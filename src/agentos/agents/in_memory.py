@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import secrets
 from dataclasses import fields, replace
 from datetime import UTC, datetime
 from typing import Callable
@@ -129,6 +130,7 @@ class InMemoryAgentTransactionalPersistence(AgentTransactionalPersistence):
         self._configurations: dict[tuple[str, int], AgentConfiguration] = {}
         self._idempotency: dict[tuple[str, str | None, str], tuple[str, AgentTransactionResult]] = {}
         self._receipts: dict[tuple[str, str], AgentTransactionReceipt] = {}
+        self._receipt_keys: dict[tuple[str, str], tuple[str | None, str]] = {}
         self._outbox: list[EventEnvelope] = []
         self._event_states: dict[str, CommitState] = {}
         self.audit_log: list[object] = []
@@ -169,10 +171,19 @@ class InMemoryAgentTransactionalPersistence(AgentTransactionalPersistence):
             self._not_committed_next = False
             raise AgentCommandRejected("agent transaction not committed")
         current = self._agents.get(str(request.agent_id))
-        if current is not None and current.user_id != request.user_id:
-            raise AgentCommandRejected("agent transaction rejected")
+        if current is not None:
+            if current.user_id != request.user_id or current.workspace_id != request.resulting_agent.workspace_id:
+                raise AgentCommandRejected("agent transaction rejected")
+            resulting_version = int(request.resulting_configuration.config_version)
+            current_version = int(current.current_config_version)
+            if resulting_version < current_version or resulting_version > current_version + 1:
+                raise AgentVersionConflict("agent configuration version conflict")
+        history_key = (str(request.agent_id), int(request.resulting_configuration.config_version))
+        historical = self._configurations.get(history_key)
+        if historical is not None and historical != request.resulting_configuration:
+            raise AgentVersionConflict("agent configuration history conflict")
         self._agents[str(request.agent_id)] = request.resulting_agent
-        self._configurations[(str(request.agent_id), int(request.resulting_configuration.config_version))] = request.resulting_configuration
+        self._configurations[history_key] = request.resulting_configuration
         receipt = AgentTransactionReceipt(
             transaction_id=request.transaction_id,
             commit_state=CommitState.COMMITTED,
@@ -186,6 +197,7 @@ class InMemoryAgentTransactionalPersistence(AgentTransactionalPersistence):
         )
         self._idempotency[key] = (request.fingerprint, result)
         self._receipts[(str(request.user_id), request.transaction_id)] = receipt
+        self._receipt_keys[(str(request.user_id), request.transaction_id)] = (key[1], request.idempotency_key)
         self.audit_log.append(request.event.event_id)
         self._outbox.append(request.event)
         self._event_states[request.event.event_id] = CommitState.COMMITTED
@@ -200,9 +212,20 @@ class InMemoryAgentTransactionalPersistence(AgentTransactionalPersistence):
         return result
 
     def inspect_commit(self, *, user_id, transaction_id, idempotency_key):
-        receipt = self._receipts.get((str(user_id), transaction_id))
+        receipt_key = (str(user_id), transaction_id)
+        receipt = self._receipts.get(receipt_key)
         if receipt is None:
             raise LookupError("transaction not found")
+        stored_scope = self._receipt_keys.get(receipt_key)
+        if stored_scope is None or stored_scope[1] != idempotency_key:
+            raise LookupError("transaction not found")
+        if receipt.commit_state is CommitState.UNKNOWN:
+            receipt = replace(receipt, commit_state=CommitState.COMMITTED)
+            self._receipts[receipt_key] = receipt
+            scope, key = stored_scope
+            fingerprint, result = self._idempotency[(str(user_id), scope, key)]
+            self._idempotency[(str(user_id), scope, key)] = (fingerprint, replace(result, receipt=receipt))
+            self._event_states[receipt.event_id] = CommitState.COMMITTED
         return receipt
 
     def confirmed_outbox(self):
@@ -266,11 +289,17 @@ class InMemoryAdministrativeExecutionRequester(AdministrativeExecutionRequester)
                 transaction_id=reference.execution_id,
                 idempotency_key=command.idempotency_key,
             )
-            self._pending[reference.execution_id] = (command, fingerprint, AdministrativeExecutionStatus.CONFIRMED, replace(result, receipt=receipt))
-            return replace(result, receipt=receipt)
+            status = (
+                AdministrativeExecutionStatus.CONFIRMED
+                if receipt.commit_state is CommitState.COMMITTED
+                else AdministrativeExecutionStatus.UNKNOWN
+            )
+            resolved = replace(result, receipt=receipt)
+            self._pending[reference.execution_id] = (command, fingerprint, status, resolved)
+            return resolved
         try:
             result = self._administration._confirm(reference, command, fingerprint)
-        except AgentCommandRejected:
+        except (AgentCommandRejected, AgentVersionConflict):
             self._pending[reference.execution_id] = (command, fingerprint, AdministrativeExecutionStatus.NOT_COMMITTED, None)
             raise
         if result.receipt.commit_state is CommitState.UNKNOWN:
@@ -359,7 +388,7 @@ class InMemoryAgentAdministration(AgentAdministration):
         current = self.persistence.get_snapshot(command.agent_id, command.user_id, command.workspace_id)
         configuration: AgentConfiguration
         if isinstance(command, CreateAgent):
-            if current is not None:
+            if str(command.agent_id) in self.persistence._agents:
                 raise AgentCommandRejected("agent already exists")
             if command.owner != command.actor:
                 raise AgentCommandRejected("agent ownership rejected")
@@ -403,6 +432,8 @@ class InMemoryAgentAdministration(AgentAdministration):
                 UnassignAgentWorkspace: "AgentWorkspaceUnassigned",
             }[type(command)]
             if isinstance(command, ReconfigureAgent):
+                if command.configuration.config_version != current.configuration.config_version + 1:
+                    raise AgentVersionConflict("agent configuration version conflict")
                 configuration = command.configuration
                 agent = replace(agent, current_config_version=configuration.config_version, updated_at=command.requested_at)
             elif isinstance(command, (SuspendAgent, ResumeAgent, ArchiveAgent)):
@@ -481,6 +512,7 @@ class InMemoryAgentRegistry(AgentRegistry):
     def __init__(self, *, persistence, policy: AgentGrantPolicy | None = None) -> None:
         self.persistence: InMemoryAgentTransactionalPersistence = persistence
         self.policy = policy or AllowAllAgentGrantPolicy()
+        self._cursors: dict[str, tuple[str, int]] = {}
 
     def get(self, agent_id: AgentId, actor: AgentAccessContext):
         snapshot = self.persistence.get_snapshot(agent_id, actor.user_id, actor.workspace_id)
@@ -495,14 +527,20 @@ class InMemoryAgentRegistry(AgentRegistry):
             if snapshot.agent.owner == query.actor
             if classification_allows(query.classification.value, snapshot.configuration.prompt.instruction_classification.value)
         )
+        scope = f"{query.user_id}|{query.workspace_id or '<user>'}"
+        scope_digest = hashlib.sha256(scope.encode("utf-8")).hexdigest()
         offset = 0
         if query.cursor is not None:
-            try:
-                offset = int(query.cursor.value.rsplit(":", 1)[1])
-            except (ValueError, IndexError) as exc:
-                raise ValueError("invalid agent cursor") from exc
+            cursor_state = self._cursors.get(query.cursor.value)
+            if cursor_state is None or cursor_state[0] != scope_digest:
+                raise ValueError("invalid agent cursor")
+            offset = cursor_state[1]
         page = snapshots[offset : offset + query.limit]
-        next_cursor = AgentPageCursor(f"agent-cursor:{offset + query.limit}") if offset + query.limit < len(snapshots) else None
+        next_cursor = None
+        if offset + query.limit < len(snapshots):
+            token = f"agent-cursor:{secrets.token_urlsafe(24)}"
+            self._cursors[token] = (scope_digest, offset + query.limit)
+            next_cursor = AgentPageCursor(token)
         return AgentPage(page, next_cursor)
 
     def resolve_for_execution(self, request: AgentResolutionRequest) -> ResolvedAgent:

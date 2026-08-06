@@ -164,6 +164,8 @@ class AssignAgentWorkspace(AgentCommand):
     def __post_init__(self) -> None:
         AgentCommand.__post_init__(self)
         require_text(self.assigned_workspace_id, "assigned_workspace_id")
+        if not isinstance(self.assignment_ref, OpaqueAgentReference):
+            raise ValueError("assignment_ref must be opaque")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

@@ -73,6 +73,8 @@ class WorkspaceAssignment:
     assigned_at: datetime
 
     def __post_init__(self) -> None:
+        if not isinstance(self.assignment_ref, OpaqueAgentReference):
+            raise ValueError("assignment_ref must be opaque")
         require_text(self.workspace_id, "workspace_id")
         require_text(self.assigned_by, "assigned_by")
         require_aware(self.assigned_at, "assigned_at")
@@ -126,6 +128,10 @@ class AgentConfiguration:
         ):
             if not isinstance(reference, OpaqueAgentReference):
                 raise ValueError("configuration references must be opaque")
+        object.__setattr__(self, "tool_grants", tuple(self.tool_grants))
+        object.__setattr__(self, "capability_grants", tuple(self.capability_grants))
+        object.__setattr__(self, "skill_grants", tuple(self.skill_grants))
+        object.__setattr__(self, "workspace_assignments", tuple(self.workspace_assignments))
         require_text(self.agent_id, "agent_id")
         if self.config_version < 1:
             raise ValueError("config_version must be positive")
@@ -139,6 +145,9 @@ class AgentConfiguration:
             if not isinstance(grant, OpaqueAgentReference):
                 raise ValueError("grant references must be opaque")
             validate_reference(str(grant), "grant reference")
+        for assignment in self.workspace_assignments:
+            if not isinstance(assignment, WorkspaceAssignment):
+                raise ValueError("workspace assignments must be typed")
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,6 +190,10 @@ class Agent:
             require_aware(self.archived_at, "archived_at")
         if self.private_memory_scope.user_id != self.user_id or self.private_memory_scope.agent_id != self.agent_id:
             raise ValueError("private memory scope ownership does not match Agent")
+        object.__setattr__(self, "audit_refs", tuple(self.audit_refs))
+        for reference in self.audit_refs:
+            if not isinstance(reference, OpaqueAgentReference):
+                raise ValueError("audit references must be opaque")
 
     def transition_to(self, target: AgentAdministrativeState, *, now: datetime) -> Agent:
         require_aware(now, "now")
@@ -223,6 +236,15 @@ class ResolvedAgentPolicies:
     purpose: str
     classification: DataClassification
 
+    def __post_init__(self) -> None:
+        for reference in (self.execution_policy_ref, self.context_policy_ref, self.memory_policy_ref):
+            if not isinstance(reference, OpaqueAgentReference):
+                raise ValueError("resolved policy references must be opaque")
+        if self.policy_version < 1:
+            raise ValueError("policy_version must be positive")
+        require_text(self.purpose, "purpose", maximum=128)
+        object.__setattr__(self, "classification", DataClassification(self.classification))
+
 
 @dataclass(frozen=True, slots=True)
 class ResolvedAgent:
@@ -243,3 +265,16 @@ class ResolvedAgent:
     def __post_init__(self) -> None:
         if self.config_version < 1:
             raise ValueError("resolved config_version must be positive")
+        if not isinstance(self.private_memory_scope, MemoryScopeReference):
+            raise ValueError("resolved memory scope must be typed")
+        object.__setattr__(self, "tool_grants", tuple(self.tool_grants))
+        object.__setattr__(self, "capability_grants", tuple(self.capability_grants))
+        object.__setattr__(self, "skill_grants", tuple(self.skill_grants))
+        for reference in (
+            self.model_profile_ref,
+            *self.tool_grants,
+            *self.capability_grants,
+            *self.skill_grants,
+        ):
+            if not isinstance(reference, OpaqueAgentReference):
+                raise ValueError("resolved references must be opaque")

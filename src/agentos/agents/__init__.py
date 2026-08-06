@@ -24,7 +24,9 @@ from .compat import (
     InMemoryAgentOutboxSource,
     agent_outbox_records,
     attach_config_version,
+    to_context_operation_context,
     to_context_seed,
+    to_provider_operation_context,
     to_provider_seed,
 )
 
@@ -51,7 +53,9 @@ __all__ = [
     "InMemoryAgentOutboxSource",
     "agent_outbox_records",
     "attach_config_version",
+    "to_context_operation_context",
     "to_context_seed",
+    "to_provider_operation_context",
     "to_provider_seed",
 ]
 __all__ += [name for name in globals() if name.startswith("Agent") or name.endswith("Agent") or name in {

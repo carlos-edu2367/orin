@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 
 from agentos.execution.models import Execution
+from agentos.context.models import ContextOperationContext
+from agentos.providers.models import ProviderOperationContext
 from agentos.events.models import CommitState, EventEnvelope
 from agentos.events.ports import (
     ConfirmedOutboxSource,
@@ -58,12 +60,58 @@ def to_provider_seed(resolved: ResolvedAgent) -> AgentProviderSeed:
     )
 
 
-def attach_config_version(execution: Execution, resolved: ResolvedAgent) -> Execution:
+def attach_config_version(
+    execution: Execution,
+    resolved: ResolvedAgent,
+    *,
+    correlation_id: str | None = None,
+    purpose: str | None = None,
+) -> Execution:
     if execution.agent_id != resolved.agent_id:
         raise ValueError("Agent does not match Execution")
     if execution.ownership.user_id != resolved.user_id or execution.ownership.workspace_id != resolved.workspace_id:
         raise ValueError("Agent ownership does not match Execution")
+    if correlation_id is not None and correlation_id != execution.correlation_id:
+        raise ValueError("correlation does not match Execution")
+    if purpose is not None and purpose != resolved.policies.purpose:
+        raise ValueError("purpose does not match resolved Agent")
     return replace(execution, agent_config_version=int(resolved.config_version))
+
+
+def to_context_operation_context(
+    resolved: ResolvedAgent, *, execution_id: str, correlation_id: str, purpose: str
+) -> ContextOperationContext:
+    if purpose != resolved.policies.purpose:
+        raise ValueError("purpose does not match resolved Agent")
+    return ContextOperationContext(
+        user_id=resolved.user_id,
+        workspace_id=resolved.workspace_id,
+        agent_id=resolved.agent_id,
+        execution_id=execution_id,
+        correlation_id=correlation_id,
+        purpose=purpose,
+    )
+
+
+def to_provider_operation_context(
+    resolved: ResolvedAgent,
+    *,
+    execution_id: str,
+    correlation_id: str,
+    purpose: str,
+    actor_ref: str,
+) -> ProviderOperationContext:
+    if purpose != resolved.policies.purpose:
+        raise ValueError("purpose does not match resolved Agent")
+    return ProviderOperationContext(
+        user_id=resolved.user_id,
+        workspace_id=resolved.workspace_id,
+        agent_id=resolved.agent_id,
+        execution_id=execution_id,
+        correlation_id=correlation_id,
+        purpose=purpose,
+        actor_ref=actor_ref,
+    )
 
 
 def agent_outbox_records(persistence) -> tuple[OutboxRecord, ...]:
@@ -115,6 +163,8 @@ __all__ = [
     "InMemoryAgentOutboxSource",
     "attach_config_version",
     "agent_outbox_records",
+    "to_context_operation_context",
     "to_context_seed",
+    "to_provider_operation_context",
     "to_provider_seed",
 ]
