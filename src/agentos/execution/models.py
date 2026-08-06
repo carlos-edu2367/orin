@@ -168,6 +168,7 @@ class Execution:
     updated_at: datetime
     finished_at: datetime | None
     checkpoint_ref: CheckpointReference | None = None
+    agent_config_version: int | None = None
 
     def __post_init__(self) -> None:
         _require_text(self.execution_id, "execution_id")
@@ -177,6 +178,8 @@ class Execution:
             raise ValueError("state_version must be positive")
         if self.iteration_count < 0:
             raise ValueError("iteration_count cannot be negative")
+        if self.agent_config_version is not None and self.agent_config_version < 1:
+            raise ValueError("agent_config_version must be positive when supplied")
         for name, value in (
             ("created_at", self.created_at),
             ("queued_at", self.queued_at),
@@ -216,6 +219,7 @@ class Execution:
         now: datetime,
         causation_id: EventId | CommandId | None = None,
         parent_execution_id: ExecutionId | None = None,
+        agent_config_version: int | None = None,
     ) -> Execution:
         return cls(
             execution_id=execution_id,
@@ -239,4 +243,5 @@ class Execution:
             started_at=None,
             updated_at=now,
             finished_at=None,
+            agent_config_version=agent_config_version,
         )
