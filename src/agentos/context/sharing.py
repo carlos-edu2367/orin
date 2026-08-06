@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Iterable
+from typing import Iterable, Protocol
 
 from .models import DataClassification
 
@@ -330,7 +330,7 @@ class HandoffRef:
         _aware(self.expires_at, "expires_at")
 
 
-class ContextSharingService:
+class ContextSharingService(Protocol):
     """Public marker protocol implemented by the context-sharing adapter."""
 
     def authorize(self, command): ...

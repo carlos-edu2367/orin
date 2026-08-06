@@ -33,11 +33,11 @@
 **Interfaces:**
 - Produces frozen `ContextShareGrant`, `SharedContextReference`, `StructuredHandoff`, `HandoffRef`, `DelegatedGrantRef`, `TaskSnapshot`, `Criterion`, `Constraint`, `OutputContractRef`, `ContextShareBudget` and `ContextSharingService`.
 
-- [ ] Write failing tests for opaque refs, required expiration/integrity/version, ownership alignment, classification ceiling, bounded refs/snapshots and forbidden redelegation.
-- [ ] Run `python -m pytest -q tests/unit/context/test_context_sharing_contracts.py` and confirm RED.
-- [ ] Add the canonical RFC 303 models and port using existing context naming/conventions; keep all content as refs or bounded summaries.
-- [ ] Run the focused test file and the existing Context suite; confirm GREEN without changing Context assembly semantics.
-- [ ] Commit only the sharing contract files and test with `feat: add canonical context sharing contracts`.
+- [x] Write failing tests for opaque refs, required expiration/integrity/version, ownership alignment, classification ceiling, bounded refs/snapshots and forbidden redelegation.
+- [x] Run `python -m pytest -q tests/unit/context/test_context_sharing_contracts.py` and confirm RED.
+- [x] Add the canonical RFC 303 models and port using existing context naming/conventions; keep all content as refs or bounded summaries.
+- [x] Run the focused test file and the existing Context suite; confirm GREEN without changing Context assembly semantics.
+- [x] Commit only the sharing contract files and test with `feat: add canonical context sharing contracts`.
 
 ### Task 2: Multi-agent value models and security
 
@@ -49,11 +49,11 @@
 **Interfaces:**
 - Produces `Collaboration`, participant/state types, `AgentMessage`, `Delegation`, `DelegationResult`, `WaitRegistration`, all command/receipt types, policy enums and bounded sanitized errors.
 
-- [ ] Write RED tests for immutable bounded commands, participant removal, message kinds, wait rules, terminal result exclusivity, cancellation scopes and classification ceilings.
-- [ ] Run the focused tests and record the expected missing-symbol/validation failures.
-- [ ] Implement frozen/slotted dataclasses, tuple normalization, opaque refs, UTC checks, bounded inline summaries and deterministic fingerprinting scoped by ownership.
-- [ ] Run focused tests plus `python -m compileall -q src tests` for the changed packages.
-- [ ] Commit with `feat: add multi-agent contracts and security`.
+- [x] Write RED tests for immutable bounded commands, participant removal, message kinds, wait rules, terminal result exclusivity, cancellation scopes and classification ceilings.
+- [x] Run the focused tests and record the expected missing-symbol/validation failures.
+- [x] Implement frozen/slotted dataclasses, tuple normalization, opaque refs, UTC checks, bounded inline summaries and deterministic fingerprinting scoped by ownership.
+- [x] Run focused tests plus `python -m compileall -q src tests` for the changed packages.
+- [x] Commit with `feat: add multi-agent contracts and security`.
 
 ### Task 3: Public ports and in-memory repositories
 
@@ -67,11 +67,11 @@
 - Consumes public Agent/Execution/Context/Events contracts.
 - Produces `MultiAgentCoordinator`, `AgentResolverPort`, `ExecutionLifecyclePort`, `ContextSharingPort`, `MultiAgentEventRecorder`, `CollaborationStore`, `InMemoryMultiAgentStore`, and commit-state receipts.
 
-- [ ] Write RED tests for collaboration persistence, idempotent record creation, participant removal without history deletion, event dedupe and commit `UNKNOWN` inspection.
-- [ ] Run the focused tests and verify failures are caused by absent ports/adapter.
-- [ ] Implement only process-local records and narrow Protocols; do not import persistence internals or technology.
-- [ ] Run the focused tests, existing Events tests and the forbidden-token scan on `src/agentos/multi_agent`.
-- [ ] Commit with `feat: add multi-agent public ports and in-memory store`.
+- [x] Write RED tests for collaboration persistence, idempotent record creation, participant removal without history deletion, event dedupe and commit `UNKNOWN` inspection.
+- [x] Run the focused tests and verify failures are caused by absent ports/adapter.
+- [x] Implement only process-local records and narrow Protocols; do not import persistence internals or technology.
+- [x] Run the focused tests, existing Events tests and the forbidden-token scan on `src/agentos/multi_agent`.
+- [x] Commit with `feat: add multi-agent public ports and in-memory store`.
 
 ### Task 4: Compatibility bridges for existing domains
 
@@ -82,11 +82,11 @@
 **Interfaces:**
 - Produces adapters that translate Agent Registry/Administration, `ExecutionControl`, Context Sharing and canonical Events into the narrow ports from Task 3.
 
-- [ ] Write RED tests proving Agent resolution rejects suspended/archived/cross-workspace agents, admin creation returns `AdministrativeExecutionRef`, and Execution commands use expected versions.
-- [ ] Run focused RED tests.
-- [ ] Implement translation only through public imports; map `Accepted`/`AlreadyApplied`/`Rejected`/`Conflict`/`Indeterminate` to sanitized multi-agent outcomes.
-- [ ] Run Agent, Execution and focused multi-agent compatibility tests.
-- [ ] Commit with `feat: bridge multi-agent to public kernel ports`.
+- [x] Write RED tests proving Agent resolution rejects suspended/archived/cross-workspace agents, admin creation returns `AdministrativeExecutionRef`, and Execution commands use expected versions.
+- [x] Run focused RED tests.
+- [x] Implement translation only through public imports; map `Accepted`/`AlreadyApplied`/`Rejected`/`Conflict`/`Indeterminate` to sanitized multi-agent outcomes.
+- [x] Run Agent, Execution and focused multi-agent compatibility tests.
+- [x] Commit with `feat: bridge multi-agent to public kernel ports`.
 
 ### Task 5: Collaboration, send and delegation service
 
@@ -97,12 +97,12 @@
 **Interfaces:**
 - Produces `MultiAgentCoordinatorService.request_agent_creation`, `.send`, `.delegate`, `.return_result`.
 
-- [ ] Write RED tests for informative/request/response/control messages, own `delivery_execution_id`, idempotency/fingerprint conflict, deadlines, canonical handoff validation, one child Execution per attempt, retry with new ID, no context/Grant inheritance and sanitized result refs.
-- [ ] Run focused tests and inspect the failure reasons.
-- [ ] Implement validate-create-record-event flow; use `ExecutionControl` through the bridge to create delivery/child Executions and never mutate `Execution` objects directly.
-- [ ] Add reauthorization on delivery/delegation consumption, explicit failure/cancelled terminals and outbox-only event recording.
-- [ ] Run the service tests plus all Agent/Execution/Context/Event suites.
-- [ ] Commit with `feat: implement multi-agent messaging and delegation`.
+- [x] Write RED tests for informative/request/response/control messages, own `delivery_execution_id`, idempotency/fingerprint conflict, deadlines, canonical handoff validation, one child Execution per attempt, retry with new ID, no context/Grant inheritance and sanitized result refs.
+- [x] Run focused tests and inspect the failure reasons.
+- [x] Implement validate-create-record-event flow; use `ExecutionControl` through the bridge to create delivery/child Executions and never mutate `Execution` objects directly.
+- [x] Add reauthorization on delivery/delegation consumption, explicit failure/cancelled terminals and outbox-only event recording.
+- [x] Run the service tests plus all Agent/Execution/Context/Event suites.
+- [x] Commit with `feat: implement multi-agent messaging and delegation`.
 
 ### Task 6: Wait, failure propagation and cancellation
 
@@ -115,12 +115,12 @@
 **Interfaces:**
 - Produces `wait_for`, `request_cancel`, terminal event reconciliation and explicit `PROPAGATE`, `CONTINUE_WITH_FAILURE_REF`, `REQUEST_RETRY`, `CASCADE`, `DETACH_IF_AUTHORIZED`, `CANCEL_CHILD_ONLY` behavior.
 
-- [ ] Write RED tests for ALL/ANY/MINIMUM_COUNT bounds, checkpoint then PAUSED, resume via QUEUED, deadline/tardy results, child dedupe, failed checkpoint, parent/child/subtree cancellation and partial cancellation.
-- [ ] Run focused RED tests.
-- [ ] Implement bounded wait registrations and event-driven reevaluation; use expected state versions and idempotency keys for pause/resume/cancel commands.
-- [ ] Implement failure policy and retry identity/cause preservation without terminal reopening or fabricated success.
-- [ ] Run focused tests and complete multi-agent suite.
-- [ ] Commit with `feat: add multi-agent waits and propagation policies`.
+- [x] Write RED tests for ALL/ANY/MINIMUM_COUNT bounds, checkpoint then PAUSED, resume via QUEUED, deadline/tardy results, child dedupe, failed checkpoint, parent/child/subtree cancellation and partial cancellation.
+- [x] Run focused RED tests.
+- [x] Implement bounded wait registrations and event-driven reevaluation; use expected state versions and idempotency keys for pause/resume/cancel commands.
+- [x] Implement failure policy and retry identity/cause preservation without terminal reopening or fabricated success.
+- [x] Run focused tests and complete multi-agent suite.
+- [x] Commit with `feat: add multi-agent waits and propagation policies`.
 
 ### Task 7: Boundary integration, documentation and final audit
 
@@ -132,9 +132,18 @@
 **Interfaces:**
 - Consumes all public package contracts and produces evidence for no concrete dependencies, no direct Execution mutation, no Context/Memory/prompt/secret copy and canonical RFC coverage.
 
-- [ ] Write failing boundary tests for prohibited imports, direct state mutation, EventBus command use and ownership/correlation/purpose continuity across every flow.
-- [ ] Run boundary RED, then implement only compatibility/doc fixes needed by demonstrated failures.
-- [ ] Run exactly `python -m pytest -q`, `python -m compileall -q src tests`, the required `rg` scan, `git diff --check` and `git status --short --branch`.
-- [ ] Run a transversal scan over `agents`, `orchestrator`, `execution`, `runtime`, `context`, `events` and `persistence`; inspect every changed file for technology leakage.
-- [ ] Audit each requirement against RFCs 050, 060, 101–104, 201–203, 303, 501–502, 601 and ADRs 002, 009, 012, 013; record uncovered production limitations honestly.
-- [ ] Commit only final docs/tests if needed with `docs: record multi-agent verification and limitations`.
+- [x] Write failing boundary tests for prohibited imports, direct state mutation, EventBus command use and ownership/correlation/purpose continuity across every flow.
+- [x] Run boundary RED, then implement only compatibility/doc fixes needed by demonstrated failures.
+- [x] Run exactly `python -m pytest -q`, `python -m compileall -q src tests`, the required `rg` scan, `git diff --check` and `git status --short --branch`.
+- [x] Run a transversal scan over `agents`, `orchestrator`, `execution`, `runtime`, `context`, `events` and `persistence`; inspect every changed file for technology leakage.
+- [x] Audit each requirement against RFCs 050, 060, 101–104, 201–203, 303, 501–502, 601 and ADRs 002, 009, 012, 013; record uncovered production limitations honestly.
+- [x] Commit only final docs/tests if needed with `docs: record multi-agent verification and limitations`.
+
+## Evidence and limitations
+
+- `python -m pytest -q`: 306 passed, 1 skipped.
+- `python -m compileall -q src tests`: passed.
+- Forbidden dependency scan in `src/agentos/multi_agent`: zero matches.
+- `git diff --check`: passed; existing LF/CRLF warnings are unrelated to whitespace errors.
+- The in-memory store and fakes prove public-contract behavior only; they do not provide process durability, distributed leases, transport delivery, broker semantics, production outbox storage, exactly-once effects or recovery across processes.
+- No production adapter for PostgreSQL, Redis, broker, mailbox, worker or scheduler was added.

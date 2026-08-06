@@ -159,3 +159,9 @@ def test_grant_rejects_cross_scope_reference_and_classification_over_ceiling():
     with pytest.raises(ValueError, match="classification"):
         replace(_reference(), classification=DataClassification.RESTRICTED).validate_against(grant)
     assert grant.redelegation is False
+
+
+def test_context_sharing_service_is_a_public_protocol():
+    from agentos.context import ContextSharingService
+
+    assert getattr(ContextSharingService, "_is_protocol", False) is True
