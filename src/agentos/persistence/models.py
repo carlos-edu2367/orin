@@ -15,6 +15,7 @@ from .security import freeze_persistence_payload
 MAX_PAGE_SIZE = 100
 MAX_FILTERS = 16
 MAX_PURPOSE_LENGTH = 128
+MAX_IDENTIFIER_LENGTH = 255
 
 
 def _required(value: object, field_name: str, *, maximum: int | None = None) -> str:
@@ -76,9 +77,9 @@ class PersistenceOperationContext:
 
     def __post_init__(self) -> None:
         for name in ("user_id", "agent_id", "execution_id", "correlation_id", "actor"):
-            _required(getattr(self, name), name)
+            _required(getattr(self, name), name, maximum=MAX_IDENTIFIER_LENGTH)
         if self.workspace_id is not None:
-            _required(self.workspace_id, "workspace_id")
+            _required(self.workspace_id, "workspace_id", maximum=MAX_IDENTIFIER_LENGTH)
         _required(self.purpose, "purpose", maximum=MAX_PURPOSE_LENGTH)
 
     def scope_key(self) -> tuple[str, ...]:
@@ -122,7 +123,7 @@ class RecordReference:
     value: str
 
     def __post_init__(self) -> None:
-        _required(self.value, "record_ref")
+        _required(self.value, "record_ref", maximum=MAX_IDENTIFIER_LENGTH)
 
     def __str__(self) -> str:
         return self.value
@@ -148,7 +149,7 @@ class OutboxReference:
     value: str
 
     def __post_init__(self) -> None:
-        _required(self.value, "outbox_ref")
+        _required(self.value, "outbox_ref", maximum=MAX_IDENTIFIER_LENGTH)
 
     def __repr__(self) -> str:
         return "OutboxReference(<opaque>)"
@@ -226,6 +227,8 @@ class TransactionRequest:
     outbox: tuple[OutboxChange, ...]
 
     def __post_init__(self) -> None:
+        for name in ("expected_versions", "changes", "audit", "outbox"):
+            object.__setattr__(self, name, tuple(getattr(self, name)))
         _required(self.transaction_id, "transaction_id", maximum=128)
         _required(self.idempotency_key, "idempotency_key", maximum=256)
         _required(self.fingerprint, "fingerprint", maximum=128)

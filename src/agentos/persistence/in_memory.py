@@ -169,7 +169,14 @@ class InMemoryTransactionalPersistence:
             (query.context.scope_key(), query.transaction_id, query.idempotency_key)
         )
         if receipt is None:
-            raise LookupError("commit not found")
+            return TransactionReceipt(
+                transaction_id=query.transaction_id,
+                commit_state=CommitState.NOT_COMMITTED,
+                record_refs=(),
+                outbox_refs=(),
+                store_revision=self._store_revision,
+                committed_at=None,
+            )
         return receipt
 
     def _lookup_idempotency(self, context, idempotency_key):
@@ -274,6 +281,7 @@ class InMemoryTransactionalPersistence:
             "record_type": query.record_type,
             "filters": as_plain_mapping(query.filters),
             "classification": query.classification_ceiling.value,
+            "limit": query.page.limit,
         }
         return hashlib.sha256(
             json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")

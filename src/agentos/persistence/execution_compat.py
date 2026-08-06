@@ -267,7 +267,7 @@ class ExecutionTransactionalPersistenceAdapter(LegacyPersistence):
                         int(request.change.expected_version) if request.change.expected_version is not None else None
                     ),
                     data=_execution_payload(request.change.new_execution),
-                    classification=DataClassification.INTERNAL,
+                    classification=request.classification,
                 ),
             ),
             audit=(
@@ -310,8 +310,13 @@ class ExecutionTransactionalPersistenceAdapter(LegacyPersistence):
                 idempotency_key=str(idempotency_key),
             )
         )
-        current = self.get(context.execution_id, context)
-        return self._legacy_receipt(result, context.execution_id, int(current.state_version))
+        resulting_version = 0
+        lookup = getattr(self._persistence, "_lookup_idempotency", None)
+        if lookup is not None:
+            inspected = lookup(self._context(context), str(idempotency_key))
+            if inspected is not None and inspected[2]:
+                resulting_version = int(inspected[2][0].version)
+        return self._legacy_receipt(result, context.execution_id, resulting_version)
 
     @staticmethod
     def _legacy_receipt(receipt: TransactionReceipt, execution_id, resulting_version: int) -> LegacyTransactionReceipt:

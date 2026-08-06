@@ -210,3 +210,18 @@ def test_not_committed_has_no_visible_effect():
     assert result.receipt.commit_state is CommitState.NOT_COMMITTED
     assert len(store.audit_records) == 0
     assert len(store.confirmed_outbox()) == 0
+
+
+def test_inspecting_an_unknown_commit_returns_not_committed_without_leaking_state():
+    store, ctx = seed_record()
+
+    receipt = store.inspect_commit(
+        InspectCommit(
+            context=ctx,
+            transaction_id="transaction:unknown",
+            idempotency_key="idempotency:unknown",
+        )
+    )
+
+    assert receipt.commit_state is CommitState.NOT_COMMITTED
+    assert receipt.transaction_id == "transaction:unknown"

@@ -5,6 +5,7 @@ from datetime import datetime
 from sqlalchemy import (
     JSON,
     Boolean,
+    CheckConstraint,
     Column,
     DateTime,
     Index,
@@ -16,6 +17,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     create_engine,
+    ForeignKey,
 )
 
 
@@ -40,6 +42,7 @@ persistence_records = Table(
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),
     UniqueConstraint("record_ref", name="uq_persistence_records_record_ref"),
+    CheckConstraint("version > 0", name="ck_persistence_records_version_positive"),
 )
 Index(
     "ix_persistence_records_scope",
@@ -69,6 +72,7 @@ persistence_audit = Table(
     Column("fields", JSON, nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False),
     UniqueConstraint("audit_ref", name="uq_persistence_audit_ref"),
+    CheckConstraint("resulting_version > 0", name="ck_persistence_audit_version_positive"),
 )
 Index("ix_persistence_audit_scope", persistence_audit.c.user_id, persistence_audit.c.workspace_id, persistence_audit.c.execution_id)
 
@@ -78,7 +82,7 @@ persistence_outbox = Table(
     Column("id", Integer, primary_key=True),
     Column("event_id", String(255), nullable=False),
     Column("transaction_id", String(128), nullable=False),
-    Column("source_record_ref", String(255), nullable=False),
+    Column("source_record_ref", String(255), ForeignKey("persistence_records.record_ref"), nullable=False),
     Column("expected_source_version", Integer, nullable=False),
     Column("user_id", String(255), nullable=False),
     Column("workspace_id", String(255), nullable=True),
@@ -91,6 +95,7 @@ persistence_outbox = Table(
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("published_at", DateTime(timezone=True), nullable=True),
     UniqueConstraint("event_id", name="uq_persistence_outbox_event_id"),
+    CheckConstraint("expected_source_version > 0", name="ck_persistence_outbox_version_positive"),
 )
 Index("ix_persistence_outbox_pending", persistence_outbox.c.published_at, persistence_outbox.c.created_at)
 Index("ix_persistence_outbox_scope", persistence_outbox.c.user_id, persistence_outbox.c.workspace_id, persistence_outbox.c.execution_id)
@@ -101,8 +106,10 @@ persistence_idempotency = Table(
     Column("id", Integer, primary_key=True),
     Column("user_id", String(255), nullable=False),
     Column("workspace_id", String(255), nullable=True),
+    Column("workspace_scope", String(255), nullable=False),
     Column("agent_id", String(255), nullable=False),
     Column("execution_id", String(255), nullable=False),
+    Column("correlation_id", String(255), nullable=False),
     Column("purpose", String(128), nullable=False),
     Column("actor", String(255), nullable=False),
     Column("idempotency_key", String(256), nullable=False),
@@ -110,18 +117,21 @@ persistence_idempotency = Table(
     Column("transaction_id", String(128), nullable=False),
     Column("commit_state", String(32), nullable=False),
     Column("receipt", JSON, nullable=False),
+    Column("records", JSON, nullable=False),
     Column("store_revision", Integer, nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False),
     UniqueConstraint(
         "user_id",
-        "workspace_id",
+        "workspace_scope",
         "agent_id",
         "execution_id",
+        "correlation_id",
         "purpose",
         "actor",
         "idempotency_key",
         name="uq_persistence_idempotency_scope",
     ),
+    CheckConstraint("store_revision >= 0", name="ck_persistence_idempotency_revision_nonnegative"),
 )
 Index(
     "ix_persistence_idempotency_transaction",

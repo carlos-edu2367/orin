@@ -13,6 +13,7 @@ from agentos.persistence import (
     RecordChange,
     RecordReference,
     TransactionOptions,
+    TransactionRequest,
 )
 
 
@@ -40,6 +41,12 @@ def test_operation_context_requires_all_ownership_and_actor_fields():
     with pytest.raises(ValueError):
         context(execution_id="")
 
+    with pytest.raises(ValueError):
+        context(user_id="u" * 256)
+
+    with pytest.raises(ValueError):
+        context(correlation_id="c" * 256)
+
 
 def test_transaction_options_are_bounded_and_typed():
     options = TransactionOptions(
@@ -62,6 +69,9 @@ def test_record_reference_and_page_cursor_represent_opaque_values():
 
     assert "secret:record-id" not in repr(reference)
     assert "private-state" not in repr(page)
+
+    with pytest.raises(ValueError):
+        RecordReference("r" * 256)
 
 
 def test_record_change_freezes_payload_and_rejects_protected_values():
@@ -106,3 +116,22 @@ def test_authorized_queries_require_bounded_context_and_page():
 
     with pytest.raises(ValueError):
         PageRequest(limit=101)
+
+
+def test_transaction_request_freezes_collection_inputs():
+    request = TransactionRequest(
+        transaction_id="transaction:1",
+        context=context(),
+        options=TransactionOptions(),
+        idempotency_key="idempotency:1",
+        fingerprint="fingerprint:1",
+        expected_versions=[],
+        changes=[],
+        audit=[],
+        outbox=[],
+    )
+
+    assert request.expected_versions == ()
+    assert request.changes == ()
+    assert request.audit == ()
+    assert request.outbox == ()

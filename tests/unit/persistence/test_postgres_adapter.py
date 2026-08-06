@@ -1,5 +1,6 @@
 from dataclasses import replace
 from datetime import datetime, timezone
+from unittest.mock import Mock
 
 from sqlalchemy import create_engine
 
@@ -137,6 +138,55 @@ def test_sqlalchemy_adapter_commits_record_and_outbox_atomically():
     assert repeated.already_applied is True
 
 
+def test_sqlalchemy_idempotency_scope_includes_correlation_and_workspace_null_is_normalized():
+    adapter, ctx = make_adapter()
+    adapter.transact(make_request(ctx))
+
+    other_context = context(
+        workspace_id=None,
+        execution_id="execution:2",
+        correlation_id="correlation:2",
+    )
+    adapter.seed(
+        AuthorizedRecord(
+            record_ref=RecordReference(other_context.execution_id),
+            record_type="execution",
+            version=1,
+            context=other_context,
+            classification=DataClassification.INTERNAL,
+            data={"state": "QUEUED", "state_version": 1},
+        )
+    )
+
+    result = adapter.transact(make_request(other_context, event_id="event:2"))
+
+    assert isinstance(result, TransactionCommitted)
+    assert result.already_applied is False
+
+
+def test_sqlalchemy_idempotent_replay_returns_original_record_snapshot():
+    adapter, ctx = make_adapter()
+    first = make_request(ctx)
+    adapter.transact(first)
+    adapter.transact(
+        make_request(
+            ctx,
+            transaction_id="transaction:2",
+            key="idempotency:2",
+            expected=2,
+            event_id="event:2",
+            fingerprint="fingerprint:2",
+        )
+    )
+
+    repeated = adapter.transact(first)
+
+    assert isinstance(repeated, TransactionCommitted)
+    assert repeated.already_applied is True
+    assert repeated.records[0].version == 2
+    assert repeated.records[0].data["state_version"] == 2
+
+
 def test_sqlalchemy_adapter_rejects_fingerprint_conflict_and_version_conflict():
     adapter, ctx = make_adapter()
     adapter.transact(make_request(ctx))
@@ -221,6 +271,82 @@ def test_sqlalchemy_reads_apply_server_scope_and_classification_filters():
     assert isinstance(hidden, NotFound)
 
 
+def test_sqlalchemy_scan_is_bounded_and_cursor_is_bound_to_page_shape():
+    adapter, ctx = make_adapter()
+    for index in (2, 3):
+        adapter.seed(
+            AuthorizedRecord(
+                record_ref=RecordReference(f"execution:{index}"),
+                record_type="execution",
+                version=1,
+                context=ctx,
+                classification=DataClassification.INTERNAL,
+                data={"state": "QUEUED", "state_version": 1},
+            )
+        )
+
+    first = adapter.scan(
+        AuthorizedScan(
+            context=ctx,
+            record_type="execution",
+            filters={"state": "QUEUED"},
+            classification_ceiling=DataClassification.INTERNAL,
+            page=__import__("agentos.persistence", fromlist=["PageRequest"]).PageRequest(limit=1),
+        )
+    )
+    assert len(first.items) == 1
+    assert first.next_cursor is not None
+
+    second = adapter.scan(
+        AuthorizedScan(
+            context=ctx,
+            record_type="execution",
+            filters={"state": "QUEUED"},
+            classification_ceiling=DataClassification.INTERNAL,
+            page=__import__("agentos.persistence", fromlist=["PageRequest"]).PageRequest(
+                limit=1, cursor=first.next_cursor
+            ),
+        )
+    )
+    assert len(second.items) == 1
+    assert second.items[0].record_ref != first.items[0].record_ref
+
+    with __import__("pytest").raises(ValueError, match="invalid persistence cursor"):
+        adapter.scan(
+            AuthorizedScan(
+                context=ctx,
+                record_type="execution",
+                filters={"state": "QUEUED"},
+                classification_ceiling=DataClassification.INTERNAL,
+                page=__import__("agentos.persistence", fromlist=["PageRequest"]).PageRequest(
+                    limit=2, cursor=first.next_cursor
+                ),
+            )
+        )
+
+
+def test_sqlalchemy_applies_postgres_transaction_options():
+    adapter = PostgresTransactionalPersistence.__new__(PostgresTransactionalPersistence)
+    adapter.engine = Mock()
+    adapter.engine.dialect.name = "postgresql"
+    session = Mock()
+    ctx = context()
+    request = make_request(ctx)
+    request = replace(
+        request,
+        options=TransactionOptions(
+            isolation="SERIALIZABLE",
+            timeout=__import__("datetime").timedelta(seconds=2),
+            read_only=True,
+        ),
+    )
+
+    adapter._configure_transaction_options(session, request)
+
+    session.connection.assert_called_once_with(execution_options={"isolation_level": "SERIALIZABLE"})
+    assert session.execute.call_count == 2
+
+
 def test_sqlalchemy_idempotency_inspection_is_actor_scoped():
     adapter, ctx = make_adapter()
     request = make_request(ctx)
@@ -228,14 +354,15 @@ def test_sqlalchemy_idempotency_inspection_is_actor_scoped():
 
     from agentos.persistence import InspectCommit
 
-    with __import__("pytest").raises(LookupError):
-        adapter.inspect_commit(
-            InspectCommit(
-                context=replace(ctx, actor="actor:other"),
-                transaction_id=request.transaction_id,
-                idempotency_key=request.idempotency_key,
-            )
+    receipt = adapter.inspect_commit(
+        InspectCommit(
+            context=replace(ctx, actor="actor:other"),
+            transaction_id=request.transaction_id,
+            idempotency_key=request.idempotency_key,
         )
+    )
+
+    assert receipt.commit_state is CommitState.NOT_COMMITTED
 
 
 def test_sqlalchemy_rejects_mutation_in_read_only_transaction():

@@ -290,7 +290,7 @@
 
 Fresh evidence:
 
-- `python -m pytest -q` → `240 passed, 1 skipped`.
+- `python -m pytest -q` → `246 passed, 1 skipped`.
 - `python -m compileall -q src tests` → exit 0.
 - Domain dependency scan → `NO_DOMAIN_MATCHES`.
 - `git diff --check` → exit 0.

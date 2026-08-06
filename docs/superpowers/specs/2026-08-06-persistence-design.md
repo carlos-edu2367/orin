@@ -70,13 +70,13 @@ TransactionIndeterminate { transaction_id }
 
 `AuthorizedRead` and `AuthorizedScan` carry context, record type/reference filters, a classification ceiling, bounded filter maps and an opaque page request. Unauthorized, cross-user, cross-workspace, cross-agent, cross-execution, wrong-purpose and above-ceiling records resolve as `NotFound` or an empty page; they never reveal existence.
 
-Page cursors are opaque and bound to the complete query fingerprint, operation context, filters, classification ceiling and store revision. Limits have a public maximum. A cursor from another query, context, classification or store revision is rejected with a sanitized public error.
+Page cursors are opaque, signed, keyset-based and bound to the complete query fingerprint, operation context, filters, classification ceiling, page limit and store revision. PostgreSQL applies scalar filters and `LIMIT page_size + 1` before materialization. Limits have a public maximum. A cursor from another query, context, classification, page shape or store revision is rejected with a sanitized public error.
 
 ## Atomicity and idempotency
 
 One `transact` call is the only atomic write boundary. It validates the complete request before mutation, then confirms all record changes, minimal audit entries, idempotency record and outbox entries in the same database transaction.
 
-The idempotency scope includes ownership, execution, operation/purpose and fingerprint. A repeated key with the same fingerprint returns the original receipt and effect. A repeated key with a different fingerprint returns an explicit idempotency conflict. Outbox event IDs are unique, and a retry cannot create the same event twice.
+The idempotency scope includes user/workspace (with a non-null normalized workspace sentinel), agent, execution, correlation, purpose, actor, key and fingerprint. A repeated key with the same fingerprint returns the original receipt and immutable committed record snapshot. A repeated key with a different fingerprint returns an explicit idempotency conflict. Outbox event IDs are unique, and a retry cannot create the same event twice.
 
 Expected versions are checked under the transaction’s write lock. A mismatch returns `TransactionConflicted`; last-write-wins is never implicit. A rejected request or rollback leaves no partial record, audit, idempotency or outbox row visible.
 
@@ -153,7 +153,7 @@ This session does not add Redis, queues, pub/sub, sessions, locks, leases, worke
 
 The implemented slice preserves the approved design. Fresh verification on 2026-08-06 reports:
 
-- `python -m pytest -q` → `240 passed, 1 skipped`.
+- `python -m pytest -q` → `246 passed, 1 skipped`.
 - `python -m compileall -q src tests` → exit 0.
 - Domain boundary scan → no SQLAlchemy/Alembic matches in Execution, Runtime, Context, Events, Providers or Agents.
 - Public persistence boundary scan → technology names occur only under `src/agentos/persistence/postgres/` and its migrations.

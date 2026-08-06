@@ -20,3 +20,7 @@ def test_schema_has_ownership_versions_and_integrity_constraints():
     assert any(constraint.name == "uq_persistence_records_record_ref" for constraint in records.constraints)
     assert any(constraint.name == "uq_persistence_outbox_event_id" for constraint in outbox.constraints)
     assert any(constraint.name == "uq_persistence_idempotency_scope" for constraint in idempotency.constraints)
+    assert idempotency.c.workspace_scope.nullable is False
+    assert idempotency.c.correlation_id.nullable is False
+    assert idempotency.c.records.nullable is False
+    assert any(constraint.name == "ck_persistence_idempotency_revision_nonnegative" for constraint in idempotency.constraints)

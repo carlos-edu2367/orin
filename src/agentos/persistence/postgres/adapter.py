@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import base64
 import hashlib
+import hmac
 import json
 import secrets
 from typing import Callable, Mapping
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
@@ -34,6 +36,7 @@ from agentos.persistence.models import (
     TransactionRejected,
     TransactionRequest,
     TransactionResult,
+    TransactionOptions,
     VersionConflict,
     as_plain_mapping,
 )
@@ -68,6 +71,7 @@ class PostgresTransactionalPersistence:
         session_factory=None,
         commit_hook: CommitHook | None = None,
         engine_options: Mapping[str, object] | None = None,
+        cursor_secret: bytes | str | None = None,
     ) -> None:
         if isinstance(engine_or_dsn, str):
             self.engine = create_engine(engine_or_dsn, future=True, **dict(engine_options or {}))
@@ -77,7 +81,11 @@ class PostgresTransactionalPersistence:
             self.engine = engine_or_dsn.engine
         self._Session = session_factory or sessionmaker(bind=self.engine, expire_on_commit=False, future=True)
         self._commit_hook = commit_hook
-        self._cursor_state: dict[str, tuple[str, int, int]] = {}
+        self._cursor_secret = (
+            cursor_secret.encode("utf-8")
+            if isinstance(cursor_secret, str)
+            else cursor_secret
+        ) or secrets.token_bytes(32)
 
     def seed(self, record: AuthorizedRecord) -> None:
         now = datetime.now(timezone.utc)
@@ -92,6 +100,7 @@ class PostgresTransactionalPersistence:
         session: Session = self._Session()
         try:
             session.begin()
+            self._configure_transaction_options(session, request)
             existing = session.execute(
                 select(persistence_idempotency).where(
                     *self._idempotency_scope_filters(request.context),
@@ -106,17 +115,9 @@ class PostgresTransactionalPersistence:
                         transaction_id=request.transaction_id,
                     )
                 receipt = self._receipt_from_json(existing["receipt"])
-                records = tuple(
-                    record
-                    for change in request.changes
-                    if (record := self._read_in_session(session, AuthorizedRead(
-                        context=request.context,
-                        record_ref=change.record_ref,
-                        record_type=change.record_type,
-                        classification_ceiling=change.classification,
-                    ))) is not None
-                    and not isinstance(record, NotFound)
-                )
+                records = self._records_from_json(existing.get("records"), request.context)
+                if not records:
+                    records = self._legacy_replay_records(session, request, receipt)
                 session.rollback()
                 return TransactionCommitted(receipt, records, already_applied=True)
 
@@ -194,8 +195,10 @@ class PostgresTransactionalPersistence:
                 persistence_idempotency.insert().values(
                     user_id=request.context.user_id,
                     workspace_id=request.context.workspace_id,
+                    workspace_scope=request.context.workspace_id or "",
                     agent_id=request.context.agent_id,
                     execution_id=request.context.execution_id,
+                    correlation_id=request.context.correlation_id,
                     purpose=request.context.purpose,
                     actor=request.context.actor,
                     idempotency_key=request.idempotency_key,
@@ -203,6 +206,7 @@ class PostgresTransactionalPersistence:
                     transaction_id=request.transaction_id,
                     commit_state=receipt.commit_state.value,
                     receipt=self._receipt_values(receipt),
+                    records=self._records_values(records),
                     store_revision=next_revision,
                     created_at=now,
                 )
@@ -252,46 +256,64 @@ class PostgresTransactionalPersistence:
     def scan(self, query: AuthorizedScan) -> AuthorizedRecordPage:
         fingerprint = self._scan_fingerprint(query)
         with self._Session() as session:
+            revision = self._current_revision(session)
+            last_ref = None
+            if query.page.cursor is not None:
+                cursor = self._decode_cursor(query.page.cursor)
+                if cursor["fingerprint"] != fingerprint or int(cursor["revision"]) != revision:
+                    raise ValueError("invalid persistence cursor")
+                last_ref = str(cursor["last_ref"])
             stmt = select(persistence_records).where(
                 persistence_records.c.record_type == query.record_type,
                 *self._scope_filters(query.context),
                 persistence_records.c.classification.in_(
                     [item.value for item in DataClassification if classification_allows(query.classification_ceiling, item)]
                 ),
-            ).order_by(persistence_records.c.record_ref)
-            rows = session.execute(stmt).mappings().all()
-            records = [self._row_to_record(row) for row in rows]
-            records = [
-                record for record in records
-                if all(record.data.get(key) == value for key, value in query.filters.items())
-            ]
-            offset = 0
-            if query.page.cursor is not None:
-                state = self._cursor_state.get(query.page.cursor)
-                revision = self._current_revision(session)
-                if state is None or state[0] != fingerprint or state[1] != revision:
-                    raise ValueError("invalid persistence cursor")
-                offset = state[2]
-            revision = self._current_revision(session)
-            page_items = tuple(records[offset : offset + query.page.limit])
+            )
+            if last_ref is not None:
+                stmt = stmt.where(persistence_records.c.record_ref > last_ref)
+            for key, value in query.filters.items():
+                stmt = stmt.where(self._json_filter(persistence_records.c.data, key, value))
+            rows = session.execute(
+                stmt.order_by(persistence_records.c.record_ref).limit(query.page.limit + 1)
+            ).mappings().all()
+            page_items = tuple(self._row_to_record(row) for row in rows[: query.page.limit])
             next_cursor = None
-            if offset + query.page.limit < len(records):
-                next_cursor = f"cursor:{secrets.token_urlsafe(24)}"
-                self._cursor_state[next_cursor] = (fingerprint, revision, offset + query.page.limit)
+            if len(rows) > query.page.limit:
+                next_cursor = self._encode_cursor(
+                    {"fingerprint": fingerprint, "revision": revision, "last_ref": str(page_items[-1].record_ref)}
+                )
             return AuthorizedRecordPage(page_items, next_cursor, revision)
 
     def inspect_commit(self, query: InspectCommit) -> TransactionReceipt:
-        with self._Session() as session:
-            row = session.execute(
-                select(persistence_idempotency).where(
-                    *self._idempotency_scope_filters(query.context),
-                    persistence_idempotency.c.transaction_id == query.transaction_id,
-                    persistence_idempotency.c.idempotency_key == query.idempotency_key,
-                )
-            ).mappings().first()
-            if row is None:
-                raise LookupError("commit not found")
-            return self._receipt_from_json(row["receipt"])
+        try:
+            with self._Session() as session:
+                row = session.execute(
+                    select(persistence_idempotency).where(
+                        *self._idempotency_scope_filters(query.context),
+                        persistence_idempotency.c.transaction_id == query.transaction_id,
+                        persistence_idempotency.c.idempotency_key == query.idempotency_key,
+                    )
+                ).mappings().first()
+                if row is None:
+                    return TransactionReceipt(
+                        transaction_id=query.transaction_id,
+                        commit_state=CommitState.NOT_COMMITTED,
+                        record_refs=(),
+                        outbox_refs=(),
+                        store_revision=self._current_revision(session),
+                        committed_at=None,
+                    )
+                return self._receipt_from_json(row["receipt"])
+        except SQLAlchemyError:
+            return TransactionReceipt(
+                transaction_id=query.transaction_id,
+                commit_state=CommitState.UNKNOWN,
+                record_refs=(),
+                outbox_refs=(),
+                store_revision=0,
+                committed_at=None,
+            )
 
     def _lookup_idempotency(self, context: PersistenceOperationContext, idempotency_key: str):
         with self._Session() as session:
@@ -304,18 +326,20 @@ class PostgresTransactionalPersistence:
             if row is None:
                 return None
             receipt = self._receipt_from_json(row["receipt"])
-            records = []
-            for reference in receipt.record_refs:
-                query = AuthorizedRead(
+            records = self._records_from_json(row.get("records"), context)
+            if not records:
+                records = self._legacy_replay_records(session, TransactionRequest(
+                    transaction_id=receipt.transaction_id,
                     context=context,
-                    record_ref=reference,
-                    record_type="execution",
-                    classification_ceiling=DataClassification.INTERNAL,
-                )
-                record = self._read_in_session(session, query)
-                if not isinstance(record, NotFound):
-                    records.append(record)
-            return row["fingerprint"], receipt, tuple(records)
+                    options=TransactionOptions(),
+                    idempotency_key=idempotency_key,
+                    fingerprint=str(row["fingerprint"]),
+                    expected_versions=(),
+                    changes=(),
+                    audit=(),
+                    outbox=(),
+                ), receipt)
+            return row["fingerprint"], receipt, records
 
     def _plan_transaction(self, session: Session, request: TransactionRequest):
         if request.options.read_only and (request.changes or request.audit or request.outbox):
@@ -423,16 +447,12 @@ class PostgresTransactionalPersistence:
 
     @staticmethod
     def _idempotency_scope_filters(context: PersistenceOperationContext):
-        workspace = (
-            persistence_idempotency.c.workspace_id.is_(None)
-            if context.workspace_id is None
-            else persistence_idempotency.c.workspace_id == context.workspace_id
-        )
         return (
             persistence_idempotency.c.user_id == context.user_id,
-            workspace,
+            persistence_idempotency.c.workspace_scope == (context.workspace_id or ""),
             persistence_idempotency.c.agent_id == context.agent_id,
             persistence_idempotency.c.execution_id == context.execution_id,
+            persistence_idempotency.c.correlation_id == context.correlation_id,
             persistence_idempotency.c.purpose == context.purpose,
             persistence_idempotency.c.actor == context.actor,
         )
@@ -457,6 +477,121 @@ class PostgresTransactionalPersistence:
         if created_at is not None:
             values["created_at"] = now
         return values
+
+    @staticmethod
+    def _records_values(records: tuple[AuthorizedRecord, ...] | list[AuthorizedRecord]) -> list[dict[str, object]]:
+        return [
+            {
+                "record_ref": str(record.record_ref),
+                "record_type": record.record_type,
+                "version": record.version,
+                "user_id": record.context.user_id,
+                "workspace_id": record.context.workspace_id,
+                "agent_id": record.context.agent_id,
+                "execution_id": record.context.execution_id,
+                "correlation_id": record.context.correlation_id,
+                "purpose": record.context.purpose,
+                "actor": record.context.actor,
+                "classification": record.classification.value,
+                "data": as_plain_mapping(record.data),
+            }
+            for record in records
+        ]
+
+    @staticmethod
+    def _records_from_json(value, context: PersistenceOperationContext) -> tuple[AuthorizedRecord, ...]:
+        if not value:
+            return ()
+        records = []
+        for item in value:
+            records.append(
+                AuthorizedRecord(
+                    record_ref=RecordReference(str(item["record_ref"])),
+                    record_type=str(item["record_type"]),
+                    version=int(item["version"]),
+                    context=PersistenceOperationContext(
+                        user_id=str(item["user_id"]),
+                        workspace_id=item.get("workspace_id"),
+                        agent_id=str(item["agent_id"]),
+                        execution_id=str(item["execution_id"]),
+                        correlation_id=str(item["correlation_id"]),
+                        purpose=str(item["purpose"]),
+                        actor=str(item["actor"]),
+                    ),
+                    classification=DataClassification(str(item["classification"])),
+                    data=item["data"],
+                )
+            )
+        if any(not PostgresTransactionalPersistence._same_scope(record.context, context) for record in records):
+            return ()
+        return tuple(records)
+
+    def _legacy_replay_records(self, session: Session, request: TransactionRequest, receipt: TransactionReceipt):
+        records = []
+        for reference in receipt.record_refs:
+            record = self._read_in_session(
+                session,
+                AuthorizedRead(
+                    context=request.context,
+                    record_ref=reference,
+                    record_type="execution",
+                    classification_ceiling=DataClassification.INTERNAL,
+                ),
+            )
+            if not isinstance(record, NotFound):
+                records.append(record)
+        return tuple(records)
+
+    def _configure_transaction_options(self, session: Session, request: TransactionRequest) -> None:
+        if self.engine.dialect.name != "postgresql":
+            return
+        isolation = {
+            "READ_COMMITTED": "READ COMMITTED",
+            "REPEATABLE_READ": "REPEATABLE READ",
+            "SERIALIZABLE": "SERIALIZABLE",
+        }[request.options.isolation.value]
+        if request.options.consistency.value == "EVENTUAL":
+            isolation = "READ COMMITTED"
+        session.connection(execution_options={"isolation_level": isolation})
+        if request.options.read_only:
+            session.execute(text("SET TRANSACTION READ ONLY"))
+        timeout_ms = max(1, int(request.options.timeout.total_seconds() * 1000))
+        session.execute(text("SET LOCAL statement_timeout = :timeout_ms"), {"timeout_ms": timeout_ms})
+
+    @staticmethod
+    def _json_filter(column, key: str, value: object):
+        expression = column[key]
+        if value is None:
+            return expression.is_(None)
+        if isinstance(value, bool):
+            return expression.as_boolean() == value
+        if isinstance(value, int) and not isinstance(value, bool):
+            return expression.as_integer() == value
+        if isinstance(value, float):
+            return expression.as_float() == value
+        if isinstance(value, str):
+            return expression.as_string() == value
+        raise ValueError("scan filters must contain scalar values")
+
+    def _encode_cursor(self, payload: Mapping[str, object]) -> str:
+        body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        signature = hmac.new(self._cursor_secret, body, hashlib.sha256).digest()
+        return base64.urlsafe_b64encode(body + b"." + signature).decode("ascii").rstrip("=")
+
+    def _decode_cursor(self, value: str) -> dict[str, object]:
+        try:
+            padded = value + "=" * (-len(value) % 4)
+            raw = base64.urlsafe_b64decode(padded.encode("ascii"))
+            body, signature = raw.rsplit(b".", 1)
+            expected = hmac.new(self._cursor_secret, body, hashlib.sha256).digest()
+            if not hmac.compare_digest(signature, expected):
+                raise ValueError
+            payload = json.loads(body.decode("utf-8"))
+            if not isinstance(payload, dict) or set(payload) != {"fingerprint", "revision", "last_ref"}:
+                raise ValueError
+            return payload
+        except (ValueError, TypeError, json.JSONDecodeError):
+            raise ValueError("invalid persistence cursor") from None
 
     @staticmethod
     def _row_to_record(row) -> AuthorizedRecord:
@@ -531,6 +666,7 @@ class PostgresTransactionalPersistence:
             "record_type": query.record_type,
             "filters": as_plain_mapping(query.filters),
             "classification": query.classification_ceiling.value,
+            "limit": query.page.limit,
         }
         return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
