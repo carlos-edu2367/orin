@@ -60,7 +60,7 @@ O plano de implementação deve registrar commits, arquivos alterados, resultado
 - `python -m pytest -q`: **280 passed, 1 skipped** em 3.01s; o único skip é o teste PostgreSQL opcional sem `AGENTOS_TEST_POSTGRES_DSN`.
 - `python -m compileall -q src tests`: passou.
 - Scan obrigatório de dependências no pacote: zero matches (exit 1 por ausência de resultados).
-- Scan transversal dos domínios existentes: zero imports de `agentos.orchestrator` e zero tokens proibidos.
+- Scan transversal do diff desta sessão (`d12d8ed..HEAD`) nos domínios existentes: zero imports de `agentos.orchestrator` e zero tokens proibidos adicionados; matches tecnológicos já existentes no checkout sujo foram preservados.
 - `git diff --check`: passou; warnings restantes são apenas normalização LF/CRLF de arquivos preexistentes.
 - Commits próprios: `c5c5901`, `37b5cbe`, `915974d`, `da9c263`, `e029d84`, `0d501ef`, `15054e8`, `d5b2709`.
 - Arquivos próprios: `src/agentos/orchestrator/{__init__,models,ports,security,in_memory,compat,service}.py`, `tests/unit/orchestrator/*.py`, esta spec e o plano correspondente.
