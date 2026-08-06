@@ -172,6 +172,9 @@ class InMemoryTransactionalPersistence:
             raise LookupError("commit not found")
         return receipt
 
+    def _lookup_idempotency(self, context, idempotency_key):
+        return self._idempotency.get((context.scope_key(), str(idempotency_key)))
+
     def reject_next(self, code: PersistenceErrorCode = PersistenceErrorCode.CONSTRAINT_VIOLATION) -> None:
         self._next_rejection = code
 

@@ -9,6 +9,8 @@ from typing import Mapping
 from agentos.events.models import DataClassification, EventEnvelope
 from agentos.events.security import freeze_payload
 
+from .security import freeze_persistence_payload
+
 
 MAX_PAGE_SIZE = 100
 MAX_FILTERS = 16
@@ -87,6 +89,7 @@ class PersistenceOperationContext:
             self.execution_id,
             self.correlation_id,
             self.purpose,
+            self.actor,
         )
 
     def __repr__(self) -> str:
@@ -174,7 +177,7 @@ class RecordChange:
         if self.expected_version is not None and self.expected_version < 1:
             raise ValueError("expected_version must be positive when supplied")
         object.__setattr__(self, "classification", DataClassification(self.classification))
-        object.__setattr__(self, "data", freeze_payload(self.data))
+        object.__setattr__(self, "data", freeze_persistence_payload(self.data))
 
 
 @dataclass(frozen=True, slots=True)
@@ -244,7 +247,7 @@ class AuthorizedRecord:
         if self.version < 1:
             raise ValueError("version must be positive")
         object.__setattr__(self, "classification", DataClassification(self.classification))
-        object.__setattr__(self, "data", freeze_payload(self.data))
+        object.__setattr__(self, "data", freeze_persistence_payload(self.data))
 
 
 @dataclass(frozen=True, slots=True)
@@ -350,6 +353,7 @@ class TransactionRejected:
     code: PersistenceErrorCode
     retryability: Retryability = Retryability.NEVER
     transaction_id: str | None = None
+    receipt: TransactionReceipt | None = None
 
 
 @dataclass(frozen=True, slots=True)

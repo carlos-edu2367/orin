@@ -292,6 +292,30 @@ class PostgresTransactionalPersistence:
                 raise LookupError("commit not found")
             return self._receipt_from_json(row["receipt"])
 
+    def _lookup_idempotency(self, context: PersistenceOperationContext, idempotency_key: str):
+        with self._Session() as session:
+            row = session.execute(
+                select(persistence_idempotency).where(
+                    *self._idempotency_scope_filters(context),
+                    persistence_idempotency.c.idempotency_key == idempotency_key,
+                )
+            ).mappings().first()
+            if row is None:
+                return None
+            receipt = self._receipt_from_json(row["receipt"])
+            records = []
+            for reference in receipt.record_refs:
+                query = AuthorizedRead(
+                    context=context,
+                    record_ref=reference,
+                    record_type="execution",
+                    classification_ceiling=DataClassification.INTERNAL,
+                )
+                record = self._read_in_session(session, query)
+                if not isinstance(record, NotFound):
+                    records.append(record)
+            return row["fingerprint"], receipt, tuple(records)
+
     def _plan_transaction(self, session: Session, request: TransactionRequest):
         expected_by_ref = {str(item.record_ref): item.version for item in request.expected_versions}
         if len(expected_by_ref) != len(request.expected_versions):

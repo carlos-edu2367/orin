@@ -31,6 +31,7 @@ from .models import (
 )
 from .ports import TransactionalPersistence
 from .in_memory import InMemoryTransactionalPersistence
+from .execution_compat import ExecutionTransactionalPersistenceAdapter
 
 __all__ = [
     "AuthorizedRead",
@@ -41,6 +42,7 @@ __all__ = [
     "CommitState",
     "ConsistencyLevel",
     "ExpectedVersion",
+    "ExecutionTransactionalPersistenceAdapter",
     "InspectCommit",
     "IsolationLevel",
     "InMemoryTransactionalPersistence",
