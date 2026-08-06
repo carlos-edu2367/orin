@@ -322,10 +322,21 @@ class EvaluationTrigger:
     kind: EvaluationTriggerKind
     requested_at: datetime
     cause_ref: OpaqueReference | None = None
+    actor: str | None = None
+    user_id: str | None = None
+    workspace_id: str | None = None
+    purpose: str | None = None
+    correlation_id: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "kind", EvaluationTriggerKind(self.kind))
         _aware(self.requested_at, "requested_at")
+        for name in ("actor", "user_id", "purpose", "correlation_id"):
+            value = getattr(self, name)
+            if value is not None:
+                _text(value, name)
+        if self.workspace_id is not None:
+            _text(self.workspace_id, "workspace_id")
 
 
 @dataclass(frozen=True, slots=True)
@@ -472,6 +483,7 @@ class SupervisionSnapshot:
     state_version: Version | int
     last_progress_at: datetime | None = None
     pending_action_ref: OpaqueReference | None = None
+    result_ref: OpaqueReference | None = None
 
     def __post_init__(self) -> None:
         _text(self.execution_id, "execution_id")

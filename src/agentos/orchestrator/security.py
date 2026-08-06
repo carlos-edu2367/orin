@@ -36,7 +36,7 @@ def require_owner(*, expected_user_id: str, expected_workspace_id: str | None, a
 
 
 def _plain(value: object, depth: int = 0) -> object:
-    if depth > 5:
+    if depth > 12:
         raise OrchestratorValidationError("fingerprint exceeds its bound")
     if isinstance(value, Decimal):
         return str(value)

@@ -105,6 +105,10 @@ class InMemoryPlanStore:
             raise OrchestratorVersionConflict("plan version conflict")
         return self._attempts.get((str(plan_id), plan_version, str(work_id)))
 
+    def materializations(self, *, plan_id, plan_version, access):
+        self.get(plan_id, access)
+        return tuple(record for (stored_plan, stored_version, _), record in self._attempts.items() if stored_plan == str(plan_id) and stored_version == plan_version)
+
     def mark_expired(self, *, plan_id, plan_version, work, access, idempotency_key):
         plan = self.get(plan_id, access)
         receipt = self._new_receipt(plan, idempotency_key, CommitState.COMMITTED, status="EXPIRED")
