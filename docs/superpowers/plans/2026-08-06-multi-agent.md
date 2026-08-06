@@ -141,7 +141,7 @@
 
 ## Evidence and limitations
 
-- `python -m pytest -q`: 306 passed, 1 skipped.
+- `python -m pytest -q`: 307 passed, 1 skipped.
 - `python -m compileall -q src tests`: passed.
 - Forbidden dependency scan in `src/agentos/multi_agent`: zero matches.
 - `git diff --check`: passed; existing LF/CRLF warnings are unrelated to whitespace errors.
