@@ -23,6 +23,15 @@ from sqlalchemy import (
 
 metadata = MetaData()
 
+persistence_clock = Table(
+    "persistence_clock",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("revision", Integer, nullable=False),
+    CheckConstraint("id = 1", name="ck_persistence_clock_singleton"),
+    CheckConstraint("revision >= 0", name="ck_persistence_clock_revision_nonnegative"),
+)
+
 persistence_records = Table(
     "persistence_records",
     metadata,
@@ -167,5 +176,6 @@ __all__ = [
     "persistence_idempotency",
     "persistence_outbox",
     "persistence_records",
+    "persistence_clock",
     "create_engine_for_tests",
 ]

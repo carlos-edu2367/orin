@@ -14,6 +14,15 @@ depends_on = None
 
 
 def upgrade() -> None:
+    op.create_table(
+        "persistence_clock",
+        sa.Column("id", sa.Integer(), primary_key=True),
+        sa.Column("revision", sa.Integer(), nullable=False),
+        sa.CheckConstraint("id = 1", name="ck_persistence_clock_singleton"),
+        sa.CheckConstraint("revision >= 0", name="ck_persistence_clock_revision_nonnegative"),
+    )
+    op.execute(sa.text("INSERT INTO persistence_clock (id, revision) VALUES (1, 0)"))
+
     with op.batch_alter_table("persistence_records", recreate="always") as batch:
         batch.create_check_constraint("ck_persistence_records_version_positive", "version > 0")
 
@@ -54,8 +63,25 @@ def upgrade() -> None:
         sa.text(
             "UPDATE persistence_idempotency "
             "SET workspace_scope = COALESCE(workspace_id, ''), "
-            "correlation_id = 'legacy:' || CAST(id AS VARCHAR(32)) "
+            "correlation_id = '__legacy__' "
             "WHERE correlation_id = ''"
+        )
+    )
+    op.execute(
+        sa.text(
+            "DELETE FROM persistence_idempotency AS older "
+            "WHERE EXISTS ("
+            "SELECT 1 FROM persistence_idempotency AS newer "
+            "WHERE newer.id > older.id "
+            "AND newer.user_id = older.user_id "
+            "AND (newer.workspace_scope = older.workspace_scope) "
+            "AND newer.agent_id = older.agent_id "
+            "AND newer.execution_id = older.execution_id "
+            "AND newer.purpose = older.purpose "
+            "AND newer.actor = older.actor "
+            "AND newer.idempotency_key = older.idempotency_key "
+            "AND newer.correlation_id = '__legacy__'"
+            ")"
         )
     )
 
@@ -85,6 +111,8 @@ def upgrade() -> None:
         )
 
 def downgrade() -> None:
+    op.drop_table("persistence_clock")
+
     with op.batch_alter_table("persistence_idempotency", recreate="always") as batch:
         batch.drop_constraint("ck_persistence_idempotency_revision_nonnegative", type_="check")
         batch.drop_constraint("uq_persistence_idempotency_scope", type_="unique")

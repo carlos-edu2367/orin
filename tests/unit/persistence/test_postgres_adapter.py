@@ -234,6 +234,12 @@ def test_sqlalchemy_commit_ack_loss_returns_indeterminate_and_inspection_finds_c
     assert receipt.commit_state is CommitState.COMMITTED
     assert read_current(adapter, ctx).version == 2
 
+    key_only = adapter.inspect_commit(
+        InspectCommit(context=ctx, transaction_id=None, idempotency_key=request.idempotency_key)
+    )
+    assert key_only.fingerprint == request.fingerprint
+    assert key_only.records[0].version == 2
+
 
 def test_sqlalchemy_reads_apply_server_scope_and_classification_filters():
     adapter, ctx = make_adapter()

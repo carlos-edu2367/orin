@@ -7,6 +7,7 @@ def test_persistence_schema_contains_only_the_durable_boundary_tables():
         "persistence_audit",
         "persistence_outbox",
         "persistence_idempotency",
+        "persistence_clock",
     }
 
 

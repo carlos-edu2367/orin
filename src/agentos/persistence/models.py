@@ -325,6 +325,8 @@ class TransactionReceipt:
     outbox_refs: tuple[OutboxReference, ...]
     store_revision: int
     committed_at: datetime | None
+    fingerprint: str | None = None
+    records: tuple[AuthorizedRecord, ...] = ()
 
     def __post_init__(self) -> None:
         _required(self.transaction_id, "transaction_id", maximum=128)
@@ -335,6 +337,9 @@ class TransactionReceipt:
             self.committed_at.tzinfo is None or self.committed_at.utcoffset() is None
         ):
             raise ValueError("committed_at must be timezone-aware")
+        if self.fingerprint is not None:
+            _required(self.fingerprint, "fingerprint", maximum=128)
+        object.__setattr__(self, "records", tuple(self.records))
 
     def __repr__(self) -> str:
         return (
@@ -394,11 +399,12 @@ TransactionResult = (
 @dataclass(frozen=True, slots=True)
 class InspectCommit:
     context: PersistenceOperationContext
-    transaction_id: str
+    transaction_id: str | None
     idempotency_key: str
 
     def __post_init__(self) -> None:
-        _required(self.transaction_id, "transaction_id", maximum=128)
+        if self.transaction_id is not None:
+            _required(self.transaction_id, "transaction_id", maximum=128)
         _required(self.idempotency_key, "idempotency_key", maximum=256)
 
 

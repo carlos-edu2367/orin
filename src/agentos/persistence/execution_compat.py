@@ -38,6 +38,7 @@ from agentos.execution.ports import (
 from agentos.persistence.models import (
     AuthorizedRead,
     AuthorizedRecord,
+    CommitState,
     ExpectedVersion,
     InspectCommit,
     OutboxChange,
@@ -226,13 +227,18 @@ class ExecutionTransactionalPersistenceAdapter(LegacyPersistence):
 
     def lookup_idempotency(self, context: ExecutionCommandContext, idempotency_key: str) -> IdempotencyRecord | None:
         canonical_context = self._context(context)
-        lookup = getattr(self._persistence, "_lookup_idempotency", None)
-        if lookup is None:
+        inspection = self._persistence.inspect_commit(
+            InspectCommit(
+                context=canonical_context,
+                transaction_id=None,
+                idempotency_key=str(idempotency_key),
+            )
+        )
+        if inspection.commit_state is not CommitState.COMMITTED:
             return None
-        result = lookup(canonical_context, str(idempotency_key))
-        if result is None:
+        fingerprint, receipt, records = inspection.fingerprint, inspection, inspection.records
+        if fingerprint is None:
             return None
-        fingerprint, receipt, records = result
         if not records:
             return None
         return IdempotencyRecord(
@@ -305,12 +311,7 @@ class ExecutionTransactionalPersistenceAdapter(LegacyPersistence):
                 idempotency_key=str(idempotency_key),
             )
         )
-        resulting_version = 0
-        lookup = getattr(self._persistence, "_lookup_idempotency", None)
-        if lookup is not None:
-            inspected = lookup(self._context(context), str(idempotency_key))
-            if inspected is not None and inspected[2]:
-                resulting_version = int(inspected[2][0].version)
+        resulting_version = int(result.records[0].version) if result.records else 0
         return self._legacy_receipt(result, context.execution_id, resulting_version)
 
     @staticmethod

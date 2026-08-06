@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import replace
 from datetime import datetime, timezone
 import base64
 import hashlib
@@ -9,7 +9,7 @@ import json
 import secrets
 from typing import Callable, Mapping
 
-from sqlalchemy import and_, func, or_, select, text
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
@@ -36,7 +36,6 @@ from agentos.persistence.models import (
     TransactionRejected,
     TransactionRequest,
     TransactionResult,
-    TransactionOptions,
     VersionConflict,
     as_plain_mapping,
 )
@@ -48,10 +47,12 @@ from .schema import (
     persistence_idempotency,
     persistence_outbox,
     persistence_records,
+    persistence_clock,
 )
 
 
 CommitHook = Callable[[TransactionRequest], None]
+LEGACY_CORRELATION = "__legacy__"
 
 
 class PersistenceAdapterError(RuntimeError):
@@ -95,6 +96,7 @@ class PostgresTransactionalPersistence:
                     **self._record_values(record, now=now),
                 )
             )
+            self._next_revision(session)
 
     def transact(self, request: TransactionRequest) -> TransactionResult:
         session: Session = self._Session()
@@ -105,7 +107,7 @@ class PostgresTransactionalPersistence:
                 select(persistence_idempotency).where(
                     *self._idempotency_scope_filters(request.context),
                     persistence_idempotency.c.idempotency_key == request.idempotency_key,
-                )
+                ).order_by(self._idempotency_order(request.context))
             ).mappings().first()
             if existing is not None:
                 if existing["fingerprint"] != request.fingerprint:
@@ -215,6 +217,9 @@ class PostgresTransactionalPersistence:
                 session.flush()
             except IntegrityError as error:
                 session.rollback()
+                replay = self._resolve_idempotency_race(request)
+                if replay is not None:
+                    return replay
                 normalized = normalize_database_error(error)
                 code = (
                     PersistenceErrorCode.DUPLICATE_OUTBOX_EVENT
@@ -244,6 +249,27 @@ class PostgresTransactionalPersistence:
             return TransactionRejected(normalized.code, normalized.retryability, request.transaction_id)
         finally:
             session.close()
+
+    def _resolve_idempotency_race(self, request: TransactionRequest) -> TransactionResult | None:
+        with self._Session() as session:
+            row = session.execute(
+                select(persistence_idempotency).where(
+                    *self._idempotency_scope_filters(request.context),
+                    persistence_idempotency.c.idempotency_key == request.idempotency_key,
+                ).order_by(self._idempotency_order(request.context))
+            ).mappings().first()
+            if row is None:
+                return None
+            if row["fingerprint"] != request.fingerprint:
+                return TransactionRejected(
+                    PersistenceErrorCode.IDEMPOTENCY_CONFLICT,
+                    transaction_id=request.transaction_id,
+                )
+            receipt = self._receipt_from_json(row["receipt"])
+            records = self._records_from_json(row.get("records"), request.context)
+            if not records:
+                records = self._legacy_replay_records(session, request, receipt)
+            return TransactionCommitted(receipt, records, already_applied=True)
 
     def read(self, query: AuthorizedRead) -> AuthorizedRecord | NotFound:
         with self._Session() as session:
@@ -288,23 +314,32 @@ class PostgresTransactionalPersistence:
     def inspect_commit(self, query: InspectCommit) -> TransactionReceipt:
         try:
             with self._Session() as session:
+                filters = [
+                    *self._idempotency_scope_filters(query.context),
+                    persistence_idempotency.c.idempotency_key == query.idempotency_key,
+                ]
+                if query.transaction_id is not None:
+                    filters.append(persistence_idempotency.c.transaction_id == query.transaction_id)
                 row = session.execute(
-                    select(persistence_idempotency).where(
-                        *self._idempotency_scope_filters(query.context),
-                        persistence_idempotency.c.transaction_id == query.transaction_id,
-                        persistence_idempotency.c.idempotency_key == query.idempotency_key,
+                    select(persistence_idempotency).where(*filters).order_by(
+                        self._idempotency_order(query.context)
                     )
                 ).mappings().first()
                 if row is None:
                     return TransactionReceipt(
-                        transaction_id=query.transaction_id,
+                        transaction_id=query.transaction_id or "inspection:unknown",
                         commit_state=CommitState.NOT_COMMITTED,
                         record_refs=(),
                         outbox_refs=(),
                         store_revision=self._current_revision(session),
                         committed_at=None,
                     )
-                return self._receipt_from_json(row["receipt"])
+                receipt = self._receipt_from_json(row["receipt"])
+                return replace(
+                    receipt,
+                    fingerprint=str(row["fingerprint"]),
+                    records=self._records_from_json(row.get("records"), query.context),
+                )
         except SQLAlchemyError:
             return TransactionReceipt(
                 transaction_id=query.transaction_id,
@@ -314,32 +349,6 @@ class PostgresTransactionalPersistence:
                 store_revision=0,
                 committed_at=None,
             )
-
-    def _lookup_idempotency(self, context: PersistenceOperationContext, idempotency_key: str):
-        with self._Session() as session:
-            row = session.execute(
-                select(persistence_idempotency).where(
-                    *self._idempotency_scope_filters(context),
-                    persistence_idempotency.c.idempotency_key == idempotency_key,
-                )
-            ).mappings().first()
-            if row is None:
-                return None
-            receipt = self._receipt_from_json(row["receipt"])
-            records = self._records_from_json(row.get("records"), context)
-            if not records:
-                records = self._legacy_replay_records(session, TransactionRequest(
-                    transaction_id=receipt.transaction_id,
-                    context=context,
-                    options=TransactionOptions(),
-                    idempotency_key=idempotency_key,
-                    fingerprint=str(row["fingerprint"]),
-                    expected_versions=(),
-                    changes=(),
-                    audit=(),
-                    outbox=(),
-                ), receipt)
-            return row["fingerprint"], receipt, records
 
     def _plan_transaction(self, session: Session, request: TransactionRequest):
         if request.options.read_only and (request.changes or request.audit or request.outbox):
@@ -409,8 +418,7 @@ class PostgresTransactionalPersistence:
             if audit.resulting_version != versions[str(audit.record_ref)]:
                 return TransactionRejected(PersistenceErrorCode.CONSTRAINT_VIOLATION, transaction_id=request.transaction_id)
 
-        current_revision = self._current_revision(session)
-        return tuple(records), versions, current_revision + 1
+        return tuple(records), versions, self._next_revision(session)
 
     def _read_in_session(self, session: Session, query: AuthorizedRead):
         stmt = select(persistence_records).where(
@@ -452,10 +460,17 @@ class PostgresTransactionalPersistence:
             persistence_idempotency.c.workspace_scope == (context.workspace_id or ""),
             persistence_idempotency.c.agent_id == context.agent_id,
             persistence_idempotency.c.execution_id == context.execution_id,
-            persistence_idempotency.c.correlation_id == context.correlation_id,
+            or_(
+                persistence_idempotency.c.correlation_id == context.correlation_id,
+                persistence_idempotency.c.correlation_id == LEGACY_CORRELATION,
+            ),
             persistence_idempotency.c.purpose == context.purpose,
             persistence_idempotency.c.actor == context.actor,
         )
+
+    @staticmethod
+    def _idempotency_order(context: PersistenceOperationContext):
+        return (persistence_idempotency.c.correlation_id == context.correlation_id).desc()
 
     @staticmethod
     def _record_values(record: AuthorizedRecord, *, now: datetime, created_at: datetime | None = ...):
@@ -556,7 +571,9 @@ class PostgresTransactionalPersistence:
         if request.options.read_only:
             session.execute(text("SET TRANSACTION READ ONLY"))
         timeout_ms = max(1, int(request.options.timeout.total_seconds() * 1000))
-        session.execute(text("SET LOCAL statement_timeout = :timeout_ms"), {"timeout_ms": timeout_ms})
+        session.execute(
+            select(func.set_config("statement_timeout", str(timeout_ms), True))
+        )
 
     @staticmethod
     def _json_filter(column, key: str, value: object):
@@ -657,8 +674,24 @@ class PostgresTransactionalPersistence:
         )
 
     def _current_revision(self, session: Session) -> int:
-        value = session.execute(select(func.max(persistence_idempotency.c.store_revision))).scalar_one()
+        value = session.execute(
+            select(persistence_clock.c.revision).where(persistence_clock.c.id == 1)
+        ).scalar_one_or_none()
         return int(value or 0)
+
+    def _next_revision(self, session: Session) -> int:
+        current = session.execute(
+            select(persistence_clock.c.revision)
+            .where(persistence_clock.c.id == 1)
+            .with_for_update()
+        ).scalar_one()
+        next_revision = int(current) + 1
+        session.execute(
+            persistence_clock.update()
+            .where(persistence_clock.c.id == 1)
+            .values(revision=next_revision)
+        )
+        return next_revision
 
     def _scan_fingerprint(self, query: AuthorizedScan) -> str:
         payload = {

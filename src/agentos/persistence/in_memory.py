@@ -165,22 +165,27 @@ class InMemoryTransactionalPersistence:
         return AuthorizedRecordPage(page_items, next_cursor, self._store_revision)
 
     def inspect_commit(self, query: InspectCommit) -> TransactionReceipt:
-        receipt = self._receipts.get(
-            (query.context.scope_key(), query.transaction_id, query.idempotency_key)
-        )
+        receipt = None
+        fingerprint = None
+        records = ()
+        if query.transaction_id is not None:
+            receipt = self._receipts.get(
+                (query.context.scope_key(), query.transaction_id, query.idempotency_key)
+            )
+        else:
+            existing = self._idempotency.get((query.context.scope_key(), query.idempotency_key))
+            if existing is not None:
+                fingerprint, receipt, records = existing
         if receipt is None:
             return TransactionReceipt(
-                transaction_id=query.transaction_id,
+                transaction_id=query.transaction_id or "inspection:unknown",
                 commit_state=CommitState.NOT_COMMITTED,
                 record_refs=(),
                 outbox_refs=(),
                 store_revision=self._store_revision,
                 committed_at=None,
             )
-        return receipt
-
-    def _lookup_idempotency(self, context, idempotency_key):
-        return self._idempotency.get((context.scope_key(), str(idempotency_key)))
+        return replace(receipt, fingerprint=fingerprint, records=records)
 
     def reject_next(self, code: PersistenceErrorCode = PersistenceErrorCode.CONSTRAINT_VIOLATION) -> None:
         self._next_rejection = code
