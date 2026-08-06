@@ -43,6 +43,10 @@ persistence_records = Table(
     Column("updated_at", DateTime(timezone=True), nullable=False),
     UniqueConstraint("record_ref", name="uq_persistence_records_record_ref"),
     CheckConstraint("version > 0", name="ck_persistence_records_version_positive"),
+    CheckConstraint(
+        "classification IN ('PUBLIC', 'INTERNAL', 'CONFIDENTIAL', 'RESTRICTED')",
+        name="ck_persistence_records_classification",
+    ),
 )
 Index(
     "ix_persistence_records_scope",
@@ -59,7 +63,7 @@ persistence_audit = Table(
     Column("id", Integer, primary_key=True),
     Column("audit_ref", String(128), nullable=False),
     Column("transaction_id", String(128), nullable=False),
-    Column("record_ref", String(255), nullable=False),
+    Column("record_ref", String(255), ForeignKey("persistence_records.record_ref"), nullable=False),
     Column("user_id", String(255), nullable=False),
     Column("workspace_id", String(255), nullable=True),
     Column("agent_id", String(255), nullable=False),
@@ -96,6 +100,10 @@ persistence_outbox = Table(
     Column("published_at", DateTime(timezone=True), nullable=True),
     UniqueConstraint("event_id", name="uq_persistence_outbox_event_id"),
     CheckConstraint("expected_source_version > 0", name="ck_persistence_outbox_version_positive"),
+    CheckConstraint(
+        "classification IN ('PUBLIC', 'INTERNAL', 'CONFIDENTIAL', 'RESTRICTED')",
+        name="ck_persistence_outbox_classification",
+    ),
 )
 Index("ix_persistence_outbox_pending", persistence_outbox.c.published_at, persistence_outbox.c.created_at)
 Index("ix_persistence_outbox_scope", persistence_outbox.c.user_id, persistence_outbox.c.workspace_id, persistence_outbox.c.execution_id)
@@ -132,6 +140,14 @@ persistence_idempotency = Table(
         name="uq_persistence_idempotency_scope",
     ),
     CheckConstraint("store_revision >= 0", name="ck_persistence_idempotency_revision_nonnegative"),
+    CheckConstraint(
+        "workspace_scope = COALESCE(workspace_id, '')",
+        name="ck_persistence_idempotency_workspace_scope",
+    ),
+    CheckConstraint(
+        "commit_state IN ('COMMITTED', 'NOT_COMMITTED', 'UNKNOWN')",
+        name="ck_persistence_idempotency_commit_state",
+    ),
 )
 Index(
     "ix_persistence_idempotency_transaction",

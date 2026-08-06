@@ -19,9 +19,19 @@ def upgrade() -> None:
 
     with op.batch_alter_table("persistence_audit", recreate="always") as batch:
         batch.create_check_constraint("ck_persistence_audit_version_positive", "resulting_version > 0")
+        batch.create_foreign_key(
+            "fk_persistence_audit_record",
+            "persistence_records",
+            ["record_ref"],
+            ["record_ref"],
+        )
 
     with op.batch_alter_table("persistence_outbox", recreate="always") as batch:
         batch.create_check_constraint("ck_persistence_outbox_version_positive", "expected_source_version > 0")
+        batch.create_check_constraint(
+            "ck_persistence_outbox_classification",
+            "classification IN ('PUBLIC', 'INTERNAL', 'CONFIDENTIAL', 'RESTRICTED')",
+        )
         batch.create_foreign_key(
             "fk_persistence_outbox_source_record",
             "persistence_records",
@@ -65,6 +75,14 @@ def upgrade() -> None:
             ],
         )
         batch.create_check_constraint("ck_persistence_idempotency_revision_nonnegative", "store_revision >= 0")
+        batch.create_check_constraint(
+            "ck_persistence_idempotency_workspace_scope",
+            "workspace_scope = COALESCE(workspace_id, '')",
+        )
+        batch.create_check_constraint(
+            "ck_persistence_idempotency_commit_state",
+            "commit_state IN ('COMMITTED', 'NOT_COMMITTED', 'UNKNOWN')",
+        )
 
 def downgrade() -> None:
     with op.batch_alter_table("persistence_idempotency", recreate="always") as batch:
@@ -80,9 +98,11 @@ def downgrade() -> None:
 
     with op.batch_alter_table("persistence_outbox", recreate="always") as batch:
         batch.drop_constraint("fk_persistence_outbox_source_record", type_="foreignkey")
+        batch.drop_constraint("ck_persistence_outbox_classification", type_="check")
         batch.drop_constraint("ck_persistence_outbox_version_positive", type_="check")
 
     with op.batch_alter_table("persistence_audit", recreate="always") as batch:
+        batch.drop_constraint("fk_persistence_audit_record", type_="foreignkey")
         batch.drop_constraint("ck_persistence_audit_version_positive", type_="check")
 
     with op.batch_alter_table("persistence_records", recreate="always") as batch:
