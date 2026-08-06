@@ -4,7 +4,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Mapping
 
-from agentos.events.compat import from_execution_event, to_canonical_event
+from agentos.events.compat import to_canonical_event
 from agentos.events.models import DataClassification
 from agentos.execution.models import (
     CancellationReason,
@@ -20,15 +20,9 @@ from agentos.execution.models import (
     TaskSnapshot,
 )
 from agentos.execution.ports import (
-    Accepted,
-    AlreadyApplied,
-    Conflict,
     ExecutionCommandContext,
-    ExecutionDomainChange,
     ExecutionNotFoundError,
     IdempotencyRecord,
-    Indeterminate,
-    Rejected,
     RejectionReason,
     TransactionCommitState,
     TransactionCommitted as LegacyTransactionCommitted,
@@ -44,10 +38,10 @@ from agentos.execution.ports import (
 from agentos.persistence.models import (
     AuthorizedRead,
     AuthorizedRecord,
-    CommitState,
     ExpectedVersion,
     InspectCommit,
     OutboxChange,
+    PersistenceErrorCode,
     PersistenceOperationContext,
     RecordChange,
     RecordReference,
@@ -56,6 +50,7 @@ from agentos.persistence.models import (
     TransactionIndeterminate,
     TransactionOptions,
     TransactionRejected,
+    TransactionReceipt,
     TransactionRequest,
 )
 from agentos.persistence.ports import TransactionalPersistence
