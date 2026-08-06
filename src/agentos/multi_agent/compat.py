@@ -11,6 +11,7 @@ from agentos.execution.ports import (
     CreateExecution,
     ExecutionCommandContext,
     ExecutionControl,
+    Indeterminate,
     PauseExecution,
     ResumeExecution,
 )
@@ -76,9 +77,11 @@ class ExecutionControlAdapter:
             execution=execution,
         )
         result = self._control.create(command)
+        if isinstance(result, Indeterminate):
+            return ExecutionCreationReceipt(execution_id, 1, result.transaction_id, "UNKNOWN")
         if not hasattr(result, "resulting_version"):
             raise MultiAgentExecutionRejected("delivery execution rejected")
-        return ExecutionCreationReceipt(execution_id, result.resulting_version, getattr(result, "transaction_id", None))
+        return ExecutionCreationReceipt(execution_id, result.resulting_version, getattr(result, "transaction_id", None), "COMMITTED")
 
     def create_child(self, *, request: DelegateTask, execution_id: str, resolved_agent):
         execution = Execution.create(
@@ -103,9 +106,11 @@ class ExecutionControlAdapter:
             execution=execution,
         )
         result = self._control.create(command)
+        if isinstance(result, Indeterminate):
+            return ExecutionCreationReceipt(execution_id, 1, result.transaction_id, "UNKNOWN")
         if not hasattr(result, "resulting_version"):
             raise MultiAgentExecutionRejected("child execution rejected")
-        return ExecutionCreationReceipt(execution_id, result.resulting_version, getattr(result, "transaction_id", None))
+        return ExecutionCreationReceipt(execution_id, result.resulting_version, getattr(result, "transaction_id", None), "COMMITTED")
 
     def request_pause(self, context: ExecutionCommandContext, *, expected_version: int, idempotency_key: str):
         return self._control.request_pause(
@@ -158,6 +163,7 @@ class ExecutionCreationReceipt:
     execution_id: str
     state_version: int
     transaction_id: str | None
+    commit_state: str = "COMMITTED"
 
 
 def _delivery_limits():

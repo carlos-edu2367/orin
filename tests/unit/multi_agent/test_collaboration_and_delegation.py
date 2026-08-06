@@ -171,7 +171,7 @@ def test_delegate_resolves_handoff_and_creates_one_child_execution():
 
 
 def test_return_result_keeps_failed_terminal_distinct():
-    service, _, _, _, _ = _service()
+    service, store, _, _, _ = _service()
     ref = SimpleNamespace(handoff_id="handoff:1", version=1, to_agent_id="agent:target", target_execution_id="execution:child", expires_at=NOW)
     command = DelegateTask(
         actor="actor:1", collaboration_id="collab:1", parent_execution_id="execution:parent",
@@ -201,3 +201,6 @@ def test_return_result_keeps_failed_terminal_distinct():
         correlation_id="corr:1", idempotency_key="return:1", requested_at=NOW,
     ))
     assert receipt.result.terminal_state is DelegationTerminalState.FAILED
+    event_types = {event.event_type for event in store.events}
+    assert "DelegationFailed" in event_types
+    assert "DelegationResultReturned" in event_types

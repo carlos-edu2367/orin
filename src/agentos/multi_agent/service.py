@@ -204,6 +204,24 @@ class MultiAgentCoordinatorService:
         if command.result.child_execution_id != delegation.child_execution_id:
             raise PermissionError("result execution does not match delegation")
         existing = self.store.save_result(command.result, fingerprint=fingerprint(command))
+        terminal_event = {
+            "COMPLETED": "DelegationCompleted",
+            "FAILED": "DelegationFailed",
+            "CANCELLED": "DelegationCancelled",
+        }[command.result.terminal_state.value]
+        self._record_fact(
+            event_type=terminal_event,
+            event_id=f"event:{command.delegation_id}:{terminal_event}",
+            execution_id=delegation.child_execution_id,
+            agent_id=delegation.delegate_agent_id,
+            command=command,
+            payload={
+                "delegation_id": command.delegation_id,
+                "terminal_state": command.result.terminal_state.value,
+                "result_ref": command.result.result_ref,
+                "failure_ref": command.result.failure_ref,
+            },
+        )
         self._record_fact(
             event_type="DelegationResultReturned",
             event_id=f"event:{command.delegation_id}:result",
