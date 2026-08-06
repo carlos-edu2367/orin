@@ -29,11 +29,9 @@
 **Interfaces:**
 - Produces `OpaqueReference`, `OrchestrationPlanDraft`, `OrchestrationPlan`, `PlannedWork`, `DependencyEdge`, `OrchestrationPolicy`, `ScheduleConstraint`, intents, commands, receipts/outcomes and `validate_plan`/`fingerprint`.
 
-- [ ] Write tests for UTC/bounds, opaque refs, duplicate/cyclic DAG rejection, legal conditions/policies, stable bounded fingerprints, sensitive-data rejection and sanitized public errors.
-- [ ] Run `python -m pytest -q tests/unit/orchestrator/test_models_security.py`; observe failure because package does not exist.
-- [ ] Implement frozen/slotted dataclasses, enums, bounded recursive ref validation, canonical fingerprinting and Kahn/topological validation.
-- [ ] Re-run the focused tests, then `python -m compileall -q src/agentos/orchestrator`.
-- [ ] Commit `feat: add orchestrator plan contracts and security`.
+- [x] Write tests for UTC/bounds, opaque refs, duplicate/cyclic DAG rejection, legal conditions/policies, stable bounded fingerprints, sensitive-data rejection and sanitized public errors.
+- [x] Run focused RED, implement frozen/slotted dataclasses, bounded recursive ref validation, canonical fingerprinting and Kahn/topological validation, then verify GREEN.
+- [x] Commit `37b5cbe` (`feat: add orchestrator plan contracts and security`).
 
 ### Task 2: Ports and deterministic in-memory coordination
 
@@ -45,11 +43,9 @@
 **Interfaces:**
 - Produces `Orchestrator`, `ExecutionFactory`, `SchedulingPort`, `DispatchPort`, `SupervisionPort`, `PlanStorePort`, `PlanAccessContext`, `DispatchRequest`, `ScheduleTrigger`, `SupervisionSnapshot`, `PlanStoreResult`, `InMemoryPlanStore`, `InMemoryScheduling`, `InMemoryDispatch`, `InMemorySupervision`.
 
-- [ ] Write tests for authorized get/list, cross-owner non-disclosure, idempotent submit, divergent fingerprint, expected-version conflicts, `COMMITTED`/`NOT_COMMITTED`/`UNKNOWN` inspection, single materialization and minimum dispatch shape.
-- [ ] Run the focused tests and observe missing Protocols/adapters.
-- [ ] Implement port-only dataclasses and in-memory records; use atomic dictionary updates, immutable snapshots, bounded events and explicit fault injection for commit states.
-- [ ] Re-run focused tests and verify no concrete infrastructure term appears in the package.
-- [ ] Commit `feat: add orchestrator plan and coordination ports`.
+- [x] Write and run RED tests, implement Protocols, atomic reference records, immutable snapshots, bounded events and explicit commit-state fault injection.
+- [x] Verify ownership, idempotency, inspection, materialization and minimum dispatch behavior.
+- [x] Commit `915974d` (`feat: add orchestrator plan and coordination ports`).
 
 ### Task 3: Execution/Agent/Event compatibility bridges
 
@@ -60,11 +56,9 @@
 **Interfaces:**
 - Produces `ExecutionControlExecutionFactory`, `AgentResolverAdapter`, `AgentAdministrationAdapter`, `ExecutionCancellationAdapter` and minimal event/persistence translation helpers.
 
-- [ ] Write tests with real in-memory Kernel/Agent ports proving creation goes through `ExecutionControl`, config version is fixed, cancellation uses expected version, and no direct EventBus/persistence mutation occurs.
-- [ ] Run focused tests to observe missing bridge.
-- [ ] Implement translation using only existing public Protocols and legacy/canonical event types; translate `Indeterminate` to `UNKNOWN` without claiming success.
-- [ ] Re-run focused tests and boundary import checks.
-- [ ] Commit `feat: bridge orchestrator to kernel ports`.
+- [x] Write and run RED tests proving `ExecutionControl` creation, fixed config version and expected-version cancellation.
+- [x] Implement public-port translation and `Indeterminate` → `UNKNOWN`; add deterministic execution identity by idempotency key.
+- [x] Commit `da9c263` (`feat: bridge orchestrator to kernel ports`) and hardening in `d5b2709`.
 
 ### Task 4: Submit and plan evaluation service
 
@@ -75,11 +69,9 @@
 **Interfaces:**
 - Produces `OrchestratorService.submit`, `.evaluate`, `.request_cancel`, `.request_retry`.
 
-- [ ] Write tests for `RunAgentTask`, `ExecutePlan`, `ContinueExecution`, admin delegation, ready/not-ready dependencies, `not_before`, expiration, bounded parallelism and Agent/config revalidation.
-- [ ] Run focused tests to observe missing service.
-- [ ] Implement authorization-first submit, immutable plan creation, dependency evaluation, one materialization per work/version, transactional event facts before dispatch, and no materialization on rejected/unknown commits.
-- [ ] Re-run focused tests; preserve `QUEUED`/terminal semantics and do not dispatch sensitive payloads.
-- [ ] Commit `feat: implement orchestrator submission and evaluation`.
+- [x] Write and run RED tests for submit/evaluate, schedule windows, DAG readiness and Agent/config revalidation.
+- [x] Implement authorization-first submission, immutable plans, dependency evaluation, one materialization per primary work/version, transactional event facts before dispatch and minimal dispatch.
+- [x] Commit `e029d84` (`feat: implement orchestrator submission and evaluation`).
 
 ### Task 5: Cancellation, failure propagation and retry
 
@@ -91,11 +83,9 @@
 **Interfaces:**
 - Extends `request_cancel`, `request_retry`, dependency failure policies and recovery commands.
 
-- [ ] Write tests for cancel-before/after materialization, terminal immutability, version conflicts, DO_NOT_MATERIALIZE, CANCEL_RELATED, failure handler, new retry identity/key and no timeout-to-cancel conversion.
-- [ ] Run focused tests to observe each missing behavior.
-- [ ] Implement explicit policy dispatch, expected-version Kernel commands, relation/cause refs and idempotent cancellation receipts.
-- [ ] Re-run focused tests and inspect event payloads for sanitization.
-- [ ] Commit `feat: add orchestrator cancellation and retry policies`.
+- [x] Write and run RED tests for cancellation before/after materialization, terminality, failure policies, handler materialization, retry identity and schedule cancellation.
+- [x] Implement expected-version Kernel cancellation, retry limits, pending reconciliation, explicit failure propagation and trigger cancellation after commit.
+- [x] Commit `0d501ef` (`feat: add orchestrator cancellation and retry policies`) and `d5b2709` (`fix: harden orchestrator reconciliation and ownership`).
 
 ### Task 6: Public exports, integration and full requirement tests
 
@@ -108,11 +98,9 @@
 **Interfaces:**
 - Produces stable package exports and regression coverage for ownership, events, persistence atomicity, cross-domain imports, PostgreSQL skip rationale and all public outcomes.
 
-- [ ] Write public import, event/outbox, supervision-observational, cross-domain dependency and forbidden-token tests.
-- [ ] Run focused tests to observe missing exports/coverage.
-- [ ] Export only stable names; keep adapters unexported unless reference tests need them; update boundary matrix to scan Orchestrator.
-- [ ] Run the complete orchestrator suite and then the complete repository suite.
-- [ ] Commit `test: cover orchestrator normative requirements`.
+- [x] Write public import, event/outbox, supervision-observational, cross-domain and forbidden-token tests.
+- [x] Export stable names and verify the complete Orchestrator suite (`32 passed`).
+- [x] Commit `15054e8` (`test: cover orchestrator normative requirements`).
 
 ### Task 7: Audit and final verification
 
@@ -120,8 +108,8 @@
 - Modify: `docs/superpowers/specs/2026-08-06-orchestrator-design.md`
 - Modify: `docs/superpowers/plans/2026-08-06-orchestrator.md`
 
-- [ ] Review every requirement in RFCs 050, 060, 101, 102, 103, 104, 201, 202, 203 and 601 plus ADRs 002, 009, 012 and 013 against code/tests.
-- [ ] Run `python -m pytest -q`, `python -m compileall -q src tests`, the exact forbidden-token scan, a transversal boundary scan, `git diff --check` and `git status --short --branch`.
-- [ ] Record fresh test counts, PostgreSQL skip reason, limitations, commits and changed files in both docs.
-- [ ] Request technical review from a reviewer subagent, fix Critical/Important findings with regression tests, and rerun all final checks.
-- [ ] Commit `docs: record orchestrator audit and verification`.
+- [x] Auditar RFCs/ADRs: RFC 050/060 (bounds/ownership), 101/102 (Kernel/version/terminal), 103 (outbox), 104 (refs), 201 (Agent), 202 (Orchestrator), 203 (fora), 601 (persistência canônica), ADRs 002/009/012/013 (tecnologia atrás de portas).
+- [x] Executar verificações finais: `280 passed, 1 skipped`, compileall, scans sem matches, diff check e status.
+- [x] Registrar skip PostgreSQL, limitações, commits e arquivos na spec.
+- [x] Review independente retornou Critical/Important; regressões foram adicionadas em `test_review_regressions.py` e corrigidas em `d5b2709`.
+- [x] Esta atualização documental completa a auditoria; permanece deliberadamente sem incluir RFC 203, scheduler físico, pool, broker, lease ou storage tecnológico.

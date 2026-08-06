@@ -54,3 +54,17 @@ RFCs 050/060: modelos imutáveis, bounds, purpose, ownership e referências opac
 ## Evidência a registrar ao concluir
 
 O plano de implementação deve registrar commits, arquivos alterados, resultado fresco de `python -m pytest -q`, `python -m compileall -q src tests`, scan de dependências proibidas no pacote e transversal, `git diff --check`, `git status --short --branch` e o motivo de eventual skip PostgreSQL.
+
+## Verificação final de 2026-08-06
+
+- `python -m pytest -q`: **280 passed, 1 skipped** em 3.01s; o único skip é o teste PostgreSQL opcional sem `AGENTOS_TEST_POSTGRES_DSN`.
+- `python -m compileall -q src tests`: passou.
+- Scan obrigatório de dependências no pacote: zero matches (exit 1 por ausência de resultados).
+- Scan transversal dos domínios existentes: zero imports de `agentos.orchestrator` e zero tokens proibidos.
+- `git diff --check`: passou; warnings restantes são apenas normalização LF/CRLF de arquivos preexistentes.
+- Commits próprios: `c5c5901`, `37b5cbe`, `915974d`, `da9c263`, `e029d84`, `0d501ef`, `15054e8`, `d5b2709`.
+- Arquivos próprios: `src/agentos/orchestrator/{__init__,models,ports,security,in_memory,compat,service}.py`, `tests/unit/orchestrator/*.py`, esta spec e o plano correspondente.
+
+O review independente identificou e foi incorporado: não registrar trigger após `UNKNOWN`, inspeção obrigatória antes de retry da mesma tentativa, IDs determinísticos por chave na bridge do Kernel, ownership nos adapters de schedule/supervisão, pending reconciliation para evitar segunda Execution, limite agregado de fingerprint, limite de retries, handlers de falha, expiração inclusiva e cancelamento de triggers após commit.
+
+Limitações residuais explícitas: o adapter in-memory é referência de processo e não substitui um PlanStore persistente; a recuperação distribuída de lease, o scheduler físico, pool de workers, broker/fila, retry distribuído, DR e PostgreSQL do Orchestrator ainda exigem adapters futuros sob RFC 601. RFC 203 — Multi-agent permanece fora do escopo.
