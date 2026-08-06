@@ -1,0 +1,3 @@
+# Task 9 — Workers, scheduler e observabilidade
+
+Crie `docs/architecture/800-operations/801-workers.md`, `802-scheduler.md`, `803-observability.md`, exclusivamente Markdown. Defina pools Agent/Browser/Maintenance/Scheduler, filas, backpressure, retries, locks, cancelamento, recovery e isolamento. Scheduler para futuras/recorrências/Skills/watchdogs/limpeza, timezone, idempotência e semântica de disparo. Observabilidade: logs estruturados, correlação, métricas, tracing, auditoria por eventos, custos e reconstrução integral da Execution. Contratos tipados, contexto sensível, eventos/fluxos/falhas/segurança/invariantes/futuro em cada RFC. Sem código. Criar task-9-report.md.

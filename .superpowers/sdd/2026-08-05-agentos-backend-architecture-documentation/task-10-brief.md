@@ -1,0 +1,3 @@
+# Task 10 — Extensibilidade
+
+Crie apenas Markdown: `docs/architecture/900-extensibility/901-plugin-sdk.md`, `902-skills.md`, `903-mcp-future.md`. Plugin SDK: manifesto, descoberta/registro, versionamento, permissões, isolamento, compatibilidade, desativação e observabilidade. Skills: workflows versionados que criam Executions, contexto mínimo, permissões, artefatos e agendamento. MCP: posição futura, portas, limites segurança e critérios de adoção sem quebrar contratos atuais. Cada RFC deve conter seções completas, contratos tipados, contexto sensível, eventos/fluxos/falhas/cancelamento, segurança, invariantes/extensibilidade/futuro, sem código. Criar task-10-report.md.
