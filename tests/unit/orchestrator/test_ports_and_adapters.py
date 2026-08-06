@@ -53,7 +53,7 @@ def test_dispatch_is_minimal_and_idempotent():
     second = dispatch.request_dispatch(request)
     assert first.accepted is True
     assert second.already_applied is True
-    assert dispatch.requests == (request,)
+    assert dispatch.dispatches == (request,)
 
 
 def test_scheduling_only_records_and_cancels_triggers():
