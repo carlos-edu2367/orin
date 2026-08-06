@@ -85,7 +85,7 @@ class InMemoryPlanStore:
         if int(plan.version) != plan_version:
             raise OrchestratorVersionConflict("plan version conflict")
         key = (str(plan_id), plan_version, str(work.work_id))
-        existing = self._attempts.get(key)
+        existing = self._attempts.get(key) if retry_of is None else None
         if existing is not None:
             if existing.idempotency_key != idempotency_key:
                 raise OrchestratorIdempotencyConflict("work materialization conflict")
@@ -95,7 +95,8 @@ class InMemoryPlanStore:
         state = self._consume_state()
         if state is not CommitState.COMMITTED:
             return PlanStoreResult(replace(receipt, commit_state=state))
-        self._attempts[key] = MaterializationRecord(plan_id, plan_version, work.work_id, execution_id, state_version, idempotency_key, retry_of)
+        storage_key = key if retry_of is None else (*key, str(execution_id))
+        self._attempts[storage_key] = MaterializationRecord(plan_id, plan_version, work.work_id, execution_id, state_version, idempotency_key, retry_of)
         self._events.append(self._event("WorkMaterialized", plan, {"plan_version": plan_version, "work_id": str(work.work_id), "execution_id": str(execution_id)}))
         return PlanStoreResult(receipt, plan)
 
@@ -107,7 +108,7 @@ class InMemoryPlanStore:
 
     def materializations(self, *, plan_id, plan_version, access):
         self.get(plan_id, access)
-        return tuple(record for (stored_plan, stored_version, _), record in self._attempts.items() if stored_plan == str(plan_id) and stored_version == plan_version)
+        return tuple(record for key, record in self._attempts.items() if key[0] == str(plan_id) and key[1] == plan_version)
 
     def mark_expired(self, *, plan_id, plan_version, work, access, idempotency_key):
         plan = self.get(plan_id, access)
@@ -178,17 +179,17 @@ class InMemoryPlanStore:
 
 class InMemoryDispatch:
     def __init__(self) -> None:
-        self._requests: dict[str, DispatchRequest] = {}
+        self._dispatches: dict[str, DispatchRequest] = {}
 
     @property
-    def requests(self):
-        return tuple(self._requests.values())
+    def dispatches(self):
+        return tuple(self._dispatches.values())
 
     def request_dispatch(self, request):
-        prior = self._requests.get(request.idempotency_key)
+        prior = self._dispatches.get(request.idempotency_key)
         if prior is not None:
             return DispatchReceipt(prior.execution_id, True, True)
-        self._requests[request.idempotency_key] = request
+        self._dispatches[request.idempotency_key] = request
         return DispatchReceipt(request.execution_id, True)
 
 
