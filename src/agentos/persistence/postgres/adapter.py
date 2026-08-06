@@ -52,7 +52,7 @@ from .schema import (
 
 
 CommitHook = Callable[[TransactionRequest], None]
-LEGACY_CORRELATION = "__legacy__"
+LEGACY_CORRELATION_PREFIX = "__legacy__"
 
 
 class PersistenceAdapterError(RuntimeError):
@@ -107,7 +107,7 @@ class PostgresTransactionalPersistence:
                 select(persistence_idempotency).where(
                     *self._idempotency_scope_filters(request.context),
                     persistence_idempotency.c.idempotency_key == request.idempotency_key,
-                ).order_by(self._idempotency_order(request.context))
+                ).order_by(*self._idempotency_order(request.context))
             ).mappings().first()
             if existing is not None:
                 if existing["fingerprint"] != request.fingerprint:
@@ -256,7 +256,7 @@ class PostgresTransactionalPersistence:
                 select(persistence_idempotency).where(
                     *self._idempotency_scope_filters(request.context),
                     persistence_idempotency.c.idempotency_key == request.idempotency_key,
-                ).order_by(self._idempotency_order(request.context))
+                ).order_by(*self._idempotency_order(request.context))
             ).mappings().first()
             if row is None:
                 return None
@@ -322,7 +322,7 @@ class PostgresTransactionalPersistence:
                     filters.append(persistence_idempotency.c.transaction_id == query.transaction_id)
                 row = session.execute(
                     select(persistence_idempotency).where(*filters).order_by(
-                        self._idempotency_order(query.context)
+                        *self._idempotency_order(query.context)
                     )
                 ).mappings().first()
                 if row is None:
@@ -335,10 +335,13 @@ class PostgresTransactionalPersistence:
                         committed_at=None,
                     )
                 receipt = self._receipt_from_json(row["receipt"])
+                records = self._records_from_json(row.get("records"), query.context)
+                if not records and str(row["correlation_id"]).startswith(f"{LEGACY_CORRELATION_PREFIX}:"):
+                    records = self._legacy_records_for_context(session, query.context, receipt)
                 return replace(
                     receipt,
                     fingerprint=str(row["fingerprint"]),
-                    records=self._records_from_json(row.get("records"), query.context),
+                    records=records,
                 )
         except SQLAlchemyError:
             return TransactionReceipt(
@@ -462,7 +465,7 @@ class PostgresTransactionalPersistence:
             persistence_idempotency.c.execution_id == context.execution_id,
             or_(
                 persistence_idempotency.c.correlation_id == context.correlation_id,
-                persistence_idempotency.c.correlation_id == LEGACY_CORRELATION,
+                persistence_idempotency.c.correlation_id.like(f"{LEGACY_CORRELATION_PREFIX}:%"),
             ),
             persistence_idempotency.c.purpose == context.purpose,
             persistence_idempotency.c.actor == context.actor,
@@ -470,7 +473,10 @@ class PostgresTransactionalPersistence:
 
     @staticmethod
     def _idempotency_order(context: PersistenceOperationContext):
-        return (persistence_idempotency.c.correlation_id == context.correlation_id).desc()
+        return (
+            (persistence_idempotency.c.correlation_id == context.correlation_id).desc(),
+            persistence_idempotency.c.id.desc(),
+        )
 
     @staticmethod
     def _record_values(record: AuthorizedRecord, *, now: datetime, created_at: datetime | None = ...):
@@ -543,11 +549,39 @@ class PostgresTransactionalPersistence:
 
     def _legacy_replay_records(self, session: Session, request: TransactionRequest, receipt: TransactionReceipt):
         records = []
+        changes = {
+            str(change.record_ref): (change.record_type, change.classification)
+            for change in request.changes
+        }
         for reference in receipt.record_refs:
+            record_type, classification = changes.get(
+                str(reference), ("execution", DataClassification.INTERNAL)
+            )
             record = self._read_in_session(
                 session,
                 AuthorizedRead(
                     context=request.context,
+                    record_ref=reference,
+                    record_type=record_type,
+                    classification_ceiling=classification,
+                ),
+            )
+            if not isinstance(record, NotFound):
+                records.append(record)
+        return tuple(records)
+
+    def _legacy_records_for_context(
+        self,
+        session: Session,
+        context: PersistenceOperationContext,
+        receipt: TransactionReceipt,
+    ) -> tuple[AuthorizedRecord, ...]:
+        records = []
+        for reference in receipt.record_refs:
+            record = self._read_in_session(
+                session,
+                AuthorizedRead(
+                    context=context,
                     record_ref=reference,
                     record_type="execution",
                     classification_ceiling=DataClassification.INTERNAL,
@@ -599,7 +633,9 @@ class PostgresTransactionalPersistence:
         try:
             padded = value + "=" * (-len(value) % 4)
             raw = base64.urlsafe_b64decode(padded.encode("ascii"))
-            body, signature = raw.rsplit(b".", 1)
+            if len(raw) <= 33 or raw[-33:-32] != b".":
+                raise ValueError
+            body, signature = raw[:-33], raw[-32:]
             expected = hmac.new(self._cursor_secret, body, hashlib.sha256).digest()
             if not hmac.compare_digest(signature, expected):
                 raise ValueError

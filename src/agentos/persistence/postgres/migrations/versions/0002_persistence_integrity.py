@@ -21,7 +21,12 @@ def upgrade() -> None:
         sa.CheckConstraint("id = 1", name="ck_persistence_clock_singleton"),
         sa.CheckConstraint("revision >= 0", name="ck_persistence_clock_revision_nonnegative"),
     )
-    op.execute(sa.text("INSERT INTO persistence_clock (id, revision) VALUES (1, 0)"))
+    op.execute(
+        sa.text(
+            "INSERT INTO persistence_clock (id, revision) "
+            "SELECT 1, COALESCE(MAX(store_revision), 0) FROM persistence_idempotency"
+        )
+    )
 
     with op.batch_alter_table("persistence_records", recreate="always") as batch:
         batch.create_check_constraint("ck_persistence_records_version_positive", "version > 0")
@@ -63,25 +68,8 @@ def upgrade() -> None:
         sa.text(
             "UPDATE persistence_idempotency "
             "SET workspace_scope = COALESCE(workspace_id, ''), "
-            "correlation_id = '__legacy__' "
+            "correlation_id = '__legacy__:' || CAST(id AS VARCHAR(32)) "
             "WHERE correlation_id = ''"
-        )
-    )
-    op.execute(
-        sa.text(
-            "DELETE FROM persistence_idempotency AS older "
-            "WHERE EXISTS ("
-            "SELECT 1 FROM persistence_idempotency AS newer "
-            "WHERE newer.id > older.id "
-            "AND newer.user_id = older.user_id "
-            "AND (newer.workspace_scope = older.workspace_scope) "
-            "AND newer.agent_id = older.agent_id "
-            "AND newer.execution_id = older.execution_id "
-            "AND newer.purpose = older.purpose "
-            "AND newer.actor = older.actor "
-            "AND newer.idempotency_key = older.idempotency_key "
-            "AND newer.correlation_id = '__legacy__'"
-            ")"
         )
     )
 

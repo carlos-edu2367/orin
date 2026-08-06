@@ -22,6 +22,7 @@ from agentos.persistence import (
     TransactionIndeterminate,
     TransactionOptions,
     TransactionRejected,
+    TransactionReceipt,
     TransactionRequest,
 )
 from agentos.persistence.postgres.migrate import upgrade
@@ -369,6 +370,48 @@ def test_sqlalchemy_idempotency_inspection_is_actor_scoped():
     )
 
     assert receipt.commit_state is CommitState.NOT_COMMITTED
+
+
+def test_sqlalchemy_legacy_idempotency_inspection_recovers_current_authorized_record():
+    adapter, ctx = make_adapter()
+    receipt = TransactionReceipt(
+        transaction_id="transaction:legacy",
+        commit_state=CommitState.COMMITTED,
+        record_refs=(RecordReference(ctx.execution_id),),
+        outbox_refs=(),
+        store_revision=1,
+        committed_at=NOW,
+    )
+    from agentos.persistence.postgres.schema import persistence_idempotency
+
+    with adapter._Session.begin() as session:
+        session.execute(
+            persistence_idempotency.insert().values(
+                user_id=ctx.user_id,
+                workspace_id=ctx.workspace_id,
+                workspace_scope=ctx.workspace_id,
+                agent_id=ctx.agent_id,
+                execution_id=ctx.execution_id,
+                correlation_id="__legacy__:1",
+                purpose=ctx.purpose,
+                actor=ctx.actor,
+                idempotency_key="idempotency:legacy",
+                fingerprint="fingerprint:legacy",
+                transaction_id=receipt.transaction_id,
+                commit_state=receipt.commit_state.value,
+                receipt=adapter._receipt_values(receipt),
+                records=[],
+                store_revision=receipt.store_revision,
+                created_at=NOW,
+            )
+        )
+
+    inspected = adapter.inspect_commit(
+        InspectCommit(context=ctx, transaction_id=None, idempotency_key="idempotency:legacy")
+    )
+
+    assert inspected.commit_state is CommitState.COMMITTED
+    assert inspected.records[0].version == 1
 
 
 def test_sqlalchemy_rejects_mutation_in_read_only_transaction():

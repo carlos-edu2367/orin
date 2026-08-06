@@ -290,6 +290,8 @@ class ExecutionTransactionalPersistenceAdapter(LegacyPersistence):
         )
         result = self._persistence.transact(canonical_request)
         if isinstance(result, TransactionCommitted):
+            if not result.records:
+                return LegacyTransactionRejected(RejectionReason.PERSISTENCE_REJECTED)
             resulting_version = result.records[0].version if result.records else 0
             receipt = self._legacy_receipt(result.receipt, request.change.execution_id, resulting_version)
             if result.already_applied:

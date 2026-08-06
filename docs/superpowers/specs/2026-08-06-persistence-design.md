@@ -95,6 +95,8 @@ The adapter uses SQLAlchemy 2 for engine/session/transaction handling and intern
 
 Constraints and indexes enforce unique record references, monotonic version updates, ownership predicates, unique event IDs, source/version relation and idempotency scope. The public layer never imports the SQLAlchemy package.
 
+The migration chain includes a single-row revision clock initialized from existing receipts, normalized workspace scope, a legacy correlation sentinel for pre-correlation idempotency rows, immutable replay snapshots for new commits, and integrity checks/foreign keys for versions, classifications and source records.
+
 The adapter receives DSN, pool settings, timeout and credentials from composition. It does not create a database, service or container. SQLite in-memory is a contract harness only; PostgreSQL-specific locking, isolation and database error integration tests run only when `AGENTOS_TEST_POSTGRES_DSN` is set.
 
 ## Migrations
@@ -153,7 +155,7 @@ This session does not add Redis, queues, pub/sub, sessions, locks, leases, worke
 
 The implemented slice preserves the approved design. Fresh verification on 2026-08-06 reports:
 
-- `python -m pytest -q` → `246 passed, 1 skipped`.
+- `python -m pytest -q` → `248 passed, 1 skipped`.
 - `python -m compileall -q src tests` → exit 0.
 - Domain boundary scan → no SQLAlchemy/Alembic matches in Execution, Runtime, Context, Events, Providers or Agents.
 - Public persistence boundary scan → technology names occur only under `src/agentos/persistence/postgres/` and its migrations.
@@ -161,3 +163,5 @@ The implemented slice preserves the approved design. Fresh verification on 2026-
 - The one skipped test is the optional PostgreSQL integration because `AGENTOS_TEST_POSTGRES_DSN` is not configured; no database, container or service was created automatically.
 
 The adapter proves PostgreSQL-shaped persistence through SQLAlchemy and SQLite contract tests. PostgreSQL-specific row-locking, isolation, deadlock and driver-error behavior remains an integration limitation until a DSN is supplied. Backup/restore, replication, partitioning, multi-region and executable disaster recovery remain intentionally outside this session.
+
+Migration `0002_persistence_integrity` preserves pre-existing idempotency receipts with a legacy correlation sentinel prefix, including duplicate null-workspace keys that could not have been uniquely interpreted under the old schema. Those historical rows contain no original record snapshot; retries never re-execute them, and can only return an authorized current record when its scope is still available.
