@@ -133,7 +133,7 @@ class OrchestrationPolicy:
     maximum_parallel_executions: int = 1
     retry_policy_ref: OpaqueReference | None = None
     context_sharing_policy_ref: OpaqueReference | None = None
-    maximum_retries: int = 0
+    maximum_retries: int = 3
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "cancellation_policy", CancellationPropagationPolicy(self.cancellation_policy))
@@ -470,10 +470,19 @@ class ScheduleTrigger:
     work_id: WorkId | str
     schedule: ScheduleConstraint
     idempotency_key: str
+    user_id: str | None = None
+    workspace_id: str | None = None
+    actor: str | None = None
 
     def __post_init__(self) -> None:
         for name in ("trigger_id", "plan_id", "work_id", "idempotency_key"):
             _text(getattr(self, name), name, 256 if name == "idempotency_key" else MAX_TEXT)
+        for name in ("user_id", "actor"):
+            value = getattr(self, name)
+            if value is not None:
+                _text(value, name)
+        if self.workspace_id is not None:
+            _text(self.workspace_id, "workspace_id")
 
 
 @dataclass(frozen=True, slots=True)

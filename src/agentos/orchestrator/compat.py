@@ -27,9 +27,10 @@ class ExecutionFactoryRejected(ValueError):
 class ExecutionControlExecutionFactory:
     """Translate one orchestration attempt to the public Kernel facade."""
 
-    def __init__(self, control: ExecutionControl, *, execution_id_factory=None) -> None:
+    def __init__(self, control: ExecutionControl, *, execution_id_factory=None, commit_inspector=None) -> None:
         self._control = control
-        self._execution_id_factory = execution_id_factory or (lambda: f"execution:{uuid4().hex}")
+        self._execution_id_factory = execution_id_factory
+        self._commit_inspector = commit_inspector
         self._idempotency: dict[str, tuple[str, ExecutionCreationReceipt]] = {}
 
     def create(self, request: CreateExecutionRequest) -> ExecutionCreationReceipt:
@@ -39,7 +40,13 @@ class ExecutionControlExecutionFactory:
             if prior[0] != operation_fingerprint:
                 raise ExecutionFactoryRejected("execution idempotency conflict")
             return prior[1]
-        execution_id = self._execution_id_factory()
+        if self._execution_id_factory is None:
+            execution_id = f"execution:{sha256(request.idempotency_key.encode()).hexdigest()[:24]}"
+        else:
+            try:
+                execution_id = self._execution_id_factory(request.idempotency_key)
+            except TypeError:
+                execution_id = self._execution_id_factory()
         execution = Execution.create(
             execution_id=execution_id,
             ownership=request.ownership,
@@ -82,6 +89,16 @@ class ExecutionControlExecutionFactory:
         if isinstance(result, Indeterminate):
             return ExecutionCreationReceipt(execution_id, 1, result.transaction_id, "UNKNOWN")
         raise ExecutionFactoryRejected("execution creation rejected")
+
+    def inspect_commit(self, request: CreateExecutionRequest, transaction_id: str) -> ExecutionCreationReceipt:
+        if self._commit_inspector is None:
+            return ExecutionCreationReceipt(
+                f"execution:{sha256(request.idempotency_key.encode()).hexdigest()[:24]}", 1, transaction_id, "UNKNOWN"
+            )
+        result = self._commit_inspector(request, transaction_id)
+        if not isinstance(result, ExecutionCreationReceipt):
+            raise ExecutionFactoryRejected("execution commit inspection rejected")
+        return result
 
 
 class ExecutionCancellationAdapter:

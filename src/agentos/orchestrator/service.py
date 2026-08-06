@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from hashlib import sha256
 from uuid import uuid4
@@ -42,6 +42,13 @@ from .security import OrchestratorAccessDenied, OrchestratorValidationError, fin
 _TERMINAL = {ExecutionState.COMPLETED, ExecutionState.FAILED, ExecutionState.CANCELLED}
 
 
+@dataclass(frozen=True, slots=True)
+class _PendingCreation:
+    request: CreateExecutionRequest
+    receipt: ExecutionCreationReceipt
+    source: str
+
+
 class OrchestratorService:
     def __init__(self, *, plan_store: PlanStorePort, execution_factory, dispatch, scheduling, resolver, supervision, cancellation=None, administration=None, continuation=None, clock=None, plan_id_factory=None) -> None:
         self._store = plan_store
@@ -55,6 +62,7 @@ class OrchestratorService:
         self._continuation = continuation
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._plan_id_factory = plan_id_factory
+        self._pending_creations: dict[tuple[str, int, str], _PendingCreation] = {}
 
     def submit(self, request: OrchestrationRequest):
         access = self._access(request.actor, request.user_id, request.workspace_id, request.purpose, request.correlation_id, request.classification)
@@ -73,7 +81,7 @@ class OrchestratorService:
         plan = OrchestrationPlan.from_draft(plan_id, draft)
         result = self._store.submit(plan, access=access, idempotency_key=request.idempotency_key, operation_fingerprint=fingerprint(request))
         for node in draft.nodes:
-            if node.schedule is not None:
+            if node.schedule is not None and result.receipt.commit_state is CommitState.COMMITTED:
                 self._scheduling.register(self._trigger(plan, node, request.idempotency_key))
         return result.receipt
 
@@ -87,55 +95,86 @@ class OrchestratorService:
         materialized: list[str] = []
         expired: list[str] = []
         dispatches: list[DispatchRequest] = []
-        active_count = sum(1 for item in self._store.materializations(plan_id=plan.plan_id, plan_version=plan.version, access=access) if str(item.execution_id))
+        active_count = self._active_count(plan, access)
         for work in plan.nodes:
             if self._store.materialization(plan_id=plan.plan_id, plan_version=plan.version, work_id=work.work_id, access=access) is not None:
                 continue
             if work.schedule is not None and now < work.schedule.not_before:
                 continue
-            if (work.deadline_at is not None and now > work.deadline_at) or (work.schedule is not None and work.schedule.expires_at is not None and now > work.schedule.expires_at):
+            if (work.deadline_at is not None and now >= work.deadline_at) or (work.schedule is not None and work.schedule.expires_at is not None and now >= work.schedule.expires_at):
                 result = self._store.mark_expired(plan_id=plan.plan_id, plan_version=plan.version, work=work, access=access, idempotency_key=f"expire:{plan.plan_id}:{plan.version}:{work.work_id}")
                 if result.receipt.commit_state.value == "COMMITTED":
                     expired.append(str(work.work_id))
                 continue
             if active_count >= plan.policy.maximum_parallel_executions:
                 continue
+            if self._is_deferred_failure_handler(plan, work, access):
+                continue
             if not self._dependencies_ready(plan, work, access):
                 continue
             ready.append(str(work.work_id))
+            pending_key = (str(plan.plan_id), int(plan.version), str(work.work_id))
+            pending = self._pending_creations.get(pending_key)
+            if pending is not None:
+                pending_request, pending_receipt, pending_source = pending.request, pending.receipt, pending.source
+                if pending_receipt.commit_state is not CommitState.COMMITTED:
+                    inspection = self._inspect_execution(pending_request, pending_receipt) if pending_source == "execution" else self._inspect_plan(access, pending_request, pending_receipt)
+                    if inspection is None:
+                        continue
+                    if inspection is False:
+                        self._pending_creations.pop(pending_key, None)
+                        continue
+                    pending_receipt = inspection
+                stored = self._store.materialize(
+                    plan_id=plan.plan_id, plan_version=plan.version, work=work,
+                    execution_id=pending_receipt.execution_id, state_version=pending_receipt.state_version,
+                    access=access, idempotency_key=pending_request.idempotency_key,
+                )
+                if stored.receipt.commit_state is not CommitState.COMMITTED:
+                    self._pending_creations[pending_key] = _PendingCreation(pending_request, pending_receipt, pending_source)
+                    continue
+                materialized.append(str(pending_receipt.execution_id))
+                active_count += 1
+                dispatch_request = self._dispatch_request(plan, work, pending_receipt)
+                self._dispatch.request_dispatch(dispatch_request)
+                dispatches.append(dispatch_request)
+                self._pending_creations.pop(pending_key, None)
+                continue
             resolved = self._resolver.resolve(
                 agent_id=str(work.agent_id), user_id=str(plan.user_id), workspace_id=plan.workspace_id,
                 purpose=str(work.purpose), correlation_id=str(plan.correlation_id), actor=plan.actor, classification=work.classification,
             )
-            creation = self._execution_factory.create(
-                CreateExecutionRequest(
-                    ownership=Ownership(str(plan.user_id), plan.workspace_id),
-                    agent_id=work.agent_id,
-                    agent_config_version=int(resolved.config_version),
-                    task=work.task,
-                    limits=work.limits,
-                    correlation_id=plan.correlation_id,
-                    purpose=work.purpose,
-                    idempotency_key=f"materialize:{plan.plan_id}:{plan.version}:{work.work_id}",
-                    requested_at=now,
-                    causation_id=str(trigger.cause_ref) if trigger.cause_ref else None,
-                )
+            creation_key = (str(plan.plan_id), int(plan.version), str(work.work_id))
+            creation_request = CreateExecutionRequest(
+                ownership=Ownership(str(plan.user_id), plan.workspace_id),
+                agent_id=work.agent_id,
+                agent_config_version=int(resolved.config_version),
+                task=work.task,
+                limits=work.limits,
+                correlation_id=plan.correlation_id,
+                purpose=work.purpose,
+                idempotency_key=f"materialize:{plan.plan_id}:{plan.version}:{work.work_id}",
+                requested_at=now,
+                causation_id=str(trigger.cause_ref) if trigger.cause_ref else None,
             )
-            if creation.commit_state.value != "COMMITTED":
+            creation = self._execution_factory.create(creation_request)
+            if creation.commit_state is not CommitState.COMMITTED:
+                self._pending_creations[creation_key] = _PendingCreation(creation_request, creation, "execution")
                 continue
             stored = self._store.materialize(
                 plan_id=plan.plan_id, plan_version=plan.version, work=work, execution_id=creation.execution_id,
                 state_version=creation.state_version, access=access, idempotency_key=f"materialize:{plan.plan_id}:{plan.version}:{work.work_id}",
             )
-            if stored.receipt.commit_state.value != "COMMITTED":
+            if stored.receipt.commit_state is not CommitState.COMMITTED:
+                self._pending_creations[creation_key] = _PendingCreation(
+                    creation_request,
+                    replace(creation, commit_state=stored.receipt.commit_state, transaction_id=stored.receipt.transaction_id),
+                    "plan",
+                )
                 continue
             materialized.append(str(creation.execution_id))
             active_count += 1
-            dispatch_request = DispatchRequest(
-                execution_id=creation.execution_id, expected_state_version=creation.state_version,
-                processing_class=ProcessingClass.STANDARD, correlation_id=plan.correlation_id,
-                purpose=work.purpose, idempotency_key=f"dispatch:{creation.execution_id}:{creation.state_version}",
-            )
+            dispatch_request = self._dispatch_request(plan, work, creation)
             self._dispatch.request_dispatch(dispatch_request)
             dispatches.append(dispatch_request)
         return EvaluationOutcome(plan.plan_id, plan.version, tuple(ready), tuple(materialized), tuple(expired), tuple(dispatches), CommitState.COMMITTED)
@@ -163,6 +202,10 @@ class OrchestratorService:
             if isinstance(result, (Accepted, AlreadyApplied)):
                 cancelled.append(str(record.execution_id))
         stored = self._store.cancel(plan_id=plan.plan_id, expected_version=command.expected_version or plan.version, access=access, idempotency_key=command.idempotency_key, cancelled_execution_ids=tuple(cancelled))
+        if stored.receipt.commit_state is CommitState.COMMITTED:
+            for node in plan.nodes:
+                if node.schedule is not None:
+                    self._scheduling.cancel(str(self._trigger(plan, node, command.idempotency_key).trigger_id), access)
         return CancellationReceipt(plan.plan_id, stored.receipt.plan_version, tuple(cancelled), stored.receipt.commit_state, stored.receipt.transaction_id)
 
     def request_retry(self, command: RetryExecution) -> RetryReceipt:
@@ -170,6 +213,12 @@ class OrchestratorService:
         plan = self._store.get(command.plan_id, access)
         if int(plan.version) != command.expected_plan_version:
             raise OrchestratorValidationError("plan version conflict")
+        retries = sum(
+            1 for item in self._store.materializations(plan_id=plan.plan_id, plan_version=plan.version, access=access)
+            if item.retry_of is not None
+        )
+        if retries >= plan.policy.maximum_retries:
+            raise OrchestratorValidationError("retry policy rejected")
         work = next((node for node in plan.nodes if str(node.work_id) == str(command.work_id)), None)
         prior = self._store.materialization(plan_id=plan.plan_id, plan_version=plan.version, work_id=command.work_id, access=access)
         if work is None or prior is None or str(prior.execution_id) != str(command.previous_execution_id):
@@ -224,14 +273,71 @@ class OrchestratorService:
                 return False
             if edge.condition is DependencyCondition.RESULT_MATCHED and (snapshot.observed_state is not ExecutionState.COMPLETED or edge.result_ref is None or snapshot.result_ref != edge.result_ref):
                 return False
-            if snapshot.observed_state is ExecutionState.FAILED and edge.failure_policy is DependencyFailurePolicy.DO_NOT_MATERIALIZE:
+            if snapshot.observed_state is ExecutionState.FAILED and edge.failure_policy in {
+                DependencyFailurePolicy.DO_NOT_MATERIALIZE,
+                DependencyFailurePolicy.CANCEL_RELATED,
+            }:
                 return False
         return True
+
+    def _active_count(self, plan, access):
+        active = 0
+        for record in self._store.materializations(plan_id=plan.plan_id, plan_version=plan.version, access=access):
+            if not str(record.execution_id):
+                continue
+            try:
+                snapshot = self._supervision.observe(record.execution_id, access)
+            except (KeyError, LookupError):
+                active += 1
+                continue
+            if snapshot.observed_state not in _TERMINAL:
+                active += 1
+        return active
+
+    def _is_deferred_failure_handler(self, plan, work, access):
+        predecessors = [node for node in plan.nodes if node.failure_handler_work_id is not None and str(node.failure_handler_work_id) == str(work.work_id)]
+        for predecessor in predecessors:
+            record = self._store.materialization(plan_id=plan.plan_id, plan_version=plan.version, work_id=predecessor.work_id, access=access)
+            if record is None or not str(record.execution_id):
+                return True
+            try:
+                snapshot = self._supervision.observe(record.execution_id, access)
+            except (KeyError, LookupError):
+                return True
+            return snapshot.observed_state is not ExecutionState.FAILED
+        return False
 
     def _trigger_access(self, trigger):
         if None in (trigger.actor, trigger.user_id, trigger.purpose, trigger.correlation_id):
             raise OrchestratorAccessDenied("orchestration access denied")
         return self._access(trigger.actor, trigger.user_id, trigger.workspace_id, trigger.purpose, trigger.correlation_id, "INTERNAL")
+
+    def _inspect_execution(self, request, receipt):
+        inspector = getattr(self._execution_factory, "inspect_commit", None)
+        if inspector is None:
+            return None
+        inspected = inspector(request, receipt.transaction_id)
+        if inspected.commit_state is CommitState.NOT_COMMITTED:
+            return False
+        if inspected.commit_state is CommitState.UNKNOWN:
+            return None
+        return inspected
+
+    def _inspect_plan(self, access, request, receipt):
+        inspected = self._store.inspect_commit(
+            access=access, transaction_id=str(receipt.transaction_id), idempotency_key=request.idempotency_key
+        )
+        if inspected.commit_state is CommitState.UNKNOWN:
+            return None
+        return replace(receipt, commit_state=CommitState.COMMITTED)
+
+    @staticmethod
+    def _dispatch_request(plan, work, creation):
+        return DispatchRequest(
+            execution_id=creation.execution_id, expected_state_version=creation.state_version,
+            processing_class=ProcessingClass.STANDARD, correlation_id=plan.correlation_id,
+            purpose=work.purpose, idempotency_key=f"dispatch:{creation.execution_id}:{creation.state_version}",
+        )
 
     @staticmethod
     def _access(actor, user_id, workspace_id, purpose, correlation_id, classification):
@@ -246,7 +352,10 @@ class OrchestratorService:
 
     @staticmethod
     def _trigger(plan, node, key):
-        return ScheduleTrigger(f"trigger:{plan.plan_id}:{node.work_id}", plan.plan_id, node.work_id, node.schedule, f"{key}:{node.work_id}")
+        return ScheduleTrigger(
+            f"trigger:{plan.plan_id}:{node.work_id}", plan.plan_id, node.work_id, node.schedule,
+            f"{key}:{node.work_id}", str(plan.user_id), plan.workspace_id, plan.actor,
+        )
 
 
 __all__ = ["OrchestratorService"]

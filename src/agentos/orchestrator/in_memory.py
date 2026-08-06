@@ -26,7 +26,7 @@ from .ports import (
     ScheduleReceipt,
     SupervisionQuery,
 )
-from .security import OrchestratorAccessDenied, OrchestratorIdempotencyConflict, OrchestratorVersionConflict, require_owner
+from .security import OrchestratorAccessDenied, OrchestratorIdempotencyConflict, OrchestratorValidationError, OrchestratorVersionConflict, require_owner
 
 
 class InMemoryPlanStore:
@@ -36,12 +36,15 @@ class InMemoryPlanStore:
         self._attempts: dict[tuple[str, int, str], MaterializationRecord] = {}
         self._idempotency: dict[tuple[tuple[str, str | None, str], str], tuple[str, OrchestrationReceipt]] = {}
         self._receipts: dict[tuple[tuple[str, str | None, str], str, str], OrchestrationReceipt] = {}
+        self._unknown: dict[tuple[tuple[str, str | None, str], str], OrchestrationReceipt] = {}
         self._events: list[EventEnvelope] = []
         self._next_state: CommitState | None = None
 
     def submit(self, plan, *, access, idempotency_key, operation_fingerprint):
         self._authorize(plan, access)
         key = (access.scope_key(), idempotency_key)
+        if key in self._unknown:
+            raise OrchestratorValidationError("commit inspection required")
         prior = self._idempotency.get(key)
         if prior is not None:
             if prior[0] != operation_fingerprint:
@@ -53,6 +56,8 @@ class InMemoryPlanStore:
             receipt = replace(receipt, commit_state=state)
             if state is CommitState.NOT_COMMITTED:
                 self._receipts[(access.scope_key(), receipt.transaction_id, idempotency_key)] = receipt
+            else:
+                self._unknown[key] = receipt
             return PlanStoreResult(receipt)
         self._plans[str(plan.plan_id)] = plan
         self._idempotency[key] = (operation_fingerprint, receipt)
@@ -75,6 +80,12 @@ class InMemoryPlanStore:
         return self._idempotency.get((access.scope_key(), idempotency_key))
 
     def inspect_commit(self, *, access, transaction_id, idempotency_key):
+        key = (access.scope_key(), idempotency_key)
+        pending = self._unknown.pop(key, None)
+        if pending is not None:
+            result = replace(pending, commit_state=CommitState.NOT_COMMITTED, status="NOT_COMMITTED")
+            self._receipts[(access.scope_key(), transaction_id, idempotency_key)] = result
+            return result
         return self._receipts.get(
             (access.scope_key(), transaction_id, idempotency_key),
             OrchestrationReceipt("inspection:none", 1, transaction_id, idempotency_key, CommitState.NOT_COMMITTED, "NOT_COMMITTED"),
@@ -166,14 +177,14 @@ class InMemoryPlanStore:
             occurred_at=self._clock(),
             source="orchestrator",
             correlation_id=str(plan.correlation_id),
-            causation_id=None,
             sequence=None,
             user_id=str(plan.user_id),
             workspace_id=str(plan.workspace_id) if plan.workspace_id is not None else None,
             execution_id=None,
             agent_id=str(plan.nodes[0].agent_id) if plan.nodes else None,
             classification=DataClassification(plan.classification),
-            payload=payload,
+            causation_id=f"plan:{plan.plan_id}:v{plan.version}",
+            payload={"purpose": str(plan.purpose), **payload},
         )
 
 
@@ -209,6 +220,11 @@ class InMemoryScheduling:
         return ScheduleReceipt(str(trigger.trigger_id), True)
 
     def cancel(self, trigger_id, access):
+        existing = self._triggers.get(str(trigger_id))
+        if existing is not None and existing.user_id is not None and (
+            existing.user_id != access.user_id or existing.workspace_id != access.workspace_id or existing.actor != access.actor
+        ):
+            raise OrchestratorAccessDenied("orchestration access denied")
         self._triggers.pop(str(trigger_id), None)
         return True
 
@@ -216,6 +232,7 @@ class InMemoryScheduling:
 class InMemorySupervision:
     def __init__(self) -> None:
         self._snapshots: dict[str, SupervisionSnapshot] = {}
+        self._owners: dict[str, PlanAccessContext] = {}
         self._observed: list[SupervisionSnapshot] = []
 
     @property
@@ -224,11 +241,20 @@ class InMemorySupervision:
 
     def set(self, snapshot, access=None):
         self._snapshots[str(snapshot.execution_id)] = snapshot
+        if access is not None:
+            self._owners[str(snapshot.execution_id)] = access
 
-    def observe(self, execution_id, access):
+    def observe(self, query_or_execution_id, access=None):
+        if isinstance(query_or_execution_id, SupervisionQuery):
+            execution_id, access = query_or_execution_id.execution_id, query_or_execution_id.access
+        else:
+            execution_id = query_or_execution_id
         snapshot = self._snapshots.get(str(execution_id))
         if snapshot is None:
             raise KeyError("execution not found")
+        owner = self._owners.get(str(execution_id))
+        if owner is not None and owner.scope_key() != access.scope_key():
+            raise OrchestratorAccessDenied("orchestration access denied")
         self._observed.append(snapshot)
         return snapshot
 

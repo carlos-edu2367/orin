@@ -63,6 +63,8 @@ def _plain(value: object, depth: int = 0) -> object:
 
 def fingerprint(value: object) -> str:
     encoded = json.dumps(_plain(value), sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    if len(encoded) > 4096:
+        raise OrchestratorValidationError("fingerprint exceeds its size limit")
     return sha256(encoded).hexdigest()
 
 
