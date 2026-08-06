@@ -89,6 +89,7 @@ def upgrade() -> None:
         sa.Column("agent_id", sa.String(255), nullable=False),
         sa.Column("execution_id", sa.String(255), nullable=False),
         sa.Column("purpose", sa.String(128), nullable=False),
+        sa.Column("actor", sa.String(255), nullable=False),
         sa.Column("idempotency_key", sa.String(256), nullable=False),
         sa.Column("fingerprint", sa.String(128), nullable=False),
         sa.Column("transaction_id", sa.String(128), nullable=False),
@@ -97,7 +98,7 @@ def upgrade() -> None:
         sa.Column("store_revision", sa.Integer(), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.UniqueConstraint(
-            "user_id", "workspace_id", "agent_id", "execution_id", "purpose", "idempotency_key",
+            "user_id", "workspace_id", "agent_id", "execution_id", "purpose", "actor", "idempotency_key",
             name="uq_persistence_idempotency_scope",
         ),
     )

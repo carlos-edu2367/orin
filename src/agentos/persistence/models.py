@@ -333,6 +333,13 @@ class TransactionReceipt:
         ):
             raise ValueError("committed_at must be timezone-aware")
 
+    def __repr__(self) -> str:
+        return (
+            "TransactionReceipt("
+            f"commit_state={self.commit_state.value!r}, records={len(self.record_refs)}, "
+            f"outbox={len(self.outbox_refs)}, store_revision={self.store_revision})"
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class VersionConflict:
@@ -355,6 +362,13 @@ class TransactionRejected:
     transaction_id: str | None = None
     receipt: TransactionReceipt | None = None
 
+    def __repr__(self) -> str:
+        return (
+            "TransactionRejected("
+            f"code={self.code.value!r}, retryability={self.retryability.value!r}, "
+            "transaction_id=<opaque>)"
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class TransactionConflicted:
@@ -364,6 +378,9 @@ class TransactionConflicted:
 @dataclass(frozen=True, slots=True)
 class TransactionIndeterminate:
     transaction_id: str
+
+    def __repr__(self) -> str:
+        return "TransactionIndeterminate(transaction_id=<opaque>)"
 
 
 TransactionResult = (

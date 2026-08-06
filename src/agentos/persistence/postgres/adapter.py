@@ -197,6 +197,7 @@ class PostgresTransactionalPersistence:
                     agent_id=request.context.agent_id,
                     execution_id=request.context.execution_id,
                     purpose=request.context.purpose,
+                    actor=request.context.actor,
                     idempotency_key=request.idempotency_key,
                     fingerprint=request.fingerprint,
                     transaction_id=request.transaction_id,
@@ -317,6 +318,8 @@ class PostgresTransactionalPersistence:
             return row["fingerprint"], receipt, tuple(records)
 
     def _plan_transaction(self, session: Session, request: TransactionRequest):
+        if request.options.read_only and (request.changes or request.audit or request.outbox):
+            return TransactionRejected(PersistenceErrorCode.INVALID_REQUEST, transaction_id=request.transaction_id)
         expected_by_ref = {str(item.record_ref): item.version for item in request.expected_versions}
         if len(expected_by_ref) != len(request.expected_versions):
             return TransactionRejected(PersistenceErrorCode.INVALID_REQUEST, transaction_id=request.transaction_id)
@@ -431,6 +434,7 @@ class PostgresTransactionalPersistence:
             persistence_idempotency.c.agent_id == context.agent_id,
             persistence_idempotency.c.execution_id == context.execution_id,
             persistence_idempotency.c.purpose == context.purpose,
+            persistence_idempotency.c.actor == context.actor,
         )
 
     @staticmethod

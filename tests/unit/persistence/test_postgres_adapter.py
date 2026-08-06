@@ -219,3 +219,31 @@ def test_sqlalchemy_reads_apply_server_scope_and_classification_filters():
 
     assert isinstance(unauthorized, NotFound)
     assert isinstance(hidden, NotFound)
+
+
+def test_sqlalchemy_idempotency_inspection_is_actor_scoped():
+    adapter, ctx = make_adapter()
+    request = make_request(ctx)
+    adapter.transact(request)
+
+    from agentos.persistence import InspectCommit
+
+    with __import__("pytest").raises(LookupError):
+        adapter.inspect_commit(
+            InspectCommit(
+                context=replace(ctx, actor="actor:other"),
+                transaction_id=request.transaction_id,
+                idempotency_key=request.idempotency_key,
+            )
+        )
+
+
+def test_sqlalchemy_rejects_mutation_in_read_only_transaction():
+    adapter, ctx = make_adapter()
+    request = replace(make_request(ctx), options=TransactionOptions(read_only=True))
+
+    result = adapter.transact(request)
+
+    assert isinstance(result, TransactionRejected)
+    assert result.code is PersistenceErrorCode.INVALID_REQUEST
+    assert read_current(adapter, ctx).version == 1

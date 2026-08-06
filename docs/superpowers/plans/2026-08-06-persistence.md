@@ -278,3 +278,22 @@
 - Every task has a RED test, focused verification, implementation, and commit checkpoint.
 - PostgreSQL concurrency claims are separated from SQLite harness claims and guarded by the DSN rule.
 - No task creates Redis, a broker, worker/scheduler infrastructure, or a domain outside RFC 601.
+
+## Execution status and evidence
+
+- [x] Task 1 — canonical public contracts and SQLAlchemy/Alembic dependency declarations.
+- [x] Task 2 — in-memory atomic/idempotent adapter with authorization, classification and cursor tests.
+- [x] Task 3 — internal SQLAlchemy schema and explicit Alembic migration.
+- [x] Task 4 — SQLAlchemy adapter, normalized errors, SQLite contract tests and optional PostgreSQL test guarded by `AGENTOS_TEST_POSTGRES_DSN`.
+- [x] Task 5 — explicit Execution compatibility bridge, JSON-safe aggregate translation and idempotency/commit inspection coverage.
+- [x] Task 6 — sanitization regressions, canonical-port matrix and final boundary checks.
+
+Fresh evidence:
+
+- `python -m pytest -q` → `240 passed, 1 skipped`.
+- `python -m compileall -q src tests` → exit 0.
+- Domain dependency scan → `NO_DOMAIN_MATCHES`.
+- `git diff --check` → exit 0.
+- PostgreSQL integration → skipped because `AGENTOS_TEST_POSTGRES_DSN` is absent; no service was created automatically.
+
+Known limits are intentional: SQLite does not prove PostgreSQL locking/isolation/deadlock semantics, and physical backup/restore, replication, partitioning, multi-region and disaster recovery procedures were not simulated.

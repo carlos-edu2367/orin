@@ -148,3 +148,16 @@ This session does not add Redis, queues, pub/sub, sessions, locks, leases, worke
 - Existing ExecutionControl and in-memory adapter remain green through an explicit compatibility bridge.
 - Runtime, Agent, Events, Context and Providers remain free of concrete persistence imports.
 - Required tests, boundary scans, compileall and final RFC/ADR audit have fresh evidence.
+
+## Implementation evidence
+
+The implemented slice preserves the approved design. Fresh verification on 2026-08-06 reports:
+
+- `python -m pytest -q` → `240 passed, 1 skipped`.
+- `python -m compileall -q src tests` → exit 0.
+- Domain boundary scan → no SQLAlchemy/Alembic matches in Execution, Runtime, Context, Events, Providers or Agents.
+- Public persistence boundary scan → technology names occur only under `src/agentos/persistence/postgres/` and its migrations.
+- `git diff --check` → exit 0.
+- The one skipped test is the optional PostgreSQL integration because `AGENTOS_TEST_POSTGRES_DSN` is not configured; no database, container or service was created automatically.
+
+The adapter proves PostgreSQL-shaped persistence through SQLAlchemy and SQLite contract tests. PostgreSQL-specific row-locking, isolation, deadlock and driver-error behavior remains an integration limitation until a DSN is supplied. Backup/restore, replication, partitioning, multi-region and executable disaster recovery remain intentionally outside this session.
