@@ -30,6 +30,7 @@ from .models import (
     VersionReference,
 )
 from .ports import TransactionalPersistence
+from .in_memory import InMemoryTransactionalPersistence
 
 __all__ = [
     "AuthorizedRead",
@@ -42,6 +43,7 @@ __all__ = [
     "ExpectedVersion",
     "InspectCommit",
     "IsolationLevel",
+    "InMemoryTransactionalPersistence",
     "NotFound",
     "OutboxChange",
     "OutboxReference",
