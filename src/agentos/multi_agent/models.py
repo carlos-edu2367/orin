@@ -295,6 +295,7 @@ class WaitForDelegations:
     requested_at: datetime
     expected_version: int | None = None
     allow_failure_refs: bool = False
+    checkpoint_ref: str | None = None
 
     def __post_init__(self) -> None:
         for field in ("actor", "user_id", "waiting_execution_id", "purpose", "correlation_id", "idempotency_key"):
@@ -312,6 +313,8 @@ class WaitForDelegations:
             raise ValueError("minimum_count is only valid for MINIMUM_COUNT")
         if self.expected_version is not None and self.expected_version < 1:
             raise ValueError("expected_version must be positive")
+        if self.checkpoint_ref is not None:
+            _required(self.checkpoint_ref, "checkpoint_ref")
         _aware(self.deadline_at, "deadline_at")
         _aware(self.requested_at, "requested_at")
 

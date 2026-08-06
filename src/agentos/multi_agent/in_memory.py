@@ -79,11 +79,23 @@ class InMemoryMultiAgentStore(MultiAgentEventRecorder):
     def save_message(self, message, *, fingerprint: str):
         return self._save("message", self._messages, message.message_id, message.idempotency_key, fingerprint, message)
 
+    def find_message_by_key(self, key: str):
+        return next((value for value in self._messages.values() if value.idempotency_key == key), None)
+
+    def fingerprint_for(self, kind: str, item_id: str) -> str | None:
+        return self._fingerprints.get((kind, item_id))
+
     def save_delegation(self, delegation, *, fingerprint: str):
         return self._save("delegation", self._delegations, delegation.delegation_id, delegation.idempotency_key, fingerprint, delegation)
 
+    def find_delegation_by_key(self, key: str):
+        return next((value for value in self._delegations.values() if value.idempotency_key == key), None)
+
     def save_result(self, result, *, fingerprint: str):
         return self._save("result", self._results, result.delegation_id, result.delegation_id, fingerprint, result)
+
+    def get_delegation(self, delegation_id: str):
+        return self._delegations[delegation_id]
 
     def save_wait(self, command, checkpoint_ref: str, *, fingerprint: str):
         from .models import WaitReceipt
