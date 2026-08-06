@@ -46,6 +46,10 @@ class InMemoryTransactionalPersistence(TransactionalPersistence):
             raise ValueError("execution already seeded")
         self._executions[execution.execution_id] = execution
 
+    def confirmed_outbox(self) -> tuple[OutboxEntry, ...]:
+        """Return the committed outbox view for read-only publisher adapters."""
+        return tuple(self.outbox)
+
     def get(self, execution_id: ExecutionId, context: ExecutionCommandContext | None = None) -> Execution:
         execution = self._executions.get(str(execution_id))
         if execution is None:
