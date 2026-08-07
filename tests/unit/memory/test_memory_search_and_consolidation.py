@@ -181,3 +181,27 @@ def test_consolidation_rejects_scope_promotion_before_output_commit():
     with pytest.raises(Exception):
         service.consolidate(command)
     assert (len(store.records), len(store.audit_log), len(store.outbox)) == before
+
+
+def test_consolidation_can_atomically_supersede_explicit_sources():
+    service, store = manager()
+    first = save(service, key="save:1", content="first fact")
+    second = save(service, key="save:2", content="second fact")
+    command = ConsolidateMemory(
+        context=context(purpose="memory.consolidate"),
+        source_refs=(ref(first.memory_id), ref(second.memory_id)),
+        target_scope=MemoryScope.PRIVATE,
+        target_kind=MemoryKind.SEMANTIC,
+        content=BoundedMemoryContent("combined fact"),
+        provenance=MemoryProvenance(source_kind="CONSOLIDATION", source_refs=("source:combined",), integrity_ref="integrity:combined"),
+        retention_policy_ref="retention:1",
+        idempotency_key="consolidate:supersede",
+        supersede_sources=True,
+    )
+
+    receipt = service.consolidate(command)
+
+    assert receipt.status == "CONSOLIDATED"
+    assert store.get(first.memory_id).status is MemoryStatus.SUPERSEDED
+    assert store.get(second.memory_id).status is MemoryStatus.SUPERSEDED
+    assert [event.event_type for event in store.outbox[-2:]] == ["MemoryConsolidated", "MemorySuperseded"]

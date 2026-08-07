@@ -177,3 +177,18 @@ def test_private_grant_is_bounded_expiring_and_revocable():
             grant_refs=("grant:1",),
             now=NOW,
         )
+
+
+def test_classification_above_actor_ceiling_fails_closed():
+    policy = InMemoryMemoryAuthorizationPolicy()
+    policy.register_agent("user-1", "agent-1")
+    item = record(classification=DataClassification.RESTRICTED)
+    with pytest.raises(Exception):
+        policy.authorize(
+            context(classification_ceiling=DataClassification.INTERNAL),
+            item,
+            operation="READ",
+            reference=reference(),
+            classification_ceiling=context(classification_ceiling=DataClassification.INTERNAL).classification_ceiling,
+            now=NOW,
+        )

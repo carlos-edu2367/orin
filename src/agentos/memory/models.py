@@ -233,6 +233,7 @@ class MemoryOperationContext:
     correlation_id: CorrelationId | str
     purpose: str
     actor: str
+    classification_ceiling: DataClassification = DataClassification.RESTRICTED
 
     def __post_init__(self) -> None:
         _required(self.user_id, "user_id")
@@ -243,6 +244,7 @@ class MemoryOperationContext:
         _required(self.correlation_id, "correlation_id")
         _required(self.purpose, "purpose", maximum=MAX_PURPOSE_CHARS)
         _required(self.actor, "actor", maximum=MAX_PURPOSE_CHARS)
+        object.__setattr__(self, "classification_ceiling", _classification(self.classification_ceiling))
 
     def __repr__(self) -> str:
         return (
@@ -784,6 +786,7 @@ class MemoryCommitRequest:
     audit: MemoryAuditRecord
     event: EventEnvelope
     result: Any
+    additional_events: tuple[EventEnvelope, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "operation", MemoryOperation(self.operation))

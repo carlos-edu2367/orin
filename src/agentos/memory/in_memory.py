@@ -189,13 +189,15 @@ class InMemoryMemoryStore:
                 self._records[str(change.record.memory_id)] = change.record
                 self._revisions.append(change.revision)
             self._audit_log.append(request.audit)
-            self._outbox.append(request.event)
-            self._event_sequences[str(request.context.execution_id)] = request.event.sequence or 0
+            events = (request.event, *request.additional_events)
+            self._outbox.extend(events)
+            self._event_sequences[str(request.context.execution_id)] = events[-1].sequence or 0
             self._idempotency[key] = (request.fingerprint, result)
             return result
 
     def _validate_request(self, request: MemoryCommitRequest) -> None:
         event = request.event
+        events = (request.event, *request.additional_events)
         context = request.context
         if event.event_id != request.audit.event_id:
             raise MemoryCommitFailure("AUDIT_EVENT_MISMATCH")
@@ -207,14 +209,26 @@ class InMemoryMemoryStore:
             or event.correlation_id != context.correlation_id
         ):
             raise MemoryCommitFailure("EVENT_CONTEXT_MISMATCH")
-        if event.sequence != self.next_event_sequence(str(context.execution_id)):
-            raise MemoryCommitFailure("EVENT_SEQUENCE_CONFLICT")
-        if event.event_id in {item.event_id for item in self._outbox}:
-            raise MemoryCommitFailure("EVENT_DUPLICATE")
-        if not event.event_type.startswith("Memory"):
-            raise MemoryCommitFailure("EVENT_TYPE_INVALID")
-        if any(key not in _EVENT_PAYLOAD_KEYS for key in event.payload):
-            raise MemoryCommitFailure("EVENT_PAYLOAD_INVALID")
+        expected_sequence = self.next_event_sequence(str(context.execution_id))
+        existing_event_ids = {item.event_id for item in self._outbox}
+        for candidate in events:
+            if (
+                candidate.user_id != context.user_id
+                or candidate.workspace_id != context.workspace_id
+                or candidate.agent_id != context.agent_id
+                or candidate.execution_id != context.execution_id
+                or candidate.correlation_id != context.correlation_id
+            ):
+                raise MemoryCommitFailure("EVENT_CONTEXT_MISMATCH")
+            if candidate.sequence != expected_sequence:
+                raise MemoryCommitFailure("EVENT_SEQUENCE_CONFLICT")
+            if candidate.event_id in existing_event_ids:
+                raise MemoryCommitFailure("EVENT_DUPLICATE")
+            if not candidate.event_type.startswith("Memory"):
+                raise MemoryCommitFailure("EVENT_TYPE_INVALID")
+            if any(key not in _EVENT_PAYLOAD_KEYS for key in candidate.payload):
+                raise MemoryCommitFailure("EVENT_PAYLOAD_INVALID")
+            expected_sequence += 1
 
 
 class _SystemClock:
@@ -320,7 +334,7 @@ class InMemoryMemoryManager:
                     current,
                     operation="WRITE",
                     reference=command.memory_ref,
-                    classification_ceiling=command.classification,
+                    classification_ceiling=command.context.classification_ceiling,
                     now=now,
                 )
             except Exception as error:
@@ -372,7 +386,7 @@ class InMemoryMemoryManager:
                     command.context,
                     record,
                     operation="WRITE",
-                    classification_ceiling=command.classification,
+                    classification_ceiling=command.context.classification_ceiling,
                     now=now,
                 )
             except Exception as error:
@@ -572,7 +586,7 @@ class InMemoryMemoryManager:
             valid_from=now,
             lineage=lineage,
         )
-        self.authorization.authorize(command.context, output, operation="CONSOLIDATE", classification_ceiling=strictest, now=now)
+        self.authorization.authorize(command.context, output, operation="CONSOLIDATE", classification_ceiling=command.context.classification_ceiling, now=now)
         consolidation_id = f"consolidation:{next(self._operation_ids)}"
         event_id = f"memory:{consolidation_id}"
         receipt = MemoryConsolidationReceipt(
@@ -586,22 +600,52 @@ class InMemoryMemoryManager:
             correlation_id=command.context.correlation_id,
             event_id=event_id,
         )
-        revision = MemoryRevision(
-            memory_id=output.memory_id,
-            version=1,
-            previous_version=None,
-            changed_by=command.context.actor,
-            execution_id=command.context.execution_id,
-            correlation_id=command.context.correlation_id,
-            change_reason="consolidated",
-            changed_at=now,
-        )
+        changes = [
+            MemoryCommitChange(
+                output,
+                None,
+                MemoryRevision(
+                    memory_id=output.memory_id,
+                    version=1,
+                    previous_version=None,
+                    changed_by=command.context.actor,
+                    execution_id=command.context.execution_id,
+                    correlation_id=command.context.correlation_id,
+                    change_reason="consolidated",
+                    changed_at=now,
+                ),
+            )
+        ]
+        if command.supersede_sources:
+            for source in current_sources:
+                superseded = replace(
+                    source,
+                    version=int(source.version) + 1,
+                    status=MemoryStatus.SUPERSEDED,
+                    superseded_by=output.memory_id,
+                )
+                changes.append(
+                    MemoryCommitChange(
+                        superseded,
+                        int(source.version),
+                        MemoryRevision(
+                            memory_id=superseded.memory_id,
+                            version=superseded.version,
+                            previous_version=source.version,
+                            changed_by=command.context.actor,
+                            execution_id=command.context.execution_id,
+                            correlation_id=command.context.correlation_id,
+                            change_reason="superseded_by_consolidation",
+                            changed_at=now,
+                        ),
+                    )
+                )
         committed = self._commit(
             operation=MemoryOperation.CONSOLIDATE,
             context=command.context,
             key=command.idempotency_key,
             fingerprint=fingerprint,
-            changes=(MemoryCommitChange(output, None, revision),),
+            changes=tuple(changes),
             memory_ids=(str(output.memory_id), *source_ids),
             versions=(1, *tuple(int(source.version) for source in current_sources)),
             scope=output.scope,
@@ -618,6 +662,18 @@ class InMemoryMemoryManager:
             },
             result=receipt,
             event_id=event_id,
+            additional_event_specs=(
+                (
+                    ("MemorySuperseded", f"{event_id}:superseded", {
+                        "source_memory_ids": source_ids,
+                        "source_versions": tuple(int(source.version) for source in current_sources),
+                        "scope": output.scope.value,
+                        "status": MemoryStatus.SUPERSEDED.value,
+                        "classification": output.classification.value,
+                    }),
+                )
+                if command.supersede_sources else ()
+            ),
         )
         return replace(committed.result, already_applied=committed.already_applied)
 
@@ -811,7 +867,7 @@ class InMemoryMemoryManager:
         )
         return replace(result.result, already_applied=result.already_applied)
 
-    def _commit(self, *, operation, context, key, fingerprint, changes, memory_ids, versions, scope, reason, event_type, payload, result, event_id):
+    def _commit(self, *, operation, context, key, fingerprint, changes, memory_ids, versions, scope, reason, event_type, payload, result, event_id, additional_event_specs=()):
         event = EventEnvelope(
             event_id=event_id,
             event_type=event_type,
@@ -840,6 +896,26 @@ class InMemoryMemoryManager:
             event_id=event_id,
             classification=DataClassification(payload.get("classification", DataClassification.INTERNAL)),
         )
+        additional_events = []
+        for offset, (additional_type, additional_id, additional_payload) in enumerate(additional_event_specs, start=1):
+            additional_events.append(
+                EventEnvelope(
+                    event_id=additional_id,
+                    event_type=additional_type,
+                    event_version=1,
+                    occurred_at=self.clock.now(),
+                    source="memory",
+                    correlation_id=context.correlation_id,
+                    causation_id=event.event_id,
+                    sequence=(event.sequence or 0) + offset,
+                    user_id=context.user_id,
+                    workspace_id=context.workspace_id,
+                    agent_id=context.agent_id,
+                    execution_id=context.execution_id,
+                    classification=DataClassification(additional_payload.get("classification", DataClassification.INTERNAL)),
+                    payload={**additional_payload, "purpose": context.purpose},
+                )
+            )
         return self.store.commit(
             MemoryCommitRequest(
                 operation=operation,
@@ -850,6 +926,7 @@ class InMemoryMemoryManager:
                 audit=audit,
                 event=event,
                 result=result,
+                additional_events=tuple(additional_events),
             )
         )
 
