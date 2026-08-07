@@ -286,6 +286,7 @@ class InMemoryTransactionalPersistence:
             "record_type": query.record_type,
             "filters": as_plain_mapping(query.filters),
             "classification": query.classification_ceiling.value,
+            "consistency": query.consistency.value,
             "limit": query.page.limit,
         }
         return hashlib.sha256(

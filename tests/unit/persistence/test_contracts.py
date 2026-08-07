@@ -63,6 +63,35 @@ def test_transaction_options_are_bounded_and_typed():
         TransactionOptions(timeout=timedelta(seconds=0))
 
 
+def test_authorized_reads_and_scans_declare_typed_strong_consistency():
+    read = AuthorizedRead(
+        context=context(),
+        record_ref=RecordReference("execution:1"),
+        record_type="execution",
+        classification_ceiling=DataClassification.CONFIDENTIAL,
+        consistency="STRONG",
+    )
+    scan = AuthorizedScan(
+        context=context(),
+        record_type="execution",
+        filters={},
+        classification_ceiling=DataClassification.INTERNAL,
+        consistency=ConsistencyLevel.STRONG,
+    )
+
+    assert read.consistency is ConsistencyLevel.STRONG
+    assert scan.consistency is ConsistencyLevel.STRONG
+
+    with pytest.raises(ValueError):
+        AuthorizedRead(
+            context=context(),
+            record_ref=RecordReference("execution:1"),
+            record_type="execution",
+            classification_ceiling=DataClassification.INTERNAL,
+            consistency="UNSUPPORTED",
+        )
+
+
 def test_record_reference_and_page_cursor_represent_opaque_values():
     reference = RecordReference("secret:record-id")
     page = PageRequest(limit=10, cursor="cursor-with-private-state")

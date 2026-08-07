@@ -297,3 +297,61 @@ Fresh evidence:
 - PostgreSQL integration → skipped because `AGENTOS_TEST_POSTGRES_DSN` is absent; no service was created automatically.
 
 Known limits are intentional: SQLite does not prove PostgreSQL locking/isolation/deadlock semantics, and physical backup/restore, replication, partitioning, multi-region and disaster recovery procedures were not simulated.
+
+## Hardening continuation — approved 2026-08-06
+
+The original implementation plan is complete in the repository. The following focused tasks close the remaining review findings without changing the four-method canonical port.
+
+### Task 7: Make authorized read consistency explicit
+
+**Files:**
+- Modify: `src/agentos/persistence/models.py`
+- Test: `tests/unit/persistence/test_contracts.py`
+
+**Interfaces:**
+- Consumes: existing `ConsistencyLevel` and `AuthorizedRead`/`AuthorizedScan` constructors.
+- Produces: `AuthorizedRead.consistency` and `AuthorizedScan.consistency`, both typed as `ConsistencyLevel` and defaulting to `STRONG`.
+
+- [ ] Write a failing contract test that constructs both queries with string and enum consistency values, asserts normalization to `ConsistencyLevel`, and rejects an unknown value.
+- [ ] Run `python -m pytest tests/unit/persistence/test_contracts.py -q` and confirm the new assertion fails because the query objects do not expose consistency.
+- [ ] Add the defaulted field and enum normalization to both frozen query models without changing existing positional call sites.
+- [ ] Run the focused contract test and confirm it passes.
+
+### Task 8: Normalize read-side database failures
+
+**Files:**
+- Modify: `src/agentos/persistence/postgres/adapter.py`
+- Test: `tests/unit/persistence/test_postgres_adapter.py`
+
+**Interfaces:**
+- Consumes: `normalize_database_error`, `PersistenceAdapterError`, `AuthorizedScan`, and `InspectCommit`.
+- Produces: sanitized `PersistenceAdapterError` for scan failures and a stable `inspection:unknown` receipt identifier when commit inspection cannot reach the database without a transaction ID.
+
+- [ ] Write failing tests that make the session factory raise a SQLAlchemy error during `scan`, and during key-only `inspect_commit`, then assert normalized code/receipt behavior with no driver text.
+- [ ] Run the focused tests and confirm the failures occur for the missing normalization and invalid `None` receipt transaction ID.
+- [ ] Wrap the SQLAlchemy portion of `scan` with the existing normalization path and use the same opaque fallback identifier in the `inspect_commit` exception path.
+- [ ] Run the focused PostgreSQL adapter tests and confirm they pass.
+
+### Task 9: Re-run the complete persistence and boundary verification
+
+**Files:**
+- Modify: `docs/superpowers/specs/2026-08-06-persistence-design.md`
+- Modify: `docs/superpowers/plans/2026-08-06-persistence.md`
+
+**Interfaces:**
+- Consumes: all canonical contracts, adapters, migrations, compatibility tests and boundary scans.
+- Produces: fresh evidence for the RFC/ADR acceptance matrix and an honest report of optional PostgreSQL integration status.
+
+- [ ] Run the focused persistence tests after each GREEN cycle.
+- [ ] Run `python -m pytest -q` and record the complete result.
+- [ ] Run `python -m compileall -q src tests` and record exit code 0.
+- [ ] Run the required forbidden-dependency scan and verify only `src/agentos/persistence/postgres/` contains SQLAlchemy/Alembic references.
+- [ ] Run `git diff --check` and inspect `git status --short --branch` before reporting completion.
+- [ ] Update this spec and plan with fresh counts, skipped optional tests and remaining production limitations.
+
+## Hardening self-review
+
+- Task 7 covers the public query contract without adding a fifth persistence operation or changing write semantics.
+- Task 8 covers both identified error paths using existing sanitized error types; no raw database exception is surfaced.
+- Task 9 covers the prompt's mandatory full-suite, compile, boundary and working-tree evidence.
+- PostgreSQL locking, deadlock and isolation claims remain explicitly limited to configured integration tests; SQLite remains a contract harness only.

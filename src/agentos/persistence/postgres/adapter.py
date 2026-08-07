@@ -281,35 +281,39 @@ class PostgresTransactionalPersistence:
 
     def scan(self, query: AuthorizedScan) -> AuthorizedRecordPage:
         fingerprint = self._scan_fingerprint(query)
-        with self._Session() as session:
-            revision = self._current_revision(session)
-            last_ref = None
-            if query.page.cursor is not None:
-                cursor = self._decode_cursor(query.page.cursor)
-                if cursor["fingerprint"] != fingerprint or int(cursor["revision"]) != revision:
-                    raise ValueError("invalid persistence cursor")
-                last_ref = str(cursor["last_ref"])
-            stmt = select(persistence_records).where(
-                persistence_records.c.record_type == query.record_type,
-                *self._scope_filters(query.context),
-                persistence_records.c.classification.in_(
-                    [item.value for item in DataClassification if classification_allows(query.classification_ceiling, item)]
-                ),
-            )
-            if last_ref is not None:
-                stmt = stmt.where(persistence_records.c.record_ref > last_ref)
-            for key, value in query.filters.items():
-                stmt = stmt.where(self._json_filter(persistence_records.c.data, key, value))
-            rows = session.execute(
-                stmt.order_by(persistence_records.c.record_ref).limit(query.page.limit + 1)
-            ).mappings().all()
-            page_items = tuple(self._row_to_record(row) for row in rows[: query.page.limit])
-            next_cursor = None
-            if len(rows) > query.page.limit:
-                next_cursor = self._encode_cursor(
-                    {"fingerprint": fingerprint, "revision": revision, "last_ref": str(page_items[-1].record_ref)}
+        try:
+            with self._Session() as session:
+                revision = self._current_revision(session)
+                last_ref = None
+                if query.page.cursor is not None:
+                    cursor = self._decode_cursor(query.page.cursor)
+                    if cursor["fingerprint"] != fingerprint or int(cursor["revision"]) != revision:
+                        raise ValueError("invalid persistence cursor")
+                    last_ref = str(cursor["last_ref"])
+                stmt = select(persistence_records).where(
+                    persistence_records.c.record_type == query.record_type,
+                    *self._scope_filters(query.context),
+                    persistence_records.c.classification.in_(
+                        [item.value for item in DataClassification if classification_allows(query.classification_ceiling, item)]
+                    ),
                 )
-            return AuthorizedRecordPage(page_items, next_cursor, revision)
+                if last_ref is not None:
+                    stmt = stmt.where(persistence_records.c.record_ref > last_ref)
+                for key, value in query.filters.items():
+                    stmt = stmt.where(self._json_filter(persistence_records.c.data, key, value))
+                rows = session.execute(
+                    stmt.order_by(persistence_records.c.record_ref).limit(query.page.limit + 1)
+                ).mappings().all()
+                page_items = tuple(self._row_to_record(row) for row in rows[: query.page.limit])
+                next_cursor = None
+                if len(rows) > query.page.limit:
+                    next_cursor = self._encode_cursor(
+                        {"fingerprint": fingerprint, "revision": revision, "last_ref": str(page_items[-1].record_ref)}
+                    )
+                return AuthorizedRecordPage(page_items, next_cursor, revision)
+        except SQLAlchemyError as error:
+            normalized = normalize_database_error(error)
+            raise PersistenceAdapterError(normalized.code, normalized.retryability) from None
 
     def inspect_commit(self, query: InspectCommit) -> TransactionReceipt:
         try:
@@ -345,7 +349,7 @@ class PostgresTransactionalPersistence:
                 )
         except SQLAlchemyError:
             return TransactionReceipt(
-                transaction_id=query.transaction_id,
+                transaction_id=query.transaction_id or "inspection:unknown",
                 commit_state=CommitState.UNKNOWN,
                 record_refs=(),
                 outbox_refs=(),
@@ -735,6 +739,7 @@ class PostgresTransactionalPersistence:
             "record_type": query.record_type,
             "filters": as_plain_mapping(query.filters),
             "classification": query.classification_ceiling.value,
+            "consistency": query.consistency.value,
             "limit": query.page.limit,
         }
         return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()

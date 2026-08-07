@@ -282,10 +282,12 @@ class AuthorizedRead:
     record_ref: RecordReference
     record_type: str
     classification_ceiling: DataClassification
+    consistency: ConsistencyLevel = ConsistencyLevel.STRONG
 
     def __post_init__(self) -> None:
         _required(self.record_type, "record_type", maximum=96)
         object.__setattr__(self, "classification_ceiling", DataClassification(self.classification_ceiling))
+        object.__setattr__(self, "consistency", ConsistencyLevel(self.consistency))
 
 
 @dataclass(frozen=True, slots=True)
@@ -295,6 +297,7 @@ class AuthorizedScan:
     filters: Mapping[str, object]
     classification_ceiling: DataClassification
     page: PageRequest = field(default_factory=PageRequest)
+    consistency: ConsistencyLevel = ConsistencyLevel.STRONG
 
     def __post_init__(self) -> None:
         _required(self.record_type, "record_type", maximum=96)
@@ -302,6 +305,7 @@ class AuthorizedScan:
             raise ValueError("filters exceed the public maximum")
         object.__setattr__(self, "filters", freeze_payload(self.filters))
         object.__setattr__(self, "classification_ceiling", DataClassification(self.classification_ceiling))
+        object.__setattr__(self, "consistency", ConsistencyLevel(self.consistency))
 
 
 @dataclass(frozen=True, slots=True)

@@ -2,6 +2,8 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from unittest.mock import Mock
 
+import pytest
+from sqlalchemy.exc import OperationalError
 from sqlalchemy import create_engine
 
 from agentos.events.models import DataClassification
@@ -27,6 +29,7 @@ from agentos.persistence import (
 )
 from agentos.persistence.postgres.migrate import upgrade
 from agentos.persistence.postgres.adapter import PostgresTransactionalPersistence
+from agentos.persistence.postgres.adapter import PersistenceAdapterError
 
 
 NOW = datetime(2026, 8, 6, tzinfo=timezone.utc)
@@ -423,3 +426,38 @@ def test_sqlalchemy_rejects_mutation_in_read_only_transaction():
     assert isinstance(result, TransactionRejected)
     assert result.code is PersistenceErrorCode.INVALID_REQUEST
     assert read_current(adapter, ctx).version == 1
+
+
+def test_sqlalchemy_scan_normalizes_database_failures_without_driver_details():
+    adapter, ctx = make_adapter()
+    adapter._Session = Mock(
+        side_effect=OperationalError("SELECT secret", {}, RuntimeError("password=secret"))
+    )
+
+    with pytest.raises(PersistenceAdapterError) as raised:
+        adapter.scan(
+            AuthorizedScan(
+                context=ctx,
+                record_type="execution",
+                filters={},
+                classification_ceiling=DataClassification.INTERNAL,
+            )
+        )
+
+    assert raised.value.code is PersistenceErrorCode.CONNECTION
+    assert "secret" not in str(raised.value)
+    assert "SELECT" not in str(raised.value)
+
+
+def test_sqlalchemy_key_only_inspection_keeps_opaque_fallback_id_on_database_failure():
+    adapter, ctx = make_adapter()
+    adapter._Session = Mock(
+        side_effect=OperationalError("SELECT secret", {}, RuntimeError("password=secret"))
+    )
+
+    receipt = adapter.inspect_commit(
+        InspectCommit(context=ctx, transaction_id=None, idempotency_key="idempotency:missing")
+    )
+
+    assert receipt.commit_state is CommitState.UNKNOWN
+    assert receipt.transaction_id == "inspection:unknown"

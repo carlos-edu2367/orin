@@ -165,3 +165,14 @@ The implemented slice preserves the approved design. Fresh verification on 2026-
 The adapter proves PostgreSQL-shaped persistence through SQLAlchemy and SQLite contract tests. PostgreSQL-specific row-locking, isolation, deadlock and driver-error behavior remains an integration limitation until a DSN is supplied. Backup/restore, replication, partitioning, multi-region and executable disaster recovery remain intentionally outside this session.
 
 Migration `0002_persistence_integrity` preserves pre-existing idempotency receipts with a legacy correlation sentinel prefix, including duplicate null-workspace keys that could not have been uniquely interpreted under the old schema. Those historical rows contain no original record snapshot; retries never re-execute them, and can only return an authorized current record when its scope is still available.
+
+## Hardening continuation approved for implementation
+
+The repository already contains the approved RFC 601 slice and its compatibility bridge. This continuation closes the remaining contract and recovery edges without changing the public write model or adding a new subsystem.
+
+1. `AuthorizedRead` and `AuthorizedScan` expose typed consistency with `STRONG` as the default, so the public read contract cannot silently lose its consistency declaration.
+2. PostgreSQL scan failures are translated through the same sanitized database-error normalization used by reads and writes; driver SQL, credentials and payloads never cross the public adapter boundary.
+3. Commit inspection preserves a stable opaque transaction reference even when the database itself is unavailable and the query was issued by idempotency key only.
+4. Regression tests prove the new behavior in RED/GREEN order, retain the existing in-memory and SQLAlchemy contract suites, and record that PostgreSQL-specific locking remains optional behind `AGENTOS_TEST_POSTGRES_DSN`.
+
+This continuation does not alter the RFC 601 public method set, the Execution compatibility contract, the migration policy, or the explicit non-goals listed above.
