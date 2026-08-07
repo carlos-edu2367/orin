@@ -287,6 +287,11 @@ class ResourceManagerService:
                 if lease.state is ResourceLeaseState.LEASED and lease.expires_at <= cutoff_at:
                     expired = replace(lease, state=ResourceLeaseState.EXPIRED)
                     self._leases[lease.lease_id] = expired
+                    binding, adapter, _, _ = self._bindings[lease.lease_id]
+                    cleanup = adapter.cleanup(binding, deadline=cutoff_at)
+                    if cleanup.effect_state is not EffectState.APPLIED:
+                        self._descriptors[lease.resource_type] = replace(self.descriptor(lease.resource_type), health=ResourceHealth.QUARANTINED)
+                        self._event("ResourceCleanupFailed", expired, reason="EXPIRY_CLEANUP_FAILED")
                     self._event("ResourceLeaseExpired", expired)
                     results.append(CleanupResult(lease.lease_id, "EXPIRED", EffectState.APPLIED))
             return tuple(results)

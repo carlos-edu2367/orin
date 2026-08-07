@@ -45,3 +45,13 @@ def test_filesystem_resource_cleanup_calls_the_filesystem_port() -> None:
     result = manager.release(__import__("agentos.resources.models", fromlist=["ReleaseResourceLease"]).ReleaseResourceLease("release", lease.lease_id, ctx, lease.fencing_token, "done", "release"))
     assert result.effect_state.value == "APPLIED"
     assert spy.leases == [lease.lease_id]
+
+
+def test_expired_lease_is_fenced_and_adapter_cleanup_is_attempted() -> None:
+    manager = ResourceManagerService()
+    ctx = ResourceOperationContext("u", "ws", "a", "e", "c", "purpose", "agent:a")
+    lease = manager.acquire(ResourceLeaseRequest("one", ctx, ResourceType.FILESYSTEM, (ResourceCapability.FILESYSTEM_READ,), (ResourceCapability.FILESYSTEM_READ,), ResourceBudget(5, 10), timedelta(minutes=1), "expiry"))
+    cutoff = lease.expires_at + timedelta(seconds=1)
+    results = manager.sweep(cutoff_at=cutoff, maximum=10)
+    assert results[0].state == "EXPIRED"
+    assert manager.validate_filesystem_handle(None, lease_id=lease.lease_id, context=ctx, operation_id="late") is False
