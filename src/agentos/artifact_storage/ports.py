@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Protocol
 
+from agentos.events.models import DataClassification
+
 from .models import (
     ArtifactCategory, ArtifactError, ArtifactMetadata, ArtifactNamespace, ArtifactOperationContext,
     ArtifactReference, ArtifactState, ChecksumAlgorithm, ContentChecksum, EffectState,
@@ -240,6 +242,7 @@ class OpenArtifactRead:
     artifact_ref: ArtifactReference
     maximum_bytes: int
     purpose: str
+    classification_ceiling: DataClassification = DataClassification.RESTRICTED
 
 
 @dataclass(frozen=True, slots=True)
@@ -267,6 +270,42 @@ class InspectArtifact:
     context: ArtifactOperationContext
     artifact_ref: ArtifactReference
     purpose: str
+
+
+@dataclass(frozen=True, slots=True)
+class DeleteArtifact:
+    operation_id: str
+    context: ArtifactOperationContext
+    artifact_ref: ArtifactReference
+    expected_version: int
+    reason: str
+    recovery_window: timedelta
+    idempotency_key: str
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactDeletionReceipt:
+    artifact_id: str
+    state: ArtifactState
+    recoverable_until: datetime | None
+    effect_state: EffectState
+
+
+@dataclass(frozen=True, slots=True)
+class ApplyArtifactRetention:
+    operation_id: str
+    context: ArtifactOperationContext
+    namespace: ArtifactNamespace
+    retention_policy_ref: str
+    cutoff_at: datetime
+    maximum_artifacts: int
+    idempotency_key: str
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactRetentionReceipt:
+    transitioned_artifact_ids: tuple[str, ...]
+    effect_state: EffectState
 
 
 class ArtifactStorage(Protocol):

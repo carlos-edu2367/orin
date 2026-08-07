@@ -109,7 +109,7 @@ class InMemoryArtifactMetadataRepository:
         return ArtifactError(code, Retryability.NON_RETRYABLE, effect_state)
 
     def usage(self, context: ArtifactOperationContext) -> QuotaUsage:
-        records = [record for record in self._records.values() if record.context.scope_key() == context.scope_key()]
+        records = [record for record in self._records.values() if self._same_owner(record.context, context)]
         staging = sum(self._reservations.get(record.metadata.artifact_id, 0) for record in records if record.metadata.state is ArtifactState.STAGING)
         available = sum(record.metadata.size_bytes for record in records if record.metadata.state is ArtifactState.AVAILABLE)
         recovery = sum(record.metadata.size_bytes for record in records if record.metadata.state is ArtifactState.DELETING)
@@ -149,9 +149,41 @@ class InMemoryArtifactMetadataRepository:
 
     def get(self, context: ArtifactOperationContext, artifact_id: str) -> ArtifactMetadataRecord | None:
         record = self._records.get(artifact_id)
-        if record is None or record.context.scope_key() != context.scope_key():
+        if record is None or not self._same_owner(record.context, context):
             return None
         return record
+
+    def bind_storage_object(self, context: ArtifactOperationContext, artifact_id: str, storage_object_ref: str) -> ArtifactMetadataRecord | ArtifactError:
+        record = self.get(context, artifact_id)
+        if record is None:
+            return self._error(ArtifactErrorCode.NOT_FOUND)
+        updated = replace(record, storage_object_ref=storage_object_ref)
+        self._records[artifact_id] = updated
+        return updated
+
+    @staticmethod
+    def _same_owner(left: ArtifactOperationContext, right: ArtifactOperationContext) -> bool:
+        return (
+            left.user_id == right.user_id
+            and left.workspace_id == right.workspace_id
+            and left.agent_id == right.agent_id
+            and left.execution_id == right.execution_id
+            and left.correlation_id == right.correlation_id
+            and left.actor == right.actor
+        )
+
+    def list_records(self, context: ArtifactOperationContext, namespace: ArtifactNamespace, *, cutoff_at: datetime, maximum: int, retention_policy_ref: str) -> tuple[ArtifactMetadataRecord, ...]:
+        if maximum < 1:
+            return ()
+        records = [
+            record for record in self._records.values()
+            if self._same_owner(record.context, context)
+            and record.metadata.namespace == namespace
+            and record.metadata.retention_policy_ref == retention_policy_ref
+            and record.metadata.state is ArtifactState.AVAILABLE
+            and record.metadata.created_at <= cutoff_at
+        ]
+        return tuple(sorted(records, key=lambda item: item.metadata.artifact_id)[:maximum])
 
     def publish_available(self, context: ArtifactOperationContext, artifact_id: str, *, size_bytes: int, checksum: ContentChecksum, idempotency_key: str) -> MetadataMutationReceipt | ArtifactError:
         record = self.get(context, artifact_id)
