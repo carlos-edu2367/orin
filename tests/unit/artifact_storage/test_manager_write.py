@@ -113,3 +113,19 @@ def test_quota_is_reserved_before_first_chunk():
     assert first.artifact_id
     assert isinstance(second, ArtifactError)
     assert second.code is ArtifactErrorCode.QUOTA_EXCEEDED
+
+
+def test_begin_finalize_and_abort_retries_reuse_the_original_effect():
+    service, storage, metadata, events = manager()
+    ctx = context()
+    request = write_request(ctx)
+    first_session = service.begin_write(request)
+    repeated_session = service.begin_write(request)
+    service.append(AppendArtifactChunk("operation:chunk", ctx, first_session.write_session_id, 0, 11, checksum(b"hello world"), "idem:chunk"), BytesIO(b"hello world"))
+    finalize = FinalizeArtifactWrite("operation:finalize", ctx, first_session.write_session_id, 11, checksum(b"hello world"), "idem:finalize")
+    first_reference = service.finalize(finalize)
+    repeated_reference = service.finalize(finalize)
+
+    assert repeated_session.artifact_id == first_session.artifact_id
+    assert repeated_reference == first_reference
+    assert [event.event_type for event in events.events].count("ArtifactStored") == 1

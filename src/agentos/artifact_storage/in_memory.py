@@ -221,14 +221,14 @@ class InMemoryArtifactStorage:
             existing_key = next(key for key, item in staging.chunks.items() if item == existing and key[:2] == fingerprint[:2])
             if existing_key != fingerprint:
                 return self._error(ArtifactErrorCode.OFFSET_CONFLICT)
-            return StorageWriteReceipt(staging.storage_object_id, request.offset_bytes, request.length_bytes, computed, EffectState.APPLIED)
+            return StorageWriteReceipt(staging.storage_object_id, request.offset_bytes + request.length_bytes, request.length_bytes, computed, EffectState.APPLIED)
         if request.offset_bytes != len(staging.data):
             return self._error(ArtifactErrorCode.OFFSET_CONFLICT)
         if (fault := self._fault("write_chunk")) is not None:
             return fault
         staging.data.extend(data)
         staging.chunks[fingerprint] = data
-        return StorageWriteReceipt(staging.storage_object_id, request.offset_bytes, request.length_bytes, computed, EffectState.APPLIED)
+        return StorageWriteReceipt(staging.storage_object_id, request.offset_bytes + request.length_bytes, request.length_bytes, computed, EffectState.APPLIED)
 
     def seal(self, request: StorageSealObject) -> StorageSealedObject | ArtifactError:
         staging = self._get_staging(request)

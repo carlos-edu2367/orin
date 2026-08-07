@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import hashlib
+import json
 from typing import Callable
 
 from agentos.events.models import DataClassification, EventEnvelope, classification_allows
@@ -32,6 +33,7 @@ from .ports import (
     ArtifactManager,
     ArtifactReadSession,
     ArtifactRetentionReceipt,
+    ArtifactVerifyReceipt,
     ArtifactWriteSession,
     BeginArtifactWrite,
     ByteSink,
@@ -51,6 +53,7 @@ from .ports import (
     StorageStagingHandle,
     StorageVerifyObject,
     StorageWriteChunk,
+    VerifyArtifact,
 )
 from .security import derive_namespace, sanitize_logical_name, sanitize_public_reason
 
@@ -99,6 +102,9 @@ class ArtifactManagerService:
         self._reads: dict[str, _ReadBinding] = {}
         self._grants: dict[str, ArtifactGrant] = {}
         self._sequences: dict[str, int] = {}
+        self._begin_idempotency: dict[tuple[tuple[str, ...], str], tuple[str, ArtifactWriteSession]] = {}
+        self._finalize_idempotency: dict[tuple[tuple[str, ...], str], tuple[str, ArtifactReference]] = {}
+        self._abort_idempotency: dict[tuple[tuple[str, ...], str], tuple[str, object]] = {}
 
     def _now(self) -> datetime:
         value = self._clock()
@@ -122,6 +128,8 @@ class ArtifactManagerService:
         return derive_namespace(context.user_id, context.workspace_id, ArtifactCategory(category).value)
 
     def _event(self, event_type: str, context: ArtifactOperationContext, metadata: ArtifactMetadata, *, reason: str | None = None) -> None:
+        if getattr(self.metadata, "events_are_transactional", False):
+            return
         sequence = self._sequences.get(context.execution_id, 0) + 1
         self._sequences[context.execution_id] = sequence
         payload = {
@@ -157,6 +165,13 @@ class ArtifactManagerService:
             logical_name = sanitize_logical_name(request.logical_name)
         except (ValueError, TypeError):
             return self._error(ArtifactErrorCode.INVALID_REQUEST)
+        fingerprint = hashlib.sha256(json.dumps((request.operation_id, request.category.value, request.logical_name, request.declared_media_type, request.expected_size_bytes, repr(request.expected_checksum), request.classification.value, request.retention_policy_ref, request.idempotency_key), default=str).encode()).hexdigest()
+        begin_key = (request.context.scope_key(), request.idempotency_key)
+        prior_begin = self._begin_idempotency.get(begin_key)
+        if prior_begin is not None:
+            if prior_begin[0] != fingerprint:
+                return self._error(ArtifactErrorCode.IDEMPOTENCY_CONFLICT)
+            return prior_begin[1]
         namespace = self.namespace_for(request.context, category)
         capabilities = self.storage.capabilities(request.context, namespace)
         maximum_size = request.expected_size_bytes if request.expected_size_bytes is not None else min(capabilities.maximum_object_bytes, self.metadata.quota.max_staging_bytes)
@@ -165,7 +180,7 @@ class ArtifactManagerService:
         if request.expected_size_bytes is not None and request.expected_size_bytes > capabilities.maximum_object_bytes:
             return self._error(ArtifactErrorCode.SIZE_LIMIT_EXCEEDED)
         artifact_id = self._next("artifact")
-        expiry = request.provenance.created_by and self._now() + timedelta(hours=1)
+        expiry = self._now() + timedelta(hours=1)
         storage_result = self.storage.begin_staging(StorageBeginStaging(
             operation_id=request.operation_id,
             context=request.context,
@@ -204,9 +219,11 @@ class ArtifactManagerService:
         if isinstance(metadata_result, ArtifactError):
             self.storage.abort_staging(StorageAbortStaging(request.operation_id, request.context, namespace, storage_result.staging_ref, "metadata rejected", self._next("abort-idem")))
             return metadata_result
+        session = ArtifactWriteSession(storage_result.staging_ref, artifact_id, 0, maximum_size, expiry, ArtifactState.STAGING)
         self._writes[storage_result.staging_ref.value] = _WriteBinding(request, namespace, storage_result, artifact_id, maximum_size)
+        self._begin_idempotency[begin_key] = (fingerprint, session)
         self._event("ArtifactWriteStarted", request.context, metadata)
-        return ArtifactWriteSession(storage_result.staging_ref, artifact_id, 0, maximum_size, expiry, ArtifactState.STAGING)
+        return session
 
     def _write_binding(self, request: AppendArtifactChunk | FinalizeArtifactWrite | AbortArtifactWrite) -> _WriteBinding | ArtifactError:
         binding = self._writes.get(request.write_session_id.value)
@@ -228,6 +245,13 @@ class ArtifactManagerService:
         return result
 
     def finalize(self, request: FinalizeArtifactWrite) -> ArtifactReference | ArtifactError:
+        finalize_key = (request.context.scope_key(), request.idempotency_key)
+        finalize_fingerprint = hashlib.sha256(json.dumps((request.write_session_id.value, request.expected_total_size_bytes, repr(request.expected_checksum)), default=str).encode()).hexdigest()
+        prior_finalize = self._finalize_idempotency.get(finalize_key)
+        if prior_finalize is not None:
+            if prior_finalize[0] != finalize_fingerprint:
+                return self._error(ArtifactErrorCode.IDEMPOTENCY_CONFLICT)
+            return prior_finalize[1]
         binding = self._write_binding(request)
         if isinstance(binding, ArtifactError):
             return binding
@@ -250,9 +274,18 @@ class ArtifactManagerService:
         )
         self._grants[grant.grant_id] = grant
         self._event("ArtifactStored", request.context, metadata)
-        return ArtifactReference(metadata.artifact_id, metadata.version, request.context.user_id, request.context.workspace_id, metadata.category, metadata.size_bytes, metadata.checksum, metadata.classification, grant.grant_id, grant.purpose, metadata.expires_at)
+        reference = ArtifactReference(metadata.artifact_id, metadata.version, request.context.user_id, request.context.workspace_id, metadata.category, metadata.size_bytes, metadata.checksum, metadata.classification, grant.grant_id, grant.purpose, metadata.expires_at)
+        self._finalize_idempotency[finalize_key] = (finalize_fingerprint, reference)
+        return reference
 
     def abort(self, request: AbortArtifactWrite):
+        abort_key = (request.context.scope_key(), request.idempotency_key)
+        abort_fingerprint = hashlib.sha256(json.dumps((request.write_session_id.value, request.reason), default=str).encode()).hexdigest()
+        prior_abort = self._abort_idempotency.get(abort_key)
+        if prior_abort is not None:
+            if prior_abort[0] != abort_fingerprint:
+                return self._error(ArtifactErrorCode.IDEMPOTENCY_CONFLICT)
+            return prior_abort[1]
         binding = self._write_binding(request)
         if isinstance(binding, ArtifactError):
             return binding
@@ -263,6 +296,7 @@ class ArtifactManagerService:
         if isinstance(metadata_result, ArtifactError):
             return metadata_result
         self._writes.pop(request.write_session_id.value, None)
+        self._abort_idempotency[abort_key] = (abort_fingerprint, metadata_result)
         return metadata_result
 
     def _check_reference(self, context: ArtifactOperationContext, reference: ArtifactReference, *, purpose: str, allow_non_available: bool = False, require_grant: bool = True) -> tuple[ArtifactMetadataRecord, ArtifactGrant] | ArtifactError:
@@ -358,12 +392,29 @@ class ArtifactManagerService:
         recoverable_until = self._now() + request.recovery_window if request.recovery_window > timedelta(0) else None
         storage_result = self.storage.delete(StorageDeleteObject(request.operation_id, request.context, record.metadata.namespace, OpaqueArtifactRef(record.storage_object_ref), record.metadata.checksum, recoverable_until, request.idempotency_key))
         if isinstance(storage_result, ArtifactError):
+            if storage_result.effect_state is EffectState.UNKNOWN:
+                self._event("ArtifactCleanupFailed", request.context, deleting.metadata, reason="cleanup outcome unknown")
             return storage_result
         deleted = self.metadata.transition(request.context, record.metadata.artifact_id, ArtifactState.DELETED, reason=request.reason, idempotency_key=self._next("deleted-idem"))
         if isinstance(deleted, ArtifactError):
             return deleted
         self._event("ArtifactDeleted", request.context, deleted.metadata, reason=request.reason)
         return ArtifactDeletionReceipt(record.metadata.artifact_id, ArtifactState.DELETED, recoverable_until, EffectState.APPLIED)
+
+    def verify(self, request: VerifyArtifact):
+        checked = self._check_reference(request.context, request.artifact_ref, purpose=str(request.artifact_ref.purpose), require_grant=False)
+        if isinstance(checked, ArtifactError):
+            return checked
+        record, _ = checked
+        result = self.storage.verify(StorageVerifyObject(request.operation_id, request.context, record.metadata.namespace, OpaqueArtifactRef(record.storage_object_ref), record.metadata.size_bytes, record.metadata.checksum))
+        if isinstance(result, ArtifactError):
+            return result
+        if result.integrity_state.value != "VERIFIED":
+            quarantined = self.metadata.transition(request.context, record.metadata.artifact_id, ArtifactState.QUARANTINED, reason="integrity mismatch", idempotency_key=request.idempotency_key)
+            if isinstance(quarantined, ArtifactError):
+                return quarantined
+            self._event("ArtifactQuarantined", request.context, quarantined.metadata, reason="integrity mismatch")
+        return ArtifactVerifyReceipt(record.metadata.artifact_id, result.integrity_state, EffectState.APPLIED)
 
     def apply_retention(self, request: ApplyArtifactRetention):
         records = self.metadata.list_records(request.context, request.namespace, cutoff_at=request.cutoff_at, maximum=request.maximum_artifacts, retention_policy_ref=request.retention_policy_ref)
