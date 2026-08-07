@@ -180,6 +180,13 @@ class RecordChange:
         object.__setattr__(self, "classification", DataClassification(self.classification))
         object.__setattr__(self, "data", freeze_persistence_payload(self.data))
 
+    def __repr__(self) -> str:
+        return (
+            "RecordChange("
+            f"record_ref=<opaque>, record_type={self.record_type!r}, "
+            f"expected_version={self.expected_version!r}, classification={self.classification.value!r})"
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class AuditChange:
@@ -195,6 +202,13 @@ class AuditChange:
         if self.resulting_version < 1:
             raise ValueError("resulting_version must be positive")
         object.__setattr__(self, "fields", freeze_payload(self.fields))
+
+    def __repr__(self) -> str:
+        return (
+            "AuditChange("
+            f"audit_ref=<opaque>, record_ref=<opaque>, decision={self.decision!r}, "
+            f"resulting_version={self.resulting_version})"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,6 +226,12 @@ class OutboxChange:
     @property
     def outbox_ref(self) -> OutboxReference:
         return OutboxReference(str(self.event.event_id))
+
+    def __repr__(self) -> str:
+        return (
+            "OutboxChange(event_ref=<opaque>, source_record_ref=<opaque>, "
+            f"expected_source_version={self.expected_source_version})"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -235,6 +255,15 @@ class TransactionRequest:
         if not isinstance(self.options, TransactionOptions):
             raise ValueError("options must be TransactionOptions")
 
+    def __repr__(self) -> str:
+        return (
+            "TransactionRequest("
+            "transaction_id=<opaque>, context=<scoped>, idempotency_key=<opaque>, "
+            "fingerprint=<opaque>, "
+            f"expected_versions={len(self.expected_versions)}, changes={len(self.changes)}, "
+            f"audit={len(self.audit)}, outbox={len(self.outbox)})"
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class AuthorizedRecord:
@@ -251,6 +280,14 @@ class AuthorizedRecord:
             raise ValueError("version must be positive")
         object.__setattr__(self, "classification", DataClassification(self.classification))
         object.__setattr__(self, "data", freeze_persistence_payload(self.data))
+
+    def __repr__(self) -> str:
+        return (
+            "AuthorizedRecord("
+            "record_ref=<opaque>, "
+            f"record_type={self.record_type!r}, version={self.version}, "
+            f"classification={self.classification.value!r})"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -303,9 +340,19 @@ class AuthorizedScan:
         _required(self.record_type, "record_type", maximum=96)
         if len(self.filters) > MAX_FILTERS:
             raise ValueError("filters exceed the public maximum")
+        if any(not isinstance(value, (type(None), bool, int, float, str)) for value in self.filters.values()):
+            raise ValueError("scan filters must contain scalar values")
         object.__setattr__(self, "filters", freeze_payload(self.filters))
         object.__setattr__(self, "classification_ceiling", DataClassification(self.classification_ceiling))
         object.__setattr__(self, "consistency", ConsistencyLevel(self.consistency))
+
+    def __repr__(self) -> str:
+        return (
+            "AuthorizedScan("
+            f"context=<scoped>, record_type={self.record_type!r}, filters={len(self.filters)}, "
+            f"classification_ceiling={self.classification_ceiling.value!r}, page={self.page!r}, "
+            f"consistency={self.consistency.value!r})"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -319,6 +366,13 @@ class AuthorizedRecordPage:
             raise ValueError("store_revision cannot be negative")
         if self.next_cursor is not None:
             _required(self.next_cursor, "next_cursor", maximum=512)
+
+    def __repr__(self) -> str:
+        return (
+            "AuthorizedRecordPage("
+            f"items={len(self.items)}, next_cursor={'present' if self.next_cursor else 'absent'}, "
+            f"store_revision={self.store_revision})"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -365,6 +419,13 @@ class TransactionCommitted:
     receipt: TransactionReceipt
     records: tuple[AuthorizedRecord, ...]
     already_applied: bool = False
+
+    def __repr__(self) -> str:
+        return (
+            "TransactionCommitted("
+            f"commit_state={self.receipt.commit_state.value!r}, records={len(self.records)}, "
+            f"already_applied={self.already_applied})"
+        )
 
 
 @dataclass(frozen=True, slots=True)

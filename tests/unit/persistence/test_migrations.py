@@ -39,3 +39,13 @@ def test_migration_initializes_revision_clock_from_existing_receipts():
     with engine.connect() as connection:
         assert connection.execute(text("SELECT revision FROM persistence_clock")).scalar_one() == 7
         assert connection.execute(text("SELECT correlation_id FROM persistence_idempotency")).scalar_one().startswith("__legacy__:")
+
+
+def test_migrations_enforce_record_classification_values():
+    engine = create_engine("sqlite:///:memory:")
+
+    upgrade(engine)
+
+    constraints = inspect(engine).get_check_constraints("persistence_records")
+
+    assert any(item["name"] == "ck_persistence_records_classification" for item in constraints)

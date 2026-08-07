@@ -5,6 +5,7 @@ import pytest
 from agentos.events.models import DataClassification
 from agentos.persistence import (
     AuthorizedRead,
+    AuthorizedRecord,
     AuthorizedScan,
     ConsistencyLevel,
     IsolationLevel,
@@ -146,6 +147,14 @@ def test_authorized_queries_require_bounded_context_and_page():
     with pytest.raises(ValueError):
         PageRequest(limit=101)
 
+    with pytest.raises(ValueError):
+        AuthorizedScan(
+            context=context(),
+            record_type="execution",
+            filters={"state": {"nested": "value"}},
+            classification_ceiling=DataClassification.INTERNAL,
+        )
+
 
 def test_transaction_request_freezes_collection_inputs():
     request = TransactionRequest(
@@ -164,3 +173,45 @@ def test_transaction_request_freezes_collection_inputs():
     assert request.changes == ()
     assert request.audit == ()
     assert request.outbox == ()
+
+
+def test_public_reprs_do_not_materialize_persistent_payloads():
+    sensitive_value = "proprietary customer document"
+    change = RecordChange(
+        record_ref=RecordReference("execution:1"),
+        record_type="execution",
+        expected_version=None,
+        data={"opaque_value": sensitive_value},
+        classification=DataClassification.INTERNAL,
+    )
+    record = AuthorizedRecord(
+        record_ref=RecordReference("execution:1"),
+        record_type="execution",
+        version=1,
+        context=context(),
+        classification=DataClassification.INTERNAL,
+        data={"opaque_value": sensitive_value},
+    )
+    request = TransactionRequest(
+        transaction_id="transaction:1",
+        context=context(),
+        options=TransactionOptions(),
+        idempotency_key="idempotency:1",
+        fingerprint="fingerprint:1",
+        expected_versions=(),
+        changes=(change,),
+        audit=(),
+        outbox=(),
+    )
+
+    assert sensitive_value not in repr(change)
+    assert sensitive_value not in repr(record)
+    assert sensitive_value not in repr(request)
+
+    query = AuthorizedScan(
+        context=context(),
+        record_type="execution",
+        filters={"opaque_filter": sensitive_value},
+        classification_ceiling=DataClassification.INTERNAL,
+    )
+    assert sensitive_value not in repr(query)

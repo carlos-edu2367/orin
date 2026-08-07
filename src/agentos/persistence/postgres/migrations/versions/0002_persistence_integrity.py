@@ -30,6 +30,10 @@ def upgrade() -> None:
 
     with op.batch_alter_table("persistence_records", recreate="always") as batch:
         batch.create_check_constraint("ck_persistence_records_version_positive", "version > 0")
+        batch.create_check_constraint(
+            "ck_persistence_records_classification",
+            "classification IN ('PUBLIC', 'INTERNAL', 'CONFIDENTIAL', 'RESTRICTED')",
+        )
 
     with op.batch_alter_table("persistence_audit", recreate="always") as batch:
         batch.create_check_constraint("ck_persistence_audit_version_positive", "resulting_version > 0")

@@ -342,6 +342,15 @@ class PostgresTransactionalPersistence:
                 records = self._records_from_json(row.get("records"), query.context)
                 if not records and str(row["correlation_id"]).startswith(f"{LEGACY_CORRELATION_PREFIX}:"):
                     records = self._legacy_records_for_context(session, query.context, receipt)
+                    if not records:
+                        return TransactionReceipt(
+                            transaction_id=query.transaction_id or receipt.transaction_id,
+                            commit_state=CommitState.NOT_COMMITTED,
+                            record_refs=(),
+                            outbox_refs=(),
+                            store_revision=self._current_revision(session),
+                            committed_at=None,
+                        )
                 return replace(
                     receipt,
                     fingerprint=str(row["fingerprint"]),
@@ -367,6 +376,8 @@ class PostgresTransactionalPersistence:
         records: list[AuthorizedRecord] = []
         for change in request.changes:
             ref = str(change.record_ref)
+            if ref in versions:
+                return TransactionRejected(PersistenceErrorCode.INVALID_REQUEST, transaction_id=request.transaction_id)
             if change.expected_version != expected_by_ref.get(ref):
                 return TransactionRejected(PersistenceErrorCode.INVALID_REQUEST, transaction_id=request.transaction_id)
             row = session.execute(
