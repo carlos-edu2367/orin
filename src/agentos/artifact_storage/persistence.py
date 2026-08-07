@@ -112,7 +112,7 @@ class TransactionalArtifactMetadataRepository(InMemoryArtifactMetadataRepository
         return ArtifactMetadataRecord(metadata, str(data["storage_object_ref"]), metadata.provenance.created_by)
 
     def _persist(self, record: ArtifactMetadataRecord, *, previous_version: int | None, idempotency_key: str, event_type: str | None) -> None:
-        context = PersistenceOperationContext(record.context.user_id, record.context.workspace_id, record.context.agent_id, record.context.execution_id, record.context.correlation_id, str(record.context.purpose), record.context.actor)
+        context = PersistenceOperationContext(record.context.user_id, record.context.workspace_id, record.context.agent_id, record.context.execution_id, record.context.correlation_id, "artifact.metadata", record.context.actor)
         ref = RecordReference(record.metadata.artifact_id)
         change = RecordChange(ref, "artifact_metadata", previous_version, self._data(record), DataClassification(record.metadata.classification))
         expected = () if previous_version is None else (ExpectedVersion(ref, previous_version),)
@@ -171,7 +171,7 @@ class TransactionalArtifactMetadataRepository(InMemoryArtifactMetadataRepository
         local = super().get(context, artifact_id)
         if local is not None:
             return local
-        persistence_context = PersistenceOperationContext(context.user_id, context.workspace_id, context.agent_id, context.execution_id, context.correlation_id, str(context.purpose), context.actor)
+        persistence_context = PersistenceOperationContext(context.user_id, context.workspace_id, context.agent_id, context.execution_id, context.correlation_id, "artifact.metadata", context.actor)
         result = self.persistence.read(AuthorizedRead(persistence_context, RecordReference(artifact_id), "artifact_metadata", DataClassification.RESTRICTED))
         if getattr(result, "data", None) is None:
             return None

@@ -7,7 +7,8 @@ from typing import Protocol
 from agentos.events.models import DataClassification
 
 from .models import (
-    ArtifactCategory, ArtifactError, ArtifactMetadata, ArtifactNamespace, ArtifactOperationContext,
+    AccessPurpose, ArtifactCategory, ArtifactError, ArtifactMetadata, ArtifactNamespace, ArtifactOperationContext,
+    ArtifactProvenance,
     ArtifactReference, ArtifactState, ChecksumAlgorithm, ContentChecksum, EffectState,
     IntegrityState, OpaqueArtifactRef, OpaqueReadRef, OpaqueWriteSessionRef, Retryability,
     StorageCapability,
@@ -248,9 +249,9 @@ class BeginArtifactWrite:
     declared_media_type: str | None
     expected_size_bytes: int | None
     expected_checksum: ContentChecksum | None
-    classification: object
+    classification: DataClassification
     retention_policy_ref: str
-    provenance: object
+    provenance: ArtifactProvenance
     idempotency_key: str
 
     def __post_init__(self) -> None:
@@ -325,7 +326,7 @@ class OpenArtifactRead:
     context: ArtifactOperationContext
     artifact_ref: ArtifactReference
     maximum_bytes: int
-    purpose: str
+    purpose: AccessPurpose
     classification_ceiling: DataClassification = DataClassification.RESTRICTED
 
     def __post_init__(self) -> None:
@@ -363,7 +364,7 @@ class ReadArtifactRange:
 class InspectArtifact:
     context: ArtifactOperationContext
     artifact_ref: ArtifactReference
-    purpose: str
+    purpose: AccessPurpose
 
 
 @dataclass(frozen=True, slots=True)
@@ -403,6 +404,28 @@ class ArtifactRetentionReceipt:
 
 
 @dataclass(frozen=True, slots=True)
+class ArtifactAbortResult:
+    artifact_id: str
+    state: ArtifactState
+    effect_state: EffectState
+
+
+@dataclass(frozen=True, slots=True)
+class ReconcileArtifactCleanup:
+    operation_id: str
+    context: ArtifactOperationContext
+    artifact_id: str
+    idempotency_key: str
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactCleanupReceipt:
+    artifact_id: str
+    state: ArtifactState
+    effect_state: EffectState
+
+
+@dataclass(frozen=True, slots=True)
 class VerifyArtifact:
     operation_id: str
     context: ArtifactOperationContext
@@ -431,16 +454,24 @@ class ArtifactStorage(Protocol):
 
 class ArtifactMetadataRepository(Protocol):
     def get(self, context: ArtifactOperationContext, artifact_id: str) -> ArtifactMetadata | None: ...
+    def create_staging(self, record: object, *, reservation_bytes: int, idempotency_key: str) -> object: ...
+    def publish_available(self, context: ArtifactOperationContext, artifact_id: str, *, size_bytes: int, checksum: ContentChecksum, idempotency_key: str) -> object: ...
+    def abort_staging(self, context: ArtifactOperationContext, artifact_id: str, *, idempotency_key: str) -> object: ...
+    def transition(self, context: ArtifactOperationContext, artifact_id: str, state: ArtifactState, *, reason: str, idempotency_key: str) -> object: ...
 
 
 class ArtifactManager(Protocol):
     def begin_write(self, request: BeginArtifactWrite) -> ArtifactWriteSession | ArtifactError: ...
-    def append(self, request: AppendArtifactChunk, source: ByteSource) -> object: ...
+    def append(self, request: AppendArtifactChunk, source: ByteSource) -> StorageWriteReceipt | ArtifactError: ...
     def finalize(self, request: FinalizeArtifactWrite) -> ArtifactReference | ArtifactError: ...
-    def abort(self, request: AbortArtifactWrite) -> object: ...
+    def abort(self, request: AbortArtifactWrite) -> ArtifactAbortResult | ArtifactError: ...
     def open_read(self, request: OpenArtifactRead) -> ArtifactReadSession | ArtifactError: ...
-    def read(self, request: ReadArtifactRange, sink: ByteSink) -> object: ...
+    def read(self, request: ReadArtifactRange, sink: ByteSink) -> StorageReadReceipt | ArtifactError: ...
     def inspect(self, request: InspectArtifact) -> ArtifactMetadata | ArtifactError: ...
+    def verify(self, request: VerifyArtifact) -> ArtifactVerifyReceipt | ArtifactError: ...
+    def delete(self, request: DeleteArtifact) -> ArtifactDeletionReceipt | ArtifactError: ...
+    def apply_retention(self, request: ApplyArtifactRetention) -> ArtifactRetentionReceipt | ArtifactError: ...
+    def reconcile_cleanup(self, request: ReconcileArtifactCleanup) -> ArtifactCleanupReceipt | ArtifactError: ...
 
 
 __all__ = [name for name in globals() if not name.startswith("_")]

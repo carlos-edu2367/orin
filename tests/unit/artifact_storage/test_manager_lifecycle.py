@@ -4,7 +4,7 @@ from agentos.artifact_storage import ArtifactCategory, ArtifactError, ArtifactEr
 from agentos.artifact_storage.in_memory import InMemoryArtifactStorage
 from agentos.artifact_storage.metadata import InMemoryArtifactMetadataRepository, QuotaPolicy
 from agentos.artifact_storage.models import ArtifactProvenanceKind, ArtifactState
-from agentos.artifact_storage.ports import ApplyArtifactRetention, BeginArtifactWrite, DeleteArtifact
+from agentos.artifact_storage.ports import ApplyArtifactRetention, BeginArtifactWrite, DeleteArtifact, FinalizeArtifactWrite, ReconcileArtifactCleanup
 from agentos.artifact_storage.service import ArtifactManagerService, InMemoryArtifactEventSink
 
 
@@ -50,3 +50,17 @@ def test_retention_expires_available_artifacts_and_is_bounded():
     assert receipt.transitioned_artifact_ids == (ref.artifact_id,)
     read_context = ctx.__class__(ctx.user_id, ctx.workspace_id, ctx.agent_id, ctx.execution_id, ctx.correlation_id, "artifact.read", ctx.actor)
     assert service.inspect(__import__("agentos.artifact_storage.ports", fromlist=["InspectArtifact"]).InspectArtifact(read_context, ref, "artifact.read")).state is ArtifactState.EXPIRED
+
+
+def test_cleanup_reconciliation_completes_deleting_without_resurrecting_id():
+    service = manager()
+    ctx = context()
+    request = BeginArtifactWrite("op", ctx, ArtifactCategory.RESULT, "result.json", None, 0, None, DataClassification.INTERNAL, "retention", ArtifactProvenance(ArtifactProvenanceKind.AGENT_RESULT, (), ctx), "idem")
+    session = service.begin_write(request)
+    ref = service.finalize(FinalizeArtifactWrite("finish", ctx, session.write_session_id, 0, None, "finish-idem"))
+    service.storage.fail_next("delete")
+    uncertain = service.delete(DeleteArtifact("delete", ctx, ref, ref.version, "cleanup", timedelta(minutes=1), "delete-idem"))
+    reconciled = service.reconcile_cleanup(ReconcileArtifactCleanup("reconcile", ctx, ref.artifact_id, "reconcile-idem"))
+
+    assert isinstance(uncertain, ArtifactError)
+    assert reconciled.state is ArtifactState.DELETED

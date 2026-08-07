@@ -174,7 +174,7 @@ class InMemoryArtifactStorage:
         )
         return StorageStagingHandle(staging_ref, object_id, 0, request.expires_at)
 
-    def _get_staging(self, request: StorageWriteChunk | StorageSealObject | StorageAbortStaging) -> _Staging | ArtifactError:
+    def _get_staging(self, request: StorageWriteChunk | StorageSealObject | StorageAbortStaging, *, allow_expired: bool = False) -> _Staging | ArtifactError:
         staging = self._staging.get(request.staging_ref.value)
         if staging is None:
             return self._error(ArtifactErrorCode.INVALID_HANDLE)
@@ -182,7 +182,7 @@ class InMemoryArtifactStorage:
             return self._error(ArtifactErrorCode.OWNERSHIP_MISMATCH)
         if staging.namespace != request.namespace:
             return self._error(ArtifactErrorCode.NAMESPACE_MISMATCH)
-        if self._now() >= staging.expires_at:
+        if self._now() >= staging.expires_at and not allow_expired:
             return self._error(ArtifactErrorCode.HANDLE_EXPIRED)
         return staging
 
@@ -253,7 +253,7 @@ class InMemoryArtifactStorage:
         return StorageSealedObject(object_ref, obj.storage_object_id, len(obj.data), obj.checksum, obj.immutable, sealed_at, IntegrityState.VERIFIED)
 
     def abort_staging(self, request: StorageAbortStaging) -> StorageAbortReceipt | ArtifactError:
-        staging = self._get_staging(request)
+        staging = self._get_staging(request, allow_expired=True)
         if isinstance(staging, ArtifactError):
             return staging
         if staging.sealed_object_ref is not None:

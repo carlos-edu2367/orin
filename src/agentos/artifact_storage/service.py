@@ -30,6 +30,8 @@ from .ports import (
     AppendArtifactChunk,
     ApplyArtifactRetention,
     ArtifactDeletionReceipt,
+    ArtifactAbortResult,
+    ArtifactCleanupReceipt,
     ArtifactManager,
     ArtifactReadSession,
     ArtifactRetentionReceipt,
@@ -43,6 +45,7 @@ from .ports import (
     InspectArtifact,
     OpenArtifactRead,
     ReadArtifactRange,
+    ReconcileArtifactCleanup,
     StorageAbortReceipt,
     StorageAbortStaging,
     StorageBeginStaging,
@@ -104,7 +107,7 @@ class ArtifactManagerService:
         self._sequences: dict[str, int] = {}
         self._begin_idempotency: dict[tuple[tuple[str, ...], str], tuple[str, ArtifactWriteSession]] = {}
         self._finalize_idempotency: dict[tuple[tuple[str, ...], str], tuple[str, ArtifactReference]] = {}
-        self._abort_idempotency: dict[tuple[tuple[str, ...], str], tuple[str, object]] = {}
+        self._abort_idempotency: dict[tuple[tuple[str, ...], str], tuple[str, ArtifactAbortResult]] = {}
 
     def _now(self) -> datetime:
         value = self._clock()
@@ -165,6 +168,8 @@ class ArtifactManagerService:
             logical_name = sanitize_logical_name(request.logical_name)
         except (ValueError, TypeError):
             return self._error(ArtifactErrorCode.INVALID_REQUEST)
+        if request.provenance.created_by.scope_key() != request.context.scope_key():
+            return self._error(ArtifactErrorCode.UNAUTHORIZED)
         fingerprint = hashlib.sha256(json.dumps((request.operation_id, request.category.value, request.logical_name, request.declared_media_type, request.expected_size_bytes, repr(request.expected_checksum), request.classification.value, request.retention_policy_ref, request.idempotency_key), default=str).encode()).hexdigest()
         begin_key = (request.context.scope_key(), request.idempotency_key)
         prior_begin = self._begin_idempotency.get(begin_key)
@@ -231,7 +236,7 @@ class ArtifactManagerService:
             return self._error(ArtifactErrorCode.INVALID_HANDLE)
         if binding.request.context.scope_key() != request.context.scope_key():
             return self._error(ArtifactErrorCode.OWNERSHIP_MISMATCH)
-        if self._now() >= binding.storage_handle.expires_at:
+        if self._now() >= binding.storage_handle.expires_at and not isinstance(request, AbortArtifactWrite):
             return self._error(ArtifactErrorCode.HANDLE_EXPIRED)
         return binding
 
@@ -296,8 +301,9 @@ class ArtifactManagerService:
         if isinstance(metadata_result, ArtifactError):
             return metadata_result
         self._writes.pop(request.write_session_id.value, None)
-        self._abort_idempotency[abort_key] = (abort_fingerprint, metadata_result)
-        return metadata_result
+        result = ArtifactAbortResult(binding.artifact_id, metadata_result.metadata.state, metadata_result.effect_state)
+        self._abort_idempotency[abort_key] = (abort_fingerprint, result)
+        return result
 
     def _check_reference(self, context: ArtifactOperationContext, reference: ArtifactReference, *, purpose: str, allow_non_available: bool = False, require_grant: bool = True) -> tuple[ArtifactMetadataRecord, ArtifactGrant] | ArtifactError:
         record = self.metadata.get(context, reference.artifact_id)
@@ -415,6 +421,23 @@ class ArtifactManagerService:
                 return quarantined
             self._event("ArtifactQuarantined", request.context, quarantined.metadata, reason="integrity mismatch")
         return ArtifactVerifyReceipt(record.metadata.artifact_id, result.integrity_state, EffectState.APPLIED)
+
+    def reconcile_cleanup(self, request: ReconcileArtifactCleanup):
+        record = self.metadata.get(request.context, request.artifact_id)
+        if record is None:
+            return self._error(ArtifactErrorCode.NOT_FOUND)
+        if record.metadata.state is not ArtifactState.DELETING:
+            return ArtifactCleanupReceipt(request.artifact_id, record.metadata.state, EffectState.NOT_APPLIED)
+        result = self.storage.delete(StorageDeleteObject(request.operation_id, request.context, record.metadata.namespace, OpaqueArtifactRef(record.storage_object_ref), record.metadata.checksum, None, request.idempotency_key))
+        if isinstance(result, ArtifactError):
+            if result.effect_state is EffectState.UNKNOWN:
+                self._event("ArtifactCleanupFailed", request.context, record.metadata, reason="cleanup reconciliation unknown")
+            return result
+        deleted = self.metadata.transition(request.context, request.artifact_id, ArtifactState.DELETED, reason="cleanup reconciled", idempotency_key=f"{request.idempotency_key}:deleted")
+        if isinstance(deleted, ArtifactError):
+            return deleted
+        self._event("ArtifactDeleted", request.context, deleted.metadata, reason="cleanup reconciled")
+        return ArtifactCleanupReceipt(request.artifact_id, ArtifactState.DELETED, EffectState.APPLIED)
 
     def apply_retention(self, request: ApplyArtifactRetention):
         records = self.metadata.list_records(request.context, request.namespace, cutoff_at=request.cutoff_at, maximum=request.maximum_artifacts, retention_policy_ref=request.retention_policy_ref)

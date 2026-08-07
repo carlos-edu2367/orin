@@ -129,3 +129,17 @@ def test_begin_finalize_and_abort_retries_reuse_the_original_effect():
     assert repeated_session.artifact_id == first_session.artifact_id
     assert repeated_reference == first_reference
     assert [event.event_type for event in events.events].count("ArtifactStored") == 1
+
+
+def test_begin_rejects_provenance_from_another_execution_and_expired_abort_is_allowed():
+    service, storage, metadata, events = manager()
+    ctx = context()
+    foreign = context(execution_id="execution:2")
+    bad = service.begin_write(write_request(ctx, provenance=ArtifactProvenance(ArtifactProvenanceKind.AGENT_RESULT, (), foreign)))
+    assert isinstance(bad, ArtifactError)
+    assert bad.code is ArtifactErrorCode.UNAUTHORIZED
+
+    session = service.begin_write(write_request(ctx, expected_size_bytes=1, expected_checksum=None, idempotency_key="expired-abort"))
+    service._writes[session.write_session_id.value].storage_handle = service._writes[session.write_session_id.value].storage_handle.__class__(session.write_session_id, "storage-object:expired", 0, NOW - timedelta(seconds=1))
+    aborted = service.abort(AbortArtifactWrite("abort", ctx, session.write_session_id, "expired cleanup", "expired-abort-idem"))
+    assert not isinstance(aborted, ArtifactError)
