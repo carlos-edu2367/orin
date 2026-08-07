@@ -16,6 +16,7 @@ def context() -> FilesystemOperationContext:
 
 def make_service(tmp_path: Path):
     resolver = LocalWorkspaceRootResolver(tmp_path)
+    resolver.root_for(context())
     adapter = LocalFilesystemAdapter(resolver)
     return FilesystemService(adapter, resolver, handle_validator=lambda handle, **_: isinstance(handle, OpaqueFilesystemHandle) and handle.binding == "lease:1"), resolver, adapter
 

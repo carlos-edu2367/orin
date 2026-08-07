@@ -42,7 +42,9 @@ class LocalWorkspaceRootResolver:
             return root
 
     def resolve(self, context: FilesystemOperationContext):
-        return self.root_for(context)
+        with self._lock:
+            item = self._roots.get(context.workspace_id)
+            return item[0] if item is not None else FilesystemError(FilesystemErrorCode.NOT_FOUND)
 
     def revalidate(self, root: CanonicalWorkspaceRoot, context: FilesystemOperationContext) -> bool:
         with self._lock:
@@ -259,8 +261,8 @@ class LocalFilesystemAdapter(InMemoryFilesystemAdapter):
                 try:
                     if 'staging' in locals() and staging.exists():
                         staging.unlink()
-                except OSError:
-                    pass
+                except OSError as cleanup_error:
+                    _ = cleanup_error
                 return self._error(FilesystemErrorCode.UNKNOWN_EFFECT, effect_state="UNKNOWN")
 
     def copy(self, root, source, destination, *, expected_source_version, overwrite, maximum_bytes, maximum_entries):

@@ -42,12 +42,20 @@ class InMemoryWorkspaceRootResolver:
         with self._lock:
             root = self._roots.get(context.workspace_id)
             if root is None:
-                identity = FilesystemObjectIdentity(self._next("identity"))
-                root = CanonicalWorkspaceRoot(self._next("root"), context.workspace_id, identity, 1)
-                self._roots[context.workspace_id] = root
-                self._identities[context.workspace_id] = identity
+                return FilesystemError(FilesystemErrorCode.NOT_FOUND)
             if context.workspace_id in self._swapped:
                 return FilesystemError(FilesystemErrorCode.UNSAFE_ROOT, "root identity changed")
+            return root
+
+    def provision(self, context: FilesystemOperationContext) -> CanonicalWorkspaceRoot:
+        with self._lock:
+            root = self._roots.get(context.workspace_id)
+            if root is not None:
+                return root
+            identity = FilesystemObjectIdentity(self._next("identity"))
+            root = CanonicalWorkspaceRoot(self._next("root"), context.workspace_id, identity, 1)
+            self._roots[context.workspace_id] = root
+            self._identities[context.workspace_id] = identity
             return root
 
     def revalidate(self, root: CanonicalWorkspaceRoot, context: FilesystemOperationContext) -> bool:
@@ -58,6 +66,34 @@ class InMemoryWorkspaceRootResolver:
     def swap_identity(self, workspace_id: str) -> None:
         with self._lock:
             self._swapped.add(workspace_id)
+
+
+class WorkspaceBackedRootResolver:
+    """Composes the public Workspace manager root/identity authority with logical storage."""
+
+    def __init__(self, workspace_manager) -> None:
+        self.workspace_manager = workspace_manager
+        self._roots: dict[str, CanonicalWorkspaceRoot] = {}
+
+    @staticmethod
+    def _workspace_context(context: FilesystemOperationContext):
+        from agentos.workspaces.models import WorkspaceOperationContext
+        return WorkspaceOperationContext(context.user_id, context.workspace_id, context.agent_id, context.execution_id, context.correlation_id, "workspace.resource", context.actor)
+
+    def resolve(self, context: FilesystemOperationContext):
+        from agentos.workspaces.models import InspectWorkspace
+        snapshot = self.workspace_manager.inspect(InspectWorkspace(self._workspace_context(context)))
+        if hasattr(snapshot, "code") or snapshot.root_descriptor is None:
+            return FilesystemError(FilesystemErrorCode.NOT_FOUND)
+        if snapshot.state.value not in ("ACTIVE", "ARCHIVED"):
+            return FilesystemError(FilesystemErrorCode.UNSAFE_ROOT, "workspace state does not permit filesystem")
+        root = CanonicalWorkspaceRoot(f"workspace-root:{hash(snapshot.root_descriptor.root_ref)}", context.workspace_id, snapshot.root_descriptor.root_identity, snapshot.policy_version)
+        self._roots[context.workspace_id] = root
+        return root
+
+    def revalidate(self, root: CanonicalWorkspaceRoot, context: FilesystemOperationContext) -> bool:
+        current = self.resolve(context)
+        return not isinstance(current, FilesystemError) and current.root_ref == root.root_ref and current.identity == root.identity and current.policy_version == root.policy_version
 
 
 class InMemoryFilesystemAdapter:
@@ -233,4 +269,4 @@ class InMemoryFilesystemAdapter:
             return FilesystemMutationResult(None, len(targets))
 
 
-__all__ = ["InMemoryFilesystemAdapter", "InMemoryWorkspaceRootResolver"]
+__all__ = ["InMemoryFilesystemAdapter", "InMemoryWorkspaceRootResolver", "WorkspaceBackedRootResolver"]

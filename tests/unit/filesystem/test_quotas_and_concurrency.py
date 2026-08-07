@@ -10,7 +10,8 @@ from agentos.filesystem.service import FilesystemService
 
 def test_concurrent_create_new_never_overwrites_or_creates_two_versions() -> None:
     ctx = FilesystemOperationContext("u", "ws", "a", "e", "c", "filesystem.write", "agent:a")
-    fs = FilesystemService(InMemoryFilesystemAdapter(), InMemoryWorkspaceRootResolver(), handle_validator=lambda handle, **_: True)
+    resolver = InMemoryWorkspaceRootResolver(); resolver.provision(ctx)
+    fs = FilesystemService(InMemoryFilesystemAdapter(), resolver, handle_validator=lambda handle, **_: True)
     kwargs = dict(context=ctx, lease_id="lease", resource_handle=OpaqueFilesystemHandle("h", "lease"), path=WorkspacePath.from_string("same"), mode=WriteMode.CREATE_NEW, atomicity=Atomicity.REQUIRE_ATOMIC, limits=FilesystemLimits(10, 1, 1))
     def write(index: int):
         return fs.write(operation_id=f"op-{index}", source=BytesIO(bytes([index])), idempotency_key=f"unique-{index}", **kwargs)
@@ -21,6 +22,7 @@ def test_concurrent_create_new_never_overwrites_or_creates_two_versions() -> Non
 
 def test_limits_reject_oversized_write_before_effect() -> None:
     ctx = FilesystemOperationContext("u", "ws", "a", "e", "c", "filesystem.write", "agent:a")
-    fs = FilesystemService(InMemoryFilesystemAdapter(), InMemoryWorkspaceRootResolver(), handle_validator=lambda handle, **_: True)
+    resolver = InMemoryWorkspaceRootResolver(); resolver.provision(ctx)
+    fs = FilesystemService(InMemoryFilesystemAdapter(), resolver, handle_validator=lambda handle, **_: True)
     result = fs.write(operation_id="large", context=ctx, lease_id="lease", resource_handle=OpaqueFilesystemHandle("h", "lease"), path=WorkspacePath.from_string("large"), source=BytesIO(b"12345"), mode=WriteMode.CREATE_NEW, atomicity=Atomicity.REQUIRE_ATOMIC, limits=FilesystemLimits(4, 2, 2), idempotency_key="large")
     assert isinstance(result, FilesystemError) and result.code is FilesystemErrorCode.QUOTA_EXCEEDED

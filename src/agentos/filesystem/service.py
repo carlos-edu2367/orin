@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from hashlib import sha256
+from io import BytesIO
 from typing import Callable
 
 from agentos.events.models import DataClassification, EventEnvelope
@@ -40,7 +41,12 @@ class FilesystemService:
         self.event_sink = event_sink or InMemoryFilesystemEventSink()
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._sequences: dict[str, int] = {}
-        self._idempotency: dict[tuple[tuple[str, ...], str], object] = {}
+        self._idempotency: dict[tuple[tuple[str, ...], str], tuple[tuple[object, ...], object]] = {}
+        self._closed_leases: set[str] = set()
+
+    def cleanup_lease(self, lease_id: str) -> bool:
+        self._closed_leases.add(lease_id)
+        return True
 
     def _root(self, context: FilesystemOperationContext):
         root = self.root_resolver.resolve(context)
@@ -116,16 +122,32 @@ class FilesystemService:
 
     def write(self, *, operation_id, context, lease_id, resource_handle, path, source: ByteSource, mode, atomicity, limits: FilesystemLimits, expected_version=None, idempotency_key=""):
         key = (context.scope_key(), idempotency_key) if idempotency_key else None
+        fingerprint = (path.segments, str(mode), str(atomicity), expected_version, limits.maximum_bytes, limits.maximum_entries)
         if key is not None and key in self._idempotency:
-            return self._idempotency[key]
+            previous_fingerprint, previous_result = self._idempotency[key]
+            return previous_result if previous_fingerprint == fingerprint else FilesystemError(FilesystemErrorCode.CONFLICT, "idempotency binding conflict")
         root = self._authorize(operation_id, context, lease_id, resource_handle)
         if isinstance(root, FilesystemError):
             return self._reject(root, context, operation_id, path)
-        result = self.adapter.write(root, path, source, mode=str(mode), atomicity=str(atomicity), maximum_bytes=limits.maximum_bytes, maximum_entries=limits.maximum_entries, expected_version=expected_version)
+        payload = source.read(limits.maximum_bytes + 1)
+        if len(payload) > limits.maximum_bytes:
+            return self._reject(FilesystemError(FilesystemErrorCode.QUOTA_EXCEEDED), context, operation_id, path)
+        reservation = None
+        if self.quota is not None:
+            reservation = self.quota.reserve(context, lease_id, len(payload), 1, len(path.segments), limits.maximum_bytes, operation_id, idempotency_key or operation_id)
+            if isinstance(reservation, FilesystemError) or hasattr(reservation, "code"):
+                return self._reject(reservation, context, operation_id, path)
+        result = self.adapter.write(root, path, BytesIO(payload), mode=str(mode), atomicity=str(atomicity), maximum_bytes=limits.maximum_bytes, maximum_entries=limits.maximum_entries, expected_version=expected_version)
         if isinstance(result, FilesystemError):
+            if reservation is not None:
+                self.quota.release(reservation, context, lease_id, operation_id)
             return self._reject(result, context, operation_id, path)
+        if reservation is not None:
+            recorded = self.quota.record(reservation, context, lease_id, result.bytes_written, 1, operation_id)
+            if isinstance(recorded, FilesystemError) or hasattr(recorded, "code"):
+                return self._reject(FilesystemError(FilesystemErrorCode.UNKNOWN_EFFECT, effect_state="UNKNOWN"), context, operation_id, path)
         if key is not None:
-            self._idempotency[key] = result
+            self._idempotency[key] = (fingerprint, result)
         self._event("FilesystemEntryCreated" if result.entry.version == 1 else "FilesystemEntryChanged", context, operation_id, path, outcome="APPLIED", version=result.entry.version)
         return result
 

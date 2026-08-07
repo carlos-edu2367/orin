@@ -25,9 +25,11 @@ def context(*, purpose: str = "filesystem.write", workspace_id: str = "ws-1") ->
 
 
 def service() -> FilesystemService:
+    resolver = InMemoryWorkspaceRootResolver()
+    resolver.provision(context())
     return FilesystemService(
         InMemoryFilesystemAdapter(),
-        InMemoryWorkspaceRootResolver(),
+        resolver,
         handle_validator=lambda handle, **kwargs: isinstance(handle, OpaqueFilesystemHandle)
         and handle.binding == f"lease:{kwargs['lease_id']}",
     )
@@ -79,3 +81,10 @@ def test_idempotent_write_returns_same_confirmed_result_without_duplicate_entry(
     first = fs.write(operation_id="write", context=context(), lease_id="lease-1", resource_handle=handle(), path=WorkspacePath.from_string("same.txt"), source=BytesIO(b"same"), mode=WriteMode.CREATE_NEW, atomicity=Atomicity.REQUIRE_ATOMIC, limits=limits(), idempotency_key="same")
     second = fs.write(operation_id="retry", context=context(), lease_id="lease-1", resource_handle=handle(), path=WorkspacePath.from_string("same.txt"), source=BytesIO(b"same"), mode=WriteMode.CREATE_NEW, atomicity=Atomicity.REQUIRE_ATOMIC, limits=limits(), idempotency_key="same")
     assert second == first
+
+
+def test_reusing_idempotency_key_for_a_different_target_is_a_conflict() -> None:
+    fs = service()
+    fs.write(operation_id="write", context=context(), lease_id="lease-1", resource_handle=handle(), path=WorkspacePath.from_string("one.txt"), source=BytesIO(b"one"), mode=WriteMode.CREATE_NEW, atomicity=Atomicity.REQUIRE_ATOMIC, limits=limits(), idempotency_key="same-key")
+    conflict = fs.write(operation_id="retry", context=context(), lease_id="lease-1", resource_handle=handle(), path=WorkspacePath.from_string("two.txt"), source=BytesIO(b"two"), mode=WriteMode.CREATE_NEW, atomicity=Atomicity.REQUIRE_ATOMIC, limits=limits(), idempotency_key="same-key")
+    assert isinstance(conflict, FilesystemError) and conflict.code is FilesystemErrorCode.CONFLICT
