@@ -71,6 +71,7 @@ _EVENT_PAYLOAD_KEYS = {
     "retained_count",
     "classification",
     "purpose",
+    "operation",
 }
 
 
@@ -338,7 +339,7 @@ class InMemoryMemoryManager:
                     now=now,
                 )
             except Exception as error:
-                self._record_access_denied(command.context, command.idempotency_key, command.scope, getattr(error, "code", "ACCESS_DENIED"))
+                self._record_access_denied(command.context, command.idempotency_key, command.scope, getattr(error, "code", "ACCESS_DENIED"), operation=MemoryOperation.SAVE)
                 raise
             if command.expected_version != current.version:
                 raise MemoryVersionConflict()
@@ -390,7 +391,7 @@ class InMemoryMemoryManager:
                     now=now,
                 )
             except Exception as error:
-                self._record_access_denied(command.context, command.idempotency_key, command.scope, getattr(error, "code", "ACCESS_DENIED"))
+                self._record_access_denied(command.context, command.idempotency_key, command.scope, getattr(error, "code", "ACCESS_DENIED"), operation=MemoryOperation.SAVE)
                 raise
             previous_version = None
 
@@ -434,7 +435,7 @@ class InMemoryMemoryManager:
                 now=now,
             )
         except Exception as error:
-            self._record_access_denied(query.context, f"read:{query.memory_ref.memory_id}:{query.memory_ref.version}", None, getattr(error, "code", "ACCESS_DENIED"))
+            self._record_access_denied(query.context, f"read:{query.memory_ref.memory_id}:{query.memory_ref.version}", None, getattr(error, "code", "ACCESS_DENIED"), operation=MemoryOperation.READ)
             raise
         if record is None:
             raise MemoryCommitFailure("READ_UNAVAILABLE")
@@ -538,14 +539,18 @@ class InMemoryMemoryManager:
         current_sources: list[MemoryRecord] = []
         for source_ref in command.source_refs:
             source = self.store.get(str(source_ref.memory_id))
-            self.authorization.authorize(
-                command.context,
-                source,
-                operation="CONSOLIDATE",
-                reference=source_ref,
-                classification_ceiling=DataClassification.RESTRICTED,
-                now=now,
-            )
+            try:
+                self.authorization.authorize(
+                    command.context,
+                    source,
+                    operation="CONSOLIDATE",
+                    reference=source_ref,
+                    classification_ceiling=DataClassification.RESTRICTED,
+                    now=now,
+                )
+            except Exception as error:
+                self._record_access_denied(command.context, command.idempotency_key, command.target_scope, getattr(error, "code", "ACCESS_DENIED"), operation=MemoryOperation.CONSOLIDATE)
+                raise
             if source is None or source.scope is not command.target_scope or int(source.version) != int(source_ref.version):
                 raise MemoryAccessDenied("CONSOLIDATION_UNAVAILABLE")
             current_sources.append(source)
@@ -586,7 +591,11 @@ class InMemoryMemoryManager:
             valid_from=now,
             lineage=lineage,
         )
-        self.authorization.authorize(command.context, output, operation="CONSOLIDATE", classification_ceiling=command.context.classification_ceiling, now=now)
+        try:
+            self.authorization.authorize(command.context, output, operation="CONSOLIDATE", classification_ceiling=command.context.classification_ceiling, now=now)
+        except Exception as error:
+            self._record_access_denied(command.context, command.idempotency_key, command.target_scope, getattr(error, "code", "ACCESS_DENIED"), operation=MemoryOperation.CONSOLIDATE)
+            raise
         consolidation_id = f"consolidation:{next(self._operation_ids)}"
         event_id = f"memory:{consolidation_id}"
         receipt = MemoryConsolidationReceipt(
@@ -724,7 +733,7 @@ class InMemoryMemoryManager:
                 now=now,
             )
         except Exception as error:
-            self._record_access_denied(command.context, command.idempotency_key, None, getattr(error, "code", "ACCESS_DENIED"))
+            self._record_access_denied(command.context, command.idempotency_key, None, getattr(error, "code", "ACCESS_DENIED"), operation=MemoryOperation.INVALIDATE)
             raise
         if current is None:
             raise MemoryCommitFailure("INVALIDATION_UNAVAILABLE")
@@ -770,14 +779,18 @@ class InMemoryMemoryManager:
         versions: list[int] = []
         for memory_ref in command.memory_refs:
             current = self.store.get(str(memory_ref.memory_id))
-            self.authorization.authorize(
-                command.context,
-                current,
-                operation="RETENTION",
-                reference=memory_ref,
-                classification_ceiling=DataClassification.RESTRICTED,
-                now=now,
-            )
+            try:
+                self.authorization.authorize(
+                    command.context,
+                    current,
+                    operation="RETENTION",
+                    reference=memory_ref,
+                    classification_ceiling=DataClassification.RESTRICTED,
+                    now=now,
+                )
+            except Exception as error:
+                self._record_access_denied(command.context, command.idempotency_key, command.scope, getattr(error, "code", "ACCESS_DENIED"), operation=MemoryOperation.RETENTION)
+                raise
             if current is None or current.scope is not command.scope:
                 raise MemoryCommitFailure("RETENTION_UNAVAILABLE")
             evaluated += 1
@@ -867,7 +880,7 @@ class InMemoryMemoryManager:
         )
         return replace(result.result, already_applied=result.already_applied)
 
-    def _commit(self, *, operation, context, key, fingerprint, changes, memory_ids, versions, scope, reason, event_type, payload, result, event_id, additional_event_specs=()):
+    def _commit(self, *, operation, context, key, fingerprint, changes, memory_ids, versions, scope, reason, event_type, payload, result, event_id, additional_event_specs=(), emit_failure=True, outcome="COMMITTED"):
         event = EventEnvelope(
             event_id=event_id,
             event_type=event_type,
@@ -888,7 +901,7 @@ class InMemoryMemoryManager:
             audit_id=f"audit:{event_id}",
             operation=operation,
             context=context,
-            outcome="COMMITTED",
+            outcome=outcome,
             memory_ids=tuple(memory_ids),
             versions=tuple(versions),
             scope=scope,
@@ -916,21 +929,47 @@ class InMemoryMemoryManager:
                     payload={**additional_payload, "purpose": context.purpose},
                 )
             )
-        return self.store.commit(
-            MemoryCommitRequest(
-                operation=operation,
-                context=context,
-                idempotency_key=str(key),
-                fingerprint=fingerprint,
-                changes=tuple(changes),
-                audit=audit,
-                event=event,
-                result=result,
-                additional_events=tuple(additional_events),
+        try:
+            return self.store.commit(
+                MemoryCommitRequest(
+                    operation=operation,
+                    context=context,
+                    idempotency_key=str(key),
+                    fingerprint=fingerprint,
+                    changes=tuple(changes),
+                    audit=audit,
+                    event=event,
+                    result=result,
+                    additional_events=tuple(additional_events),
+                )
             )
-        )
+        except (MemoryCommitFailure, MemoryVersionConflict, MemoryIdempotencyConflict) as error:
+            if emit_failure:
+                try:
+                    self._record_fact(
+                        operation=operation,
+                        context=context,
+                        key=f"failed:{key}",
+                        fingerprint=f"failed:{fingerprint}:{getattr(error, 'code', 'COMMIT_FAILED')}",
+                        event_type="MemoryOperationFailed",
+                        payload={
+                            "operation": operation.value,
+                            "outcome": "FAILED",
+                            "reason": getattr(error, "code", "COMMIT_FAILED"),
+                            "scope": scope.value if scope else "UNKNOWN",
+                            "classification": DataClassification.INTERNAL.value,
+                        },
+                        memory_ids=tuple(memory_ids),
+                        versions=tuple(versions),
+                        scope=scope,
+                        reason=getattr(error, "code", "COMMIT_FAILED"),
+                        outcome="FAILED",
+                    )
+                except Exception:
+                    pass
+            raise
 
-    def _record_fact(self, *, operation, context, key, fingerprint, event_type, payload, memory_ids, versions, scope, reason):
+    def _record_fact(self, *, operation, context, key, fingerprint, event_type, payload, memory_ids, versions, scope, reason, outcome="COMMITTED"):
         event_id = f"memory:{operation.value.lower()}:{next(self._operation_ids)}"
         return self._commit(
             operation=operation,
@@ -946,12 +985,14 @@ class InMemoryMemoryManager:
             payload=payload,
             result=None,
             event_id=event_id,
+            emit_failure=False,
+            outcome=outcome,
         )
 
-    def _record_access_denied(self, context: MemoryOperationContext, key: str, scope: MemoryScope | None, reason: str):
+    def _record_access_denied(self, context: MemoryOperationContext, key: str, scope: MemoryScope | None, reason: str, *, operation: MemoryOperation):
         try:
             return self._record_fact(
-                operation=MemoryOperation.READ,
+                operation=operation,
                 context=context,
                 key=f"denied:{key}",
                 fingerprint=f"denied:{key}:{reason}",

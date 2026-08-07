@@ -8,6 +8,7 @@ import agentos.memory as memory
 from agentos.memory.in_memory import InMemoryMemoryManager, InMemoryMemoryStore
 from agentos.memory.models import (
     BoundedMemoryContent,
+    MemoryCommitFailure,
     MemoryAccessDenied,
     MemoryOperationContext,
     MemoryProvenance,
@@ -86,6 +87,35 @@ def test_event_payloads_are_minimal_and_duplicate_event_ids_are_not_appended():
     replay = manager.save(command)
     assert replay.already_applied is True
     assert len(store.outbox) == 1
+
+
+def test_commit_rejection_emits_only_a_categorical_operation_failure_fact():
+    class RejectingStore(InMemoryMemoryStore):
+        def commit(self, request):
+            if request.changes:
+                raise MemoryCommitFailure("INJECTED_COMMIT_FAILURE")
+            return super().commit(request)
+
+    store = RejectingStore()
+    policy = InMemoryMemoryAuthorizationPolicy()
+    policy.register_agent("user-1", "agent-1")
+    manager = InMemoryMemoryManager(store=store, authorization=policy, clock=type("Clock", (), {"now": lambda self: NOW})())
+    command = SaveMemory(
+        context=MemoryOperationContext("user-1", None, "agent-1", "execution-1", "correlation-1", "memory.write", "agent-1"),
+        scope=MemoryScope.USER,
+        kind="FACT",
+        content=BoundedMemoryContent("a fact"),
+        provenance=MemoryProvenance(source_kind="USER_STATEMENT", source_refs=("source:1",), integrity_ref="integrity:1"),
+        classification="INTERNAL",
+        retention_policy_ref="retention:1",
+        idempotency_key="save:failed",
+    )
+
+    with pytest.raises(MemoryCommitFailure):
+        manager.save(command)
+    assert store.records == ()
+    assert [event.event_type for event in store.outbox] == ["MemoryOperationFailed"]
+    assert set(store.outbox[0].payload) <= {"operation", "outcome", "reason", "scope", "classification", "purpose"}
 
 
 def test_memory_package_has_no_concrete_infrastructure_tokens():

@@ -11,27 +11,30 @@ from .models import (
     InvalidateMemory,
     MemoryCommitRequest,
     MemoryCommitResult,
+    MemoryConsolidationReceipt,
     MemoryMatch,
     MemoryOperationContext,
     MemoryRecord,
     MemorySearchResult,
+    MemoryWriteReceipt,
+    RetentionReceipt,
     SearchMemory,
     SaveMemory,
 )
 
 
 class MemoryManager(Protocol):
-    def save(self, command: SaveMemory): ...
+    def save(self, command: SaveMemory) -> MemoryWriteReceipt: ...
 
     def get(self, query: GetMemory) -> AuthorizedMemory: ...
 
     def search(self, query: SearchMemory) -> MemorySearchResult: ...
 
-    def invalidate(self, command: InvalidateMemory): ...
+    def invalidate(self, command: InvalidateMemory) -> MemoryWriteReceipt: ...
 
-    def consolidate(self, command: ConsolidateMemory): ...
+    def consolidate(self, command: ConsolidateMemory) -> MemoryConsolidationReceipt: ...
 
-    def apply_retention(self, command: ApplyMemoryRetention): ...
+    def apply_retention(self, command: ApplyMemoryRetention) -> RetentionReceipt: ...
 
 
 class MemorySearchAdapter(Protocol):
