@@ -107,3 +107,28 @@ Cada comportamento começa por um teste RED. Os ciclos cobrem contratos e contex
 ## Limitações explícitas
 
 O adapter in-memory não oferece durabilidade, recuperação após processo, PostgreSQL, migrações, busca semântica, embeddings, Artifact Storage ou exactly-once. A conexão com RFC 601 fica para uma composição posterior que implemente a mesma porta de commit e preserve a autoridade transacional e a outbox.
+
+## Auditoria requisito → evidência
+
+| Requisito documental | Evidência implementada |
+| --- | --- |
+| Porta única, tipada e independente | `models.py`/`ports.py` definem `MemoryManager`, stores e busca; o scan não encontrou tecnologia concreta. |
+| PRIVATE/WORKSPACE/USER/SEMANTIC e ownership | `security.py`, `MemoryRecord`, grants explícitos e testes de cross-agent/cross-workspace/classificação. |
+| Proveniência, integridade, bounds e redaction | `MemoryProvenance`, `BoundedMemoryContent`, `MemoryArtifactReference`, validação de conteúdo e testes de segredo/prompt. |
+| Versão, conflito e idempotência | `InMemoryMemoryStore.commit`, `expected_version`, fingerprint, tombstones e receipts repetíveis. |
+| Busca antes de ranking/materialização | `_passes_filters` e autorização ocorrem antes de `InMemoryMemorySearchAdapter.rank`; resultados são refs/excertos bounded. |
+| Consolidação, lineage e supersession | `consolidate` reautoriza fontes, usa classificação mais restritiva e confirma `MemoryConsolidated`/`MemorySuperseded` atomicamente. |
+| Retenção limitada | `apply_retention` percorre somente `memory_refs` fornecidas e retorna contagens auditáveis. |
+| Context temporário | `MemoryContextSource` reutiliza `SourceKind.MEMORY`, entrega refs e nunca chama mutação; o pacote Context não importa Memory. |
+| Events mínimos pós-commit | outbox do store contém fatos categóricos, payload whitelist, classificação/finalidade e deduplicação por idempotência. |
+| Limites de produção explícitos | nenhum schema/migration/ORM/vector/Redis/worker/API foi adicionado; durabilidade depende da composição RFC 601. |
+
+## Evidência de verificação — 2026-08-06
+
+- `python -m pytest -q`: **361 passed, 1 skipped**.
+- `python -m compileall -q src tests`: concluído sem saída/erro.
+- scan obrigatório em `src/agentos/memory`: **zero matches** para tecnologias fora do escopo.
+- `git diff --check`: concluído sem erro; os avisos de conversão LF/CRLF pertencem a arquivos preexistentes do workspace.
+- `git status --short --branch`: somente alterações preexistentes permanecem fora dos commits de Memory.
+
+Commits da implementação: `c507be0`, `474d215`, `02c7f94`, `e18b86b`, `98b054c` e `f938b40`.
