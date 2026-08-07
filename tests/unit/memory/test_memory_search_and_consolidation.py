@@ -11,6 +11,7 @@ from agentos.memory.models import (
     MemoryAccessDenied,
     MemoryFilter,
     MemoryKind,
+    MemoryGrant,
     MemoryOperationContext,
     MemoryProvenance,
     MemoryReference,
@@ -116,6 +117,30 @@ def test_search_filters_before_ranking_and_returns_bounded_authorized_matches():
     assert "deadline" not in repr(store.outbox[-1])
 
 
+def test_search_declares_lexical_capability_and_verifiable_citation():
+    service, _ = manager()
+    first = save(service, key="save:citation", content="The project deadline is Friday")
+
+    assert service.search_adapter.capabilities.supported == ("LEXICAL",)
+    result = service.search(
+        SearchMemory(
+            context=context(purpose="memory.search"),
+            allowed_scopes=(MemoryScope.PRIVATE,),
+            query=BoundedSearchIntent("deadline"),
+            maximum_results=1,
+            maximum_content_units=64,
+            classification_ceiling=DataClassification.INTERNAL,
+        )
+    )
+
+    match = result.matches[0]
+    assert match.memory_ref.memory_id == first.memory_id
+    assert match.citation.memory_id == first.memory_id
+    assert match.citation.version == match.version
+    assert match.citation.source_refs == ("source:save:citation",) and match.citation.provenance_ref
+    assert "The project deadline" not in repr(match.citation)
+
+
 def test_cross_agent_search_fails_closed_without_private_grant():
     service, _ = manager()
     first = save(service, key="save:1", content="private detail")
@@ -126,6 +151,35 @@ def test_cross_agent_search_fails_closed_without_private_grant():
                 memory_ref=ref(first.memory_id, purpose="memory.read"),
             )
         )
+
+
+def test_search_authorization_does_not_consume_resolution_grant():
+    service, _ = manager()
+    first = save(service, key="save:grant-search", content="private detail")
+    service.authorization.register_grant(
+        MemoryGrant(
+            grant_id="grant:search",
+            memory_id=first.memory_id,
+            user_id="user-1",
+            source_agent_id="agent-1",
+            target_agent_id="agent-2",
+            target_execution_id="execution-2",
+            purpose="memory.search",
+            classification_ceiling=DataClassification.INTERNAL,
+            expires_at=NOW + timedelta(minutes=5),
+            maximum_uses=1,
+        )
+    )
+    query = SearchMemory(
+        context=context(agent_id="agent-2", execution_id="execution-2", actor="agent-2", purpose="memory.search"),
+        allowed_scopes=(MemoryScope.PRIVATE,),
+        query=BoundedSearchIntent("private"),
+        grant_refs=("grant:search",),
+        classification_ceiling=DataClassification.INTERNAL,
+    )
+
+    assert service.search(query).matches
+    assert service.search(query).matches
 
 
 def test_consolidation_preserves_lineage_and_strictest_classification_without_mutating_sources():

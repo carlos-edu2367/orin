@@ -105,6 +105,12 @@ class MemoryMatchReason(StrEnum):
     RECENCY = "RECENCY"
 
 
+class MemorySearchCapability(StrEnum):
+    LEXICAL = "LEXICAL"
+    HYBRID = "HYBRID"
+    SEMANTIC = "SEMANTIC"
+
+
 class MemoryOperation(StrEnum):
     SAVE = "SAVE"
     READ = "READ"
@@ -137,11 +143,52 @@ class MemoryRetryability(StrEnum):
     AFTER_RECONCILIATION = "AFTER_RECONCILIATION"
 
 
+class MemoryCommitState(StrEnum):
+    COMMITTED = "COMMITTED"
+    NOT_COMMITTED = "NOT_COMMITTED"
+    UNKNOWN = "UNKNOWN"
+
+
 class MemoryRetentionOutcome(StrEnum):
     RETAINED = "RETAINED"
     EXPIRED = "EXPIRED"
     INVALIDATED = "INVALIDATED"
     ALREADY_TERMINAL = "ALREADY_TERMINAL"
+
+
+@dataclass(frozen=True, slots=True)
+class MemorySearchCapabilities:
+    supported: tuple[str, ...]
+    adapter_version: str = "memory-search:1"
+
+    def __post_init__(self) -> None:
+        normalized = tuple(MemorySearchCapability(value).value for value in self.supported)
+        if not normalized:
+            raise ValueError("at least one search capability is required")
+        object.__setattr__(self, "supported", normalized)
+        _required(self.adapter_version, "adapter_version", maximum=64)
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryCitation:
+    memory_id: MemoryId | str
+    version: Version | int
+    source_refs: tuple[str, ...]
+    provenance_ref: str
+    integrity_ref: str
+
+    def __post_init__(self) -> None:
+        _required(self.memory_id, "memory_id")
+        _positive(self.version, "version")
+        if not self.source_refs:
+            raise ValueError("citation requires source_refs")
+        for source_ref in self.source_refs:
+            _required(source_ref, "source_ref")
+        _required(self.provenance_ref, "provenance_ref")
+        _required(self.integrity_ref, "integrity_ref")
+
+    def __repr__(self) -> str:
+        return f"MemoryCitation(memory_id={self.memory_id!r}, version={self.version}, refs={len(self.source_refs)})"
 
 
 class MemoryError(RuntimeError):
@@ -667,6 +714,7 @@ class MemoryMatch:
     match_reasons: tuple[MemoryMatchReason, ...]
     provenance: MemoryProvenance
     classification: DataClassification
+    citation: MemoryCitation | None = None
 
     def __post_init__(self) -> None:
         _positive(self.version, "version")
@@ -678,6 +726,25 @@ class MemoryMatch:
         if self.relevance < 0:
             raise ValueError("relevance cannot be negative")
         object.__setattr__(self, "match_reasons", tuple(MemoryMatchReason(reason) for reason in self.match_reasons))
+        if self.citation is None:
+            object.__setattr__(
+                self,
+                "citation",
+                MemoryCitation(
+                    memory_id=self.memory_ref.memory_id,
+                    version=self.version,
+                    source_refs=self.provenance.source_refs,
+                    provenance_ref=self.provenance.integrity_ref or "provenance:memory",
+                    integrity_ref=self.memory_ref.integrity_ref,
+                ),
+            )
+
+    def __repr__(self) -> str:
+        return (
+            "MemoryMatch("
+            f"memory_id={self.memory_ref.memory_id!r}, version={self.version}, "
+            f"relevance={self.relevance!r}, reasons={len(self.match_reasons)})"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -800,6 +867,14 @@ class MemoryCommitResult:
     already_applied: bool
     result: Any
     event_id: str
+    commit_state: MemoryCommitState = MemoryCommitState.COMMITTED
+    transaction_id: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "commit_state", MemoryCommitState(self.commit_state))
+        _required(self.event_id, "event_id")
+        if self.transaction_id is not None:
+            _required(self.transaction_id, "transaction_id")
 
 
 def stable_fingerprint(value: Mapping[str, object]) -> str:
@@ -827,8 +902,10 @@ __all__ = [
     "MemoryCommitFailure",
     "MemoryCommitRequest",
     "MemoryCommitResult",
+    "MemoryCommitState",
     "MemoryConsolidationReceipt",
     "MemoryContent",
+    "MemoryCitation",
     "MemoryError",
     "MemoryErrorCategory",
     "MemoryFilter",
@@ -849,6 +926,8 @@ __all__ = [
     "MemoryRevision",
     "MemoryScope",
     "MemorySearchResult",
+    "MemorySearchCapability",
+    "MemorySearchCapabilities",
     "MemorySourceKind",
     "MemoryStatus",
     "MemoryValidationError",

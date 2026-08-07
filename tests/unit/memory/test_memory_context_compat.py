@@ -11,6 +11,7 @@ from agentos.memory.context_compat import MemoryContextSource
 from agentos.memory.models import (
     BoundedMemoryContent,
     MemoryKind,
+    MemoryFilter,
     MemoryMatch,
     MemoryMatchReason,
     MemoryReference,
@@ -102,10 +103,34 @@ def test_context_source_propagates_scope_and_returns_reference_first_candidates(
     assert len(candidates) == 1
     assert isinstance(candidates[0].content, ContentReference)
     assert candidates[0].provenance.source_kind.value == "MEMORY"
+
+
+def test_context_source_propagates_bounded_search_filters_and_citation_reasons():
+    manager = FakeManager(result())
+    source = MemoryContextSource(
+        manager,
+        search_intent="deadline",
+        maximum_results=3,
+        filters=(MemoryFilter(kinds=(MemoryKind.FACT,)),),
+    )
+    query = AuthorizedContextQuery(
+        context=context(),
+        purpose="memory.search",
+        allowed_kinds=(ContextItemKind.MEMORY_REFERENCE,),
+        classification_ceiling=DataClassification.INTERNAL,
+        cutoff_at=NOW,
+    )
+
+    candidates = source.collect(query)
+
+    assert candidates
+    assert str(candidates[0].content.reference).startswith("memory:")
+    assert candidates[0].provenance.source_version is not None
+    assert "TERM_MATCH" in candidates[0].provenance.transformation_chain
     assert candidates[0].classification is DataClassification.INTERNAL
     assert manager.queries[0].context.user_id == "user-1"
     assert manager.queries[0].context.execution_id == "execution-1"
-    assert manager.queries[0].context.purpose == "context.memory"
+    assert manager.queries[0].context.purpose == "memory.search"
 
 
 def test_context_collection_has_no_implicit_memory_write():

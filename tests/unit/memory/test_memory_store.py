@@ -3,12 +3,16 @@ from datetime import datetime, timezone
 import pytest
 
 from agentos.events import DataClassification, EventEnvelope
-from agentos.memory.in_memory import InMemoryMemoryStore
+from agentos.memory.in_memory import InMemoryMemoryManager, InMemoryMemoryStore
+from agentos.memory.security import InMemoryMemoryAuthorizationPolicy
 from agentos.memory.models import (
     BoundedMemoryContent,
     MemoryAuditRecord,
     MemoryCommitChange,
     MemoryCommitRequest,
+    MemoryCommitFailure,
+    MemoryCommitResult,
+    MemoryCommitState,
     MemoryIdempotencyConflict,
     MemoryOperation,
     MemoryOperationContext,
@@ -19,6 +23,7 @@ from agentos.memory.models import (
     MemoryStatus,
     MemoryVersionConflict,
     MemoryWriteReceipt,
+    SaveMemory,
 )
 
 
@@ -123,6 +128,30 @@ def request(*, new_record, expected_version, key="idem:1", fingerprint="fingerpr
     )
 
 
+class Clock:
+    def now(self):
+        return NOW
+
+
+def policy():
+    value = InMemoryMemoryAuthorizationPolicy()
+    value.register_agent("user-1", "agent-1")
+    return value
+
+
+def command():
+    return SaveMemory(
+        context=ctx(),
+        scope=MemoryScope.PRIVATE,
+        kind="FACT",
+        content=BoundedMemoryContent("fact"),
+        provenance=MemoryProvenance(source_kind="USER_STATEMENT", source_refs=("source:1",), integrity_ref="integrity:1"),
+        classification=DataClassification.INTERNAL,
+        retention_policy_ref="retention:1",
+        idempotency_key="save:unknown",
+    )
+
+
 def test_store_commits_record_revision_audit_and_outbox_together():
     store = InMemoryMemoryStore()
     result = store.commit(request(new_record=record(), expected_version=None))
@@ -167,3 +196,23 @@ def test_store_keeps_terminal_tombstone_and_does_not_resurrect_it():
     assert store.get("memory:1").status is MemoryStatus.INVALIDATED
     with pytest.raises(MemoryVersionConflict):
         store.commit(request(new_record=record(version=3), expected_version=2, key="idem:3", fingerprint="fingerprint:3", event_id="event:3", sequence=3))
+
+
+def test_unknown_commit_is_public_and_never_becomes_a_success_receipt():
+    store = UnknownCommitStore()
+    service = InMemoryMemoryManager(store=store, authorization=policy(), clock=Clock())
+
+    with pytest.raises(MemoryCommitFailure, match="COMMIT_UNKNOWN"):
+        service.save(command())
+
+
+class UnknownCommitStore(InMemoryMemoryStore):
+    def commit(self, request):
+        return MemoryCommitResult(
+            applied=False,
+            already_applied=False,
+            result=None,
+            event_id=request.event.event_id,
+            commit_state=MemoryCommitState.UNKNOWN,
+            transaction_id="transaction:unknown",
+        )

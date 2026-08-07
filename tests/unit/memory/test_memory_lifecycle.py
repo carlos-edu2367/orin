@@ -132,6 +132,29 @@ def test_update_requires_expected_version_and_same_key_is_idempotent():
         service.save(replace(update, idempotency_key="save:3", expected_version=1))
 
 
+def test_update_cannot_raise_classification_or_change_memory_scope():
+    service, _, _ = manager()
+    first = service.save(save_command())
+    ref = reference(first.memory_id, first.version)
+    restricted_context = context(classification_ceiling=DataClassification.INTERNAL)
+
+    with pytest.raises(MemoryAccessDenied):
+        service.save(
+            replace(
+                save_command(context=restricted_context, memory_ref=ref, expected_version=first.version, idempotency_key="save:restricted"),
+                classification=DataClassification.RESTRICTED,
+            )
+        )
+
+    with pytest.raises(Exception):
+        service.save(
+            replace(
+                save_command(memory_ref=ref, expected_version=first.version, idempotency_key="save:scope"),
+                scope=MemoryScope.WORKSPACE,
+            )
+        )
+
+
 def test_invalidate_is_versioned_and_cannot_resurrect():
     service, store, _ = manager()
     first = service.save(save_command())

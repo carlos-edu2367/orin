@@ -123,6 +123,14 @@ class InMemoryMemoryAuthorizationPolicy:
     def suspend_agent(self, user_id: str, agent_id: str) -> None:
         self.register_agent(user_id, agent_id, active=False)
 
+    def is_agent_active(self, user_id: str, agent_id: str) -> bool:
+        with self._lock:
+            return (str(user_id), str(agent_id)) in self._active_agents
+
+    def has_workspace_access(self, user_id: str, workspace_id: str, agent_id: str) -> bool:
+        with self._lock:
+            return (str(user_id), str(workspace_id), str(agent_id)) in self._workspace_access
+
     def register_workspace_access(self, user_id: str, workspace_id: str, agent_id: str) -> None:
         with self._lock:
             self._workspace_access.add((str(user_id), str(workspace_id), str(agent_id)))
@@ -160,6 +168,7 @@ class InMemoryMemoryAuthorizationPolicy:
         reference: MemoryReference | None = None,
         classification_ceiling: DataClassification | None = None,
         grant_refs: tuple[str, ...] = (),
+        consume_grant: bool = True,
         now: datetime | None = None,
     ) -> None:
         moment = _now(now)
@@ -184,7 +193,7 @@ class InMemoryMemoryAuthorizationPolicy:
                 raise MemoryAccessDenied()
             if record.scope is MemoryScope.WORKSPACE and not owner_access:
                 raise MemoryAccessDenied()
-            if not owner_access and grant is not None:
+            if not owner_access and grant is not None and consume_grant:
                 self._consume(grant)
 
     def _owner_access(self, context: MemoryOperationContext, record: MemoryRecord) -> bool:

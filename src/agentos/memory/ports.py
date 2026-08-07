@@ -16,6 +16,7 @@ from .models import (
     MemoryOperationContext,
     MemoryRecord,
     MemorySearchResult,
+    MemorySearchCapabilities,
     MemoryWriteReceipt,
     RetentionReceipt,
     SearchMemory,
@@ -38,6 +39,9 @@ class MemoryManager(Protocol):
 
 
 class MemorySearchAdapter(Protocol):
+    @property
+    def capabilities(self) -> MemorySearchCapabilities: ...
+
     def rank(self, records: tuple[MemoryRecord, ...], query: SearchMemory) -> tuple[MemoryMatch, ...]: ...
 
 
@@ -53,6 +57,14 @@ class MemoryStore(Protocol):
     def commit(self, request: MemoryCommitRequest) -> MemoryCommitResult: ...
 
 
+class MemoryTransactionalCommitPort(Protocol):
+    """Narrow composition boundary for RFC 601 transactional authority."""
+
+    def commit(self, request: MemoryCommitRequest) -> MemoryCommitResult: ...
+
+    def inspect_commit(self, transaction_id: str, idempotency_key: str) -> MemoryCommitResult: ...
+
+
 class MemoryAuthorizationPolicy(Protocol):
     def authorize(
         self,
@@ -63,6 +75,7 @@ class MemoryAuthorizationPolicy(Protocol):
         reference=None,
         classification_ceiling=None,
         grant_refs: tuple[str, ...] = (),
+        consume_grant: bool = True,
         now: datetime | None = None,
     ) -> None: ...
 
@@ -77,4 +90,5 @@ __all__ = [
     "MemoryManager",
     "MemorySearchAdapter",
     "MemoryStore",
+    "MemoryTransactionalCommitPort",
 ]

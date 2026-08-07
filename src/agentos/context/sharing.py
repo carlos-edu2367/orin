@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from enum import StrEnum
 from typing import Iterable, Protocol
 
 from .models import DataClassification
@@ -9,6 +10,27 @@ from .models import DataClassification
 
 _MAX_REFS = 32
 _MAX_TEXT = 256
+
+
+class SharedContextKind(StrEnum):
+    TASK = "TASK"
+    DECISION = "DECISION"
+    MESSAGE = "MESSAGE"
+    MEMORY = "MEMORY"
+    ARTIFACT = "ARTIFACT"
+    BLACKBOARD_ITEM = "BLACKBOARD_ITEM"
+    EVENT = "EVENT"
+    TOOL_RESULT = "TOOL_RESULT"
+    CONTROL_STATE = "CONTROL_STATE"
+
+
+class ContextShareStatus(StrEnum):
+    PENDING = "PENDING"
+    ACTIVE = "ACTIVE"
+    REVOKED = "REVOKED"
+    EXPIRED = "EXPIRED"
+    CONSUMED = "CONSUMED"
+    CANCELLED = "CANCELLED"
 
 
 def _required(value: object, field: str, *, maximum: int = _MAX_TEXT) -> None:
@@ -79,6 +101,15 @@ class ContextShareGrant:
     correlation_id: str
     issued_at: datetime
     expires_at: datetime
+    allowed_kinds: tuple[str, ...] = ()
+    filters: tuple[object, ...] = ()
+    consumption_policy: str = "SINGLE_USE"
+    status: ContextShareStatus = ContextShareStatus.ACTIVE
+    issued_by: str = ""
+    authorization_basis_ref: str = ""
+    consumed_at: datetime | None = None
+    resolution_count: int = 0
+    revoked_at: datetime | None = None
 
     def __post_init__(self) -> None:
         for field in (
@@ -96,6 +127,25 @@ class ContextShareGrant:
         _aware(self.expires_at, "expires_at")
         if self.expires_at <= self.issued_at:
             raise ValueError("expires_at must be after issued_at")
+        object.__setattr__(self, "allowed_kinds", tuple(str(kind) for kind in self.allowed_kinds))
+        if not self.allowed_kinds:
+            object.__setattr__(self, "allowed_kinds", (SharedContextKind.MEMORY.value,))
+        object.__setattr__(self, "filters", tuple(self.filters))
+        if any(not isinstance(item, ContextShareFilter) for item in self.filters):
+            raise ValueError("filters must use canonical ContextShareFilter")
+        if self.consumption_policy not in ("SINGLE_USE", "MULTI_USE_UNTIL_TERMINAL"):
+            raise ValueError("consumption_policy is invalid")
+        object.__setattr__(self, "status", ContextShareStatus(self.status))
+        if self.resolution_count < 0:
+            raise ValueError("resolution_count cannot be negative")
+        if self.issued_by == "":
+            object.__setattr__(self, "issued_by", self.source_agent_id)
+        if self.authorization_basis_ref == "":
+            object.__setattr__(self, "authorization_basis_ref", self.authorization_ref)
+        if self.consumed_at is not None:
+            _aware(self.consumed_at, "consumed_at")
+        if self.revoked_at is not None:
+            _aware(self.revoked_at, "revoked_at")
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,7 +187,10 @@ class SharedContextReference:
     def validate_against(self, grant: ContextShareGrant, *, now: datetime | None = None) -> None:
         if self.grant_id != grant.grant_id:
             raise ValueError("grant scope does not match reference")
-        if self.source_user_id != grant.user_id or self.source_workspace_id != grant.workspace_id:
+        if self.source_user_id != grant.user_id or (
+            self.source_workspace_id != grant.workspace_id
+            and not (self.source_workspace_id is None and grant.workspace_id is not None)
+        ):
             raise ValueError("reference ownership does not match grant")
         if self.source_agent_id != grant.source_agent_id or self.target_agent_id != grant.target_agent_id:
             raise ValueError("reference Agent scope does not match grant")
@@ -330,6 +383,243 @@ class HandoffRef:
         _aware(self.expires_at, "expires_at")
 
 
+@dataclass(frozen=True, slots=True)
+class AuthorizedSourceReference:
+    source_kind: str
+    source_ref: str
+    source_version: int | None
+    user_id: str
+    workspace_id: str | None
+    owner_agent_id: str | None
+    authorization_ref: str
+    permitted_purposes: tuple[str, ...]
+    classification: DataClassification
+    expires_at: datetime | None
+    integrity_ref: str | None
+
+    def __post_init__(self) -> None:
+        for field in ("source_kind", "source_ref", "user_id", "authorization_ref"):
+            _required(getattr(self, field), field)
+        if self.workspace_id is not None:
+            _required(self.workspace_id, "workspace_id")
+        if self.owner_agent_id is not None:
+            _required(self.owner_agent_id, "owner_agent_id")
+        if self.source_version is not None and self.source_version < 1:
+            raise ValueError("source_version must be positive")
+        object.__setattr__(self, "permitted_purposes", tuple(self.permitted_purposes))
+        if not self.permitted_purposes:
+            raise ValueError("permitted_purposes cannot be empty")
+        object.__setattr__(self, "classification", _classification(self.classification))
+        if self.expires_at is not None:
+            _aware(self.expires_at, "expires_at")
+        if self.integrity_ref is not None:
+            _required(self.integrity_ref, "integrity_ref")
+
+
+@dataclass(frozen=True, slots=True)
+class ContextShareFilter:
+    field: str
+    operator: str
+    value: object
+
+    def __post_init__(self) -> None:
+        if self.field not in {
+            "SOURCE_KIND", "SOURCE_VERSION", "SOURCE_AGENT_ID", "SOURCE_EXECUTION_ID",
+            "AUTHORED_BY", "CREATED_AT", "OBSERVED_AT", "CLASSIFICATION", "SOURCE_REF",
+        }:
+            raise ValueError("share filter field is invalid")
+        if self.operator not in {"EQUALS", "IN", "BETWEEN", "AT_OR_BEFORE", "AT_OR_AFTER", "AT_MOST"}:
+            raise ValueError("share filter operator is invalid")
+        if self.field == "CLASSIFICATION":
+            _classification(self.value)
+        elif self.field in {"CREATED_AT", "OBSERVED_AT"}:
+            values = self.value if isinstance(self.value, tuple) else (self.value,)
+            if any(not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None for value in values):
+                raise ValueError("temporal share filter value is invalid")
+        else:
+            values = self.value if isinstance(self.value, (tuple, list)) else (self.value,)
+            if any(not isinstance(value, str) or not value.strip() or len(value) > _MAX_TEXT for value in values):
+                raise ValueError("share filter value is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class AuthorizeContextShare:
+    actor: str
+    execution_id: str
+    user_id: str
+    workspace_id: str | None
+    source_agent_id: str
+    target_agent_id: str
+    source_execution_id: str
+    target_execution_id: str
+    purpose: str
+    requested_kinds: tuple[str, ...]
+    filters: tuple[ContextShareFilter, ...]
+    budget: ContextShareBudget
+    classification_ceiling: DataClassification
+    consumption_policy: str
+    expires_at: datetime
+    correlation_id: str
+    idempotency_key: str
+    authorization_ref: str
+
+    def __post_init__(self) -> None:
+        for field in (
+            "actor", "execution_id", "user_id", "source_agent_id", "target_agent_id",
+            "source_execution_id", "target_execution_id", "purpose", "correlation_id",
+            "idempotency_key", "authorization_ref",
+        ):
+            _required(getattr(self, field), field)
+        if self.workspace_id is not None:
+            _required(self.workspace_id, "workspace_id")
+        object.__setattr__(self, "requested_kinds", tuple(str(kind) for kind in self.requested_kinds))
+        if not self.requested_kinds:
+            raise ValueError("requested_kinds cannot be empty")
+        object.__setattr__(self, "filters", tuple(self.filters))
+        if any(not isinstance(item, ContextShareFilter) for item in self.filters):
+            raise ValueError("filters must use canonical ContextShareFilter")
+        object.__setattr__(self, "classification_ceiling", _classification(self.classification_ceiling))
+        _aware(self.expires_at, "expires_at")
+
+
+@dataclass(frozen=True, slots=True)
+class CreateSharedContextReference:
+    actor: str
+    execution_id: str
+    user_id: str
+    workspace_id: str | None
+    source_agent_id: str
+    target_agent_id: str
+    source_execution_id: str
+    target_execution_id: str
+    grant_id: str
+    source_ref: AuthorizedSourceReference
+    source_kind: str
+    expected_source_version: int | None
+    purpose: str
+    correlation_id: str
+    idempotency_key: str
+
+
+@dataclass(frozen=True, slots=True)
+class CreateStructuredHandoff:
+    actor: str
+    execution_id: str
+    user_id: str
+    workspace_id: str | None
+    source_agent_id: str
+    target_agent_id: str
+    source_execution_id: str
+    target_execution_id: str
+    grant_id: str
+    objective: TaskSnapshot
+    success_criteria: tuple[Criterion, ...]
+    constraints: tuple[Constraint, ...]
+    expected_output: OutputContractRef | None
+    context_refs: tuple[SharedContextReference, ...]
+    minimal_snapshot_ref: str | None
+    delegated_grant_refs: tuple[DelegatedGrantRef, ...]
+    budget: ContextShareBudget
+    purpose: str
+    correlation_id: str
+    idempotency_key: str
+
+
+@dataclass(frozen=True, slots=True)
+class ResolveSharedContext:
+    actor: str
+    execution_id: str
+    user_id: str
+    workspace_id: str | None
+    source_agent_id: str
+    target_agent_id: str
+    source_execution_id: str
+    target_execution_id: str
+    grant_id: str
+    handoff_ref: HandoffRef
+    requested_ref_ids: tuple[str, ...]
+    purpose: str
+    remaining_budget: ContextShareBudget
+    expected_resolution_count: int
+    correlation_id: str
+    idempotency_key: str
+
+
+@dataclass(frozen=True, slots=True)
+class SharedContextExclusion:
+    shared_ref_id: str | None
+    source_kind: str
+    required: bool
+    reason: str
+    source_version: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedContextSeed:
+    grant_id: str
+    target_execution_id: str
+    authorized_candidates: tuple[SharedContextReference, ...]
+    excluded: tuple[SharedContextExclusion, ...]
+    policy_version: str
+    grant_status: ContextShareStatus
+    resolution_count: int
+    truncated: bool
+    correlation_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class RevokeContextShare:
+    actor: str
+    execution_id: str
+    user_id: str
+    workspace_id: str | None
+    source_agent_id: str
+    target_agent_id: str
+    source_execution_id: str
+    target_execution_id: str
+    grant_id: str
+    reason: str
+    purpose: str
+    correlation_id: str
+    idempotency_key: str
+
+
+@dataclass(frozen=True, slots=True)
+class RevocationReceipt:
+    grant_id: str
+    previous_status: ContextShareStatus
+    status: ContextShareStatus
+    target_execution_id: str
+    correlation_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class ExpireContextShare:
+    actor: str
+    execution_id: str
+    user_id: str
+    workspace_id: str | None
+    source_agent_id: str
+    target_agent_id: str
+    source_execution_id: str
+    target_execution_id: str
+    grant_id: str
+    policy_cutoff_at: datetime
+    reason: str
+    purpose: str
+    correlation_id: str
+    idempotency_key: str
+
+
+@dataclass(frozen=True, slots=True)
+class ExpirationReceipt:
+    grant_id: str
+    previous_status: ContextShareStatus
+    status: ContextShareStatus
+    target_execution_id: str
+    correlation_id: str
+
+
 class ContextSharingService(Protocol):
     """Public marker protocol implemented by the context-sharing adapter."""
 
@@ -339,9 +629,16 @@ class ContextSharingService(Protocol):
 
     def resolve(self, query): ...
 
+    def revoke(self, command: RevokeContextShare) -> RevocationReceipt: ...
+
+    def expire(self, command: ExpireContextShare) -> ExpirationReceipt: ...
+
 
 __all__ = [
-    "Constraint", "ContextShareBudget", "ContextShareGrant", "ContextSharingService",
-    "Criterion", "DelegatedGrantRef", "HandoffRef", "OutputContractRef",
-    "SharedContextReference", "StructuredHandoff", "TaskSnapshot",
+    "AuthorizedSourceReference", "AuthorizeContextShare", "Constraint", "ContextShareBudget",
+    "ContextShareFilter", "ContextShareGrant", "ContextShareStatus", "ContextSharingService",
+    "CreateSharedContextReference", "CreateStructuredHandoff", "Criterion", "DelegatedGrantRef",
+    "ExpireContextShare", "ExpirationReceipt", "HandoffRef", "OutputContractRef", "ResolvedContextSeed",
+    "ResolveSharedContext", "RevocationReceipt", "RevokeContextShare", "SharedContextExclusion",
+    "SharedContextKind", "SharedContextReference", "StructuredHandoff", "TaskSnapshot",
 ]

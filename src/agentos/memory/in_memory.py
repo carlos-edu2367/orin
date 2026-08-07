@@ -23,11 +23,14 @@ from .models import (
     MemoryCommitChange,
     MemoryCommitRequest,
     MemoryCommitResult,
+    MemoryCommitState,
+    MemoryAccessDenied,
     MemoryIdempotencyConflict,
     MemoryOperation,
     MemoryOperationContext,
     MemoryMatch,
     MemoryMatchReason,
+    MemorySearchCapabilities,
     MemoryRecord,
     MemoryReference,
     MemoryRevision,
@@ -84,6 +87,7 @@ class InMemoryMemoryStore:
         self._audit_log: list[object] = []
         self._outbox: list[EventEnvelope] = []
         self._idempotency: dict[tuple[str, ...], tuple[str, MemoryCommitResult]] = {}
+        self._transactions: dict[str, MemoryCommitResult] = {}
         self._event_sequences: defaultdict[str, int] = defaultdict(int)
         self._lock = RLock()
 
@@ -185,6 +189,7 @@ class InMemoryMemoryStore:
                 already_applied=False,
                 result=request.result,
                 event_id=request.event.event_id,
+                transaction_id=f"memory-transaction:{request.event.event_id}",
             )
             for change in request.changes:
                 self._records[str(change.record.memory_id)] = change.record
@@ -194,6 +199,14 @@ class InMemoryMemoryStore:
             self._outbox.extend(events)
             self._event_sequences[str(request.context.execution_id)] = events[-1].sequence or 0
             self._idempotency[key] = (request.fingerprint, result)
+            self._transactions[result.transaction_id] = result
+            return result
+
+    def inspect_commit(self, transaction_id: str, idempotency_key: str) -> MemoryCommitResult:
+        with self._lock:
+            result = self._transactions.get(str(transaction_id))
+            if result is None:
+                raise MemoryCommitFailure("TRANSACTION_NOT_FOUND")
             return result
 
     def _validate_request(self, request: MemoryCommitRequest) -> None:
@@ -238,6 +251,8 @@ class _SystemClock:
 
 
 class InMemoryMemorySearchAdapter:
+    capabilities = MemorySearchCapabilities(("LEXICAL",), adapter_version="memory-search:lexical:1")
+
     def rank(self, records: tuple[MemoryRecord, ...], query: SearchMemory) -> tuple[MemoryMatch, ...]:
         terms = tuple(term for term in query.query.text.lower().split() if term)
         ranked: list[tuple[float, float, str, MemoryMatch]] = []
@@ -329,6 +344,17 @@ class InMemoryMemoryManager:
             current = self.store.get(str(command.memory_ref.memory_id))
             if current is None:
                 raise MemoryVersionConflict()
+            if current.scope is not command.scope:
+                raise MemoryVersionConflict("SCOPE_MISMATCH")
+            if not clearance_allows(command.context.classification_ceiling.value, command.classification.value):
+                self._record_access_denied(
+                    command.context,
+                    command.idempotency_key,
+                    current.scope,
+                    "CLASSIFICATION_DENIED",
+                    operation=MemoryOperation.SAVE,
+                )
+                raise MemoryAccessDenied("CLASSIFICATION_DENIED")
             try:
                 self.authorization.authorize(
                     command.context,
@@ -495,6 +521,7 @@ class InMemoryMemoryManager:
                     reference=reference,
                     classification_ceiling=query.classification_ceiling,
                     grant_refs=query.grant_refs,
+                    consume_grant=False,
                     now=now,
                 )
             except Exception:
@@ -930,7 +957,7 @@ class InMemoryMemoryManager:
                 )
             )
         try:
-            return self.store.commit(
+            committed = self.store.commit(
                 MemoryCommitRequest(
                     operation=operation,
                     context=context,
@@ -943,6 +970,11 @@ class InMemoryMemoryManager:
                     additional_events=tuple(additional_events),
                 )
             )
+            if committed.commit_state is MemoryCommitState.UNKNOWN:
+                raise MemoryCommitFailure("COMMIT_UNKNOWN")
+            if committed.commit_state is not MemoryCommitState.COMMITTED:
+                raise MemoryCommitFailure("COMMIT_NOT_CONFIRMED")
+            return committed
         except (MemoryCommitFailure, MemoryVersionConflict, MemoryIdempotencyConflict) as error:
             if emit_failure:
                 try:
