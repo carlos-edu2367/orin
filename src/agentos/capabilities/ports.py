@@ -163,6 +163,11 @@ class CapabilityEvent:
     result_ref: str | None = None
     outcome: str | None = None
     reason: str | None = None
+    user_id: str | None = None
+    workspace_id: str | None = None
+    purpose: str | None = None
+    state_version: int | None = None
+    usage: ResourceUsage | None = None
 
     def __post_init__(self) -> None:
         if self.sequence < 1:
@@ -176,6 +181,8 @@ class CapabilityEvent:
             value = getattr(self, name)
             if value is not None and (not isinstance(value, str) or not value.strip() or len(value) > 255):
                 raise ValueError(f"{name} must be bounded when supplied")
+        if self.state_version is not None and self.state_version < 1:
+            raise ValueError("state_version must be positive when supplied")
 
 
 @dataclass(frozen=True, slots=True)

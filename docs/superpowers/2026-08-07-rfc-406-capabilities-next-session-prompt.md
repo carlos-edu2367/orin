@@ -301,3 +301,7 @@ Não entregue “quase pronto”, não pare por falta de tempo, não peça confi
 Ao fechar o gate, acrescente aqui a evidência real de implementação, testes, decisões, commits, review, limitações legítimas e o próximo gate documentado. Não deixe este registro vazio, genérico ou baseado em intenção.
 
 Próximo gate esperado: identificar exclusivamente a partir da sequência normativa existente após RFC 406; se não houver RFC seguinte documentado, registrar essa ausência como decisão documental, sem criar backlog fictício.
+
+## Registro de encerramento da sessão de 2026-08-07
+
+O Gate RFC 406 foi fechado nesta sessão. A implementação está em `src/agentos/capabilities`, com contratos imutáveis, registry versionado, scheduler determinístico, `CapabilityService`, Tool/Child/State ports, checkpoint bounded, retry/UNKNOWN, compensação, cancelamento, events/outbox e integração canônica com `ExecutionControl`. Evidência: `python -m pytest -q` retornou `637 passed, 6 skipped`; testes RFC 406 retornaram `37 passed, 1 skipped`; `compileall` e `git diff --check` retornaram código 0. O skip opcional é PostgreSQL por ausência de `AGENTOS_TEST_POSTGRES_DSN`; nenhum sucesso foi simulado. Commits do gate: `3854a9d` e `5c9454b`; o commit documental final desta sessão será o commit imediatamente seguinte no histórico. A segunda passagem independente read-only foi executada sobre o diff do gate e os findings foram cobertos por testes RED/GREEN. Não há próximo RFC definido pela documentação atual.

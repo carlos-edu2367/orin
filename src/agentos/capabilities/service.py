@@ -187,6 +187,8 @@ class CapabilityService:
         if run.cancellation_requested:
             return self._cancel_run(run, request.context, "cancel requested")
         descriptor = self._registry.resolve(run.capability_ref, run.context)
+        if descriptor.status.value == "DISABLED":
+            return self._fail_run(run, run.context, "capability_disabled")
         program = self._registry.program(run.capability_ref, run.context)
         self._validate_program(program, descriptor)
         execution = self._execution_control.load(self._execution_context(run.context))
@@ -202,7 +204,7 @@ class CapabilityService:
                 )
             )
             run = self._save(
-                replace(run, state=CapabilityRunState.RUNNING, started_at=self._clock()),
+                replace(run, state=CapabilityRunState.RUNNING, started_at=run.started_at or self._clock()),
                 event=self._event(run, CapabilityEventType.STARTED),
             )
             execution = self._execution_control.load(self._execution_context(run.context))
@@ -246,6 +248,8 @@ class CapabilityService:
                     )
                 )
             descriptor = self._registry.resolve(run.capability_ref, run.context)
+            if descriptor.status.value == "DISABLED":
+                return self._fail_run(run, request.context, "capability_disabled")
             return self._continue(run, descriptor, program, self._activate_execution(run.context))
         if run.state is CapabilityRunState.PAUSED:
             execution = self._execution_control.load(self._execution_context(run.context))
@@ -258,6 +262,8 @@ class CapabilityService:
                     )
                 )
             descriptor = self._registry.resolve(run.capability_ref, run.context)
+            if descriptor.status.value == "DISABLED":
+                return self._fail_run(run, request.context, "capability_disabled")
             return self._continue(run, descriptor, program, self._activate_execution(run.context))
         return self.run(RunCapability(run.capability_run_id, run.context, run.state_version, request.resume_from))
 
@@ -395,7 +401,8 @@ class CapabilityService:
             return self._cancel_run(run, run.context, tool_outcome.reason)
         if isinstance(tool_outcome, ToolFailed):
             record = CapabilityStepRecord(step.step_id, attempt, invocation_id, None, StepOutcomeState.UNKNOWN if tool_outcome.effect_state is EffectState.UNKNOWN else StepOutcomeState.FAILED, tool_outcome.result_ref, tool_outcome.effect_state, self._clock(), tool_outcome.error_code)
-            self._save(replace(run, current_steps=(), completed_steps=run.completed_steps + (record,)), event=self._event(run, CapabilityEventType.STEP_FINISHED, step_id=str(step.step_id), result_ref=tool_outcome.result_ref, outcome=record.outcome.value))
+            failed_usage = run.usage.plus(replace(tool_outcome.usage, tool_invocations=tool_outcome.usage.tool_invocations + 1, steps=tool_outcome.usage.steps + 1))
+            self._save(replace(run, current_steps=(), completed_steps=run.completed_steps + (record,), usage=failed_usage), event=self._event(run, CapabilityEventType.STEP_FINISHED, step_id=str(step.step_id), result_ref=tool_outcome.result_ref, outcome=record.outcome.value))
             if tool_outcome.retryability is Retryability.SAFE and tool_outcome.effect_state is not EffectState.UNKNOWN and attempt < step.retry_policy.maximum_attempts:
                 return self._continue(self._state.load(str(run.capability_run_id), run.context), descriptor, self._registry.program(run.capability_ref, run.context), execution)
             return self._fail_run(self._state.load(str(run.capability_run_id), run.context), run.context, tool_outcome.error_code)
@@ -535,7 +542,12 @@ class CapabilityService:
         return self._state.save(run, expected_version=run.state_version, checkpoint=checkpoint, event=event)
 
     def _event(self, run, event_type, *, step_id=None, result_ref=None, outcome=None, reason=None):
-        return CapabilityEvent(event_type, str(run.capability_run_id), run.capability_ref, str(run.context.execution_id), str(run.context.correlation_id), run.state_version + 1, self._clock(), step_id, result_ref, outcome, reason)
+        return CapabilityEvent(
+            event_type, str(run.capability_run_id), run.capability_ref, str(run.context.execution_id),
+            str(run.context.correlation_id), run.state_version + 1, self._clock(), step_id, result_ref,
+            outcome, reason, str(run.context.user_id), str(run.context.workspace_id) if run.context.workspace_id is not None else None,
+            str(run.context.purpose), run.state_version + 1, run.usage,
+        )
 
     @staticmethod
     def _execution_context(context):
@@ -564,8 +576,9 @@ class CapabilityService:
             if step.child_capability_ref == descriptor.capability_ref:
                 raise ValueError("recursive Capability composition is forbidden")
 
-    @staticmethod
-    def _ensure_limits(run, descriptor):
+    def _ensure_limits(self, run, descriptor):
+        if run.started_at is not None and (self._clock() - run.started_at).total_seconds() > descriptor.limits.timeout_seconds:
+            raise CapabilityConflict("capability timeout exhausted")
         if run.usage.steps >= descriptor.limits.maximum_steps or run.usage.tool_invocations >= descriptor.limits.maximum_tool_invocations or run.usage.child_executions >= descriptor.limits.maximum_child_executions or run.usage.resource_units > descriptor.limits.maximum_resource_usage or (descriptor.limits.maximum_cost is not None and run.usage.cost > descriptor.limits.maximum_cost):
             raise CapabilityConflict("capability limit exhausted before next effect")
 
@@ -574,8 +587,9 @@ class CapabilityService:
         if usage.steps > descriptor.limits.maximum_steps or usage.tool_invocations > descriptor.limits.maximum_tool_invocations or usage.resource_units > descriptor.limits.maximum_resource_usage or (descriptor.limits.maximum_cost is not None and usage.cost > descriptor.limits.maximum_cost):
             raise CapabilityConflict("capability limit exceeded after effect")
 
-    @staticmethod
-    def _limit_error(run, descriptor):
+    def _limit_error(self, run, descriptor):
+        if run.started_at is not None and (self._clock() - run.started_at).total_seconds() > descriptor.limits.timeout_seconds:
+            return "timeout"
         if run.usage.tool_invocations >= descriptor.limits.maximum_tool_invocations:
             return "maximum_tool_invocations"
         if run.usage.child_executions >= descriptor.limits.maximum_child_executions:

@@ -27,6 +27,7 @@ from agentos.capabilities.models import (
 from agentos.capabilities.ports import (
     ChildExecutionSnapshot,
     ChildExecutionState,
+    CapabilityStateNotFound,
     InMemoryCapabilityState,
     ToolCancelled,
     ToolSucceeded,
@@ -166,6 +167,17 @@ def test_start_creates_queued_execution_and_is_idempotent():
     execution = persistence.get(first.execution_id)
     assert execution.state is ExecutionState.QUEUED
     assert state.load(first.capability_run_id, ctx(first.execution_id)).state is CapabilityRunState.QUEUED
+
+
+def test_inspect_is_scoped_to_the_complete_operation_context():
+    service, _control, _persistence, _state, _tool, _child, request = make_service()
+    accepted = service.start(request)
+    from agentos.capabilities.models import AuthorizedCapabilityQuery
+
+    snapshot = service.inspect(AuthorizedCapabilityQuery(ctx(accepted.execution_id), accepted.capability_run_id))
+    assert snapshot.capability_run_id == accepted.capability_run_id
+    with pytest.raises(CapabilityStateNotFound):
+        service.inspect(AuthorizedCapabilityQuery(replace(ctx(accepted.execution_id), user_id="user:other"), accepted.capability_run_id))
 
 
 def test_run_invokes_exact_tool_ref_and_completes_canonical_execution():

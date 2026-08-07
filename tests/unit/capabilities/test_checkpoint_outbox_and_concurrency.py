@@ -25,6 +25,10 @@ def test_tool_waiting_maps_to_waiting_tool_and_persists_bounded_checkpoint():
     assert "secret" not in repr(checkpoint).lower()
     assert "handle" not in repr(checkpoint).lower()
     assert any(event.event_type.value == "CapabilityCheckpointCreated" for event in state.events())
+    event = state.events()[0]
+    assert event.user_id == "user:1"
+    assert event.execution_id == accepted.execution_id
+    assert event.state_version >= 1
 
 
 def test_state_port_rejects_stale_writer_and_scopes_checkpoint_load():
@@ -33,4 +37,3 @@ def test_state_port_rejects_stale_writer_and_scopes_checkpoint_load():
     run = state.load(accepted.capability_run_id, ctx(accepted.execution_id))
     with pytest.raises(StateConflict):
         state.save(run, expected_version=run.state_version + 1)
-
