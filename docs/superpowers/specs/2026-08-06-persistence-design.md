@@ -176,3 +176,21 @@ The repository already contains the approved RFC 601 slice and its compatibility
 4. Regression tests prove the new behavior in RED/GREEN order, retain the existing in-memory and SQLAlchemy contract suites, and record that PostgreSQL-specific locking remains optional behind `AGENTOS_TEST_POSTGRES_DSN`.
 
 This continuation does not alter the RFC 601 public method set, the Execution compatibility contract, the migration policy, or the explicit non-goals listed above.
+
+## Hardening execution evidence
+
+The continuation was implemented in commit `ba83412`. Its focused RED/GREEN cycle covered typed query consistency, SQLAlchemy scan-error normalization, and stable key-only unknown-commit inspection. The focused persistence suite passed with `21 passed`; the complete repository verification passed with `329 passed, 1 skipped`, and `python -m compileall -q src tests` exited 0.
+
+The optional PostgreSQL suite was explicitly invoked and skipped because `AGENTOS_TEST_POSTGRES_DSN` was not configured. SQLite remains a contract harness and does not prove PostgreSQL row locking, isolation, deadlock or driver-specific timeout semantics. No database, container or service was created automatically.
+
+The required boundary scan found no forbidden infrastructure names in Execution, Runtime, Context, Events or Providers, and the repository-wide SQLAlchemy/Alembic scan found no matches outside `src/agentos/persistence/postgres/`. `git diff --check` passed. Existing unrelated working-tree changes remain untouched and are reported separately by Git.
+
+## Requirement audit
+
+- The canonical port exposes only `transact`, `read`, `scan` and `inspect_commit`; the complete context, typed transaction/read options, result algebra, opaque references and bounded pages are covered by the contract tests.
+- Both adapters validate ownership, correlation, purpose, version expectations, idempotency fingerprints, classification ceilings, outbox identity and rollback behavior before exposing results.
+- State, minimal audit, idempotency receipt and outbox are committed as one unit; publication remains outside persistence and only follows a confirmed commit.
+- Commit ambiguity is represented as `UNKNOWN`/`TransactionIndeterminate`; inspection is authorized by the same scope and never replays a command.
+- SQLAlchemy 2, Alembic, physical schema and database error translation remain inside the PostgreSQL package; migrations are explicit and never run on import or Runtime startup.
+- Execution compatibility remains an explicit adapter, while Runtime, Agent, Events, Context and Providers remain free of concrete persistence technology.
+- Redis, brokers, workers, Scheduler, Artifact Storage, API, Provider execution, distributed transactions, exactly-once publication and operational disaster recovery were not introduced.

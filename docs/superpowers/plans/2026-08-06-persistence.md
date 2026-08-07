@@ -312,10 +312,10 @@ The original implementation plan is complete in the repository. The following fo
 - Consumes: existing `ConsistencyLevel` and `AuthorizedRead`/`AuthorizedScan` constructors.
 - Produces: `AuthorizedRead.consistency` and `AuthorizedScan.consistency`, both typed as `ConsistencyLevel` and defaulting to `STRONG`.
 
-- [ ] Write a failing contract test that constructs both queries with string and enum consistency values, asserts normalization to `ConsistencyLevel`, and rejects an unknown value.
-- [ ] Run `python -m pytest tests/unit/persistence/test_contracts.py -q` and confirm the new assertion fails because the query objects do not expose consistency.
-- [ ] Add the defaulted field and enum normalization to both frozen query models without changing existing positional call sites.
-- [ ] Run the focused contract test and confirm it passes.
+- [x] Write a failing contract test that constructs both queries with string and enum consistency values, asserts normalization to `ConsistencyLevel`, and rejects an unknown value.
+- [x] Run `python -m pytest tests/unit/persistence/test_contracts.py -q` and confirm the new assertion fails because the query objects do not expose consistency.
+- [x] Add the defaulted field and enum normalization to both frozen query models without changing existing positional call sites.
+- [x] Run the focused contract test and confirm it passes.
 
 ### Task 8: Normalize read-side database failures
 
@@ -327,10 +327,10 @@ The original implementation plan is complete in the repository. The following fo
 - Consumes: `normalize_database_error`, `PersistenceAdapterError`, `AuthorizedScan`, and `InspectCommit`.
 - Produces: sanitized `PersistenceAdapterError` for scan failures and a stable `inspection:unknown` receipt identifier when commit inspection cannot reach the database without a transaction ID.
 
-- [ ] Write failing tests that make the session factory raise a SQLAlchemy error during `scan`, and during key-only `inspect_commit`, then assert normalized code/receipt behavior with no driver text.
-- [ ] Run the focused tests and confirm the failures occur for the missing normalization and invalid `None` receipt transaction ID.
-- [ ] Wrap the SQLAlchemy portion of `scan` with the existing normalization path and use the same opaque fallback identifier in the `inspect_commit` exception path.
-- [ ] Run the focused PostgreSQL adapter tests and confirm they pass.
+- [x] Write failing tests that make the session factory raise a SQLAlchemy error during `scan`, and during key-only `inspect_commit`, then assert normalized code/receipt behavior with no driver text.
+- [x] Run the focused tests and confirm the failures occur for the missing normalization and invalid `None` receipt transaction ID.
+- [x] Wrap the SQLAlchemy portion of `scan` with the existing normalization path and use the same opaque fallback identifier in the `inspect_commit` exception path.
+- [x] Run the focused PostgreSQL adapter tests and confirm they pass.
 
 ### Task 9: Re-run the complete persistence and boundary verification
 
@@ -342,12 +342,12 @@ The original implementation plan is complete in the repository. The following fo
 - Consumes: all canonical contracts, adapters, migrations, compatibility tests and boundary scans.
 - Produces: fresh evidence for the RFC/ADR acceptance matrix and an honest report of optional PostgreSQL integration status.
 
-- [ ] Run the focused persistence tests after each GREEN cycle.
-- [ ] Run `python -m pytest -q` and record the complete result.
-- [ ] Run `python -m compileall -q src tests` and record exit code 0.
-- [ ] Run the required forbidden-dependency scan and verify only `src/agentos/persistence/postgres/` contains SQLAlchemy/Alembic references.
-- [ ] Run `git diff --check` and inspect `git status --short --branch` before reporting completion.
-- [ ] Update this spec and plan with fresh counts, skipped optional tests and remaining production limitations.
+- [x] Run the focused persistence tests after each GREEN cycle.
+- [x] Run `python -m pytest -q` and record the complete result.
+- [x] Run `python -m compileall -q src tests` and record exit code 0.
+- [x] Run the required forbidden-dependency scan and verify only `src/agentos/persistence/postgres/` contains SQLAlchemy/Alembic references.
+- [x] Run `git diff --check` and inspect `git status --short --branch` before reporting completion.
+- [x] Update this spec and plan with fresh counts, skipped optional tests and remaining production limitations.
 
 ## Hardening self-review
 
@@ -355,3 +355,28 @@ The original implementation plan is complete in the repository. The following fo
 - Task 8 covers both identified error paths using existing sanitized error types; no raw database exception is surfaced.
 - Task 9 covers the prompt's mandatory full-suite, compile, boundary and working-tree evidence.
 - PostgreSQL locking, deadlock and isolation claims remain explicitly limited to configured integration tests; SQLite remains a contract harness only.
+
+## Hardening execution evidence
+
+- Commit `ba83412` contains only the persistence hardening continuation: typed query consistency, normalized SQLAlchemy scan failures, stable unknown-inspection receipts, tests, and updated persistence documents.
+- RED/GREEN evidence: the new contract test first failed with `TypeError` for the missing `consistency` argument; the two adapter regressions first failed with raw `OperationalError`/invalid `None` receipt; focused GREEN verification passed with `21 passed`.
+- Full verification: `python -m pytest -q` → `329 passed, 1 skipped`; `python -m compileall -q src tests` → exit 0; `git diff --check` → exit 0.
+- Optional PostgreSQL verification: `AGENTOS_TEST_POSTGRES_DSN configured: False`; `python -m pytest tests/integration/persistence/test_postgres_optional.py -q` → `1 skipped`. No database, container or service was created.
+- Boundary verification: the required Kernel/domain scan produced `NO_FORBIDDEN_DOMAIN_MATCHES`; the repository-wide SQLAlchemy/Alembic scan produced `NO_OUTSIDE_POSTGRES_MATCHES` after excluding `src/agentos/persistence/postgres/`.
+
+## Requirement audit
+
+| Requirement area | Evidence | Status |
+| --- | --- | --- |
+| Canonical four-method port and complete operation context | `src/agentos/persistence/models.py`, `ports.py`, `test_contracts.py`, `test_requirement_matrix.py` | Covered |
+| Atomic state, audit, idempotency and outbox commit | `test_in_memory_transactions.py`, `test_postgres_adapter.py` | Covered by in-memory/SQLite harness |
+| Fingerprint idempotency, duplicate event prevention and optimistic versions | transaction and adapter tests | Covered |
+| Ownership, correlation, purpose and classification filtering | authorization, adapter and compatibility tests | Covered |
+| Bounded scans and query-bound opaque cursors | authorization and adapter scan tests | Covered |
+| Rollback, `NOT_COMMITTED`, `UNKNOWN` and explicit inspection | transaction, adapter and compatibility tests | Covered |
+| Error normalization and sanitized public representations | `test_security_regressions.py` plus scan/inspection regressions | Covered |
+| SQLAlchemy/Alembic isolation and explicit migrations | schema/migration tests plus boundary scans | Covered |
+| Runtime/Agent/Events/Context/Providers technology independence | `test_boundary_scan.py`, integration boundary test, required scans | Covered |
+| PostgreSQL locking/isolation/deadlock behavior | optional integration suite | Not executed: DSN absent |
+| Backup, restore, replication, partitioning, multi-region and executable DR | RFC 601 limitation record | Explicitly out of scope |
+| Redis, brokers, workers, scheduler, API, artifacts and other domains | scope review and unchanged tree outside persistence | Not introduced |
