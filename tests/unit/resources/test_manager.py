@@ -59,6 +59,23 @@ def test_unavailable_descriptor_rejects_without_allocating_lease() -> None:
     assert manager.active_leases() == ()
 
 
+def test_reusing_acquire_idempotency_key_with_different_capability_is_rejected() -> None:
+    manager = ResourceManagerService()
+    first = manager.acquire(request(key="same", caps=(ResourceCapability.FILESYSTEM_READ,)))
+    conflict = manager.acquire(request(key="same", caps=(ResourceCapability.FILESYSTEM_WRITE,)))
+    assert first.lease_id
+    assert isinstance(conflict, ResourceError) and conflict.code is ResourceErrorCode.INVALID_REQUEST
+
+
+def test_authorize_same_operation_is_idempotent_and_does_not_double_count_budget() -> None:
+    manager = ResourceManagerService()
+    lease = manager.acquire(request())
+    first = manager.authorize(AuthorizeResourceOperation(lease.lease_id, "operation:repeat", context(), ResourceCapability.FILESYSTEM_READ, requested_usage_operations=1))
+    second = manager.authorize(AuthorizeResourceOperation(lease.lease_id, "operation:repeat", context(), ResourceCapability.FILESYSTEM_READ, requested_usage_operations=1))
+    assert first == second
+    assert manager.inspect(context=context(), lease_id=lease.lease_id).usage_operations == 1
+
+
 def test_terminal_and_browser_reference_adapters_have_lifecycle_and_cleanup() -> None:
     manager = ResourceManagerService()
     terminal = manager.acquire(request(resource_type=ResourceType.TERMINAL, caps=(ResourceCapability.TERMINAL_SESSION,), key="terminal"))

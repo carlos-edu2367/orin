@@ -60,3 +60,17 @@ def test_local_adapter_rejects_root_target_and_cross_boundary_copy(tmp_path: Pat
     copied = fs.copy(operation_id="copy", context=context(), lease_id="1", resource_handle=handle, source=WorkspacePath.from_string("inside.txt"), destination=outside, limits=FilesystemLimits(100, 5, 2), expected_source_version=created.entry.version, idempotency_key="copy")
     assert not isinstance(copied, FilesystemError)
     assert resolver.location_for("ws-1").joinpath("outside").exists()
+
+
+def test_local_adapter_rejects_hard_link_ambiguity(tmp_path: Path) -> None:
+    fs, resolver, _ = make_service(tmp_path)
+    root_dir = resolver.location_for("ws-1")
+    original = root_dir / "original.txt"
+    original.write_text("content", encoding="utf-8")
+    linked = root_dir / "linked.txt"
+    try:
+        linked.hardlink_to(original)
+    except (OSError, NotImplementedError):
+        pytest.skip("platform cannot create hard links for this test")
+    result = fs.stat(operation_id="hardlink", context=context(), lease_id="1", resource_handle=OpaqueFilesystemHandle("h", "lease:1"), path=WorkspacePath.from_string("linked.txt"), limits=FilesystemLimits(100, 5, 2))
+    assert isinstance(result, FilesystemError) and result.code is FilesystemErrorCode.UNSAFE_ROOT

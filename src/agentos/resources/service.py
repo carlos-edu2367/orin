@@ -54,6 +54,9 @@ class ResourceManagerService:
         self._leases: dict[str, ResourceLease] = {}
         self._bindings: dict[str, tuple[object, object, ResourceOperationContext, str]] = {}
         self._idempotency: dict[tuple[tuple[str, ...], str], ResourceLease] = {}
+        self._idempotency_fingerprints: dict[tuple[tuple[str, ...], str], tuple[object, ...]] = {}
+        self._operation_handles: dict[tuple[object, ...], AuthorizedResourceHandle] = {}
+        self._renew_idempotency: dict[tuple[object, ...], ResourceLease] = {}
         self._sequences: dict[str, int] = {}
         self._descriptors: dict[ResourceType, ResourceDescriptor] = {}
         self._adapters: dict[ResourceType, ResourceAdapter] = {}
@@ -125,10 +128,11 @@ class ResourceManagerService:
         except PermissionError:
             return self._error(ResourceErrorCode.UNAUTHORIZED)
         key = (request.context.scope_key(), request.idempotency_key)
+        fingerprint = (request.resource_type, request.required_capabilities, request.requested_permissions, request.requested_budget, request.requested_duration)
         with self._lock:
             previous = self._idempotency.get(key)
             if previous is not None:
-                return previous
+                return previous if self._idempotency_fingerprints[key] == fingerprint else self._error(ResourceErrorCode.INVALID_REQUEST, "idempotency binding conflict")
             descriptor = self._descriptors.get(request.resource_type)
             if descriptor is None:
                 return self._error(ResourceErrorCode.NOT_FOUND)
@@ -157,6 +161,7 @@ class ResourceManagerService:
             self._leases[lease_id] = lease
             self._bindings[lease_id] = (binding, adapter, request.context, descriptor.adapter_ref)
             self._idempotency[key] = lease
+            self._idempotency_fingerprints[key] = fingerprint
             self._event("ResourceLeaseGranted", lease)
             return lease
 
@@ -179,6 +184,9 @@ class ResourceManagerService:
 
     def renew(self, request: RenewResourceLease):
         with self._lock:
+            idem_key = (request.context.scope_key(), request.lease_id, request.idempotency_key)
+            if idem_key in self._renew_idempotency:
+                return self._renew_idempotency[idem_key]
             lease = self._lease_for(request.lease_id, request.context)
             if isinstance(lease, ResourceError):
                 return lease
@@ -191,11 +199,16 @@ class ResourceManagerService:
                 return self._error(ResourceErrorCode.BUDGET_EXCEEDED)
             updated = replace(lease, expires_at=lease.expires_at + request.requested_extension)
             self._leases[lease.lease_id] = updated
+            self._renew_idempotency[idem_key] = updated
             self._event("ResourceLeaseRenewed", updated)
             return updated
 
     def authorize(self, request: AuthorizeResourceOperation):
         with self._lock:
+            operation_key = (request.lease_id, request.operation_id, request.context.binding_key())
+            previous_handle = self._operation_handles.get(operation_key)
+            if previous_handle is not None:
+                return previous_handle if request.capability in previous_handle.capabilities else self._error(ResourceErrorCode.INVALID_REQUEST, "operation binding conflict")
             lease = self._lease_for(request.lease_id, request.context)
             if isinstance(lease, ResourceError):
                 return lease
@@ -212,6 +225,7 @@ class ResourceManagerService:
             binding, adapter, _, _ = self._bindings[lease.lease_id]
             handle = AuthorizedResourceHandle(f"handle:{uuid4().hex}", lease.lease_id, request.operation_id, (request.capability,), lease.expires_at)
             self._bindings[handle.handle_ref] = (binding, adapter, request.context, request.operation_id)
+            self._operation_handles[operation_key] = handle
             self._leases[lease.lease_id] = replace(lease, usage_operations=lease.usage_operations + request.requested_usage_operations, usage_bytes=lease.usage_bytes + request.requested_usage_bytes)
             return handle
 

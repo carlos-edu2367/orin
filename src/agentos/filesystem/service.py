@@ -114,9 +114,20 @@ class FilesystemService:
         root = self._authorize(operation_id, context, lease_id, resource_handle)
         if isinstance(root, FilesystemError):
             return self._reject(root, context, operation_id, path)
+        reservation = None
+        if self.quota is not None:
+            reservation = self.quota.reserve(context, lease_id, 0, 1, len(path.segments), limits.maximum_bytes, operation_id, operation_id)
+            if hasattr(reservation, "code"):
+                return self._reject(FilesystemError(FilesystemErrorCode.QUOTA_EXCEEDED), context, operation_id, path)
         result = self.adapter.create_directory(root, path, create_parents=create_parents, maximum_depth=limits.maximum_depth)
         if isinstance(result, FilesystemError):
+            if reservation is not None:
+                self.quota.release(reservation, context, lease_id, operation_id)
             return self._reject(result, context, operation_id, path)
+        if reservation is not None:
+            recorded = self.quota.record(reservation, context, lease_id, 0, 1, operation_id)
+            if hasattr(recorded, "code"):
+                return self._reject(FilesystemError(FilesystemErrorCode.UNKNOWN_EFFECT, effect_state="UNKNOWN"), context, operation_id, path)
         self._event("FilesystemEntryCreated", context, operation_id, path, outcome="APPLIED", version=result.version)
         return result
 
@@ -163,13 +174,28 @@ class FilesystemService:
             return self._reject(root, context, operation_id, source)
         if not self.root_resolver.revalidate(root, context):
             return self._reject(FilesystemError(FilesystemErrorCode.UNSAFE_ROOT), context, operation_id, source)
+        reservation = None
+        source_entry = None
+        if not moving and self.quota is not None:
+            source_entry = self.adapter.stat(root, source, expected_version=expected_source_version)
+            if isinstance(source_entry, FilesystemError):
+                return self._reject(source_entry, context, operation_id, source)
+            reservation = self.quota.reserve(context, lease_id, source_entry.size_bytes, 1, len(destination.segments), limits.maximum_bytes, operation_id, idempotency_key or operation_id)
+            if hasattr(reservation, "code"):
+                return self._reject(FilesystemError(FilesystemErrorCode.QUOTA_EXCEEDED), context, operation_id, source)
         method = self.adapter.move if moving else self.adapter.copy
         kwargs = {"expected_source_version": expected_source_version, "overwrite": str(overwrite)}
         if not moving:
             kwargs.update(maximum_bytes=limits.maximum_bytes, maximum_entries=limits.maximum_entries)
         result = method(root, source, destination, **kwargs)
         if isinstance(result, FilesystemError):
+            if reservation is not None:
+                self.quota.release(reservation, context, lease_id, operation_id)
             return self._reject(result, context, operation_id, source)
+        if reservation is not None:
+            recorded = self.quota.record(reservation, context, lease_id, result.entry.size_bytes if result.entry else 0, 1, operation_id)
+            if hasattr(recorded, "code"):
+                return self._reject(FilesystemError(FilesystemErrorCode.UNKNOWN_EFFECT, effect_state="UNKNOWN"), context, operation_id, destination)
         self._event("FilesystemEntryChanged", context, operation_id, destination, outcome="APPLIED", version=result.entry.version if result.entry else None)
         return result
 

@@ -95,13 +95,17 @@ class LocalFilesystemAdapter(InMemoryFilesystemAdapter):
             stat = location.lstat()
         except OSError:
             return False
-        return location.is_symlink() or bool(getattr(stat, "st_file_attributes", 0) & 0x400)
+        return location.is_symlink() or bool(getattr(stat, "st_file_attributes", 0) & 0x400) or (location.is_file() and stat.st_nlink > 1)
 
     def _safe(self, root: CanonicalWorkspaceRoot, path: WorkspacePath, *, allow_missing_leaf: bool = False) -> Path | FilesystemError:
         location = self._location(root)
         if isinstance(location, FilesystemError):
             return location
         current = location
+        try:
+            root_device = location.stat().st_dev
+        except OSError:
+            return self._error(FilesystemErrorCode.UNSAFE_ROOT)
         for index, segment in enumerate(path.segments):
             current = current / segment
             exists = current.exists() or current.is_symlink()
@@ -112,6 +116,8 @@ class LocalFilesystemAdapter(InMemoryFilesystemAdapter):
             if self._reparse(current):
                 return self._error(FilesystemErrorCode.UNSAFE_ROOT, "link or reparse point rejected")
             try:
+                if current.stat().st_dev != root_device:
+                    return self._error(FilesystemErrorCode.UNSAFE_ROOT, "mount boundary rejected")
                 if current.resolve(strict=True).parent != current.parent.resolve(strict=True) and index == 0:
                     return self._error(FilesystemErrorCode.UNSAFE_ROOT)
                 current.resolve(strict=True).relative_to(location)
@@ -278,6 +284,8 @@ class LocalFilesystemAdapter(InMemoryFilesystemAdapter):
                 return source_entry
             if source_entry.kind is not FilesystemEntryKind.FILE:
                 return self._error(FilesystemErrorCode.TYPE_MISMATCH)
+            if source_entry.size_bytes > maximum_bytes:
+                return self._error(FilesystemErrorCode.QUOTA_EXCEEDED)
             if destination_location.exists() and overwrite == "NEVER":
                 return self._error(FilesystemErrorCode.CONFLICT)
             if not destination_location.parent.exists():

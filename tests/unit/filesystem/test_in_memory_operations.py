@@ -40,7 +40,9 @@ def handle() -> OpaqueFilesystemHandle:
 
 
 def limits(**overrides) -> FilesystemLimits:
-    return FilesystemLimits(maximum_bytes=100, maximum_entries=20, maximum_depth=5, **overrides)
+    values = {"maximum_bytes": 100, "maximum_entries": 20, "maximum_depth": 5}
+    values.update(overrides)
+    return FilesystemLimits(**values)
 
 
 def test_in_memory_filesystem_supports_directory_write_stat_list_read_copy_move_and_remove() -> None:
@@ -88,3 +90,10 @@ def test_reusing_idempotency_key_for_a_different_target_is_a_conflict() -> None:
     fs.write(operation_id="write", context=context(), lease_id="lease-1", resource_handle=handle(), path=WorkspacePath.from_string("one.txt"), source=BytesIO(b"one"), mode=WriteMode.CREATE_NEW, atomicity=Atomicity.REQUIRE_ATOMIC, limits=limits(), idempotency_key="same-key")
     conflict = fs.write(operation_id="retry", context=context(), lease_id="lease-1", resource_handle=handle(), path=WorkspacePath.from_string("two.txt"), source=BytesIO(b"two"), mode=WriteMode.CREATE_NEW, atomicity=Atomicity.REQUIRE_ATOMIC, limits=limits(), idempotency_key="same-key")
     assert isinstance(conflict, FilesystemError) and conflict.code is FilesystemErrorCode.CONFLICT
+
+
+def test_copy_respects_filesystem_quota_limit_before_effect() -> None:
+    fs = service()
+    created = fs.write(operation_id="write", context=context(), lease_id="lease-1", resource_handle=handle(), path=WorkspacePath.from_string("source.txt"), source=BytesIO(b"12345"), mode=WriteMode.CREATE_NEW, atomicity=Atomicity.REQUIRE_ATOMIC, limits=limits(), idempotency_key="source")
+    rejected = fs.copy(operation_id="copy", context=context(), lease_id="lease-1", resource_handle=handle(), source=WorkspacePath.from_string("source.txt"), destination=WorkspacePath.from_string("copy.txt"), limits=limits(maximum_bytes=4), expected_source_version=created.entry.version, idempotency_key="copy")
+    assert isinstance(rejected, FilesystemError) and rejected.code is FilesystemErrorCode.QUOTA_EXCEEDED

@@ -87,7 +87,7 @@ class WorkspaceBackedRootResolver:
             return FilesystemError(FilesystemErrorCode.NOT_FOUND)
         if snapshot.state.value not in ("ACTIVE", "ARCHIVED"):
             return FilesystemError(FilesystemErrorCode.UNSAFE_ROOT, "workspace state does not permit filesystem")
-        root = CanonicalWorkspaceRoot(f"workspace-root:{hash(snapshot.root_descriptor.root_ref)}", context.workspace_id, snapshot.root_descriptor.root_identity, snapshot.policy_version)
+        root = CanonicalWorkspaceRoot(f"workspace-root:{context.workspace_id}", context.workspace_id, snapshot.root_descriptor.root_identity, snapshot.policy_version)
         self._roots[context.workspace_id] = root
         return root
 

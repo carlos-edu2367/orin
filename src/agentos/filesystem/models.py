@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 import re
@@ -191,7 +191,7 @@ class FilesystemEntry:
     size_bytes: int
     version: int
     classification: DataClassification = DataClassification.INTERNAL
-    modified_at: datetime = datetime.now(timezone.utc)
+    modified_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "kind", FilesystemEntryKind(self.kind))
