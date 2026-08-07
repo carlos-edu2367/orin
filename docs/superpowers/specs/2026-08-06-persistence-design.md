@@ -1,196 +1,63 @@
-# AgentOS RFC 601 Persistence Boundary — Design Specification
+# Persistência transacional do AgentOS — Especificação
 
-**Status:** Approved for implementation
-**Date:** 2026-08-06
-**Scope:** Durable transactional persistence boundary, PostgreSQL adapter, migrations, and explicit Execution compatibility adapter.
+**Data:** 2026-08-06
+**Escopo:** RFC 601, ADRs 002, 009 e 012
+**Status:** aprovado para implementação nesta sessão
 
-## Goal
+## Objetivo
 
-Replace the reference-only persistence boundary with a technology-independent public port and a SQLAlchemy 2/Alembic PostgreSQL adapter without changing Runtime, Execution rules, Events, Context, Agents, Providers, or Model Catalog contracts.
+Completar a fronteira de persistência transacional do AgentOS sem permitir que Runtime, Execution, Events, Context, Agents ou Providers conheçam SQLAlchemy, Alembic, sessões, conexões ou schema físico. PostgreSQL será o adapter durável; o adapter em memória permanecerá como referência determinística e compatível.
 
-PostgreSQL is the durable authority for state, ownership, versions, audit records, idempotency records, and outbox entries. Redis, brokers, workers, schedulers, Artifact Storage, API, and distributed commit+publish remain outside this implementation.
+## Decisões de desenho
 
-## Decisions
+### Porta pública
 
-The implementation uses the approved “canonical port plus explicit compatibility adapter” approach:
+`agentos.persistence` será a única porta canônica. Seus quatro métodos públicos são `transact`, `read`, `scan` e `inspect_commit`. `PersistenceOperationContext` exige `user_id`, `workspace_id` opcional, `agent_id`, `execution_id`, `correlation_id`, `purpose` e `actor`. `TransactionRequest` carrega opções, versões esperadas, fingerprint, mudanças, auditoria e outbox; referências são opacas.
 
-1. `src/agentos/persistence/` owns stable public dataclasses, enums, Protocols, sanitized failures, bounded authorization queries, and the canonical transaction result algebra.
-2. `src/agentos/persistence/in_memory.py` implements the canonical port as a deterministic test adapter.
-3. `src/agentos/persistence/postgres/` is the only technology package. SQLAlchemy, Alembic, engine/session details, physical schema and database exception translation remain inside it.
-4. `src/agentos/persistence/execution_compat.py` adapts the canonical port to the existing `agentos.execution.ports.TransactionalPersistence` contract. The existing ExecutionControl façade remains unchanged and remains the only mutating Runtime-facing façade.
-5. The existing `agentos.execution.in_memory.InMemoryTransactionalPersistence` remains available for the current Kernel tests. It is not silently redefined as the canonical port; the new bridge makes compatibility explicit.
+`ExecutionTransactionalPersistenceAdapter` fará a migração explícita da porta legada de `execution.ports.TransactionalPersistence`. Nenhum segundo contrato será duplicado ou exportado como se fosse canônico.
 
-## Public contract
+### Unidade transacional
 
-The public port has exactly four operations:
+Uma transação valida contexto, ownership, tipo, classificação, versões e relação entre mudança/auditoria/outbox antes de mutar. Estado, auditoria mínima, entrada de outbox, recibo e registro de idempotência são uma unidade de commit. Eventos não são publicados pelo adapter.
 
-```text
-TransactionalPersistence.transact(request) -> TransactionResult
-TransactionalPersistence.read(query) -> AuthorizedRecord | NotFound
-TransactionalPersistence.scan(query) -> AuthorizedRecordPage
-TransactionalPersistence.inspect_commit(query) -> TransactionReceipt
-```
+`COMMITTED` só aparece após o commit; rejeições não deixam efeitos parciais. Falha de conexão durante `commit()` produz `TransactionIndeterminate`/`UNKNOWN`, e `inspect_commit` é a única reconciliação antes de qualquer retry. Falhas de validação, constraint, timeout, deadlock e serialização são normalizadas em códigos públicos e sem detalhes do driver.
 
-### Operation context
+### Idempotência e concorrência
 
-Every operation carries `PersistenceOperationContext` with the six ownership/correlation fields required by RFC 601 plus the actor:
+A chave de idempotência é indexada por todos os campos de escopo do contexto e pela própria chave. O fingerprint divergente retorna `IDEMPOTENCY_CONFLICT`; o mesmo fingerprint retorna o recibo e o resultado confirmado. Cada mudança exige a versão esperada coerente; concorrência retorna `TransactionConflicted`, sem last-write-wins. `event_id` é único e outbox aponta para a mudança e a versão resultante.
 
-```text
-PersistenceOperationContext {
-  user_id: UserId
-  workspace_id: WorkspaceId | null
-  agent_id: AgentId
-  execution_id: ExecutionId
-  correlation_id: CorrelationId
-  purpose: Purpose
-  actor: ActorRef
-}
-```
+### Leituras e scans
 
-All text is non-blank and bounded. `workspace_id` may be null only for explicitly user-scoped work. The adapter never infers missing ownership from a record ID, credential, cursor, event or database session.
+`read` aplica ownership e ceiling de classificação antes de materializar o registro e retorna `NotFound` tanto para ausência quanto para falta de autorização. `scan` impõe tipo, filtros escalares bounded, ceiling e página máxima. Cursor é assinado/opaco e vinculado a contexto, filtros, classificação, consistência, limite e revisão do store; uma mudança invalida o cursor.
 
-### Transaction types
+### Adapter PostgreSQL e migrations
 
-`TransactionOptions` expresses consistency, isolation, timeout and `read_only`. `TransactionRequest` contains a transaction ID, complete context, options, an idempotency key, a caller-supplied operation fingerprint, expected versions, JSON-safe immutable record changes, minimal audit entries and canonical outbox entries.
+`persistence.postgres` é o único pacote tecnológico. Ele usa SQLAlchemy 2 para engine/sessão/transação e Alembic para migrations versionadas. A URL e opções entram por composição. `upgrade()` é uma operação administrativa explícita; nenhum import, construção de adapter, startup do Runtime ou chamada de domínio executa migration.
 
-Record references, version references and outbox references are opaque value objects. Public values never expose SQL, ORM instances, sessions, connections, table names, credentials or physical paths.
+O schema mínimo contém registros versionados, ownership, auditoria, outbox, idempotência e relógio de revisão, com constraints/índices para unicidade, versão, classificação e origem da outbox. SQLite é somente harness de contrato; locking/isolation PostgreSQL real permanece teste opcional condicionado a `AGENTOS_TEST_POSTGRES_DSN`.
 
-The result algebra is:
+### Segurança e observabilidade
+
+Payloads públicos são congelados, bounded e rejeitam campos sensíveis. `repr`, exceções normalizadas, logs e eventos não incluem SQL, DSN, credenciais, segredos ou payload proprietário. O adapter expõe somente IDs, tipos, versões e códigos. Retenção física, backup, restore, replicação, multi-região e exatamente-uma-vez ficam documentados como limitações, não simulados.
+
+## Fluxo de dados
 
 ```text
-TransactionCommitted { receipt, records, already_applied }
-TransactionRejected { code, retryability }
-TransactionConflicted { conflicts }
-TransactionIndeterminate { transaction_id }
+Domínio/Execution
+    -> porta canônica + contexto completo
+    -> validação/autorização/versão/fingerprint
+    -> estado + auditoria + outbox + idempotência
+    -> COMMITTED ou resultado explícito de falha
+    -> OutboxPublisher/EventBus somente após COMMITTED
 ```
 
-`TransactionReceipt.commit_state` is explicitly one of `COMMITTED`, `NOT_COMMITTED` or `UNKNOWN`. A committed result is returned only after durable commit. A connection failure during commit is `UNKNOWN`; callers must call `inspect_commit` before retrying.
+## Estratégia de testes
 
-### Authorized reads and scans
+Cada correção começa com teste RED verificando a falha específica, recebe implementação mínima GREEN e termina com suíte focada. A matriz em `docs/superpowers/2026-08-06-persistence-requirement-matrix.md` liga requisitos a arquivos e evidências. O fechamento exige suíte completa, `compileall`, scan de dependências, `git diff --check` e revisão independente somente leitura contra RFC 601/ADRs.
 
-`AuthorizedRead` and `AuthorizedScan` carry context, record type/reference filters, a classification ceiling, bounded filter maps and an opaque page request. Unauthorized, cross-user, cross-workspace, cross-agent, cross-execution, wrong-purpose and above-ceiling records resolve as `NotFound` or an empty page; they never reveal existence.
+## Limitações explícitas
 
-Page cursors are opaque, signed, keyset-based and bound to the complete query fingerprint, operation context, filters, classification ceiling, page limit and store revision. PostgreSQL applies scalar filters and `LIMIT page_size + 1` before materialization. Limits have a public maximum. A cursor from another query, context, classification, page shape or store revision is rejected with a sanitized public error.
-
-## Atomicity and idempotency
-
-One `transact` call is the only atomic write boundary. It validates the complete request before mutation, then confirms all record changes, minimal audit entries, idempotency record and outbox entries in the same database transaction.
-
-The idempotency scope includes user/workspace (with a non-null normalized workspace sentinel), agent, execution, correlation, purpose, actor, key and fingerprint. A repeated key with the same fingerprint returns the original receipt and immutable committed record snapshot. A repeated key with a different fingerprint returns an explicit idempotency conflict. Outbox event IDs are unique, and a retry cannot create the same event twice.
-
-Expected versions are checked under the transaction’s write lock. A mismatch returns `TransactionConflicted`; last-write-wins is never implicit. A rejected request or rollback leaves no partial record, audit, idempotency or outbox row visible.
-
-## Authorization and classification
-
-The adapter applies server-side predicates for every read, scan and mutation. It revalidates user, workspace, agent, execution, correlation and purpose where the record carries those dimensions. Classification is checked before materializing data. Error text, `repr`, logs and operational events contain only sanitized codes and opaque IDs; they never include SQL, credentials, secrets, prompts, raw payloads or proprietary values.
-
-## PostgreSQL adapter
-
-The adapter uses SQLAlchemy 2 for engine/session/transaction handling and internal mappings. Internal tables cover the minimum durable authority:
-
-- versioned records with record type, opaque reference, ownership, classification and JSON-safe snapshot;
-- minimal audit entries;
-- outbox entries with immutable event identity and source/version relation;
-- idempotency keys, fingerprints and receipts.
-
-Constraints and indexes enforce unique record references, monotonic version updates, ownership predicates, unique event IDs, source/version relation and idempotency scope. The public layer never imports the SQLAlchemy package.
-
-The migration chain includes a single-row revision clock initialized from existing receipts, normalized workspace scope, a legacy correlation sentinel for pre-correlation idempotency rows, immutable replay snapshots for new commits, and integrity checks/foreign keys for versions, classifications and source records.
-
-The adapter receives DSN, pool settings, timeout and credentials from composition. It does not create a database, service or container. SQLite in-memory is a contract harness only; PostgreSQL-specific locking, isolation and database error integration tests run only when `AGENTOS_TEST_POSTGRES_DSN` is set.
-
-## Migrations
-
-Alembic migrations are versioned under the PostgreSQL technology package. The initial migration creates only the tables, constraints and indexes listed above. A public administrative helper may invoke `upgrade`, but construction, import, Runtime startup and domain operations never invoke migrations implicitly.
-
-Backup, restore, replication, partitioning, multi-region and disaster recovery are documented limitations, not simulated by this adapter.
-
-## Execution compatibility
-
-The compatibility adapter translates existing `ExecutionDomainChange`, legacy Execution event envelopes, audit records and receipts to/from canonical persistence records. It preserves the signatures and result behavior consumed by `ExecutionControlService`, including `Accepted`, `AlreadyApplied`, `Rejected`, `Conflict` and `Indeterminate`.
-
-The translation is the only place allowed to serialize/deserialize the `Execution` aggregate and legacy event envelope. Runtime, Context, Events, Agents and Providers do not import SQLAlchemy, Alembic or schema types.
-
-## Error and recovery semantics
-
-Database constraint violations, deadlocks, serialization failures, timeouts, connection failures and unknown database errors are normalized into bounded public codes with retryability. Deadlock/serialization/timeout are retryable only when the caller’s idempotency and budget policy permits. A failure before commit is `NOT_COMMITTED`; a lost commit acknowledgement is `UNKNOWN`; no adapter invents success.
-
-`inspect_commit` is authorized by the same context and idempotency scope. It returns the durable receipt if the transaction committed, `NOT_COMMITTED` when the transaction is known absent, or `UNKNOWN` when the database cannot establish a final state. It never replays a command.
-
-## Testing strategy
-
-The test suite is layered:
-
-1. Public contract tests cover complete/incomplete context, bounded options, opaque references, classification, cursor binding and sanitized representations.
-2. In-memory contract tests cover ownership, idempotency, fingerprint conflicts, expected versions, atomicity, rollback, `UNKNOWN`/inspection, outbox deduplication and bounded reads/scans.
-3. SQLAlchemy SQLite tests cover schema mapping, explicit migration invocation, transaction behavior, normalized errors and the same canonical contract where SQLite semantics are valid.
-4. Optional PostgreSQL tests cover row locking, isolation, deadlock/timeout/constraint normalization and concurrent optimistic version conflicts only when `AGENTOS_TEST_POSTGRES_DSN` is configured.
-5. Compatibility and boundary tests prove existing Execution behavior and that Kernel/domain packages contain no concrete persistence dependency.
-
-Every production behavior is introduced by a RED test, followed by minimal GREEN implementation and a focused/full verification run. The mandatory final commands are:
-
-```text
-python -m pytest -q
-python -m compileall -q src tests
-```
-
-The final audit also scans for SQLAlchemy/Alembic outside the PostgreSQL adapter/migrations and reports optional PostgreSQL test status explicitly.
-
-## Explicit non-goals
-
-This session does not add Redis, queues, pub/sub, sessions, locks, leases, workers, Scheduler, DispatchCoordinator, Artifact Storage, Workspaces, Memory, Blackboard, Configuration, API/FastAPI/SSE, Provider execution, filesystem, distributed transactions, exactly-once delivery or commit+publish atomicity.
-
-## Acceptance criteria
-
-- A single typed canonical persistence port exists and is technology-independent.
-- PostgreSQL confirms state, audit, idempotency and outbox atomically.
-- Conflicts, idempotency divergence, rollback and indeterminate commit are explicit.
-- Reads/scans are bounded, opaque-cursor based, ownership filtered and classification aware.
-- Alembic migrations are ordered and explicitly operated.
-- Existing ExecutionControl and in-memory adapter remain green through an explicit compatibility bridge.
-- Runtime, Agent, Events, Context and Providers remain free of concrete persistence imports.
-- Required tests, boundary scans, compileall and final RFC/ADR audit have fresh evidence.
-
-## Implementation evidence
-
-The implemented slice preserves the approved design. Fresh verification on 2026-08-06 reports:
-
-- `python -m pytest -q` → `248 passed, 1 skipped`.
-- `python -m compileall -q src tests` → exit 0.
-- Domain boundary scan → no SQLAlchemy/Alembic matches in Execution, Runtime, Context, Events, Providers or Agents.
-- Public persistence boundary scan → technology names occur only under `src/agentos/persistence/postgres/` and its migrations.
-- `git diff --check` → exit 0.
-- The one skipped test is the optional PostgreSQL integration because `AGENTOS_TEST_POSTGRES_DSN` is not configured; no database, container or service was created automatically.
-
-The adapter proves PostgreSQL-shaped persistence through SQLAlchemy and SQLite contract tests. PostgreSQL-specific row-locking, isolation, deadlock and driver-error behavior remains an integration limitation until a DSN is supplied. Backup/restore, replication, partitioning, multi-region and executable disaster recovery remain intentionally outside this session.
-
-Migration `0002_persistence_integrity` preserves pre-existing idempotency receipts with a legacy correlation sentinel prefix, including duplicate null-workspace keys that could not have been uniquely interpreted under the old schema. Those historical rows contain no original record snapshot; retries never re-execute them, and can only return an authorized current record when its scope is still available.
-
-## Hardening continuation approved for implementation
-
-The repository already contains the approved RFC 601 slice and its compatibility bridge. This continuation closes the remaining contract and recovery edges without changing the public write model or adding a new subsystem.
-
-1. `AuthorizedRead` and `AuthorizedScan` expose typed consistency with `STRONG` as the default, so the public read contract cannot silently lose its consistency declaration.
-2. PostgreSQL scan failures are translated through the same sanitized database-error normalization used by reads and writes; driver SQL, credentials and payloads never cross the public adapter boundary.
-3. Commit inspection preserves a stable opaque transaction reference even when the database itself is unavailable and the query was issued by idempotency key only.
-4. Regression tests prove the new behavior in RED/GREEN order, retain the existing in-memory and SQLAlchemy contract suites, and record that PostgreSQL-specific locking remains optional behind `AGENTOS_TEST_POSTGRES_DSN`.
-
-This continuation does not alter the RFC 601 public method set, the Execution compatibility contract, the migration policy, or the explicit non-goals listed above.
-
-## Hardening execution evidence
-
-The continuation was implemented in commit `ba83412`. Its focused RED/GREEN cycle covered typed query consistency, SQLAlchemy scan-error normalization, and stable key-only unknown-commit inspection. The focused persistence suite passed with `21 passed`; the complete repository verification passed with `329 passed, 1 skipped`, and `python -m compileall -q src tests` exited 0.
-
-The optional PostgreSQL suite was explicitly invoked and skipped because `AGENTOS_TEST_POSTGRES_DSN` was not configured. SQLite remains a contract harness and does not prove PostgreSQL row locking, isolation, deadlock or driver-specific timeout semantics. No database, container or service was created automatically.
-
-The required boundary scan found no forbidden infrastructure names in Execution, Runtime, Context, Events or Providers, and the repository-wide SQLAlchemy/Alembic scan found no matches outside `src/agentos/persistence/postgres/`. `git diff --check` passed. Existing unrelated working-tree changes remain untouched and are reported separately by Git.
-
-## Requirement audit
-
-- The canonical port exposes only `transact`, `read`, `scan` and `inspect_commit`; the complete context, typed transaction/read options, result algebra, opaque references and bounded pages are covered by the contract tests.
-- Both adapters validate ownership, correlation, purpose, version expectations, idempotency fingerprints, classification ceilings, outbox identity and rollback behavior before exposing results.
-- State, minimal audit, idempotency receipt and outbox are committed as one unit; publication remains outside persistence and only follows a confirmed commit.
-- Commit ambiguity is represented as `UNKNOWN`/`TransactionIndeterminate`; inspection is authorized by the same scope and never replays a command.
-- SQLAlchemy 2, Alembic, physical schema and database error translation remain inside the PostgreSQL package; migrations are explicit and never run on import or Runtime startup.
-- Execution compatibility remains an explicit adapter, while Runtime, Agent, Events, Context and Providers remain free of concrete persistence technology.
-- Redis, brokers, workers, Scheduler, Artifact Storage, API, Provider execution, distributed transactions, exactly-once publication and operational disaster recovery were not introduced.
+- O adapter PostgreSQL é coberto em SQLite e por integração PostgreSQL somente quando o DSN é fornecido.
+- Não serão criados Redis, broker, workers, scheduler, API, storage de artifacts, ou transação distribuída.
+- `COMMITTED` + publicação externa não é exactly-once; outbox atrasada/repetida é reconciliável por `event_id`.
+- Backup, restauração, retenção física, replicação, particionamento e disaster recovery executável permanecem operação futura.

@@ -1,382 +1,165 @@
-# RFC 601 Persistence Boundary Implementation Plan
+# Persistência transacional do AgentOS Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task with verification checkpoints.
 
-**Goal:** Implement the canonical RFC 601 transactional persistence port, its in-memory reference adapter, SQLAlchemy 2/Alembic PostgreSQL adapter, and explicit Execution compatibility bridge.
+**Goal:** Completar a porta RFC 601, o adapter PostgreSQL isolado e o adapter em memória com atomicidade, autorização, idempotência, concorrência otimista e reconciliação de commit.
 
-**Architecture:** Public persistence contracts live in `src/agentos/persistence/` and contain only frozen Python values, Protocols and sanitized result types. A generic in-memory adapter proves the contract; the PostgreSQL package owns SQLAlchemy, internal mappings, error translation and migrations. `execution_compat.py` translates the existing Execution port without changing Runtime or ExecutionControl.
+**Architecture:** `agentos.persistence` mantém contratos independentes de tecnologia; `execution_compat.py` é a única ponte legada. `persistence.postgres` contém SQLAlchemy/Alembic e grava registros, auditoria, outbox e idempotência na mesma transação; o adapter em memória fornece o mesmo comportamento como referência.
 
-**Tech Stack:** Python 3.13 target (current interpreter 3.12.10), frozen dataclasses, `Protocol`, `StrEnum`, pytest, SQLAlchemy 2, Alembic, SQLite in-memory contract harness, optional PostgreSQL via `AGENTOS_TEST_POSTGRES_DSN`.
+**Tech Stack:** Python 3.13+, dataclasses congeladas, `Protocol`, `pytest`, SQLAlchemy 2, Alembic, SQLite apenas para harness, PostgreSQL opcional via `AGENTOS_TEST_POSTGRES_DSN`, `compileall`, `rg`.
 
 ## Global Constraints
 
-- PostgreSQL is the sole durable transactional authority; Redis and brokers are out of scope.
-- `TransactionalPersistence` exposes exactly `transact`, `read`, `scan` and `inspect_commit`.
-- SQLAlchemy and Alembic appear only in `src/agentos/persistence/postgres/` and its migrations.
-- `ExecutionControl` remains the only mutating Runtime-facing Execution façade.
-- State, minimal audit, idempotency and outbox are one commit unit.
-- `COMMITTED` is returned only after durable commit; commit acknowledgement loss returns `UNKNOWN`.
-- Same idempotency scope plus same fingerprint replays the receipt; divergent fingerprint is an explicit conflict.
-- Reads and scans apply ownership and classification filters before materializing results.
-- Cursors are opaque, bounded and bound to query/context/classification/store revision.
-- Migrations are never run on import, Runtime startup or domain calls.
-- No provider, context, event bus, agent, Redis, worker, scheduler, API or artifact implementation is added.
-- Preserve pre-existing user changes in the working tree; commit only files intentionally added by this plan.
+- A porta canônica expõe somente `transact`, `read`, `scan` e `inspect_commit`.
+- `COMMITTED` implica estado, auditoria, outbox e idempotência confirmados no mesmo commit.
+- `UNKNOWN` exige `inspect_commit` antes de retry.
+- Ownership, contexto, classificação, fingerprint, versão e filtros são revalidados no adapter.
+- SQLAlchemy e Alembic aparecem somente em `src/agentos/persistence/postgres` e migrations.
+- Migrations são aplicadas somente por `upgrade()` explícito.
+- Não criar Redis, broker, worker, scheduler, API, Artifact Storage ou domínio fora da persistência.
+- Preservar todas as alterações pré-existentes do working tree; usar `git add` somente com caminhos explícitos.
 
 ---
 
-### Task 1: Add canonical public contracts and dependency declarations
+### Task 1: Registrar desenho e matriz de requisitos
 
 **Files:**
-- Create: `src/agentos/persistence/__init__.py`
-- Create: `src/agentos/persistence/models.py`
-- Create: `src/agentos/persistence/ports.py`
-- Create: `src/agentos/persistence/security.py`
-- Modify: `pyproject.toml`
-- Test: `tests/unit/persistence/test_contracts.py`
+- Create: `docs/superpowers/specs/2026-08-06-persistence-design.md`
+- Create: `docs/superpowers/plans/2026-08-06-persistence.md`
+- Create: `docs/superpowers/2026-08-06-persistence-requirement-matrix.md`
 
-**Interfaces:**
-- Produces `PersistenceOperationContext`, `TransactionOptions`, `RecordReference`, `ExpectedVersion`, `RecordChange`, `AuditChange`, `OutboxChange`, `TransactionRequest`, `TransactionReceipt`, `TransactionResult`, `AuthorizedRead`, `AuthorizedScan`, `AuthorizedRecord`, `AuthorizedRecordPage`, `NotFound`, and `TransactionalPersistence`.
-- `TransactionalPersistence.transact(request)`, `.read(query)`, `.scan(query)`, and `.inspect_commit(query)` are the only canonical methods.
+- [x] **Step 1: Registrar a especificação**
 
-- [ ] **Step 1: Write RED contract tests.** Add tests that construct a complete context, reject blank/overlong required fields, reject invalid transaction options and page limits, ensure record/reference `repr` values are opaque, and ensure payload freeze rejects secrets, oversized text and unsupported objects.
+Documentar fronteira, fluxo, segurança, limitações e estratégia de testes.
 
-- [ ] **Step 2: Run the focused tests.**
+- [x] **Step 2: Registrar o plano**
 
-  Run: `python -m pytest tests/unit/persistence/test_contracts.py -q`
+Mapear cada mudança a arquivos, testes e gates executáveis.
 
-  Expected: FAIL because `agentos.persistence` does not exist.
+- [x] **Step 3: Registrar a matriz**
 
-- [ ] **Step 3: Implement the public value types.** Use frozen, slotted dataclasses and bounded immutable mappings. Reuse `agentos.events.models.DataClassification` rather than defining a second classification enum. Define `PersistenceErrorCode` and `Retryability` with sanitized messages and no exception `repr` containing values. Make `AuthorizedRead`/`AuthorizedScan` reject a page limit above 100 and `TransactionOptions` reject non-positive timeouts.
+Relacionar RFC/ADR, contrato/arquivo, teste, lacuna, correção e evidência sem afirmar cobertura que não tenha teste.
 
-- [ ] **Step 4: Add only justified dependencies.** Update `[project].dependencies` to include `SQLAlchemy>=2.0,<3` and `alembic>=1.14,<2`, without adding Redis, broker, HTTP or provider packages.
+---
 
-- [ ] **Step 5: Run the focused tests again.**
-
-  Run: `python -m pytest tests/unit/persistence/test_contracts.py -q`
-
-  Expected: PASS with no warnings.
-
-- [ ] **Step 6: Commit the public contract slice.**
-
-  Run: `git add src/agentos/persistence pyproject.toml tests/unit/persistence/test_contracts.py; git commit -m "feat: add canonical persistence contracts"`
-
-### Task 2: Implement the canonical in-memory adapter
-
-**Files:**
-- Create: `src/agentos/persistence/in_memory.py`
-- Test: `tests/unit/persistence/test_in_memory_transactions.py`
-- Test: `tests/unit/persistence/test_in_memory_authorization.py`
-
-**Interfaces:**
-- Consumes Task 1 public types.
-- Produces `InMemoryTransactionalPersistence` implementing the canonical Protocol, with test-only `seed`, `reject_next`, `not_committed_next`, `indeterminate_next`, `audit_records`, and `confirmed_outbox` inspection helpers.
-
-- [ ] **Step 1: Write RED atomicity/idempotency tests.** Cover same fingerprint replay, divergent fingerprint rejection, optimistic version conflict, duplicate event ID rejection, state+audit+outbox visibility after commit, and no partial mutation after rejection.
-
-- [ ] **Step 2: Run the focused tests.**
-
-  Run: `python -m pytest tests/unit/persistence/test_in_memory_transactions.py -q`
-
-  Expected: FAIL because the adapter is not implemented.
-
-- [ ] **Step 3: Implement the minimal transaction engine.** Validate every change against request context and classification before changing dictionaries. Store idempotency by `(user_id, workspace_id, agent_id, execution_id, purpose, idempotency_key)`. Apply all records, audit entries, idempotency receipt and outbox entries only after every check passes. Use a monotonically increasing store revision and reject duplicate outbox event IDs.
-
-- [ ] **Step 4: Add RED commit-state tests.** Verify `not_committed_next` produces `NOT_COMMITTED` with no visible effect, `indeterminate_next` applies the unit but returns `TransactionIndeterminate`, and `inspect_commit` returns the durable committed receipt without replaying the request.
-
-- [ ] **Step 5: Implement commit inspection.** Keep an internal receipt index keyed by authorized context and transaction ID. Return `NOT_COMMITTED` for a known rejected transaction, `COMMITTED` for an applied unknown commit, and a sanitized lookup failure for an unrelated context/key.
-
-- [ ] **Step 6: Run the transaction tests.**
-
-  Run: `python -m pytest tests/unit/persistence/test_in_memory_transactions.py -q`
-
-  Expected: PASS.
-
-- [ ] **Step 7: Write and verify RED authorization tests.** Assert that cross-user/workspace/agent/execution/purpose reads return `NotFound`, records above the classification ceiling are hidden, and a mismatched cursor cannot be reused.
-
-- [ ] **Step 8: Implement bounded reads/scans.** Apply authorization and classification before returning `AuthorizedRecord`. Bind cursor tokens to a SHA-256 query fingerprint, context, classification and store revision; cap page size at 100 and return empty pages for unauthorized scans.
-
-- [ ] **Step 9: Run all in-memory tests.**
-
-  Run: `python -m pytest tests/unit/persistence/test_in_memory_transactions.py tests/unit/persistence/test_in_memory_authorization.py -q`
-
-  Expected: PASS.
-
-- [ ] **Step 10: Commit the in-memory slice.**
-
-  Run: `git add src/agentos/persistence/in_memory.py tests/unit/persistence/test_in_memory_transactions.py tests/unit/persistence/test_in_memory_authorization.py; git commit -m "feat: add in-memory persistence adapter"`
-
-### Task 3: Add SQLAlchemy internal schema and explicit Alembic migration
-
-**Files:**
-- Create: `src/agentos/persistence/postgres/__init__.py`
-- Create: `src/agentos/persistence/postgres/schema.py`
-- Create: `src/agentos/persistence/postgres/errors.py`
-- Create: `src/agentos/persistence/postgres/migrate.py`
-- Create: `src/agentos/persistence/postgres/migrations/env.py`
-- Create: `src/agentos/persistence/postgres/migrations/script.py.mako`
-- Create: `src/agentos/persistence/postgres/migrations/versions/0001_initial_persistence.py`
-- Test: `tests/unit/persistence/test_postgres_schema.py`
-- Test: `tests/unit/persistence/test_migrations.py`
-
-**Interfaces:**
-- Produces internal `metadata`, table definitions, `create_engine_for_tests`, normalized database error mapping, and explicit `upgrade(dsn, revision="head")`.
-- No symbol from this task is imported by Runtime, Events, Context, Providers or Agents.
-
-- [ ] **Step 1: Write RED schema tests.** Assert that metadata declares records, audit, outbox and idempotency tables, unique event/idempotency constraints, ownership columns, version columns and classification columns.
-
-- [ ] **Step 2: Run the schema tests.**
-
-  Run: `python -m pytest tests/unit/persistence/test_postgres_schema.py -q`
-
-  Expected: FAIL because the PostgreSQL package does not exist.
-
-- [ ] **Step 3: Implement internal SQLAlchemy 2 mappings.** Use `DeclarativeBase` or SQLAlchemy Core tables only in this package. Store bounded JSON-safe snapshots in JSON columns, decimal cost as text/decimal-safe values, timezone-aware timestamps, ownership fields, `record_version`, and immutable event IDs. Add indexes for ownership, record type/version and outbox pending reads.
-
-- [ ] **Step 4: Write RED migration tests.** Construct the adapter/schema without calling Alembic and assert the database has no persistence tables until `upgrade()` is explicitly invoked; then run `upgrade()` against `sqlite:///:memory:` and assert the tables exist.
-
-- [ ] **Step 5: Implement the explicit migration entry point.** Configure Alembic programmatically with the package migration directory. `upgrade()` is the only function that invokes Alembic; imports and adapter construction do not call it.
-
-- [ ] **Step 6: Run schema and migration tests.**
-
-  Run: `python -m pytest tests/unit/persistence/test_postgres_schema.py tests/unit/persistence/test_migrations.py -q`
-
-  Expected: PASS.
-
-- [ ] **Step 7: Commit the schema slice.**
-
-  Run: `git add src/agentos/persistence/postgres tests/unit/persistence/test_postgres_schema.py tests/unit/persistence/test_migrations.py; git commit -m "feat: add persistence schema and migrations"`
-
-### Task 4: Implement the PostgreSQL/SQLAlchemy adapter
-
-**Files:**
-- Create: `src/agentos/persistence/postgres/adapter.py`
-- Modify: `src/agentos/persistence/postgres/__init__.py`
-- Test: `tests/unit/persistence/test_postgres_adapter.py`
-- Test: `tests/integration/persistence/test_postgres_optional.py`
-
-**Interfaces:**
-- Implements the canonical `TransactionalPersistence` with `PostgresTransactionalPersistence(engine_or_dsn, session_factory=None, commit_hook=None)` and no automatic migration.
-- Uses Task 3 schema and maps SQLAlchemy/DBAPI errors to `PersistenceErrorCode` and retryability without exposing SQL or driver messages.
-
-- [ ] **Step 1: Write RED SQLite adapter tests.** Cover explicit schema setup, create/update/read/scan, same-key replay, divergent fingerprint, expected-version conflict, atomic audit/outbox insertion, rollback, duplicate event constraint and bounded authorization.
-
-- [ ] **Step 2: Run the focused adapter tests.**
-
-  Run: `python -m pytest tests/unit/persistence/test_postgres_adapter.py -q`
-
-  Expected: FAIL because the adapter is not implemented.
-
-- [ ] **Step 3: Implement engine/session composition.** Accept a DSN or prebuilt engine from composition. Configure pool and timeout options only through constructor arguments. Use a session transaction per `transact`; apply supported isolation/read-only/timeout options without assuming SQLite supports PostgreSQL locking.
-
-- [ ] **Step 4: Implement transactional writes.** Within one session transaction, lock/read expected records, validate ownership/classification/fingerprints, update record versions, insert audit/idempotency/outbox rows, and commit. Roll back on every rejection or exception. Invoke the injected `commit_hook` only around commit so tests can simulate `NOT_COMMITTED` and lost acknowledgement without changing domain code.
-
-- [ ] **Step 5: Implement read, scan and inspect.** Use server-side ownership/classification predicates, bounded filters and keyset/offset state represented only by the opaque cursor. `inspect_commit` reads the idempotency receipt under the same context scope and never replays the transaction.
-
-- [ ] **Step 6: Implement normalized error translation.** Map integrity conflicts to explicit rejection/conflict codes, deadlocks and serialization failures to retryable codes, statement/transaction timeouts to retryable timeout codes, and connection loss during commit to `TransactionIndeterminate`. Public messages contain only stable codes and opaque transaction IDs.
-
-- [ ] **Step 7: Run unit adapter tests.**
-
-  Run: `python -m pytest tests/unit/persistence/test_postgres_adapter.py -q`
-
-  Expected: PASS.
-
-- [ ] **Step 8: Add optional PostgreSQL tests.** Skip unless `AGENTOS_TEST_POSTGRES_DSN` is set. When configured, explicitly run the migration, then cover concurrent expected-version conflict, transaction isolation/locking and database-specific deadlock/timeout normalization.
-
-- [ ] **Step 9: Run optional tests with the environment rule.**
-
-  Run: `python -m pytest tests/integration/persistence/test_postgres_optional.py -q`
-
-  Expected: PASS when DSN is configured; otherwise explicit skips and no automatic service creation.
-
-- [ ] **Step 10: Commit the SQL adapter slice.**
-
-  Run: `git add src/agentos/persistence/postgres/adapter.py src/agentos/persistence/postgres/__init__.py tests/unit/persistence/test_postgres_adapter.py tests/integration/persistence/test_postgres_optional.py; git commit -m "feat: implement SQLAlchemy persistence adapter"`
-
-### Task 5: Add explicit Execution compatibility bridge
-
-**Files:**
-- Create: `src/agentos/persistence/execution_compat.py`
-- Modify: `src/agentos/persistence/__init__.py`
-- Test: `tests/unit/persistence/test_execution_compat.py`
-- Test: `tests/unit/integration/test_kernel_boundaries.py`
-
-**Interfaces:**
-- Produces `ExecutionTransactionalPersistenceAdapter` implementing `agentos.execution.ports.TransactionalPersistence` over any canonical persistence adapter.
-- Preserves old `ExecutionControlService` result types and converts legacy Execution event envelopes through `agentos.events.compat` explicitly.
-
-- [ ] **Step 1: Write RED compatibility tests.** Seed an `Execution` through the canonical in-memory adapter, load it through the old Execution port, perform a transition through `ExecutionControlService`, and assert that the canonical record, audit and canonical outbox all commit together. Add an indeterminate commit test requiring `inspect_commit` before retry.
-
-- [ ] **Step 2: Run the focused compatibility tests.**
-
-  Run: `python -m pytest tests/unit/persistence/test_execution_compat.py -q`
-
-  Expected: FAIL because the bridge is not implemented.
-
-- [ ] **Step 3: Implement bounded Execution serialization.** Encode/decode the `Execution` aggregate using only JSON-safe strings, numbers, enums, references and ISO timestamps. Keep the serializer in the compatibility module; do not add persistence imports to `execution.models` or `execution.control`.
-
-- [ ] **Step 4: Implement request/result translation.** Map `TransactionRequest` to canonical record/audit/outbox changes, map canonical receipts/results back to the old result algebra, and scope lookup/inspection with every context field. Use `to_canonical_event(..., agent_id=...)` and `from_execution_event(...)` only at this bridge.
-
-- [ ] **Step 5: Run compatibility and boundary tests.**
-
-  Run: `python -m pytest tests/unit/persistence/test_execution_compat.py tests/unit/integration/test_kernel_boundaries.py -q`
-
-  Expected: PASS; SQLAlchemy/Alembic strings appear only in the PostgreSQL package/migrations.
-
-- [ ] **Step 6: Commit the bridge slice.**
-
-  Run: `git add src/agentos/persistence/execution_compat.py src/agentos/persistence/__init__.py tests/unit/persistence/test_execution_compat.py tests/unit/integration/test_kernel_boundaries.py; git commit -m "feat: bridge execution persistence contract"`
-
-### Task 6: Complete requirement coverage and final verification
-
-**Files:**
-- Modify: `docs/superpowers/specs/2026-08-06-persistence-design.md`
-- Modify: `docs/superpowers/plans/2026-08-06-persistence.md`
-- Create or modify: `tests/unit/persistence/test_security_regressions.py`
-- Create or modify: `tests/unit/persistence/test_requirement_matrix.py`
-
-**Interfaces:**
-- Consumes all previous public contracts and adapters.
-- Produces fresh evidence for the RFC/ADR acceptance criteria and an honest limitation record for unavailable PostgreSQL integration.
-
-- [ ] **Step 1: Write RED security regression tests.** Prove that exception strings, `repr`, audit records and persistence errors omit SQL, passwords, credentials, secrets, prompt/raw payload fields and proprietary content.
-
-- [ ] **Step 2: Implement only the minimum sanitization fixes exposed by those tests.** Do not add logging of record payloads or schema details.
-
-- [ ] **Step 3: Run the complete mandatory verification.**
-
-  Run: `python -m pytest -q`
-
-  Expected: all existing and new unit tests pass; optional PostgreSQL tests are skipped only when the DSN is absent.
-
-  Run: `python -m compileall -q src tests`
-
-  Expected: exit code 0.
-
-  Run: `rg -n "SQLAlchemy|sqlalchemy|Alembic|alembic" src/agentos --glob '!persistence/postgres/**'`
-
-  Expected: no matches.
-
-  Run: `git diff --check`
-
-  Expected: exit code 0.
-
-  Run: `git status --short --branch`
-
-  Expected: report only intentional persistence files plus pre-existing user changes.
-
-- [ ] **Step 4: Audit each requirement against RFC 050, 060, 101–104, 201, 501, 502, 601 and ADRs 002, 009, 012.** Record covered behavior, evidence command/test, and explicit limitation for backup/restore/replication/multi-region/DR and absent PostgreSQL DSN.
-
-- [ ] **Step 5: Commit the final evidence update.**
-
-  Run: `git add docs/superpowers/specs/2026-08-06-persistence-design.md docs/superpowers/plans/2026-08-06-persistence.md tests/unit/persistence; git commit -m "docs: record persistence verification"`
-
-## Self-review
-
-- Scope is one subsystem: the RFC 601 persistence boundary plus its required adapters and compatibility bridge.
-- All public names used in later tasks are defined in Task 1.
-- Every task has a RED test, focused verification, implementation, and commit checkpoint.
-- PostgreSQL concurrency claims are separated from SQLite harness claims and guarded by the DSN rule.
-- No task creates Redis, a broker, worker/scheduler infrastructure, or a domain outside RFC 601.
-
-## Execution status and evidence
-
-- [x] Task 1 — canonical public contracts and SQLAlchemy/Alembic dependency declarations.
-- [x] Task 2 — in-memory atomic/idempotent adapter with authorization, classification and cursor tests.
-- [x] Task 3 — internal SQLAlchemy schema and explicit Alembic migration.
-- [x] Task 4 — SQLAlchemy adapter, normalized errors, SQLite contract tests and optional PostgreSQL test guarded by `AGENTOS_TEST_POSTGRES_DSN`.
-- [x] Task 5 — explicit Execution compatibility bridge, JSON-safe aggregate translation and idempotency/commit inspection coverage.
-- [x] Task 6 — sanitization regressions, canonical-port matrix and final boundary checks.
-
-Fresh evidence:
-
-- `python -m pytest -q` → `248 passed, 1 skipped`.
-- `python -m compileall -q src tests` → exit 0.
-- Domain dependency scan → `NO_DOMAIN_MATCHES`.
-- `git diff --check` → exit 0.
-- PostgreSQL integration → skipped because `AGENTOS_TEST_POSTGRES_DSN` is absent; no service was created automatically.
-
-Known limits are intentional: SQLite does not prove PostgreSQL locking/isolation/deadlock semantics, and physical backup/restore, replication, partitioning, multi-region and disaster recovery procedures were not simulated.
-
-## Hardening continuation — approved 2026-08-06
-
-The original implementation plan is complete in the repository. The following focused tasks close the remaining review findings without changing the four-method canonical port.
-
-### Task 7: Make authorized read consistency explicit
+### Task 2: Fechar contratos e adapter em memória com TDD
 
 **Files:**
 - Modify: `src/agentos/persistence/models.py`
-- Test: `tests/unit/persistence/test_contracts.py`
+- Modify: `src/agentos/persistence/in_memory.py`
+- Modify: `src/agentos/persistence/security.py`
+- Modify: `tests/unit/persistence/test_contracts.py`
+- Modify: `tests/unit/persistence/test_in_memory_transactions.py`
+- Modify: `tests/unit/persistence/test_in_memory_authorization.py`
+- Modify: `tests/unit/persistence/test_security_regressions.py`
 
-**Interfaces:**
-- Consumes: existing `ConsistencyLevel` and `AuthorizedRead`/`AuthorizedScan` constructors.
-- Produces: `AuthorizedRead.consistency` and `AuthorizedScan.consistency`, both typed as `ConsistencyLevel` and defaulting to `STRONG`.
+- [ ] **Step 1: Escrever testes RED**
 
-- [x] Write a failing contract test that constructs both queries with string and enum consistency values, asserts normalization to `ConsistencyLevel`, and rejects an unknown value.
-- [x] Run `python -m pytest tests/unit/persistence/test_contracts.py -q` and confirm the new assertion fails because the query objects do not expose consistency.
-- [x] Add the defaulted field and enum normalization to both frozen query models without changing existing positional call sites.
-- [x] Run the focused contract test and confirm it passes.
+Cobrir contexto completo, fingerprint divergente, conflito de versão, rollback de validação, `UNKNOWN`/inspeção, outbox duplicada, ceiling, cursor inválido após revisão e mensagens sem segredo.
 
-### Task 8: Normalize read-side database failures
+- [ ] **Step 2: Rodar os testes focados e confirmar RED**
+
+Executar `python -m pytest -q tests/unit/persistence/test_in_memory_transactions.py tests/unit/persistence/test_in_memory_authorization.py tests/unit/persistence/test_security_regressions.py` e confirmar falha pela lacuna esperada.
+
+- [ ] **Step 3: Implementar o mínimo**
+
+Corrigir somente validação, atomicidade, cursor, idempotência e sanitização necessárias; preservar resultados públicos tipados.
+
+- [ ] **Step 4: Rodar GREEN e refatorar**
+
+Executar os mesmos testes, depois `python -m pytest -q tests/unit/persistence`.
+
+---
+
+### Task 3: Fechar ponte explícita com Execution
+
+**Files:**
+- Modify: `src/agentos/persistence/execution_compat.py`
+- Modify: `tests/unit/persistence/test_execution_persistence_compat.py`
+- Modify: `tests/unit/execution/test_in_memory_persistence.py` somente se uma regressão de compatibilidade demonstrada exigir ajuste
+
+- [ ] **Step 1: Escrever teste RED**
+
+Provar que `ExecutionControlService` continua usando apenas a ponte, preserva idempotência e traduz `UNKNOWN`, conflito e autorização sem expor o contrato canônico ao Runtime.
+
+- [ ] **Step 2: Confirmar RED**
+
+Executar `python -m pytest -q tests/unit/persistence/test_execution_persistence_compat.py`.
+
+- [ ] **Step 3: Implementar GREEN**
+
+Atualizar apenas traduções de request/result e validações de contexto necessárias.
+
+- [ ] **Step 4: Verificar**
+
+Executar `python -m pytest -q tests/unit/persistence/test_execution_persistence_compat.py tests/unit/execution`.
+
+---
+
+### Task 4: Auditar e fechar adapter SQLAlchemy/Alembic com TDD
 
 **Files:**
 - Modify: `src/agentos/persistence/postgres/adapter.py`
-- Test: `tests/unit/persistence/test_postgres_adapter.py`
+- Modify: `src/agentos/persistence/postgres/errors.py`
+- Modify: `src/agentos/persistence/postgres/schema.py`
+- Modify: `src/agentos/persistence/postgres/migrations/versions/0001_initial_persistence.py`
+- Modify: `src/agentos/persistence/postgres/migrations/versions/0002_persistence_integrity.py`
+- Modify: `tests/unit/persistence/test_postgres_adapter.py`
+- Modify: `tests/unit/persistence/test_postgres_schema.py`
+- Modify: `tests/unit/persistence/test_migrations.py`
+- Modify: `tests/integration/persistence/test_postgres_optional.py` somente para casos opcionais bounded
 
-**Interfaces:**
-- Consumes: `normalize_database_error`, `PersistenceAdapterError`, `AuthorizedScan`, and `InspectCommit`.
-- Produces: sanitized `PersistenceAdapterError` for scan failures and a stable `inspection:unknown` receipt identifier when commit inspection cannot reach the database without a transaction ID.
+- [ ] **Step 1: Escrever testes RED**
 
-- [x] Write failing tests that make the session factory raise a SQLAlchemy error during `scan`, and during key-only `inspect_commit`, then assert normalized code/receipt behavior with no driver text.
-- [x] Run the focused tests and confirm the failures occur for the missing normalization and invalid `None` receipt transaction ID.
-- [x] Wrap the SQLAlchemy portion of `scan` with the existing normalization path and use the same opaque fallback identifier in the `inspect_commit` exception path.
-- [x] Run the focused PostgreSQL adapter tests and confirm they pass.
+Cobrir commit atômico estado/auditoria/outbox, rollback, constraint/outbox duplicada, inspeção por escopo, cursor vinculado, opções de isolamento/timeout, erro de conexão no commit e ausência de migration implícita.
 
-### Task 9: Re-run the complete persistence and boundary verification
+- [ ] **Step 2: Confirmar RED**
+
+Executar `python -m pytest -q tests/unit/persistence/test_postgres_adapter.py tests/unit/persistence/test_migrations.py tests/unit/persistence/test_postgres_schema.py`.
+
+- [ ] **Step 3: Implementar o mínimo**
+
+Manter SQLAlchemy/Alembic isolados, normalizar erros sem mensagem de driver, usar constraints/índices e tornar a transação segura sob retry/commit indeterminado.
+
+- [ ] **Step 4: Verificar GREEN**
+
+Executar a suíte unitária de persistência; executar integração PostgreSQL apenas se `AGENTOS_TEST_POSTGRES_DSN` existir e registrar o resultado.
+
+---
+
+### Task 5: Auditoria de fronteiras e matriz
 
 **Files:**
-- Modify: `docs/superpowers/specs/2026-08-06-persistence-design.md`
-- Modify: `docs/superpowers/plans/2026-08-06-persistence.md`
+- Modify: `docs/superpowers/2026-08-06-persistence-requirement-matrix.md`
+- Modify: `tests/unit/persistence/test_requirement_matrix.py` somente se um requisito novo precisar de prova automatizada
 
-**Interfaces:**
-- Consumes: all canonical contracts, adapters, migrations, compatibility tests and boundary scans.
-- Produces: fresh evidence for the RFC/ADR acceptance matrix and an honest report of optional PostgreSQL integration status.
+- [ ] **Step 1: Auditar imports**
 
-- [x] Run the focused persistence tests after each GREEN cycle.
-- [x] Run `python -m pytest -q` and record the complete result.
-- [x] Run `python -m compileall -q src tests` and record exit code 0.
-- [x] Run the required forbidden-dependency scan and verify only `src/agentos/persistence/postgres/` contains SQLAlchemy/Alembic references.
-- [x] Run `git diff --check` and inspect `git status --short --branch` before reporting completion.
-- [x] Update this spec and plan with fresh counts, skipped optional tests and remaining production limitations.
+Executar scan sem matches de SQLAlchemy/Alembic em Runtime, Execution, Context, Events, Agents e Providers; confirmar tecnologia confinada ao adapter/migrations.
 
-## Hardening self-review
+- [ ] **Step 2: Atualizar matriz com evidência fresca**
 
-- Task 7 covers the public query contract without adding a fifth persistence operation or changing write semantics.
-- Task 8 covers both identified error paths using existing sanitized error types; no raw database exception is surfaced.
-- Task 9 covers the prompt's mandatory full-suite, compile, boundary and working-tree evidence.
-- PostgreSQL locking, deadlock and isolation claims remain explicitly limited to configured integration tests; SQLite remains a contract harness only.
+Registrar comandos, contagens, limitações PostgreSQL e qualquer linha ainda fora de escopo.
 
-## Hardening execution evidence
+---
 
-- Commit `ba83412` contains only the persistence hardening continuation: typed query consistency, normalized SQLAlchemy scan failures, stable unknown-inspection receipts, tests, and updated persistence documents.
-- RED/GREEN evidence: the new contract test first failed with `TypeError` for the missing `consistency` argument; the two adapter regressions first failed with raw `OperationalError`/invalid `None` receipt; focused GREEN verification passed with `21 passed`.
-- Full verification: `python -m pytest -q` → `329 passed, 1 skipped`; `python -m compileall -q src tests` → exit 0; `git diff --check` → exit 0.
-- Optional PostgreSQL verification: `AGENTOS_TEST_POSTGRES_DSN configured: False`; `python -m pytest tests/integration/persistence/test_postgres_optional.py -q` → `1 skipped`. No database, container or service was created.
-- Boundary verification: the required Kernel/domain scan produced `NO_FORBIDDEN_DOMAIN_MATCHES`; the repository-wide SQLAlchemy/Alembic scan produced `NO_OUTSIDE_POSTGRES_MATCHES` after excluding `src/agentos/persistence/postgres/`.
+### Task 6: Gates finais e revisão independente
 
-## Requirement audit
+**Files:**
+- Modify: arquivos aplicáveis da implementação e matriz após achados da revisão
 
-| Requirement area | Evidence | Status |
-| --- | --- | --- |
-| Canonical four-method port and complete operation context | `src/agentos/persistence/models.py`, `ports.py`, `test_contracts.py`, `test_requirement_matrix.py` | Covered |
-| Atomic state, audit, idempotency and outbox commit | `test_in_memory_transactions.py`, `test_postgres_adapter.py` | Covered by in-memory/SQLite harness |
-| Fingerprint idempotency, duplicate event prevention and optimistic versions | transaction and adapter tests | Covered |
-| Ownership, correlation, purpose and classification filtering | authorization, adapter and compatibility tests | Covered |
-| Bounded scans and query-bound opaque cursors | authorization and adapter scan tests | Covered |
-| Rollback, `NOT_COMMITTED`, `UNKNOWN` and explicit inspection | transaction, adapter and compatibility tests | Covered |
-| Error normalization and sanitized public representations | `test_security_regressions.py` plus scan/inspection regressions | Covered |
-| SQLAlchemy/Alembic isolation and explicit migrations | schema/migration tests plus boundary scans | Covered |
-| Runtime/Agent/Events/Context/Providers technology independence | `test_boundary_scan.py`, integration boundary test, required scans | Covered |
-| PostgreSQL locking/isolation/deadlock behavior | optional integration suite | Not executed: DSN absent |
-| Backup, restore, replication, partitioning, multi-region and executable DR | RFC 601 limitation record | Explicitly out of scope |
-| Redis, brokers, workers, scheduler, API, artifacts and other domains | scope review and unchanged tree outside persistence | Not introduced |
+- [ ] **Step 1: Rodar gates antes da revisão**
+
+Executar `python -m pytest -q`, `python -m compileall -q src tests`, scan de fronteiras e `git diff --check`.
+
+- [ ] **Step 2: Disparar subagente revisor somente leitura**
+
+Entregar contexto/diff e pedir revisão contra RFC 601 e ADRs 002/009/012, buscando atomicidade, `UNKNOWN`, autorização, vazamento tecnológico e regressões, com severidade e arquivo/linha.
+
+- [ ] **Step 3: Tratar achados**
+
+Para cada achado, decidir aplicável/não aplicável com evidência; corrigir os aplicáveis com teste RED/GREEN e atualizar a matriz.
+
+- [ ] **Step 4: Repetir todos os gates**
+
+Executar novamente suíte completa, `compileall`, scans, `git diff --check`, status e resultado dos testes PostgreSQL opcionais antes da resposta final.
