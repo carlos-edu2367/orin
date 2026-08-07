@@ -65,7 +65,7 @@ Foi feita uma segunda passagem read-only independente sobre `3854a9d..5c9454b`, 
 
 - `3854a9d` — `docs: define RFC 406 capabilities design`
 - `5c9454b` — `feat: implement RFC 406 capabilities boundary`
-- commit documental final — será o commit imediatamente seguinte no histórico desta sessão
+- `6d14a21` — `docs: close RFC 406 capabilities gate` (inclui ajustes finais, matriz, closeout e prompt)
 
 ## Limitações legítimas
 
