@@ -59,6 +59,7 @@ Foi feita revisão read-only independente do diff contra RFC 402, RFC 403, RFC 6
 - `e163252 feat: integrate resource manager with filesystem and workspaces`
 - `0c53451 fix: harden resource expiry and filesystem cleanup`
 - `2d3e2a9 fix: enforce resource idempotency and filesystem containment`
+- `4e97810 docs: close filesystem and resource manager gates`
 
 ## Próximo gate
 
