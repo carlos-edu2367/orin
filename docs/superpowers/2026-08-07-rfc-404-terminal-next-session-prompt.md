@@ -277,3 +277,11 @@ Somente ao concluir o gate, informe:
 - próximo gate indicado pela documentação atualizada.
 
 Não entregue “quase pronto”, não pare por falta de tempo, não peça confirmação e não transforme requisito obrigatório em backlog. A sessão só termina quando o RFC 404 estiver realmente fechado, integrado, verificado e documentado.
+
+## Registro de encerramento desta sessão — 2026-08-07
+
+O gate foi implementado no pacote `src/agentos/terminal` com contratos imutáveis, serviço, adapter de referência determinístico, adapter local isolado, supervisor, buffer bounded, stream/input/cancelamento, persistência/outbox, restore e overflow por referência opaca. A cobertura executada está registrada em `docs/superpowers/2026-08-07-rfc-404-terminal-requirement-matrix.md` e o closeout em `docs/superpowers/2026-08-07-rfc-404-terminal-closeout.md`.
+
+Decisões principais: Resource Manager continua autoridade de lease/capability/fencing/cleanup; cwd público é sempre `WorkspacePath`; o adapter local usa `shell=False` e só resolve caminho físico dentro da boundary; output excedente é truncado ou publicado por writer de Artifact autorizado; commits indeterminados são inspecionados, nunca repetidos cegamente.
+
+Próximo gate indicado: RFC 405 — Browser Resource, consumindo as portas já fechadas de Resource Manager, Workspaces, Filesystem, Persistence, Artifact Storage e Events.
