@@ -466,11 +466,25 @@ class InspectCommit:
     context: PersistenceOperationContext
     transaction_id: str | None
     idempotency_key: str
+    classification_ceiling: DataClassification = DataClassification.RESTRICTED
+    legacy_compatibility: bool = False
 
     def __post_init__(self) -> None:
         if self.transaction_id is not None:
             _required(self.transaction_id, "transaction_id", maximum=128)
         _required(self.idempotency_key, "idempotency_key", maximum=256)
+        object.__setattr__(self, "classification_ceiling", DataClassification(self.classification_ceiling))
+        if not isinstance(self.legacy_compatibility, bool):
+            raise ValueError("legacy_compatibility must be boolean")
+
+    def __repr__(self) -> str:
+        return (
+            "InspectCommit(context=<scoped>, transaction_id=<opaque>, "
+            "idempotency_key=<opaque>, "
+            f"classification_ceiling={self.classification_ceiling.value!r}, "
+            f"legacy_compatibility={self.legacy_compatibility})"
+        )
+
 
 
 def as_plain_mapping(value: Mapping[str, object]) -> dict[str, object]:

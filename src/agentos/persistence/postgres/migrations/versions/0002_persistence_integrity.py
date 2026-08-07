@@ -29,32 +29,64 @@ def upgrade() -> None:
     )
 
     with op.batch_alter_table("persistence_records", recreate="always") as batch:
+        batch.add_column(
+            sa.Column("workspace_scope", sa.String(255), nullable=False, server_default=sa.text("''"))
+        )
         batch.create_check_constraint("ck_persistence_records_version_positive", "version > 0")
         batch.create_check_constraint(
             "ck_persistence_records_classification",
             "classification IN ('PUBLIC', 'INTERNAL', 'CONFIDENTIAL', 'RESTRICTED')",
         )
+        batch.create_unique_constraint(
+            "uq_persistence_records_ownership",
+            ["record_ref", "user_id", "workspace_scope", "agent_id", "execution_id", "correlation_id", "purpose", "actor"],
+        )
+
+    op.execute(sa.text("UPDATE persistence_records SET workspace_scope = COALESCE(workspace_id, '')"))
 
     with op.batch_alter_table("persistence_audit", recreate="always") as batch:
+        batch.add_column(
+            sa.Column("workspace_scope", sa.String(255), nullable=False, server_default=sa.text("''"))
+        )
         batch.create_check_constraint("ck_persistence_audit_version_positive", "resulting_version > 0")
+
+    op.execute(sa.text("UPDATE persistence_audit SET workspace_scope = COALESCE(workspace_id, '')"))
+
+    with op.batch_alter_table("persistence_audit", recreate="always") as batch:
         batch.create_foreign_key(
-            "fk_persistence_audit_record",
+            "fk_persistence_audit_record_scope",
             "persistence_records",
-            ["record_ref"],
-            ["record_ref"],
+            ["record_ref", "user_id", "workspace_scope", "agent_id", "execution_id", "correlation_id", "purpose", "actor"],
+            ["record_ref", "user_id", "workspace_scope", "agent_id", "execution_id", "correlation_id", "purpose", "actor"],
         )
 
     with op.batch_alter_table("persistence_outbox", recreate="always") as batch:
+        batch.add_column(
+            sa.Column("workspace_scope", sa.String(255), nullable=False, server_default=sa.text("''"))
+        )
+        batch.add_column(
+            sa.Column("actor", sa.String(255), nullable=False, server_default=sa.text("''"))
+        )
         batch.create_check_constraint("ck_persistence_outbox_version_positive", "expected_source_version > 0")
         batch.create_check_constraint(
             "ck_persistence_outbox_classification",
             "classification IN ('PUBLIC', 'INTERNAL', 'CONFIDENTIAL', 'RESTRICTED')",
         )
+
+    op.execute(
+        sa.text(
+            "UPDATE persistence_outbox SET workspace_scope = COALESCE(workspace_id, ''), "
+            "actor = COALESCE((SELECT actor FROM persistence_records "
+            "WHERE persistence_records.record_ref = persistence_outbox.source_record_ref), '')"
+        )
+    )
+
+    with op.batch_alter_table("persistence_outbox", recreate="always") as batch:
         batch.create_foreign_key(
-            "fk_persistence_outbox_source_record",
+            "fk_persistence_outbox_source_scope",
             "persistence_records",
-            ["source_record_ref"],
-            ["record_ref"],
+            ["source_record_ref", "user_id", "workspace_scope", "agent_id", "execution_id", "correlation_id", "purpose", "actor"],
+            ["record_ref", "user_id", "workspace_scope", "agent_id", "execution_id", "correlation_id", "purpose", "actor"],
         )
 
     with op.batch_alter_table("persistence_idempotency", recreate="always") as batch:
@@ -107,6 +139,8 @@ def downgrade() -> None:
 
     with op.batch_alter_table("persistence_idempotency", recreate="always") as batch:
         batch.drop_constraint("ck_persistence_idempotency_revision_nonnegative", type_="check")
+        batch.drop_constraint("ck_persistence_idempotency_workspace_scope", type_="check")
+        batch.drop_constraint("ck_persistence_idempotency_commit_state", type_="check")
         batch.drop_constraint("uq_persistence_idempotency_scope", type_="unique")
         batch.create_unique_constraint(
             "uq_persistence_idempotency_scope",
@@ -117,13 +151,19 @@ def downgrade() -> None:
         batch.drop_column("workspace_scope")
 
     with op.batch_alter_table("persistence_outbox", recreate="always") as batch:
-        batch.drop_constraint("fk_persistence_outbox_source_record", type_="foreignkey")
+        batch.drop_constraint("fk_persistence_outbox_source_scope", type_="foreignkey")
         batch.drop_constraint("ck_persistence_outbox_classification", type_="check")
         batch.drop_constraint("ck_persistence_outbox_version_positive", type_="check")
+        batch.drop_column("workspace_scope")
+        batch.drop_column("actor")
 
     with op.batch_alter_table("persistence_audit", recreate="always") as batch:
-        batch.drop_constraint("fk_persistence_audit_record", type_="foreignkey")
+        batch.drop_constraint("fk_persistence_audit_record_scope", type_="foreignkey")
         batch.drop_constraint("ck_persistence_audit_version_positive", type_="check")
+        batch.drop_column("workspace_scope")
 
     with op.batch_alter_table("persistence_records", recreate="always") as batch:
+        batch.drop_constraint("uq_persistence_records_ownership", type_="unique")
+        batch.drop_constraint("ck_persistence_records_classification", type_="check")
         batch.drop_constraint("ck_persistence_records_version_positive", type_="check")
+        batch.drop_column("workspace_scope")

@@ -26,4 +26,20 @@ def upgrade(bind: Engine | Connection | str, revision: str = "head") -> None:
     command.upgrade(config, revision)
 
 
-__all__ = ["MIGRATIONS_PATH", "upgrade"]
+def downgrade(bind: Engine | Connection | str, revision: str = "base") -> None:
+    """Revert migrations explicitly as an administrative operation."""
+    config = Config()
+    config.set_main_option("script_location", str(MIGRATIONS_PATH))
+    if isinstance(bind, Engine):
+        with bind.begin() as connection:
+            config.attributes["connection"] = connection
+            command.downgrade(config, revision)
+        return
+    if isinstance(bind, Connection):
+        config.attributes["connection"] = bind
+    else:
+        config.set_main_option("sqlalchemy.url", bind)
+    command.downgrade(config, revision)
+
+
+__all__ = ["MIGRATIONS_PATH", "downgrade", "upgrade"]

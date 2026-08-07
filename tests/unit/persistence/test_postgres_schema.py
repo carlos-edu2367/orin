@@ -25,3 +25,16 @@ def test_schema_has_ownership_versions_and_integrity_constraints():
     assert idempotency.c.correlation_id.nullable is False
     assert idempotency.c.records.nullable is False
     assert any(constraint.name == "ck_persistence_idempotency_revision_nonnegative" for constraint in idempotency.constraints)
+
+
+def test_schema_binds_audit_and_outbox_to_the_full_record_scope():
+    records = metadata.tables["persistence_records"]
+    audit = metadata.tables["persistence_audit"]
+    outbox = metadata.tables["persistence_outbox"]
+
+    assert "workspace_scope" in records.c
+    assert "workspace_scope" in audit.c
+    assert "workspace_scope" in outbox.c
+    assert any(constraint.name == "uq_persistence_records_ownership" for constraint in records.constraints)
+    assert any(len(constraint.column_keys) == 8 for constraint in audit.foreign_key_constraints)
+    assert any(len(constraint.column_keys) == 8 for constraint in outbox.foreign_key_constraints)

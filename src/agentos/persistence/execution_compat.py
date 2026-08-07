@@ -232,6 +232,7 @@ class ExecutionTransactionalPersistenceAdapter(LegacyPersistence):
                 context=canonical_context,
                 transaction_id=None,
                 idempotency_key=str(idempotency_key),
+                legacy_compatibility=True,
             )
         )
         if inspection.commit_state is not CommitState.COMMITTED:
@@ -311,6 +312,7 @@ class ExecutionTransactionalPersistenceAdapter(LegacyPersistence):
                 context=self._context(context),
                 transaction_id=str(transaction_id),
                 idempotency_key=str(idempotency_key),
+                legacy_compatibility=True,
             )
         )
         resulting_version = int(result.records[0].version) if result.records else 0

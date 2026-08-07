@@ -14,7 +14,7 @@ Completar a fronteira de persistência transacional do AgentOS sem permitir que 
 
 `agentos.persistence` será a única porta canônica. Seus quatro métodos públicos são `transact`, `read`, `scan` e `inspect_commit`. `PersistenceOperationContext` exige `user_id`, `workspace_id` opcional, `agent_id`, `execution_id`, `correlation_id`, `purpose` e `actor`. `TransactionRequest` carrega opções, versões esperadas, fingerprint, mudanças, auditoria e outbox; referências são opacas.
 
-`ExecutionTransactionalPersistenceAdapter` fará a migração explícita da porta legada de `execution.ports.TransactionalPersistence`. Nenhum segundo contrato será duplicado ou exportado como se fosse canônico.
+`ExecutionTransactionalPersistenceAdapter` fará a migração explícita da porta legada de `execution.ports.TransactionalPersistence`. Nenhum segundo contrato será duplicado ou exportado como se fosse canônico. A leitura de recibos históricos sem `correlation_id` só é permitida por uma opção de compatibilidade explícita, nunca por fallback genérico.
 
 ### Unidade transacional
 
@@ -28,13 +28,13 @@ A chave de idempotência é indexada por todos os campos de escopo do contexto e
 
 ### Leituras e scans
 
-`read` aplica ownership e ceiling de classificação antes de materializar o registro e retorna `NotFound` tanto para ausência quanto para falta de autorização. `scan` impõe tipo, filtros escalares bounded, ceiling e página máxima. Cursor é assinado/opaco e vinculado a contexto, filtros, classificação, consistência, limite e revisão do store; uma mudança invalida o cursor.
+`read` aplica ownership e ceiling de classificação antes de materializar o registro e retorna `NotFound` tanto para ausência quanto para falta de autorização. `scan` impõe tipo, filtros escalares bounded, ceiling e página máxima. Cursor é assinado/opaco e vinculado a contexto, filtros, classificação, consistência, limite e revisão do store; uma mudança invalida o cursor. `inspect_commit` retorna referências/recibo mesmo quando o snapshot excede o ceiling e não materializa esse conteúdo. O adapter PostgreSQL rejeita consistência eventual sem uma réplica explícita e configura leitura forte com `REPEATABLE READ`.
 
 ### Adapter PostgreSQL e migrations
 
 `persistence.postgres` é o único pacote tecnológico. Ele usa SQLAlchemy 2 para engine/sessão/transação e Alembic para migrations versionadas. A URL e opções entram por composição. `upgrade()` é uma operação administrativa explícita; nenhum import, construção de adapter, startup do Runtime ou chamada de domínio executa migration.
 
-O schema mínimo contém registros versionados, ownership, auditoria, outbox, idempotência e relógio de revisão, com constraints/índices para unicidade, versão, classificação e origem da outbox. SQLite é somente harness de contrato; locking/isolation PostgreSQL real permanece teste opcional condicionado a `AGENTOS_TEST_POSTGRES_DSN`.
+O schema mínimo contém registros versionados, ownership, auditoria, outbox, idempotência e relógio de revisão, com constraints/índices para unicidade, versão, classificação e FK composta de ownership entre registro, auditoria e outbox. O bridge `PostgresConfirmedOutboxSource` lê somente entradas confirmadas, bounded e filtradas por contexto. SQLite é somente harness de contrato; locking/isolation PostgreSQL real permanece teste opcional condicionado a `AGENTOS_TEST_POSTGRES_DSN`.
 
 ### Segurança e observabilidade
 

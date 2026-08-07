@@ -7,6 +7,8 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy import create_engine
 
 from agentos.events.models import DataClassification
+from agentos.events.ports import OutboxPosition, PublicationLease, PublishOutboxBatch
+from agentos.events.models import EventContext
 from agentos.persistence import (
     AuthorizedRead,
     AuthorizedRecord,
@@ -30,6 +32,8 @@ from agentos.persistence import (
 from agentos.persistence.postgres.migrate import upgrade
 from agentos.persistence.postgres.adapter import PostgresTransactionalPersistence
 from agentos.persistence.postgres.adapter import PersistenceAdapterError
+from agentos.persistence.postgres.outbox import PostgresConfirmedOutboxSource
+from agentos.persistence.postgres.migrate import downgrade
 
 
 NOW = datetime(2026, 8, 6, tzinfo=timezone.utc)
@@ -70,7 +74,7 @@ def make_event(ctx, event_id="event:1", sequence=2):
     )
 
 
-def make_request(ctx, *, transaction_id="transaction:1", key="idempotency:1", expected=1, event_id="event:1", fingerprint="fingerprint:1"):
+def make_request(ctx, *, transaction_id="transaction:1", key="idempotency:1", expected=1, event_id="event:1", fingerprint="fingerprint:1", classification=DataClassification.INTERNAL):
     ref = RecordReference(ctx.execution_id)
     return TransactionRequest(
         transaction_id=transaction_id,
@@ -85,7 +89,7 @@ def make_request(ctx, *, transaction_id="transaction:1", key="idempotency:1", ex
                 record_type="execution",
                 expected_version=expected,
                 data={"state": "RUNNING", "state_version": expected + 1},
-                classification=DataClassification.INTERNAL,
+                classification=classification,
             ),
         ),
         audit=(),
@@ -257,6 +261,124 @@ def test_sqlalchemy_commit_ack_loss_returns_indeterminate_and_inspection_finds_c
     assert key_only.records[0].version == 2
 
 
+def test_sqlalchemy_read_only_noop_does_not_advance_store_revision():
+    adapter, ctx = make_adapter()
+    request = TransactionRequest(
+        transaction_id="transaction:read-only",
+        context=ctx,
+        options=TransactionOptions(read_only=True),
+        idempotency_key="idempotency:read-only",
+        fingerprint="fingerprint:read-only",
+        expected_versions=(),
+        changes=(),
+        audit=(),
+        outbox=(),
+    )
+
+    result = adapter.transact(request)
+
+    assert isinstance(result, TransactionCommitted)
+    assert result.receipt.store_revision == 1
+
+
+def test_sqlalchemy_commit_inspection_hides_records_above_classification_ceiling():
+    adapter, ctx = make_adapter()
+    request = make_request(ctx, classification=DataClassification.RESTRICTED)
+    result = adapter.transact(request)
+
+    assert isinstance(result, TransactionCommitted)
+    receipt = adapter.inspect_commit(
+        InspectCommit(
+            context=ctx,
+            transaction_id=request.transaction_id,
+            idempotency_key=request.idempotency_key,
+            classification_ceiling=DataClassification.CONFIDENTIAL,
+        )
+    )
+
+    assert receipt.commit_state is CommitState.COMMITTED
+    assert receipt.record_refs == (RecordReference(ctx.execution_id),)
+    assert receipt.records == ()
+
+
+def test_sqlalchemy_rejects_eventual_consistency_without_replica_support():
+    adapter, ctx = make_adapter()
+
+    with pytest.raises(PersistenceAdapterError) as raised:
+        adapter.read(
+            AuthorizedRead(
+                context=ctx,
+                record_ref=RecordReference(ctx.execution_id),
+                record_type="execution",
+                classification_ceiling=DataClassification.INTERNAL,
+                consistency="EVENTUAL",
+            )
+        )
+
+    assert raised.value.code is PersistenceErrorCode.INVALID_REQUEST
+
+
+def test_postgres_outbox_source_reads_only_confirmed_bounded_entries():
+    adapter, ctx = make_adapter()
+    request = make_request(ctx)
+    result = adapter.transact(request)
+    assert isinstance(result, TransactionCommitted)
+    source = PostgresConfirmedOutboxSource(adapter)
+    event_context = EventContext(
+        user_id=ctx.user_id,
+        workspace_id=ctx.workspace_id,
+        agent_id=ctx.agent_id,
+        execution_id=ctx.execution_id,
+        correlation_id=ctx.correlation_id,
+        purpose=ctx.purpose,
+    )
+    batch = PublishOutboxBatch(
+        publisher_ref="publisher:1",
+        partition_ref="partition:1",
+        after_position=None,
+        maximum_events=1,
+        lease=PublicationLease("lease:1", "publisher:1", 10),
+        context=event_context,
+    )
+
+    records = source.read_outbox(batch)
+
+    assert len(records) == 1
+    assert records[0].commit_state.value == "COMMITTED"
+    assert source.inspect_commit(records[0], batch) is True
+    assert source.read_outbox(replace(batch, after_position=records[0].position)) == ()
+
+
+def test_read_options_reject_eventual_and_select_repeatable_read_for_strong_queries():
+    adapter = PostgresTransactionalPersistence.__new__(PostgresTransactionalPersistence)
+    adapter.engine = Mock()
+    adapter.engine.dialect.name = "postgresql"
+    session = Mock()
+    ctx = context()
+    query = AuthorizedRead(
+        context=ctx,
+        record_ref=RecordReference(ctx.execution_id),
+        record_type="execution",
+        classification_ceiling=DataClassification.INTERNAL,
+    )
+
+    adapter._configure_read_options(session, query)
+
+    session.connection.assert_called_once_with(execution_options={"isolation_level": "REPEATABLE READ"})
+
+
+def test_migrations_can_downgrade_to_initial_revision():
+    engine = create_engine("sqlite:///:memory:")
+    upgrade(engine)
+
+    downgrade(engine, "0001_initial_persistence")
+
+    from sqlalchemy import inspect
+
+    assert "persistence_clock" not in inspect(engine).get_table_names()
+    assert "workspace_scope" not in inspect(engine).get_columns("persistence_idempotency")
+
+
 def test_sqlalchemy_reads_apply_server_scope_and_classification_filters():
     adapter, ctx = make_adapter()
     adapter.seed(
@@ -422,7 +544,12 @@ def test_sqlalchemy_legacy_idempotency_inspection_recovers_current_authorized_re
         )
 
     inspected = adapter.inspect_commit(
-        InspectCommit(context=ctx, transaction_id=None, idempotency_key="idempotency:legacy")
+        InspectCommit(
+            context=ctx,
+            transaction_id=None,
+            idempotency_key="idempotency:legacy",
+            legacy_compatibility=True,
+        )
     )
 
     assert inspected.commit_state is CommitState.COMMITTED

@@ -225,3 +225,81 @@ def test_inspecting_an_unknown_commit_returns_not_committed_without_leaking_stat
 
     assert receipt.commit_state is CommitState.NOT_COMMITTED
     assert receipt.transaction_id == "transaction:unknown"
+
+
+def test_read_only_noop_does_not_advance_store_revision():
+    store, ctx = seed_record()
+    command = TransactionRequest(
+        transaction_id="transaction:read-only",
+        context=ctx,
+        options=TransactionOptions(read_only=True),
+        idempotency_key="idempotency:read-only",
+        fingerprint="fingerprint:read-only",
+        expected_versions=(),
+        changes=(),
+        audit=(),
+        outbox=(),
+    )
+
+    result = store.transact(command)
+
+    assert isinstance(result, TransactionCommitted)
+    assert result.receipt.store_revision == 1
+
+
+def test_in_memory_rejects_eventual_consistency_without_replica_support():
+    store, ctx = seed_record()
+    command = TransactionRequest(
+        transaction_id="transaction:eventual",
+        context=ctx,
+        options=TransactionOptions(consistency="EVENTUAL"),
+        idempotency_key="idempotency:eventual",
+        fingerprint="fingerprint:eventual",
+        expected_versions=(),
+        changes=(),
+        audit=(),
+        outbox=(),
+    )
+
+    result = store.transact(command)
+
+    assert isinstance(result, TransactionRejected)
+    assert result.code is PersistenceErrorCode.INVALID_REQUEST
+
+
+def test_commit_inspection_hides_records_above_classification_ceiling():
+    store, ctx = seed_record()
+    result = store.transact(
+        TransactionRequest(
+            transaction_id="transaction:restricted",
+            context=ctx,
+            options=TransactionOptions(),
+            idempotency_key="idempotency:restricted",
+            fingerprint="fingerprint:restricted",
+            expected_versions=(ExpectedVersion(RecordReference(ctx.execution_id), 1),),
+            changes=(
+                RecordChange(
+                    record_ref=RecordReference(ctx.execution_id),
+                    record_type="execution",
+                    expected_version=1,
+                    data={"state": "RUNNING"},
+                    classification=DataClassification.RESTRICTED,
+                ),
+            ),
+            audit=(),
+            outbox=(),
+        )
+    )
+
+    assert isinstance(result, TransactionCommitted)
+    receipt = store.inspect_commit(
+        InspectCommit(
+            context=ctx,
+            transaction_id="transaction:restricted",
+            idempotency_key="idempotency:restricted",
+            classification_ceiling=DataClassification.CONFIDENTIAL,
+        )
+    )
+
+    assert receipt.record_refs == (RecordReference(ctx.execution_id),)
+    assert receipt.records == ()

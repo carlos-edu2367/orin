@@ -14,6 +14,7 @@ from .models import (
     AuthorizedRecordPage,
     AuthorizedScan,
     CommitState,
+    ConsistencyLevel,
     InspectCommit,
     NotFound,
     PersistenceErrorCode,
@@ -62,6 +63,12 @@ class InMemoryTransactionalPersistence:
         self._store_revision += 1
 
     def transact(self, request: TransactionRequest) -> TransactionResult:
+        if request.options.consistency is ConsistencyLevel.EVENTUAL:
+            return TransactionRejected(
+                PersistenceErrorCode.INVALID_REQUEST,
+                Retryability.NEVER,
+                request.transaction_id,
+            )
         scope = request.context.scope_key()
         idempotency_key = (scope, request.idempotency_key)
         existing = self._idempotency.get(idempotency_key)
@@ -73,6 +80,15 @@ class InMemoryTransactionalPersistence:
                     transaction_id=request.transaction_id,
                 )
             return TransactionCommitted(receipt, records, already_applied=True)
+
+        if request.options.read_only and not (request.changes or request.audit or request.outbox):
+            return TransactionCommitted(
+                replace(
+                    self._receipt(request, CommitState.COMMITTED),
+                    committed_at=datetime.now(timezone.utc),
+                ),
+                (),
+            )
 
         if self._next_rejection is not None:
             code = self._next_rejection
@@ -102,7 +118,8 @@ class InMemoryTransactionalPersistence:
                 receipt,
             )
 
-        self._store_revision += 1
+        if new_records:
+            self._store_revision += 1
         committed_receipt = replace(
             receipt,
             commit_state=CommitState.COMMITTED,
@@ -168,14 +185,11 @@ class InMemoryTransactionalPersistence:
         receipt = None
         fingerprint = None
         records = ()
-        if query.transaction_id is not None:
-            receipt = self._receipts.get(
-                (query.context.scope_key(), query.transaction_id, query.idempotency_key)
-            )
-        else:
-            existing = self._idempotency.get((query.context.scope_key(), query.idempotency_key))
-            if existing is not None:
-                fingerprint, receipt, records = existing
+        existing = self._idempotency.get((query.context.scope_key(), query.idempotency_key))
+        if existing is not None:
+            fingerprint, candidate_receipt, records = existing
+            if query.transaction_id is None or candidate_receipt.transaction_id == query.transaction_id:
+                receipt = candidate_receipt
         if receipt is None:
             return TransactionReceipt(
                 transaction_id=query.transaction_id or "inspection:unknown",
@@ -185,7 +199,12 @@ class InMemoryTransactionalPersistence:
                 store_revision=self._store_revision,
                 committed_at=None,
             )
-        return replace(receipt, fingerprint=fingerprint, records=records)
+        visible_records = tuple(
+            record
+            for record in records
+            if classification_allows(query.classification_ceiling, record.classification)
+        )
+        return replace(receipt, fingerprint=fingerprint, records=visible_records)
 
     def reject_next(self, code: PersistenceErrorCode = PersistenceErrorCode.CONSTRAINT_VIOLATION) -> None:
         self._next_rejection = code

@@ -17,7 +17,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     create_engine,
-    ForeignKey,
+    ForeignKeyConstraint,
 )
 
 
@@ -41,6 +41,7 @@ persistence_records = Table(
     Column("version", Integer, nullable=False),
     Column("user_id", String(255), nullable=False),
     Column("workspace_id", String(255), nullable=True),
+    Column("workspace_scope", String(255), nullable=False),
     Column("agent_id", String(255), nullable=False),
     Column("execution_id", String(255), nullable=False),
     Column("correlation_id", String(255), nullable=False),
@@ -51,6 +52,10 @@ persistence_records = Table(
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),
     UniqueConstraint("record_ref", name="uq_persistence_records_record_ref"),
+    UniqueConstraint(
+        "record_ref", "user_id", "workspace_scope", "agent_id", "execution_id",
+        "correlation_id", "purpose", "actor", name="uq_persistence_records_ownership",
+    ),
     CheckConstraint("version > 0", name="ck_persistence_records_version_positive"),
     CheckConstraint(
         "classification IN ('PUBLIC', 'INTERNAL', 'CONFIDENTIAL', 'RESTRICTED')",
@@ -72,9 +77,10 @@ persistence_audit = Table(
     Column("id", Integer, primary_key=True),
     Column("audit_ref", String(128), nullable=False),
     Column("transaction_id", String(128), nullable=False),
-    Column("record_ref", String(255), ForeignKey("persistence_records.record_ref"), nullable=False),
+    Column("record_ref", String(255), nullable=False),
     Column("user_id", String(255), nullable=False),
     Column("workspace_id", String(255), nullable=True),
+    Column("workspace_scope", String(255), nullable=False),
     Column("agent_id", String(255), nullable=False),
     Column("execution_id", String(255), nullable=False),
     Column("correlation_id", String(255), nullable=False),
@@ -85,6 +91,16 @@ persistence_audit = Table(
     Column("fields", JSON, nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False),
     UniqueConstraint("audit_ref", name="uq_persistence_audit_ref"),
+    ForeignKeyConstraint(
+        ["record_ref", "user_id", "workspace_scope", "agent_id", "execution_id", "correlation_id", "purpose", "actor"],
+        [
+            "persistence_records.record_ref", "persistence_records.user_id",
+            "persistence_records.workspace_scope", "persistence_records.agent_id",
+            "persistence_records.execution_id", "persistence_records.correlation_id",
+            "persistence_records.purpose", "persistence_records.actor",
+        ],
+        name="fk_persistence_audit_record_scope",
+    ),
     CheckConstraint("resulting_version > 0", name="ck_persistence_audit_version_positive"),
 )
 Index("ix_persistence_audit_scope", persistence_audit.c.user_id, persistence_audit.c.workspace_id, persistence_audit.c.execution_id)
@@ -95,19 +111,31 @@ persistence_outbox = Table(
     Column("id", Integer, primary_key=True),
     Column("event_id", String(255), nullable=False),
     Column("transaction_id", String(128), nullable=False),
-    Column("source_record_ref", String(255), ForeignKey("persistence_records.record_ref"), nullable=False),
+    Column("source_record_ref", String(255), nullable=False),
     Column("expected_source_version", Integer, nullable=False),
     Column("user_id", String(255), nullable=False),
     Column("workspace_id", String(255), nullable=True),
+    Column("workspace_scope", String(255), nullable=False),
     Column("agent_id", String(255), nullable=False),
     Column("execution_id", String(255), nullable=False),
     Column("correlation_id", String(255), nullable=False),
     Column("purpose", String(128), nullable=False),
+    Column("actor", String(255), nullable=False),
     Column("classification", String(32), nullable=False),
     Column("event", JSON, nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("published_at", DateTime(timezone=True), nullable=True),
     UniqueConstraint("event_id", name="uq_persistence_outbox_event_id"),
+    ForeignKeyConstraint(
+        ["source_record_ref", "user_id", "workspace_scope", "agent_id", "execution_id", "correlation_id", "purpose", "actor"],
+        [
+            "persistence_records.record_ref", "persistence_records.user_id",
+            "persistence_records.workspace_scope", "persistence_records.agent_id",
+            "persistence_records.execution_id", "persistence_records.correlation_id",
+            "persistence_records.purpose", "persistence_records.actor",
+        ],
+        name="fk_persistence_outbox_source_scope",
+    ),
     CheckConstraint("expected_source_version > 0", name="ck_persistence_outbox_version_positive"),
     CheckConstraint(
         "classification IN ('PUBLIC', 'INTERNAL', 'CONFIDENTIAL', 'RESTRICTED')",

@@ -23,6 +23,7 @@ from agentos.persistence.models import (
     AuthorizedRecordPage,
     AuthorizedScan,
     CommitState,
+    ConsistencyLevel,
     InspectCommit,
     NotFound,
     PersistenceErrorCode,
@@ -99,6 +100,12 @@ class PostgresTransactionalPersistence:
             self._next_revision(session)
 
     def transact(self, request: TransactionRequest) -> TransactionResult:
+        if request.options.consistency is ConsistencyLevel.EVENTUAL:
+            return TransactionRejected(
+                PersistenceErrorCode.INVALID_REQUEST,
+                Retryability.NEVER,
+                request.transaction_id,
+            )
         session: Session = self._Session()
         try:
             session.begin()
@@ -122,6 +129,19 @@ class PostgresTransactionalPersistence:
                     records = self._legacy_replay_records(session, request, receipt)
                 session.rollback()
                 return TransactionCommitted(receipt, records, already_applied=True)
+
+            if request.options.read_only and not (request.changes or request.audit or request.outbox):
+                now = datetime.now(timezone.utc)
+                receipt = TransactionReceipt(
+                    transaction_id=request.transaction_id,
+                    commit_state=CommitState.COMMITTED,
+                    record_refs=(),
+                    outbox_refs=(),
+                    store_revision=self._current_revision(session),
+                    committed_at=now,
+                )
+                session.commit()
+                return TransactionCommitted(receipt, ())
 
             plan = self._plan_transaction(session, request)
             if isinstance(plan, TransactionResult):
@@ -154,6 +174,7 @@ class PostgresTransactionalPersistence:
                         record_ref=str(audit.record_ref),
                         user_id=request.context.user_id,
                         workspace_id=request.context.workspace_id,
+                        workspace_scope=request.context.workspace_id or "",
                         agent_id=request.context.agent_id,
                         execution_id=request.context.execution_id,
                         correlation_id=request.context.correlation_id,
@@ -175,10 +196,12 @@ class PostgresTransactionalPersistence:
                         expected_source_version=item.expected_source_version,
                         user_id=request.context.user_id,
                         workspace_id=request.context.workspace_id,
+                        workspace_scope=request.context.workspace_id or "",
                         agent_id=request.context.agent_id,
                         execution_id=request.context.execution_id,
                         correlation_id=request.context.correlation_id,
                         purpose=request.context.purpose,
+                        actor=request.context.actor,
                         classification=item.event.classification.value,
                         event=self._event_values(item.event),
                         created_at=now,
@@ -272,17 +295,21 @@ class PostgresTransactionalPersistence:
             return TransactionCommitted(receipt, records, already_applied=True)
 
     def read(self, query: AuthorizedRead) -> AuthorizedRecord | NotFound:
+        self._reject_unsupported_read_consistency(query.consistency)
         with self._Session() as session:
             try:
+                self._configure_read_options(session, query)
                 return self._read_in_session(session, query)
             except SQLAlchemyError as error:
                 normalized = normalize_database_error(error)
                 raise PersistenceAdapterError(normalized.code, normalized.retryability) from None
 
     def scan(self, query: AuthorizedScan) -> AuthorizedRecordPage:
+        self._reject_unsupported_read_consistency(query.consistency)
         fingerprint = self._scan_fingerprint(query)
         try:
             with self._Session() as session:
+                self._configure_read_options(session, query)
                 revision = self._current_revision(session)
                 last_ref = None
                 if query.page.cursor is not None:
@@ -319,7 +346,9 @@ class PostgresTransactionalPersistence:
         try:
             with self._Session() as session:
                 filters = [
-                    *self._idempotency_scope_filters(query.context),
+                    *self._idempotency_scope_filters(
+                        query.context, include_legacy=query.legacy_compatibility
+                    ),
                     persistence_idempotency.c.idempotency_key == query.idempotency_key,
                 ]
                 if query.transaction_id is not None:
@@ -339,9 +368,13 @@ class PostgresTransactionalPersistence:
                         committed_at=None,
                     )
                 receipt = self._receipt_from_json(row["receipt"])
-                records = self._records_from_json(row.get("records"), query.context)
+                records = self._records_from_json(
+                    row.get("records"), query.context, query.classification_ceiling
+                )
                 if not records and str(row["correlation_id"]).startswith(f"{LEGACY_CORRELATION_PREFIX}:"):
-                    records = self._legacy_records_for_context(session, query.context, receipt)
+                    records = self._legacy_records_for_context(
+                        session, query.context, receipt, query.classification_ceiling
+                    )
                     if not records:
                         return TransactionReceipt(
                             transaction_id=query.transaction_id or receipt.transaction_id,
@@ -472,16 +505,21 @@ class PostgresTransactionalPersistence:
         )
 
     @staticmethod
-    def _idempotency_scope_filters(context: PersistenceOperationContext):
+    def _idempotency_scope_filters(
+        context: PersistenceOperationContext, *, include_legacy: bool = False
+    ):
+        correlation = (persistence_idempotency.c.correlation_id == context.correlation_id)
+        if include_legacy:
+            correlation = or_(
+                correlation,
+                persistence_idempotency.c.correlation_id.like(f"{LEGACY_CORRELATION_PREFIX}:%"),
+            )
         return (
             persistence_idempotency.c.user_id == context.user_id,
             persistence_idempotency.c.workspace_scope == (context.workspace_id or ""),
             persistence_idempotency.c.agent_id == context.agent_id,
             persistence_idempotency.c.execution_id == context.execution_id,
-            or_(
-                persistence_idempotency.c.correlation_id == context.correlation_id,
-                persistence_idempotency.c.correlation_id.like(f"{LEGACY_CORRELATION_PREFIX}:%"),
-            ),
+            correlation,
             persistence_idempotency.c.purpose == context.purpose,
             persistence_idempotency.c.actor == context.actor,
         )
@@ -501,6 +539,7 @@ class PostgresTransactionalPersistence:
             "version": record.version,
             "user_id": record.context.user_id,
             "workspace_id": record.context.workspace_id,
+            "workspace_scope": record.context.workspace_id or "",
             "agent_id": record.context.agent_id,
             "execution_id": record.context.execution_id,
             "correlation_id": record.context.correlation_id,
@@ -535,7 +574,11 @@ class PostgresTransactionalPersistence:
         ]
 
     @staticmethod
-    def _records_from_json(value, context: PersistenceOperationContext) -> tuple[AuthorizedRecord, ...]:
+    def _records_from_json(
+        value,
+        context: PersistenceOperationContext,
+        classification_ceiling: DataClassification = DataClassification.RESTRICTED,
+    ) -> tuple[AuthorizedRecord, ...]:
         if not value:
             return ()
         records = []
@@ -560,7 +603,11 @@ class PostgresTransactionalPersistence:
             )
         if any(not PostgresTransactionalPersistence._same_scope(record.context, context) for record in records):
             return ()
-        return tuple(records)
+        return tuple(
+            record
+            for record in records
+            if classification_allows(classification_ceiling, record.classification)
+        )
 
     def _legacy_replay_records(self, session: Session, request: TransactionRequest, receipt: TransactionReceipt):
         records = []
@@ -590,6 +637,7 @@ class PostgresTransactionalPersistence:
         session: Session,
         context: PersistenceOperationContext,
         receipt: TransactionReceipt,
+        classification_ceiling: DataClassification,
     ) -> tuple[AuthorizedRecord, ...]:
         records = []
         for reference in receipt.record_refs:
@@ -599,7 +647,7 @@ class PostgresTransactionalPersistence:
                     context=context,
                     record_ref=reference,
                     record_type="execution",
-                    classification_ceiling=DataClassification.INTERNAL,
+                    classification_ceiling=classification_ceiling,
                 ),
             )
             if not isinstance(record, NotFound):
@@ -607,6 +655,8 @@ class PostgresTransactionalPersistence:
         return tuple(records)
 
     def _configure_transaction_options(self, session: Session, request: TransactionRequest) -> None:
+        if request.options.consistency.value == "EVENTUAL":
+            raise PersistenceAdapterError(PersistenceErrorCode.INVALID_REQUEST, Retryability.NEVER)
         if self.engine.dialect.name != "postgresql":
             return
         isolation = {
@@ -614,8 +664,6 @@ class PostgresTransactionalPersistence:
             "REPEATABLE_READ": "REPEATABLE READ",
             "SERIALIZABLE": "SERIALIZABLE",
         }[request.options.isolation.value]
-        if request.options.consistency.value == "EVENTUAL":
-            isolation = "READ COMMITTED"
         session.connection(execution_options={"isolation_level": isolation})
         if request.options.read_only:
             session.execute(text("SET TRANSACTION READ ONLY"))
@@ -623,6 +671,22 @@ class PostgresTransactionalPersistence:
         session.execute(
             select(func.set_config("statement_timeout", str(timeout_ms), True))
         )
+
+    def _configure_read_options(self, session: Session, query: AuthorizedRead | AuthorizedScan) -> None:
+        self._reject_unsupported_read_consistency(query.consistency)
+        if self.engine.dialect.name != "postgresql":
+            return
+        isolation = (
+            "REPEATABLE READ"
+            if query.consistency.value == "STRONG"
+            else "READ COMMITTED"
+        )
+        session.connection(execution_options={"isolation_level": isolation})
+
+    @staticmethod
+    def _reject_unsupported_read_consistency(consistency) -> None:
+        if getattr(consistency, "value", consistency) == "EVENTUAL":
+            raise PersistenceAdapterError(PersistenceErrorCode.INVALID_REQUEST, Retryability.NEVER)
 
     @staticmethod
     def _json_filter(column, key: str, value: object):
