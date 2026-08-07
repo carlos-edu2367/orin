@@ -19,6 +19,7 @@ from .models import (
     OpaqueReadRef,
     OpaqueWriteSessionRef,
     Retryability,
+    StorageCapability,
 )
 from .ports import ArtifactManager, ArtifactMetadataRepository, ArtifactStorage
 
@@ -46,4 +47,5 @@ __all__ = [
     "OpaqueReadRef",
     "OpaqueWriteSessionRef",
     "Retryability",
+    "StorageCapability",
 ]
