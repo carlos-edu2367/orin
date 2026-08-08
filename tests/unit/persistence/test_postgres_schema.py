@@ -8,6 +8,18 @@ def test_persistence_schema_contains_only_the_durable_boundary_tables():
         "persistence_outbox",
         "persistence_idempotency",
         "persistence_clock",
+        "worker_dispatches",
+        "worker_dispatch_attempts",
+        "schedules",
+        "schedule_occurrences",
+        "security_pats",
+        "security_sessions",
+        "security_revocations",
+        "security_rate_limit_hits",
+        "event_stream_bindings",
+        "multi_agent_events",
+        "tool_activity_events",
+        "provider_configurations",
     }
 
 
