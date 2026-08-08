@@ -1,114 +1,103 @@
-Prompt da próxima sessão — Fases B, C e D do fechamento do AgentOS Frontend
+Prompt da próxima sessão — Fases E, F, H e Verificação + Documentação final
 
-Você é o agente responsável por implementar, nesta sessão, exatamente as Fases B, C e D descritas em `docs/frontend/PROJECT_CLOSEOUT_ROADMAP.md`. A Fase 0 (composição de produção — Security, Execution, ClientEventStream reais sobre Postgres) já está concluída e verificada; não a refaça, não a redesenhe, apenas construa sobre ela. As Fases E, F, H e a verificação/documentação final **não fazem parte do escopo desta sessão** — ficam para uma sessão seguinte, registradas no roadmap. Não as antecipe e não invente pendência para elas além do que o roadmap já registra.
+Você é o agente responsável por implementar, nesta sessão, exatamente as Fases E, F, H e a Fase Verificação + Documentação descritas em `docs/frontend/PROJECT_CLOSEOUT_ROADMAP.md`. As Fases 0, B, C e D já estão concluídas e verificadas nesta branch (commit `688cb0b`, `feat(frontend-backend): compose production execution/security/event surface and bridge Fases B and D`): Security/Execution/ClientEventStream reais sobre Postgres (Fase 0), a ponte tool_runtime/multi_agent → `ClientEventStream` (Fase B), a Fase C fechada como limitação documentada (`result_ref` não é resolvível hoje — não reabra sem grep real novo que contradiga a investigação já registrada), e `ProviderConfigurationApplication` em produção (Fase D). Não refaça, não redesenhe nenhuma delas — apenas construa sobre o que já existe. Esta sessão fecha o escopo completo do `PROJECT_CLOSEOUT_ROADMAP.md`.
 
 ## Regra de conclusão para este escopo
 
 Não finalize, não entregue resposta parcial e não declare sucesso enquanto:
 
-* a Fase B (bridge tool_runtime/multi_agent → `ClientEventStream`) não estiver implementada e comprovada por um teste de integração real mostrando um evento de Tool e um evento de Delegation atravessando outbox → stream público → `ClientEvent`, contra Postgres real (não fixture, não fake);
-* a Fase C (resolução de `result_ref` → `display_text`) não estiver implementada, **ou** a investigação real (grep/leitura, não suposição) tiver concluído de forma documentada que não há armazenamento texto-seguro por trás do ref e que o menor adapter viável foi tentado antes de desistir;
-* a Fase D (`ProviderConfigurationApplication` em produção) não estiver implementada e comprovada por um teste de integração fim a fim (`PUT`/`GET`/`DELETE /v1/providers/{provider}`) contra Postgres real;
-* a suíte completa do backend (`python -m pytest -q`, com `AGENTOS_TEST_POSTGRES_DSN` setado para o Postgres do próprio `docker-compose.yml` do projeto — `postgresql://agentos@localhost:5433/agentos`, já rodando) não estiver verde;
-* `docs/frontend/IMPLEMENTATION_PLAN.md` (seção "Decisões locais registradas para a Fase 0" já existe como padrão a seguir) e `docs/frontend/PROJECT_CLOSEOUT_ROADMAP.md` não estiverem atualizados com o que foi de fato implementado, incluindo qualquer decisão de design tomada durante B/C/D.
+* a Fase E (UI de input para `WAITING_USER`) não estiver implementada e comprovada por teste unitário + E2E, seguindo o padrão de fake documentado já estabelecido em `execution-controls.spec.ts`;
+* a Fase F (bug de sobreposição no `AgentRail`) não estiver corrigida com o menor diff possível, e o workaround registrado em `reduced-motion.spec.ts` (clique extra "fecha antes de expandir") não tiver sido removido e o teste reexecutado sem ele;
+* a Fase H (teste flaky `agentGraphProjection`) não tiver sua causa raiz investigada (rodando isolado vs. na suíte completa, com `--reporter=verbose`, múltiplas vezes) e corrigida — não apenas mitigada por timeout maior;
+* a suíte completa do backend (`python -m pytest -q`, com e sem `AGENTOS_TEST_POSTGRES_DSN=postgresql://agentos@localhost:5433/agentos` setado — o Postgres do `docker-compose.yml` deste projeto já roda nessa porta) não estiver verde;
+* `npm run test`, `npm run test:e2e` (specs novos/tocados rodados 2–3× isolados), `npm run test:visual`, `npm run lint` e `npm run build` (em `frontend/`) não estiverem verdes;
+* a segunda passagem read-only independente (autorização/ownership dos adapters de B/C/D, ausência de fallback in-memory em produção, sanitização de payload na ponte de eventos, ausência de vazamento no result/input resolvido) não tiver sido feita e registrada;
+* `docs/frontend/IMPLEMENTATION_PLAN.md` (checkboxes reais das Fases 0–6 + "Decisões locais" de E/F/H), `BACKEND_DISCOVERY.md`, `BACKEND_CAPABILITY_MATRIX.md` e `BACKEND_UI_MAPPING.md` não estiverem atualizados com o que foi de fato implementado.
 
-Cada gap que sobrar dentro de B, C ou D precisa de uma nota de limitação real e específica, nunca uma pendência silenciosa.
+Cada gap que sobrar dentro de E, F ou H precisa de uma nota de limitação real e específica, nunca uma pendência silenciosa.
 
 ## Autonomia obrigatória
 
-Não faça perguntas ao usuário. Toda ambiguidade de contrato de payload, nome de campo ou decisão de design deve ser resolvida lendo o código real (domínio, ports, testes existentes) e escolhendo a alternativa mais aderente ao que já existe — nunca inventando um endpoint, campo, tabela ou evento que o domínio não sustente. Registre cada decisão local, com a razão, na seção "Decisões locais" da fase correspondente em `IMPLEMENTATION_PLAN.md`.
+Não faça perguntas ao usuário. Toda ambiguidade de contrato de payload, nome de campo ou decisão de design deve ser resolvida lendo o código real (domínio, componentes, testes existentes) e escolhendo a alternativa mais aderente ao que já existe — nunca inventando um endpoint, campo, evento ou comportamento que o domínio/frontend não sustente. Registre cada decisão local, com a razão, na seção "Decisões locais" da fase correspondente em `IMPLEMENTATION_PLAN.md`.
 
-Preserve integralmente o worktree existente. Não use `git reset --hard`, `git checkout --`, remoções amplas ou qualquer operação que descarte trabalho. Não faça commit, push ou PR sem pedido explícito do usuário.
+Preserve integralmente o worktree existente. Não use `git reset --hard`, `git checkout --`, remoções amplas ou qualquer operação que descarte trabalho. Não faça commit, push ou PR sem pedido explícito do usuário (a menos que o usuário já tenha pedido nesta própria mensagem, como fez na sessão anterior).
 
 ## Leitura obrigatória antes de alterar código
 
 Nesta ordem:
 
-1. `docs/frontend/PROJECT_CLOSEOUT_ROADMAP.md` completo — é o plano desta sessão, já grounded em investigação real.
-2. `docs/frontend/IMPLEMENTATION_PLAN.md`, seção "Fase 0" e "Decisões locais registradas para a Fase 0" — contrato e decisões já em produção que B/C/D devem respeitar.
-3. `src/agentos/persistence/postgres/execution_adapters.py`, `event_stream.py`, `security.py` — os três adapters da Fase 0; B e C estendem `event_stream.py`/`execution_adapters.py` sem duplicar os padrões já usados ali (resolução de escopo via `persistence_records`, contexto determinístico, exceções `Application*Error`).
-4. `src/agentos/multi_agent/ports.py` (`MultiAgentEventRecorder`), `in_memory.py` (`InMemoryMultiAgentStore.record_event`), `service.py` (`_record_fact`/`_record_message_fact`) — a porta que a Fase B.1 implementa.
-5. `src/agentos/tool_runtime/runtime.py` (`ToolRuntimeService.__init__`, `_entry`, `self.outbox`), `models.py` (`ToolOutboxEntry`) — o ponto sem porta de injeção que a Fase B.2 precisa abrir.
-6. `src/agentos/artifact_storage/` (modelos + `tests/integration/artifact_storage/test_artifact_postgres_optional.py` como referência de adapter Postgres já testado) e `src/agentos/memory/` — candidatos a armazenamento por trás de `result_ref` para a Fase C. Depois, `grep -rn "result_ref" src/agentos/runtime src/agentos/execution` para confirmar onde e como o ref é produzido hoje, antes de assumir que é um artifact ref.
-7. `src/agentos/providers/catalog.py`, `resolver.py`, `compat.py` — o storage/lógica de provider já existente que a Fase D compõe; `src/agentos/api/contracts.py` (`ProviderConfigurationApplication`) e `tests/unit/api/test_api_asgi.py` (`FakeProviderConfiguration`) para o contrato exato que o gateway espera (nunca reler/reexibir a API key).
-8. `src/agentos/persistence/postgres/schema.py` e a pasta `migrations/versions/` — próxima migration deve ser `0006_*`; siga o estilo das migrations `0004`/`0005` (uma linha por `create_table`, índices explícitos).
+1. `docs/frontend/PROJECT_CLOSEOUT_ROADMAP.md` completo, seções "Fase E", "Fase F", "Fase H" e "Fase Verificação + Documentação" — é o plano desta sessão.
+2. `docs/frontend/IMPLEMENTATION_PLAN.md`, seções "Fase B", "Fase C" e "Fase D" (recém-fechadas) e suas "Decisões locais" — contrato e decisões que E/F/H devem respeitar (em especial: `result_ref`/`input_ref` continuam opacos, Fase C não mudou isso; nenhuma rota HTTP compõe `ToolRuntimeService`/`MultiAgentCoordinatorService` em produção ainda, então `ExecutionRoute` continua sem popular `events` a partir de um binding real).
+3. `frontend/src/api/executions.ts` (`provideExecutionInput`) e `frontend/src/features/executions/ExecutionPage.tsx`/`ExecutionControls.tsx`/`ExecutionRoute.tsx` — onde o composer de input da Fase E entra; reusar o padrão de `Idempotency-Key` por intenção já estabelecido em `ExecutionControls`.
+4. `frontend/tests/e2e/execution-controls.spec.ts` — o padrão de fake documentado no topo do arquivo que a Fase E deve seguir para o novo E2E.
+5. `frontend/src/features/agents/AgentRail.tsx`, `AgentGlyph.tsx` e `frontend/src/styles/index.css` (classes `.agent-glyph__detail`, `.agent-rail__glyphs`, `.agent-rail__expand`) — o bug de sobreposição da Fase F, já diagnosticado como z-index/position quando o painel de detalhe expande.
+6. `frontend/tests/e2e/reduced-motion.spec.ts` — contém hoje o workaround "fecha antes de expandir" que existe só por causa do bug da Fase F; remover após corrigir.
+7. `frontend/tests/unit/agentGraphProjection.test.ts` — o teste "opens the lazy-loaded 3D scene from the 'Expandir grafo' affordance..." já identificado como instável (suspeita registrada: race entre fake timers/`act()` e o `lazy()` do `OrchestrationScene`, ver "Decisões locais" da Fase 5/6 em `IMPLEMENTATION_PLAN.md`).
+8. `docs/frontend/BACKEND_DISCOVERY.md`, `BACKEND_CAPABILITY_MATRIX.md`, `BACKEND_UI_MAPPING.md` — já atualizados nesta última sessão para refletir B/C/D; qualquer hipótese que E/F/H contradiga deve ser corrigida também.
 
 Faça uma leitura read-only completa do que listar acima antes de qualquer edição.
 
 ## Escopo obrigatório
 
-### Fase B — Bridge tool_runtime/multi_agent → `ClientEventStream`
+### Fase E — UI de input para `WAITING_USER`
 
-Ver detalhamento em `PROJECT_CLOSEOUT_ROADMAP.md`, seção "Fase B". Resumo:
+Ver `PROJECT_CLOSEOUT_ROADMAP.md`, seção "Fase E". Componente mínimo em `ExecutionPage`/`ExecutionRoute`, visível só quando `execution.state === 'WAITING_USER'`, reusando `ExecutionControls`/`Disclosure` e o padrão de `Idempotency-Key` por intenção. `input_ref` continua opaco (Fase C não resolveu nada aqui — confirmado, não reabrir). TDD: unit test do componente (`frontend/tests/unit/`) + E2E seguindo o padrão de fake já documentado em `execution-controls.spec.ts`. Rodar o novo E2E isolado 2–3× antes de considerar fechado.
 
-- **B.1**: `PostgresMultiAgentEventRecorder` implementando `MultiAgentEventRecorder.record_event`, tabela dedicada (recomendação do roadmap: `multi_agent_events`, sem FK para `persistence_records` — delegação não é uma "record" versionada). Compor no lugar real onde `MultiAgentService` é construído em produção (não existe hoje — provavelmente precisa ser adicionado a `bootstrap/production.py`).
-- **B.2**: adicionar um sink injetável opcional a `ToolRuntimeService` (`__init__(..., sink: Callable[[ToolOutboxEntry], None] | None = None)`, chamado em `_entry()` além do `self.outbox.append` existente — preserva 100% do comportamento atual). Tabela dedicada `tool_activity_events`. `PostgresToolActivitySink` grava as entradas.
-- **B.3**: estender `PostgresClientEventStream.read()` para unir `persistence_outbox` com as duas tabelas novas, projetando tudo para o mesmo `ClientEvent`. Antes de fixar os nomes de payload, comparar com o que `frontend/src/features/activities/activityNormalizer.ts` e `frontend/src/features/agents/agentGraphProjection.ts` já assumem; traduzir no projetor se os nomes reais divergirem, documentando a tradução na Fase B do `IMPLEMENTATION_PLAN.md`/roadmap.
+### Fase F — Bug de sobreposição no `AgentRail`
 
-TDD: teste de integração primeiro (RED confirmado por tabela/adapter ausente), depois implementação mínima, depois `tests/integration/persistence/test_event_stream_postgres_optional.py` ganha um caso com um evento de cada fonte lido em ordem por um único `read()`.
+Ver `PROJECT_CLOSEOUT_ROADMAP.md`, seção "Fase F". Independente de E/H. Investigar `.agent-glyph__detail`, `.agent-rail__glyphs`, `.agent-rail__expand` — provavelmente `z-index`/`position` quando o painel de detalhe expande sobre elementos abaixo. Menor diff possível; sem redesenhar a tela. Depois de corrigido: remover o clique extra "fecha antes de expandir" de `reduced-motion.spec.ts` e confirmar que passa sem o workaround.
 
-### Fase C — Resolução de `result_ref` → `display_text`
+### Fase H — Estabilizar teste flaky `agentGraphProjection`
 
-Ver `PROJECT_CLOSEOUT_ROADMAP.md`, seção "Fase C". Investigar antes de codar (item 6 da leitura obrigatória). Se `result_ref` for de fato resolvível: adapter mínimo, mesma autorização por `user_id` já usada em `ExecutionQueryAdapter`, populando `result.display_text` em `_to_execution_view` sem nunca inventar texto quando não resolvível. Se a investigação real concluir que não há caminho seguro hoje, documentar a limitação especificamente (o que foi checado, por que não dá) em vez de deixar como pendência muda.
+Ver `PROJECT_CLOSEOUT_ROADMAP.md`, seção "Fase H". Independente de E/F. Rodar `agentGraphProjection.test.ts` isolado várias vezes com `--reporter=verbose`, depois na suíte completa, para confirmar a hipótese de race antes de mexer. Corrigir a causa raiz (provavelmente aguardar a resolução do lazy-import antes de avançar os timers, ou usar `findBy*` em vez de `getBy*` no ponto de transição). Não apenas aumentar timeout.
 
-### Fase D — `ProviderConfigurationApplication` em produção
+### Fase Verificação + Documentação (fecha o escopo completo do roadmap)
 
-Ver `PROJECT_CLOSEOUT_ROADMAP.md`, seção "Fase D". Adapter sobre `src/agentos/providers/` já existente, composto em `compose_production_services`. Teste de integração fim a fim contra Postgres real cobrindo `PUT`/`GET`/`DELETE /v1/providers/{provider}`, confirmando que a API key nunca volta em nenhuma resposta (mesmo padrão de `_provider_public()` no gateway).
+Só depois de E, F e H:
+
+1. `python -m pytest -q` (com e sem `AGENTOS_TEST_POSTGRES_DSN` setado).
+2. `python -m compileall -q src tests`, `git diff --check`.
+3. `npm run test`, `npm run test:e2e` (specs novos/tocados 2–3× isolados), `npm run test:visual`, `npm run lint`, `npm run build` (em `frontend/`).
+4. Segunda passagem read-only independente focada em: autorização/ownership dos adapters de B/C/D (`PostgresMultiAgentEventRecorder`, `PostgresToolActivitySink`, `PostgresProviderConfigurationAdapter`), ausência de fallback in-memory em produção (`create_production_app`'s guard continua passando), sanitização de payload na ponte de eventos (B.3 — nenhum campo sensível vazando no `ClientEvent` projetado), ausência de vazamento no result/input resolvido (C permanece sem `display_text`, nunca inventado).
+5. Atualizar `IMPLEMENTATION_PLAN.md` (checkboxes reais das Fases 0–6 que E/F fecham, novas "Decisões locais" de E/F/H), `BACKEND_DISCOVERY.md`, `BACKEND_CAPABILITY_MATRIX.md`, `BACKEND_UI_MAPPING.md`.
+6. Preencher o "Registro de encerramento" abaixo.
 
 ## Restrições
 
-- Não invente endpoint, campo de payload, evento, tabela ou DTO que o domínio não sustente — sempre grounded em código real lido nesta sessão.
-- Não reintroduza fallback in-memory em produção; o guard existente em `create_production_app` que rejeita isso deve continuar passando.
-- Não quebre nenhum teste já verde (`690 passed, 2 skipped` na composição atual da suíte completa).
+- Não invente endpoint, campo de payload, evento, componente ou DTO que o backend/domínio não sustente — sempre grounded em código real lido nesta sessão.
+- Não quebre nenhum teste já verde: backend `701 passed, 2 skipped` com `AGENTOS_TEST_POSTGRES_DSN` setado (`663 passed, 40 skipped` sem ela); frontend conforme o estado atual de `npm run test`/`test:e2e`/`test:visual` antes de suas mudanças — rode-os primeiro para ter a baseline exata antes de tocar em código.
 - Siga TDD sem exceção: teste primeiro, RED confirmado, implementação mínima, GREEN.
-- Migrations novas seguem o padrão `000N_*` já estabelecido; nunca edite uma migration já aplicada (`0001`–`0005`).
+- Menor diff possível na Fase F — é uma correção de CSS/layout, não uma oportunidade de redesenhar `AgentRail`.
 
 ## Verificação obrigatória antes da conclusão
 
 ```
+AGENTOS_TEST_POSTGRES_DSN=postgresql://agentos@localhost:5433/agentos python -m pytest -q
 python -m pytest -q
-```
-
-(rodar uma vez com `AGENTOS_TEST_POSTGRES_DSN=postgresql://agentos@localhost:5433/agentos` setado — o Postgres do `docker-compose.yml` deste projeto já roda nessa porta — e confirmar que os testes de integração novos de B/C/D passam de verdade, não só que o skip funciona)
-
-```
 python -m compileall -q src tests
 git diff --check
 ```
 
+```
+cd frontend
+npm run test
+npm run test:e2e
+npm run test:visual
+npm run lint
+npm run build
+```
+
 ## Documentação obrigatória antes do fechamento
 
-- `docs/frontend/IMPLEMENTATION_PLAN.md`: novas seções "Decisões locais registradas" para B, C e D, no mesmo padrão já usado nas Fases 0–6.
-- `docs/frontend/PROJECT_CLOSEOUT_ROADMAP.md`: marcar B, C, D como concluídos com evidência real (arquivo de teste, comando rodado), atualizar a tabela de estado atual no topo.
-- `docs/frontend/BACKEND_DISCOVERY.md` e `BACKEND_CAPABILITY_MATRIX.md`: remover qualquer hipótese que a composição real de B/C/D contradiga.
+- `docs/frontend/IMPLEMENTATION_PLAN.md`: novas seções "Decisões locais registradas" para E, F e H, no mesmo padrão já usado nas Fases 0–D.
+- `docs/frontend/PROJECT_CLOSEOUT_ROADMAP.md`: marcar E, F, H e Verificação como concluídos com evidência real (arquivo de teste, comando rodado), atualizar a tabela de estado atual no topo.
+- `docs/frontend/BACKEND_DISCOVERY.md`, `BACKEND_CAPABILITY_MATRIX.md`, `BACKEND_UI_MAPPING.md`: remover qualquer hipótese que E/F/H contradigam.
 - Este arquivo: acrescentar o "Registro de encerramento" abaixo ao concluir.
 
 ## Relatório final obrigatório
 
-Ao concluir, informe: arquivos alterados; decisões de desenho e alternativas rejeitadas com a razão; evidência de um evento de Tool e de um evento de Delegation atravessando outbox → stream público (Fase B); como o resultado textual é resolvido ou a limitação real que impediu isso (Fase C); confirmação de que `PUT`/`GET`/`DELETE /v1/providers/{provider}` funcionam contra Postgres real sem vazar a API key (Fase D); comandos executados e resultados reais; limitações legítimas remanescentes, apenas as que a investigação real comprovou. Não transforme requisito obrigatório de B, C ou D em backlog sem justificativa técnica real e documentada.
+Ao concluir, informe: arquivos alterados; decisões de desenho e alternativas rejeitadas com a razão; evidência do componente de input de `WAITING_USER` funcionando (unit + E2E) (Fase E); evidência da correção do bug de sobreposição, incluindo a remoção do workaround em `reduced-motion.spec.ts` (Fase F); evidência da causa raiz do teste flaky corrigida, não apenas mitigada (Fase H); resultado de todos os comandos de verificação (backend com e sem Postgres, frontend completo); limitações legítimas remanescentes, apenas as que a investigação real comprovou.
 
 ## Registro de encerramento — a ser preenchido pelo agente executor
 
-Ao fechar este escopo (B, C, D), acrescente aqui a evidência real de implementação, testes, decisões e limitações legítimas. Não deixe este registro vazio, genérico ou baseado em intenção.
-
-### Fechamento (Fases B, C, D)
-
-**Fase B — Concluída.** `PostgresMultiAgentEventRecorder` (`src/agentos/persistence/postgres/multi_agent_events.py`) implementa `MultiAgentEventRecorder.record_event`, idempotente por `event_id`, gravando em `multi_agent_events` (migration `0006_multi_agent_and_tool_events`). `ToolRuntimeService.__init__` (`src/agentos/tool_runtime/runtime.py`) ganhou um `sink: Callable[[ToolOutboxEntry], None] | None = None` opcional, chamado em `_entry()` sem alterar o comportamento do outbox em memória existente; `PostgresToolActivitySink` (`src/agentos/persistence/postgres/tool_activity.py`) grava em `tool_activity_events` (mesma migration). `PostgresClientEventStream.read()` (`src/agentos/persistence/postgres/event_stream.py`) agora une as três tabelas (`persistence_outbox`, `multi_agent_events`, `tool_activity_events`), ordenadas por `(created_at, fonte, id)`, no mesmo `ClientEvent`; o cursor opaco passou de um inteiro único para um mapa `{fonte: posição}` (uma posição por fonte). Evidência: `tests/integration/persistence/test_event_stream_postgres_optional.py::test_a_tool_event_and_a_delegation_event_cross_the_bridge_into_the_same_client_event_stream` grava um `DelegationCreated` real via `PostgresMultiAgentEventRecorder` e um `ToolStarted`/`ToolFinished` real via um `ToolRuntimeService` com `PostgresToolActivitySink` injetado, abre um stream e lê os quatro tipos de evento (`ExecutionQueued`, `DelegationCreated`, `ToolStarted`, `ToolFinished`) em um único `read()` contra `postgresql://agentos@localhost:5433/agentos`. `bootstrap/multi_agent.py` expõe `compose_multi_agent_event_recorder(engine)` para uma futura composição completa do coordinator (que não existe hoje — ver decisões locais).
-
-**Fase C — Fechada como limitação documentada, não implementada.** Investigação real (grep + leitura) confirmou: `result_ref` só é produzido hoje por `providers/compat.py:RuntimeProviderAdapter._map_outcome`, como a string sintética `f"result:{invocation_id}"` — o texto real gerado (`GenerationSucceeded.message`) é descartado, nunca persistido. `RuntimeService`/`RuntimeProviderAdapter` não são compostos em nenhum lugar de `src/agentos/bootstrap/` — nenhuma execution chega a `COMPLETED` por esse caminho em produção hoje. `artifact_storage.ArtifactManager.inspect`/`.read` exigem um `ArtifactReference` completo (checksum, `authorization_ref`, tamanho) que nada deriva de uma string de `result_ref`; `memory/` é indexado por `memory_id`, sem relação com o formato do ref. Nenhum adapter foi escrito — inventar um significaria fabricar uma relação `execution↔artifact_storage` que o domínio não sustenta. `ExecutionQueryAdapter._to_execution_view` permanece sem `result.display_text`, como já estava desde a Fase 0.
-
-**Fase D — Concluída.** `PostgresProviderConfigurationAdapter` (`src/agentos/persistence/postgres/provider_configuration.py`) implementa `configure`/`inspect`/`revoke` sobre uma tabela dedicada `provider_configurations` (migration `0007_provider_configurations`), escopada por `(user_id, provider)`; composto em `compose_production_services` (`src/agentos/bootstrap/production.py`). Evidência: `tests/integration/api/test_provider_configuration_postgres_optional.py` (4/4, Postgres real) — `PUT`/`GET` round-trip preservando `secret_ref`, `DELETE` desabilita sem vazar a chave, `GET` de provider nunca configurado devolve 404, isolamento por usuário (stranger recebe 404). Toda asserção usa `assert secret_api_key not in response.text` (texto bruto da resposta, não só o JSON), então uma fuga em qualquer serialização teria sido pega.
-
-**Comandos executados e resultados reais:**
-- `AGENTOS_TEST_POSTGRES_DSN=postgresql://agentos@localhost:5433/agentos python -m pytest -q` → `701 passed, 2 skipped` (era `690 passed, 2 skipped` antes desta sessão; as 11 novas são os testes de integração de B/C/D e o teste unitário do sink).
-- `python -m pytest -q` (sem `AGENTOS_TEST_POSTGRES_DSN`) → `663 passed, 40 skipped` — confirma que o skip funciona igual sem a variável.
-- `python -m compileall -q src tests` → sem erro.
-- `git diff --check` → sem erro de whitespace (só avisos de normalização de fim de linha LF/CRLF pré-existentes, não introduzidos nesta sessão).
-
-**Limitações legítimas remanescentes (só as que a investigação real comprovou):**
-- Nem `MultiAgentCoordinatorService` nem `ToolRuntimeService` são compostos por nenhuma rota HTTP hoje — a ponte até o `ClientEventStream` está provada por teste de integração direto contra os adapters/sinks, mas nenhum usuário real alcança esse caminho via gateway ainda (documentado em `BACKEND_DISCOVERY.md`/`BACKEND_CAPABILITY_MATRIX.md`/`BACKEND_UI_MAPPING.md`).
-- `AgentMessageCreated.payload.sender_agent_id` nunca é persistido pelo domínio (`multi_agent/service.py:_record_message_fact` só grava `recipient_agent_id`) — o projetor da Fase B não pode traduzir um dado que não existe; a aresta de mensagem correspondente no frontend simplesmente não é desenhada, sem inventar o campo.
-- `result_ref`/`display_text` (Fase C) seguem sem resolução: é uma limitação de duas camadas do domínio (texto descartado pelo compat adapter + Runtime não composto em produção), não algo que um adapter desta sessão pudesse legitimamente corrigir sem inventar um contrato novo.
-- A API key de provider (Fase D) é armazenada em texto plano — não existe infraestrutura de criptografia em repouso neste código-fonte hoje; a garantia real é que a chave nunca sai pela API pública, não que o armazenamento seja criptografado.
-
-Arquivos alterados/criados nesta sessão: ver `docs/frontend/PROJECT_CLOSEOUT_ROADMAP.md` (seção "Arquivos novos desta sessão") e `docs/frontend/IMPLEMENTATION_PLAN.md` (seções "Fase B"/"Fase C"/"Fase D" e respectivas "Decisões locais") para a lista completa com justificativa de cada decisão.
+Ao fechar este escopo (E, F, H, Verificação), acrescente aqui a evidência real de implementação, testes, decisões e limitações legítimas. Não deixe este registro vazio, genérico ou baseado em intenção.
