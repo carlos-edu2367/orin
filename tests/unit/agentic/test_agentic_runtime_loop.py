@@ -408,3 +408,48 @@ def test_read_only_calls_run_concurrently_and_keep_their_order() -> None:
     assert result.state == "completed"
     finished = [payload for state, payload in store.events if state == "tool_finished"]
     assert [item["invocation_id"] for item in finished] == ["call-1", "call-2"]
+
+
+def test_a_write_call_is_not_reordered_around_read_only_calls_that_follow_it() -> None:
+    class OrderRecordingToolset:
+        def __init__(self) -> None:
+            self.execution_order: list[str] = []
+
+        def schemas(self):
+            return []
+
+        def is_read_only(self, name: str) -> bool:
+            return name == "read_file"
+
+        def invoke(self, name, arguments):
+            self.execution_order.append(name)
+            return ToolOutcome("succeeded", f"{name} ok", "content")
+
+    class MixedBatchProvider:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def stream(self, request):
+            self.calls += 1
+            if self.calls == 1:
+                return normalize_sse(
+                    [
+                        'data: {"choices":[{"delta":{"tool_calls":['
+                        '{"index":0,"id":"call-1","function":{"name":"write_file","arguments":"{}"}},'
+                        '{"index":1,"id":"call-2","function":{"name":"read_file","arguments":"{}"}},'
+                        '{"index":2,"id":"call-3","function":{"name":"read_file","arguments":"{}"}}'
+                        ']},"finish_reason":"tool_calls"}]}',
+                        "data: [DONE]",
+                    ],
+                    provider="openrouter",
+                )
+            return normalize_sse(['data: {"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}', "data: [DONE]"], provider="openrouter")
+
+    toolset = OrderRecordingToolset()
+    store = Store()
+    runtime = AgenticTurnRuntime(store=store, provider=MixedBatchProvider(), toolset=toolset)
+
+    result = runtime.run("turn-1")
+
+    assert result.state == "completed"
+    assert toolset.execution_order == ["write_file", "read_file", "read_file"]

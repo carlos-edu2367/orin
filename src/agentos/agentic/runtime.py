@@ -214,9 +214,11 @@ class AgenticTurnRuntime:
     def _run_toolset(self, turn: dict[str, object], calls: list[dict[str, str]]) -> list[dict[str, object]]:
         """Execute the model's calls and return results it can actually read.
 
-        Read-only calls in the same batch run concurrently; anything that can
-        write to the workspace stays sequential so two calls never race on the
-        same file. Results are emitted in the order the model requested them.
+        Consecutive read-only calls run concurrently; anything that can write
+        to the workspace, or a read-only call that isn't adjacent to another
+        one, stays sequential so two calls never race on the same file and no
+        call runs out of the order the model requested. Results are emitted
+        in the order the model requested them.
         """
         from .agent_tools import AgentToolError, parse_arguments
 
@@ -231,16 +233,35 @@ class AgenticTurnRuntime:
                 prepared.append((call_id, name, None, str(error)))
 
         is_read_only = getattr(self.toolset, "is_read_only", None)
-        parallel_indexes = [
-            index for index, (_, name, arguments, error) in enumerate(prepared)
-            if error is None and callable(is_read_only) and is_read_only(name)
-        ]
+        eligible = [error is None and callable(is_read_only) and is_read_only(name) for _, name, _, error in prepared]
+
+        # Walk the batch once, in the model's order. Each maximal run of
+        # consecutive read-only calls is dispatched to the pool together;
+        # everything else (a write-capable call, or a run of exactly one
+        # read-only call) is invoked in place before moving on. This keeps a
+        # write from ever starting before an earlier call finishes, or from
+        # blocking a later independent read.
         outcomes: dict[int, object] = {}
-        if len(parallel_indexes) > 1:
-            with ThreadPoolExecutor(max_workers=min(len(parallel_indexes), MAX_PARALLEL_TOOLS)) as pool:
-                futures = {index: pool.submit(self.toolset.invoke, prepared[index][1], prepared[index][2]) for index in parallel_indexes}
-                for index, future in futures.items():
-                    outcomes[index] = future.result()
+        index = 0
+        while index < len(prepared):
+            if not eligible[index]:
+                _, name, arguments, error = prepared[index]
+                if error is None:
+                    outcomes[index] = self.toolset.invoke(name, arguments)
+                index += 1
+                continue
+            run_end = index
+            while run_end < len(prepared) and eligible[run_end]:
+                run_end += 1
+            run_indexes = list(range(index, run_end))
+            if len(run_indexes) > 1:
+                with ThreadPoolExecutor(max_workers=min(len(run_indexes), MAX_PARALLEL_TOOLS)) as pool:
+                    futures = {i: pool.submit(self.toolset.invoke, prepared[i][1], prepared[i][2]) for i in run_indexes}
+                    for i, future in futures.items():
+                        outcomes[i] = future.result()
+            else:
+                outcomes[index] = self.toolset.invoke(prepared[index][1], prepared[index][2])
+            index = run_end
 
         results: list[dict[str, object]] = []
         for index, (call_id, name, arguments, error) in enumerate(prepared):
