@@ -202,14 +202,18 @@ class HTTPProviderStreamTransport:
     def stream(self, request: Mapping[str, object]) -> Iterator[NormalizedStreamItem]:
         messages = list(request.get("messages") or [])
         tools = list(request.get("tools") or [])
+        tool_choice = request.get("tool_choice")
         if self.provider == "anthropic":
             system = "\n".join(str(item.get("content", "")) for item in messages if item.get("role") == "system")
             messages = [item for item in messages if item.get("role") != "system"]
             payload: dict[str, object] = {"model": self.model, "max_tokens": int(request.get("max_output_tokens") or 1024), "messages": messages, "stream": True}
             if system:
-                payload["system"] = system
+                # A cached prefix must be a block, not a bare string. Marking the
+                # last system block and the last tool covers system + every tool
+                # definition, which is the part that repeats on every iteration.
+                payload["system"] = [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
             if tools:
-                payload["tools"] = [
+                projected = [
                     {
                         "name": item.get("name") or item.get("function", {}).get("name"),
                         "description": item.get("description") or item.get("function", {}).get("description", ""),
@@ -217,12 +221,24 @@ class HTTPProviderStreamTransport:
                     }
                     for item in tools
                 ]
+                projected[-1] = {**projected[-1], "cache_control": {"type": "ephemeral"}}
+                payload["tools"] = projected
+                if tool_choice is not None:
+                    payload["tool_choice"] = {"type": str(tool_choice)}
             endpoint = f"{self.base_url}/messages"
             headers = {"x-api-key": self._api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"}
         else:
-            payload = {"model": self.model, "messages": messages, "stream": True, "max_tokens": int(request.get("max_output_tokens") or 1024)}
+            payload = {
+                "model": self.model, "messages": messages, "stream": True,
+                "max_tokens": int(request.get("max_output_tokens") or 1024),
+                # Without this an OpenAI-compatible stream omits usage entirely
+                # and the turn records no tokens at all.
+                "stream_options": {"include_usage": True},
+            }
             if tools:
                 payload["tools"] = tools
+                if tool_choice is not None:
+                    payload["tool_choice"] = str(tool_choice)
             endpoint = f"{self.base_url}/chat/completions"
             headers = {"content-type": "application/json"}
             if self._api_key:
