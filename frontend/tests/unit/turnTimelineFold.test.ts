@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildMessageTimelines, buildTurnTimeline, resolveTurnId } from '../../src/features/conversations/turnTimeline'
+import { buildMessageTimelines, buildTurnTimeline, resolveTurnId } from '../../src/features/conversations/turnTimelineFold'
 import { kindFor, stateFor, type ConversationActivityEvent } from '../../src/features/conversations/activityTypes'
 
 let sequence = 0
