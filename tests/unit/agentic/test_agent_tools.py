@@ -79,6 +79,25 @@ def test_list_files_reports_workspace_entries(toolset: AgentToolset) -> None:
     assert "sub" in outcome.content
 
 
+def test_search_files_returns_matches_the_model_can_read(toolset: AgentToolset) -> None:
+    toolset.invoke("write_file", {"path": "src/app.py", "content": "import os\nDEBUG = True\n"})
+
+    outcome = toolset.invoke("search_files", {"pattern": "DEBUG"})
+
+    assert outcome.status == "succeeded"
+    assert "src/app.py:2" in outcome.content
+    assert outcome.payload["count"] == 1
+
+
+def test_search_files_reports_no_match_without_failing(toolset: AgentToolset) -> None:
+    toolset.invoke("write_file", {"path": "src/app.py", "content": "nothing\n"})
+
+    outcome = toolset.invoke("search_files", {"pattern": "DEBUG"})
+
+    assert outcome.status == "succeeded"
+    assert outcome.payload["count"] == 0
+
+
 def test_run_command_returns_output_and_exit_code(toolset: AgentToolset) -> None:
     outcome = toolset.invoke("run_command", {"command": "echo agentos"})
 

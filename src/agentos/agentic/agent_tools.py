@@ -221,6 +221,17 @@ class AgentToolset:
                 self.list_files, "filesystem",
             ),
             ToolDefinition(
+                "search_files",
+                "Search file contents in the conversation workspace with a regular expression. Use this before reading files when you do not know where something is.",
+                _schema({
+                    "pattern": {**_TEXT, "description": "Python regular expression."},
+                    "glob": {**_TEXT, "description": "Relative glob filter, e.g. '**/*.py'. Defaults to every file."},
+                    "max_results": {"type": "integer", "minimum": 1, "maximum": 200},
+                    "ignore_case": {"type": "boolean"},
+                }, ("pattern",)),
+                self.search_files, "filesystem",
+            ),
+            ToolDefinition(
                 "fetch_url", "Fetch a public web page or API response and return its readable text.",
                 _schema({"url": _TEXT}, ("url",)),
                 self.fetch_url, "web",
@@ -372,6 +383,18 @@ class AgentToolset:
             "summary": f"Listou {len(entries)} {'item' if len(entries) == 1 else 'itens'}",
             "content": listing,
             "payload": {"path": path or "/", "count": len(entries), "label": path or "/"},
+        }
+
+    def search_files(self, pattern: str, glob: str = "**/*", max_results: int = 50, ignore_case: bool = True) -> dict[str, Any]:
+        matches = self.workspace.search(pattern, glob=glob, max_results=int(max_results), ignore_case=bool(ignore_case))
+        if not matches:
+            body = "[no match]"
+        else:
+            body = "\n".join(f"{item['path']}:{item['line']}: {item['text']}" for item in matches)
+        return {
+            "summary": f"Buscou '{pattern[:40]}': {len(matches)} {'ocorrência' if len(matches) == 1 else 'ocorrências'}",
+            "content": body,
+            "payload": {"pattern": pattern[:200], "count": len(matches), "label": pattern[:80]},
         }
 
     def run_command(self, command: str, background: bool = False) -> dict[str, Any]:

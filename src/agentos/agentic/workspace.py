@@ -15,6 +15,9 @@ import re
 MAX_READ_BYTES = 200_000
 MAX_WRITE_BYTES = 1_000_000
 MAX_SNAPSHOT_FILES = 1_000
+MAX_SEARCH_RESULTS = 200
+MAX_SEARCH_FILE_BYTES = 2_000_000
+MAX_SEARCH_LINE_CHARS = 400
 
 _SAFE_SEGMENT = re.compile(r"^[A-Za-z0-9._-]+$")
 _PROJECT_WORKSPACE_ID = re.compile(r"^workspace:[A-Za-z0-9._-]+$")
@@ -98,6 +101,41 @@ class ConversationWorkspace:
             })
         return entries
 
+    def search(self, pattern: str, *, glob: str = "**/*", max_results: int = 50, ignore_case: bool = True) -> list[dict[str, object]]:
+        """Scan workspace text files for a regular expression.
+
+        The glob is validated before it reaches ``Path.glob`` because a pattern
+        containing ``..`` would otherwise walk out of the sandbox that every
+        other method is careful to enforce.
+        """
+        if not isinstance(pattern, str) or not pattern.strip():
+            raise WorkspaceError("pattern must be a non-blank string")
+        if not isinstance(glob, str) or not glob.strip() or ".." in glob or glob.startswith("/") or "\\" in glob:
+            raise WorkspaceError("glob must be a relative pattern without '..'")
+        try:
+            expression = re.compile(pattern, re.IGNORECASE if ignore_case else 0)
+        except re.error as error:
+            raise WorkspaceError(f"pattern is not a valid regular expression: {error}") from error
+        limit = max(1, min(int(max_results), MAX_SEARCH_RESULTS))
+        matches: list[dict[str, object]] = []
+        for item in sorted(self.root.glob(glob)):
+            if len(matches) >= limit:
+                break
+            try:
+                resolved = item.resolve()
+                relative = resolved.relative_to(self.root).as_posix()
+                if not resolved.is_file() or resolved.stat().st_size > MAX_SEARCH_FILE_BYTES:
+                    continue
+                text = resolved.read_bytes()[:MAX_SEARCH_FILE_BYTES].decode("utf-8", "replace")
+            except (OSError, ValueError):
+                continue
+            for number, line in enumerate(text.splitlines(), start=1):
+                if len(matches) >= limit:
+                    break
+                if expression.search(line):
+                    matches.append({"path": relative, "line": number, "text": line.strip()[:MAX_SEARCH_LINE_CHARS]})
+        return matches
+
     def file_snapshot(self) -> dict[str, dict[str, int]]:
         """Return bounded metadata for regular files that remain in this workspace."""
         snapshot: dict[str, dict[str, int]] = {}
@@ -130,4 +168,13 @@ class ConversationWorkspace:
         return {"path": self.relative(target), "size_bytes": target.stat().st_size}
 
 
-__all__ = ["ConversationWorkspace", "MAX_READ_BYTES", "MAX_SNAPSHOT_FILES", "MAX_WRITE_BYTES", "WorkspaceError"]
+__all__ = [
+    "ConversationWorkspace",
+    "MAX_READ_BYTES",
+    "MAX_SEARCH_FILE_BYTES",
+    "MAX_SEARCH_LINE_CHARS",
+    "MAX_SEARCH_RESULTS",
+    "MAX_SNAPSHOT_FILES",
+    "MAX_WRITE_BYTES",
+    "WorkspaceError",
+]
