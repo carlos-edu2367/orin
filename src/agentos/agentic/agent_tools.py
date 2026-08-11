@@ -64,6 +64,8 @@ class ToolDefinition:
     # A read-only tool has no workspace or network side effect, so several of
     # them may run at once without changing what any of them observes.
     read_only: bool = False
+    # Coarse labels a policy can authorize or refuse as a family.
+    policy_tags: tuple[str, ...] = ()
 
     def schema(self) -> dict[str, Any]:
         return {"type": "function", "function": {"name": self.name, "description": self.description, "parameters": dict(self.parameters)}}
@@ -191,6 +193,7 @@ class AgentToolset:
         enable_terminal: bool = True,
         skills=None,
         skill_load_recorder: Callable[[object], None] | None = None,
+        policy: object | None = None,
     ) -> None:
         self.workspace = workspace
         self.memory = memory
@@ -203,6 +206,7 @@ class AgentToolset:
         self._enable_terminal = enable_terminal
         self.skills = skills
         self._skill_load_recorder = skill_load_recorder
+        self._policy = policy
         self._loaded_skills: set[tuple[str, str]] = set()
         self._definitions: tuple[ToolDefinition, ...] | None = None
         self._by_name: dict[str, ToolDefinition] = {}
@@ -224,7 +228,7 @@ class AgentToolset:
             ToolDefinition(
                 "write_file", "Create or overwrite a UTF-8 text file in the conversation workspace.",
                 _schema({"path": _TEXT, "content": _TEXT}, ("path", "content")),
-                self.write_file, "filesystem",
+                self.write_file, "filesystem", policy_tags=("mutates",),
             ),
             ToolDefinition(
                 "edit_file",
@@ -240,7 +244,7 @@ class AgentToolset:
                     },
                     "replace_all": {"type": "boolean", "description": "Replace every occurrence instead of requiring a unique one."},
                 }, ("path",)),
-                self.edit_file, "filesystem",
+                self.edit_file, "filesystem", policy_tags=("mutates",),
             ),
             ToolDefinition(
                 "list_files", "List files and directories in the conversation workspace. Use depth to see a whole subtree in one call.",
@@ -264,7 +268,7 @@ class AgentToolset:
             ToolDefinition(
                 "fetch_url", "Fetch a public web page or API response and return its readable text.",
                 _schema({"url": _TEXT}, ("url",)),
-                self.fetch_url, "web", read_only=True,
+                self.fetch_url, "web", read_only=True, policy_tags=("network",),
             ),
         ]
         if self._search_client is not None:
@@ -272,26 +276,26 @@ class AgentToolset:
                 "web_search",
                 "Search the public web and return titles, URLs and snippets. Use this to find an address, then fetch_url to read it.",
                 _schema({"query": _TEXT, "limit": {"type": "integer", "minimum": 1, "maximum": 10}}, ("query",)),
-                self.web_search, "web", read_only=True,
+                self.web_search, "web", read_only=True, policy_tags=("network",),
             ))
         if self._browser is not None:
             items.append(ToolDefinition(
                 "browse_page",
                 "Open a public page in a real browser and return its rendered text. Use this only when fetch_url comes back empty or incomplete because the page builds its content with JavaScript.",
                 _schema({"url": _TEXT}, ("url",)),
-                self.browse_page, "web", read_only=True,
+                self.browse_page, "web", read_only=True, policy_tags=("network",),
             ))
         if self._enable_terminal:
             items.append(ToolDefinition(
                 "run_command", "Run one shell command inside the conversation workspace and return its output. Set background=true only for a long-lived server; it returns immediately.",
                 _schema({"command": {**_TEXT, "description": "A single command line, executed with the workspace as the working directory."}, "background": {"type": "boolean", "description": "Start without waiting; use only for persistent servers."}}, ("command",)),
-                self.run_command, "terminal",
+                self.run_command, "terminal", policy_tags=("mutates",),
             ))
         if self.memory is not None:
             items.append(ToolDefinition(
                 "remember", "Save a durable fact about the user or the project for future conversations.",
                 _schema({"fact": _TEXT, "tags": {"type": "array", "items": _TEXT}}, ("fact",)),
-                self.remember, "memory",
+                self.remember, "memory", policy_tags=("mutates",),
             ))
             items.append(ToolDefinition(
                 "recall", "Search previously saved facts.",
@@ -306,14 +310,14 @@ class AgentToolset:
                     "name": {**_TEXT, "description": "Short name, e.g. Researcher"},
                     "role": {**_TEXT, "description": "One line describing what this agent is responsible for."},
                 }, ("name", "role")),
-                self.create_agent, "agent",
+                self.create_agent, "agent", policy_tags=("mutates",),
             ))
         if self._delegate is not None:
             items.append(ToolDefinition(
                 "ask_agent",
                 "Send a task to a subagent you created and wait for its answer.",
                 _schema({"name": _TEXT, "task": {**_TEXT, "description": "The complete instruction; the subagent cannot see this conversation."}}, ("name", "task")),
-                self.ask_agent, "agent",
+                self.ask_agent, "agent", policy_tags=("mutates",),
             ))
         if self._delegate_batch is not None:
             items.append(ToolDefinition(
@@ -355,7 +359,10 @@ class AgentToolset:
     def definitions(self) -> tuple[ToolDefinition, ...]:
         """The tool set is fixed for the lifetime of a turn, so build it once."""
         if self._definitions is None:
-            self._definitions = self._build_definitions()
+            built = self._build_definitions()
+            if self._policy is not None:
+                built = tuple(item for item in built if self._policy.allows(item.name, item.policy_tags))
+            self._definitions = built
             self._by_name = {item.name: item for item in self._definitions}
         return self._definitions
 
