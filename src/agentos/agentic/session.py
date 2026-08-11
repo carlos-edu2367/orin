@@ -24,6 +24,11 @@ from .workspace import ConversationWorkspace
 SUBAGENT_DEADLINE = timedelta(seconds=180)
 MAX_SUBAGENTS_PER_TURN = 4
 PREVIEW_CHARS = 400
+# A subagent writes the deliverable the main agent will hand to the user, so it
+# needs the same output budget; inheriting the dataclass default silently cut
+# every long answer at 1024 tokens.
+SUBAGENT_MAX_OUTPUT_TOKENS = 4096
+SUBAGENT_MAX_ACTIONS = 12
 
 
 class ProjectWorkspaceResolutionError(RuntimeError):
@@ -379,7 +384,13 @@ class TurnSession:
             provider=self.provider_factory(),
             toolset=subagent_tools,
             system_prompt=self._subagent_prompt(record, task_text, subagent_tools),
-            limits=AgenticLimits(deadline=SUBAGENT_DEADLINE, max_iterations=self.limits.max_iterations, max_actions=12),
+            limits=AgenticLimits(
+                deadline=SUBAGENT_DEADLINE,
+                max_iterations=self.limits.max_iterations,
+                max_actions=SUBAGENT_MAX_ACTIONS,
+                max_output_tokens=SUBAGENT_MAX_OUTPUT_TOKENS,
+                max_context_tokens=self.limits.max_context_tokens,
+            ),
             cancelled=self.cancelled,
         )
         result = runtime.run(str(self.turn["turn_id"]), turn=self.turn)
@@ -502,4 +513,4 @@ class TurnSession:
         )
 
 
-__all__ = ["MAX_SUBAGENTS_PER_TURN", "ProjectWorkspaceResolutionError", "TurnSession", "build_system_prompt", "environment_facts", "resolve_effective_workspace_id"]
+__all__ = ["MAX_SUBAGENTS_PER_TURN", "ProjectWorkspaceResolutionError", "SUBAGENT_MAX_ACTIONS", "SUBAGENT_MAX_OUTPUT_TOKENS", "TurnSession", "build_system_prompt", "environment_facts", "resolve_effective_workspace_id"]

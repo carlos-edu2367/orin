@@ -135,6 +135,81 @@ def build(tmp_path: Path, batches, *, cancelled=None, enable_subagents=True):
     return session, store, agents, provider
 
 
+def _session_with_one_subagent():
+    from pathlib import Path
+    from tempfile import mkdtemp
+
+    from agentos.agentic.session import TurnSession
+
+    class AgentsStore:
+        def __init__(self) -> None:
+            self.records = {"Pesquisador": {"agent_id": "agent-sub", "name": "Pesquisador", "role": "pesquisa"}}
+            self.states: list[tuple[str, str]] = []
+
+        def create(self, name, role, **kwargs):
+            return {"agent_id": "agent-sub", "name": name, "role": role, "created": True}
+
+        def find(self, name):
+            return self.records.get(name)
+
+        def list(self):
+            return list(self.records.values())
+
+        def set_state(self, agent_id, state):
+            self.states.append((agent_id, state))
+
+        def record_usage(self, *args, **kwargs):
+            return None
+
+    class Store:
+        def main_agent_id(self, turn):
+            return "agent-main"
+
+        def history_for_turn(self, turn):
+            return [{"role": "user", "content": "faça x"}]
+
+        def record(self, *args, **kwargs):
+            return None
+
+    turn = {"turn_id": "turn-1", "conversation_id": "conversation_1", "user_id": "user-1", "provider": "openrouter", "model_id": "m", "execution_id": "execution-1"}
+    return TurnSession(
+        turn=turn, store=Store(), agents_store=AgentsStore(), memory_store=None,
+        provider_factory=lambda: object(), workspace_root=Path(mkdtemp()),
+    )
+
+
+def test_a_subagent_gets_the_same_output_budget_as_the_main_agent() -> None:
+    from agentos.agentic.session import SUBAGENT_MAX_OUTPUT_TOKENS
+
+    assert SUBAGENT_MAX_OUTPUT_TOKENS == 4096
+
+
+def test_the_subagent_runtime_is_built_with_that_budget(monkeypatch) -> None:
+    from agentos.agentic import session as session_module
+
+    captured: list[object] = []
+    original = session_module.AgenticTurnRuntime
+
+    class Recording(original):
+        def __init__(self, **kwargs):
+            captured.append(kwargs["limits"])
+            super().__init__(**kwargs)
+
+        def run(self, turn_id, *, turn=None):
+            from agentos.agentic.runtime import AgenticRunResult
+
+            self.store.delta(turn or {}, "done")
+            self.store.finish(turn or {})
+            return AgenticRunResult("completed", 1, 0)
+
+    monkeypatch.setattr(session_module, "AgenticTurnRuntime", Recording)
+
+    outcome = _session_with_one_subagent()._ask_agent("Pesquisador", "faça x")
+
+    assert outcome.status == "succeeded"
+    assert captured[0].max_output_tokens == 4096
+
+
 def test_the_system_prompt_names_the_tools_the_agent_actually_has(tmp_path: Path) -> None:
     session, _store, _agents, _provider = build(tmp_path, [])
     runtime = session.build_runtime()
