@@ -477,11 +477,29 @@ class TurnSession:
 
     def _subagent_prompt(self, record: Mapping[str, object], task: str, toolset: AgentToolset) -> str:
         prompt = (
-            f"You are '{record['name']}', a specialist subagent inside AgentOS. Your role: {record['role']}.\n"
+            f"You are '{record['name']}', a specialist subagent inside Orin. Your role: {record['role']}.\n"
             "You were given one task by the main agent and you cannot see the user's conversation.\n"
             "Use your tools to actually do the work, then reply with the finished result and nothing else.\n"
-            "Answer in the same language as the task. Be concise and factual."
+            "Answer in the same language as the task. Be concise and factual.\n"
+            "Request every independent tool call in the same response instead of one at a time."
         )
+        environment = environment_facts()
+        prompt += (
+            "\n\n## Workspace and environment\n"
+            "- You share one working directory with the main agent. All paths are relative to it; do not use absolute paths.\n"
+            f"- Operating system: {environment['os']}.\n"
+            f"- run_command executes through: {environment['shell']} — use that shell's syntax.\n"
+            f"- Python: {environment['python']}. Also on PATH: {environment['available']}."
+        )
+        try:
+            tree = [f"{item['kind'][:1]} {item['path']}" for item in self.workspace.list_entries(depth=3)][:40]
+        except Exception:
+            # Prompt enrichment must never be why a delegation cannot start.
+            tree = []
+        if tree:
+            prompt += "\n- It currently contains:\n" + "\n".join(f"  {line}" for line in tree)
+        else:
+            prompt += "\n- It is currently empty."
         catalog = self._skill_catalog(task, toolset)
         if catalog:
             prompt += "\n\nRelevant procedural Skills are available as metadata only. Load one with use_skill only if it helps:"

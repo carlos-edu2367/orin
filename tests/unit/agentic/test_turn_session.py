@@ -184,6 +184,17 @@ def _session_with_two_subagents():
     return session
 
 
+def test_the_subagent_prompt_describes_the_shared_workspace_and_shell() -> None:
+    session = _session_with_one_subagent()
+    session.workspace.write_text("report.md", "draft\n")
+    toolset = session._toolset(subagents=False)
+
+    prompt = session._subagent_prompt({"name": "Pesquisador", "role": "pesquisa"}, "escreva o resumo", toolset)
+
+    assert "report.md" in prompt
+    assert "run_command executes through" in prompt
+
+
 def test_two_delegations_run_at_the_same_time(monkeypatch) -> None:
     import threading
 
