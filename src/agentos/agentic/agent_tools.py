@@ -186,6 +186,7 @@ class AgentToolset:
         create_agent: Callable[[str, str], ToolOutcome] | None = None,
         http_client: httpx.Client | None = None,
         search_client: object | None = None,
+        browser: object | None = None,
         enable_terminal: bool = True,
         skills=None,
         skill_load_recorder: Callable[[object], None] | None = None,
@@ -197,6 +198,7 @@ class AgentToolset:
         self._create_agent = create_agent
         self._http_client = http_client
         self._search_client = search_client
+        self._browser = browser
         self._enable_terminal = enable_terminal
         self.skills = skills
         self._skill_load_recorder = skill_load_recorder
@@ -270,6 +272,13 @@ class AgentToolset:
                 "Search the public web and return titles, URLs and snippets. Use this to find an address, then fetch_url to read it.",
                 _schema({"query": _TEXT, "limit": {"type": "integer", "minimum": 1, "maximum": 10}}, ("query",)),
                 self.web_search, "web", read_only=True,
+            ))
+        if self._browser is not None:
+            items.append(ToolDefinition(
+                "browse_page",
+                "Open a public page in a real browser and return its rendered text. Use this only when fetch_url comes back empty or incomplete because the page builds its content with JavaScript.",
+                _schema({"url": _TEXT}, ("url",)),
+                self.browse_page, "web", read_only=True,
             ))
         if self._enable_terminal:
             items.append(ToolDefinition(
@@ -613,6 +622,23 @@ class AgentToolset:
             raise AgentToolError(f"The search provider could not be reached: {type(error).__name__}") from error
         except Exception:  # noqa: BLE001 - provider failures must not reach the model
             raise AgentToolError("The search provider returned an invalid response.") from None
+
+    def browse_page(self, url: str) -> dict[str, Any]:
+        if self._browser is None:
+            raise AgentToolError("The browser is not available.")
+        target = _public_url(url)
+        try:
+            html = self._browser.render(target)
+        except RuntimeError as error:
+            raise AgentToolError(f"The page could not be rendered: {error}") from error
+        parser = _TextExtractor()
+        parser.feed(html)
+        title = parser.title or target
+        return {
+            "summary": f"Abriu {urlparse(target).netloc}",
+            "content": f"{target}\n\n{parser.text()}",
+            "payload": {"url": target, "label": title[:120] or target, "rendered": True},
+        }
 
     def remember(self, fact: str, tags: list[str] | None = None) -> dict[str, Any]:
         if self.memory is None:

@@ -243,6 +243,7 @@ class TurnSession:
         skills=None,
         skill_load_recorder: Callable[[object], None] | None = None,
         search_client=None,
+        browser=None,
     ) -> None:
         self.turn = turn
         self.store = store
@@ -255,6 +256,7 @@ class TurnSession:
         self.skills = skills
         self.skill_load_recorder = skill_load_recorder
         self.search_client = search_client
+        self.browser = browser
         self.workspace = ConversationWorkspace(workspace_root, resolve_effective_workspace_id(turn))
         self._subagent_runs = 0
         self._subagent_lock = Lock()
@@ -530,6 +532,7 @@ class TurnSession:
             skills=self.skills,
             skill_load_recorder=self.skill_load_recorder,
             search_client=self.search_client,
+            browser=self.browser,
         )
 
     def _skill_catalog(self, task: str, toolset: AgentToolset) -> tuple[object, ...]:

@@ -28,6 +28,37 @@ def test_web_search_is_absent_without_a_configured_client(toolset: AgentToolset)
     assert "web_search" not in [item.name for item in toolset.definitions()]
 
 
+def test_browse_page_is_absent_without_a_browser(toolset: AgentToolset) -> None:
+    assert "browse_page" not in [item.name for item in toolset.definitions()]
+
+
+def test_browse_page_returns_the_rendered_text(tmp_path) -> None:
+    class Browser:
+        def render(self, url):
+            return "<html><head><title>Rendered</title></head><body><p>hello</p><script>x()</script></body></html>"
+
+    tools = AgentToolset(ConversationWorkspace(tmp_path, "chat_browser"), browser=Browser())
+
+    outcome = tools.invoke("browse_page", {"url": "https://example.test/page"})
+
+    assert outcome.status == "succeeded"
+    assert "hello" in outcome.content
+    assert "x()" not in outcome.content
+    assert outcome.payload["label"] == "Rendered"
+
+
+def test_browse_page_refuses_a_private_address(tmp_path) -> None:
+    class Browser:
+        def render(self, url):
+            raise AssertionError("must not be reached")
+
+    tools = AgentToolset(ConversationWorkspace(tmp_path, "chat_browser"), browser=Browser())
+
+    outcome = tools.invoke("browse_page", {"url": "http://127.0.0.1/admin"})
+
+    assert outcome.status == "failed"
+
+
 def test_web_search_returns_titles_and_urls_to_the_model(tmp_path) -> None:
     from agentos.agentic.web_search import SearchResult
 
