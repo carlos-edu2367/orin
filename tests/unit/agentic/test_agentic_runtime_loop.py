@@ -495,6 +495,46 @@ def test_the_last_iteration_forbids_tools_and_returns_an_answer() -> None:
     assert result.budget_exhausted is True
 
 
+def test_an_identical_failing_call_is_not_executed_twice() -> None:
+    class RepeatingProvider:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def stream(self, request):
+            self.calls += 1
+            if self.calls <= 2:
+                return normalize_sse(
+                    [
+                        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-%d","function":{"name":"read_file","arguments":"{\\"path\\":\\"nope\\"}"}}]},"finish_reason":"tool_calls"}]}' % self.calls,
+                        "data: [DONE]",
+                    ],
+                    provider="openrouter",
+                )
+            return normalize_sse(['data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}', "data: [DONE]"], provider="openrouter")
+
+    class CountingToolset:
+        def __init__(self) -> None:
+            self.invocations = 0
+
+        def schemas(self):
+            return []
+
+        def is_read_only(self, name: str) -> bool:
+            return True
+
+        def invoke(self, name, arguments):
+            self.invocations += 1
+            return ToolOutcome("failed", "não encontrado", "file not found", {}, "TOOL_REFUSED")
+
+    toolset = CountingToolset()
+    runtime = AgenticTurnRuntime(store=Store(), provider=RepeatingProvider(), toolset=toolset)
+
+    result = runtime.run("turn-1")
+
+    assert result.state == "completed"
+    assert toolset.invocations == 1
+
+
 def test_a_final_iteration_with_only_tool_calls_and_no_text_still_fails_with_iteration_limit() -> None:
     """The provider may ignore tool_choice="none" and request tools anyway.
 

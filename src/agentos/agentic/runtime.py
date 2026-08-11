@@ -80,6 +80,7 @@ class AgenticTurnRuntime:
         self._life(turn, "running")
         messages = list(self.store.history_for_turn(turn))[-32:]
         action_count = 0
+        self._failed_signatures: dict[str, str] = {}
         provider_retries = 0
         total_tokens = 0
         total_cost = Decimal("0")
@@ -233,6 +234,13 @@ class AgenticTurnRuntime:
         characters = len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
         return max(512, characters * 4)
 
+    @staticmethod
+    def _signature(name: str, arguments: Mapping[str, object]) -> str:
+        try:
+            return f"{name}:{json.dumps(arguments, sort_keys=True, ensure_ascii=False, default=str)}"
+        except (TypeError, ValueError):
+            return f"{name}:{arguments!r}"
+
     def _run_toolset(self, turn: dict[str, object], calls: list[dict[str, str]]) -> list[dict[str, object]]:
         """Execute the model's calls and return results it can actually read.
 
@@ -242,7 +250,7 @@ class AgenticTurnRuntime:
         call runs out of the order the model requested. Results are emitted
         in the order the model requested them.
         """
-        from .agent_tools import AgentToolError, parse_arguments
+        from .agent_tools import AgentToolError, ToolOutcome, parse_arguments
 
         prepared: list[tuple[str, str, dict[str, object] | None, str | None]] = []
         for call in calls:
@@ -254,21 +262,40 @@ class AgenticTurnRuntime:
             except AgentToolError as error:
                 prepared.append((call_id, name, None, str(error)))
 
+        # A call whose exact (name, arguments) signature already failed
+        # earlier in this turn is never invoked again — neither in the pool
+        # nor sequentially — it is short-circuited with the earlier error.
+        duplicate = [error is None and self._signature(name, arguments) in self._failed_signatures for _, name, arguments, error in prepared]
+
+        def duplicate_outcome(name: str, arguments: Mapping[str, object]) -> ToolOutcome:
+            previous = self._failed_signatures[self._signature(name, arguments)]
+            content = (
+                f"{previous}\n\n[this exact call already failed in this turn; "
+                "it was not run again — change the arguments or use a different tool]"
+            )
+            return ToolOutcome("failed", "Chamada repetida ignorada", content, {}, "DUPLICATE_TOOL_CALL")
+
         is_read_only = getattr(self.toolset, "is_read_only", None)
-        eligible = [error is None and callable(is_read_only) and is_read_only(name) for _, name, _, error in prepared]
+        eligible = [
+            error is None and not duplicate[i] and callable(is_read_only) and is_read_only(name)
+            for i, (_, name, _, error) in enumerate(prepared)
+        ]
 
         # Walk the batch once, in the model's order. Each maximal run of
         # consecutive read-only calls is dispatched to the pool together;
-        # everything else (a write-capable call, or a run of exactly one
-        # read-only call) is invoked in place before moving on. This keeps a
-        # write from ever starting before an earlier call finishes, or from
-        # blocking a later independent read.
+        # everything else (a write-capable call, a duplicate of an already
+        # failed call, or a run of exactly one read-only call) is invoked (or
+        # short-circuited) in place before moving on. This keeps a write from
+        # ever starting before an earlier call finishes, or from blocking a
+        # later independent read.
         outcomes: dict[int, object] = {}
         index = 0
         while index < len(prepared):
             if not eligible[index]:
                 _, name, arguments, error = prepared[index]
-                if error is None:
+                if duplicate[index]:
+                    outcomes[index] = duplicate_outcome(name, arguments)
+                elif error is None:
                     outcomes[index] = self.toolset.invoke(name, arguments)
                 index += 1
                 continue
@@ -292,6 +319,8 @@ class AgenticTurnRuntime:
                 results.append({"id": call_id, "name": name, "status": "failed", "content": error})
                 continue
             outcome = outcomes.get(index) or self.toolset.invoke(name, arguments)
+            if outcome.status == "failed" and not duplicate[index]:
+                self._failed_signatures[self._signature(name, arguments)] = outcome.content
             self._life(
                 turn, "tool_finished", tool_name=name, invocation_id=call_id, status=outcome.status,
                 summary=outcome.summary, error_code=outcome.error_code, tool_payload=dict(outcome.payload),
