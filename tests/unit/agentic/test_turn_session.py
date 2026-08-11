@@ -464,6 +464,37 @@ def test_the_ledger_section_is_absent_when_nothing_was_done() -> None:
     assert "What you already did" not in prompt
 
 
+def test_environment_facts_name_the_shell_and_the_operating_system() -> None:
+    from agentos.agentic.session import environment_facts
+
+    facts = environment_facts()
+
+    assert facts["os"]
+    assert facts["shell"]
+    assert facts["python"].startswith("3.")
+
+
+def test_the_prompt_states_the_environment_and_the_workspace_tree() -> None:
+    prompt = build_system_prompt(
+        tool_names=("run_command",), memories=[], agents=[], workspace_hint="hint", subagents_enabled=False,
+        environment={"os": "Windows 11", "shell": "cmd.exe", "python": "3.12.4"},
+        workspace_tree=("d src", "f src/app.py"),
+    )
+
+    assert "cmd.exe" in prompt
+    assert "src/app.py" in prompt
+
+
+def test_an_empty_workspace_says_so_instead_of_printing_an_empty_tree() -> None:
+    prompt = build_system_prompt(
+        tool_names=("run_command",), memories=[], agents=[], workspace_hint="hint", subagents_enabled=False,
+        environment={"os": "Windows 11", "shell": "cmd.exe", "python": "3.12.4"},
+        workspace_tree=(),
+    )
+
+    assert "empty" in prompt.lower()
+
+
 def test_omniroute_records_only_the_requested_route_for_observability(tmp_path: Path) -> None:
     session, store, _agents, _provider = build(tmp_path, [])
     session.turn["provider"] = "omniroute"

@@ -7,8 +7,12 @@ reported.
 """
 from __future__ import annotations
 
+import os
+import platform
+import shutil
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import MappingProxyType
 from typing import Callable, Mapping
 
 from .agent_tools import AgentToolset, ToolOutcome
@@ -24,6 +28,26 @@ PREVIEW_CHARS = 400
 
 class ProjectWorkspaceResolutionError(RuntimeError):
     """A project turn must never run in a fallback workspace."""
+
+
+def environment_facts() -> dict[str, str]:
+    """Describe the machine the agent's commands actually run on.
+
+    ``run_command`` uses ``shell=True``, so the interpreter is the platform's
+    default. Telling the model which one it is removes a whole class of retries
+    caused by guessing cmd vs PowerShell vs sh syntax.
+    """
+    if os.name == "nt":
+        shell = os.environ.get("COMSPEC") or "cmd.exe"
+    else:
+        shell = os.environ.get("SHELL") or "/bin/sh"
+    tooling = ", ".join(name for name in ("git", "node", "npm", "uv", "docker") if shutil.which(name))
+    return {
+        "os": f"{platform.system()} {platform.release()}".strip(),
+        "shell": Path(shell).name,
+        "python": platform.python_version(),
+        "available": tooling or "none detected",
+    }
 
 
 def resolve_effective_workspace_id(turn: Mapping[str, object]) -> str:
@@ -48,6 +72,8 @@ def build_system_prompt(
     subagents_enabled: bool,
     skill_catalog: tuple[object, ...] = (),
     tool_ledger: tuple[Mapping[str, str], ...] = (),
+    environment: Mapping[str, str] = MappingProxyType({}),
+    workspace_tree: tuple[str, ...] = (),
 ) -> str:
     lines = [
         "You are the main agent of AgentOS, a local-first agent workspace running on the user's own machine.",
@@ -75,6 +101,19 @@ def build_system_prompt(
         f"- You have a private working directory for this conversation. All file paths are relative to it. {workspace_hint}",
         "- Commands run with that directory as the working directory.",
     ]
+    if workspace_tree:
+        lines += ["- It currently contains:"]
+        lines += [f"  {item}" for item in workspace_tree]
+    else:
+        lines += ["- It is currently empty."]
+    if environment:
+        lines += [
+            "",
+            "## Environment",
+            f"- Operating system: {environment.get('os', 'unknown')}",
+            f"- run_command executes through: {environment.get('shell', 'unknown')} — use that shell's syntax, not another one's.",
+            f"- Python: {environment.get('python', 'unknown')}. Also on PATH: {environment.get('available', 'unknown')}.",
+        ]
     if subagents_enabled:
         lines += [
             "",
@@ -425,16 +464,28 @@ class TurnSession:
                 ledger = ()
         else:
             ledger = ()
+        try:
+            tree = tuple(f"{item['kind'][:1]} {item['path']}" for item in self.workspace.list_entries(depth=3))[:60]
+        except Exception:
+            # A prompt enrichment must never be the reason a turn cannot start.
+            tree = ()
+        try:
+            environment = environment_facts()
+        except Exception:
+            # A prompt enrichment must never be the reason a turn cannot start.
+            environment = {}
         history = self.store.history_for_turn(self.turn)
         task = next((str(item.get("content") or "") for item in reversed(history) if item.get("role") == "user"), "")
         prompt = build_system_prompt(
             tool_names=tuple(item.name for item in toolset.definitions()),
             memories=memories,
             agents=agents,
-            workspace_hint="It starts empty unless a previous turn created files.",
+            workspace_hint="Files you create there persist for the whole conversation.",
             subagents_enabled=self.enable_subagents,
             skill_catalog=self._skill_catalog(task, toolset),
             tool_ledger=ledger,
+            environment=environment,
+            workspace_tree=tree,
         )
         # OmniRoute's public OpenAI-compatible response does not guarantee the
         # selected upstream/provider. Record the requested route only; never
@@ -451,4 +502,4 @@ class TurnSession:
         )
 
 
-__all__ = ["MAX_SUBAGENTS_PER_TURN", "ProjectWorkspaceResolutionError", "TurnSession", "build_system_prompt", "resolve_effective_workspace_id"]
+__all__ = ["MAX_SUBAGENTS_PER_TURN", "ProjectWorkspaceResolutionError", "TurnSession", "build_system_prompt", "environment_facts", "resolve_effective_workspace_id"]
