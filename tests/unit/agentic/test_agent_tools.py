@@ -24,6 +24,27 @@ def test_write_then_read_returns_the_content_to_the_model(toolset: AgentToolset)
     assert "step one" in outcome.content
 
 
+def test_web_search_is_absent_without_a_configured_client(toolset: AgentToolset) -> None:
+    assert "web_search" not in [item.name for item in toolset.definitions()]
+
+
+def test_web_search_returns_titles_and_urls_to_the_model(tmp_path) -> None:
+    from agentos.agentic.web_search import SearchResult
+
+    class Searcher:
+        def search(self, query, *, limit=5):
+            return [SearchResult("Orin docs", "https://example.test/a", "how it works")]
+
+    tools = AgentToolset(ConversationWorkspace(tmp_path, "chat_search"), search_client=Searcher())
+
+    outcome = tools.invoke("web_search", {"query": "orin"})
+
+    assert outcome.status == "succeeded"
+    assert "https://example.test/a" in outcome.content
+    assert outcome.payload["count"] == 1
+    assert tools.is_read_only("web_search")
+
+
 def test_edit_file_replaces_a_unique_text_fragment_without_rewriting_the_document(toolset: AgentToolset) -> None:
     toolset.invoke("write_file", {"path": "notes/plan.md", "content": "first\nsecond\nthird\n"})
 

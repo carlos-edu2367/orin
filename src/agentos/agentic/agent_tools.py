@@ -185,6 +185,7 @@ class AgentToolset:
         delegate_batch: Callable[[list[Mapping[str, Any]]], ToolOutcome] | None = None,
         create_agent: Callable[[str, str], ToolOutcome] | None = None,
         http_client: httpx.Client | None = None,
+        search_client: object | None = None,
         enable_terminal: bool = True,
         skills=None,
         skill_load_recorder: Callable[[object], None] | None = None,
@@ -195,6 +196,7 @@ class AgentToolset:
         self._delegate_batch = delegate_batch
         self._create_agent = create_agent
         self._http_client = http_client
+        self._search_client = search_client
         self._enable_terminal = enable_terminal
         self.skills = skills
         self._skill_load_recorder = skill_load_recorder
@@ -262,6 +264,13 @@ class AgentToolset:
                 self.fetch_url, "web", read_only=True,
             ),
         ]
+        if self._search_client is not None:
+            items.append(ToolDefinition(
+                "web_search",
+                "Search the public web and return titles, URLs and snippets. Use this to find an address, then fetch_url to read it.",
+                _schema({"query": _TEXT, "limit": {"type": "integer", "minimum": 1, "maximum": 10}}, ("query",)),
+                self.web_search, "web", read_only=True,
+            ))
         if self._enable_terminal:
             items.append(ToolDefinition(
                 "run_command", "Run one shell command inside the conversation workspace and return its output. Set background=true only for a long-lived server; it returns immediately.",
@@ -570,6 +579,24 @@ class AgentToolset:
             "summary": f"Consultou {urlparse(target).netloc}",
             "content": f"{target}\nHTTP {response.status_code}\n\n{body}",
             "payload": {"url": target, "status": response.status_code, "label": title[:120] or target},
+        }
+
+    def web_search(self, query: str, limit: int = 5) -> dict[str, Any]:
+        if self._search_client is None:
+            raise AgentToolError("Web search is not available.")
+        if not isinstance(query, str) or not query.strip():
+            raise AgentToolError("query must be a non-blank string")
+        try:
+            results = self._search_client.search(query.strip(), limit=int(limit))
+        except httpx.HTTPError as error:
+            raise AgentToolError(f"The search provider could not be reached: {type(error).__name__}") from error
+        if not results:
+            return {"summary": f"Nenhum resultado para '{query.strip()[:40]}'", "content": "[no results]", "payload": {"count": 0, "label": query.strip()[:80]}}
+        body = "\n\n".join(f"{item.title}\n{item.url}\n{item.snippet}" for item in results)
+        return {
+            "summary": f"Buscou na web: {len(results)} {'resultado' if len(results) == 1 else 'resultados'}",
+            "content": body,
+            "payload": {"count": len(results), "label": query.strip()[:80]},
         }
 
     def remember(self, fact: str, tags: list[str] | None = None) -> dict[str, Any]:

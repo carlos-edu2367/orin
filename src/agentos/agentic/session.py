@@ -242,6 +242,7 @@ class TurnSession:
         enable_subagents: bool = True,
         skills=None,
         skill_load_recorder: Callable[[object], None] | None = None,
+        search_client=None,
     ) -> None:
         self.turn = turn
         self.store = store
@@ -253,6 +254,7 @@ class TurnSession:
         self.enable_subagents = enable_subagents
         self.skills = skills
         self.skill_load_recorder = skill_load_recorder
+        self.search_client = search_client
         self.workspace = ConversationWorkspace(workspace_root, resolve_effective_workspace_id(turn))
         self._subagent_runs = 0
         self._subagent_lock = Lock()
@@ -527,6 +529,7 @@ class TurnSession:
             delegate_batch=self._ask_agents if subagents else None,
             skills=self.skills,
             skill_load_recorder=self.skill_load_recorder,
+            search_client=self.search_client,
         )
 
     def _skill_catalog(self, task: str, toolset: AgentToolset) -> tuple[object, ...]:

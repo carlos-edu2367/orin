@@ -20,6 +20,7 @@ from agentos.provider_catalog.omniroute import DEFAULT_OMNIROUTE_BASE_URL, norma
 from agentos.agentic.runtime import AgenticLimits, AgenticTurnRuntime
 from agentos.agentic.settings import AgentRuntimeSettingsStore
 from agentos.agentic.session import TurnSession
+from agentos.agentic.web_search import search_client_from_environment
 from agentos.conversations.chat import PostgresChatStore
 from agentos.persistence.postgres.agent_memory import PostgresAgentMemoryStore
 from agentos.persistence.postgres.agentic_activity import PostgresAgenticActivityStore
@@ -222,6 +223,7 @@ class ChatWorker:
                 user_id=str(turn["user_id"]), execution_id=str(turn["execution_id"]),
                 agent_id=str(self.store.main_agent_id(turn)), loaded=loaded,
             ),
+            search_client=search_client_from_environment(),
             enable_subagents=self._enable_subagents,
         )
         return session.build_runtime()

@@ -67,6 +67,13 @@ event. Do not put provider keys in `.env.local`.
 Refresh the catalog after saving; the composer's model picker only offers models
 the server actually authorized.
 
+### Configure web search
+
+| Variable | Description |
+| --- | --- |
+| `AGENTOS_SEARCH_API_KEY` | Chave da API de busca (Brave Search por padrão). Sem ela a tool `web_search` não é registrada. |
+| `AGENTOS_SEARCH_ENDPOINT` | Endpoint alternativo compatível com o formato do Brave Search. Opcional. |
+
 ## Using it
 
 Type what you need and press Enter. While the agent works you will see:
