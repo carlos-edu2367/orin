@@ -8,3 +8,20 @@ __pycache__/
 venv/
 dist/
 build/
+node_modules/
+test-results/
+playwright-report/
+.env
+.env.local
+
+# Local runtime output: process logs, agent workspaces, visual captures.
+.logs/
+data/workspaces/
+frontend/tests/visual/output/
+*.run-*.log
+
+# Superpowers scratch (contains local session tokens)
+.superpowers/
+
+# Local runtime state
+data/*.json

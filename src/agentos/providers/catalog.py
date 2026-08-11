@@ -17,14 +17,14 @@ class InMemoryModelCatalog:
         self._model_revisions: dict[ModelRef, tuple[ModelDescriptor, ...]] = {}
         self._profiles: dict[ModelProfile, ModelProfileDefinition] = {}
         self._selections: dict[ModelSelectionRef, CatalogSelectionRecord] = {}
-        self._idempotency: dict[str, tuple[object, CatalogMutationResult]] = {}
+        self._idempotency: dict[tuple[str, ...], tuple[object, CatalogMutationResult]] = {}
 
     @property
     def catalog_version(self) -> int:
         return self._version
 
     def _check(self, request: CatalogMutationRequest) -> CatalogMutationResult | None:
-        previous = self._idempotency.get(str(request.idempotency_key))
+        previous = self._idempotency.get(self._idempotency_key(request))
         if previous is not None:
             if previous[0] != request:
                 raise CatalogConflictError("IDEMPOTENCY_PAYLOAD_CONFLICT")
@@ -36,8 +36,22 @@ class InMemoryModelCatalog:
     def _commit(self, request: CatalogMutationRequest, result: CatalogMutationResult) -> CatalogMutationResult:
         self._version += 1
         committed = replace(result, catalog_version=self._version)
-        self._idempotency[str(request.idempotency_key)] = (request, committed)
+        self._idempotency[self._idempotency_key(request)] = (request, committed)
         return committed
+
+    @staticmethod
+    def _idempotency_key(request: CatalogMutationRequest) -> tuple[str, ...]:
+        context = request.context
+        return (
+            str(context.user_id),
+            str(context.workspace_id),
+            str(context.agent_id),
+            str(context.execution_id),
+            str(context.correlation_id),
+            str(context.purpose),
+            str(context.actor_ref),
+            str(request.idempotency_key),
+        )
 
     def register_provider(self, request: RegisterProvider) -> CatalogMutationResult:
         if (existing := self._check(request)) is not None:

@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from agentos.events import (
     CommitState,
@@ -61,6 +61,16 @@ def test_inspected_unknown_commit_can_be_published(event_factory):
     assert result.published_event_ids == ("event:1",)
 
 
+def test_unknown_commit_is_inspected_even_without_optional_request_context(event_factory):
+    record = OutboxRecord(event_factory(), OutboxPosition("1"), CommitState.UNKNOWN)
+    source = FakeOutboxSource(record and (record,), confirmations={"event:1": True})
+    request = replace(_request(), context=None)
+
+    result = InMemoryOutboxPublisher(source, InMemoryEventBus()).publish_pending(request)
+
+    assert result.published_event_ids == ("event:1",)
+
+
 def test_retry_reuses_event_id_and_does_not_confirm_domain(event_factory):
     record = OutboxRecord(event_factory(), OutboxPosition("1"), CommitState.COMMITTED)
     source = FakeOutboxSource((record,))
@@ -72,3 +82,17 @@ def test_retry_reuses_event_id_and_does_not_confirm_domain(event_factory):
     assert second.duplicate_event_ids == ("event:1",)
     assert source.domain_confirmation_count == 0
     assert [event.event_id for event in bus.events] == ["event:1"]
+
+
+def test_cursor_does_not_skip_pending_entry_before_later_committed_entry(event_factory):
+    pending = OutboxRecord(event_factory(), OutboxPosition("1"), CommitState.UNKNOWN)
+    committed = OutboxRecord(
+        replace(event_factory(), event_id="event:2", sequence=2),
+        OutboxPosition("2"),
+        CommitState.COMMITTED,
+    )
+    source = FakeOutboxSource((pending, committed), confirmations={})
+    result = InMemoryOutboxPublisher(source, InMemoryEventBus()).publish_pending(_request())
+
+    assert result.pending_event_ids == ("event:1",)
+    assert result.next_position is None

@@ -77,6 +77,15 @@ def classification_allows(
 
 
 def scope_matches(record_context, operation_context) -> bool:
+    if operation_context.workspace_id is None:
+        return (
+            record_context.user_id == operation_context.user_id
+            and record_context.agent_id == operation_context.agent_id
+            and record_context.execution_id == operation_context.execution_id
+            and record_context.correlation_id == operation_context.correlation_id
+            and record_context.purpose == operation_context.purpose
+            and record_context.actor == operation_context.actor
+        )
     return record_context.scope_key() == operation_context.scope_key()
 
 

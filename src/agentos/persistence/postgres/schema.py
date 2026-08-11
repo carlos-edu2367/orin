@@ -356,6 +356,26 @@ tool_activity_events = Table(
 )
 Index("ix_tool_activity_events_scope", tool_activity_events.c.user_id, tool_activity_events.c.execution_id)
 
+tool_invocations = Table(
+    "tool_invocations", metadata,
+    Column("invocation_id", String(255), primary_key=True),
+    Column("user_id", String(255), nullable=False),
+    Column("workspace_id", String(255), nullable=True),
+    Column("agent_id", String(255), nullable=False),
+    Column("execution_id", String(255), nullable=False),
+    Column("correlation_id", String(255), nullable=False),
+    Column("purpose", String(255), nullable=False),
+    Column("actor", String(255), nullable=False),
+    Column("tool_id", String(255), nullable=False),
+    Column("tool_version", Integer, nullable=False),
+    Column("state", String(32), nullable=False),
+    Column("fingerprint", String(128), nullable=False),
+    Column("outcome", JSON, nullable=True),
+    Column("started_at", DateTime(timezone=True), nullable=True),
+    Column("finished_at", DateTime(timezone=True), nullable=True),
+)
+Index("ix_tool_invocations_scope", tool_invocations.c.user_id, tool_invocations.c.execution_id)
+
 
 # Frontend Fase D: user-configured LLM provider credentials. There is no
 # execution/agent scope for a provider configuration (it is set once per
@@ -367,14 +387,303 @@ provider_configurations = Table(
     Column("user_id", String(255), nullable=False),
     Column("provider", String(32), nullable=False),
     Column("enabled", Boolean, nullable=False),
-    Column("model", String(255), nullable=False),
-    Column("api_key", String(4096), nullable=False),
+    # Retained only for migration compatibility. New credential records never
+    # store or interpret a selected model; agent revisions own that selection.
+    Column("model", String(255), nullable=True),
+      Column("api_key", String(4096), nullable=True),  # legacy rotation column; never written for new credentials
+    Column("api_key_ciphertext", String(8192), nullable=True),
+    Column("base_url", String(2048), nullable=True),
     Column("secret_ref", String(255), nullable=False),
+    Column("catalog_refreshed_at", DateTime(timezone=True), nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),
     UniqueConstraint("user_id", "provider", name="uq_provider_configurations_user_provider"),
 )
 Index("ix_provider_configurations_user", provider_configurations.c.user_id)
+
+
+provider_model_catalog = Table(
+    "provider_model_catalog", metadata,
+    Column("id", Integer, primary_key=True),
+    Column("user_id", String(255), nullable=False),
+    Column("provider", String(32), nullable=False),
+    Column("model_id", String(512), nullable=False),
+    Column("display_name", String(512), nullable=False),
+    Column("context_window", Integer, nullable=True),
+    Column("capabilities", JSON, nullable=False),
+    Column("input_modalities", JSON, nullable=False),
+    Column("output_modalities", JSON, nullable=False),
+    Column("input_per_million", String(64), nullable=True),
+    Column("output_per_million", String(64), nullable=True),
+    Column("route_kind", String(32), nullable=False, server_default="model"),
+    Column("refreshed_at", DateTime(timezone=True), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+    UniqueConstraint("user_id", "provider", "model_id", name="uq_provider_model_catalog_scope"),
+)
+Index("ix_provider_model_catalog_scope", provider_model_catalog.c.user_id, provider_model_catalog.c.provider)
+
+
+provider_model_favorites = Table(
+    "provider_model_favorites", metadata,
+    Column("id", Integer, primary_key=True),
+    Column("user_id", String(255), nullable=False),
+    Column("provider", String(32), nullable=False),
+    Column("model_id", String(512), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    UniqueConstraint("user_id", "provider", "model_id", name="uq_provider_model_favorites_scope"),
+)
+Index("ix_provider_model_favorites_scope", provider_model_favorites.c.user_id, provider_model_favorites.c.provider)
+
+
+provider_model_selections = Table(
+    "provider_model_selections", metadata,
+    Column("id", Integer, primary_key=True),
+    Column("selection_ref", String(512), nullable=False, unique=True),
+    Column("user_id", String(255), nullable=False),
+    Column("agent_id", String(255), nullable=False),
+    Column("execution_id", String(255), nullable=False),
+    Column("correlation_id", String(255), nullable=False),
+    Column("purpose", String(128), nullable=False),
+    Column("model_ref", String(1024), nullable=False),
+    Column("model_revision", String(512), nullable=False),
+    Column("selection", JSON, nullable=True),
+    Column("requirements", JSON, nullable=True),
+    Column("resolved_at", DateTime(timezone=True), nullable=False),
+    Column("valid_until", DateTime(timezone=True), nullable=False),
+)
+Index("ix_provider_model_selections_scope", provider_model_selections.c.user_id, provider_model_selections.c.agent_id)
+
+
+agent_model_configurations = Table(
+    "agent_model_configurations", metadata,
+    Column("id", Integer, primary_key=True),
+    Column("user_id", String(255), nullable=False),
+    Column("agent_id", String(255), nullable=False),
+    Column("config_version", Integer, nullable=False),
+    Column("provider", String(32), nullable=False),
+    Column("model_id", String(512), nullable=False),
+    Column("selection_ref", String(512), nullable=True),
+    Column("model_revision", String(512), nullable=True),
+    Column("model_profile_ref", String(1024), nullable=False),
+    Column("catalog_refreshed_at", DateTime(timezone=True), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    UniqueConstraint("user_id", "agent_id", "config_version", name="uq_agent_model_configuration_revision"),
+)
+
+
+conversation_prompts = Table(
+    "conversation_prompts", metadata,
+    Column("id", Integer, primary_key=True),
+    Column("prompt_ref", String(255), nullable=False, unique=True),
+    Column("user_id", String(255), nullable=False),
+    Column("message", String(16000), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+)
+Index("ix_conversation_prompts_user", conversation_prompts.c.user_id)
+
+# The product conversation is deliberately separate from the opaque legacy
+# prompt reference: it is the public, ordered history the chat UI rehydrates.
+conversations = Table(
+    "conversations", metadata,
+    Column("id", Integer, primary_key=True), Column("conversation_id", String(255), nullable=False, unique=True),
+    Column("user_id", String(255), nullable=False), Column("title", String(160), nullable=False),
+    Column("provider", String(32), nullable=False), Column("model_id", String(512), nullable=False),
+    Column("state", String(32), nullable=False), Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False), Column("project_id", String(255), nullable=True),
+)
+Index("ix_conversations_user_updated", conversations.c.user_id, conversations.c.updated_at)
+Index("ix_conversations_project_updated", conversations.c.project_id, conversations.c.updated_at)
+
+projects = Table(
+    "projects", metadata,
+    Column("project_id", String(255), primary_key=True), Column("user_id", String(255), nullable=False),
+    Column("workspace_id", String(255), nullable=False, unique=True), Column("name", String(120), nullable=False),
+    Column("description", String(2000), nullable=True), Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False), Column("archived_at", DateTime(timezone=True), nullable=True),
+)
+Index("ix_projects_user_active", projects.c.user_id, projects.c.archived_at, projects.c.updated_at)
+
+conversation_messages = Table(
+    "conversation_messages", metadata,
+    Column("id", Integer, primary_key=True), Column("message_id", String(255), nullable=False, unique=True),
+    Column("conversation_id", String(255), nullable=False), Column("turn_id", String(255), nullable=True),
+    Column("user_id", String(255), nullable=False), Column("role", String(16), nullable=False), Column("content", String(16000), nullable=False),
+    Column("sequence", Integer, nullable=False), Column("status", String(32), nullable=False), Column("retryable", Boolean, nullable=False, server_default="false"),
+    Column("created_at", DateTime(timezone=True), nullable=False), Column("updated_at", DateTime(timezone=True), nullable=False),
+    UniqueConstraint("conversation_id", "sequence", name="uq_conversation_message_sequence"),
+    CheckConstraint("role IN ('user', 'assistant')", name="ck_conversation_message_role"),
+)
+Index("ix_conversation_messages_history", conversation_messages.c.conversation_id, conversation_messages.c.sequence)
+
+conversation_turns = Table(
+    "conversation_turns", metadata,
+    Column("id", Integer, primary_key=True), Column("turn_id", String(255), nullable=False, unique=True),
+    Column("conversation_id", String(255), nullable=False), Column("user_id", String(255), nullable=False), Column("execution_id", String(255), nullable=False, unique=True),
+    Column("user_message_id", String(255), nullable=False), Column("assistant_message_id", String(255), nullable=False),
+    Column("provider", String(32), nullable=False), Column("model_id", String(512), nullable=False), Column("state", String(32), nullable=False),
+    Column("idempotency_key", String(255), nullable=False), Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("started_at", DateTime(timezone=True)), Column("finished_at", DateTime(timezone=True)), Column("updated_at", DateTime(timezone=True), nullable=False),
+    UniqueConstraint("user_id", "idempotency_key", name="uq_conversation_turn_idempotency"),
+)
+Index("ix_conversation_turns_conversation", conversation_turns.c.conversation_id, conversation_turns.c.created_at)
+
+conversation_dispatches = Table(
+    "conversation_dispatches", metadata,
+    Column("id", Integer, primary_key=True), Column("turn_id", String(255), nullable=False, unique=True), Column("state", String(32), nullable=False),
+    Column("attempts", Integer, nullable=False, server_default="0"), Column("last_error", String(96)), Column("queued_at", DateTime(timezone=True), nullable=False),
+    Column("acquired_at", DateTime(timezone=True)), Column("updated_at", DateTime(timezone=True), nullable=False),
+)
+Index("ix_conversation_dispatch_state", conversation_dispatches.c.state, conversation_dispatches.c.queued_at)
+
+conversation_events = Table(
+    "conversation_events", metadata,
+    Column("id", Integer, primary_key=True), Column("conversation_id", String(255), nullable=False), Column("user_id", String(255), nullable=False),
+    Column("event_type", String(64), nullable=False), Column("message_id", String(255)), Column("payload", JSON, nullable=False), Column("created_at", DateTime(timezone=True), nullable=False),
+)
+Index("ix_conversation_events_cursor", conversation_events.c.conversation_id, conversation_events.c.id)
+
+conversation_activity_events = Table(
+    "conversation_activity_events", metadata,
+    Column("id", Integer, primary_key=True),
+    Column("event_id", String(255), nullable=False),
+    Column("conversation_id", String(255), nullable=False),
+    Column("user_id", String(255), nullable=False),
+    Column("workspace_id", String(255), nullable=True),
+    Column("turn_id", String(255), nullable=False),
+    Column("execution_id", String(255), nullable=False),
+    Column("agent_id", String(255), nullable=False),
+    Column("parent_agent_id", String(255), nullable=True),
+    Column("event_type", String(64), nullable=False),
+    Column("sequence", Integer, nullable=False),
+    Column("summary", String(512), nullable=False),
+    Column("payload", JSON, nullable=False),
+    Column("visibility", String(16), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    UniqueConstraint("event_id", name="uq_conversation_activity_event_id"),
+    UniqueConstraint("user_id", "conversation_id", "turn_id", "sequence", name="uq_conversation_activity_sequence"),
+    CheckConstraint("sequence > 0", name="ck_conversation_activity_sequence_positive"),
+)
+Index("ix_conversation_activity_conversation_cursor", conversation_activity_events.c.conversation_id, conversation_activity_events.c.id)
+Index("ix_conversation_activity_user_created", conversation_activity_events.c.user_id, conversation_activity_events.c.created_at)
+Index("ix_conversation_activity_turn_sequence", conversation_activity_events.c.turn_id, conversation_activity_events.c.sequence)
+
+agent_memories = Table(
+    "agent_memories", metadata,
+    Column("memory_id", String(255), primary_key=True),
+    Column("user_id", String(255), nullable=False),
+    Column("conversation_id", String(255), nullable=True),
+    Column("scope_type", String(16), nullable=False, server_default="user"),
+    Column("scope_id", String(255), nullable=False, server_default=""),
+    Column("project_id", String(255), nullable=True),
+    Column("source_message_id", String(255), nullable=True),
+    Column("source_execution_id", String(255), nullable=True),
+    Column("fact", String(2000), nullable=False),
+    Column("tags", JSON, nullable=False, default=list),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+    UniqueConstraint("user_id", "fact", name="uq_agent_memories_user_fact"),
+)
+Index("ix_agent_memories_user_updated", agent_memories.c.user_id, agent_memories.c.updated_at)
+
+# Agent Skills are procedural packages.  Keep identity, immutable published
+# versions and execution evidence distinct: a current version may move while
+# an execution must still explain exactly what it loaded.
+skills = Table(
+    "skills", metadata,
+    Column("id", Integer, primary_key=True),
+    Column("skill_id", String(255), nullable=False),
+    Column("user_id", String(255), nullable=True),
+    Column("workspace_id", String(255), nullable=True),
+    Column("scope", String(32), nullable=False),
+    Column("source", String(32), nullable=False),
+    Column("enabled", Boolean, nullable=False, server_default="true"),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+)
+Index("ix_agent_memories_scope", agent_memories.c.user_id, agent_memories.c.scope_type, agent_memories.c.project_id, agent_memories.c.updated_at)
+Index("ix_skills_scope", skills.c.scope, skills.c.user_id, skills.c.workspace_id)
+Index("ix_skills_identity", skills.c.skill_id, skills.c.scope, skills.c.user_id, skills.c.workspace_id)
+
+skill_versions = Table(
+    "skill_versions", metadata,
+    Column("id", Integer, primary_key=True),
+    Column("skill_record_id", Integer, nullable=False),
+    Column("version", String(64), nullable=False),
+    Column("name", String(255), nullable=False),
+    Column("description", Text, nullable=False),
+    Column("metadata", JSON, nullable=False),
+    Column("instructions", Text, nullable=False),
+    Column("content_digest", String(64), nullable=False),
+    Column("published_at", DateTime(timezone=True), nullable=False),
+    UniqueConstraint("skill_record_id", "version", name="uq_skill_versions_ref"),
+)
+Index("ix_skill_versions_skill", skill_versions.c.skill_record_id, skill_versions.c.published_at)
+
+agent_skills = Table(
+    "agent_skills", metadata,
+    Column("id", Integer, primary_key=True),
+    Column("user_id", String(255), nullable=False),
+    Column("agent_id", String(255), nullable=False),
+    Column("skill_version_id", Integer, nullable=False),
+    Column("mode", String(32), nullable=False, server_default="pinned"),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    UniqueConstraint("user_id", "agent_id", "skill_version_id", name="uq_agent_skills_ref"),
+)
+Index("ix_agent_skills_agent", agent_skills.c.user_id, agent_skills.c.agent_id)
+
+execution_skills = Table(
+    "execution_skills", metadata,
+    Column("id", Integer, primary_key=True),
+    Column("user_id", String(255), nullable=False),
+    Column("execution_id", String(255), nullable=False),
+    Column("agent_id", String(255), nullable=False),
+    Column("skill_id", String(255), nullable=False),
+    Column("version", String(64), nullable=False),
+    Column("content_digest", String(64), nullable=False),
+    Column("content_snapshot", Text, nullable=False),
+    Column("loaded_at", DateTime(timezone=True), nullable=False),
+    Column("load_count", Integer, nullable=False, server_default="1"),
+    UniqueConstraint("execution_id", "skill_id", "version", name="uq_execution_skills_ref"),
+)
+Index("ix_execution_skills_execution", execution_skills.c.user_id, execution_skills.c.execution_id)
+
+conversation_agents = Table(
+    "conversation_agents", metadata,
+    Column("agent_id", String(255), primary_key=True),
+    Column("conversation_id", String(255), nullable=False),
+    Column("user_id", String(255), nullable=False),
+    Column("parent_agent_id", String(255), nullable=True),
+    Column("name", String(120), nullable=False),
+    Column("role", String(512), nullable=False),
+    Column("provider", String(32), nullable=True),
+    Column("model_id", String(512), nullable=True),
+    Column("state", String(32), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+    UniqueConstraint("conversation_id", "name", name="uq_conversation_agents_name"),
+)
+Index("ix_conversation_agents_conversation", conversation_agents.c.conversation_id)
+
+conversation_agent_usage = Table(
+    "conversation_agent_usage", metadata,
+    Column("conversation_id", String(255), primary_key=True),
+    Column("agent_id", String(255), primary_key=True),
+    Column("user_id", String(255), nullable=False),
+    Column("provider", String(32), nullable=False),
+    Column("model_id", String(512), nullable=False),
+    Column("input_tokens", Integer, nullable=True),
+    Column("output_tokens", Integer, nullable=True),
+    Column("total_tokens", Integer, nullable=True),
+    Column("usage_reported", Boolean, nullable=False, server_default="false"),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+)
+Index("ix_conversation_agent_usage_conversation", conversation_agent_usage.c.conversation_id)
+
+runtime_heartbeats = Table(
+    "runtime_heartbeats", metadata,
+    Column("component", String(64), primary_key=True), Column("updated_at", DateTime(timezone=True), nullable=False),
+)
 
 
 def create_engine_for_tests(url: str = "sqlite:///:memory:", **kwargs):
@@ -399,6 +708,17 @@ __all__ = [
     "event_stream_bindings",
     "multi_agent_events",
     "tool_activity_events",
+    "tool_invocations",
+    "conversation_activity_events",
+    "conversation_agents",
+    "conversation_agent_usage",
+    "conversations",
+    "projects",
+    "agent_memories",
+    "skills",
+    "skill_versions",
+    "agent_skills",
+    "execution_skills",
     "provider_configurations",
     "create_engine_for_tests",
 ]

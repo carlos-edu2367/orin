@@ -1,6 +1,6 @@
 # Context Pipeline Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Build the deterministic RFC 104 Context domain in `agentos.context` and connect it to the existing Runtime through a reference-only compatibility adapter.
 
@@ -32,7 +32,7 @@
 - Consumes: `ExecutionId`, `UserId`, `WorkspaceId`, `CorrelationId`, `DataClassification` and existing Runtime reference conventions.
 - Produces: `ContextOperationContext`, `ContextAssemblyRequest`, `ContextBudget`, `ContextCandidate`, `ContextItem`, `ContextSnapshot`, `ContextManifest`, `ContextTurnUpdate`, `TokenAccounting`, `Provenance`, enums, categorized `ContextError`, and the canonical Protocols.
 
-- [ ] **Step 1: Write failing contract tests**
+- [x] **Step 1: Write failing contract tests**
 
 ```python
 def test_assembly_request_requires_complete_sensitive_scope():
@@ -63,13 +63,13 @@ def test_snapshot_and_manifest_are_reference_and_sanitized_shapes():
     assert "secret" not in repr(snapshot).lower()
 ```
 
-- [ ] **Step 2: Run the contract tests and verify the expected RED failure**
+- [x] **Step 2: Run the contract tests and verify the expected RED failure**
 
 Run: `python -m pytest tests/unit/context/test_context_contracts.py -q`
 
 Expected: FAIL because `agentos.context` and its public types do not exist.
 
-- [ ] **Step 3: Implement the minimal immutable contracts**
+- [x] **Step 3: Implement the minimal immutable contracts**
 
 Define non-blank opaque references, timezone-aware instants, positive turns, non-negative token/cost values and tuple-based collections. Include `ContextItemKind`, `ContextPriority`, `OverflowPolicy`, `ContextDisposition`, `ContextErrorCategory` and `Retryability`. Model `ContentReference` separately from inline strings. Define `ContextOperationContext` with the six sensitive fields plus `purpose`; define `AuthorizedContextQuery` with the complete context, cutoff, classification ceiling and allowed kinds.
 
@@ -90,7 +90,7 @@ class ContextManager(Protocol):
     def finalize(self, execution_id: ExecutionId, disposition: ContextDisposition) -> None: ...
 ```
 
-- [ ] **Step 4: Run the contract tests and verify GREEN**
+- [x] **Step 4: Run the contract tests and verify GREEN**
 
 Run: `python -m pytest tests/unit/context/test_context_contracts.py -q`
 
@@ -108,7 +108,7 @@ Expected: PASS with no warnings.
 - Consumes: Task 1 models and `ContextSource`, `ContextManifestRecorder`, `ContextPolicy`, `ContextClock`, `CancellationSignal` Protocols.
 - Produces: `ContextManagerService(sources, recorder, policy, clock, cancellation=None)` implementing canonical `assemble`, `apply_turn` and `finalize`.
 
-- [ ] **Step 1: Write failing validation and sanitization tests**
+- [x] **Step 1: Write failing validation and sanitization tests**
 
 ```python
 def test_assemble_sends_complete_scope_to_every_source(context_fixture):
@@ -139,19 +139,19 @@ def test_cross_workspace_candidate_is_rejected(context_fixture):
     assert error.value.category is ContextErrorCategory.OWNERSHIP
 ```
 
-- [ ] **Step 2: Run the focused tests and verify RED**
+- [x] **Step 2: Run the focused tests and verify RED**
 
 Run: `python -m pytest tests/unit/context/test_context_pipeline.py -q`
 
 Expected: FAIL because `ContextManagerService` and the in-memory test ports do not exist.
 
-- [ ] **Step 3: Implement scope validation and candidate preparation**
+- [x] **Step 3: Implement scope validation and candidate preparation**
 
 Validate request scope, task reference/content, budget, model requirements reference and prior manifest ownership before any source call. Build an authorized query for each source with the fixed cutoff and classification ceiling. Revalidate every returned candidate's user/workspace/agent/execution ownership, provenance reference, classification and non-negative estimate. Reject cross-scope candidates with a sanitized `ContextError`.
 
 Sanitize inline content before it enters any returned object. Redact bearer tokens and key/value secrets using bounded regular expressions, reject malformed control structures, and mark all non-system/agent/task/control content as untrusted data. Never include the original value in an error, manifest reason, `repr`, or diagnostic reference. Add a transformation record when redaction or data delimiting occurs. Content references remain opaque and receive no authorization from their spelling.
 
-- [ ] **Step 4: Run the focused tests and verify GREEN**
+- [x] **Step 4: Run the focused tests and verify GREEN**
 
 Run: `python -m pytest tests/unit/context/test_context_pipeline.py -q`
 
@@ -169,7 +169,7 @@ Expected: PASS.
 - Consumes: prepared candidates from Task 2 and fixed policy/tokenizer snapshots.
 - Produces: deterministic snapshots and manifests with included/excluded/transformation records and complete token accounting.
 
-- [ ] **Step 1: Write failing selection and budget tests**
+- [x] **Step 1: Write failing selection and budget tests**
 
 ```python
 def test_required_items_are_preserved_before_optional_items(context_fixture):
@@ -204,13 +204,13 @@ def test_manifest_has_only_references_and_categorical_reasons(context_fixture):
     assert all("secret" not in repr(record).lower() for record in manifest.excluded)
 ```
 
-- [ ] **Step 2: Run the focused tests and verify RED**
+- [x] **Step 2: Run the focused tests and verify RED**
 
 Run: `python -m pytest tests/unit/context/test_context_pipeline.py -k "required or manifest" -q`
 
 Expected: FAIL because selection and manifest allocation are not implemented.
 
-- [ ] **Step 3: Implement deterministic selection and accounting**
+- [x] **Step 3: Implement deterministic selection and accounting**
 
 Remove duplicate candidate IDs and dominated representations first. Sort with a stable key: required priority first, dependency rank, descending relevance, ascending estimated tokens, valid newest `created_at`, then source kind/candidate reference. Apply per-kind limits and available input tokens after control reservation; preserve required items, then high/normal/low according to policy. Reference content already has reference cost; do not fabricate a tokenizer. Use the injected token estimator/policy snapshot to account input, reserved output, reserved control, included, excluded and transformed totals.
 
@@ -218,7 +218,7 @@ When optional candidates cannot fit, record categorical exclusions. When an inli
 
 Create a manifest with policy version, tokenizer profile, source cutoff, previous manifest ID, reference-only records, transformations and accounting. Record it once, then create the snapshot with its returned manifest reference and a temporary context reference. Enforce the postconditions after recording; a recorder that returns a mismatched reference raises a reconciliation error.
 
-- [ ] **Step 4: Run the focused tests and verify GREEN**
+- [x] **Step 4: Run the focused tests and verify GREEN**
 
 Run: `python -m pytest tests/unit/context/test_context_pipeline.py -q`
 
@@ -237,7 +237,7 @@ Expected: PASS.
 - Consumes: Task 3 manifests and the canonical `ContextTurnUpdate` reference types.
 - Produces: `apply_turn` with expected-turn/manifest chaining, exactly-once usage deltas, cooperative cancellation and `finalize` disposal.
 
-- [ ] **Step 1: Write failing lifecycle tests**
+- [x] **Step 1: Write failing lifecycle tests**
 
 ```python
 def test_apply_turn_chains_manifest_without_loading_full_history(context_fixture):
@@ -277,19 +277,19 @@ def test_finalize_discards_ephemeral_state_and_never_saves_memory(context_fixtur
     assert context_fixture.recorder.finalized == [("execution-1", ContextDisposition.DISCARD)]
 ```
 
-- [ ] **Step 2: Run lifecycle tests and verify RED**
+- [x] **Step 2: Run lifecycle tests and verify RED**
 
 Run: `python -m pytest tests/unit/context/test_context_lifecycle.py -q`
 
 Expected: FAIL because turn state, cancellation and finalization are not implemented.
 
-- [ ] **Step 3: Implement incremental turn state and disposal**
+- [x] **Step 3: Implement incremental turn state and disposal**
 
 Load the previous manifest through the recorder with the exact request ownership, verify execution/turn chain and derive the next turn as `expected_turn + 1`. Convert only explicit message/tool/decision/event/control references into candidates; do not query a history source unless a configured source is explicitly part of the request. Deduplicate usage with a per-execution applied-update key derived from the previous manifest and expected turn; conflicting reuse raises `TURN_CONFLICT`.
 
 Check cancellation before source calls and between each candidate processing/allocation step. `finalize` removes in-memory execution state regardless of disposition and accepts only known dispositions. It may retain recorder audit metadata through the injected recorder, but it never calls a Memory-like method and never stores inline Context content.
 
-- [ ] **Step 4: Run lifecycle tests and verify GREEN**
+- [x] **Step 4: Run lifecycle tests and verify GREEN**
 
 Run: `python -m pytest tests/unit/context/test_context_lifecycle.py -q`
 
@@ -309,7 +309,7 @@ Expected: PASS.
 - Consumes: canonical `ContextManagerService` and existing `agentos.runtime.models` request/snapshot shapes.
 - Produces: `RuntimeContextManagerAdapter` implementing the current Runtime `ContextManager` surface and returning reference-only Runtime snapshots.
 
-- [ ] **Step 1: Write failing compatibility tests**
+- [x] **Step 1: Write failing compatibility tests**
 
 ```python
 def test_runtime_adapter_preserves_complete_operation_context(context_fixture):
@@ -326,19 +326,19 @@ def test_runtime_adapter_does_not_expose_canonical_items_or_payloads(context_fix
     assert "prompt" not in repr(result).lower()
 ```
 
-- [ ] **Step 2: Run compatibility tests and verify RED**
+- [x] **Step 2: Run compatibility tests and verify RED**
 
 Run: `python -m pytest tests/unit/context/test_runtime_compatibility.py -q`
 
 Expected: FAIL because the adapter and canonical-to-runtime conversion do not exist.
 
-- [ ] **Step 3: Implement the adapter without changing Runtime business logic**
+- [x] **Step 3: Implement the adapter without changing Runtime business logic**
 
 Translate Runtime `OperationContext` into canonical `ContextOperationContext`, create a reference-only `TaskSnapshot` from `task_ref`, create the canonical budget from the configured Runtime-facing defaults, and pass the model requirements reference as an opaque policy input. Convert canonical snapshots to `agentos.runtime.models.ContextSnapshot(context_ref, manifest_ref)`. Translate Runtime turn result references into `TurnReference` values and preserve expected turn/previous manifest semantics. Finalize by mapping Runtime `ExecutionState` to canonical `ContextDisposition`.
 
 Export the canonical package and adapter. Keep the existing Runtime fake/test surface valid; production composition can inject `RuntimeContextManagerAdapter(ContextManagerService(...))` and no Runtime source imports are added.
 
-- [ ] **Step 4: Run Runtime and compatibility tests and verify GREEN**
+- [x] **Step 4: Run Runtime and compatibility tests and verify GREEN**
 
 Run: `python -m pytest tests/unit/context tests/unit/runtime -q`
 
@@ -351,13 +351,13 @@ Expected: all Context and Runtime tests pass.
 **Files:**
 - Modify only files identified by failing tests from Tasks 1–5.
 
-- [ ] **Step 1: Run the complete test suite**
+- [x] **Step 1: Run the complete test suite**
 
 Run: `python -m pytest -q`
 
 Expected: exit code 0 and no failures.
 
-- [ ] **Step 2: Run compilation and boundary scans**
+- [x] **Step 2: Run compilation and boundary scans**
 
 Run: `python -m compileall -q src tests`
 
@@ -367,10 +367,14 @@ Run: `rg -n "(FastAPI|fastapi|Playwright|playwright|Redis|redis|SQLAlchemy|sqlal
 
 Expected: no concrete infrastructure/provider/storage dependency matches in the Context package.
 
-- [ ] **Step 3: Audit the RFC 104 checklist against code and tests**
+- [x] **Step 3: Audit the RFC 104 checklist against code and tests**
 
 Verify explicitly that the code has public assemble/apply/finalize methods; complete scope propagation; fixed cutoff/policy; source collection; ownership/classification/provenance/integrity revalidation; sanitization and untrusted-data delimiting; deterministic ordering; category/global budgeting; required-item failure; reference-only snapshots/manifests; manifest chaining; cooperative cancellation; ephemeral finalization; and no implicit Memory write.
 
-- [ ] **Step 4: Record final status with fresh evidence**
+- [x] **Step 4: Record final status with fresh evidence**
 
 Report exact test and compile commands, counts, any environment limitation, and the created files. Do not claim completion until all commands from this task have fresh successful output.
+
+## Kernel closeout note (2026-08-06)
+
+All implementation steps above are supported by the Context suite and closeout regressions. Context remains ephemeral and port-driven; no Memory, Artifact Storage or concrete source was implemented. Provenance now requires retrieval time and turn references preserve decision/event source kinds; contract enums and provenance source kinds are rejected when unknown.

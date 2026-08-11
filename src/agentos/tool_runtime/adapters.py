@@ -7,8 +7,69 @@ from __future__ import annotations
 
 from datetime import timedelta
 from io import BytesIO
+import re
+from typing import Any, Mapping
 
 from .models import AtomicToolCall
+
+
+def sanitize_adapter_result(result: object) -> dict[str, Any]:
+    """Keep only bounded public summary/artifact fields from an adapter result.
+
+    Adapter output may contain bytes, logical paths, command output, handles,
+    credentials, or prompts. None of those fields are allowed to cross into a
+    provider or event projection.
+    """
+    if not isinstance(result, Mapping):
+        return {}
+    public: dict[str, Any] = {}
+    summary = result.get("summary")
+    if isinstance(summary, str) and summary.strip() and len(summary) <= 256:
+        public["summary"] = summary
+    values: list[object] = []
+    if result.get("artifact_ref") is not None:
+        values.append(result["artifact_ref"])
+    refs = result.get("artifact_refs", ())
+    if isinstance(refs, (tuple, list)):
+        values.extend(refs)
+    artifact_refs: list[str] = []
+    for value in values:
+        if not isinstance(value, str) or not value.strip() or len(value) > 256:
+            continue
+        if any(marker in value for marker in ("/", "\\", "\n", "\r")):
+            continue
+        if value not in artifact_refs:
+            artifact_refs.append(value)
+    if artifact_refs:
+        public["artifact_refs"] = artifact_refs[:16]
+    return public
+
+
+_SENSITIVE_KEY = re.compile(r"(?:api|access|secret|auth|token|password|credential|private|provider|prompt|header|cookie|tool).*?(?:key|value|output|input|token|secret)?", re.I)
+_SENSITIVE_FRAGMENT = re.compile(r"(?i)\b(api[_-]?key|access[_-]?token|secret|password|credential|authorization|provider[_-]?output|tool[_-]?args)\s*[:=]\s*[^\s,;]+")
+
+
+def sanitize_stream_value(value: object, *, depth: int = 0) -> object:
+    """Return a small, JSON-safe progress payload with secret-like data removed."""
+    if depth > 4:
+        return "[TRUNCATED]"
+    if isinstance(value, Mapping):
+        public: dict[str, object] = {}
+        for key, item in value.items():
+            if not isinstance(key, str) or len(key) > 64 or _SENSITIVE_KEY.search(key.replace("_", "")):
+                continue
+            sanitized = sanitize_stream_value(item, depth=depth + 1)
+            if sanitized is not None:
+                public[key] = sanitized
+        return public
+    if isinstance(value, (list, tuple)):
+        return [sanitize_stream_value(item, depth=depth + 1) for item in value[:32]]
+    if isinstance(value, str):
+        bounded = value[:256]
+        return _SENSITIVE_FRAGMENT.sub(lambda match: f"{match.group(1)}=[REDACTED]", bounded)
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return "[UNSUPPORTED]"
 
 
 def _context(call: AtomicToolCall, module):
@@ -85,4 +146,11 @@ class ArtifactInspectAtomicTool:
         return {"artifact_id": result.artifact_id, "size_bytes": result.size_bytes, "state": result.state.value}
 
 
-__all__ = ["FilesystemAtomicTool", "TerminalCommandAtomicTool", "BrowserNavigateAtomicTool", "ArtifactInspectAtomicTool"]
+__all__ = [
+    "ArtifactInspectAtomicTool",
+    "BrowserNavigateAtomicTool",
+    "FilesystemAtomicTool",
+    "TerminalCommandAtomicTool",
+    "sanitize_adapter_result",
+    "sanitize_stream_value",
+]

@@ -10,6 +10,7 @@ from .models import DisableTool, RegisterTool, RegistrationResult, ToolDescripto
 class ToolRegistry(Protocol):
     def resolve(self, tool_ref: ToolRef, context) -> ToolDescriptor: ...
     def tool(self, tool_ref: ToolRef): ...
+    def list_authorized(self, context, *, statuses=(ToolStatus.ACTIVE, ToolStatus.DEPRECATED), permission_filter=()): ...
 
 
 class InMemoryToolRegistry:
@@ -42,10 +43,17 @@ class InMemoryToolRegistry:
 
     def resolve(self, tool_ref: ToolRef, context) -> ToolDescriptor:
         with self._lock:
+            if isinstance(tool_ref, str):
+                matches = [item for item in self._entries.items() if item[0].tool_id == tool_ref or item[1][0].name == tool_ref]
+                if len(matches) != 1:
+                    raise LookupError("tool name is not registered")
+                tool_ref = matches[0][0]
             entry = self._entries.get(tool_ref)
             if entry is None: raise LookupError("tool version is not registered")
             descriptor = entry[0]
             if descriptor.status is ToolStatus.DISABLED: raise PermissionError("tool version is disabled")
+            if not self._authorization(context, "invoke", descriptor):
+                raise PermissionError("tool invocation is unauthorized")
             return descriptor
 
     def tool(self, tool_ref: ToolRef) -> object:
@@ -69,6 +77,20 @@ class InMemoryToolRegistry:
             return RegistrationResult(updated, "DISABLED") if requested else updated
 
     def list(self, context, *, statuses: tuple[ToolStatus, ...] = (ToolStatus.ACTIVE, ToolStatus.DEPRECATED)) -> tuple[ToolDescriptor, ...]:
-        return tuple(entry[0] for entry in self._entries.values() if entry[0].status in statuses)
+        return self.list_authorized(context, statuses=statuses)
+
+    def list_authorized(self, context, *, statuses: tuple[ToolStatus, ...] = (ToolStatus.ACTIVE, ToolStatus.DEPRECATED), permission_filter: tuple[str, ...] = ()) -> tuple[ToolDescriptor, ...]:
+        required = set(permission_filter)
+        with self._lock:
+            visible = []
+            for descriptor, _tool, _integrity in self._entries.values():
+                if descriptor.status not in statuses:
+                    continue
+                if required and not required.issubset(set(descriptor.permissions)):
+                    continue
+                if not self._authorization(context, "list", descriptor):
+                    continue
+                visible.append(descriptor)
+            return tuple(visible)
 
 __all__ = ["ToolRegistry", "InMemoryToolRegistry"]

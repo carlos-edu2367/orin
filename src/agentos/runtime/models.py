@@ -302,7 +302,13 @@ class ProviderCancelled:
     usage: RuntimeUsage = RuntimeUsage()
 
 
-ProviderOutcome = ProviderFinal | ProviderToolRequest | ProviderUserInputRequest | ProviderFailed | ProviderCancelled
+@dataclass(frozen=True, slots=True)
+class ProviderIndeterminate:
+    error: RuntimeErrorInfo
+    usage: RuntimeUsage = RuntimeUsage()
+
+
+ProviderOutcome = ProviderFinal | ProviderToolRequest | ProviderUserInputRequest | ProviderFailed | ProviderCancelled | ProviderIndeterminate
 
 
 @dataclass(frozen=True, slots=True)
@@ -387,6 +393,7 @@ __all__ = [
     "OperationContext",
     "ProviderCancelled",
     "ProviderFailed",
+    "ProviderIndeterminate",
     "ProviderFinal",
     "ProviderOutcome",
     "ProviderRequest",

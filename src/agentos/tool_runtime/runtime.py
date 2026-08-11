@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import json
-from dataclasses import replace
+import inspect
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from threading import RLock
 from uuid import uuid4
@@ -17,6 +18,21 @@ from .models import (
     ToolInvocationRequest, ToolInvocationSnapshot, ToolInvocationState, ToolOutboxEntry,
     ToolStreamItem, ToolStreamSink, ToolSucceeded, ToolFailed, ToolCancelled,
 )
+from .adapters import sanitize_stream_value
+
+
+@dataclass(frozen=True, slots=True)
+class ToolRuntimeHooks:
+    """Optional policy seams evaluated by the runtime before an effect."""
+
+    authorization: object | None = None
+    policy: object | None = None
+    owner: object | None = None
+    lease: object | None = None
+    idempotency: object | None = None
+    limits: object | None = None
+    cancellation: object | None = None
+    audit: object | None = None
 
 
 class ToolAuthorizationPolicy:
@@ -25,15 +41,19 @@ class ToolAuthorizationPolicy:
 
 
 class ToolRuntimeService:
-    def __init__(self, registry, resource_manager, *, authorization=None, clock=None, sink=None) -> None:
+    def __init__(self, registry, resource_manager, *, authorization=None, clock=None, sink=None, state_store=None, hooks=None) -> None:
         self.registry = registry
         self.resource_manager = resource_manager
         self.authorization = authorization or ToolAuthorizationPolicy()
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._snapshots: dict[str, ToolInvocationSnapshot] = {}
         self._request_keys: dict[tuple[tuple[str, ...], object, str], tuple[str, str]] = {}
+        self._request_fingerprints: dict[str, str] = {}
+        self._released_invocations: set[str] = set()
         self.outbox: list[ToolOutboxEntry] = []
         self._sink = sink
+        self._state_store = state_store
+        self.hooks = hooks or ToolRuntimeHooks()
         self._signals: dict[str, CancellationSignal] = {}
         self._lock = RLock()
 
@@ -57,14 +77,55 @@ class ToolRuntimeService:
         if kind == "array": return isinstance(value, list) and all(ToolRuntimeService._schema(item, schema["items"]) for item in value)
         return {"string": isinstance(value, str), "integer": isinstance(value, int) and not isinstance(value, bool), "number": isinstance(value, (int, float)) and not isinstance(value, bool), "boolean": isinstance(value, bool), "null": value is None}[kind]
 
+    @staticmethod
+    def _hook_allows(hook, *args) -> bool:
+        if hook is None:
+            return True
+        target = hook if callable(hook) else getattr(hook, "allows", None)
+        if target is None:
+            return False
+        try:
+            signature = inspect.signature(target)
+            positional = [
+                parameter for parameter in signature.parameters.values()
+                if parameter.kind in (parameter.POSITIONAL_ONLY, parameter.POSITIONAL_OR_KEYWORD)
+            ]
+            accepts_varargs = any(parameter.kind is parameter.VAR_POSITIONAL for parameter in signature.parameters.values())
+            if accepts_varargs:
+                decision = target(*args)
+            else:
+                maximum = len(positional)
+                required = sum(parameter.default is parameter.empty for parameter in positional)
+                if required > len(args) or maximum == 0:
+                    return False
+                decision = target(*args[:maximum])
+        except (TypeError, ValueError, AttributeError):
+            return False
+        except Exception:
+            return False
+        return decision is True
+
     def _entry(self, event_type, snapshot, **payload):
-        entry = ToolOutboxEntry(event_type, snapshot.invocation_id, snapshot.tool_ref, snapshot.context.correlation_id, payload, self._now(), snapshot.context)
+        safe_payload = {key: value for key, value in payload.items() if key in {"purpose", "outcome", "error_code", "effect_state", "stream_sequence", "progress_kind"}}
+        entry = ToolOutboxEntry(event_type, snapshot.invocation_id, snapshot.tool_ref, snapshot.context.correlation_id, safe_payload, self._now(), snapshot.context)
         self.outbox.append(entry)
         if self._sink is not None:
             self._sink(entry)
+        audit = getattr(self.hooks, "audit", None)
+        if audit is not None:
+            event = {
+                "event_type": event_type,
+                "invocation_id": snapshot.invocation_id,
+                "tool_id": snapshot.tool_ref.tool_id,
+                "tool_version": snapshot.tool_ref.version,
+                **safe_payload,
+            }
+            audit(event)
 
     def _save(self, snapshot, event_type=None, **payload):
         self._snapshots[snapshot.invocation_id] = snapshot
+        if self._state_store is not None:
+            self._state_store.save(snapshot, self._request_fingerprints.get(snapshot.invocation_id, ""))
         if event_type: self._entry(event_type, snapshot, **payload)
         return snapshot
 
@@ -88,19 +149,35 @@ class ToolRuntimeService:
         return self._execute(request, sink)
 
     def _execute(self, request, sink):
+        fingerprint = json.dumps(request.arguments, sort_keys=True, default=str)
         with self._lock:
             prior = self._snapshots.get(request.invocation_id)
+            if prior is None and self._state_store is not None:
+                restored = self._state_store.load(request.invocation_id, request.context)
+                if restored is not None:
+                    prior, restored_fingerprint = restored
+                    self._snapshots[request.invocation_id] = prior
+                    self._request_fingerprints[request.invocation_id] = restored_fingerprint
             if prior is not None:
-                if prior.context != request.context or prior.tool_ref != request.tool_ref: return self._failure(request, ToolErrorCode.IDEMPOTENCY_CONFLICT, "invocation identity is already bound")
+                if prior.context != request.context or prior.tool_ref != request.tool_ref or self._request_fingerprints.get(request.invocation_id) != fingerprint:
+                    return self._failure(request, ToolErrorCode.IDEMPOTENCY_CONFLICT, "invocation identity is already bound")
                 if prior.outcome is not None: return prior.outcome
             initial = ToolInvocationSnapshot(request.invocation_id, request.tool_ref, request.context, ToolInvocationState.REQUESTED, None)
+            self._request_fingerprints[request.invocation_id] = fingerprint
             self._save(initial)
             try: descriptor = self.registry.resolve(request.tool_ref, request.context)
             except LookupError: return self._failure(request, ToolErrorCode.NOT_FOUND, "tool version is not registered")
-            except PermissionError: return self._failure(request, ToolErrorCode.DISABLED, "tool version is disabled")
+            except PermissionError as exc:
+                code = ToolErrorCode.DISABLED if "disabled" in str(exc).lower() else ToolErrorCode.UNAUTHORIZED
+                return self._failure(request, code, str(exc)[:128])
+            if not self._hook_allows(self.hooks.owner, request.context, descriptor):
+                return self._failure(request, ToolErrorCode.UNAUTHORIZED, "tool owner policy was denied")
+            if not self._hook_allows(self.hooks.policy, request.context, descriptor, request.arguments):
+                return self._failure(request, ToolErrorCode.UNAUTHORIZED, "tool policy was denied")
+            if not self._hook_allows(self.hooks.idempotency, request, descriptor):
+                return self._failure(request, ToolErrorCode.IDEMPOTENCY_CONFLICT, "tool idempotency policy was denied")
             if descriptor.idempotency.value == "IDEMPOTENT_WITH_KEY" and request.idempotency_key is None:
                 return self._failure(request, ToolErrorCode.INVALID_INPUT, "idempotency key is required")
-            fingerprint = json.dumps(request.arguments, sort_keys=True, default=str)
             if request.idempotency_key is not None:
                 idem_key = (request.context.scope_key(), request.tool_ref, request.idempotency_key)
                 known = self._request_keys.get(idem_key)
@@ -110,8 +187,12 @@ class ToolRuntimeService:
                 self._request_keys[idem_key] = (request.invocation_id, fingerprint)
             if self._serialized_size(request.arguments) > descriptor.limits.maximum_input_bytes or not self._schema(dict(request.arguments), descriptor.input_schema):
                 return self._failure(request, ToolErrorCode.INVALID_INPUT, "tool arguments do not satisfy closed input schema")
-            if not self._limits(request, descriptor): return self._failure(request, ToolErrorCode.LIMIT_EXCEEDED, "requested limits exceed tool limits")
+            if not self._hook_allows(self.hooks.limits, request, descriptor) or not self._limits(request, descriptor): return self._failure(request, ToolErrorCode.LIMIT_EXCEEDED, "requested limits exceed tool limits")
+            if not self._hook_allows(self.hooks.authorization, request.context, descriptor, request.arguments):
+                return self._failure(request, ToolErrorCode.UNAUTHORIZED, "tool authorization hook was denied")
             if not self.authorization.authorize(request.context, descriptor, request.arguments): return self._failure(request, ToolErrorCode.UNAUTHORIZED, "tool authorization was denied")
+            if not self._hook_allows(self.hooks.cancellation, request):
+                return self._failure(request, ToolErrorCode.CANCELLED, "tool cancellation policy was requested")
             self._save(replace(initial, state=ToolInvocationState.AUTHORIZED))
             resource_context = self._resource_context(request.context)
             leases, handles = [], []
@@ -131,6 +212,9 @@ class ToolRuntimeService:
                         self._release(resource_context, leases, request.invocation_id)
                         return self._failure(request, ToolErrorCode.RESOURCE_UNAVAILABLE, handle.reason, retryability=handle.retryability, effect_state=handle.effect_state)
                     handles.append(handle)
+            if not self._hook_allows(self.hooks.lease, request.context, descriptor, request):
+                self._release(resource_context, leases, request.invocation_id)
+                return self._failure(request, ToolErrorCode.RESOURCE_UNAVAILABLE, "tool lease policy was denied")
             signal = CancellationSignal(); self._signals[request.invocation_id] = signal
             running = ToolInvocationSnapshot(request.invocation_id, request.tool_ref, request.context, ToolInvocationState.RUNNING, None, tuple(lease.lease_id for lease in leases), self._now())
             self._save(running, "ToolStarted", purpose=request.context.purpose)
@@ -146,8 +230,12 @@ class ToolRuntimeService:
                 if signal.requested() or emitted >= descriptor.limits.maximum_stream_items:
                     return StreamDisposition.REJECTED
                 if not isinstance(value, dict): return StreamDisposition.REJECTED
+                public_value = sanitize_stream_value(value)
+                if not isinstance(public_value, dict): return StreamDisposition.REJECTED
+                if self._serialized_size(public_value) > descriptor.limits.maximum_output_bytes:
+                    return StreamDisposition.REJECTED
                 emitted += 1
-                item = ToolStreamItem(request.invocation_id, emitted, self._now(), kind, value)
+                item = ToolStreamItem(request.invocation_id, emitted, self._now(), kind, public_value)
                 disposition = sink.emit(item) if sink is not None else StreamDisposition.ACCEPTED
                 if disposition is StreamDisposition.ACCEPTED:
                     with self._lock: self._entry("ToolProgressed", running, stream_sequence=item.sequence, progress_kind=item.kind)
@@ -155,7 +243,12 @@ class ToolRuntimeService:
             result = tool.stream(call, emit) if sink is not None and hasattr(tool, "stream") else tool.execute(call)
             if self._now() > call.deadline:
                 outcome = ToolFailed(request.invocation_id, ToolError(ToolErrorCode.TIMEOUT, Retryability.NEVER, EffectState.UNKNOWN, "tool deadline elapsed"))
-            elif isinstance(result, (ToolSucceeded, ToolFailed, ToolCancelled)): outcome = result
+            elif isinstance(result, ToolSucceeded):
+                if not isinstance(result.result, dict) or not self._schema(result.result, descriptor.output_schema) or self._serialized_size(result.result) > descriptor.limits.maximum_output_bytes:
+                    outcome = ToolFailed(request.invocation_id, ToolError(ToolErrorCode.INVALID_OUTPUT, reason="tool output does not satisfy closed output schema"))
+                else:
+                    outcome = result
+            elif isinstance(result, (ToolFailed, ToolCancelled)): outcome = result
             elif signal.requested(): return self._cancel(request, running, leases, "cancel requested", sink)
             elif not isinstance(result, dict) or not self._schema(result, descriptor.output_schema) or self._serialized_size(result) > descriptor.limits.maximum_output_bytes:
                 outcome = ToolFailed(request.invocation_id, ToolError(ToolErrorCode.INVALID_OUTPUT, reason="tool output does not satisfy closed output schema"))
@@ -176,6 +269,10 @@ class ToolRuntimeService:
         return outcome
 
     def _release(self, context, leases, invocation_id):
+        with self._lock:
+            if invocation_id in self._released_invocations:
+                return
+            self._released_invocations.add(invocation_id)
         for lease in reversed(leases):
             self.resource_manager.release(ReleaseResourceLease(f"tool-release:{invocation_id}:{lease.lease_id}", lease.lease_id, context, lease.fencing_token, "tool invocation complete", f"tool-release:{invocation_id}:{lease.lease_id}"))
 
@@ -208,4 +305,4 @@ class ToolRuntimeService:
         return snapshot
 
 
-__all__ = ["ToolRuntimeService", "ToolAuthorizationPolicy"]
+__all__ = ["ToolRuntimeHooks", "ToolRuntimeService", "ToolAuthorizationPolicy"]

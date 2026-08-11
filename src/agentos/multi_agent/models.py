@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from typing import NewType
+import re
 
 from agentos.context.sharing import HandoffRef, StructuredHandoff, TaskSnapshot
 from agentos.events import DataClassification
@@ -23,6 +24,13 @@ def _required(value: object, field: str, *, maximum: int = 256) -> None:
         raise ValueError(f"{field} must be a non-blank string")
     if len(value) > maximum:
         raise ValueError(f"{field} exceeds its bound")
+
+
+def _opaque_ref(value: object, field: str) -> None:
+    _required(value, field, maximum=512)
+    text = str(value)
+    if re.match(r"^[A-Za-z0-9][A-Za-z0-9:._/-]*$", text) is None or any(token in text.lower() for token in ("password", "secret", "token=", "api_key", "credential")):
+        raise ValueError(f"{field} must be an opaque reference")
 
 
 def _aware(value: datetime | None, field: str) -> None:
@@ -203,7 +211,7 @@ class AgentMessage:
         if len(self.content_refs) > 16:
             raise ValueError("content_refs exceeds its bound")
         for ref in self.content_refs:
-            _required(ref, "content_ref")
+            _opaque_ref(ref, "content_ref")
         object.__setattr__(self, "classification", _classification(self.classification))
         object.__setattr__(self, "kind", AgentMessageKind(self.kind))
         _aware(self.deadline_at, "deadline_at")
@@ -275,8 +283,8 @@ class DelegationResult:
                 raise ValueError("COMPLETED requires result_ref and no failure_ref")
         elif self.result_ref is not None or not self.failure_ref:
             raise ValueError("non-COMPLETED result requires failure_ref and no result_ref")
-        _required(self.result_ref, "result_ref") if self.result_ref is not None else None
-        _required(self.failure_ref, "failure_ref") if self.failure_ref is not None else None
+        _opaque_ref(self.result_ref, "result_ref") if self.result_ref is not None else None
+        _opaque_ref(self.failure_ref, "failure_ref") if self.failure_ref is not None else None
 
 
 @dataclass(frozen=True, slots=True)

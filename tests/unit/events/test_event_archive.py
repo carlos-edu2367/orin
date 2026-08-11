@@ -1,5 +1,7 @@
 from dataclasses import dataclass, field
 
+import pytest
+
 from agentos.events import (
     ArchiveCursor,
     AuthorizedEventQuery,
@@ -52,6 +54,31 @@ def test_query_is_paginated_and_does_not_cross_ownership(event_factory):
     assert first.next_cursor is not None
     other = archive.query(AuthorizedEventQuery(_context("user:2")))
     assert other.events == ()
+
+
+def test_query_respects_agent_and_execution_context(event_factory):
+    bus = InMemoryEventBus()
+    archive = InMemoryEventArchive(bus)
+    bus.publish(
+        (
+            event_factory(),
+            event_factory(event_id="event:2", agent_id="agent:other", execution_id="execution:other"),
+        )
+    )
+
+    page = archive.query(AuthorizedEventQuery(_context()))
+
+    assert [event.event_id for event in page.events] == ["event:1"]
+
+
+def test_replay_unknown_event_id_is_rejected_without_storage_error(event_factory):
+    bus = InMemoryEventBus()
+    consumer = RecordingConsumer()
+    subscription_ref = bus.subscribe(_subscription(), consumer)
+    archive = InMemoryEventArchive(bus)
+
+    with pytest.raises(PermissionError):
+        archive.replay(ReplayRequest(_context(), subscription_ref, event_ids=("event:missing",)))
 
 
 def test_replay_preserves_identity_and_marks_operation_outside_envelope(event_factory):

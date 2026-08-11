@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title">
+  <title>Orin</title>
+  <defs>
+    <linearGradient id="violet" x1="12" y1="8" x2="54" y2="58" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#e9c8ff" />
+      <stop offset=".48" stop-color="#a66cff" />
+      <stop offset="1" stop-color="#6328d8" />
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="16" fill="#0b0a14" />
+  <path d="M18 43a22 22 0 1 1 28 0" fill="none" stroke="url(#violet)" stroke-linecap="round" stroke-width="7" />
+  <path d="M32 24 27.5 52h9L32 24Z" fill="url(#violet)" />
+  <path d="m49 10 1.8 4.2L55 16l-4.2 1.8L49 22l-1.8-4.2L43 16l4.2-1.8L49 10Z" fill="#d8b4fe" />
+</svg>

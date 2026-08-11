@@ -4,13 +4,16 @@ from dataclasses import replace
 from decimal import Decimal
 from threading import Event, Thread
 
-from agentos.execution.models import CancellationReasonCode, ExecutionState
-from agentos.execution.ports import ControlSignal
+from agentos.execution.models import CancellationReason, CancellationReasonCode, ExecutionState
+from agentos.execution.ports import ControlSignal, Indeterminate, Rejected
 from agentos.runtime.models import (
     ActionFailed,
+    ActionSucceeded,
     CompletedOutcome,
     ProviderFinal,
     ProviderToolRequest,
+    ProviderCancelled,
+    Retryability,
     RuntimeErrorCategory,
     RuntimeErrorInfo,
     RuntimeLimits,
@@ -33,6 +36,64 @@ def test_cancel_after_provider_result_never_completes(runtime_fixture):
     assert outcome.reason.code is CancellationReasonCode.USER_REQUESTED
     assert runtime_fixture.control.final_state is ExecutionState.CANCELLED
     assert ExecutionState.COMPLETED not in runtime_fixture.control.targets
+
+
+def test_cancel_rejection_is_not_reported_as_confirmed_cancellation(runtime_fixture):
+    runtime_fixture.control.signal = ControlSignal.CANCEL_REQUESTED
+    runtime_fixture.control.request_cancel = lambda _command: Rejected(
+        reason="INVALID_TRANSITION", current_state=runtime_fixture.control.execution.state
+    )
+
+    outcome = runtime_fixture.runtime.execute(runtime_fixture.request)
+
+    assert isinstance(outcome, FailedOutcome)
+    assert outcome.error.category is RuntimeErrorCategory.RECONCILIATION
+    assert runtime_fixture.control.final_state is ExecutionState.QUEUED
+
+
+def test_unknown_cancel_commit_is_not_reported_as_confirmed_cancellation(runtime_fixture):
+    runtime_fixture.provider.outcomes = [
+        ProviderCancelled(CancellationReason(CancellationReasonCode.USER_REQUESTED))
+    ]
+    runtime_fixture.control.commit = lambda _command: Indeterminate("transaction:unknown")
+
+    outcome = runtime_fixture.runtime.execute(runtime_fixture.request)
+
+    assert isinstance(outcome, FailedOutcome)
+    assert outcome.error.category is RuntimeErrorCategory.RECONCILIATION
+    assert runtime_fixture.control.final_state is ExecutionState.RUNNING
+
+
+def test_provider_cancellation_persists_consumed_usage(runtime_fixture):
+    runtime_fixture.provider.outcomes = [
+        ProviderCancelled(
+            CancellationReason(CancellationReasonCode.USER_REQUESTED),
+            RuntimeUsage(iterations=1, provider_tokens=5, cost=2),
+        )
+    ]
+
+    outcome = runtime_fixture.runtime.execute(runtime_fixture.request)
+
+    assert isinstance(outcome, CancelledOutcome)
+    assert runtime_fixture.control.execution.usage.provider_tokens == 5
+    assert runtime_fixture.control.execution.usage.cost == 2
+
+
+def test_provider_indeterminate_is_not_reported_as_provider_success(runtime_fixture):
+    from agentos.runtime.models import ProviderIndeterminate
+
+    runtime_fixture.provider.outcomes = [
+        ProviderIndeterminate(
+            RuntimeErrorInfo(RuntimeErrorCategory.RECONCILIATION, "PROVIDER_INDETERMINATE", Retryability.POLICY_DEPENDENT),
+            RuntimeUsage(iterations=1, provider_tokens=3),
+        )
+    ]
+
+    outcome = runtime_fixture.runtime.execute(runtime_fixture.request)
+
+    assert isinstance(outcome, FailedOutcome)
+    assert outcome.error.category is RuntimeErrorCategory.RECONCILIATION
+    assert runtime_fixture.control.execution.usage.provider_tokens == 3
 
 
 def test_pause_after_provider_result_returns_paused(runtime_fixture):
@@ -86,11 +147,58 @@ def test_execution_timeout_is_distinct_from_provider_timeout(runtime_fixture):
     assert runtime_fixture.control.final_state is ExecutionState.FAILED
 
 
+def test_execution_deadline_is_checked_after_provider_effect(runtime_fixture):
+    runtime_fixture.runtime._limits = RuntimeLimits(max_duration_seconds=1)
+    runtime_fixture.clock.monotonic_values = [0.0, 0.0, 0.0, 2.0]
+    runtime_fixture.provider.outcomes = [ProviderFinal("result:late")]
+
+    outcome = runtime_fixture.runtime.execute(runtime_fixture.request)
+
+    assert isinstance(outcome, FailedOutcome)
+    assert outcome.error.category is RuntimeErrorCategory.EXECUTION_TIMEOUT
+    assert runtime_fixture.control.final_state is ExecutionState.FAILED
+
+
+def test_provider_timeout_is_distinct_when_effect_exceeds_provider_budget(runtime_fixture):
+    runtime_fixture.runtime._limits = RuntimeLimits(
+        max_duration_seconds=60,
+        provider_timeout_seconds=1,
+    )
+    runtime_fixture.clock.monotonic_values = [0.0, 0.0, 0.0, 2.0]
+    runtime_fixture.provider.outcomes = [ProviderFinal("result:late")]
+
+    outcome = runtime_fixture.runtime.execute(runtime_fixture.request)
+
+    assert isinstance(outcome, FailedOutcome)
+    assert outcome.error.category is RuntimeErrorCategory.PROVIDER_TIMEOUT
+    assert runtime_fixture.control.final_state is ExecutionState.FAILED
+
+
 def test_action_timeout_is_distinct_from_cancellation(runtime_fixture):
     runtime_fixture.provider.outcomes = [
-        ProviderToolRequest(action_ref="tool:slow", invocation_ref="invocation:slow")
+        ProviderToolRequest(action_ref="tool:slow", invocation_ref="invocation:slow"),
+        ProviderFinal("result:after-action"),
     ]
     runtime_fixture.action.raise_timeout = True
+
+    outcome = runtime_fixture.runtime.execute(runtime_fixture.request)
+
+    assert isinstance(outcome, FailedOutcome)
+    assert outcome.error.category is RuntimeErrorCategory.ACTION_TIMEOUT
+    assert runtime_fixture.control.final_state is ExecutionState.FAILED
+
+
+def test_action_timeout_budget_is_checked_after_action_effect(runtime_fixture):
+    runtime_fixture.runtime._limits = RuntimeLimits(
+        max_duration_seconds=60,
+        action_timeout_seconds=1,
+    )
+    runtime_fixture.provider.outcomes = [
+        ProviderToolRequest(action_ref="tool:slow", invocation_ref="invocation:slow"),
+        ProviderFinal("result:after-action"),
+    ]
+    runtime_fixture.clock.monotonic_values = [0.0, 0.0, 0.0, 0.0, 0.0, 2.0]
+    runtime_fixture.action.outcomes = [ActionSucceeded("result:slow")]
 
     outcome = runtime_fixture.runtime.execute(runtime_fixture.request)
 
@@ -146,6 +254,32 @@ def test_action_failure_is_not_reported_as_success(runtime_fixture):
     assert isinstance(outcome, FailedOutcome)
     assert outcome.error.category is RuntimeErrorCategory.ACTION
     assert runtime_fixture.control.final_state is ExecutionState.FAILED
+
+
+def test_action_failure_commit_uncertainty_is_reported_as_reconciliation(runtime_fixture):
+    runtime_fixture.provider.outcomes = [
+        ProviderToolRequest(action_ref="tool:fail", invocation_ref="invocation:fail")
+    ]
+    runtime_fixture.action.outcomes = [
+        ActionFailed(RuntimeErrorInfo(RuntimeErrorCategory.ACTION, "ACTION_REJECTED"))
+    ]
+    original_commit = runtime_fixture.control.commit
+    commit_calls = 0
+
+    def commit_with_uncertainty(command):
+        nonlocal commit_calls
+        commit_calls += 1
+        if commit_calls == 2:
+            return Indeterminate("transaction:unknown")
+        return original_commit(command)
+
+    runtime_fixture.control.commit = commit_with_uncertainty
+
+    outcome = runtime_fixture.runtime.execute(runtime_fixture.request)
+
+    assert isinstance(outcome, FailedOutcome)
+    assert outcome.error.category is RuntimeErrorCategory.RECONCILIATION
+    assert runtime_fixture.control.final_state is ExecutionState.WAITING_TOOL
 
 
 def test_runtime_rejects_a_second_concurrent_execution(runtime_fixture):

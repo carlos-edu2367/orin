@@ -1,0 +1,375 @@
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from pathlib import Path
+
+import pytest
+
+from agentos.agentic.events import AgentActivityEventType
+from agentos.agentic.provider_stream import NormalizedStreamItem, StreamKind
+from agentos.agentic.runtime import AgenticLimits
+from agentos.agentic.session import TurnSession, build_system_prompt
+from agentos.providers.models import ProviderUsage
+from agentos.skills.builtins import load_builtin_skills
+from agentos.skills.registry import SkillRegistry
+
+
+TURN = {
+    "turn_id": "turn-1",
+    "conversation_id": "chat_session",
+    "user_id": "local-user",
+    "execution_id": "exe-1",
+    "provider": "openrouter",
+    "model_id": "test-model",
+    "user_message_id": "msg-user",
+    "assistant_message_id": "msg-assistant",
+}
+
+
+class RecordingStore:
+    """Captures everything the runtime and the session publish."""
+
+    def __init__(self) -> None:
+        self.deltas: list[str] = []
+        self.finished: list[tuple[bool, str | None]] = []
+        self.activity: list[tuple[AgentActivityEventType, str, dict, str | None]] = []
+
+    def load(self, turn_id: str) -> dict:
+        return TURN
+
+    def history_for_turn(self, turn) -> list[dict[str, str]]:
+        return [{"role": "user", "content": "faça o trabalho"}]
+
+    def delta(self, turn, text: str) -> None:
+        self.deltas.append(text)
+
+    def finish(self, turn, *, failed: bool = False, code: str | None = None) -> None:
+        self.finished.append((failed, code))
+
+    def record(self, turn, event_type, summary, payload=None, *, agent_id=None, parent_agent_id=None) -> None:
+        self.activity.append((event_type, summary, dict(payload or {}), agent_id))
+
+    def main_agent_id(self, turn) -> str:
+        return f"agent:{turn['conversation_id']}:main"
+
+    def types(self) -> list[str]:
+        return [item[0].value for item in self.activity]
+
+
+class MemoryAgentsStore:
+    def __init__(self) -> None:
+        self.rows: dict[str, dict] = {}
+        self.states: list[tuple[str, str]] = []
+        self.usage: dict[str, dict[str, int | str | None]] = {}
+
+    def create(self, name: str, role: str, *, parent_agent_id: str, provider: str | None = None, model_id: str | None = None) -> dict:
+        agent_id = f"agent:chat_session:{name.lower()}"
+        created = agent_id not in self.rows
+        self.rows[agent_id] = {"agent_id": agent_id, "name": name, "role": role, "parent_agent_id": parent_agent_id, "provider": provider, "model_id": model_id, "state": "idle"}
+        return {**self.rows[agent_id], "created": created}
+
+    def find(self, name: str) -> dict | None:
+        return self.rows.get(f"agent:chat_session:{name.lower()}")
+
+    def set_state(self, agent_id: str, state: str) -> None:
+        self.states.append((agent_id, state))
+
+    def list(self) -> list[dict]:
+        return list(self.rows.values())
+
+    def record_usage(self, agent_id: str, provider: str, model_id: str, *, input_tokens: int | None, output_tokens: int | None, total_tokens: int | None) -> None:
+        self.usage[agent_id] = {
+            "provider": provider, "model_id": model_id, "input_tokens": input_tokens,
+            "output_tokens": output_tokens, "total_tokens": total_tokens,
+        }
+
+
+class ScriptedProvider:
+    """Replays a queued list of stream event batches, one per provider call."""
+
+    def __init__(self, batches: list[list[NormalizedStreamItem]]) -> None:
+        self.batches = batches
+        self.requests: list[dict] = []
+
+    def stream(self, request):
+        self.requests.append(request)
+        if not self.batches:
+            return iter([NormalizedStreamItem(StreamKind.TEXT, 1, text="pronto"), NormalizedStreamItem(StreamKind.FINISH, 2, finish_reason="stop")])
+        return iter(self.batches.pop(0))
+
+
+def tool_call(call_id: str, name: str, arguments: str) -> list[NormalizedStreamItem]:
+    return [
+        NormalizedStreamItem(StreamKind.TOOL_CALL, 1, tool_call_id=call_id, tool_name=name, arguments_delta=arguments),
+        NormalizedStreamItem(StreamKind.FINISH, 2, finish_reason="tool_calls"),
+    ]
+
+
+def text(value: str) -> list[NormalizedStreamItem]:
+    return [NormalizedStreamItem(StreamKind.TEXT, 1, text=value), NormalizedStreamItem(StreamKind.FINISH, 2, finish_reason="stop")]
+
+
+def text_with_usage(value: str, *, input_tokens: int, output_tokens: int) -> list[NormalizedStreamItem]:
+    return [
+        NormalizedStreamItem(StreamKind.USAGE, 1, usage=ProviderUsage(input_tokens, output_tokens, input_tokens + output_tokens, measurement="CONFIRMED")),
+        NormalizedStreamItem(StreamKind.TEXT, 2, text=value),
+        NormalizedStreamItem(StreamKind.FINISH, 3, finish_reason="stop"),
+    ]
+
+
+def build(tmp_path: Path, batches, *, cancelled=None, enable_subagents=True):
+    store = RecordingStore()
+    agents = MemoryAgentsStore()
+    provider = ScriptedProvider(list(batches))
+    session = TurnSession(
+        turn=dict(TURN), store=store, agents_store=agents, memory_store=None,
+        provider_factory=lambda: provider, workspace_root=tmp_path,
+        cancelled=cancelled or (lambda _turn: False), enable_subagents=enable_subagents,
+    )
+    return session, store, agents, provider
+
+
+def test_the_system_prompt_names_the_tools_the_agent_actually_has(tmp_path: Path) -> None:
+    session, _store, _agents, _provider = build(tmp_path, [])
+    runtime = session.build_runtime()
+
+    assert runtime.system_prompt is not None
+    assert "read_file" in runtime.system_prompt
+    assert "run_command" in runtime.system_prompt
+    assert "create_agent" in runtime.system_prompt
+
+
+def test_relevant_skill_metadata_is_injected_lazily_and_loaded_via_tool_result(tmp_path: Path) -> None:
+    store = RecordingStore()
+    agents = MemoryAgentsStore()
+    provider = ScriptedProvider([
+        tool_call("skill-1", "use_skill", '{"skill_id":"systematic-debugging"}'),
+        text("investiguei com evidência"),
+    ])
+    store.history_for_turn = lambda _turn: [{"role": "user", "content": "meu endpoint começou a retornar erro"}]
+    session = TurnSession(
+        turn=dict(TURN), store=store, agents_store=agents, memory_store=None,
+        provider_factory=lambda: provider, workspace_root=tmp_path,
+        skills=SkillRegistry(load_builtin_skills()),
+    )
+
+    result = session.build_runtime().run("turn-1")
+
+    assert result.state == "completed"
+    first_prompt = str(provider.requests[0]["messages"][0]["content"])
+    assert "Systematic Debugging" in first_prompt
+    assert "## Workflow" not in first_prompt
+    loaded = [message for message in provider.requests[-1]["messages"] if message.get("role") == "tool"]
+    assert any("## Workflow" in str(message.get("content")) for message in loaded)
+
+
+def test_the_prompt_omits_subagents_when_they_are_disabled(tmp_path: Path) -> None:
+    session, _store, _agents, _provider = build(tmp_path, [], enable_subagents=False)
+    runtime = session.build_runtime()
+
+    assert "create_agent" not in (runtime.system_prompt or "")
+
+
+def test_a_tool_result_reaches_the_model_as_readable_content(tmp_path: Path) -> None:
+    session, store, _agents, provider = build(tmp_path, [
+        tool_call("call-1", "write_file", '{"path": "note.txt", "content": "conteudo real"}'),
+        tool_call("call-2", "read_file", '{"path": "note.txt"}'),
+        text("o arquivo diz: conteudo real"),
+    ])
+
+    result = session.build_runtime().run("turn-1")
+
+    assert result.state == "completed"
+    # The third provider call must be able to see what read_file returned.
+    tool_messages = [item for item in provider.requests[-1]["messages"] if item.get("role") == "tool"]
+    assert any("conteudo real" in str(item.get("content")) for item in tool_messages)
+    assert store.finished == [(False, None)]
+
+
+def test_tool_activity_is_published_for_the_ui(tmp_path: Path) -> None:
+    session, store, _agents, _provider = build(tmp_path, [
+        tool_call("call-1", "write_file", '{"path": "a.txt", "content": "x"}'),
+        text("feito"),
+    ])
+
+    session.build_runtime().run("turn-1")
+
+    assert "tool.started" in store.types()
+    assert "tool.finished" in store.types()
+    finished = next(item for item in store.activity if item[0] is AgentActivityEventType.TOOL_FINISHED)
+    assert finished[2]["tool_name"] == "write_file"
+    assert finished[2]["status"] == "succeeded"
+    assert finished[2]["tool_kind"] == "filesystem"
+    artifact = next(item for item in store.activity if item[0] is AgentActivityEventType.ARTIFACT_CREATED)
+    assert artifact[2]["path"] == "a.txt"
+    assert artifact[2]["size_bytes"] == 1
+
+
+def test_a_failing_tool_is_reported_without_killing_the_turn(tmp_path: Path) -> None:
+    session, store, _agents, _provider = build(tmp_path, [
+        tool_call("call-1", "read_file", '{"path": "missing.txt"}'),
+        text("não encontrei o arquivo"),
+    ])
+
+    result = session.build_runtime().run("turn-1")
+
+    assert result.state == "completed"
+    finished = next(item for item in store.activity if item[0] is AgentActivityEventType.TOOL_FINISHED)
+    assert finished[2]["status"] == "failed"
+
+
+def test_creating_and_asking_a_subagent_produces_the_collaboration_events(tmp_path: Path) -> None:
+    session, store, agents, _provider = build(tmp_path, [
+        tool_call("call-1", "create_agent", '{"name": "Researcher", "role": "pesquisa"}'),
+        tool_call("call-2", "ask_agent", '{"name": "Researcher", "task": "investigue X"}'),
+        # The subagent's own provider call:
+        text("encontrei Y"),
+        text("o Researcher encontrou Y"),
+    ])
+
+    result = session.build_runtime().run("turn-1")
+
+    assert result.state == "completed"
+    types = store.types()
+    assert "agent.created" in types
+    assert "agent.message_sent" in types
+    assert "agent.message_received" in types
+    assert agents.find("Researcher") is not None
+
+    received = next(item for item in store.activity if item[0] is AgentActivityEventType.AGENT_MESSAGE_RECEIVED)
+    assert "encontrei Y" in str(received[2]["content"])
+    # The subagent's activity is attributed to the subagent, not to Main.
+    assert received[3] == agents.find("Researcher")["agent_id"]
+
+
+def test_a_subagent_inherits_the_turn_model_and_reports_its_own_token_usage(tmp_path: Path) -> None:
+    session, _store, agents, _provider = build(tmp_path, [
+        tool_call("call-1", "create_agent", '{"name": "Researcher", "role": "pesquisa"}'),
+        tool_call("call-2", "ask_agent", '{"name": "Researcher", "task": "investigue X"}'),
+        text_with_usage("encontrei Y", input_tokens=11, output_tokens=7),
+        text_with_usage("o Researcher encontrou Y", input_tokens=13, output_tokens=5),
+    ])
+
+    result = session.build_runtime().run("turn-1")
+
+    child = agents.find("Researcher")
+    assert result.state == "completed"
+    assert child is not None
+    assert child["provider"] == "openrouter"
+    assert child["model_id"] == "test-model"
+    assert agents.usage[child["agent_id"]]["total_tokens"] == 18
+    assert agents.usage["agent:chat_session:main"]["total_tokens"] == 18
+
+
+def test_a_subagent_cannot_recursively_spawn_more_subagents(tmp_path: Path) -> None:
+    session, _store, _agents, _provider = build(tmp_path, [])
+    child_tools = session._toolset(subagents=False)
+
+    names = {item.name for item in child_tools.definitions()}
+    assert "create_agent" not in names
+    assert "ask_agent" not in names
+
+
+def test_asking_an_unknown_agent_tells_the_model_to_create_it(tmp_path: Path) -> None:
+    session, _store, _agents, _provider = build(tmp_path, [])
+    outcome = session._ask_agent("Fantasma", "faça algo")
+
+    assert outcome.status == "failed"
+    assert outcome.error_code == "AGENT_NOT_FOUND"
+    assert "create_agent" in outcome.content
+
+
+def test_a_subagent_failure_with_partial_text_is_reported_as_a_failed_delegation(tmp_path: Path) -> None:
+    session, store, agents, _provider = build(tmp_path, [[
+        NormalizedStreamItem(StreamKind.TEXT, 1, text="Ainda estou investigando."),
+        NormalizedStreamItem(StreamKind.TOOL_CALL, 2, tool_call_id="call-1", tool_name="list_files", arguments_delta="{}"),
+        NormalizedStreamItem(StreamKind.FINISH, 3, finish_reason="tool_calls"),
+    ]])
+    session.limits = AgenticLimits(max_iterations=1, max_actions=24)
+    child = agents.create("Reviewer", "revisa", parent_agent_id="agent:chat_session:main")
+
+    outcome = session._ask_agent("Reviewer", "revise o projeto")
+
+    assert outcome.status == "failed"
+    assert outcome.error_code == "ITERATION_LIMIT"
+    assert (child["agent_id"], "failed") in agents.states
+    assert "delegation.failed" in store.types()
+    assert "agent.message_received" not in store.types()
+
+
+def test_an_empty_subagent_completion_is_reported_as_a_failed_delegation(tmp_path: Path) -> None:
+    session, store, agents, _provider = build(tmp_path, [[
+        NormalizedStreamItem(StreamKind.FINISH, 1, finish_reason="stop"),
+    ]])
+    child = agents.create("Reviewer", "revisa", parent_agent_id="agent:chat_session:main")
+
+    outcome = session._ask_agent("Reviewer", "revise o projeto")
+
+    assert outcome.status == "failed"
+    assert outcome.error_code == "SUBAGENT_EMPTY_RESPONSE"
+    assert (child["agent_id"], "failed") in agents.states
+    assert "delegation.failed" in store.types()
+    assert "agent.message_received" not in store.types()
+
+
+def test_a_subagent_inherits_an_unlimited_iteration_setting(tmp_path: Path) -> None:
+    session, _store, agents, _provider = build(tmp_path, [
+        *[tool_call(f"call-{index}", "list_files", "{}") for index in range(1, 8)],
+        text("review concluída"),
+    ])
+    session.limits = AgenticLimits(max_iterations=None, max_actions=24)
+    agents.create("Reviewer", "revisa", parent_agent_id="agent:chat_session:main")
+
+    outcome = session._ask_agent("Reviewer", "revise o projeto")
+
+    assert outcome.status == "succeeded"
+    assert "review concluída" in outcome.content
+
+
+def test_a_cancelled_turn_stops_and_reports_cancellation(tmp_path: Path) -> None:
+    session, store, _agents, _provider = build(
+        tmp_path,
+        [tool_call("call-1", "write_file", '{"path": "a.txt", "content": "x"}'), text("feito")],
+        cancelled=lambda _turn: True,
+    )
+
+    result = session.build_runtime().run("turn-1")
+
+    assert result.state == "cancelled"
+    assert store.finished == [(True, "TURN_CANCELLED")]
+
+
+def test_the_subagent_budget_is_bounded(tmp_path: Path) -> None:
+    session, _store, agents, _provider = build(tmp_path, [])
+    agents.create("Worker", "trabalha", parent_agent_id="agent:chat_session:main")
+    session._subagent_runs = 99
+
+    outcome = session._ask_agent("Worker", "faça algo")
+
+    assert outcome.status == "failed"
+    assert outcome.error_code == "SUBAGENT_LIMIT"
+
+
+def test_the_prompt_lists_remembered_facts() -> None:
+    prompt = build_system_prompt(
+        tool_names=("read_file",),
+        memories=[{"fact": "O usuário se chama Carlos."}],
+        agents=[],
+        workspace_hint="",
+        subagents_enabled=False,
+    )
+
+    assert "Carlos" in prompt
+    assert "remember" in prompt
+
+
+def test_omniroute_records_only_the_requested_route_for_observability(tmp_path: Path) -> None:
+    session, store, _agents, _provider = build(tmp_path, [])
+    session.turn["provider"] = "omniroute"
+    session.turn["model_id"] = "auto/coding"
+
+    session.build_runtime()
+
+    event = next(item for item in store.activity if item[0].value == "model.routing_started")
+    assert event[1] == "Selecionando rota"
+    assert event[2] == {"requested_route": "auto/coding", "provider": "omniroute"}

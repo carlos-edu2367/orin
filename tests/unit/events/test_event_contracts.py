@@ -34,3 +34,8 @@ def test_sequence_and_ids_are_validated(event_factory):
         event_factory(sequence=0)
     with pytest.raises(ValueError):
         event_factory(execution_id="execution:1", sequence=None)
+
+
+def test_envelope_requires_canonical_pascal_case_event_type(event_factory):
+    with pytest.raises(ValueError):
+        event_factory(event_type="execution_started")

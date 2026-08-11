@@ -144,15 +144,15 @@ class _OpaqueRef:
 
 
 class OpaqueArtifactRef(_OpaqueRef):
-    pass
+    ...
 
 
 class OpaqueReadRef(_OpaqueRef):
-    pass
+    ...
 
 
 class OpaqueWriteSessionRef(_OpaqueRef):
-    pass
+    ...
 
 
 @dataclass(frozen=True, slots=True)

@@ -1,0 +1,23 @@
+:root {
+  --orin-ink: #070611;
+  --orin-ink-rgb: 7 6 17;
+  --orin-surface: #0b0a14;
+  --orin-surface-rgb: 11 10 20;
+  --orin-surface-raised: rgba(245, 241, 255, .045);
+  --orin-surface-raised-strong: rgba(245, 241, 255, .075);
+  --orin-line: rgba(245, 241, 255, .1);
+  --orin-line-strong: rgba(245, 241, 255, .18);
+  --orin-text: #f5f1ff;
+  --orin-text-rgb: 245 241 255;
+  --orin-muted: rgba(245, 241, 255, .58);
+  --orin-faint: rgba(245, 241, 255, .34);
+  --orin-accent: #a66cff;
+  --orin-accent-strong: #7c3aed;
+  --orin-accent-soft: #d8b4fe;
+  --orin-accent-rgb: 166 108 255;
+  --orin-accent-dim: rgb(var(--orin-accent-rgb) / .44);
+  --orin-danger: #ff9d91;
+  --orin-warn: #f4cb7a;
+  --orin-success: #86d9a5;
+  --orin-info: #9ac7ff;
+}

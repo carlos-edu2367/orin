@@ -72,7 +72,7 @@ class ContextManagerService:
         self._clock = clock
         self._cancellation = cancellation
         self._active: dict[str, ContextSnapshot] = {}
-        self._requests: dict[str, ContextAssemblyRequest] = {}
+        self._assembly_state: dict[str, ContextAssemblyRequest] = {}
         self._applied_turns: set[tuple[str, str, int]] = set()
         self._finalized: set[str] = set()
 
@@ -84,7 +84,7 @@ class ContextManagerService:
         self._ensure_not_finalized(request.context.execution_id)
         snapshot = self._assemble(request, extra_candidates=(), previous_manifest=None)
         self._active[request.context.execution_id] = snapshot
-        self._requests[request.context.execution_id] = request
+        self._assembly_state[request.context.execution_id] = request
         return snapshot
 
     def apply_turn(self, request: ContextTurnUpdate) -> ContextSnapshot:
@@ -104,7 +104,7 @@ class ContextManagerService:
         if previous.ownership is not None and previous.ownership != OwnershipScope.from_context(request.context):
             raise ContextError(ContextErrorCategory.OWNERSHIP, "CONTEXT_MANIFEST_OWNERSHIP_MISMATCH")
 
-        base = self._requests.get(request.context.execution_id)
+        base = self._assembly_state.get(request.context.execution_id)
         if base is None:
             base = ContextAssemblyRequest(
                 context=request.context,
@@ -125,14 +125,14 @@ class ContextManagerService:
         snapshot = self._assemble(base, extra_candidates=extra, previous_manifest=previous, usage=request.usage)
         self._applied_turns.add(key)
         self._active[request.context.execution_id] = snapshot
-        self._requests[request.context.execution_id] = base
+        self._assembly_state[request.context.execution_id] = base
         return snapshot
 
     def finalize(self, execution_id: str, disposition: ContextDisposition) -> None:
         if not isinstance(disposition, ContextDisposition):
             raise ContextError(ContextErrorCategory.INVALID_REQUEST, "CONTEXT_DISPOSITION_INVALID")
         self._active.pop(execution_id, None)
-        self._requests.pop(execution_id, None)
+        self._assembly_state.pop(execution_id, None)
         self._finalized.add(execution_id)
         finalize = getattr(self._recorder, "finalize", None)
         if finalize is not None:
@@ -465,18 +465,18 @@ class ContextManagerService:
         return ContextReference(f"candidate:{candidate.candidate_id}")
 
     def _turn_candidates(self, request: ContextTurnUpdate) -> tuple[ContextCandidate, ...]:
-        references = []
+        references: list[tuple[TurnReference, SourceKind]] = []
         if request.model_message is not None:
-            references.append(request.model_message)
-        references.extend(request.tool_results)
-        references.extend(request.new_messages)
-        references.extend(request.decisions)
-        references.extend(request.observed_events)
+            references.append((request.model_message, SourceKind.AGENT))
+        references.extend((reference, SourceKind.TOOL) for reference in request.tool_results)
+        references.extend((reference, SourceKind.USER) for reference in request.new_messages)
+        references.extend((reference, SourceKind.DECISION) for reference in request.decisions)
+        references.extend((reference, SourceKind.EVENT) for reference in request.observed_events)
         if request.control_state is not None:
-            references.append(request.control_state)
+            references.append((request.control_state, SourceKind.SYSTEM))
         ownership = OwnershipScope.from_context(request.context)
         result = []
-        for index, reference in enumerate(references):
+        for index, (reference, source_kind) in enumerate(references):
             kind = reference.kind
             priority = ContextPriority.REQUIRED if kind is ContextItemKind.CONTROL_STATE else ContextPriority.NORMAL
             result.append(
@@ -486,7 +486,7 @@ class ContextManagerService:
                     content=ContentReference(ContextReference(str(reference.reference))),
                     ownership=ownership,
                     provenance=Provenance(
-                        source_kind=SourceKind.TOOL if kind is ContextItemKind.TOOL_RESULT else SourceKind.USER,
+                        source_kind=source_kind,
                         source_ref=str(reference.reference),
                         retrieved_at=self._clock.now(),
                     ),

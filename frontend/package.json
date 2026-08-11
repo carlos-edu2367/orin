@@ -1,0 +1,51 @@
+{
+  "name": "agentos-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "dev:local": "vite --host 127.0.0.1",
+    "build": "tsc -b && vite build",
+    "test": "vitest run",
+    "test:e2e": "playwright test",
+    "test:visual": "playwright test --config=playwright.visual.config.ts",
+    "test:watch": "vitest",
+    "lint": "eslint . --max-warnings=0"
+  },
+  "dependencies": {
+    "@react-three/drei": "^10.7.8",
+    "@react-three/fiber": "^9.7.0",
+    "motion": "latest",
+    "react": "latest",
+    "react-dom": "latest",
+    "react-markdown": "^10.1.0",
+    "react-router-dom": "latest",
+    "remark-gfm": "^4.0.1",
+    "tailwindcss": "^3.4.17",
+    "three": "^0.180.0"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "^4.12.1",
+    "@eslint/js": "latest",
+    "@playwright/test": "^1.62.1",
+    "@testing-library/jest-dom": "latest",
+    "@testing-library/react": "latest",
+    "@testing-library/user-event": "latest",
+    "@types/node": "latest",
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "@types/three": "^0.185.4",
+    "@typescript-eslint/eslint-plugin": "latest",
+    "@typescript-eslint/parser": "latest",
+    "@vitejs/plugin-react": "latest",
+    "autoprefixer": "latest",
+    "eslint": "latest",
+    "eslint-plugin-react-hooks": "latest",
+    "globals": "^17.9.0",
+    "jsdom": "^26.1.0",
+    "typescript": "latest",
+    "vite": "latest",
+    "vitest": "latest"
+  }
+}

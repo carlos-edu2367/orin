@@ -438,9 +438,7 @@ class MemoryRecord:
             raise ValueError("base_scope must equal the ownership scope")
         if isinstance(self.content, str):
             object.__setattr__(self, "content", BoundedMemoryContent(self.content))
-        if isinstance(self.content, BoundedMemoryContent):
-            pass
-        elif not isinstance(self.content, MemoryArtifactReference):
+        if not isinstance(self.content, (BoundedMemoryContent, MemoryArtifactReference)):
             raise ValueError("content must be bounded text or MemoryArtifactReference")
         _required(self.retention_policy_ref, "retention_policy_ref")
         _positive(self.version, "version")

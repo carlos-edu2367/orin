@@ -6,6 +6,7 @@ import os
 import shlex
 import signal
 import subprocess
+import sys
 from threading import Thread
 from typing import Mapping, Protocol
 
@@ -58,11 +59,17 @@ class _LocalSupervisor:
 class LocalTerminalAdapter(ReferenceTerminalAdapter):
     """Operational local adapter; all host process details stay inside this module."""
 
-    def __init__(self, cwd_resolver: LocalWorkspaceCwdResolver | None, *, secret_resolver=None, environment_allowlist: tuple[str, ...] = ()) -> None:
+    def __init__(self, cwd_resolver: LocalWorkspaceCwdResolver | None, *, secret_resolver=None, environment_allowlist: tuple[str, ...] = (), allowed_executables: tuple[str, ...] | None = None) -> None:
         super().__init__()
         self.cwd_resolver = cwd_resolver
         self.secret_resolver = secret_resolver or (lambda _reference: {})
         self.environment_allowlist = frozenset(environment_allowlist)
+        # The local adapter is still an explicit worker boundary: shell
+        # parsing is disabled and only named executables may be launched.
+        # The interpreter is retained for the adapter's isolated unit tests;
+        # the production composition supplies a narrower read-only list.
+        defaults = (sys.executable, "echo", "printf", "pwd", "dir", "type", "rg")
+        self.allowed_executables = frozenset(os.path.basename(item).lower() for item in (allowed_executables or defaults))
         self._processes: dict[str, subprocess.Popen] = {}
         self._delegate_supervisor = super().supervisor()
         self._local_supervisor = _LocalSupervisor(self)
@@ -96,6 +103,9 @@ class LocalTerminalAdapter(ReferenceTerminalAdapter):
             return TerminalError(TerminalErrorCode.INVALID_REQUEST)
         if not argv:
             return TerminalError(TerminalErrorCode.INVALID_REQUEST)
+        executable = os.path.basename(argv[0]).lower()
+        if executable not in self.allowed_executables or any(token in request.command.command for token in ("|", ";", "&&", "||", ">", "<", "`", "$(", "\n", "\r")):
+            return TerminalError(TerminalErrorCode.POLICY_DENIED)
         if str(request.command.session_id) not in self._sessions:
             return TerminalError(TerminalErrorCode.NOT_FOUND)
         self.register_result(request.command.command, final_cwd=logical_cwd, complete=False)

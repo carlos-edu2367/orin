@@ -21,6 +21,8 @@ from agentos.execution.ports import (
     ExecutionControl,
     ExecutionControlQuery,
     ExecutionRelatedChange,
+    Conflict,
+    Indeterminate,
     Rejected,
     TransitionExecution,
 )
@@ -40,6 +42,7 @@ from .models import (
     ModelResolveRequest,
     ProviderCancelled,
     ProviderFailed,
+    ProviderIndeterminate,
     ProviderFinal,
     ProviderToolRequest,
     ProviderUserInputRequest,
@@ -105,7 +108,7 @@ class RuntimeService:
                 try:
                     self._context_manager.finalize(request.execution_id, disposition)
                 except Exception:
-                    pass
+                    disposition = None
             return outcome
         finally:
             self._active.release()
@@ -138,7 +141,7 @@ class RuntimeService:
                     worker_ref=request.worker_ref,
                 )
             )
-            if isinstance(acquisition, Rejected):
+            if isinstance(acquisition, (Rejected, Conflict, Indeterminate)):
                 return self._failure(request.execution_id, RuntimeErrorCategory.INITIALIZATION, "ACQUISITION_REJECTED")
             execution, context = self._load(request)
 
@@ -154,7 +157,7 @@ class RuntimeService:
                     reason_code="runtime_started",
                 )
             )
-            if isinstance(started, Rejected):
+            if isinstance(started, (Rejected, Conflict, Indeterminate)):
                 return self._failure(request.execution_id, RuntimeErrorCategory.INITIALIZATION, "START_REJECTED")
             execution, context = self._load(request)
 
@@ -269,6 +272,7 @@ class RuntimeService:
                 context,
                 RuntimeErrorInfo(RuntimeErrorCategory.MODEL_RESOLUTION, "MODEL_RESOLUTION_FAILED"),
             )
+        provider_started = self._clock.monotonic()
         try:
             provider_outcome = self._provider.generate(
                 self._provider_request(request, execution, context_snapshot, selection, usage)
@@ -285,12 +289,32 @@ class RuntimeService:
                 context,
                 RuntimeErrorInfo(RuntimeErrorCategory.PROVIDER, "PROVIDER_FAILED"),
             )
+        provider_elapsed = self._clock.monotonic() - provider_started
+        provider_usage = self._provider_delta(provider_outcome.usage)
+        provider_timeout = self._effective_limits(execution).provider_timeout_seconds
+        if provider_timeout is not None and provider_elapsed > provider_timeout:
+            return self._fail_execution(
+                execution,
+                context,
+                RuntimeErrorInfo(RuntimeErrorCategory.PROVIDER_TIMEOUT, "PROVIDER_TIMEOUT"),
+                provider_usage,
+            )
+        if self._deadline_exceeded(
+            started_monotonic,
+            execution,
+            current_monotonic=provider_started + provider_elapsed,
+        ):
+            return self._fail_execution(
+                execution,
+                context,
+                RuntimeErrorInfo(RuntimeErrorCategory.EXECUTION_TIMEOUT, "EXECUTION_DEADLINE_EXCEEDED"),
+                provider_usage,
+            )
         if self._signal(context) is ControlSignal.CANCEL_REQUESTED:
-            return self._cancel(execution, context)
+            return self._cancel(execution, context, usage=provider_usage, manifest_ref=context_snapshot.manifest_ref)
         if self._signal(context) is ControlSignal.PAUSE_REQUESTED:
             return self._pause(execution, context)
 
-        provider_usage = self._provider_delta(provider_outcome.usage)
         if isinstance(provider_outcome, ProviderFinal):
             final_usage = usage.plus(provider_usage)
             postcondition = self._post_effect_budget(
@@ -331,7 +355,7 @@ class RuntimeService:
                     ),
                 )
             )
-            if isinstance(result, Rejected):
+            if isinstance(result, (Rejected, Conflict, Indeterminate)):
                 return self._failure(request.execution_id, RuntimeErrorCategory.RECONCILIATION, "RESULT_COMMIT_REJECTED")
             return CompletedOutcome(request.execution_id, provider_outcome.result_ref, final_usage)
 
@@ -357,9 +381,10 @@ class RuntimeService:
                     ),
                 )
             )
-            if isinstance(waiting, Rejected):
+            if isinstance(waiting, (Rejected, Conflict, Indeterminate)):
                 return self._failure(request.execution_id, RuntimeErrorCategory.RECONCILIATION, "WAIT_TOOL_REJECTED")
             waiting_execution, waiting_context = self._load(request)
+            action_started = self._clock.monotonic()
             try:
                 action = self._action_port.invoke(
                     ActionRequest(
@@ -381,12 +406,28 @@ class RuntimeService:
                     waiting_context,
                     RuntimeErrorInfo(RuntimeErrorCategory.ACTION, "ACTION_FAILED"),
                 )
+            action_elapsed = self._clock.monotonic() - action_started
+            action_timeout = self._effective_limits(waiting_execution).action_timeout_seconds
+            if action_timeout is not None and action_elapsed > action_timeout:
+                return self._fail_execution(
+                    waiting_execution,
+                    waiting_context,
+                    RuntimeErrorInfo(RuntimeErrorCategory.ACTION_TIMEOUT, "ACTION_TIMEOUT"),
+                    action.usage,
+                )
+            if self._deadline_exceeded(started_monotonic, waiting_execution):
+                return self._fail_execution(
+                    waiting_execution,
+                    waiting_context,
+                    RuntimeErrorInfo(RuntimeErrorCategory.EXECUTION_TIMEOUT, "EXECUTION_DEADLINE_EXCEEDED"),
+                    action.usage,
+                )
             if self._signal(waiting_context) is ControlSignal.CANCEL_REQUESTED:
                 return self._cancel(waiting_execution, waiting_context)
             if isinstance(action, ActionCancelled):
                 return self._cancel(waiting_execution, waiting_context, action.reason)
             if isinstance(action, ActionFailed):
-                self._control.commit(
+                result = self._control.commit(
                     CommitExecutionChanges(
                         context=waiting_context,
                         command_id=self._id("action-failed"),
@@ -400,6 +441,12 @@ class RuntimeService:
                         changes=(self._usage_change(action.usage),),
                     )
                 )
+                if isinstance(result, (Rejected, Conflict, Indeterminate)):
+                    return self._failure(
+                        request.execution_id,
+                        RuntimeErrorCategory.RECONCILIATION,
+                        "ACTION_FAILURE_COMMIT_UNCONFIRMED",
+                    )
                 return FailedOutcome(request.execution_id, action.error)
             if isinstance(action, ActionSucceeded):
                 waiting_execution, waiting_context = self._load(request)
@@ -442,31 +489,46 @@ class RuntimeService:
                         ),
                     )
                     )
-                if isinstance(resumed, Rejected):
+                if isinstance(resumed, (Rejected, Conflict, Indeterminate)):
                     return self._failure(request.execution_id, RuntimeErrorCategory.RECONCILIATION, "ACTION_RESUME_REJECTED")
                 next_execution, next_context = self._load(request)
                 return self._run_loop(request, next_execution, next_context, started_monotonic)
             return self._failure(request.execution_id, RuntimeErrorCategory.ACTION, "UNKNOWN_ACTION_OUTCOME")
 
         if isinstance(provider_outcome, ProviderUserInputRequest):
-            transition = self._control.transition(
-                TransitionExecution(
+            transition = self._control.commit(
+                CommitExecutionChanges(
                     context=context,
                     command_id=self._id("wait-user"),
                     idempotency_key=self._id("wait-user-key"),
                     expected_version=execution.state_version,
                     requested_at=self._clock.now(),
+                    expected_state=ExecutionState.RUNNING,
                     target_state=ExecutionState.WAITING_USER,
                     reason_code="input_required",
+                    changes=self._changes_with_manifest(provider_usage, context_snapshot.manifest_ref),
                 )
             )
-            if isinstance(transition, Rejected):
+            if isinstance(transition, (Rejected, Conflict, Indeterminate)):
                 return self._failure(request.execution_id, RuntimeErrorCategory.RECONCILIATION, "WAIT_USER_REJECTED")
             return WaitingOutcome(request.execution_id, ExecutionState.WAITING_USER)
 
         if isinstance(provider_outcome, ProviderCancelled):
-            return self._cancel(execution, context, provider_outcome.reason)
+            return self._cancel(
+                execution,
+                context,
+                provider_outcome.reason,
+                usage=provider_usage,
+                manifest_ref=context_snapshot.manifest_ref,
+            )
         if isinstance(provider_outcome, ProviderFailed):
+            return self._fail_execution(
+                execution,
+                context,
+                provider_outcome.error,
+                provider_usage,
+            )
+        if isinstance(provider_outcome, ProviderIndeterminate):
             return self._fail_execution(
                 execution,
                 context,
@@ -503,20 +565,43 @@ class RuntimeService:
         execution: Execution,
         context: ExecutionCommandContext,
         reason: CancellationReason | None = None,
+        *,
+        usage: RuntimeUsage = RuntimeUsage(),
+        manifest_ref: str | None = None,
     ) -> CancelledOutcome:
         cancellation = reason or CancellationReason(CancellationReasonCode.USER_REQUESTED)
-        result = self._control.request_cancel(
-            CancelExecution(
-                context=context,
-                command_id=self._id("cancel"),
-                idempotency_key=self._id("cancel-key"),
-                expected_version=execution.state_version,
-                requested_at=self._clock.now(),
-                reason=cancellation,
+        if usage != RuntimeUsage() or manifest_ref is not None:
+            result = self._control.commit(
+                CommitExecutionChanges(
+                    context=context,
+                    command_id=self._id("cancel"),
+                    idempotency_key=self._id("cancel-key"),
+                    expected_version=execution.state_version,
+                    requested_at=self._clock.now(),
+                    expected_state=execution.state,
+                    target_state=ExecutionState.CANCELLED,
+                    reason_code=cancellation.code.value,
+                    cancellation_reason=cancellation,
+                    changes=self._changes_with_manifest(usage, manifest_ref) if manifest_ref is not None else (self._usage_change(usage),),
+                )
             )
-        )
-        if isinstance(result, Rejected):
-            return CancelledOutcome(execution.execution_id, cancellation)
+        else:
+            result = self._control.request_cancel(
+                CancelExecution(
+                    context=context,
+                    command_id=self._id("cancel"),
+                    idempotency_key=self._id("cancel-key"),
+                    expected_version=execution.state_version,
+                    requested_at=self._clock.now(),
+                    reason=cancellation,
+                )
+            )
+        if isinstance(result, (Rejected, Conflict, Indeterminate)):
+            return self._failure(
+                execution.execution_id,
+                RuntimeErrorCategory.RECONCILIATION,
+                "CANCEL_COMMIT_UNCONFIRMED",
+            )
         return CancelledOutcome(execution.execution_id, cancellation)
 
     def _pause(self, execution: Execution, context: ExecutionCommandContext) -> WaitingOutcome:
@@ -539,8 +624,12 @@ class RuntimeService:
                 ),
             )
         )
-        if isinstance(result, Rejected):
-            return WaitingOutcome(execution.execution_id, ExecutionState.PAUSED)
+        if isinstance(result, (Rejected, Conflict, Indeterminate)):
+            return self._failure(
+                execution.execution_id,
+                RuntimeErrorCategory.RECONCILIATION,
+                "PAUSE_COMMIT_UNCONFIRMED",
+            )
         return WaitingOutcome(execution.execution_id, ExecutionState.PAUSED)
 
     def _terminal_outcome(self, execution: Execution) -> RuntimeOutcome | None:
@@ -629,6 +718,19 @@ class RuntimeService:
             return self._pause(execution, context)
         return None
 
+    def _deadline_exceeded(
+        self,
+        started_monotonic: float,
+        execution: Execution,
+        *,
+        current_monotonic: float | None = None,
+    ) -> bool:
+        limit = self._effective_limits(execution).max_duration_seconds
+        if limit is None:
+            return False
+        now = self._clock.monotonic() if current_monotonic is None else current_monotonic
+        return now - started_monotonic > limit
+
     def _post_effect_budget(self, request, execution, context, usage, delta):
         limits = self._effective_limits(execution)
         if limits.max_iterations is not None and usage.iterations > limits.max_iterations:
@@ -682,6 +784,12 @@ class RuntimeService:
                 else (),
             )
         )
+        if isinstance(result, (Rejected, Conflict, Indeterminate)):
+            return self._failure(
+                execution.execution_id,
+                RuntimeErrorCategory.RECONCILIATION,
+                "FAILURE_COMMIT_UNCONFIRMED",
+            )
         return FailedOutcome(execution.execution_id, error)
 
     def _operation_context(self, request, execution):

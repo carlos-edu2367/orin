@@ -1,0 +1,55 @@
+from sqlalchemy import create_engine
+
+from agentos.persistence.postgres.schema import metadata
+from agentos.persistence.postgres.skills import PostgresSkillLibraryService
+
+
+def test_custom_skill_survives_a_new_library_service_instance() -> None:
+    engine = create_engine("sqlite://")
+    metadata.create_all(engine)
+    first = PostgresSkillLibraryService(engine)
+    created = first.create({"user_id": "u1", "name": "Deploy Review", "description": "Review a deploy.", "version": "1.0.0", "tags": ["deploy"], "instructions": "# Workflow"})
+
+    reloaded = PostgresSkillLibraryService(engine)
+    detail = reloaded.get({"user_id": "u1", "skill_id": created["id"]})
+
+    assert detail["instructions"] == "# Workflow"
+    assert created["id"] in [item["id"] for item in reloaded.list({"user_id": "u1", "query": "deploy", "limit": 20})["items"]]
+
+
+def test_loaded_skill_records_an_immutable_execution_snapshot() -> None:
+    engine = create_engine("sqlite://")
+    metadata.create_all(engine)
+    service = PostgresSkillLibraryService(engine)
+    created = service.create({"user_id": "u1", "name": "Deploy", "description": "Deploy safely.", "version": "1.0.0", "tags": [], "instructions": "# Workflow"})
+    loaded = service.registry_for("u1").load(created["id"])
+
+    service.record_load(user_id="u1", execution_id="exe-1", agent_id="agent-1", loaded=loaded)
+    snapshots = service.loads_for_execution(user_id="u1", execution_id="exe-1")
+
+    assert snapshots[0]["version"] == "1.0.0"
+    assert snapshots[0]["content_snapshot"] == "# Workflow"
+
+
+def test_user_scope_can_override_a_builtin_identity_without_colliding() -> None:
+    engine = create_engine("sqlite://")
+    metadata.create_all(engine)
+    service = PostgresSkillLibraryService(engine)
+
+    service.create({"user_id": "u1", "name": "Testing", "description": "A private testing process.", "version": "1.0.0", "tags": [], "instructions": "# Private workflow"})
+
+    assert service.get({"user_id": "u1", "skill_id": "testing"})["instructions"] == "# Private workflow"
+
+
+def test_agent_can_switch_between_auto_discovery_and_pinned_skill_versions() -> None:
+    engine = create_engine("sqlite://")
+    metadata.create_all(engine)
+    service = PostgresSkillLibraryService(engine)
+
+    assert service.agent_skills({"user_id": "u1", "agent_id": "a1"}) == {"mode": "auto", "items": []}
+    pinned = service.set_agent_skills({"user_id": "u1", "agent_id": "a1", "mode": "pinned", "skill_ids": ["testing"]})
+
+    assert pinned["mode"] == "pinned"
+    assert pinned["items"][0]["id"] == "testing"
+    assert service.agents_for_skill({"user_id": "u1", "skill_id": "testing"})["items"] == [{"agent_id": "a1", "mode": "pinned"}]
+    assert service.set_agent_skills({"user_id": "u1", "agent_id": "a1", "mode": "auto", "skill_ids": []}) == {"mode": "auto", "items": []}

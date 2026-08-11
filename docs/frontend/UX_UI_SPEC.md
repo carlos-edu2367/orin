@@ -8,7 +8,7 @@
 
 ### Home → execution
 
-A home tem marca AgentOS, uma pergunta curta e composer. O envio cria uma intenção de execution; a interface muda para “Preparando tarefa” somente após o recibo 202. A entidade abstrata do hero sofre morph para o rail de agentes da execution. Sem um contrato de prompt/output, o composer deve ser planejado como **futuro**: inicialmente pode selecionar `agent_id` e enviar `task_ref` conhecido, nunca fingir chat livre.
+A home tem marca AgentOS, uma pergunta curta e composer. A pessoa escreve a mensagem e escolhe provider e modelo entre as opções autorizadas do catálogo por usuário; o browser não envia `agent_id` nem `task_ref`. O envio mantém a home no estado de preparação enquanto a mutação está pendente e a transição para `/execution/{execution_id}` acontece somente após o recibo `201` confirmado. Erro preserva a mensagem, anuncia a falha e devolve o foco ao composer.
 
 ### Execution principal
 
@@ -40,3 +40,8 @@ Não renderizar cada Event. Normalizar por `event_id`, ordenar por execution+seq
 - Não usar tabelas, cards de métricas ou logs na área principal.
 - Glass apenas em navegação, command palette, menus e inspector.
 - Conexões de agents descrevem delegação/mensagem confirmada; pulso de ida ocorre em `DelegationCreated` ou `AgentMessageCreated`, retorno em `DelegationResultReturned`. Não animar “mensagem” se só houver child execution.
+# Composer de conversa e catálogo (2026-08-10)
+
+Na Home, o primeiro campo é a mensagem. Provider e modelo têm rótulos explícitos, o catálogo é pesquisável e favoritos aparecem como atalhos. O botão permanece indisponível até existir um modelo autorizado; catálogo vazio direciona a pessoa para a configuração do provider. A interface nunca mostra identificadores de agente, referências de tarefa ou valores de segredo.
+
+Em Configurações, cada painel separa claramente credencial (campo de senha, somente escrita) de catálogo (atualização, lista normalizada e favorito). Escolher/favoritar um modelo não muda a chave nem define um modelo global de execução.

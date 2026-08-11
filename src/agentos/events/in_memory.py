@@ -297,7 +297,7 @@ class InMemoryOutboxPublisher:
             if record.commit_state is CommitState.COMMITTED:
                 ready.append(record)
             elif record.commit_state is CommitState.UNKNOWN:
-                if request.context is not None and self._source.inspect_commit(record, request):
+                if self._source.inspect_commit(record, request):
                     ready.append(record)
                 else:
                     pending.append(record.event.event_id)
@@ -305,7 +305,12 @@ class InMemoryOutboxPublisher:
                 failed.append(record.event.event_id)
 
         receipt = self._bus.publish(tuple(record.event for record in ready))
-        next_position = records[-1].position if records else None
+        pending_ids = set(pending) | set(failed) | set(receipt.rejected_event_ids)
+        next_position = None
+        for record in records:
+            if record.event.event_id in pending_ids:
+                break
+            next_position = record.position
         return OutboxPublishResult(
             published_event_ids=receipt.published_event_ids,
             pending_event_ids=tuple(pending),
@@ -412,7 +417,9 @@ class InMemoryEventArchive:
         if request.event_ids:
             if any(event_id in self._expired for event_id in request.event_ids):
                 return (), ReplayStatus.EXPIRED
-            candidates = tuple(self._events[event_id] for event_id in request.event_ids if event_id in self._events)
+            if any(event_id not in self._events for event_id in request.event_ids):
+                raise PermissionError("replay target is not authorized")
+            candidates = tuple(self._events[event_id] for event_id in request.event_ids)
         else:
             start = self._cursor_offset(request.cursor)
             candidates = tuple(
@@ -430,8 +437,8 @@ class InMemoryEventArchive:
         return (
             context.user_id == event.user_id
             and context.workspace_id == event.workspace_id
-            and (context.agent_id == event.agent_id or event.agent_id is None)
-            and (context.execution_id == event.execution_id or event.execution_id is None)
+            and (event.agent_id is None or context.agent_id == event.agent_id)
+            and (event.execution_id is None or context.execution_id == event.execution_id)
         )
 
     @staticmethod
@@ -440,6 +447,8 @@ class InMemoryEventArchive:
             event.user_id == query.context.user_id
             and event.workspace_id == query.context.workspace_id
             and classification_allows(query.clearance, event.classification)
+            and (event.agent_id is None or event.agent_id == query.context.agent_id)
+            and (event.execution_id is None or event.execution_id == query.context.execution_id)
             and (not query.event_ids or event.event_id in query.event_ids)
             and (query.event_type is None or event.event_type == query.event_type)
             and (query.event_version is None or event.event_version == query.event_version)

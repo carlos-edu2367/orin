@@ -169,11 +169,8 @@ class InMemoryMemoryStore:
                 current = self._records.get(str(change.record.memory_id))
                 expected = change.expected_version
                 actual = current.version if current is not None else None
-                if expected != actual:
-                    if current is None and expected is None:
-                        pass
-                    else:
-                        raise MemoryVersionConflict()
+                if expected != actual and not (current is None and expected is None):
+                    raise MemoryVersionConflict()
                 if current is not None:
                     if current.status is not MemoryStatus.ACTIVE and change.record.status is MemoryStatus.ACTIVE:
                         raise MemoryVersionConflict("TOMBSTONE_RESURRECTION")
@@ -998,7 +995,7 @@ class InMemoryMemoryManager:
                         outcome="FAILED",
                     )
                 except Exception:
-                    pass
+                    _ = error
             raise
 
     def _record_fact(self, *, operation, context, key, fingerprint, event_type, payload, memory_ids, versions, scope, reason, outcome="COMMITTED"):

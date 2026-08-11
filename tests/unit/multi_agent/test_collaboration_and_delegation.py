@@ -40,15 +40,17 @@ def _collaboration() -> Collaboration:
 
 
 class FakeResolver:
-    def __init__(self, inactive=None):
+    def __init__(self, inactive=None, providers=None):
         self.inactive = inactive
+        self.providers = providers or {}
         self.calls = []
 
     def resolve(self, **kwargs):
         self.calls.append(kwargs)
         if kwargs["agent_id"] == self.inactive:
             raise ValueError("agent is not active")
-        return SimpleNamespace(agent_id=kwargs["agent_id"], config_version=2)
+        provider = self.providers.get(kwargs["agent_id"], "openrouter")
+        return SimpleNamespace(agent_id=kwargs["agent_id"], config_version=2, model_profile_ref=f"model-profile:{provider}:model-a:version")
 
 
 class FakeExecution:
@@ -74,11 +76,11 @@ class FakeSharing:
         return SimpleNamespace(handoff_id=ref.handoff_id)
 
 
-def _service(*, inactive=None):
+def _service(*, inactive=None, providers=None, model_policy=None):
     store = InMemoryMultiAgentStore()
     store.save_collaboration(_collaboration(), idempotency_key="collab:1")
     execution = FakeExecution()
-    resolver = FakeResolver(inactive=inactive)
+    resolver = FakeResolver(inactive=inactive, providers=providers)
     sharing = FakeSharing()
     service = MultiAgentCoordinatorService(
         store=store,
@@ -88,6 +90,7 @@ def _service(*, inactive=None):
         sharing=sharing,
         events=store,
         clock=lambda: NOW,
+        model_policy=model_policy,
     )
     return service, store, execution, resolver, sharing
 
@@ -168,6 +171,30 @@ def test_delegate_resolves_handoff_and_creates_one_child_execution():
     assert len(sharing.calls) == 1
     assert execution.children[0]["request"].parent_execution_id == "execution:parent"
     assert any(event.event_type == "DelegationCreated" for event in store.events)
+
+
+def test_delegate_keeps_child_on_same_provider_by_default_and_rejects_cross_provider_without_grant():
+    service, _, execution, _, _ = _service(providers={"agent:source": "openrouter", "agent:target": "openrouter"})
+    ref = SimpleNamespace(handoff_id="handoff:provider", version=1, to_agent_id="agent:target", target_execution_id="execution:child", expires_at=NOW)
+    command = DelegateTask("actor:1", "collab:1", "execution:parent", "agent:source", "agent:target", "user:1", "workspace:1", "actor:1", ref, ExecutionLimits(60, 5), None, "task.delegation", DataClassification.INTERNAL, "auth:1", DelegationFailurePolicy.PROPAGATE, DelegationCancellationPolicy.CANCEL_CHILD_ONLY, "corr:1", "command:provider", "delegate:provider", NOW)
+    service.delegate(command)
+    assert execution.children[0]["resolved_agent"].model_profile_ref.startswith("model-profile:openrouter:")
+
+    policy = SimpleNamespace(validate=lambda **_: (_ for _ in ()).throw(PermissionError("cross-provider child model requires an explicit grant")))
+    cross, _, _, _, _ = _service(providers={"agent:source": "openrouter", "agent:target": "openai"}, model_policy=policy)
+    with pytest.raises(PermissionError, match="cross-provider"):
+        cross.delegate(command)
+
+
+def test_delegate_accepts_cross_provider_only_when_explicit_grant_authorizes_it():
+    policy = SimpleNamespace(validate=lambda **_: None)
+    service, _, execution, _, _ = _service(providers={"agent:source": "openrouter", "agent:target": "openai"}, model_policy=policy)
+    ref = SimpleNamespace(handoff_id="handoff:grant", version=1, to_agent_id="agent:target", target_execution_id="execution:child", expires_at=NOW)
+    command = DelegateTask("actor:1", "collab:1", "execution:parent", "agent:source", "agent:target", "user:1", "workspace:1", "actor:1", ref, ExecutionLimits(60, 5), None, "task.delegation", DataClassification.INTERNAL, "provider-grant:approved", DelegationFailurePolicy.PROPAGATE, DelegationCancellationPolicy.CANCEL_CHILD_ONLY, "corr:1", "command:grant", "delegate:grant", NOW)
+    service.delegate(command)
+    assert len(execution.children) == 1
+
+
 
 
 def test_return_result_keeps_failed_terminal_distinct():

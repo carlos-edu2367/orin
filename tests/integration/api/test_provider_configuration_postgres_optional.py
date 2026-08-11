@@ -10,11 +10,14 @@ guarantee ``_provider_public()`` already enforces for a fake adapter in
 from __future__ import annotations
 
 import os
+from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
+
+from agentos.persistence.postgres.schema import provider_configurations
 
 from agentos.bootstrap.production import DependencyProbe, ProductionSettings, compose_production_services, create_production_app
 from agentos.persistence.postgres import upgrade
@@ -47,7 +50,7 @@ def _client_with_pat(engine) -> tuple[TestClient, str, str]:
     return TestClient(app), token, user_id
 
 
-def test_configure_then_inspect_round_trips_through_real_postgres_without_leaking_the_key() -> None:
+def test_configure_then_inspect_round_trips_through_real_postgres_without_model_or_key_leakage() -> None:
     engine = _engine()
     client, token, _user_id = _client_with_pat(engine)
     headers = {"Authorization": f"Bearer {token}"}
@@ -56,21 +59,51 @@ def test_configure_then_inspect_round_trips_through_real_postgres_without_leakin
     configured = client.put(
         "/v1/providers/openai",
         headers={**headers, "Idempotency-Key": f"provider-{uuid4().hex}"},
-        json={"api_key": secret_api_key, "model": "gpt-test", "enabled": True},
+        json={"api_key": secret_api_key, "enabled": True},
     )
     assert configured.status_code == 200
     assert secret_api_key not in configured.text
     assert "api_key" not in configured.json()
     assert configured.json()["provider"] == "openai"
-    assert configured.json()["model"] == "gpt-test"
+    assert "model" not in configured.json()
     assert configured.json()["enabled"] is True
+    assert configured.json()["catalog_refreshed_at"] is None
 
     inspected = client.get("/v1/providers/openai", headers=headers)
     assert inspected.status_code == 200
     assert secret_api_key not in inspected.text
     assert "api_key" not in inspected.json()
-    assert inspected.json()["model"] == "gpt-test"
+    assert "model" not in inspected.json()
     assert inspected.json()["enabled"] is True
+    assert inspected.json()["catalog_refreshed_at"] is None
+
+
+def test_legacy_model_value_remains_credential_data_and_is_never_exposed_or_used_as_a_default() -> None:
+    engine = _engine()
+    client, token, user_id = _client_with_pat(engine)
+    headers = {"Authorization": f"Bearer {token}"}
+    legacy_model = "legacy-provider-default"
+
+    with engine.begin() as connection:
+        connection.execute(
+            provider_configurations.insert().values(
+                user_id=user_id,
+                provider="openrouter",
+                enabled=True,
+                model=legacy_model,
+                api_key="legacy-key",
+                secret_ref="provider-secret:legacy",
+                created_at=datetime.now(UTC),
+                updated_at=datetime.now(UTC),
+            )
+        )
+
+    response = client.get("/v1/providers/openrouter", headers=headers)
+
+    assert response.status_code == 200
+    assert legacy_model not in response.text
+    assert "model" not in response.json()
+    assert response.json()["catalog_refreshed_at"] is None
 
 
 def test_revoke_disables_the_provider_and_never_leaks_the_key() -> None:
@@ -81,7 +114,7 @@ def test_revoke_disables_the_provider_and_never_leaks_the_key() -> None:
     client.put(
         "/v1/providers/anthropic",
         headers={**headers, "Idempotency-Key": f"provider-{uuid4().hex}"},
-        json={"api_key": secret_api_key, "model": "claude-test", "enabled": True},
+        json={"api_key": secret_api_key, "enabled": True},
     )
 
     revoked = client.delete(
@@ -115,7 +148,7 @@ def test_provider_configuration_is_isolated_per_user() -> None:
     owner_client.put(
         "/v1/providers/openai",
         headers={"Authorization": f"Bearer {owner_token}", "Idempotency-Key": f"provider-{uuid4().hex}"},
-        json={"api_key": secret_api_key, "model": "gpt-test", "enabled": True},
+        json={"api_key": secret_api_key, "enabled": True},
     )
 
     response = stranger_client.get("/v1/providers/openai", headers={"Authorization": f"Bearer {stranger_token}"})

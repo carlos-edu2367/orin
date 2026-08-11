@@ -27,6 +27,14 @@ class ModelResolverService:
         self._cancellation = cancellation
         self._validity = validity
 
+    def load_snapshot(
+        self,
+        reference: ApprovedModelRequirementsRef,
+        context: ModelCatalogOperationContext,
+    ) -> ApprovedModelRequirementsSnapshot:
+        """Load an approved snapshot through the resolver's public port."""
+        return self._catalog.load_snapshot(reference, context)
+
     def _cancelled(self, request_or_requirements) -> bool:
         signal = getattr(request_or_requirements, "cancellation", None)
         return bool(self._cancellation is not None and self._cancellation.is_cancelled()) or bool(signal is not None and hasattr(signal, "is_cancelled") and signal.is_cancelled())
@@ -35,21 +43,23 @@ class ModelResolverService:
         requirements = request.requirements
         if self._cancelled(requirements):
             return ModelResolutionCancelled(CancellationReason(CancellationReasonCode.POLICY_REQUESTED))
+        if requirements.fallback.mode is FallbackMode.POLICY:
+            return NoCompatibleModel("FALLBACK_POLICY_NOT_MATERIALIZED", ())
         now = self._clock()
+        profile = self._catalog.get_profile(requirements.requested_profile) if requirements.requested_profile else None
         page = self._catalog.list_models(AuthorizedModelListQuery(requirements.context))
-        eligible, rejected = self._filter(page.items, requirements)
+        eligible, rejected = self._filter(page.items, requirements, profile)
         if self._cancelled(requirements):
             return ModelResolutionCancelled(CancellationReason(CancellationReasonCode.POLICY_REQUESTED))
         if not eligible:
             return NoCompatibleModel("NO_COMPATIBLE_MODEL", tuple(rejected))
 
-        profile = self._catalog.get_profile(requirements.requested_profile) if requirements.requested_profile else None
         preferred = requirements.preferred_model_ref
-        eligible.sort(key=lambda descriptor: self._sort_key(descriptor, requirements, preferred))
+        eligible.sort(key=lambda descriptor: self._sort_key(descriptor, requirements, preferred, profile))
         primary = eligible[0]
         fallback_refs = self._fallback_refs(requirements.fallback, eligible, primary)
-        selected_primary = self._selected(primary, 1, ModelRole.PRIMARY)
-        selected_fallbacks = tuple(self._selected(item, index + 2, ModelRole.FALLBACK) for index, item in enumerate(fallback_refs))
+        selected_primary = self._selected(primary, 1, ModelRole.PRIMARY, requirements)
+        selected_fallbacks = tuple(self._selected(item, index + 2, ModelRole.FALLBACK, requirements) for index, item in enumerate(fallback_refs))
         selection_ref = ModelSelectionRef(f"selection:{request.request_id}")
         selection_id = ModelSelectionId(f"selection-id:{request.request_id}")
         valid_until = now + self._validity
@@ -78,6 +88,9 @@ class ModelResolverService:
             issued_at=now,
             valid_until=valid_until,
             integrity_ref=IntegrityRef(f"integrity:{request.request_id}"),
+            allowed_failure_categories=requirements.fallback.allowed_failure_categories,
+            maximum_fallback_attempts=requirements.fallback.maximum_attempts,
+            allow_cross_provider_fallback=requirements.fallback.allow_cross_provider,
         )
         explanation = SelectionExplanation(
             requested_profile=requirements.requested_profile,
@@ -123,15 +136,28 @@ class ModelResolverService:
             return NoCompatibleModel("NO_MATERIALIZED_FALLBACK", ())
         candidate = remaining[0]
         descriptor = self._catalog.get_model(AuthorizedModelQuery(request.context, candidate.model_ref))
-        if descriptor.status in {ModelStatus.DISABLED, ModelStatus.RETIRED}:
+        provider = self._catalog.get_provider(candidate.provider_ref)
+        if descriptor.status in {ModelStatus.DISABLED, ModelStatus.RETIRED} or provider is None or provider.status in {ProviderStatus.DISABLED, ProviderStatus.RETIRED}:
             return NoCompatibleModel("FALLBACK_MODEL_UNAVAILABLE", (CandidateRejection(candidate.model_ref, ConstraintCode.MODEL_STATUS, "status not eligible"),))
-        if request.remaining_limits.maximum_cost is not None and candidate.estimated_cost_ceiling is not None and candidate.estimated_cost_ceiling > request.remaining_limits.maximum_cost:
-            return NoCompatibleModel("FALLBACK_BUDGET_EXCEEDED", (CandidateRejection(candidate.model_ref, ConstraintCode.BUDGET, "remaining budget"),))
+        if request.remaining_limits.maximum_cost is not None and candidate.estimated_cost_ceiling is not None:
+            consumed = request.consumed_cost.amount or Decimal("0")
+            if consumed + candidate.estimated_cost_ceiling > request.remaining_limits.maximum_cost:
+                return NoCompatibleModel("FALLBACK_BUDGET_EXCEEDED", (CandidateRejection(candidate.model_ref, ConstraintCode.BUDGET, "accumulated budget"),))
         now = self._clock()
         new_ref = ModelSelectionRef(f"selection:{request.request_id}")
         new_id = ModelSelectionId(f"selection-id:{request.request_id}")
         valid_until = min(selection.valid_until, now + self._validity)
         snapshot = self._catalog.load_snapshot(selection.approved_requirements_ref, request.context)
+        if snapshot.allowed_failure_categories and request.failure_category not in snapshot.allowed_failure_categories:
+            return NoCompatibleModel("FALLBACK_NOT_ALLOWED_FOR_FAILURE", ())
+        if len(selection.fallbacks) >= snapshot.maximum_fallback_attempts:
+            return NoCompatibleModel("FALLBACK_ATTEMPTS_EXHAUSTED", ())
+        failed_provider = next(
+            (item.provider_ref for item in (selection.primary, *selection.fallbacks) if item.model_ref == request.failed_model_ref),
+            selection.primary.provider_ref,
+        )
+        if not snapshot.allow_cross_provider_fallback and candidate.provider_ref != failed_provider:
+            return NoCompatibleModel("FALLBACK_PROVIDER_NOT_ALLOWED", ())
         snapshot = replace(snapshot, approved_requirements_ref=ApprovedModelRequirementsRef(f"approved:{request.request_id}"), selection_id=new_id, issued_at=now, valid_until=valid_until, integrity_ref=IntegrityRef(f"integrity:{request.request_id}"))
         new_selection = replace(
             selection,
@@ -146,18 +172,18 @@ class ModelResolverService:
         self._catalog.record_selection(new_selection, snapshot)
         return ModelResolved(new_selection)
 
-    def _filter(self, descriptors, requirements):
+    def _filter(self, descriptors, requirements, profile=None):
         eligible = []
         rejected = []
         for descriptor in descriptors:
-            code = self._rejection(descriptor, requirements)
+            code = self._rejection(descriptor, requirements, profile)
             if code is None:
                 eligible.append(descriptor)
             else:
                 rejected.append(CandidateRejection(descriptor.model_ref, code, code.value))
         return eligible, rejected
 
-    def _rejection(self, descriptor: ModelDescriptor, requirements: ModelRequirements) -> ConstraintCode | None:
+    def _rejection(self, descriptor: ModelDescriptor, requirements: ModelRequirements, profile=None) -> ConstraintCode | None:
         provider = self._catalog.get_provider(descriptor.provider_ref)
         if provider is None:
             return ConstraintCode.PROVIDER_STATUS
@@ -171,6 +197,12 @@ class ModelResolverService:
             return ConstraintCode.PROVIDER_DENIED
         if requirements.allowed_model_refs and descriptor.model_ref not in requirements.allowed_model_refs:
             return ConstraintCode.MODEL_NOT_ALLOWED
+        if descriptor.compatibility.allowed_purposes and requirements.context.purpose not in descriptor.compatibility.allowed_purposes:
+            return ConstraintCode.PURPOSE
+        if profile is not None:
+            for constraint in profile.required:
+                if not self._satisfies_constraint(descriptor, requirements, constraint):
+                    return constraint.code
         if _CLASSIFICATION_RANK[requirements.data_classification] > _CLASSIFICATION_RANK[descriptor.compatibility.maximum_data_classification]:
             return ConstraintCode.DATA_CLASSIFICATION
         if provider.supported_data_classifications and requirements.data_classification not in provider.supported_data_classifications:
@@ -205,11 +237,17 @@ class ModelResolverService:
         return None
 
     @staticmethod
-    def _sort_key(descriptor, requirements, preferred):
+    def _sort_key(descriptor, requirements, preferred, profile=None):
         estimated = Decimal("Infinity")
         if descriptor.cost.comparable:
             estimated = descriptor.cost.input_per_million_tokens + descriptor.cost.output_per_million_tokens
-        return (0 if preferred is not None and descriptor.model_ref == preferred else 1, estimated, str(descriptor.model_ref))
+        preference = Decimal("0")
+        if profile is not None:
+            preference = sum(
+                (item.weight for item in profile.preferences if item.name in {str(descriptor.model_ref), str(descriptor.provider_ref)}),
+                Decimal("0"),
+            )
+        return (0 if preferred is not None and descriptor.model_ref == preferred else 1, -preference, estimated, str(descriptor.model_ref))
 
     @staticmethod
     def _fallback_refs(fallback, eligible, primary):
@@ -223,8 +261,29 @@ class ModelResolverService:
         return refs[: max(0, fallback.maximum_attempts - 1)]
 
     @staticmethod
-    def _selected(descriptor, rank, role):
-        return SelectedModel(descriptor.model_ref, descriptor.provider_ref, descriptor.provider_binding_ref, descriptor.revision, ResolvedCapabilities((), descriptor.compatibility.supported_input_kinds, descriptor.compatibility.supported_response_formats, descriptor.cancellation.mode), None if not descriptor.cost.comparable else Decimal("1"), rank, role)
+    def _selected(descriptor, rank, role, requirements):
+        estimate = None
+        if descriptor.cost.comparable:
+            estimate = (Decimal(requirements.maximum_input_tokens) * descriptor.cost.input_per_million_tokens + Decimal(requirements.maximum_output_tokens) * descriptor.cost.output_per_million_tokens) / Decimal("1000000")
+            if descriptor.cost.minimum_charge is not None:
+                estimate = max(estimate, descriptor.cost.minimum_charge)
+        return SelectedModel(descriptor.model_ref, descriptor.provider_ref, descriptor.provider_binding_ref, descriptor.revision, ResolvedCapabilities((), descriptor.compatibility.supported_input_kinds, descriptor.compatibility.supported_response_formats, descriptor.cancellation.mode), estimate, rank, role)
+
+    @staticmethod
+    def _satisfies_constraint(descriptor, requirements, constraint):
+        value = str(constraint.value).upper()
+        if constraint.code is ConstraintCode.CAPABILITY:
+            supported = {
+                "VISION": descriptor.vision.supported,
+                "TOOLS": descriptor.tools.supported,
+                "STREAMING": descriptor.streaming.supported,
+            }.get(value)
+            return supported is not None and supported
+        if constraint.code is ConstraintCode.INPUT_KIND:
+            return InputKind(value) in descriptor.compatibility.supported_input_kinds
+        if constraint.code is ConstraintCode.RESPONSE_FORMAT:
+            return ResponseFormat(value) in descriptor.compatibility.supported_response_formats
+        return True
 
 
 __all__ = ["ModelResolverService"]

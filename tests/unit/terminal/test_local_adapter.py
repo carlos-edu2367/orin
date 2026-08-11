@@ -52,3 +52,13 @@ def test_local_adapter_requires_private_cwd_resolver() -> None:
     result = adapter.create_session(CreateTerminalSession("create", context(), "lease", WorkspacePath.root(), "shell:local", (), limits(), "create"))
     assert isinstance(result, TerminalError)
     assert result.code.value == "CWD_REJECTED"
+
+
+def test_local_adapter_rejects_unlisted_executable_and_shell_composition() -> None:
+    adapter = LocalTerminalAdapter(Resolver("."), allowed_executables=("echo",))
+    created = adapter.create_session(CreateTerminalSession("create", context(), "lease", WorkspacePath.root(), "shell:local", (), limits(), "create"))
+    assert not isinstance(created, TerminalError)
+    denied = adapter.execute(ExecuteTerminalCommand(TerminalCommand("denied", created.session_id, context(), "python -c x", WorkspacePath.root(), (), timedelta(seconds=5), 1024, "denied")))
+    assert isinstance(denied, TerminalError) and denied.code.value == "POLICY_DENIED"
+    composed = adapter.execute(ExecuteTerminalCommand(TerminalCommand("composed", created.session_id, context(), "echo ok | type", WorkspacePath.root(), (), timedelta(seconds=5), 1024, "composed")))
+    assert isinstance(composed, TerminalError) and composed.code.value == "POLICY_DENIED"

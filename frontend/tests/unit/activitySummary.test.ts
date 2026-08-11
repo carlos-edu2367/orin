@@ -1,0 +1,116 @@
+import { describe, expect, it } from 'vitest'
+import { summarizeActivities } from '../../src/features/conversations/activitySummary'
+import { kindFor, stateFor, type ConversationActivityEvent } from '../../src/features/conversations/activityTypes'
+
+let sequence = 0
+
+function event(partial: Partial<ConversationActivityEvent> & { type: string }): ConversationActivityEvent {
+  sequence += 1
+  const toolKind = partial.toolKind
+  return {
+    eventId: partial.eventId ?? `activity:turn-1:${sequence}`,
+    cursor: `a.${sequence}`,
+    kind: partial.kind ?? kindFor(partial.type, toolKind),
+    state: partial.state ?? stateFor(partial.type, partial.status, partial.errorCode),
+    agentId: partial.agentId ?? 'agent:c:main',
+    summary: partial.summary ?? partial.type,
+    ...partial,
+  }
+}
+
+function toolPair(name: string, toolKind: string, summary: string, invocationId: string, status = 'succeeded') {
+  return [
+    event({ type: 'tool.started', toolName: name, toolKind, invocationId, summary: `Executando ${name}` }),
+    event({ type: 'tool.finished', toolName: name, toolKind, invocationId, status, summary }),
+  ]
+}
+
+describe('activity grouping', () => {
+  it('collapses a run of same-family tools into one readable row', () => {
+    const events = [
+      ...toolPair('read_file', 'filesystem', 'Leu a.txt', 'call-1'),
+      ...toolPair('read_file', 'filesystem', 'Leu b.txt', 'call-2'),
+      ...toolPair('read_file', 'filesystem', 'Leu c.txt', 'call-3'),
+    ]
+
+    const groups = summarizeActivities(events)
+
+    expect(groups).toHaveLength(1)
+    expect(groups[0].count).toBe(3)
+    expect(groups[0].label).toBe('3 operações em arquivos')
+    expect(groups[0].events).toHaveLength(3)
+  })
+
+  it('keeps a single tool call labelled by what it actually did', () => {
+    const groups = summarizeActivities(toolPair('run_command', 'terminal', '$ npm test', 'call-9'))
+
+    expect(groups).toHaveLength(1)
+    expect(groups[0].label).toBe('$ npm test')
+  })
+
+  it('drops the started event once its finished event has arrived', () => {
+    const events = toolPair('read_file', 'filesystem', 'Leu a.txt', 'call-1')
+
+    expect(summarizeActivities(events)[0].events.every((item) => item.type === 'tool.finished')).toBe(true)
+  })
+
+  it('keeps a still-running tool visible before it finishes', () => {
+    const groups = summarizeActivities([
+      event({ type: 'tool.started', toolName: 'run_command', toolKind: 'terminal', invocationId: 'call-live', summary: 'Executando run_command' }),
+    ])
+
+    expect(groups).toHaveLength(1)
+    expect(groups[0].state).toBe('waiting_tool')
+  })
+
+  it('does not merge tools from different families', () => {
+    const groups = summarizeActivities([
+      ...toolPair('read_file', 'filesystem', 'Leu a.txt', 'call-1'),
+      ...toolPair('run_command', 'terminal', '$ ls', 'call-2'),
+    ])
+
+    expect(groups.map((group) => group.kind)).toEqual(['tool', 'tool'])
+    expect(groups).toHaveLength(2)
+  })
+
+  it('marks a group as failed when any member failed', () => {
+    const groups = summarizeActivities([
+      ...toolPair('run_command', 'terminal', '$ ok', 'call-1'),
+      ...toolPair('run_command', 'terminal', '$ boom', 'call-2', 'failed'),
+    ])
+
+    expect(groups[0].failed).toBe(true)
+    expect(groups[0].state).toBe('failed')
+  })
+
+  it('promotes agent creation and messaging to their own rows', () => {
+    const groups = summarizeActivities([
+      event({ type: 'agent.created', label: 'Researcher', summary: 'Criou o agente Researcher', agentId: 'agent:c:sub' }),
+      event({ type: 'agent.message_sent', label: 'Researcher', content: 'Investigue X', summary: 'Enviou uma tarefa para Researcher' }),
+      event({ type: 'agent.message_received', label: 'Researcher', content: 'Encontrei Y', summary: 'Recebeu a resposta de Researcher', agentId: 'agent:c:sub' }),
+    ])
+
+    expect(groups.map((group) => group.events[0].type)).toEqual(['agent.created', 'agent.message_sent', 'agent.message_received'])
+    expect(groups.every((group) => group.kind === 'agent')).toBe(true)
+  })
+
+  it('never renders raw assistant deltas as activity rows', () => {
+    const groups = summarizeActivities([
+      event({ type: 'assistant.delta', content: 'parcial', messageId: 'msg-1' }),
+      event({ type: 'assistant.delta', content: 'mais', messageId: 'msg-1' }),
+    ])
+
+    expect(groups).toEqual([])
+  })
+
+  it('hides the bookkeeping lifecycle lines but keeps terminal ones', () => {
+    const groups = summarizeActivities([
+      event({ type: 'turn.started', summary: 'Turn started' }),
+      event({ type: 'tool.requested', summary: 'Preparando ferramentas' }),
+      event({ type: 'turn.completed', summary: 'Resposta concluída' }),
+    ])
+
+    expect(groups).toHaveLength(1)
+    expect(groups[0].events[0].type).toBe('turn.completed')
+  })
+})

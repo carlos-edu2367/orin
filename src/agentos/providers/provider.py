@@ -28,13 +28,29 @@ class ProviderInvocationValidator:
             raise ProviderContractError(ProviderErrorCategory.POLICY_REJECTED, "SELECTION_NOT_APPROVED")
         if request.limits.maximum_input_tokens > request.approved_requirements.maximum_input_tokens or request.limits.maximum_output_tokens > request.approved_requirements.maximum_output_tokens or request.limits.maximum_total_tokens > request.approved_requirements.maximum_total_tokens:
             raise ProviderContractError(ProviderErrorCategory.CONTEXT_LIMIT, "INVOCATION_LIMIT_EXCEEDED")
+        if request.response_format is not request.approved_requirements.response_format:
+            raise ProviderContractError(ProviderErrorCategory.POLICY_REJECTED, "RESPONSE_FORMAT_NOT_APPROVED")
         if request.response_format not in {ResponseFormat.TEXT, ResponseFormat.JSON, ResponseFormat.SCHEMA_CONSTRAINED}:
             raise ProviderContractError(ProviderErrorCategory.UNSUPPORTED_CAPABILITY, "RESPONSE_FORMAT_UNSUPPORTED")
         if self._catalog is not None:
             descriptor = self._catalog.get_model(AuthorizedModelQuery(request.context, selected.model_ref))
             provider = self._catalog.get_provider(selected.provider_ref)
+            if descriptor.provider_ref != selected.provider_ref or descriptor.provider_binding_ref != selected.provider_binding_ref:
+                raise ProviderContractError(ProviderErrorCategory.POLICY_REJECTED, "MODEL_BINDING_MISMATCH")
             if descriptor.status in {ModelStatus.DISABLED, ModelStatus.RETIRED} or provider is None or provider.status in {ProviderStatus.DISABLED, ProviderStatus.RETIRED}:
                 raise ProviderContractError(ProviderErrorCategory.MODEL_UNAVAILABLE, "MODEL_NOT_ACTIVE")
+        if any(isinstance(part, ImagePart) for message in request.messages for part in message.parts):
+            if InputKind.IMAGE not in request.approved_requirements.input_kinds:
+                raise ProviderContractError(ProviderErrorCategory.POLICY_REJECTED, "IMAGE_NOT_APPROVED")
+            if request.limits.maximum_images < sum(
+                isinstance(part, ImagePart) for message in request.messages for part in message.parts
+            ):
+                raise ProviderContractError(ProviderErrorCategory.UNSUPPORTED_CAPABILITY, "IMAGE_LIMIT_EXCEEDED")
+        if request.tools:
+            if RequiredCapability.TOOLS not in request.approved_requirements.required_capabilities:
+                raise ProviderContractError(ProviderErrorCategory.POLICY_REJECTED, "TOOLS_NOT_APPROVED")
+            if request.limits.maximum_tool_calls < len(request.tools):
+                raise ProviderContractError(ProviderErrorCategory.UNSUPPORTED_CAPABILITY, "TOOL_LIMIT_EXCEEDED")
 
 
 class ProviderOutcomeNormalizer:

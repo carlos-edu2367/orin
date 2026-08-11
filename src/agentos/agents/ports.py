@@ -32,31 +32,31 @@ class AgentError(ValueError):
 
 
 class AgentNotFound(LookupError, AgentError):
-    pass
+    ...
 
 
 class AgentAccessDenied(PermissionError, AgentError):
-    pass
+    ...
 
 
 class AgentResolutionRejected(AgentError):
-    pass
+    ...
 
 
 class AgentIdempotencyConflict(AgentError):
-    pass
+    ...
 
 
 class AgentVersionConflict(AgentError):
-    pass
+    ...
 
 
 class AgentCommandRejected(AgentError):
-    pass
+    ...
 
 
 class AgentTransactionUnknown(AgentError):
-    pass
+    ...
 
 
 @dataclass(frozen=True, slots=True)

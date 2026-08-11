@@ -41,6 +41,11 @@ from agentos.providers.models import (
     ModelStatus,
     ModelDescriptor,
     ModelContextLimits,
+    ImagePart,
+    ProviderMessage,
+    ContentRole,
+    ToolDeclaration,
+    ToolRef,
 )
 from agentos.providers.provider import ProviderInvocationValidator
 
@@ -79,6 +84,63 @@ def test_usage_and_cost_remain_present_on_failure_and_cancellation():
     outcome = GenerationFailed(ProviderInvocationId("invocation:1"), ProviderError(ProviderErrorCategory.TIMEOUT, "TIMEOUT", "safe"), usage, cost)
     assert outcome.usage.input_tokens == 10
     assert outcome.cost.amount == Decimal("0.02")
+
+
+def test_provider_error_rejects_secret_like_public_messages():
+    with pytest.raises(ValueError):
+        ProviderError(ProviderErrorCategory.UNKNOWN, "SECRET", "password=private", provider_ref=ProviderRef("provider:1"))
+
+
+def test_invocation_rejects_request_format_that_snapshot_did_not_approve():
+    changed = replace(request(), response_format=ResponseFormat.JSON)
+
+    with pytest.raises(Exception) as error:
+        ProviderInvocationValidator().validate(changed)
+
+    assert error.value.category is ProviderErrorCategory.POLICY_REJECTED
+
+
+def test_invocation_rejects_image_not_approved_by_snapshot():
+    changed = replace(
+        request(),
+        messages=(ProviderMessage(ContentRole.USER, (ImagePart("image:1", "image/png"),)),),
+    )
+
+    with pytest.raises(Exception) as error:
+        ProviderInvocationValidator().validate(changed)
+
+    assert error.value.category is ProviderErrorCategory.POLICY_REJECTED
+
+
+def test_invocation_rejects_tool_declarations_not_approved_by_snapshot():
+    changed = replace(
+        request(),
+        tools=(ToolDeclaration(ToolRef("tool:1"), "public-tool", "safe", "schema:1"),),
+    )
+
+    with pytest.raises(Exception) as error:
+        ProviderInvocationValidator().validate(changed)
+
+    assert error.value.category is ProviderErrorCategory.POLICY_REJECTED
+
+
+def test_invocation_rejects_binding_that_does_not_match_catalog_descriptor():
+    class Catalog:
+        def get_model(self, _query):
+            return ModelDescriptor(
+                ModelRef("model:1"),
+                ProviderRef("provider:1"),
+                "public-model",
+                provider_binding_ref=ProviderModelBindingRef("binding:actual"),
+            )
+
+        def get_provider(self, _provider_ref):
+            return type("Provider", (), {"status": "ACTIVE"})()
+
+    with pytest.raises(Exception) as error:
+        ProviderInvocationValidator(Catalog()).validate(request())
+
+    assert error.value.category is ProviderErrorCategory.POLICY_REJECTED
 
 
 def test_stream_sequences_are_positive_and_terminal_is_explicit():

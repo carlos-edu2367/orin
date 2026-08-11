@@ -148,11 +148,11 @@ export type ExecutionProjection = ExecutionView & { visual_status: string };
 export function toVisualStatus(state: ExecutionStatus): string;
 ```
 
-- [ ] Escrever `ExecutionPage.test.tsx` para validar label “Trabalhando” em `RUNNING`, “Aguardando você” em `WAITING_USER`, e controles inacessíveis em estados terminais.
-- [ ] Rodar `npm run test -- ExecutionPage.test.tsx` e confirmar falha por componentes ausentes.
-- [ ] Criar tema dark, tokens de surface/typography/accent e primitives acessíveis; implementar Home, ExecutionPage e inspector fechado, sem tabela ou dashboard.
-- [ ] Implementar `toVisualStatus` como mapeamento puro dos estados persistidos; manter rótulos derivados fora do tipo de backend.
-- [ ] Rodar `npm run test -- ExecutionPage.test.tsx` e `npm run build`.
+- [x] Escrever `ExecutionPage.test.tsx` para validar label “Trabalhando” em `RUNNING`, “Aguardando você” em `WAITING_USER`, e controles inacessíveis em estados terminais.
+- [x] Rodar `npm run test -- ExecutionPage.test.tsx` e confirmar falha por componentes ausentes.
+- [x] Criar tema dark, tokens de surface/typography/accent e primitives acessíveis; implementar Home, ExecutionPage e inspector fechado, sem tabela ou dashboard.
+- [x] Implementar `toVisualStatus` como mapeamento puro dos estados persistidos; manter rótulos derivados fora do tipo de backend.
+- [x] Rodar `npm run test -- ExecutionPage.test.tsx` e `npm run build`.
 - [ ] Commit sugerido: `feat(frontend): add accessible conversation shell`.
 
 **Critério de saída:** há uma navegação desktop coerente, acessível e visualmente fiel ao spec, ainda sem dados de rede.
@@ -370,7 +370,7 @@ export function getPerformanceProfile(input: { reducedMotion: boolean; visible: 
 - Modify: `frontend/src/features/agents/OrchestrationScene.tsx` (correção de a11y crítica, decisão local: ver abaixo)
 - Modify: `docs/frontend/BACKEND_UI_MAPPING.md`
 
-- [x] Escrever E2E de create/control, incluindo 202, conflito de versão, indeterminado e rate limit com recuperação visível. **Input não incluído**: `provideExecutionInput` (api/executions.ts) não é chamado por nenhum componente hoje; não foi criada uma UI de input nesta fase de hardening (ver "Decisões locais" abaixo).
+- [x] Escrever E2E de create/control, incluindo 202, conflito de versão, indeterminado e rate limit com recuperação visível. A UI de input opaco foi adicionada posteriormente na Fase E e é coberta em `execution-input.spec.ts`.
 - [x] Escrever E2E de reduced motion que confirma ausência de canvas/pulso e presença das mesmas mudanças de estado em texto.
 - [x] Executar scanner de acessibilidade (`@axe-core/playwright`) para Home, Execution (running e com rail/cena expandidos), Disclosure aberto, Inspector aberto e Provider Settings; 1 violação crítica real encontrada e corrigida (`aria-prohibited-attr` em `OrchestrationScene`, ver "Decisões locais"). Nenhuma outra tela apresentou violação crítica/séria.
 - [x] Capturar visual regression das quatro telas de referência: home, execution running, activity expanded e orchestration expanded.
@@ -486,6 +486,55 @@ export function getPerformanceProfile(input: { reducedMotion: boolean; visible: 
 - **A API key é armazenada em texto plano em `provider_configurations.api_key`, não criptografada em repouso.** Não existe nenhuma infraestrutura de criptografia em repouso neste código-fonte hoje (confirmado por grep: `SecretStr`/"encrypt"/"Fernet" só aparecem em `gateway.py`/`production.py`/`settings.py`, nenhum deles implementa criptografia real — `SecretStr` do Pydantic só redige em memória/logs, não no banco). Isso espelha o único outro lugar deste código que já armazena uma API key de provider: `ProductionSettings.OPENAI_API_KEY` etc. vêm de variável de ambiente em texto plano, sem criptografia de campo. Construir uma nova infraestrutura de criptografia estaria além do escopo desta fase (adicionar dependência/design novos não pedidos); a garantia real que a Fase D entrega é que a chave nunca **sai** pela API pública, não que o armazenamento em repouso seja criptografado — essa é uma limitação legítima, registrada aqui, não escondida.
 - **`secret_ref` é um handle opaco gerado (`provider-secret:{uuid4().hex}`), não a chave.** Ele sobrevive a atualizações (`configure` reaproveita o `secret_ref` existente numa linha já configurada) para dar um identificador estável de "qual segredo é este" sem nunca ser a chave em si — mesmo formato que `FakeProviderConfiguration` já usava nos testes existentes (`tests/unit/api/test_api_asgi.py`).
 - **`inspect`/`revoke` de um provider nunca configurado levantam `ApplicationNotFoundError` (404), consistente com o mesmo padrão já usado por `ExecutionQueryAdapter.get`** — nunca inventa um estado "desabilitado por padrão" para um provider que o usuário nunca configurou.
+
+---
+
+## Fase E — UI de input para `WAITING_USER`
+
+**Objetivo:** permitir que uma execution aguardando o usuário envie a única forma de entrada que o gateway autoriza hoje: `input_ref` opaco com `expected_state_version`.
+
+**Frontend files:**
+- Create: `frontend/src/features/executions/ExecutionInputComposer.tsx`, `frontend/tests/unit/ExecutionInputComposer.test.tsx`, `frontend/tests/e2e/execution-input.spec.ts`
+- Modify: `frontend/src/features/executions/{ExecutionPage,ExecutionRoute}.tsx`, `frontend/tests/unit/{ExecutionPage,ExecutionRoute}.test.tsx`, `frontend/src/styles/index.css`
+
+- [x] TDD RED: o teste unitário do composer falhou por módulo inexistente; o teste de página falhou porque nenhum composer era renderizado em `WAITING_USER`; o teste da rota falhou porque a intenção de input não era encaminhada.
+- [x] Implementar `ExecutionInputComposer` sob `Disclosure`, visível apenas em `execution.state === 'WAITING_USER'`, sem inventar prompt/texto ou resolver `input_ref`.
+- [x] Encaminhar `POST /v1/executions/{id}/input` por `provideExecutionInput` com `{ input_ref, expected_state_version }`; reusar a mesma `MutationIntent` para a mesma referência e versão até o recibo `202` ser aceito.
+- [x] TDD GREEN: `ExecutionInputComposer.test.tsx`, `ExecutionPage.test.tsx` e `ExecutionRoute.test.tsx` (15 testes no conjunto) passam; a rota testa especificamente a reutilização de `Idempotency-Key` após falha de rede.
+- [x] E2E: `execution-input.spec.ts` usa fake documentado do `ExecutionView`, do recibo `202` e do stream público; confirma o body opaco. Rodado isoladamente 3 vezes, todas verdes.
+
+### Decisões locais registradas para a Fase E
+
+- **O campo é uma referência, não uma caixa de conversa.** `ExecutionInputRequest` do gateway aceita somente `input_ref` (1–4096 caracteres) e `expected_state_version`; o composer exibe esse contrato e jamais envia conteúdo de resposta como se fosse suportado.
+- **A chave idempotente é indexada por `input_ref` e versão.** A mesma intenção que falha pode ser repetida sem criar outra chave; trocar a referência ou a versão representa uma intenção distinta. A chave é descartada depois do recibo aceito, igual ao padrão de controls já existente.
+- **Não há transição otimista.** O endpoint retorna apenas um recibo `202`; a página mantém `WAITING_USER` até o snapshot/evento autorizado atualizar a projection para `QUEUED`.
+
+---
+
+## Fase F — sobreposição de detalhe no `AgentRail`
+
+- [x] TDD RED: removido o clique de fechamento temporário em `reduced-motion.spec.ts`; Playwright falhou com `agent-glyph__detail` interceptando o pointer do botão `Expandir grafo`.
+- [x] Corrigir com o menor diff: `AgentRail` marca o rail quando há detalhe aberto e `.agent-rail__glyphs--detail-open` reserva 96px abaixo dos glyphs; o painel continua visível e deixa de cobrir o controle abaixo.
+- [x] GREEN: `reduced-motion.spec.ts` passa sem o workaround, inclusive com canvas real fora de reduced motion; o spec foi rodado isoladamente 3 vezes.
+
+### Decisões locais registradas para a Fase F
+
+- **Reservar fluxo, não reduzir z-index.** Baixar o painel atrás do botão permitiria o clique, mas esconderia a informação aberta; reservar espaço preserva ambos os controles e mantém o layout original.
+- **Sem redesenho do rail.** Não foram alterados tamanhos, glyphs, motion ou a hierarquia de disclosure; apenas a altura que o detalhe absoluto precisa enquanto está aberto.
+
+---
+
+## Fase H — estabilizar `agentGraphProjection`
+
+- [x] Investigação: quatro execuções isoladas pré-correção passavam, mas a suíte completa reproduziu o timeout global de 5s ao aguardar o import real e lazy de `OrchestrationScene`; não há fake timers nesse teste.
+- [x] Corrigir a causa: o unit de `AgentRail` agora mocka somente a fronteira `OrchestrationScene`, mantendo a asserção de expandir/recolher e dos glyphs 2D. A cena real continua coberta em `OrchestrationScene.test.tsx` e nas E2Es de reduced motion/a11y.
+- [x] Remover o timeout explícito de 5s e aguardar por condição com `findByText` padrão; não foi aumentado timeout algum.
+- [x] GREEN: `agentGraphProjection.test.ts` passou 3 vezes isolado com `--reporter=verbose` (24/24) e na suíte completa (100/100).
+
+### Decisões locais registradas para a Fase H
+
+- **O unit testa o rail, não o custo de carregar R3F.** O import real da cena é uma fronteira de integração e pode competir pelo processo Vite/jsdom sob a suíte completa; mocká-lo aqui elimina a condição de corrida sem sacrificar cobertura funcional, que permanece no browser.
+- **E2E é serializada (`workers: 1`).** Duas specs reais de cena falhavam somente quando quatro workers carregavam o mesmo chunk R3F no único Vite dev server; rodar esta pequena suíte em um worker elimina a contenção compartilhada sem relaxar nenhuma asserção ou timeout.
 
 ---
 

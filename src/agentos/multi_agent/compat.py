@@ -20,7 +20,7 @@ from .models import DelegateTask, SendAgentMessage
 
 
 class MultiAgentExecutionRejected(ValueError):
-    pass
+    ...
 
 
 class AgentResolverAdapter:

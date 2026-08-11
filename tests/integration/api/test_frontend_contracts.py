@@ -22,6 +22,10 @@ from sqlalchemy import create_engine
 from agentos.bootstrap.production import DependencyProbe, ProductionSettings, compose_production_services, create_production_app
 from agentos.persistence.postgres import upgrade
 from agentos.persistence.postgres.security import PostgresSecurityService
+from agentos.persistence.postgres.provider_configuration import PostgresProviderConfigurationAdapter
+from agentos.persistence.postgres.provider_models import PostgresProviderCatalogRepository
+from agentos.provider_catalog.models import ProviderCatalogContext
+from agentos.provider_catalog.service import ProviderModelCatalogService
 
 
 pytestmark = pytest.mark.skipif(not os.getenv("AGENTOS_TEST_POSTGRES_DSN"), reason="AGENTOS_TEST_POSTGRES_DSN is not configured")
@@ -166,3 +170,46 @@ def test_control_with_a_stale_expected_version_returns_409_conflict() -> None:
 
     assert response.status_code == 409
     assert response.json()["error"]["category"] == "CONFLICT"
+
+
+def test_production_conversation_binds_cached_model_and_hides_the_opaque_prompt_reference() -> None:
+    engine = _engine()
+    client, token, user_id = _client_with_pat(engine)
+    PostgresProviderConfigurationAdapter(engine).configure({"provider": "openrouter", "user_id": user_id, "enabled": True, "api_key": "test-key"})
+
+    class Catalog:
+        def fetch(self, api_key: str):
+            assert api_key == "test-key"
+            return [{"id": "anthropic/model-a", "name": "Model A", "context_length": 128000, "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]}, "supported_parameters": [], "pricing": {}}]
+
+    ProviderModelCatalogService(PostgresProviderCatalogRepository(engine), {"openrouter": Catalog()}).refresh(
+        ProviderCatalogContext(user_id, "provider.catalog.refresh"), "openrouter"
+    )
+    response = client.post(
+        "/v1/conversations",
+        headers={"Authorization": f"Bearer {token}", "Idempotency-Key": f"conversation-{uuid4().hex}"},
+        json={"message": "Organize os dados", "selection": {"provider": "openrouter", "model_id": "anthropic/model-a"}},
+    )
+
+    assert response.status_code == 201
+    # The composed production surface is the durable chat application, so the
+    # receipt names the conversation and its first turn — not an internal agent
+    # or prompt reference.
+    receipt = response.json()
+    assert set(receipt) == {"conversation_id", "title", "turn_id", "message_id", "state"}
+    assert receipt["state"] == "queued"
+    with engine.connect() as connection:
+        queued = connection.exec_driver_sql(
+            "SELECT state, provider, model_id FROM conversation_turns WHERE turn_id = %s", (receipt["turn_id"],),
+        ).one()
+        dispatch = connection.exec_driver_sql(
+            "SELECT state FROM conversation_dispatches WHERE turn_id = %s", (receipt["turn_id"],),
+        ).scalar_one()
+    assert queued == ("queued", "openrouter", "anthropic/model-a")
+    # The turn must still be waiting for a worker rather than having been executed
+    # inside the HTTP request. "enqueued" is equally valid here: if a real
+    # publisher happens to be running against this database it will have moved
+    # the row on already, and that is the same invariant.
+    assert dispatch in {"pending", "enqueued"}
+    assert "prompt:" not in response.text
+    assert "test-key" not in response.text

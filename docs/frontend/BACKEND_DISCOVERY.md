@@ -16,7 +16,9 @@ O gateway FastAPI registra `POST /v1/executions`, controle e input, leituras gen
 | SSE | abrir, ler replay e conectar em stream | Requer seleção explícita de executions; não existe feed global. |
 | Ausentes | Agent versions, delegations, scheduler, workers, terminal, browser e download de artifact | Existem no domínio, não em rota pública implementada. |
 
-Todo request protegido usa sessão cookie com CSRF+Origin ou Bearer PAT; mutações exigem `Idempotency-Key`. O cliente não controla ownership, `user_id`, correlação ou credencial. Erros têm envelope sanitizado com `message_key`, `correlation_id`, `retryable` e `retry_after`.
+Todo request protegido usa sessão cookie ou Bearer PAT; mutações autenticadas por cookie acrescentam CSRF+Origin, e todas as mutações exigem `Idempotency-Key`. Leituras autenticadas por cookie não exigem CSRF. O cliente não controla ownership, `user_id`, correlação ou credencial. Erros têm envelope sanitizado com `message_key`, `correlation_id`, `retryable` e `retry_after`.
+
+O host confiável da sessão é pré-requisito explícito do frontend: antes de servir a aplicação, ele emite o cookie de sessão `HttpOnly` e injeta o token CSRF no documento. Login/IdP e emissão ou uso de PAT estão deliberadamente ausentes do browser; a interface não implementa login, não cria bearer tokens e não persiste PAT em storage.
 
 ## Lifecycle de Execution confirmado
 
@@ -58,7 +60,7 @@ O Runtime (`src/agentos/runtime/service.py`) começa `STARTING`, monta Context, 
 
 ## Catálogo de eventos e semântica
 
-Não existe um catálogo único nem um adaptador que conecte todos os outboxes ao `ClientEventStream`. O envelope canônico possui `event_id`, `event_type`, `occurred_at`, `correlation_id`, `causation_id`, `execution_id`, `agent_id` opcional, `sequence` por execution e payload pequeno/sanitizado. `sequence` é por execution nos envelopes de domínio; a implementação de stream de teste usa uma sequência global de entrega. Não trate ambos como a mesma ordenação.
+Não existe um catálogo único para todos os domínios, mas o `PostgresClientEventStream` público agora une os outboxes de Execution, multi-agent e Tool Runtime. O envelope canônico possui `event_id`, `event_type`, `occurred_at`, `correlation_id`, `causation_id`, `execution_id`, `agent_id` opcional, `sequence` por execution e payload pequeno/sanitizado. `sequence` é por execution nos envelopes de domínio; a implementação de stream de teste usa uma sequência global de entrega. Não trate ambos como a mesma ordenação.
 
 | Família | Tipos encontrados | Associação / uso visual seguro |
 | --- | --- | --- |
@@ -79,6 +81,8 @@ Eventos podem ser reentregues após reconexão. O frontend deduplica por `event_
 
 Consequências: entrega é ao-menos-uma-vez, o stream deve ser visto como sinal para reconciliar snapshots e o frontend não pode prometer token streaming de texto nem animação frame-exata de Tool sem composição adicional.
 
+O frontend expõe um composer somente em `WAITING_USER`, mas ele envia estritamente o `input_ref` opaco e a versão esperada que o gateway recebe. A transição para `QUEUED` continua sendo observada pelo snapshot/stream; não há texto de input nem confirmação otimista autorizada pelo contrato atual.
+
 ## Multi-agent real
 
 `MultiAgentService.send()` cria uma `AgentMessage`, uma delivery execution sintética e emite `AgentMessageCreated`. `delegate()` valida colaboração, participantes, propósito/classificação e handoff, cria `Delegation`, cria child execution usando o agent resolvido e emite `DelegationCreated` + `StructuredHandoffCreated`. A relação parent/child é explícita em `Delegation.parent_execution_id/child_execution_id` e em `Execution.parent_execution_id`.
@@ -94,7 +98,12 @@ Artifacts, Memories, Workspaces, Filesystem, Terminal, Browser, Capabilities, Wo
 ## Limitações que mudam o desenho
 
 - `create_production_app` instala adapters indisponíveis se a composição não for fornecida; isto é fail-closed, não um backend de frontend pronto.
-- O SSE de referência não recebe a outbox de Execution, Tool, Multi-agent ou Resource automaticamente.
+- O stream público lê as outboxes duráveis de Execution, Tool e multi-agent; recursos continuam sem ponte pública, e nenhuma rota HTTP ainda compõe `ToolRuntimeService`/`MultiAgentCoordinatorService` para produzir esses dois tipos de fato para um usuário real.
 - `GET` de resource não tem schema concreto e não traz garantia de lista/paginação.
 - Não há endpoint para texto final, conteúdo de `result_ref`, args/output de Tool, graph de delegação, uso/custo por execution, logs ou download de artifact.
 - Não há HTTP para agentes/versões/delegations/scheduler/workers. A interface deve ocultar essas capacidades até que existam contratos autorizados.
+# Provider, catálogo e composer (atualização 2026-08-10)
+
+- `PUT /v1/providers/{provider}` recebe somente `api_key` e `enabled`; o modelo não é parte da credencial e campos sensíveis não são serializados.
+- O navegador lê somente metadados normalizados e escopados por usuário em `/models`. A atualização de OpenRouter é feita no servidor com `GET /api/v1/models`; payload bruto e chave não são persistidos no catálogo público.
+- `POST /v1/conversations` é a superfície da Home. Ele materializa o prompt opaco, resolve o modelo pelo domínio `agentos.providers`, grava a seleção e cria a execução sem aceitar `agent_id`/`task_ref` do browser.

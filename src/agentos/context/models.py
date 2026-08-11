@@ -100,6 +100,7 @@ class SourceKind(StrEnum):
     FILE = "FILE"
     EVENT = "EVENT"
     TOOL = "TOOL"
+    DECISION = "DECISION"
     USER = "USER"
     TEST = "TEST"
 
@@ -176,6 +177,10 @@ class ContextBudget:
     overflow_policy: OverflowPolicy = OverflowPolicy.REFERENCE_THEN_EXCLUDE
 
     def __post_init__(self) -> None:
+        try:
+            object.__setattr__(self, "overflow_policy", OverflowPolicy(self.overflow_policy))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("overflow_policy is invalid") from exc
         _positive(self.maximum_input_tokens, "maximum_input_tokens")
         _non_negative(self.reserved_output_tokens, "reserved_output_tokens")
         _non_negative(self.reserved_control_tokens, "reserved_control_tokens")
@@ -210,12 +215,18 @@ class Provenance:
     transformation_chain: tuple[TransformationReference | str, ...] = ()
 
     def __post_init__(self) -> None:
+        try:
+            object.__setattr__(self, "source_kind", SourceKind(self.source_kind))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("source_kind is invalid") from exc
         _required(str(self.source_kind), "source_kind")
         _required(str(self.source_ref), "source_ref")
         if self.retrieved_at is not None:
             _aware(self.retrieved_at, "retrieved_at")
         if self.observed_at is not None:
             _aware(self.observed_at, "observed_at")
+        if self.retrieved_at is None:
+            raise ValueError("retrieved_at is required")
 
 
 @dataclass(frozen=True, slots=True)
@@ -235,6 +246,12 @@ class ContextCandidate:
     depends_on: tuple[ContextCandidateId | str, ...] = ()
 
     def __post_init__(self) -> None:
+        try:
+            object.__setattr__(self, "kind", ContextItemKind(self.kind))
+            object.__setattr__(self, "priority", ContextPriority(self.priority))
+            object.__setattr__(self, "classification", DataClassification(self.classification))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("context candidate contract enum is invalid") from exc
         _required(self.candidate_id, "candidate_id")
         _non_negative(self.estimated_tokens, "estimated_tokens")
         if self.relevance < 0:
@@ -320,6 +337,10 @@ class ContextPolicySnapshot:
     required_kinds: tuple[ContextItemKind, ...] = ()
 
     def __post_init__(self) -> None:
+        try:
+            object.__setattr__(self, "classification_ceiling", DataClassification(self.classification_ceiling))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("classification_ceiling is invalid") from exc
         _required(self.policy_version, "policy_version")
         _required(self.tokenizer_profile, "tokenizer_profile")
         _aware(self.source_cutoff_at, "source_cutoff_at")

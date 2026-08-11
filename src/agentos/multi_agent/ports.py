@@ -62,6 +62,10 @@ class ContextSharingPort(Protocol):
     def resolve_handoff(self, ref: HandoffRef, *, user_id: str, workspace_id: str | None, purpose: str, now) -> StructuredHandoff: ...
 
 
+class ChildModelPolicyPort(Protocol):
+    def validate(self, *, parent: ResolvedAgent, child: ResolvedAgent, command: DelegateTask) -> None: ...
+
+
 @runtime_checkable
 class MultiAgentEventRecorder(Protocol):
     def record_event(self, event: EventEnvelope) -> bool: ...
@@ -97,6 +101,6 @@ class MultiAgentCoordinator(Protocol):
 
 __all__ = [
     "AgentAdministrationPort", "AgentResolverPort", "CollaborationStore", "CommitReceipt",
-    "CommitState", "ContextSharingPort", "ExecutionLifecyclePort", "MultiAgentCoordinator",
+    "ChildModelPolicyPort", "CommitState", "ContextSharingPort", "ExecutionLifecyclePort", "MultiAgentCoordinator",
     "MultiAgentEventRecorder",
 ]

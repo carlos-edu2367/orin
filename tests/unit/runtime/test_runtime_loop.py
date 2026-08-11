@@ -6,6 +6,8 @@ from agentos.runtime.models import (
     ProviderFinal,
     ProviderToolRequest,
     ProviderUserInputRequest,
+    RuntimeUsage,
+    WaitingOutcome,
 )
 
 
@@ -33,3 +35,15 @@ def test_provider_user_input_request_returns_waiting_user(runtime_fixture):
 
     assert outcome.state is ExecutionState.WAITING_USER
     assert runtime_fixture.control.final_state is ExecutionState.WAITING_USER
+
+
+def test_provider_user_input_persists_consumed_usage(runtime_fixture):
+    runtime_fixture.provider.outcomes = [
+        ProviderUserInputRequest("input:1", RuntimeUsage(iterations=1, provider_tokens=7, cost=1))
+    ]
+
+    outcome = runtime_fixture.runtime.execute(runtime_fixture.request)
+
+    assert isinstance(outcome, WaitingOutcome)
+    assert runtime_fixture.control.execution.usage.provider_tokens == 7
+    assert runtime_fixture.control.execution.usage.cost == 1

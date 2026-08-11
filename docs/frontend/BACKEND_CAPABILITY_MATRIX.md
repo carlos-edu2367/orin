@@ -3,9 +3,12 @@
 | UX desejada | Backend suporta? | Como observar/controlar | Fonte | Limitação |
 | --- | --- | --- | --- | --- |
 | Criar uma tarefa | Parcial | `POST /v1/executions` | `api/gateway.py` | `task_ref` é referência, não texto de prompt; o recibo é assíncrono. |
+| Iniciar conversa por mensagem | Sim | `POST /v1/conversations` com `{ message, selection }` | `conversations/service.py`, `api/gateway.py` | Cria o `task_ref` opaco no servidor; a resposta nunca contém prompt, chave ou referência de tarefa. |
+| Catálogo de modelos autorizado | Sim (OpenRouter) | `POST/GET /v1/providers/{provider}/models` | `provider_catalog/`, Postgres | Apenas OpenRouter tem adapter dinâmico composto; OpenAI/Anthropic retornam limitação segura até adapters oficiais serem implementados. |
+| Favoritos de modelo | Sim | `PUT/DELETE /v1/providers/{provider}/favorites/{model_id}` | `provider_models.py` | São preferências do usuário, não concedem autorização. |
 | Ver lifecycle da execution | Parcial | GET de projection + eventos Execution se stream for composto | `execution/models.py`, `api/events.py` | Produção não injeta query/stream reais. |
 | Pausar, retomar, cancelar | Sim no contrato | Control `PAUSE`, `RESUME`, `CANCEL`, versão esperada | `api/gateway.py` | UI precisa tratar 202, conflito e corrida de estado. |
-| Pedir input ao usuário | Parcial | `WAITING_USER`; POST input com versão | `runtime/service.py`, gateway | O contrato recebe `input_ref`, não conteúdo. |
+| Pedir input ao usuário | Parcial | `WAITING_USER`; POST input com versão | `runtime/service.py`, gateway, `ExecutionInputComposer` | A UI envia `input_ref` opaco, não conteúdo; não há resolução/armazenamento público para transformar uma resposta textual em ref. |
 | Mostrar resposta textual | Não | Apenas `result_ref` | `execution/models.py` | Falta resolução/DTO seguro para resultado. |
 | Indicador “trabalhando” | Sim, se eventos projetados | `QUEUED/STARTING/RUNNING` | execution | Não significa que há texto ou token streaming. |
 | Agrupar tool calls | Parcial | `ToolStarted/Progressed/Finished` por `invocation_id` | tool runtime | Ponte outbox→`ClientEventStream` existe e está provada (`PostgresToolActivitySink`, ver IMPLEMENTATION_PLAN.md Fase B), mas nenhuma rota HTTP compõe um `ToolRuntimeService` com esse sink hoje; args/output continuam não públicos. |

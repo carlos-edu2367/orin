@@ -9,19 +9,19 @@ from agentos.events import DataClassification
 
 
 class MultiAgentError(ValueError):
-    pass
+    ...
 
 
 class MultiAgentAccessDenied(PermissionError, MultiAgentError):
-    pass
+    ...
 
 
 class MultiAgentIdempotencyConflict(MultiAgentError):
-    pass
+    ...
 
 
 class MultiAgentValidationError(MultiAgentError):
-    pass
+    ...
 
 
 def require_same_scope(*, expected_user_id: str, expected_workspace_id: str | None, actual_user_id: str, actual_workspace_id: str | None) -> None:

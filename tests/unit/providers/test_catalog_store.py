@@ -55,6 +55,24 @@ def test_register_provider_is_idempotent_for_same_key_and_rejects_version_confli
         catalog.register_provider(replace(provider_request(), expected_catalog_version=first.catalog_version + 1))
 
 
+def test_catalog_idempotency_key_is_scoped_to_operation_context():
+    catalog = InMemoryModelCatalog()
+    first = catalog.register_provider(provider_request())
+    other_context_request = replace(
+        provider_request(expected=first.catalog_version),
+        context=context("user-2"),
+        descriptor=replace(
+            provider_request().descriptor,
+            provider_ref=ProviderRef("provider:2"),
+        ),
+    )
+
+    second = catalog.register_provider(other_context_request)
+
+    assert second.catalog_version == first.catalog_version + 1
+    assert catalog.get_provider(ProviderRef("provider:2")) is not None
+
+
 def test_status_transitions_are_valid_and_revision_history_is_immutable():
     catalog = InMemoryModelCatalog()
     catalog.register_provider(provider_request())

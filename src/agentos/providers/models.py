@@ -177,6 +177,7 @@ class ConstraintCode(StrEnum):
     COST_UNKNOWN = "COST_UNKNOWN"
     BUDGET = "BUDGET"
     AVAILABILITY_EXPIRED = "AVAILABILITY_EXPIRED"
+    PURPOSE = "PURPOSE"
 
 
 class ProviderErrorCategory(StrEnum):
@@ -573,12 +574,16 @@ class ApprovedModelRequirementsSnapshot:
     issued_at: datetime
     valid_until: datetime
     integrity_ref: IntegrityRef
+    allowed_failure_categories: tuple[ProviderErrorCategory, ...] = ()
+    maximum_fallback_attempts: int = 1
+    allow_cross_provider_fallback: bool = False
 
     def __post_init__(self) -> None:
         _aware(self.issued_at, "issued_at")
         _aware(self.valid_until, "valid_until")
         if self.valid_until <= self.issued_at:
             raise ValueError("valid_until must be after issued_at")
+        _positive(self.maximum_fallback_attempts, "maximum_fallback_attempts")
 
     @property
     def user_id(self):
@@ -702,7 +707,8 @@ class ProviderError:
             object.__setattr__(self, "retryability", Retryability(self.retryability))
         _required(self.code, "code")
         _required(self.message, "message")
-        if "api_key" in self.message.lower() or "authorization:" in self.message.lower():
+        normalized = self.message.lower().replace("-", "_")
+        if any(token in normalized for token in ("api_key", "authorization:", "password=", "secret=", "credential=")):
             raise ValueError("message must be sanitized")
 
 
@@ -1098,7 +1104,7 @@ class ProviderContractError(RuntimeError):
 
 
 class CatalogConflictError(RuntimeError):
-    pass
+    ...
 
 
 @dataclass(frozen=True, slots=True)

@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
@@ -61,6 +61,9 @@ function stubFetch(current: () => Snapshot, onCancel?: () => void, onSend?: (bod
       onSend?.(String(init?.body ?? ''))
       return new Response(JSON.stringify({ conversation_id: CONVERSATION_ID, title: 't', turn_id: 'turn-2', message_id: 'msg-3', state: 'queued' }), { status: 201, headers: { 'Content-Type': 'application/json' } })
     }
+    if (url.endsWith('/v1/projects/sidebar')) {
+      return new Response(JSON.stringify({ items: [{ project_id: 'project-e2e', name: 'Projeto de teste', description: null, chats: [] }] }), { headers: { 'Content-Type': 'application/json' } })
+    }
     if (url.endsWith('/v1/conversations')) {
       return new Response(JSON.stringify({ items: [{ conversation_id: CONVERSATION_ID, title: 'Conversa de teste', state: current().state }] }), { headers: { 'Content-Type': 'application/json' } })
     }
@@ -111,6 +114,16 @@ describe('ChatPage', () => {
     expect(await screen.findByText('Escreveu hello.txt')).toBeInTheDocument()
     // A finished turn must not look like it is still running.
     expect(screen.queryByRole('button', { name: 'Parar execução' })).not.toBeInTheDocument()
+  })
+
+  it('reuses the shared navigation for chat history and projects', async () => {
+    globalThis.fetch = stubFetch(() => ({ state: 'completed', messages: [], activities: [] }))
+
+    renderChat()
+
+    expect(await screen.findByRole('link', { name: 'Conversa de teste' })).toBeInTheDocument()
+    await userEvent.setup().click(screen.getByRole('tab', { name: 'Projetos' }))
+    expect(await screen.findByText('Projeto de teste')).toBeInTheDocument()
   })
 
   it('shows the action that happened between two pieces of narration in the order it happened', async () => {
@@ -185,6 +198,51 @@ describe('ChatPage', () => {
     await waitFor(() => expect(cancelled).toHaveBeenCalled())
   })
 
+  it('leaves the running UI as soon as a terminal event arrives on an open stream', async () => {
+    let completed = false
+    let closeStream: () => void = () => {}
+    let emitTerminal: () => void = () => {}
+    globalThis.fetch = vi.fn<typeof fetch>().mockImplementation(async (input) => {
+      const url = typeof input === 'string' ? input : String(input)
+      if (url.includes('/events?')) {
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            closeStream = () => controller.close()
+            emitTerminal = () => {
+              completed = true
+              controller.enqueue(new TextEncoder().encode(
+                'id: a.10\nevent: turn.completed\ndata: {"event_id":"activity:turn-1:10","event_type":"turn.completed","sequence":10,"summary":"Resposta concluída","payload":{"state":"completed"},"occurred_at":"2026-08-10T20:00:10+00:00","turn_id":"turn-1","execution_id":"exe-1","agent_id":"agent:chat_e2e:main","cursor":"a.10"}\n\n',
+              ))
+            }
+          },
+        })
+        return new Response(body, { headers: { 'Content-Type': 'text/event-stream' } })
+      }
+      if (url.endsWith('/v1/projects/sidebar')) {
+        return new Response(JSON.stringify({ items: [] }), { headers: { 'Content-Type': 'application/json' } })
+      }
+      if (url.endsWith('/v1/conversations')) {
+        return new Response(JSON.stringify({ items: [{ conversation_id: CONVERSATION_ID, title: 'Conversa de teste', state: completed ? 'completed' : 'running' }] }), { headers: { 'Content-Type': 'application/json' } })
+      }
+      if (url.includes(`/v1/conversations/${CONVERSATION_ID}`)) {
+        return new Response(JSON.stringify(snapshotBody({
+          state: completed ? 'completed' : 'running',
+          messages: [{ message_id: 'msg-1', role: 'assistant', content: 'Resposta concluída.', status: 'completed', retryable: false }],
+          activities: [],
+        })), { headers: { 'Content-Type': 'application/json' } })
+      }
+      return new Response('{}', { headers: { 'Content-Type': 'application/json' } })
+    })
+
+    renderChat()
+
+    await screen.findByRole('button', { name: 'Parar execução' })
+    emitTerminal()
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Parar execução' })).not.toBeInTheDocument())
+    expect(screen.queryByText('Pensando')).not.toBeInTheDocument()
+    closeStream()
+  })
+
   it('sends a follow-up message and shows it immediately', async () => {
     const sent = vi.fn()
     globalThis.fetch = stubFetch(() => ({
@@ -201,6 +259,31 @@ describe('ChatPage', () => {
 
     await waitFor(() => expect(sent).toHaveBeenCalled())
     expect(String(sent.mock.calls[0][0])).toContain('e agora?')
+  })
+
+  it('keeps the fixed composer fully revealed when reading the latest message', async () => {
+    globalThis.fetch = stubFetch(() => ({
+      state: 'completed',
+      messages: [{ message_id: 'msg-1', role: 'assistant', content: 'Feito.', status: 'completed', retryable: false }],
+      activities: [],
+    }))
+
+    const { container } = renderChat()
+    await screen.findByText('Feito.')
+    const scroll = container.querySelector('.chat__scroll') as HTMLDivElement
+    Object.defineProperties(scroll, {
+      clientHeight: { configurable: true, value: 400 },
+      scrollHeight: { configurable: true, value: 1_000 },
+      scrollTop: { configurable: true, writable: true, value: 600 },
+    })
+    fireEvent.scroll(scroll)
+
+    expect(screen.getByTestId('chat-composer')).toHaveAttribute('data-at-bottom', 'true')
+
+    scroll.scrollTop = 200
+    fireEvent.scroll(scroll)
+
+    expect(screen.getByTestId('chat-composer')).toHaveAttribute('data-at-bottom', 'false')
   })
 
   it('renders an agent-to-agent exchange with its direction and preview', async () => {

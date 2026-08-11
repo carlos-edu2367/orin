@@ -8,12 +8,15 @@ import {
 } from '../../api/conversations'
 import { ApiError } from '../../api/errors'
 import { CommandPalette } from '../../components/CommandPalette'
+import { Brand } from '../../components/Brand'
 import { OverviewPanel } from '../overview/OverviewPanel'
+import { WorkspaceNavigation } from '../projects/WorkspaceNavigation'
 import { ActivityStream } from './ActivityStream'
 import { AgentPulse, modeFromEvents } from './AgentPulse'
 import { Composer } from './Composer'
 import { MarkdownMessage } from './MarkdownMessage'
 import { TurnTimeline } from './TurnTimeline'
+import { WorkspaceFilePreview, type WorkspaceFileReference } from './WorkspaceFileCard'
 import { activityReducer, createActivityState } from './activityReducer'
 import type { ConversationActivityEvent } from './activityTypes'
 import { buildMessageTimelines } from './turnTimelineFold'
@@ -42,7 +45,10 @@ export function ChatPage() {
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [stopping, setStopping] = useState(false)
+  const [atBottom, setAtBottom] = useState(true)
   const [activity, dispatch] = useReducer(activityReducer, undefined, createActivityState)
+  const [previewReference, setPreviewReference] = useState<WorkspaceFileReference | null>(null)
+  const closePreview = useCallback(() => setPreviewReference(null), [])
 
   const cursorRef = useRef('0')
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -73,6 +79,17 @@ export function ChatPage() {
           onEvent: (event) => {
             cursorRef.current = event.cursor
             dispatch({ type: 'event', event })
+            const terminalState = terminalConversationState(event)
+            if (terminalState) {
+              setConversation((current) => current === null ? current : {
+                ...current,
+                state: terminalState,
+                turns: current.turns.map((turn) => turn.turn_id === event.turnId
+                  ? { ...turn, state: terminalState, finished_at: turn.finished_at ?? event.occurredAt ?? null }
+                  : turn),
+              })
+              void loadSnapshot(false).catch(() => undefined)
+            }
           },
           onCursor: (cursor) => {
             cursorRef.current = cursor
@@ -203,10 +220,7 @@ export function ChatPage() {
   return (
     <main className="chat">
       <header className="chat__bar">
-        <Link className="brand" to="/">
-          <span className="brand__mark" aria-hidden="true"><span /></span>
-          AgentOS
-        </Link>
+        <Brand to="/" />
         <div className="chat__title">
           <h1>{conversation?.title ?? 'Conversa'}</h1>
           {conversation && <span className="chat__model">{conversation.provider} · {conversation.model_id}</span>}
@@ -221,13 +235,20 @@ export function ChatPage() {
             Visão geral
           </button>
           <CommandPalette conversations={chats} />
+          <Link className="ghost-button" to="/settings" aria-label="Abrir Settings">Settings</Link>
         </div>
       </header>
+
+      <aside className="workspace-navigation">
+        <WorkspaceNavigation client={client} onChatsChange={setChats} />
+      </aside>
 
       <div className="chat__body">
         <div className="chat__scroll" ref={scrollRef} onScroll={(event) => {
           const element = event.currentTarget
-          pinnedRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 120
+          const nextAtBottom = element.scrollHeight - element.scrollTop - element.clientHeight < 120
+          pinnedRef.current = nextAtBottom
+          setAtBottom((current) => current === nextAtBottom ? current : nextAtBottom)
         }}>
           <div className="chat__thread">
             {loading && <p className="chat__placeholder" role="status">Carregando conversa…</p>}
@@ -244,9 +265,9 @@ export function ChatPage() {
                   transition={{ duration: 0.24, ease: [0.22, 0.61, 0.36, 1] }}
                 >
                   {timeline
-                    ? <TurnTimeline items={timeline} />
+                    ? <TurnTimeline items={timeline} conversationId={conversationId} client={client} onPreview={setPreviewReference} />
                     : item.role === 'assistant' && item.content
-                      ? <MarkdownMessage content={item.content} />
+                      ? <MarkdownMessage content={item.content} conversationId={conversationId} client={client} onPreview={setPreviewReference} />
                       : <p>{item.content || placeholderFor(item)}</p>}
                   {item.retryable && <span className="bubble__retry">Você pode reenviar esta mensagem.</span>}
                 </motion.article>
@@ -283,7 +304,15 @@ export function ChatPage() {
         </AnimatePresence>
       </div>
 
-      <footer className="chat__foot">
+      {previewReference && (
+        <WorkspaceFilePreview
+          reference={previewReference}
+          client={client}
+          onClose={closePreview}
+        />
+      )}
+
+      <footer className="chat__foot" data-testid="chat-composer" data-at-bottom={atBottom}>
         {activity.connection === 'degraded' && (
           <p className="chat__connection" role="status">Atualizações em tempo real indisponíveis; tentando reconectar.</p>
         )}
@@ -311,6 +340,12 @@ function placeholderFor(message: ConversationMessage): string {
     case 'cancelled': return 'Execução cancelada por você.'
     default: return 'Sem texto nesta resposta.'
   }
+}
+
+function terminalConversationState(event: ConversationActivityEvent): 'completed' | 'failed' | 'cancelled' | null {
+  if (event.type === 'turn.completed') return 'completed'
+  if (event.type === 'turn.failed') return event.state === 'cancelled' ? 'cancelled' : 'failed'
+  return null
 }
 
 function isResyncError(value: unknown): value is ApiError {

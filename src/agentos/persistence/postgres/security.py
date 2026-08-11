@@ -87,7 +87,10 @@ class PostgresSecurityService:
                 pat_revoked = connection.execute(select(security_pats.c.revoked).where(security_pats.c.credential_ref == row["credential_ref"])).scalar_one_or_none()
                 if pat_revoked:
                     raise AuthenticationError("session is invalid")
-                return AuthenticatedPrincipal(row["user_id"], row["credential_ref"], frozenset(row["scopes"]), "session", False)
+                return AuthenticatedPrincipal(
+                    row["user_id"], row["credential_ref"], frozenset(row["scopes"]),
+                    "session", False, session_id=session_id,
+                )
         raise AuthenticationError("credential is required")
 
     def validate_csrf(self, principal: AuthenticatedPrincipal, token: str | None, origin: str | None) -> None:
@@ -95,13 +98,14 @@ class PostgresSecurityService:
             return
         if not token or not origin:
             raise AuthorizationError("csrf validation failed")
-        digest = self._digest(token)
         with self._engine.connect() as connection:
-            rows = connection.execute(select(security_sessions.c.csrf_digest).where(
+            stored = connection.execute(select(security_sessions.c.csrf_digest).where(
+                security_sessions.c.session_id == principal.session_id,
+                security_sessions.c.user_id == principal.user_id,
                 security_sessions.c.credential_ref == principal.credential_ref,
                 security_sessions.c.revoked.is_(False),
-            )).scalars().all()
-        if any(compare_digest(stored, digest) for stored in rows):
+            )).scalar_one_or_none()
+        if stored is not None and compare_digest(stored, self._digest(token)):
             return
         raise AuthorizationError("csrf validation failed")
 

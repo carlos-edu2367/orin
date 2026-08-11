@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 from datetime import UTC, datetime
+from pathlib import Path
 
 from agentos.execution.events import DataClassification
 from agentos.runtime.models import ModelResolveRequest as RuntimeModelResolveRequest, OperationContext, ProviderRequest as RuntimeProviderRequest, RuntimeLimits
@@ -46,6 +47,12 @@ def test_runtime_model_adapter_preserves_scope_and_returns_reference_only():
     assert result.selection_ref == "selection:requirements:1"
     assert result.approved_requirements_ref == "approved:requirements:1"
     assert "binding" not in repr(result).lower()
+
+
+def test_runtime_model_adapter_does_not_reach_into_resolver_private_storage():
+    source = Path("src/agentos/providers/compat.py").read_text(encoding="utf-8")
+
+    assert "._catalog" not in source
 
 
 def test_runtime_provider_adapter_preserves_context_and_maps_failure():

@@ -42,6 +42,9 @@ from agentos.execution.models import (
     ExecutionLimits,
     Ownership,
     TaskSnapshot,
+    ExecutionFailure,
+    ExecutionState,
+    FailureReason,
 )
 from agentos.execution.ports import (
     Accepted,
@@ -59,6 +62,7 @@ from agentos.execution.ports import (
     RejectionReason,
     ResumeExecution,
     UnauthorizedExecutionError,
+    TransitionExecution,
 )
 from agentos.persistence.execution_compat import ExecutionTransactionalPersistenceAdapter
 
@@ -238,6 +242,24 @@ class ExecutionApplicationAdapter:
             expected_version=None if expected_version is None else int(expected_version),
             requested_at=command["requested_at"],
             input_ref=str(command["input_ref"]),
+        ))
+        return _result_to_receipt(result, execution_id)
+
+    def transition(self, command: dict[str, object]) -> dict[str, object]:
+        """Trusted worker transition; not registered as an HTTP control action."""
+        execution_id, user_id = str(command["execution_id"]), str(command["user_id"])
+        try:
+            scope = self._scope.resolve(execution_id, user_id)
+        except ExecutionNotFoundError as error:
+            raise ApplicationNotFoundError(execution_id) from error
+        target = ExecutionState(str(command["target_state"]))
+        failure = ExecutionFailure(FailureReason.RUNTIME_ERROR) if target is ExecutionState.FAILED else None
+        result = self._control.transition(TransitionExecution(
+            context=ExecutionCommandContext(scope.user_id, scope.workspace_id, scope.agent_id, execution_id, scope.correlation_id, _PURPOSE),
+            command_id=f"worker_{uuid4().hex}", idempotency_key=str(command["idempotency_key"]),
+            expected_version=int(command["expected_state_version"]), requested_at=command["requested_at"],
+            target_state=target, reason_code=str(command["reason_code"]),
+            result_ref=str(command["result_ref"]) if target is ExecutionState.COMPLETED else None, failure=failure,
         ))
         return _result_to_receipt(result, execution_id)
 

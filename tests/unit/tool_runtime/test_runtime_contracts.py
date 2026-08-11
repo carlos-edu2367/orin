@@ -20,6 +20,8 @@ from agentos.tool_runtime import (
     ToolStatus,
     StreamDisposition,
 )
+from agentos.tool_runtime.models import ToolSucceeded
+from agentos.tool_runtime.registry import ToolRegistry
 from agentos.resources.models import ResourceCapability, ResourceType
 
 
@@ -100,6 +102,57 @@ def test_stream_has_monotonic_items_and_an_explicit_terminal():
     )
     assert [item.sequence for item in sink.items] == [1]
     assert sink.terminal == outcome
+
+
+def test_stream_drops_secret_like_fields_before_the_sink():
+    class StreamingSecret(EchoTool):
+        def stream(self, call, emit):
+            emit("PROGRESS", {"value": "safe", "apiKey": "secret", "provider_output": "private"})
+            return {"value": call.input["value"]}
+
+    class Sink:
+        def __init__(self): self.items, self.terminal = [], None
+        def emit(self, item): self.items.append(item); return StreamDisposition.ACCEPTED
+        def close(self, terminal): self.terminal = terminal
+
+    registry = InMemoryToolRegistry()
+    registry.register_bootstrap(replace(descriptor(), supports_streaming=True), StreamingSecret(), integrity="sha256:trusted")
+    sink = Sink()
+    ToolRuntimeService(registry, ResourceManagerService()).stream(
+        ToolInvocationRequest("inv-stream-secret", ToolRef("echo", 1), context(), {"value": "ok"}, "stream-secret"), sink
+    )
+    assert sink.items[0].value == {"value": "safe"}
+
+
+def test_typed_success_outcome_must_still_satisfy_the_closed_output_schema():
+    class MaliciousTypedTool(EchoTool):
+        def execute(self, call):
+            return ToolSucceeded(call.invocation_id, {"credential": "secret"})
+
+    registry = InMemoryToolRegistry()
+    registry.register_bootstrap(descriptor(), MaliciousTypedTool(), integrity="sha256:trusted")
+    outcome = ToolRuntimeService(registry, ResourceManagerService()).invoke(
+        ToolInvocationRequest("inv-typed", ToolRef("echo", 1), context(), {"value": "ok"}, "typed-key")
+    )
+    assert outcome.error.code == "INVALID_OUTPUT"
+
+
+def test_registry_authorization_applies_to_resolution_and_invocation():
+    registry = InMemoryToolRegistry(authorization=lambda *_args: False)
+    registry.register_bootstrap(descriptor(), EchoTool(), integrity="sha256:trusted")
+    runtime = ToolRuntimeService(registry, ResourceManagerService())
+    outcome = runtime.invoke(ToolInvocationRequest("inv-registry-denied", ToolRef("echo", 1), context(), {"value": "ok"}, "registry-key"))
+    assert outcome.error.code == "UNAUTHORIZED"
+
+
+def test_same_invocation_id_with_different_arguments_is_an_idempotency_conflict():
+    registry = InMemoryToolRegistry()
+    registry.register_bootstrap(descriptor(), EchoTool(), integrity="sha256:trusted")
+    runtime = ToolRuntimeService(registry, ResourceManagerService())
+    first = ToolInvocationRequest("inv-fingerprint", ToolRef("echo", 1), context(), {"value": "one"}, "fingerprint-key")
+    runtime.invoke(first)
+    conflict = runtime.invoke(replace(first, arguments={"value": "two"}))
+    assert conflict.error.code == "IDEMPOTENCY_CONFLICT"
 
 
 def test_capability_bridge_calls_the_real_tool_runtime_without_importing_it_from_capability_domain():

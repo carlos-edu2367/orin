@@ -19,8 +19,28 @@ def test_persistence_schema_contains_only_the_durable_boundary_tables():
         "event_stream_bindings",
         "multi_agent_events",
         "tool_activity_events",
+        "tool_invocations",
         "provider_configurations",
-    }
+        "provider_model_catalog",
+        "provider_model_favorites",
+        "provider_model_selections",
+        "agent_model_configurations",
+            "conversation_prompts",
+            "conversations",
+            "conversation_messages",
+            "conversation_turns",
+            "conversation_dispatches",
+            "conversation_events",
+            "conversation_activity_events",
+            "conversation_agents",
+            "conversation_agent_usage",
+            "agent_memories",
+            "skills",
+            "skill_versions",
+            "agent_skills",
+            "execution_skills",
+            "runtime_heartbeats",
+        }
 
 
 def test_schema_has_ownership_versions_and_integrity_constraints():

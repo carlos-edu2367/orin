@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from datetime import timedelta
 
 from agentos.execution.models import CancellationReason, CancellationReasonCode
 from agentos.runtime.models import (
@@ -8,6 +9,7 @@ from agentos.runtime.models import (
     ModelSelection as RuntimeModelSelection,
     ProviderCancelled,
     ProviderFailed,
+    ProviderIndeterminate,
     ProviderFinal,
     ProviderToolRequest,
     ProviderUserInputRequest,
@@ -44,7 +46,10 @@ class RuntimeModelResolverAdapter:
             selection_ref=outcome.selection.selection_ref,
             approved_requirements_ref=outcome.selection.approved_requirements_ref,
             canonical_selection=outcome.selection,
-            approved_requirements=self._resolver._catalog.load_snapshot(outcome.selection.approved_requirements_ref, requirements.context),
+            approved_requirements=self._resolver.load_snapshot(
+                outcome.selection.approved_requirements_ref,
+                requirements.context,
+            ),
         )
 
 
@@ -82,6 +87,39 @@ class RuntimeProviderAdapter:
         outcome = self._provider.generate(canonical_request)
         return self._map_outcome(outcome, request.invocation_ref)
 
+    def stream(self, request):
+        """Expose the canonical streaming port to the agentic runtime.
+
+        The legacy adapter remains a mapper for ``generate``; stream requests
+        are already canonical and therefore must not be converted to the
+        smaller legacy outcome DTOs.
+        """
+        stream = self._provider.open_stream(request)
+        if not hasattr(self._provider, "read_stream"):
+            return stream
+
+        def events():
+            after = 0
+            for _ in range(128):
+                batch = self._provider.read_stream(
+                    ReadProviderStream(request.context, stream.stream_id, after, 128, timedelta(milliseconds=50))
+                )
+                if not batch:
+                    return
+                for event in batch:
+                    after = max(after, int(getattr(event, "sequence", after)))
+                    yield event
+                    if type(event).__name__ in {"StreamCompleted", "StreamFailed", "StreamCancelled"}:
+                        return
+
+        return events()
+
+    def read_stream(self, request):
+        return self._provider.read_stream(request)
+
+    def cancel(self, request):
+        return self._provider.cancel(request)
+
     @staticmethod
     def _usage(usage: ProviderUsage, cost: ProviderCost) -> RuntimeUsage:
         tokens = usage.total_tokens
@@ -101,7 +139,9 @@ class RuntimeProviderAdapter:
             return ProviderUserInputRequest(str(outcome.input_request_ref), usage)
         if isinstance(outcome, GenerationCancelled):
             return ProviderCancelled(outcome.reason, usage)
-        if isinstance(outcome, (GenerationFailed, GenerationIndeterminate)):
+        if isinstance(outcome, GenerationIndeterminate):
+            return ProviderIndeterminate(RuntimeErrorInfo(RuntimeErrorCategory.RECONCILIATION, str(outcome.error.code), Retryability.POLICY_DEPENDENT), usage)
+        if isinstance(outcome, GenerationFailed):
             category = RuntimeErrorCategory.PROVIDER_TIMEOUT if outcome.error.category is ProviderErrorCategory.TIMEOUT else RuntimeErrorCategory.PROVIDER
             retryability = Retryability(outcome.error.retryability.value)
             return ProviderFailed(RuntimeErrorInfo(category, str(outcome.error.code), retryability), usage)

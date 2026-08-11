@@ -6,15 +6,15 @@
 
 | Item | Status | Evidência |
 | --- | --- | --- |
-| Fase 0 — Security/Execution/Events em produção | **Concluído** | `tests/integration/api/test_frontend_contracts.py` (6/6, Postgres real); suíte completa `690 passed, 2 skipped` |
+| Fase 0 — Security/Execution/Events em produção | **Concluído** | `tests/integration/api/test_frontend_contracts.py` (6/6, Postgres real); verificação final `701 passed, 2 skipped` |
 | Frontend Fases 1–6 | Concluído (sessões anteriores) | 97 testes unitários, 20 E2E, 4 baselines visuais — não tocado nesta rodada |
 | B — Bridge tool_runtime/multi_agent → stream público | **Concluído** | `tests/integration/persistence/test_event_stream_postgres_optional.py::test_a_tool_event_and_a_delegation_event_cross_the_bridge_into_the_same_client_event_stream` (Postgres real) — ver Fase B abaixo |
 | C — Resolução de `result_ref` → `display_text` | **Fechado como limitação documentada** | investigação real (grep/leitura) confirma que não há dado resolvível hoje — ver Fase C abaixo |
 | D — `ProviderConfigurationApplication` em produção | **Concluído** | `tests/integration/api/test_provider_configuration_postgres_optional.py` (4/4, Postgres real) — ver Fase D abaixo |
-| E — UI de input para `WAITING_USER` | Não iniciado (fora do escopo desta sessão) | ver Fase E |
-| F — Bug de sobreposição no `AgentRail` | Não iniciado (fora do escopo desta sessão) | ver Fase F |
-| H — Teste flaky `agentGraphProjection` | Não iniciado (fora do escopo desta sessão) | ver Fase H |
-| Verificação completa + docs | Parcial (backend B/C/D verificado; frontend/E/F/H ficam para a próxima sessão) | ver Fase Verificação |
+| E — UI de input para `WAITING_USER` | **Concluído** | `ExecutionInputComposer.test.tsx`, `ExecutionRoute.test.tsx` e `execution-input.spec.ts` (E2E isolado 3×) |
+| F — Bug de sobreposição no `AgentRail` | **Concluído** | `reduced-motion.spec.ts` sem clique de fechamento; RED documentou interceptação de pointer e GREEN 3× isolado |
+| H — Teste flaky `agentGraphProjection` | **Concluído** | mock da fronteira lazy no unit; 24/24 isolado 3× e 100/100 na suíte Vitest completa |
+| Verificação completa + docs | **Concluído** | backend com/sem Postgres, compileall, Vitest, E2E, visual, lint e build verdes nesta sessão |
 
 **Arquivos novos desta sessão (Fase 0):**
 `src/agentos/persistence/postgres/{security,execution_adapters,event_stream}.py`, migrations `0004_security`, `0005_event_stream_bindings`, `tests/integration/persistence/test_{security,execution_adapters,event_stream}_postgres_optional.py`, `tests/integration/api/test_frontend_contracts.py`. Modificados: `bootstrap/production.py`, `api/{gateway,contracts}.py`, `persistence/postgres/schema.py`, `tests/unit/persistence/test_postgres_schema.py`.
@@ -91,6 +91,8 @@ Mais contida que B/C — `src/agentos/providers/` (catálogo, resolver, compat) 
 
 ## Fase E — UI de input para `WAITING_USER`
 
+**Status: Concluído nesta sessão.** `ExecutionInputComposer` é exibido apenas em `WAITING_USER`, envia `{ input_ref, expected_state_version }` por `provideExecutionInput` e preserva uma `Idempotency-Key` por intenção. Evidência: unit tests em `ExecutionInputComposer.test.tsx`/`ExecutionPage.test.tsx`/`ExecutionRoute.test.tsx` e `tests/e2e/execution-input.spec.ts` (3 execuções isoladas verdes).
+
 Só depois de B/C/D estarem minimamente estáveis (o composer precisa saber se `input_ref` requer a mesma resolução de C, ou se é só opaco na escrita).
 
 - Componente mínimo em `ExecutionPage`/`ExecutionRoute`, visível só quando `execution.state === 'WAITING_USER'`, reusando `ExecutionControls`/`Disclosure` e o padrão de `Idempotency-Key` por intenção já estabelecido.
@@ -100,6 +102,8 @@ Só depois de B/C/D estarem minimamente estáveis (o composer precisa saber se `
 ---
 
 ## Fase F — Bug de sobreposição no `AgentRail`
+
+**Status: Concluído nesta sessão.** Ao remover o workaround, Playwright comprovou que `.agent-glyph__detail` interceptava o pointer de `Expandir grafo`; o rail agora reserva espaço só durante o detalhe aberto. `reduced-motion.spec.ts` passa sem o clique extra, em três execuções isoladas.
 
 Independente de B–E, pode ser feito em paralelo por não depender de backend.
 
@@ -111,6 +115,8 @@ Independente de B–E, pode ser feito em paralelo por não depender de backend.
 
 ## Fase H — Estabilizar teste flaky `agentGraphProjection`
 
+**Status: Concluído nesta sessão.** A suíte completa reproduziu o timeout global durante o import lazy real de R3F; o teste de rail agora isola essa fronteira e espera por condição sem timeout explícito. A cena real segue coberta em browser; o E2E foi serializado porque quatro workers concorriam pelo mesmo chunk no único Vite server.
+
 Independente, pode ser feito em paralelo.
 
 - `frontend/tests/unit/agentGraphProjection.test.ts` — suspeita já registrada: race entre fake timers/`act()` e o `lazy()` do `OrchestrationScene`. Investigar com `--reporter=verbose` rodando isolado várias vezes vs. na suíte completa para confirmar a hipótese antes de mexer.
@@ -119,6 +125,8 @@ Independente, pode ser feito em paralelo.
 ---
 
 ## Fase Verificação + Documentação (fecha o escopo)
+
+**Status: Concluído nesta sessão.** Evidência final: `AGENTOS_TEST_POSTGRES_DSN=postgresql://agentos@localhost:5433/agentos python -m pytest -q` → 701 passed, 2 skipped; sem a variável → 663 passed, 40 skipped; `python -m compileall -q src tests`; `npm run test` → 100/100; `npm run test:e2e` → 21/21; `npm run test:visual` → 4/4; `npm run lint`; `npm run build`. A passagem read-only confirmou scope por usuário/credential no stream, ausência de fallback in-memory no bootstrap de produção, payloads de Tool limitados a metadata (`purpose`, `stream_sequence`, `progress_kind`, outcome/error/effect state) e resultado/input sem texto resolvido.
 
 Só depois de B–H:
 

@@ -17,6 +17,7 @@ from agentos.context.models import (
     OverflowPolicy,
     OwnershipScope,
     Provenance,
+    SourceKind,
 )
 
 
@@ -34,7 +35,7 @@ def candidate(
         kind=kind,
         content=content if isinstance(content, (str, ContentReference)) else str(content),
         ownership=OwnershipScope("user-1", workspace_id, "agent-1", "execution-1"),
-        provenance=Provenance("test-source", "source:1", retrieved_at=now),
+        provenance=Provenance(SourceKind.TEST, "source:1", retrieved_at=now),
         classification=DataClassification.INTERNAL,
         relevance=1.0,
         priority=priority,

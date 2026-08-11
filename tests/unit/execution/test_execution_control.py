@@ -315,6 +315,58 @@ def test_same_idempotency_key_with_different_command_is_rejected(make_control, c
     assert len(persistence.outbox) == 1
 
 
+def test_same_idempotency_key_is_scoped_to_execution_ownership(make_control, command_context, now):
+    from dataclasses import replace
+    from agentos.execution.in_memory import InMemoryTransactionalPersistence
+
+    persistence = InMemoryTransactionalPersistence()
+    first = make_control(ExecutionState.QUEUED)[1].get("execution-1")
+    second = replace(
+        first,
+        execution_id="execution-2",
+        ownership=replace(first.ownership, workspace_id="workspace-2"),
+        correlation_id="correlation-2",
+    )
+    persistence.seed(first)
+    persistence.seed(second)
+    control = __import__("agentos.execution.control", fromlist=["ExecutionControlService"]).ExecutionControlService(persistence)
+    first_context = command_context
+    second_context = replace(
+        command_context,
+        workspace_id="workspace-2",
+        execution_id="execution-2",
+        correlation_id="correlation-2",
+    )
+
+    first_result = control.transition(transition_command(first_context, now, ExecutionState.STARTING, key="shared-key"))
+    second_result = control.transition(transition_command(second_context, now, ExecutionState.STARTING, key="shared-key"))
+
+    assert first_result.resulting_version == 2
+    assert second_result.resulting_version == 2
+    assert persistence.get("execution-2").state is ExecutionState.STARTING
+
+
+def test_legacy_execution_event_rejects_sensitive_or_unbounded_payload(now):
+    from agentos.execution.events import DataClassification, EventEnvelope
+    from agentos.execution.models import Ownership
+
+    with pytest.raises(ValueError):
+        EventEnvelope(
+            event_id="event:unsafe",
+            event_type=ExecutionEventType.EXECUTION_STARTED,
+            event_version=1,
+            occurred_at=now,
+            source="execution-control",
+            correlation_id="correlation-1",
+            causation_id=None,
+            sequence=1,
+            ownership=Ownership("user-1", "workspace-1"),
+            execution_id="execution-1",
+            classification=DataClassification.INTERNAL,
+            payload={"prompt": "do not include"},
+        )
+
+
 def test_commit_applies_reference_only_usage_and_checkpoint_changes(
     make_control, command_context, now
 ):

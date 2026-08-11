@@ -35,6 +35,10 @@ from agentos.providers.models import (
     ProviderCost,
     ProviderModelBindingRef,
     ProviderInvocationLimits,
+    ModelProfileDefinition,
+    ModelConstraint,
+    WeightedPreference,
+    PublishModelProfile,
 )
 from agentos.execution.models import CancellationReason, CancellationReasonCode
 from agentos.providers.resolver import ModelResolverService
@@ -98,3 +102,114 @@ def test_fallback_is_materialized_and_never_broadens_scope():
     assert isinstance(fallback, ModelResolved)
     assert fallback.selection.context == primary.selection.context
     assert fallback.selection.primary.model_ref in {model.model_ref for model in primary.selection.fallbacks}
+
+
+def test_fallback_respects_allowed_failure_categories():
+    resolver = ModelResolverService(setup_catalog(), clock=lambda: NOW)
+    primary = resolver.resolve(request(requirements(
+        fallback=FallbackRequest(
+            mode="EXPLICIT_ORDER",
+            ordered_model_refs=(ModelRef("model:2"),),
+            maximum_attempts=2,
+            allowed_failure_categories=(ProviderErrorCategory.TIMEOUT,),
+        )
+    )))
+    assert isinstance(primary, ModelResolved)
+
+    result = resolver.resolve_fallback(ResolveFallback(
+        "fallback:category", ctx(), primary.selection.selection_ref,
+        primary.selection.primary.model_ref, ProviderErrorCategory.CONNECTION,
+        ProviderUsage(), ProviderCost(), ProviderInvocationLimits(100, 20, 120),
+        "cancel:none", "fallback:category:key",
+    ))
+
+    assert isinstance(result, NoCompatibleModel)
+
+
+def test_fallback_budget_includes_consumed_cost_and_candidate_cost():
+    resolver = ModelResolverService(setup_catalog(), clock=lambda: NOW)
+    primary = resolver.resolve(request(requirements(
+        fallback=FallbackRequest(
+            mode="EXPLICIT_ORDER",
+            ordered_model_refs=(ModelRef("model:2"),),
+            maximum_attempts=2,
+        )
+    )))
+    assert isinstance(primary, ModelResolved)
+
+    result = resolver.resolve_fallback(ResolveFallback(
+        "fallback:budget", ctx(), primary.selection.selection_ref,
+        primary.selection.primary.model_ref, ProviderErrorCategory.TIMEOUT,
+        ProviderUsage(), ProviderCost(Decimal("0.0001"), "USD", measurement="CONFIRMED"),
+        ProviderInvocationLimits(100, 20, 120, maximum_cost=Decimal("0.0003")),
+        "cancel:none", "fallback:budget:key",
+    ))
+
+    assert isinstance(result, NoCompatibleModel)
+    assert result.error == "FALLBACK_BUDGET_EXCEEDED"
+
+
+def test_profile_preferences_are_applied_only_after_hard_constraints():
+    catalog = setup_catalog()
+    catalog.publish_profile(
+        PublishModelProfile(
+            "request:profile",
+            ctx(),
+            catalog.catalog_version,
+            "key:profile",
+            ModelProfileDefinition(
+                ModelProfile.BALANCED,
+                preferences=(WeightedPreference("model:2", Decimal("100")),),
+                revision="profile:2",
+            ),
+        )
+    )
+    resolver = ModelResolverService(catalog, clock=lambda: NOW)
+
+    result = resolver.resolve(request(requirements()))
+
+    assert isinstance(result, ModelResolved)
+    assert result.selection.primary.model_ref == ModelRef("model:2")
+
+
+def test_model_purpose_is_a_hard_constraint():
+    catalog = setup_catalog()
+    catalog.register_model(RegisterModel("request:m4", ctx(), catalog.catalog_version, "key:m4", ModelDescriptor(
+        ModelRef("model:4"), ProviderRef("provider:1"), "model-4",
+        compatibility=__import__("agentos.providers.models", fromlist=["ModelCompatibility"]).ModelCompatibility(
+            allowed_purposes=("other-purpose",),
+        ),
+    )))
+    resolver = ModelResolverService(catalog, clock=lambda: NOW)
+    result = resolver.resolve(request(requirements(allowed_model_refs=(ModelRef("model:4"),))))
+
+    assert isinstance(result, NoCompatibleModel)
+    assert any(rejection.code is ConstraintCode.PURPOSE for rejection in result.considered)
+
+
+def test_selected_cost_ceiling_uses_catalog_pricing():
+    resolver = ModelResolverService(setup_catalog(), clock=lambda: NOW)
+
+    result = resolver.resolve(request(requirements()))
+
+    assert isinstance(result, ModelResolved)
+    assert result.selection.primary.estimated_cost_ceiling == Decimal("0.00014")
+
+
+def test_policy_fallback_is_rejected_without_a_materialized_policy_port():
+    resolver = ModelResolverService(setup_catalog(), clock=lambda: NOW)
+
+    result = resolver.resolve(
+        request(
+            requirements(
+                fallback=FallbackRequest(
+                    mode="POLICY",
+                    policy_ref="fallback-policy:missing",
+                    maximum_attempts=2,
+                )
+            )
+        )
+    )
+
+    assert isinstance(result, NoCompatibleModel)
+    assert result.error == "FALLBACK_POLICY_NOT_MATERIALIZED"

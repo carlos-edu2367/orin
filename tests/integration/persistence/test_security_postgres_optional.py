@@ -53,6 +53,20 @@ def test_session_requires_matching_csrf_digest_and_origin() -> None:
         service.validate_csrf(authenticated, "wrong-token", "https://app.example")
 
 
+def test_session_rejects_csrf_token_from_another_session_with_the_same_credential() -> None:
+    engine = _engine()
+    suffix = uuid4().hex
+    principal = AuthenticatedPrincipal(f"user:{suffix}", f"cred:{suffix}", frozenset({"api"}), "session")
+    service = PostgresSecurityService(engine)
+    service.add_session(f"sess-1:{suffix}", principal, csrf_token=f"csrf-1:{suffix}")
+    service.add_session(f"sess-2:{suffix}", principal, csrf_token=f"csrf-2:{suffix}")
+    authenticated = service.authenticate(bearer_token=None, session_id=f"sess-1:{suffix}")
+
+    service.validate_csrf(authenticated, f"csrf-1:{suffix}", "https://app.example")
+    with pytest.raises(AuthorizationError):
+        service.validate_csrf(authenticated, f"csrf-2:{suffix}", "https://app.example")
+
+
 def test_revoke_invalidates_credential_and_bumps_epoch_durably() -> None:
     engine = _engine()
     suffix = uuid4().hex

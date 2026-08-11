@@ -99,12 +99,12 @@ class CancelExecution(ExecutionCommand):
 
 @dataclass(frozen=True, slots=True)
 class PauseExecution(ExecutionCommand):
-    pass
+    ...
 
 
 @dataclass(frozen=True, slots=True)
 class ResumeExecution(ExecutionCommand):
-    pass
+    ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -269,11 +269,11 @@ class IdempotencyRecord:
 
 
 class ExecutionNotFoundError(LookupError):
-    pass
+    ...
 
 
 class UnauthorizedExecutionError(PermissionError):
-    pass
+    ...
 
 
 class ExecutionControl(Protocol):

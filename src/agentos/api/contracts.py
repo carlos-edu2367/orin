@@ -1,0 +1,82 @@
+"""Framework-free public ports consumed by the HTTP adapter."""
+
+from __future__ import annotations
+
+from typing import Any, Protocol
+
+
+class ExecutionApplication(Protocol):
+    def create(self, command: dict[str, object]) -> object: ...
+    def control(self, command: dict[str, object]) -> object: ...
+    def provide_input(self, command: dict[str, object]) -> object: ...
+
+
+class ResourceApplication(Protocol):
+    def get(self, query: dict[str, object]) -> object: ...
+    def list(self, query: dict[str, object]) -> object: ...
+
+
+class ProviderConfigurationApplication(Protocol):
+    """Application boundary for a future visual Provider-configuration flow."""
+
+    def configure(self, command: dict[str, object]) -> object: ...
+    def inspect(self, query: dict[str, object]) -> object: ...
+    def revoke(self, command: dict[str, object]) -> object: ...
+    def test_connection(self, command: dict[str, object]) -> object: ...
+    def install(self, command: dict[str, object]) -> object: ...
+    def installation_status(self, query: dict[str, object]) -> object: ...
+
+
+class ProviderModelCatalogApplication(Protocol):
+    def refresh(self, context: object, provider: str) -> object: ...
+    def list(self, context: object, provider: str, favorites_only: bool = False) -> object: ...
+    def favorite(self, context: object, provider: str, model_id: str, favorite: bool) -> object: ...
+
+
+class ConversationApplication(Protocol):
+    def create(self, context: object, *, message: str, provider: str, model_id: str, workspace_id: str | None, idempotency_key: str) -> object: ...
+    def send(self, user_id: str, conversation_id: str, message: str, idempotency_key: str) -> object: ...
+    def list(self, user_id: str) -> object: ...
+    def get(self, conversation_id: str, user_id: str) -> object: ...
+    def events(self, conversation_id: str, user_id: str, after: str = "0") -> object: ...
+
+
+class SecurityService(Protocol):
+    def authenticate(self, *, bearer_token: str | None, session_id: str | None) -> "AuthenticatedPrincipal": ...
+    def validate_csrf(self, principal: "AuthenticatedPrincipal", token: str | None, origin: str | None) -> None: ...
+    def authorize(self, principal: "AuthenticatedPrincipal", *, action: str, resource_id: str | None, purpose: str) -> None: ...
+    def check_rate_limit(self, principal: "AuthenticatedPrincipal", *, action: str, origin: str | None) -> None: ...
+    def revocation_epoch(self, principal: "AuthenticatedPrincipal") -> int: ...
+
+
+class AuthenticatedPrincipal(Protocol):
+    user_id: str
+    credential_ref: str
+    credential_kind: str
+    session_id: str | None
+
+
+class ApplicationConflictError(RuntimeError):
+    """Raised when a command loses an optimistic-concurrency race (HTTP 409)."""
+
+    def __init__(self, execution_id: str, current_state_version: int) -> None:
+        self.execution_id = execution_id
+        self.current_state_version = current_state_version
+        super().__init__(f"execution {execution_id} is at version {current_state_version}")
+
+
+class ApplicationIndeterminateError(RuntimeError):
+    """Raised when a transaction's commit outcome could not be confirmed (HTTP 409, retryable)."""
+
+    def __init__(self, execution_id: str, transaction_id: str) -> None:
+        self.execution_id = execution_id
+        self.transaction_id = transaction_id
+        super().__init__(f"execution {execution_id} transaction {transaction_id} is indeterminate")
+
+
+class ApplicationValidationError(ValueError):
+    """Raised when a command is structurally rejected by the domain (HTTP 422)."""
+
+
+class ApplicationNotFoundError(LookupError):
+    """Raised when a referenced execution or resource does not exist for this caller (HTTP 404)."""

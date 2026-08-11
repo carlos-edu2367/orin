@@ -1,0 +1,330 @@
+"""Durable provider/action turn loop."""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+from itertools import count
+import json
+from typing import Callable, Mapping
+
+from .action_loop import ActionLoop, MalformedToolCall
+from .provider_stream import NormalizedStreamItem, StreamKind
+
+
+@dataclass(frozen=True, slots=True)
+class AgenticLimits:
+    max_actions: int = 8
+    max_iterations: int | None = 8
+    deadline: timedelta = timedelta(seconds=120)
+    max_provider_retries: int = 1
+    max_provider_tokens: int | None = None
+    max_cost: Decimal | None = None
+    max_output_tokens: int = 1024
+
+    def __post_init__(self) -> None:
+        if self.max_actions < 0 or (self.max_iterations is not None and self.max_iterations < 1) or self.max_provider_retries < 0 or self.deadline <= timedelta(0):
+            raise ValueError("agentic limits are invalid")
+        if self.max_output_tokens < 1:
+            raise ValueError("agentic limits are invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class AgenticRunResult:
+    state: str
+    iterations: int = 0
+    actions: int = 0
+    error_code: str | None = None
+
+
+class AgenticTurnRuntime:
+    def __init__(
+        self,
+        *,
+        store: object,
+        provider: object,
+        actions: ActionLoop | None = None,
+        limits: AgenticLimits | None = None,
+        clock: Callable[[], datetime] | None = None,
+        cancelled: Callable[[Mapping[str, object]], bool] | None = None,
+        toolset: object | None = None,
+        system_prompt: str | None = None,
+    ) -> None:
+        self.store, self.provider = store, provider
+        # ``toolset`` is the agent-facing path: its results are returned to the
+        # model verbatim. ``actions`` remains the policy-projected path used by
+        # the tool-runtime contract tests, where results are summaries only.
+        self.toolset = toolset
+        self.actions = actions or ActionLoop(None, None)
+        self.limits = limits or AgenticLimits()
+        self.clock = clock or (lambda: datetime.now(UTC))
+        self.cancelled = cancelled or (lambda _turn: False)
+        self.system_prompt = system_prompt
+
+    def run(self, turn_id: str, *, turn: dict[str, object] | None = None) -> AgenticRunResult:
+        turn = turn or self._load(turn_id)
+        deadline = self.clock() + self.limits.deadline
+        self._life(turn, "running")
+        messages = list(self.store.history_for_turn(turn))[-32:]
+        action_count = 0
+        provider_retries = 0
+        total_tokens = 0
+        total_cost = Decimal("0")
+        iterations = range(1, self.limits.max_iterations + 1) if self.limits.max_iterations is not None else count(1)
+        for iteration in iterations:
+            if self.cancelled(turn):
+                return self._cancel(turn, iteration, action_count)
+            if self.clock() >= deadline:
+                return self._fail(turn, "TURN_DEADLINE_EXCEEDED", iteration, action_count)
+            remaining_tokens = self.limits.max_output_tokens if self.limits.max_provider_tokens is None else self.limits.max_provider_tokens - total_tokens
+            if remaining_tokens <= 0:
+                return self._fail(turn, "PROVIDER_TOKEN_LIMIT", iteration, action_count)
+            request = {
+                "turn_id": turn_id, "provider": str(turn.get("provider", "")), "model": str(turn.get("model_id", "")),
+                "messages": self._request_messages(messages), "tools": self._tool_schemas(turn),
+                "max_output_tokens": min(self.limits.max_output_tokens, remaining_tokens),
+            }
+            try:
+                events = self.provider.stream(request)
+            except Exception:
+                if provider_retries < self.limits.max_provider_retries and self.clock() < deadline:
+                    provider_retries += 1
+                    self._life(turn, "retrying", attempt=provider_retries)
+                    continue
+                return self._fail(turn, "PROVIDER_STREAM_FAILED", iteration, action_count)
+            text_parts: list[str] = []
+            calls: dict[str, dict[str, str]] = {}
+            input_tokens: int | None = None
+            output_tokens: int | None = None
+            reported_total_tokens: int | None = None
+            finish = None
+            retryable_error = False
+            rate_limited = False
+            try:
+                for raw_event in events:
+                    if self.cancelled(turn):
+                        return self._cancel(turn, iteration, action_count)
+                    if self.clock() >= deadline:
+                        return self._fail(turn, "TURN_DEADLINE_EXCEEDED", iteration, action_count)
+                    event = self._coerce(raw_event)
+                    if event.kind is StreamKind.TEXT and event.text:
+                        text_parts.append(event.text)
+                        self.store.delta(turn, event.text)
+                    elif event.kind is StreamKind.TOOL_CALL and event.tool_call_id:
+                        current = calls.setdefault(event.tool_call_id, {"id": event.tool_call_id, "name": event.tool_name or "", "arguments": ""})
+                        if event.tool_name:
+                            current["name"] = event.tool_name
+                        current["arguments"] += event.arguments_delta or ""
+                    elif event.kind is StreamKind.USAGE:
+                        total_cost += event.cost or Decimal("0")
+                        if event.usage:
+                            # Some streaming protocols send input usage at the
+                            # start and output usage at the end. Keep the latest
+                            # known value per field and persist one provider-call
+                            # total instead of adding cumulative snapshots.
+                            input_tokens = event.usage.input_tokens if event.usage.input_tokens is not None else input_tokens
+                            output_tokens = event.usage.output_tokens if event.usage.output_tokens is not None else output_tokens
+                            reported_total_tokens = event.usage.total_tokens if event.usage.total_tokens is not None else reported_total_tokens
+                    elif event.kind is StreamKind.FINISH:
+                        finish = event.finish_reason
+                    elif event.kind is StreamKind.RATE_LIMIT:
+                        rate_limited = True
+                    elif event.kind is StreamKind.ERROR and event.error:
+                        retryable_error = event.error.retryability.value == "SAFE"
+            except Exception:
+                if provider_retries < self.limits.max_provider_retries and self.clock() < deadline:
+                    provider_retries += 1
+                    self._life(turn, "retrying", attempt=provider_retries)
+                    continue
+                return self._fail(turn, "PROVIDER_STREAM_FAILED", iteration, action_count)
+            provider_total_tokens = reported_total_tokens
+            if provider_total_tokens is None and input_tokens is not None and output_tokens is not None:
+                provider_total_tokens = input_tokens + output_tokens
+            usage_is_plausible = input_tokens is None or input_tokens <= self._maximum_plausible_input_tokens(request)
+            if usage_is_plausible:
+                total_tokens += provider_total_tokens or 0
+                reporter = getattr(self.store, "record_usage", None)
+                if callable(reporter) and any(value is not None for value in (input_tokens, output_tokens, provider_total_tokens)):
+                    reporter(turn, input_tokens=input_tokens, output_tokens=output_tokens, total_tokens=provider_total_tokens)
+            if self.limits.max_provider_tokens is not None and total_tokens > self.limits.max_provider_tokens:
+                return self._fail(turn, "PROVIDER_TOKEN_LIMIT", iteration, action_count)
+            if self.limits.max_cost is not None and total_cost > self.limits.max_cost:
+                return self._fail(turn, "PROVIDER_COST_LIMIT", iteration, action_count)
+            if (retryable_error or rate_limited) and not text_parts and not calls and provider_retries < self.limits.max_provider_retries and self.clock() < deadline:
+                provider_retries += 1
+                self._life(turn, "retrying", attempt=provider_retries)
+                continue
+            if (retryable_error or rate_limited) and not text_parts and not calls:
+                return self._fail(turn, "PROVIDER_RETRY_EXHAUSTED", iteration, action_count)
+            if calls or (finish is not None and finish.value == "TOOL_CALLS"):
+                self._life(turn, "waiting_tool", count=len(calls))
+                if self.toolset is not None:
+                    if action_count + len(calls) > self.limits.max_actions:
+                        return self._fail(turn, "ACTION_LIMIT", iteration, action_count)
+                    results = self._run_toolset(turn, list(calls.values()))
+                    action_count += len(results)
+                else:
+                    try:
+                        for _ in calls.values():
+                            self._life(turn, "tool_started")
+                        batch = self.actions.execute(list(calls.values()), turn, action_count=action_count, max_actions=self.limits.max_actions)
+                    except MalformedToolCall:
+                        self._life(turn, "tool_failed", code="MALFORMED_OR_DUPLICATE_TOOL_CALL")
+                        return self._fail(turn, "MALFORMED_OR_DUPLICATE_TOOL_CALL", iteration, action_count)
+                    action_count = batch.count
+                    results = list(batch.results)
+                    for result in results:
+                        self._life(turn, "tool_finished", status=result["status"], result_ref=result.get("result_ref"))
+                messages.append(self._assistant_tool_message(turn, text_parts, calls))
+                messages.extend(self._tool_result_message(turn, result) for result in results)
+                self._life(turn, "running")
+                continue
+            if finish is not None or text_parts:
+                self._life(turn, "completed")
+                self.store.finish(turn)
+                return AgenticRunResult("completed", iteration, action_count)
+        return self._fail(turn, "ITERATION_LIMIT", self.limits.max_iterations or 0, action_count)
+
+    def _tool_schemas(self, turn: Mapping[str, object]) -> list[dict[str, object]]:
+        if self.toolset is not None:
+            return self.toolset.schemas()
+        return self.actions.tool_schemas(turn)
+
+    def _request_messages(self, messages: list[dict[str, object]]) -> list[dict[str, object]]:
+        window = messages[-32:]
+        if not self.system_prompt:
+            return window
+        return [{"role": "system", "content": self.system_prompt}, *window]
+
+    @staticmethod
+    def _maximum_plausible_input_tokens(request: Mapping[str, object]) -> int:
+        """Reject provider telemetry that cannot describe the submitted prompt.
+
+        A token can expand to a few encoded bytes, hence the intentionally wide
+        four-token-per-character allowance. This catches fixed context-window
+        values returned as usage without rejecting a genuinely large prompt.
+        """
+        payload = {"messages": request.get("messages", []), "tools": request.get("tools", [])}
+        characters = len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+        return max(512, characters * 4)
+
+    def _run_toolset(self, turn: dict[str, object], calls: list[dict[str, str]]) -> list[dict[str, object]]:
+        """Execute the model's calls and return results it can actually read."""
+        from .agent_tools import AgentToolError, parse_arguments
+
+        results: list[dict[str, object]] = []
+        for call in calls:
+            name = str(call.get("name") or "")
+            call_id = str(call.get("id") or "")
+            self._life(turn, "tool_started", tool_name=name, invocation_id=call_id)
+            try:
+                arguments = parse_arguments(call.get("arguments") or "{}")
+            except AgentToolError as error:
+                outcome_content = str(error)
+                self._life(turn, "tool_finished", tool_name=name, invocation_id=call_id, status="failed", summary=outcome_content, error_code="INVALID_ARGUMENTS")
+                results.append({"id": call_id, "name": name, "status": "failed", "content": outcome_content})
+                continue
+            outcome = self.toolset.invoke(name, arguments)
+            self._life(
+                turn, "tool_finished", tool_name=name, invocation_id=call_id, status=outcome.status,
+                summary=outcome.summary, error_code=outcome.error_code, tool_payload=dict(outcome.payload),
+            )
+            results.append({"id": call_id, "name": name, "status": outcome.status, "content": outcome.content})
+        return results
+
+    def _load(self, turn_id: str) -> dict[str, object]:
+        if hasattr(self.store, "load"):
+            return self.store.load(turn_id)
+        if hasattr(self.store, "get_turn"):
+            return self.store.get_turn(turn_id)
+        raise LookupError("turn store cannot load a turn")
+
+    def _life(self, turn: dict[str, object], state: str, **payload: object) -> None:
+        if hasattr(self.store, "lifecycle"):
+            self.store.lifecycle(turn, state, **payload)
+
+    def _fail(self, turn: dict[str, object], code: str, iteration: int, actions: int) -> AgenticRunResult:
+        self._life(turn, "failed", code=code)
+        self.store.finish(turn, failed=True, code=code)
+        return AgenticRunResult("failed", iteration, actions, code)
+
+    def _cancel(self, turn: dict[str, object], iteration: int, actions: int) -> AgenticRunResult:
+        cancel = getattr(self.provider, "cancel", None)
+        if callable(cancel):
+            try:
+                cancel({"turn_id": turn.get("turn_id"), "execution_id": turn.get("execution_id"), "reason": "turn_cancelled"})
+            except Exception:
+                pass
+        self._life(turn, "cancelled", code="TURN_CANCELLED")
+        self.store.finish(turn, failed=True, code="TURN_CANCELLED")
+        return AgenticRunResult("cancelled", iteration, actions, "TURN_CANCELLED")
+
+    @staticmethod
+    def _redacted_result(result: Mapping[str, object]) -> str:
+        safe = {"status": result.get("status"), "summary": result.get("summary"), "result_ref": result.get("result_ref"), "error_code": result.get("error_code")}
+        return str(safe)
+
+    @classmethod
+    def _assistant_tool_message(cls, turn: Mapping[str, object], text_parts: list[str], calls: Mapping[str, Mapping[str, str]]) -> dict[str, object]:
+        provider = str(turn.get("provider", "")).lower()
+        if provider == "anthropic":
+            blocks: list[dict[str, object]] = []
+            if text_parts:
+                blocks.append({"type": "text", "text": "".join(text_parts)})
+            for call in calls.values():
+                try:
+                    arguments = json.loads(call["arguments"])
+                except (TypeError, json.JSONDecodeError):
+                    arguments = {}
+                blocks.append({"type": "tool_use", "id": call["id"], "name": call["name"], "input": arguments})
+            return {"role": "assistant", "content": blocks}
+        return {
+            "role": "assistant",
+            "content": "".join(text_parts) or None,
+            "tool_calls": [
+                {"id": call["id"], "type": "function", "function": {"name": call["name"], "arguments": call["arguments"]}}
+                for call in calls.values()
+            ],
+        }
+
+    @classmethod
+    def _tool_result_message(cls, turn: Mapping[str, object], result: Mapping[str, object]) -> dict[str, object]:
+        # A toolset result carries the content the model asked for; the policy
+        # path carries only a summary, which is the whole point of that path.
+        content = str(result["content"]) if "content" in result else cls._redacted_result(result)
+        if str(turn.get("provider", "")).lower() == "anthropic":
+            return {"role": "user", "content": [{"type": "tool_result", "tool_use_id": str(result.get("id", "")), "content": content}]}
+        return {"role": "tool", "tool_call_id": str(result.get("id", "")), "content": content}
+
+    @staticmethod
+    def _coerce(event: object) -> NormalizedStreamItem:
+        if isinstance(event, NormalizedStreamItem):
+            return event
+        event_type = type(event).__name__
+        if event_type == "ContentDelta":
+            return NormalizedStreamItem(StreamKind.TEXT, int(getattr(event, "sequence", 1)), text=str(getattr(event, "delta", "")))
+        if event_type == "ToolCallDelta":
+            delta = getattr(event, "delta", "")
+            arguments = delta if isinstance(delta, str) else str(getattr(delta, "arguments", delta or ""))
+            return NormalizedStreamItem(StreamKind.TOOL_CALL, int(getattr(event, "sequence", 1)), tool_call_id=str(getattr(event, "tool_call_id", "")), arguments_delta=arguments)
+        if event_type == "UsageUpdated":
+            cost = getattr(getattr(event, "cost", None), "amount", None)
+            return NormalizedStreamItem(StreamKind.USAGE, int(getattr(event, "sequence", 1)), usage=getattr(event, "usage", None), cost=cost)
+        if event_type == "StreamCompleted":
+            outcome = getattr(event, "outcome", None)
+            reason = "tool_calls" if type(outcome).__name__ == "ToolCallsRequested" else "stop"
+            return NormalizedStreamItem(StreamKind.FINISH, int(getattr(event, "sequence", 1)), finish_reason=reason)
+        if event_type == "StreamFailed":
+            return NormalizedStreamItem(StreamKind.ERROR, int(getattr(event, "sequence", 1)), error=getattr(event, "error", None))
+        if event_type == "StreamCancelled":
+            return NormalizedStreamItem(StreamKind.ERROR, int(getattr(event, "sequence", 1)))
+        kind = getattr(event, "delta", None)
+        if kind is not None:
+            return NormalizedStreamItem(StreamKind.TEXT, int(getattr(event, "sequence", 1)), text=str(kind))
+        usage = getattr(event, "usage", None)
+        if usage is not None:
+            return NormalizedStreamItem(StreamKind.USAGE, int(getattr(event, "sequence", 1)), usage=usage)
+        raise ValueError("provider returned an unsupported stream event")
+
+
+__all__ = ["AgenticLimits", "AgenticRunResult", "AgenticTurnRuntime"]

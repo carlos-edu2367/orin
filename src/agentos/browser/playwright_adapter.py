@@ -45,13 +45,39 @@ class PlaywrightBrowserAdapter:
             page = context.new_page()
             self._pages[job.page_id] = page
         if job.operation is BrowserOperationKind.NAVIGATE:
+            policy = NetworkPolicy()
+            initial_url = str(job.arguments.get("url", ""))
+
+            def guard(route, request):
+                try:
+                    if request.resource_type != "document" and not policy.allow_subresources:
+                        route.abort("blockedbyclient")
+                        return
+                    previous = initial_url
+                    redirect_count = 0
+                    redirected = getattr(request, "redirected_from", None)
+                    while redirected is not None:
+                        redirect_count += 1
+                        previous = redirected.url
+                        redirected = getattr(redirected, "redirected_from", None)
+                    validate_redirect(request.url, policy, previous, redirect_count=redirect_count, maximum_redirects=job.limits.maximum_redirects)
+                    route.continue_()
+                except (NetworkPolicyError, ValueError):
+                    route.abort("blockedbyclient")
+
             try:
-                url = validate_url(str(job.arguments["url"]), NetworkPolicy())
+                url = validate_url(initial_url, policy)
+                page.route("**/*", guard)
                 page.goto(url, timeout=int(job.limits.timeout.total_seconds() * 1000), wait_until="domcontentloaded")
             except (KeyError, NetworkPolicyError, Exception) as exc:
                 if isinstance(exc, NetworkPolicyError):
                     return BrowserJobFailed(job.job_id, BrowserErrorCode.POLICY_DENIED, EffectState.NOT_APPLIED, Retryability.NEVER)
                 return BrowserJobFailed(job.job_id, BrowserErrorCode.UNKNOWN, EffectState.UNKNOWN, Retryability.AFTER_RECONCILIATION)
+            finally:
+                try:
+                    page.unroute("**/*", guard)
+                except Exception:
+                    pass
             snapshot = BrowserPageSnapshot(job.page_id or "page", job.session_id or "session", url, str(page.title())[:256], BrowserPageStatus.READY, 1, job.submitted_at, datetime.now(timezone.utc))
             return BrowserResult("PAGE", page=snapshot, page_version=1)
         if job.operation is BrowserOperationKind.CAPTURE_DOM:

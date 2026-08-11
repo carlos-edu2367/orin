@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
+import re
 from typing import Mapping
 
 from .security import clearance_allows, freeze_payload
@@ -123,6 +124,8 @@ class EventEnvelope:
     def __post_init__(self) -> None:
         for field in ("event_id", "event_type", "source", "correlation_id", "user_id"):
             _required(getattr(self, field), field)
+        if re.fullmatch(r"[A-Z][A-Za-z0-9]*", self.event_type) is None:
+            raise ValueError("event_type must use canonical PascalCase")
         if self.causation_id is not None:
             _required(self.causation_id, "causation_id")
         if self.workspace_id is not None:
