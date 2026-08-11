@@ -27,6 +27,7 @@ from urllib.parse import urlparse
 import httpx
 
 from .workspace import ConversationWorkspace, WorkspaceError
+from .browser_tools import _safe_display_url, sanitize_page_text
 
 
 MAX_TOOL_RESULT_CHARS = 12_000
@@ -633,12 +634,22 @@ class AgentToolset:
             raise AgentToolError(f"The page could not be rendered: {error}") from error
         parser = _TextExtractor()
         parser.feed(html)
-        title = parser.title or target
+        safe_target = _safe_display_url(target)
+        title = sanitize_page_text(parser.title) or safe_target
+        body = sanitize_page_text(parser.text())
         return {
-            "summary": f"Abriu {urlparse(target).netloc}",
-            "content": f"{target}\n\n{parser.text()}",
-            "payload": {"url": target, "label": title[:120] or target, "rendered": True},
+            "summary": f"Abriu {urlparse(safe_target).netloc}",
+            "content": f"{safe_target}\n\n{body}",
+            "payload": {"url": safe_target, "label": title[:120] or safe_target, "rendered": True},
         }
+
+    def close(self) -> None:
+        closer = getattr(self._browser, "close", None)
+        if callable(closer):
+            try:
+                closer()
+            except Exception:
+                pass
 
     def remember(self, fact: str, tags: list[str] | None = None) -> dict[str, Any]:
         if self.memory is None:

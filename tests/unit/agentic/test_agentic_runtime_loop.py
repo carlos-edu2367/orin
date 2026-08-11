@@ -577,3 +577,19 @@ def test_a_final_iteration_with_only_tool_calls_and_no_text_still_fails_with_ite
     assert result.state == "failed"
     assert result.error_code == "ITERATION_LIMIT"
     assert store.deltas == []
+
+
+def test_runtime_close_forwards_to_the_toolset() -> None:
+    class ClosableToolset:
+        def __init__(self) -> None:
+            self.closed = 0
+
+        def close(self) -> None:
+            self.closed += 1
+
+    toolset = ClosableToolset()
+    runtime = AgenticTurnRuntime(store=object(), provider=object(), toolset=toolset)
+
+    runtime.close()
+
+    assert toolset.closed == 1

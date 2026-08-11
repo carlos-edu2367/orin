@@ -10,7 +10,10 @@ back to the model.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+import re
+from threading import Lock
 from typing import Mapping
+from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
 from agentos.browser.models import (
@@ -20,6 +23,7 @@ from agentos.browser.models import (
     BrowserLimits,
     BrowserOperationContext,
     BrowserOperationKind,
+    BrowserResult,
     BrowserWorkerGrant,
     GrantCapability,
 )
@@ -28,13 +32,40 @@ from agentos.browser.models import (
 BROWSER_TIMEOUT = timedelta(seconds=30)
 MAX_DOM_BYTES = 2_000_000
 MAX_SCREENSHOT_BYTES = 4_000_000
+_SENSITIVE_PAGE_VALUE = re.compile(
+    r"(?i)([\"']?\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|password|secret|authorization|cookie|credential)\b[\"']?\s*[:=]\s*[\"']?)([^,\s<>\"'}]+)"
+)
+
+
+def _safe_display_url(value: str) -> str:
+    parsed = urlsplit(value)
+    host = (parsed.hostname or "").lower()
+    if ":" in host:
+        host = f"[{host}]"
+    netloc = host
+    if parsed.port:
+        netloc += f":{parsed.port}"
+    return urlunsplit((parsed.scheme.lower(), netloc, parsed.path or "/", "", ""))
+
+
+def sanitize_page_text(value: str) -> str:
+    return _SENSITIVE_PAGE_VALUE.sub(r"\1[REDACTED]", value)
 
 
 class _MemorySink:
-    def __init__(self) -> None:
+    def __init__(self, maximum_bytes: int) -> None:
         self.buffer = bytearray()
+        self.maximum_bytes = maximum_bytes
+        self.aborted = False
+        self.committed = False
 
     def write(self, data: bytes) -> int:
+        if self.aborted:
+            raise ValueError("cannot write to an aborted artifact")
+        if self.committed:
+            raise ValueError("cannot write to a committed artifact")
+        if len(self.buffer) + len(data) > self.maximum_bytes:
+            raise ValueError("artifact exceeds maximum bytes")
         self.buffer.extend(data)
         return len(data)
 
@@ -46,13 +77,25 @@ class MemoryArtifactOutput:
         self.data = b""
 
     def begin(self, kind: str, context: object, grant: object, maximum_bytes: int) -> _MemorySink:
-        return _MemorySink()
+        if not isinstance(maximum_bytes, int) or maximum_bytes < 0:
+            raise ValueError("maximum bytes must be non-negative")
+        return _MemorySink(maximum_bytes)
 
     def commit(self, sink: _MemorySink, media_type: str) -> BrowserArtifactRef:
+        if sink.aborted:
+            raise ValueError("cannot commit an aborted artifact")
+        if sink.committed:
+            raise ValueError("artifact is already committed")
+        sink.committed = True
         self.data = bytes(sink.buffer)
         return BrowserArtifactRef(f"memory:{uuid4().hex}", 1, len(self.data), media_type, "INTERNAL")
 
     def abort(self, sink: _MemorySink) -> None:
+        sink.aborted = True
+        sink.buffer.clear()
+        self.data = b""
+
+    def reset(self) -> None:
         self.data = b""
 
 
@@ -71,6 +114,8 @@ class ConversationBrowser:
             f"grant-{uuid4().hex}", self._context, f"lease-{uuid4().hex}", "profile-conversation", self._session_id,
             (GrantCapability.NAVIGATE, GrantCapability.READ_DOM), datetime.now(UTC) + BROWSER_TIMEOUT, 1,
         )
+        self._render_lock = Lock()
+        self._closed = False
 
     def _job(self, operation: BrowserOperationKind, arguments: Mapping[str, object]) -> BrowserJob:
         now = datetime.now(UTC)
@@ -80,24 +125,43 @@ class ConversationBrowser:
             f"idempotency-{uuid4().hex}", now + BROWSER_TIMEOUT, now,
         )
 
-    def _run(self, operation: BrowserOperationKind, arguments: Mapping[str, object]):
+    def _run(self, operation: BrowserOperationKind, arguments: Mapping[str, object], expected_kind: str) -> BrowserResult:
         outcome = self.adapter.execute(self._job(operation, arguments))
         if isinstance(outcome, BrowserJobFailed):
             raise RuntimeError(f"browser refused the operation: {outcome.error_code.value}")
+        if not isinstance(outcome, BrowserResult) or outcome.kind != expected_kind:
+            raise RuntimeError(f"browser returned an unexpected {operation.value} result; expected {expected_kind}")
         return outcome
 
     def render(self, url: str) -> str:
         """Navigate and return the rendered HTML of the page."""
-        self._run(BrowserOperationKind.NAVIGATE, {"url": url})
-        self._run(BrowserOperationKind.CAPTURE_DOM, {})
-        return self.output.data.decode("utf-8", "replace")
+        with self._render_lock:
+            self.output.reset()
+            page = self._run(BrowserOperationKind.NAVIGATE, {"url": url}, "PAGE")
+            if page.page is None:
+                raise RuntimeError("browser returned PAGE without a page snapshot")
+            dom = self._run(BrowserOperationKind.CAPTURE_DOM, {}, "DOM")
+            if dom.artifact_ref is None:
+                raise RuntimeError("browser returned DOM without an artifact")
+            if dom.artifact_ref.size_bytes != len(self.output.data):
+                raise RuntimeError("browser returned DOM without matching artifact data")
+            return self.output.data.decode("utf-8", "replace")
 
     def close(self) -> None:
-        try:
-            self.adapter.cleanup(self._session_id)
-        except Exception:
-            # Cleanup is best effort; a stuck engine must not fail the turn.
-            pass
+        with self._render_lock:
+            if self._closed:
+                return
+            self._closed = True
+            try:
+                self.adapter.cleanup(self._session_id)
+            except Exception:
+                pass
+            shutdown = getattr(self.adapter, "close", None)
+            if callable(shutdown):
+                try:
+                    shutdown()
+                except Exception:
+                    pass
 
 
 def conversation_browser_for(turn: Mapping[str, object]) -> ConversationBrowser | None:

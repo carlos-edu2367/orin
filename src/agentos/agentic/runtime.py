@@ -80,6 +80,18 @@ class AgenticTurnRuntime:
         self.clock = clock or (lambda: datetime.now(UTC))
         self.cancelled = cancelled or (lambda _turn: False)
         self.system_prompt = system_prompt
+        self._closed = False
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        closer = getattr(self.toolset, "close", None)
+        if callable(closer):
+            try:
+                closer()
+            except Exception:
+                pass
 
     def run(self, turn_id: str, *, turn: dict[str, object] | None = None) -> AgenticRunResult:
         turn = turn or self._load(turn_id)

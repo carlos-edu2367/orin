@@ -59,6 +59,24 @@ def test_browse_page_refuses_a_private_address(tmp_path) -> None:
     assert outcome.status == "failed"
 
 
+def test_browse_page_redacts_url_credentials_queries_and_secret_like_page_text(tmp_path) -> None:
+    secret = "super-secret-123"
+
+    class Browser:
+        def render(self, url):
+            return f"<html><head><title>token={secret}</title></head><body><p>api_key={secret}</p><p>visible content</p></body></html>"
+
+    raw_url = f"https://user:{secret}@example.test/page?api_key={secret}&next=/account#{secret}"
+    outcome = AgentToolset(ConversationWorkspace(tmp_path, "chat_browser_secret"), browser=Browser()).invoke("browse_page", {"url": raw_url})
+
+    assert outcome.status == "succeeded"
+    assert secret not in outcome.summary
+    assert secret not in outcome.content
+    assert secret not in repr(outcome.payload)
+    assert "https://example.test/page" in outcome.content
+    assert "visible content" in outcome.content
+
+
 def test_web_search_returns_titles_and_urls_to_the_model(tmp_path) -> None:
     from agentos.agentic.web_search import SearchResult
 

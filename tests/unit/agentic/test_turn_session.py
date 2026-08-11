@@ -413,6 +413,25 @@ def test_tool_activity_is_published_for_the_ui(tmp_path: Path) -> None:
     assert artifact[2]["size_bytes"] == 1
 
 
+def test_browse_page_tool_ledger_does_not_keep_raw_url_secrets(tmp_path: Path) -> None:
+    session, store, _agents, _provider = build(tmp_path, [])
+    secret = "ledger-secret-123"
+
+    session.emit_lifecycle(
+        TURN,
+        "tool_finished",
+        tool_name="browse_page",
+        invocation_id="call-1",
+        status="succeeded",
+        summary="Abriu example.test",
+        tool_payload={"url": "https://example.test/page", "label": "safe", "rendered": True},
+        tool_arguments={"url": f"https://user:{secret}@example.test/page?token={secret}"},
+    )
+
+    assert secret not in repr(store.tool_records)
+    assert store.tool_records[0]["arguments"] == {"url": "https://example.test/page"}
+
+
 def test_every_finished_tool_is_recorded_in_the_ledger(tmp_path: Path) -> None:
     session, store, _agents, _provider = build(tmp_path, [
         tool_call("call-1", "write_file", '{"path": "a.txt", "content": "x"}'),

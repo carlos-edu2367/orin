@@ -305,8 +305,13 @@ class TurnSession:
             ledger = getattr(self.store, "record_tool_call", None)
             if callable(ledger):
                 try:
+                    tool_arguments = dict(payload.get("tool_arguments") or {})
+                    if name == "browse_page" and isinstance(tool_arguments.get("url"), str):
+                        from .browser_tools import _safe_display_url
+
+                        tool_arguments["url"] = _safe_display_url(str(tool_arguments["url"]))
                     ledger(
-                        self.turn, tool_name=name, arguments=dict(payload.get("tool_arguments") or {}),
+                        self.turn, tool_name=name, arguments=tool_arguments,
                         status=status, summary=summary,
                     )
                 except Exception:

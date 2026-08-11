@@ -120,8 +120,10 @@ class ChatWorker:
             return
         self._project(turn, "STARTING", "worker_acquired")
         self._project(turn, "RUNNING", "provider_started")
+        runtime = None
         try:
-            result = self._runtime_for(turn).run(str(turn_id))
+            runtime = self._runtime_for(turn)
+            result = runtime.run(str(turn_id))
         except Exception:
             # A turn that dies silently is the single worst failure mode for a
             # local install: the UI shows "failed" with no way to learn why.
@@ -129,6 +131,13 @@ class ChatWorker:
             self._project(turn, "FAILED", "provider_failed")
             self.store.finish(turn, failed=True, code="provider_unavailable")
             return
+        finally:
+            closer = getattr(runtime, "close", None)
+            if callable(closer):
+                try:
+                    closer()
+                except Exception:
+                    _LOGGER.exception("chat runtime cleanup for turn %s failed", turn_id)
         if result.state == "completed":
             self._project(turn, "COMPLETED", "provider_completed", result_ref=f"conversation-message:{turn['assistant_message_id']}")
         elif result.state == "cancelled":
@@ -206,29 +215,35 @@ class ChatWorker:
         engine = self.store._engine
         skill_library = PostgresSkillLibraryService(engine)
         configured_limits = self._runtime_settings.get(str(turn["user_id"]))
-        session = TurnSession(
-            turn=turn,
-            store=_RuntimeStore(self, turn),
-            agents_store=ConversationAgentStore(engine, conversation_id=str(turn["conversation_id"]), user_id=str(turn["user_id"])),
-            memory_store=PostgresAgentMemoryStore(
-                engine, str(turn["user_id"]), conversation_id=str(turn["conversation_id"]),
-                project_id=str(turn["project_id"]) if turn.get("project_id") else None,
-                execution_id=str(turn["execution_id"]),
-            ),
-            provider_factory=lambda: self._provider_transport(turn),
-            workspace_root=self._workspace_root,
-            cancelled=lambda current: self.store.cancel_requested(str(current["turn_id"])),
-            limits=AgenticLimits(deadline=TURN_DEADLINE, max_iterations=configured_limits["max_iterations"], max_actions=24, max_output_tokens=4096, max_context_tokens=60_000),
-            skills=skill_library.registry_for(str(turn["user_id"]), agent_id=str(self.store.main_agent_id(turn))),
-            skill_load_recorder=lambda loaded: skill_library.record_load(
-                user_id=str(turn["user_id"]), execution_id=str(turn["execution_id"]),
-                agent_id=str(self.store.main_agent_id(turn)), loaded=loaded,
-            ),
-            search_client=search_client_from_environment(),
-            browser=conversation_browser_for(turn),
-            enable_subagents=self._enable_subagents,
-        )
-        return session.build_runtime()
+        browser = conversation_browser_for(turn)
+        try:
+            session = TurnSession(
+                turn=turn,
+                store=_RuntimeStore(self, turn),
+                agents_store=ConversationAgentStore(engine, conversation_id=str(turn["conversation_id"]), user_id=str(turn["user_id"])),
+                memory_store=PostgresAgentMemoryStore(
+                    engine, str(turn["user_id"]), conversation_id=str(turn["conversation_id"]),
+                    project_id=str(turn["project_id"]) if turn.get("project_id") else None,
+                    execution_id=str(turn["execution_id"]),
+                ),
+                provider_factory=lambda: self._provider_transport(turn),
+                workspace_root=self._workspace_root,
+                cancelled=lambda current: self.store.cancel_requested(str(current["turn_id"])),
+                limits=AgenticLimits(deadline=TURN_DEADLINE, max_iterations=configured_limits["max_iterations"], max_actions=24, max_output_tokens=4096, max_context_tokens=60_000),
+                skills=skill_library.registry_for(str(turn["user_id"]), agent_id=str(self.store.main_agent_id(turn))),
+                skill_load_recorder=lambda loaded: skill_library.record_load(
+                    user_id=str(turn["user_id"]), execution_id=str(turn["execution_id"]),
+                    agent_id=str(self.store.main_agent_id(turn)), loaded=loaded,
+                ),
+                search_client=search_client_from_environment(),
+                browser=browser,
+                enable_subagents=self._enable_subagents,
+            )
+            return session.build_runtime()
+        except Exception:
+            if browser is not None:
+                browser.close()
+            raise
 
 
 async def agentos_agent(ctx: dict, turn_id: str) -> None:

@@ -19,6 +19,7 @@ class PlaywrightBrowserAdapter:
         self._browser = None
         self._contexts = {}
         self._pages = {}
+        self._page_sessions = {}
 
     @staticmethod
     def is_available() -> bool:
@@ -44,6 +45,7 @@ class PlaywrightBrowserAdapter:
         if page is None:
             page = context.new_page()
             self._pages[job.page_id] = page
+            self._page_sessions[job.page_id] = job.session_id
         if job.operation is BrowserOperationKind.NAVIGATE:
             policy = NetworkPolicy()
             initial_url = str(job.arguments.get("url", ""))
@@ -108,13 +110,43 @@ class PlaywrightBrowserAdapter:
             raise
 
     def cleanup(self, session_id: str) -> bool:
+        for page_id, page_session_id in tuple(self._page_sessions.items()):
+            if page_session_id != session_id:
+                continue
+            page = self._pages.pop(page_id, None)
+            self._page_sessions.pop(page_id, None)
+            if page is not None:
+                try:
+                    page.close()
+                except Exception:
+                    pass
         context = self._contexts.pop(session_id, None)
         if context is not None:
             context.close()
-        for page_id, page in tuple(self._pages.items()):
-            if page_id.startswith(session_id):
-                self._pages.pop(page_id, None)
         return True
+
+    def close(self) -> None:
+        for session_id in tuple(self._contexts):
+            try:
+                self.cleanup(session_id)
+            except Exception:
+                pass
+        self._pages.clear()
+        self._page_sessions.clear()
+        browser = self._browser
+        self._browser = None
+        if browser is not None:
+            try:
+                browser.close()
+            except Exception:
+                pass
+        playwright = self._playwright
+        self._playwright = None
+        if playwright is not None:
+            try:
+                playwright.stop()
+            except Exception:
+                pass
 
 
 __all__ = ["PlaywrightBrowserAdapter"]
