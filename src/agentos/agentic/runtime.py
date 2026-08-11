@@ -13,6 +13,7 @@ from .action_loop import ActionLoop, MalformedToolCall
 from .provider_stream import NormalizedStreamItem, StreamKind
 
 MAX_PARALLEL_TOOLS = 4
+AGED_TOOL_RESULT_CHARS = 400
 
 # Sentinel distinguishing "no pin resolved yet" from "resolved, and there is
 # no user message to pin." Used only as the default for the ``_pinned_index``
@@ -211,6 +212,7 @@ class AgenticTurnRuntime:
                         self._life(turn, "tool_finished", status=result["status"], result_ref=result.get("result_ref"))
                 messages.append(self._assistant_tool_message(turn, text_parts, calls))
                 messages.extend(self._tool_result_message(turn, result) for result in results)
+                self._age_tool_results(messages, keep_recent=len(results))
                 self._life(turn, "running")
                 continue
             if (finish is not None or text_parts) and not (final_iteration and not text_parts):
@@ -352,6 +354,40 @@ class AgenticTurnRuntime:
             if isinstance(content, list):
                 return any(isinstance(block, Mapping) and block.get("type") == "tool_result" for block in content)
         return False
+
+    @staticmethod
+    def _is_tool_result(message: Mapping[str, object]) -> bool:
+        if message.get("role") == "tool":
+            return True
+        content = message.get("content")
+        return isinstance(content, list) and any(isinstance(block, Mapping) and block.get("type") == "tool_result" for block in content)
+
+    @classmethod
+    def _compress(cls, text: str) -> str:
+        if len(text) <= AGED_TOOL_RESULT_CHARS:
+            return text
+        return f"{text[:AGED_TOOL_RESULT_CHARS]}\n[compressed: {len(text)} characters total; re-run the tool if you need the rest]"
+
+    @classmethod
+    def _age_tool_results(cls, messages: list[dict[str, object]], keep_recent: int) -> None:
+        """Shrink tool output the model has already had a chance to read.
+
+        The full result is what the model needed on the iteration right after
+        the call. Re-sending it on every later iteration is pure cost, so older
+        results keep only their head plus a pointer back to the tool.
+        """
+        indexes = [index for index, message in enumerate(messages) if cls._is_tool_result(message)]
+        for index in indexes[: max(0, len(indexes) - max(0, int(keep_recent)))]:
+            message = messages[index]
+            content = message.get("content")
+            if isinstance(content, str):
+                message["content"] = cls._compress(content)
+            elif isinstance(content, list):
+                message["content"] = [
+                    {**block, "content": cls._compress(str(block.get("content", "")))}
+                    if isinstance(block, Mapping) and block.get("type") == "tool_result" else block
+                    for block in content
+                ]
 
     @staticmethod
     def _maximum_plausible_input_tokens(request: Mapping[str, object]) -> int:

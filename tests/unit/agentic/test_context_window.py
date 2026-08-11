@@ -124,3 +124,28 @@ def test_atomic_tool_unit_anthropic_shape_never_orphans_a_tool_result() -> None:
         item.get("role") == "user" and isinstance(item.get("content"), list) and any(block.get("type") == "tool_result" for block in item["content"])
         for item in window
     )
+
+
+def test_old_tool_results_are_compressed_but_recent_ones_are_kept() -> None:
+    messages = [
+        {"role": "user", "content": "go"},
+        {"role": "tool", "tool_call_id": "a", "content": "old " * 500},
+        {"role": "tool", "tool_call_id": "b", "content": "new " * 500},
+    ]
+
+    AgenticTurnRuntime._age_tool_results(messages, keep_recent=1)
+
+    assert "compressed" in messages[1]["content"]
+    assert len(messages[1]["content"]) < 800
+    assert messages[2]["content"] == "new " * 500
+
+
+def test_anthropic_tool_results_are_compressed_in_their_block_shape() -> None:
+    messages = [
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "a", "content": "old " * 500}]},
+        {"role": "assistant", "content": "thinking"},
+    ]
+
+    AgenticTurnRuntime._age_tool_results(messages, keep_recent=0)
+
+    assert "compressed" in messages[0]["content"][0]["content"]
