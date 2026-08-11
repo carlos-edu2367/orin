@@ -26,7 +26,6 @@ from urllib.parse import urlparse
 
 import httpx
 
-from .events import AgentActivityEventType
 from .workspace import ConversationWorkspace, WorkspaceError
 
 
@@ -195,10 +194,12 @@ class AgentToolset:
         self.skills = skills
         self._skill_load_recorder = skill_load_recorder
         self._loaded_skills: set[tuple[str, str]] = set()
+        self._definitions: tuple[ToolDefinition, ...] | None = None
+        self._by_name: dict[str, ToolDefinition] = {}
 
     # -- definitions ----------------------------------------------------
 
-    def definitions(self) -> tuple[ToolDefinition, ...]:
+    def _build_definitions(self) -> tuple[ToolDefinition, ...]:
         items: list[ToolDefinition] = [
             ToolDefinition(
                 "read_file",
@@ -315,14 +316,22 @@ class AgentToolset:
             ))
         return tuple(items)
 
+    def definitions(self) -> tuple[ToolDefinition, ...]:
+        """The tool set is fixed for the lifetime of a turn, so build it once."""
+        if self._definitions is None:
+            self._definitions = self._build_definitions()
+            self._by_name = {item.name: item for item in self._definitions}
+        return self._definitions
+
     def schemas(self) -> list[dict[str, Any]]:
         return [item.schema() for item in self.definitions()]
 
     def resolve(self, name: str) -> ToolDefinition:
-        for item in self.definitions():
-            if item.name == name:
-                return item
-        raise AgentToolError(f"Unknown tool '{name}'.")
+        self.definitions()
+        definition = self._by_name.get(name)
+        if definition is None:
+            raise AgentToolError(f"Unknown tool '{name}'.")
+        return definition
 
     # -- execution ------------------------------------------------------
 
@@ -351,7 +360,11 @@ class AgentToolset:
         payload.setdefault("tool_kind", definition.kind)
         if truncated:
             payload["truncated"] = True
-            content += "\n\n[output truncated]"
+            content += (
+                f"\n\n[output truncated at {MAX_TOOL_RESULT_CHARS} characters — "
+                "narrow the request instead of repeating it: use read_file with offset/limit, "
+                "search_files with a tighter pattern, or a command that prints less]"
+            )
         return ToolOutcome("succeeded", str(result.get("summary", f"{name} concluído"))[:240], content, payload)
 
     # -- handlers -------------------------------------------------------
@@ -656,19 +669,6 @@ class AgentToolset:
         if self._delegate is None:
             raise AgentToolError("Subagents are not available.")
         return self._delegate(str(name), str(task))
-
-
-def activity_for(kind: str, status: str) -> AgentActivityEventType:
-    """Map a tool family to the public event the UI groups on."""
-    if status != "succeeded":
-        return AgentActivityEventType.TOOL_FINISHED
-    return {
-        "filesystem": AgentActivityEventType.TOOL_FINISHED,
-        "terminal": AgentActivityEventType.TOOL_FINISHED,
-        "web": AgentActivityEventType.TOOL_FINISHED,
-        "memory": AgentActivityEventType.TOOL_FINISHED,
-        "skill": AgentActivityEventType.TOOL_FINISHED,
-    }.get(kind, AgentActivityEventType.TOOL_FINISHED)
 
 
 def parse_arguments(raw: object) -> dict[str, Any]:
