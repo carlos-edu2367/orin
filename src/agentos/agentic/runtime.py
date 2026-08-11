@@ -14,6 +14,11 @@ from .provider_stream import NormalizedStreamItem, StreamKind
 
 MAX_PARALLEL_TOOLS = 4
 
+# Sentinel distinguishing "no pin resolved yet" from "resolved, and there is
+# no user message to pin." Used only as the default for the ``_pinned_index``
+# instance attribute, which ``run`` sets once per turn.
+_PIN_UNSET = object()
+
 CLOSING_INSTRUCTION = (
     "You have reached this turn's action budget. Do not request any more tools. "
     "Answer now with what you already accomplished, state plainly what is still missing, "
@@ -82,6 +87,14 @@ class AgenticTurnRuntime:
         messages = list(self.store.history_for_turn(turn))
         action_count = 0
         self._failed_signatures: dict[str, str] = {}
+        # ``history_for_turn`` returns the whole conversation up to and
+        # including this turn's request, so the current request is always the
+        # last user message in this pre-loop snapshot. Resolving it once here
+        # -- instead of re-deriving "the last user message" from the growing
+        # ``messages`` list on every iteration -- keeps the pin from drifting
+        # onto a later tool-result message (Anthropic emits those with
+        # ``role: "user"`` too) as the loop appends to ``messages`` below.
+        self._pinned_index = self._last_user_index(messages)
         provider_retries = 0
         total_tokens = 0
         total_cost = Decimal("0")
@@ -229,35 +242,116 @@ class AgenticTurnRuntime:
     def _request_messages(self, messages: list[dict[str, object]]) -> list[dict[str, object]]:
         """Keep the most recent exchange within budget without losing the ask.
 
-        Dropping by message count loses the user's original request first, which
-        is exactly the message the agent needs to still be working on. The first
-        user message is pinned and the rest of the budget goes to the newest
-        messages.
+        Dropping by message count loses the user's current request first, which
+        is exactly the message the agent needs to still be working on. The pin
+        is normally resolved once by ``run`` (see ``self._pinned_index``) before
+        the loop starts, so it can never drift onto a later tool-result message
+        that also carries ``role: "user"`` (the Anthropic shape) as ``messages``
+        grows. When called without ``run`` having set it -- e.g. directly in a
+        test -- the pin falls back to the last real user message in the list
+        given, still excluding tool-result-shaped ones.
+
+        A tool-calling assistant message and the tool-result messages that
+        answer it are packed as one atomic unit: either both survive the cut or
+        both are dropped, so a trim can never orphan a tool result whose call
+        was evicted (both providers reject that shape).
         """
         budget = self.limits.max_context_tokens
-        pinned_index = next((index for index, item in enumerate(messages) if item.get("role") == "user"), None)
+        pinned_index = getattr(self, "_pinned_index", _PIN_UNSET)
+        if pinned_index is _PIN_UNSET:
+            pinned_index = self._last_user_index(messages)
         pinned = messages[pinned_index] if pinned_index is not None else None
         available = budget - (self._estimated_tokens(pinned) if pinned is not None else 0)
-        tail: list[dict[str, object]] = []
-        for index in range(len(messages) - 1, -1, -1):
-            if index == pinned_index:
+        kept: set[int] = {pinned_index} if pinned_index is not None else set()
+        for unit in reversed(self._group_tool_units(messages)):
+            if pinned_index is not None and pinned_index in unit:
                 continue
-            cost = self._estimated_tokens(messages[index])
+            cost = sum(self._estimated_tokens(messages[index]) for index in unit)
             if cost > available:
                 break
             available -= cost
-            tail.append(messages[index])
-        tail.reverse()
-        omitted = len(messages) - len(tail) - (1 if pinned is not None else 0)
-        window: list[dict[str, object]] = []
-        if pinned is not None:
-            window.append(pinned)
+            kept.update(unit)
+        ordered_kept = sorted(kept)
+        omitted = len(messages) - len(ordered_kept)
+        marker = None
         if omitted > 0:
-            window.append({"role": "system", "content": f"[{omitted} earlier messages omitted to stay within the context budget; re-read files or re-run searches if you need their content]"})
-        window.extend(tail)
+            marker = {"role": "system", "content": f"[{omitted} earlier messages omitted to stay within the context budget; re-read files or re-run searches if you need their content]"}
+        window: list[dict[str, object]] = []
+        previous = -1
+        marker_inserted = False
+        for index in ordered_kept:
+            if marker is not None and not marker_inserted and index != previous + 1:
+                window.append(marker)
+                marker_inserted = True
+            window.append(messages[index])
+            previous = index
+        if marker is not None and not marker_inserted:
+            window.append(marker)
         if not self.system_prompt:
             return window
         return [{"role": "system", "content": self.system_prompt}, *window]
+
+    @classmethod
+    def _last_user_index(cls, messages: list[dict[str, object]]) -> int | None:
+        """Index of the most recent real user request, ignoring tool results.
+
+        Anthropic tool-result messages also carry ``role: "user"``; a naive
+        "last user message" search would match those as the loop appends them.
+        """
+        return next(
+            (
+                index for index in range(len(messages) - 1, -1, -1)
+                if messages[index].get("role") == "user" and not cls._is_tool_result_message(messages[index])
+            ),
+            None,
+        )
+
+    @classmethod
+    def _group_tool_units(cls, messages: list[dict[str, object]]) -> list[list[int]]:
+        """Group each tool-calling assistant message with the results answering it.
+
+        Covers both provider shapes: OpenAI's assistant message carries
+        ``tool_calls`` and results are ``role: "tool"``; Anthropic's assistant
+        message has list content with ``tool_use`` blocks and results are
+        ``role: "user"`` messages with list content carrying ``tool_result``
+        blocks. Every other message is its own single-message unit.
+        """
+        units: list[list[int]] = []
+        index = 0
+        total = len(messages)
+        while index < total:
+            unit = [index]
+            if cls._is_tool_call_message(messages[index]):
+                follow = index + 1
+                while follow < total and cls._is_tool_result_message(messages[follow]):
+                    unit.append(follow)
+                    follow += 1
+                index = follow
+            else:
+                index += 1
+            units.append(unit)
+        return units
+
+    @staticmethod
+    def _is_tool_call_message(message: Mapping[str, object]) -> bool:
+        if message.get("role") != "assistant":
+            return False
+        if message.get("tool_calls"):
+            return True
+        content = message.get("content")
+        if isinstance(content, list):
+            return any(isinstance(block, Mapping) and block.get("type") == "tool_use" for block in content)
+        return False
+
+    @staticmethod
+    def _is_tool_result_message(message: Mapping[str, object]) -> bool:
+        if message.get("role") == "tool":
+            return True
+        if message.get("role") == "user":
+            content = message.get("content")
+            if isinstance(content, list):
+                return any(isinstance(block, Mapping) and block.get("type") == "tool_result" for block in content)
+        return False
 
     @staticmethod
     def _maximum_plausible_input_tokens(request: Mapping[str, object]) -> int:
