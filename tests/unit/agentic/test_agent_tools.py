@@ -77,6 +77,32 @@ def test_browse_page_redacts_url_credentials_queries_and_secret_like_page_text(t
     assert "visible content" in outcome.content
 
 
+@pytest.mark.parametrize(
+    ("page", "secret_fragments"),
+    (
+        ("<p>Authorization: Bearer bearer-secret-123</p><p>ordinary prose remains</p>", ("bearer-secret-123",)),
+        ("<p>api_key = super secret-value-456</p><p>ordinary prose remains</p>", ("super secret-value-456", "secret-value-456")),
+        ("<pre>-----BEGIN PRIVATE KEY-----\\nMIIE-secret-material\\n-----END PRIVATE KEY-----</pre><p>ordinary prose remains</p>", ("MIIE-secret-material", "BEGIN PRIVATE KEY", "END PRIVATE KEY")),
+        ("<p>Unlabelled eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.signature-secret-value</p><p>ordinary prose remains</p>", ("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.signature-secret-value",)),
+    ),
+)
+def test_browse_page_redacts_common_rendered_secret_forms(tmp_path, page: str, secret_fragments: tuple[str, ...]) -> None:
+    class Browser:
+        def render(self, url):
+            return f"<html><head><title>{page}</title></head><body>{page}</body></html>"
+
+    outcome = AgentToolset(ConversationWorkspace(tmp_path, "chat_browser_secret_forms"), browser=Browser()).invoke(
+        "browse_page", {"url": "https://example.test/public"}
+    )
+
+    assert outcome.status == "succeeded"
+    for fragment in secret_fragments:
+        assert fragment not in outcome.summary
+        assert fragment not in outcome.content
+        assert fragment not in repr(outcome.payload)
+    assert "ordinary prose remains" in outcome.content
+
+
 def test_web_search_returns_titles_and_urls_to_the_model(tmp_path) -> None:
     from agentos.agentic.web_search import SearchResult
 

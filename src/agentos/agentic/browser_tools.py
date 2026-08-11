@@ -32,9 +32,11 @@ from agentos.browser.models import (
 BROWSER_TIMEOUT = timedelta(seconds=30)
 MAX_DOM_BYTES = 2_000_000
 MAX_SCREENSHOT_BYTES = 4_000_000
-_SENSITIVE_PAGE_VALUE = re.compile(
-    r"(?i)([\"']?\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|password|secret|authorization|cookie|credential)\b[\"']?\s*[:=]\s*[\"']?)([^,\s<>\"'}]+)"
-)
+_SENSITIVE_NAME = r"(?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|password|secret|authorization|cookie|credential)"
+_PRIVATE_KEY_BLOCK = re.compile(r"-----BEGIN [^-]*PRIVATE KEY-----.*?-----END [^-]*PRIVATE KEY-----", re.IGNORECASE | re.DOTALL)
+_AUTHORIZATION_VALUE = re.compile(rf"(?i)(\bauthorization\b\s*[:=]\s*)(?:bearer\s+)?[^\r\n,.;!?]+")
+_SENSITIVE_ASSIGNMENT = re.compile(rf"(?i)([\"']?\b{_SENSITIVE_NAME}\b[\"']?\s*[:=]\s*)[^\r\n,.;!?]+")
+_JWT_VALUE = re.compile(r"(?<![A-Za-z0-9_-])(eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,})(?![A-Za-z0-9_-])")
 
 
 def _safe_display_url(value: str) -> str:
@@ -49,7 +51,10 @@ def _safe_display_url(value: str) -> str:
 
 
 def sanitize_page_text(value: str) -> str:
-    return _SENSITIVE_PAGE_VALUE.sub(r"\1[REDACTED]", value)
+    value = _PRIVATE_KEY_BLOCK.sub("[REDACTED PRIVATE KEY]", value)
+    value = _AUTHORIZATION_VALUE.sub(r"\1[REDACTED]", value)
+    value = _SENSITIVE_ASSIGNMENT.sub(r"\1[REDACTED]", value)
+    return _JWT_VALUE.sub("[REDACTED TOKEN]", value)
 
 
 class _MemorySink:
