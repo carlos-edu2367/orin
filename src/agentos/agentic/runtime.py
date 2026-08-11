@@ -484,7 +484,7 @@ class AgenticTurnRuntime:
         results: list[dict[str, object]] = []
         for index, (call_id, name, arguments, error) in enumerate(prepared):
             if error is not None:
-                self._life(turn, "tool_finished", tool_name=name, invocation_id=call_id, status="failed", summary=error, error_code="INVALID_ARGUMENTS")
+                self._life(turn, "tool_finished", tool_name=name, invocation_id=call_id, status="failed", summary=error, error_code="INVALID_ARGUMENTS", tool_arguments={})
                 results.append({"id": call_id, "name": name, "status": "failed", "content": error})
                 continue
             outcome = outcomes.get(index) or self.toolset.invoke(name, arguments)
@@ -493,6 +493,7 @@ class AgenticTurnRuntime:
             self._life(
                 turn, "tool_finished", tool_name=name, invocation_id=call_id, status=outcome.status,
                 summary=outcome.summary, error_code=outcome.error_code, tool_payload=dict(outcome.payload),
+                tool_arguments=dict(arguments),
             )
             results.append({"id": call_id, "name": name, "status": outcome.status, "content": outcome.content})
         return results

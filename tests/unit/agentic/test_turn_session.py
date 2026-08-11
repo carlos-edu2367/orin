@@ -33,6 +33,7 @@ class RecordingStore:
         self.deltas: list[str] = []
         self.finished: list[tuple[bool, str | None]] = []
         self.activity: list[tuple[AgentActivityEventType, str, dict, str | None]] = []
+        self.tool_records: list[dict[str, object]] = []
 
     def load(self, turn_id: str) -> dict:
         return TURN
@@ -51,6 +52,9 @@ class RecordingStore:
 
     def main_agent_id(self, turn) -> str:
         return f"agent:{turn['conversation_id']}:main"
+
+    def record_tool_call(self, turn, *, tool_name, arguments, status, summary) -> None:
+        self.tool_records.append({"tool_name": tool_name, "arguments": arguments, "status": status, "summary": summary})
 
     def types(self) -> list[str]:
         return [item[0].value for item in self.activity]
@@ -203,6 +207,21 @@ def test_tool_activity_is_published_for_the_ui(tmp_path: Path) -> None:
     artifact = next(item for item in store.activity if item[0] is AgentActivityEventType.ARTIFACT_CREATED)
     assert artifact[2]["path"] == "a.txt"
     assert artifact[2]["size_bytes"] == 1
+
+
+def test_every_finished_tool_is_recorded_in_the_ledger(tmp_path: Path) -> None:
+    session, store, _agents, _provider = build(tmp_path, [
+        tool_call("call-1", "write_file", '{"path": "a.txt", "content": "x"}'),
+        tool_call("call-2", "read_file", '{"path": "missing.txt"}'),
+        text("feito"),
+    ])
+
+    session.build_runtime().run("turn-1")
+
+    assert [(item["tool_name"], item["status"]) for item in store.tool_records] == [
+        ("write_file", "succeeded"),
+        ("read_file", "failed"),
+    ]
 
 
 def test_a_failing_tool_is_reported_without_killing_the_turn(tmp_path: Path) -> None:
@@ -379,6 +398,24 @@ def test_the_prompt_lists_remembered_facts() -> None:
 
     assert "Carlos" in prompt
     assert "remember" in prompt
+
+
+def test_the_system_prompt_lists_what_the_agent_already_did() -> None:
+    prompt = build_system_prompt(
+        tool_names=("read_file",), memories=[], agents=[], workspace_hint="hint",
+        subagents_enabled=False,
+        tool_ledger=({"tool_name": "write_file", "arguments": '{"path": "report.md"}', "status": "succeeded", "summary": "Escreveu report.md"},),
+    )
+
+    assert "What you already did in this conversation" in prompt
+    assert "write_file" in prompt
+    assert "report.md" in prompt
+
+
+def test_the_ledger_section_is_absent_when_nothing_was_done() -> None:
+    prompt = build_system_prompt(tool_names=("read_file",), memories=[], agents=[], workspace_hint="hint", subagents_enabled=False)
+
+    assert "What you already did" not in prompt
 
 
 def test_omniroute_records_only_the_requested_route_for_observability(tmp_path: Path) -> None:

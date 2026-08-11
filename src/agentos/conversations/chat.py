@@ -163,6 +163,24 @@ class PostgresChatStore:
             except Exception:
                 return
 
+    def tool_ledger(self, turn: Mapping[str, object], *, limit: int = 20) -> list[dict[str, str]]:
+        """The most recent tool steps of this conversation, oldest first."""
+        bounded = max(1, min(int(limit), 50))
+        with self._engine.connect() as connection:
+            rows = connection.execute(
+                select(
+                    conversation_tool_records.c.tool_name, conversation_tool_records.c.arguments,
+                    conversation_tool_records.c.status, conversation_tool_records.c.summary,
+                )
+                .where(conversation_tool_records.c.conversation_id == turn["conversation_id"])
+                .order_by(conversation_tool_records.c.sequence.desc())
+                .limit(bounded)
+            ).mappings().all()
+        return [
+            {"tool_name": str(row["tool_name"]), "arguments": str(row["arguments"]), "status": str(row["status"]), "summary": str(row["summary"])}
+            for row in reversed(rows)
+        ]
+
     @staticmethod
     def main_agent_id(turn: Mapping[str, object]) -> str:
         # Stable across turns so the conversation-level graph keeps one root node.

@@ -47,6 +47,7 @@ def build_system_prompt(
     workspace_hint: str,
     subagents_enabled: bool,
     skill_catalog: tuple[object, ...] = (),
+    tool_ledger: tuple[Mapping[str, str], ...] = (),
 ) -> str:
     lines = [
         "You are the main agent of AgentOS, a local-first agent workspace running on the user's own machine.",
@@ -85,6 +86,16 @@ def build_system_prompt(
     if agents:
         roster = "; ".join(f"{item['name']} ({item['role']})" for item in agents[:8])
         lines += [f"- Subagents that already exist in this conversation: {roster}."]
+    if tool_ledger:
+        lines += [
+            "",
+            "## What you already did in this conversation",
+            "These steps already happened. Do not repeat them just to see their result — read the file again only if you expect it to have changed.",
+        ]
+        lines += [
+            f"- {item['tool_name']}({item['arguments'][:120]}) → {item['status']}: {item['summary'][:120]}"
+            for item in tool_ledger
+        ]
     if memories:
         lines += ["", "## What you remember about this user"]
         lines += [f"- {item['fact']}" for item in memories[:12]]
@@ -238,6 +249,15 @@ class TurnSession:
                 "invocation_id": str(payload.get("invocation_id") or ""),
                 "error_code": payload.get("error_code"),
             }, agent_id=actor)
+            ledger = getattr(self.store, "record_tool_call", None)
+            if callable(ledger):
+                try:
+                    ledger(
+                        self.turn, tool_name=name, arguments=dict(payload.get("tool_arguments") or {}),
+                        status=status, summary=summary,
+                    )
+                except Exception:
+                    pass
             if status == "succeeded":
                 artifacts = extra.get("artifacts")
                 if isinstance(artifacts, list):
@@ -397,6 +417,14 @@ class TurnSession:
         toolset = self._toolset(subagents=self.enable_subagents)
         memories = self.memory.recent(limit=12) if self.memory is not None else []
         agents = self.agents_store.list() if self.agents_store is not None else []
+        reader = getattr(self.store, "tool_ledger", None)
+        if callable(reader):
+            try:
+                ledger = tuple(reader(self.turn, limit=20))
+            except Exception:
+                ledger = ()
+        else:
+            ledger = ()
         history = self.store.history_for_turn(self.turn)
         task = next((str(item.get("content") or "") for item in reversed(history) if item.get("role") == "user"), "")
         prompt = build_system_prompt(
@@ -406,6 +434,7 @@ class TurnSession:
             workspace_hint="It starts empty unless a previous turn created files.",
             subagents_enabled=self.enable_subagents,
             skill_catalog=self._skill_catalog(task, toolset),
+            tool_ledger=ledger,
         )
         # OmniRoute's public OpenAI-compatible response does not guarantee the
         # selected upstream/provider. Record the requested route only; never

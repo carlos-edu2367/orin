@@ -63,3 +63,12 @@ def test_recording_swallows_insert_failures(store: PostgresChatStore, monkeypatc
     monkeypatch.setattr(store._engine, "begin", fail_begin)
 
     store.record_tool_call(_turn(), tool_name="write_file", arguments={"path": "a.md"}, status="succeeded", summary="ok")
+
+
+def test_the_ledger_returns_recent_entries_in_chronological_order(store: PostgresChatStore) -> None:
+    for index in range(5):
+        store.record_tool_call(_turn(), tool_name=f"tool_{index}", arguments={}, status="succeeded", summary=f"passo {index}")
+
+    ledger = store.tool_ledger(_turn(), limit=3)
+
+    assert [item["tool_name"] for item in ledger] == ["tool_2", "tool_3", "tool_4"]
