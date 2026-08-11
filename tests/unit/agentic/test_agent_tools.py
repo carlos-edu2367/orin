@@ -107,6 +107,34 @@ def test_web_search_no_results_redacts_the_query_from_summary_and_label(tmp_path
     assert secret not in repr(outcome.payload)
 
 
+def test_web_search_redactor_failures_use_a_fixed_safe_error(tmp_path) -> None:
+    from agentos.agentic.web_search import SearchResult
+
+    secret = "redactor-secret-999"
+
+    class ExplodingSearcher:
+        def search(self, query, *, limit=5):
+            return [SearchResult("title", "https://example.test/a", "snippet")]
+
+        def redact_text(self, value):
+            raise RuntimeError(secret)
+
+    tools = AgentToolset(
+        ConversationWorkspace(tmp_path, "chat_search_redactor_error"),
+        search_client=ExplodingSearcher(),
+    )
+
+    outcome = tools.invoke("web_search", {"query": "orin"})
+
+    assert outcome.status == "failed"
+    assert outcome.content == "The search provider returned an invalid response."
+    assert outcome.summary == "The search provider returned an invalid response."
+    assert outcome.payload == {"tool_kind": "web"}
+    assert secret not in outcome.content
+    assert secret not in outcome.summary
+    assert secret not in repr(outcome.payload)
+
+
 def test_edit_file_replaces_a_unique_text_fragment_without_rewriting_the_document(toolset: AgentToolset) -> None:
     toolset.invoke("write_file", {"path": "notes/plan.md", "content": "first\nsecond\nthird\n"})
 
