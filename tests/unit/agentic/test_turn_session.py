@@ -220,6 +220,46 @@ def test_the_per_turn_subagent_budget_still_applies_to_a_batch() -> None:
     assert outcome.error_code == "SUBAGENT_LIMIT"
 
 
+def test_a_worker_exception_is_reported_without_discarding_other_batch_results() -> None:
+    from agentos.agentic.agent_tools import ToolOutcome
+
+    session = _session_with_two_subagents()
+
+    def ask_agent(name: str, task: str) -> ToolOutcome:
+        if name == "Pesquisador":
+            raise RuntimeError("provider unavailable")
+        return ToolOutcome("succeeded", "Redator concluiu", "Redator result", {"agent_name": name})
+
+    session._ask_agent = ask_agent
+
+    outcome = session._ask_agents([{"name": "Pesquisador", "task": "a"}, {"name": "Redator", "task": "b"}])
+
+    assert outcome.status == "failed"
+    assert outcome.error_code == "SUBAGENT_FAILED"
+    assert "Pesquisador" in outcome.content
+    assert "Redator result" in outcome.content
+
+
+def test_a_mixed_batch_reports_success_and_failure_as_failed() -> None:
+    from agentos.agentic.agent_tools import ToolOutcome
+
+    session = _session_with_two_subagents()
+
+    def ask_agent(name: str, task: str) -> ToolOutcome:
+        if name == "Pesquisador":
+            return ToolOutcome("failed", "Pesquisador falhou", "Pesquisador failure", {"agent_name": name}, "SUBAGENT_FAILED")
+        return ToolOutcome("succeeded", "Redator concluiu", "Redator result", {"agent_name": name})
+
+    session._ask_agent = ask_agent
+
+    outcome = session._ask_agents([{"name": "Pesquisador", "task": "a"}, {"name": "Redator", "task": "b"}])
+
+    assert outcome.status == "failed"
+    assert outcome.error_code == "SUBAGENT_FAILED"
+    assert "Pesquisador failure" in outcome.content
+    assert "Redator result" in outcome.content
+
+
 def test_a_subagent_gets_the_same_output_budget_as_the_main_agent() -> None:
     from agentos.agentic.session import SUBAGENT_MAX_OUTPUT_TOKENS
 

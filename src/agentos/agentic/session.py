@@ -444,17 +444,32 @@ class TurnSession:
             pending.append((str(item["name"]), str(item["task"])))
         if len(pending) == 1:
             return self._ask_agent(*pending[0])
+
+        def run_request(entry: tuple[str, str]) -> ToolOutcome:
+            name, task = entry
+            try:
+                return self._ask_agent(name, task)
+            except Exception as error:
+                return ToolOutcome(
+                    "failed",
+                    f"{name} não concluiu",
+                    f"Subagent '{name}' failed unexpectedly ({type(error).__name__}: {error}).",
+                    {"agent_name": name, "tool_kind": "agent"},
+                    "SUBAGENT_EXCEPTION",
+                )
+
         with ThreadPoolExecutor(max_workers=min(len(pending), MAX_SUBAGENTS_PER_TURN)) as pool:
-            outcomes = list(pool.map(lambda entry: self._ask_agent(entry[0], entry[1]), pending))
-        succeeded = [outcome for outcome in outcomes if outcome.status == "succeeded"]
+            outcomes = list(pool.map(run_request, pending))
+        failures = [outcome for outcome in outcomes if outcome.status != "succeeded"]
+        succeeded_count = len(outcomes) - len(failures)
         body = "\n\n---\n\n".join(f"{name}:\n{outcome.content}" for (name, _), outcome in zip(pending, outcomes))
-        status = "succeeded" if succeeded else "failed"
+        status = "failed" if failures else "succeeded"
         return ToolOutcome(
             status,
-            f"{len(succeeded)}/{len(outcomes)} subagentes concluíram",
+            f"{succeeded_count}/{len(outcomes)} subagentes concluíram",
             body,
-            {"tool_kind": "agent", "label": ", ".join(name for name, _ in pending)[:120], "requested": len(outcomes), "succeeded": len(succeeded)},
-            None if succeeded else "SUBAGENT_LIMIT" if all(item.error_code == "SUBAGENT_LIMIT" for item in outcomes) else "SUBAGENT_FAILED",
+            {"tool_kind": "agent", "label": ", ".join(name for name, _ in pending)[:120], "requested": len(outcomes), "succeeded": succeeded_count},
+            None if not failures else "SUBAGENT_LIMIT" if all(item.error_code == "SUBAGENT_LIMIT" for item in failures) else "SUBAGENT_FAILED",
         )
 
     def _subagent_task(self, record: Mapping[str, object], task: str) -> str:
