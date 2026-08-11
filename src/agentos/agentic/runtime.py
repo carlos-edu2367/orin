@@ -208,8 +208,21 @@ class AgenticTurnRuntime:
                         return self._fail(turn, "MALFORMED_OR_DUPLICATE_TOOL_CALL", iteration, action_count)
                     action_count = batch.count
                     results = list(batch.results)
-                    for result in results:
-                        self._life(turn, "tool_finished", status=result["status"], result_ref=result.get("result_ref"))
+                    for call, result in zip(calls.values(), results):
+                        try:
+                            arguments = json.loads(call.get("arguments") or "{}")
+                        except (TypeError, json.JSONDecodeError):
+                            arguments = {}
+                        if not isinstance(arguments, Mapping):
+                            arguments = {}
+                        name = str(call.get("name") or "tool")
+                        status = str(result.get("status") or "failed")
+                        self._life(
+                            turn, "tool_finished", tool_name=name, invocation_id=str(call.get("id") or ""),
+                            status=status, summary=str(result.get("summary") or f"{name} {status}"),
+                            error_code=result.get("error_code"), result_ref=result.get("result_ref"),
+                            tool_arguments=dict(arguments),
+                        )
                 messages.append(self._assistant_tool_message(turn, text_parts, calls))
                 messages.extend(self._tool_result_message(turn, result) for result in results)
                 self._age_tool_results(messages, keep_recent=len(results))

@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from agentos.agentic.action_loop import ActionLoop
 from agentos.agentic.events import AgentActivityEventType
 from agentos.agentic.provider_stream import NormalizedStreamItem, StreamKind
 from agentos.agentic.runtime import AgenticLimits
@@ -222,6 +224,50 @@ def test_every_finished_tool_is_recorded_in_the_ledger(tmp_path: Path) -> None:
         ("write_file", "succeeded"),
         ("read_file", "failed"),
     ]
+
+
+def test_legacy_actions_path_records_the_call_identity_in_the_ledger(tmp_path: Path) -> None:
+    class LegacyRegistry:
+        descriptor = SimpleNamespace(
+            name="lookup",
+            description="Look up a value",
+            input_schema={
+                "type": "object",
+                "properties": {"q": {"type": "string"}},
+                "required": ["q"],
+                "additionalProperties": False,
+            },
+            tool_ref=SimpleNamespace(tool_id="lookup", version=1),
+        )
+
+        def list(self, _context):
+            return (self.descriptor,)
+
+        def resolve(self, _name, _context):
+            return self.descriptor
+
+    class LegacyToolRuntime:
+        def invoke(self, _request):
+            return SimpleNamespace(result_ref="result:1")
+
+    session, store, _agents, _provider = build(tmp_path, [
+        tool_call("call-legacy", "lookup", '{"q": "safe"}'),
+        text("feito"),
+    ])
+    runtime = session.build_runtime()
+    runtime.toolset = None
+    runtime.actions = ActionLoop(LegacyRegistry(), LegacyToolRuntime())
+
+    runtime.run("turn-1")
+
+    assert store.tool_records == [{
+        "tool_name": "lookup",
+        "arguments": {"q": "safe"},
+        "status": "succeeded",
+        "summary": "lookup succeeded",
+    }]
+    finished = next(item for item in store.activity if item[0] is AgentActivityEventType.TOOL_FINISHED)
+    assert finished[2]["invocation_id"] == "call-legacy"
 
 
 def test_a_failing_tool_is_reported_without_killing_the_turn(tmp_path: Path) -> None:
