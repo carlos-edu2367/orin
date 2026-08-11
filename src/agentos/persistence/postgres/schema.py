@@ -528,6 +528,18 @@ conversation_turns = Table(
 )
 Index("ix_conversation_turns_conversation", conversation_turns.c.conversation_id, conversation_turns.c.created_at)
 
+conversation_tool_records = Table(
+    "conversation_tool_records", metadata,
+    Column("id", Integer, primary_key=True), Column("record_id", String(255), nullable=False, unique=True),
+    Column("conversation_id", String(255), nullable=False), Column("turn_id", String(255), nullable=False),
+    Column("user_id", String(255), nullable=False), Column("sequence", Integer, nullable=False),
+    Column("tool_name", String(64), nullable=False), Column("arguments", String(1000), nullable=False),
+    Column("status", String(16), nullable=False), Column("summary", String(512), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    UniqueConstraint("conversation_id", "sequence", name="uq_conversation_tool_record_sequence"),
+)
+Index("ix_conversation_tool_records_conversation", conversation_tool_records.c.conversation_id, conversation_tool_records.c.sequence)
+
 conversation_dispatches = Table(
     "conversation_dispatches", metadata,
     Column("id", Integer, primary_key=True), Column("turn_id", String(255), nullable=False, unique=True), Column("state", String(32), nullable=False),

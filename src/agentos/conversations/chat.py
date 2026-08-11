@@ -1,6 +1,7 @@
 """Durable public conversation application service and worker-facing store."""
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -9,12 +10,13 @@ from uuid import uuid4
 
 from sqlalchemy import func, insert, select, update
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import IntegrityError
 
 from agentos.api.contracts import ApplicationNotFoundError
 from agentos.api.events import CursorError
 from agentos.agentic.events import AgentActivityEvent, AgentActivityEventType
 from agentos.persistence.postgres.agentic_activity import ActivityCursorError
-from agentos.persistence.postgres.schema import (conversation_activity_events, conversation_agent_usage, conversation_agents, conversation_dispatches, conversation_events, conversation_messages, conversations, conversation_turns, projects, runtime_heartbeats)
+from agentos.persistence.postgres.schema import (conversation_activity_events, conversation_agent_usage, conversation_agents, conversation_dispatches, conversation_events, conversation_messages, conversation_tool_records, conversation_turns, conversations, projects, runtime_heartbeats)
 
 
 def _id(prefix: str) -> str: return f"{prefix}_{uuid4().hex}"
@@ -125,6 +127,38 @@ class PostgresChatStore:
                 select(func.max(conversation_activity_events.c.sequence)).where(conversation_activity_events.c.turn_id == turn_id)
             ).scalar()
         return int(current or 0) + 1
+
+    def record_tool_call(self, turn: Mapping[str, object], *, tool_name: str, arguments: Mapping[str, object], status: str, summary: str) -> None:
+        """Append one line to the conversation's durable tool ledger.
+
+        This is a projection, exactly like the activity log: it must never be
+        able to roll back or fail the turn it is describing.
+        """
+        try:
+            rendered = json.dumps(arguments, ensure_ascii=False, sort_keys=True, default=str)[:1000]
+        except (TypeError, ValueError):
+            rendered = str(arguments)[:1000]
+        now = datetime.now(UTC)
+        for _ in range(6):
+            try:
+                with self._engine.connect() as connection:
+                    current = connection.execute(
+                        select(func.max(conversation_tool_records.c.sequence)).where(conversation_tool_records.c.conversation_id == turn["conversation_id"])
+                    ).scalar()
+                sequence = int(current or 0) + 1
+                with self._engine.begin() as connection:
+                    connection.execute(insert(conversation_tool_records).values(
+                        record_id=f"tool:{turn['conversation_id']}:{sequence}",
+                        conversation_id=str(turn["conversation_id"]), turn_id=str(turn["turn_id"]),
+                        user_id=str(turn["user_id"]), sequence=sequence, tool_name=str(tool_name)[:64],
+                        arguments=rendered, status=str(status)[:16], summary=str(summary)[:512] or str(tool_name)[:512],
+                        created_at=now,
+                    ))
+                return
+            except IntegrityError:
+                continue
+            except Exception:
+                return
 
     @staticmethod
     def main_agent_id(turn: Mapping[str, object]) -> str:
