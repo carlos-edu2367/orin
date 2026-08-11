@@ -51,3 +51,26 @@ def test_search_rejects_an_invalid_regular_expression(workspace: ConversationWor
 def test_search_rejects_a_glob_that_tries_to_escape_the_workspace(workspace: ConversationWorkspace) -> None:
     with pytest.raises(WorkspaceError):
         workspace.search("anything", glob="../**/*")
+
+
+def test_read_lines_returns_a_window_and_the_total(workspace: ConversationWorkspace) -> None:
+    workspace.write_text("big.txt", "\n".join(f"line {index}" for index in range(1, 101)) + "\n")
+
+    lines, first, total, truncated = workspace.read_lines("big.txt", offset=10, limit=3)
+
+    assert lines == ["line 10", "line 11", "line 12"]
+    assert (first, total, truncated) == (10, 100, False)
+
+
+def test_read_lines_clamps_an_offset_past_the_end(workspace: ConversationWorkspace) -> None:
+    workspace.write_text("small.txt", "only\n")
+
+    lines, first, total, _ = workspace.read_lines("small.txt", offset=99)
+
+    assert lines == []
+    assert (first, total) == (99, 1)
+
+
+def test_read_lines_rejects_a_non_file(workspace: ConversationWorkspace) -> None:
+    with pytest.raises(WorkspaceError):
+        workspace.read_lines("missing.txt")

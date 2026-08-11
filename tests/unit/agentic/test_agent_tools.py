@@ -30,7 +30,10 @@ def test_edit_file_replaces_a_unique_text_fragment_without_rewriting_the_documen
     outcome = toolset.invoke("edit_file", {"path": "notes/plan.md", "old_text": "second", "new_text": "updated"})
 
     assert outcome.status == "succeeded"
-    assert toolset.invoke("read_file", {"path": "notes/plan.md"}).content == "first\nupdated\nthird\n"
+    content = toolset.invoke("read_file", {"path": "notes/plan.md"}).content
+    assert "     1\tfirst" in content
+    assert "     2\tupdated" in content
+    assert "     3\tthird" in content
 
 
 def test_edit_file_refuses_ambiguous_fragments(toolset: AgentToolset) -> None:
@@ -67,6 +70,25 @@ def test_failed_tools_report_the_reason_back_to_the_model(toolset: AgentToolset)
 
     assert outcome.status == "failed"
     assert "missing.md" in outcome.content
+
+
+def test_read_file_numbers_lines_and_paginates(toolset: AgentToolset) -> None:
+    toolset.invoke("write_file", {"path": "big.txt", "content": "\n".join(f"line {index}" for index in range(1, 51)) + "\n"})
+
+    outcome = toolset.invoke("read_file", {"path": "big.txt", "offset": 3, "limit": 2})
+
+    assert outcome.status == "succeeded"
+    assert "     3\tline 3" in outcome.content
+    assert "line 5" not in outcome.content
+    assert outcome.payload["total_lines"] == 50
+
+
+def test_read_file_tells_the_model_how_to_read_the_rest(toolset: AgentToolset) -> None:
+    toolset.invoke("write_file", {"path": "big.txt", "content": "\n".join(f"line {index}" for index in range(1, 51)) + "\n"})
+
+    outcome = toolset.invoke("read_file", {"path": "big.txt", "offset": 1, "limit": 2})
+
+    assert "offset=3" in outcome.content
 
 
 def test_list_files_reports_workspace_entries(toolset: AgentToolset) -> None:

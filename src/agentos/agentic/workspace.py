@@ -18,6 +18,7 @@ MAX_SNAPSHOT_FILES = 1_000
 MAX_SEARCH_RESULTS = 200
 MAX_SEARCH_FILE_BYTES = 2_000_000
 MAX_SEARCH_LINE_CHARS = 400
+MAX_READ_LINES = 800
 
 _SAFE_SEGMENT = re.compile(r"^[A-Za-z0-9._-]+$")
 _PROJECT_WORKSPACE_ID = re.compile(r"^workspace:[A-Za-z0-9._-]+$")
@@ -74,6 +75,19 @@ class ConversationWorkspace:
         data = target.read_bytes()[: MAX_READ_BYTES + 1]
         truncated = len(data) > MAX_READ_BYTES
         return data[:MAX_READ_BYTES].decode("utf-8", "replace"), truncated
+
+    def read_lines(self, path: str, *, offset: int = 1, limit: int = 400) -> tuple[list[str], int, int, bool]:
+        """Return a bounded line window plus the total, so the model can page.
+
+        ``read_text`` stays as the whole-file accessor used by ``edit_file``;
+        this is the accessor used by the model, which must be able to ask for
+        the part of a file it has not seen yet.
+        """
+        content, truncated = self.read_text(path)
+        lines = content.splitlines()
+        start = max(1, int(offset))
+        window = max(1, min(int(limit), MAX_READ_LINES))
+        return lines[start - 1: start - 1 + window], start, len(lines), truncated
 
     def write_text(self, path: str, content: str) -> int:
         if not isinstance(content, str):
@@ -171,6 +185,7 @@ class ConversationWorkspace:
 __all__ = [
     "ConversationWorkspace",
     "MAX_READ_BYTES",
+    "MAX_READ_LINES",
     "MAX_SEARCH_FILE_BYTES",
     "MAX_SEARCH_LINE_CHARS",
     "MAX_SEARCH_RESULTS",

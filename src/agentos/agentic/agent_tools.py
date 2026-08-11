@@ -201,8 +201,13 @@ class AgentToolset:
     def definitions(self) -> tuple[ToolDefinition, ...]:
         items: list[ToolDefinition] = [
             ToolDefinition(
-                "read_file", "Read a UTF-8 text file from the conversation workspace.",
-                _schema({"path": {**_TEXT, "description": "Workspace-relative path, e.g. notes/plan.md"}}, ("path",)),
+                "read_file",
+                "Read a UTF-8 text file from the conversation workspace. Output is line-numbered. Use offset/limit to read a long file in windows instead of guessing.",
+                _schema({
+                    "path": {**_TEXT, "description": "Workspace-relative path, e.g. notes/plan.md"},
+                    "offset": {"type": "integer", "minimum": 1, "description": "First line to return (1-based). Defaults to 1."},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 800, "description": "How many lines to return. Defaults to 400."},
+                }, ("path",)),
                 self.read_file, "filesystem",
             ),
             ToolDefinition(
@@ -337,12 +342,21 @@ class AgentToolset:
 
     # -- handlers -------------------------------------------------------
 
-    def read_file(self, path: str) -> dict[str, Any]:
-        content, truncated = self.workspace.read_text(path)
+    def read_file(self, path: str, offset: int = 1, limit: int = 400) -> dict[str, Any]:
+        lines, first, total, truncated = self.workspace.read_lines(path, offset=int(offset), limit=int(limit))
+        if not lines:
+            body = "[empty file]" if total == 0 else f"[no lines at offset {first}; the file has {total} lines]"
+        else:
+            body = "\n".join(f"{first + index:6}\t{line}" for index, line in enumerate(lines))
+        next_line = first + len(lines)
+        if lines and next_line <= total:
+            body += f"\n\n[{total - next_line + 1} more lines; continue with read_file(path=\"{path}\", offset={next_line})]"
+        if truncated:
+            body += "\n\n[file exceeds the workspace read limit; the tail was not loaded]"
         return {
             "summary": f"Leu {path}",
-            "content": content or "[empty file]",
-            "payload": {"path": path, "truncated": truncated, "label": path},
+            "content": body,
+            "payload": {"path": path, "first_line": first, "returned_lines": len(lines), "total_lines": total, "truncated": truncated, "label": path},
         }
 
     def write_file(self, path: str, content: str) -> dict[str, Any]:
