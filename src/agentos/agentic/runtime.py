@@ -364,6 +364,8 @@ class AgenticTurnRuntime:
 
     @classmethod
     def _compress(cls, text: str) -> str:
+        if "\n[compressed: " in text and text.endswith(" characters total; re-run the tool if you need the rest]"):
+            return text
         if len(text) <= AGED_TOOL_RESULT_CHARS:
             return text
         return f"{text[:AGED_TOOL_RESULT_CHARS]}\n[compressed: {len(text)} characters total; re-run the tool if you need the rest]"

@@ -149,3 +149,15 @@ def test_anthropic_tool_results_are_compressed_in_their_block_shape() -> None:
     AgenticTurnRuntime._age_tool_results(messages, keep_recent=0)
 
     assert "compressed" in messages[0]["content"][0]["content"]
+
+
+def test_aging_an_old_tool_result_again_keeps_original_compression_marker() -> None:
+    original = "old " * 500
+    messages = [{"role": "tool", "tool_call_id": "a", "content": original}]
+
+    AgenticTurnRuntime._age_tool_results(messages, keep_recent=0)
+    aged = messages[0]["content"]
+    AgenticTurnRuntime._age_tool_results(messages, keep_recent=0)
+
+    assert messages[0]["content"] == aged
+    assert "[compressed: 2000 characters total;" in aged

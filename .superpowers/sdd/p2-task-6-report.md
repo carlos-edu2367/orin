@@ -38,3 +38,21 @@ The required scoped suites are green. The full-unit command remains unable to co
 ## Commit
 
 `perf(agentic): compress tool results the model already read` (commit created after verification)
+
+## Round 1 review fix
+
+The reviewer found that an already-compressed result was selected again on
+each later tool batch. `_compress` now recognizes its own terminal compression
+marker and returns the existing payload unchanged, preserving both the aged
+prefix and the original source length in the pointer.
+
+Added regression coverage in
+`tests/unit/agentic/test_context_window.py` proving repeated aging is
+byte-for-byte stable and retains the original 2,000-character marker.
+
+Verification for this fix:
+
+- Focused aging tests — 3 passed, 7 deselected.
+- `uv run pytest tests/unit/agentic -q` — 98 passed, 2 skipped.
+- `uv run pytest tests/unit/agentic tests/unit/workers -q` — 102 passed, 2 skipped.
+- `git diff --check` — no whitespace errors.
