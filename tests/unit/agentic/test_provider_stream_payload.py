@@ -59,3 +59,11 @@ def test_anthropic_tool_choice_uses_its_own_shape() -> None:
     list(_transport("anthropic", captured).stream(request))
 
     assert captured[0]["tool_choice"] == {"type": "none"}
+
+
+def test_anthropic_required_tool_choice_is_canonicalized_to_any() -> None:
+    captured: list[dict] = []
+    request = {**_request(), "tool_choice": "required"}
+    list(_transport("anthropic", captured).stream(request))
+
+    assert captured[0]["tool_choice"] == {"type": "any"}

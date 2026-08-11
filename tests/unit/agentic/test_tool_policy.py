@@ -44,6 +44,20 @@ def test_a_policy_can_deny_a_whole_family_by_tag(tmp_path: Path) -> None:
     assert "read_file" in published
 
 
+def test_a_mutation_policy_hides_both_single_and_batch_delegation(tmp_path: Path) -> None:
+    tools = AgentToolset(
+        ConversationWorkspace(tmp_path, "chat_policy"),
+        delegate=lambda _name, _task: None,
+        delegate_batch=lambda _tasks: None,
+        policy=AllowList(denied=("tag:mutates",)),
+    )
+
+    published = [item.name for item in tools.definitions()]
+
+    assert "ask_agent" not in published
+    assert "ask_agents" not in published
+
+
 def test_no_policy_publishes_everything(tmp_path: Path) -> None:
     tools = AgentToolset(ConversationWorkspace(tmp_path, "chat_policy"))
 

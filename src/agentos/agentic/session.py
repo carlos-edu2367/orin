@@ -308,7 +308,7 @@ class TurnSession:
             if callable(ledger):
                 try:
                     tool_arguments = dict(payload.get("tool_arguments") or {})
-                    if name == "browse_page" and isinstance(tool_arguments.get("url"), str):
+                    if name in {"browse_page", "fetch_url"} and isinstance(tool_arguments.get("url"), str):
                         from .browser_tools import _safe_display_url
 
                         tool_arguments["url"] = _safe_display_url(str(tool_arguments["url"]))

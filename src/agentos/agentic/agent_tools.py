@@ -19,20 +19,22 @@ import json
 import os
 import re
 import shlex
+import socket
 import signal
 import subprocess
 from typing import Any, Callable, Mapping
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import httpx
 
-from .workspace import ConversationWorkspace, WorkspaceError
+from .workspace import MAX_LIST_DEPTH, ConversationWorkspace, WorkspaceError
 from .browser_tools import _safe_display_url, sanitize_page_text
 
 
 MAX_TOOL_RESULT_CHARS = 12_000
 COMMAND_TIMEOUT_SECONDS = 45
 FETCH_TIMEOUT_SECONDS = 25
+MAX_FETCH_REDIRECTS = 5
 
 # Commands that would damage the host rather than the workspace. This is a local
 # personal installation, so the goal is to stop an obviously catastrophic action
@@ -61,8 +63,9 @@ class ToolDefinition:
     handler: Callable[..., dict[str, Any]]
     # Drives the icon/label the UI shows for a grouped activity card.
     kind: str
-    # A read-only tool has no workspace or network side effect, so several of
-    # them may run at once without changing what any of them observes.
+    # A read-only tool does not mutate the workspace, so several of them may
+    # run at once without changing what any of them observes. Network reads
+    # remain subject to the public-network policy.
     read_only: bool = False
     # Coarse labels a policy can authorize or refuse as a family.
     policy_tags: tuple[str, ...] = ()
@@ -132,7 +135,7 @@ def _bounded(value: str, limit: int = MAX_TOOL_RESULT_CHARS) -> tuple[str, bool]
     return value[:limit], True
 
 
-def _public_url(url: str) -> str:
+def _public_url(url: str, *, resolve_dns: bool = False) -> str:
     parsed = urlparse(url.strip())
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         raise AgentToolError("Only absolute http(s) URLs can be fetched.")
@@ -142,6 +145,14 @@ def _public_url(url: str) -> str:
     try:
         address = ip_address(host)
     except ValueError:
+        if resolve_dns:
+            try:
+                records = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+            except OSError as error:
+                raise AgentToolError("The URL host could not be resolved safely.") from error
+            addresses = tuple(dict.fromkeys(str(record[4][0]) for record in records if record[4]))
+            if not addresses or any(not ip_address(item).is_global for item in addresses):
+                raise AgentToolError("Private network addresses cannot be fetched.")
         return url.strip()
     if address.is_private or address.is_loopback or address.is_link_local or address.is_reserved:
         raise AgentToolError("Private network addresses cannot be fetched.")
@@ -250,7 +261,7 @@ class AgentToolset:
                 "list_files", "List files and directories in the conversation workspace. Use depth to see a whole subtree in one call.",
                 _schema({
                     "path": {**_TEXT, "description": "Workspace-relative directory; omit for the root."},
-                    "depth": {"type": "integer", "minimum": 1, "maximum": 5, "description": "How many directory levels to descend. Defaults to 1."},
+                    "depth": {"type": "integer", "minimum": 1, "maximum": MAX_LIST_DEPTH, "description": "How many directory levels to descend. Defaults to 1."},
                 }),
                 self.list_files, "filesystem", read_only=True,
             ),
@@ -329,7 +340,7 @@ class AgentToolset:
                         "items": _schema({"name": _TEXT, "task": {**_TEXT, "description": "The complete instruction; the subagent cannot see this conversation."}}, ("name", "task")),
                     },
                 }, ("tasks",)),
-                self.ask_agents, "agent",
+                self.ask_agents, "agent", policy_tags=("mutates",),
             ))
         if self.skills is not None:
             items.extend((
@@ -402,8 +413,7 @@ class AgentToolset:
             message = f"{type(error).__name__}: {error}"
             return ToolOutcome("failed", f"{name} falhou", message[:MAX_TOOL_RESULT_CHARS], {"tool_kind": definition.kind}, "TOOL_FAILED")
         if isinstance(result, ToolOutcome):
-            result.payload.setdefault("tool_kind", definition.kind)
-            return result
+            return self._finalize_outcome(result, definition.kind)
         content, truncated = _bounded(str(result.get("content", "")))
         payload = dict(result.get("payload") or {})
         payload.setdefault("tool_kind", definition.kind)
@@ -419,6 +429,28 @@ class AgentToolset:
             content, _ = _bounded(content, MAX_TOOL_RESULT_CHARS - len(notice))
             content += notice
         return ToolOutcome("succeeded", str(result.get("summary", f"{name} concluído"))[:240], content, payload)
+
+    @staticmethod
+    def _finalize_outcome(outcome: ToolOutcome, kind: str) -> ToolOutcome:
+        payload = dict(outcome.payload or {})
+        payload.setdefault("tool_kind", kind)
+        content, truncated = _bounded(str(outcome.content or ""))
+        if truncated:
+            notice = (
+                f"\n\n[output truncated at {MAX_TOOL_RESULT_CHARS} characters — "
+                "narrow the request instead of repeating it: use read_file with offset/limit, "
+                "search_files with a tighter pattern, or a command that prints less]"
+            )
+            content, _ = _bounded(content, MAX_TOOL_RESULT_CHARS - len(notice))
+            content += notice
+            payload["truncated"] = True
+        return ToolOutcome(
+            outcome.status,
+            str(outcome.summary or "tool completed")[:240],
+            content,
+            payload,
+            outcome.error_code,
+        )
 
     # -- handlers -------------------------------------------------------
 
@@ -567,10 +599,24 @@ class AgentToolset:
         }
 
     def fetch_url(self, url: str) -> dict[str, Any]:
-        target = _public_url(url)
-        client = self._http_client or httpx.Client(timeout=FETCH_TIMEOUT_SECONDS, follow_redirects=True)
+        target = _public_url(url, resolve_dns=True)
+        client = self._http_client or httpx.Client(timeout=FETCH_TIMEOUT_SECONDS, follow_redirects=False)
         try:
-            response = client.get(target, headers={"User-Agent": "AgentOS/1.0 (+local)", "Accept": "text/html,application/json,text/plain;q=0.9"})
+            current = target
+            for redirect_count in range(MAX_FETCH_REDIRECTS + 1):
+                response = client.get(
+                    current,
+                    headers={"User-Agent": "Orin/1.0 (+local)", "Accept": "text/html,application/json,text/plain;q=0.9"},
+                    follow_redirects=False,
+                )
+                if not response.is_redirect:
+                    break
+                location = response.headers.get("location")
+                if not location:
+                    break
+                if redirect_count >= MAX_FETCH_REDIRECTS:
+                    raise AgentToolError("Too many redirects.")
+                current = _public_url(urljoin(current, location), resolve_dns=True)
         except httpx.HTTPError as error:
             raise AgentToolError(f"Could not fetch the URL: {type(error).__name__}") from error
         finally:
@@ -583,19 +629,22 @@ class AgentToolset:
                 body = json.dumps(response.json(), ensure_ascii=False, indent=2)
             except ValueError:
                 body = raw
-            title = target
+            title = current
         elif media in {"text/html", "application/xhtml+xml"} or raw.lstrip()[:1] == "<":
             parser = _TextExtractor()
             parser.feed(raw)
             body = parser.text()
-            title = parser.title or target
+            title = parser.title or current
         else:
             body = raw
-            title = target
+            title = current
+        safe_target = _safe_display_url(current)
+        body = sanitize_page_text(body)
+        safe_title = sanitize_page_text(title)
         return {
-            "summary": f"Consultou {urlparse(target).netloc}",
-            "content": f"{target}\nHTTP {response.status_code}\n\n{body}",
-            "payload": {"url": target, "status": response.status_code, "label": title[:120] or target},
+            "summary": f"Consultou {urlparse(safe_target).netloc}",
+            "content": f"{safe_target}\nHTTP {response.status_code}\n\n{body}",
+            "payload": {"url": safe_target, "status": response.status_code, "label": safe_title[:120] or safe_target},
         }
 
     def web_search(self, query: str, limit: int = 5) -> dict[str, Any]:

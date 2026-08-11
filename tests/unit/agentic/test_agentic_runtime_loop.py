@@ -410,6 +410,52 @@ def test_read_only_calls_run_concurrently_and_keep_their_order() -> None:
     assert [item["invocation_id"] for item in finished] == ["call-1", "call-2"]
 
 
+def test_parallel_tool_exceptions_become_failed_results_without_losing_sibling_results() -> None:
+    class ExceptionToolset:
+        def schemas(self):
+            return []
+
+        def is_read_only(self, name: str) -> bool:
+            return True
+
+        def invoke(self, name, arguments):
+            if name == "explode":
+                raise RuntimeError("worker exploded")
+            return ToolOutcome("succeeded", "ok", "sibling result")
+
+    class TwoCallProvider:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def stream(self, request):
+            self.calls += 1
+            if self.calls == 1:
+                return normalize_sse(
+                    [
+                        'data: {"choices":[{"delta":{"tool_calls":['
+                        '{"index":0,"id":"call-1","function":{"name":"explode","arguments":"{}"}},'
+                        '{"index":1,"id":"call-2","function":{"name":"succeed","arguments":"{}"}}'
+                        ']},"finish_reason":"tool_calls"}]}',
+                        "data: [DONE]",
+                    ],
+                    provider="openrouter",
+                )
+            return normalize_sse(
+                ['data: {"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}', "data: [DONE]"],
+                provider="openrouter",
+            )
+
+    store = Store()
+    runtime = AgenticTurnRuntime(store=store, provider=TwoCallProvider(), toolset=ExceptionToolset())
+
+    result = runtime.run("turn-1")
+
+    assert result.state == "completed"
+    finished = [payload for state, payload in store.events if state == "tool_finished"]
+    assert [item["status"] for item in finished] == ["failed", "succeeded"]
+    assert "worker exploded" in str(finished[0].get("summary")) or finished[0].get("error_code") == "TOOL_FAILED"
+
+
 def test_a_write_call_is_not_reordered_around_read_only_calls_that_follow_it() -> None:
     class OrderRecordingToolset:
         def __init__(self) -> None:
@@ -493,6 +539,25 @@ def test_the_last_iteration_forbids_tools_and_returns_an_answer() -> None:
     assert provider.calls[-1]["tool_choice"] == "none"
     assert provider.calls[0].get("tool_choice") is None
     assert result.budget_exhausted is True
+
+
+def test_a_clean_first_response_at_maximum_iteration_is_not_budget_exhausted() -> None:
+    class CleanProvider:
+        def stream(self, request):
+            return normalize_sse(
+                ['data: {"choices":[{"delta":{"content":"complete"},"finish_reason":"stop"}]}', "data: [DONE]"],
+                provider="openrouter",
+            )
+
+    result = AgenticTurnRuntime(
+        store=Store(),
+        provider=CleanProvider(),
+        toolset=type("Toolset", (), {"schemas": lambda self: []})(),
+        limits=AgenticLimits(max_iterations=1),
+    ).run("turn-1")
+
+    assert result.state == "completed"
+    assert result.budget_exhausted is False
 
 
 def test_an_identical_failing_call_is_not_executed_twice() -> None:

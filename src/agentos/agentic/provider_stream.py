@@ -52,6 +52,29 @@ class NormalizedStreamItem:
             object.__setattr__(self, "finish_reason", _finish(self.finish_reason))
 
 
+def _anthropic_tool_choice(value: object) -> dict[str, str]:
+    if isinstance(value, Mapping):
+        choice_type = str(value.get("type") or "").lower()
+        if choice_type == "function":
+            choice_type = "tool"
+        if choice_type == "required":
+            choice_type = "any"
+        if choice_type == "tool":
+            name = value.get("name")
+            function = value.get("function")
+            if name is None and isinstance(function, Mapping):
+                name = function.get("name")
+            if name:
+                return {"type": "tool", "name": str(name)}
+        if choice_type in {"auto", "any", "none"}:
+            return {"type": choice_type}
+    choice_type = str(value).lower()
+    if choice_type == "required":
+        choice_type = "any"
+    if choice_type not in {"auto", "any", "none"}:
+        choice_type = "auto"
+    return {"type": choice_type}
+
 def _finish(value: object) -> FinishReason:
     mapping = {"stop": FinishReason.STOP, "length": FinishReason.LENGTH, "tool_calls": FinishReason.TOOL_CALLS, "tool_use": FinishReason.TOOL_CALLS, "content_filter": FinishReason.CONTENT_FILTER, "refusal": FinishReason.REFUSAL, "error": FinishReason.ERROR}
     return mapping.get(str(value).lower(), FinishReason.UNKNOWN)
@@ -224,7 +247,7 @@ class HTTPProviderStreamTransport:
                 projected[-1] = {**projected[-1], "cache_control": {"type": "ephemeral"}}
                 payload["tools"] = projected
                 if tool_choice is not None:
-                    payload["tool_choice"] = {"type": str(tool_choice)}
+                    payload["tool_choice"] = _anthropic_tool_choice(tool_choice)
             endpoint = f"{self.base_url}/messages"
             headers = {"x-api-key": self._api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"}
         else:

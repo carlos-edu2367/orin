@@ -7,7 +7,7 @@ import httpx
 import pytest
 
 from agentos.agentic import agent_tools
-from agentos.agentic.agent_tools import AgentToolError, AgentToolset, parse_arguments
+from agentos.agentic.agent_tools import AgentToolError, AgentToolset, ToolOutcome, parse_arguments
 from agentos.agentic.workspace import ConversationWorkspace, WorkspaceError
 
 
@@ -438,6 +438,64 @@ def test_fetch_url_returns_readable_text(tmp_path: Path) -> None:
     assert outcome.status == "succeeded"
     assert "Hello world" in outcome.content
     assert "x=1" not in outcome.content
+
+
+def test_fetch_url_rejects_a_private_redirect_before_following_it(tmp_path: Path) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(302, headers={"location": "http://127.0.0.1/internal"}, request=request)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    tools = AgentToolset(ConversationWorkspace(tmp_path, "chat_fetch_redirect"), http_client=client)
+
+    outcome = tools.invoke("fetch_url", {"url": "https://example.com/start"})
+
+    assert outcome.status == "failed"
+    assert len(requests) == 1
+    assert "127.0.0.1" not in outcome.content
+
+
+def test_fetch_url_redacts_url_secrets_and_common_fetched_secret_text(tmp_path: Path) -> None:
+    secret = "fetch-secret-123"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            html=(
+                f"<html><head><title>token={secret}</title></head>"
+                f"<body><p>api_key={secret}</p><p>visible content</p></body></html>"
+            ),
+            request=request,
+        )
+
+    raw_url = f"https://user:{secret}@example.com/doc?token={secret}#{secret}"
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    tools = AgentToolset(ConversationWorkspace(tmp_path, "chat_fetch_secret"), http_client=client)
+
+    outcome = tools.invoke("fetch_url", {"url": raw_url})
+
+    assert outcome.status == "succeeded"
+    assert secret not in outcome.summary
+    assert secret not in outcome.content
+    assert secret not in repr(outcome.payload)
+    assert "https://example.com/doc" in outcome.content
+    assert "visible content" in outcome.content
+
+
+def test_delegated_tool_outcomes_use_the_same_result_cap(tmp_path: Path) -> None:
+    delegated = ToolOutcome("succeeded", "delegated", "x" * (agent_tools.MAX_TOOL_RESULT_CHARS + 100))
+    tools = AgentToolset(
+        ConversationWorkspace(tmp_path, "chat_delegate_cap"),
+        delegate=lambda _name, _task: delegated,
+    )
+
+    outcome = tools.invoke("ask_agent", {"name": "Researcher", "task": "return a lot"})
+
+    assert outcome.status == "succeeded"
+    assert len(outcome.content) <= agent_tools.MAX_TOOL_RESULT_CHARS
+    assert "narrow the request instead of repeating it" in outcome.content
 
 
 def test_unknown_tool_is_reported_not_raised(toolset: AgentToolset) -> None:

@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 import hashlib
 
 from .models import BrowserArtifactRef, BrowserErrorCode, BrowserJob, BrowserJobFailed, BrowserJobSucceeded, BrowserOperationKind, BrowserPageSnapshot, BrowserPageStatus, BrowserResult, EffectState, RedactedCookieMetadata, Retryability
-from .security import NetworkPolicy, NetworkPolicyError, validate_url
+from .security import NetworkPolicy, NetworkPolicyError, validate_redirect, validate_url
 
 
 class PlaywrightBrowserAdapter:

@@ -243,7 +243,7 @@ class AgenticTurnRuntime:
             if (finish is not None or text_parts) and not (final_iteration and not text_parts):
                 self._life(turn, "completed")
                 self.store.finish(turn)
-                return AgenticRunResult("completed", iteration, action_count, budget_exhausted=final_iteration)
+                return AgenticRunResult("completed", iteration, action_count, budget_exhausted=final_iteration and (iteration > 1 or bool(calls)))
         # Reaching this point means the loop ended without any provider answer
         # that carried text; a turn that produced text has already returned
         # "completed" above. This also covers a final iteration where the
@@ -501,7 +501,11 @@ class AgenticTurnRuntime:
                 with ThreadPoolExecutor(max_workers=min(len(run_indexes), MAX_PARALLEL_TOOLS)) as pool:
                     futures = {i: pool.submit(self.toolset.invoke, prepared[i][1], prepared[i][2]) for i in run_indexes}
                     for i, future in futures.items():
-                        outcomes[i] = future.result()
+                        try:
+                            outcomes[i] = future.result()
+                        except Exception as error:  # noqa: BLE001 - preserve per-tool failure parity
+                            message = f"{type(error).__name__}: {error}"
+                            outcomes[i] = ToolOutcome("failed", f"{prepared[i][1]} falhou", message[:12_000], {}, "TOOL_FAILED")
             else:
                 outcomes[index] = self.toolset.invoke(prepared[index][1], prepared[index][2])
             index = run_end
@@ -512,7 +516,7 @@ class AgenticTurnRuntime:
                 self._life(turn, "tool_finished", tool_name=name, invocation_id=call_id, status="failed", summary=error, error_code="INVALID_ARGUMENTS", tool_arguments={})
                 results.append({"id": call_id, "name": name, "status": "failed", "content": error})
                 continue
-            outcome = outcomes.get(index) or self.toolset.invoke(name, arguments)
+            outcome = outcomes[index]
             if outcome.status == "failed" and not duplicate[index]:
                 self._failed_signatures[self._signature(name, arguments)] = outcome.content
             self._life(

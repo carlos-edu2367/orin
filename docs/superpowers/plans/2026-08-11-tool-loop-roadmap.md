@@ -57,3 +57,10 @@ editado no Plano 3). Executar fora de ordem exige reconciliar esses três à mã
   `tests/unit/agentic/test_agent_tools.py` (fixture `toolset`, asserts sobre `ToolOutcome`).
 - Rodar a suíte de um arquivo: `uv run pytest tests/unit/agentic/test_agent_tools.py -v`
 - Commits pequenos, um por tarefa, prefixo `feat:`/`fix:`/`refactor:`/`perf:`.
+
+## Contrato de política aceito
+
+Quando uma policy remove uma tool do catálogo publicado, uma chamada posterior com esse nome
+continua sendo tratada pelo contrato existente de `AgentToolset`: ela retorna uma falha
+`UNKNOWN_TOOL`, sem executar o handler. Isso é deliberado — o modelo não recebe informação sobre
+qual regra interna negou a tool, e o caminho legado de tool-result permanece uniforme.

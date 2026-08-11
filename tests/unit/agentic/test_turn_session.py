@@ -432,6 +432,26 @@ def test_browse_page_tool_ledger_does_not_keep_raw_url_secrets(tmp_path: Path) -
     assert store.tool_records[0]["arguments"] == {"url": "https://example.test/page"}
 
 
+def test_fetch_url_tool_ledger_and_activity_do_not_keep_raw_url_secrets(tmp_path: Path) -> None:
+    session, store, _agents, _provider = build(tmp_path, [])
+    secret = "fetch-ledger-secret-456"
+
+    session.emit_lifecycle(
+        TURN,
+        "tool_finished",
+        tool_name="fetch_url",
+        invocation_id="call-1",
+        status="succeeded",
+        summary="Consultou example.test",
+        tool_payload={"url": "https://example.test/page", "label": "safe"},
+        tool_arguments={"url": f"https://user:{secret}@example.test/page?token={secret}"},
+    )
+
+    assert secret not in repr(store.tool_records)
+    assert secret not in repr(store.activity)
+    assert store.tool_records[0]["arguments"] == {"url": "https://example.test/page"}
+
+
 def test_every_finished_tool_is_recorded_in_the_ledger(tmp_path: Path) -> None:
     session, store, _agents, _provider = build(tmp_path, [
         tool_call("call-1", "write_file", '{"path": "a.txt", "content": "x"}'),

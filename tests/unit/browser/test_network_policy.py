@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+import socket
 
 from agentos.browser.security import NetworkPolicy, NetworkPolicyError, sanitize_url, validate_redirect, validate_url
 
@@ -33,6 +34,27 @@ def test_dns_rebinding_is_revalidated_for_each_hop() -> None:
     rebinding = NetworkPolicy(allowed_hosts=("example.com",), resolver=lambda host: ("127.0.0.1",))
     with pytest.raises(NetworkPolicyError):
         validate_url("https://example.com", rebinding)
+
+
+def test_default_dns_policy_rejects_a_hostname_resolving_to_private_space(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 0))],
+    )
+
+    with pytest.raises(NetworkPolicyError):
+        validate_url("https://private.example", NetworkPolicy(allowed_hosts=("private.example",)))
+
+
+def test_default_dns_policy_fails_closed_when_hostname_cannot_be_resolved(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail_resolution(*_args, **_kwargs):
+        raise socket.gaierror("no answer")
+
+    monkeypatch.setattr(socket, "getaddrinfo", fail_resolution)
+
+    with pytest.raises(NetworkPolicyError):
+        validate_url("https://unresolved.example", NetworkPolicy(allowed_hosts=("unresolved.example",)))
 
 
 def test_redirect_limit_and_origin_policy_are_enforced() -> None:

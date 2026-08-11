@@ -18,7 +18,14 @@ def _default_resolver(host: str) -> tuple[str, ...]:
         ip_address(host)
         return (host,)
     except ValueError:
-        return ("93.184.216.34",)
+        try:
+            records = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+        except OSError as exc:
+            raise NetworkPolicyError("destination could not be resolved") from exc
+        addresses = tuple(dict.fromkeys(str(record[4][0]) for record in records if record[4]))
+        if not addresses:
+            raise NetworkPolicyError("destination could not be resolved")
+        return addresses
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,7 +61,10 @@ def validate_url(value: str, policy: NetworkPolicy, *, redirect_count: int = 0) 
     host = parsed.hostname.lower().rstrip(".")
     if policy.allowed_hosts and host not in tuple(item.lower().rstrip(".") for item in policy.allowed_hosts):
         raise NetworkPolicyError("host denied")
-    for address in policy.resolver(host):
+    addresses = tuple(policy.resolver(host))
+    if not addresses:
+        raise NetworkPolicyError("destination could not be resolved")
+    for address in addresses:
         resolved = ip_address(address)
         if not resolved.is_global:
             raise NetworkPolicyError("destination denied")
