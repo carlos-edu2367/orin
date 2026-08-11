@@ -216,8 +216,19 @@ class AgentToolset:
                 self.write_file, "filesystem",
             ),
             ToolDefinition(
-                "edit_file", "Replace one unique text fragment in a UTF-8 file. Read the file first and provide exact old_text.",
-                _schema({"path": _TEXT, "old_text": _TEXT, "new_text": _TEXT}, ("path", "old_text", "new_text")),
+                "edit_file",
+                "Replace text fragments in a UTF-8 workspace file. Read the file first. Pass 'edits' to apply several replacements in one call; the whole batch is rejected if any fragment is missing or ambiguous.",
+                _schema({
+                    "path": _TEXT,
+                    "old_text": _TEXT,
+                    "new_text": _TEXT,
+                    "edits": {
+                        "type": "array",
+                        "description": "Batch form. Each item replaces one fragment; they are applied in order.",
+                        "items": _schema({"old_text": _TEXT, "new_text": _TEXT}, ("old_text", "new_text")),
+                    },
+                    "replace_all": {"type": "boolean", "description": "Replace every occurrence instead of requiring a unique one."},
+                }, ("path",)),
                 self.edit_file, "filesystem",
             ),
             ToolDefinition(
@@ -370,24 +381,52 @@ class AgentToolset:
             "payload": {"path": path, "bytes_written": written, "label": path, "artifacts": [self.workspace.file_metadata(path)]},
         }
 
-    def edit_file(self, path: str, old_text: str, new_text: str) -> dict[str, Any]:
-        if not isinstance(old_text, str) or not old_text:
-            raise AgentToolError("old_text must be a non-blank string")
-        if not isinstance(new_text, str):
-            raise AgentToolError("new_text must be a string")
+    @staticmethod
+    def _normalized_edits(old_text: str | None, new_text: str | None, edits: list[Mapping[str, Any]] | None) -> list[tuple[str, str]]:
+        single = old_text is not None or new_text is not None
+        if single and edits:
+            raise AgentToolError("provide either old_text/new_text or edits, not both.")
+        if single:
+            if not isinstance(old_text, str) or not old_text:
+                raise AgentToolError("old_text must be a non-blank string")
+            if not isinstance(new_text, str):
+                raise AgentToolError("new_text must be a string")
+            return [(old_text, new_text)]
+        if not isinstance(edits, list) or not edits:
+            raise AgentToolError("provide old_text/new_text or a non-empty edits array.")
+        normalized: list[tuple[str, str]] = []
+        for index, item in enumerate(edits):
+            if not isinstance(item, Mapping):
+                raise AgentToolError(f"edits[{index}] must be an object with old_text and new_text.")
+            current, replacement = item.get("old_text"), item.get("new_text")
+            if not isinstance(current, str) or not current:
+                raise AgentToolError(f"edits[{index}].old_text must be a non-blank string")
+            if not isinstance(replacement, str):
+                raise AgentToolError(f"edits[{index}].new_text must be a string")
+            normalized.append((current, replacement))
+        return normalized
+
+    def edit_file(self, path: str, old_text: str | None = None, new_text: str | None = None, edits: list[Mapping[str, Any]] | None = None, replace_all: bool = False) -> dict[str, Any]:
+        operations = self._normalized_edits(old_text, new_text, edits)
         content, truncated = self.workspace.read_text(path)
         if truncated:
             raise AgentToolError("file is too large to edit safely; split the edit into a smaller file or rewrite it deliberately.")
-        matches = content.count(old_text)
-        if matches == 0:
-            raise AgentToolError("old_text was not found; read the file and provide the exact fragment.")
-        if matches > 1:
-            raise AgentToolError("old_text occurs more than once; include more surrounding text to make the edit unambiguous.")
-        written = self.workspace.write_text(path, content.replace(old_text, new_text, 1))
+        # Every edit is validated against the running draft before anything is
+        # written, so a bad fragment late in the batch cannot leave the file
+        # half-edited.
+        draft = content
+        for index, (current, replacement) in enumerate(operations):
+            matches = draft.count(current)
+            if matches == 0:
+                raise AgentToolError(f"edit {index + 1}: old_text was not found; read the file and provide the exact fragment.")
+            if matches > 1 and not replace_all:
+                raise AgentToolError(f"edit {index + 1}: old_text occurs {matches} times; add surrounding text or set replace_all=true.")
+            draft = draft.replace(current, replacement) if replace_all else draft.replace(current, replacement, 1)
+        written = self.workspace.write_text(path, draft)
         return {
             "summary": f"Editou {path}",
-            "content": f"Replaced one unique fragment in {path} ({written} bytes).",
-            "payload": {"path": path, "bytes_written": written, "label": path, "artifacts": [self.workspace.file_metadata(path)]},
+            "content": f"Applied {len(operations)} edit(s) to {path} ({written} bytes).",
+            "payload": {"path": path, "bytes_written": written, "edits_applied": len(operations), "label": path, "artifacts": [self.workspace.file_metadata(path)]},
         }
 
     def list_files(self, path: str = "", depth: int = 1) -> dict[str, Any]:

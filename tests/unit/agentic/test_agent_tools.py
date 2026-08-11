@@ -45,6 +45,50 @@ def test_edit_file_refuses_ambiguous_fragments(toolset: AgentToolset) -> None:
     assert outcome.error_code == "TOOL_REFUSED"
 
 
+def test_edit_file_applies_a_batch_of_edits_in_one_call(toolset: AgentToolset) -> None:
+    toolset.invoke("write_file", {"path": "app.py", "content": "alpha\nbeta\ngamma\n"})
+
+    outcome = toolset.invoke("edit_file", {"path": "app.py", "edits": [
+        {"old_text": "alpha", "new_text": "one"},
+        {"old_text": "gamma", "new_text": "three"},
+    ]})
+
+    assert outcome.status == "succeeded"
+    assert outcome.payload["edits_applied"] == 2
+    assert "     1\tone" in toolset.invoke("read_file", {"path": "app.py"}).content
+    assert "     3\tthree" in toolset.invoke("read_file", {"path": "app.py"}).content
+
+
+def test_edit_file_writes_nothing_when_one_edit_in_the_batch_fails(toolset: AgentToolset) -> None:
+    toolset.invoke("write_file", {"path": "app.py", "content": "alpha\nbeta\n"})
+
+    outcome = toolset.invoke("edit_file", {"path": "app.py", "edits": [
+        {"old_text": "alpha", "new_text": "one"},
+        {"old_text": "missing", "new_text": "x"},
+    ]})
+
+    assert outcome.status == "failed"
+    assert "alpha" in toolset.invoke("read_file", {"path": "app.py"}).content
+
+
+def test_edit_file_can_replace_every_occurrence_when_asked(toolset: AgentToolset) -> None:
+    toolset.invoke("write_file", {"path": "app.py", "content": "same\nsame\n"})
+
+    outcome = toolset.invoke("edit_file", {"path": "app.py", "old_text": "same", "new_text": "done", "replace_all": True})
+
+    assert outcome.status == "succeeded"
+    assert "same" not in toolset.invoke("read_file", {"path": "app.py"}).content
+
+
+def test_edit_file_refuses_mixing_the_single_and_batch_forms(toolset: AgentToolset) -> None:
+    toolset.invoke("write_file", {"path": "app.py", "content": "alpha\n"})
+
+    outcome = toolset.invoke("edit_file", {"path": "app.py", "old_text": "alpha", "new_text": "one", "edits": [{"old_text": "alpha", "new_text": "two"}]})
+
+    assert outcome.status == "failed"
+    assert outcome.error_code == "TOOL_REFUSED"
+
+
 def test_paths_cannot_escape_the_conversation_workspace(toolset: AgentToolset) -> None:
     outcome = toolset.invoke("write_file", {"path": "../escape.txt", "content": "x"})
 
