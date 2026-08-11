@@ -537,8 +537,9 @@ def test_edit_file_applies_a_batch_of_edits_in_one_call(toolset: AgentToolset) -
     ]})
 
     assert outcome.status == "succeeded"
-    assert toolset.invoke("read_file", {"path": "app.py"}).payload["total_lines"] == 3
-    assert "one" in outcome.content or outcome.payload["edits_applied"] == 2
+    assert outcome.payload["edits_applied"] == 2
+    assert "     1\tone" in toolset.invoke("read_file", {"path": "app.py"}).content
+    assert "     3\tthree" in toolset.invoke("read_file", {"path": "app.py"}).content
 
 
 def test_edit_file_writes_nothing_when_one_edit_in_the_batch_fails(toolset: AgentToolset) -> None:
