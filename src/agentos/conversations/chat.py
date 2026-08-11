@@ -136,8 +136,11 @@ class PostgresChatStore:
         """
         try:
             rendered = json.dumps(arguments, ensure_ascii=False, sort_keys=True, default=str)[:1000]
-        except (TypeError, ValueError):
-            rendered = str(arguments)[:1000]
+        except Exception:
+            try:
+                rendered = str(arguments)[:1000]
+            except Exception:
+                rendered = "<unserializable>"
         now = datetime.now(UTC)
         for _ in range(6):
             try:

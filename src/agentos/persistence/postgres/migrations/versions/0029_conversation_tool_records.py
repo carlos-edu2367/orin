@@ -1,6 +1,6 @@
 """persist a compact ledger of the tools an agent ran in a conversation.
 
-Revision ID: 0029_tool_records
+Revision ID: 0029_conversation_tool_records
 Revises: 0028_projects
 """
 from __future__ import annotations
@@ -9,7 +9,7 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision = "0029_tool_records"
+revision = "0029_conversation_tool_records"
 down_revision = "0028_projects"
 branch_labels = None
 depends_on = None

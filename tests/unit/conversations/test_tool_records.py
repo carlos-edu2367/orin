@@ -40,3 +40,26 @@ def test_recording_never_raises_when_the_payload_is_not_serializable(store: Post
         rows = connection.execute(select(conversation_tool_records)).mappings().all()
 
     assert len(rows) == 1
+
+
+class _ExplodingString:
+    def __str__(self) -> str:
+        raise RuntimeError("rendering failed")
+
+
+def test_recording_swallows_argument_rendering_failures(store: PostgresChatStore) -> None:
+    store.record_tool_call(_turn(), tool_name="write_file", arguments={"handle": _ExplodingString()}, status="succeeded", summary="ok")
+
+    with store._engine.connect() as connection:
+        rows = connection.execute(select(conversation_tool_records)).mappings().all()
+
+    assert len(rows) == 1
+
+
+def test_recording_swallows_insert_failures(store: PostgresChatStore, monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail_begin():
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(store._engine, "begin", fail_begin)
+
+    store.record_tool_call(_turn(), tool_name="write_file", arguments={"path": "a.md"}, status="succeeded", summary="ok")
