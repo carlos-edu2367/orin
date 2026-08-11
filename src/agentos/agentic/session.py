@@ -40,7 +40,7 @@ def environment_facts() -> dict[str, str]:
     if os.name == "nt":
         shell = os.environ.get("COMSPEC") or "cmd.exe"
     else:
-        shell = os.environ.get("SHELL") or "/bin/sh"
+        shell = "/bin/sh"
     tooling = ", ".join(name for name in ("git", "node", "npm", "uv", "docker") if shutil.which(name))
     return {
         "os": f"{platform.system()} {platform.release()}".strip(),
@@ -76,7 +76,7 @@ def build_system_prompt(
     workspace_tree: tuple[str, ...] = (),
 ) -> str:
     lines = [
-        "You are the main agent of AgentOS, a local-first agent workspace running on the user's own machine.",
+        "You are the main agent of Orin, a local-first agent workspace running on the user's own machine.",
         "Answer in the language the user writes in. Be direct and concrete; skip filler and self-description.",
         "",
         "## How you work",

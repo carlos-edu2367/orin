@@ -50,3 +50,15 @@ Added the three brief-specified tests in `tests/unit/agentic/test_turn_session.p
 ## Scope and concerns
 
 Only `src/agentos/agentic/session.py`, `tests/unit/agentic/test_turn_session.py`, and this report are task-scoped changes. No known concerns remain within the brief’s scope; the two skipped agentic tests are existing platform-dependent symlink tests.
+
+## Round 1 reviewer fixes
+
+- Changed the user-visible system-prompt identity from `AgentOS` to `Orin`; `agentos` remains the internal Python/package identifier.
+- Corrected POSIX environment reporting to `sh`, matching `subprocess.Popen(..., shell=True)`'s `/bin/sh` execution behavior. Windows continues to use `COMSPEC` with the `cmd.exe` fallback.
+- Added focused, host-independent coverage asserting the public product name and asserting that a POSIX `$SHELL` value such as `/usr/bin/fish` does not change the reported command shell.
+- The reviewer’s Minor integration-coverage gap was intentionally left unchanged as requested.
+
+### Round 1 verification
+
+- `uv run pytest tests/unit/agentic/test_turn_session.py -k "public_product_name or posix_regardless" -v`
+- Result: 2 passed, 25 deselected.

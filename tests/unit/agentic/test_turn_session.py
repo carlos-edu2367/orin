@@ -145,6 +145,13 @@ def test_the_system_prompt_names_the_tools_the_agent_actually_has(tmp_path: Path
     assert "create_agent" in runtime.system_prompt
 
 
+def test_the_system_prompt_uses_orin_as_the_public_product_name() -> None:
+    prompt = build_system_prompt(tool_names=(), memories=[], agents=[], workspace_hint="hint", subagents_enabled=False)
+
+    assert "You are the main agent of Orin" in prompt
+    assert "You are the main agent of AgentOS" not in prompt
+
+
 def test_relevant_skill_metadata_is_injected_lazily_and_loaded_via_tool_result(tmp_path: Path) -> None:
     store = RecordingStore()
     agents = MemoryAgentsStore()
@@ -472,6 +479,16 @@ def test_environment_facts_name_the_shell_and_the_operating_system() -> None:
     assert facts["os"]
     assert facts["shell"]
     assert facts["python"].startswith("3.")
+
+
+def test_environment_facts_report_bin_sh_on_posix_regardless_of_preferred_shell(monkeypatch: pytest.MonkeyPatch) -> None:
+    import agentos.agentic.session as session_module
+
+    monkeypatch.setattr(session_module.os, "name", "posix")
+    monkeypatch.setenv("SHELL", "/usr/bin/fish")
+    monkeypatch.setattr(session_module.shutil, "which", lambda _name: None)
+
+    assert session_module.environment_facts()["shell"] == "sh"
 
 
 def test_the_prompt_states_the_environment_and_the_workspace_tree() -> None:
