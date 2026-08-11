@@ -492,3 +492,48 @@ def test_the_last_iteration_forbids_tools_and_returns_an_answer() -> None:
     assert store.deltas == ["partial answer"]
     assert provider.calls[-1]["tool_choice"] == "none"
     assert provider.calls[0].get("tool_choice") is None
+    assert result.budget_exhausted is True
+
+
+def test_a_final_iteration_with_only_tool_calls_and_no_text_still_fails_with_iteration_limit() -> None:
+    """The provider may ignore tool_choice="none" and request tools anyway.
+
+    If that happens on the last allowed iteration and no text comes with it,
+    the turn must fail with ITERATION_LIMIT exactly as it did before the
+    closing-instruction change, rather than reporting an empty "completed"
+    turn with the model's tool calls silently discarded.
+    """
+
+    class IgnoresToolChoiceProvider:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def stream(self, request):
+            self.calls.append(request)
+            return normalize_sse(
+                [
+                    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","function":{"name":"read_file","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}',
+                    "data: [DONE]",
+                ],
+                provider="openrouter",
+            )
+
+    class EchoToolset:
+        def schemas(self):
+            return []
+
+        def is_read_only(self, name: str) -> bool:
+            return True
+
+        def invoke(self, name, arguments):
+            return ToolOutcome("succeeded", "ok", "content")
+
+    store = Store()
+    provider = IgnoresToolChoiceProvider()
+    runtime = AgenticTurnRuntime(store=store, provider=provider, toolset=EchoToolset(), limits=AgenticLimits(max_iterations=1, max_actions=8))
+
+    result = runtime.run("turn-1")
+
+    assert result.state == "failed"
+    assert result.error_code == "ITERATION_LIMIT"
+    assert store.deltas == []

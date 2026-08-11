@@ -342,7 +342,16 @@ class TurnSession:
              "content": answer[:PREVIEW_CHARS], "from_agent_id": agent_id, "tool_kind": "agent"},
             agent_id=agent_id, parent_agent_id=self.main_agent_id,
         )
-        return ToolOutcome("succeeded", f"Recebeu a resposta de {clean}", f"{clean} reported:\n\n{answer}", {"agent_name": clean, "label": clean, "tool_kind": "agent"})
+        payload: dict[str, object] = {"agent_name": clean, "label": clean, "tool_kind": "agent"}
+        if result.budget_exhausted:
+            payload["budget_exhausted"] = True
+            content = (
+                f"{clean} ran out of its action budget before finishing and reports the following "
+                f"partial, possibly incomplete, answer:\n\n{answer}"
+            )
+        else:
+            content = f"{clean} reported:\n\n{answer}"
+        return ToolOutcome("succeeded", f"Recebeu a resposta de {clean}", content, payload)
 
     def _subagent_task(self, record: Mapping[str, object], task: str) -> str:
         return f"{task}\n\nWhen you are done, reply with the complete result. The main agent only sees your final message."

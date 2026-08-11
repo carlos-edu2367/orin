@@ -297,6 +297,24 @@ def test_a_subagent_that_hits_its_iteration_limit_reports_its_partial_answer(tmp
     assert "delegation.failed" not in store.types()
 
 
+def test_a_subagent_that_exhausts_its_budget_reports_an_explicit_incomplete_marker(tmp_path: Path) -> None:
+    session, store, agents, _provider = build(tmp_path, [[
+        NormalizedStreamItem(StreamKind.TEXT, 1, text="Ainda estou investigando."),
+        NormalizedStreamItem(StreamKind.TOOL_CALL, 2, tool_call_id="call-1", tool_name="list_files", arguments_delta="{}"),
+        NormalizedStreamItem(StreamKind.FINISH, 3, finish_reason="tool_calls"),
+    ]])
+    session.limits = AgenticLimits(max_iterations=1, max_actions=24)
+    child = agents.create("Reviewer", "revisa", parent_agent_id="agent:chat_session:main")
+
+    outcome = session._ask_agent("Reviewer", "revise o projeto")
+
+    assert outcome.status == "succeeded"
+    assert "Ainda estou investigando." in outcome.content
+    assert "budget" in outcome.content.lower()
+    assert (child["agent_id"], "completed") in agents.states
+    assert outcome.payload.get("budget_exhausted") is True
+
+
 def test_an_empty_subagent_completion_is_reported_as_a_failed_delegation(tmp_path: Path) -> None:
     session, store, agents, _provider = build(tmp_path, [[
         NormalizedStreamItem(StreamKind.FINISH, 1, finish_reason="stop"),

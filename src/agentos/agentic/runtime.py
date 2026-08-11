@@ -44,6 +44,10 @@ class AgenticRunResult:
     iterations: int = 0
     actions: int = 0
     error_code: str | None = None
+    # True only when the run completed because it hit its final allowed
+    # iteration (the tool_choice="none" closing turn), never on an ordinary
+    # completion that finished with budget to spare.
+    budget_exhausted: bool = False
 
 
 class AgenticTurnRuntime:
@@ -194,12 +198,16 @@ class AgenticTurnRuntime:
                 messages.extend(self._tool_result_message(turn, result) for result in results)
                 self._life(turn, "running")
                 continue
-            if finish is not None or text_parts:
+            if (finish is not None or text_parts) and not (final_iteration and not text_parts):
                 self._life(turn, "completed")
                 self.store.finish(turn)
-                return AgenticRunResult("completed", iteration, action_count)
-        # Reaching this point means the loop ended without any provider answer at
-        # all; a turn that produced text has already returned "completed" above.
+                return AgenticRunResult("completed", iteration, action_count, budget_exhausted=final_iteration)
+        # Reaching this point means the loop ended without any provider answer
+        # that carried text; a turn that produced text has already returned
+        # "completed" above. This also covers a final iteration where the
+        # provider ignored tool_choice="none" and returned only tool calls: the
+        # model's requested tools are discarded rather than silently reported
+        # as a completed turn.
         return self._fail(turn, "ITERATION_LIMIT", self.limits.max_iterations or 0, action_count)
 
     def _tool_schemas(self, turn: Mapping[str, object]) -> list[dict[str, object]]:
