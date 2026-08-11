@@ -74,3 +74,19 @@ def test_read_lines_clamps_an_offset_past_the_end(workspace: ConversationWorkspa
 def test_read_lines_rejects_a_non_file(workspace: ConversationWorkspace) -> None:
     with pytest.raises(WorkspaceError):
         workspace.read_lines("missing.txt")
+
+
+def test_list_entries_is_shallow_by_default(workspace: ConversationWorkspace) -> None:
+    workspace.write_text("src/deep/app.py", "x\n")
+
+    paths = [item["path"] for item in workspace.list_entries()]
+
+    assert paths == ["src"]
+
+
+def test_list_entries_descends_when_asked(workspace: ConversationWorkspace) -> None:
+    workspace.write_text("src/deep/app.py", "x\n")
+
+    paths = [item["path"] for item in workspace.list_entries(depth=3)]
+
+    assert paths == ["src", "src/deep", "src/deep/app.py"]

@@ -19,6 +19,7 @@ MAX_SEARCH_RESULTS = 200
 MAX_SEARCH_FILE_BYTES = 2_000_000
 MAX_SEARCH_LINE_CHARS = 400
 MAX_READ_LINES = 800
+MAX_LIST_DEPTH = 5
 
 _SAFE_SEGMENT = re.compile(r"^[A-Za-z0-9._-]+$")
 _PROJECT_WORKSPACE_ID = re.compile(r"^workspace:[A-Za-z0-9._-]+$")
@@ -102,18 +103,27 @@ class ConversationWorkspace:
         target.write_bytes(payload)
         return len(payload)
 
-    def list_entries(self, path: str = "") -> list[dict[str, object]]:
+    def list_entries(self, path: str = "", *, depth: int = 1) -> list[dict[str, object]]:
         target = self.resolve(path) if path.strip() else self.root
         if not target.is_dir():
             raise WorkspaceError(f"'{path}' is not a directory in this workspace")
+        levels = max(1, min(int(depth), MAX_LIST_DEPTH))
         entries: list[dict[str, object]] = []
-        for item in sorted(target.iterdir(), key=lambda value: (value.is_file(), value.name.lower()))[:500]:
+        self._collect(target, levels, entries)
+        return entries
+
+    def _collect(self, directory: Path, levels: int, entries: list[dict[str, object]]) -> None:
+        for item in sorted(directory.iterdir(), key=lambda value: (value.is_file(), value.name.lower())):
+            if len(entries) >= 500:
+                return
+            is_file = item.is_file()
             entries.append({
                 "path": self.relative(item),
-                "kind": "file" if item.is_file() else "directory",
-                "size_bytes": item.stat().st_size if item.is_file() else None,
+                "kind": "file" if is_file else "directory",
+                "size_bytes": item.stat().st_size if is_file else None,
             })
-        return entries
+            if not is_file and levels > 1:
+                self._collect(item, levels - 1, entries)
 
     def search(self, pattern: str, *, glob: str = "**/*", max_results: int = 50, ignore_case: bool = True) -> list[dict[str, object]]:
         """Scan workspace text files for a regular expression.
@@ -184,6 +194,7 @@ class ConversationWorkspace:
 
 __all__ = [
     "ConversationWorkspace",
+    "MAX_LIST_DEPTH",
     "MAX_READ_BYTES",
     "MAX_READ_LINES",
     "MAX_SEARCH_FILE_BYTES",

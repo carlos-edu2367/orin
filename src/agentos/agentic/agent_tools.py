@@ -221,8 +221,11 @@ class AgentToolset:
                 self.edit_file, "filesystem",
             ),
             ToolDefinition(
-                "list_files", "List files and directories in the conversation workspace.",
-                _schema({"path": {**_TEXT, "description": "Workspace-relative directory; omit for the root."}}),
+                "list_files", "List files and directories in the conversation workspace. Use depth to see a whole subtree in one call.",
+                _schema({
+                    "path": {**_TEXT, "description": "Workspace-relative directory; omit for the root."},
+                    "depth": {"type": "integer", "minimum": 1, "maximum": 5, "description": "How many directory levels to descend. Defaults to 1."},
+                }),
                 self.list_files, "filesystem",
             ),
             ToolDefinition(
@@ -387,8 +390,8 @@ class AgentToolset:
             "payload": {"path": path, "bytes_written": written, "label": path, "artifacts": [self.workspace.file_metadata(path)]},
         }
 
-    def list_files(self, path: str = "") -> dict[str, Any]:
-        entries = self.workspace.list_entries(path)
+    def list_files(self, path: str = "", depth: int = 1) -> dict[str, Any]:
+        entries = self.workspace.list_entries(path, depth=int(depth))
         if not entries:
             listing = "[empty directory]"
         else:
@@ -396,7 +399,7 @@ class AgentToolset:
         return {
             "summary": f"Listou {len(entries)} {'item' if len(entries) == 1 else 'itens'}",
             "content": listing,
-            "payload": {"path": path or "/", "count": len(entries), "label": path or "/"},
+            "payload": {"path": path or "/", "count": len(entries), "depth": int(depth), "label": path or "/"},
         }
 
     def search_files(self, pattern: str, glob: str = "**/*", max_results: int = 50, ignore_case: bool = True) -> dict[str, Any]:
