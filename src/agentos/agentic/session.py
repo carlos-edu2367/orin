@@ -10,8 +10,10 @@ from __future__ import annotations
 import os
 import platform
 import shutil
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from threading import Lock
 from types import MappingProxyType
 from typing import Callable, Mapping
 
@@ -124,6 +126,7 @@ def build_system_prompt(
             "",
             "## Subagents",
             "- For a large task with a distinct, self-contained part, create a specialist with `create_agent` and hand it that part with `ask_agent`.",
+            "- When two or more delegated parts do not depend on each other, send them together with `ask_agents`; they run at the same time.",
             "- A subagent cannot see this conversation. Put everything it needs in the task text.",
             "- Do not create a subagent for something you can finish yourself in a step or two.",
         ]
@@ -251,6 +254,7 @@ class TurnSession:
         self.skill_load_recorder = skill_load_recorder
         self.workspace = ConversationWorkspace(workspace_root, resolve_effective_workspace_id(turn))
         self._subagent_runs = 0
+        self._subagent_lock = Lock()
         self.main_agent_id = store.main_agent_id(turn) if hasattr(store, "main_agent_id") else str(turn.get("agent_id", "agent:main"))
 
     # -- activity -------------------------------------------------------
@@ -365,9 +369,10 @@ class TurnSession:
         record = self.agents_store.find(clean)
         if record is None:
             return ToolOutcome("failed", f"Agente {clean} não existe", f"No subagent named '{clean}'. Create it first with create_agent.", {"tool_kind": "agent"}, "AGENT_NOT_FOUND")
-        if self._subagent_runs >= MAX_SUBAGENTS_PER_TURN:
-            return ToolOutcome("failed", "Limite de subagentes atingido", "The subagent budget for this turn is exhausted; finish the work yourself.", {"tool_kind": "agent"}, "SUBAGENT_LIMIT")
-        self._subagent_runs += 1
+        with self._subagent_lock:
+            if self._subagent_runs >= MAX_SUBAGENTS_PER_TURN:
+                return ToolOutcome("failed", "Limite de subagentes atingido", "The subagent budget for this turn is exhausted; finish the work yourself.", {"tool_kind": "agent"}, "SUBAGENT_LIMIT")
+            self._subagent_runs += 1
         agent_id, task_text = str(record["agent_id"]), str(task)
         self._record(
             AgentActivityEventType.AGENT_MESSAGE_SENT,
@@ -423,6 +428,35 @@ class TurnSession:
             content = f"{clean} reported:\n\n{answer}"
         return ToolOutcome("succeeded", f"Recebeu a resposta de {clean}", content, payload)
 
+    def _ask_agents(self, requests: list[Mapping[str, str]]) -> ToolOutcome:
+        """Run several independent delegations at once.
+
+        Each subagent already has its own store view and its own agent id, so
+        the only shared mutable state is the per-turn budget, which the lock in
+        ``_ask_agent`` guards.
+        """
+        if not isinstance(requests, list) or not requests:
+            return ToolOutcome("failed", "Nenhuma tarefa informada", "Provide a non-empty tasks array of {name, task} objects.", {"tool_kind": "agent"}, "INVALID_ARGUMENTS")
+        pending: list[tuple[str, str]] = []
+        for index, item in enumerate(requests):
+            if not isinstance(item, Mapping) or not str(item.get("name") or "").strip() or not str(item.get("task") or "").strip():
+                return ToolOutcome("failed", "Tarefa inválida", f"tasks[{index}] must be an object with a non-blank name and task.", {"tool_kind": "agent"}, "INVALID_ARGUMENTS")
+            pending.append((str(item["name"]), str(item["task"])))
+        if len(pending) == 1:
+            return self._ask_agent(*pending[0])
+        with ThreadPoolExecutor(max_workers=min(len(pending), MAX_SUBAGENTS_PER_TURN)) as pool:
+            outcomes = list(pool.map(lambda entry: self._ask_agent(entry[0], entry[1]), pending))
+        succeeded = [outcome for outcome in outcomes if outcome.status == "succeeded"]
+        body = "\n\n---\n\n".join(f"{name}:\n{outcome.content}" for (name, _), outcome in zip(pending, outcomes))
+        status = "succeeded" if succeeded else "failed"
+        return ToolOutcome(
+            status,
+            f"{len(succeeded)}/{len(outcomes)} subagentes concluíram",
+            body,
+            {"tool_kind": "agent", "label": ", ".join(name for name, _ in pending)[:120], "requested": len(outcomes), "succeeded": len(succeeded)},
+            None if succeeded else "SUBAGENT_LIMIT" if all(item.error_code == "SUBAGENT_LIMIT" for item in outcomes) else "SUBAGENT_FAILED",
+        )
+
     def _subagent_task(self, record: Mapping[str, object], task: str) -> str:
         return f"{task}\n\nWhen you are done, reply with the complete result. The main agent only sees your final message."
 
@@ -447,6 +481,7 @@ class TurnSession:
             memory=self.memory,
             create_agent=self._create_agent if subagents else None,
             delegate=self._ask_agent if subagents else None,
+            delegate_batch=self._ask_agents if subagents else None,
             skills=self.skills,
             skill_load_recorder=self.skill_load_recorder,
         )

@@ -182,6 +182,7 @@ class AgentToolset:
         *,
         memory=None,
         delegate: Callable[[str, str], ToolOutcome] | None = None,
+        delegate_batch: Callable[[list[Mapping[str, Any]]], ToolOutcome] | None = None,
         create_agent: Callable[[str, str], ToolOutcome] | None = None,
         http_client: httpx.Client | None = None,
         enable_terminal: bool = True,
@@ -191,6 +192,7 @@ class AgentToolset:
         self.workspace = workspace
         self.memory = memory
         self._delegate = delegate
+        self._delegate_batch = delegate_batch
         self._create_agent = create_agent
         self._http_client = http_client
         self._enable_terminal = enable_terminal
@@ -293,6 +295,18 @@ class AgentToolset:
                 "Send a task to a subagent you created and wait for its answer.",
                 _schema({"name": _TEXT, "task": {**_TEXT, "description": "The complete instruction; the subagent cannot see this conversation."}}, ("name", "task")),
                 self.ask_agent, "agent",
+            ))
+        if self._delegate_batch is not None:
+            items.append(ToolDefinition(
+                "ask_agents",
+                "Send tasks to several subagents at once and wait for all of them. Use this instead of calling ask_agent repeatedly when the tasks do not depend on each other.",
+                _schema({
+                    "tasks": {
+                        "type": "array",
+                        "items": _schema({"name": _TEXT, "task": {**_TEXT, "description": "The complete instruction; the subagent cannot see this conversation."}}, ("name", "task")),
+                    },
+                }, ("tasks",)),
+                self.ask_agents, "agent",
             ))
         if self.skills is not None:
             items.extend((
@@ -682,6 +696,11 @@ class AgentToolset:
         if self._delegate is None:
             raise AgentToolError("Subagents are not available.")
         return self._delegate(str(name), str(task))
+
+    def ask_agents(self, tasks: list[Mapping[str, Any]]) -> ToolOutcome:
+        if self._delegate_batch is None:
+            raise AgentToolError("Subagents are not available.")
+        return self._delegate_batch(list(tasks))
 
 
 def parse_arguments(raw: object) -> dict[str, Any]:

@@ -178,6 +178,48 @@ def _session_with_one_subagent():
     )
 
 
+def _session_with_two_subagents():
+    session = _session_with_one_subagent()
+    session.agents_store.records["Redator"] = {"agent_id": "agent-sub-2", "name": "Redator", "role": "redação"}
+    return session
+
+
+def test_two_delegations_run_at_the_same_time(monkeypatch) -> None:
+    import threading
+
+    from agentos.agentic import session as session_module
+
+    barrier = threading.Barrier(2, timeout=5)
+    original = session_module.AgenticTurnRuntime
+
+    class Concurrent(original):
+        def run(self, turn_id, *, turn=None):
+            from agentos.agentic.runtime import AgenticRunResult
+
+            barrier.wait()
+            self.store.delta(turn or {}, "resultado")
+            self.store.finish(turn or {})
+            return AgenticRunResult("completed", 1, 0)
+
+    monkeypatch.setattr(session_module, "AgenticTurnRuntime", Concurrent)
+
+    session = _session_with_two_subagents()
+    outcome = session._ask_agents([{"name": "Pesquisador", "task": "a"}, {"name": "Redator", "task": "b"}])
+
+    assert outcome.status == "succeeded"
+    assert "Pesquisador" in outcome.content and "Redator" in outcome.content
+
+
+def test_the_per_turn_subagent_budget_still_applies_to_a_batch() -> None:
+    session = _session_with_two_subagents()
+    session._subagent_runs = 4
+
+    outcome = session._ask_agents([{"name": "Pesquisador", "task": "a"}])
+
+    assert outcome.status == "failed"
+    assert outcome.error_code == "SUBAGENT_LIMIT"
+
+
 def test_a_subagent_gets_the_same_output_budget_as_the_main_agent() -> None:
     from agentos.agentic.session import SUBAGENT_MAX_OUTPUT_TOKENS
 
