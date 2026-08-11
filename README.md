@@ -1,12 +1,33 @@
-# AgentOS
+# Orin (AgentOS)
 
-A local-first agent workspace. You describe what you need; an agent works on it
-with real tools — files, a terminal, the web, memory — and can create subagents
-for parts of the job. The interface stays a chat; everything the agents did is
+A local-first agent workspace. You describe what you need; Orin works on it with
+real tools — files, a terminal, the web, memory — and can create subagents for
+parts of the job. The interface stays a chat; everything the agents did is
 visible in it, summarized, and expandable when you want the detail.
 
 Everything runs on your machine. Nothing leaves it except the provider calls you
 configure.
+
+## Status
+
+This repository is intentionally being published while the project is still in
+active development. It is a working foundation, not a production release or a
+security-complete product yet.
+
+The current version includes the agent/tool loop, durable conversations and
+turns, context continuity, memory, subagent delegation, provider catalog and
+credential encryption, web access, browser policy controls, and the execution
+overview in the frontend.
+
+Known limitations before using it beyond a local development machine:
+
+- SSRF hardening is not complete for every shared-address edge case, including
+  the CGNAT range (`100.64.0.0/10`). Keep the service bound to `127.0.0.1` and
+  do not expose it through a reverse proxy or port forward.
+- The latest local validation still has two known persistence-test failures:
+  one migration downgrade expectation and one schema metadata expectation.
+- Playwright-based visual checks are optional and are skipped when the browser
+  dependency is unavailable.
 
 ## Requirements
 
@@ -66,6 +87,20 @@ event. Do not put provider keys in `.env.local`.
 
 Refresh the catalog after saving; the composer's model picker only offers models
 the server actually authorized.
+
+## Repository and secrets
+
+Only source, tests, public examples, and project documentation belong in this
+repository. Local credentials and runtime output are intentionally excluded:
+
+- `.env.local` is ignored; never commit real provider keys or database secrets.
+- `.env.example` and `.env.local.example` are safe templates for configuration.
+- `.superpowers/`, caches, `data/`, build output, and local test artifacts are
+  local-only files and are not part of the product snapshot.
+
+Provider credentials entered in the UI are encrypted at rest with
+`AGENTOS_PROVIDER_ENCRYPTION_KEY`. Treat that key like a secret and generate a
+new one for each local environment.
 
 ### Configure web search
 
