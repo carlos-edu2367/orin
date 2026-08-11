@@ -60,6 +60,9 @@ class ToolDefinition:
     handler: Callable[..., dict[str, Any]]
     # Drives the icon/label the UI shows for a grouped activity card.
     kind: str
+    # A read-only tool has no workspace or network side effect, so several of
+    # them may run at once without changing what any of them observes.
+    read_only: bool = False
 
     def schema(self) -> dict[str, Any]:
         return {"type": "function", "function": {"name": self.name, "description": self.description, "parameters": dict(self.parameters)}}
@@ -209,7 +212,7 @@ class AgentToolset:
                     "offset": {"type": "integer", "minimum": 1, "description": "First line to return (1-based). Defaults to 1."},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 800, "description": "How many lines to return. Defaults to 400."},
                 }, ("path",)),
-                self.read_file, "filesystem",
+                self.read_file, "filesystem", read_only=True,
             ),
             ToolDefinition(
                 "write_file", "Create or overwrite a UTF-8 text file in the conversation workspace.",
@@ -238,7 +241,7 @@ class AgentToolset:
                     "path": {**_TEXT, "description": "Workspace-relative directory; omit for the root."},
                     "depth": {"type": "integer", "minimum": 1, "maximum": 5, "description": "How many directory levels to descend. Defaults to 1."},
                 }),
-                self.list_files, "filesystem",
+                self.list_files, "filesystem", read_only=True,
             ),
             ToolDefinition(
                 "search_files",
@@ -249,12 +252,12 @@ class AgentToolset:
                     "max_results": {"type": "integer", "minimum": 1, "maximum": 200},
                     "ignore_case": {"type": "boolean"},
                 }, ("pattern",)),
-                self.search_files, "filesystem",
+                self.search_files, "filesystem", read_only=True,
             ),
             ToolDefinition(
                 "fetch_url", "Fetch a public web page or API response and return its readable text.",
                 _schema({"url": _TEXT}, ("url",)),
-                self.fetch_url, "web",
+                self.fetch_url, "web", read_only=True,
             ),
         ]
         if self._enable_terminal:
@@ -272,7 +275,7 @@ class AgentToolset:
             items.append(ToolDefinition(
                 "recall", "Search previously saved facts.",
                 _schema({"query": _TEXT}, ("query",)),
-                self.recall, "memory",
+                self.recall, "memory", read_only=True,
             ))
         if self._create_agent is not None:
             items.append(ToolDefinition(
@@ -296,17 +299,17 @@ class AgentToolset:
                 ToolDefinition(
                     "search_skills", "Search available procedural skills by task, tag, or capability. Returns metadata only.",
                     _schema({"query": _TEXT, "tags": {"type": "array", "items": _TEXT}, "capability": _TEXT, "limit": {"type": "integer", "minimum": 1, "maximum": 20}}, ("query",)),
-                    self.search_skills, "skill",
+                    self.search_skills, "skill", read_only=True,
                 ),
                 ToolDefinition(
                     "list_skills", "List available procedural skills with compact metadata and optional tag filter.",
                     _schema({"tag": _TEXT, "limit": {"type": "integer", "minimum": 1, "maximum": 100}}),
-                    self.list_skills, "skill",
+                    self.list_skills, "skill", read_only=True,
                 ),
                 ToolDefinition(
                     "read_skill_resource", "Read a UTF-8 file from a Skill package resources, references, examples, or templates directory.",
                     _schema({"skill_id": _TEXT, "resource_path": _TEXT, "version": _TEXT}, ("skill_id", "resource_path")),
-                    self.read_skill_resource, "skill",
+                    self.read_skill_resource, "skill", read_only=True,
                 ),
                 ToolDefinition(
                     "use_skill", "Load the operational instructions of an available Skill when it is needed for the current task.",
@@ -332,6 +335,12 @@ class AgentToolset:
         if definition is None:
             raise AgentToolError(f"Unknown tool '{name}'.")
         return definition
+
+    def is_read_only(self, name: str) -> bool:
+        try:
+            return self.resolve(name).read_only
+        except AgentToolError:
+            return False
 
     # -- execution ------------------------------------------------------
 

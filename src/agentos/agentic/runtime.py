@@ -1,6 +1,7 @@
 """Durable provider/action turn loop."""
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -10,6 +11,8 @@ from typing import Callable, Mapping
 
 from .action_loop import ActionLoop, MalformedToolCall
 from .provider_stream import NormalizedStreamItem, StreamKind
+
+MAX_PARALLEL_TOOLS = 4
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,22 +212,43 @@ class AgenticTurnRuntime:
         return max(512, characters * 4)
 
     def _run_toolset(self, turn: dict[str, object], calls: list[dict[str, str]]) -> list[dict[str, object]]:
-        """Execute the model's calls and return results it can actually read."""
+        """Execute the model's calls and return results it can actually read.
+
+        Read-only calls in the same batch run concurrently; anything that can
+        write to the workspace stays sequential so two calls never race on the
+        same file. Results are emitted in the order the model requested them.
+        """
         from .agent_tools import AgentToolError, parse_arguments
 
-        results: list[dict[str, object]] = []
+        prepared: list[tuple[str, str, dict[str, object] | None, str | None]] = []
         for call in calls:
             name = str(call.get("name") or "")
             call_id = str(call.get("id") or "")
             self._life(turn, "tool_started", tool_name=name, invocation_id=call_id)
             try:
-                arguments = parse_arguments(call.get("arguments") or "{}")
+                prepared.append((call_id, name, parse_arguments(call.get("arguments") or "{}"), None))
             except AgentToolError as error:
-                outcome_content = str(error)
-                self._life(turn, "tool_finished", tool_name=name, invocation_id=call_id, status="failed", summary=outcome_content, error_code="INVALID_ARGUMENTS")
-                results.append({"id": call_id, "name": name, "status": "failed", "content": outcome_content})
+                prepared.append((call_id, name, None, str(error)))
+
+        is_read_only = getattr(self.toolset, "is_read_only", None)
+        parallel_indexes = [
+            index for index, (_, name, arguments, error) in enumerate(prepared)
+            if error is None and callable(is_read_only) and is_read_only(name)
+        ]
+        outcomes: dict[int, object] = {}
+        if len(parallel_indexes) > 1:
+            with ThreadPoolExecutor(max_workers=min(len(parallel_indexes), MAX_PARALLEL_TOOLS)) as pool:
+                futures = {index: pool.submit(self.toolset.invoke, prepared[index][1], prepared[index][2]) for index in parallel_indexes}
+                for index, future in futures.items():
+                    outcomes[index] = future.result()
+
+        results: list[dict[str, object]] = []
+        for index, (call_id, name, arguments, error) in enumerate(prepared):
+            if error is not None:
+                self._life(turn, "tool_finished", tool_name=name, invocation_id=call_id, status="failed", summary=error, error_code="INVALID_ARGUMENTS")
+                results.append({"id": call_id, "name": name, "status": "failed", "content": error})
                 continue
-            outcome = self.toolset.invoke(name, arguments)
+            outcome = outcomes.get(index) or self.toolset.invoke(name, arguments)
             self._life(
                 turn, "tool_finished", tool_name=name, invocation_id=call_id, status=outcome.status,
                 summary=outcome.summary, error_code=outcome.error_code, tool_payload=dict(outcome.payload),

@@ -310,3 +310,11 @@ def test_truncated_output_keeps_the_full_instructive_message(toolset: AgentTools
     outcome = toolset.invoke("read_file", {"path": "huge.txt"})
 
     assert "narrow the request instead of repeating it" in outcome.content
+
+
+def test_read_tools_are_declared_read_only_and_write_tools_are_not(toolset: AgentToolset) -> None:
+    assert toolset.is_read_only("read_file")
+    assert toolset.is_read_only("list_files")
+    assert not toolset.is_read_only("write_file")
+    assert not toolset.is_read_only("run_command")
+    assert not toolset.is_read_only("unknown_tool")

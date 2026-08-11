@@ -360,3 +360,51 @@ def test_runtime_audits_unknown_tool_call_as_failed_action() -> None:
 
     assert result.state == "failed"
     assert any(state == "tool_failed" and payload["code"] == "MALFORMED_OR_DUPLICATE_TOOL_CALL" for state, payload in store.events)
+
+
+def test_read_only_calls_run_concurrently_and_keep_their_order() -> None:
+    import threading
+    import time
+
+    barrier = threading.Barrier(2, timeout=5)
+
+    class SlowToolset:
+        def schemas(self):
+            return []
+
+        def is_read_only(self, name: str) -> bool:
+            return True
+
+        def invoke(self, name, arguments):
+            # Both calls must be in flight at once or this times out.
+            barrier.wait()
+            time.sleep(0.01)
+            return ToolOutcome("succeeded", f"{name} ok", f"content-{arguments['n']}")
+
+    class TwoCallProvider:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def stream(self, request):
+            self.calls += 1
+            if self.calls == 1:
+                return normalize_sse(
+                    [
+                        'data: {"choices":[{"delta":{"tool_calls":['
+                        '{"index":0,"id":"call-1","function":{"name":"read_file","arguments":"{\\"n\\":1}"}},'
+                        '{"index":1,"id":"call-2","function":{"name":"read_file","arguments":"{\\"n\\":2}"}}'
+                        ']},"finish_reason":"tool_calls"}]}',
+                        "data: [DONE]",
+                    ],
+                    provider="openrouter",
+                )
+            return normalize_sse(['data: {"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}', "data: [DONE]"], provider="openrouter")
+
+    store = Store()
+    runtime = AgenticTurnRuntime(store=store, provider=TwoCallProvider(), toolset=SlowToolset())
+
+    result = runtime.run("turn-1")
+
+    assert result.state == "completed"
+    finished = [payload for state, payload in store.events if state == "tool_finished"]
+    assert [item["invocation_id"] for item in finished] == ["call-1", "call-2"]
