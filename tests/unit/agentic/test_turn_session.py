@@ -279,7 +279,7 @@ def test_asking_an_unknown_agent_tells_the_model_to_create_it(tmp_path: Path) ->
     assert "create_agent" in outcome.content
 
 
-def test_a_subagent_failure_with_partial_text_is_reported_as_a_failed_delegation(tmp_path: Path) -> None:
+def test_a_subagent_that_hits_its_iteration_limit_reports_its_partial_answer(tmp_path: Path) -> None:
     session, store, agents, _provider = build(tmp_path, [[
         NormalizedStreamItem(StreamKind.TEXT, 1, text="Ainda estou investigando."),
         NormalizedStreamItem(StreamKind.TOOL_CALL, 2, tool_call_id="call-1", tool_name="list_files", arguments_delta="{}"),
@@ -290,11 +290,11 @@ def test_a_subagent_failure_with_partial_text_is_reported_as_a_failed_delegation
 
     outcome = session._ask_agent("Reviewer", "revise o projeto")
 
-    assert outcome.status == "failed"
-    assert outcome.error_code == "ITERATION_LIMIT"
-    assert (child["agent_id"], "failed") in agents.states
-    assert "delegation.failed" in store.types()
-    assert "agent.message_received" not in store.types()
+    assert outcome.status == "succeeded"
+    assert "Ainda estou investigando." in outcome.content
+    assert (child["agent_id"], "completed") in agents.states
+    assert "agent.message_received" in store.types()
+    assert "delegation.failed" not in store.types()
 
 
 def test_an_empty_subagent_completion_is_reported_as_a_failed_delegation(tmp_path: Path) -> None:

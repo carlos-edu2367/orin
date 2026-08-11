@@ -453,3 +453,42 @@ def test_a_write_call_is_not_reordered_around_read_only_calls_that_follow_it() -
 
     assert result.state == "completed"
     assert toolset.execution_order == ["write_file", "read_file", "read_file"]
+
+
+def test_the_last_iteration_forbids_tools_and_returns_an_answer() -> None:
+    class AlwaysToolsProvider:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def stream(self, request):
+            self.calls.append(request)
+            if request.get("tool_choice") == "none":
+                return normalize_sse(['data: {"choices":[{"delta":{"content":"partial answer"},"finish_reason":"stop"}]}', "data: [DONE]"], provider="openrouter")
+            return normalize_sse(
+                [
+                    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-%d","function":{"name":"read_file","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}' % len(self.calls),
+                    "data: [DONE]",
+                ],
+                provider="openrouter",
+            )
+
+    class EchoToolset:
+        def schemas(self):
+            return []
+
+        def is_read_only(self, name: str) -> bool:
+            return True
+
+        def invoke(self, name, arguments):
+            return ToolOutcome("succeeded", "ok", "content")
+
+    store = Store()
+    provider = AlwaysToolsProvider()
+    runtime = AgenticTurnRuntime(store=store, provider=provider, toolset=EchoToolset(), limits=AgenticLimits(max_iterations=3, max_actions=8))
+
+    result = runtime.run("turn-1")
+
+    assert result.state == "completed"
+    assert store.deltas == ["partial answer"]
+    assert provider.calls[-1]["tool_choice"] == "none"
+    assert provider.calls[0].get("tool_choice") is None

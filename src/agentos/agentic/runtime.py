@@ -14,6 +14,12 @@ from .provider_stream import NormalizedStreamItem, StreamKind
 
 MAX_PARALLEL_TOOLS = 4
 
+CLOSING_INSTRUCTION = (
+    "You have reached this turn's action budget. Do not request any more tools. "
+    "Answer now with what you already accomplished, state plainly what is still missing, "
+    "and say what the next step would be."
+)
+
 
 @dataclass(frozen=True, slots=True)
 class AgenticLimits:
@@ -82,11 +88,17 @@ class AgenticTurnRuntime:
             remaining_tokens = self.limits.max_output_tokens if self.limits.max_provider_tokens is None else self.limits.max_provider_tokens - total_tokens
             if remaining_tokens <= 0:
                 return self._fail(turn, "PROVIDER_TOKEN_LIMIT", iteration, action_count)
+            final_iteration = self.limits.max_iterations is not None and iteration == self.limits.max_iterations
+            window = self._request_messages(messages)
+            if final_iteration:
+                window = [*window, {"role": "system", "content": CLOSING_INSTRUCTION}]
             request = {
                 "turn_id": turn_id, "provider": str(turn.get("provider", "")), "model": str(turn.get("model_id", "")),
-                "messages": self._request_messages(messages), "tools": self._tool_schemas(turn),
+                "messages": window, "tools": self._tool_schemas(turn),
                 "max_output_tokens": min(self.limits.max_output_tokens, remaining_tokens),
             }
+            if final_iteration:
+                request["tool_choice"] = "none"
             try:
                 events = self.provider.stream(request)
             except Exception:
@@ -159,7 +171,7 @@ class AgenticTurnRuntime:
                 continue
             if (retryable_error or rate_limited) and not text_parts and not calls:
                 return self._fail(turn, "PROVIDER_RETRY_EXHAUSTED", iteration, action_count)
-            if calls or (finish is not None and finish.value == "TOOL_CALLS"):
+            if (calls or (finish is not None and finish.value == "TOOL_CALLS")) and not final_iteration:
                 self._life(turn, "waiting_tool", count=len(calls))
                 if self.toolset is not None:
                     if action_count + len(calls) > self.limits.max_actions:
@@ -186,6 +198,8 @@ class AgenticTurnRuntime:
                 self._life(turn, "completed")
                 self.store.finish(turn)
                 return AgenticRunResult("completed", iteration, action_count)
+        # Reaching this point means the loop ended without any provider answer at
+        # all; a turn that produced text has already returned "completed" above.
         return self._fail(turn, "ITERATION_LIMIT", self.limits.max_iterations or 0, action_count)
 
     def _tool_schemas(self, turn: Mapping[str, object]) -> list[dict[str, object]]:
