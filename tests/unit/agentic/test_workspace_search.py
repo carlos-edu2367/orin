@@ -90,3 +90,19 @@ def test_list_entries_descends_when_asked(workspace: ConversationWorkspace) -> N
     paths = [item["path"] for item in workspace.list_entries(depth=3)]
 
     assert paths == ["src", "src/deep", "src/deep/app.py"]
+
+
+def test_list_entries_does_not_follow_a_symlink_out_of_the_workspace(
+    workspace: ConversationWorkspace, tmp_path: Path
+) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("secret", encoding="utf-8")
+    try:
+        (workspace.root / "linked").symlink_to(outside)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation is unavailable on this host")
+
+    results = workspace.list_entries(depth=3)
+
+    assert not any(item["path"].endswith("secret.txt") for item in results)

@@ -116,11 +116,20 @@ class ConversationWorkspace:
         for item in sorted(directory.iterdir(), key=lambda value: (value.is_file(), value.name.lower())):
             if len(entries) >= 500:
                 return
-            is_file = item.is_file()
+            # A directory-shaped symlink planted inside the workspace can point
+            # outside ``root``; resolving and re-checking containment here (same
+            # pattern as ``search``/``file_snapshot``) keeps the recursion from
+            # walking out of the sandbox.
+            try:
+                resolved = item.resolve()
+                resolved.relative_to(self.root)
+            except (OSError, ValueError):
+                continue
+            is_file = resolved.is_file()
             entries.append({
                 "path": self.relative(item),
                 "kind": "file" if is_file else "directory",
-                "size_bytes": item.stat().st_size if is_file else None,
+                "size_bytes": resolved.stat().st_size if is_file else None,
             })
             if not is_file and levels > 1:
                 self._collect(item, levels - 1, entries)
