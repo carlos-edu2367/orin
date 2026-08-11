@@ -216,7 +216,7 @@ class ChatWorker:
             provider_factory=lambda: self._provider_transport(turn),
             workspace_root=self._workspace_root,
             cancelled=lambda current: self.store.cancel_requested(str(current["turn_id"])),
-            limits=AgenticLimits(deadline=TURN_DEADLINE, max_iterations=configured_limits["max_iterations"], max_actions=24, max_output_tokens=4096),
+            limits=AgenticLimits(deadline=TURN_DEADLINE, max_iterations=configured_limits["max_iterations"], max_actions=24, max_output_tokens=4096, max_context_tokens=60_000),
             skills=skill_library.registry_for(str(turn["user_id"]), agent_id=str(self.store.main_agent_id(turn))),
             skill_load_recorder=lambda loaded: skill_library.record_load(
                 user_id=str(turn["user_id"]), execution_id=str(turn["execution_id"]),

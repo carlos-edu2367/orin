@@ -30,11 +30,12 @@ class AgenticLimits:
     max_provider_tokens: int | None = None
     max_cost: Decimal | None = None
     max_output_tokens: int = 1024
+    max_context_tokens: int = 60_000
 
     def __post_init__(self) -> None:
         if self.max_actions < 0 or (self.max_iterations is not None and self.max_iterations < 1) or self.max_provider_retries < 0 or self.deadline <= timedelta(0):
             raise ValueError("agentic limits are invalid")
-        if self.max_output_tokens < 1:
+        if self.max_output_tokens < 1 or self.max_context_tokens < 1_000:
             raise ValueError("agentic limits are invalid")
 
 
@@ -78,7 +79,7 @@ class AgenticTurnRuntime:
         turn = turn or self._load(turn_id)
         deadline = self.clock() + self.limits.deadline
         self._life(turn, "running")
-        messages = list(self.store.history_for_turn(turn))[-32:]
+        messages = list(self.store.history_for_turn(turn))
         action_count = 0
         self._failed_signatures: dict[str, str] = {}
         provider_retries = 0
@@ -216,8 +217,44 @@ class AgenticTurnRuntime:
             return self.toolset.schemas()
         return self.actions.tool_schemas(turn)
 
+    @staticmethod
+    def _estimated_tokens(message: Mapping[str, object]) -> int:
+        """Cheap upper-bound estimate; four characters per token is the usual rule."""
+        try:
+            payload = json.dumps(message, ensure_ascii=False, default=str)
+        except (TypeError, ValueError):
+            payload = str(message)
+        return max(1, len(payload) // 4)
+
     def _request_messages(self, messages: list[dict[str, object]]) -> list[dict[str, object]]:
-        window = messages[-32:]
+        """Keep the most recent exchange within budget without losing the ask.
+
+        Dropping by message count loses the user's original request first, which
+        is exactly the message the agent needs to still be working on. The first
+        user message is pinned and the rest of the budget goes to the newest
+        messages.
+        """
+        budget = self.limits.max_context_tokens
+        pinned_index = next((index for index, item in enumerate(messages) if item.get("role") == "user"), None)
+        pinned = messages[pinned_index] if pinned_index is not None else None
+        available = budget - (self._estimated_tokens(pinned) if pinned is not None else 0)
+        tail: list[dict[str, object]] = []
+        for index in range(len(messages) - 1, -1, -1):
+            if index == pinned_index:
+                continue
+            cost = self._estimated_tokens(messages[index])
+            if cost > available:
+                break
+            available -= cost
+            tail.append(messages[index])
+        tail.reverse()
+        omitted = len(messages) - len(tail) - (1 if pinned is not None else 0)
+        window: list[dict[str, object]] = []
+        if pinned is not None:
+            window.append(pinned)
+        if omitted > 0:
+            window.append({"role": "system", "content": f"[{omitted} earlier messages omitted to stay within the context budget; re-read files or re-run searches if you need their content]"})
+        window.extend(tail)
         if not self.system_prompt:
             return window
         return [{"role": "system", "content": self.system_prompt}, *window]
