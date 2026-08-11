@@ -7,6 +7,7 @@ reported.
 """
 from __future__ import annotations
 
+import json
 import os
 import platform
 import shutil
@@ -483,7 +484,16 @@ class TurnSession:
             "Answer in the same language as the task. Be concise and factual.\n"
             "Request every independent tool call in the same response instead of one at a time."
         )
-        environment = environment_facts()
+        try:
+            environment = environment_facts()
+        except Exception:
+            # A prompt enrichment must never be the reason a delegation cannot start.
+            environment = {
+                "os": "unavailable",
+                "shell": "unavailable",
+                "python": "unavailable",
+                "available": "unavailable",
+            }
         prompt += (
             "\n\n## Workspace and environment\n"
             "- You share one working directory with the main agent. All paths are relative to it; do not use absolute paths.\n"
@@ -492,7 +502,7 @@ class TurnSession:
             f"- Python: {environment['python']}. Also on PATH: {environment['available']}."
         )
         try:
-            tree = [f"{item['kind'][:1]} {item['path']}" for item in self.workspace.list_entries(depth=3)][:40]
+            tree = [f"{item['kind'][:1]} {json.dumps(str(item['path']), ensure_ascii=True)}" for item in self.workspace.list_entries(depth=3)][:40]
         except Exception:
             # Prompt enrichment must never be why a delegation cannot start.
             tree = []
