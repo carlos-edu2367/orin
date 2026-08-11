@@ -45,6 +45,68 @@ def test_web_search_returns_titles_and_urls_to_the_model(tmp_path) -> None:
     assert tools.is_read_only("web_search")
 
 
+def test_web_search_redacts_the_configured_key_from_the_activity_facing_outcome(tmp_path) -> None:
+    from agentos.agentic.web_search import BraveSearchClient
+
+    secret = "search-secret-123"
+    payload = {"web": {"results": [{
+        "title": f"Title {secret}",
+        "url": f"https://example.test/{secret}",
+        "description": f"Description {secret}",
+    }]}}
+    client = httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(200, json=payload)))
+    tools = AgentToolset(
+        ConversationWorkspace(tmp_path, "chat_search_secret"),
+        search_client=BraveSearchClient(secret, client),
+    )
+
+    outcome = tools.invoke("web_search", {"query": f"find {secret}"})
+
+    assert secret not in outcome.summary
+    assert secret not in outcome.content
+    assert secret not in repr(outcome.payload)
+
+
+def test_web_search_translates_provider_errors_without_leaking_the_key(tmp_path) -> None:
+    from agentos.agentic.web_search import BraveSearchClient
+
+    secret = "search-secret-456"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, json={"error": secret})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    tools = AgentToolset(
+        ConversationWorkspace(tmp_path, "chat_search_error"),
+        search_client=BraveSearchClient(secret, client),
+    )
+
+    outcome = tools.invoke("web_search", {"query": f"find {secret}"})
+
+    assert outcome.status == "failed"
+    assert secret not in outcome.summary
+    assert secret not in outcome.content
+    assert secret not in repr(outcome.payload)
+
+
+def test_web_search_no_results_redacts_the_query_from_summary_and_label(tmp_path) -> None:
+    from agentos.agentic.web_search import BraveSearchClient
+
+    secret = "search-secret-789"
+    client = httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={"web": {"results": []}})))
+    tools = AgentToolset(
+        ConversationWorkspace(tmp_path, "chat_search_empty"),
+        search_client=BraveSearchClient(secret, client),
+    )
+
+    outcome = tools.invoke("web_search", {"query": f"find {secret}"})
+
+    assert outcome.status == "succeeded"
+    assert outcome.content == "[no results]"
+    assert secret not in outcome.summary
+    assert secret not in repr(outcome.payload)
+
+
 def test_edit_file_replaces_a_unique_text_fragment_without_rewriting_the_document(toolset: AgentToolset) -> None:
     toolset.invoke("write_file", {"path": "notes/plan.md", "content": "first\nsecond\nthird\n"})
 

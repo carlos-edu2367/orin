@@ -13,6 +13,8 @@ from typing import Any, Mapping
 
 import httpx
 
+from .agent_tools import AgentToolError, _public_url
+
 
 SEARCH_TIMEOUT_SECONDS = 15
 MAX_SEARCH_RESULTS = 10
@@ -37,7 +39,7 @@ class BraveSearchClient:
         if not isinstance(api_key, str) or not api_key.strip():
             raise ValueError("api_key must be a non-blank string")
         self._api_key = api_key
-        self._endpoint = endpoint
+        self._endpoint = _public_url(endpoint)
         self._client = client or httpx.Client(timeout=SEARCH_TIMEOUT_SECONDS)
         self._owns_client = client is None
 
@@ -49,7 +51,18 @@ class BraveSearchClient:
             headers={"x-subscription-token": self._api_key, "accept": "application/json"},
         )
         response.raise_for_status()
-        return self._project(response.json(), bounded)
+        try:
+            body = response.json()
+        except (TypeError, ValueError):
+            return []
+        return [
+            SearchResult(
+                self.redact_text(result.title),
+                self.redact_text(result.url),
+                self.redact_text(result.snippet),
+            )
+            for result in self._project(body, bounded)
+        ]
 
     @staticmethod
     def _project(body: Any, limit: int) -> list[SearchResult]:
@@ -62,7 +75,9 @@ class BraveSearchClient:
             if not isinstance(item, Mapping):
                 continue
             url = str(item.get("url") or "")
-            if not url.startswith(("http://", "https://")):
+            try:
+                url = _public_url(url)
+            except AgentToolError:
                 continue
             results.append(SearchResult(
                 str(item.get("title") or url)[:MAX_TITLE_CHARS],
@@ -70,6 +85,9 @@ class BraveSearchClient:
                 str(item.get("description") or "")[:MAX_SNIPPET_CHARS],
             ))
         return results
+
+    def redact_text(self, value: object) -> str:
+        return str(value).replace(self._api_key, "[REDACTED]")
 
     def close(self) -> None:
         if self._owns_client:

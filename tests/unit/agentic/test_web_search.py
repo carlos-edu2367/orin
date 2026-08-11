@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import httpx
+import pytest
 
+from agentos.agentic.agent_tools import AgentToolError
 from agentos.agentic.web_search import BraveSearchClient, SearchResult, search_client_from_environment
 
 
@@ -47,3 +49,35 @@ def test_a_client_is_built_when_the_key_is_present(monkeypatch) -> None:
     monkeypatch.setenv("AGENTOS_SEARCH_API_KEY", "abc")
 
     assert isinstance(search_client_from_environment(), BraveSearchClient)
+
+
+@pytest.mark.parametrize("endpoint", [
+    "http://127.0.0.1/search",
+    "http://localhost/search",
+    "http://10.0.0.1/search",
+    "http://169.254.169.254/search",
+    "http://search.local/search",
+])
+def test_private_search_endpoints_are_rejected_before_a_request(endpoint: str) -> None:
+    with pytest.raises(AgentToolError):
+        BraveSearchClient("key", endpoint=endpoint)
+
+
+def test_non_public_result_urls_are_omitted() -> None:
+    payload = {"web": {"results": [
+        {"title": "loopback", "url": "http://127.0.0.1/a", "description": "no"},
+        {"title": "private", "url": "https://10.0.0.1/a", "description": "no"},
+        {"title": "link local", "url": "https://169.254.169.254/a", "description": "no"},
+        {"title": "local", "url": "https://intranet.local/a", "description": "no"},
+        {"title": "public", "url": "https://example.test/a", "description": "yes"},
+    ]}}
+
+    results = BraveSearchClient("key", _client(payload)).search("orin")
+
+    assert results == [SearchResult("public", "https://example.test/a", "yes")]
+
+
+def test_malformed_json_becomes_no_results() -> None:
+    client = httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(200, content=b"not-json")))
+
+    assert BraveSearchClient("key", client).search("orin") == []

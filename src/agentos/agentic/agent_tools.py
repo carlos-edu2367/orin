@@ -586,17 +586,32 @@ class AgentToolset:
             raise AgentToolError("Web search is not available.")
         if not isinstance(query, str) or not query.strip():
             raise AgentToolError("query must be a non-blank string")
+        redact = getattr(self._search_client, "redact_text", str)
+        clean_query = str(redact(query.strip()))
         try:
             results = self._search_client.search(query.strip(), limit=int(limit))
         except httpx.HTTPError as error:
             raise AgentToolError(f"The search provider could not be reached: {type(error).__name__}") from error
-        if not results:
-            return {"summary": f"Nenhum resultado para '{query.strip()[:40]}'", "content": "[no results]", "payload": {"count": 0, "label": query.strip()[:80]}}
-        body = "\n\n".join(f"{item.title}\n{item.url}\n{item.snippet}" for item in results)
+        except Exception as error:  # noqa: BLE001 - provider failures must not reach the model
+            raise AgentToolError("The search provider returned an invalid response.") from error
+        safe_results: list[tuple[str, str, str]] = []
+        for item in results or ():
+            try:
+                url = _public_url(str(item.url))
+            except (AgentToolError, TypeError, ValueError):
+                continue
+            safe_results.append((
+                str(redact(item.title)),
+                str(redact(url)),
+                str(redact(item.snippet)),
+            ))
+        if not safe_results:
+            return {"summary": f"Nenhum resultado para '{clean_query[:40]}'", "content": "[no results]", "payload": {"count": 0, "label": clean_query[:80]}}
+        body = "\n\n".join("\n".join(item) for item in safe_results)
         return {
-            "summary": f"Buscou na web: {len(results)} {'resultado' if len(results) == 1 else 'resultados'}",
+            "summary": f"Buscou na web: {len(safe_results)} {'resultado' if len(safe_results) == 1 else 'resultados'}",
             "content": body,
-            "payload": {"count": len(results), "label": query.strip()[:80]},
+            "payload": {"count": len(safe_results), "label": clean_query[:80]},
         }
 
     def remember(self, fact: str, tags: list[str] | None = None) -> dict[str, Any]:
