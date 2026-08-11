@@ -293,3 +293,20 @@ def test_truncated_output_tells_the_model_how_to_narrow_it(toolset: AgentToolset
 
 def test_definitions_are_built_once_per_toolset(toolset: AgentToolset) -> None:
     assert toolset.definitions() is toolset.definitions()
+
+
+def test_truncated_output_content_fits_within_the_result_budget(toolset: AgentToolset) -> None:
+    toolset.invoke("write_file", {"path": "huge.txt", "content": "x" * 20_000 + "\n"})
+
+    outcome = toolset.invoke("read_file", {"path": "huge.txt"})
+
+    assert outcome.payload["truncated"] is True
+    assert len(outcome.content) <= agent_tools.MAX_TOOL_RESULT_CHARS
+
+
+def test_truncated_output_keeps_the_full_instructive_message(toolset: AgentToolset) -> None:
+    toolset.invoke("write_file", {"path": "huge.txt", "content": "x" * 20_000 + "\n"})
+
+    outcome = toolset.invoke("read_file", {"path": "huge.txt"})
+
+    assert "narrow the request instead of repeating it" in outcome.content

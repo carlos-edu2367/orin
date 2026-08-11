@@ -360,11 +360,15 @@ class AgentToolset:
         payload.setdefault("tool_kind", definition.kind)
         if truncated:
             payload["truncated"] = True
-            content += (
+            notice = (
                 f"\n\n[output truncated at {MAX_TOOL_RESULT_CHARS} characters — "
                 "narrow the request instead of repeating it: use read_file with offset/limit, "
                 "search_files with a tighter pattern, or a command that prints less]"
             )
+            # The notice itself counts against the budget, so make room for it
+            # rather than growing content past MAX_TOOL_RESULT_CHARS.
+            content, _ = _bounded(content, MAX_TOOL_RESULT_CHARS - len(notice))
+            content += notice
         return ToolOutcome("succeeded", str(result.get("summary", f"{name} concluído"))[:240], content, payload)
 
     # -- handlers -------------------------------------------------------
