@@ -229,22 +229,58 @@ class HTTPProviderStreamTransport:
     def __repr__(self) -> str:
         return f"HTTPProviderStreamTransport(provider={self.provider!r}, base_url={self.base_url!r}, model={self.model!r})"
 
+    @staticmethod
+    def _with_cached_tail(messages: list[dict[str, object]]) -> list[dict[str, object]]:
+        """Mark the last content block of the last message as a cache breakpoint.
+
+        The conversation only ever grows by appending -- the same history
+        (including every tool result) is resent on each loop iteration and on
+        every later turn of the same conversation, and until now none of it
+        was cached. Marking the tail lets Anthropic reuse the cached prefix
+        for everything except what was just appended, instead of billing the
+        whole growing transcript at full price on every call. Builds new
+        list/dict objects rather than mutating in place: the runtime keeps and
+        reuses these message dicts across iterations, and mutating one would
+        leave a stray, stale cache_control marker on it once it is no longer
+        the last message -- silently burning through the 4-breakpoint cap.
+        """
+        if not messages:
+            return messages
+        *head, last = messages
+        content = last.get("content")
+        if isinstance(content, str) and content:
+            marked = {**last, "content": [{"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}]}
+        elif isinstance(content, list) and content:
+            new_content = [*content[:-1], {**content[-1], "cache_control": {"type": "ephemeral"}}]
+            marked = {**last, "content": new_content}
+        else:
+            return messages
+        return [*head, marked]
+
     def stream(self, request: Mapping[str, object]) -> Iterator[NormalizedStreamItem]:
         messages = list(request.get("messages") or [])
         tools = list(request.get("tools") or [])
         tool_choice = request.get("tool_choice")
         if self.provider == "anthropic":
-            system = "\n".join(str(item.get("content", "")) for item in messages if item.get("role") == "system")
+            system_items = [item for item in messages if item.get("role") == "system"]
             messages = [item for item in messages if item.get("role") != "system"]
+            messages = self._with_cached_tail(messages)
             # Anthropic requires max_tokens, so an uncapped turn still has to
             # name a number here; every other provider simply omits the field.
             requested = request.get("max_output_tokens")
             payload: dict[str, object] = {"model": self.model, "max_tokens": int(requested) if requested else ANTHROPIC_REQUIRED_MAX_TOKENS, "messages": messages, "stream": True}
-            if system:
-                # A cached prefix must be a block, not a bare string. Marking the
-                # last system block and the last tool covers system + every tool
-                # definition, which is the part that repeats on every iteration.
-                payload["system"] = [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
+            if system_items:
+                # The first system item is the fixed agent prompt, byte-identical
+                # across every iteration of a turn (and most turns of a
+                # conversation) -- that is the part worth caching. Anything after
+                # it (a context-budget trim marker, the final-iteration closing
+                # instruction) is call-specific and would invalidate a cache
+                # entry keyed on the whole joined string, so it stays out of the
+                # cached prefix as separate, uncached blocks instead.
+                payload["system"] = [
+                    {"type": "text", "text": str(item.get("content", "")), **({"cache_control": {"type": "ephemeral"}} if index == 0 else {})}
+                    for index, item in enumerate(system_items)
+                ]
             if tools:
                 projected = [
                     {

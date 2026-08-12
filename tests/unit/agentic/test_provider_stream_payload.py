@@ -56,6 +56,67 @@ def test_anthropic_payload_marks_the_cacheable_prefix() -> None:
     assert "cache_control" not in payload["tools"][0]
 
 
+def test_anthropic_payload_marks_the_last_message_block_as_cacheable() -> None:
+    """The growing conversation is the bulk of every request's tokens and is
+    resent on every loop iteration and every later turn -- it must be
+    cacheable too, not just system/tools."""
+    captured: list[dict] = []
+    list(_transport("anthropic", captured).stream(_request()))
+
+    payload = captured[0]
+    assert payload["messages"][-1]["content"] == [{"type": "text", "text": "hi", "cache_control": {"type": "ephemeral"}}]
+
+
+def test_anthropic_payload_caches_the_last_block_of_list_shaped_content() -> None:
+    captured: list[dict] = []
+    request = _request()
+    request["messages"] = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": [{"type": "tool_use", "id": "call_1", "name": "search", "input": {}}]},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call_1", "content": "ok"}, {"type": "text", "text": "and also this"}]},
+    ]
+
+    list(_transport("anthropic", captured).stream(request))
+
+    last_content = captured[0]["messages"][-1]["content"]
+    assert last_content[0] == {"type": "tool_result", "tool_use_id": "call_1", "content": "ok"}
+    assert last_content[-1] == {"type": "text", "text": "and also this", "cache_control": {"type": "ephemeral"}}
+
+
+def test_anthropic_payload_does_not_mutate_the_caller_supplied_messages() -> None:
+    """The runtime keeps and reappends these exact dicts across loop
+    iterations; if the transport mutated them in place, a stale
+    cache_control marker would stick around once the message is no longer
+    last, quietly eating into the 4-breakpoint-per-request cap."""
+    captured: list[dict] = []
+    request = _request()
+    original_last = request["messages"][-1]
+
+    list(_transport("anthropic", captured).stream(request))
+
+    assert "cache_control" not in original_last
+    assert original_last["content"] == "hi"
+
+
+def test_anthropic_payload_separates_a_dynamic_system_item_from_the_cached_one() -> None:
+    """A second system-role item (context-budget trim marker, closing
+    instruction) must not be folded into the cached prefix -- doing so would
+    invalidate the cache every time its text differs turn to turn."""
+    captured: list[dict] = []
+    request = _request()
+    request["messages"] = [
+        {"role": "system", "content": "you are orin"},
+        {"role": "system", "content": "3 earlier messages omitted"},
+        {"role": "user", "content": "hi"},
+    ]
+
+    list(_transport("anthropic", captured).stream(request))
+
+    system = captured[0]["system"]
+    assert system[0] == {"type": "text", "text": "you are orin", "cache_control": {"type": "ephemeral"}}
+    assert system[1] == {"type": "text", "text": "3 earlier messages omitted"}
+
+
 def test_openai_payload_asks_for_usage_in_the_stream() -> None:
     captured: list[dict] = []
     list(_transport("openrouter", captured).stream(_request()))
