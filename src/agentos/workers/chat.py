@@ -17,6 +17,8 @@ from sqlalchemy import create_engine, select
 
 from agentos.bootstrap.production import ProductionSettings, activity_cursor_fallback
 from agentos.agentic.provider_stream import HTTPProviderStreamTransport
+from agentos.provider_catalog.models import PROVIDERS_WITH_BASE_URL
+from agentos.provider_catalog.ollama import DEFAULT_OLLAMA_BASE_URL, normalize_ollama_base_url
 from agentos.provider_catalog.omniroute import DEFAULT_OMNIROUTE_BASE_URL, normalize_omniroute_base_url
 from agentos.agentic.runtime import AgenticLimits, AgenticTurnRuntime
 from agentos.agentic.settings import AgentRuntimeSettingsStore
@@ -41,6 +43,7 @@ PROVIDER_BASE_URLS = {
     "openrouter": "https://openrouter.ai/api/v1",
     "openai": "https://api.openai.com/v1",
     "omniroute": DEFAULT_OMNIROUTE_BASE_URL,
+    "ollama": DEFAULT_OLLAMA_BASE_URL,
 }
 
 # Upper bound used whenever the turn's model has no known (or no smaller)
@@ -54,6 +57,11 @@ MIN_MAX_CONTEXT_TOKENS = 4_000
 # trimmed message window, and the reply itself (uncapped here, so it can use
 # the provider's own max) still has to fit in what's left.
 CONTEXT_WINDOW_RESERVE_TOKENS = 12_000
+
+# num_ctx for an Ollama model the catalog has no window for. Deliberately not
+# DEFAULT_MAX_CONTEXT_TOKENS: asking an unknown local model for a 60k KV cache
+# is what spills into system RAM and drops inference by 20-50x.
+OLLAMA_FALLBACK_NUM_CTX = 16_384
 
 # A turn is allowed to continue until the worker's job timeout.  The old
 # five-minute deadline cut off ordinary multi-step file work mid-task.
@@ -189,20 +197,13 @@ class ChatWorker:
                     expired.append(str(row["turn_id"]))
         return tuple(expired)
 
-    def _max_context_tokens_for(self, turn: dict[str, object]) -> int:
-        """Derive the context-trim budget from the turn's actual model window.
-
-        The provider catalog already knows each model's real context window
-        (used today only to filter model *selection*); this is the first
-        place that spends it on the agentic loop's own request-sizing budget,
-        instead of the flat 60k every model used to get regardless of what it
-        can actually accept. A small or unrefreshed-catalog model falls back
-        to a safe smaller budget rather than risking an oversized request.
+    def _context_window_for(self, turn: dict[str, object]) -> int | None:
+        """The turn model's real context window, or None if it is unknown.
 
         Best-effort only: any failure here (catalog not yet refreshed for
         this model, or -- in unit tests -- a store whose engine is a bare
-        stub) falls back to the previous flat default rather than blocking
-        turn construction over a sizing refinement.
+        stub) reports None rather than blocking turn construction over a
+        sizing refinement.
         """
         try:
             with self.store._engine.connect() as c:
@@ -214,10 +215,43 @@ class ChatWorker:
                     )
                 ).scalar()
         except Exception:
+            return None
+        return int(context_window) if context_window else None
+
+    def _max_context_tokens_for(self, turn: dict[str, object]) -> int:
+        """Derive the context-trim budget from the turn's actual model window.
+
+        The provider catalog already knows each model's real context window
+        (used today only to filter model *selection*); this is the first
+        place that spends it on the agentic loop's own request-sizing budget,
+        instead of the flat 60k every model used to get regardless of what it
+        can actually accept. A small or unrefreshed-catalog model falls back
+        to a safe smaller budget rather than risking an oversized request.
+        """
+        context_window = self._context_window_for(turn)
+        if context_window is None:
             return DEFAULT_MAX_CONTEXT_TOKENS
-        if not context_window:
-            return DEFAULT_MAX_CONTEXT_TOKENS
-        return max(MIN_MAX_CONTEXT_TOKENS, min(DEFAULT_MAX_CONTEXT_TOKENS, int(context_window) - CONTEXT_WINDOW_RESERVE_TOKENS))
+        return max(MIN_MAX_CONTEXT_TOKENS, min(DEFAULT_MAX_CONTEXT_TOKENS, context_window - CONTEXT_WINDOW_RESERVE_TOKENS))
+
+    def _num_ctx_for(self, turn: dict[str, object]) -> int:
+        """The KV cache Ollama should allocate for this turn.
+
+        Never more than the window this turn will actually fill, and never
+        more than the model can hold: both ceilings matter, because the cache
+        is real VRAM on the user's own machine.
+        """
+        context_window = self._context_window_for(turn)
+        if context_window is None:
+            return OLLAMA_FALLBACK_NUM_CTX
+        return min(context_window, self._max_context_tokens_for(turn) + CONTEXT_WINDOW_RESERVE_TOKENS)
+
+    def _base_url_for(self, provider: str, credential) -> str:
+        configured = str(credential.get("base_url") or "")
+        if provider == "omniroute":
+            return normalize_omniroute_base_url(configured or DEFAULT_OMNIROUTE_BASE_URL)
+        if provider == "ollama":
+            return normalize_ollama_base_url(configured or DEFAULT_OLLAMA_BASE_URL)
+        return PROVIDER_BASE_URLS.get(provider, PROVIDER_BASE_URLS["openrouter"])
 
     def _provider_transport(self, turn: dict[str, object]) -> HTTPProviderStreamTransport:
         with self.store._engine.connect() as c:
@@ -225,9 +259,10 @@ class ChatWorker:
         if credential is None or not credential["enabled"]:
             raise ValueError("provider unavailable")
         provider, model = str(turn["provider"]), str(turn["model_id"])
-        api_key = self._credential_value(credential, str(turn["user_id"]), provider, allow_empty=provider == "omniroute")
-        base_url = normalize_omniroute_base_url(str(credential.get("base_url") or DEFAULT_OMNIROUTE_BASE_URL)) if provider == "omniroute" else PROVIDER_BASE_URLS.get(provider, PROVIDER_BASE_URLS["openrouter"])
-        return HTTPProviderStreamTransport(provider=provider, base_url=base_url, api_key=api_key, model=model)
+        api_key = self._credential_value(credential, str(turn["user_id"]), provider, allow_empty=provider in PROVIDERS_WITH_BASE_URL)
+        base_url = self._base_url_for(provider, credential)
+        num_ctx = self._num_ctx_for(turn) if provider == "ollama" else None
+        return HTTPProviderStreamTransport(provider=provider, base_url=base_url, api_key=api_key, model=model, num_ctx=num_ctx)
 
     def _credential_value(self, credential, user_id: str, provider: str, *, allow_empty: bool = False) -> str:
         """Read the provider key, upgrading a pre-encryption row in place.

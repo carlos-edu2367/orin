@@ -241,3 +241,53 @@ def test_agentos_agent_does_not_block_the_event_loop_during_a_turn() -> None:
         return order
 
     assert asyncio.run(scenario()) == ["other-turn-acquired", "turn-finished"]
+
+
+def _ollama_worker(*rows: dict[str, object]) -> ChatWorker:
+    engine = _catalog_engine(*rows)
+
+    class OllamaStore(Store):
+        _engine = engine
+
+    return ChatWorker(OllamaStore())
+
+
+def test_num_ctx_never_exceeds_the_models_own_window() -> None:
+    """A 262k model must not be asked to allocate a 262k KV cache."""
+    worker = _ollama_worker({
+        "user_id": "user-1", "provider": "ollama", "model_id": "qwen3:8b",
+        "display_name": "qwen3:8b", "context_window": 262_144,
+    })
+    turn = {**TURN, "provider": "ollama", "model_id": "qwen3:8b"}
+
+    budget = worker._max_context_tokens_for(turn) + chat_module.CONTEXT_WINDOW_RESERVE_TOKENS
+
+    assert worker._num_ctx_for(turn) == budget
+    assert budget < 262_144
+
+
+def test_num_ctx_is_capped_by_a_small_models_window() -> None:
+    worker = _ollama_worker({
+        "user_id": "user-1", "provider": "ollama", "model_id": "tiny:1b",
+        "display_name": "tiny:1b", "context_window": 8_192,
+    })
+    turn = {**TURN, "provider": "ollama", "model_id": "tiny:1b"}
+
+    assert worker._num_ctx_for(turn) == 8_192
+
+
+def test_num_ctx_falls_back_conservatively_for_an_uncatalogued_model() -> None:
+    """The worker's 60k default would be a VRAM trap for an unknown model."""
+    worker = _ollama_worker()
+    turn = {**TURN, "provider": "ollama", "model_id": "ghost:1b"}
+
+    assert worker._num_ctx_for(turn) == chat_module.OLLAMA_FALLBACK_NUM_CTX
+    assert chat_module.OLLAMA_FALLBACK_NUM_CTX < chat_module.DEFAULT_MAX_CONTEXT_TOKENS
+
+
+def test_base_url_resolution_covers_local_and_cloud_ollama() -> None:
+    worker = _ollama_worker()
+
+    assert worker._base_url_for("ollama", {"base_url": None}) == "http://localhost:11434"
+    assert worker._base_url_for("ollama", {"base_url": "https://ollama.com/v1"}) == "https://ollama.com"
+    assert worker._base_url_for("openai", {"base_url": None}) == chat_module.PROVIDER_BASE_URLS["openai"]
