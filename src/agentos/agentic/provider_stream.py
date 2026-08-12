@@ -282,9 +282,10 @@ def normalize_ndjson(lines: Iterable[str | bytes]) -> Iterator[NormalizedStreamI
 
 class HTTPProviderStreamTransport:
     """Small, injectable HTTP transport used only by the worker/runtime edge."""
-    def __init__(self, *, provider: str, base_url: str, api_key: str, model: str, client: httpx.Client | None = None) -> None:
+    def __init__(self, *, provider: str, base_url: str, api_key: str, model: str, client: httpx.Client | None = None, num_ctx: int | None = None) -> None:
         self.provider, self.base_url, self.model = provider, base_url.rstrip("/"), model
         self._api_key = api_key
+        self._num_ctx = num_ctx
         self._client = client or httpx.Client(timeout=60)
         self._owns_client = client is None
 
@@ -374,9 +375,34 @@ class HTTPProviderStreamTransport:
             headers["authorization"] = f"Bearer {self._api_key}"
         return f"{self.base_url}/chat/completions", headers, payload
 
+    def _ollama_request(self, messages: list, tools: list, tool_choice: object, requested: object) -> tuple[str, dict[str, str], dict[str, object]]:
+        payload: dict[str, object] = {"model": self.model, "messages": messages, "stream": True}
+        options: dict[str, object] = {}
+        # Ollama defaults to a 4096-token window regardless of what the model
+        # can hold, which is well under this loop's system prompt plus tool
+        # schemas. num_ctx is the whole reason the native API is used here.
+        if self._num_ctx:
+            options["num_ctx"] = int(self._num_ctx)
+        if requested:
+            options["num_predict"] = int(requested)
+        if options:
+            payload["options"] = options
+        # The native API has no tool_choice. The runtime's closing "none"
+        # iteration is honored by withholding the declarations entirely --
+        # stricter than the hint every other provider gets.
+        withheld = isinstance(tool_choice, str) and tool_choice.lower() == "none"
+        if tools and not withheld:
+            payload["tools"] = tools
+        headers = {"content-type": "application/json"}
+        if self._api_key:
+            headers["authorization"] = f"Bearer {self._api_key}"
+        return f"{self.base_url}/api/chat", headers, payload
+
     def _request_for(self, messages: list, tools: list, tool_choice: object, requested: object) -> tuple[str, dict[str, str], dict[str, object]]:
         if self.provider == "anthropic":
             return self._anthropic_request(messages, tools, tool_choice, requested)
+        if self.provider == "ollama":
+            return self._ollama_request(messages, tools, tool_choice, requested)
         return self._openai_request(messages, tools, tool_choice, requested)
 
     def stream(self, request: Mapping[str, object]) -> Iterator[NormalizedStreamItem]:
@@ -392,7 +418,11 @@ class HTTPProviderStreamTransport:
             has_limit = any(value is not None for value in (limit.remaining, limit.reset_after_seconds, limit.limit))
             if has_limit:
                 yield NormalizedStreamItem(StreamKind.RATE_LIMIT, 1, rate_limit=limit)
-            for item in normalize_sse(response.iter_lines(), provider=self.provider):
+            events = (
+                normalize_ndjson(response.iter_lines()) if self.provider == "ollama"
+                else normalize_sse(response.iter_lines(), provider=self.provider)
+            )
+            for item in events:
                 yield replace(item, sequence=item.sequence + (1 if has_limit else 0))
 
     def close(self) -> None:

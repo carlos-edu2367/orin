@@ -219,3 +219,90 @@ def test_ndjson_ignores_blank_keepalive_lines() -> None:
     items = list(normalize_ndjson(["", "   ", json.dumps({"message": {"content": "ok"}, "done": False})]))
 
     assert [item.kind for item in items] == [StreamKind.TEXT]
+
+
+def _ollama_transport(captured: list[dict], *, num_ctx: int | None = 32_768, api_key: str = "") -> HTTPProviderStreamTransport:
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append({"url": str(request.url), "headers": dict(request.headers), "body": json.loads(request.content)})
+        return httpx.Response(200, text=json.dumps({"done": True, "done_reason": "stop"}) + "\n")
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    return HTTPProviderStreamTransport(provider="ollama", base_url="http://localhost:11434", api_key=api_key, model="qwen3:8b", client=client, num_ctx=num_ctx)
+
+
+def test_ollama_posts_to_the_native_chat_endpoint_with_the_context_size() -> None:
+    captured: list[dict] = []
+
+    list(_ollama_transport(captured).stream(_request()))
+
+    assert captured[0]["url"] == "http://localhost:11434/api/chat"
+    assert captured[0]["body"]["stream"] is True
+    assert captured[0]["body"]["options"]["num_ctx"] == 32_768
+    assert captured[0]["body"]["options"]["num_predict"] == 512
+    # The system prompt stays inline; the native API has no separate field.
+    assert captured[0]["body"]["messages"][0] == {"role": "system", "content": "you are orin"}
+
+
+def test_ollama_omits_the_options_it_was_not_given() -> None:
+    captured: list[dict] = []
+    request = {key: value for key, value in _request().items() if key != "max_output_tokens"}
+
+    list(_ollama_transport(captured, num_ctx=None).stream(request))
+
+    assert "options" not in captured[0]["body"]
+
+
+def test_ollama_forwards_the_tool_declarations_unchanged() -> None:
+    """Orin already emits the exact shape Ollama's native API expects."""
+    captured: list[dict] = []
+
+    list(_ollama_transport(captured).stream(_request()))
+
+    assert captured[0]["body"]["tools"] == _request()["tools"]
+    assert "tool_choice" not in captured[0]["body"]
+
+
+def test_ollama_withholds_the_tools_on_the_closing_iteration() -> None:
+    """Ollama has no tool_choice, so "none" is honored by sending no tools."""
+    captured: list[dict] = []
+
+    list(_ollama_transport(captured).stream({**_request(), "tool_choice": "none"}))
+
+    assert "tools" not in captured[0]["body"]
+
+
+def test_ollama_keeps_the_tools_when_tool_choice_is_absent() -> None:
+    """A None tool_choice must not be mistaken for the literal string "none"."""
+    captured: list[dict] = []
+
+    list(_ollama_transport(captured).stream({**_request(), "tool_choice": None}))
+
+    assert captured[0]["body"]["tools"] == _request()["tools"]
+
+
+def test_ollama_authenticates_only_when_a_cloud_key_is_configured() -> None:
+    local: list[dict] = []
+    list(_ollama_transport(local).stream(_request()))
+    assert "authorization" not in local[0]["headers"]
+
+    cloud: list[dict] = []
+    list(_ollama_transport(cloud, api_key="cloud-secret").stream(_request()))
+    assert cloud[0]["headers"]["authorization"] == "Bearer cloud-secret"
+
+
+def test_ollama_stream_is_normalized_as_ndjson() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="\n".join([
+            json.dumps({"message": {"content": "hi"}, "done": False}),
+            json.dumps({"done": True, "done_reason": "stop", "prompt_eval_count": 4, "eval_count": 1}),
+        ]))
+
+    transport = HTTPProviderStreamTransport(
+        provider="ollama", base_url="http://localhost:11434", api_key="", model="qwen3:8b",
+        client=httpx.Client(transport=httpx.MockTransport(handler)), num_ctx=8192,
+    )
+
+    items = list(transport.stream(_request()))
+
+    assert [item.kind for item in items] == [StreamKind.TEXT, StreamKind.USAGE, StreamKind.FINISH]
+    assert items[0].text == "hi"
