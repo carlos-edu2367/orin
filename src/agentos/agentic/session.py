@@ -23,7 +23,7 @@ from agentos.installation import orin_paths
 from .agent_tools import AgentToolset, ToolOutcome
 from .events import AgentActivityEventType
 from .runtime import AgenticLimits, AgenticTurnRuntime
-from .workspace import ConversationWorkspace
+from .workspace import resolve_workspace
 
 
 SUBAGENT_DEADLINE = timedelta(seconds=180)
@@ -262,7 +262,13 @@ class TurnSession:
         self.search_client = search_client
         self.browser = browser
         self.tool_policy = tool_policy
-        self.workspace = ConversationWorkspace(workspace_root or orin_paths().workspaces, resolve_effective_workspace_id(turn))
+        local_root = turn.get("workspace_root_path")
+        self.workspace_is_local = isinstance(local_root, str) and bool(local_root.strip())
+        self.workspace = resolve_workspace(
+            resolve_effective_workspace_id(turn),
+            managed_root=workspace_root or orin_paths().workspaces,
+            local_root=local_root if isinstance(local_root, str) else None,
+        )
         self._subagent_runs = 0
         self._subagent_lock = Lock()
         self.main_agent_id = store.main_agent_id(turn) if hasattr(store, "main_agent_id") else str(turn.get("agent_id", "agent:main"))
@@ -586,7 +592,12 @@ class TurnSession:
             tool_names=tuple(item.name for item in toolset.definitions()),
             memories=memories,
             agents=agents,
-            workspace_hint="Files you create there persist for the whole conversation.",
+            workspace_hint=(
+                "This directory is a folder on the user's own machine that they attached to this chat. "
+                "Files already in it are theirs: do not reorganise, move or delete anything you were not asked to change."
+                if self.workspace_is_local
+                else "Files you create there persist for the whole conversation."
+            ),
             subagents_enabled=self.enable_subagents,
             skill_catalog=self._skill_catalog(task, toolset),
             tool_ledger=ledger,

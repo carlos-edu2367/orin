@@ -16,7 +16,7 @@ from agentos.api.contracts import ApplicationNotFoundError
 from agentos.api.events import CursorError
 from agentos.agentic.events import AgentActivityEvent, AgentActivityEventType
 from agentos.persistence.postgres.agentic_activity import ActivityCursorError
-from agentos.persistence.postgres.schema import (conversation_activity_events, conversation_agent_usage, conversation_agents, conversation_dispatches, conversation_events, conversation_messages, conversation_tool_records, conversation_turns, conversations, projects, runtime_heartbeats)
+from agentos.persistence.postgres.schema import (conversation_activity_events, conversation_agent_usage, conversation_agents, conversation_dispatches, conversation_events, conversation_messages, conversation_tool_records, conversation_turns, conversations, projects, runtime_heartbeats, workspace_roots)
 
 
 def _id(prefix: str) -> str: return f"{prefix}_{uuid4().hex}"
@@ -310,10 +310,12 @@ class PostgresChatStore:
         with self._engine.begin() as c:
             result = c.execute(update(conversation_dispatches).where(conversation_dispatches.c.turn_id == turn_id, conversation_dispatches.c.state.in_(("pending", "enqueued"))).values(state="active", attempts=conversation_dispatches.c.attempts + 1, acquired_at=now, updated_at=now))
             if result.rowcount != 1: return None
+            effective_workspace_id = func.coalesce(projects.c.workspace_id, conversation_turns.c.conversation_id)
             turn = c.execute(
-                select(conversation_turns, conversations.c.project_id, projects.c.workspace_id.label("project_workspace_id"))
+                select(conversation_turns, conversations.c.project_id, projects.c.workspace_id.label("project_workspace_id"), workspace_roots.c.root_path.label("workspace_root_path"))
                 .join(conversations, conversations.c.conversation_id == conversation_turns.c.conversation_id)
                 .outerjoin(projects, projects.c.project_id == conversations.c.project_id)
+                .outerjoin(workspace_roots, workspace_roots.c.workspace_id == effective_workspace_id)
                 .where(conversation_turns.c.turn_id == turn_id)
             ).mappings().one()
             c.execute(update(conversation_turns).where(conversation_turns.c.turn_id == turn_id).values(state="starting", started_at=now, updated_at=now))
