@@ -28,7 +28,7 @@ from .contracts import (
     ResourceApplication,
     SecurityService,
 )
-from agentos.provider_catalog.models import ProviderCatalogContext
+from agentos.provider_catalog.models import PROVIDERS_WITH_OPTIONAL_KEY, ProviderCatalogContext
 from agentos.provider_catalog.service import ProviderCatalogUnavailable
 from .events import CursorError, InMemoryClientEventStream
 from .security import AuthenticationError, AuthorizationError, AuthenticatedPrincipal, InMemorySecurityService, RateLimitError
@@ -700,7 +700,7 @@ def create_app(services: ApiServices) -> FastAPI:
     @app.put("/v1/providers/{provider}")
     async def configure_provider(provider: str, payload: ProviderSetupRequest, request: Request) -> JSONResponse:
         provider_name = _provider_name(provider)
-        if provider_name != "omniroute" and payload.api_key is None:
+        if provider_name not in PROVIDERS_WITH_OPTIONAL_KEY and payload.api_key is None:
             raise ValueError("API key is required for this provider")
         principal = principal_for(request, mutable=True)
         services.security.check_rate_limit(principal, action="provider.configure", origin=request.headers.get("origin"))
@@ -743,7 +743,24 @@ def create_app(services: ApiServices) -> FastAPI:
             "provider": "omniroute", "user_id": principal.user_id, "purpose": payload.purpose,
             "api_key": payload.api_key.get_secret_value() if payload.api_key is not None else "", "base_url": payload.base_url,
         })
-        return JSONResponse(_omniroute_test_public(result))
+        return JSONResponse(_connection_test_public(result))
+
+    @app.post("/v1/providers/ollama/test")
+    async def test_ollama_connection(payload: ProviderSetupRequest, request: Request) -> JSONResponse:
+        principal = principal_for(request, mutable=True)
+        services.security.check_rate_limit(principal, action="provider.test", origin=request.headers.get("origin"))
+        services.security.authorize(principal, action="provider.test", resource_id="ollama", purpose=payload.purpose)
+        _idempotency(request)
+        # Reaching a local daemon is blocking I/O; keeping it off the event
+        # loop matters more here than for a hosted gateway, because an Ollama
+        # that is simply not running takes the full connect timeout to fail.
+        result = await run_in_threadpool(
+            _require_port(services.provider_configuration).test_connection,
+            {"provider": "ollama", "user_id": principal.user_id, "purpose": payload.purpose,
+             "api_key": payload.api_key.get_secret_value() if payload.api_key is not None else "",
+             "base_url": payload.base_url},
+        )
+        return JSONResponse(_connection_test_public(result))
 
     @app.post("/v1/providers/omniroute/install")
     async def install_omniroute(request: Request) -> JSONResponse:
@@ -933,7 +950,7 @@ def _is_loopback_client(host: str | None) -> bool:
 
 def _provider_name(value: str) -> str:
     normalized = value.strip().lower()
-    if normalized not in {"openai", "anthropic", "openrouter", "omniroute"}:
+    if normalized not in {"openai", "anthropic", "openrouter", "omniroute", "ollama"}:
         raise ValueError("unsupported provider")
     return normalized
 
@@ -959,10 +976,10 @@ def _catalog_refresh_public(value: object) -> dict[str, object]:
     return {"count": data["count"], "refreshed_at": refreshed_at.isoformat() if isinstance(refreshed_at, datetime) else None}
 
 
-def _omniroute_test_public(value: object) -> dict[str, object]:
+def _connection_test_public(value: object) -> dict[str, object]:
     data = _jsonable(value)
     if not isinstance(data, dict) or data.get("connected") is not True:
-        raise ValueError("OmniRoute connection response is invalid")
+        raise ValueError("provider connection response is invalid")
     count = data.get("models_available")
     return {
         "connected": True,

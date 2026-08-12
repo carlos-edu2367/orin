@@ -612,3 +612,23 @@ def test_localhost_trust_serves_the_built_single_page_application(tmp_path: Path
     assert response.text == "<main>AgentOS local</main>"
     assert missing_api.status_code == 404
     assert missing_api.json()["error"]["category"] == "NOT_FOUND"
+
+
+def test_ollama_is_an_accepted_provider_name() -> None:
+    from agentos.api.gateway import _provider_name
+
+    assert _provider_name("Ollama") == "ollama"
+    with pytest.raises(ValueError):
+        _provider_name("llamafile")
+
+
+def test_configuring_ollama_does_not_require_a_key_at_the_gateway() -> None:
+    """Local Ollama is keyless; the Cloud rule lives in the adapter, which
+    is the only layer that sees the base URL."""
+    import inspect
+
+    from agentos.api import gateway
+
+    source = inspect.getsource(gateway)
+    assert 'provider_name not in PROVIDERS_WITH_OPTIONAL_KEY and payload.api_key is None' in source
+    assert '@app.post("/v1/providers/ollama/test")' in source
