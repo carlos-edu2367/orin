@@ -46,7 +46,14 @@ class ProviderModelCatalogService:
         refreshed_at = self._now()
         normalizer = _normalize_omniroute if normalized_provider == "omniroute" else _normalize_openrouter
         records = [normalizer(model, refreshed_at) for model in raw_models]
-        records.sort(key=lambda item: (item.display_name.casefold(), item.model_id))
+        # The repository stores one row per (user, provider, model_id); an upstream
+        # catalog that lists the same id twice (OmniRoute is known to do this — see
+        # tests/unit/provider_catalog/test_service.py) would otherwise violate that
+        # constraint and fail the whole refresh instead of just dropping the repeat.
+        deduplicated: dict[str, ProviderModelRecord] = {}
+        for record in records:
+            deduplicated[record.model_id] = record
+        records = sorted(deduplicated.values(), key=lambda item: (item.display_name.casefold(), item.model_id))
         self._repository.replace(context, normalized_provider, records, refreshed_at)
         return RefreshReceipt(refreshed_at, len(records))
 

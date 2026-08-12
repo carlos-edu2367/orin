@@ -282,6 +282,9 @@ function ProviderPanel({ provider, client, bootstrap }: { provider: ProviderName
       </form>}
       {isOmniRoute && omniOpen && <OmniRouteFreeSetup />}
       {canRevoke && <section className="provider-panel__catalog" aria-label={`Modelos de ${providerLabel(provider)}`}>
+        {isOmniRoute && <button type="button" className="button button--secondary" disabled={action.pending || bootstrap.status === 'missing_csrf'} onClick={onRefresh}>
+          {action.pending && action.kind === 'refresh' ? 'Atualizando…' : 'Atualizar catálogo'}
+        </button>}
         <button type="button" className="button button--secondary" disabled={catalogLoading} onClick={loadModels}>
           {catalogLoading ? 'Carregando modelos' : 'Ver modelos autorizados'}
         </button>

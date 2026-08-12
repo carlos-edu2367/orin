@@ -129,3 +129,30 @@ def test_refreshes_omniroute_from_its_saved_gateway_url() -> None:
     assert item.provider == "omniroute"
     assert item.model_id == "auto/coding"
     assert item.route_kind == "auto"
+
+
+def test_refresh_deduplicates_upstream_models_sharing_the_same_id() -> None:
+    """OmniRoute's own catalog is known to list the same model id twice (e.g. a
+    text and a video listing sharing one route). The repository enforces a
+    unique (user_id, provider, model_id) constraint, so a duplicate here must
+    never reach ``replace`` — it would otherwise crash the whole refresh."""
+    repository = FakeRepository()
+    repository.configured[("user-a", "omniroute")] = {
+        "enabled": True, "api_key": "omni-secret", "base_url": "http://localhost:20128/v1",
+    }
+
+    class FakeOmniRouteWithDuplicates:
+        def fetch(self, api_key: str, *, base_url: str) -> list[dict[str, object]]:
+            return [
+                {"id": "veo-free/seedance", "name": "veo-free/Seedance"},
+                {"id": "veo-free/seedance", "name": "veo-free/Seedance"},
+                {"id": "auto/coding", "name": "Coding route", "route_kind": "auto"},
+            ]
+
+    service = ProviderModelCatalogService(repository, {"omniroute": FakeOmniRouteWithDuplicates()}, now=lambda: datetime(2026, 8, 10, tzinfo=UTC))
+
+    receipt = service.refresh(context("user-a"), "omniroute")
+    items = service.list(context("user-a"), "omniroute")
+
+    assert receipt.count == 2
+    assert sorted(item.model_id for item in items) == ["auto/coding", "veo-free/seedance"]

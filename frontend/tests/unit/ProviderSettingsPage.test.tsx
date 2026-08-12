@@ -140,6 +140,25 @@ describe('ProviderSettingsPage OpenRouter setup', () => {
     expect(document.body.textContent).not.toContain('omni-key')
   })
 
+  it('exposes a catalog refresh control for OmniRoute, since it has no standard form to host one', async () => {
+    const fetchImpl = vi.fn<typeof fetch>((input, init) => {
+      const url = String(input)
+      if (url.endsWith('/models:refresh')) return Promise.resolve(json({ count: 1, refreshed_at: '2026-08-12T00:00:00Z' }))
+      if (init?.method === 'GET' && url.endsWith('/models')) return Promise.resolve(json({ items: [{ ...model(), provider: 'omniroute', model_id: 'auto/coding' }] }))
+      if (init?.method === 'GET') return Promise.resolve(json({ provider: 'omniroute', enabled: true, base_url: 'http://localhost:20128/v1' }))
+      return Promise.resolve(json({}))
+    })
+    const user = userEvent.setup()
+    render(<ProviderSettingsPage client={client(fetchImpl)} bootstrap={{ status: 'ready', csrfToken: 'csrf-test' }} />)
+
+    const panel = await screen.findByRole('article', { name: 'OmniRoute' })
+    const refreshButton = await within(panel).findByRole('button', { name: 'Atualizar catálogo' })
+    await user.click(refreshButton)
+
+    expect(fetchImpl.mock.calls.some(([requestInput]) => String(requestInput).endsWith('/models:refresh'))).toBe(true)
+    expect(await within(panel).findByText('auto/coding')).toBeInTheDocument()
+  })
+
   it('recognizes an OmniRoute installation that completed outside the current request', async () => {
     const fetchImpl = vi.fn<typeof fetch>((input, init) => {
       const url = String(input)
