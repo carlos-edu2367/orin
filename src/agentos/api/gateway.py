@@ -486,7 +486,7 @@ def create_app(services: ApiServices) -> FastAPI:
             client_host = request.client.host if request.client is not None else None
             if not _is_loopback_client(client_host):
                 return JSONResponse({"dialog_unavailable": True}, status_code=200)
-            result = choose_folder()
+            result = await run_in_threadpool(choose_folder)
             if not result.available:
                 return JSONResponse({"dialog_unavailable": True}, status_code=200)
             if result.cancelled or not result.path:

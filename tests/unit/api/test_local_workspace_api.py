@@ -24,7 +24,7 @@ class _StubConversations:
         return {"conversation_id": conversation_id, "title": "Chat", "state": "idle", "project_id": None, "messages": [], "turns": []}
 
 
-def _client(tmp_path: Path) -> tuple[TestClient, PostgresLocalWorkspaceStore]:
+def _client(tmp_path: Path, *, loopback: bool = False) -> tuple[TestClient, PostgresLocalWorkspaceStore]:
     engine = create_engine("sqlite://", future=True, connect_args={"check_same_thread": False}, poolclass=StaticPool)
     metadata.create_all(engine)
     security = InMemorySecurityService()
@@ -32,7 +32,9 @@ def _client(tmp_path: Path) -> tuple[TestClient, PostgresLocalWorkspaceStore]:
     security.add_pat("other", AuthenticatedPrincipal("other", "cred", frozenset({"api"})))
     store = PostgresLocalWorkspaceStore(engine)
     services = ApiServices(security=security, conversation_application=_StubConversations(), local_workspaces=store, workspace_root=tmp_path / "managed")
-    return TestClient(create_app(services)), store
+    app = create_app(services)
+    client_peer = ("127.0.0.1", 12345) if loopback else ("testclient", 50000)
+    return TestClient(app, client=client_peer), store
 
 
 def test_inspect_reports_a_typed_folder(tmp_path: Path) -> None:
@@ -110,3 +112,41 @@ def test_conversation_get_carries_the_workspace_block(tmp_path: Path) -> None:
     client.put("/v1/conversations/chat_a/workspace", headers={"Authorization": "Bearer owner", "Idempotency-Key": "i10"}, json={"path": str(folder), "acknowledged_risk": False})
     after = client.get("/v1/conversations/chat_a", headers={"Authorization": "Bearer owner"}).json()
     assert after["workspace"]["kind"] == "local" and after["workspace"]["folder_name"] == "site"
+
+
+def test_the_native_dialog_runs_through_a_threadpool(tmp_path: Path, monkeypatch) -> None:
+    """A dialog left open behind another window must never hold an API worker.
+
+    ``choose_folder`` is a blocking subprocess call. Calling it directly inside
+    the ``async def`` route would stall the single event loop — and every other
+    request on it — for as long as the dialog stays open. Routing it through
+    ``run_in_threadpool`` is what keeps the loop free while the dialog waits.
+    """
+    from agentos.api import gateway as gateway_module
+    from agentos.local_workspace.picker import PickResult
+
+    client, _ = _client(tmp_path, loopback=True)
+
+    marker = object()
+
+    def fake_choose_folder(**_kwargs: object) -> PickResult:
+        return PickResult(path=None, cancelled=True, available=True)
+
+    fake_choose_folder.marker = marker  # type: ignore[attr-defined]
+    monkeypatch.setattr(gateway_module, "choose_folder", fake_choose_folder)
+
+    calls: list[object] = []
+    original_run_in_threadpool = gateway_module.run_in_threadpool
+
+    async def spying_run_in_threadpool(func, *args, **kwargs):
+        calls.append(func)
+        return await original_run_in_threadpool(func, *args, **kwargs)
+
+    monkeypatch.setattr(gateway_module, "run_in_threadpool", spying_run_in_threadpool)
+
+    response = client.post("/v1/conversations/chat_a/workspace/inspect", headers={"Authorization": "Bearer owner", "Idempotency-Key": "dlg"}, json={})
+
+    assert response.status_code == 200
+    assert response.json() == {"cancelled": True}
+    assert getattr(gateway_module.choose_folder, "marker", None) is marker
+    assert any(getattr(call, "marker", None) is marker for call in calls), "choose_folder must be awaited through run_in_threadpool, not called directly"

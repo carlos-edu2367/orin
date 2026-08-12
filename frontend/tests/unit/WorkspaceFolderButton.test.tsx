@@ -27,6 +27,16 @@ describe('WorkspaceFolderButton', () => {
     expect(screen.getByRole('button', { name: /site/ })).toHaveAttribute('title', 'D:/site')
   })
 
+  it('falls back to the path when a drive root has no folder name', () => {
+    render(<WorkspaceFolderButton {...api({ state: { kind: 'local', path: 'C:\\', folderName: '', scope: 'chat', projectName: null } })} />)
+    const button = screen.getByRole('button', { name: 'C:\\' })
+    expect(button).toHaveAttribute('title', 'C:\\')
+    // The accessible-name computation falls back to the `title` attribute when
+    // visible text is blank, which would let an empty label pass unnoticed.
+    // Assert the rendered text itself so a regression here is caught for real.
+    expect(button).toHaveTextContent('C:\\')
+  })
+
   it('attaches a plain folder after one confirmation', async () => {
     const props = api()
     render(<WorkspaceFolderButton {...props} />)

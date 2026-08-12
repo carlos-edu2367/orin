@@ -30,7 +30,7 @@ export function WorkspaceFolderButton({ state, onInspect, onAttach, onDetach, on
   const [notice, setNotice] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
 
-  const label = state.kind === 'local' ? (state.folderName ?? 'Pasta') : 'Pasta'
+  const label = state.kind === 'local' ? (state.folderName || state.path || 'Pasta') : 'Pasta'
 
   async function inspect(path: string | null) {
     setBusy(true); setError(null); setNotice(null)
