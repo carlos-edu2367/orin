@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import httpx
 import pytest
 
 from agentos.provider_catalog.ollama import (
     DEFAULT_OLLAMA_BASE_URL,
     OLLAMA_CLOUD_BASE_URL,
+    OllamaCatalogClient,
     is_ollama_cloud,
     normalize_ollama_base_url,
 )
@@ -36,3 +38,83 @@ def test_cloud_is_recognized_by_host_not_by_a_stored_mode_flag() -> None:
     assert is_ollama_cloud(DEFAULT_OLLAMA_BASE_URL) is False
     assert is_ollama_cloud("http://gpu.lan:11434") is False
     assert is_ollama_cloud("https://notollama.com") is False
+
+
+def _handler(seen: list[str], *, show_fails_for: str | None = None):
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen.append(f"{request.method} {request.url}")
+        if request.url.path == "/api/tags":
+            return httpx.Response(200, json={"models": [
+                {"name": "qwen3:8b", "model": "qwen3:8b", "details": {"family": "qwen3"}},
+                {"name": "llava:7b", "model": "llava:7b", "details": {"family": "llava"}},
+            ]})
+        import json as _json
+
+        model = _json.loads(request.content)["model"]
+        if model == show_fails_for:
+            return httpx.Response(500, json={"error": "boom"})
+        if model == "llava:7b":
+            return httpx.Response(200, json={
+                "capabilities": ["completion", "vision"],
+                "model_info": {"llava.context_length": 32768, "llava.block_count": 32},
+            })
+        return httpx.Response(200, json={
+            "capabilities": ["completion", "tools"],
+            "model_info": {"qwen3.context_length": 262144, "general.parameter_count": 8},
+        })
+
+    return handle
+
+
+def test_merges_the_tag_list_with_per_model_details() -> None:
+    seen: list[str] = []
+    client = OllamaCatalogClient(client=httpx.Client(transport=httpx.MockTransport(_handler(seen))))
+
+    models = client.fetch("", base_url="http://localhost:11434")
+
+    assert seen[0] == "GET http://localhost:11434/api/tags"
+    assert [item["id"] for item in models] == ["qwen3:8b", "llava:7b"]
+    assert models[0]["context_length"] == 262144
+    assert models[0]["capabilities"] == ["completion", "tools"]
+    assert models[1]["context_length"] == 32768
+    assert models[1]["capabilities"] == ["completion", "vision"]
+
+
+def test_sends_a_bearer_token_only_when_a_cloud_key_is_configured() -> None:
+    headers: list[dict[str, str]] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        headers.append(dict(request.headers))
+        return httpx.Response(200, json={"models": []})
+
+    transport = httpx.MockTransport(handle)
+    OllamaCatalogClient(client=httpx.Client(transport=transport)).fetch("", base_url="http://localhost:11434")
+    assert "authorization" not in headers[0]
+
+    OllamaCatalogClient(client=httpx.Client(transport=transport)).fetch("cloud-secret", base_url="https://ollama.com")
+    assert headers[1]["authorization"] == "Bearer cloud-secret"
+
+
+def test_a_failed_detail_lookup_degrades_only_that_model() -> None:
+    """One unreadable model must not cost the user the whole catalog refresh."""
+    seen: list[str] = []
+    client = OllamaCatalogClient(client=httpx.Client(transport=httpx.MockTransport(_handler(seen, show_fails_for="llava:7b"))))
+
+    models = client.fetch("", base_url="http://localhost:11434")
+
+    assert [item["id"] for item in models] == ["qwen3:8b", "llava:7b"]
+    assert models[1]["context_length"] is None
+    assert models[1]["capabilities"] == []
+
+
+def test_connection_failure_is_a_sanitized_catalog_error() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused")
+
+    client = OllamaCatalogClient(client=httpx.Client(transport=httpx.MockTransport(handle)))
+
+    with pytest.raises(RuntimeError) as failure:
+        client.fetch("cloud-secret", base_url="https://ollama.com")
+
+    assert "cloud-secret" not in str(failure.value)
+    assert "cloud-secret" not in repr(client)
