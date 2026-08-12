@@ -27,3 +27,15 @@ def test_adapter_maps_a_provider_qualified_catalog_record_to_the_existing_model_
     assert descriptor.tools.supported is True
     assert InputKind.IMAGE in descriptor.compatibility.supported_input_kinds
     assert str(descriptor.cost.input_per_million_tokens) == "3"
+
+
+def test_the_resolver_catalog_covers_every_configurable_provider() -> None:
+    """A provider missing from this tuple is invisible to model resolution.
+    OmniRoute was absent since it shipped; Ollama must not repeat that."""
+    import inspect
+
+    from agentos.provider_catalog import resolver_catalog
+
+    listing = inspect.getsource(resolver_catalog.PostgresProviderModelCatalog.list_models)
+    for provider in ("openrouter", "openai", "anthropic", "omniroute", "ollama"):
+        assert f'"{provider}"' in listing

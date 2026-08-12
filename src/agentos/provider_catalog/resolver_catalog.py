@@ -66,7 +66,7 @@ class PostgresProviderModelCatalog:
     def list_models(self, query: AuthorizedModelListQuery) -> ModelPage:
         context = ProviderCatalogContext(str(query.context.user_id), str(query.context.purpose))
         items = []
-        for provider in ("openrouter", "openai", "anthropic"):
+        for provider in ("openrouter", "openai", "anthropic", "omniroute", "ollama"):
             for record in self._repository.list(context, provider):
                 descriptor = _descriptor(record)
                 items.append(replace(
