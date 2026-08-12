@@ -107,3 +107,55 @@ def test_local_http_transport_runs_provider_tool_provider_loop_without_internet(
     assert result.state == "completed"
     assert store.content == ["local answer"]
     assert store.states == ["running", "waiting_tool", "tool_started", "tool_finished", "running", "completed", "completed"]
+
+
+def test_ollama_ndjson_stream_drives_a_full_tool_round_trip() -> None:
+    """The native stream must reach the runtime as the same typed events an
+    SSE provider produces, tool call included."""
+    import json
+
+    import httpx
+
+    from agentos.agentic.provider_stream import HTTPProviderStreamTransport, StreamKind
+
+    calls: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(json.loads(request.content))
+        if len(calls) == 1:
+            body = "\n".join([
+                json.dumps({"message": {"role": "assistant", "content": "checking"}, "done": False}),
+                json.dumps({"message": {"tool_calls": [{"function": {"name": "read_file", "arguments": {"path": "a.txt"}}}]}, "done": False}),
+                json.dumps({"done": True, "done_reason": "stop", "prompt_eval_count": 40, "eval_count": 9}),
+            ])
+        else:
+            body = "\n".join([
+                json.dumps({"message": {"role": "assistant", "content": "done"}, "done": False}),
+                json.dumps({"done": True, "done_reason": "stop", "prompt_eval_count": 60, "eval_count": 3}),
+            ])
+        return httpx.Response(200, text=body)
+
+    transport = HTTPProviderStreamTransport(
+        provider="ollama", base_url="http://localhost:11434", api_key="", model="qwen3:8b",
+        client=httpx.Client(transport=httpx.MockTransport(handler)), num_ctx=32_768,
+    )
+    request = {
+        "messages": [{"role": "user", "content": "read a.txt"}],
+        "tools": [{"type": "function", "function": {"name": "read_file", "description": "read", "parameters": {"type": "object", "properties": {}}}}],
+    }
+
+    first = list(transport.stream(request))
+    second = list(transport.stream({**request, "tool_choice": "none"}))
+
+    assert [item.kind for item in first] == [StreamKind.TEXT, StreamKind.TOOL_CALL, StreamKind.USAGE, StreamKind.FINISH]
+    assert first[1].tool_call_id == "tool-call:1"
+    assert json.loads(first[1].arguments_delta) == {"path": "a.txt"}
+    assert first[3].finish_reason.value == "TOOL_CALLS"
+    assert first[2].usage.total_tokens == 49
+
+    assert calls[0]["options"]["num_ctx"] == 32_768
+    assert "tools" in calls[0]
+    # The closing iteration withholds the declarations entirely.
+    assert "tools" not in calls[1]
+    assert [item.kind for item in second] == [StreamKind.TEXT, StreamKind.USAGE, StreamKind.FINISH]
+    assert second[2].finish_reason.value == "STOP"
