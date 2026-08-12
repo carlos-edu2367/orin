@@ -34,7 +34,8 @@ from .events import CursorError, InMemoryClientEventStream
 from .security import AuthenticationError, AuthorizationError, AuthenticatedPrincipal, InMemorySecurityService, RateLimitError
 from agentos.agentic.file_preview import media_type_for, open_in_default_application
 from agentos.installation import orin_paths
-from agentos.agentic.workspace import ConversationWorkspace, WorkspaceError
+from agentos.agentic.workspace import ConversationWorkspace, WorkspaceError, resolve_workspace
+from agentos.local_workspace import FolderRejected, choose_folder, inspect_folder
 
 
 # Conversation SSE pacing. The active poll is fast enough to feel like token
@@ -108,6 +109,15 @@ class CreateConversationRequest(_RequestModel):
     workspace_id: str | None = Field(default=None, min_length=1, max_length=255)
 
 
+class InspectWorkspaceFolderRequest(_RequestModel):
+    path: str | None = Field(default=None, max_length=4096)
+
+
+class AttachWorkspaceFolderRequest(_RequestModel):
+    path: str = Field(min_length=1, max_length=4096)
+    acknowledged_risk: bool = False
+
+
 class CreateProjectRequest(_RequestModel):
     name: str = Field(min_length=1, max_length=120)
     description: str | None = Field(default=None, max_length=2000)
@@ -174,6 +184,7 @@ class ApiServices:
         agentic_runtime: object | None = None,
         events: InMemoryClientEventStream | None = None,
         workspace_root: str | Path | None = None,
+        local_workspaces: object | None = None,
     ) -> None:
         self.security = security or InMemorySecurityService()
         self.execution_application = execution_application
@@ -184,6 +195,7 @@ class ApiServices:
         self.conversation_application = conversation_application
         self.projects = projects
         self.skills = skills
+        self.local_workspaces = local_workspaces
         self.omniroute_runtime = omniroute_runtime
         self.agentic_runtime = agentic_runtime
         self.events = events or InMemoryClientEventStream()
@@ -416,22 +428,108 @@ def create_app(services: ApiServices) -> FastAPI:
             raise ApplicationNotFoundError(memory_id)
         return JSONResponse(status_code=204, content=None)
 
+    def effective_workspace_id(conversation: dict[str, object], principal: AuthenticatedPrincipal) -> tuple[str, str | None]:
+        """The workspace id a chat actually resolves to, plus the project's name.
+
+        A chat inside a project shares the project's workspace, so attaching a
+        folder there attaches it for every chat of that project. The name comes
+        back so the interface can say so before confirming.
+        """
+        project_id = conversation.get("project_id")
+        if not isinstance(project_id, str) or not project_id:
+            return str(conversation.get("conversation_id") or ""), None
+        project = require_port(services.projects).get(project_id, principal.user_id)
+        data = project if isinstance(project, dict) else {"workspace_id": getattr(project, "workspace_id", None), "name": getattr(project, "name", None)}
+        workspace_id = data.get("workspace_id")
+        if not isinstance(workspace_id, str) or not workspace_id:
+            raise ApplicationNotFoundError(str(conversation.get("conversation_id") or ""))
+        name = data.get("name")
+        return workspace_id, name if isinstance(name, str) else None
+
+    def local_root_for(workspace_id: str, principal: AuthenticatedPrincipal) -> str | None:
+        store = services.local_workspaces
+        if store is None:
+            return None
+        return store.root_for(workspace_id, principal.user_id)
+
+    def workspace_state(conversation: dict[str, object], principal: AuthenticatedPrincipal) -> dict[str, object]:
+        workspace_id, project_name = effective_workspace_id(conversation, principal)
+        root = local_root_for(workspace_id, principal)
+        return {
+            "kind": "local" if root else "managed",
+            "path": root,
+            "folder_name": Path(root).name if root else None,
+            "scope": "project" if project_name is not None else "chat",
+            "project_name": project_name,
+        }
+
+    def conversation_record(conversation_id: str, principal: AuthenticatedPrincipal) -> dict[str, object]:
+        conversation = _jsonable(require_port(services.conversation_application).get(conversation_id, principal.user_id))
+        if not isinstance(conversation, dict):
+            raise ApplicationNotFoundError(conversation_id)
+        return conversation
+
     @app.get("/v1/conversations/{conversation_id}")
     async def get_conversation(conversation_id: str, request: Request) -> JSONResponse:
         principal = principal_for(request)
         services.security.authorize(principal, action="conversation.read", resource_id=conversation_id, purpose="conversation.read")
-        return JSONResponse(_jsonable(require_port(services.conversation_application).get(conversation_id, principal.user_id)))  # type: ignore[union-attr]
+        conversation = conversation_record(conversation_id, principal)
+        return JSONResponse({**conversation, "workspace": workspace_state(conversation, principal)})
+
+    @app.post("/v1/conversations/{conversation_id}/workspace/inspect")
+    async def inspect_conversation_workspace(conversation_id: str, payload: InspectWorkspaceFolderRequest, request: Request) -> JSONResponse:
+        principal = principal_for(request, mutable=True)
+        services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.workspace.inspect")
+        conversation_record(conversation_id, principal)
+        chosen = payload.path
+        if chosen is None:
+            client_host = request.client.host if request.client is not None else None
+            if not _is_loopback_client(client_host):
+                return JSONResponse({"dialog_unavailable": True}, status_code=200)
+            result = choose_folder()
+            if not result.available:
+                return JSONResponse({"dialog_unavailable": True}, status_code=200)
+            if result.cancelled or not result.path:
+                return JSONResponse({"cancelled": True}, status_code=200)
+            chosen = result.path
+        try:
+            inspection = inspect_folder(chosen, home=Path.home(), orin_data=orin_paths().data)
+        except FolderRejected as error:
+            raise ApplicationValidationError("invalid workspace folder") from error
+        return JSONResponse(asdict(inspection))
+
+    @app.put("/v1/conversations/{conversation_id}/workspace")
+    async def attach_conversation_workspace(conversation_id: str, payload: AttachWorkspaceFolderRequest, request: Request) -> JSONResponse:
+        principal = principal_for(request, mutable=True)
+        services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.workspace.attach")
+        conversation = conversation_record(conversation_id, principal)
+        try:
+            inspection = inspect_folder(payload.path, home=Path.home(), orin_data=orin_paths().data)
+        except FolderRejected as error:
+            raise ApplicationValidationError("invalid workspace folder") from error
+        if not inspection.is_directory:
+            raise ApplicationValidationError("workspace folder does not exist")
+        if not inspection.writable:
+            raise ApplicationValidationError("workspace folder is not writable")
+        if inspection.risk != "none" and not payload.acknowledged_risk:
+            return _error(409, "CONFLICT", "workspace_risk_acknowledgement_required", retryable=False)
+        workspace_id, _ = effective_workspace_id(conversation, principal)
+        _require_port(services.local_workspaces).set_root(workspace_id, principal.user_id, inspection.path)
+        return JSONResponse(workspace_state(conversation, principal))
+
+    @app.delete("/v1/conversations/{conversation_id}/workspace")
+    async def detach_conversation_workspace(conversation_id: str, request: Request) -> JSONResponse:
+        principal = principal_for(request, mutable=True)
+        services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.workspace.detach")
+        conversation = conversation_record(conversation_id, principal)
+        workspace_id, _ = effective_workspace_id(conversation, principal)
+        _require_port(services.local_workspaces).clear_root(workspace_id, principal.user_id)
+        return JSONResponse(workspace_state(conversation, principal))
 
     def conversation_workspace(conversation_id: str, principal: AuthenticatedPrincipal) -> ConversationWorkspace:
-        conversation = _jsonable(require_port(services.conversation_application).get(conversation_id, principal.user_id))
-        if not isinstance(conversation, dict): raise ApplicationNotFoundError(conversation_id)
-        project_id = conversation.get("project_id")
-        workspace_id = conversation_id
-        if isinstance(project_id, str) and project_id:
-            project = require_port(services.projects).get(project_id, principal.user_id)
-            workspace_id = getattr(project, "workspace_id", None) if not isinstance(project, dict) else project.get("workspace_id")
-            if not isinstance(workspace_id, str) or not workspace_id: raise ApplicationNotFoundError(conversation_id)
-        return ConversationWorkspace(services.workspace_root, workspace_id)
+        conversation = conversation_record(conversation_id, principal)
+        workspace_id, _ = effective_workspace_id(conversation, principal)
+        return resolve_workspace(workspace_id, managed_root=services.workspace_root, local_root=local_root_for(workspace_id, principal))
 
     @app.get("/v1/conversations/{conversation_id}/files/{path:path}")
     async def get_conversation_file(conversation_id: str, path: str, request: Request, disposition: str = "inline") -> FileResponse:
