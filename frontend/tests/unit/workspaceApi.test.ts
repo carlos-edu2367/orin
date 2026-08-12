@@ -30,8 +30,8 @@ describe('workspace api', () => {
     const state = await attachWorkspaceFolder(client, 'chat_a', 'C:/', true)
 
     expect(state).toEqual({ kind: 'local', path: 'C:/', folderName: 'C:', scope: 'chat', projectName: null })
-    const init = fetchImpl.mock.calls[0][1] as RequestInit
-    expect(JSON.parse(String(init.body))).toEqual({ path: 'C:/', acknowledged_risk: true })
+    const init = fetchImpl.mock.calls[0][1]
+    expect(JSON.parse(String(init?.body))).toEqual({ path: 'C:/', acknowledged_risk: true })
   })
 
   it('reads the state returned by detach', async () => {

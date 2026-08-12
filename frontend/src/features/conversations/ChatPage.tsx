@@ -7,6 +7,7 @@ import {
   type Conversation, type ConversationMessage,
 } from '../../api/conversations'
 import { ApiError } from '../../api/errors'
+import { attachWorkspaceFolder, detachWorkspaceFolder, inspectWorkspaceFolder, type WorkspaceState } from '../../api/workspace'
 import { CommandPalette } from '../../components/CommandPalette'
 import { Brand } from '../../components/Brand'
 import { OverviewPanel } from '../overview/OverviewPanel'
@@ -17,9 +18,12 @@ import { Composer } from './Composer'
 import { MarkdownMessage } from './MarkdownMessage'
 import { TurnTimeline } from './TurnTimeline'
 import { WorkspaceFilePreview, type WorkspaceFileReference } from './WorkspaceFileCard'
+import { WorkspaceFolderButton } from './WorkspaceFolderButton'
 import { activityReducer, createActivityState } from './activityReducer'
 import type { ConversationActivityEvent } from './activityTypes'
 import { buildMessageTimelines } from './turnTimelineFold'
+
+const MANAGED_WORKSPACE: WorkspaceState = { kind: 'managed', path: null, folderName: null, scope: 'chat', projectName: null }
 
 const RUNNING_STATES = new Set(['queued', 'starting', 'running', 'streaming', 'cancelling'])
 
@@ -325,6 +329,15 @@ export function ChatPage() {
           error={error}
           hint={stopping ? 'parando…' : undefined}
           placeholder="Continue a conversa…"
+          settings={
+            <WorkspaceFolderButton
+              state={conversation?.workspace ?? MANAGED_WORKSPACE}
+              onInspect={(path) => inspectWorkspaceFolder(client, conversationId, path)}
+              onAttach={(path, acknowledged) => attachWorkspaceFolder(client, conversationId, path, acknowledged)}
+              onDetach={() => detachWorkspaceFolder(client, conversationId)}
+              onChange={(next) => setConversation((current) => (current ? { ...current, workspace: next } : current))}
+            />
+          }
         />
       </footer>
     </main>

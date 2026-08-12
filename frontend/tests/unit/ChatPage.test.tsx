@@ -28,7 +28,7 @@ function activity(sequence: number, type: string, summary: string, payload: Reco
   }
 }
 
-function snapshotBody(snapshot: Snapshot) {
+function snapshotBody(snapshot: Snapshot, workspace: Record<string, unknown> = { kind: 'managed', path: null, folder_name: null, scope: 'chat', project_name: null }) {
   return {
     conversation_id: CONVERSATION_ID,
     title: 'Conversa de teste',
@@ -39,6 +39,7 @@ function snapshotBody(snapshot: Snapshot) {
     turns: [{ turn_id: 'turn-1', state: snapshot.state, created_at: '2026-08-10T20:00:00+00:00', started_at: null, finished_at: null }],
     activities: snapshot.activities,
     activity_cursor: 'a.9',
+    workspace,
   }
 }
 
@@ -300,5 +301,22 @@ describe('ChatPage', () => {
 
     expect(await screen.findByText(/Criou o agente/)).toBeInTheDocument()
     expect(await screen.findByText(/Investigue a documentação/)).toBeInTheDocument()
+  })
+
+  it('shows the attached folder next to the composer', async () => {
+    const snapshot: Snapshot = { state: 'idle', messages: [], activities: [] }
+    const local = { kind: 'local', path: 'D:/site', folder_name: 'site', scope: 'chat', project_name: null }
+    globalThis.fetch = vi.fn<typeof fetch>().mockImplementation(async (input) => {
+      const url = typeof input === 'string' ? input : String(input)
+      if (url.includes('/events?')) return new Response('event: heartbeat\ndata: {"cursor":"a.9"}\n\n', { headers: { 'Content-Type': 'text/event-stream' } })
+      if (url.endsWith('/v1/projects/sidebar')) return new Response(JSON.stringify({ items: [] }), { headers: { 'Content-Type': 'application/json' } })
+      if (url.endsWith('/v1/conversations')) return new Response(JSON.stringify({ items: [{ conversation_id: CONVERSATION_ID, title: 'Conversa de teste', state: 'idle' }] }), { headers: { 'Content-Type': 'application/json' } })
+      if (url.includes(`/v1/conversations/${CONVERSATION_ID}`)) return new Response(JSON.stringify(snapshotBody(snapshot, local)), { headers: { 'Content-Type': 'application/json' } })
+      return new Response('{}', { headers: { 'Content-Type': 'application/json' } })
+    })
+
+    renderChat()
+
+    expect(await screen.findByRole('button', { name: /site/ })).toBeInTheDocument()
   })
 })
