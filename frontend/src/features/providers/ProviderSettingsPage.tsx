@@ -539,49 +539,64 @@ function OllamaSetup(props: OllamaSetupProps) {
   const isCloud = props.mode === 'cloud'
 
   return <form className="ollama-flow" onSubmit={props.onSave}>
-    <div className="ollama-flow__modes" role="radiogroup" aria-label="Modo do Ollama">
-      {(['local', 'cloud'] as const).map((mode) => (
-        <button
-          key={mode}
-          type="button"
-          role="radio"
-          aria-checked={props.mode === mode}
-          className={props.mode === mode ? 'chip is-selected' : 'chip'}
-          disabled={props.action.pending || sessionUnavailable}
-          onClick={() => props.onModeChange(mode)}
-        >
-          {mode === 'local' ? 'Local' : 'Cloud'}
+    <div className="ollama-flow__overview" data-testid="ollama-flow-overview">
+      <div className="ollama-flow__overview-copy">
+        <p className="ollama-flow__kicker">AMBIENTE DE EXECUÇÃO</p>
+        <h3>{isCloud ? 'Modelos na Ollama Cloud' : 'Modelos no seu ambiente'}</h3>
+        <p>{isCloud
+          ? 'Acesse modelos hospedados pela Ollama usando uma chave criada em ollama.com/settings/keys.'
+          : 'Execute modelos nesta máquina ou em outra da sua rede. Nenhuma chave é necessária.'}</p>
+      </div>
+      <span className="ollama-flow__status" role="status">{props.connection?.connected ? 'Conectado' : isCloud ? 'Chave necessária' : 'Pronto para testar'}</span>
+      <div className="ollama-flow__modes" role="radiogroup" aria-label="Modo do Ollama">
+        {(['local', 'cloud'] as const).map((mode) => (
+          <button
+            key={mode}
+            type="button"
+            role="radio"
+            aria-checked={props.mode === mode}
+            className={props.mode === mode ? 'chip is-selected' : 'chip'}
+            disabled={props.action.pending || sessionUnavailable}
+            onClick={() => props.onModeChange(mode)}
+          >
+            {mode === 'local' ? 'Local' : 'Cloud'}
+          </button>
+        ))}
+      </div>
+    </div>
+
+    <div className="ollama-flow__connection" data-testid="ollama-flow-connection">
+      <div className="ollama-flow__section-heading">
+        <div><p className="ollama-flow__kicker">CONEXÃO</p><h3>Onde o Ollama está rodando?</h3></div>
+        <span>Endpoint seguro</span>
+      </div>
+      <div className="ollama-flow__fields">
+        <label htmlFor="ollama-base-url">URL do servidor</label>
+        <input id="ollama-base-url" name="base-url" type="url" autoComplete="off" value={props.baseUrl} onChange={(event) => props.onBaseUrlChange(event.target.value)} />
+        {isCloud && <>
+          <label htmlFor="ollama-api-key">Chave de API</label>
+          <input id="ollama-api-key" name="api-key" type="password" autoComplete="off" value={props.apiKey} onChange={(event) => props.onApiKeyChange(event.target.value)} placeholder="Inserir uma nova chave" />
+        </>}
+      </div>
+    </div>
+
+    <div className="ollama-flow__footer" data-testid="ollama-flow-footer">
+      <label className="provider-panel__toggle" htmlFor="ollama-enabled">
+        <input id="ollama-enabled" type="checkbox" checked={props.enabled} onChange={(event) => props.onEnabledChange(event.target.checked)} />
+        <span><strong>Disponibilizar para os agentes</strong><small>Permitir que os agentes utilizem este provider</small></span>
+      </label>
+
+      <div className="ollama-flow__actions">
+        <button type="button" className="button button--secondary" disabled={props.action.pending || sessionUnavailable} onClick={props.onTest}>
+          {isTesting ? 'Testando conexão…' : 'Testar conexão'}
         </button>
-      ))}
-    </div>
-    <p>{isCloud
-      ? 'Modelos hospedados pela Ollama. Precisa de uma chave criada em ollama.com/settings/keys.'
-      : 'Modelos rodando nesta máquina (ou em outra da sua rede). Nenhuma chave é necessária.'}</p>
-
-    <div className="ollama-flow__fields">
-      <label htmlFor="ollama-base-url">URL do servidor</label>
-      <input id="ollama-base-url" name="base-url" type="url" autoComplete="off" value={props.baseUrl} onChange={(event) => props.onBaseUrlChange(event.target.value)} />
-      {isCloud && <>
-        <label htmlFor="ollama-api-key">Chave de API</label>
-        <input id="ollama-api-key" name="api-key" type="password" autoComplete="off" value={props.apiKey} onChange={(event) => props.onApiKeyChange(event.target.value)} placeholder="Inserir uma nova chave" />
-      </>}
-    </div>
-
-    <label className="provider-panel__toggle" htmlFor="ollama-enabled">
-      <input id="ollama-enabled" type="checkbox" checked={props.enabled} onChange={(event) => props.onEnabledChange(event.target.checked)} />
-      Ativar Ollama para os agentes
-    </label>
-
-    <div className="ollama-flow__actions">
-      <button type="button" className="button button--secondary" disabled={props.action.pending || sessionUnavailable} onClick={props.onTest}>
-        {isTesting ? 'Testando conexão…' : 'Testar conexão'}
-      </button>
-      <button type="submit" className="button button--primary" disabled={props.action.pending || sessionUnavailable || (isCloud && !props.apiKey)}>
-        {isSaving ? 'Salvando…' : 'Salvar e ativar'}
-      </button>
-      <button type="button" className="button button--secondary button--danger" disabled={props.action.pending || !props.canRevoke || sessionUnavailable} onClick={props.onRevoke}>
-        Desativar acesso
-      </button>
+        <button type="submit" className="button button--primary" disabled={props.action.pending || sessionUnavailable || (isCloud && !props.apiKey)}>
+          {isSaving ? 'Salvando…' : 'Salvar e ativar'}
+        </button>
+        <button type="button" className="button button--secondary button--danger" disabled={props.action.pending || !props.canRevoke || sessionUnavailable} onClick={props.onRevoke}>
+          Desativar acesso
+        </button>
+      </div>
     </div>
 
     {props.connection?.connected && <p className="omniroute-step__success" aria-live="polite">

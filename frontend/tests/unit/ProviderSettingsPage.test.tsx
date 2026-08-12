@@ -318,6 +318,16 @@ async function ollamaPanel(): Promise<HTMLElement> {
 }
 
 describe('ProviderSettingsPage Ollama setup', () => {
+  it('exposes semantic regions for the connection card layout', async () => {
+    render(<ProviderSettingsPage client={client(providerFetch(() => json({ provider: 'ollama', enabled: true })))} bootstrap={{ status: 'ready', csrfToken: 'csrf-test' }} />)
+
+    const panel = await ollamaPanel()
+
+    expect(within(panel).getByTestId('ollama-flow-overview')).toBeInTheDocument()
+    expect(within(panel).getByTestId('ollama-flow-connection')).toBeInTheDocument()
+    expect(within(panel).getByTestId('ollama-flow-footer')).toBeInTheDocument()
+  })
+
   it('starts in local mode with the default url and no key field', async () => {
     render(<ProviderSettingsPage client={client(providerFetch(() => json({ provider: 'ollama', enabled: true })))} bootstrap={{ status: 'ready', csrfToken: 'csrf-test' }} />)
 

@@ -186,11 +186,14 @@ h1 { margin: 0; color: var(--orin-text); font-size: clamp(42px, 6vw, 76px); font
 .provider-panel__form input[type="password"],
 .provider-panel__form input[type="url"],
 .omniroute-flow input[type="password"],
-.omniroute-flow input[type="url"] { width: 100%; padding: 13px 14px; border: 1px solid rgb(var(--orin-text-rgb) / .16); border-radius: 10px; background: rgb(var(--orin-text-rgb) / .04); color: var(--orin-text); transition: border-color .2s ease, background .2s ease; }
+.omniroute-flow input[type="url"],
+.ollama-flow input[type="password"],
+.ollama-flow input[type="url"] { width: 100%; padding: 13px 14px; border: 1px solid rgb(var(--orin-text-rgb) / .16); border-radius: 10px; background: rgb(var(--orin-text-rgb) / .04); color: var(--orin-text); transition: border-color .2s ease, background .2s ease; }
 .provider-panel__form input::placeholder,
-.omniroute-flow input::placeholder { color: rgb(var(--orin-text-rgb) / .31); }
+.omniroute-flow input::placeholder, .ollama-flow input::placeholder { color: rgb(var(--orin-text-rgb) / .31); }
 .provider-panel__form input:focus,
-.omniroute-flow input:focus { border-color: var(--orin-accent); background: rgb(var(--orin-text-rgb) / .07); outline: none; }
+.omniroute-flow input:focus,
+.ollama-flow input:focus { border-color: var(--orin-accent); background: rgb(var(--orin-text-rgb) / .07); outline: none; }
 .provider-panel__toggle { display: flex; align-items: center; gap: 8px; margin-top: 14px; color: rgb(var(--orin-text-rgb) / .7); font-size: 12px; }
 .provider-panel__toggle input { width: 15px; height: 15px; accent-color: var(--orin-accent); }
 .provider-panel__actions { display: flex; gap: 10px; margin-top: 18px; }
@@ -221,6 +224,28 @@ h1 { margin: 0; color: var(--orin-text); font-size: clamp(42px, 6vw, 76px); font
 .omniroute-flow__actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px; }
 .omniroute-step__success { margin: 12px 0 0 !important; color: var(--orin-accent) !important; font-size: 12px !important; }
 .omniroute-flow__session { margin: 0; color: #ffb7ad; font-size: 12px; }
+.ollama-flow { display: grid; gap: 18px; }
+.ollama-flow__overview { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 18px 24px; align-items: start; padding: 22px; border: 1px solid rgb(var(--orin-accent-rgb) / .26); border-radius: 15px; background: radial-gradient(circle at 100% 0, rgb(var(--orin-accent-rgb) / .16), transparent 48%), rgb(var(--orin-text-rgb) / .035); }
+.ollama-flow__overview-copy h3, .ollama-flow__section-heading h3 { margin: 3px 0 7px; color: var(--orin-text); font-size: 17px; font-weight: 600; letter-spacing: -.02em; }
+.ollama-flow__overview-copy > p:last-child { max-width: 540px; margin: 0; color: rgb(var(--orin-text-rgb) / .62); font-size: 12px; line-height: 1.55; }
+.ollama-flow__kicker { margin: 0; color: var(--orin-accent); font-size: 9px; font-weight: 750; letter-spacing: .14em; }
+.ollama-flow__status { padding: 6px 10px; border: 1px solid rgb(var(--orin-accent-rgb) / .3); border-radius: 999px; color: var(--orin-accent); font-size: 10px; white-space: nowrap; }
+.ollama-flow__modes { display: flex; gap: 4px; width: max-content; padding: 4px; border: 1px solid rgb(var(--orin-text-rgb) / .12); border-radius: 11px; background: rgb(var(--orin-ink-rgb) / .45); }
+.ollama-flow .chip { min-width: 72px; padding: 8px 12px; border: 0; border-radius: 7px; background: transparent; color: rgb(var(--orin-text-rgb) / .52); font-size: 11px; cursor: pointer; }
+.ollama-flow .chip:hover:not(:disabled) { color: var(--orin-text); background: rgb(var(--orin-text-rgb) / .07); }
+.ollama-flow .chip.is-selected { background: var(--orin-accent); color: var(--orin-ink); font-weight: 700; }
+.ollama-flow__connection { padding: 20px 22px; border: 1px solid rgb(var(--orin-text-rgb) / .1); border-radius: 15px; background: rgb(var(--orin-text-rgb) / .025); }
+.ollama-flow__section-heading { display: flex; justify-content: space-between; gap: 16px; align-items: start; }
+.ollama-flow__section-heading > span { color: rgb(var(--orin-text-rgb) / .37); font-size: 10px; }
+.ollama-flow__fields { display: grid; grid-template-columns: 1fr 1fr; gap: 7px 12px; margin-top: 18px; }
+.ollama-flow__fields label { align-self: end; color: rgb(var(--orin-text-rgb) / .62); font-size: 11px; }
+.ollama-flow__fields input + label { margin-top: 0; }
+.ollama-flow__footer { display: flex; justify-content: space-between; align-items: center; gap: 20px; padding-top: 2px; }
+.ollama-flow__footer .provider-panel__toggle { margin-top: 0; }
+.ollama-flow__footer .provider-panel__toggle span { display: grid; gap: 3px; }
+.ollama-flow__footer .provider-panel__toggle strong { color: rgb(var(--orin-text-rgb) / .85); font-size: 12px; font-weight: 550; }
+.ollama-flow__footer .provider-panel__toggle small { color: rgb(var(--orin-text-rgb) / .42); font-size: 10px; }
+.ollama-flow__actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 .provider-panel__catalog { margin-top: 20px; }
 .provider-panel__catalog summary { cursor: pointer; color: rgb(var(--orin-text-rgb) / .86); font-size: 13px; font-weight: 580; }
 .provider-panel__catalog > p { max-width: 620px; color: rgb(var(--orin-text-rgb) / .6); font-size: 12px; line-height: 1.55; }
@@ -242,6 +267,8 @@ h1 { margin: 0; color: var(--orin-text); font-size: clamp(42px, 6vw, 76px); font
   .provider-settings { padding-top: 44px; }
   .provider-panel { padding: 20px; }
   .omniroute-step { grid-template-columns: 28px minmax(0, 1fr); gap: 10px; }
+  .ollama-flow__footer { align-items: stretch; flex-direction: column; }
+  .ollama-flow__actions { justify-content: stretch; }
 }
 @media (max-width: 480px) {
   .brand__word { font-size: 15px; }
@@ -249,6 +276,12 @@ h1 { margin: 0; color: var(--orin-text); font-size: clamp(42px, 6vw, 76px); font
   .omniroute-step__state { margin-top: 2px; }
   .omniroute-flow__actions, .provider-panel__actions { flex-direction: column; }
   .omniroute-flow__actions .button, .provider-panel__actions .button { width: 100%; }
+  .ollama-flow__overview { grid-template-columns: 1fr; padding: 18px; }
+  .ollama-flow__status { width: max-content; }
+  .ollama-flow__connection { padding: 18px; }
+  .ollama-flow__fields { grid-template-columns: 1fr; }
+  .ollama-flow__actions { flex-direction: column; }
+  .ollama-flow__actions .button { width: 100%; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; }
