@@ -43,7 +43,7 @@ export function RuntimeSettingsPage({ client }: { client?: ApiClient }) {
   return <SettingsPage>
     <p className="eyebrow">RUNTIME</p>
     <h1>Interações do agente</h1>
-    <p className="settings-content__lede">Defina quantas rodadas de ferramentas e raciocínio um turno pode executar. Sem limite remove o teto de rodadas; a proteção de uma hora contra processos travados continua ativa.</p>
+    <p className="settings-content__lede">Defina quantas rodadas de ferramentas e raciocínio um turno pode executar. Sem limite remove os tetos de rodadas e ações, inclusive para subagentes; a proteção contra processos travados continua ativa.</p>
     <section className="runtime-settings" aria-busy={loading}>
       <label className="provider-panel__toggle"><input type="checkbox" checked={maxIterations === null} disabled={loading || saving} onChange={(event) => setMaxIterations(event.target.checked ? null : Number(draft) || 24)} />Sem limite de interações</label>
       <label className="runtime-settings__field">Máximo de interações por turno<input aria-label="Máximo de interações por turno" type="number" min="1" step="1" value={draft} disabled={loading || saving || maxIterations === null} onChange={(event) => setDraft(event.target.value)} /></label>

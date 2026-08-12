@@ -638,10 +638,10 @@ def test_an_empty_subagent_completion_is_reported_as_a_failed_delegation(tmp_pat
 
 def test_a_subagent_inherits_an_unlimited_iteration_setting(tmp_path: Path) -> None:
     session, _store, agents, _provider = build(tmp_path, [
-        *[tool_call(f"call-{index}", "list_files", "{}") for index in range(1, 8)],
+        *[tool_call(f"call-{index}", "list_files", "{}") for index in range(1, 14)],
         text("review concluída"),
     ])
-    session.limits = AgenticLimits(max_iterations=None, max_actions=24)
+    session.limits = AgenticLimits(max_iterations=None, max_actions=None)
     agents.create("Reviewer", "revisa", parent_agent_id="agent:chat_session:main")
 
     outcome = session._ask_agent("Reviewer", "revise o projeto")

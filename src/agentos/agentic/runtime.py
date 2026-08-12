@@ -29,7 +29,7 @@ CLOSING_INSTRUCTION = (
 
 @dataclass(frozen=True, slots=True)
 class AgenticLimits:
-    max_actions: int = 8
+    max_actions: int | None = 8
     max_iterations: int | None = 8
     deadline: timedelta = timedelta(seconds=120)
     max_provider_retries: int = 1
@@ -39,7 +39,7 @@ class AgenticLimits:
     max_context_tokens: int = 60_000
 
     def __post_init__(self) -> None:
-        if self.max_actions < 0 or (self.max_iterations is not None and self.max_iterations < 1) or self.max_provider_retries < 0 or self.deadline <= timedelta(0):
+        if (self.max_actions is not None and self.max_actions < 0) or (self.max_iterations is not None and self.max_iterations < 1) or self.max_provider_retries < 0 or self.deadline <= timedelta(0):
             raise ValueError("agentic limits are invalid")
         if self.max_output_tokens < 1 or self.max_context_tokens < 1_000:
             raise ValueError("agentic limits are invalid")
@@ -206,7 +206,7 @@ class AgenticTurnRuntime:
             if (calls or (finish is not None and finish.value == "TOOL_CALLS")) and not final_iteration:
                 self._life(turn, "waiting_tool", count=len(calls))
                 if self.toolset is not None:
-                    if action_count + len(calls) > self.limits.max_actions:
+                    if self.limits.max_actions is not None and action_count + len(calls) > self.limits.max_actions:
                         return self._fail(turn, "ACTION_LIMIT", iteration, action_count)
                     results = self._run_toolset(turn, list(calls.values()))
                     action_count += len(results)

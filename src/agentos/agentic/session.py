@@ -406,7 +406,7 @@ class TurnSession:
             limits=AgenticLimits(
                 deadline=SUBAGENT_DEADLINE,
                 max_iterations=self.limits.max_iterations,
-                max_actions=SUBAGENT_MAX_ACTIONS,
+                max_actions=None if self.limits.max_actions is None else SUBAGENT_MAX_ACTIONS,
                 max_output_tokens=SUBAGENT_MAX_OUTPUT_TOKENS,
                 max_context_tokens=self.limits.max_context_tokens,
             ),

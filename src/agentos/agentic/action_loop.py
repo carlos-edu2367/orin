@@ -52,8 +52,8 @@ class ActionLoop:
             return []
         return [project_tool_schema(descriptor) for descriptor in self.registry.list(context)]
 
-    def execute(self, calls: list[object], context: object, *, action_count: int, max_actions: int) -> ActionBatch:
-        if action_count + len(calls) > max_actions:
+    def execute(self, calls: list[object], context: object, *, action_count: int, max_actions: int | None) -> ActionBatch:
+        if max_actions is not None and action_count + len(calls) > max_actions:
             raise MalformedToolCall("maximum action count exceeded")
         prepared: list[tuple[object, str, str, Mapping[str, object], object]] = []
         pending_ids: set[str] = set()

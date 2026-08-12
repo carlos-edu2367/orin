@@ -111,6 +111,35 @@ def test_runtime_construction_failure_closes_the_optional_browser(monkeypatch: p
     assert browser.closed == 1
 
 
+def test_unlimited_runtime_setting_removes_the_action_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Settings:
+        def get(self, user_id):
+            return {"max_iterations": None}
+
+    class SkillLibrary:
+        def registry_for(self, user_id, *, agent_id):
+            return None
+
+    captured = {}
+    monkeypatch.setattr(chat_module, "conversation_browser_for", lambda turn: None)
+    monkeypatch.setattr(chat_module, "PostgresSkillLibraryService", lambda engine: SkillLibrary())
+    monkeypatch.setattr(chat_module, "ConversationAgentStore", lambda *args, **kwargs: object())
+    monkeypatch.setattr(chat_module, "PostgresAgentMemoryStore", lambda *args, **kwargs: None)
+    monkeypatch.setattr(chat_module, "search_client_from_environment", lambda: None)
+
+    def capture_session(**kwargs):
+        captured["limits"] = kwargs["limits"]
+        return type("Session", (), {"build_runtime": lambda self: object()})()
+
+    monkeypatch.setattr(chat_module, "TurnSession", capture_session)
+    worker = ChatWorker(Store(), runtime_settings=Settings())
+
+    worker._runtime_for(dict(TURN))
+
+    assert captured["limits"].max_iterations is None
+    assert captured["limits"].max_actions is None
+
+
 def test_agentos_agent_does_not_block_the_event_loop_during_a_turn() -> None:
     """A chat turn is fully synchronous (blocking HTTP streaming plus database
     calls). arq runs every job coroutine on a single event loop, so awaiting

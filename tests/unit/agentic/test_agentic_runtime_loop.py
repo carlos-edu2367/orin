@@ -140,6 +140,34 @@ def test_runtime_executes_tool_then_continues_and_redacts_result() -> None:
     assert "must-not-leak" not in repr(provider.calls)
 
 
+def test_runtime_allows_unlimited_actions_when_configured_as_none() -> None:
+    class ManyToolsProvider:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def stream(self, request):
+            self.calls += 1
+            if self.calls <= 13:
+                yield NormalizedStreamItem(StreamKind.TOOL_CALL, self.calls, tool_call_id=f"call-{self.calls}", tool_name="lookup", arguments_delta='{"q":"safe"}')
+                yield NormalizedStreamItem(StreamKind.FINISH, self.calls + 100, finish_reason="tool_calls")
+            else:
+                yield NormalizedStreamItem(StreamKind.TEXT, self.calls + 100, text="done")
+                yield NormalizedStreamItem(StreamKind.FINISH, self.calls + 101, finish_reason="stop")
+
+    provider = ManyToolsProvider()
+    runtime = AgenticTurnRuntime(
+        store=Store(),
+        provider=provider,
+        actions=ActionLoop(Registry(), ActionRuntime()),
+        limits=AgenticLimits(max_iterations=None, max_actions=None, deadline=timedelta(seconds=5)),
+    )
+
+    result = runtime.run("turn-1")
+
+    assert result.state == "completed"
+    assert result.actions == 13
+
+
 def test_runtime_publishes_each_text_delta_before_reading_the_next_stream_event() -> None:
     store = Store()
 
