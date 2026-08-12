@@ -159,6 +159,63 @@ describe('ProviderSettingsPage OpenRouter setup', () => {
     expect(await within(panel).findByText('auto/coding')).toBeInTheDocument()
   })
 
+  it('explains an empty catalog instead of silently rendering nothing', async () => {
+    const fetchImpl = vi.fn<typeof fetch>((input, init) => {
+      const url = String(input)
+      if (init?.method === 'GET' && url.endsWith('/models')) return Promise.resolve(json({ items: [] }))
+      if (init?.method === 'GET') return Promise.resolve(json({ provider: 'openrouter', enabled: true }))
+      return Promise.resolve(json({}))
+    })
+    const user = userEvent.setup()
+    render(<ProviderSettingsPage client={client(fetchImpl)} bootstrap={{ status: 'ready', csrfToken: 'csrf-test' }} />)
+
+    const panel = await openRouterPanel()
+    await user.click(within(panel).getByRole('button', { name: 'Ver modelos autorizados' }))
+
+    expect(await within(panel).findByText('Nenhum modelo no catálogo. Use "Atualizar catálogo" para buscá-los do provider.')).toBeInTheDocument()
+  })
+
+  it('surfaces a catalog listing failure instead of swallowing it', async () => {
+    const fetchImpl = vi.fn<typeof fetch>((input, init) => {
+      const url = String(input)
+      if (init?.method === 'GET' && url.endsWith('/models')) return Promise.resolve(error('provider_unavailable', 'INTERNAL', 'corr-catalog-500', 500))
+      if (init?.method === 'GET') return Promise.resolve(json({ provider: 'openrouter', enabled: true }))
+      return Promise.resolve(json({}))
+    })
+    const user = userEvent.setup()
+    render(<ProviderSettingsPage client={client(fetchImpl)} bootstrap={{ status: 'ready', csrfToken: 'csrf-test' }} />)
+
+    const panel = await openRouterPanel()
+    await user.click(within(panel).getByRole('button', { name: 'Ver modelos autorizados' }))
+
+    expect(await within(panel).findByRole('alert')).toHaveTextContent('O provider não está disponível no momento.')
+  })
+
+  it('populates the catalog when the OmniRoute flow is saved, so the composer stops asking for setup', async () => {
+    const calls: string[] = []
+    const fetchImpl = vi.fn<typeof fetch>((input, init) => {
+      const url = String(input)
+      calls.push(`${init?.method ?? 'GET'} ${url}`)
+      if (url.endsWith('/models:refresh')) return Promise.resolve(json({ count: 1, refreshed_at: '2026-08-12T00:00:00Z' }))
+      if (init?.method === 'GET' && url.endsWith('/models')) {
+        const listed = calls.some((entry) => entry.includes('/models:refresh'))
+        return Promise.resolve(json({ items: listed ? [{ ...model(), provider: 'omniroute', model_id: 'auto/coding' }] : [] }))
+      }
+      if (init?.method === 'GET') return Promise.resolve(error('resource_not_found', 'NOT_FOUND', 'corr-empty', 404))
+      if (init?.method === 'PUT') return Promise.resolve(json({ provider: 'omniroute', enabled: true, base_url: 'http://localhost:20128/v1' }))
+      return Promise.resolve(json({}))
+    })
+    const user = userEvent.setup()
+    render(<ProviderSettingsPage client={client(fetchImpl)} bootstrap={{ status: 'ready', csrfToken: 'csrf-test' }} />)
+
+    const panel = await screen.findByRole('article', { name: 'OmniRoute' })
+    await user.click(within(panel).getByRole('button', { name: 'Configurar OmniRoute' }))
+    await user.click(within(panel).getByRole('button', { name: 'Salvar e ativar' }))
+
+    expect(await within(panel).findByText('auto/coding')).toBeInTheDocument()
+    expect(calls.some((entry) => entry.startsWith('POST') && entry.endsWith('/models:refresh'))).toBe(true)
+  })
+
   it('recognizes an OmniRoute installation that completed outside the current request', async () => {
     const fetchImpl = vi.fn<typeof fetch>((input, init) => {
       const url = String(input)

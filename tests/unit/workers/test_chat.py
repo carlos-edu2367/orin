@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import time
+
 import pytest
 
 from agentos.agentic.runtime import AgenticRunResult
@@ -106,3 +109,33 @@ def test_runtime_construction_failure_closes_the_optional_browser(monkeypatch: p
         worker._runtime_for(dict(TURN))
 
     assert browser.closed == 1
+
+
+def test_agentos_agent_does_not_block_the_event_loop_during_a_turn() -> None:
+    """A chat turn is fully synchronous (blocking HTTP streaming plus database
+    calls). arq runs every job coroutine on a single event loop, so awaiting
+    ``run`` inline freezes that loop for the whole turn: no other turn can be
+    acquired, and the 30s watchdog then fails each queued turn as
+    ``worker_unavailable``. OmniRoute's free routes are slow enough to make this
+    the normal case, so the blocking call belongs on a worker thread.
+    """
+
+    class BlockingWorker:
+        def run(self, turn_id: str) -> None:
+            # Stands in for a long provider stream holding the calling thread.
+            time.sleep(0.4)
+
+    async def scenario() -> list[str]:
+        order: list[str] = []
+
+        async def concurrent_job() -> None:
+            await asyncio.sleep(0.1)
+            order.append("other-turn-acquired")
+
+        task = asyncio.create_task(concurrent_job())
+        await chat_module.agentos_agent({"chat_worker": BlockingWorker()}, "turn-1")
+        order.append("turn-finished")
+        await task
+        return order
+
+    assert asyncio.run(scenario()) == ["other-turn-acquired", "turn-finished"]

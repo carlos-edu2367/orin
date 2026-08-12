@@ -6,6 +6,7 @@ looked up inside this trusted worker after it has acquired the durable turn.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from datetime import UTC, datetime, timedelta
@@ -248,7 +249,14 @@ class ChatWorker:
 
 
 async def agentos_agent(ctx: dict, turn_id: str) -> None:
-    ctx["chat_worker"].run(turn_id)
+    # ``run`` is synchronous throughout: it streams from the provider over a
+    # blocking HTTP client and talks to PostgreSQL between chunks. arq drives
+    # every job on one event loop, so calling it inline would hold that loop for
+    # the entire turn — ``max_jobs`` would be meaningless, no further turn could
+    # be acquired, and ``ChatWorker.watchdog`` would fail each waiting turn as
+    # ``worker_unavailable`` after 30s. A slow route (OmniRoute's free providers
+    # routinely stream keepalives for tens of seconds) makes that the norm.
+    await asyncio.to_thread(ctx["chat_worker"].run, turn_id)
 
 
 async def startup(ctx: dict) -> None:

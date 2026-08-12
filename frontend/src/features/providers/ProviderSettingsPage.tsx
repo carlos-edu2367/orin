@@ -65,6 +65,7 @@ function ProviderPanel({ provider, client, bootstrap }: { provider: ProviderName
   const [installed, setInstalled] = useState(false)
   const [models, setModels] = useState<ProviderModel[]>([])
   const [catalogLoading, setCatalogLoading] = useState(false)
+  const [catalog, setCatalog] = useState<{ loaded: boolean; error: ApiError | null }>({ loaded: false, error: null })
   // One Idempotency-Key per intention (save/revoke), reused while that intention
   // has not yet received an accepted response — same pattern as ExecutionRoute.
   const intents = useRef(new Map<string, MutationIntent>())
@@ -109,11 +110,14 @@ function ProviderPanel({ provider, client, bootstrap }: { provider: ProviderName
     return () => { active = false; controller.abort(); globalThis.clearInterval(interval) }
   }, [action.kind, action.pending, client, provider])
 
+  // A silent `catch` here is what makes the button look inert: the request
+  // fails, the list stays empty, and the panel renders exactly nothing. Both
+  // outcomes — a failure and a genuinely empty catalog — have to say so.
   function loadModels() {
     setCatalogLoading(true)
     return listProviderModels(client, provider)
-      .then(setModels)
-      .catch(() => setModels([]))
+      .then((items) => { setModels(items); setCatalog({ loaded: true, error: null }) })
+      .catch((error: unknown) => { setModels([]); setCatalog({ loaded: true, error: toApiError(error) }) })
       .finally(() => setCatalogLoading(false))
   }
 
@@ -134,8 +138,23 @@ function ProviderPanel({ provider, client, bootstrap }: { provider: ProviderName
       const state = await configureProvider(client, provider, { apiKey, enabled, ...(provider === 'omniroute' ? { baseUrl } : {}) }, intent)
       intents.current.delete('configure')
       setLoad({ status: 'loaded', state })
-      setAction({ pending: false, error: null, kind: null })
       setApiKey('')
+      // "Salvar e ativar" is the last step of the guided OmniRoute flow, but a
+      // saved credential alone leaves the catalog empty — which is why the
+      // composer kept offering "Configurar provider" right after a successful
+      // setup. Fetching the catalog here is what actually finishes the flow.
+      // A refresh failure is reported on the catalog, never as a failed save:
+      // the credential is already stored at this point.
+      if (provider === 'omniroute' && state.enabled === true) {
+        try {
+          await refreshProviderModels(client, provider, intentFor('refresh'))
+          intents.current.delete('refresh')
+          await loadModels()
+        } catch (refreshError) {
+          setCatalog({ loaded: true, error: toApiError(refreshError) })
+        }
+      }
+      setAction({ pending: false, error: null, kind: null })
     } catch (error) {
       setAction({ pending: false, error: toApiError(error), kind: 'configure' })
     }
@@ -296,6 +315,10 @@ function ProviderPanel({ provider, client, bootstrap }: { provider: ProviderName
             </button>
           </li>)}
         </ul>}
+        {catalog.error && <ProviderErrorNotice error={catalog.error} action="refresh" />}
+        {catalog.loaded && !catalog.error && models.length === 0 && <p role="status">
+          Nenhum modelo no catálogo. Use "Atualizar catálogo" para buscá-los do provider.
+        </p>}
       </section>}
     </article>
   )
