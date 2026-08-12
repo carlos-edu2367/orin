@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { ApiClient, createBrowserApiClient, type MutationIntent } from '../../api/client'
 import { readBrowserSessionBootstrap, type BrowserSessionBootstrap } from '../../api/browserSession'
 import { ApiError, isAuthenticationError, isCsrfAuthorizationError } from '../../api/errors'
-import { configureProvider, inspectProvider, revokeProvider, refreshProviderModels, listProviderModels, setProviderModelFavorite, testOmniRouteConnection, installOmniRoute, getOmniRouteInstallationStatus, getOmniRouteRuntime, setOmniRouteAutoStart, controlOmniRoute, PROVIDER_NAMES, type OmniRouteRuntime, type ProviderModel, type ProviderName, type ProviderPublicState } from '../../api/providers'
+import { configureProvider, inspectProvider, revokeProvider, refreshProviderModels, listProviderModels, setProviderModelFavorite, testOmniRouteConnection, testOllamaConnection, installOmniRoute, getOmniRouteInstallationStatus, getOmniRouteRuntime, setOmniRouteAutoStart, controlOmniRoute, PROVIDER_NAMES, type OmniRouteRuntime, type ProviderModel, type ProviderName, type ProviderPublicState } from '../../api/providers'
 import { OMNIROUTE_FREE_PROVIDER_GUIDES } from './omnirouteFreeProviders'
 import { Brand } from '../../components/Brand'
 
@@ -58,9 +58,12 @@ function ProviderPanel({ provider, client, bootstrap }: { provider: ProviderName
   const [load, setLoad] = useState<LoadState>({ status: 'loading' })
   const [action, setAction] = useState<ActionState>({ pending: false, error: null, kind: null })
   const [apiKey, setApiKey] = useState('')
-  const [baseUrl, setBaseUrl] = useState('http://localhost:20128/v1')
+  const [baseUrl, setBaseUrl] = useState(() => provider === 'ollama' ? 'http://localhost:11434' : 'http://localhost:20128/v1')
   const [enabled, setEnabled] = useState(true)
   const [omniOpen, setOmniOpen] = useState(provider !== 'omniroute')
+  // Ollama's mode is not stored: it is read back from the saved URL's host,
+  // exactly as the backend derives it. One source, so the two cannot disagree.
+  const [ollamaMode, setOllamaMode] = useState<'local' | 'cloud'>('local')
   const [connection, setConnection] = useState<{ connected: boolean; models: number | null } | null>(null)
   const [installed, setInstalled] = useState(false)
   const [models, setModels] = useState<ProviderModel[]>([])
@@ -78,6 +81,10 @@ function ProviderPanel({ provider, client, bootstrap }: { provider: ProviderName
         if (state.enabled !== null) setEnabled(state.enabled)
         if (provider === 'omniroute' && state.enabled === true) setOmniOpen(true)
         if (provider === 'omniroute' && typeof state.extra.base_url === 'string') setBaseUrl(state.extra.base_url)
+        if (provider === 'ollama' && typeof state.extra.base_url === 'string') {
+          setBaseUrl(state.extra.base_url)
+          setOllamaMode(/(^|\.)ollama\.com$/i.test(new URL(state.extra.base_url).hostname) ? 'cloud' : 'local')
+        }
       })
       .catch((error: unknown) => {
         if (error instanceof DOMException && error.name === 'AbortError') return
@@ -129,13 +136,17 @@ function ProviderPanel({ provider, client, bootstrap }: { provider: ProviderName
     return created
   }
 
+  // OmniRoute and a local Ollama are both reachable without a credential;
+  // Ollama Cloud narrows back to requiring one, same as every other provider.
+  const requiresApiKey = provider !== 'omniroute' && !(provider === 'ollama' && ollamaMode === 'local')
+
   async function onSave(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    if (action.pending || (!apiKey && provider !== 'omniroute') || bootstrap.status === 'missing_csrf') return
+    if (action.pending || (!apiKey && requiresApiKey) || bootstrap.status === 'missing_csrf') return
     setAction({ pending: true, error: null, kind: 'configure' })
     const intent = intentFor('configure')
     try {
-      const state = await configureProvider(client, provider, { apiKey, enabled, ...(provider === 'omniroute' ? { baseUrl } : {}) }, intent)
+      const state = await configureProvider(client, provider, { apiKey, enabled, ...(provider === 'omniroute' || provider === 'ollama' ? { baseUrl } : {}) }, intent)
       intents.current.delete('configure')
       setLoad({ status: 'loaded', state })
       setApiKey('')
@@ -145,7 +156,7 @@ function ProviderPanel({ provider, client, bootstrap }: { provider: ProviderName
       // setup. Fetching the catalog here is what actually finishes the flow.
       // A refresh failure is reported on the catalog, never as a failed save:
       // the credential is already stored at this point.
-      if (provider === 'omniroute' && state.enabled === true) {
+      if ((provider === 'omniroute' || provider === 'ollama') && state.enabled === true) {
         try {
           await refreshProviderModels(client, provider, intentFor('refresh'))
           intents.current.delete('refresh')
@@ -202,6 +213,20 @@ function ProviderPanel({ provider, client, bootstrap }: { provider: ProviderName
     }
   }
 
+  async function onTestOllama() {
+    if (provider !== 'ollama' || action.pending || bootstrap.status === 'missing_csrf') return
+    setAction({ pending: true, error: null, kind: 'test' })
+    try {
+      const result = await testOllamaConnection(client, { apiKey, baseUrl }, intentFor('test'))
+      intents.current.delete('test')
+      setConnection({ connected: true, models: result.models_available })
+      setAction({ pending: false, error: null, kind: null })
+    } catch (error) {
+      setConnection(null)
+      setAction({ pending: false, error: toApiError(error), kind: 'test' })
+    }
+  }
+
   async function onInstall() {
     if (provider !== 'omniroute' || action.pending || bootstrap.status === 'missing_csrf') return
     setAction({ pending: true, error: null, kind: 'install' })
@@ -230,6 +255,7 @@ function ProviderPanel({ provider, client, bootstrap }: { provider: ProviderName
 
   const canRevoke = load.status === 'loaded' && load.state.enabled === true
   const isOmniRoute = provider === 'omniroute'
+  const isOllama = provider === 'ollama'
 
   return (
     <article className="provider-panel" aria-labelledby={`provider-${provider}-title`}>
@@ -260,7 +286,25 @@ function ProviderPanel({ provider, client, bootstrap }: { provider: ProviderName
       />}
       {isOmniRoute && <OmniRouteRuntimePanel client={client} bootstrap={bootstrap} />}
 
-      {!isOmniRoute && <form className="provider-panel__form" onSubmit={onSave}>
+      {isOllama && <OllamaSetup
+        mode={ollamaMode}
+        enabled={enabled}
+        apiKey={apiKey}
+        baseUrl={baseUrl}
+        action={action}
+        canRevoke={canRevoke}
+        bootstrap={bootstrap}
+        connection={connection}
+        onModeChange={(mode) => { setOllamaMode(mode); setBaseUrl(mode === 'cloud' ? 'https://ollama.com' : 'http://localhost:11434'); setConnection(null) }}
+        onTest={onTestOllama}
+        onSave={onSave}
+        onRevoke={onRevoke}
+        onApiKeyChange={setApiKey}
+        onBaseUrlChange={setBaseUrl}
+        onEnabledChange={setEnabled}
+      />}
+
+      {!isOmniRoute && !isOllama && <form className="provider-panel__form" onSubmit={onSave}>
         <label htmlFor={`${provider}-api-key`}>Chave de API</label>
         <input
           id={`${provider}-api-key`}
@@ -345,6 +389,8 @@ function providerLabel(provider: ProviderName): string {
       return 'OpenRouter'
     case 'omniroute':
       return 'OmniRoute'
+    case 'ollama':
+      return 'Ollama'
   }
 }
 
@@ -461,6 +507,89 @@ function OmniRouteFreeSetup() {
       </li>)}
     </ul>
   </details>
+}
+
+type OllamaSetupProps = {
+  mode: 'local' | 'cloud'
+  enabled: boolean
+  apiKey: string
+  baseUrl: string
+  action: ActionState
+  canRevoke: boolean
+  bootstrap: BrowserSessionBootstrap
+  connection: { connected: boolean; models: number | null } | null
+  onModeChange: (mode: 'local' | 'cloud') => void
+  onTest: () => void
+  onSave: (event: FormEvent<HTMLFormElement>) => void
+  onRevoke: () => void
+  onApiKeyChange: (value: string) => void
+  onBaseUrlChange: (value: string) => void
+  onEnabledChange: (value: boolean) => void
+}
+
+/**
+ * Local and Cloud are one provider row, so this is a mode switch rather than
+ * two panels: the backend derives the mode from the saved host, and the only
+ * difference the user has to care about is that Cloud needs a key.
+ */
+function OllamaSetup(props: OllamaSetupProps) {
+  const sessionUnavailable = props.bootstrap.status === 'missing_csrf'
+  const isTesting = props.action.pending && props.action.kind === 'test'
+  const isSaving = props.action.pending && props.action.kind === 'configure'
+  const isCloud = props.mode === 'cloud'
+
+  return <form className="ollama-flow" onSubmit={props.onSave}>
+    <div className="ollama-flow__modes" role="radiogroup" aria-label="Modo do Ollama">
+      {(['local', 'cloud'] as const).map((mode) => (
+        <button
+          key={mode}
+          type="button"
+          role="radio"
+          aria-checked={props.mode === mode}
+          className={props.mode === mode ? 'chip is-selected' : 'chip'}
+          disabled={props.action.pending || sessionUnavailable}
+          onClick={() => props.onModeChange(mode)}
+        >
+          {mode === 'local' ? 'Local' : 'Cloud'}
+        </button>
+      ))}
+    </div>
+    <p>{isCloud
+      ? 'Modelos hospedados pela Ollama. Precisa de uma chave criada em ollama.com/settings/keys.'
+      : 'Modelos rodando nesta máquina (ou em outra da sua rede). Nenhuma chave é necessária.'}</p>
+
+    <div className="ollama-flow__fields">
+      <label htmlFor="ollama-base-url">URL do servidor</label>
+      <input id="ollama-base-url" name="base-url" type="url" autoComplete="off" value={props.baseUrl} onChange={(event) => props.onBaseUrlChange(event.target.value)} />
+      {isCloud && <>
+        <label htmlFor="ollama-api-key">Chave de API</label>
+        <input id="ollama-api-key" name="api-key" type="password" autoComplete="off" value={props.apiKey} onChange={(event) => props.onApiKeyChange(event.target.value)} placeholder="Inserir uma nova chave" />
+      </>}
+    </div>
+
+    <label className="provider-panel__toggle" htmlFor="ollama-enabled">
+      <input id="ollama-enabled" type="checkbox" checked={props.enabled} onChange={(event) => props.onEnabledChange(event.target.checked)} />
+      Ativar Ollama para os agentes
+    </label>
+
+    <div className="ollama-flow__actions">
+      <button type="button" className="button button--secondary" disabled={props.action.pending || sessionUnavailable} onClick={props.onTest}>
+        {isTesting ? 'Testando conexão…' : 'Testar conexão'}
+      </button>
+      <button type="submit" className="button button--primary" disabled={props.action.pending || sessionUnavailable || (isCloud && !props.apiKey)}>
+        {isSaving ? 'Salvando…' : 'Salvar e ativar'}
+      </button>
+      <button type="button" className="button button--secondary button--danger" disabled={props.action.pending || !props.canRevoke || sessionUnavailable} onClick={props.onRevoke}>
+        Desativar acesso
+      </button>
+    </div>
+
+    {props.connection?.connected && <p className="omniroute-step__success" aria-live="polite">
+      Conexão pronta{props.connection.models === null ? '' : ` · ${props.connection.models} modelos disponíveis`}.
+    </p>}
+    {sessionUnavailable && <p role="status">Não foi possível confirmar sua sessão segura. Atualize a página antes de continuar.</p>}
+    {props.action.error && <ProviderErrorNotice error={props.action.error} action={props.action.kind} />}
+  </form>
 }
 
 function describeState(load: LoadState): string {

@@ -312,3 +312,39 @@ describe('ollama provider client', () => {
     expect(result).toEqual({ connected: true, models_available: 3, base_url: 'http://localhost:11434' })
   })
 })
+
+async function ollamaPanel(): Promise<HTMLElement> {
+  return screen.findByRole('article', { name: 'Ollama' })
+}
+
+describe('ProviderSettingsPage Ollama setup', () => {
+  it('starts in local mode with the default url and no key field', async () => {
+    render(<ProviderSettingsPage client={client(providerFetch(() => json({ provider: 'ollama', enabled: true })))} bootstrap={{ status: 'ready', csrfToken: 'csrf-test' }} />)
+
+    const panel = await ollamaPanel()
+
+    expect(within(panel).getByLabelText('URL do servidor')).toHaveValue('http://localhost:11434')
+    expect(within(panel).queryByLabelText('Chave de API')).toBeNull()
+  })
+
+  it('switches to cloud, swaps the url and asks for a key', async () => {
+    const user = userEvent.setup()
+    render(<ProviderSettingsPage client={client(providerFetch(() => json({ provider: 'ollama', enabled: true })))} bootstrap={{ status: 'ready', csrfToken: 'csrf-test' }} />)
+
+    const panel = await ollamaPanel()
+    await user.click(within(panel).getByRole('radio', { name: 'Cloud' }))
+
+    expect(within(panel).getByLabelText('URL do servidor')).toHaveValue('https://ollama.com')
+    expect(within(panel).getByLabelText('Chave de API')).toBeInTheDocument()
+  })
+
+  it('will not save a cloud connection without a key', async () => {
+    const user = userEvent.setup()
+    render(<ProviderSettingsPage client={client(providerFetch(() => json({ provider: 'ollama', enabled: true })))} bootstrap={{ status: 'ready', csrfToken: 'csrf-test' }} />)
+
+    const panel = await ollamaPanel()
+    await user.click(within(panel).getByRole('radio', { name: 'Cloud' }))
+
+    expect(within(panel).getByRole('button', { name: 'Salvar e ativar' })).toBeDisabled()
+  })
+})
