@@ -42,6 +42,19 @@ class ConversationWorkspace:
         self.root = Path(root).resolve() / _directory_name(conversation_id)
         self.root.mkdir(parents=True, exist_ok=True)
 
+    @classmethod
+    def at_root(cls, root: Path | str) -> "ConversationWorkspace":
+        """Use ``root`` as the working root itself.
+
+        A folder the person chose is already the root: appending a workspace id
+        below it would put the agent's work in a subdirectory of their project
+        instead of in it. Nothing is created here — the folder exists because it
+        was inspected before being accepted.
+        """
+        workspace = cls.__new__(cls)
+        workspace.root = Path(root).resolve()
+        return workspace
+
     def resolve(self, path: str) -> Path:
         if not isinstance(path, str) or not path.strip():
             raise WorkspaceError("path must be a non-blank string")
@@ -225,6 +238,13 @@ class ConversationWorkspace:
         return {"path": self.relative(target), "size_bytes": target.stat().st_size}
 
 
+def resolve_workspace(workspace_id: str, *, managed_root: Path | str, local_root: str | None) -> ConversationWorkspace:
+    """The one place that decides where a workspace id lives on disk."""
+    if isinstance(local_root, str) and local_root.strip():
+        return ConversationWorkspace.at_root(local_root.strip())
+    return ConversationWorkspace(managed_root, workspace_id)
+
+
 __all__ = [
     "ConversationWorkspace",
     "MAX_LIST_DEPTH",
@@ -236,4 +256,5 @@ __all__ = [
     "MAX_SNAPSHOT_FILES",
     "MAX_WRITE_BYTES",
     "WorkspaceError",
+    "resolve_workspace",
 ]
