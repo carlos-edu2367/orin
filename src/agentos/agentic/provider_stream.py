@@ -257,65 +257,73 @@ class HTTPProviderStreamTransport:
             return messages
         return [*head, marked]
 
-    def stream(self, request: Mapping[str, object]) -> Iterator[NormalizedStreamItem]:
-        messages = list(request.get("messages") or [])
-        tools = list(request.get("tools") or [])
-        tool_choice = request.get("tool_choice")
+    def _anthropic_request(self, messages: list, tools: list, tool_choice: object, requested: object) -> tuple[str, dict[str, str], dict[str, object]]:
+        system_items = [item for item in messages if item.get("role") == "system"]
+        messages = [item for item in messages if item.get("role") != "system"]
+        messages = self._with_cached_tail(messages)
+        # Anthropic requires max_tokens, so an uncapped turn still has to
+        # name a number here; every other provider simply omits the field.
+        payload: dict[str, object] = {"model": self.model, "max_tokens": int(requested) if requested else ANTHROPIC_REQUIRED_MAX_TOKENS, "messages": messages, "stream": True}
+        if system_items:
+            # The first system item is the fixed agent prompt, byte-identical
+            # across every iteration of a turn (and most turns of a
+            # conversation) -- that is the part worth caching. Anything after
+            # it (a context-budget trim marker, the final-iteration closing
+            # instruction) is call-specific and would invalidate a cache
+            # entry keyed on the whole joined string, so it stays out of the
+            # cached prefix as separate, uncached blocks instead.
+            payload["system"] = [
+                {"type": "text", "text": str(item.get("content", "")), **({"cache_control": {"type": "ephemeral"}} if index == 0 else {})}
+                for index, item in enumerate(system_items)
+            ]
+        if tools:
+            projected = [
+                {
+                    "name": item.get("name") or item.get("function", {}).get("name"),
+                    "description": item.get("description") or item.get("function", {}).get("description", ""),
+                    "input_schema": item.get("input_schema") or item.get("function", {}).get("parameters", {}),
+                }
+                for item in tools
+            ]
+            projected[-1] = {**projected[-1], "cache_control": {"type": "ephemeral"}}
+            payload["tools"] = projected
+            if tool_choice is not None:
+                payload["tool_choice"] = _anthropic_tool_choice(tool_choice)
+        headers = {"x-api-key": self._api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"}
+        return f"{self.base_url}/messages", headers, payload
+
+    def _openai_request(self, messages: list, tools: list, tool_choice: object, requested: object) -> tuple[str, dict[str, str], dict[str, object]]:
+        payload: dict[str, object] = {
+            "model": self.model, "messages": messages, "stream": True,
+            # Without this an OpenAI-compatible stream omits usage entirely
+            # and the turn records no tokens at all.
+            "stream_options": {"include_usage": True},
+        }
+        # No cap configured means no cap sent: the provider then allows the
+        # model its own maximum, instead of us cutting a long reply short.
+        if requested:
+            payload["max_tokens"] = int(requested)
+        if tools:
+            payload["tools"] = tools
+            if tool_choice is not None:
+                payload["tool_choice"] = str(tool_choice)
+        headers = {"content-type": "application/json"}
+        if self._api_key:
+            headers["authorization"] = f"Bearer {self._api_key}"
+        return f"{self.base_url}/chat/completions", headers, payload
+
+    def _request_for(self, messages: list, tools: list, tool_choice: object, requested: object) -> tuple[str, dict[str, str], dict[str, object]]:
         if self.provider == "anthropic":
-            system_items = [item for item in messages if item.get("role") == "system"]
-            messages = [item for item in messages if item.get("role") != "system"]
-            messages = self._with_cached_tail(messages)
-            # Anthropic requires max_tokens, so an uncapped turn still has to
-            # name a number here; every other provider simply omits the field.
-            requested = request.get("max_output_tokens")
-            payload: dict[str, object] = {"model": self.model, "max_tokens": int(requested) if requested else ANTHROPIC_REQUIRED_MAX_TOKENS, "messages": messages, "stream": True}
-            if system_items:
-                # The first system item is the fixed agent prompt, byte-identical
-                # across every iteration of a turn (and most turns of a
-                # conversation) -- that is the part worth caching. Anything after
-                # it (a context-budget trim marker, the final-iteration closing
-                # instruction) is call-specific and would invalidate a cache
-                # entry keyed on the whole joined string, so it stays out of the
-                # cached prefix as separate, uncached blocks instead.
-                payload["system"] = [
-                    {"type": "text", "text": str(item.get("content", "")), **({"cache_control": {"type": "ephemeral"}} if index == 0 else {})}
-                    for index, item in enumerate(system_items)
-                ]
-            if tools:
-                projected = [
-                    {
-                        "name": item.get("name") or item.get("function", {}).get("name"),
-                        "description": item.get("description") or item.get("function", {}).get("description", ""),
-                        "input_schema": item.get("input_schema") or item.get("function", {}).get("parameters", {}),
-                    }
-                    for item in tools
-                ]
-                projected[-1] = {**projected[-1], "cache_control": {"type": "ephemeral"}}
-                payload["tools"] = projected
-                if tool_choice is not None:
-                    payload["tool_choice"] = _anthropic_tool_choice(tool_choice)
-            endpoint = f"{self.base_url}/messages"
-            headers = {"x-api-key": self._api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"}
-        else:
-            payload = {
-                "model": self.model, "messages": messages, "stream": True,
-                # Without this an OpenAI-compatible stream omits usage entirely
-                # and the turn records no tokens at all.
-                "stream_options": {"include_usage": True},
-            }
-            # No cap configured means no cap sent: the provider then allows the
-            # model its own maximum, instead of us cutting a long reply short.
-            requested = request.get("max_output_tokens")
-            if requested:
-                payload["max_tokens"] = int(requested)
-            if tools:
-                payload["tools"] = tools
-                if tool_choice is not None:
-                    payload["tool_choice"] = str(tool_choice)
-            endpoint = f"{self.base_url}/chat/completions"
-            headers = {"content-type": "application/json"}
-            if self._api_key:
-                headers["authorization"] = f"Bearer {self._api_key}"
+            return self._anthropic_request(messages, tools, tool_choice, requested)
+        return self._openai_request(messages, tools, tool_choice, requested)
+
+    def stream(self, request: Mapping[str, object]) -> Iterator[NormalizedStreamItem]:
+        endpoint, headers, payload = self._request_for(
+            list(request.get("messages") or []),
+            list(request.get("tools") or []),
+            request.get("tool_choice"),
+            request.get("max_output_tokens"),
+        )
         with self._client.stream("POST", endpoint, headers=headers, json=payload) as response:
             response.raise_for_status()
             limit = project_rate_limit_headers(response.headers)
