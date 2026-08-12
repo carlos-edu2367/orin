@@ -42,7 +42,7 @@ class FakeOpenRouter:
     def __init__(self) -> None:
         self.fail = False
 
-    def fetch(self, api_key: str) -> list[dict[str, object]]:
+    def fetch(self, api_key: str, *, base_url: str = "") -> list[dict[str, object]]:
         assert api_key == "secret-for-user-a"
         if self.fail:
             raise TimeoutError("upstream was unavailable")
@@ -129,6 +129,30 @@ def test_refreshes_omniroute_from_its_saved_gateway_url() -> None:
     assert item.provider == "omniroute"
     assert item.model_id == "auto/coding"
     assert item.route_kind == "auto"
+
+
+def test_every_upstream_is_called_with_the_stored_base_url() -> None:
+    """The Protocol declares base_url, so refresh needs no per-provider branch."""
+    repository = FakeRepository()
+    seen: dict[str, str] = {}
+
+    class RecordingUpstream:
+        def fetch(self, api_key: str, *, base_url: str = "") -> list[dict[str, object]]:
+            seen["base_url"] = base_url
+            return []
+
+    service = ProviderModelCatalogService(repository, {"openrouter": RecordingUpstream()}, now=lambda: datetime(2026, 8, 12, tzinfo=UTC))
+    service.refresh(context("user-a"), "openrouter")
+
+    assert seen["base_url"] == ""
+
+
+def test_the_provider_shape_rules_have_a_single_definition() -> None:
+    """Four layers consult these; a per-module copy is a drift waiting to happen."""
+    from agentos.provider_catalog.models import PROVIDERS_WITH_BASE_URL, PROVIDERS_WITH_OPTIONAL_KEY
+
+    assert PROVIDERS_WITH_BASE_URL == frozenset({"omniroute", "ollama"})
+    assert PROVIDERS_WITH_OPTIONAL_KEY == frozenset({"omniroute", "ollama"})
 
 
 def test_refresh_deduplicates_upstream_models_sharing_the_same_id() -> None:

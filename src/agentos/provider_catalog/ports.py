@@ -14,7 +14,9 @@ class ProviderCatalogRepository(Protocol):
 
 
 class ProviderCatalogUpstream(Protocol):
-    def fetch(self, api_key: str) -> list[dict[str, object]]: ...
+    # Declared here rather than left to each client's default, so the service
+    # needs no per-provider branch to decide whether the kwarg is accepted.
+    def fetch(self, api_key: str, *, base_url: str = "") -> list[dict[str, object]]: ...
 
 
 class ProviderStreamTransport(Protocol):

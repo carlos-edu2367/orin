@@ -61,3 +61,12 @@ class RefreshReceipt:
     def __post_init__(self) -> None:
         if self.count < 0:
             raise ValueError("count cannot be negative")
+
+
+# Providers whose endpoint the user configures rather than the code, and which
+# are therefore reachable without a credential of their own. Defined once
+# because the catalog service, the credential adapter, the chat worker and the
+# gateway all branch on them; Ollama narrows the second set at runtime, since
+# only its local mode is keyless.
+PROVIDERS_WITH_BASE_URL = frozenset({"omniroute", "ollama"})
+PROVIDERS_WITH_OPTIONAL_KEY = frozenset({"omniroute", "ollama"})

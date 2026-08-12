@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Callable, Mapping
 
-from .models import PricingSummary, ProviderCatalogContext, ProviderModelRecord, RefreshReceipt
+from .models import PROVIDERS_WITH_OPTIONAL_KEY, PricingSummary, ProviderCatalogContext, ProviderModelRecord, RefreshReceipt
 from .ports import ProviderCatalogRepository, ProviderCatalogUpstream
 
 
@@ -30,21 +30,17 @@ class ProviderModelCatalogService:
         if credential is None or credential.get("enabled") is not True:
             raise ProviderCatalogUnavailable("provider is not configured")
         api_key = credential.get("api_key")
-        if not isinstance(api_key, str) or (not api_key and normalized_provider != "omniroute"):
+        if not isinstance(api_key, str) or (not api_key and normalized_provider not in PROVIDERS_WITH_OPTIONAL_KEY):
             raise ProviderCatalogUnavailable("provider credential is unavailable")
         upstream = self._upstreams.get(normalized_provider)
         if upstream is None:
             raise ProviderCatalogUnavailable("provider catalog is not supported")
         try:
-            raw_models = (
-                upstream.fetch(api_key, base_url=str(credential.get("base_url") or ""))
-                if normalized_provider == "omniroute"
-                else upstream.fetch(api_key)
-            )
+            raw_models = upstream.fetch(api_key, base_url=str(credential.get("base_url") or ""))
         except Exception as error:
             raise ProviderCatalogUnavailable("provider catalog refresh failed") from error
         refreshed_at = self._now()
-        normalizer = _normalize_omniroute if normalized_provider == "omniroute" else _normalize_openrouter
+        normalizer = _NORMALIZERS.get(normalized_provider, _normalize_openrouter)
         records = [normalizer(model, refreshed_at) for model in raw_models]
         # The repository stores one row per (user, provider, model_id); an upstream
         # catalog that lists the same id twice (OmniRoute is known to do this — see
@@ -151,3 +147,9 @@ def _per_million(value: object) -> str | None:
     if converted < 0:
         return None
     return format(converted.normalize(), "f").rstrip("0").rstrip(".") or "0"
+
+
+_NORMALIZERS = {
+    "openrouter": _normalize_openrouter,
+    "omniroute": _normalize_omniroute,
+}

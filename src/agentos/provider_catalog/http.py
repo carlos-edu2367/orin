@@ -14,7 +14,7 @@ class OpenRouterModelCatalogClient:
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
 
-    def fetch(self, api_key: str) -> list[dict[str, object]]:
+    def fetch(self, api_key: str, *, base_url: str = "") -> list[dict[str, object]]:
         response = httpx.get(
             f"{self._base_url}/api/v1/models",
             headers={"Authorization": f"Bearer {api_key}"},
