@@ -232,6 +232,20 @@ kbd {
 .composer__bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 10px 10px 14px; }
 .composer__settings { min-width: 0; }
 .composer__actions { display: flex; align-items: center; gap: 10px; }
+
+.workspace-folder { position: relative; }
+.workspace-folder__button { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--orin-line); background: transparent; color: var(--orin-muted); font-size: 12px; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-folder__button:hover { color: var(--orin-ink); border-color: var(--orin-accent-soft); }
+.workspace-folder__button.is-attached { color: var(--orin-ink); border-color: var(--orin-accent-soft); }
+.workspace-folder__panel { position: absolute; bottom: calc(100% + 8px); left: 0; z-index: 20; display: flex; flex-direction: column; gap: 8px; width: 320px; padding: 12px; border-radius: 12px; border: 1px solid var(--orin-line); background: var(--orin-surface); box-shadow: 0 12px 32px rgba(0, 0, 0, 0.28); }
+.workspace-folder__path { font-family: ui-monospace, monospace; font-size: 12px; word-break: break-all; color: var(--orin-ink); }
+.workspace-folder__meta { font-size: 12px; color: var(--orin-muted); }
+.workspace-folder__risk { font-size: 12px; color: var(--danger); }
+.workspace-folder__risk-action { border-color: var(--danger); color: var(--danger); }
+.workspace-folder__field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--orin-muted); }
+.workspace-folder__field input { padding: 6px 8px; border-radius: 8px; border: 1px solid var(--orin-line); background: transparent; color: var(--orin-ink); font-family: ui-monospace, monospace; font-size: 12px; }
+.workspace-folder__notice { font-size: 12px; color: var(--orin-muted); }
+.workspace-folder__error { font-size: 12px; color: var(--danger); }
 .composer__hint { font-family: var(--mono); font-size: 10px; color: var(--faint); }
 
 .composer__action {
