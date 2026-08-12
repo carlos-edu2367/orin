@@ -218,6 +218,68 @@ def normalize_sse(lines: Iterable[str | bytes], *, provider: str) -> Iterator[No
             yield NormalizedStreamItem(StreamKind.FINISH, sequence, finish_reason=_finish(choice["finish_reason"]))
 
 
+def normalize_ndjson(lines: Iterable[str | bytes]) -> Iterator[NormalizedStreamItem]:
+    """Normalize Ollama's native ``/api/chat`` stream: one JSON object per line.
+
+    The native API is used instead of Ollama's OpenAI-compatible endpoint
+    because only it accepts ``options.num_ctx``; the compatible one leaves a
+    local model pinned at Ollama's 4096-token default.  The cost is this
+    second normalizer, since the native stream is NDJSON rather than SSE.
+    """
+    sequence = 0
+    tool_calls = 0
+    saw_tool_call = False
+    for raw in lines:
+        line = (raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)).strip()
+        if not line:
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            sequence += 1
+            yield NormalizedStreamItem(StreamKind.ERROR, sequence, error=ProviderError(ProviderErrorCategory.INVALID_RESPONSE, "INVALID_NDJSON", "provider stream failed"))
+            continue
+        if not isinstance(payload, Mapping):
+            continue
+        if payload.get("error") is not None:
+            sequence += 1
+            yield NormalizedStreamItem(StreamKind.ERROR, sequence, error=_safe_error(payload))
+            continue
+        message = payload.get("message")
+        if isinstance(message, Mapping):
+            content = message.get("content")
+            if isinstance(content, str) and content:
+                sequence += 1
+                yield NormalizedStreamItem(StreamKind.TEXT, sequence, text=content)
+            for item in message.get("tool_calls") or ():
+                if not isinstance(item, Mapping):
+                    continue
+                function = item.get("function") if isinstance(item.get("function"), Mapping) else {}
+                # Ollama emits no call id, and each call arrives complete in a
+                # single chunk rather than as argument deltas. A stream-scoped
+                # counter is what keeps two distinct calls from colliding on
+                # one id and being merged into one by the runtime.
+                tool_calls += 1
+                saw_tool_call = True
+                sequence += 1
+                yield NormalizedStreamItem(
+                    StreamKind.TOOL_CALL, sequence,
+                    tool_call_id=f"tool-call:{tool_calls}",
+                    tool_name=str(function.get("name") or "") or None,
+                    arguments_delta=json.dumps(function.get("arguments") or {}),
+                )
+        if payload.get("done") is True:
+            sequence += 1
+            yield NormalizedStreamItem(StreamKind.USAGE, sequence, usage=_usage({
+                "prompt_tokens": payload.get("prompt_eval_count"),
+                "completion_tokens": payload.get("eval_count"),
+            }))
+            sequence += 1
+            # Ollama reports "stop" even when the turn ends in a tool call, so
+            # the observed calls decide the reason rather than done_reason.
+            yield NormalizedStreamItem(StreamKind.FINISH, sequence, finish_reason=FinishReason.TOOL_CALLS if saw_tool_call else _finish(payload.get("done_reason")))
+
+
 class HTTPProviderStreamTransport:
     """Small, injectable HTTP transport used only by the worker/runtime edge."""
     def __init__(self, *, provider: str, base_url: str, api_key: str, model: str, client: httpx.Client | None = None) -> None:
@@ -338,4 +400,4 @@ class HTTPProviderStreamTransport:
             self._client.close()
 
 
-__all__ = ["ANTHROPIC_REQUIRED_MAX_TOKENS", "HTTPProviderStreamTransport", "NormalizedStreamItem", "RateLimitInfo", "StreamKind", "normalize_sse", "project_rate_limit_headers"]
+__all__ = ["ANTHROPIC_REQUIRED_MAX_TOKENS", "HTTPProviderStreamTransport", "NormalizedStreamItem", "RateLimitInfo", "StreamKind", "normalize_ndjson", "normalize_sse", "project_rate_limit_headers"]

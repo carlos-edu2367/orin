@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import json
+
 import httpx
 import pytest
 
-from agentos.agentic.provider_stream import ANTHROPIC_REQUIRED_MAX_TOKENS, HTTPProviderStreamTransport
+from agentos.agentic.provider_stream import ANTHROPIC_REQUIRED_MAX_TOKENS, HTTPProviderStreamTransport, StreamKind, normalize_ndjson
+from agentos.providers.models import FinishReason
 
 
 def _transport(provider: str, captured: list[dict]) -> HTTPProviderStreamTransport:
@@ -146,3 +149,73 @@ def test_anthropic_required_tool_choice_is_canonicalized_to_any() -> None:
     list(_transport("anthropic", captured).stream(request))
 
     assert captured[0]["tool_choice"] == {"type": "any"}
+
+
+def test_ndjson_stream_yields_text_then_usage_and_a_finish() -> None:
+    lines = [
+        json.dumps({"message": {"role": "assistant", "content": "hel"}, "done": False}),
+        json.dumps({"message": {"role": "assistant", "content": "lo"}, "done": False}),
+        json.dumps({"message": {"role": "assistant", "content": ""}, "done": True,
+                    "done_reason": "stop", "prompt_eval_count": 31, "eval_count": 7}),
+    ]
+
+    items = list(normalize_ndjson(lines))
+
+    assert [item.kind for item in items] == [StreamKind.TEXT, StreamKind.TEXT, StreamKind.USAGE, StreamKind.FINISH]
+    assert "".join(item.text or "" for item in items) == "hello"
+    assert items[2].usage.input_tokens == 31
+    assert items[2].usage.output_tokens == 7
+    assert items[2].usage.total_tokens == 38
+    assert items[3].finish_reason is FinishReason.STOP
+    assert [item.sequence for item in items] == [1, 2, 3, 4]
+
+
+def test_ndjson_gives_each_tool_call_its_own_id() -> None:
+    """Ollama sends no call id, and two calls sharing one would be merged."""
+    lines = [
+        json.dumps({"message": {"tool_calls": [{"function": {"name": "read_file", "arguments": {"path": "a.txt"}}}]}, "done": False}),
+        json.dumps({"message": {"tool_calls": [{"function": {"name": "read_file", "arguments": {"path": "b.txt"}}}]}, "done": False}),
+        json.dumps({"done": True, "done_reason": "stop", "prompt_eval_count": 10, "eval_count": 2}),
+    ]
+
+    items = [item for item in normalize_ndjson(lines) if item.kind is StreamKind.TOOL_CALL]
+
+    assert [item.tool_call_id for item in items] == ["tool-call:1", "tool-call:2"]
+    assert [item.tool_name for item in items] == ["read_file", "read_file"]
+    assert [json.loads(item.arguments_delta or "{}") for item in items] == [{"path": "a.txt"}, {"path": "b.txt"}]
+
+
+def test_ndjson_finishes_as_tool_calls_when_the_model_asked_for_one() -> None:
+    """Ollama reports done_reason "stop" even for a turn that ends in a call."""
+    lines = [
+        json.dumps({"message": {"tool_calls": [{"function": {"name": "read_file", "arguments": {}}}]}, "done": False}),
+        json.dumps({"done": True, "done_reason": "stop", "prompt_eval_count": 5, "eval_count": 1}),
+    ]
+
+    finish = [item for item in normalize_ndjson(lines) if item.kind is StreamKind.FINISH]
+
+    assert finish[0].finish_reason is FinishReason.TOOL_CALLS
+
+
+def test_ndjson_reports_a_provider_error_without_echoing_it() -> None:
+    items = list(normalize_ndjson([json.dumps({"error": "model 'ghost' not found, api_key=leaked"})]))
+
+    assert items[0].kind is StreamKind.ERROR
+    assert "leaked" not in items[0].error.message
+    assert items[0].error.message == "provider stream failed"
+
+
+def test_ndjson_survives_a_malformed_line() -> None:
+    lines = ["{not json", json.dumps({"message": {"content": "ok"}, "done": False})]
+
+    items = list(normalize_ndjson(lines))
+
+    assert items[0].kind is StreamKind.ERROR
+    assert items[0].error.code == "INVALID_NDJSON"
+    assert items[1].kind is StreamKind.TEXT
+
+
+def test_ndjson_ignores_blank_keepalive_lines() -> None:
+    items = list(normalize_ndjson(["", "   ", json.dumps({"message": {"content": "ok"}, "done": False})]))
+
+    assert [item.kind for item in items] == [StreamKind.TEXT]
