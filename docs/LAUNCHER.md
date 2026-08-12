@@ -20,7 +20,7 @@ interface really answers, and opens it in your browser.
   ✓ Frontend
 
   Orin is ready
-  http://127.0.0.1:8000
+  http://127.0.0.1:49200
 ```
 
 `Ctrl+C` stops it again, and takes every process it started with it.
@@ -94,12 +94,12 @@ Running `orin` while Orin is already running does not start a second copy:
 ```text
   Orin is already running.
 
-  Opening http://127.0.0.1:8000
+  Opening http://127.0.0.1:49200
 ```
 
 ## Ports
 
-Orin binds `127.0.0.1` only, never a LAN address. Port 8000 by default.
+Orin binds `127.0.0.1` only, never a LAN address. Port 49200 by default.
 
 - The port is free → it is used.
 - The port belongs to your own running Orin → that instance is opened.

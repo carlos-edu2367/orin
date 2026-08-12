@@ -10,7 +10,11 @@ from __future__ import annotations
 import socket
 from dataclasses import dataclass
 
-DEFAULT_PORT = 8000
+# 49152-65535 is IANA's dynamic/private range: never assigned to any
+# registered service, so it can't collide with the common Python dev-server
+# defaults (Django's 8000, countless "python -m http.server" instances on
+# 8000/8080) the way a low registered port would.
+DEFAULT_PORT = 49200
 SCAN_LIMIT = 64
 LOOPBACK = "127.0.0.1"
 
@@ -63,8 +67,8 @@ def select_port(requested: int | None, *, explicit: bool = False, host: str = LO
 
     An explicitly requested port is never silently moved: the user asked for a
     specific address and a different one would be a lie. A default port that is
-    taken moves forward, because "something else already uses 8000" is not a
-    reason to refuse to start.
+    taken moves forward, because "something else already uses the default" is
+    not a reason to refuse to start.
     """
     preferred = requested or DEFAULT_PORT
     if port_is_free(preferred, host):

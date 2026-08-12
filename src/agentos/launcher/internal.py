@@ -14,6 +14,8 @@ from __future__ import annotations
 import os
 import sys
 
+from .ports import DEFAULT_PORT
+
 SERVICES = ("backend", "publisher", "worker")
 
 
@@ -22,7 +24,7 @@ def run_backend() -> int:
     import uvicorn
 
     host = os.getenv("ORIN_BACKEND_HOST", "127.0.0.1")
-    port = int(os.getenv("ORIN_BACKEND_PORT", "8000"))
+    port = int(os.getenv("ORIN_BACKEND_PORT", str(DEFAULT_PORT)))
     uvicorn.run(
         "agentos.api.asgi:app",
         host=host,

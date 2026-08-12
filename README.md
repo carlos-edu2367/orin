@@ -77,7 +77,7 @@ answers, and opens it in your browser. `Ctrl+C` stops everything it started.
   ✓ Frontend
 
   Orin is ready
-  http://127.0.0.1:8000
+  http://127.0.0.1:49200
 ```
 
 `orin status`, `orin logs`, `orin stop` and `orin restart` are there when you
