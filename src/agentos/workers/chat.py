@@ -29,7 +29,7 @@ from agentos.persistence.postgres.agent_memory import PostgresAgentMemoryStore
 from agentos.persistence.postgres.agentic_activity import PostgresAgenticActivityStore
 from agentos.persistence.postgres.conversation_agents import ConversationAgentStore
 from agentos.persistence.postgres.execution_adapters import ExecutionApplicationAdapter, ExecutionQueryAdapter
-from agentos.persistence.postgres.schema import conversation_dispatches, provider_configurations
+from agentos.persistence.postgres.schema import conversation_dispatches, provider_configurations, provider_model_catalog
 from agentos.persistence.provider_secrets import ProviderSecretCipher
 from agentos.persistence.postgres.skills import PostgresSkillLibraryService
 
@@ -42,6 +42,18 @@ PROVIDER_BASE_URLS = {
     "openai": "https://api.openai.com/v1",
     "omniroute": DEFAULT_OMNIROUTE_BASE_URL,
 }
+
+# Upper bound used whenever the turn's model has no known (or no smaller)
+# context window -- unchanged from the previous flat behavior.
+DEFAULT_MAX_CONTEXT_TOKENS = 60_000
+# AgenticLimits rejects anything below 1_000; this keeps a real margin above
+# that floor so a tiny-context model still has room for the pinned request.
+MIN_MAX_CONTEXT_TOKENS = 4_000
+# Headroom subtracted from a model's real context window before it becomes
+# the trim budget: the system prompt and tool schemas ride outside the
+# trimmed message window, and the reply itself (uncapped here, so it can use
+# the provider's own max) still has to fit in what's left.
+CONTEXT_WINDOW_RESERVE_TOKENS = 12_000
 
 # A turn is allowed to continue until the worker's job timeout.  The old
 # five-minute deadline cut off ordinary multi-step file work mid-task.
@@ -177,6 +189,36 @@ class ChatWorker:
                     expired.append(str(row["turn_id"]))
         return tuple(expired)
 
+    def _max_context_tokens_for(self, turn: dict[str, object]) -> int:
+        """Derive the context-trim budget from the turn's actual model window.
+
+        The provider catalog already knows each model's real context window
+        (used today only to filter model *selection*); this is the first
+        place that spends it on the agentic loop's own request-sizing budget,
+        instead of the flat 60k every model used to get regardless of what it
+        can actually accept. A small or unrefreshed-catalog model falls back
+        to a safe smaller budget rather than risking an oversized request.
+
+        Best-effort only: any failure here (catalog not yet refreshed for
+        this model, or -- in unit tests -- a store whose engine is a bare
+        stub) falls back to the previous flat default rather than blocking
+        turn construction over a sizing refinement.
+        """
+        try:
+            with self.store._engine.connect() as c:
+                context_window = c.execute(
+                    select(provider_model_catalog.c.context_window).where(
+                        provider_model_catalog.c.user_id == turn["user_id"],
+                        provider_model_catalog.c.provider == turn["provider"],
+                        provider_model_catalog.c.model_id == turn["model_id"],
+                    )
+                ).scalar()
+        except Exception:
+            return DEFAULT_MAX_CONTEXT_TOKENS
+        if not context_window:
+            return DEFAULT_MAX_CONTEXT_TOKENS
+        return max(MIN_MAX_CONTEXT_TOKENS, min(DEFAULT_MAX_CONTEXT_TOKENS, int(context_window) - CONTEXT_WINDOW_RESERVE_TOKENS))
+
     def _provider_transport(self, turn: dict[str, object]) -> HTTPProviderStreamTransport:
         with self.store._engine.connect() as c:
             credential = c.execute(select(provider_configurations.c.api_key, provider_configurations.c.api_key_ciphertext, provider_configurations.c.base_url, provider_configurations.c.enabled).where(provider_configurations.c.user_id == turn["user_id"], provider_configurations.c.provider == turn["provider"])).mappings().first()
@@ -231,7 +273,7 @@ class ChatWorker:
                 provider_factory=lambda: self._provider_transport(turn),
                 workspace_root=self._workspace_root,
                 cancelled=lambda current: self.store.cancel_requested(str(current["turn_id"])),
-                limits=AgenticLimits(deadline=TURN_DEADLINE, max_iterations=configured_limits["max_iterations"], max_actions=None if configured_limits["max_iterations"] is None else 24, max_context_tokens=60_000),
+                limits=AgenticLimits(deadline=TURN_DEADLINE, max_iterations=configured_limits["max_iterations"], max_actions=None if configured_limits["max_iterations"] is None else 24, max_context_tokens=self._max_context_tokens_for(turn)),
                 skills=skill_library.registry_for(str(turn["user_id"]), agent_id=str(self.store.main_agent_id(turn))),
                 skill_load_recorder=lambda loaded: skill_library.record_load(
                     user_id=str(turn["user_id"]), execution_id=str(turn["execution_id"]),
