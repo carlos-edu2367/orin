@@ -22,7 +22,7 @@ import shlex
 import socket
 import signal
 import subprocess
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Collection, Mapping
 from urllib.parse import urljoin, urlparse
 
 import httpx
@@ -237,8 +237,17 @@ class AgentToolset:
                 self.read_file, "filesystem", read_only=True,
             ),
             ToolDefinition(
-                "write_file", "Create or overwrite a UTF-8 text file in the conversation workspace.",
-                _schema({"path": _TEXT, "content": _TEXT}, ("path", "content")),
+                "write_file",
+                "Create or overwrite a UTF-8 text file in the conversation workspace. A file longer than one reply must be written in parts: the first call with the default mode, each following call with mode=\"append\".",
+                _schema({
+                    "path": _TEXT,
+                    "content": _TEXT,
+                    "mode": {
+                        "type": "string",
+                        "enum": ["overwrite", "append"],
+                        "description": "'overwrite' (default) replaces the file; 'append' adds to the end, creating the file if needed.",
+                    },
+                }, ("path", "content")),
                 self.write_file, "filesystem", policy_tags=("mutates",),
             ),
             ToolDefinition(
@@ -393,6 +402,15 @@ class AgentToolset:
         except AgentToolError:
             return False
 
+    def argument_names(self, name: str) -> frozenset[str] | None:
+        """The argument names a tool declares, or None when the tool is unknown."""
+        try:
+            definition = self.resolve(name)
+        except AgentToolError:
+            return None
+        properties = definition.parameters.get("properties")
+        return frozenset(properties) if isinstance(properties, Mapping) else None
+
     # -- execution ------------------------------------------------------
 
     def invoke(self, name: str, arguments: Mapping[str, Any]) -> ToolOutcome:
@@ -471,12 +489,19 @@ class AgentToolset:
             "payload": {"path": path, "first_line": first, "returned_lines": len(lines), "total_lines": total, "truncated": truncated, "label": path},
         }
 
-    def write_file(self, path: str, content: str) -> dict[str, Any]:
-        written = self.workspace.write_text(path, content)
+    def write_file(self, path: str, content: str, mode: str = "overwrite") -> dict[str, Any]:
+        if mode not in {"overwrite", "append"}:
+            raise AgentToolError("mode must be 'overwrite' or 'append'.")
+        if mode == "append":
+            written, total = self.workspace.append_text(path, content)
+            body = f"Appended {written} bytes to {path}; it now holds {total} bytes."
+        else:
+            written = total = self.workspace.write_text(path, content)
+            body = f"Wrote {written} bytes to {path}."
         return {
-            "summary": f"Escreveu {path}",
-            "content": f"Wrote {written} bytes to {path}.",
-            "payload": {"path": path, "bytes_written": written, "label": path, "artifacts": [self.workspace.file_metadata(path)]},
+            "summary": f"{'Acrescentou a' if mode == 'append' else 'Escreveu'} {path}",
+            "content": body,
+            "payload": {"path": path, "bytes_written": written, "bytes_total": total, "mode": mode, "label": path, "artifacts": [self.workspace.file_metadata(path)]},
         }
 
     @staticmethod
@@ -838,62 +863,283 @@ class AgentToolset:
         return self._delegate_batch(list(tasks))
 
 
-def parse_arguments(raw: object) -> dict[str, Any]:
+TRUNCATED_ARGUMENTS_MESSAGE = (
+    "Tool arguments were cut off before the call ended — the output limit was reached in the "
+    "middle of this call, so the payload is incomplete. Do not resend it unchanged: split it. "
+    "Write a long file in parts (write_file for the first part, then write_file with "
+    "mode=\"append\" for each following part), and save a long script with write_file before "
+    "running it with run_command."
+)
+MALFORMED_ARGUMENTS_MESSAGE = (
+    "Tool arguments were not valid JSON and could not be repaired. Resend the call with every "
+    "string properly escaped, or split a long payload into smaller write_file calls "
+    "(mode=\"append\" adds to the end of an existing file)."
+)
+
+
+def parse_arguments(raw: object, known_keys: Collection[str] | None = None) -> dict[str, Any]:
+    """Read a tool call's arguments, repairing JSON a model wrote incorrectly.
+
+    ``known_keys`` are the argument names the target tool actually declares.
+    When a broken payload has more than one reading that accounts for the whole
+    text — file content that itself looks like JSON does this — the reading
+    whose keys all belong to the tool is the one the model meant.
+    """
     if isinstance(raw, Mapping):
         return dict(raw)
     if isinstance(raw, str):
         text = raw.strip() or "{}"
         try:
             value = json.loads(text)
-        except json.JSONDecodeError as error:
-            try:
-                value = json.loads(_escape_control_characters_in_json_strings(text))
-            except (json.JSONDecodeError, ValueError) as repair_error:
-                raise AgentToolError("Tool arguments were not valid JSON.") from repair_error
+        except json.JSONDecodeError:
+            return _ToolArgumentReader(text, known_keys).parse()
         if not isinstance(value, Mapping):
             raise AgentToolError("Tool arguments must be a JSON object.")
         return dict(value)
     raise AgentToolError("Tool arguments must be a JSON object.")
 
 
-def _escape_control_characters_in_json_strings(text: str) -> str:
-    """Repair literal controls emitted inside provider JSON string values.
+_JSON_ESCAPES = {'"': '"', "\\": "\\", "/": "/", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t"}
+_JSON_WHITESPACE = " \t\r\n"
+_JSON_LITERALS = {"true": True, "false": False, "null": None}
+_VALUE_STARTS = '"{[-0123456789tfn]'  # ']' covers a trailing comma before it
+# A model writing a long CSS/JS payload leaves genuinely ambiguous text, so the
+# reader below explores alternatives. The budget counts characters examined, not
+# alternatives, so a hostile or hopeless payload cannot turn that search into an
+# unbounded amount of work whatever shape it takes. A payload that can be read at
+# all is read in a few passes over its own text; anything needing far more than
+# that is not going to resolve, and the model is better served by a fast error.
+_REPAIR_STEPS_PER_CHARACTER = 20
+_MAX_REPAIR_STEPS = 4_000_000
+_MAX_REPAIR_DEPTH = 40
 
-    Some providers/models return file contents with raw newlines, carriage
-    returns, or tabs instead of JSON escapes. We only rewrite characters while
-    inside a JSON string and leave every other syntax error for ``json.loads``
-    to reject. Existing escapes and escaped quotes are preserved.
+
+class _RepairBudgetExhausted(Exception):
+    """The search for a consistent reading of the payload ran too long."""
+
+
+class _ToolArgumentReader:
+    """Read the arguments object a model *meant* to send when its JSON is invalid.
+
+    Providers stream tool arguments as raw text, and a model writing a file full
+    of CSS or JavaScript routinely breaks that text: it leaves literal newlines
+    inside a string, writes ``"Inter"`` or ``[data-role="tab"]`` without escaping
+    the inner quotes, and emits ``\\d`` or ``\\201C``, which JSON rejects as an
+    invalid escape. No per-character rule can tell a quote that ends a value
+    from a quote that belongs to the content, so this reader does not try: it
+    enumerates the possible readings lazily and keeps the first one that
+    accounts for every byte of the payload. Where more than one reading does
+    that, the tool's own argument names decide (see ``parse``).
+
+    Only strings are treated as ambiguous. Nothing here invents structure: a
+    payload that no reading explains is still an error the model must fix.
     """
-    output: list[str] = []
-    in_string = False
-    escaped = False
-    for index, character in enumerate(text):
-        if escaped:
-            output.append(character)
-            escaped = False
-            continue
-        if character == "\\" and in_string:
-            output.append(character)
-            escaped = True
-            continue
-        if character == '"':
-            if in_string:
-                next_index = index + 1
-                while next_index < len(text) and text[next_index] in " \t\r\n":
-                    next_index += 1
-                if next_index >= len(text) or text[next_index] not in ",}]:":
-                    output.append("\\\"")
+
+    def __init__(self, text: str, known_keys: Collection[str] | None = None) -> None:
+        self.text = text
+        self.known_keys = frozenset(known_keys) if known_keys else None
+        self.budget = min(_MAX_REPAIR_STEPS, _REPAIR_STEPS_PER_CHARACTER * len(text) + 50_000)
+        self.declared_keys_only = False
+
+    def parse(self) -> dict[str, Any]:
+        # First pass: only the argument names the tool declares may end a string
+        # value. That is what tells ``"font-family: "Inter", sans-serif"`` apart
+        # from a real ``", "content":`` boundary, and it collapses the search on
+        # a payload whose content is itself full of JSON-looking text. A model
+        # that also invented an argument name gets the second, permissive pass.
+        for declared_only in (True, False) if self.known_keys else (False,):
+            self.declared_keys_only = declared_only
+            self.budget = min(_MAX_REPAIR_STEPS, _REPAIR_STEPS_PER_CHARACTER * len(self.text) + 50_000)
+            reading = self._first_complete_reading()
+            if reading is not None:
+                return reading
+        # Text that stops before its closing brace was cut off mid-call; text
+        # that reaches it is complete but written wrong. The model can only act
+        # on the difference if we tell it which one happened.
+        raise AgentToolError(MALFORMED_ARGUMENTS_MESSAGE if self.text.rstrip().endswith("}") else TRUNCATED_ARGUMENTS_MESSAGE)
+
+    def _first_complete_reading(self) -> dict[str, Any] | None:
+        index = self._skip(0)
+        if index >= len(self.text) or self.text[index] != "{":
+            return None
+        try:
+            for value, end in self._object(index, 0):
+                if self._skip(end) < len(self.text):
                     continue
-            in_string = not in_string
-            output.append(character)
-            continue
-        if in_string:
-            output.append({"\n": "\\n", "\r": "\\r", "\t": "\\t"}.get(character, character))
+                if not self.declared_keys_only or self.known_keys.issuperset(value):
+                    return value
+        except _RepairBudgetExhausted:
+            return None
+        return None
+
+    def _spend(self, cost: int = 1) -> None:
+        self.budget -= cost
+        if self.budget <= 0:
+            raise _RepairBudgetExhausted
+
+    def _skip(self, index: int) -> int:
+        while index < len(self.text) and self.text[index] in _JSON_WHITESPACE:
+            index += 1
+        return index
+
+    def _object(self, index: int, depth: int):
+        if depth <= _MAX_REPAIR_DEPTH:
+            yield from self._members(index + 1, {}, depth)
+
+    def _members(self, index: int, current: dict[str, Any], depth: int):
+        index = self._skip(index)
+        if index >= len(self.text):
+            return
+        character = self.text[index]
+        if character == "}":
+            self._spend()
+            yield dict(current), index + 1
+        elif character == ",":
+            yield from self._members(index + 1, current, depth)
+        elif character == '"':
+            for key, after_key in self._string(index, "key"):
+                cursor = self._skip(after_key)
+                if cursor < len(self.text) and self.text[cursor] == ":":
+                    for value, after_value in self._value(cursor + 1, "object", depth):
+                        yield from self._members(after_value, {**current, key: value}, depth)
+
+    def _array(self, index: int, depth: int):
+        if depth <= _MAX_REPAIR_DEPTH:
+            yield from self._items(index + 1, [], depth)
+
+    def _items(self, index: int, current: list[Any], depth: int):
+        index = self._skip(index)
+        if index >= len(self.text):
+            return
+        character = self.text[index]
+        if character == "]":
+            self._spend()
+            yield list(current), index + 1
+        elif character == ",":
+            yield from self._items(index + 1, current, depth)
         else:
-            output.append(character)
-    if in_string:
-        raise ValueError("unterminated JSON string")
-    return "".join(output)
+            for value, after in self._value(index, "array", depth):
+                yield from self._items(after, [*current, value], depth)
+
+    def _value(self, index: int, container: str, depth: int):
+        index = self._skip(index)
+        if index >= len(self.text):
+            return
+        character = self.text[index]
+        if character == "{":
+            yield from self._object(index, depth + 1)
+        elif character == "[":
+            yield from self._array(index, depth + 1)
+        elif character == '"':
+            yield from self._string(index, "value" if container == "object" else "item")
+        else:
+            yield from self._scalar(index)
+
+    def _scalar(self, index: int):
+        end = index
+        while end < len(self.text) and self.text[end] not in ",}]" and self.text[end] not in _JSON_WHITESPACE:
+            end += 1
+        token = self.text[index:end]
+        if token in _JSON_LITERALS:
+            self._spend()
+            yield _JSON_LITERALS[token], end
+            return
+        try:
+            number = json.loads(token)
+        except ValueError:
+            return
+        self._spend()
+        yield number, end
+
+    def _string(self, index: int, role: str):
+        """Yield every reading of the string starting at ``index``, shortest first.
+
+        A quote that could close the string is offered as one reading and then
+        kept as content, so the caller decides which one actually parses.
+        """
+        cursor = index + 1
+        parts: list[str] = []
+        while cursor < len(self.text):
+            self._spend()
+            character = self.text[cursor]
+            if character == "\\":
+                consumed, decoded = self._escape(cursor)
+                if consumed == 0:
+                    return
+                parts.append(decoded)
+                cursor += consumed
+                continue
+            if character == '"' and self._may_terminate(cursor, role):
+                # Materializing a candidate costs as much as the text behind it,
+                # so charge for it: that is what keeps a payload with thousands
+                # of possible boundaries from being explored quadratically.
+                self._spend(len(parts))
+                yield "".join(parts), cursor + 1
+            parts.append(character)
+            cursor += 1
+
+    def _escape(self, index: int) -> tuple[int, str]:
+        following = self.text[index + 1: index + 2]
+        if not following:
+            return 0, ""
+        if following in _JSON_ESCAPES:
+            return 2, _JSON_ESCAPES[following]
+        if following == "u":
+            raw = self.text[index + 2: index + 6]
+            if len(raw) == 4 and all(character in "0123456789abcdefABCDEF" for character in raw):
+                code = int(raw, 16)
+                if 0xD800 <= code <= 0xDBFF and self.text[index + 6: index + 8] == "\\u":
+                    low_raw = self.text[index + 8: index + 12]
+                    if len(low_raw) == 4 and all(character in "0123456789abcdefABCDEF" for character in low_raw):
+                        low = int(low_raw, 16)
+                        if 0xDC00 <= low <= 0xDFFF:
+                            return 12, chr(0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00))
+                if 0xD800 <= code <= 0xDFFF:
+                    # A lone surrogate cannot be encoded as UTF-8 later on.
+                    return 6, "�"
+                return 6, chr(code)
+        # Not a JSON escape at all — a CSS codepoint or a regex like ``\d``.
+        # The backslash is content; the character after it is read normally.
+        return 1, "\\"
+
+    def _may_terminate(self, index: int, role: str) -> bool:
+        after = self._skip(index + 1)
+        if after >= len(self.text):
+            return True
+        character = self.text[after]
+        if role == "key":
+            return character == ":"
+        if role == "value":
+            return character == "}" or (character == "," and self._key_ahead(after + 1))
+        return character == "]" or (character == "," and self._item_ahead(after + 1))
+
+    def _key_ahead(self, index: int) -> bool:
+        index = self._skip(index)
+        if index >= len(self.text):
+            return False
+        if self.text[index] == "}":
+            return True  # a trailing comma before the closing brace
+        if self.text[index] != '"':
+            return False
+        cursor = index + 1
+        while cursor < len(self.text):
+            character = self.text[cursor]
+            if character == "\\":
+                cursor += 2
+                continue
+            if character in "\r\n":
+                return False
+            if character == '"':
+                after = self._skip(cursor + 1)
+                if after >= len(self.text) or self.text[after] != ":":
+                    return False
+                return not self.declared_keys_only or self.text[index + 1: cursor] in self.known_keys
+            cursor += 1
+        return False
+
+    def _item_ahead(self, index: int) -> bool:
+        index = self._skip(index)
+        return index < len(self.text) and self.text[index] in _VALUE_STARTS
 
 
 __all__ = [

@@ -93,6 +93,7 @@ def build_system_prompt(
         "- You act, you do not only advise. If a task can be done with a tool, use the tool instead of describing it.",
         "- Chain tools when needed: read before you edit, use edit_file for a focused replacement, verify after you write, check a command's output before reporting success.",
         "- Never claim you did something you did not actually do with a tool. If a tool failed, say so and what you tried.",
+        "- One reply is bounded, so a single tool call cannot carry an unlimited payload. Write a long file in parts: write_file for the first part, then write_file with mode=\"append\" for each following part. Save a long script with write_file and then run it, instead of passing it inline to run_command.",
         "- Keep the final answer for the user short and useful; the interface already shows every tool step you took.",
         "- When you create a useful workspace file, link it in your final answer as [filename](workspace://relative/path). Prioritize final deliverables and include generator scripts when useful.",
         "- Use run_command only for commands that finish. To start a local server, call run_command with background=true; on Windows do not use nohup or Unix '&' syntax.",

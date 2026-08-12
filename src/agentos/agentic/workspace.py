@@ -103,6 +103,30 @@ class ConversationWorkspace:
         target.write_bytes(payload)
         return len(payload)
 
+    def append_text(self, path: str, content: str) -> tuple[int, int]:
+        """Add to the end of a file, creating it when absent.
+
+        A model whose reply is bounded cannot emit a long file in one tool call,
+        so it writes the first part and appends the rest. The write limit applies
+        to the resulting file, not to the fragment, and nothing is written when
+        the fragment would push the file past it.
+        """
+        if not isinstance(content, str):
+            raise WorkspaceError("content must be text")
+        payload = content.encode("utf-8")
+        target = self.resolve(path)
+        if target == self.root:
+            raise WorkspaceError("path must name a file")
+        if target.exists() and not target.is_file():
+            raise WorkspaceError(f"'{path}' is not a file in this workspace")
+        existing = target.stat().st_size if target.is_file() else 0
+        if existing + len(payload) > MAX_WRITE_BYTES:
+            raise WorkspaceError("content exceeds the workspace write limit")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("ab") as handle:
+            handle.write(payload)
+        return len(payload), existing + len(payload)
+
     def list_entries(self, path: str = "", *, depth: int = 1) -> list[dict[str, object]]:
         target = self.resolve(path) if path.strip() else self.root
         if not target.is_dir():

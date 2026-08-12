@@ -529,6 +529,56 @@ def test_a_write_call_is_not_reordered_around_read_only_calls_that_follow_it() -
     assert toolset.execution_order == ["write_file", "read_file", "read_file"]
 
 
+def test_a_stylesheet_written_with_unescaped_quotes_still_reaches_the_tool() -> None:
+    """A model writing CSS breaks its own JSON; the turn must survive it."""
+
+    class RecordingToolset:
+        def __init__(self) -> None:
+            self.arguments: list[dict[str, object]] = []
+
+        def schemas(self):
+            return []
+
+        def is_read_only(self, name: str) -> bool:
+            return False
+
+        def argument_names(self, name: str):
+            return frozenset({"path", "content", "mode"}) if name == "write_file" else None
+
+        def invoke(self, name, arguments):
+            self.arguments.append(dict(arguments))
+            return ToolOutcome("succeeded", f"{name} ok", "written")
+
+    # Literal newlines, an unescaped font name and a CSS codepoint escape, exactly
+    # as a provider streams them when the model does not escape its own payload.
+    broken = '{"path": "styles.css", "content": "body {\\n  font-family: "Inter", sans-serif;\\n}\\n.q::before { content: "\\\\201C"; }"}'
+    broken = broken.replace("\\n", "\n")
+
+    class CssProvider:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def stream(self, request):
+            self.calls += 1
+            if self.calls == 1:
+                return [
+                    NormalizedStreamItem(StreamKind.TOOL_CALL, 1, tool_call_id="call-1", tool_name="write_file", arguments_delta=broken),
+                    NormalizedStreamItem(StreamKind.FINISH, 2, finish_reason="tool_calls"),
+                ]
+            return normalize_sse(['data: {"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}', "data: [DONE]"], provider="openrouter")
+
+    toolset = RecordingToolset()
+    runtime = AgenticTurnRuntime(store=Store(), provider=CssProvider(), toolset=toolset)
+
+    result = runtime.run("turn-1")
+
+    assert result.state == "completed"
+    assert toolset.arguments == [{
+        "path": "styles.css",
+        "content": 'body {\n  font-family: "Inter", sans-serif;\n}\n.q::before { content: "\\201C"; }',
+    }]
+
+
 def test_the_last_iteration_forbids_tools_and_returns_an_answer() -> None:
     class AlwaysToolsProvider:
         def __init__(self) -> None:

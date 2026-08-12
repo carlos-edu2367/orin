@@ -451,8 +451,9 @@ class AgenticTurnRuntime:
             name = str(call.get("name") or "")
             call_id = str(call.get("id") or "")
             self._life(turn, "tool_started", tool_name=name, invocation_id=call_id)
+            argument_names = getattr(self.toolset, "argument_names", None)
             try:
-                prepared.append((call_id, name, parse_arguments(call.get("arguments") or "{}"), None))
+                prepared.append((call_id, name, parse_arguments(call.get("arguments") or "{}", argument_names(name) if callable(argument_names) else None), None))
             except AgentToolError as error:
                 prepared.append((call_id, name, None, str(error)))
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import subprocess
+import time
 
 import httpx
 import pytest
@@ -535,9 +536,152 @@ def test_parse_arguments_repairs_unescaped_code_quotes_inside_json_strings() -> 
     }
 
 
+def test_parse_arguments_repairs_a_quote_followed_by_a_comma_inside_css() -> None:
+    raw = '{"path":"styles.css","content":"body { font-family: "Inter", "Helvetica", sans-serif; }"}'
+
+    assert parse_arguments(raw) == {
+        "path": "styles.css",
+        "content": 'body { font-family: "Inter", "Helvetica", sans-serif; }',
+    }
+
+
+def test_parse_arguments_repairs_a_quote_inside_an_attribute_selector() -> None:
+    raw = '{"path":"styles.css","content":"a[data-role="tab"] { color: red; }"}'
+
+    assert parse_arguments(raw) == {
+        "path": "styles.css",
+        "content": 'a[data-role="tab"] { color: red; }',
+    }
+
+
+def test_parse_arguments_repairs_invalid_escape_sequences() -> None:
+    raw = '{"path":"styles.css","content":".q::before { content: \'\\201C\'; }"}'
+
+    assert parse_arguments(raw) == {
+        "path": "styles.css",
+        "content": ".q::before { content: '\\201C'; }",
+    }
+
+
+def test_parse_arguments_repairs_a_javascript_regex_backslash() -> None:
+    raw = '{"path":"app.js","content":"const digits = /\\d+/g;\nconst gap = /\\s/;"}'
+
+    assert parse_arguments(raw) == {
+        "path": "app.js",
+        "content": "const digits = /\\d+/g;\nconst gap = /\\s/;",
+    }
+
+
+def test_parse_arguments_keeps_a_quote_before_a_brace_as_content() -> None:
+    raw = '{"path":"app.js","content":"const close = "}";\nrender(close);"}'
+
+    assert parse_arguments(raw) == {
+        "path": "app.js",
+        "content": 'const close = "}";\nrender(close);',
+    }
+
+
+def test_parse_arguments_keeps_json_content_that_looks_like_the_call_itself(toolset: AgentToolset) -> None:
+    raw = '{"path":"data.json","content":"{"name": "orin", "version": "1.0"}"}'
+
+    assert parse_arguments(raw, toolset.argument_names("write_file")) == {
+        "path": "data.json",
+        "content": '{"name": "orin", "version": "1.0"}',
+    }
+
+
+def test_argument_names_are_unknown_for_an_unknown_tool(toolset: AgentToolset) -> None:
+    assert toolset.argument_names("launch_missiles") is None
+    assert toolset.argument_names("write_file") == frozenset({"path", "content", "mode"})
+
+
+def test_parse_arguments_repairs_nested_arrays_of_edits() -> None:
+    raw = '{"path":"app.js","edits":[{"old_text":"const a = "1";","new_text":"const a = "2";"}]}'
+
+    assert parse_arguments(raw) == {
+        "path": "app.js",
+        "edits": [{"old_text": 'const a = "1";', "new_text": 'const a = "2";'}],
+    }
+
+
+def test_parse_arguments_keeps_valid_json_untouched() -> None:
+    raw = '{"path":"a.txt","content":"tab\\tnewline\\nquote\\"backslash\\\\","limit":5,"deep":true}'
+
+    assert parse_arguments(raw) == {
+        "path": "a.txt",
+        "content": 'tab\tnewline\nquote"backslash\\',
+        "limit": 5,
+        "deep": True,
+    }
+
+
 def test_parse_arguments_still_rejects_malformed_json_after_safe_repair() -> None:
     with pytest.raises(AgentToolError):
         parse_arguments('{"path":"styles.css","content":"unterminated}')
+
+
+def test_parse_arguments_reports_truncated_arguments_with_a_way_out() -> None:
+    with pytest.raises(AgentToolError) as error:
+        parse_arguments('{"path":"styles.css","content":"body {\n  margin: 0;\n  colo')
+
+    message = str(error.value)
+    assert "cut off" in message
+    assert "append" in message
+
+
+def test_parse_arguments_repairs_a_long_stylesheet(toolset: AgentToolset) -> None:
+    css = "".join(
+        f'.card-{index} {{ font-family: "Inter", "Helvetica Neue", sans-serif; }}\n'
+        f'.card-{index}::before {{ content: "\\201C"; }}\n'
+        f'.card-{index}[data-state="open"] {{ background: url("img/photo-{index}.jpg"); }}\n'
+        for index in range(200)
+    )
+
+    value = parse_arguments('{"path":"styles.css","content":"' + css + '"}', toolset.argument_names("write_file"))
+
+    assert value == {"path": "styles.css", "content": css}
+
+
+def test_parse_arguments_rejects_an_ambiguous_payload_without_stalling(toolset: AgentToolset) -> None:
+    started = time.perf_counter()
+
+    with pytest.raises(AgentToolError):
+        parse_arguments('{"path":"a.css","content":"' + ('x"y", "k": ' * 3000), toolset.argument_names("write_file"))
+
+    assert time.perf_counter() - started < 5.0
+
+
+def test_write_file_appends_instead_of_overwriting(toolset: AgentToolset) -> None:
+    toolset.invoke("write_file", {"path": "styles.css", "content": "body { margin: 0; }\n"})
+
+    outcome = toolset.invoke("write_file", {"path": "styles.css", "content": "h1 { color: red; }\n", "mode": "append"})
+
+    assert outcome.status == "succeeded"
+    assert outcome.payload["mode"] == "append"
+    assert toolset.workspace.read_text("styles.css")[0] == "body { margin: 0; }\nh1 { color: red; }\n"
+
+
+def test_write_file_append_creates_a_missing_file(toolset: AgentToolset) -> None:
+    outcome = toolset.invoke("write_file", {"path": "notes/log.md", "content": "first\n", "mode": "append"})
+
+    assert outcome.status == "succeeded"
+    assert toolset.workspace.read_text("notes/log.md")[0] == "first\n"
+
+
+def test_write_file_rejects_an_unknown_mode(toolset: AgentToolset) -> None:
+    outcome = toolset.invoke("write_file", {"path": "a.txt", "content": "x", "mode": "prepend"})
+
+    assert outcome.status == "failed"
+    assert "append" in outcome.content
+
+
+def test_write_file_append_respects_the_workspace_write_limit(toolset: AgentToolset) -> None:
+    toolset.invoke("write_file", {"path": "big.txt", "content": "x" * 900_000})
+
+    outcome = toolset.invoke("write_file", {"path": "big.txt", "content": "y" * 200_000, "mode": "append"})
+
+    assert outcome.status == "failed"
+    assert toolset.workspace.resolve("big.txt").stat().st_size == 900_000
 
 
 def test_schemas_are_provider_ready(toolset: AgentToolset) -> None:
