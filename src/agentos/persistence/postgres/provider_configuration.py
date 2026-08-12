@@ -142,6 +142,10 @@ class PostgresProviderConfigurationAdapter:
         client = OmniRouteCatalogClient() if provider == "omniroute" else OllamaCatalogClient()
         try:
             models = client.fetch(str(command["api_key"]), base_url=str(base_url))
+            if provider == "ollama" and is_ollama_cloud(str(base_url)):
+                if not models:
+                    raise RuntimeError("Ollama Cloud returned no models")
+                client.verify_cloud_access(str(command["api_key"]), base_url=str(base_url), model=str(models[0]["id"]))
         except RuntimeError as error:
             # The adapter only permits the gateway's safe generic response.
             raise ValueError("provider connection failed") from error

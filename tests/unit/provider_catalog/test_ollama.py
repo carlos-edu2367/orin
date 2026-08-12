@@ -95,6 +95,28 @@ def test_sends_a_bearer_token_only_when_a_cloud_key_is_configured() -> None:
     assert headers[1]["authorization"] == "Bearer cloud-secret"
 
 
+def test_cloud_access_probe_uses_an_authenticated_chat_request() -> None:
+    requests: list[httpx.Request] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/api/chat":
+            return httpx.Response(200, json={"model": "qwen3:8b", "message": {"content": "ok"}, "done": True})
+        return httpx.Response(500, json={"error": "unexpected endpoint"})
+
+    client = OllamaCatalogClient(client=httpx.Client(transport=httpx.MockTransport(handle)))
+
+    client.verify_cloud_access("cloud-secret", base_url="https://ollama.com", model="qwen3:8b")
+
+    assert requests[0].url == "https://ollama.com/api/chat"
+    assert requests[0].headers["authorization"] == "Bearer cloud-secret"
+    assert requests[0].read() is not None
+    assert requests[0].content
+    assert requests[0].method == "POST"
+    assert b'"model":"qwen3:8b"' in requests[0].content
+    assert b'"stream":false' in requests[0].content
+
+
 def test_a_failed_detail_lookup_degrades_only_that_model() -> None:
     """One unreadable model must not cost the user the whole catalog refresh."""
     seen: list[str] = []

@@ -68,6 +68,28 @@ def test_ollama_cloud_is_configured_with_a_key() -> None:
     assert state["base_url"] == "https://ollama.com"
 
 
+def test_ollama_cloud_connection_test_verifies_the_key_after_catalog_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeOllama:
+        def __init__(self) -> None:
+            self.verified: tuple[str, str, str] | None = None
+
+        def fetch(self, api_key: str, *, base_url: str) -> list[dict[str, object]]:
+            assert api_key == "cloud-secret"
+            assert base_url == "https://ollama.com"
+            return [{"id": "deepseek-v4-flash:cloud"}]
+
+        def verify_cloud_access(self, api_key: str, *, base_url: str, model: str) -> None:
+            self.verified = (api_key, base_url, model)
+
+    fake = FakeOllama()
+    monkeypatch.setattr("agentos.persistence.postgres.provider_configuration.OllamaCatalogClient", lambda: fake)
+
+    result = _adapter().test_connection({"provider": "ollama", "api_key": "cloud-secret", "base_url": "https://ollama.com"})
+
+    assert result["connected"] is True
+    assert fake.verified == ("cloud-secret", "https://ollama.com", "deepseek-v4-flash:cloud")
+
+
 def test_a_rejected_provider_still_cannot_be_connection_tested() -> None:
     with pytest.raises(ValueError):
         _adapter().test_connection({"provider": "openai", "api_key": "k", "base_url": None})

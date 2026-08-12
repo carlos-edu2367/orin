@@ -72,6 +72,29 @@ class OllamaCatalogClient:
             if self._client is None:
                 client.close()
 
+    def verify_cloud_access(self, api_key: str, *, base_url: str, model: str) -> None:
+        """Verify a Cloud key against an inference endpoint.
+
+        ``/api/tags`` and ``/api/show`` are useful for catalog discovery but do
+        not prove that a key can generate a response. Cloud access is only
+        authenticated when the request reaches ``/api/chat``.
+        """
+        if not api_key.strip():
+            raise RuntimeError("Ollama Cloud API key is required")
+        base = normalize_ollama_base_url(base_url)
+        client = self._client or httpx.Client(timeout=self._timeout)
+        try:
+            self._json(
+                client,
+                "POST",
+                f"{base}/api/chat",
+                api_key,
+                {"model": model, "messages": [{"role": "user", "content": "Reply with OK."}], "stream": False, "options": {"num_predict": 1}},
+            )
+        finally:
+            if self._client is None:
+                client.close()
+
     def _model(self, client: httpx.Client, base: str, api_key: str, item: dict[str, Any]) -> dict[str, object]:
         name = _text(item.get("model")) or _text(item.get("name"))
         if name is None:
