@@ -1,7 +1,7 @@
 import type { ApiClient } from './client'
 import { invalidResponseError } from './errors'
 
-export const PROVIDER_NAMES = ['openai', 'anthropic', 'openrouter', 'omniroute'] as const
+export const PROVIDER_NAMES = ['openai', 'anthropic', 'openrouter', 'omniroute', 'ollama'] as const
 export type ProviderName = (typeof PROVIDER_NAMES)[number]
 
 /**
@@ -115,6 +115,22 @@ export function testOmniRouteConnection(
 ): Promise<OmniRouteConnection> {
   return client.request({
     path: `${providerPath('omniroute')}/test`, method: 'POST', intent,
+    body: { api_key: input.apiKey, base_url: input.baseUrl },
+    parse: (value) => {
+      const data = record(value)
+      if (data.connected !== true) throw invalidResponseError()
+      return { connected: true, models_available: data.models_available === null ? null : nonNegativeInteger(data.models_available), base_url: nullableString(data.base_url) }
+    },
+  })
+}
+
+export function testOllamaConnection(
+  client: ApiClient,
+  input: { apiKey: string; baseUrl: string },
+  intent = client.createMutationIntent(),
+): Promise<OmniRouteConnection> {
+  return client.request({
+    path: `${providerPath('ollama')}/test`, method: 'POST', intent,
     body: { api_key: input.apiKey, base_url: input.baseUrl },
     parse: (value) => {
       const data = record(value)

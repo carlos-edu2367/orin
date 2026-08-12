@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ApiClient } from '../../src/api/client'
 import { ProviderSettingsPage } from '../../src/features/providers/ProviderSettingsPage'
+import { PROVIDER_NAMES, testOllamaConnection } from '../../src/api/providers'
 
 const apiKey = 'sk-openrouter-test-key'
 
@@ -287,3 +288,27 @@ function model() {
 async function openRouterPanel(): Promise<HTMLElement> {
   return screen.findByRole('article', { name: 'OpenRouter' })
 }
+
+describe('ollama provider client', () => {
+  it('is offered alongside the other providers', () => {
+    expect(PROVIDER_NAMES).toContain('ollama')
+  })
+
+  it('posts the base url and key to the ollama test route', async () => {
+    const seen: Array<Record<string, unknown>> = []
+    const client = {
+      createMutationIntent: () => ({ key: 'intent-1' }),
+      request: async (options: Record<string, unknown>) => {
+        seen.push(options)
+        return (options.parse as (value: unknown) => unknown)({ connected: true, models_available: 3, base_url: 'http://localhost:11434' })
+      },
+    } as never
+
+    const result = await testOllamaConnection(client, { apiKey: '', baseUrl: 'http://localhost:11434' })
+
+    expect(seen[0].path).toBe('/v1/providers/ollama/test')
+    expect(seen[0].method).toBe('POST')
+    expect(seen[0].body).toEqual({ api_key: '', base_url: 'http://localhost:11434' })
+    expect(result).toEqual({ connected: true, models_available: 3, base_url: 'http://localhost:11434' })
+  })
+})
