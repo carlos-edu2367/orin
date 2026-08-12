@@ -504,6 +504,13 @@ projects = Table(
 )
 Index("ix_projects_user_active", projects.c.user_id, projects.c.archived_at, projects.c.updated_at)
 
+workspace_roots = Table(
+    "workspace_roots", metadata,
+    Column("workspace_id", String(255), primary_key=True), Column("user_id", String(255), nullable=False),
+    Column("root_path", String(4096), nullable=False), Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+)
+
 conversation_messages = Table(
     "conversation_messages", metadata,
     Column("id", Integer, primary_key=True), Column("message_id", String(255), nullable=False, unique=True),
@@ -726,6 +733,7 @@ __all__ = [
     "conversation_agent_usage",
     "conversations",
     "projects",
+    "workspace_roots",
     "agent_memories",
     "skills",
     "skill_versions",
