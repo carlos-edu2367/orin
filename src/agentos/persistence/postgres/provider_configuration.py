@@ -44,6 +44,8 @@ from agentos.api.contracts import ApplicationNotFoundError
 
 from .schema import provider_configurations
 from agentos.persistence.provider_secrets import ProviderSecretCipher
+from agentos.provider_catalog.models import PROVIDERS_WITH_BASE_URL, PROVIDERS_WITH_OPTIONAL_KEY
+from agentos.provider_catalog.ollama import DEFAULT_OLLAMA_BASE_URL, OllamaCatalogClient, is_ollama_cloud, normalize_ollama_base_url
 from agentos.provider_catalog.omniroute import DEFAULT_OMNIROUTE_BASE_URL, normalize_omniroute_base_url
 from agentos.provider_catalog.omniroute import OmniRouteCatalogClient
 from agentos.provider_catalog.installation import OmniRouteInstaller
@@ -55,7 +57,7 @@ def _public(row) -> dict[str, object]:
         "enabled": bool(row["enabled"]),
         "secret_ref": str(row["secret_ref"]),
         "catalog_refreshed_at": row.get("catalog_refreshed_at"),
-        **({"base_url": row["base_url"]} if str(row["provider"]) == "omniroute" and row.get("base_url") else {}),
+        **({"base_url": row["base_url"]} if str(row["provider"]) in PROVIDERS_WITH_BASE_URL and row.get("base_url") else {}),
     }
 
 
@@ -71,8 +73,8 @@ class PostgresProviderConfigurationAdapter:
         provider = str(command["provider"])
         user_id = str(command["user_id"])
         enabled = bool(command["enabled"])
-        api_key = _api_key(provider, command.get("api_key"))
         base_url = _base_url(provider, command.get("base_url"))
+        api_key = _api_key(provider, command.get("api_key"), base_url)
         now = datetime.now(UTC)
         with self._engine.begin() as connection:
             existing = connection.execute(
@@ -86,14 +88,14 @@ class PostgresProviderConfigurationAdapter:
                 connection.execute(
                     insert(provider_configurations).values(
                         user_id=user_id, provider=provider, enabled=enabled,
-                        api_key=None, api_key_ciphertext=self._cipher.encrypt(api_key, allow_empty=provider == "omniroute"), base_url=base_url, secret_ref=secret_ref, catalog_refreshed_at=None, created_at=now, updated_at=now,
+                        api_key=None, api_key_ciphertext=self._cipher.encrypt(api_key, allow_empty=provider in PROVIDERS_WITH_OPTIONAL_KEY), base_url=base_url, secret_ref=secret_ref, catalog_refreshed_at=None, created_at=now, updated_at=now,
                     )
                 )
                 row = {"provider": provider, "enabled": enabled, "base_url": base_url, "secret_ref": secret_ref, "catalog_refreshed_at": None}
             else:
                 connection.execute(
                     update(provider_configurations).where(provider_configurations.c.id == existing["id"]).values(
-                        enabled=enabled, api_key=None, api_key_ciphertext=self._cipher.encrypt(api_key, allow_empty=provider == "omniroute"), base_url=base_url, updated_at=now,
+                        enabled=enabled, api_key=None, api_key_ciphertext=self._cipher.encrypt(api_key, allow_empty=provider in PROVIDERS_WITH_OPTIONAL_KEY), base_url=base_url, updated_at=now,
                     )
                 )
                 row = {"provider": provider, "enabled": enabled, "base_url": base_url, "secret_ref": existing["secret_ref"], "catalog_refreshed_at": existing["catalog_refreshed_at"]}
@@ -133,14 +135,16 @@ class PostgresProviderConfigurationAdapter:
         return _public({**existing, "enabled": False})
 
     def test_connection(self, command: dict[str, object]) -> dict[str, object]:
-        if str(command.get("provider")) != "omniroute":
-            raise ValueError("connection testing is only available for OmniRoute")
-        base_url = _base_url("omniroute", command.get("base_url"))
+        provider = str(command.get("provider"))
+        if provider not in PROVIDERS_WITH_BASE_URL:
+            raise ValueError("connection testing is not available for this provider")
+        base_url = _base_url(provider, command.get("base_url"))
+        client = OmniRouteCatalogClient() if provider == "omniroute" else OllamaCatalogClient()
         try:
-            models = OmniRouteCatalogClient().fetch(str(command["api_key"]), base_url=str(base_url))
+            models = client.fetch(str(command["api_key"]), base_url=str(base_url))
         except RuntimeError as error:
             # The adapter only permits the gateway's safe generic response.
-            raise ValueError("OmniRoute connection failed") from error
+            raise ValueError("provider connection failed") from error
         return {"connected": True, "models_available": len(models), "base_url": base_url}
 
     def install(self, command: dict[str, object]) -> dict[str, object]:
@@ -158,13 +162,20 @@ __all__ = ["PostgresProviderConfigurationAdapter"]
 
 
 def _base_url(provider: str, value: object) -> str | None:
-    if provider != "omniroute":
-        return None
-    return normalize_omniroute_base_url(str(value or DEFAULT_OMNIROUTE_BASE_URL))
+    if provider == "omniroute":
+        return normalize_omniroute_base_url(str(value or DEFAULT_OMNIROUTE_BASE_URL))
+    if provider == "ollama":
+        return normalize_ollama_base_url(str(value or DEFAULT_OLLAMA_BASE_URL))
+    return None
 
 
-def _api_key(provider: str, value: object) -> str:
+def _api_key(provider: str, value: object, base_url: str | None = None) -> str:
     api_key = str(value or "")
-    if provider != "omniroute" and len(api_key) < 4:
+    optional = provider in PROVIDERS_WITH_OPTIONAL_KEY
+    # Local Ollama needs no credential; the hosted service always does. The
+    # host is the only thing that distinguishes the two, so it decides here.
+    if provider == "ollama" and base_url is not None and is_ollama_cloud(base_url):
+        optional = False
+    if not optional and len(api_key) < 4:
         raise ValueError("provider API key is required")
     return api_key

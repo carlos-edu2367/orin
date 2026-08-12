@@ -1,3 +1,4 @@
+import pytest
 from sqlalchemy import create_engine, select
 
 from agentos.persistence.postgres.provider_configuration import PostgresProviderConfigurationAdapter
@@ -30,3 +31,43 @@ def test_omniroute_configuration_persists_an_empty_gateway_key_encrypted() -> No
     assert saved["enabled"] is True
     assert stored.startswith("enc:v1:")
     assert cipher.decrypt(stored) == ""
+
+
+def _adapter() -> PostgresProviderConfigurationAdapter:
+    engine = create_engine("sqlite://")
+    metadata.create_all(engine, tables=[provider_configurations])
+    return PostgresProviderConfigurationAdapter(engine, cipher=ProviderSecretCipher(b"0" * 32))
+
+
+def _command(**overrides: object) -> dict[str, object]:
+    return {"provider": "ollama", "user_id": "user-1", "enabled": True, "api_key": "", "base_url": None, **overrides}
+
+
+def test_a_local_ollama_is_configured_without_a_key() -> None:
+    state = _adapter().configure(_command(base_url="http://localhost:11434"))
+
+    assert state["provider"] == "ollama"
+    assert state["enabled"] is True
+    assert state["base_url"] == "http://localhost:11434"
+    assert not any("api_key" in key for key in state)
+
+
+def test_the_local_default_applies_when_no_url_is_given() -> None:
+    assert _adapter().configure(_command())["base_url"] == "http://localhost:11434"
+
+
+def test_ollama_cloud_refuses_to_be_configured_without_a_key() -> None:
+    """The mode comes from the host, so the key rule has to read it too."""
+    with pytest.raises(ValueError):
+        _adapter().configure(_command(base_url="https://ollama.com"))
+
+
+def test_ollama_cloud_is_configured_with_a_key() -> None:
+    state = _adapter().configure(_command(base_url="https://ollama.com/v1", api_key="cloud-secret"))
+
+    assert state["base_url"] == "https://ollama.com"
+
+
+def test_a_rejected_provider_still_cannot_be_connection_tested() -> None:
+    with pytest.raises(ValueError):
+        _adapter().test_connection({"provider": "openai", "api_key": "k", "base_url": None})
