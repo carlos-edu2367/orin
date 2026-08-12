@@ -155,6 +155,69 @@ def test_the_provider_shape_rules_have_a_single_definition() -> None:
     assert PROVIDERS_WITH_OPTIONAL_KEY == frozenset({"omniroute", "ollama"})
 
 
+class FakeOllama:
+    def fetch(self, api_key: str, *, base_url: str = "") -> list[dict[str, object]]:
+        assert base_url == "http://localhost:11434"
+        return [
+            {"id": "qwen3:8b", "name": "qwen3:8b", "context_length": 262144, "capabilities": ["completion", "tools"]},
+            {"id": "llava:7b", "name": "llava:7b", "context_length": 32768, "capabilities": ["completion", "vision"]},
+            {"id": "orphan:1b", "name": "orphan:1b", "context_length": None, "capabilities": []},
+        ]
+
+
+def _ollama_service(repository: FakeRepository) -> ProviderModelCatalogService:
+    repository.configured[("user-a", "ollama")] = {
+        "enabled": True, "api_key": "", "base_url": "http://localhost:11434",
+    }
+    return ProviderModelCatalogService(repository, {"ollama": FakeOllama()}, now=lambda: datetime(2026, 8, 12, tzinfo=UTC))
+
+
+def test_refresh_normalizes_ollama_models_including_their_capabilities() -> None:
+    repository = FakeRepository()
+    service = _ollama_service(repository)
+
+    receipt = service.refresh(context("user-a"), "ollama")
+    items = {item.model_id: item for item in service.list(context("user-a"), "ollama")}
+
+    assert receipt.count == 3
+    assert items["qwen3:8b"].provider == "ollama"
+    assert items["qwen3:8b"].context_window == 262144
+    assert items["qwen3:8b"].capabilities == ("completion", "tools")
+    assert items["qwen3:8b"].pricing is None
+    assert items["qwen3:8b"].route_kind == "model"
+
+
+def test_a_vision_capability_becomes_an_image_input_modality() -> None:
+    repository = FakeRepository()
+    service = _ollama_service(repository)
+    service.refresh(context("user-a"), "ollama")
+
+    items = {item.model_id: item for item in service.list(context("user-a"), "ollama")}
+
+    assert items["llava:7b"].input_modalities == ("text", "image")
+    assert items["llava:7b"].output_modalities == ("text",)
+    assert items["qwen3:8b"].input_modalities == ("text",)
+
+
+def test_a_model_without_details_is_still_catalogued() -> None:
+    repository = FakeRepository()
+    service = _ollama_service(repository)
+    service.refresh(context("user-a"), "ollama")
+
+    items = {item.model_id: item for item in service.list(context("user-a"), "ollama")}
+
+    assert items["orphan:1b"].context_window is None
+    assert items["orphan:1b"].capabilities == ()
+
+
+def test_a_local_ollama_refreshes_without_any_credential() -> None:
+    """Local Ollama needs no key, so an empty one must not block the refresh."""
+    repository = FakeRepository()
+    service = _ollama_service(repository)
+
+    assert service.refresh(context("user-a"), "ollama").count == 3
+
+
 def test_refresh_deduplicates_upstream_models_sharing_the_same_id() -> None:
     """OmniRoute's own catalog is known to list the same model id twice (e.g. a
     text and a video listing sharing one route). The repository enforces a

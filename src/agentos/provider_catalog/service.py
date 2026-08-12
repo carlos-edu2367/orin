@@ -64,7 +64,7 @@ class ProviderModelCatalogService:
 
 def _provider(value: str) -> str:
     normalized = value.strip().lower()
-    if normalized not in {"openai", "anthropic", "openrouter", "omniroute"}:
+    if normalized not in {"openai", "anthropic", "openrouter", "omniroute", "ollama"}:
         raise ProviderCatalogUnavailable("unsupported provider")
     return normalized
 
@@ -114,6 +114,29 @@ def _normalize_omniroute(raw: dict[str, object], refreshed_at: datetime) -> Prov
     )
 
 
+def _normalize_ollama(raw: dict[str, object], refreshed_at: datetime) -> ProviderModelRecord:
+    model_id = _text(raw.get("id"))
+    if model_id is None:
+        raise ProviderCatalogUnavailable("provider returned an invalid model")
+    capabilities = tuple(sorted({_text(value) for value in _list(raw.get("capabilities")) if _text(value)}))
+    context_window = raw.get("context_length")
+    if isinstance(context_window, bool) or not isinstance(context_window, int) or context_window < 1:
+        context_window = None
+    return ProviderModelRecord(
+        provider="ollama",
+        model_id=model_id,
+        display_name=_text(raw.get("name")) or model_id,
+        context_window=context_window,
+        capabilities=capabilities,
+        # Ollama reports vision as a capability rather than as a modality list.
+        input_modalities=("text", "image") if "vision" in capabilities else ("text",),
+        output_modalities=("text",),
+        # Local inference is free, and the hosted API publishes no per-token price.
+        pricing=None,
+        refreshed_at=refreshed_at,
+    )
+
+
 def _list(value: object) -> list[object]:
     return value if isinstance(value, list) else []
 
@@ -152,4 +175,5 @@ def _per_million(value: object) -> str | None:
 _NORMALIZERS = {
     "openrouter": _normalize_openrouter,
     "omniroute": _normalize_omniroute,
+    "ollama": _normalize_ollama,
 }
