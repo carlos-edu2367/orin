@@ -3,6 +3,16 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import type { ProviderModel, ProviderName } from '../api/providers'
 
+/**
+ * Orin's loop is tool-driven, so a model that cannot call tools cannot run a
+ * turn. Ollama is the first provider to report this per model; a provider
+ * that reports no capabilities at all says nothing either way, and its
+ * models are left unmarked rather than wrongly accused.
+ */
+function lacksToolSupport(model: ProviderModel): boolean {
+  return model.capabilities.length > 0 && !model.capabilities.includes('tools')
+}
+
 export type ModelPickerProps = {
   providers: ProviderName[]
   provider: ProviderName
@@ -45,7 +55,8 @@ export function ModelPicker(props: ModelPickerProps) {
   const selected = useMemo(() => props.models.find((model) => model.model_id === props.modelId), [props.models, props.modelId])
   const filtered = useMemo(() => {
     const needle = query.trim().toLowerCase()
-    const ranked = [...props.models].sort((a, b) => Number(b.is_favorite) - Number(a.is_favorite))
+    const ranked = [...props.models].sort((a, b) =>
+      Number(lacksToolSupport(a)) - Number(lacksToolSupport(b)) || Number(b.is_favorite) - Number(a.is_favorite))
     if (!needle) return ranked.slice(0, 60)
     return ranked.filter((model) => `${model.display_name} ${model.model_id}`.toLowerCase().includes(needle)).slice(0, 60)
   }, [props.models, query])
@@ -123,6 +134,7 @@ export function ModelPicker(props: ModelPickerProps) {
                   >
                     <span className="picker-option__name">{model.is_favorite && <span aria-label="favorito">★</span>}{model.display_name}</span>
                     {model.context_window ? <span className="picker-option__meta">{Math.round(model.context_window / 1000)}k</span> : null}
+                    {lacksToolSupport(model) ? <span className="picker-option__meta picker-option__meta--warn" title="Este modelo não chama ferramentas; o Orin não consegue executar um turno com ele.">sem ferramentas</span> : null}
                   </button>
                 </li>
               ))}
