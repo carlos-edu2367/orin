@@ -846,11 +846,54 @@ def parse_arguments(raw: object) -> dict[str, Any]:
         try:
             value = json.loads(text)
         except json.JSONDecodeError as error:
-            raise AgentToolError("Tool arguments were not valid JSON.") from error
+            try:
+                value = json.loads(_escape_control_characters_in_json_strings(text))
+            except (json.JSONDecodeError, ValueError) as repair_error:
+                raise AgentToolError("Tool arguments were not valid JSON.") from repair_error
         if not isinstance(value, Mapping):
             raise AgentToolError("Tool arguments must be a JSON object.")
         return dict(value)
     raise AgentToolError("Tool arguments must be a JSON object.")
+
+
+def _escape_control_characters_in_json_strings(text: str) -> str:
+    """Repair literal controls emitted inside provider JSON string values.
+
+    Some providers/models return file contents with raw newlines, carriage
+    returns, or tabs instead of JSON escapes. We only rewrite characters while
+    inside a JSON string and leave every other syntax error for ``json.loads``
+    to reject. Existing escapes and escaped quotes are preserved.
+    """
+    output: list[str] = []
+    in_string = False
+    escaped = False
+    for index, character in enumerate(text):
+        if escaped:
+            output.append(character)
+            escaped = False
+            continue
+        if character == "\\" and in_string:
+            output.append(character)
+            escaped = True
+            continue
+        if character == '"':
+            if in_string:
+                next_index = index + 1
+                while next_index < len(text) and text[next_index] in " \t\r\n":
+                    next_index += 1
+                if next_index >= len(text) or text[next_index] not in ",}]:":
+                    output.append("\\\"")
+                    continue
+            in_string = not in_string
+            output.append(character)
+            continue
+        if in_string:
+            output.append({"\n": "\\n", "\r": "\\r", "\t": "\\t"}.get(character, character))
+        else:
+            output.append(character)
+    if in_string:
+        raise ValueError("unterminated JSON string")
+    return "".join(output)
 
 
 __all__ = [

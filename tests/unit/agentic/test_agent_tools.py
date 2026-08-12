@@ -517,6 +517,29 @@ def test_parse_arguments_rejects_non_objects() -> None:
         parse_arguments("[1, 2]")
 
 
+def test_parse_arguments_repairs_literal_control_characters_inside_json_strings() -> None:
+    raw = '{"path":"styles.css","content":"body {\n  color: \\\"#fff\\\";\r\n\tmargin: 0;\n}"}'
+
+    assert parse_arguments(raw) == {
+        "path": "styles.css",
+        "content": 'body {\n  color: "#fff";\r\n\tmargin: 0;\n}',
+    }
+
+
+def test_parse_arguments_repairs_unescaped_code_quotes_inside_json_strings() -> None:
+    raw = '{"path":"app.js","content":"const message = "hello";\nconsole.log(message);"}'
+
+    assert parse_arguments(raw) == {
+        "path": "app.js",
+        "content": 'const message = "hello";\nconsole.log(message);',
+    }
+
+
+def test_parse_arguments_still_rejects_malformed_json_after_safe_repair() -> None:
+    with pytest.raises(AgentToolError):
+        parse_arguments('{"path":"styles.css","content":"unterminated}')
+
+
 def test_schemas_are_provider_ready(toolset: AgentToolset) -> None:
     schemas = toolset.schemas()
 
