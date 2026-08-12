@@ -39,6 +39,7 @@ from agentos.persistence.provider_secrets import ProviderSecretCipher
 from agentos.persistence.postgres.provider_models import PostgresProviderCatalogRepository
 from agentos.persistence.postgres.security import PostgresSecurityService
 from agentos.provider_catalog.http import OpenRouterModelCatalogClient
+from agentos.provider_catalog.ollama import OllamaCatalogClient
 from agentos.provider_catalog.omniroute import OmniRouteCatalogClient
 from agentos.provider_catalog.service import ProviderModelCatalogService
 from agentos.resources.service import ResourceManagerService
@@ -271,7 +272,7 @@ def compose_production_services(engine: Engine, *, localhost_trust_enabled: bool
         resource_services={**{name: unavailable for name in ("agents", "capabilities", "tools", "workspaces", "artifacts", "memories")}, "multi_agent": multi_agent_coordinator or unavailable},
         skills=PostgresSkillLibraryService(engine),
         provider_configuration=PostgresProviderConfigurationAdapter(engine, cipher=provider_cipher),
-        provider_catalog=ProviderModelCatalogService(provider_repository, {"openrouter": OpenRouterModelCatalogClient(), "omniroute": OmniRouteCatalogClient()}),
+        provider_catalog=ProviderModelCatalogService(provider_repository, {"openrouter": OpenRouterModelCatalogClient(), "omniroute": OmniRouteCatalogClient(), "ollama": OllamaCatalogClient()}),
         conversation_application=ChatApplication(PostgresChatStore(engine, PostgresAgenticActivityStore(engine, cursor_secret)), ExecutionApplicationAdapter(engine)),
         projects=PostgresProjectStore(engine),
         omniroute_runtime=omniroute_runtime,

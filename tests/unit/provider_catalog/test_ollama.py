@@ -118,3 +118,14 @@ def test_connection_failure_is_a_sanitized_catalog_error() -> None:
 
     assert "cloud-secret" not in str(failure.value)
     assert "cloud-secret" not in repr(client)
+
+
+def test_production_composition_registers_the_ollama_upstream() -> None:
+    """A provider absent from the composed upstreams can never refresh."""
+    import inspect
+
+    from agentos.bootstrap import production
+
+    source = inspect.getsource(production)
+    assert "OllamaCatalogClient" in source
+    assert '"ollama": OllamaCatalogClient()' in source
