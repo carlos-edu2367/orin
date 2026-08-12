@@ -35,13 +35,17 @@ class AgenticLimits:
     max_provider_retries: int = 1
     max_provider_tokens: int | None = None
     max_cost: Decimal | None = None
-    max_output_tokens: int = 1024
+    # None means the turn asks for no output cap at all, so the model may use
+    # whatever its own maximum is. Any cap here is a hard ceiling on a single
+    # reply: a tool call that does not fit under it is cut off mid-call, which
+    # the model cannot recover from beyond splitting the payload.
+    max_output_tokens: int | None = None
     max_context_tokens: int = 60_000
 
     def __post_init__(self) -> None:
         if (self.max_actions is not None and self.max_actions < 0) or (self.max_iterations is not None and self.max_iterations < 1) or self.max_provider_retries < 0 or self.deadline <= timedelta(0):
             raise ValueError("agentic limits are invalid")
-        if self.max_output_tokens < 1 or self.max_context_tokens < 1_000:
+        if (self.max_output_tokens is not None and self.max_output_tokens < 1) or self.max_context_tokens < 1_000:
             raise ValueError("agentic limits are invalid")
 
 
@@ -117,8 +121,8 @@ class AgenticTurnRuntime:
                 return self._cancel(turn, iteration, action_count)
             if self.clock() >= deadline:
                 return self._fail(turn, "TURN_DEADLINE_EXCEEDED", iteration, action_count)
-            remaining_tokens = self.limits.max_output_tokens if self.limits.max_provider_tokens is None else self.limits.max_provider_tokens - total_tokens
-            if remaining_tokens <= 0:
+            remaining_tokens = None if self.limits.max_provider_tokens is None else self.limits.max_provider_tokens - total_tokens
+            if remaining_tokens is not None and remaining_tokens <= 0:
                 return self._fail(turn, "PROVIDER_TOKEN_LIMIT", iteration, action_count)
             final_iteration = self.limits.max_iterations is not None and iteration == self.limits.max_iterations
             window = self._request_messages(messages)
@@ -127,7 +131,7 @@ class AgenticTurnRuntime:
             request = {
                 "turn_id": turn_id, "provider": str(turn.get("provider", "")), "model": str(turn.get("model_id", "")),
                 "messages": window, "tools": self._tool_schemas(turn),
-                "max_output_tokens": min(self.limits.max_output_tokens, remaining_tokens),
+                "max_output_tokens": min([value for value in (self.limits.max_output_tokens, remaining_tokens) if value is not None], default=None),
             }
             if final_iteration:
                 request["tool_choice"] = "none"

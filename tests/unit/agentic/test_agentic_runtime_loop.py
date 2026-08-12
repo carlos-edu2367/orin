@@ -529,6 +529,39 @@ def test_a_write_call_is_not_reordered_around_read_only_calls_that_follow_it() -
     assert toolset.execution_order == ["write_file", "read_file", "read_file"]
 
 
+class _RequestRecordingProvider:
+    def __init__(self) -> None:
+        self.requests: list[dict[str, object]] = []
+
+    def stream(self, request):
+        self.requests.append(dict(request))
+        return normalize_sse(['data: {"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}', "data: [DONE]"], provider="openrouter")
+
+
+def test_no_output_cap_is_requested_when_none_is_configured() -> None:
+    provider = _RequestRecordingProvider()
+    runtime = AgenticTurnRuntime(store=Store(), provider=provider)
+
+    assert runtime.run("turn-1").state == "completed"
+    assert provider.requests[0]["max_output_tokens"] is None
+
+
+def test_a_provider_token_budget_still_caps_the_request() -> None:
+    provider = _RequestRecordingProvider()
+    runtime = AgenticTurnRuntime(store=Store(), provider=provider, limits=AgenticLimits(max_provider_tokens=700))
+
+    assert runtime.run("turn-1").state == "completed"
+    assert provider.requests[0]["max_output_tokens"] == 700
+
+
+def test_an_output_cap_is_forwarded_when_it_is_configured() -> None:
+    provider = _RequestRecordingProvider()
+    runtime = AgenticTurnRuntime(store=Store(), provider=provider, limits=AgenticLimits(max_output_tokens=256))
+
+    assert runtime.run("turn-1").state == "completed"
+    assert provider.requests[0]["max_output_tokens"] == 256
+
+
 def test_a_stylesheet_written_with_unescaped_quotes_still_reaches_the_tool() -> None:
     """A model writing CSS breaks its own JSON; the turn must survive it."""
 

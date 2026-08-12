@@ -16,6 +16,13 @@ import httpx
 from agentos.providers.models import FinishReason, ProviderError, ProviderErrorCategory, ProviderUsage, Retryability
 
 
+# Anthropic rejects a request without max_tokens, so a turn that configures no
+# output cap still needs a number for that provider alone. This is the largest
+# value every current Anthropic model accepts; a model with a smaller ceiling
+# needs an explicit AgenticLimits.max_output_tokens.
+ANTHROPIC_REQUIRED_MAX_TOKENS = 8192
+
+
 class StreamKind(StrEnum):
     TEXT = "text"
     TOOL_CALL = "tool-call"
@@ -229,7 +236,10 @@ class HTTPProviderStreamTransport:
         if self.provider == "anthropic":
             system = "\n".join(str(item.get("content", "")) for item in messages if item.get("role") == "system")
             messages = [item for item in messages if item.get("role") != "system"]
-            payload: dict[str, object] = {"model": self.model, "max_tokens": int(request.get("max_output_tokens") or 1024), "messages": messages, "stream": True}
+            # Anthropic requires max_tokens, so an uncapped turn still has to
+            # name a number here; every other provider simply omits the field.
+            requested = request.get("max_output_tokens")
+            payload: dict[str, object] = {"model": self.model, "max_tokens": int(requested) if requested else ANTHROPIC_REQUIRED_MAX_TOKENS, "messages": messages, "stream": True}
             if system:
                 # A cached prefix must be a block, not a bare string. Marking the
                 # last system block and the last tool covers system + every tool
@@ -253,11 +263,15 @@ class HTTPProviderStreamTransport:
         else:
             payload = {
                 "model": self.model, "messages": messages, "stream": True,
-                "max_tokens": int(request.get("max_output_tokens") or 1024),
                 # Without this an OpenAI-compatible stream omits usage entirely
                 # and the turn records no tokens at all.
                 "stream_options": {"include_usage": True},
             }
+            # No cap configured means no cap sent: the provider then allows the
+            # model its own maximum, instead of us cutting a long reply short.
+            requested = request.get("max_output_tokens")
+            if requested:
+                payload["max_tokens"] = int(requested)
             if tools:
                 payload["tools"] = tools
                 if tool_choice is not None:
@@ -280,4 +294,4 @@ class HTTPProviderStreamTransport:
             self._client.close()
 
 
-__all__ = ["HTTPProviderStreamTransport", "NormalizedStreamItem", "RateLimitInfo", "StreamKind", "normalize_sse", "project_rate_limit_headers"]
+__all__ = ["ANTHROPIC_REQUIRED_MAX_TOKENS", "HTTPProviderStreamTransport", "NormalizedStreamItem", "RateLimitInfo", "StreamKind", "normalize_sse", "project_rate_limit_headers"]

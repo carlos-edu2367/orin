@@ -3,7 +3,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from agentos.agentic.provider_stream import HTTPProviderStreamTransport
+from agentos.agentic.provider_stream import ANTHROPIC_REQUIRED_MAX_TOKENS, HTTPProviderStreamTransport
 
 
 def _transport(provider: str, captured: list[dict]) -> HTTPProviderStreamTransport:
@@ -26,6 +26,24 @@ def _request() -> dict[str, object]:
         ],
         "max_output_tokens": 512,
     }
+
+
+def test_openai_payload_omits_the_cap_when_no_output_limit_is_configured() -> None:
+    captured: list[dict] = []
+    request = {key: value for key, value in _request().items() if key != "max_output_tokens"}
+
+    list(_transport("openrouter", captured).stream(request))
+
+    assert "max_tokens" not in captured[0]
+
+
+def test_anthropic_payload_keeps_the_required_max_tokens_without_a_configured_limit() -> None:
+    captured: list[dict] = []
+    request = {key: value for key, value in _request().items() if key != "max_output_tokens"}
+
+    list(_transport("anthropic", captured).stream(request))
+
+    assert captured[0]["max_tokens"] == ANTHROPIC_REQUIRED_MAX_TOKENS
 
 
 def test_anthropic_payload_marks_the_cacheable_prefix() -> None:
