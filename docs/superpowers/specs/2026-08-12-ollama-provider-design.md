@@ -190,12 +190,32 @@ esses headers e a projeção simplesmente devolve tudo `None`.
 
 ## 3. Catálogo
 
-Novo `OllamaCatalogClient` em `src/agentos/provider_catalog/ollama.py`, seguindo
-o contrato `ProviderCatalogUpstream`:
+### Correção do contrato `ProviderCatalogUpstream`
+
+O Protocol em `provider_catalog/ports.py` declara hoje apenas
+`fetch(self, api_key: str)`. O `OmniRouteCatalogClient` só encaixa nele porque
+seu `base_url` tem valor default — e é por isso que `ProviderModelCatalogService.
+refresh` precisa ramificar por nome de provider só para decidir se passa o kwarg.
+O Protocol passa a declarar o parâmetro que dois dos três clientes já usam:
 
 ```python
-def fetch(self, api_key: str, *, base_url: str) -> list[dict[str, object]]
+class ProviderCatalogUpstream(Protocol):
+    def fetch(self, api_key: str, *, base_url: str = "") -> list[dict[str, object]]: ...
 ```
+
+`OpenRouterModelCatalogClient` ganha o parâmetro e o ignora. Com isso a chamada em
+`refresh` vira uma linha só, **sem ramo por provider**:
+
+```python
+raw_models = upstream.fetch(api_key, base_url=str(credential.get("base_url") or ""))
+```
+
+Isso remove um desvio em vez de acrescentar outro; o frozenset de providers
+continua necessário apenas para a regra de chave vazia.
+
+### `OllamaCatalogClient`
+
+Novo em `src/agentos/provider_catalog/ollama.py`:
 
 1. `GET {base}/api/tags` para listar;
 2. `POST {base}/api/show {"model": <nome>}` por modelo, para ler
@@ -218,9 +238,9 @@ Um `/api/show` que falhe **degrada apenas aquele modelo** (`context_window=None`
 `/api/tags` vira `RuntimeError("Ollama connection failed")` sanitizado, como o
 `OmniRouteCatalogClient`, e o serviço a converte em `ProviderCatalogUnavailable`.
 
-Em `ProviderModelCatalogService.refresh`, os dois casos especiais literais de
-`"omniroute"` (o kwarg `base_url` e a tolerância a chave vazia) passam a
-consultar os frozensets nomeados.
+Em `ProviderModelCatalogService.refresh`, o caso especial do kwarg `base_url`
+desaparece com a correção do Protocol acima; a tolerância a chave vazia passa a
+consultar o frozenset nomeado.
 
 Registro em `bootstrap/production.py`:
 
@@ -295,6 +315,9 @@ real e a correção é de uma palavra.
 - `tests/unit/provider_catalog/test_service.py`: `_normalize_ollama` (descoberta
   da chave `*.context_length`, capabilities, `vision` virando modalidade
   `image`, `/api/show` que falha degradando só aquele modelo).
+- `tests/unit/provider_catalog/`: `OpenRouterModelCatalogClient` continua
+  funcionando após ganhar o parâmetro `base_url` que ignora, e `refresh` passa a
+  chamar todo upstream com o mesmo kwarg.
 - Novo `tests/unit/provider_catalog/test_ollama_client.py`:
   `normalize_ollama_base_url` (rejeita credenciais e query, remove `/v1` e
   `/api`), `is_ollama_cloud`, merge de `tags` + `show`, falha sanitizada.
