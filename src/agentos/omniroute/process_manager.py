@@ -17,6 +17,32 @@ from typing import Callable, Protocol, Sequence
 
 import httpx
 
+from agentos.installation import orin_paths
+
+# The gateway is a Node application that reads its own configuration and
+# provider catalog before it serves anything. On a cold start that takes tens of
+# seconds on an ordinary machine, and giving up early does not merely report a
+# failure — it kills a process that was about to work.
+DEFAULT_STARTUP_TIMEOUT = 45.0
+HEALTH_REQUEST_TIMEOUT = 5.0
+
+
+def _startup_timeout() -> float:
+    try:
+        value = float(os.getenv("AGENTOS_OMNIROUTE_STARTUP_TIMEOUT", "").strip() or DEFAULT_STARTUP_TIMEOUT)
+    except ValueError:
+        return DEFAULT_STARTUP_TIMEOUT
+    return value if value > 0 else DEFAULT_STARTUP_TIMEOUT
+
+
+def _terminate_tree(pid: int) -> bool:
+    from subprocess import DEVNULL, run
+
+    try:
+        return run(["taskkill", "/PID", str(pid), "/T", "/F"], stdout=DEVNULL, stderr=DEVNULL, check=False).returncode == 0  # noqa: S603, S607
+    except OSError:
+        return False
+
 
 class _Process(Protocol):
     pid: int
@@ -33,13 +59,23 @@ class OmniRouteRuntimeSettingsStore:
     this file holds only the user's boolean startup preference.
     """
 
-    def __init__(self, path: str | Path = "data/omniroute-runtime.json") -> None:
-        self._path = Path(path)
+    def __init__(self, path: str | Path | None = None) -> None:
+        self._path = Path(path) if path is not None else orin_paths().data / "omniroute-runtime.json"
         self._lock = RLock()
 
     def auto_start(self, user_id: str) -> bool:
         with self._lock:
             return bool(self._read().get(user_id, False))
+
+    def any_enabled(self) -> bool:
+        """Whether *any* user asked for OmniRoute to start with Orin.
+
+        This is a local desktop installation, so startup happens before a user is
+        known. The launcher reads this to decide whether OmniRoute is part of the
+        startup plan at all; it is never written outside the settings endpoint.
+        """
+        with self._lock:
+            return any(self._read().values())
 
     def set_auto_start(self, user_id: str, value: bool) -> bool:
         if not user_id.strip():
@@ -90,6 +126,11 @@ class OmniRouteProcessManager:
     def auto_start(self, user_id: str) -> bool:
         return self._settings.auto_start(user_id)
 
+    @property
+    def base_url(self) -> str:
+        """The gateway endpoint this manager supervises."""
+        return self._base_url
+
     def set_auto_start(self, user_id: str, value: bool) -> dict[str, object]:
         return {"auto_start": self._settings.set_auto_start(user_id, value)}
 
@@ -105,9 +146,8 @@ class OmniRouteProcessManager:
         startup uses the persisted preferences collectively and is intentionally
         best-effort.
         """
-        with self._lock:
-            if not any(self._settings._read().values()):
-                return self.status()
+        if not self._settings.any_enabled():
+            return self.status()
         return self.start()
 
     def status(self) -> dict[str, object]:
@@ -132,7 +172,14 @@ class OmniRouteProcessManager:
             if self._wait_ready():
                 self._last_failure = None
                 return {"state": "ready", "ownership": "agentos"}
-            self._last_failure = "OmniRoute did not become ready before the startup timeout"
+            if self._owned_alive():
+                # Slow is not broken. A cold gateway can take minutes to serve
+                # its first request, and killing it at the timeout guarantees it
+                # never finishes. Ownership is kept so Stop and Restart still
+                # act on this exact process.
+                self._last_failure = None
+                return {"state": "starting", "ownership": "agentos"}
+            self._last_failure = "OmniRoute exited before it became ready"
             self._terminate_owned()
             return {"state": "failed", "ownership": None}
 
@@ -162,18 +209,25 @@ class OmniRouteProcessManager:
     def _terminate_owned(self) -> None:
         process = self._process
         self._process = None
-        if process is not None and process.poll() is None:
-            process.terminate()
+        if process is None or process.poll() is not None:
+            return
+        # On Windows the detected executable is an npm `.cmd` shim, so the
+        # process we hold is a shell whose child is the actual gateway.
+        # Terminating only the shim leaves the gateway running with nothing
+        # supervising it; the tree is one unit and is ended as one.
+        if os.name == "nt" and _terminate_tree(process.pid):
+            return
+        process.terminate()
 
     def _request_health(self) -> bool:
         try:
-            response = httpx.get(f"{self._base_url}/models", timeout=1.5)
+            response = httpx.get(f"{self._base_url}/models", timeout=HEALTH_REQUEST_TIMEOUT)
             return 200 <= response.status_code < 300
         except httpx.HTTPError:
             return False
 
     def _wait_for_health(self) -> bool:
-        deadline = monotonic() + 12
+        deadline = monotonic() + _startup_timeout()
         while monotonic() < deadline:
             if self._healthy():
                 return True

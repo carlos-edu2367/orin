@@ -5,12 +5,14 @@ import json
 from pathlib import Path
 from threading import RLock
 
+from agentos.installation import orin_paths
+
 
 class AgentRuntimeSettingsStore:
     """Persist per-user turn-loop limits without coupling workers to the API process."""
 
-    def __init__(self, path: str | Path = "data/agent-runtime.json") -> None:
-        self._path = Path(path)
+    def __init__(self, path: str | Path | None = None) -> None:
+        self._path = Path(path) if path is not None else orin_paths().data / "agent-runtime.json"
         self._lock = RLock()
 
     def get(self, user_id: str) -> dict[str, int | None]:

@@ -25,3 +25,5 @@ frontend/tests/visual/output/
 
 # Local runtime state
 data/*.json
+data/run/
+.cache/

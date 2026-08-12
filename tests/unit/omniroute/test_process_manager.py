@@ -45,7 +45,25 @@ def test_external_gateway_is_never_started_or_stopped(tmp_path: Path) -> None:
     assert manager.stop() == {"state": "external", "ownership": "external"}
 
 
-def test_failed_health_does_not_leave_a_process_owned_or_ready(tmp_path: Path) -> None:
+def test_a_gateway_that_exited_is_reported_as_failed_and_left_unowned(tmp_path: Path) -> None:
+    settings = OmniRouteRuntimeSettingsStore(tmp_path / "runtime.json")
+    process = Process()
+    process.terminated = True  # already gone by the time readiness gave up
+    manager = OmniRouteProcessManager(
+        settings,
+        command=("omniroute",),
+        health=lambda: False,
+        start_process=lambda _command: process,
+        wait_ready=lambda: False,
+    )
+
+    assert manager.start()["state"] == "failed"
+    assert manager.status()["state"] == "stopped"
+
+
+def test_a_slow_gateway_is_left_starting_rather_than_killed(tmp_path: Path) -> None:
+    # A cold OmniRoute can take minutes to answer its first request. Terminating
+    # it at the readiness timeout is what would guarantee it never succeeds.
     settings = OmniRouteRuntimeSettingsStore(tmp_path / "runtime.json")
     process = Process()
     manager = OmniRouteProcessManager(
@@ -56,6 +74,8 @@ def test_failed_health_does_not_leave_a_process_owned_or_ready(tmp_path: Path) -
         wait_ready=lambda: False,
     )
 
-    assert manager.start()["state"] == "failed"
+    assert manager.start() == {"state": "starting", "ownership": "agentos"}
+    assert process.terminated is False
+    assert manager.status() == {"state": "starting", "ownership": "agentos"}
+    assert manager.stop() == {"state": "stopped", "ownership": None}
     assert process.terminated is True
-    assert manager.status()["state"] == "stopped"

@@ -20,6 +20,11 @@ dependencies = [
     "uvicorn[standard]>=0.32,<1",
 ]
 
+[project.scripts]
+# The single public entry point. A frozen build exposes the same callable as
+# orin.exe, so nothing that depends on it has to change when Orin is packaged.
+orin = "agentos.launcher.cli:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 

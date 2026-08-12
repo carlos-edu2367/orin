@@ -27,6 +27,7 @@ from agentos.api.security import AuthenticationError, LoopbackSecurityService
 from agentos.conversations.chat import ChatApplication, PostgresChatStore
 from agentos.projects import PostgresProjectStore
 from agentos.configuration import AgentOSSettings
+from agentos.installation import orin_paths
 from agentos.persistence.postgres.event_stream import PostgresClientEventStream
 from agentos.persistence.postgres.agentic_activity import PostgresAgenticActivityStore
 from agentos.persistence.postgres.tool_activity import PostgresToolActivitySink
@@ -183,10 +184,10 @@ class _LocalTerminalCwd:
         return self.resolver.revalidate(root, fs_context) and self.resolve(context, path) is not None
 
 
-def compose_agentic_tool_runtime(*, workspace_root: str | Path = "data/workspaces", engine: Engine | None = None) -> tuple[ResourceManagerService, ProductionToolRuntime]:
+def compose_agentic_tool_runtime(*, workspace_root: str | Path | None = None, engine: Engine | None = None) -> tuple[ResourceManagerService, ProductionToolRuntime]:
     """Compose real local filesystem, terminal and browser tool bindings."""
     resource_manager = ResourceManagerService()
-    resolver = LocalWorkspaceRootResolver(Path(workspace_root))
+    resolver = LocalWorkspaceRootResolver(Path(workspace_root) if workspace_root is not None else orin_paths().workspaces)
     filesystem = FilesystemService(
         LocalFilesystemAdapter(resolver), resolver,
         handle_validator=resource_manager.validate_filesystem_handle,
@@ -307,16 +308,35 @@ def create_production_app(settings: ProductionSettings, *, services: ApiServices
     if settings.LOCALHOST_TRUST_ENABLED:
         _mount_local_frontend(app, settings.WEB_DIST_DIR)
 
-    @app.on_event("startup")
-    async def _start_configured_omniroute() -> None:
+    def _omniroute_manager() -> object | None:
         manager = getattr(services, "omniroute_runtime", None) if services is not None else None
         if manager is None or isinstance(manager, _UnavailableApplicationPort):
+            return None
+        return manager
+
+    @app.on_event("startup")
+    async def _start_configured_omniroute() -> None:
+        manager = _omniroute_manager()
+        if manager is None:
             return
         try:
             await __import__("fastapi.concurrency", fromlist=["run_in_threadpool"]).run_in_threadpool(manager.start_if_any_enabled)
         except Exception:
             # OmniRoute is optional: a failed local gateway must never make
             # AgentOS unavailable.
+            return
+
+    @app.on_event("shutdown")
+    async def _stop_owned_omniroute() -> None:
+        # Only the gateway this process spawned is stopped; `stop()` is a no-op
+        # for an external instance. Without this, exiting AgentOS left the child
+        # it started running with nothing supervising it.
+        manager = _omniroute_manager()
+        if manager is None:
+            return
+        try:
+            await __import__("fastapi.concurrency", fromlist=["run_in_threadpool"]).run_in_threadpool(manager.stop)
+        except Exception:
             return
 
     return app

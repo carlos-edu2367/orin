@@ -33,6 +33,7 @@ from agentos.provider_catalog.service import ProviderCatalogUnavailable
 from .events import CursorError, InMemoryClientEventStream
 from .security import AuthenticationError, AuthorizationError, AuthenticatedPrincipal, InMemorySecurityService, RateLimitError
 from agentos.agentic.file_preview import media_type_for, open_in_default_application
+from agentos.installation import orin_paths
 from agentos.agentic.workspace import ConversationWorkspace, WorkspaceError
 
 
@@ -172,7 +173,7 @@ class ApiServices:
         omniroute_runtime: object | None = None,
         agentic_runtime: object | None = None,
         events: InMemoryClientEventStream | None = None,
-        workspace_root: str | Path = "data/workspaces",
+        workspace_root: str | Path | None = None,
     ) -> None:
         self.security = security or InMemorySecurityService()
         self.execution_application = execution_application
@@ -186,7 +187,7 @@ class ApiServices:
         self.omniroute_runtime = omniroute_runtime
         self.agentic_runtime = agentic_runtime
         self.events = events or InMemoryClientEventStream()
-        self.workspace_root = Path(workspace_root)
+        self.workspace_root = Path(workspace_root) if workspace_root is not None else orin_paths().workspaces
 
 
 def create_app(services: ApiServices) -> FastAPI:

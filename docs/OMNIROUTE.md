@@ -25,9 +25,17 @@ Fontes: [README](https://github.com/diegosouzapw/OmniRoute/blob/main/README.md),
 
 O AgentOS inclui uma ação explícita **Instalar OmniRoute**, que executa somente o comando oficial `npm install -g omniroute` (com limite de 180 segundos e sem expor logs do processo). O endpoint padrão oficial é `http://localhost:20128/v1`.
 
-Em **Settings → OmniRoute**, a opção **Start OmniRoute when AgentOS launches** é persistida localmente. Quando habilitada, o AgentOS primeiro consulta o endpoint `/v1/models`: se uma instância saudável já existe, ela aparece como **External** e não é duplicada nem encerrada. Caso esteja ausente, o AgentOS inicia o executável detectado (`AGENTOS_OMNIROUTE_COMMAND`, quando configurado; caso contrário `omniroute`) e aguarda a saúde por no máximo 12 segundos. A falha não impede o AgentOS de iniciar e é apresentada sem stack trace.
+Em **Settings → OmniRoute**, a opção **Start OmniRoute when Orin launches** é persistida localmente. Ela é a única fonte de verdade sobre iniciar o gateway junto com o Orin: o launcher `orin` a lê e nunca a escreve. Quando habilitada, o Orin primeiro consulta o endpoint `/v1/models`: se uma instância saudável já existe, ela aparece como **External** e não é duplicada nem encerrada. Caso esteja ausente, o Orin inicia o executável detectado (`AGENTOS_OMNIROUTE_COMMAND`, quando configurado; caso contrário `omniroute`).
 
-Somente um processo iniciado pelo próprio AgentOS recebe ações **Stop** e **Restart**. O AgentOS não encerra a instância quando fecha; auto-start não implica auto-stop.
+Um gateway frio pode demorar muito para responder à primeira requisição — em uma máquina comum, mais de um minuto. Por isso:
+
+- o tempo de espera pela saúde é de 45 segundos por padrão, ajustável por `AGENTOS_OMNIROUTE_STARTUP_TIMEOUT`;
+- esgotado esse tempo, o processo **não** é encerrado se ainda estiver vivo: ele é reportado como `starting` e continua sob posse do Orin, porque matá-lo garantiria que nunca ficasse pronto. Só um processo que já saiu é reportado como `failed`;
+- o launcher espera poucos segundos por ele durante a inicialização e segue adiante, imprimindo `✓ OmniRouter` quando o gateway responder. O Orin fica utilizável o tempo todo.
+
+Quando desabilitada, o OmniRoute simplesmente não faz parte da inicialização: não há passo, sondagem nem aviso.
+
+Somente um processo iniciado pelo próprio Orin recebe ações **Stop** e **Restart**, e somente ele é encerrado quando o Orin encerra — no Windows a árvore inteira do processo é finalizada, porque o executável detectado é um shim `.cmd` cujo filho é o gateway real. Uma instância externa detectada permanece intocada.
 
 No AgentOS, abra **Settings → Providers → OmniRoute → Configurar**, informe a Base URL, teste a conexão e salve. A chave é de escrita única e é armazenada cifrada pela mesma infraestrutura de secrets usada pelos demais providers. Um gateway local sem autenticação também pode ser salvo/testado com a chave vazia.
 

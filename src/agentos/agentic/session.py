@@ -18,6 +18,8 @@ from threading import Lock
 from types import MappingProxyType
 from typing import Callable, Mapping
 
+from agentos.installation import orin_paths
+
 from .agent_tools import AgentToolset, ToolOutcome
 from .events import AgentActivityEventType
 from .runtime import AgenticLimits, AgenticTurnRuntime
@@ -236,7 +238,7 @@ class TurnSession:
         agents_store,
         memory_store,
         provider_factory: Callable[[], object],
-        workspace_root: Path | str = "data/workspaces",
+        workspace_root: Path | str | None = None,
         cancelled: Callable[[Mapping[str, object]], bool] | None = None,
         limits: AgenticLimits | None = None,
         enable_subagents: bool = True,
@@ -259,7 +261,7 @@ class TurnSession:
         self.search_client = search_client
         self.browser = browser
         self.tool_policy = tool_policy
-        self.workspace = ConversationWorkspace(workspace_root, resolve_effective_workspace_id(turn))
+        self.workspace = ConversationWorkspace(workspace_root or orin_paths().workspaces, resolve_effective_workspace_id(turn))
         self._subagent_runs = 0
         self._subagent_lock = Lock()
         self.main_agent_id = store.main_agent_id(turn) if hasattr(store, "main_agent_id") else str(turn.get("agent_id", "agent:main"))

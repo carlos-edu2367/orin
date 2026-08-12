@@ -50,21 +50,49 @@ encrypts provider credentials at rest:
 python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 
-Then bring everything up:
+Build the web client once, then register the command:
 
 ```powershell
-docker compose up -d --wait
-.\scripts\run-local.ps1
+npm --prefix frontend ci
+npm --prefix frontend run build
+.\scripts\install-orin.ps1
 ```
 
-That script builds the web client, applies migrations, and starts the three
-processes the system needs. Open <http://127.0.0.1:8000>.
+Open a new terminal — any terminal, any directory — and run:
 
 ```powershell
-.\scripts\stop-local.ps1
+orin
 ```
 
-`run-local.ps1 -SkipBuild` skips the client build when only Python changed.
+Orin starts PostgreSQL and Redis, applies migrations, starts the backend and the
+workers, starts OmniRouter if you enabled it, waits until the interface actually
+answers, and opens it in your browser. `Ctrl+C` stops everything it started.
+
+```text
+  ORIN
+
+  ✓ Services
+  ✓ Backend
+  ✓ Workers
+  ✓ Frontend
+
+  Orin is ready
+  http://127.0.0.1:8000
+```
+
+`orin status`, `orin logs`, `orin stop` and `orin restart` are there when you
+need them. See [docs/LAUNCHER.md](docs/LAUNCHER.md) for readiness checks,
+single-instance detection, process lifecycle, paths, and how this becomes an
+installable `orin.exe`.
+
+Rebuild the web client after changing the frontend:
+
+```powershell
+npm --prefix frontend run build
+```
+
+`scripts\run-local.ps1` and `scripts\stop-local.ps1` still exist for driving the
+individual processes during development.
 
 ### Why three processes
 

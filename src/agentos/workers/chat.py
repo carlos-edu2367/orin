@@ -23,6 +23,7 @@ from agentos.agentic.session import TurnSession
 from agentos.agentic.browser_tools import conversation_browser_for
 from agentos.agentic.web_search import search_client_from_environment
 from agentos.conversations.chat import PostgresChatStore
+from agentos.installation import orin_paths
 from agentos.persistence.postgres.agent_memory import PostgresAgentMemoryStore
 from agentos.persistence.postgres.agentic_activity import PostgresAgenticActivityStore
 from agentos.persistence.postgres.conversation_agents import ConversationAgentStore
@@ -103,13 +104,13 @@ class ChatWorker:
         store: PostgresChatStore,
         runtime_factory: Callable[[dict[str, object]], AgenticTurnRuntime] | None = None,
         *,
-        workspace_root: str = "data/workspaces",
+        workspace_root: str | None = None,
         enable_subagents: bool = True,
         runtime_settings: AgentRuntimeSettingsStore | None = None,
     ) -> None:
         self.store, self._executions, self._queries = store, ExecutionApplicationAdapter(store._engine), ExecutionQueryAdapter(store._engine)
         self._runtime_factory = runtime_factory
-        self._workspace_root = workspace_root
+        self._workspace_root = workspace_root if workspace_root is not None else str(orin_paths().workspaces)
         self._enable_subagents = enable_subagents
         self._runtime_settings = runtime_settings or AgentRuntimeSettingsStore()
 
@@ -256,7 +257,12 @@ async def startup(ctx: dict) -> None:
     secret = settings.AGENTOS_ACTIVITY_CURSOR_SECRET.get_secret_value() if settings.AGENTOS_ACTIVITY_CURSOR_SECRET else None
     # The worker and the API must sign activity cursors identically, otherwise a
     # cursor issued by one is rejected by the other and every stream resyncs.
-    ctx["chat_worker"] = ChatWorker(PostgresChatStore(engine, PostgresAgenticActivityStore(engine, secret or activity_cursor_fallback(engine))))
+    worker = ChatWorker(PostgresChatStore(engine, PostgresAgenticActivityStore(engine, secret or activity_cursor_fallback(engine))))
+    # Report on startup, not only when a turn arrives. A worker that has claimed
+    # nothing yet is still a worker that is up, and the launcher needs to be able
+    # to tell "ready" from "never started" without waiting for a first message.
+    worker.store.heartbeat("chat-worker")
+    ctx["chat_worker"] = worker
 
 
 class WorkerSettings:
