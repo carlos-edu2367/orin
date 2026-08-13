@@ -1,11 +1,10 @@
 """Production ASGI entry point composed with durable adapters."""
 
-from sqlalchemy import create_engine
-
 from agentos.bootstrap.production import ProductionSettings, compose_production_services, create_production_app
+from agentos.persistence.sqlite import create_local_engine
 
 settings = ProductionSettings()
-engine = create_engine(settings.DATABASE_URL, pool_pre_ping=True)
+engine = create_local_engine(settings.DATABASE_URL)
 app = create_production_app(
     settings,
     services=compose_production_services(

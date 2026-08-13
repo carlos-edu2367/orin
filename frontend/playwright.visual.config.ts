@@ -29,5 +29,8 @@ export default defineConfig({
     command: 'npm run dev -- --host 127.0.0.1',
     url: 'http://127.0.0.1:4173',
     reuseExistingServer: true,
+    // Visual fixtures inject their own CSRF bootstrap, so their rendered state
+    // must not inherit loopback mode from an interactive local runtime.
+    env: { ...process.env, VITE_AUTH_MODE: '' },
   },
 })

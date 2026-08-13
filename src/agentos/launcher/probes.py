@@ -87,49 +87,37 @@ def http_probe(url: str, *, timeout: float = 2.0, expect: Callable[[int, str], b
     return ProbeResult(False, f"{url} returned {response.status_code}")
 
 
-def postgres_probe(dsn: str, *, timeout: float = 3.0) -> ProbeResult:
+def sqlite_probe(dsn: str) -> ProbeResult:
     try:
         from sqlalchemy import create_engine, text
 
-        engine = create_engine(dsn, pool_pre_ping=True, connect_args={"connect_timeout": int(timeout)})
+        if not dsn.startswith("sqlite"):
+            return ProbeResult(False, "local runtime requires SQLite")
+        engine = create_engine(dsn, pool_pre_ping=True)
         try:
             with engine.connect() as connection:
                 connection.execute(text("SELECT 1"))
         finally:
             engine.dispose()
-        return ProbeResult(True, "postgres answering")
+        return ProbeResult(True, "local SQLite database ready")
     except Exception as error:
-        return ProbeResult(False, f"postgres unavailable ({type(error).__name__})")
-
-
-def redis_probe(url: str, *, timeout: float = 3.0) -> ProbeResult:
-    try:
-        import redis
-
-        client = redis.Redis.from_url(url, socket_connect_timeout=timeout, socket_timeout=timeout)
-        try:
-            if client.ping():
-                return ProbeResult(True, "redis answering")
-        finally:
-            client.close()
-        return ProbeResult(False, "redis did not answer PING")
-    except Exception as error:
-        return ProbeResult(False, f"redis unavailable ({type(error).__name__})")
+        return ProbeResult(False, f"SQLite unavailable ({type(error).__name__})")
 
 
 def heartbeat_probe(dsn: str, components: tuple[str, ...], *, maximum_age: timedelta = timedelta(seconds=30)) -> ProbeResult:
     """Whether the given runtime components reported in recently.
 
-    The publisher and the chat worker both write ``runtime_heartbeats``. That row
-    is the only signal that says the process not only started but reached its
-    loop with a working database connection, which is what "ready" has to mean.
+    Each local worker writes ``runtime_heartbeats``. That row is the only signal
+    that says a process not only started but reached its loop with a working
+    database connection, which is what "ready" has to mean.
     """
     try:
-        from sqlalchemy import create_engine, select
+        from sqlalchemy import select
 
         from agentos.persistence.postgres.schema import runtime_heartbeats
+        from agentos.persistence.sqlite import create_local_engine
 
-        engine = create_engine(dsn, pool_pre_ping=True)
+        engine = create_local_engine(dsn)
         try:
             with engine.connect() as connection:
                 rows = dict(
@@ -185,8 +173,7 @@ __all__ = [
     "heartbeat_probe",
     "host_port_from_url",
     "http_probe",
-    "postgres_probe",
-    "redis_probe",
+    "sqlite_probe",
     "tcp_probe",
     "wait_until",
 ]

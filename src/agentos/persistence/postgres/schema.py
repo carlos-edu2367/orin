@@ -193,7 +193,7 @@ Index(
     persistence_idempotency.c.execution_id,
 )
 
-# Operational state is explicit and durable. Redis/ARQ only materializes these
+# Operational state is explicit and durable. The local worker polls these
 # records; it never decides their existence, version, or terminal state.
 dispatches = Table(
     "worker_dispatches", metadata,

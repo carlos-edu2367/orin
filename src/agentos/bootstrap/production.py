@@ -1,9 +1,4 @@
-"""Fail-closed production composition for the AgentOS HTTP boundary.
-
-This module deliberately contains no in-memory fallback. Deployment code must
-provide real security, application/query and event-stream adapters; readiness
-also verifies the PostgreSQL and Redis dependencies before traffic is admitted.
-"""
+"""Fail-closed local composition for the AgentOS HTTP boundary."""
 
 from __future__ import annotations
 
@@ -58,6 +53,7 @@ from agentos.omniroute import OmniRouteProcessManager, OmniRouteRuntimeSettingsS
 from agentos.agentic.settings import AgentRuntimeSettingsStore
 from agentos.filesystem.models import FilesystemOperationContext, WorkspacePath
 from agentos.uploads.staging import UploadStaging
+from agentos.persistence.sqlite import create_local_engine
 
 
 class ProductionSettings(AgentOSSettings):
@@ -69,7 +65,6 @@ class ProductionSettings(AgentOSSettings):
     model_config = SettingsConfigDict(env_prefix="", extra="ignore")
 
     DATABASE_URL: str
-    REDIS_URL: str
     AGENTOS_ENV: str = "development"
     LOCALHOST_TRUST_ENABLED: bool = False
     WEB_DIST_DIR: str | None = None
@@ -99,14 +94,14 @@ class ProductionSettings(AgentOSSettings):
 @dataclass(frozen=True, slots=True)
 class DependencyProbe:
     postgres: Callable[[], bool]
-    redis: Callable[[], bool]
+    redis: Callable[[], bool] | None = None
 
     @classmethod
     def from_settings(cls, settings: ProductionSettings) -> "DependencyProbe":
-        def postgres_ready() -> bool:
+        def database_ready() -> bool:
             try:
-                from sqlalchemy import create_engine, text
-                engine = create_engine(settings.DATABASE_URL, pool_pre_ping=True)
+                from sqlalchemy import text
+                engine = create_local_engine(settings.DATABASE_URL)
                 with engine.connect() as connection:
                     connection.execute(text("SELECT 1"))
                 engine.dispose()
@@ -114,19 +109,11 @@ class DependencyProbe:
             except Exception:
                 return False
 
-        def redis_ready() -> bool:
-            try:
-                import redis
-                client = redis.Redis.from_url(settings.REDIS_URL, socket_connect_timeout=2, socket_timeout=2)
-                return bool(client.ping())
-            except Exception:
-                return False
-
-        return cls(postgres_ready, redis_ready)
+        return cls(database_ready)
 
     def ready(self) -> bool:
         try:
-            return bool(self.postgres()) and bool(self.redis())
+            return bool(self.postgres())
         except Exception:
             return False
 

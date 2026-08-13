@@ -2,12 +2,14 @@
   "name": "orin-desktop",
   "private": true,
   "version": "0.1.0",
+  "author": "Carlos Eduardo",
   "description": "Electron host for the Orin local application",
   "main": "electron/main.cjs",
   "scripts": {
     "start": "electron .",
     "dev": "electron . --devtools",
-    "build": "electron-builder --win"
+    "build": "electron-builder --win",
+    "build:dir": "electron-builder --win --dir"
   },
   "devDependencies": {
     "electron": "^37.2.6",
@@ -21,6 +23,17 @@
     "files": [
       "electron/**/*",
       "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../dist/runtime",
+        "to": "runtime",
+        "filter": ["**/*"]
+      },
+      {
+        "from": "../LICENSE",
+        "to": "LICENSE"
+      }
     ],
     "win": {
       "target": [

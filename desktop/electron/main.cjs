@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, Menu, shell } = require('electron')
+const { app, BrowserWindow, dialog, ipcMain, Menu, shell } = require('electron')
 const { spawn } = require('node:child_process')
 const fs = require('node:fs/promises')
 const path = require('node:path')
@@ -77,6 +77,7 @@ function registerIpc() {
     appUrl = url
     await mainWindow.loadURL(url)
     watchLauncherLifecycle()
+    checkForUpdate()
     return true
   })
   ipcMain.handle('desktop:open-logs', async (event) => {
@@ -91,6 +92,44 @@ function registerIpc() {
     closeWindow()
     return true
   })
+}
+
+async function checkForUpdate() {
+  const cache = path.join(app.getPath('userData'), 'orin-update.json')
+  try {
+    const prior = JSON.parse(await fs.readFile(cache, 'utf8'))
+    if (prior.checkedAt && Date.now() - Date.parse(prior.checkedAt) < 24 * 60 * 60 * 1000) return
+  } catch {}
+  try {
+    const response = await fetch('https://github.com/carlos-edu2367/orin/releases/latest/download/release.json', { signal: AbortSignal.timeout(3500) })
+    if (!response.ok) return
+    const release = await response.json()
+    await fs.writeFile(cache, JSON.stringify({ checkedAt: new Date().toISOString() }), 'utf8')
+    if (!release || typeof release.version !== 'string' || !isNewerVersion(release.version, app.getVersion())) return
+    const choice = await dialog.showMessageBox(mainWindow, {
+      type: 'info',
+      buttons: ['Later', 'Open update instructions'],
+      defaultId: 0,
+      title: 'Orin update available',
+      message: `Orin ${release.version} is available.`,
+      detail: 'Updates are verified and installed only after you choose to proceed.',
+    })
+    if (choice.response === 1) shell.openExternal(repositoryReleaseUrl(release.release_url))
+  } catch {
+    // Updates are advisory. Offline/startup use must never be delayed or fail.
+  }
+}
+
+function repositoryReleaseUrl(value) {
+  const fallback = 'https://github.com/carlos-edu2367/orin/releases/latest'
+  return typeof value === 'string' && value.startsWith('https://github.com/carlos-edu2367/orin/releases/') ? value : fallback
+}
+
+function isNewerVersion(candidate, current) {
+  const parse = (value) => value.replace(/^v/, '').split('.').map((part) => Number.parseInt(part, 10) || 0)
+  const [a, b, c] = parse(candidate)
+  const [x, y, z] = parse(current)
+  return a > x || (a === x && (b > y || (b === y && c > z)))
 }
 
 async function readStatus() {

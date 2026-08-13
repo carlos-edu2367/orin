@@ -1,19 +1,17 @@
-"""ARQ worker for durable chat turns.
+"""Durable chat-turn worker implementation.
 
-Run separately from HTTP with ``arq agentos.workers.chat.WorkerSettings``.
-The only queue payload is a turn identifier; credentials and prompt history are
-looked up inside this trusted worker after it has acquired the durable turn.
+It is run by the local polling worker process. The queue carries only a turn
+identifier; credentials and prompt history are looked up after the worker has
+acquired the durable turn.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from datetime import UTC, datetime, timedelta
 from typing import Callable
 
-from arq.connections import RedisSettings
-from sqlalchemy import create_engine, select
+from sqlalchemy import select
 
 from agentos.bootstrap.production import ProductionSettings, activity_cursor_fallback
 from agentos.agentic.provider_stream import HTTPProviderStreamTransport
@@ -42,6 +40,7 @@ from agentos.persistence.provider_secrets import ProviderSecretCipher
 from agentos.persistence.postgres.skills import PostgresSkillLibraryService
 from agentos.reading.selection import VisionModel, choose_vision_model
 from agentos.reading.vision import VisionReader
+from agentos.persistence.sqlite import create_local_engine
 
 
 _LOGGER = logging.getLogger("agentos.workers.chat")
@@ -490,6 +489,12 @@ class ChatWorker:
 
 
 async def agentos_agent(ctx: dict, turn_id: str) -> None:
+    """Compatibility helper for integrations that schedule a worker thread."""
+    await asyncio.to_thread(ctx["chat_worker"].run, turn_id)
+
+
+def create_chat_worker() -> ChatWorker:
+    """Build the synchronous worker used by the local durable poller."""
     # ``run`` is synchronous throughout: it streams from the provider over a
     # blocking HTTP client and talks to PostgreSQL between chunks. arq drives
     # every job on one event loop, so calling it inline would hold that loop for
@@ -497,12 +502,8 @@ async def agentos_agent(ctx: dict, turn_id: str) -> None:
     # be acquired, and ``ChatWorker.watchdog`` would fail each waiting turn as
     # ``worker_unavailable`` after 30s. A slow route (OmniRoute's free providers
     # routinely stream keepalives for tens of seconds) makes that the norm.
-    await asyncio.to_thread(ctx["chat_worker"].run, turn_id)
-
-
-async def startup(ctx: dict) -> None:
     settings = ProductionSettings()
-    engine = create_engine(settings.DATABASE_URL, pool_pre_ping=True)
+    engine = create_local_engine(settings.DATABASE_URL)
     secret = settings.AGENTOS_ACTIVITY_CURSOR_SECRET.get_secret_value() if settings.AGENTOS_ACTIVITY_CURSOR_SECRET else None
     # The worker and the API must sign activity cursors identically, otherwise a
     # cursor issued by one is rejected by the other and every stream resyncs.
@@ -511,25 +512,7 @@ async def startup(ctx: dict) -> None:
     # nothing yet is still a worker that is up, and the launcher needs to be able
     # to tell "ready" from "never started" without waiting for a first message.
     worker.store.heartbeat("chat-worker")
-    ctx["chat_worker"] = worker
+    return worker
 
 
-class WorkerSettings:
-    """arq entry point.
-
-    ``redis_settings`` must be a plain class attribute: arq reads this class
-    through ``__dict__``, so a property or a metaclass descriptor is invisible to
-    it and the worker silently falls back to arq's default Redis instead of the
-    configured one. It is bound conditionally only so that importing this module
-    for its ``ChatWorker`` does not require a full deployment environment.
-    """
-
-    functions = [agentos_agent]
-    on_startup = startup
-    max_jobs = 8
-    job_timeout = int(os.getenv("AGENTOS_WORKER_JOB_TIMEOUT", "3900"))
-    if os.getenv("REDIS_URL"):
-        redis_settings = RedisSettings.from_dsn(os.environ["REDIS_URL"])
-
-
-__all__ = ["ChatWorker", "PROVIDER_BASE_URLS", "WorkerSettings", "agentos_agent"]
+__all__ = ["ChatWorker", "PROVIDER_BASE_URLS", "agentos_agent", "create_chat_worker"]

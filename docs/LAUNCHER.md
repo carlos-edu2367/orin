@@ -43,9 +43,9 @@ and leaves your data, configuration and logs alone.
 
 | Step | What it is | Ready when |
 | --- | --- | --- |
-| Services | PostgreSQL and Redis, plus schema migrations | `SELECT 1` succeeds and Redis answers `PING` |
+| Services | local SQLite database and schema migrations | SQLite answers `SELECT 1` and migration reaches head |
 | Backend | HTTP, SSE, and the web interface itself | `/healthz` answers, then `/readyz` confirms the database and queue |
-| Workers | the dispatch publisher and the chat worker | both have written fresh rows to `runtime_heartbeats` |
+| Workers | durable turn worker and scheduled-chat worker | the chat worker has written a fresh heartbeat |
 | OmniRouter | the optional local gateway — **only if you enabled it** | `GET <gateway>/v1/models` returns 2xx |
 | Frontend | the built SPA the backend serves | `GET /` returns the application document |
 
@@ -120,7 +120,7 @@ orin start              # the same as `orin`
 orin stop
 orin restart
 orin status
-orin logs [--service backend|publisher|worker|launcher] [-n 50] [--follow]
+orin logs [--service backend|worker|scheduler|launcher] [-n 50] [--follow]
 orin --version
 orin --help
 ```
@@ -134,10 +134,16 @@ used in a script.
 regular command. It starts Electron before datastore work begins, then writes an
 atomic snapshot to `data/run/desktop-startup.json` (or the configured run
 directory). The splash polls that file and displays actual launcher stages:
-Docker, PostgreSQL, Redis, migrations, API, `/healthz`, `/readyz`, publisher,
-worker, and the frontend probe.
+SQLite, migrations, API, `/healthz`, `/readyz`, worker, scheduler and the
+frontend probe.
 
-Electron never starts Docker, services, or Python workers itself. Once the
+launcher confirms readiness it provides the chosen loopback URL, and Electron
+loads `http://127.0.0.1:<port>` in the same `BrowserWindow`. This preserves the
+existing cookies, SSE, WebSocket, upload, download, and routing behavior.
+Electron never starts services or workers itself. Once the launcher confirms
+readiness it provides the chosen loopback URL, and Electron loads
+`http://127.0.0.1:<port>` in the same `BrowserWindow`. This preserves the
+existing cookies, SSE, WebSocket, upload, download, and routing behavior.
 launcher confirms readiness it provides the chosen loopback URL, and Electron
 loads `http://127.0.0.1:<port>` in the same `BrowserWindow`. This preserves the
 existing cookies, SSE, WebSocket, upload, download, and routing behavior.
@@ -168,8 +174,8 @@ not you passed `--verbose`:
 | --- | --- |
 | `launcher.log` | startup decisions, spawned commands, probe results, shutdown |
 | `backend.log` | the HTTP process |
-| `publisher.log` | the dispatch publisher |
 | `worker.log` | the chat worker |
+| `scheduler.log` | the scheduled-chat poller |
 | `desktop.log` | Electron main-process output |
 
 Values that look like keys, tokens or passwords are redacted before anything is
@@ -240,7 +246,7 @@ gateway from surviving the process that started it.
 and falls back to terminating the recorded process tree if the supervisor does
 not act on it.
 
-## How this becomes `orin.exe`
+## Windows release build
 
 Nothing above is tied to a repository, a virtual environment, or a working
 directory, so packaging is a build problem rather than a redesign.
@@ -253,7 +259,7 @@ executable that is.
 **The installation directory is already read-only at runtime.** Configuration,
 data, logs and run state resolve to per-user locations outside it.
 
-The remaining work, none of which requires touching the launcher:
+The release workflow is implemented as follows:
 
 1. **Build** — CI produces `frontend/dist` and freezes the launcher and backend
    into one `orin.exe` (PyInstaller onedir), shipped as a versioned archive with
@@ -268,7 +274,6 @@ The remaining work, none of which requires touching the launcher:
    Rollback is flipping it back: user data was never inside either version, so
    neither direction can lose it.
 
-One external dependency remains: PostgreSQL and Redis. Today the launcher brings
-them up through Docker Compose when a compose file ships with the installation.
-The `Services` step is the single seam where a bundled datastore replaces that,
-and no step above it changes when it does.
+The installed runtime has no Docker, PostgreSQL, Redis, Python or Node
+dependency. OmniRoute remains a separately installed optional npm integration;
+it is never started unless the user explicitly enables it.

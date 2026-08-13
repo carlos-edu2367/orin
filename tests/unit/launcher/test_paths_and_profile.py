@@ -92,11 +92,11 @@ def test_frozen_build_reports_an_installed_profile(monkeypatch: pytest.MonkeyPat
     assert profile.service_command("worker") == (str(tmp_path / "orin.exe"), "internal-service", "worker")
 
 
-def test_installed_profile_has_no_repository_compose_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_installed_profile_has_no_external_service_definition(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr("sys.frozen", True, raising=False)
     monkeypatch.setattr("sys.executable", str(tmp_path / "orin.exe"))
 
-    assert RuntimeProfile.detect().compose_file is None
+    assert not hasattr(RuntimeProfile.detect(), "compose_file")
 
 
 def test_user_layout_is_outside_the_installation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

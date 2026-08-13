@@ -59,6 +59,10 @@ class ScheduledChatService:
         self._chat = PostgresChatStore(engine)
         self._clock = clock
 
+    def heartbeat(self, component: str) -> None:
+        """Record that the poller has a usable durable-store connection."""
+        self._chat.heartbeat(component)
+
     @staticmethod
     def _zone(name: str) -> ZoneInfo:
         try:

@@ -64,24 +64,11 @@ class RuntimeProfile:
         """
         candidates = (
             [self.repository / "frontend" / "dist"] if self.repository is not None else []
-        ) + [self.root / "web", _package_root() / "web"]
+        ) + [self.root / "web", self.root / "_internal" / "web", _package_root() / "web"]
         for candidate in candidates:
             if (candidate / "index.html").is_file():
                 return candidate
         return candidates[0] if candidates else None
-
-    @property
-    def compose_file(self) -> Path | None:
-        """Docker Compose definition for Postgres and Redis, when one ships.
-
-        This is the seam a bundled datastore replaces later. The supervisor only
-        knows "make the services reachable"; how that happens lives here.
-        """
-        for candidate in ([self.repository] if self.repository is not None else []) + [self.root]:
-            path = candidate / "docker-compose.yml"
-            if path.is_file():
-                return path
-        return None
 
     def environment_files(self, config_dir: Path) -> tuple[Path, ...]:
         """Configuration files to load, lowest precedence first."""
@@ -111,6 +98,14 @@ class RuntimeProfile:
         if getattr(sys, "frozen", False):
             return (sys.executable,)
         return (sys.executable, "-m", "agentos.launcher")
+
+    @property
+    def installer(self) -> Path:
+        """The verified release installer shipped beside a frozen runtime."""
+        candidates = [self.root / "install.ps1", self.root / "_internal" / "install.ps1"]
+        if self.repository is not None:
+            candidates.append(self.repository / "install.ps1")
+        return next((candidate for candidate in candidates if candidate.is_file()), candidates[0])
 
     @classmethod
     def detect(cls) -> "RuntimeProfile":

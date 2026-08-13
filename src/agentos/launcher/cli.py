@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import subprocess
 import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -75,6 +76,7 @@ def build_parser() -> argparse.ArgumentParser:
     commands.add_parser("start", parents=[shared], help="start the Orin runtime (the default)")
     commands.add_parser("stop", help="stop a running Orin")
     commands.add_parser("restart", parents=[shared], help="stop a running Orin and start it again")
+    commands.add_parser("update", help="install the latest verified Orin release")
     commands.add_parser("status", help="show whether Orin is running, and where")
 
     logs = commands.add_parser("logs", help="show Orin's logs")
@@ -234,6 +236,27 @@ def command_restart(arguments: argparse.Namespace, paths: OrinPaths, profile: Ru
     return command_start(arguments, paths, profile, console)
 
 
+def command_update(paths: OrinPaths, profile: RuntimeProfile, console: Console) -> int:
+    installer = profile.installer
+    if not installer.is_file():
+        console.error(f"The release installer is missing: {installer}. Reinstall Orin to restore it.")
+        return 1
+    if running_instance(paths) is not None:
+        code = command_stop(paths, console)
+        if code != 0:
+            return code
+    console.line("\n  Downloading the latest verified Orin release...")
+    try:
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(installer)],
+            check=False,
+        )
+    except OSError as error:
+        console.error(f"Could not start the installer: {error}")
+        return 1
+    return int(result.returncode)
+
+
 # -- entry point --------------------------------------------------------
 
 
@@ -260,6 +283,8 @@ def main(argv: list[str] | None = None) -> int:
             return command_stop(paths, console)
         if command == "restart":
             return command_restart(arguments, paths, profile, console)
+        if command == "update":
+            return command_update(paths, profile, console)
         if command == "status":
             return command_status(paths, profile, console)
         if command == "logs":

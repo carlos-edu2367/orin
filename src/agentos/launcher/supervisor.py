@@ -90,7 +90,7 @@ class Supervisor:
     _stop: threading.Event = field(default_factory=threading.Event, init=False)
     desktop_status: DesktopStatusWriter | None = field(default=None, init=False)
     desktop_process: DesktopProcess | None = field(default=None, init=False)
-    _desktop_current_service: str = field(default="docker", init=False)
+    _desktop_current_service: str = field(default="database", init=False)
 
     # -- addresses ------------------------------------------------------
 
@@ -162,7 +162,7 @@ class Supervisor:
         if self.options.desktop:
             self.desktop_status = DesktopStatusWriter(self.paths, restart_command=self.profile.launcher_command())
             self.desktop_status.set_url(self.base_url)
-            self._desktop_service("docker", "starting", "Verificando Docker Desktop")
+            self._desktop_service("database", "starting", "Preparando banco de dados local")
             if not self.options.desktop_reuse:
                 try:
                     self.desktop_process = launch_desktop(
@@ -177,15 +177,12 @@ class Supervisor:
 
     def _step_services(self) -> None:
         assert self.environment is not None
-        self._desktop_current_service = "docker"
+        self._desktop_current_service = "database"
         try:
             status = ensure_datastores(self.environment, self.profile, log=self.log)
             if stop_requested(self.paths):
                 raise StartupCancelled("A inicialização foi cancelada.")
-            docker_detail = "Infraestrutura Docker pronta" if status.started_here else "Serviços locais já estavam disponíveis"
-            self._desktop_service("docker", "ready", docker_detail)
-            self._desktop_service("postgres", "ready", status.postgres.detail)
-            self._desktop_service("redis", "ready", status.redis.detail)
+            self._desktop_service("database", "ready", status.database.detail)
             self._desktop_current_service = "migrations"
             self._desktop_service("migrations", "starting", "Aplicando atualizações do banco")
             apply_migrations(self.environment, self.profile, log=self.log)
@@ -230,25 +227,25 @@ class Supervisor:
 
     def _step_workers(self) -> None:
         assert self.environment is not None
-        self._desktop_current_service = "publisher"
-        self._desktop_service("publisher", "starting", "Iniciando publicador")
-        publisher = self._spawn("publisher")
         self._desktop_current_service = "worker"
         self._desktop_service("worker", "starting", "Iniciando worker")
         worker = self._spawn("worker")
+        self._desktop_current_service = "scheduler"
+        self._desktop_service("scheduler", "starting", "Iniciando tarefas agendadas")
+        scheduler = self._spawn("scheduler")
         ready = wait_until(
-            lambda: heartbeat_probe(self.environment.database_url, ("chat-publisher", "chat-worker")),  # type: ignore[union-attr]
+            lambda: heartbeat_probe(self.environment.database_url, ("chat-worker", "scheduled-chat-worker")),  # type: ignore[union-attr]
             timeout=WORKERS_READY_TIMEOUT,
             interval=0.5,
-            abort=lambda: self._startup_abort(publisher) or self._startup_abort(worker),
+            abort=lambda: self._startup_abort(worker) or self._startup_abort(scheduler),
         )
         if not ready:
             self.console.failed("Workers")
             self._raise_if_startup_cancelled(ready)
-            dead = next((child for child in (publisher, worker) if child.exited() is not None), None)
-            raise StartupFailed(self._child_failure("Workers", dead or publisher, ready))
-        self._desktop_service("publisher", "ready", "Publicador conectado")
+            dead = next((child for child in (worker, scheduler) if child.exited() is not None), None)
+            raise StartupFailed(self._child_failure("Workers", dead or worker, ready))
         self._desktop_service("worker", "ready", "Worker conectado")
+        self._desktop_service("scheduler", "ready", "Tarefas agendadas conectadas")
         self.console.step("Workers")
 
     def _step_omnirouter(self) -> None:
@@ -429,8 +426,8 @@ class Supervisor:
                 continue
             self.log.info("stopping %s (pid %s)", child.name, child.pid)
             child.stop()
-            # The publisher and the chat worker are one thing to the user, so
-            # they get one line rather than two identical ones.
+            # The chat and scheduler workers are one thing to the user, so they
+            # get one line rather than two identical ones.
             label = _label(child.name)
             if label not in reported:
                 reported.add(label)
@@ -464,7 +461,7 @@ class Supervisor:
                 self._watch_omniroute()
                 dead = next((child for child in self.children if child.exited() is not None), None)
                 if dead is not None:
-                    self._desktop_current_service = {"backend": "backend", "publisher": "publisher", "worker": "worker"}.get(dead.name, "backend")
+                    self._desktop_current_service = {"backend": "backend", "worker": "worker", "scheduler": "scheduler"}.get(dead.name, "backend")
                     self._desktop_failed(f"{_label(dead.name)} parou inesperadamente. Veja os logs para mais detalhes.")
                     self.console.error(
                         f"{_label(dead.name)} stopped unexpectedly (exit code {dead.exited()}).\n"
@@ -510,7 +507,7 @@ class Supervisor:
 
 
 def _label(name: str) -> str:
-    return {"backend": "Backend", "publisher": "Workers", "worker": "Workers", "frontend": "Frontend"}.get(name, name.title())
+    return {"backend": "Backend", "worker": "Workers", "scheduler": "Workers", "frontend": "Frontend"}.get(name, name.title())
 
 
 def attach_to_running(console: Console, state: InstanceState, *, open_browser: bool = True) -> int:

@@ -20,15 +20,13 @@ from agentos.installation import OrinPaths
 StartupState = Literal["pending", "starting", "ready", "error", "stopped"]
 
 SERVICE_ORDER = (
-    "docker",
-    "postgres",
-    "redis",
+    "database",
     "migrations",
     "backend",
     "health",
     "ready",
-    "publisher",
     "worker",
+    "scheduler",
     "frontend",
 )
 
@@ -81,6 +79,11 @@ class DesktopStatusWriter:
         self._touch()
 
     def service(self, name: str, state: StartupState, detail: str = "") -> None:
+        # Pre-standalone development snapshots used ``docker``. Accept it only
+        # while reading/testing old callers; published snapshots expose the
+        # accurate local ``database`` stage.
+        if name == "docker":
+            name = "database"
         if name not in self._snapshot.services:
             raise ValueError(f"unknown desktop startup service: {name}")
         self._snapshot.services[name] = StartupService(state, _brief(detail))

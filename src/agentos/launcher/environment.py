@@ -14,9 +14,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from agentos.installation import OrinPaths, RuntimeProfile
+from agentos.persistence.sqlite import sqlite_url
 
-DEFAULT_DATABASE_URL = "postgresql+psycopg://agentos@127.0.0.1:5433/agentos"
-DEFAULT_REDIS_URL = "redis://127.0.0.1:6380/0"
 
 _SECRET_NAME = re.compile(r"(KEY|SECRET|TOKEN|PASSWORD|CREDENTIAL)", re.IGNORECASE)
 
@@ -59,7 +58,7 @@ def _generated_encryption_key() -> str:
     return Fernet.generate_key().decode()
 
 
-def write_default_configuration(path: Path) -> Path:
+def write_default_configuration(path: Path, *, database_url: str = "sqlite+pysqlite:///orin.db") -> Path:
     """Create a first-run configuration file.
 
     An installed Orin has no repository to copy an example from, and asking a
@@ -73,8 +72,7 @@ def write_default_configuration(path: Path) -> Path:
                 "# Orin local configuration. Generated on first run.",
                 "# Provider API keys are NOT stored here; add them in Settings -> Providers,",
                 "# where they are encrypted at rest with the key below.",
-                f"DATABASE_URL={DEFAULT_DATABASE_URL}",
-                f"REDIS_URL={DEFAULT_REDIS_URL}",
+                f"DATABASE_URL={database_url}",
                 "AGENTOS_ENV=local",
                 "LOCALHOST_TRUST_ENABLED=true",
                 f"AGENTOS_PROVIDER_ENCRYPTION_KEY={_generated_encryption_key()}",
@@ -100,15 +98,11 @@ class RuntimeEnvironment:
     def database_url(self) -> str:
         return self.values["DATABASE_URL"]
 
-    @property
-    def redis_url(self) -> str:
-        return self.values["REDIS_URL"]
-
     def for_port(self, port: int) -> dict[str, str]:
         return {**self.values, "ORIN_BACKEND_PORT": str(port), "ORIN_BACKEND_HOST": "127.0.0.1"}
 
     def describe(self) -> str:
-        return "\n".join(f"{name}={redact(name, value)}" for name, value in sorted(self.values.items()) if name.startswith(("DATABASE", "REDIS", "AGENTOS", "ORIN", "WEB", "LOCALHOST")))
+        return "\n".join(f"{name}={redact(name, value)}" for name, value in sorted(self.values.items()) if name.startswith(("DATABASE", "AGENTOS", "ORIN", "WEB", "LOCALHOST")))
 
 
 def load_environment(paths: OrinPaths, profile: RuntimeProfile) -> RuntimeEnvironment:
@@ -122,16 +116,19 @@ def load_environment(paths: OrinPaths, profile: RuntimeProfile) -> RuntimeEnviro
     """
     files = profile.environment_files(paths.config)
     created: Path | None = None
+    default_database_url = sqlite_url(paths.data / "orin.db")
     if not files:
-        created = write_default_configuration(paths.config / "orin.env")
+        created = write_default_configuration(paths.config / "orin.env", database_url=default_database_url)
         files = (created,)
 
     values: dict[str, str] = dict(os.environ)
     for path in files:
         values.update(parse_env_file(path))
 
-    values.setdefault("DATABASE_URL", DEFAULT_DATABASE_URL)
-    values.setdefault("REDIS_URL", DEFAULT_REDIS_URL)
+    # A personal install is deliberately self-contained. Ignore legacy
+    # Postgres values left in a checkout/config rather than making Docker an
+    # accidental runtime dependency again.
+    values["DATABASE_URL"] = default_database_url
     values.setdefault("AGENTOS_ENV", "local")
     values.setdefault("LOCALHOST_TRUST_ENABLED", "true")
 
@@ -147,6 +144,12 @@ def load_environment(paths: OrinPaths, profile: RuntimeProfile) -> RuntimeEnviro
         )
     # Absolute, always: the backend must not resolve its own UI through a cwd.
     values["WEB_DIST_DIR"] = str(web.resolve())
+    bundled_browser = next(
+        (candidate for candidate in (profile.root / "playwright", profile.root / "_internal" / "playwright") if candidate.is_dir()),
+        paths.cache / "playwright",
+    )
+    browser_path = bundled_browser
+    values.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(browser_path.resolve()))
     values.update(paths.as_environment())
 
     _validate(values, profile)
@@ -168,11 +171,11 @@ def _validate(values: dict[str, str], profile: RuntimeProfile) -> None:
             "  python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\"\n"
             + ("and put it in .env.local." if profile.is_development else "and put it in your Orin configuration file.")
         )
+    if not values.get("DATABASE_URL", "").startswith("sqlite"):
+        raise ConfigurationError("The local Orin runtime only supports the bundled SQLite database.")
 
 
 __all__ = [
-    "DEFAULT_DATABASE_URL",
-    "DEFAULT_REDIS_URL",
     "ConfigurationError",
     "RuntimeEnvironment",
     "load_environment",

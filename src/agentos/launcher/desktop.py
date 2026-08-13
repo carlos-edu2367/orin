@@ -96,7 +96,13 @@ def _electron_command(profile: RuntimeProfile) -> tuple[str, ...]:
             "Electron is not installed. Run 'npm --prefix desktop install' once, then run 'orin --desktop' again."
         )
 
-    executable = profile.root / "Orin Desktop.exe" if os.name == "nt" else profile.root / "Orin Desktop"
+    # In the packaged Electron layout, ``orin.exe`` lives in
+    # ``resources/runtime`` while the host executable is one level above in
+    # ``resources``. Electron Builder keeps ``Orin Desktop.exe`` at the root of
+    # ``win-unpacked``, two levels above the frozen runtime. Development keeps
+    # using the local Electron binary above.
+    host_root = profile.root.parent.parent if getattr(__import__("sys"), "frozen", False) else profile.root
+    executable = host_root / "Orin Desktop.exe" if os.name == "nt" else host_root / "Orin Desktop"
     if executable.is_file():
         return (str(executable),)
     raise DesktopUnavailable(

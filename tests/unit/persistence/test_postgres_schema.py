@@ -12,6 +12,7 @@ def test_persistence_schema_contains_only_the_durable_boundary_tables():
         "worker_dispatch_attempts",
         "schedules",
         "schedule_occurrences",
+        "scheduled_chat_tasks",
         "security_pats",
         "security_sessions",
         "security_revocations",

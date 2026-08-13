@@ -19,7 +19,7 @@ try {
 # system python3.13.exe, and a leftover process from any of them will keep
 # consuming jobs with stale code loaded.
 Get-CimInstance Win32_Process |
-    Where-Object { $_.CommandLine -match 'agentos\.workers\.(publisher|chat|scheduler)' -or $_.CommandLine -match 'agentos\.api\.asgi' } |
+    Where-Object { $_.CommandLine -match 'agentos\.launcher.*internal-service' -or $_.CommandLine -match 'agentos\.workers\.(publisher|scheduler)' -or $_.CommandLine -match 'agentos\.api\.asgi' } |
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
 
 Write-Host "AgentOS local stack stopped." -ForegroundColor Yellow

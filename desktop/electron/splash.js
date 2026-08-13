@@ -1,13 +1,11 @@
 const SERVICES = [
-  ['docker', 'Docker Desktop'],
-  ['postgres', 'PostgreSQL'],
-  ['redis', 'Redis'],
+  ['database', 'Banco de dados local'],
   ['migrations', 'Atualizações do banco'],
   ['backend', 'API local'],
   ['health', 'Verificação de saúde'],
   ['ready', 'Aplicação pronta'],
-  ['publisher', 'Publisher'],
   ['worker', 'Worker'],
+  ['scheduler', 'Tarefas agendadas'],
   ['frontend', 'Interface do Orin'],
 ]
 

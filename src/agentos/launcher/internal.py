@@ -16,7 +16,7 @@ import sys
 
 from .ports import DEFAULT_PORT
 
-SERVICES = ("backend", "publisher", "worker")
+SERVICES = ("backend", "worker", "scheduler")
 
 
 def run_backend() -> int:
@@ -39,33 +39,27 @@ def run_backend() -> int:
     return 0
 
 
-def run_publisher() -> int:
-    """Moves durable pending turns onto the queue, and sweeps lost ones."""
-    import asyncio
-
+def run_worker() -> int:
+    """Claims durable SQLite turns and runs the agent loop."""
     from agentos.workers.publisher import main
 
     try:
-        asyncio.run(main())
+        main()
     except KeyboardInterrupt:
         return 0
     return 0
 
 
-def run_worker() -> int:
-    """Claims a turn and runs the agent loop."""
-    from arq import run_worker
-
-    from agentos.workers.chat import WorkerSettings
-
+def run_scheduler() -> int:
+    from agentos.workers.scheduler import main
     try:
-        run_worker(WorkerSettings)  # type: ignore[arg-type]
+        main()
     except KeyboardInterrupt:
         return 0
     return 0
 
 
-_RUNNERS = {"backend": run_backend, "publisher": run_publisher, "worker": run_worker}
+_RUNNERS = {"backend": run_backend, "worker": run_worker, "scheduler": run_scheduler}
 
 
 def run_service(name: str) -> int:

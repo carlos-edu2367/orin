@@ -95,7 +95,7 @@ def test_a_first_run_generates_a_usable_configuration(tmp_path: Path, monkeypatc
 
     assert environment.created_configuration == paths.config / "orin.env"
     assert environment.values["AGENTOS_PROVIDER_ENCRYPTION_KEY"]
-    assert environment.database_url.startswith("postgresql+psycopg://")
+    assert environment.database_url.startswith("sqlite+pysqlite://")
 
 
 def test_the_web_bundle_is_handed_to_children_as_an_absolute_path(tmp_path: Path) -> None:

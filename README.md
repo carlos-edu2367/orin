@@ -8,6 +8,10 @@ visible in it, summarized, and expandable when you want the detail.
 Everything runs on your machine. Nothing leaves it except the provider calls you
 configure.
 
+## License
+
+This project is licensed under the [MIT License](LICENSE).
+
 ## Status
 
 This repository is intentionally being published while the project is still in
@@ -38,8 +42,8 @@ keys and capture the current screen. Each observation creates a private PNG
 in the conversation workspace; the chat renders it as a browser activity
 card and the file endpoint applies the usual conversation authorization.
 
-`scripts/run-local.ps1` provisions Chromium automatically. To provision it
-separately after installing dependencies, run:
+The release package includes Chromium. For source development,
+`scripts/run-local.ps1` provisions it automatically; to provision it separately:
 
 ```powershell
 .\scripts\install-browser.ps1
@@ -52,12 +56,30 @@ argument.
 
 ## Requirements
 
-- Python 3.13+
-- Node.js 20+
-- Docker Desktop (PostgreSQL + Redis)
-- An API key for at least one provider (OpenRouter, OpenAI, or Anthropic)
+The Windows release includes the runtime, SQLite and Chromium. It does not need
+Python, Node.js, Docker, PostgreSQL or Redis. You only need a provider account
+when you choose to configure one in Settings. Python and Node remain source
+development requirements only.
 
-## Start it
+## Install on Windows
+
+After releases are published, install the complete release from
+PowerShell:
+
+```powershell
+irm https://github.com/carlos-edu2367/orin/releases/latest/download/install.ps1 | iex
+```
+
+The installer verifies the release SHA-256 before activation, creates the local
+configuration and asks whether to create an **Orin Desktop** shortcut. It adds
+`orin` to the user PATH. The source-controlled [install.ps1](install.ps1) is
+the same release installer and may be downloaded, reviewed and executed locally
+instead of using a one-liner.
+
+`orin update` will use this same verified release flow. The application may
+recommend an available release, but it never replaces itself in the background.
+
+## Start from source
 
 ```powershell
 Copy-Item .env.local.example .env.local
@@ -85,8 +107,8 @@ Open a new terminal — any terminal, any directory — and run:
 orin
 ```
 
-Orin starts PostgreSQL and Redis, applies migrations, starts the backend and the
-workers, starts OmniRouter if you enabled it, waits until the interface actually
+Orin opens its local SQLite database, applies migrations, starts the backend and
+worker, starts OmniRouter only if you already installed/enabled it with npm, waits until the interface actually
 answers, and opens it in your browser. `Ctrl+C` stops everything it started.
 
 ```text
@@ -119,16 +141,15 @@ orin --desktop
 ```
 
 The Electron window appears immediately with a live startup screen. The Python
-launcher remains the single owner of Docker, PostgreSQL, Redis, migrations, the
-API, publisher, and worker; Electron only observes its local startup snapshot
+launcher remains the single owner of SQLite, migrations, the API, scheduler and
+worker; Electron only observes its local startup snapshot
 and loads the API-served application after `/healthz`, `/readyz`, and the
 frontend probe pass. The main web UI is never loaded from `file://`.
 
-Docker Desktop remains a requirement for the local Compose services. If Docker
-or another startup step fails, the window keeps the concise error and offers to
-retry, open the existing Orin logs, or close. Closing the window asks the same
-cooperative launcher shutdown path used by `orin stop`; it never closes Docker
-Desktop itself.
+If the local database or another startup step fails, the window keeps the
+concise error and offers to retry, open the existing Orin logs, or close.
+Closing the window asks the same cooperative launcher shutdown path used by
+`orin stop`.
 
 For Electron development, use the same command with DevTools enabled:
 
@@ -143,9 +164,9 @@ Set-Location desktop
 npm run build
 ```
 
-This produces the Electron host under `desktop/dist`. It is not yet a complete
-standalone Orin distribution: a packaged release still needs to ship its frozen
-`orin` launcher beside `Orin Desktop.exe`, and still requires Docker Desktop.
+`scripts/build-windows.ps1` builds the complete release layout: frozen launcher,
+Electron host, frontend, SQLite migrations and Chromium. Release publication is
+handled separately from the build.
 
 Rebuild the web client after changing the frontend:
 
@@ -156,13 +177,13 @@ npm --prefix frontend run build
 `scripts\run-local.ps1` and `scripts\stop-local.ps1` still exist for driving the
 individual processes during development.
 
-### Why three processes
+### Why three local processes
 
 | Process | Responsibility |
 | --- | --- |
 | `uvicorn agentos.api.asgi:app` | HTTP + SSE. Accepts a turn, persists it, serves the built client. Never calls a provider. |
-| `agentos.workers.publisher` | Moves durable pending turns onto the Redis/ARQ queue. |
-| `arq agentos.workers.chat.WorkerSettings` | Claims a turn, runs the agent loop, calls the provider, executes tools. |
+| `agentos.workers.publisher` | Polls and claims the durable SQLite turn queue, runs the provider/tool loop. |
+| `agentos.workers.scheduler` | Materializes due scheduled chats as normal durable turns. |
 
 Keeping the worker out of the HTTP process is what lets a long turn run without
 blocking the API, and what lets you restart the UI without killing a run in
@@ -246,12 +267,12 @@ network.
 ## Architecture
 
 ```
-browser ── HTTP/SSE ──► FastAPI gateway ──► PostgreSQL (conversations, turns,
-   ▲                                        activity, memory, agents)
+browser ── HTTP/SSE ──► FastAPI gateway ──► SQLite (conversations, turns,
+   ▲                                        activity, memory, agents, queue)
    │                                             ▲
-   └──── activity stream ◄── publisher ─► Redis ─┴─► chat worker ─► provider
-                                                          │
-                                                          └─► tools
+   └──── activity stream ◄──── worker ──────────┴─► provider
+                                                      │
+                                                      └─► tools
 ```
 
 - **Conversation / turn** (`src/agentos/conversations/chat.py`) is the durable
@@ -297,17 +318,11 @@ python -m pytest -q tests/unit
 
 ```powershell
 .\scripts\stop-local.ps1     # the suite shares this database; see the note below
-$env:AGENTOS_TEST_POSTGRES_DSN='postgresql+psycopg://agentos@127.0.0.1:5433/agentos'
-$env:AGENTOS_POSTGRES_URL=$env:AGENTOS_TEST_POSTGRES_DSN
-$env:AGENTOS_REDIS_URL='redis://127.0.0.1:6380/0'
 python -m pytest -q tests/integration
 ```
 
-The integration suite runs against the same local database as the app. Stop the
-stack first: a running publisher will pick up the turns the tests create and move
-them along, which makes assertions about queue state flaky. Point
-`AGENTOS_TEST_POSTGRES_DSN` at a separate database if you want to run both at
-once.
+The integration suite uses an isolated SQLite database. Stop an active Orin
+instance before tests that exercise durable turn recovery.
 
 ```powershell
 Set-Location frontend

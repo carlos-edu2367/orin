@@ -1,50 +1,27 @@
-"""Durable-to-ARQ publisher and recovery loop for chat dispatches.
+"""Polling worker for the durable SQLite conversation queue.
 
-Run this process beside the ARQ worker. It can be restarted safely because
-``conversation_dispatches`` remains the source of truth and jobs contain only
-the turn id.
-
-It also runs the recovery sweep. Without it, a turn whose worker died would sit
-in ``running`` forever and the UI would show a conversation that never finishes —
-the single most confusing failure a local install can have.
+The database owns dispatch state. This process claims it directly, so Redis and
+ARQ are not part of the local product. One worker process is intentional:
+SQLite has a single writer and turns may run for a long time.
 """
 from __future__ import annotations
 
-import asyncio
 import logging
+import time
 from datetime import timedelta
 
-from arq.connections import RedisSettings, create_pool
-from sqlalchemy import create_engine
-
-from agentos.bootstrap.production import ProductionSettings
-from agentos.conversations.chat import PostgresChatStore
+from agentos.workers.chat import ChatWorker, create_chat_worker
 
 
-_LOGGER = logging.getLogger("agentos.workers.publisher")
-
-POLL_SECONDS = 0.5
-# How long a claimed turn may go without finishing before it is considered lost.
-# Generous enough for a long tool chain, short enough that a crash is noticed.
+_LOGGER = logging.getLogger("agentos.workers.worker")
+POLL_SECONDS = 0.35
 STALE_AFTER = timedelta(seconds=600)
-# How long an unclaimed turn may wait before it is failed as "no worker".
 UNCLAIMED_AFTER = timedelta(seconds=45)
 SWEEP_EVERY_SECONDS = 15.0
 
 
-async def publish_once(store: PostgresChatStore, pool) -> int:
-    store.heartbeat("chat-publisher")
-    count = 0
-    for turn_id in store.pending():
-        await pool.enqueue_job("agentos_agent", turn_id, _job_id=f"chat:{turn_id}")
-        if store.mark_enqueued(turn_id): count += 1
-    return count
-
-
-def recover_once(store: PostgresChatStore) -> tuple[str, ...]:
-    """Requeue turns whose worker vanished and fail the ones nobody claimed."""
-    from agentos.workers.chat import ChatWorker
-
+def recover_once(store) -> tuple[str, ...]:
+    """Requeue turns after a worker crash and fail turns no worker can claim."""
     recovered = ChatWorker(store).watchdog(maximum_age=UNCLAIMED_AFTER)
     stale = store.recover_stale(maximum_age=STALE_AFTER)
     if recovered or stale:
@@ -52,29 +29,24 @@ def recover_once(store: PostgresChatStore) -> tuple[str, ...]:
     return tuple({*recovered, *stale})
 
 
-async def main() -> None:
+def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
-    settings = ProductionSettings()
-    store = PostgresChatStore(create_engine(settings.DATABASE_URL, pool_pre_ping=True))
-    pool = await create_pool(RedisSettings.from_dsn(settings.REDIS_URL))
-    loop = asyncio.get_running_loop()
-    next_sweep = loop.time()
-    try:
-        while True:
-            try:
-                await publish_once(store, pool)
-                if loop.time() >= next_sweep:
-                    next_sweep = loop.time() + SWEEP_EVERY_SECONDS
-                    # The sweep touches several rows; keep it off the event loop.
-                    await asyncio.to_thread(recover_once, store)
-            except Exception:
-                # A transient database or Redis error must not end the loop; the
-                # next tick retries, and the durable tables lost nothing.
-                _LOGGER.exception("publisher tick failed")
-            await asyncio.sleep(POLL_SECONDS)
-    finally:
-        await pool.close()
+    worker = create_chat_worker()
+    next_sweep = 0.0
+    while True:
+        try:
+            worker.store.heartbeat("chat-worker")
+            if time.monotonic() >= next_sweep:
+                next_sweep = time.monotonic() + SWEEP_EVERY_SECONDS
+                recover_once(worker.store)
+            pending = worker.store.pending()
+            if pending:
+                worker.run(str(pending[0]))
+                continue
+        except Exception:
+            _LOGGER.exception("worker tick failed")
+        time.sleep(POLL_SECONDS)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

@@ -34,7 +34,7 @@ def test_desktop_status_snapshot_is_complete_and_atomic(tmp_path: Path) -> None:
     assert tuple(payload["services"]) == SERVICE_ORDER
     assert payload["mode"] == "error"
     assert payload["url"] == "http://127.0.0.1:49200"
-    assert payload["services"]["docker"]["state"] == "ready"
+    assert payload["services"]["database"]["state"] == "ready"
     assert payload["services"]["backend"]["state"] == "error"
     assert not writer.path.with_suffix(".tmp").exists()
 
@@ -66,6 +66,17 @@ def test_development_profile_uses_the_local_electron_package(tmp_path: Path) -> 
     assert command == (str(executable), str(desktop))
 
 
+def test_frozen_profile_finds_electron_host_above_resources(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    runtime = tmp_path / "win-unpacked" / "resources" / "runtime"
+    runtime.mkdir(parents=True)
+    host = tmp_path / "win-unpacked" / ("Orin Desktop.exe" if sys.platform == "win32" else "Orin Desktop")
+    host.write_text("", encoding="utf-8")
+    profile = RuntimeProfile("installed", runtime, "1", None)
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+
+    assert _electron_command(profile) == (str(host),)
+
+
 class _Cp1252Stream(io.StringIO):
     encoding = "cp1252"
 
@@ -89,17 +100,17 @@ def test_datastore_failure_is_published_to_the_desktop_snapshot(tmp_path: Path, 
         profile=RuntimeProfile("installed", tmp_path / "install", "1", None),
         console=Console(io.StringIO(), colour=False),
     )
-    supervisor.environment = RuntimeEnvironment({"DATABASE_URL": "postgresql://x", "REDIS_URL": "redis://x"}, (), None)
+    supervisor.environment = RuntimeEnvironment({"DATABASE_URL": "sqlite:///orin.db"}, (), None)
     supervisor.desktop_status = DesktopStatusWriter(paths, restart_command=(sys.executable, "-m", "agentos.launcher"))
     monkeypatch.setattr(
         supervisor_module,
         "ensure_datastores",
-        lambda *_, **__: (_ for _ in ()).throw(RuntimeError("Docker Desktop is not running")),
+        lambda *_, **__: (_ for _ in ()).throw(RuntimeError("SQLite database is unavailable")),
     )
 
     with pytest.raises(StartupFailed):
         supervisor._step_services()
 
     assert supervisor.desktop_status.snapshot.mode == "error"
-    assert supervisor.desktop_status.snapshot.services["docker"].state == "error"
-    assert "Docker Desktop" in supervisor.desktop_status.snapshot.message
+    assert supervisor.desktop_status.snapshot.services["database"].state == "error"
+    assert "SQLite database" in supervisor.desktop_status.snapshot.message

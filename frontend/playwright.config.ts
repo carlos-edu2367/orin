@@ -17,5 +17,9 @@ export default defineConfig({
     command: 'npm run dev -- --host 127.0.0.1',
     url: 'http://127.0.0.1:4173',
     reuseExistingServer: true,
+    // Browser specs inject their own CSRF bootstrap. Do not inherit a developer's
+    // loopback-mode environment, which would deliberately bypass that token and
+    // make the authentication assertions non-deterministic.
+    env: { ...process.env, VITE_AUTH_MODE: '' },
   },
 })
