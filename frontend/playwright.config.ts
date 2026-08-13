@@ -1,4 +1,5 @@
 import { defineConfig } from '@playwright/test'
+import { env as processEnv } from 'node:process'
 
 export default defineConfig({
   testDir: './tests/e2e',
@@ -20,6 +21,6 @@ export default defineConfig({
     // Browser specs inject their own CSRF bootstrap. Do not inherit a developer's
     // loopback-mode environment, which would deliberately bypass that token and
     // make the authentication assertions non-deterministic.
-    env: { ...process.env, VITE_AUTH_MODE: '' },
+    env: { ...processEnv, VITE_AUTH_MODE: '' },
   },
 })

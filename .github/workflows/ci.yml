@@ -21,6 +21,8 @@ jobs:
           python-version: '3.13'
       - name: Install Python test runner
         run: uv sync --frozen --all-groups
+      - name: Install Chromium for Python browser tests
+        run: uv run playwright install chromium
       - name: Run Python suite
         run: uv run pytest -q --tb=short
 

@@ -1,4 +1,5 @@
 import { defineConfig } from '@playwright/test'
+import { env as processEnv } from 'node:process'
 
 // A second, deliberately separate Playwright config (Fase 6, IMPLEMENTATION_PLAN.md
 // "Decisões locais registradas para a Fase 6"): visual regression baselines are a
@@ -31,6 +32,6 @@ export default defineConfig({
     reuseExistingServer: true,
     // Visual fixtures inject their own CSRF bootstrap, so their rendered state
     // must not inherit loopback mode from an interactive local runtime.
-    env: { ...process.env, VITE_AUTH_MODE: '' },
+    env: { ...processEnv, VITE_AUTH_MODE: '' },
   },
 })
