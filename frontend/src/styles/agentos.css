@@ -230,8 +230,35 @@ kbd {
 }
 .composer__input::placeholder { color: var(--faint); }
 .composer__bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 10px 10px 14px; }
-.composer__settings { min-width: 0; }
+.composer__settings { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .composer__actions { display: flex; align-items: center; gap: 10px; }
+
+.composer__attach {
+  display: grid; place-items: center; width: 28px; height: 28px; padding: 0;
+  border: 0; border-radius: 50%; background: transparent; color: var(--muted); cursor: pointer;
+  transition: background 0.16s var(--ease), color 0.16s var(--ease);
+}
+.composer__attach:hover { background: var(--raised); color: var(--text); }
+
+.composer__attachments {
+  display: flex; flex-wrap: wrap; gap: 8px; margin: 0; padding: 12px 14px 0; list-style: none;
+}
+.attachment-chip {
+  display: flex; align-items: center; gap: 8px; max-width: 220px; padding: 5px 6px 5px 8px;
+  border: 1px solid var(--line); border-radius: 999px; background: var(--raised); font-size: 12px;
+}
+.attachment-chip--uploading { opacity: 0.65; }
+.attachment-chip--failed { border-color: rgba(255, 157, 145, 0.5); }
+.attachment-chip__thumb { width: 20px; height: 20px; border-radius: 50%; object-fit: cover; flex: 0 0 auto; }
+.attachment-chip__glyph { flex: 0 0 auto; width: 20px; height: 20px; display: grid; place-items: center; border-radius: 50%; background: var(--raised-strong); color: var(--signal-dim); font-size: 11px; }
+.attachment-chip__name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 110px; font-weight: 560; }
+.attachment-chip__size { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100px; color: var(--faint); font-family: var(--mono); font-size: 10px; }
+.attachment-chip--failed .attachment-chip__size { color: var(--danger); }
+.attachment-chip__remove {
+  display: grid; place-items: center; width: 18px; height: 18px; padding: 0; margin-left: 2px;
+  border: 0; border-radius: 50%; background: transparent; color: var(--faint); cursor: pointer; font-size: 13px; line-height: 1;
+}
+.attachment-chip__remove:hover { background: var(--raised-strong); color: var(--text); }
 
 .workspace-folder { position: relative; }
 .workspace-folder__button { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--orin-line); background: transparent; color: var(--orin-muted); font-size: 12px; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

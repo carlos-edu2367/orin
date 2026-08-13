@@ -1,5 +1,6 @@
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
-import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ClipboardEvent, type DragEvent, type FormEvent, type KeyboardEvent, type ReactNode } from 'react'
+import { AttachmentChips, type ComposerAttachment } from './AttachmentChips'
 
 export type ComposerProps = {
   value: string
@@ -23,6 +24,10 @@ export type ComposerProps = {
    * needs refreshing should still be able to write and keep their draft.
    */
   canSend?: boolean
+  /** Files chosen, dropped, or pasted, waiting to be sent alongside the text. */
+  attachments?: ComposerAttachment[]
+  onAttach?: (files: File[]) => void
+  onRemoveAttachment?: (id: string) => void
 }
 
 const MAX_ROWS_HEIGHT = 260
@@ -38,8 +43,10 @@ const MAX_ROWS_HEIGHT = 260
 export function Composer({
   value, onChange, onSubmit, onStop, running = false, disabled = false,
   placeholder = 'Descreva o que você precisa…', settings, hint, error, autoFocus, notice, focusSignal = 0, canSend = true,
+  attachments = [], onAttach = () => {}, onRemoveAttachment = () => {},
 }: ComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
   const [focused, setFocused] = useState(false)
   const reduced = useReducedMotion()
 
@@ -62,7 +69,7 @@ export function Composer({
 
   function submit(event: FormEvent) {
     event.preventDefault()
-    if (running || disabled || !canSend || !value.trim()) return
+    if (running || disabled || !canSend || (!value.trim() && attachments.length === 0)) return
     onSubmit()
   }
 
@@ -70,14 +77,35 @@ export function Composer({
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault()
       if (running || !canSend) return
-      if (value.trim()) onSubmit()
+      if (value.trim() || attachments.length > 0) onSubmit()
     }
   }
 
+  function onPaste(event: ClipboardEvent<HTMLTextAreaElement>) {
+    const files = Array.from(event.clipboardData?.files ?? [])
+    if (files.length > 0) {
+      event.preventDefault()
+      onAttach(files)
+    }
+  }
+
+  function onDrop(event: DragEvent<HTMLFormElement>) {
+    const files = Array.from(event.dataTransfer?.files ?? [])
+    if (files.length > 0) {
+      event.preventDefault()
+      onAttach(files)
+    }
+  }
+
+  function onDragOver(event: DragEvent<HTMLFormElement>) {
+    if (event.dataTransfer?.types?.includes('Files')) event.preventDefault()
+  }
+
   return (
-    <form className={`composer${focused ? ' is-focused' : ''}${running ? ' is-running' : ''}`} onSubmit={submit}>
+    <form className={`composer${focused ? ' is-focused' : ''}${running ? ' is-running' : ''}`} onSubmit={submit} onDrop={onDrop} onDragOver={onDragOver}>
       <div className="composer__surface">
         <label className="visually-hidden" htmlFor="composer-message">Mensagem</label>
+        <AttachmentChips items={attachments} onRemove={onRemoveAttachment} />
         <textarea
           id="composer-message"
           ref={textareaRef}
@@ -88,11 +116,35 @@ export function Composer({
           disabled={disabled}
           onChange={(event) => onChange(event.target.value)}
           onKeyDown={onKeyDown}
+          onPaste={onPaste}
           onFocus={() => setFocused(true)}
           onBlur={() => setFocused(false)}
         />
         <div className="composer__bar">
-          <div className="composer__settings">{settings}</div>
+          <div className="composer__settings">
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              hidden
+              onChange={(event) => {
+                const files = Array.from(event.target.files ?? [])
+                if (files.length > 0) onAttach(files)
+                event.target.value = ''
+              }}
+            />
+            <button
+              type="button"
+              className="composer__attach"
+              aria-label="Anexar arquivos"
+              onClick={() => fileInputRef.current?.click()}
+            >
+              <svg aria-hidden="true" viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M10.7 4.3 5.4 9.6a2 2 0 1 0 2.8 2.8l5.1-5.1a3.4 3.4 0 1 0-4.8-4.8L3.3 7.7" />
+              </svg>
+            </button>
+            {settings}
+          </div>
           <div className="composer__actions">
             {hint && <span className="composer__hint" role="status" aria-live="polite">{hint}</span>}
             <AnimatePresence mode="wait" initial={false}>
@@ -116,7 +168,7 @@ export function Composer({
                   type="submit"
                   className="composer__action composer__action--send"
                   aria-label="Enviar mensagem"
-                  disabled={disabled || !canSend || !value.trim()}
+                  disabled={disabled || !canSend || (!value.trim() && attachments.length === 0)}
                   initial={reduced ? false : { scale: 0.7, opacity: 0, rotate: 25 }}
                   animate={{ scale: 1, opacity: 1, rotate: 0 }}
                   exit={reduced ? { opacity: 0 } : { scale: 0.7, opacity: 0, rotate: -25 }}
