@@ -9,9 +9,9 @@ import { ProjectNavigation } from './ProjectNavigation'
 
 type ConversationSummary = Pick<Conversation, 'conversation_id' | 'title' | 'state'>
 
-type Props = { client?: ApiClient; onChatsChange?: (chats: ConversationSummary[]) => void }
+type Props = { client?: ApiClient; onChatsChange?: (chats: ConversationSummary[]) => void; onNewConversation?: () => void }
 
-export function WorkspaceNavigation({ client, onChatsChange }: Props) {
+export function WorkspaceNavigation({ client, onChatsChange, onNewConversation }: Props) {
   const apiClient = useMemo(() => client ?? createBrowserApiClient(), [client])
   const navigate = useNavigate()
   const [chats, setChats] = useState<ConversationSummary[]>([])
@@ -34,19 +34,30 @@ export function WorkspaceNavigation({ client, onChatsChange }: Props) {
     setProjects(sidebar.items)
   }, [apiClient, onChatsChange])
 
-  useEffect(() => { void reload().catch(() => setError('Não foi possível atualizar a navegação.')) }, [reload])
+  useEffect(() => {
+    let active = true
+    queueMicrotask(() => {
+      void reload().catch(() => {
+        if (active) setError('Não foi possível atualizar a navegação.')
+      })
+    })
+    return () => { active = false }
+  }, [reload])
 
   useEffect(() => {
     if (!projectId) return
     const controller = new AbortController()
-    setLoadingModels(true)
-    setModels([])
-    setModelId('')
-    void listProviderModels(apiClient, provider, controller.signal).then((items) => {
+    queueMicrotask(() => {
       if (controller.signal.aborted) return
-      setModels(items)
-      setModelId(items.find((item) => item.is_favorite)?.model_id ?? items[0]?.model_id ?? '')
-    }).catch(() => setError('Não foi possível carregar os modelos deste provider.')).finally(() => { if (!controller.signal.aborted) setLoadingModels(false) })
+      setLoadingModels(true)
+      setModels([])
+      setModelId('')
+      void listProviderModels(apiClient, provider, controller.signal).then((items) => {
+        if (controller.signal.aborted) return
+        setModels(items)
+        setModelId(items.find((item) => item.is_favorite)?.model_id ?? items[0]?.model_id ?? '')
+      }).catch(() => setError('Não foi possível carregar os modelos deste provider.')).finally(() => { if (!controller.signal.aborted) setLoadingModels(false) })
+    })
     return () => controller.abort()
   }, [apiClient, projectId, provider])
 
@@ -70,7 +81,7 @@ export function WorkspaceNavigation({ client, onChatsChange }: Props) {
   }
 
   return <>
-    <ProjectNavigation standalone={chats} projects={projects} onCreateProject={() => setCreatingProject(true)} onNewChat={setProjectId} />
+    <ProjectNavigation standalone={chats} projects={projects} onCreateProject={() => setCreatingProject(true)} onNewChat={setProjectId} onNewConversation={onNewConversation ?? (() => navigate('/'))} />
     {creatingProject && <div className="project-dialog" role="dialog" aria-modal="true" aria-label="Criar projeto"><form onSubmit={(event) => { event.preventDefault(); void submitProject() }}><h2>Criar projeto</h2><label>Nome<input autoFocus value={projectName} onChange={(event) => setProjectName(event.target.value)} maxLength={120} /></label><label>Descrição<input value={projectDescription} onChange={(event) => setProjectDescription(event.target.value)} maxLength={2000} /></label><div><button type="button" onClick={() => setCreatingProject(false)}>Cancelar</button><button type="submit">Criar</button></div></form></div>}
     {projectId && <div className="project-dialog" role="dialog" aria-modal="true" aria-label="Novo chat no projeto"><form onSubmit={(event) => { event.preventDefault(); void submitProjectChat() }}><h2>Novo chat no projeto</h2><label>Mensagem inicial<textarea autoFocus value={message} onChange={(event) => setMessage(event.target.value)} placeholder="Descreva o que este chat precisa resolver" /></label><ModelPicker providers={[...PROVIDER_NAMES]} provider={provider} onProviderChange={setProvider} models={models} modelId={modelId} onModelChange={setModelId} loading={loadingModels} disabled={loadingModels} /><div><button type="button" onClick={() => { setProjectId(null); setMessage('') }}>Cancelar</button><button type="submit" disabled={!message.trim() || !modelId || loadingModels}>Criar chat</button></div></form></div>}
     {error && <p className="workspace-navigation__error" role="status">{error}</p>}

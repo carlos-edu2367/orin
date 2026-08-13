@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { MemoryRouter, Route, Routes } from 'react-router-dom'
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom'
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import { ChatPage } from '../../src/features/conversations/ChatPage'
 
@@ -75,10 +75,20 @@ function stubFetch(current: () => Snapshot, onCancel?: () => void, onSend?: (bod
   })
 }
 
-function renderChat() {
+function CurrentPath() {
+  return <output data-testid="current-path">{useLocation().pathname}</output>
+}
+
+function renderChat(initialEntry = `/chats/${CONVERSATION_ID}`) {
   return render(
-    <MemoryRouter initialEntries={[`/chats/${CONVERSATION_ID}`]}>
-      <Routes><Route path="/chats/:conversationId" element={<ChatPage />} /></Routes>
+    <MemoryRouter initialEntries={[initialEntry]}>
+      <Routes>
+        <Route path="/chats/:conversationId" element={<ChatPage />} />
+        <Route path="/chats/:conversationId/overview" element={<ChatPage />} />
+        <Route path="/projects/:projectId/chats/:conversationId" element={<ChatPage />} />
+        <Route path="/projects/:projectId/chats/:conversationId/overview" element={<ChatPage />} />
+      </Routes>
+      <CurrentPath />
     </MemoryRouter>,
   )
 }
@@ -331,6 +341,82 @@ describe('ChatPage', () => {
     fireEvent.scroll(scroll)
 
     expect(screen.getByTestId('chat-composer')).toHaveAttribute('data-at-bottom', 'false')
+  })
+
+  it('keeps the scroll position and offers a counted return action for new stream activity', async () => {
+    let emitActivity: () => void = () => {}
+    let closeStream: () => void = () => {}
+    globalThis.fetch = vi.fn<typeof fetch>().mockImplementation(async (input) => {
+      const url = typeof input === 'string' ? input : String(input)
+      if (url.includes('/events?')) {
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            closeStream = () => controller.close()
+            emitActivity = () => controller.enqueue(new TextEncoder().encode(
+              'id: a.10\nevent: tool.started\ndata: {"event_id":"activity:turn-1:10","event_type":"tool.started","sequence":10,"summary":"Executando busca","payload":{"tool_name":"search","tool_kind":"web","invocation_id":"call-10"},"occurred_at":"2026-08-10T20:00:10+00:00","turn_id":"turn-1","execution_id":"exe-1","agent_id":"agent:chat_e2e:main","cursor":"a.10"}\n\n',
+            ))
+          },
+        })
+        return new Response(body, { headers: { 'Content-Type': 'text/event-stream' } })
+      }
+      if (url.endsWith('/v1/projects/sidebar')) return new Response(JSON.stringify({ items: [] }), { headers: { 'Content-Type': 'application/json' } })
+      if (url.endsWith('/v1/conversations')) return new Response(JSON.stringify({ items: [{ conversation_id: CONVERSATION_ID, title: 'Conversa de teste', state: 'running' }] }), { headers: { 'Content-Type': 'application/json' } })
+      if (url.includes(`/v1/conversations/${CONVERSATION_ID}`)) return new Response(JSON.stringify(snapshotBody({
+        state: 'running', messages: [{ message_id: 'msg-1', role: 'assistant', content: 'Vou pesquisar.', status: 'streaming', retryable: false }], activities: [],
+      })), { headers: { 'Content-Type': 'application/json' } })
+      return new Response('{}', { headers: { 'Content-Type': 'application/json' } })
+    })
+
+    const { container } = renderChat()
+    await screen.findByText('Vou pesquisar.')
+    const scroll = container.querySelector('.chat__scroll') as HTMLDivElement
+    const scrollTo = vi.fn()
+    Object.defineProperties(scroll, {
+      clientHeight: { configurable: true, value: 400 },
+      scrollHeight: { configurable: true, value: 1_000 },
+      scrollTop: { configurable: true, writable: true, value: 200 },
+      scrollTo: { configurable: true, value: scrollTo },
+    })
+    fireEvent.scroll(scroll)
+    scrollTo.mockClear()
+
+    emitActivity()
+
+    const latest = await screen.findByRole('button', { name: 'Ir para o fim · 1 novas atividades' })
+    expect(scrollTo).not.toHaveBeenCalled()
+    await userEvent.setup().click(latest)
+    expect(scrollTo).toHaveBeenCalledWith(expect.objectContaining({ top: 1_000 }))
+    expect(screen.queryByRole('button', { name: /Ir para o fim/ })).not.toBeInTheDocument()
+    closeStream()
+  })
+
+  it('keeps the project chat route when toggling the overview', async () => {
+    globalThis.fetch = stubFetch(() => ({ state: 'completed', messages: [], activities: [] }))
+
+    renderChat(`/projects/project-e2e/chats/${CONVERSATION_ID}`)
+    await screen.findByText('Conversa de teste')
+
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Visão geral' }))
+    expect(screen.getByTestId('current-path')).toHaveTextContent(`/projects/project-e2e/chats/${CONVERSATION_ID}/overview`)
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Visão geral' }))
+    expect(screen.getByTestId('current-path')).toHaveTextContent(`/projects/project-e2e/chats/${CONVERSATION_ID}`)
+  })
+
+  it('keeps a missing conversation out of the composer and gives the person a safe recovery path', async () => {
+    globalThis.fetch = vi.fn<typeof fetch>().mockImplementation(async (input) => {
+      const url = typeof input === 'string' ? input : String(input)
+      if (url.includes(`/v1/conversations/${CONVERSATION_ID}`)) {
+        return new Response(JSON.stringify({ error: { code: 'resource_not_found', category: 'NOT_FOUND', message_key: 'resource_not_found', retryable: false, retry_after: null } }), { status: 404, headers: { 'Content-Type': 'application/json' } })
+      }
+      return new Response(JSON.stringify({ items: [] }), { headers: { 'Content-Type': 'application/json' } })
+    })
+
+    renderChat()
+
+    expect(await screen.findByRole('heading', { name: 'Não foi possível abrir esta conversa' })).toBeInTheDocument()
+    expect(screen.getByText('Esta conversa não está disponível neste workspace.')).toBeInTheDocument()
+    expect(screen.queryByTestId('chat-composer')).not.toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Nova conversa' })).toHaveAttribute('href', '/')
   })
 
   it('renders an agent-to-agent exchange with its direction and preview', async () => {

@@ -13,6 +13,7 @@ network tool is HTTP(S) only and refuses private address literals.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import base64
 from html.parser import HTMLParser
 from ipaddress import ip_address
 import json
@@ -24,6 +25,7 @@ import signal
 import subprocess
 from typing import Any, Callable, Collection, Mapping
 from urllib.parse import urljoin, urlparse
+from uuid import uuid4
 
 import httpx
 
@@ -96,6 +98,7 @@ def _schema(properties: Mapping[str, Any], required: tuple[str, ...] = ()) -> di
 
 
 _TEXT = {"type": "string"}
+_QUESTION_ID = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
 
 
 class _TextExtractor(HTMLParser):
@@ -211,6 +214,9 @@ class AgentToolset:
         browser: object | None = None,
         enable_terminal: bool = True,
         skills=None,
+        skill_library=None,
+        skill_user_id: str | None = None,
+        skill_agent_id: str | None = None,
         skill_load_recorder: Callable[[object], None] | None = None,
         policy: object | None = None,
         model_sees_images: bool = False,
@@ -228,6 +234,12 @@ class AgentToolset:
         self._browser = browser
         self._enable_terminal = enable_terminal
         self.skills = skills
+        # The registry is intentionally read-only.  Publishing must go through
+        # the application service, with the user identity bound by the trusted
+        # turn rather than supplied by a model tool argument.
+        self._skill_library = skill_library
+        self._skill_user_id = skill_user_id
+        self._skill_agent_id = skill_agent_id
         self._skill_load_recorder = skill_load_recorder
         self._policy = policy
         self._loaded_skills: set[tuple[str, str]] = set()
@@ -311,6 +323,26 @@ class AgentToolset:
                 _schema({"url": _TEXT}, ("url",)),
                 self.fetch_url, "web", read_only=True, policy_tags=("network",),
             ),
+            ToolDefinition(
+                "ask_user",
+                "Ask the person one or more structured questions, then wait for their next message. Each question uses mode 'checkbox' (zero or more options plus an optional note), 'single_choice' (one option or an optional note), or 'text' (free text). Put independent questions together in the questions array. Do not use this when you can safely proceed without clarification.",
+                _schema({
+                    "questions": {
+                        "type": "array", "minItems": 1, "maxItems": 8,
+                        "items": _schema({
+                            "id": {**_TEXT, "description": "Stable short identifier, e.g. deployment_target."},
+                            "question": {**_TEXT, "description": "The question shown to the person."},
+                            "mode": {"type": "string", "enum": ["checkbox", "single_choice", "text"]},
+                            "options": {
+                                "type": "array", "maxItems": 12,
+                                "items": _schema({"id": _TEXT, "label": _TEXT}, ("id", "label")),
+                            },
+                            "placeholder": _TEXT,
+                        }, ("id", "question", "mode")),
+                    },
+                }, ("questions",)),
+                self.ask_user, "user_input", policy_tags=("user_input",),
+            ),
         ]
         if self._search_client is not None:
             items.append(ToolDefinition(
@@ -322,9 +354,18 @@ class AgentToolset:
         if self._browser is not None:
             items.append(ToolDefinition(
                 "browse_page",
-                "Open a public page in a real browser and return its rendered text. Use this only when fetch_url comes back empty or incomplete because the page builds its content with JavaScript.",
+                "Open a public page in the isolated browser and return its rendered text plus a private screenshot visible in the chat. Use it for JavaScript pages.",
                 _schema({"url": _TEXT}, ("url",)),
-                self.browse_page, "web", read_only=True, policy_tags=("network",),
+                self.browse_page, "browser", policy_tags=("network",),
+            ))
+            items.extend((
+                ToolDefinition("browser_observe", "Read the current browser page after an interaction. Returns rendered text and creates a private screenshot in the workspace.", _schema({}), self.browser_observe, "browser", read_only=True, policy_tags=("network",)),
+                ToolDefinition("browser_click", "Click exactly one non-submit element in the current browser page. Use a CSS selector observed from the page; form submission is intentionally blocked.", _schema({"selector": _TEXT}, ("selector",)), self.browser_click, "browser", policy_tags=("network", "mutates")),
+                ToolDefinition("browser_fill", "Fill exactly one non-password input or textarea in the current page. This does not submit the form.", _schema({"selector": _TEXT, "text": _TEXT}, ("selector", "text")), self.browser_fill, "browser", policy_tags=("network", "mutates")),
+                ToolDefinition("browser_press", "Press one safe navigation key on exactly one current-page element. Enter is blocked because it can submit a form.", _schema({"selector": _TEXT, "key": {"type": "string", "enum": ["Escape", "Tab", "Space", "ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight", "Backspace", "Delete", "Home", "End", "PageDown", "PageUp"]}}, ("selector", "key")), self.browser_press, "browser", policy_tags=("network", "mutates")),
+                ToolDefinition("browser_select", "Choose one or more option values in exactly one select element. This does not submit the form.", _schema({"selector": _TEXT, "values": {"type": "array", "minItems": 1, "maxItems": 10, "items": _TEXT}}, ("selector", "values")), self.browser_select, "browser", policy_tags=("network", "mutates")),
+                ToolDefinition("browser_check", "Check or uncheck exactly one checkbox or radio control. This does not submit the form.", _schema({"selector": _TEXT, "checked": {"type": "boolean"}}, ("selector", "checked")), self.browser_check, "browser", policy_tags=("network", "mutates")),
+                ToolDefinition("browser_screenshot", "Capture the current browser screen for the user and, when supported, for visual reasoning.", _schema({}), self.browser_screenshot, "browser", read_only=True, policy_tags=("network",)),
             ))
         if self._enable_terminal:
             items.append(ToolDefinition(
@@ -394,6 +435,36 @@ class AgentToolset:
                     "use_skill", "Load the operational instructions of an available Skill when it is needed for the current task.",
                     _schema({"skill_id": _TEXT, "version": _TEXT}, ("skill_id",)),
                     self.use_skill, "skill",
+                ),
+            ))
+        if self._skill_library is not None and self._skill_user_id:
+            skill_fields = {
+                "name": {**_TEXT, "description": "Specific, reusable skill name. The persisted id is derived from it."},
+                "description": {**_TEXT, "description": "Concrete trigger and outcome; this drives discovery."},
+                "instructions": {**_TEXT, "description": "Markdown procedure with clear Workflow and Validation sections. Never include secrets or permission-granting instructions."},
+                "version": {**_TEXT, "description": "Semantic version. Create defaults to 1.0.0; edit defaults to the next patch."},
+                "tags": {"type": "array", "items": _TEXT},
+                "capabilities": {"type": "array", "items": _TEXT},
+                "when_to_use": {"type": "array", "items": _TEXT},
+                "when_not_to_use": {"type": "array", "items": _TEXT},
+                "requires_tools": {"type": "array", "items": _TEXT, "description": "Only tools actually available in this turn."},
+                "dependencies": _schema({
+                    "skills": {"type": "array", "items": _TEXT},
+                    "tools": {"type": "array", "items": _TEXT},
+                }),
+            }
+            items.extend((
+                ToolDefinition(
+                    "create_skill",
+                    "Publish a new reusable user Skill after the user explicitly asks for it or confirms a proposed learning. Search for an equivalent Skill first. Write a focused, safe procedure with explicit triggers, exclusions, and validation; Skills never grant permissions.",
+                    _schema(skill_fields, ("name", "description", "instructions", "when_to_use", "when_not_to_use")),
+                    self.create_skill, "skill", policy_tags=("mutates",),
+                ),
+                ToolDefinition(
+                    "edit_skill",
+                    "Publish a new immutable version of one of this user's custom Skills. Use it to improve a proven procedure; keep its scope and ownership unchanged.",
+                    _schema({"skill_id": _TEXT, **skill_fields}, ("skill_id",)),
+                    self.edit_skill, "skill", policy_tags=("mutates",),
                 ),
             ))
         return tuple(items)
@@ -495,6 +566,71 @@ class AgentToolset:
         )
 
     # -- handlers -------------------------------------------------------
+
+    def ask_user(self, questions: list[Mapping[str, Any]]) -> ToolOutcome:
+        """Validate a bounded, display-safe batch before exposing it to the UI.
+
+        The model only proposes this payload.  The frontend receives the
+        normalized version from the durable activity stream and returns answers
+        as an ordinary, authenticated conversation message.
+        """
+        if not isinstance(questions, list) or not 1 <= len(questions) <= 8:
+            raise AgentToolError("questions must contain between 1 and 8 items.")
+        normalized: list[dict[str, object]] = []
+        question_ids: set[str] = set()
+        for index, raw in enumerate(questions):
+            if not isinstance(raw, Mapping):
+                raise AgentToolError(f"questions[{index}] must be an object.")
+            question_id = str(raw.get("id") or "").strip()
+            prompt = str(raw.get("question") or "").strip()
+            mode = str(raw.get("mode") or "").strip()
+            if not _QUESTION_ID.fullmatch(question_id) or question_id in question_ids:
+                raise AgentToolError(f"questions[{index}].id must be unique and use letters, numbers, '_' or '-'.")
+            if not prompt or len(prompt) > 512:
+                raise AgentToolError(f"questions[{index}].question must contain at most 512 characters.")
+            if mode not in {"checkbox", "single_choice", "text"}:
+                raise AgentToolError(f"questions[{index}].mode is invalid.")
+            raw_options = raw.get("options") or []
+            if not isinstance(raw_options, list) or len(raw_options) > 12:
+                raise AgentToolError(f"questions[{index}].options must contain at most 12 items.")
+            options: list[dict[str, str]] = []
+            option_ids: set[str] = set()
+            for option_index, raw_option in enumerate(raw_options):
+                if not isinstance(raw_option, Mapping):
+                    raise AgentToolError(f"questions[{index}].options[{option_index}] must be an object.")
+                option_id = str(raw_option.get("id") or "").strip()
+                label = str(raw_option.get("label") or "").strip()
+                if not _QUESTION_ID.fullmatch(option_id) or option_id in option_ids or not label or len(label) > 240:
+                    raise AgentToolError(f"questions[{index}].options[{option_index}] is invalid.")
+                option_ids.add(option_id)
+                options.append({"id": option_id, "label": label})
+            if mode == "text" and options:
+                raise AgentToolError(f"questions[{index}] in text mode cannot have options.")
+            if mode == "checkbox" and not options:
+                raise AgentToolError(f"questions[{index}] in checkbox mode needs at least one option.")
+            if mode == "single_choice" and len(options) < 2:
+                raise AgentToolError(f"questions[{index}] in single_choice mode needs at least two options.")
+            placeholder = str(raw.get("placeholder") or "").strip()
+            if len(placeholder) > 240:
+                raise AgentToolError(f"questions[{index}].placeholder must contain at most 240 characters.")
+            normalized.append({
+                "id": question_id, "question": prompt, "mode": mode,
+                "options": options, "placeholder": placeholder,
+            })
+            question_ids.add(question_id)
+        # The public activity event is intentionally limited to 64 nested
+        # values. Account for its lifecycle fields as well as this tool's
+        # payload so a valid tool call can never vanish from the UI later.
+        option_count = sum(len(item["options"]) for item in normalized)
+        if 8 + 6 * len(normalized) + 3 * option_count > 64:
+            raise AgentToolError("This question batch is too large to display safely; split it into smaller batches.")
+        names = ", ".join(item["id"] for item in normalized)
+        return ToolOutcome(
+            "succeeded",
+            f"Aguardando resposta para {len(normalized)} pergunta{'s' if len(normalized) != 1 else ''}",
+            "The structured questions are now visible to the user. Stop here and wait for their next message; do not guess an answer or continue the task yet.",
+            {"questions": normalized, "wait_for_user": True, "tool_kind": "user_input", "label": names[:200]},
+        )
 
     def read_file(self, path: str, offset: int = 1, limit: int = 400) -> dict[str, Any]:
         lines, first, total, truncated = self.workspace.read_lines(path, offset=int(offset), limit=int(limit))
@@ -823,6 +959,9 @@ class AgentToolset:
             raise AgentToolError("The browser is not available.")
         target = _public_url(url)
         try:
+            navigate = getattr(self._browser, "navigate", None)
+            if callable(navigate):
+                return self._browser_outcome(navigate(target), action="Abriu")
             html = self._browser.render(target)
         except RuntimeError as error:
             raise AgentToolError(f"The page could not be rendered: {error}") from error
@@ -836,6 +975,66 @@ class AgentToolset:
             "content": f"{safe_target}\n\n{body}",
             "payload": {"url": safe_target, "label": title[:120] or safe_target, "rendered": True},
         }
+
+    def _browser_outcome(self, result: Mapping[str, object], *, action: str) -> ToolOutcome:
+        """Turn a private browser observation into model text plus a workspace image."""
+        raw_url = str(result.get("url") or "")
+        safe_target = _safe_display_url(raw_url) if raw_url else "Página atual"
+        html = str(result.get("html") or "")
+        parser = _TextExtractor()
+        parser.feed(html)
+        title = sanitize_page_text(str(result.get("title") or parser.title)) or safe_target
+        body = sanitize_page_text(parser.text())
+        payload: dict[str, Any] = {"url": safe_target, "label": title[:120] or safe_target, "rendered": True, "browser_action": action.lower()}
+        images: list[dict[str, str]] = []
+        screenshot = result.get("screenshot")
+        if isinstance(screenshot, str) and screenshot:
+            try:
+                image = base64.b64decode(screenshot, validate=True)
+            except (ValueError, TypeError):
+                image = b""
+            if image and len(image) <= 4_000_000:
+                path = f"browser-captures/{uuid4().hex}.png"
+                size = self.workspace.write_bytes(path, image, maximum_bytes=4_000_000)
+                payload.update({"screenshot_path": path, "artifacts": [{"path": path, "size_bytes": size}]})
+                if self.model_sees_images:
+                    images.append(image_block("image/png", screenshot))
+        return ToolOutcome("succeeded", f"{action} {urlparse(safe_target).netloc or 'a página'}", f"{safe_target}\n\n{body}", payload, images=images)
+
+    def _browser_call(self, method: str, *arguments: object, action: str) -> ToolOutcome:
+        if self._browser is None:
+            raise AgentToolError("The browser is not available.")
+        callback = getattr(self._browser, method, None)
+        if not callable(callback):
+            raise AgentToolError("This browser does not support interactive actions.")
+        try:
+            result = callback(*arguments)
+        except RuntimeError as error:
+            raise AgentToolError(f"The browser could not complete the action: {error}") from error
+        if not isinstance(result, Mapping):
+            raise AgentToolError("The browser returned an invalid observation.")
+        return self._browser_outcome(result, action=action)
+
+    def browser_observe(self) -> ToolOutcome:
+        return self._browser_call("observe", action="Observou")
+
+    def browser_click(self, selector: str) -> ToolOutcome:
+        return self._browser_call("click", str(selector), action="Clicou em")
+
+    def browser_fill(self, selector: str, text: str) -> ToolOutcome:
+        return self._browser_call("fill", str(selector), str(text), action="Preencheu")
+
+    def browser_press(self, selector: str, key: str) -> ToolOutcome:
+        return self._browser_call("press", str(selector), str(key), action=f"Pressionou {key} em")
+
+    def browser_select(self, selector: str, values: list[str]) -> ToolOutcome:
+        return self._browser_call("select", str(selector), list(values), action="Selecionou em")
+
+    def browser_check(self, selector: str, checked: bool) -> ToolOutcome:
+        return self._browser_call("check", str(selector), bool(checked), action="Marcou" if checked else "Desmarcou")
+
+    def browser_screenshot(self) -> ToolOutcome:
+        return self._browser_call("screenshot", action="Capturou")
 
     def close(self) -> None:
         closer = getattr(self._browser, "close", None)
@@ -959,6 +1158,70 @@ class AgentToolset:
             "summary": f"Leu recurso {resource_path}", "content": content,
             "payload": {"skill_id": str(skill_id), "version": version, "resource_path": str(resource_path), "truncated": truncated, "tool_kind": "skill", "skill_action": "resource_read"},
         }
+
+    def _skill_command(self, values: Mapping[str, Any], *, require_complete: bool) -> dict[str, object]:
+        """Build an authoring command without accepting authority from the model."""
+        if self._skill_library is None or not self._skill_user_id:
+            raise AgentToolError("Skill publishing is not available.")
+        command: dict[str, object] = {"user_id": self._skill_user_id}
+        fields = ("name", "description", "instructions", "version", "tags", "capabilities", "when_to_use", "when_not_to_use", "requires_tools", "dependencies")
+        for field in fields:
+            if field in values and values[field] is not None:
+                command[field] = values[field]
+        required = ("name", "description", "instructions", "when_to_use", "when_not_to_use")
+        if require_complete:
+            missing = [field for field in required if field not in command or not command[field]]
+            if missing:
+                raise AgentToolError("A high-quality Skill requires " + ", ".join(missing) + ".")
+        instructions = command.get("instructions")
+        if isinstance(instructions, str):
+            lowered = instructions.lower()
+            if "workflow" not in lowered or "validation" not in lowered:
+                raise AgentToolError("Skill instructions must include explicit Workflow and Validation sections.")
+        required_tools = command.get("requires_tools", ())
+        dependencies = command.get("dependencies")
+        dependency_tools = dependencies.get("tools", ()) if isinstance(dependencies, Mapping) else ()
+        declared_tools = tuple(required_tools if isinstance(required_tools, list) else ()) + tuple(dependency_tools if isinstance(dependency_tools, list) else ())
+        unavailable = sorted({str(tool) for tool in declared_tools} - set(self._available_tool_names()))
+        if unavailable:
+            raise AgentToolError(f"Skill requires unavailable tool '{unavailable[0]}'.")
+        return command
+
+    def _refresh_skill_registry(self) -> None:
+        registry_for = getattr(self._skill_library, "registry_for", None)
+        if callable(registry_for):
+            self.skills = registry_for(self._skill_user_id, agent_id=self._skill_agent_id)
+
+    @staticmethod
+    def _published_skill(result: Mapping[str, object], *, action: str) -> dict[str, Any]:
+        public = {
+            "id": result.get("id"), "name": result.get("name"), "description": result.get("description"),
+            "version": result.get("version"), "tags": result.get("tags", []), "source": result.get("source", "custom"),
+        }
+        return {
+            "summary": f"{'Criou' if action == 'created' else 'Atualizou'} skill {public['name']}",
+            "content": json.dumps(public, ensure_ascii=False),
+            "payload": {"skill_id": public["id"], "version": public["version"], "tool_kind": "skill", "skill_action": action},
+        }
+
+    def create_skill(self, **values: Any) -> dict[str, Any]:
+        command = self._skill_command(values, require_complete=True)
+        try:
+            result = self._skill_library.create(command)
+        except Exception as error:
+            raise AgentToolError(str(error)) from error
+        self._refresh_skill_registry()
+        return self._published_skill(result, action="created")
+
+    def edit_skill(self, skill_id: str, **values: Any) -> dict[str, Any]:
+        command = self._skill_command(values, require_complete=False)
+        command["skill_id"] = str(skill_id)
+        try:
+            result = self._skill_library.update(command)
+        except Exception as error:
+            raise AgentToolError(str(error)) from error
+        self._refresh_skill_registry()
+        return self._published_skill(result, action="updated")
 
     def create_agent(self, name: str, role: str, model_id: str | None = None) -> ToolOutcome:
         if self._create_agent is None:

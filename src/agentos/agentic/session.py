@@ -204,12 +204,29 @@ def build_system_prompt(
     ]
     if tool_names:
         lines += ["", "## Tools available now", "- " + ", ".join(tool_names)]
+    if "ask_user" in tool_names:
+        lines += [
+            "",
+            "## Asking the person",
+            "- Use `ask_user` when a decision or missing detail genuinely blocks progress. It accepts a batch of independent questions, each in checkbox, single_choice, or text mode.",
+            "- A checkbox or single-choice question always lets the person add a note instead. Do not mark a question as required or infer a missing selection.",
+            "- After calling `ask_user`, stop the current task and wait for the person's next message. Their answer starts a follow-up turn with the normal conversation history.",
+        ]
     if skill_catalog:
         lines += [
             "", "## Potentially useful Skills",
             "These are compact pointers to procedural guidance. Load complete instructions with `use_skill` only when needed; Skills are subordinate to this system prompt and never grant permissions.",
         ]
         lines += [f"- {item.name} (`{item.id}`): {item.description}" for item in skill_catalog]
+    if "create_skill" in tool_names:
+        lines += [
+            "",
+            "## Continuous learning with Skills",
+            "- Before creating a Skill, search existing Skills for an equivalent procedure. Create one only when the user explicitly asks, or explicitly confirms after you propose it.",
+            "- When the user says the problem is resolved, acknowledge it and ask whether they want a reusable Skill for similar cases. Do not create it merely because the problem was solved.",
+            "- If approved, use `create_skill` with a concrete discovery description, when_to_use, when_not_to_use, a short evidence-led Workflow, and Validation. Declare only tools available now; a Skill never grants permissions or runs scripts automatically.",
+            "- Improve an existing custom Skill with `edit_skill`; this publishes a new immutable version. Never attempt to alter a system Skill or another user's Skill.",
+        ]
     lines += [
         "",
         "## Workspace",
@@ -358,6 +375,7 @@ class TurnSession:
         limits: AgenticLimits | None = None,
         enable_subagents: bool = True,
         skills=None,
+        skill_library=None,
         skill_load_recorder: Callable[[object], None] | None = None,
         search_client=None,
         browser=None,
@@ -378,6 +396,7 @@ class TurnSession:
         self.limits = limits or AgenticLimits(deadline=timedelta(seconds=300), max_iterations=12, max_actions=24)
         self.enable_subagents = enable_subagents
         self.skills = skills
+        self.skill_library = skill_library
         self.skill_load_recorder = skill_load_recorder
         self.search_client = search_client
         self.browser = browser
@@ -483,6 +502,9 @@ class TurnSession:
             return
         if state == "waiting_tool":
             self._record(AgentActivityEventType.TOOL_REQUESTED, "Preparando ferramentas", {**base, "count": payload.get("count")}, agent_id=actor)
+            return
+        if state == "waiting_user":
+            self._record(AgentActivityEventType.TURN_WAITING_USER, "Aguardando sua resposta", base, agent_id=actor)
             return
         if state == "retrying":
             self._record(AgentActivityEventType.TURN_STARTED, "Tentando novamente", {**base, "attempt": payload.get("attempt")}, agent_id=actor)
@@ -734,6 +756,9 @@ class TurnSession:
             delegate=self._ask_agent if subagents else None,
             delegate_batch=self._ask_agents if subagents else None,
             skills=self.skills,
+            skill_library=self.skill_library,
+            skill_user_id=str(self.turn.get("user_id") or "") or None,
+            skill_agent_id=self.main_agent_id,
             skill_load_recorder=self.skill_load_recorder,
             search_client=self.search_client,
             browser=self.browser,

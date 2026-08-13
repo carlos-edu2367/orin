@@ -124,3 +124,24 @@ def test_reopened_conversation_keeps_text_deltas_interleaved_with_activity() -> 
         ("filesystem.read", "Leu o arquivo config.txt"),
         ("assistant.delta", "Entendi; vou aplicar a correção."),
     ]
+
+
+def test_a_follow_up_message_closes_a_waiting_user_turn() -> None:
+    engine = create_engine("sqlite://", future=True)
+    metadata.create_all(engine)
+    store = PostgresChatStore(engine)
+    first = store.create(
+        user_id="user-1", message="Configure isto.", provider="openrouter", model_id="model-a", idempotency_key="request-1",
+    )
+    waiting = store.claim(first.turn_id)
+    assert waiting is not None
+    store.finish(waiting, code="WAITING_USER")
+
+    follow_up = store.create(
+        user_id="user-1", conversation_id=first.conversation_id, message="Use a opção segura.", provider="", model_id="", idempotency_key="request-2",
+    )
+    snapshot = store.get(first.conversation_id, "user-1")
+
+    assert follow_up.state == "queued"
+    assert snapshot["turns"][0]["state"] == "completed"
+    assert snapshot["state"] == "queued"

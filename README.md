@@ -29,6 +29,27 @@ Known limitations before using it beyond a local development machine:
 - Playwright-based visual checks are optional and are skipped when the browser
   dependency is unavailable.
 
+## Browser for agents
+
+Orin can open public HTTPS pages in an isolated Chromium process for each
+agent turn. The browser can observe a page, click non-submit controls, fill
+non-password fields, select options, toggle controls, use safe navigation
+keys and capture the current screen. Each observation creates a private PNG
+in the conversation workspace; the chat renders it as a browser activity
+card and the file endpoint applies the usual conversation authorization.
+
+`scripts/run-local.ps1` provisions Chromium automatically. To provision it
+separately after installing dependencies, run:
+
+```powershell
+.\scripts\install-browser.ps1
+```
+
+Form submission, password entry, arbitrary JavaScript, cookies, clipboard,
+camera and geolocation are intentionally unavailable. They require an
+explicit future approval/profile flow rather than a model-controlled tool
+argument.
+
 ## Requirements
 
 - Python 3.13+

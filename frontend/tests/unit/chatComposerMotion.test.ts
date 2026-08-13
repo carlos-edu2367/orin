@@ -2,6 +2,7 @@
 
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
+import process from 'node:process'
 import { describe, expect, it } from 'vitest'
 
 const stylesheet = readFileSync(resolve(process.cwd(), 'src/styles/agentos.css'), 'utf8')
@@ -15,6 +16,12 @@ describe('chat composer motion', () => {
     expect(stylesheet).toMatch(/\.chat \{[\s\S]*height: 100dvh;[\s\S]*overflow: hidden;/)
     expect(stylesheet).toMatch(/\.workspace-navigation \{[\s\S]*overflow-y: auto;/)
     expect(stylesheet).toMatch(/\.chat__scroll \{[^}]*height: 100%;[^}]*overflow-y: auto;/)
+  })
+
+  it('keeps sidebar actions outside the scrollable navigation list', () => {
+    expect(stylesheet).toMatch(/\.project-navigation \{[^}]*display: flex;[^}]*flex-direction: column;/)
+    expect(stylesheet).toMatch(/\.project-navigation__scroll \{[^}]*flex: 1;[^}]*overflow-y: auto;/)
+    expect(stylesheet).toMatch(/\.project-navigation__actions \{[^}]*border-top: 1px solid var\(--line\)/)
   })
 
   it('uses the full bottom of the chat column as the composer reveal target', () => {

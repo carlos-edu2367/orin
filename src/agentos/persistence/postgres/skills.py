@@ -102,7 +102,7 @@ class PostgresSkillLibraryService:
         return {**self._summary(metadata), "instructions": loaded.instructions, "dependencies": [item.ref.id for item in loaded.dependencies], "requires_tools": list(loaded.skill.required_tools), "versions": sorted(set(versions), reverse=True)}
 
     def create(self, command: Mapping[str, object]) -> dict[str, object]:
-        skill = Skill(id=_id(str(command["name"])), name=str(command["name"]), version=str(command.get("version") or "1.0.0"), description=str(command["description"]), instructions=str(command["instructions"]), tags=tuple(str(value) for value in command.get("tags") or ()), scope=SkillScope.USER, source=SkillSource.CUSTOM)
+        skill = self._custom_skill(command, skill_id=_id(str(command["name"])))
         try:
             self._insert(skill, user_id=str(command["user_id"]))
         except IntegrityError as error:
@@ -114,9 +114,39 @@ class PostgresSkillLibraryService:
         prior = self.registry_for(user_id).resolve(skill_id, scope=SkillScope.USER)
         core = prior.version.split("-", 1)[0].split("+", 1)[0]
         version = str(command.get("version") or f"{core.rsplit('.', 1)[0]}.{int(core.rsplit('.', 1)[1]) + 1}")
-        skill = Skill(id=prior.id, name=str(command.get("name") or prior.name), version=version, description=str(command.get("description") or prior.description), instructions=str(command.get("instructions") or prior.instructions), tags=tuple(str(value) for value in command.get("tags") or prior.tags), scope=SkillScope.USER, source=SkillSource.CUSTOM, dependencies=prior.dependencies, requires_tools=prior.requires_tools)
+        values: dict[str, object] = {
+            "name": command.get("name", prior.name), "version": version,
+            "description": command.get("description", prior.description),
+            "instructions": command.get("instructions", prior.instructions),
+            "tags": command.get("tags", prior.tags), "capabilities": command.get("capabilities", prior.capabilities),
+            "when_to_use": command.get("when_to_use", prior.when_to_use),
+            "when_not_to_use": command.get("when_not_to_use", prior.when_not_to_use),
+            "requires_tools": command.get("requires_tools", prior.requires_tools),
+            "dependencies": command.get("dependencies", {"skills": prior.dependencies.skills, "tools": prior.dependencies.tools}),
+        }
+        skill = self._custom_skill(values, skill_id=prior.id)
         self._insert(skill, user_id=user_id)
         return self.get({"user_id": user_id, "skill_id": skill_id})
+
+    @staticmethod
+    def _custom_skill(command: Mapping[str, object], *, skill_id: str) -> Skill:
+        dependencies = command.get("dependencies") or {}
+        if not isinstance(dependencies, Mapping):
+            raise ValueError("dependencies must be an object")
+        return Skill(
+            id=skill_id, name=str(command["name"]), version=str(command.get("version") or "1.0.0"),
+            description=str(command["description"]), instructions=str(command["instructions"]),
+            tags=tuple(str(value) for value in command.get("tags") or ()),
+            capabilities=tuple(str(value) for value in command.get("capabilities") or ()),
+            when_to_use=tuple(str(value) for value in command.get("when_to_use") or ()),
+            when_not_to_use=tuple(str(value) for value in command.get("when_not_to_use") or ()),
+            dependencies=SkillDependencies(
+                tuple(str(value) for value in dependencies.get("skills") or ()),
+                tuple(str(value) for value in dependencies.get("tools") or ()),
+            ),
+            requires_tools=tuple(str(value) for value in command.get("requires_tools") or ()),
+            scope=SkillScope.USER, source=SkillSource.CUSTOM,
+        )
 
     def agent_skills(self, query: Mapping[str, object]) -> dict[str, object]:
         user_id, agent_id = str(query["user_id"]), str(query["agent_id"])

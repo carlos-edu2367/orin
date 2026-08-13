@@ -116,6 +116,19 @@ class ConversationWorkspace:
         target.write_bytes(payload)
         return len(payload)
 
+    def write_bytes(self, path: str, content: bytes, *, maximum_bytes: int = MAX_WRITE_BYTES) -> int:
+        """Write a bounded binary artifact without bypassing workspace containment."""
+        if not isinstance(content, bytes):
+            raise WorkspaceError("content must be bytes")
+        if not isinstance(maximum_bytes, int) or maximum_bytes < 0 or len(content) > maximum_bytes:
+            raise WorkspaceError("content exceeds the workspace write limit")
+        target = self.resolve(path)
+        if target == self.root:
+            raise WorkspaceError("path must name a file")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+        return len(content)
+
     def append_text(self, path: str, content: str) -> tuple[int, int]:
         """Add to the end of a file, creating it when absent.
 

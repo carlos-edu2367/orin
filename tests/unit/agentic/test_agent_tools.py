@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import subprocess
 import time
+import base64
 
 import httpx
 import pytest
@@ -10,6 +11,7 @@ import pytest
 from agentos.agentic import agent_tools
 from agentos.agentic.agent_tools import AgentToolError, AgentToolset, ToolOutcome, parse_arguments
 from agentos.agentic.workspace import ConversationWorkspace, WorkspaceError
+from agentos.skills.service import SkillLibraryService
 
 
 @pytest.fixture()
@@ -29,6 +31,80 @@ def test_web_search_is_absent_without_a_configured_client(toolset: AgentToolset)
     assert "web_search" not in [item.name for item in toolset.definitions()]
 
 
+def test_ask_user_accepts_a_mixed_batch_and_refuses_invalid_choices(toolset: AgentToolset) -> None:
+    outcome = toolset.invoke("ask_user", {"questions": [
+        {"id": "features", "question": "Quais recursos?", "mode": "checkbox", "options": [{"id": "search", "label": "Busca"}]},
+        {"id": "tone", "question": "Qual tom?", "mode": "single_choice", "options": [{"id": "formal", "label": "Formal"}, {"id": "casual", "label": "Casual"}]},
+        {"id": "notes", "question": "Algo mais?", "mode": "text"},
+    ]})
+
+    assert outcome.status == "succeeded"
+    assert outcome.payload["wait_for_user"] is True
+    assert [item["mode"] for item in outcome.payload["questions"]] == ["checkbox", "single_choice", "text"]
+    assert toolset.invoke("ask_user", {"questions": [{"id": "bad", "question": "Escolha", "mode": "single_choice", "options": [{"id": "only", "label": "Apenas uma"}]}]}).status == "failed"
+
+
+def test_agent_can_publish_and_immediately_use_a_versioned_user_skill(tmp_path: Path) -> None:
+    library = SkillLibraryService(builtins=())
+    tools = AgentToolset(
+        ConversationWorkspace(tmp_path, "chat_skills"), skills=library._registry("owner-1"),
+        skill_library=library, skill_user_id="owner-1", skill_agent_id="agent-1",
+    )
+
+    outcome = tools.invoke("create_skill", {
+        "name": "Endpoint Recovery", "description": "Recover a failing HTTP endpoint using a repeatable diagnosis.",
+        "instructions": "## Workflow\n\n1. Reproduce the failure.\n\n## Validation\n\nRun the focused check.",
+        "tags": ["http", "debugging"], "capabilities": ["diagnose_endpoint"],
+        "when_to_use": ["an endpoint fails after a change"],
+        "when_not_to_use": ["a request is only for style review"],
+        "requires_tools": ["read_file"], "user_id": "attacker-should-not-control-this",
+    })
+
+    assert outcome.status == "succeeded"
+    assert outcome.payload["skill_id"] == "endpoint-recovery"
+    detail = library.get({"user_id": "owner-1", "skill_id": "endpoint-recovery"})
+    assert detail["instructions"].startswith("## Workflow")
+    assert detail["versions"] == ["1.0.0"]
+    assert tools.invoke("use_skill", {"skill_id": "endpoint-recovery"}).status == "succeeded"
+    assert library.list({"user_id": "attacker-should-not-control-this", "query": "endpoint"})["items"] == []
+
+
+def test_agent_skill_publishing_requires_validation_and_available_tools(tmp_path: Path) -> None:
+    library = SkillLibraryService(builtins=())
+    tools = AgentToolset(
+        ConversationWorkspace(tmp_path, "chat_skills"), skills=library._registry("owner-1"),
+        skill_library=library, skill_user_id="owner-1",
+    )
+    base = {
+        "name": "Safe Review", "description": "Review changes safely.",
+        "instructions": "## Workflow\n\n1. Inspect the change.",
+        "when_to_use": ["before a release"], "when_not_to_use": ["for unrelated research"],
+    }
+
+    assert tools.invoke("create_skill", base).status == "failed"
+    base["instructions"] += "\n\n## Validation\n\n1. Run a focused test."
+    base["requires_tools"] = ["tool-that-does-not-exist"]
+    assert tools.invoke("create_skill", base).status == "failed"
+
+
+def test_agent_edits_only_its_custom_skill_as_a_new_version(tmp_path: Path) -> None:
+    library = SkillLibraryService(builtins=())
+    library.create({
+        "user_id": "owner-1", "name": "Safe Review", "description": "Review changes safely.",
+        "instructions": "## Workflow\n\n1. Inspect.\n\n## Validation\n\n1. Test.",
+    })
+    tools = AgentToolset(
+        ConversationWorkspace(tmp_path, "chat_skills"), skills=library._registry("owner-1"),
+        skill_library=library, skill_user_id="owner-1",
+    )
+
+    outcome = tools.invoke("edit_skill", {"skill_id": "safe-review", "description": "Review release changes safely."})
+
+    assert outcome.status == "succeeded"
+    assert outcome.payload["version"] == "1.0.1"
+    assert library.get({"user_id": "owner-1", "skill_id": "safe-review"})["description"] == "Review release changes safely."
+
+
 def test_browse_page_is_absent_without_a_browser(toolset: AgentToolset) -> None:
     assert "browse_page" not in [item.name for item in toolset.definitions()]
 
@@ -46,6 +122,31 @@ def test_browse_page_returns_the_rendered_text(tmp_path) -> None:
     assert "hello" in outcome.content
     assert "x()" not in outcome.content
     assert outcome.payload["label"] == "Rendered"
+
+
+def test_interactive_browser_tools_save_a_private_visual_capture(tmp_path: Path) -> None:
+    screenshot = base64.b64encode(b"not-a-real-png-but-a-bounded-private-capture").decode()
+
+    class Browser:
+        def navigate(self, url):
+            return {"url": url, "title": "Example", "html": "<html><body><button id='next'>Next</button></body></html>", "screenshot": screenshot}
+
+        def click(self, selector):
+            assert selector == "#next"
+            return {"url": "https://example.test/next", "title": "Next", "html": "<html><body>next page</body></html>", "screenshot": screenshot}
+
+    workspace = ConversationWorkspace(tmp_path, "chat_browser_interactive")
+    tools = AgentToolset(workspace, browser=Browser())
+
+    assert {"browse_page", "browser_click", "browser_fill", "browser_screenshot"} <= {item.name for item in tools.definitions()}
+    opened = tools.invoke("browse_page", {"url": "https://example.test"})
+    clicked = tools.invoke("browser_click", {"selector": "#next"})
+
+    assert opened.status == clicked.status == "succeeded"
+    path = str(clicked.payload["screenshot_path"])
+    assert path.startswith("browser-captures/")
+    assert workspace.resolve(path).read_bytes().startswith(b"not-a-real")
+    assert clicked.payload["artifacts"] == [{"path": path, "size_bytes": workspace.resolve(path).stat().st_size}]
 
 
 def test_browse_page_refuses_a_private_address(tmp_path) -> None:

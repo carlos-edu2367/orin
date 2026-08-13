@@ -246,6 +246,13 @@ class AgenticTurnRuntime:
                 for result in results:
                     messages.extend(self._tool_result_messages(turn, result))
                 self._age_tool_results(messages, keep_recent=len(results))
+                # ``ask_user`` deliberately ends this provider run.  A worker
+                # must never stay blocked while a person considers a form, and
+                # the next authenticated chat message starts the follow-up turn.
+                if any(bool(result.get("wait_for_user")) for result in results):
+                    self._life(turn, "waiting_user")
+                    self.store.finish(turn, code="WAITING_USER")
+                    return AgenticRunResult("waiting_user", iteration, action_count)
                 self._life(turn, "running")
                 continue
             if (finish is not None or text_parts) and not (final_iteration and not text_parts):
@@ -533,7 +540,11 @@ class AgenticTurnRuntime:
                 summary=outcome.summary, error_code=outcome.error_code, tool_payload=dict(outcome.payload),
                 tool_arguments=dict(arguments),
             )
-            results.append({"id": call_id, "name": name, "status": outcome.status, "content": outcome.content, "images": list(outcome.images or [])})
+            results.append({
+                "id": call_id, "name": name, "status": outcome.status,
+                "content": outcome.content, "images": list(outcome.images or []),
+                "wait_for_user": bool(outcome.payload.get("wait_for_user")),
+            })
         return results
 
     def _load(self, turn_id: str) -> dict[str, object]:

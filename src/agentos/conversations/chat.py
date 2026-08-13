@@ -207,7 +207,7 @@ class PostgresChatStore:
         # Stable across turns so the conversation-level graph keeps one root node.
         return f"agent:{turn['conversation_id']}:main"
 
-    def create(self, *, user_id: str, message: str, provider: str, model_id: str, idempotency_key: str, conversation_id: str | None = None, project_id: str | None = None, attachments: Sequence[Mapping[str, object]] = (), new_conversation_id: str | None = None) -> ChatReceipt:
+    def create(self, *, user_id: str, message: str, provider: str, model_id: str, idempotency_key: str, conversation_id: str | None = None, project_id: str | None = None, attachments: Sequence[Mapping[str, object]] = (), new_conversation_id: str | None = None, scheduled_by_schedule_id: str | None = None) -> ChatReceipt:
         message = message.strip()
         attachments = list(attachments)
         if len(message) > 16000: raise ValueError("message must be a bounded non-blank string")
@@ -232,6 +232,23 @@ class PostgresChatStore:
                 if row is None: raise ApplicationNotFoundError(conversation_id)
                 provider, model_id = row["provider"], row["model_id"]
                 sequence = int(c.execute(select(func.max(conversation_messages.c.sequence)).where(conversation_messages.c.conversation_id == conversation_id)).scalar() or 0) + 1
+                # A normal follow-up message is also a valid answer to the
+                # last structured prompt. Close it before queuing the next
+                # turn so reloading the chat never presents stale forms again.
+                waiting = c.execute(select(conversation_turns.c.assistant_message_id).where(
+                    conversation_turns.c.conversation_id == conversation_id,
+                    conversation_turns.c.user_id == user_id,
+                    conversation_turns.c.state == "waiting_user",
+                )).scalars().all()
+                if waiting:
+                    c.execute(update(conversation_turns).where(
+                        conversation_turns.c.conversation_id == conversation_id,
+                        conversation_turns.c.user_id == user_id,
+                        conversation_turns.c.state == "waiting_user",
+                    ).values(state="completed", finished_at=now, updated_at=now))
+                    c.execute(update(conversation_messages).where(
+                        conversation_messages.c.message_id.in_(waiting)
+                    ).values(status="completed", updated_at=now))
             turn_id, user_message_id, assistant_message_id = _id("turn"), _id("msg"), _id("msg")
             execution_id = self.execution_id_for(turn_id)
             c.execute(insert(conversation_messages), [
@@ -246,12 +263,12 @@ class PostgresChatStore:
                     "media_type": str(item["media_type"]), "kind": str(item["kind"]),
                     "bytes": int(item["bytes"]), "created_at": now,
                 } for item in attachments])
-            c.execute(insert(conversation_turns).values(turn_id=turn_id, conversation_id=conversation_id, user_id=user_id, execution_id=execution_id, user_message_id=user_message_id, assistant_message_id=assistant_message_id, provider=provider, model_id=model_id, state="queued", idempotency_key=idempotency_key, created_at=now, updated_at=now))
+            c.execute(insert(conversation_turns).values(turn_id=turn_id, conversation_id=conversation_id, user_id=user_id, execution_id=execution_id, user_message_id=user_message_id, assistant_message_id=assistant_message_id, provider=provider, model_id=model_id, state="queued", idempotency_key=idempotency_key, scheduled_by_schedule_id=scheduled_by_schedule_id, created_at=now, updated_at=now))
             c.execute(insert(conversation_dispatches).values(turn_id=turn_id, state="pending", attempts=0, queued_at=now, updated_at=now))
             c.execute(insert(conversation_events).values(conversation_id=conversation_id, user_id=user_id, event_type="turn.queued", message_id=assistant_message_id, payload={"state": "queued"}, created_at=now))
             c.execute(update(conversations).where(conversations.c.conversation_id == conversation_id).values(state="queued", updated_at=now))
         receipt = ChatReceipt(conversation_id, _title(title_source), turn_id, assistant_message_id, "queued")
-        self._activity({"conversation_id": conversation_id, "turn_id": turn_id, "execution_id": execution_id, "user_id": user_id}, AgentActivityEventType.TURN_STARTED, "Turn queued")
+        self._activity({"conversation_id": conversation_id, "turn_id": turn_id, "execution_id": execution_id, "user_id": user_id}, AgentActivityEventType.TURN_STARTED, "Execução agendada na fila" if scheduled_by_schedule_id else "Turn queued", {"scheduled_by_schedule_id": scheduled_by_schedule_id} if scheduled_by_schedule_id else None)
         return receipt
 
     def list(self, user_id: str) -> dict[str, object]:
@@ -291,7 +308,7 @@ class PostgresChatStore:
                 activity_cursor = cursor
                 if len(page.events) < 500:
                     break
-        return {"conversation_id": conv["conversation_id"], "title": conv["title"], "state": conv["state"], "provider": conv["provider"], "model_id": conv["model_id"], "project_id": conv["project_id"], "messages": [{"message_id": m["message_id"], "role": m["role"], "content": m["content"], "status": m["status"], "retryable": bool(m["retryable"]), "attachments": attachments_by_message.get(str(m["message_id"]), [])} for m in messages], "turns": [{"turn_id": t["turn_id"], "state": t["state"], "created_at": t["created_at"].isoformat(), "started_at": t["started_at"].isoformat() if t["started_at"] else None, "finished_at": t["finished_at"].isoformat() if t["finished_at"] else None} for t in turns], "activities": activities, "activity_cursor": activity_cursor}
+        return {"conversation_id": conv["conversation_id"], "title": conv["title"], "state": conv["state"], "provider": conv["provider"], "model_id": conv["model_id"], "project_id": conv["project_id"], "messages": [{"message_id": m["message_id"], "role": m["role"], "content": m["content"], "status": m["status"], "retryable": bool(m["retryable"]), "attachments": attachments_by_message.get(str(m["message_id"]), [])} for m in messages], "turns": [{"turn_id": t["turn_id"], "state": t["state"], "created_at": t["created_at"].isoformat(), "started_at": t["started_at"].isoformat() if t["started_at"] else None, "finished_at": t["finished_at"].isoformat() if t["finished_at"] else None, "scheduled_by_schedule_id": t["scheduled_by_schedule_id"]} for t in turns], "activities": activities, "activity_cursor": activity_cursor}
 
     @staticmethod
     def _public_activity(event: AgentActivityEvent, cursor: str | None = None) -> dict[str, object]:
@@ -420,13 +437,13 @@ class PostgresChatStore:
         now = datetime.now(UTC)
         # A cancelled turn is a distinct terminal state, not a failure: the UI
         # must not offer "retry" for something the user chose to stop.
-        state = "cancelled" if code == "TURN_CANCELLED" else ("failed" if failed else "completed")
+        state = "cancelled" if code == "TURN_CANCELLED" else ("waiting_user" if code == "WAITING_USER" else ("failed" if failed else "completed"))
         retryable = failed and state != "cancelled"
         with self._engine.begin() as c:
             # A turn only finishes once. Without this guard a late projection
             # error in the worker could rewrite an answered turn as failed.
             current = c.execute(select(conversation_turns.c.state).where(conversation_turns.c.turn_id == turn["turn_id"])).scalar()
-            if str(current) in ("completed", "failed", "cancelled"):
+            if str(current) in ("completed", "failed", "cancelled", "waiting_user"):
                 return
             c.execute(update(conversation_dispatches).where(conversation_dispatches.c.turn_id == turn["turn_id"]).values(state=state, last_error=code, updated_at=now))
             c.execute(update(conversation_turns).where(conversation_turns.c.turn_id == turn["turn_id"]).values(state=state, finished_at=now, updated_at=now))
@@ -434,9 +451,10 @@ class PostgresChatStore:
             c.execute(update(conversations).where(conversations.c.conversation_id == turn["conversation_id"]).values(state=state, updated_at=now))
             c.execute(insert(conversation_events).values(conversation_id=turn["conversation_id"], user_id=turn["user_id"], event_type=f"turn.{state}", message_id=turn["assistant_message_id"], payload={"state": state, "retryable": retryable}, created_at=now))
         summaries = {"cancelled": "Execução cancelada", "failed": "Não foi possível concluir", "completed": "Resposta concluída"}
+        summaries["waiting_user"] = "Aguardando sua resposta"
         self._activity(
             turn,
-            AgentActivityEventType.TURN_FAILED if failed else AgentActivityEventType.TURN_COMPLETED,
+            AgentActivityEventType.TURN_FAILED if failed else (AgentActivityEventType.TURN_WAITING_USER if state == "waiting_user" else AgentActivityEventType.TURN_COMPLETED),
             summaries[state],
             {"state": state, "retryable": retryable, "error_code": code},
         )

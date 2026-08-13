@@ -66,6 +66,21 @@ describe('conversation activity reducer', () => {
     })
   })
 
+  it('keeps a bounded private browser screenshot path and rejects traversal', () => {
+    const accepted = parseConversationActivityEvent({
+      event_id: 'browser-1', event_type: 'tool.finished', sequence: 1, summary: 'Abriu example.com',
+      payload: { tool_name: 'browse_page', tool_kind: 'browser', status: 'succeeded', screenshot_path: 'browser-captures/one.png' },
+    }, 'a.1')
+    const rejected = parseConversationActivityEvent({
+      event_id: 'browser-2', event_type: 'tool.finished', sequence: 2, summary: 'Abriu example.com',
+      payload: { tool_name: 'browse_page', tool_kind: 'browser', status: 'succeeded', screenshot_path: '../secret.png' },
+    }, 'a.2')
+
+    expect(accepted.toolKind).toBe('browser')
+    expect(accepted.screenshotPath).toBe('browser-captures/one.png')
+    expect(rejected.screenshotPath).toBeUndefined()
+  })
+
   it('marks a failed tool so the card can surface it', () => {
     const parsed = parseConversationActivityEvent({
       event_id: 'activity:turn-1:6', event_type: 'tool.finished', summary: 'run_command falhou', agent_id: 'agent:c:main',

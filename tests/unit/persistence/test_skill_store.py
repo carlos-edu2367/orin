@@ -8,12 +8,18 @@ def test_custom_skill_survives_a_new_library_service_instance() -> None:
     engine = create_engine("sqlite://")
     metadata.create_all(engine)
     first = PostgresSkillLibraryService(engine)
-    created = first.create({"user_id": "u1", "name": "Deploy Review", "description": "Review a deploy.", "version": "1.0.0", "tags": ["deploy"], "instructions": "# Workflow"})
+    created = first.create({
+        "user_id": "u1", "name": "Deploy Review", "description": "Review a deploy.", "version": "1.0.0",
+        "tags": ["deploy"], "capabilities": ["review_deploy"],
+        "when_to_use": ["before deployment"], "when_not_to_use": ["for a code-style request"],
+        "requires_tools": ["read_file"], "dependencies": {"tools": ["run_command"]}, "instructions": "# Workflow",
+    })
 
     reloaded = PostgresSkillLibraryService(engine)
     detail = reloaded.get({"user_id": "u1", "skill_id": created["id"]})
 
     assert detail["instructions"] == "# Workflow"
+    assert detail["requires_tools"] == ["run_command", "read_file"]
     assert created["id"] in [item["id"] for item in reloaded.list({"user_id": "u1", "query": "deploy", "limit": 20})["items"]]
 
 

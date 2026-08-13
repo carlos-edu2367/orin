@@ -13,6 +13,8 @@ class Skills:
 
     def create(self, command):
         assert command["user_id"] == "user-1"
+        assert command["when_to_use"] == ["a regression occurs"]
+        assert command["dependencies"]["tools"] == ["read_file"]
         return {"id": "custom-debug", "name": command["name"], "description": command["description"], "version": command["version"], "tags": command["tags"], "source": "custom", "available": True}
 
     def update(self, command):
@@ -41,7 +43,7 @@ def test_skills_api_lists_compact_metadata_and_creates_a_custom_skill() -> None:
     headers = {"Authorization": "Bearer pat", "Idempotency-Key": "skill-1"}
 
     listed = client.get("/v1/skills?query=debug&limit=20", headers=headers)
-    created = client.post("/v1/skills", headers=headers, json={"name": "Custom Debug", "description": "Debug internal failures.", "version": "1.0.0", "tags": ["debugging"], "instructions": "# Workflow"})
+    created = client.post("/v1/skills", headers=headers, json={"name": "Custom Debug", "description": "Debug internal failures.", "version": "1.0.0", "tags": ["debugging"], "when_to_use": ["a regression occurs"], "when_not_to_use": ["for style review"], "dependencies": {"tools": ["read_file"]}, "instructions": "# Workflow"})
 
     assert listed.status_code == 200
     assert set(listed.json()["items"][0]) == {"id", "name", "description", "version", "tags", "source", "available"}

@@ -111,7 +111,7 @@ class _RuntimeStore:
         # only job left here is the technical execution projection.
         target = {
             "running": "RUNNING", "waiting_tool": "WAITING_TOOL", "tool_started": "RUNNING",
-            "tool_finished": "RUNNING", "retrying": "RUNNING",
+            "tool_finished": "RUNNING", "retrying": "RUNNING", "waiting_user": "WAITING_USER",
         }.get(state)
         if target is not None:
             try:
@@ -173,6 +173,8 @@ class ChatWorker:
                     _LOGGER.exception("chat runtime cleanup for turn %s failed", turn_id)
         if result.state == "completed":
             self._project(turn, "COMPLETED", "provider_completed", result_ref=f"conversation-message:{turn['assistant_message_id']}")
+        elif result.state == "waiting_user":
+            self._project(turn, "WAITING_USER", "agent_requested_user_input")
         elif result.state == "cancelled":
             self._project(turn, "CANCELLED", "user_cancelled")
         else:
@@ -462,6 +464,7 @@ class ChatWorker:
                 cancelled=lambda current: self.store.cancel_requested(str(current["turn_id"])),
                 limits=AgenticLimits(deadline=TURN_DEADLINE, max_iterations=configured_limits["max_iterations"], max_actions=None if configured_limits["max_iterations"] is None else 24, max_context_tokens=self._max_context_tokens_for(turn)),
                 skills=skill_library.registry_for(str(turn["user_id"]), agent_id=str(self.store.main_agent_id(turn))),
+                skill_library=skill_library,
                 skill_load_recorder=lambda loaded: skill_library.record_load(
                     user_id=str(turn["user_id"]), execution_id=str(turn["execution_id"]),
                     agent_id=str(self.store.main_agent_id(turn)), loaded=loaded,

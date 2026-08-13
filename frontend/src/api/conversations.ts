@@ -24,7 +24,7 @@ export type MessageAttachment = { path: string; original_name: string; media_typ
 
 export type Conversation = { conversation_id: string; title: string; state: string; messages: ConversationMessage[]; turns: ConversationTurn[]; provider: string; model_id: string; activities: ConversationActivityEvent[]; activity_cursor: string; workspace: WorkspaceState }
 export type ConversationMessage = { message_id: string; role: 'user' | 'assistant'; content: string; status: string; retryable: boolean; attachments: MessageAttachment[] }
-export type ConversationTurn = { turn_id: string; state: string; created_at: string; started_at: string | null; finished_at: string | null }
+export type ConversationTurn = { turn_id: string; state: string; created_at: string; started_at: string | null; finished_at: string | null; scheduled_by_schedule_id: string | null }
 
 export function createConversation(client: ApiClient, input: CreateConversationInput, intent = client.createMutationIntent()): Promise<ConversationReceipt> {
   return client.request({
@@ -129,6 +129,7 @@ export function getConversationOverview(client: ApiClient, id: string): Promise<
           turn_id: string(item.turn_id), state: string(item.state), created_at: string(item.created_at),
           started_at: typeof item.started_at === 'string' ? item.started_at : null,
           finished_at: typeof item.finished_at === 'string' ? item.finished_at : null,
+          scheduled_by_schedule_id: typeof item.scheduled_by_schedule_id === 'string' ? item.scheduled_by_schedule_id : null,
         })),
         activity_count: Number(data.activity_count) || 0,
         duration_seconds: typeof data.duration_seconds === 'number' ? data.duration_seconds : null,
@@ -254,7 +255,10 @@ export function parseConversationActivityEvent(value: unknown, cursor: string): 
   assign('status', status)
   assign('label', optionalText(payload.label, 200))
   assign('path', optionalText(payload.path, 512))
+  assign('screenshotPath', optionalWorkspacePath(payload.screenshot_path))
   assign('occurredAt', optionalText(item.occurred_at, 64))
+  const questions = parseUserQuestions(payload.questions)
+  if (questions) event.questions = questions
   if (errorCode) event.errorCode = errorCode
   if (typeof payload.content === 'string' && payload.content.length <= 16_000) event.content = payload.content
   return event
@@ -266,7 +270,7 @@ export function parseConversation(value: unknown): Conversation {
   if (!Array.isArray(data.messages) || !Array.isArray(data.turns)) throw invalidResponseError()
   const activities = parseSnapshotActivities(data.activities)
   const activityCursor = data.activity_cursor === undefined ? (activities[activities.length - 1]?.cursor ?? '0') : publicId(data.activity_cursor)
-  return { conversation_id: string(data.conversation_id), title: string(data.title), state: string(data.state), provider: string(data.provider), model_id: string(data.model_id), activities, activity_cursor: activityCursor, workspace: parseWorkspaceState(data.workspace ?? {}), messages: data.messages.map((item) => { const m = item as Record<string, unknown>; const role = string(m.role); if (role !== 'user' && role !== 'assistant') throw invalidResponseError(); return { message_id: string(m.message_id), role, content: typeof m.content === 'string' ? m.content : '', status: string(m.status), retryable: m.retryable === true, attachments: parseMessageAttachments(m.attachments) } }), turns: data.turns.map((item) => { const t = item as Record<string, unknown>; return { turn_id: string(t.turn_id), state: string(t.state), created_at: string(t.created_at), started_at: typeof t.started_at === 'string' ? t.started_at : null, finished_at: typeof t.finished_at === 'string' ? t.finished_at : null } }) }
+  return { conversation_id: string(data.conversation_id), title: string(data.title), state: string(data.state), provider: string(data.provider), model_id: string(data.model_id), activities, activity_cursor: activityCursor, workspace: parseWorkspaceState(data.workspace ?? {}), messages: data.messages.map((item) => { const m = item as Record<string, unknown>; const role = string(m.role); if (role !== 'user' && role !== 'assistant') throw invalidResponseError(); return { message_id: string(m.message_id), role, content: typeof m.content === 'string' ? m.content : '', status: string(m.status), retryable: m.retryable === true, attachments: parseMessageAttachments(m.attachments) } }), turns: data.turns.map((item) => { const t = item as Record<string, unknown>; return { turn_id: string(t.turn_id), state: string(t.state), created_at: string(t.created_at), started_at: typeof t.started_at === 'string' ? t.started_at : null, finished_at: typeof t.finished_at === 'string' ? t.finished_at : null, scheduled_by_schedule_id: typeof t.scheduled_by_schedule_id === 'string' ? t.scheduled_by_schedule_id : null } }) }
 }
 
 function parseMessageAttachments(value: unknown): MessageAttachment[] {
@@ -320,6 +324,41 @@ function parseSnapshotActivities(value: unknown): ConversationActivityEvent[] {
 
 function optionalText(value: unknown, max = 255): string | undefined {
   return typeof value === 'string' && value.trim().length > 0 && value.length <= max ? value : undefined
+}
+
+function optionalWorkspacePath(value: unknown): string | undefined {
+  const path = optionalText(value, 512)
+  if (!path || path.startsWith('/') || path.includes('\\') || path.split('/').some((part) => !part || part === '.' || part === '..')) return undefined
+  return path
+}
+
+function parseUserQuestions(value: unknown): ConversationActivityEvent['questions'] | undefined {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 8) return undefined
+  const ids = new Set<string>()
+  const parsed = value.map((entry) => {
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) return null
+    const item = entry as Record<string, unknown>
+    const id = optionalText(item.id, 64)
+    const question = optionalText(item.question, 1000)
+    const mode = item.mode
+    if (!id || !question || ids.has(id) || (mode !== 'checkbox' && mode !== 'single_choice' && mode !== 'text')) return null
+    const rawOptions = Array.isArray(item.options) ? item.options : []
+    if (rawOptions.length > 12) return null
+    const optionIds = new Set<string>()
+    const options = rawOptions.map((option) => {
+      if (typeof option !== 'object' || option === null || Array.isArray(option)) return null
+      const candidate = option as Record<string, unknown>
+      const optionId = optionalText(candidate.id, 64)
+      const label = optionalText(candidate.label, 240)
+      if (!optionId || !label || optionIds.has(optionId)) return null
+      optionIds.add(optionId)
+      return { id: optionId, label }
+    })
+    if (options.some((option) => option === null) || (mode === 'text' && options.length > 0) || (mode === 'checkbox' && options.length < 1) || (mode === 'single_choice' && options.length < 2)) return null
+    ids.add(id)
+    return { id, question, mode, options: options as Array<{ id: string; label: string }>, placeholder: optionalText(item.placeholder, 240) }
+  })
+  return parsed.some((item) => item === null) ? undefined : parsed as NonNullable<ConversationActivityEvent['questions']>
 }
 
 

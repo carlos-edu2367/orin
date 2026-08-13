@@ -169,19 +169,13 @@ class ConversationBrowser:
                     pass
 
 
-def conversation_browser_for(turn: Mapping[str, object]) -> ConversationBrowser | None:
-    """Build a browser only when the optional engine is actually installed."""
-    from agentos.browser.playwright_adapter import PlaywrightBrowserAdapter
+def conversation_browser_for(turn: Mapping[str, object]) -> object | None:
+    """Build an isolated browser host only when the optional engine exists."""
+    from agentos.browser.conversation_worker import IsolatedConversationBrowser, playwright_available
 
-    if not PlaywrightBrowserAdapter.is_available():
+    if not playwright_available():
         return None
-    return ConversationBrowser(
-        PlaywrightBrowserAdapter(),
-        user_id=str(turn.get("user_id") or "user"),
-        workspace_id=str(turn.get("workspace_id") or turn.get("conversation_id") or "workspace"),
-        agent_id=str(turn.get("agent_id") or "agent"),
-        execution_id=str(turn.get("execution_id") or "execution"),
-    )
+    return IsolatedConversationBrowser()
 
 
 __all__ = ["BROWSER_TIMEOUT", "ConversationBrowser", "MemoryArtifactOutput", "conversation_browser_for"]

@@ -531,10 +531,23 @@ conversation_turns = Table(
     Column("user_message_id", String(255), nullable=False), Column("assistant_message_id", String(255), nullable=False),
     Column("provider", String(32), nullable=False), Column("model_id", String(512), nullable=False), Column("state", String(32), nullable=False),
     Column("idempotency_key", String(255), nullable=False), Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("scheduled_by_schedule_id", String(255), nullable=True),
     Column("started_at", DateTime(timezone=True)), Column("finished_at", DateTime(timezone=True)), Column("updated_at", DateTime(timezone=True), nullable=False),
     UniqueConstraint("user_id", "idempotency_key", name="uq_conversation_turn_idempotency"),
 )
 Index("ix_conversation_turns_conversation", conversation_turns.c.conversation_id, conversation_turns.c.created_at)
+Index("ix_conversation_turns_schedule", conversation_turns.c.scheduled_by_schedule_id, conversation_turns.c.created_at)
+
+scheduled_chat_tasks = Table(
+    "scheduled_chat_tasks", metadata,
+    Column("task_id", String(255), primary_key=True), Column("schedule_id", String(255), nullable=False, unique=True),
+    Column("user_id", String(255), nullable=False), Column("message", String(16000), nullable=False),
+    Column("provider", String(32), nullable=False), Column("model_id", String(512), nullable=False),
+    Column("project_id", String(255), nullable=True), Column("conversation_id", String(255), nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False), Column("updated_at", DateTime(timezone=True), nullable=False),
+    ForeignKeyConstraint(["schedule_id"], ["schedules.schedule_id"], name="fk_scheduled_chat_schedule"),
+)
+Index("ix_scheduled_chat_user", scheduled_chat_tasks.c.user_id, scheduled_chat_tasks.c.updated_at)
 
 conversation_tool_records = Table(
     "conversation_tool_records", metadata,
@@ -739,6 +752,7 @@ __all__ = [
     "dispatch_attempts",
     "schedules",
     "schedule_occurrences",
+    "scheduled_chat_tasks",
     "security_pats",
     "security_sessions",
     "security_revocations",

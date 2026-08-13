@@ -1,9 +1,9 @@
 import { motion, useReducedMotion } from 'motion/react'
 import { useEffect, useMemo, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { readBrowserSessionBootstrap, type BrowserSessionBootstrap } from '../api/browserSession'
 import { ApiClient, createBrowserApiClient } from '../api/client'
-import { createConversation, listConversations } from '../api/conversations'
+import { createConversation } from '../api/conversations'
 import { ApiError, isAuthenticationError, isCsrfAuthorizationError } from '../api/errors'
 import { PROVIDER_NAMES, listProviderModels, type ProviderModel, type ProviderName } from '../api/providers'
 import { AmbientField } from '../components/three/AmbientField'
@@ -104,11 +104,21 @@ export function Home({ client, bootstrap }: HomeProps) {
 
       <header className="home__bar">
         <Brand />
+        <Link className="ghost-button" to="/schedules">Agendar</Link>
         <CommandPalette conversations={chats} />
       </header>
 
       <aside className="workspace-navigation">
-        <WorkspaceNavigation client={apiClient} onChatsChange={setChats} />
+        <WorkspaceNavigation
+          client={apiClient}
+          onChatsChange={setChats}
+          onNewConversation={() => {
+            setMessage('')
+            resetAttachments()
+            setError(null)
+            setFocusSignal((value) => value + 1)
+          }}
+        />
       </aside>
 
       <section className="home__stage" data-testid="home-submit-state" data-submitting={submitting}>

@@ -20,4 +20,18 @@ describe('CommandPalette', () => {
     expect(dialog.parentElement).toBe(document.body)
     expect(screen.getByRole('button', { name: /Planejar a semana/ })).toBeInTheDocument()
   })
+
+  it('searches conversations beyond the compact resting list', async () => {
+    const conversations = Array.from({ length: 40 }, (_, index) => ({
+      conversation_id: `chat-${index + 1}`,
+      title: index === 39 ? 'Investigação antiga' : `Conversa ${index + 1}`,
+      state: 'completed',
+    }))
+    render(<MemoryRouter><CommandPalette conversations={conversations} /></MemoryRouter>)
+
+    await userEvent.setup().keyboard('{Control>}k{/Control}')
+    expect(screen.queryByRole('button', { name: /Investigação antiga/ })).not.toBeInTheDocument()
+    await userEvent.setup().type(screen.getByRole('textbox', { name: 'Buscar' }), 'investigação antiga')
+    expect(screen.getByRole('button', { name: /Investigação antiga/ })).toBeInTheDocument()
+  })
 })

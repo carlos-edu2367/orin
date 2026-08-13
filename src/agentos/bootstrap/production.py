@@ -26,6 +26,7 @@ from agentos.api.gateway import ApiServices, create_app
 from agentos.api.security import AuthenticationError, LoopbackSecurityService
 from agentos.conversations.chat import ChatApplication, PostgresChatStore
 from agentos.local_workspace.store import PostgresLocalWorkspaceStore
+from agentos.scheduler.scheduled_chats import ScheduledChatService
 from agentos.projects import PostgresProjectStore
 from agentos.configuration import AgentOSSettings
 from agentos.installation import orin_paths
@@ -290,6 +291,7 @@ def compose_production_services(engine: Engine, *, localhost_trust_enabled: bool
         local_workspaces=PostgresLocalWorkspaceStore(engine),
         uploads=staging,
         vision_model_settings=PostgresVisionModelSettingsStore(engine),
+        scheduled_chats=ScheduledChatService(engine),
     )
 
 

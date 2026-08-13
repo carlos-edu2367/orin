@@ -79,6 +79,7 @@ function toolGroupLabel(group: ActivityGroup): string {
     case 'filesystem': return `${plural} operações em arquivos`
     case 'terminal': return `Terminal · ${plural} comandos`
     case 'web': return `Consultou ${plural} páginas`
+    case 'browser': return `${plural} ações no navegador`
     case 'memory': return `${plural} atualizações de memória`
     default: return `${plural} ações de ${toolKindLabel(kind)}`
   }
@@ -115,6 +116,7 @@ export function toolKindLabel(toolKind: string | undefined): string {
     case 'filesystem': return 'arquivos'
     case 'terminal': return 'terminal'
     case 'web': return 'web'
+    case 'browser': return 'navegador'
     case 'memory': return 'memória'
     case 'agent': return 'agentes'
     case 'artifact': return 'artefatos'

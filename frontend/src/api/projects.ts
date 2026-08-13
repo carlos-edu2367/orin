@@ -32,6 +32,14 @@ export function createProject(client: ApiClient, input: { name: string; descript
   return client.request({ path: '/v1/projects', method: 'POST', expectedStatus: 201, intent, body: { name: input.name, description: input.description ?? null }, parse: project })
 }
 
+export function listProjects(client: ApiClient): Promise<{ items: Project[] }> {
+  return client.request({ path: '/v1/projects', parse: (value) => {
+    const data = record(value)
+    if (!Array.isArray(data.items)) throw invalidResponseError()
+    return { items: data.items.map(project) }
+  } })
+}
+
 export function createProjectConversation(client: ApiClient, projectId: string, input: { message: string; provider: string; model_id: string }, intent = client.createMutationIntent()): Promise<{ conversation_id: string }> {
   return client.request({ path: `/v1/projects/${encodeURIComponent(projectId)}/conversations`, method: 'POST', expectedStatus: 201, intent, body: { message: input.message, selection: { provider: input.provider, model_id: input.model_id } }, parse: (value) => ({ conversation_id: text(record(value).conversation_id) }) })
 }

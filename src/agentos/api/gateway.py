@@ -113,6 +113,21 @@ class CreateConversationRequest(_RequestModel):
     attachments: list[str] = Field(default_factory=list, max_length=MAX_FILES_PER_MESSAGE)
 
 
+class ScheduleRecurrenceRequest(_RequestModel):
+    kind: str = Field(pattern="^(once|hourly|daily|weekly)$")
+    fire_at: datetime | None = None
+    time_of_day: str | None = Field(default=None, max_length=5)
+    weekday: int | None = Field(default=None, ge=0, le=6)
+
+
+class CreateScheduledChatRequest(_RequestModel):
+    message: str = Field(min_length=1, max_length=16000)
+    selection: ConversationSelectionRequest
+    timezone: str = Field(min_length=1, max_length=128)
+    recurrence: ScheduleRecurrenceRequest
+    project_id: str | None = Field(default=None, min_length=1, max_length=255)
+
+
 class InspectWorkspaceFolderRequest(_RequestModel):
     path: str | None = Field(default=None, max_length=4096)
 
@@ -137,11 +152,21 @@ class SendConversationMessageRequest(_RequestModel):
     attachments: list[str] = Field(default_factory=list, max_length=MAX_FILES_PER_MESSAGE)
 
 
+class SkillDependenciesRequest(_RequestModel):
+    skills: list[str] = Field(default_factory=list, max_length=24)
+    tools: list[str] = Field(default_factory=list, max_length=24)
+
+
 class CreateSkillRequest(_RequestModel):
     name: str = Field(min_length=1, max_length=128)
     description: str = Field(min_length=1, max_length=2000)
     version: str = Field(default="1.0.0", min_length=5, max_length=64)
     tags: list[str] = Field(default_factory=list, max_length=24)
+    capabilities: list[str] = Field(default_factory=list, max_length=24)
+    when_to_use: list[str] = Field(default_factory=list, max_length=24)
+    when_not_to_use: list[str] = Field(default_factory=list, max_length=24)
+    requires_tools: list[str] = Field(default_factory=list, max_length=24)
+    dependencies: SkillDependenciesRequest = Field(default_factory=SkillDependenciesRequest)
     instructions: str = Field(min_length=1, max_length=32000)
 
 
@@ -150,6 +175,11 @@ class UpdateSkillRequest(_RequestModel):
     description: str | None = Field(default=None, min_length=1, max_length=2000)
     version: str | None = Field(default=None, min_length=5, max_length=64)
     tags: list[str] | None = Field(default=None, max_length=24)
+    capabilities: list[str] | None = Field(default=None, max_length=24)
+    when_to_use: list[str] | None = Field(default=None, max_length=24)
+    when_not_to_use: list[str] | None = Field(default=None, max_length=24)
+    requires_tools: list[str] | None = Field(default=None, max_length=24)
+    dependencies: SkillDependenciesRequest | None = None
     instructions: str | None = Field(default=None, min_length=1, max_length=32000)
 
 
@@ -197,6 +227,7 @@ class ApiServices:
         local_workspaces: object | None = None,
         uploads: object | None = None,
         vision_model_settings: object | None = None,
+        scheduled_chats: object | None = None,
     ) -> None:
         self.security = security or InMemorySecurityService()
         self.execution_application = execution_application
@@ -214,6 +245,7 @@ class ApiServices:
         self.workspace_root = Path(workspace_root) if workspace_root is not None else orin_paths().workspaces
         self.uploads = uploads
         self.vision_model_settings = vision_model_settings
+        self.scheduled_chats = scheduled_chats
 
 
 def create_app(services: ApiServices) -> FastAPI:
@@ -406,6 +438,39 @@ def create_app(services: ApiServices) -> FastAPI:
         principal = principal_for(request)
         services.security.authorize(principal, action="conversation.list", resource_id=None, purpose="conversation.read")
         return JSONResponse(_jsonable(require_port(services.conversation_application).list(principal.user_id)))  # type: ignore[union-attr]
+
+    @app.post("/v1/schedules", status_code=201)
+    async def create_scheduled_chat(payload: CreateScheduledChatRequest, request: Request) -> JSONResponse:
+        from agentos.scheduler.scheduled_chats import ScheduledChatInput
+        principal = principal_for(request, mutable=True)
+        services.security.check_rate_limit(principal, action="schedule.create", origin=request.headers.get("origin"))
+        services.security.authorize(principal, action="schedule.create", resource_id=payload.project_id, purpose="schedule.create")
+        provider = _provider_name(payload.selection.provider)
+        result = require_port(services.scheduled_chats).create(  # type: ignore[union-attr]
+            principal.user_id,
+            ScheduledChatInput(
+                message=payload.message, provider=provider, model_id=payload.selection.model_id,
+                timezone=payload.timezone, recurrence=payload.recurrence.kind,
+                fire_at=payload.recurrence.fire_at, time_of_day=payload.recurrence.time_of_day,
+                weekday=payload.recurrence.weekday, project_id=payload.project_id,
+            ),
+            idempotency_key=_idempotency(request),
+        )
+        return JSONResponse(_jsonable(result), status_code=201)
+
+    @app.get("/v1/schedules")
+    async def list_scheduled_chats(request: Request) -> JSONResponse:
+        principal = principal_for(request)
+        services.security.authorize(principal, action="schedule.list", resource_id=None, purpose="schedule.read")
+        return JSONResponse(_jsonable(require_port(services.scheduled_chats).list(principal.user_id)))  # type: ignore[union-attr]
+
+    @app.delete("/v1/schedules/{schedule_id}", status_code=204)
+    async def cancel_scheduled_chat(schedule_id: str, request: Request) -> JSONResponse:
+        principal = principal_for(request, mutable=True)
+        services.security.authorize(principal, action="schedule.cancel", resource_id=schedule_id, purpose="schedule.cancel")
+        if not require_port(services.scheduled_chats).cancel(principal.user_id, schedule_id):  # type: ignore[union-attr]
+            raise ApplicationNotFoundError(schedule_id)
+        return JSONResponse(status_code=204, content=None)
 
     @app.post("/v1/projects", status_code=201)
     async def create_project(payload: CreateProjectRequest, request: Request) -> JSONResponse:
@@ -750,7 +815,7 @@ def create_app(services: ApiServices) -> FastAPI:
         principal = principal_for(request, mutable=True)
         services.security.check_rate_limit(principal, action="skills.create", origin=request.headers.get("origin"))
         services.security.authorize(principal, action="skills.create", resource_id=None, purpose="skills.create")
-        result = _require_port(services.skills).create({"user_id": principal.user_id, "name": payload.name, "description": payload.description, "version": payload.version, "tags": payload.tags, "instructions": payload.instructions, "idempotency_key": _idempotency(request), "purpose": "skills.create"})
+        result = _require_port(services.skills).create({"user_id": principal.user_id, **payload.model_dump(), "idempotency_key": _idempotency(request), "purpose": "skills.create"})
         return JSONResponse(_jsonable(result), status_code=201)
 
     @app.put("/v1/skills/{skill_id}")

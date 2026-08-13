@@ -11,6 +11,7 @@ const GLYPHS: Record<string, string> = {
   filesystem: '◫',
   terminal: '›_',
   web: '◍',
+  browser: '◉',
   memory: '◈',
   agent: '◇',
   artifact: '▣',

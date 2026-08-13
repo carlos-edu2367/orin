@@ -27,6 +27,7 @@ import { WorkspaceFilePreview, type WorkspaceFileReference } from './WorkspaceFi
 import { WorkspaceFolderButton } from './WorkspaceFolderButton'
 import { activityReducer, createActivityState } from './activityReducer'
 import type { ConversationActivityEvent } from './activityTypes'
+import type { UserQuestionAnswer } from './UserQuestionCard'
 import { buildMessageTimelines } from './turnTimelineFold'
 import { useComposerAttachments } from './useComposerAttachments'
 
@@ -68,7 +69,7 @@ const RUNNING_STATES = new Set(['queued', 'starting', 'running', 'streaming', 'c
  * durable snapshot reconciles it whenever the turn settles.
  */
 export function ChatPage() {
-  const { conversationId = '' } = useParams()
+  const { conversationId = '', projectId } = useParams()
   const location = useLocation()
   const navigate = useNavigate()
   const client = useMemo(() => createBrowserApiClient(), [])
@@ -80,9 +81,12 @@ export function ChatPage() {
   const { attachments, onAttach, onRemoveAttachment, canSend: attachmentsReady, readyUploadIds, reset: resetAttachments } = useComposerAttachments(client)
   const [pendingUserMessage, setPendingUserMessage] = useState<ConversationMessage | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [loadFailure, setLoadFailure] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
+  const [loadAttempt, setLoadAttempt] = useState(0)
   const [stopping, setStopping] = useState(false)
   const [atBottom, setAtBottom] = useState(true)
+  const [newActivityCount, setNewActivityCount] = useState(0)
   const [activity, dispatch] = useReducer(activityReducer, undefined, createActivityState)
   const [previewReference, setPreviewReference] = useState<WorkspaceFileReference | null>(null)
   const closePreview = useCallback(() => setPreviewReference(null), [])
@@ -97,7 +101,12 @@ export function ChatPage() {
   const cursorRef = useRef('0')
   const scrollRef = useRef<HTMLDivElement>(null)
   const pinnedRef = useRef(true)
+  const observedContentRef = useRef(new Set<string>())
+  const observedConversationRef = useRef(conversationId)
   const showOverview = location.pathname.endsWith('/overview')
+  const conversationPath = projectId === undefined
+    ? `/chats/${encodeURIComponent(conversationId)}`
+    : `/projects/${encodeURIComponent(projectId)}/chats/${encodeURIComponent(conversationId)}`
 
   const loadSnapshot = useCallback(async (resetActivity: boolean) => {
     const next = await getConversation(client, conversationId)
@@ -162,12 +171,13 @@ export function ChatPage() {
     }
 
     const start = async () => {
+      setLoadFailure(null)
       try {
         await loadSnapshot(true)
-        const list = await listConversations(client)
-        if (!cancelled) setChats(list.items)
+        void listConversations(client).then((list) => { if (!cancelled) setChats(list.items) }).catch(() => undefined)
         void reconnect()
-      } catch {
+      } catch (caught) {
+        if (!cancelled) setLoadFailure(conversationLoadHeadline(caught))
         if (!cancelled) setError('Não foi possível carregar esta conversa.')
       } finally {
         if (!cancelled) setLoading(false)
@@ -180,7 +190,7 @@ export function ChatPage() {
       controller.abort()
       if (timer !== undefined) window.clearTimeout(timer)
     }
-  }, [client, conversationId, loadSnapshot])
+  }, [client, conversationId, loadAttempt, loadSnapshot])
 
   // Fetched once, best-effort: every vision-capable model this user has, and
   // the explicit override, so the composer's notice can name the model that
@@ -266,9 +276,44 @@ export function ChatPage() {
     () => activity.events.filter((event) => !claimedTurnIds.has(event.turnId ?? '')),
     [activity.events, claimedTurnIds],
   )
+  const openQuestionTurnIds = useMemo(
+    () => new Set((conversation?.turns ?? []).filter((turn) => turn.state === 'waiting_user').map((turn) => turn.turn_id)),
+    [conversation?.turns],
+  )
 
   const running = RUNNING_STATES.has(conversation?.state ?? '')
   const mode = useMemo(() => modeFromEvents(activity.events, conversation?.state ?? 'queued'), [activity.events, conversation?.state])
+
+  // Track identities rather than render passes. Snapshot reconciliation can
+  // repeat the same items after an SSE event, but it must not inflate the
+  // return-to-latest action. A changed message body is new visible content even
+  // when its durable message id already existed as an empty placeholder.
+  useEffect(() => {
+    const content = new Set([
+      ...messages.map((item) => `message:${item.message_id}:${item.content}`),
+      // A delta's visible representation is the assistant message above; it
+      // must not increment the return action twice just because the same
+      // update also exists in the append-only event log.
+      ...activity.events.filter((event) => event.kind !== 'message').map((event) => `activity:${event.eventId}`),
+    ])
+    if (observedConversationRef.current !== conversationId) {
+      observedConversationRef.current = conversationId
+      observedContentRef.current = content
+      pinnedRef.current = true
+      setAtBottom(true)
+      setNewActivityCount(0)
+      return
+    }
+
+    let additions = 0
+    for (const key of content) {
+      if (!observedContentRef.current.has(key)) additions += 1
+    }
+    for (const key of content) observedContentRef.current.add(key)
+    if (additions > 0 && !pinnedRef.current) {
+      setNewActivityCount((current) => current + additions)
+    }
+  }, [activity.events, conversationId, messages])
 
   useEffect(() => {
     if (!pinnedRef.current) return
@@ -278,6 +323,41 @@ export function ChatPage() {
     if (typeof element.scrollTo === 'function') element.scrollTo({ top: element.scrollHeight, behavior: reduced ? 'auto' : 'smooth' })
     else element.scrollTop = element.scrollHeight
   }, [messages, activity.events.length, reduced])
+
+  const scrollToLatest = useCallback(() => {
+    const element = scrollRef.current
+    if (!element) return
+    pinnedRef.current = true
+    setAtBottom(true)
+    setNewActivityCount(0)
+    if (typeof element.scrollTo === 'function') element.scrollTo({ top: element.scrollHeight, behavior: reduced ? 'auto' : 'smooth' })
+    else element.scrollTop = element.scrollHeight
+  }, [reduced])
+
+  const submitQuestionAnswers = useCallback(async (event: ConversationActivityEvent, answers: UserQuestionAnswer[]) => {
+    if (!event.questions || !event.turnId || !openQuestionTurnIds.has(event.turnId) || running) return
+    const byId = new Map(event.questions.map((question) => [question.id, question]))
+    const text = ['Respostas às perguntas do agente:']
+    for (const answer of answers) {
+      const question = byId.get(answer.id)
+      if (!question) continue
+      const labels = answer.selected.map((id) => question.options.find((option) => option.id === id)?.label).filter((label): label is string => Boolean(label))
+      text.push(`\n${question.question}\n${labels.length ? `Seleção: ${labels.join(', ')}` : 'Seleção: nenhuma'}`)
+      if (answer.note) text.push(`Observação: ${answer.note}`)
+    }
+    const response = text.join('\n')
+    setError(null)
+    setPendingUserMessage({ message_id: `pending-${Date.now()}`, role: 'user', content: response, status: 'completed', retryable: false, attachments: [] })
+    try {
+      await sendConversationMessage(client, conversationId, response)
+      await loadSnapshot(false)
+      void listConversations(client).then((value) => setChats(value.items)).catch(() => undefined)
+    } catch (caught) {
+      setPendingUserMessage(null)
+      setError('Não foi possível enviar as respostas. Tente novamente.')
+      throw caught
+    }
+  }, [client, conversationId, loadSnapshot, openQuestionTurnIds, running])
 
   async function submit() {
     const text = message.trim()
@@ -317,6 +397,7 @@ export function ChatPage() {
         <Brand to="/" />
         <div className="chat__title">
           <h1>{conversation?.title ?? 'Conversa'}</h1>
+          {conversation?.turns.some((turn) => turn.scheduled_by_schedule_id) && <span className="chat__model">execuções agendadas</span>}
           {conversation && <span className="chat__model">{conversation.provider} · {conversation.model_id}</span>}
         </div>
         <div className="chat__bar-actions">
@@ -324,7 +405,7 @@ export function ChatPage() {
             type="button"
             className={showOverview ? 'ghost-button is-active' : 'ghost-button'}
             aria-pressed={showOverview}
-            onClick={() => navigate(showOverview ? `/chats/${conversationId}` : `/chats/${conversationId}/overview`)}
+            onClick={() => navigate(showOverview ? conversationPath : `${conversationPath}/overview`)}
           >
             Visão geral
           </button>
@@ -343,12 +424,23 @@ export function ChatPage() {
           const nextAtBottom = element.scrollHeight - element.scrollTop - element.clientHeight < 120
           pinnedRef.current = nextAtBottom
           setAtBottom((current) => current === nextAtBottom ? current : nextAtBottom)
+          if (nextAtBottom) setNewActivityCount(0)
         }}>
           <div className="chat__thread">
+            {!loading && loadFailure && (
+              <section className="chat__load-error" role="alert">
+                <h2>Não foi possível abrir esta conversa</h2>
+                <p>{loadFailure}</p>
+                <div>
+                  <button type="button" className="ghost-button" onClick={() => { setLoading(true); setLoadAttempt((value) => value + 1) }}>Tentar novamente</button>
+                  <Link className="ghost-button" to="/">Nova conversa</Link>
+                </div>
+              </section>
+            )}
             {loading && <p className="chat__placeholder" role="status">Carregando conversa…</p>}
             {!loading && messages.length === 0 && <p className="chat__placeholder">Esta conversa ainda não tem mensagens.</p>}
 
-            {messages.map((item) => {
+            {!loadFailure && messages.map((item) => {
               const timeline = item.role === 'assistant' ? timelinesByMessage.get(item.message_id) : undefined
               return (
                 <motion.article
@@ -359,7 +451,7 @@ export function ChatPage() {
                   transition={{ duration: 0.24, ease: [0.22, 0.61, 0.36, 1] }}
                 >
                   {timeline
-                    ? <TurnTimeline items={timeline} conversationId={conversationId} client={client} onPreview={setPreviewReference} />
+                    ? <TurnTimeline items={timeline} conversationId={conversationId} client={client} onPreview={setPreviewReference} openQuestionTurnIds={openQuestionTurnIds} onAnswer={submitQuestionAnswers} />
                     : item.role === 'assistant' && item.content
                       ? <MarkdownMessage content={item.content} conversationId={conversationId} client={client} onPreview={setPreviewReference} />
                       : <p>{item.content || placeholderFor(item)}</p>}
@@ -371,10 +463,10 @@ export function ChatPage() {
               )
             })}
 
-            <ActivityStream events={unclaimedEvents} />
+            {!loadFailure && <ActivityStream events={unclaimedEvents} conversationId={conversationId} onPreview={setPreviewReference} openQuestionTurnIds={openQuestionTurnIds} onAnswer={submitQuestionAnswers} />}
 
             <AnimatePresence>
-              {running && (
+              {!loadFailure && running && (
                 <motion.div
                   key="pulse"
                   initial={reduced ? false : { opacity: 0, y: 6 }}
@@ -389,13 +481,19 @@ export function ChatPage() {
           </div>
         </div>
 
+        {newActivityCount > 0 && !atBottom && (
+          <button type="button" className="chat__new-activity" onClick={scrollToLatest}>
+            Ir para o fim · {newActivityCount} novas atividades
+          </button>
+        )}
+
         <AnimatePresence>
           {showOverview && conversation && (
             <OverviewPanel
               conversationId={conversationId}
               client={client}
               liveEvents={activity.events}
-              onClose={() => navigate(`/chats/${conversationId}`)}
+              onClose={() => navigate(conversationPath)}
             />
           )}
         </AnimatePresence>
@@ -409,7 +507,7 @@ export function ChatPage() {
         />
       )}
 
-      <footer className="chat__foot" data-testid="chat-composer" data-at-bottom={atBottom}>
+      {!loadFailure && <footer className="chat__foot" data-testid="chat-composer" data-at-bottom={atBottom}>
         {activity.connection === 'degraded' && (
           <p className="chat__connection" role="status">Atualizações em tempo real indisponíveis; tentando reconectar.</p>
         )}
@@ -437,7 +535,7 @@ export function ChatPage() {
             />
           }
         />
-      </footer>
+      </footer>}
     </main>
   )
 }
@@ -451,6 +549,12 @@ function placeholderFor(message: ConversationMessage): string {
     case 'cancelled': return 'Execução cancelada por você.'
     default: return 'Sem texto nesta resposta.'
   }
+}
+
+function conversationLoadHeadline(error: unknown): string {
+  if (error instanceof ApiError && error.status === 404) return 'Esta conversa não está disponível neste workspace.'
+  if (error instanceof ApiError && (error.status === 0 || error.code === 'network_error')) return 'Não foi possível alcançar o backend local. Confirme se o Orin está em execução.'
+  return 'A conversa não pôde ser carregada agora. Tente novamente.'
 }
 
 function terminalConversationState(event: ConversationActivityEvent): 'completed' | 'failed' | 'cancelled' | null {

@@ -11,6 +11,7 @@ import { ProjectPage } from '../features/projects/ProjectPage'
 import { SettingsPage, SettingsPlaceholder } from '../features/settings/SettingsPage'
 import { RuntimeSettingsPage } from '../features/settings/RuntimeSettingsPage'
 import { MemoryPage } from '../features/memory/MemoryPage'
+import { SchedulesPage } from '../features/schedules/SchedulesPage'
 
 export type RouteDefinition = {
   path: string
@@ -19,10 +20,10 @@ export type RouteDefinition = {
 
 export const routes: RouteDefinition[] = [
   { path: '/', element: <Home /> },
-  { path: '/chats/:conversationId', element: <ChatPage /> },
-  { path: '/chats/:conversationId/overview', element: <ChatPage /> },
-  { path: '/projects/:projectId/chats/:conversationId', element: <ChatPage /> },
-  { path: '/projects/:projectId/chats/:conversationId/overview', element: <ChatPage /> },
+  { path: '/chats/:conversationId', element: <ConversationRoute /> },
+  { path: '/chats/:conversationId/overview', element: <ConversationRoute /> },
+  { path: '/projects/:projectId/chats/:conversationId', element: <ConversationRoute /> },
+  { path: '/projects/:projectId/chats/:conversationId/overview', element: <ConversationRoute /> },
   { path: '/projects/:projectId', element: <ProjectPage /> },
   { path: '/projects/:projectId/memory', element: <ProjectMemoryRoute /> },
   { path: '/settings', element: <SettingsPage /> },
@@ -37,6 +38,7 @@ export const routes: RouteDefinition[] = [
   { path: '/providers', element: <ProviderSettingsPage /> },
   { path: '/skills', element: <SkillsPage /> },
   { path: '/skills/:skillId', element: <SkillsPage /> },
+  { path: '/schedules', element: <SchedulesPage /> },
   // Deterministic execution fixtures. They render the legacy execution surface
   // without a backend and exist for visual/a11y regression runs only.
   { path: '/execution/fixture-running', element: <ExecutionPage execution={fixtureExecutions.running} /> },
@@ -51,4 +53,11 @@ export const routes: RouteDefinition[] = [
 function ProjectMemoryRoute() {
   const { projectId = '' } = useParams()
   return <MemoryPage projectId={projectId} />
+}
+
+function ConversationRoute() {
+  const { conversationId = '', projectId = '' } = useParams()
+  // Switching conversations must not leave a previous transcript visible while
+  // the next snapshot is still loading. Toggling the overview keeps this key.
+  return <ChatPage key={`${projectId}:${conversationId}`} />
 }

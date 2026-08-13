@@ -11,7 +11,7 @@ import re
 from typing import Mapping
 
 from .builtins import load_builtin_skills
-from .models import Skill, SkillScope, SkillSource
+from .models import Skill, SkillDependencies, SkillScope, SkillSource
 from .registry import SkillNotFound, SkillRegistry
 from .retrieval import RetrievalQuery
 
@@ -44,6 +44,10 @@ class SkillLibraryService:
         for skill_id in preference[1]:
             include(skill_id)
         return SkillRegistry(tuple(registry.resolve(skill_id) for skill_id in wanted))
+
+    def registry_for(self, user_id: str, agent_id: str | None = None) -> SkillRegistry:
+        """Expose the same runtime registry contract as the durable adapter."""
+        return self._registry(user_id, agent_id)
 
     @staticmethod
     def _summary(metadata) -> dict[str, object]:
@@ -78,7 +82,7 @@ class SkillLibraryService:
 
     def create(self, command: Mapping[str, object]) -> dict[str, object]:
         user_id = str(command["user_id"])
-        candidate = Skill(id=_id(str(command["name"])), name=str(command["name"]), version=str(command.get("version") or "1.0.0"), description=str(command["description"]), instructions=str(command["instructions"]), tags=tuple(str(tag) for tag in command.get("tags") or ()), scope=SkillScope.USER, source=SkillSource.CUSTOM)
+        candidate = self._custom_skill(command, skill_id=_id(str(command["name"])))
         registry = self._registry(user_id)
         try:
             registry.resolve(candidate.id, version=candidate.version, scope=SkillScope.USER)
@@ -91,12 +95,39 @@ class SkillLibraryService:
         user_id, skill_id = str(command["user_id"]), str(command["skill_id"])
         prior = self._registry(user_id).resolve(skill_id, scope=SkillScope.USER)
         version = str(command.get("version") or self._next_patch(prior.version))
-        candidate = Skill(id=prior.id, name=str(command.get("name") or prior.name), version=version,
-            description=str(command.get("description") or prior.description), instructions=str(command.get("instructions") or prior.instructions or ""),
-            tags=tuple(str(tag) for tag in command.get("tags") or prior.tags), scope=SkillScope.USER, source=SkillSource.CUSTOM,
-            dependencies=prior.dependencies, requires_tools=prior.requires_tools)
+        values: dict[str, object] = {
+            "name": command.get("name", prior.name), "version": version,
+            "description": command.get("description", prior.description),
+            "instructions": command.get("instructions", prior.instructions),
+            "tags": command.get("tags", prior.tags), "capabilities": command.get("capabilities", prior.capabilities),
+            "when_to_use": command.get("when_to_use", prior.when_to_use),
+            "when_not_to_use": command.get("when_not_to_use", prior.when_not_to_use),
+            "requires_tools": command.get("requires_tools", prior.requires_tools),
+            "dependencies": command.get("dependencies", {"skills": prior.dependencies.skills, "tools": prior.dependencies.tools}),
+        }
+        candidate = self._custom_skill(values, skill_id=prior.id)
         self._custom.setdefault(user_id, []).append(candidate)
         return self.get({"user_id": user_id, "skill_id": skill_id})
+
+    @staticmethod
+    def _custom_skill(command: Mapping[str, object], *, skill_id: str) -> Skill:
+        dependencies = command.get("dependencies") or {}
+        if not isinstance(dependencies, Mapping):
+            raise ValueError("dependencies must be an object")
+        return Skill(
+            id=skill_id, name=str(command["name"]), version=str(command.get("version") or "1.0.0"),
+            description=str(command["description"]), instructions=str(command["instructions"]),
+            tags=tuple(str(tag) for tag in command.get("tags") or ()),
+            capabilities=tuple(str(capability) for capability in command.get("capabilities") or ()),
+            when_to_use=tuple(str(item) for item in command.get("when_to_use") or ()),
+            when_not_to_use=tuple(str(item) for item in command.get("when_not_to_use") or ()),
+            dependencies=SkillDependencies(
+                tuple(str(item) for item in dependencies.get("skills") or ()),
+                tuple(str(item) for item in dependencies.get("tools") or ()),
+            ),
+            requires_tools=tuple(str(item) for item in command.get("requires_tools") or ()),
+            scope=SkillScope.USER, source=SkillSource.CUSTOM,
+        )
 
     def agent_skills(self, query: Mapping[str, object]) -> dict[str, object]:
         user_id, agent_id = str(query["user_id"]), str(query["agent_id"])

@@ -42,12 +42,19 @@ export type ConversationActivityEvent = {
   status?: string
   label?: string
   path?: string
+  /** Private workspace image created from a browser observation. */
+  screenshotPath?: string
   summary: string
   /** Streamed assistant text, or the preview of an agent-to-agent message. */
   content?: string
   errorCode?: string | null
+  questions?: UserQuestion[]
   occurredAt?: string
 }
+
+export type UserQuestionMode = 'checkbox' | 'single_choice' | 'text'
+export type UserQuestionOption = { id: string; label: string }
+export type UserQuestion = { id: string; question: string; mode: UserQuestionMode; options: UserQuestionOption[]; placeholder?: string }
 
 /** One rendered row in the chat: a single event or a collapsed run of them. */
 export type ActivityGroup = {
@@ -85,7 +92,7 @@ export type AgentEdge = {
   fact: 'delegation' | 'message' | 'result'
 }
 
-export const TOOL_KINDS = ['filesystem', 'terminal', 'web', 'memory', 'agent', 'artifact'] as const
+export const TOOL_KINDS = ['filesystem', 'terminal', 'web', 'browser', 'memory', 'agent', 'artifact', 'user_input'] as const
 export type ToolKind = (typeof TOOL_KINDS)[number]
 
 const AGENT_TYPES = new Set([

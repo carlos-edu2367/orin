@@ -99,6 +99,36 @@ class ActionRuntime:
         )
 
 
+def test_a_user_question_ends_the_provider_run_without_waiting_for_a_worker() -> None:
+    class QuestionProvider:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def stream(self, request):
+            self.calls += 1
+            return normalize_sse([
+                'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"ask-1","function":{"name":"ask_user","arguments":"{\\"questions\\":[]}"}}]},"finish_reason":"tool_calls"}]}',
+                "data: [DONE]",
+            ], provider="openrouter")
+
+    class QuestionToolset:
+        def schemas(self): return []
+        def is_read_only(self, name): return False
+        def argument_names(self, name): return frozenset({"questions"})
+        def invoke(self, name, arguments):
+            assert name == "ask_user" and arguments == {"questions": []}
+            return ToolOutcome("succeeded", "Aguardando resposta", "wait", {"wait_for_user": True})
+
+    store = Store()
+    provider = QuestionProvider()
+    result = AgenticTurnRuntime(store=store, provider=provider, toolset=QuestionToolset()).run("turn-1")
+
+    assert result.state == "waiting_user"
+    assert provider.calls == 1
+    assert store.finished == [(False, "WAITING_USER")]
+    assert any(state == "waiting_user" for state, _ in store.events)
+
+
 class Registry:
     def list(self, context):
         return (

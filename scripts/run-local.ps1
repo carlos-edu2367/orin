@@ -50,6 +50,11 @@ if (-not $SkipBuild) {
     } finally { Pop-Location }
 }
 
+if ($env:AGENTOS_BROWSER_ENABLED -ne "false") {
+    Write-Host "Checking the isolated browser engine..." -ForegroundColor Cyan
+    & (Join-Path $PSScriptRoot "install-browser.ps1")
+}
+
 Write-Host "Applying database migrations..." -ForegroundColor Cyan
 Invoke-Checked { & $python -m alembic upgrade head } "alembic upgrade head"
 
@@ -65,12 +70,14 @@ function Start-Component([string]$name, [string[]]$arguments) {
 $api = Start-Component "api" @("-m", "uvicorn", "--app-dir", "src", "agentos.api.asgi:app", "--env-file", $EnvFile, "--host", "127.0.0.1", "--port", "$Port", "--no-proxy-headers")
 $publisher = Start-Component "publisher" @("-m", "agentos.workers.publisher")
 $worker = Start-Component "worker" @("-m", "arq", "agentos.workers.chat.WorkerSettings")
+$scheduler = Start-Component "scheduler" @("-m", "agentos.workers.scheduler")
 
 Write-Host ""
 Write-Host "AgentOS is starting:" -ForegroundColor Green
 Write-Host "  API       pid $($api.Id)   http://127.0.0.1:$Port"
 Write-Host "  publisher pid $($publisher.Id)"
 Write-Host "  worker    pid $($worker.Id)"
+Write-Host "  scheduler pid $($scheduler.Id)"
 Write-Host "  logs      $logs"
 Write-Host ""
 Write-Host "Stop everything with: .\scripts\stop-local.ps1" -ForegroundColor Yellow

@@ -40,7 +40,7 @@ export function CommandPalette({ commands = [], conversations = [] }: CommandPal
     { id: 'memory', label: 'Memory', hint: 'Memórias globais', group: 'Ir para', run: () => navigate('/settings/memory') },
     { id: 'skills', label: 'Biblioteca de skills', hint: 'Procedimentos disponíveis', group: 'Ir para', run: () => navigate('/skills') },
     ...commands,
-    ...conversations.slice(0, 12).map((item) => ({
+    ...conversations.map((item) => ({
       id: `chat:${item.conversation_id}`,
       label: item.title,
       hint: item.state,
@@ -55,10 +55,15 @@ export function CommandPalette({ commands = [], conversations = [] }: CommandPal
     return items.filter((item) => `${item.label} ${item.hint ?? ''} ${item.group}`.toLowerCase().includes(needle))
   }, [items, query])
 
+  // Keep the resting palette compact, but never make older conversations
+  // unreachable: as soon as the person searches, every loaded conversation is
+  // considered. The API currently returns the complete local history.
+  const visible = useMemo(() => query.trim() ? filtered : filtered.slice(0, 32), [filtered, query])
+
   // Filtering can shrink the list under the highlighted row, so the effective
   // index is clamped while rendering rather than corrected by a follow-up state
   // update that would render the out-of-range value once first.
-  const activeIndex = Math.min(active, Math.max(filtered.length - 1, 0))
+  const activeIndex = Math.min(active, Math.max(visible.length - 1, 0))
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -69,29 +74,29 @@ export function CommandPalette({ commands = [], conversations = [] }: CommandPal
       }
       if (!open) return
       if (event.key === 'Escape') { event.preventDefault(); close(); return }
-      if (event.key === 'ArrowDown') { event.preventDefault(); setActive(Math.min(activeIndex + 1, filtered.length - 1)) }
+      if (event.key === 'ArrowDown') { event.preventDefault(); setActive(Math.min(activeIndex + 1, visible.length - 1)) }
       if (event.key === 'ArrowUp') { event.preventDefault(); setActive(Math.max(activeIndex - 1, 0)) }
       if (event.key === 'Enter') {
         event.preventDefault()
-        const chosen = filtered[activeIndex]
+        const chosen = visible[activeIndex]
         if (chosen) { chosen.run(); close() }
       }
     }
     document.addEventListener('keydown', onKeyDown)
     return () => document.removeEventListener('keydown', onKeyDown)
-  }, [open, filtered, activeIndex, close])
+  }, [open, visible, activeIndex, close])
 
   useEffect(() => { if (open) inputRef.current?.focus() }, [open])
 
   const grouped = useMemo(() => {
     const map = new Map<string, PaletteCommand[]>()
-    for (const item of filtered) {
+    for (const item of visible) {
       const list = map.get(item.group) ?? []
       list.push(item)
       map.set(item.group, list)
     }
     return [...map.entries()]
-  }, [filtered])
+  }, [visible])
 
   return (
     <>
@@ -134,7 +139,7 @@ export function CommandPalette({ commands = [], conversations = [] }: CommandPal
                       <p className="palette__group">{group}</p>
                       <ul>
                         {entries.map((item) => {
-                          const index = filtered.indexOf(item)
+                          const index = visible.indexOf(item)
                           return (
                             <li key={item.id}>
                               <button

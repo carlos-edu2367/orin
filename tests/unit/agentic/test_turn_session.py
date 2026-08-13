@@ -352,6 +352,16 @@ def test_the_system_prompt_uses_orin_as_the_public_product_name() -> None:
     assert "You are the main agent of AgentOS" not in prompt
 
 
+def test_the_system_prompt_offers_skill_learning_only_after_user_confirmation() -> None:
+    prompt = build_system_prompt(
+        tool_names=("search_skills", "create_skill", "edit_skill"), memories=[], agents=[],
+        workspace_hint="hint", subagents_enabled=False,
+    )
+
+    assert "When the user says the problem is resolved" in prompt
+    assert "Do not create it merely because the problem was solved" in prompt
+
+
 def test_relevant_skill_metadata_is_injected_lazily_and_loaded_via_tool_result(tmp_path: Path) -> None:
     store = RecordingStore()
     agents = MemoryAgentsStore()

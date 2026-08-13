@@ -5,7 +5,10 @@ def test_library_service_creates_lists_and_versions_a_user_skill() -> None:
     service = SkillLibraryService()
     created = service.create({
         "user_id": "u1", "name": "Internal Review", "description": "Review internal changes.",
-        "version": "1.0.0", "tags": ["review"], "instructions": "# Workflow\n\nReview it.",
+        "version": "1.0.0", "tags": ["review"], "capabilities": ["review_change"],
+        "when_to_use": ["before an internal release"], "when_not_to_use": ["for an external audit"],
+        "requires_tools": ["read_file"], "dependencies": {"tools": ["run_command"]},
+        "instructions": "# Workflow\n\nReview it.",
     })
 
     listed = service.list({"user_id": "u1", "query": "internal", "limit": 20})
@@ -14,3 +17,4 @@ def test_library_service_creates_lists_and_versions_a_user_skill() -> None:
     assert created["source"] == "custom"
     assert [item["id"] for item in listed["items"]] == [created["id"]]
     assert detail["instructions"].startswith("# Workflow")
+    assert detail["requires_tools"] == ["run_command", "read_file"]
