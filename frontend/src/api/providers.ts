@@ -191,6 +191,40 @@ export function setProviderModelFavorite(client: ApiClient, provider: ProviderNa
   })
 }
 
+/**
+ * The model chosen to perform visual reading (`src/agentos/reading/selection.py`)
+ * when the turn's own model cannot see an attachment. `mode: 'automatic'` means
+ * nothing is stored and the worker picks at turn time (own provider, then a
+ * local Ollama, then anything else); `'manual'` means `provider`/`modelId` are
+ * both present and override that choice.
+ */
+export type VisionModelSetting = { provider: ProviderName | null; modelId: string | null; mode: 'automatic' | 'manual' }
+
+export function getVisionModelSetting(client: ApiClient, signal?: AbortSignal): Promise<VisionModelSetting> {
+  return client.request({ path: '/v1/settings/vision-model', signal, parse: parseVisionModelSetting })
+}
+
+export function setVisionModelSetting(
+  client: ApiClient,
+  input: { provider: ProviderName; modelId: string } | { provider: null; modelId: null },
+  intent = client.createMutationIntent(),
+): Promise<VisionModelSetting> {
+  return client.request({
+    path: '/v1/settings/vision-model',
+    method: 'PUT',
+    body: { provider: input.provider, model_id: input.modelId },
+    intent,
+    parse: parseVisionModelSetting,
+  })
+}
+
+function parseVisionModelSetting(value: unknown): VisionModelSetting {
+  const data = record(value)
+  if (data.mode !== 'automatic' && data.mode !== 'manual') throw invalidResponseError()
+  const provider = PROVIDER_NAMES.includes(data.provider as ProviderName) ? data.provider as ProviderName : null
+  return { provider, modelId: nullableString(data.model_id), mode: data.mode }
+}
+
 const SENSITIVE_FIELD_TERMS = ['api_key', 'secret', 'token', 'password', 'credential']
 
 function isSensitiveFieldName(name: string): boolean {

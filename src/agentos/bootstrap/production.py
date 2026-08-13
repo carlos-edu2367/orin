@@ -42,6 +42,7 @@ from agentos.provider_catalog.http import OpenRouterModelCatalogClient
 from agentos.provider_catalog.ollama import OllamaCatalogClient
 from agentos.provider_catalog.omniroute import OmniRouteCatalogClient
 from agentos.provider_catalog.service import ProviderModelCatalogService
+from agentos.reading.store import PostgresVisionModelSettingsStore
 from agentos.resources.service import ResourceManagerService
 from agentos.filesystem.local import LocalFilesystemAdapter, LocalWorkspaceRootResolver
 from agentos.filesystem.service import FilesystemService
@@ -288,6 +289,7 @@ def compose_production_services(engine: Engine, *, localhost_trust_enabled: bool
         events=PostgresClientEventStream(engine),  # type: ignore[arg-type]
         local_workspaces=PostgresLocalWorkspaceStore(engine),
         uploads=staging,
+        vision_model_settings=PostgresVisionModelSettingsStore(engine),
     )
 
 

@@ -170,6 +170,11 @@ class AgentRuntimeSettingsRequest(_RequestModel):
     max_iterations: int | None = Field(default=None, ge=1)
 
 
+class VisionModelRequest(_RequestModel):
+    provider: str | None = Field(default=None, max_length=32)
+    model_id: str | None = Field(default=None, max_length=512)
+
+
 class ApiServices:
     """Dependency container. All dependencies are application/security ports."""
 
@@ -191,6 +196,7 @@ class ApiServices:
         workspace_root: str | Path | None = None,
         local_workspaces: object | None = None,
         uploads: object | None = None,
+        vision_model_settings: object | None = None,
     ) -> None:
         self.security = security or InMemorySecurityService()
         self.execution_application = execution_application
@@ -207,6 +213,7 @@ class ApiServices:
         self.events = events or InMemoryClientEventStream()
         self.workspace_root = Path(workspace_root) if workspace_root is not None else orin_paths().workspaces
         self.uploads = uploads
+        self.vision_model_settings = vision_model_settings
 
 
 def create_app(services: ApiServices) -> FastAPI:
@@ -904,6 +911,28 @@ def create_app(services: ApiServices) -> FastAPI:
         services.security.authorize(principal, action="runtime.configure", resource_id="agentic", purpose="runtime.configure")
         _idempotency(request)
         return JSONResponse(_require_port(services.agentic_runtime).set_max_iterations(principal.user_id, payload.max_iterations))
+
+    @app.get("/v1/settings/vision-model")
+    async def get_vision_model_setting(request: Request) -> JSONResponse:
+        principal = principal_for(request)
+        services.security.authorize(principal, action="settings.vision_model.read", resource_id=None, purpose="settings.vision_model.read")
+        selection = _require_port(services.vision_model_settings).get(principal.user_id)
+        if selection is None:
+            return JSONResponse({"provider": None, "model_id": None, "mode": "automatic"})
+        return JSONResponse({"provider": selection.provider, "model_id": selection.model_id, "mode": "manual"})
+
+    @app.put("/v1/settings/vision-model")
+    async def set_vision_model_setting(payload: VisionModelRequest, request: Request) -> JSONResponse:
+        principal = principal_for(request, mutable=True)
+        services.security.authorize(principal, action="settings.vision_model.configure", resource_id=None, purpose="settings.vision_model.configure")
+        if (payload.provider is None) != (payload.model_id is None):
+            raise ApplicationValidationError("provider and model_id must both be present or both be absent")
+        store = _require_port(services.vision_model_settings)
+        if payload.provider is None:
+            store.clear(principal.user_id)
+            return JSONResponse({"provider": None, "model_id": None, "mode": "automatic"})
+        store.set(principal.user_id, payload.provider, payload.model_id)
+        return JSONResponse({"provider": payload.provider, "model_id": payload.model_id, "mode": "manual"})
 
     @app.post("/v1/providers/{provider}/models:refresh")
     async def refresh_provider_models(provider: str, request: Request) -> JSONResponse:

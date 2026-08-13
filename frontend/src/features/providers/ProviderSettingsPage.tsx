@@ -4,6 +4,7 @@ import { readBrowserSessionBootstrap, type BrowserSessionBootstrap } from '../..
 import { ApiError, isAuthenticationError, isCsrfAuthorizationError } from '../../api/errors'
 import { configureProvider, inspectProvider, revokeProvider, refreshProviderModels, listProviderModels, setProviderModelFavorite, testOmniRouteConnection, testOllamaConnection, installOmniRoute, getOmniRouteInstallationStatus, getOmniRouteRuntime, setOmniRouteAutoStart, controlOmniRoute, PROVIDER_NAMES, type OmniRouteRuntime, type ProviderModel, type ProviderName, type ProviderPublicState } from '../../api/providers'
 import { OMNIROUTE_FREE_PROVIDER_GUIDES } from './omnirouteFreeProviders'
+import { VisionModelSetting } from './VisionModelSetting'
 import { Brand } from '../../components/Brand'
 
 type ProviderSettingsPageProps = {
@@ -41,6 +42,7 @@ export function ProviderSettingsPage({ client = createBrowserApiClient(), bootst
             <ProviderPanel key={provider} provider={provider} client={client} bootstrap={session} />
           ))}
         </div>
+        <VisionModelSetting client={client} bootstrap={session} />
       </section>
     </main>
   )

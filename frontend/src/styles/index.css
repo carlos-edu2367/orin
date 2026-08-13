@@ -200,6 +200,13 @@ h1 { margin: 0; color: var(--orin-text); font-size: clamp(42px, 6vw, 76px); font
 .provider-panel__error { display: flex; gap: 12px; margin-top: 16px; padding: 14px 16px; border: 1px solid rgba(255, 157, 145, .23); border-radius: 12px; background: rgba(255, 157, 145, .045); }
 .provider-panel__error strong { color: #ffb7ad; font-size: 12px; }
 .provider-panel__error p { margin: 4px 0 0; color: rgb(var(--orin-text-rgb) / .58); font-size: 11px; line-height: 1.45; }
+.vision-model-setting { margin-top: 20px; padding: 26px 28px; border: 1px solid rgb(var(--orin-text-rgb) / .12); border-radius: 16px; background: rgb(var(--orin-text-rgb) / .045); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); }
+.vision-model-setting h2 { margin: 0 0 8px; color: var(--orin-text); font-size: 20px; font-weight: 560; letter-spacing: -.02em; }
+.vision-model-setting__hint { max-width: 620px; margin: 0 0 16px; color: rgb(var(--orin-text-rgb) / .58); font-size: 12px; line-height: 1.55; }
+.vision-model-setting label { display: block; margin-bottom: 6px; color: rgb(var(--orin-text-rgb) / .62); font-size: 12px; }
+.vision-model-setting select { width: 100%; max-width: 420px; padding: 13px 14px; border: 1px solid rgb(var(--orin-text-rgb) / .16); border-radius: 10px; background: rgb(var(--orin-text-rgb) / .04); color: var(--orin-text); }
+.vision-model-setting select:focus { border-color: var(--orin-accent); background: rgb(var(--orin-text-rgb) / .07); outline: none; }
+.vision-model-setting p[role="status"], .vision-model-setting p[role="alert"] { margin: 10px 0 0; color: rgb(var(--orin-text-rgb) / .58); font-size: 11px; line-height: 1.45; }
 .omniroute-flow__intro { display: grid; gap: 14px; max-width: 610px; padding: 22px; border: 1px solid rgb(var(--orin-accent-rgb) / .2); border-radius: 14px; background: linear-gradient(125deg, rgb(var(--orin-accent-rgb) / .09), rgb(var(--orin-text-rgb) / .025) 42%); }
 .omniroute-flow__intro p { margin: 0; max-width: 540px; color: rgb(var(--orin-text-rgb) / .72); line-height: 1.55; }
 .omniroute-flow__intro .omniroute-flow__kicker { color: var(--orin-accent); font-size: 10px; font-weight: 700; letter-spacing: .14em; }
