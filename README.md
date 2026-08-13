@@ -151,6 +151,17 @@ Type what you need and press Enter. While the agent works you will see:
 - **Visão geral** — the execution as an orbital map: agents, links, live pulses,
   plus model, provider, duration, tool counts and errors.
 
+**Attaching a file** — use the composer's attach button, drag a file onto it, or
+paste one from the clipboard. The file is written to `uploads/` inside the
+conversation's workspace, same as anything else the agent creates — including
+when that workspace is a local folder you picked, not the managed
+`data/workspaces/<conversation_id>` directory. Reading it back is `view_file`
+(see the tool table above): a document's text is extracted locally, but
+reading an image or a scanned page visually sends the file's bytes to the
+provider of whichever model does the reading — the turn's own model when it
+can see, otherwise the configured visual-reading model — which is why the
+automatic choice prefers a local Ollama over sending the file off-machine.
+
 `Ctrl/Cmd + K` opens the command palette: conversations, Settings, memory, providers, and new chat. Settings is the single global management area; project memory and workspace controls stay on the relevant project.
 
 ## What the agent can do
@@ -160,6 +171,7 @@ Tools are defined in `src/agentos/agentic/agent_tools.py`.
 | Tool | Notes |
 | --- | --- |
 | `read_file`, `write_file`, `edit_file`, `list_files` | Confined to `data/workspaces/<conversation_id>`. `edit_file` replaces exactly one matching fragment, preventing ambiguous edits. Path traversal and symlinks out of the sandbox are rejected. |
+| `view_file` | Lê um documento (PDF, Word, Excel, PowerPoint, texto) ou uma imagem do workspace. Texto nativo é extraído sem custo de modelo; imagem e página escaneada vão para o modelo do turno quando ele enxerga, ou para o modelo de leitura visual configurado. |
 | `run_command` | Runs in that same directory, 45s timeout. A denylist blocks host-destroying commands (`shutdown`, `mkfs`, `rm -rf /`, …). |
 | `fetch_url` | Public http(s) only; private, loopback and link-local addresses are refused. Returns readable text. |
 | `remember`, `recall` | Durable facts scoped to the user, recalled into later conversations. |
