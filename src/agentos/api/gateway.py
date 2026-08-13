@@ -359,12 +359,23 @@ def create_app(services: ApiServices) -> FastAPI:
             return []
         return promote_uploads(require_port(services.uploads), workspace_for(workspace_id, principal), principal.user_id, upload_ids)
 
+    def require_content(message: str, attachments: list[str]) -> None:
+        """A turn needs text, an attachment, or both — never neither.
+
+        The store itself raises a plain ``ValueError`` for this, which no
+        exception handler maps to a client error, so the check happens here
+        where ``ApplicationValidationError`` is already mapped to a 422.
+        """
+        if not message.strip() and not attachments:
+            raise ApplicationValidationError("message must include text or at least one attachment")
+
     @app.post("/v1/conversations", status_code=201)
     async def create_conversation(payload: CreateConversationRequest, request: Request) -> JSONResponse:
         principal = principal_for(request, mutable=True)
         provider = _provider_name(payload.selection.provider)
         services.security.check_rate_limit(principal, action="conversation.create", origin=request.headers.get("origin"))
         services.security.authorize(principal, action="conversation.create", resource_id=provider, purpose="conversation.create")
+        require_content(payload.message, payload.attachments)
         application = require_port(services.conversation_application)
         conversation_id = application.allocate_conversation_id()  # type: ignore[union-attr]
         attachments = promote(conversation_id, principal, payload.attachments)
@@ -436,6 +447,7 @@ def create_app(services: ApiServices) -> FastAPI:
         project = require_port(services.projects).get(project_id, principal.user_id)
         if project is None: raise ApplicationNotFoundError(project_id)
         provider = _provider_name(payload.selection.provider)
+        require_content(payload.message, payload.attachments)
         application = require_port(services.conversation_application)
         conversation_id = application.allocate_conversation_id()  # type: ignore[union-attr]
         attachments = promote(project.workspace_id, principal, payload.attachments)
@@ -617,6 +629,7 @@ def create_app(services: ApiServices) -> FastAPI:
     async def send_conversation_message(conversation_id: str, payload: SendConversationMessageRequest, request: Request) -> JSONResponse:
         principal = principal_for(request, mutable=True)
         services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.send")
+        require_content(payload.message, payload.attachments)
         attachments: list[dict[str, object]] = []
         workspace_id = conversation_id
         if payload.attachments:

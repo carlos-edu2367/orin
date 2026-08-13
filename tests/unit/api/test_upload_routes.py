@@ -33,3 +33,21 @@ def test_delete_upload_removes_it(tmp_path):
     upload_id = client.post("/v1/uploads", files={"file": ("foto.png", PNG, "image/png")}, headers=_AUTH).json()["upload_id"]
     assert client.delete(f"/v1/uploads/{upload_id}", headers=_AUTH).status_code == 204
     assert client.delete(f"/v1/uploads/{upload_id}", headers=_AUTH).status_code == 404
+
+
+def test_create_conversation_rejects_a_blank_message_with_no_attachments(tmp_path):
+    response = _client(tmp_path).post(
+        "/v1/conversations",
+        json={"message": "   ", "selection": {"provider": "anthropic", "model_id": "m"}},
+        headers=_AUTH,
+    )
+    assert response.status_code == 422
+
+
+def test_send_message_rejects_a_blank_message_with_no_attachments(tmp_path):
+    response = _client(tmp_path).post(
+        "/v1/conversations/chat_1/messages",
+        json={"message": ""},
+        headers=_AUTH,
+    )
+    assert response.status_code == 422
