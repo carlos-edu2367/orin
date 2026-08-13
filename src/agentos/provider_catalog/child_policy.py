@@ -14,18 +14,17 @@ class ParentProviderChildModelPolicy:
         source = _provider(parent)
         if source is None:
             return ()
-        return tuple(self._catalog.list(ProviderCatalogContext(user_id, purpose), source))
+        return tuple(self._catalog.list(ProviderCatalogContext(user_id, purpose), source, favorites_only=True))
 
     def validate(self, *, parent, child, command) -> None:
         source, target = _provider(parent), _provider(child)
-        if source is None or target is None or source == target:
-            return
-        if self._grants is not None and self._grants.allows(
-            parent=parent, child=child, authorization_ref=command.authorization_ref,
-            user_id=command.user_id, workspace_id=command.workspace_id, purpose=command.purpose,
-        ):
-            return
-        raise PermissionError("cross-provider child model requires an explicit grant")
+        if source is None or target is None or source != target:
+            raise PermissionError("child model must use the parent provider")
+        allowed = self.list_available_models(user_id=command.user_id, parent=parent, purpose=command.purpose)
+        profile_ref = str(getattr(child, "model_profile_ref", ""))
+        allowed_prefixes = tuple(f"model-profile:{source}:{item.model_id}:" for item in allowed)
+        if not profile_ref.startswith(allowed_prefixes):
+            raise PermissionError("child model must be a favorite of the parent provider")
 
 
 def _provider(resolved) -> str | None:

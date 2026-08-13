@@ -35,6 +35,7 @@ from agentos.persistence.postgres.schema import (
     conversation_dispatches,
     provider_configurations,
     provider_model_catalog,
+    provider_model_favorites,
     vision_model_selections,
 )
 from agentos.persistence.provider_secrets import ProviderSecretCipher
@@ -372,6 +373,49 @@ class ChatWorker:
         num_ctx = self._num_ctx_for(turn) if provider == "ollama" else None
         return self._transport_for(str(turn["user_id"]), provider, str(turn["model_id"]), num_ctx=num_ctx)
 
+    def _favorite_child_model_ids(self, turn: dict[str, object]) -> tuple[str, ...]:
+        """Return this user's favorites, limited to the provider of the active turn."""
+        try:
+            with self.store._engine.connect() as connection:
+                rows = connection.execute(
+                    select(provider_model_catalog.c.model_id)
+                    .join(
+                        provider_model_favorites,
+                        (provider_model_favorites.c.user_id == provider_model_catalog.c.user_id)
+                        & (provider_model_favorites.c.provider == provider_model_catalog.c.provider)
+                        & (provider_model_favorites.c.model_id == provider_model_catalog.c.model_id),
+                    )
+                    .where(
+                        provider_model_catalog.c.user_id == turn["user_id"],
+                        provider_model_catalog.c.provider == turn["provider"],
+                    )
+                    .order_by(provider_model_catalog.c.display_name, provider_model_catalog.c.model_id)
+                ).all()
+        except Exception:
+            return ()
+        return tuple(str(row.model_id) for row in rows)
+
+    def _is_favorite_child_model(self, turn: dict[str, object], model_id: str) -> bool:
+        """Authorize a model at execution time against the durable user catalog."""
+        try:
+            with self.store._engine.connect() as connection:
+                return connection.execute(
+                    select(provider_model_catalog.c.id)
+                    .join(
+                        provider_model_favorites,
+                        (provider_model_favorites.c.user_id == provider_model_catalog.c.user_id)
+                        & (provider_model_favorites.c.provider == provider_model_catalog.c.provider)
+                        & (provider_model_favorites.c.model_id == provider_model_catalog.c.model_id),
+                    )
+                    .where(
+                        provider_model_catalog.c.user_id == turn["user_id"],
+                        provider_model_catalog.c.provider == turn["provider"],
+                        provider_model_catalog.c.model_id == model_id,
+                    )
+                ).scalar_one_or_none() is not None
+        except Exception:
+            return False
+
     def _credential_value(self, credential, user_id: str, provider: str, *, allow_empty: bool = False) -> str:
         """Read the provider key, upgrading a pre-encryption row in place.
 
@@ -428,6 +472,12 @@ class ChatWorker:
                 model_sees_images=self._model_sees_images(turn),
                 model_calls_tools=self._model_calls_tools(turn),
                 vision_reader_factory=self._vision_reader_factory(turn),
+                child_model_ids=self._favorite_child_model_ids(turn),
+                child_model_authorizer=lambda model_id: self._is_favorite_child_model(turn, model_id),
+                child_provider_factory=lambda model_id: self._transport_for(
+                    str(turn["user_id"]), str(turn["provider"]), model_id,
+                    num_ctx=self._num_ctx_for({**turn, "model_id": model_id}) if str(turn["provider"]) == "ollama" else None,
+                ),
             )
             return session.build_runtime()
         except Exception:

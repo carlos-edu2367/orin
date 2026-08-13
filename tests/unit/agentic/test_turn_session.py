@@ -80,6 +80,9 @@ class MemoryAgentsStore:
     def set_state(self, agent_id: str, state: str) -> None:
         self.states.append((agent_id, state))
 
+    def set_model(self, agent_id: str, model_id: str) -> None:
+        self.rows[agent_id]["model_id"] = model_id
+
     def list(self) -> list[dict]:
         return list(self.rows.values())
 
@@ -123,7 +126,7 @@ def text_with_usage(value: str, *, input_tokens: int, output_tokens: int) -> lis
     ]
 
 
-def build(tmp_path: Path, batches, *, cancelled=None, enable_subagents=True):
+def build(tmp_path: Path, batches, *, cancelled=None, enable_subagents=True, child_model_ids=(), child_provider_factory=None):
     store = RecordingStore()
     agents = MemoryAgentsStore()
     provider = ScriptedProvider(list(batches))
@@ -131,6 +134,8 @@ def build(tmp_path: Path, batches, *, cancelled=None, enable_subagents=True):
         turn=dict(TURN), store=store, agents_store=agents, memory_store=None,
         provider_factory=lambda: provider, workspace_root=tmp_path,
         cancelled=cancelled or (lambda _turn: False), enable_subagents=enable_subagents,
+        child_model_ids=tuple(child_model_ids),
+        child_provider_factory=child_provider_factory,
     )
     return session, store, agents, provider
 
@@ -565,6 +570,55 @@ def test_a_subagent_inherits_the_turn_model_and_reports_its_own_token_usage(tmp_
     assert child["model_id"] == "test-model"
     assert agents.usage[child["agent_id"]]["total_tokens"] == 18
     assert agents.usage["agent:chat_session:main"]["total_tokens"] == 18
+
+
+def test_a_subagent_can_use_an_explicit_favorite_of_the_current_provider(tmp_path: Path) -> None:
+    session, _store, agents, provider = build(tmp_path, [
+        tool_call("call-1", "create_agent", '{"name": "Researcher", "role": "pesquisa", "model_id": "favorite-model"}'),
+        tool_call("call-2", "ask_agent", '{"name": "Researcher", "task": "investigue X"}'),
+        text("encontrei Y"),
+        text("o Researcher encontrou Y"),
+    ], child_model_ids=("favorite-model",))
+
+    result = session.build_runtime().run("turn-1")
+
+    child = agents.find("Researcher")
+    assert result.state == "completed"
+    assert child is not None and child["provider"] == "openrouter" and child["model_id"] == "favorite-model"
+    assert [request["model"] for request in provider.requests] == ["test-model", "test-model", "favorite-model", "test-model"]
+
+
+def test_a_subagent_rejects_an_explicit_non_favorite_model(tmp_path: Path) -> None:
+    session, _store, agents, _provider = build(tmp_path, [], child_model_ids=("favorite-model",))
+
+    outcome = session._create_agent("Researcher", "pesquisa", "non-favorite-model")
+
+    assert outcome.status == "failed"
+    assert outcome.error_code == "CHILD_MODEL_NOT_FAVORITE"
+    assert agents.find("Researcher") is None
+
+
+def test_a_subagent_falls_back_to_the_current_model_when_its_favorite_cannot_start(tmp_path: Path) -> None:
+    provider = ScriptedProvider([text("encontrei Y")])
+
+    def child_provider_factory(model_id: str):
+        if model_id == "favorite-model":
+            raise RuntimeError("favorite model unavailable")
+        return provider
+
+    session, store, agents, _unused_provider = build(
+        tmp_path, [], child_model_ids=("favorite-model",), child_provider_factory=child_provider_factory,
+    )
+    session._create_agent("Researcher", "pesquisa", "favorite-model")
+
+    outcome = session._ask_agent("Researcher", "investigue X")
+
+    assert outcome.status == "succeeded"
+    assert agents.find("Researcher")["model_id"] == "test-model"
+    assert provider.requests[0]["model"] == "test-model"
+    fallback = next(item for item in store.activity if item[0] is AgentActivityEventType.MODEL_ROUTING_STARTED)
+    assert fallback[2]["requested_model_id"] == "favorite-model"
+    assert fallback[2]["fallback_model_id"] == "test-model"
 
 
 def test_a_subagent_cannot_recursively_spawn_more_subagents(tmp_path: Path) -> None:

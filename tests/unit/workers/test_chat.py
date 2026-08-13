@@ -8,7 +8,7 @@ import pytest
 from sqlalchemy import create_engine, insert
 
 from agentos.agentic.runtime import AgenticRunResult
-from agentos.persistence.postgres.schema import metadata, provider_model_catalog
+from agentos.persistence.postgres.schema import metadata, provider_model_catalog, provider_model_favorites
 from agentos.workers import chat as chat_module
 from agentos.workers.chat import ChatWorker
 
@@ -174,6 +174,34 @@ def test_max_context_tokens_derives_from_the_models_real_context_window() -> Non
     turn = {**TURN, "provider": "openrouter", "model_id": "some/small-model"}
 
     assert worker._max_context_tokens_for(turn) == 16_000 - chat_module.CONTEXT_WINDOW_RESERVE_TOKENS
+
+
+def test_child_model_authorization_is_limited_to_the_turn_users_provider_favorites() -> None:
+    engine = _catalog_engine(
+        {"user_id": "user-1", "provider": "openrouter", "model_id": "favorite-model", "display_name": "Favorite", "context_window": 16_000},
+        {"user_id": "user-1", "provider": "openrouter", "model_id": "other-model", "display_name": "Other", "context_window": 16_000},
+        {"user_id": "user-1", "provider": "ollama", "model_id": "other-provider", "display_name": "Other provider", "context_window": 16_000},
+        {"user_id": "user-2", "provider": "openrouter", "model_id": "other-user", "display_name": "Other user", "context_window": 16_000},
+    )
+    now = datetime.now(UTC)
+    with engine.begin() as connection:
+        connection.execute(insert(provider_model_favorites), [
+            {"user_id": "user-1", "provider": "openrouter", "model_id": "favorite-model", "created_at": now},
+            {"user_id": "user-1", "provider": "ollama", "model_id": "other-provider", "created_at": now},
+            {"user_id": "user-2", "provider": "openrouter", "model_id": "other-user", "created_at": now},
+        ])
+
+    class CatalogStore(Store):
+        _engine = engine
+
+    worker = ChatWorker(CatalogStore())
+    turn = {**TURN, "provider": "openrouter", "model_id": "current-model"}
+
+    assert worker._favorite_child_model_ids(turn) == ("favorite-model",)
+    assert worker._is_favorite_child_model(turn, "favorite-model") is True
+    assert worker._is_favorite_child_model(turn, "other-model") is False
+    assert worker._is_favorite_child_model(turn, "other-provider") is False
+    assert worker._is_favorite_child_model(turn, "other-user") is False
 
 
 def test_max_context_tokens_falls_back_to_the_default_when_the_catalog_has_no_row() -> None:

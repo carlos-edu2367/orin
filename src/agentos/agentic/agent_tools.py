@@ -205,7 +205,7 @@ class AgentToolset:
         memory=None,
         delegate: Callable[[str, str], ToolOutcome] | None = None,
         delegate_batch: Callable[[list[Mapping[str, Any]]], ToolOutcome] | None = None,
-        create_agent: Callable[[str, str], ToolOutcome] | None = None,
+        create_agent: Callable[[str, str, str | None], ToolOutcome] | None = None,
         http_client: httpx.Client | None = None,
         search_client: object | None = None,
         browser: object | None = None,
@@ -346,10 +346,11 @@ class AgentToolset:
         if self._create_agent is not None:
             items.append(ToolDefinition(
                 "create_agent",
-                "Create a specialist subagent. Use it when a task has a distinct, self-contained part worth isolating.",
+                "Create a specialist subagent. An optional model_id must be a favorite model of the current provider; omit it to use the current model.",
                 _schema({
                     "name": {**_TEXT, "description": "Short name, e.g. Researcher"},
                     "role": {**_TEXT, "description": "One line describing what this agent is responsible for."},
+                    "model_id": {**_TEXT, "description": "Optional exact ID of a favorite model from the current provider. Defaults to the current model."},
                 }, ("name", "role")),
                 self.create_agent, "agent", policy_tags=("mutates",),
             ))
@@ -959,10 +960,10 @@ class AgentToolset:
             "payload": {"skill_id": str(skill_id), "version": version, "resource_path": str(resource_path), "truncated": truncated, "tool_kind": "skill", "skill_action": "resource_read"},
         }
 
-    def create_agent(self, name: str, role: str) -> ToolOutcome:
+    def create_agent(self, name: str, role: str, model_id: str | None = None) -> ToolOutcome:
         if self._create_agent is None:
             raise AgentToolError("Subagents are not available.")
-        return self._create_agent(str(name), str(role))
+        return self._create_agent(str(name), str(role), str(model_id) if model_id is not None else None)
 
     def ask_agent(self, name: str, task: str) -> ToolOutcome:
         if self._delegate is None:

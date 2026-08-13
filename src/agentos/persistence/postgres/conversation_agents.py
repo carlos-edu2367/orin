@@ -58,6 +58,17 @@ class ConversationAgentStore:
         with self._engine.begin() as connection:
             connection.execute(update(conversation_agents).where(conversation_agents.c.agent_id == agent_id).values(state=state, updated_at=datetime.now(UTC)))
 
+    def set_model(self, agent_id: str, model_id: str) -> None:
+        """Persist a safe pre-run model fallback for one child agent."""
+        if not model_id.strip():
+            raise ValueError("model_id must be non-blank")
+        with self._engine.begin() as connection:
+            connection.execute(
+                update(conversation_agents)
+                .where(conversation_agents.c.agent_id == agent_id)
+                .values(model_id=model_id.strip()[:512], updated_at=datetime.now(UTC))
+            )
+
     def record_usage(
         self,
         agent_id: str,

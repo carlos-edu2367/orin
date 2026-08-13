@@ -183,6 +183,7 @@ def build_system_prompt(
     agents: list[dict[str, object]],
     workspace_hint: str,
     subagents_enabled: bool,
+    child_model_ids: tuple[str, ...] = (),
     skill_catalog: tuple[object, ...] = (),
     tool_ledger: tuple[Mapping[str, str], ...] = (),
     environment: Mapping[str, str] = MappingProxyType({}),
@@ -233,10 +234,13 @@ def build_system_prompt(
             "",
             "## Subagents",
             "- For a large task with a distinct, self-contained part, create a specialist with `create_agent` and hand it that part with `ask_agent`.",
+            "- Omit `model_id` to use the current model. If you supply `model_id`, it must be one of the current provider's favorite model IDs listed below.",
             "- When two or more delegated parts do not depend on each other, send them together with `ask_agents`; they run at the same time.",
             "- A subagent cannot see this conversation. Put everything it needs in the task text.",
             "- Do not create a subagent for something you can finish yourself in a step or two.",
         ]
+        if child_model_ids:
+            lines += ["- Favorite model IDs available for an explicit choice: " + ", ".join(json.dumps(model_id, ensure_ascii=True) for model_id in child_model_ids) + "."]
     if agents:
         roster = "; ".join(f"{item['name']} ({item['role']})" for item in agents[:8])
         lines += [f"- Subagents that already exist in this conversation: {roster}."]
@@ -361,6 +365,9 @@ class TurnSession:
         model_sees_images: bool = False,
         model_calls_tools: bool = True,
         vision_reader_factory: Callable[[], object] | None = None,
+        child_model_ids: tuple[str, ...] = (),
+        child_model_authorizer: Callable[[str], bool] | None = None,
+        child_provider_factory: Callable[[str], object] | None = None,
     ) -> None:
         self.turn = turn
         self.store = store
@@ -377,6 +384,11 @@ class TurnSession:
         self.tool_policy = tool_policy
         self.model_sees_images = bool(model_sees_images)
         self.model_calls_tools = bool(model_calls_tools)
+        self.child_model_ids = tuple(dict.fromkeys(
+            model_id.strip() for model_id in child_model_ids if isinstance(model_id, str) and model_id.strip()
+        ))
+        self._child_model_authorizer = child_model_authorizer or (lambda model_id: model_id in self.child_model_ids)
+        self._child_provider_factory = child_provider_factory or (lambda _model_id: self.provider_factory())
         # Best-effort: a store that does not expose attachments (most test
         # doubles) simply means this turn carries none for the pre-read path.
         attachments_reader = getattr(store, "attachments_for_turn", None)
@@ -487,7 +499,20 @@ class TurnSession:
 
     # -- subagents ------------------------------------------------------
 
-    def _create_agent(self, name: str, role: str) -> ToolOutcome:
+    def _child_model_allowed(self, model_id: str, *, allow_current: bool = False) -> bool:
+        """Authorize a subagent model without trusting the tool call or prompt."""
+        current_model_id = str(self.turn.get("model_id") or "")
+        return bool(model_id) and ((allow_current and model_id == current_model_id) or self._child_model_authorizer(model_id))
+
+    def _create_agent(self, name: str, role: str, model_id: str | None = None) -> ToolOutcome:
+        requested_model_id = str(model_id).strip() if model_id is not None else ""
+        selected_model_id = requested_model_id or str(self.turn.get("model_id") or "")
+        if not self._child_model_allowed(selected_model_id, allow_current=not requested_model_id):
+            return ToolOutcome(
+                "failed", "Modelo de subagente nao permitido",
+                "When model_id is provided, choose one of the current provider's favorite models.",
+                {"tool_kind": "agent"}, "CHILD_MODEL_NOT_FAVORITE",
+            )
         clean = " ".join(str(name).split())[:60]
         if not clean:
             return ToolOutcome("failed", "Nome de agente inválido", "The agent name must be a non-blank string.", {}, "INVALID_ARGUMENTS")
@@ -496,12 +521,13 @@ class TurnSession:
             str(role),
             parent_agent_id=self.main_agent_id,
             provider=str(self.turn.get("provider") or ""),
-            model_id=str(self.turn.get("model_id") or ""),
+            model_id=selected_model_id,
         )
         self._record(
             AgentActivityEventType.AGENT_CREATED,
             f"Criou o agente {clean}",
-            {"agent_name": clean, "role": str(role)[:200], "label": clean, "created": bool(record.get("created", True))},
+            {"agent_name": clean, "role": str(role)[:200], "label": clean, "created": bool(record.get("created", True)),
+             "provider": str(record.get("provider") or ""), "model_id": str(record.get("model_id") or "")},
             agent_id=str(record["agent_id"]), parent_agent_id=self.main_agent_id,
         )
         return ToolOutcome(
@@ -515,11 +541,48 @@ class TurnSession:
         record = self.agents_store.find(clean)
         if record is None:
             return ToolOutcome("failed", f"Agente {clean} não existe", f"No subagent named '{clean}'. Create it first with create_agent.", {"tool_kind": "agent"}, "AGENT_NOT_FOUND")
+        # Legacy conversation-agent rows predate provider/model snapshots.
+        # Treat their absent values exactly as an omitted model_id: use the
+        # current turn model, never an arbitrary catalog model.
+        child_provider = str(record.get("provider") or self.turn.get("provider") or "")
+        child_model_id = str(record.get("model_id") or self.turn.get("model_id") or "")
+        if child_provider != str(self.turn.get("provider") or "") or not self._child_model_allowed(child_model_id, allow_current=True):
+            return ToolOutcome(
+                "failed", f"Modelo de {clean} nao permitido",
+                "This subagent is not configured with the current model or a current favorite model for this provider.",
+                {"agent_name": clean, "label": clean, "tool_kind": "agent"}, "CHILD_MODEL_NOT_FAVORITE",
+            )
         with self._subagent_lock:
             if self._subagent_runs >= MAX_SUBAGENTS_PER_TURN:
                 return ToolOutcome("failed", "Limite de subagentes atingido", "The subagent budget for this turn is exhausted; finish the work yourself.", {"tool_kind": "agent"}, "SUBAGENT_LIMIT")
             self._subagent_runs += 1
         agent_id, task_text = str(record["agent_id"]), str(task)
+        active_model_id = child_model_id
+        try:
+            child_provider_instance = self._child_provider_factory(active_model_id)
+        except Exception as error:
+            current_model_id = str(self.turn.get("model_id") or "")
+            if active_model_id == current_model_id:
+                raise
+            # The requested favorite failed before the child could run or
+            # invoke a tool. Falling back here is safe; retrying after a run
+            # begins could duplicate side effects.
+            active_model_id = current_model_id
+            try:
+                child_provider_instance = self._child_provider_factory(active_model_id)
+            except Exception:
+                raise error
+            update_model = getattr(self.agents_store, "set_model", None)
+            if callable(update_model):
+                update_model(agent_id, active_model_id)
+            self._record(
+                AgentActivityEventType.MODEL_ROUTING_STARTED,
+                f"Modelo de {clean} indisponivel; usando o modelo atual",
+                {"agent_name": clean, "requested_model_id": child_model_id, "fallback_model_id": active_model_id,
+                 "reason": type(error).__name__},
+                agent_id=agent_id, parent_agent_id=self.main_agent_id,
+            )
+        subagent_turn = {**self.turn, "model_id": active_model_id}
         self._record(
             AgentActivityEventType.AGENT_MESSAGE_SENT,
             f"Enviou uma tarefa para {clean}",
@@ -528,11 +591,11 @@ class TurnSession:
             agent_id=self.main_agent_id,
         )
         self.agents_store.set_state(agent_id, "working")
-        sub_store = _SubagentStore(self, self.turn, agent_id, clean, self._subagent_task(record, task_text))
+        sub_store = _SubagentStore(self, subagent_turn, agent_id, clean, self._subagent_task(record, task_text))
         subagent_tools = self._toolset(subagents=False)
         runtime = AgenticTurnRuntime(
             store=sub_store,
-            provider=self.provider_factory(),
+            provider=child_provider_instance,
             toolset=subagent_tools,
             system_prompt=self._subagent_prompt(record, task_text, subagent_tools),
             limits=AgenticLimits(
@@ -544,7 +607,7 @@ class TurnSession:
             ),
             cancelled=self.cancelled,
         )
-        result = runtime.run(str(self.turn["turn_id"]), turn=self.turn)
+        result = runtime.run(str(self.turn["turn_id"]), turn=subagent_turn)
         answer = "".join(sub_store.text).strip()
         if result.state != "completed" or not answer:
             reason = result.error_code or ("SUBAGENT_EMPTY_RESPONSE" if not answer else "SUBAGENT_FAILED")
@@ -726,6 +789,7 @@ class TurnSession:
                 else "Files you create there persist for the whole conversation."
             ),
             subagents_enabled=self.enable_subagents,
+            child_model_ids=self.child_model_ids,
             skill_catalog=self._skill_catalog(task, toolset),
             tool_ledger=ledger,
             environment=environment,
