@@ -106,6 +106,12 @@ class RuntimeProfile:
             return (sys.executable, "internal-service", service)
         return (sys.executable, "-m", "agentos.launcher", "internal-service", service)
 
+    def launcher_command(self) -> tuple[str, ...]:
+        """The public launcher command, used by the desktop retry action."""
+        if getattr(sys, "frozen", False):
+            return (sys.executable,)
+        return (sys.executable, "-m", "agentos.launcher")
+
     @classmethod
     def detect(cls) -> "RuntimeProfile":
         repository = find_repository_root()

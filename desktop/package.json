@@ -1,0 +1,35 @@
+{
+  "name": "orin-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Electron host for the Orin local application",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --devtools",
+    "build": "electron-builder --win"
+  },
+  "devDependencies": {
+    "electron": "^37.2.6",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "dev.orin.desktop",
+    "productName": "Orin Desktop",
+    "asar": true,
+    "files": [
+      "electron/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "executableName": "Orin Desktop"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
+}

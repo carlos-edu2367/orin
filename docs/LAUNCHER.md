@@ -114,6 +114,7 @@ Orin binds `127.0.0.1` only, never a LAN address. Port 49200 by default.
 orin                    # start, wait for ready, open the browser
 orin --port 9000        # start on a specific port
 orin --no-browser       # start without opening a browser
+orin --desktop          # start and host the API-served app in Electron
 orin -v                 # show startup detail on the console
 orin start              # the same as `orin`
 orin stop
@@ -127,6 +128,37 @@ orin --help
 `orin status` exits `0` when Orin is running and `3` when it is not, so it can be
 used in a script.
 
+## Orin Desktop
+
+`orin --desktop` uses the same `Supervisor` and the same local services as the
+regular command. It starts Electron before datastore work begins, then writes an
+atomic snapshot to `data/run/desktop-startup.json` (or the configured run
+directory). The splash polls that file and displays actual launcher stages:
+Docker, PostgreSQL, Redis, migrations, API, `/healthz`, `/readyz`, publisher,
+worker, and the frontend probe.
+
+Electron never starts Docker, services, or Python workers itself. Once the
+launcher confirms readiness it provides the chosen loopback URL, and Electron
+loads `http://127.0.0.1:<port>` in the same `BrowserWindow`. This preserves the
+existing cookies, SSE, WebSocket, upload, download, and routing behavior.
+
+The shell is a single Electron instance. A second `orin --desktop` asks its
+existing window to focus, while the launcher's existing lock continues to stop a
+second backend set. Closing the window writes the regular cooperative stop
+request, including when startup is still waiting for a health check.
+
+In a development checkout, install its dependencies once:
+
+```powershell
+Set-Location desktop
+npm ci
+```
+
+Then use `orin --desktop --desktop-devtools` while changing shell files. Electron
+logs are written beside the other launcher logs as `desktop.log`. Build the
+initial Windows shell with `npm run build` from `desktop`; it is only the
+Electron host until the frozen launcher is packaged next to it.
+
 ## Logs
 
 The console stays minimal. Full detail is always written to files, whether or
@@ -138,6 +170,7 @@ not you passed `--verbose`:
 | `backend.log` | the HTTP process |
 | `publisher.log` | the dispatch publisher |
 | `worker.log` | the chat worker |
+| `desktop.log` | Electron main-process output |
 
 Values that look like keys, tokens or passwords are redacted before anything is
 written, and secrets are passed to child processes through the environment —

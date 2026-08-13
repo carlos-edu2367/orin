@@ -1,0 +1,42 @@
+:root {
+  color-scheme: dark;
+  --ink: #070611;
+  --surface: #0b0a14;
+  --raised: rgba(245, 241, 255, .045);
+  --line: rgba(235, 227, 255, .11);
+  --text: #f5f1ff;
+  --muted: #a69fb8;
+  --faint: #706a7c;
+  --accent: #a66cff;
+  --danger: #ff6b7d;
+  --radius: 18px;
+}
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 320px; min-height: 100vh; color: var(--text); background: var(--ink); font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+.splash-shell { display: grid; min-height: 100vh; place-items: center; overflow: hidden; padding: 28px; background: radial-gradient(ellipse 68% 52% at 50% 12%, rgb(166 108 255 / .16), transparent 66%), radial-gradient(ellipse 48% 42% at 8% 95%, rgb(166 108 255 / .09), transparent 70%), var(--surface); }
+.splash-card { width: min(100%, 580px); padding: 42px; border: 1px solid var(--line); border-radius: var(--radius); background: rgb(11 10 20 / .76); box-shadow: 0 28px 90px rgb(0 0 0 / .42), 0 0 80px rgb(166 108 255 / .07); backdrop-filter: blur(16px); animation: appear .45s ease-out both; }
+.brand { display: flex; align-items: center; gap: 10px; font-size: 13px; font-weight: 760; letter-spacing: .18em; }
+.brand-mark { display: grid; width: 27px; height: 27px; place-items: center; border: 1px solid var(--accent); border-radius: 8px; color: var(--accent); font-size: 13px; letter-spacing: 0; box-shadow: 0 0 20px rgb(166 108 255 / .28); }
+.eyebrow { margin: 39px 0 10px; color: var(--accent); font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 10px; font-weight: 650; letter-spacing: .17em; }
+h1 { margin: 0; font-size: clamp(28px, 5vw, 38px); letter-spacing: -.045em; }
+.message { min-height: 42px; margin: 12px 0 28px; color: var(--muted); font-size: 14px; line-height: 1.5; }
+.steps { display: grid; gap: 5px; margin: 0; padding: 0; list-style: none; }
+.step { display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 10px; align-items: center; padding: 10px 11px; border: 1px solid transparent; border-radius: 10px; transition: color .2s ease, background .2s ease, border-color .2s ease; }
+.step-icon { display: grid; width: 17px; height: 17px; place-items: center; color: var(--faint); font-family: ui-monospace, Consolas, monospace; font-size: 13px; }
+.step-label { display: grid; gap: 2px; min-width: 0; font-size: 13px; font-weight: 550; }
+.step-detail { overflow: hidden; color: var(--faint); font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.step--starting { border-color: rgb(166 108 255 / .17); background: rgb(166 108 255 / .055); }
+.step--starting .step-icon { color: var(--accent); animation: pulse 1.2s ease-in-out infinite; }
+.step--ready .step-icon { color: #b8f5d0; }
+.step--error { border-color: rgb(255 107 125 / .22); background: rgb(255 107 125 / .055); }
+.step--error .step-icon { color: var(--danger); }
+.progress { height: 3px; margin-top: 28px; overflow: hidden; border-radius: 999px; background: rgb(245 241 255 / .10); }
+.progress span { display: block; width: 8%; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #7c3aed, var(--accent)); box-shadow: 0 0 12px rgb(166 108 255 / .7); transition: width .35s ease; }
+.failure-actions { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 24px; }
+.button { border: 1px solid var(--line); border-radius: 9px; padding: 9px 12px; background: var(--raised); color: var(--text); cursor: pointer; font: 600 12px inherit; transition: border-color .16s ease, transform .16s ease; }
+.button:hover { border-color: rgb(166 108 255 / .55); transform: translateY(-1px); }
+.button-primary { border-color: var(--accent); background: var(--accent); color: var(--ink); }
+.button-quiet { margin-left: auto; color: var(--muted); }
+@keyframes appear { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes pulse { 50% { opacity: .35; transform: scale(.8); } }
+@media (max-width: 520px) { .splash-shell { padding: 16px; } .splash-card { padding: 28px 22px; } .eyebrow { margin-top: 28px; } }

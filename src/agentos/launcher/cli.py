@@ -17,6 +17,7 @@ from time import sleep
 from agentos.installation import OrinPaths, RuntimeProfile, orin_paths, runtime_profile
 
 from .internal import SERVICES, run_service
+from .desktop import focus_desktop
 from .ports import DEFAULT_PORT, port_is_listening
 from .probes import http_probe
 from .state import (
@@ -44,6 +45,9 @@ def _start_options() -> argparse.ArgumentParser:
     shared = argparse.ArgumentParser(add_help=False)
     shared.add_argument("--port", type=int, default=argparse.SUPPRESS, help=f"port for the Orin interface (default {DEFAULT_PORT})")
     shared.add_argument("--no-browser", action="store_true", default=argparse.SUPPRESS, help="do not open a browser window")
+    shared.add_argument("--desktop", action="store_true", default=argparse.SUPPRESS, help="open Orin in the Electron desktop window")
+    shared.add_argument("--desktop-devtools", action="store_true", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+    shared.add_argument("--desktop-reuse", action="store_true", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
     shared.add_argument("-v", "--verbose", action="store_true", default=argparse.SUPPRESS, help="show startup detail on the console")
     return shared
 
@@ -65,7 +69,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--version", action="store_true", help="print the Orin version and exit")
-    parser.set_defaults(port=None, no_browser=False, verbose=False, command=None)
+    parser.set_defaults(port=None, no_browser=False, verbose=False, desktop=False, desktop_devtools=False, desktop_reuse=False, command=None)
 
     commands = parser.add_subparsers(dest="command", metavar="command")
     commands.add_parser("start", parents=[shared], help="start the Orin runtime (the default)")
@@ -113,8 +117,13 @@ def command_start(arguments: argparse.Namespace, paths: OrinPaths, profile: Runt
     lock = InstanceLock(paths.instance_lock)
     if existing is not None or not lock.acquire():
         state = existing or read_state(paths)
+        if arguments.desktop and focus_desktop(paths, profile):
+            if state is not None:
+                return attach_to_running(console, state, open_browser=False)
+            console.line("\n  Orin is already starting in the desktop window.\n")
+            return 0
         if state is not None:
-            return attach_to_running(console, state, open_browser=not arguments.no_browser)
+            return attach_to_running(console, state, open_browser=not arguments.no_browser and not arguments.desktop)
         console.error("Another Orin launcher is starting on this installation. Try again in a moment.")
         return 1
 
@@ -126,8 +135,11 @@ def command_start(arguments: argparse.Namespace, paths: OrinPaths, profile: Runt
         options=LaunchOptions(
             port=arguments.port,
             explicit_port=arguments.port is not None,
-            open_browser=not arguments.no_browser,
+            open_browser=not arguments.no_browser and not arguments.desktop,
             verbose=arguments.verbose,
+            desktop=arguments.desktop,
+            desktop_devtools=arguments.desktop_devtools,
+            desktop_reuse=arguments.desktop_reuse,
         ),
         log=log,
     )

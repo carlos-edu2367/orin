@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Orin</title>
+    <link rel="stylesheet" href="./splash.css" />
+  </head>
+  <body>
+    <main class="splash-shell">
+      <section class="splash-card" aria-labelledby="title">
+        <header class="brand"><span class="brand-mark">O</span><span>ORIN</span></header>
+        <p class="eyebrow">AMBIENTE LOCAL</p>
+        <h1 id="title">Preparando seu ambiente</h1>
+        <p id="message" class="message" role="status">Conectando ao launcher…</p>
+        <ol id="steps" class="steps" aria-label="Progresso de inicialização"></ol>
+        <div class="progress" aria-hidden="true"><span id="progress-bar"></span></div>
+        <section id="failure-actions" class="failure-actions" hidden>
+          <button id="retry" class="button button-primary" type="button">Tentar novamente</button>
+          <button id="open-logs" class="button" type="button">Abrir logs</button>
+          <button id="close" class="button button-quiet" type="button">Fechar</button>
+        </section>
+      </section>
+    </main>
+    <script src="./splash.js"></script>
+  </body>
+</html>

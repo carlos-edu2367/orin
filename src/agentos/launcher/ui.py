@@ -65,8 +65,16 @@ class Console:
     def _write(self, text: str = "") -> None:
         if self.quiet:
             return
-        self.stream.write(text + "\n")
+        self._write_text(text + "\n")
         self.stream.flush()
+
+    def _write_text(self, text: str) -> None:
+        """Write readable output even when a legacy Windows console is CP-1252."""
+        try:
+            self.stream.write(text)
+        except UnicodeEncodeError:
+            encoding = getattr(self.stream, "encoding", None) or "utf-8"
+            self.stream.write(text.encode(encoding, errors="replace").decode(encoding))
 
     def banner(self) -> None:
         self._write()
@@ -113,10 +121,10 @@ class Console:
             self._write("    " + self._paint(message, "dim"))
 
     def error(self, message: str) -> None:
-        self.stream.write("\n  " + self._paint("Orin could not start.", "bold", "red") + "\n")
+        self._write_text("\n  " + self._paint("Orin could not start.", "bold", "red") + "\n")
         for line in message.splitlines():
-            self.stream.write("  " + line + "\n")
-        self.stream.write("\n")
+            self._write_text("  " + line + "\n")
+        self._write_text("\n")
         self.stream.flush()
 
     def line(self, message: str) -> None:

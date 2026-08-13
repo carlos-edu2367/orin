@@ -85,6 +85,47 @@ need them. See [docs/LAUNCHER.md](docs/LAUNCHER.md) for readiness checks,
 single-instance detection, process lifecycle, paths, and how this becomes an
 installable `orin.exe`.
 
+### Orin Desktop
+
+The browser version remains the default. To host that exact same local web app
+in an Electron window instead, install the small desktop shell once and run:
+
+```powershell
+Set-Location desktop
+npm ci
+Set-Location ..
+orin --desktop
+```
+
+The Electron window appears immediately with a live startup screen. The Python
+launcher remains the single owner of Docker, PostgreSQL, Redis, migrations, the
+API, publisher, and worker; Electron only observes its local startup snapshot
+and loads the API-served application after `/healthz`, `/readyz`, and the
+frontend probe pass. The main web UI is never loaded from `file://`.
+
+Docker Desktop remains a requirement for the local Compose services. If Docker
+or another startup step fails, the window keeps the concise error and offers to
+retry, open the existing Orin logs, or close. Closing the window asks the same
+cooperative launcher shutdown path used by `orin stop`; it never closes Docker
+Desktop itself.
+
+For Electron development, use the same command with DevTools enabled:
+
+```powershell
+orin --desktop --desktop-devtools
+```
+
+The shell can also be packaged as a starting point for a Windows installer:
+
+```powershell
+Set-Location desktop
+npm run build
+```
+
+This produces the Electron host under `desktop/dist`. It is not yet a complete
+standalone Orin distribution: a packaged release still needs to ship its frozen
+`orin` launcher beside `Orin Desktop.exe`, and still requires Docker Desktop.
+
 Rebuild the web client after changing the frontend:
 
 ```powershell

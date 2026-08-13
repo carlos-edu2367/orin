@@ -24,6 +24,8 @@ from agentos.omniroute import OmniRouteRuntimeSettingsStore
 from agentos.provider_catalog.omniroute import DEFAULT_OMNIROUTE_BASE_URL
 
 from .environment import RuntimeEnvironment, load_environment
+from .desktop import DesktopProcess, DesktopUnavailable, launch_desktop
+from .desktop_status import DesktopStatusWriter
 from .ports import PortChoice, select_port
 from .probes import ProbeResult, frontend_probe, heartbeat_probe, http_probe, wait_until
 from .processes import ProcessGroup, SupervisedProcess, child_environment
@@ -54,12 +56,19 @@ class StartupFailed(RuntimeError):
     """A startup step failed; the message is written for the person reading it."""
 
 
+class StartupCancelled(StartupFailed):
+    """The desktop window asked the launcher to stop while it was starting."""
+
+
 @dataclass(frozen=True, slots=True)
 class LaunchOptions:
     port: int | None = None
     explicit_port: bool = False
     open_browser: bool = True
     verbose: bool = False
+    desktop: bool = False
+    desktop_devtools: bool = False
+    desktop_reuse: bool = False
 
 
 @dataclass
@@ -79,6 +88,9 @@ class Supervisor:
     _omniroute_next_check: float = field(default=0.0, init=False)
     _omniroute_deadline: float = field(default=0.0, init=False)
     _stop: threading.Event = field(default_factory=threading.Event, init=False)
+    desktop_status: DesktopStatusWriter | None = field(default=None, init=False)
+    desktop_process: DesktopProcess | None = field(default=None, init=False)
+    _desktop_current_service: str = field(default="docker", init=False)
 
     # -- addresses ------------------------------------------------------
 
@@ -101,8 +113,14 @@ class Supervisor:
             self._step_workers()
             self._step_omnirouter()
             self._step_frontend()
+        except StartupCancelled as error:
+            self._rollback()
+            self._desktop_stopped(str(error))
+            self.console.stopped()
+            return 130
         except StartupFailed as error:
             self._rollback()
+            self._desktop_failed(str(error))
             self.console.error(str(error))
             self.log.error("startup failed: %s", error)
             return 1
@@ -115,6 +133,8 @@ class Supervisor:
             self.paths,
             InstanceState.create(port=self.port, url=self.base_url, version=self.profile.version, profile=self.profile.kind),
         )
+        if self.desktop_status is not None:
+            self.desktop_status.ready(self.base_url)
         self.console.ready(self.base_url)
         if self.choice is not None and self.choice.message:
             self.console.detail(self.choice.message)
@@ -139,51 +159,96 @@ class Supervisor:
         if self.choice.message:
             self.console.warning(self.choice.message)
         clear_stop_request(self.paths)
+        if self.options.desktop:
+            self.desktop_status = DesktopStatusWriter(self.paths, restart_command=self.profile.launcher_command())
+            self.desktop_status.set_url(self.base_url)
+            self._desktop_service("docker", "starting", "Verificando Docker Desktop")
+            if not self.options.desktop_reuse:
+                try:
+                    self.desktop_process = launch_desktop(
+                        self.paths,
+                        self.profile,
+                        self.desktop_status,
+                        devtools=self.options.desktop_devtools,
+                    )
+                except DesktopUnavailable as error:
+                    self._desktop_failed(str(error))
+                    raise StartupFailed(str(error)) from error
 
     def _step_services(self) -> None:
         assert self.environment is not None
+        self._desktop_current_service = "docker"
         try:
-            ensure_datastores(self.environment, self.profile, log=self.log)
+            status = ensure_datastores(self.environment, self.profile, log=self.log)
+            if stop_requested(self.paths):
+                raise StartupCancelled("A inicialização foi cancelada.")
+            docker_detail = "Infraestrutura Docker pronta" if status.started_here else "Serviços locais já estavam disponíveis"
+            self._desktop_service("docker", "ready", docker_detail)
+            self._desktop_service("postgres", "ready", status.postgres.detail)
+            self._desktop_service("redis", "ready", status.redis.detail)
+            self._desktop_current_service = "migrations"
+            self._desktop_service("migrations", "starting", "Aplicando atualizações do banco")
             apply_migrations(self.environment, self.profile, log=self.log)
+        except StartupCancelled:
+            raise
         except Exception as error:
             self.console.failed("Services")
+            self._desktop_failed(str(error))
             raise StartupFailed(str(error)) from error
+        self._desktop_service("migrations", "ready", "Banco de dados atualizado")
         self.console.step("Services")
 
     def _step_backend(self) -> None:
+        self._desktop_current_service = "backend"
+        self._desktop_service("backend", "starting", "Iniciando API local")
         process = self._spawn("backend")
+        self._desktop_current_service = "health"
+        self._desktop_service("health", "starting", "Aguardando /healthz")
         ready = wait_until(
             lambda: http_probe(f"{self.base_url}/healthz", timeout=2.0),
             timeout=BACKEND_READY_TIMEOUT,
-            abort=lambda: self._child_died(process),
+            abort=lambda: self._startup_abort(process),
         )
         if ready:
+            self._desktop_service("health", "ready", ready.detail)
+            self._desktop_current_service = "ready"
+            self._desktop_service("ready", "starting", "Aguardando /readyz")
             # /healthz says the process is up; /readyz says it can reach the
             # database and the queue, which is what the workers depend on.
             ready = wait_until(
                 lambda: http_probe(f"{self.base_url}/readyz", timeout=3.0),
                 timeout=BACKEND_READY_TIMEOUT,
-                abort=lambda: self._child_died(process),
+                abort=lambda: self._startup_abort(process),
             )
         if not ready:
             self.console.failed("Backend")
+            self._raise_if_startup_cancelled(ready)
             raise StartupFailed(self._child_failure("Backend", process, ready))
+        self._desktop_service("ready", "ready", ready.detail)
+        self._desktop_service("backend", "ready", "API local pronta")
         self.console.step("Backend")
 
     def _step_workers(self) -> None:
         assert self.environment is not None
+        self._desktop_current_service = "publisher"
+        self._desktop_service("publisher", "starting", "Iniciando publicador")
         publisher = self._spawn("publisher")
+        self._desktop_current_service = "worker"
+        self._desktop_service("worker", "starting", "Iniciando worker")
         worker = self._spawn("worker")
         ready = wait_until(
             lambda: heartbeat_probe(self.environment.database_url, ("chat-publisher", "chat-worker")),  # type: ignore[union-attr]
             timeout=WORKERS_READY_TIMEOUT,
             interval=0.5,
-            abort=lambda: self._child_died(publisher) or self._child_died(worker),
+            abort=lambda: self._startup_abort(publisher) or self._startup_abort(worker),
         )
         if not ready:
             self.console.failed("Workers")
+            self._raise_if_startup_cancelled(ready)
             dead = next((child for child in (publisher, worker) if child.exited() is not None), None)
             raise StartupFailed(self._child_failure("Workers", dead or publisher, ready))
+        self._desktop_service("publisher", "ready", "Publicador conectado")
+        self._desktop_service("worker", "ready", "Worker conectado")
         self.console.step("Workers")
 
     def _step_omnirouter(self) -> None:
@@ -195,6 +260,8 @@ class Supervisor:
         the Start/Stop/Restart controls in the interface act on.
         """
         self.omniroute_expected = self._omniroute_enabled()
+        if stop_requested(self.paths):
+            raise StartupCancelled("A inicialização foi cancelada.")
         if not self.omniroute_expected:
             # Disabled is an ordinary choice, not a warning and not a log line
             # the user has to read. The step simply does not exist.
@@ -204,7 +271,9 @@ class Supervisor:
             lambda: self._omniroute_probe(),
             timeout=OMNIROUTE_GRACE,
             interval=0.5,
+            abort=self._startup_abort,
         )
+        self._raise_if_startup_cancelled(ready)
         if ready:
             self.omniroute_ready = True
             self.console.step("OmniRouter")
@@ -216,18 +285,22 @@ class Supervisor:
         self.log.info("omniroute not ready within the grace window: %s", ready.detail)
 
     def _step_frontend(self) -> None:
+        self._desktop_current_service = "frontend"
+        self._desktop_service("frontend", "starting", "Verificando a interface do Orin")
         ready = wait_until(
             lambda: frontend_probe(self.base_url),
             timeout=FRONTEND_READY_TIMEOUT,
-            abort=lambda: self._child_died(self.children[0]) if self.children else None,
+            abort=lambda: self._startup_abort(self.children[0]) if self.children else self._startup_abort(),
         )
         if not ready:
             self.console.failed("Frontend")
+            self._raise_if_startup_cancelled(ready)
             raise StartupFailed(
                 "The web interface is not being served.\n"
                 f"  {ready.detail}\n"
                 f"  Backend log: {self.paths.service_log('backend')}"
             )
+        self._desktop_service("frontend", "ready", ready.detail)
         self.console.step("Frontend")
 
     # -- omniroute ------------------------------------------------------
@@ -316,6 +389,28 @@ class Supervisor:
             message.extend(f"  {line}" for line in tail.splitlines()[-8:])
         return "\n".join(message)
 
+    def _startup_abort(self, child: SupervisedProcess | None = None) -> str | None:
+        if stop_requested(self.paths):
+            return "startup canceled by the desktop window"
+        return self._child_died(child) if child is not None else None
+
+    @staticmethod
+    def _raise_if_startup_cancelled(result: ProbeResult) -> None:
+        if "startup canceled" in result.detail:
+            raise StartupCancelled("A inicialização foi cancelada.")
+
+    def _desktop_service(self, name: str, state: str, detail: str = "") -> None:
+        if self.desktop_status is not None:
+            self.desktop_status.service(name, state, detail)  # type: ignore[arg-type]
+
+    def _desktop_failed(self, message: str) -> None:
+        if self.desktop_status is not None:
+            self.desktop_status.failed(self._desktop_current_service, message)
+
+    def _desktop_stopped(self, message: str) -> None:
+        if self.desktop_status is not None:
+            self.desktop_status.stopped(message)
+
     # -- shutdown -------------------------------------------------------
 
     def _rollback(self) -> None:
@@ -353,6 +448,7 @@ class Supervisor:
         self.group.close()
         clear_state(self.paths)
         clear_stop_request(self.paths)
+        self._desktop_stopped("Orin foi encerrado.")
         self.console.stopped()
 
     # -- supervision ----------------------------------------------------
@@ -368,6 +464,8 @@ class Supervisor:
                 self._watch_omniroute()
                 dead = next((child for child in self.children if child.exited() is not None), None)
                 if dead is not None:
+                    self._desktop_current_service = {"backend": "backend", "publisher": "publisher", "worker": "worker"}.get(dead.name, "backend")
+                    self._desktop_failed(f"{_label(dead.name)} parou inesperadamente. Veja os logs para mais detalhes.")
                     self.console.error(
                         f"{_label(dead.name)} stopped unexpectedly (exit code {dead.exited()}).\n"
                         f"  Log: {dead.log_path}"
