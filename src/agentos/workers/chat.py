@@ -96,6 +96,9 @@ class _RuntimeStore:
     def history_for_turn(self, turn: dict[str, object]):
         return self._store.history_for_turn(turn)
 
+    def attachments_for_turn(self, turn: dict[str, object]):
+        return self._store.attachments_for_turn(turn)
+
     def delta(self, turn: dict[str, object], text: str) -> None:
         self._store.delta(turn, text)
 

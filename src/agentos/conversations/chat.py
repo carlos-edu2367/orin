@@ -378,6 +378,24 @@ class PostgresChatStore:
             history.append({"role": str(row["role"]), "content": content})
         return history
 
+    def attachments_for_turn(self, turn: Mapping[str, object]) -> list[dict[str, object]]:
+        """The attachment records of this turn's own user message, insertion order.
+
+        This is the only place ``TurnSession`` needs to read attachments back:
+        a model that cannot call tools has no other way to learn what is in
+        the file the person just attached (see ``pre_read_attachments``).
+        """
+        with self._engine.connect() as c:
+            rows = c.execute(
+                select(conversation_message_attachments)
+                .where(conversation_message_attachments.c.message_id == turn["user_message_id"])
+                .order_by(conversation_message_attachments.c.id)
+            ).mappings().all()
+        return [{
+            "path": str(row["path"]), "original_name": str(row["original_name"]),
+            "media_type": str(row["media_type"]), "kind": str(row["kind"]), "bytes": int(row["bytes"]),
+        } for row in rows]
+
     def delta(self, turn: dict[str, object], text: str) -> None:
         if not text: return
         now = datetime.now(UTC)

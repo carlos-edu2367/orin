@@ -36,6 +36,11 @@ PREVIEW_CHARS = 400
 # every long answer at 1024 tokens.
 SUBAGENT_MAX_OUTPUT_TOKENS = 4096
 SUBAGENT_MAX_ACTIONS = 12
+# A model that cannot call tools gets its visual attachments read before the
+# turn starts (see ``pre_read_attachments``); this bounds how many of those
+# reads happen so a person who attaches a dozen files cannot turn one turn
+# into a dozen vision calls.
+MAX_PRE_READ_FILES = 4
 
 
 class ProjectWorkspaceResolutionError(RuntimeError):
@@ -90,6 +95,39 @@ def environment_facts() -> dict[str, str]:
         "python": platform.python_version(),
         "available": tooling or "none detected",
     }
+
+
+def pre_read_attachments(history, attachments, toolset, *, max_files: int = MAX_PRE_READ_FILES):
+    """Read visual attachments before the turn starts.
+
+    A model that cannot call tools would otherwise never look at the file the
+    person just attached. This is the only path that reads without the model
+    asking, and it exists solely for that case.
+    """
+    visual = [item for item in attachments if str(item.get("kind")) in {"image", "pdf"}][:max_files]
+    if not visual:
+        return history
+    readings: list[str] = []
+    for item in visual:
+        try:
+            result = toolset.view_file(str(item.get("path") or ""))
+        except Exception:
+            # A pre-read is an enrichment; it never becomes the reason a turn
+            # cannot start.
+            continue
+        content = str((result or {}).get("content") or "").strip()
+        if content:
+            readings.append(content)
+    if not readings:
+        return history
+    joined = "\n\n---\n\n".join(readings)
+    updated = [dict(item) for item in history]
+    for index in range(len(updated) - 1, -1, -1):
+        if updated[index].get("role") == "user":
+            updated[index]["content"] = f"{updated[index].get('content', '')}\n\n{joined}"
+            return updated
+    updated.append({"role": "user", "content": joined})
+    return updated
 
 
 def resolve_effective_workspace_id(turn: Mapping[str, object]) -> str:
@@ -238,12 +276,19 @@ class _MainAgentStore:
     (technical) projection.
     """
 
-    def __init__(self, session: "TurnSession", inner: object) -> None:
+    def __init__(self, session: "TurnSession", inner: object, toolset: object) -> None:
         self._session = session
         self._inner = inner
+        self._toolset = toolset
 
     def __getattr__(self, name: str) -> object:
         return getattr(self._inner, name)
+
+    def history_for_turn(self, turn: dict[str, object]) -> list[dict[str, str]]:
+        history = self._inner.history_for_turn(turn)
+        if not self._session.model_calls_tools:
+            history = pre_read_attachments(history, self._session.turn_attachments, self._toolset)
+        return history
 
     def lifecycle(self, turn: dict[str, object], state: str, **payload: object) -> None:
         self._session.emit_lifecycle(turn, state, **payload)
@@ -299,6 +344,13 @@ class TurnSession:
         self.tool_policy = tool_policy
         self.model_sees_images = bool(model_sees_images)
         self.model_calls_tools = bool(model_calls_tools)
+        # Best-effort: a store that does not expose attachments (most test
+        # doubles) simply means this turn carries none for the pre-read path.
+        attachments_reader = getattr(store, "attachments_for_turn", None)
+        try:
+            self.turn_attachments = list(attachments_reader(turn)) if callable(attachments_reader) else []
+        except Exception:
+            self.turn_attachments = []
         # Wrapped once, cheaply: the factory itself is only invoked the first
         # time a tool call actually needs a visual reading.
         self._visual_reader = _LazyVisionReader(vision_reader_factory) if vision_reader_factory is not None else None
@@ -656,9 +708,9 @@ class TurnSession:
                 {"requested_route": str(self.turn.get("model_id") or ""), "provider": "omniroute"},
             )
         return AgenticTurnRuntime(
-            store=_MainAgentStore(self, self.store), provider=self.provider_factory(), toolset=toolset,
+            store=_MainAgentStore(self, self.store, toolset), provider=self.provider_factory(), toolset=toolset,
             system_prompt=prompt, limits=self.limits, cancelled=self.cancelled,
         )
 
 
-__all__ = ["MAX_SUBAGENTS_PER_TURN", "ProjectWorkspaceResolutionError", "SUBAGENT_MAX_ACTIONS", "SUBAGENT_MAX_OUTPUT_TOKENS", "TurnSession", "build_system_prompt", "environment_facts", "resolve_effective_workspace_id"]
+__all__ = ["MAX_PRE_READ_FILES", "MAX_SUBAGENTS_PER_TURN", "ProjectWorkspaceResolutionError", "SUBAGENT_MAX_ACTIONS", "SUBAGENT_MAX_OUTPUT_TOKENS", "TurnSession", "build_system_prompt", "environment_facts", "pre_read_attachments", "resolve_effective_workspace_id"]

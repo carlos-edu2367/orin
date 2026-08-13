@@ -60,3 +60,23 @@ def test_history_marks_the_attachment_for_the_model():
     assert "veja isto" in history[0]["content"]
     assert "uploads/nota.pdf" in history[0]["content"]
     assert "view_file" in history[0]["content"]
+
+
+def test_attachments_for_turn_returns_the_turns_user_message_attachments():
+    store = _store()
+    receipt = store.create(
+        user_id="user-1", message="veja isto", provider="anthropic", model_id="m",
+        idempotency_key="k1", attachments=[ATTACHMENT],
+    )
+    turn = store.claim(receipt.turn_id)
+    assert store.attachments_for_turn(turn) == [{
+        "path": "uploads/nota.pdf", "original_name": "nota.pdf",
+        "media_type": "application/pdf", "kind": "pdf", "bytes": 2048,
+    }]
+
+
+def test_attachments_for_turn_is_empty_without_attachments():
+    store = _store()
+    receipt = store.create(user_id="user-1", message="oi", provider="anthropic", model_id="m", idempotency_key="k1")
+    turn = store.claim(receipt.turn_id)
+    assert store.attachments_for_turn(turn) == []
