@@ -7,6 +7,10 @@ import {
   type Conversation, type ConversationMessage,
 } from '../../api/conversations'
 import { ApiError } from '../../api/errors'
+import {
+  PROVIDER_NAMES, getVisionModelSetting, listProviderModels,
+  type ProviderModel, type ProviderName, type VisionModelSetting,
+} from '../../api/providers'
 import { deleteUpload, uploadFile } from '../../api/uploads'
 import { attachWorkspaceFolder, detachWorkspaceFolder, inspectWorkspaceFolder, type WorkspaceState } from '../../api/workspace'
 import { CommandPalette } from '../../components/CommandPalette'
@@ -15,6 +19,7 @@ import { OverviewPanel } from '../overview/OverviewPanel'
 import { WorkspaceNavigation } from '../projects/WorkspaceNavigation'
 import { ActivityStream } from './ActivityStream'
 import { AgentPulse, modeFromEvents } from './AgentPulse'
+import { attachmentNotice } from './attachmentNotice'
 import type { ComposerAttachment } from './AttachmentChips'
 import { Composer } from './Composer'
 import { MarkdownMessage } from './MarkdownMessage'
@@ -25,6 +30,31 @@ import { WorkspaceFolderButton } from './WorkspaceFolderButton'
 import { activityReducer, createActivityState } from './activityReducer'
 import type { ConversationActivityEvent } from './activityTypes'
 import { buildMessageTimelines } from './turnTimelineFold'
+
+const TOOL_CAPABILITY_NAMES = new Set(['tools', 'tool_use', 'function_calling'])
+
+/** Mirrors the worker's own `_model_calls_tools`: an unrefreshed catalog must not silently disable tools. */
+function modelCallsTools(capabilities: string[]): boolean {
+  return capabilities.length === 0 || capabilities.some((item) => TOOL_CAPABILITY_NAMES.has(item.toLowerCase()))
+}
+
+/**
+ * Mirrors `choose_vision_model` (`src/agentos/reading/selection.py`): what the
+ * person chose, then the conversation's own provider, then a local Ollama,
+ * then anything else. Only used to name the model in the composer's notice.
+ */
+function chooseVisionModel(candidates: ProviderModel[], turnProvider: string, override: VisionModelSetting | null): ProviderModel | null {
+  if (candidates.length === 0) return null
+  if (override?.provider && override.modelId) {
+    const chosen = candidates.find((item) => item.provider === override.provider && item.model_id === override.modelId)
+    if (chosen) return chosen
+  }
+  const sameProvider = candidates.find((item) => item.provider === turnProvider)
+  if (sameProvider) return sameProvider
+  const local = candidates.find((item) => item.provider === 'ollama')
+  if (local) return local
+  return candidates[0]
+}
 
 const MANAGED_WORKSPACE: WorkspaceState = { kind: 'managed', path: null, folderName: null, scope: 'chat', projectName: null }
 
@@ -57,6 +87,13 @@ export function ChatPage() {
   const [activity, dispatch] = useReducer(activityReducer, undefined, createActivityState)
   const [previewReference, setPreviewReference] = useState<WorkspaceFileReference | null>(null)
   const closePreview = useCallback(() => setPreviewReference(null), [])
+  // What the composer's attachment notice needs to know: the turn's own model
+  // capabilities, and — only to name it in the notice — every vision-capable
+  // model this user has plus the explicit override, the same inputs
+  // `VisionModelSetting` already reads.
+  const [turnModelCatalog, setTurnModelCatalog] = useState<ProviderModel | null>(null)
+  const [visionCandidates, setVisionCandidates] = useState<ProviderModel[]>([])
+  const [visionSetting, setVisionSetting] = useState<VisionModelSetting | null>(null)
 
   const cursorRef = useRef('0')
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -153,6 +190,54 @@ export function ChatPage() {
       if (timer !== undefined) window.clearTimeout(timer)
     }
   }, [client, conversationId, loadSnapshot])
+
+  // Fetched once, best-effort: every vision-capable model this user has, and
+  // the explicit override, so the composer's notice can name the model that
+  // would actually do the reading. A failure here must never block the chat
+  // itself — it only means the notice falls back to "no vision model".
+  useEffect(() => {
+    const controller = new AbortController()
+    Promise.allSettled(PROVIDER_NAMES.map((provider) => listProviderModels(client, provider, controller.signal)))
+      .then((results) => {
+        if (controller.signal.aborted) return
+        const items = results.flatMap((result) => (result.status === 'fulfilled' ? result.value : []))
+        setVisionCandidates(items.filter((item) => item.input_modalities.includes('image')))
+      })
+    getVisionModelSetting(client, controller.signal)
+      .then((value) => { if (!controller.signal.aborted) setVisionSetting(value) })
+      .catch(() => { if (!controller.signal.aborted) setVisionSetting({ provider: null, modelId: null, mode: 'automatic' }) })
+    return () => controller.abort()
+  }, [client])
+
+  // The turn's own model capabilities, refetched whenever the conversation's
+  // model changes. Best-effort: an unrefreshed or unreachable catalog leaves
+  // this null, and the notice logic below treats that as "unknown" the same
+  // way the worker's own capability check does.
+  const provider = conversation?.provider
+  const modelId = conversation?.model_id
+  useEffect(() => {
+    if (!provider || !modelId || !PROVIDER_NAMES.includes(provider as ProviderName)) return
+    const controller = new AbortController()
+    listProviderModels(client, provider as ProviderName, controller.signal)
+      .then((items) => {
+        if (controller.signal.aborted) return
+        setTurnModelCatalog(items.find((item) => item.model_id === modelId) ?? null)
+      })
+      .catch(() => { if (!controller.signal.aborted) setTurnModelCatalog(null) })
+    return () => controller.abort()
+  }, [client, provider, modelId])
+  // A stale entry from the previous model must never be read as this one's
+  // capabilities while the new model's own fetch is still in flight.
+  const turnModel = turnModelCatalog?.model_id === modelId ? turnModelCatalog : null
+
+  const hasVisualAttachment = attachments.some((item) => item.kind === 'image' || item.kind === 'pdf')
+  const visionModel = chooseVisionModel(visionCandidates, provider ?? '', visionSetting)
+  const notice = attachmentNotice({
+    hasVisualAttachment,
+    modelSeesImages: turnModel?.input_modalities.includes('image') ?? false,
+    modelCallsTools: turnModel ? modelCallsTools(turnModel.capabilities) : true,
+    visionModelName: visionModel?.model_id ?? null,
+  })
 
   // Streamed text belongs to the assistant message the deltas name; the durable
   // snapshot wins as soon as it catches up, so a reload shows the same text.
@@ -384,6 +469,7 @@ export function ChatPage() {
           onAttach={onAttach}
           onRemoveAttachment={onRemoveAttachment}
           canSend={attachments.every((item) => item.state !== 'uploading')}
+          notice={notice}
           settings={
             <WorkspaceFolderButton
               state={conversation?.workspace ?? MANAGED_WORKSPACE}
