@@ -197,26 +197,49 @@ class ChatWorker:
                     expired.append(str(row["turn_id"]))
         return tuple(expired)
 
-    def _context_window_for(self, turn: dict[str, object]) -> int | None:
-        """The turn model's real context window, or None if it is unknown.
+    def _catalog_row_for(self, turn: dict[str, object]) -> dict[str, object] | None:
+        """The turn model's provider-catalog row, or None if it is unknown.
 
         Best-effort only: any failure here (catalog not yet refreshed for
         this model, or -- in unit tests -- a store whose engine is a bare
         stub) reports None rather than blocking turn construction over a
-        sizing refinement.
+        sizing or capability refinement.
         """
         try:
             with self.store._engine.connect() as c:
-                context_window = c.execute(
-                    select(provider_model_catalog.c.context_window).where(
+                row = c.execute(
+                    select(provider_model_catalog).where(
                         provider_model_catalog.c.user_id == turn["user_id"],
                         provider_model_catalog.c.provider == turn["provider"],
                         provider_model_catalog.c.model_id == turn["model_id"],
                     )
-                ).scalar()
+                ).mappings().first()
         except Exception:
             return None
+        return dict(row) if row else None
+
+    def _context_window_for(self, turn: dict[str, object]) -> int | None:
+        """The turn model's real context window, or None if it is unknown."""
+        row = self._catalog_row_for(turn) or {}
+        context_window = row.get("context_window")
         return int(context_window) if context_window else None
+
+    def _model_sees_images(self, turn: dict[str, object]) -> bool:
+        row = self._catalog_row_for(turn) or {}
+        modalities = row.get("input_modalities") or ()
+        if isinstance(modalities, str):
+            modalities = [item.strip() for item in modalities.split(",")]
+        return "image" in {str(item).lower() for item in modalities}
+
+    def _model_calls_tools(self, turn: dict[str, object]) -> bool:
+        row = self._catalog_row_for(turn) or {}
+        capabilities = row.get("capabilities") or ()
+        if isinstance(capabilities, str):
+            capabilities = [item.strip() for item in capabilities.split(",")]
+        names = {str(item).lower() for item in capabilities}
+        # An unrefreshed catalog must not silently disable tools: only an
+        # explicit capability list that omits tools counts as "cannot".
+        return not names or "tools" in names or "tool_use" in names or "function_calling" in names
 
     def _max_context_tokens_for(self, turn: dict[str, object]) -> int:
         """Derive the context-trim budget from the turn's actual model window.
@@ -317,6 +340,8 @@ class ChatWorker:
                 search_client=search_client_from_environment(),
                 browser=browser,
                 enable_subagents=self._enable_subagents,
+                model_sees_images=self._model_sees_images(turn),
+                model_calls_tools=self._model_calls_tools(turn),
             )
             return session.build_runtime()
         except Exception:

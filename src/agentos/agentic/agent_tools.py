@@ -31,6 +31,7 @@ from agentos.reading.extract import extract_text
 from .workspace import MAX_LIST_DEPTH, ConversationWorkspace, WorkspaceError
 from .browser_tools import _safe_display_url, sanitize_page_text
 from .file_preview import media_type_for
+from .provider_content import image_block
 
 
 MAX_TOOL_RESULT_CHARS = 12_000
@@ -210,9 +211,11 @@ class AgentToolset:
         skills=None,
         skill_load_recorder: Callable[[object], None] | None = None,
         policy: object | None = None,
+        model_sees_images: bool = False,
     ) -> None:
         self.workspace = workspace
         self.memory = memory
+        self.model_sees_images = bool(model_sees_images)
         self._delegate = delegate
         self._delegate_batch = delegate_batch
         self._create_agent = create_agent
@@ -529,6 +532,16 @@ class AgentToolset:
         }
 
     def _view_image(self, path: str, target, media_type: str, question: str) -> dict[str, Any]:
+        if self.model_sees_images:
+            import base64
+
+            data = base64.b64encode(target.read_bytes()).decode("ascii")
+            return {
+                "summary": f"Abriu {path}",
+                "content": f"A imagem '{path}' está anexada logo abaixo.",
+                "payload": {"path": path, "media_type": media_type, "label": path},
+                "images": [image_block(media_type, data)],
+            }
         return {
             "summary": f"Não foi possível ler {path}",
             "content": (

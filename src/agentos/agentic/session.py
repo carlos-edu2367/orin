@@ -248,6 +248,8 @@ class TurnSession:
         search_client=None,
         browser=None,
         tool_policy=None,
+        model_sees_images: bool = False,
+        model_calls_tools: bool = True,
     ) -> None:
         self.turn = turn
         self.store = store
@@ -262,6 +264,8 @@ class TurnSession:
         self.search_client = search_client
         self.browser = browser
         self.tool_policy = tool_policy
+        self.model_sees_images = bool(model_sees_images)
+        self.model_calls_tools = bool(model_calls_tools)
         local_root = turn.get("workspace_root_path")
         self.workspace_is_local = isinstance(local_root, str) and bool(local_root.strip())
         self.workspace = resolve_workspace(
@@ -550,6 +554,7 @@ class TurnSession:
             search_client=self.search_client,
             browser=self.browser,
             policy=self.tool_policy,
+            model_sees_images=self.model_sees_images,
         )
 
     def _skill_catalog(self, task: str, toolset: AgentToolset) -> tuple[object, ...]:
