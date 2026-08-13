@@ -27,8 +27,10 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 
+from agentos.reading.extract import extract_text
 from .workspace import MAX_LIST_DEPTH, ConversationWorkspace, WorkspaceError
 from .browser_tools import _safe_display_url, sanitize_page_text
+from .file_preview import media_type_for
 
 
 MAX_TOOL_RESULT_CHARS = 12_000
@@ -235,6 +237,15 @@ class AgentToolset:
                     "limit": {"type": "integer", "minimum": 1, "maximum": 800, "description": "How many lines to return. Defaults to 400."},
                 }, ("path",)),
                 self.read_file, "filesystem", read_only=True,
+            ),
+            ToolDefinition(
+                "view_file",
+                "Read a document or an image from the conversation workspace: PDF, Word, Excel, PowerPoint, plain text, or a picture. Use this instead of read_file whenever the file is not plain text.",
+                _schema({
+                    "path": {**_TEXT, "description": "Workspace-relative path, e.g. uploads/nota.pdf"},
+                    "question": {**_TEXT, "description": "What you need from the file. Guides the visual reading of an image or a scanned page."},
+                }, ("path",)),
+                self.view_file, "filesystem", read_only=True,
             ),
             ToolDefinition(
                 "write_file",
@@ -487,6 +498,39 @@ class AgentToolset:
             "summary": f"Leu {path}",
             "content": body,
             "payload": {"path": path, "first_line": first, "returned_lines": len(lines), "total_lines": total, "truncated": truncated, "label": path},
+        }
+
+    def view_file(self, path: str, question: str = "") -> dict[str, Any]:
+        target = self.workspace.resolve(path)
+        if not target.is_file():
+            raise AgentToolError(f"'{path}' is not a file in this workspace.")
+        media_type = media_type_for(target)
+        if media_type.startswith("image/"):
+            return self._view_image(path, target, media_type, question)
+        try:
+            extracted = extract_text(target, media_type)
+        except ValueError as error:
+            raise AgentToolError(f"'{path}' ({media_type}) cannot be read as a document.") from error
+        body, truncated = _bounded(extracted.text)
+        if not body.strip() and extracted.pages_without_text:
+            body = f"[o PDF não tem camada de texto nas páginas {', '.join(str(number) for number in extracted.pages_without_text)}]"
+        if truncated or extracted.truncated:
+            body += "\n\n[conteúdo truncado no limite de leitura]"
+        return {
+            "summary": f"Leu {path}",
+            "content": body or "[documento sem texto]",
+            "payload": {"path": path, "media_type": media_type, "label": path,
+                        "pages_without_text": list(extracted.pages_without_text)},
+        }
+
+    def _view_image(self, path: str, target, media_type: str, question: str) -> dict[str, Any]:
+        return {
+            "summary": f"Não foi possível ler {path}",
+            "content": (
+                f"'{path}' é uma imagem e este turno não tem leitura visual disponível: "
+                "o modelo atual não enxerga e nenhum modelo de leitura visual está configurado."
+            ),
+            "payload": {"path": path, "media_type": media_type, "label": path},
         }
 
     def write_file(self, path: str, content: str, mode: str = "overwrite") -> dict[str, Any]:
