@@ -15,6 +15,8 @@ import httpx
 
 from agentos.providers.models import FinishReason, ProviderError, ProviderErrorCategory, ProviderUsage, Retryability
 
+from .provider_content import project_messages
+
 
 # Anthropic rejects a request without max_tokens, so a turn that configures no
 # output cap still needs a number for that provider alone. This is the largest
@@ -375,6 +377,7 @@ class HTTPProviderStreamTransport:
         return [*head, marked]
 
     def _anthropic_request(self, messages: list, tools: list, tool_choice: object, requested: object) -> tuple[str, dict[str, str], dict[str, object]]:
+        messages = project_messages(messages, "anthropic")
         system_items = [item for item in messages if item.get("role") == "system"]
         messages = [item for item in messages if item.get("role") != "system"]
         messages = self._with_cached_tail(messages)
@@ -410,6 +413,7 @@ class HTTPProviderStreamTransport:
         return f"{self.base_url}/messages", headers, payload
 
     def _openai_request(self, messages: list, tools: list, tool_choice: object, requested: object) -> tuple[str, dict[str, str], dict[str, object]]:
+        messages = project_messages(messages, "openai")
         payload: dict[str, object] = {
             "model": self.model, "messages": messages, "stream": True,
             # Without this an OpenAI-compatible stream omits usage entirely
@@ -479,6 +483,7 @@ class HTTPProviderStreamTransport:
         return converted
 
     def _ollama_request(self, messages: list, tools: list, tool_choice: object, requested: object) -> tuple[str, dict[str, str], dict[str, object]]:
+        messages = project_messages(messages, "ollama")
         payload: dict[str, object] = {"model": self.model, "messages": self._ollama_messages(messages), "stream": True}
         options: dict[str, object] = {}
         # Ollama defaults to a 4096-token window regardless of what the model
