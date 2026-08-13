@@ -378,4 +378,30 @@ describe('ProviderSettingsPage Ollama setup', () => {
 
     expect(within(panel).queryByText('local-only-model')).toBeNull()
   })
+
+  it('refreshes the cloud catalog with the stored credential without asking for the key again', async () => {
+    const calls: string[] = []
+    const fetchImpl = vi.fn<typeof fetch>((input, init) => {
+      const url = String(input)
+      calls.push(`${init?.method ?? 'GET'} ${url}`)
+      if (url.endsWith('/models:refresh')) return Promise.resolve(json({ count: 1, refreshed_at: '2026-08-12T00:00:00Z' }))
+      if (init?.method === 'GET' && url.endsWith('/models')) {
+        const refreshed = calls.some((entry) => entry.includes('/models:refresh'))
+        return Promise.resolve(json({ items: refreshed ? [{ ...model(), provider: 'ollama', model_id: 'cloud-only-model' }] : [] }))
+      }
+      if (init?.method === 'GET') return Promise.resolve(json({ provider: 'ollama', enabled: true, base_url: 'https://ollama.com' }))
+      return Promise.resolve(json({}))
+    })
+    const user = userEvent.setup()
+    render(<ProviderSettingsPage client={client(fetchImpl)} bootstrap={{ status: 'ready', csrfToken: 'csrf-test' }} />)
+
+    const panel = await ollamaPanel()
+    const refreshButton = await within(panel).findByRole('button', { name: 'Atualizar catálogo' })
+    expect(within(panel).getByLabelText('Chave de API')).toHaveValue('')
+
+    await user.click(refreshButton)
+
+    expect(calls.some((entry) => entry.startsWith('POST') && entry.endsWith('/models:refresh'))).toBe(true)
+    expect(await within(panel).findByText('cloud-only-model')).toBeInTheDocument()
+  })
 })
