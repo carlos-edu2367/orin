@@ -140,6 +140,41 @@ def test_runtime_executes_tool_then_continues_and_redacts_result() -> None:
     assert "must-not-leak" not in repr(provider.calls)
 
 
+def test_runtime_preserves_ollama_thinking_on_the_next_tool_request() -> None:
+    store = Store()
+    store.turn["provider"] = "ollama"
+
+    class ThinkingProvider:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def stream(self, request):
+            self.calls.append(request)
+            if len(self.calls) == 1:
+                return iter([
+                    NormalizedStreamItem(StreamKind.TOOL_CALL, 1, thinking="inspect the file", tool_call_id="call-1", tool_name="lookup", arguments_delta='{"q":"safe"}'),
+                    NormalizedStreamItem(StreamKind.FINISH, 2, finish_reason="tool_calls"),
+                ])
+            return iter([
+                NormalizedStreamItem(StreamKind.TEXT, 1, text="done"),
+                NormalizedStreamItem(StreamKind.FINISH, 2, finish_reason="stop"),
+            ])
+
+    provider = ThinkingProvider()
+    runtime = AgenticTurnRuntime(
+        store=store,
+        provider=provider,
+        actions=ActionLoop(Registry(), ActionRuntime()),
+        limits=AgenticLimits(max_actions=2, max_iterations=3, deadline=timedelta(seconds=5)),
+        clock=lambda: datetime.now(UTC),
+    )
+
+    result = runtime.run("turn-1")
+
+    assert result.state == "completed"
+    assert provider.calls[1]["messages"][1]["thinking"] == "inspect the file"
+
+
 def test_runtime_allows_unlimited_actions_when_configured_as_none() -> None:
     class ManyToolsProvider:
         def __init__(self) -> None:

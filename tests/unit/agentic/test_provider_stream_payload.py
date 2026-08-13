@@ -185,6 +185,36 @@ def test_ndjson_gives_each_tool_call_its_own_id() -> None:
     assert [json.loads(item.arguments_delta or "{}") for item in items] == [{"path": "a.txt"}, {"path": "b.txt"}]
 
 
+def test_ndjson_accumulates_repeated_tool_chunks_by_index() -> None:
+    """Ollama streams one assistant tool message across multiple chunks."""
+    lines = [
+        json.dumps({"message": {"tool_calls": [{"function": {"index": 0, "name": "read_file", "arguments": {"path": "a.txt"}}}]}, "done": False}),
+        json.dumps({"message": {"tool_calls": [{"function": {"index": 0, "name": "read_file", "arguments": {"offset": 12}}}]}, "done": False}),
+        json.dumps({"message": {"tool_calls": [{"function": {"index": 1, "name": "read_file", "arguments": {"path": "b.txt"}}}]}, "done": False}),
+        json.dumps({"done": True, "done_reason": "stop"}),
+    ]
+
+    items = [item for item in normalize_ndjson(lines) if item.kind is StreamKind.TOOL_CALL]
+
+    assert [item.tool_call_id for item in items] == ["tool-call:1", "tool-call:2"]
+    assert [json.loads(item.arguments_delta or "{}") for item in items] == [
+        {"path": "a.txt", "offset": 12}, {"path": "b.txt"},
+    ]
+
+
+def test_ndjson_accumulates_ollama_thinking_for_the_follow_up_history() -> None:
+    lines = [
+        json.dumps({"message": {"thinking": "inspect ", "tool_calls": [{"function": {"index": 0, "name": "read_file", "arguments": {"path": "a.txt"}}}]}, "done": False}),
+        json.dumps({"message": {"thinking": "the file", "tool_calls": [{"function": {"index": 0, "name": "read_file", "arguments": {}}}]}, "done": False}),
+        json.dumps({"done": True, "done_reason": "stop"}),
+    ]
+
+    items = [item for item in normalize_ndjson(lines) if item.kind is StreamKind.TOOL_CALL]
+
+    assert len(items) == 1
+    assert items[0].thinking == "inspect the file"
+
+
 def test_ndjson_finishes_as_tool_calls_when_the_model_asked_for_one() -> None:
     """Ollama reports done_reason "stop" even for a turn that ends in a call."""
     lines = [
@@ -278,6 +308,22 @@ def test_ollama_keeps_the_tools_when_tool_choice_is_absent() -> None:
     list(_ollama_transport(captured).stream({**_request(), "tool_choice": None}))
 
     assert captured[0]["body"]["tools"] == _request()["tools"]
+
+
+def test_ollama_preserves_thinking_on_an_assistant_tool_message() -> None:
+    captured: list[dict] = []
+    request = {
+        **_request(),
+        "messages": [
+            {"role": "user", "content": "read a.txt"},
+            {"role": "assistant", "thinking": "inspect the file", "content": "", "tool_calls": [{"id": "call-1", "type": "function", "function": {"name": "read_file", "arguments": '{"path":"a.txt"}'}}]},
+            {"role": "tool", "tool_call_id": "call-1", "content": "contents"},
+        ],
+    }
+
+    list(_ollama_transport(captured).stream(request))
+
+    assert captured[0]["body"]["messages"][1]["thinking"] == "inspect the file"
 
 
 def test_ollama_authenticates_only_when_a_cloud_key_is_configured() -> None:

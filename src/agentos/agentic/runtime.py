@@ -144,6 +144,7 @@ class AgenticTurnRuntime:
                     continue
                 return self._fail(turn, "PROVIDER_STREAM_FAILED", iteration, action_count)
             text_parts: list[str] = []
+            thinking_parts: list[str] = []
             calls: dict[str, dict[str, str]] = {}
             input_tokens: int | None = None
             output_tokens: int | None = None
@@ -158,6 +159,8 @@ class AgenticTurnRuntime:
                     if self.clock() >= deadline:
                         return self._fail(turn, "TURN_DEADLINE_EXCEEDED", iteration, action_count)
                     event = self._coerce(raw_event)
+                    if event.thinking:
+                        thinking_parts.append(event.thinking)
                     if event.kind is StreamKind.TEXT and event.text:
                         text_parts.append(event.text)
                         self.store.delta(turn, event.text)
@@ -239,7 +242,7 @@ class AgenticTurnRuntime:
                             error_code=result.get("error_code"), result_ref=result.get("result_ref"),
                             tool_arguments=dict(arguments),
                         )
-                messages.append(self._assistant_tool_message(turn, text_parts, calls))
+                messages.append(self._assistant_tool_message(turn, text_parts, calls, thinking_parts))
                 messages.extend(self._tool_result_message(turn, result) for result in results)
                 self._age_tool_results(messages, keep_recent=len(results))
                 self._life(turn, "running")
@@ -565,7 +568,7 @@ class AgenticTurnRuntime:
         return str(safe)
 
     @classmethod
-    def _assistant_tool_message(cls, turn: Mapping[str, object], text_parts: list[str], calls: Mapping[str, Mapping[str, str]]) -> dict[str, object]:
+    def _assistant_tool_message(cls, turn: Mapping[str, object], text_parts: list[str], calls: Mapping[str, Mapping[str, str]], thinking_parts: list[str] | None = None) -> dict[str, object]:
         provider = str(turn.get("provider", "")).lower()
         if provider == "anthropic":
             blocks: list[dict[str, object]] = []
@@ -578,7 +581,7 @@ class AgenticTurnRuntime:
                     arguments = {}
                 blocks.append({"type": "tool_use", "id": call["id"], "name": call["name"], "input": arguments})
             return {"role": "assistant", "content": blocks}
-        return {
+        message: dict[str, object] = {
             "role": "assistant",
             "content": "".join(text_parts) or None,
             "tool_calls": [
@@ -586,6 +589,9 @@ class AgenticTurnRuntime:
                 for call in calls.values()
             ],
         }
+        if provider == "ollama" and thinking_parts:
+            message["thinking"] = "".join(thinking_parts)
+        return message
 
     @classmethod
     def _tool_result_message(cls, turn: Mapping[str, object], result: Mapping[str, object]) -> dict[str, object]:

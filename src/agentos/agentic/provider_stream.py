@@ -44,6 +44,7 @@ class NormalizedStreamItem:
     kind: StreamKind
     sequence: int
     text: str | None = None
+    thinking: str | None = None
     tool_call_id: str | None = None
     tool_name: str | None = None
     arguments_delta: str | None = None
@@ -225,10 +226,34 @@ def normalize_ndjson(lines: Iterable[str | bytes]) -> Iterator[NormalizedStreamI
     because only it accepts ``options.num_ctx``; the compatible one leaves a
     local model pinned at Ollama's 4096-token default.  The cost is this
     second normalizer, since the native stream is NDJSON rather than SSE.
+    Ollama streams partial assistant messages, so tool calls and thinking are
+    accumulated before the runtime receives the assistant tool message.
     """
     sequence = 0
-    tool_calls = 0
+    tool_calls: dict[int, dict[str, object]] = {}
+    tool_order: list[int] = []
     saw_tool_call = False
+    thinking_parts: list[str] = []
+    pending_flushed = False
+
+    def flush_tool_calls() -> list[NormalizedStreamItem]:
+        nonlocal sequence
+        if not tool_calls:
+            return []
+        thinking = "".join(thinking_parts)
+        result: list[NormalizedStreamItem] = []
+        for position, index in enumerate(tool_order, 1):
+            call = tool_calls[index]
+            sequence += 1
+            result.append(NormalizedStreamItem(
+                StreamKind.TOOL_CALL, sequence,
+                thinking=thinking if position == 1 else None,
+                tool_call_id=f"tool-call:{position}",
+                tool_name=str(call.get("name") or "") or None,
+                arguments_delta=json.dumps(call.get("arguments") or {}, ensure_ascii=False),
+            ))
+        return result
+
     for raw in lines:
         line = (raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)).strip()
         if not line:
@@ -247,6 +272,9 @@ def normalize_ndjson(lines: Iterable[str | bytes]) -> Iterator[NormalizedStreamI
             continue
         message = payload.get("message")
         if isinstance(message, Mapping):
+            thinking = message.get("thinking")
+            if isinstance(thinking, str) and thinking:
+                thinking_parts.append(thinking)
             content = message.get("content")
             if isinstance(content, str) and content:
                 sequence += 1
@@ -255,20 +283,44 @@ def normalize_ndjson(lines: Iterable[str | bytes]) -> Iterator[NormalizedStreamI
                 if not isinstance(item, Mapping):
                     continue
                 function = item.get("function") if isinstance(item.get("function"), Mapping) else {}
-                # Ollama emits no call id, and each call arrives complete in a
-                # single chunk rather than as argument deltas. A stream-scoped
-                # counter is what keeps two distinct calls from colliding on
-                # one id and being merged into one by the runtime.
-                tool_calls += 1
+                raw_index = function.get("index", item.get("index"))
+                try:
+                    index = int(raw_index) if raw_index is not None else len(tool_order)
+                except (TypeError, ValueError):
+                    index = len(tool_order)
+                if index not in tool_calls:
+                    tool_calls[index] = {"name": "", "arguments": {}}
+                    tool_order.append(index)
+                call = tool_calls[index]
+                name = function.get("name")
+                if name:
+                    call["name"] = str(name)
+                arguments = function.get("arguments")
+                if isinstance(arguments, Mapping):
+                    current = call.get("arguments")
+                    if not isinstance(current, dict):
+                        current = {}
+                    current.update(arguments)
+                    call["arguments"] = current
+                elif isinstance(arguments, str):
+                    try:
+                        parsed = json.loads(arguments)
+                    except json.JSONDecodeError:
+                        parsed = None
+                    if isinstance(parsed, Mapping):
+                        current = call.get("arguments")
+                        if not isinstance(current, dict):
+                            current = {}
+                        current.update(parsed)
+                        call["arguments"] = current
                 saw_tool_call = True
-                sequence += 1
-                yield NormalizedStreamItem(
-                    StreamKind.TOOL_CALL, sequence,
-                    tool_call_id=f"tool-call:{tool_calls}",
-                    tool_name=str(function.get("name") or "") or None,
-                    arguments_delta=json.dumps(function.get("arguments") or {}),
-                )
         if payload.get("done") is True:
+            for item in flush_tool_calls():
+                yield item
+            pending_flushed = True
+            if thinking_parts and not saw_tool_call and not (isinstance(message, Mapping) and message.get("content")):
+                sequence += 1
+                yield NormalizedStreamItem(StreamKind.TEXT, sequence, thinking="".join(thinking_parts))
             sequence += 1
             yield NormalizedStreamItem(StreamKind.USAGE, sequence, usage=_usage({
                 "prompt_tokens": payload.get("prompt_eval_count"),
@@ -278,6 +330,8 @@ def normalize_ndjson(lines: Iterable[str | bytes]) -> Iterator[NormalizedStreamI
             # Ollama reports "stop" even when the turn ends in a tool call, so
             # the observed calls decide the reason rather than done_reason.
             yield NormalizedStreamItem(StreamKind.FINISH, sequence, finish_reason=FinishReason.TOOL_CALLS if saw_tool_call else _finish(payload.get("done_reason")))
+    if not pending_flushed:
+        yield from flush_tool_calls()
 
 
 class HTTPProviderStreamTransport:
@@ -408,6 +462,9 @@ class HTTPProviderStreamTransport:
                 content = message.get("content")
                 if isinstance(content, str) and content:
                     native_message["content"] = content
+                thinking = message.get("thinking")
+                if isinstance(thinking, str) and thinking:
+                    native_message["thinking"] = thinking
                 converted.append(native_message)
                 continue
             if role == "tool":
