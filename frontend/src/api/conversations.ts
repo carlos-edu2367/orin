@@ -9,6 +9,7 @@ export type CreateConversationInput = {
   provider: ProviderName
   model_id: string
   workspace_id?: string | null
+  attachments?: string[]
 }
 
 export type ConversationReceipt = {
@@ -19,14 +20,16 @@ export type ConversationReceipt = {
   state: string
 }
 
+export type MessageAttachment = { path: string; original_name: string; media_type: string; kind: string; bytes: number }
+
 export type Conversation = { conversation_id: string; title: string; state: string; messages: ConversationMessage[]; turns: ConversationTurn[]; provider: string; model_id: string; activities: ConversationActivityEvent[]; activity_cursor: string; workspace: WorkspaceState }
-export type ConversationMessage = { message_id: string; role: 'user' | 'assistant'; content: string; status: string; retryable: boolean }
+export type ConversationMessage = { message_id: string; role: 'user' | 'assistant'; content: string; status: string; retryable: boolean; attachments: MessageAttachment[] }
 export type ConversationTurn = { turn_id: string; state: string; created_at: string; started_at: string | null; finished_at: string | null }
 
 export function createConversation(client: ApiClient, input: CreateConversationInput, intent = client.createMutationIntent()): Promise<ConversationReceipt> {
   return client.request({
     path: '/v1/conversations', method: 'POST', expectedStatus: 201, intent,
-    body: { message: input.message, selection: { provider: input.provider, model_id: input.model_id }, workspace_id: input.workspace_id ?? null },
+    body: { message: input.message, selection: { provider: input.provider, model_id: input.model_id }, workspace_id: input.workspace_id ?? null, attachments: input.attachments ?? [] },
     parse: parseConversationReceipt,
   })
 }
@@ -48,8 +51,8 @@ export function listConversations(client: ApiClient): Promise<{ items: Array<Pic
   } })
 }
 
-export function sendConversationMessage(client: ApiClient, id: string, message: string, intent = client.createMutationIntent()): Promise<ConversationReceipt> {
-  return client.request({ path: `/v1/conversations/${encodeURIComponent(id)}/messages`, method: 'POST', expectedStatus: 201, intent, body: { message }, parse: parseConversationReceipt })
+export function sendConversationMessage(client: ApiClient, id: string, message: string, attachments: string[] = [], intent = client.createMutationIntent()): Promise<ConversationReceipt> {
+  return client.request({ path: `/v1/conversations/${encodeURIComponent(id)}/messages`, method: 'POST', expectedStatus: 201, intent, body: { message, attachments }, parse: parseConversationReceipt })
 }
 
 export function cancelConversation(client: ApiClient, id: string, intent = client.createMutationIntent()): Promise<{ cancelling: string[] }> {
@@ -263,7 +266,19 @@ export function parseConversation(value: unknown): Conversation {
   if (!Array.isArray(data.messages) || !Array.isArray(data.turns)) throw invalidResponseError()
   const activities = parseSnapshotActivities(data.activities)
   const activityCursor = data.activity_cursor === undefined ? (activities[activities.length - 1]?.cursor ?? '0') : publicId(data.activity_cursor)
-  return { conversation_id: string(data.conversation_id), title: string(data.title), state: string(data.state), provider: string(data.provider), model_id: string(data.model_id), activities, activity_cursor: activityCursor, workspace: parseWorkspaceState(data.workspace ?? {}), messages: data.messages.map((item) => { const m = item as Record<string, unknown>; const role = string(m.role); if (role !== 'user' && role !== 'assistant') throw invalidResponseError(); return { message_id: string(m.message_id), role, content: typeof m.content === 'string' ? m.content : '', status: string(m.status), retryable: m.retryable === true } }), turns: data.turns.map((item) => { const t = item as Record<string, unknown>; return { turn_id: string(t.turn_id), state: string(t.state), created_at: string(t.created_at), started_at: typeof t.started_at === 'string' ? t.started_at : null, finished_at: typeof t.finished_at === 'string' ? t.finished_at : null } }) }
+  return { conversation_id: string(data.conversation_id), title: string(data.title), state: string(data.state), provider: string(data.provider), model_id: string(data.model_id), activities, activity_cursor: activityCursor, workspace: parseWorkspaceState(data.workspace ?? {}), messages: data.messages.map((item) => { const m = item as Record<string, unknown>; const role = string(m.role); if (role !== 'user' && role !== 'assistant') throw invalidResponseError(); return { message_id: string(m.message_id), role, content: typeof m.content === 'string' ? m.content : '', status: string(m.status), retryable: m.retryable === true, attachments: parseMessageAttachments(m.attachments) } }), turns: data.turns.map((item) => { const t = item as Record<string, unknown>; return { turn_id: string(t.turn_id), state: string(t.state), created_at: string(t.created_at), started_at: typeof t.started_at === 'string' ? t.started_at : null, finished_at: typeof t.finished_at === 'string' ? t.finished_at : null } }) }
+}
+
+function parseMessageAttachments(value: unknown): MessageAttachment[] {
+  if (!Array.isArray(value)) return []
+  return value.map((item) => {
+    const data = record(item)
+    return {
+      path: string(data.path), original_name: string(data.original_name),
+      media_type: string(data.media_type), kind: string(data.kind),
+      bytes: typeof data.bytes === 'number' ? data.bytes : 0,
+    }
+  })
 }
 
 function string(value: unknown): string {

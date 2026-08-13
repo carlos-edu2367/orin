@@ -84,7 +84,8 @@ export class ApiClient {
 
         let body: unknown
         try {
-          body = await response.json()
+          // A 204 has no body by definition; parsing one would only fail.
+          body = response.status === 204 ? undefined : await response.json()
           return options.parse(body)
         } catch (error) {
           if (error instanceof ApiError) throw error
@@ -107,6 +108,30 @@ export class ApiClient {
       }
     }
     throw invalidResponseError()
+  }
+
+  async upload<T>(options: { path: string; body: FormData; expectedStatus?: number; parse: (value: unknown) => T }): Promise<T> {
+    // No Content-Type header is set here: the browser must generate the
+    // multipart boundary itself from the FormData body.
+    const url = this.safeUrl(options.path)
+    const headers = new Headers({ Accept: 'application/json' })
+    if (this.bearerToken) headers.set('Authorization', `Bearer ${this.bearerToken}`)
+    if (this.csrfToken) headers.set('X-CSRF-Token', this.csrfToken)
+    const response = await this.fetchImpl.call(globalThis, url, {
+      method: 'POST',
+      headers,
+      credentials: 'same-origin',
+      body: options.body,
+    })
+    if (!response.ok || (options.expectedStatus !== undefined && response.status !== options.expectedStatus)) {
+      throw await parseApiErrorResponse(response)
+    }
+    try {
+      return options.parse(await response.json())
+    } catch (error) {
+      if (error instanceof ApiError) throw error
+      throw invalidResponseError()
+    }
   }
 
   async stream(options: StreamRequestOptions): Promise<Response> {
