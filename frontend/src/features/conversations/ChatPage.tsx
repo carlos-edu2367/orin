@@ -61,6 +61,14 @@ export function ChatPage() {
   const cursorRef = useRef('0')
   const scrollRef = useRef<HTMLDivElement>(null)
   const pinnedRef = useRef(true)
+  const attachmentsRef = useRef(attachments)
+  useEffect(() => { attachmentsRef.current = attachments }, [attachments])
+
+  // Leaving mid-upload must not leak the preview blob: nothing else ever
+  // revokes a chip's object URL once the page it lives on is gone.
+  useEffect(() => () => {
+    attachmentsRef.current.forEach((item) => { if (item.previewUrl) URL.revokeObjectURL(item.previewUrl) })
+  }, [])
   const showOverview = location.pathname.endsWith('/overview')
 
   const loadSnapshot = useCallback(async (resetActivity: boolean) => {
