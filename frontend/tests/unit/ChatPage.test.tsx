@@ -262,6 +262,52 @@ describe('ChatPage', () => {
     expect(String(sent.mock.calls[0][0])).toContain('e agora?')
   })
 
+  it('sends a turn with an attachment and no text', async () => {
+    const sent = vi.fn()
+    globalThis.fetch = vi.fn<typeof fetch>().mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : String(input)
+      const method = (init?.method ?? 'GET').toUpperCase()
+      if (url.includes('/events?')) {
+        return new Response('event: heartbeat\ndata: {"cursor":"a.9"}\n\n', { headers: { 'Content-Type': 'text/event-stream' } })
+      }
+      if (url.endsWith('/v1/uploads') && method === 'POST') {
+        return new Response(JSON.stringify({ upload_id: 'upl_1', filename: 'foto.png', media_type: 'image/png', kind: 'image', bytes: 3 }), { status: 201, headers: { 'Content-Type': 'application/json' } })
+      }
+      if (url.includes('/messages') && method === 'POST') {
+        sent(String(init?.body ?? ''))
+        return new Response(JSON.stringify({ conversation_id: CONVERSATION_ID, title: 't', turn_id: 'turn-2', message_id: 'msg-3', state: 'queued' }), { status: 201, headers: { 'Content-Type': 'application/json' } })
+      }
+      if (url.endsWith('/v1/projects/sidebar')) {
+        return new Response(JSON.stringify({ items: [] }), { headers: { 'Content-Type': 'application/json' } })
+      }
+      if (url.endsWith('/v1/conversations')) {
+        return new Response(JSON.stringify({ items: [{ conversation_id: CONVERSATION_ID, title: 'Conversa de teste', state: 'completed' }] }), { headers: { 'Content-Type': 'application/json' } })
+      }
+      if (url.includes(`/v1/conversations/${CONVERSATION_ID}`)) {
+        return new Response(JSON.stringify(snapshotBody({
+          state: 'completed',
+          messages: [{ message_id: 'msg-1', role: 'assistant', content: 'Feito.', status: 'completed', retryable: false }],
+          activities: [],
+        })), { headers: { 'Content-Type': 'application/json' } })
+      }
+      return new Response('{}', { headers: { 'Content-Type': 'application/json' } })
+    })
+
+    const { container } = renderChat()
+    await screen.findByText('Feito.')
+
+    const fileInput = container.querySelector('input[type="file"]') as HTMLInputElement
+    const file = new File([new Uint8Array([1, 2, 3])], 'foto.png', { type: 'image/png' })
+    fireEvent.change(fileInput, { target: { files: [file] } })
+
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Enviar mensagem' })).not.toBeDisabled())
+    fireEvent.click(screen.getByRole('button', { name: 'Enviar mensagem' }))
+
+    await waitFor(() => expect(sent).toHaveBeenCalled())
+    const body = JSON.parse(String(sent.mock.calls[0][0]))
+    expect(body).toEqual({ message: '', attachments: ['upl_1'] })
+  })
+
   it('keeps the fixed composer fully revealed when reading the latest message', async () => {
     globalThis.fetch = stubFetch(() => ({
       state: 'completed',
