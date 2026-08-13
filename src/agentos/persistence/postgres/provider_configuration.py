@@ -95,10 +95,10 @@ class PostgresProviderConfigurationAdapter:
             else:
                 connection.execute(
                     update(provider_configurations).where(provider_configurations.c.id == existing["id"]).values(
-                        enabled=enabled, api_key=None, api_key_ciphertext=self._cipher.encrypt(api_key, allow_empty=provider in PROVIDERS_WITH_OPTIONAL_KEY), base_url=base_url, updated_at=now,
+                        enabled=enabled, api_key=None, api_key_ciphertext=self._cipher.encrypt(api_key, allow_empty=provider in PROVIDERS_WITH_OPTIONAL_KEY), base_url=base_url, catalog_refreshed_at=None, updated_at=now,
                     )
                 )
-                row = {"provider": provider, "enabled": enabled, "base_url": base_url, "secret_ref": existing["secret_ref"], "catalog_refreshed_at": existing["catalog_refreshed_at"]}
+                row = {"provider": provider, "enabled": enabled, "base_url": base_url, "secret_ref": existing["secret_ref"], "catalog_refreshed_at": None}
         return _public(row)
 
     def inspect(self, query: dict[str, object]) -> dict[str, object]:
@@ -145,7 +145,21 @@ class PostgresProviderConfigurationAdapter:
             if provider == "ollama" and is_ollama_cloud(str(base_url)):
                 if not models:
                     raise RuntimeError("Ollama Cloud returned no models")
-                client.verify_cloud_access(str(command["api_key"]), base_url=str(base_url), model=str(models[0]["id"]))
+                last_model_error: OllamaCloudAuthenticationError | None = None
+                for model in models:
+                    try:
+                        client.verify_cloud_access(str(command["api_key"]), base_url=str(base_url), model=str(model["id"]))
+                    except OllamaCloudAuthenticationError as error:
+                        # The Cloud catalog can contain models that are not
+                        # enabled for this account. A single forbidden model
+                        # must not make a valid credential look rejected.
+                        last_model_error = error
+                        continue
+                    break
+                else:
+                    if last_model_error is not None:
+                        raise last_model_error
+                    raise RuntimeError("Ollama Cloud returned no usable models")
         except OllamaCloudAuthenticationError as error:
             raise ProviderCredentialRejectedError from error
         except RuntimeError as error:

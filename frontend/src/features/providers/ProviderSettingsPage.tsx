@@ -162,6 +162,7 @@ function ProviderPanel({ provider, client, bootstrap }: { provider: ProviderName
           intents.current.delete('refresh')
           await loadModels()
         } catch (refreshError) {
+          setModels([])
           setCatalog({ loaded: true, error: toApiError(refreshError) })
         }
       }
@@ -295,7 +296,7 @@ function ProviderPanel({ provider, client, bootstrap }: { provider: ProviderName
         canRevoke={canRevoke}
         bootstrap={bootstrap}
         connection={connection}
-        onModeChange={(mode) => { setOllamaMode(mode); setBaseUrl(mode === 'cloud' ? 'https://ollama.com' : 'http://localhost:11434'); setConnection(null) }}
+        onModeChange={(mode) => { setOllamaMode(mode); setBaseUrl(mode === 'cloud' ? 'https://ollama.com' : 'http://localhost:11434'); setConnection(null); setModels([]); setCatalog({ loaded: false, error: null }) }}
         onTest={onTestOllama}
         onSave={onSave}
         onRevoke={onRevoke}

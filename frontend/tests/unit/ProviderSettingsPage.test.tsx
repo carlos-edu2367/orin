@@ -357,4 +357,25 @@ describe('ProviderSettingsPage Ollama setup', () => {
 
     expect(within(panel).getByRole('button', { name: 'Salvar e ativar' })).toBeDisabled()
   })
+
+  it('clears the local catalog immediately when switching to cloud', async () => {
+    const user = userEvent.setup()
+    const fetchImpl = vi.fn<typeof fetch>((input, init) => {
+      const url = String(input)
+      if (init?.method === 'GET' && url.endsWith('/models')) {
+        return Promise.resolve(json({ items: [{ ...model(), provider: 'ollama', model_id: 'local-only-model', display_name: 'Local only model' }] }))
+      }
+      if (init?.method === 'GET') return Promise.resolve(json({ provider: 'ollama', enabled: true, base_url: 'http://localhost:11434' }))
+      return Promise.resolve(json({}))
+    })
+    render(<ProviderSettingsPage client={client(fetchImpl)} bootstrap={{ status: 'ready', csrfToken: 'csrf-test' }} />)
+
+    const panel = await ollamaPanel()
+    await user.click(within(panel).getByRole('button', { name: 'Ver modelos autorizados' }))
+    expect(await within(panel).findByText('local-only-model')).toBeInTheDocument()
+
+    await user.click(within(panel).getByRole('radio', { name: 'Cloud' }))
+
+    expect(within(panel).queryByText('local-only-model')).toBeNull()
+  })
 })

@@ -131,6 +131,24 @@ def test_refreshes_omniroute_from_its_saved_gateway_url() -> None:
     assert item.route_kind == "auto"
 
 
+def test_refreshes_ollama_cloud_from_the_remote_catalog_without_rewriting_model_ids() -> None:
+    repository = FakeRepository()
+    repository.configured[("user-a", "ollama")] = {
+        "enabled": True, "api_key": "cloud-secret", "base_url": "https://ollama.com",
+    }
+
+    class FakeCloudOllama:
+        def fetch(self, api_key: str, *, base_url: str) -> list[dict[str, object]]:
+            assert api_key == "cloud-secret"
+            assert base_url == "https://ollama.com"
+            return [{"id": "gemma4:31b", "name": "gemma4:31b", "capabilities": ["tools"]}]
+
+    service = ProviderModelCatalogService(repository, {"ollama": FakeCloudOllama()}, now=lambda: datetime(2026, 8, 12, tzinfo=UTC))
+
+    assert service.refresh(context("user-a"), "ollama").count == 1
+    assert service.list(context("user-a"), "ollama")[0].model_id == "gemma4:31b"
+
+
 def test_every_upstream_is_called_with_the_stored_base_url() -> None:
     """The Protocol declares base_url, so refresh needs no per-provider branch."""
     repository = FakeRepository()

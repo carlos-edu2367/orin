@@ -1,5 +1,6 @@
 import pytest
-from sqlalchemy import create_engine, select
+from datetime import UTC, datetime
+from sqlalchemy import create_engine, select, update
 
 from agentos.persistence.postgres.provider_configuration import PostgresProviderConfigurationAdapter
 from agentos.persistence.postgres.schema import metadata, provider_configurations
@@ -83,6 +84,27 @@ def test_ollama_cloud_key_is_trimmed_before_storage() -> None:
     assert adapter._cipher.decrypt(stored) == "cloud-secret"
 
 
+def test_reconfiguring_a_provider_invalidates_its_model_catalog() -> None:
+    adapter = _adapter()
+    adapter.configure(_command(base_url="http://localhost:11434"))
+    refreshed_at = datetime(2026, 8, 12, tzinfo=UTC)
+    with adapter._engine.begin() as connection:
+        connection.execute(update(provider_configurations).values(catalog_refreshed_at=refreshed_at))
+
+    state = adapter.configure(_command(base_url="https://ollama.com", api_key="cloud-secret"))
+
+    assert state["catalog_refreshed_at"] is None
+
+    with adapter._engine.connect() as connection:
+        actual = connection.execute(
+            select(provider_configurations.c.catalog_refreshed_at).where(
+                provider_configurations.c.user_id == "user-1",
+                provider_configurations.c.provider == "ollama",
+            )
+        ).scalar_one()
+    assert actual is None
+
+
 def test_ollama_cloud_connection_test_verifies_the_key_after_catalog_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
     class FakeOllama:
         def __init__(self) -> None:
@@ -91,7 +113,7 @@ def test_ollama_cloud_connection_test_verifies_the_key_after_catalog_fetch(monke
         def fetch(self, api_key: str, *, base_url: str) -> list[dict[str, object]]:
             assert api_key == "cloud-secret"
             assert base_url == "https://ollama.com"
-            return [{"id": "deepseek-v4-flash:cloud"}]
+            return [{"id": "gemma4:31b"}]
 
         def verify_cloud_access(self, api_key: str, *, base_url: str, model: str) -> None:
             self.verified = (api_key, base_url, model)
@@ -102,7 +124,31 @@ def test_ollama_cloud_connection_test_verifies_the_key_after_catalog_fetch(monke
     result = _adapter().test_connection({"provider": "ollama", "api_key": "cloud-secret", "base_url": "https://ollama.com"})
 
     assert result["connected"] is True
-    assert fake.verified == ("cloud-secret", "https://ollama.com", "deepseek-v4-flash:cloud")
+    assert fake.verified == ("cloud-secret", "https://ollama.com", "gemma4:31b")
+
+
+def test_ollama_cloud_connection_test_skips_a_model_that_rejects_access(monkeypatch: pytest.MonkeyPatch) -> None:
+    from agentos.provider_catalog.ollama import OllamaCloudAuthenticationError
+
+    class FakeOllama:
+        def __init__(self) -> None:
+            self.verified: list[str] = []
+
+        def fetch(self, api_key: str, *, base_url: str) -> list[dict[str, object]]:
+            return [{"id": "restricted-model"}, {"id": "accessible-model"}]
+
+        def verify_cloud_access(self, api_key: str, *, base_url: str, model: str) -> None:
+            self.verified.append(model)
+            if model == "restricted-model":
+                raise OllamaCloudAuthenticationError
+
+    fake = FakeOllama()
+    monkeypatch.setattr("agentos.persistence.postgres.provider_configuration.OllamaCatalogClient", lambda: fake)
+
+    result = _adapter().test_connection({"provider": "ollama", "api_key": "cloud-secret", "base_url": "https://ollama.com"})
+
+    assert result["connected"] is True
+    assert fake.verified == ["restricted-model", "accessible-model"]
 
 
 def test_a_rejected_provider_still_cannot_be_connection_tested() -> None:

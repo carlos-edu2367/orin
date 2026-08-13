@@ -408,6 +408,7 @@ provider_model_catalog = Table(
     Column("user_id", String(255), nullable=False),
     Column("provider", String(32), nullable=False),
     Column("model_id", String(512), nullable=False),
+    Column("catalog_base_url", String(2048), nullable=True),
     Column("display_name", String(512), nullable=False),
     Column("context_window", Integer, nullable=True),
     Column("capabilities", JSON, nullable=False),

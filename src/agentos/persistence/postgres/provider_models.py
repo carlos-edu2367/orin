@@ -36,6 +36,10 @@ class PostgresProviderCatalogRepository:
     def replace(self, context: ProviderCatalogContext, provider: str, records: list[ProviderModelRecord], refreshed_at: datetime) -> None:
         now = datetime.now(UTC)
         with self._engine.begin() as connection:
+            base_url = connection.execute(select(provider_configurations.c.base_url).where(
+                provider_configurations.c.user_id == context.user_id,
+                provider_configurations.c.provider == provider,
+            )).scalar_one_or_none()
             connection.execute(delete(provider_model_catalog).where(
                 provider_model_catalog.c.user_id == context.user_id,
                 provider_model_catalog.c.provider == provider,
@@ -46,6 +50,7 @@ class PostgresProviderCatalogRepository:
                         "user_id": context.user_id,
                         "provider": provider,
                         "model_id": record.model_id,
+                        "catalog_base_url": base_url,
                         "display_name": record.display_name,
                         "context_window": record.context_window,
                         "capabilities": list(record.capabilities),
@@ -69,6 +74,10 @@ class PostgresProviderCatalogRepository:
         statement = select(
             provider_model_catalog,
             provider_model_favorites.c.id.label("favorite_id"),
+        ).join(
+            provider_configurations,
+            (provider_configurations.c.user_id == provider_model_catalog.c.user_id)
+            & (provider_configurations.c.provider == provider_model_catalog.c.provider),
         ).outerjoin(
             provider_model_favorites,
             (provider_model_favorites.c.user_id == provider_model_catalog.c.user_id)
@@ -77,6 +86,15 @@ class PostgresProviderCatalogRepository:
         ).where(
             provider_model_catalog.c.user_id == context.user_id,
             provider_model_catalog.c.provider == provider,
+            provider_configurations.c.enabled.is_(True),
+            provider_configurations.c.catalog_refreshed_at.is_not(None),
+            (
+                (provider_model_catalog.c.catalog_base_url == provider_configurations.c.base_url)
+                | (
+                    provider_model_catalog.c.catalog_base_url.is_(None)
+                    & provider_configurations.c.base_url.is_(None)
+                )
+            ),
         )
         if favorites_only:
             statement = statement.where(provider_model_favorites.c.id.is_not(None))
