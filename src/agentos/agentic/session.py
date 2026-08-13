@@ -108,6 +108,7 @@ def pre_read_attachments(history, attachments, toolset, *, max_files: int = MAX_
     if not visual:
         return history
     readings: list[str] = []
+    images: list[dict[str, str]] = []
     for item in visual:
         try:
             result = toolset.view_file(str(item.get("path") or ""))
@@ -118,15 +119,47 @@ def pre_read_attachments(history, attachments, toolset, *, max_files: int = MAX_
         content = str((result or {}).get("content") or "").strip()
         if content:
             readings.append(content)
-    if not readings:
+        # A model that sees images but cannot call tools needs the attachment
+        # in its *first* request. ``view_file`` returns neutral image blocks in
+        # this case; keeping only its explanatory text would leave the model
+        # with "image attached below" and no image below.
+        raw_images = (result or {}).get("images") or ()
+        for block in raw_images:
+            if not isinstance(block, Mapping):
+                continue
+            if block.get("type") != "image":
+                continue
+            media_type, data = block.get("media_type"), block.get("data")
+            if isinstance(media_type, str) and media_type and isinstance(data, str) and data:
+                images.append({"type": "image", "media_type": media_type, "data": data})
+    if not readings and not images:
         return history
     joined = "\n\n---\n\n".join(readings)
     updated = [dict(item) for item in history]
     for index in range(len(updated) - 1, -1, -1):
         if updated[index].get("role") == "user":
-            updated[index]["content"] = f"{updated[index].get('content', '')}\n\n{joined}"
+            original = updated[index].get("content", "")
+            if images:
+                if isinstance(original, list):
+                    content = [dict(block) if isinstance(block, Mapping) else block for block in original]
+                    if joined:
+                        content.append({"type": "text", "text": joined})
+                else:
+                    text = str(original)
+                    if joined:
+                        text = f"{text}\n\n{joined}" if text else joined
+                    content = [{"type": "text", "text": text}]
+                updated[index]["content"] = [*content, *images]
+            elif isinstance(original, list):
+                updated[index]["content"] = [*original, {"type": "text", "text": joined}]
+            else:
+                text = str(original)
+                updated[index]["content"] = f"{text}\n\n{joined}" if text else joined
             return updated
-    updated.append({"role": "user", "content": joined})
+    content: object = joined
+    if images:
+        content = [{"type": "text", "text": joined}, *images]
+    updated.append({"role": "user", "content": content})
     return updated
 
 

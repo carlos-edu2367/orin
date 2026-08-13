@@ -9,10 +9,14 @@ class _Transport:
     def __init__(self, items):
         self.items = items
         self.requests = []
+        self.closed = 0
 
     def stream(self, request):
         self.requests.append(request)
         return iter(self.items)
+
+    def close(self):
+        self.closed += 1
 
 
 def _reader(transport):
@@ -53,3 +57,22 @@ def test_an_empty_transcription_raises():
 def test_without_a_model_it_refuses_before_any_call():
     with pytest.raises(VisionUnavailable):
         VisionReader(lambda model: None, model=None).transcribe([("QUJD", "image/png")])
+
+
+def test_the_ephemeral_transport_is_closed_after_reading():
+    transport = _Transport([NormalizedStreamItem(StreamKind.TEXT, 1, text="ok")])
+
+    assert _reader(transport).transcribe([("QUJD", "image/png")]) == "ok"
+    assert transport.closed == 1
+
+
+def test_a_transport_exception_becomes_a_safe_unavailable_result_and_is_closed():
+    class _BrokenTransport(_Transport):
+        def stream(self, request):
+            self.requests.append(request)
+            raise RuntimeError("network down")
+
+    transport = _BrokenTransport([])
+    with pytest.raises(VisionUnavailable):
+        _reader(transport).transcribe([("QUJD", "image/png")])
+    assert transport.closed == 1

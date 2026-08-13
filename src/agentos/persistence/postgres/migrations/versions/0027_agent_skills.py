@@ -26,6 +26,12 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    for table, index in (("execution_skills", "ix_execution_skills_execution"), ("agent_skills", "ix_agent_skills_agent"), ("skill_versions", "ix_skill_versions_skill"), ("skills", "ix_skills_identity"), ("skills", "ix_skills_scope")):
-        op.drop_index(index, table_name=table)
+    for table, indexes in (
+        ("execution_skills", ("ix_execution_skills_execution",)),
+        ("agent_skills", ("ix_agent_skills_agent",)),
+        ("skill_versions", ("ix_skill_versions_skill",)),
+        ("skills", ("ix_skills_identity", "ix_skills_scope")),
+    ):
+        for index in indexes:
+            op.drop_index(index, table_name=table)
         op.drop_table(table)

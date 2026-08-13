@@ -20,6 +20,21 @@ def test_a_visual_attachment_is_read_and_appended():
     assert result[-1]["role"] == "user"
 
 
+def test_a_vision_model_without_tools_receives_the_pre_read_image():
+    toolset = _Toolset({
+        "content": "A imagem 'uploads/foto.png' estÃ¡ anexada logo abaixo.",
+        "images": [{"type": "image", "media_type": "image/jpeg", "data": "QUJD"}],
+    })
+    history = [{"role": "user", "content": "o que aparece?"}]
+
+    result = pre_read_attachments(history, [{"path": "uploads/foto.png", "kind": "image"}], toolset)
+
+    assert result[-1]["role"] == "user"
+    assert isinstance(result[-1]["content"], list)
+    assert result[-1]["content"][-1] == {"type": "image", "media_type": "image/jpeg", "data": "QUJD"}
+    assert "o que aparece?" in result[-1]["content"][0]["text"]
+
+
 def test_a_text_attachment_is_not_pre_read():
     toolset = _Toolset({"content": "irrelevante"})
     history = [{"role": "user", "content": "leia"}]

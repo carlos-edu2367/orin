@@ -42,11 +42,23 @@ class VisionReader:
         content: list[dict[str, str]] = [{"type": "text", "text": f"{instruction.strip()}\n\n{DEFAULT_INSTRUCTION}".strip()}]
         content.extend(image_block(media_type, data) for data, media_type in images)
         parts: list[str] = []
-        for item in transport.stream({"messages": [{"role": "user", "content": content}], "tools": []}):
-            if item.kind is StreamKind.ERROR:
-                raise VisionUnavailable("the visual reading model failed")
-            if item.kind is StreamKind.TEXT and item.text:
-                parts.append(item.text)
+        try:
+            for item in transport.stream({"messages": [{"role": "user", "content": content}], "tools": []}):
+                if item.kind is StreamKind.ERROR:
+                    raise VisionUnavailable("the visual reading model failed")
+                if item.kind is StreamKind.TEXT and item.text:
+                    parts.append(item.text)
+        except VisionUnavailable:
+            raise
+        except Exception as error:
+            raise VisionUnavailable("the visual reading model failed") from error
+        finally:
+            closer = getattr(transport, "close", None)
+            if callable(closer):
+                try:
+                    closer()
+                except Exception:
+                    pass
         text = "".join(parts).strip()
         if not text:
             raise VisionUnavailable("the visual reading model returned nothing")
