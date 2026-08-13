@@ -90,7 +90,10 @@ class FakeConversationApplication:
     def __init__(self) -> None:
         self.create_calls = 0
 
-    def create(self, context, *, message, provider, model_id, workspace_id, idempotency_key):
+    def allocate_conversation_id(self) -> str:
+        return "conv-1"
+
+    def create(self, context, *, message, provider, model_id, workspace_id, idempotency_key, project_id=None, attachments=(), new_conversation_id=None):
         self.create_calls += 1
         assert context.user_id == "user-1"
         assert (message, provider, model_id, workspace_id) == ("Organize este projeto", "openrouter", "anthropic/test-model", None)

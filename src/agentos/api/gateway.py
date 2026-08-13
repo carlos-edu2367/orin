@@ -10,7 +10,7 @@ from time import monotonic
 from typing import Any
 from uuid import uuid4
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, File, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -37,6 +37,8 @@ from agentos.agentic.file_preview import media_type_for, open_in_default_applica
 from agentos.installation import orin_paths
 from agentos.agentic.workspace import ConversationWorkspace, WorkspaceError, resolve_workspace
 from agentos.local_workspace import FolderRejected, choose_folder, inspect_folder
+from agentos.uploads.media import MAX_FILES_PER_MESSAGE, MAX_UPLOAD_BYTES, UploadRejected
+from agentos.uploads.promotion import discard_promoted, promote_uploads
 
 
 # Conversation SSE pacing. The active poll is fast enough to feel like token
@@ -105,9 +107,10 @@ class ConversationSelectionRequest(_RequestModel):
 
 
 class CreateConversationRequest(_RequestModel):
-    message: str = Field(min_length=1, max_length=16000)
+    message: str = Field(default="", max_length=16000)
     selection: ConversationSelectionRequest
     workspace_id: str | None = Field(default=None, min_length=1, max_length=255)
+    attachments: list[str] = Field(default_factory=list, max_length=MAX_FILES_PER_MESSAGE)
 
 
 class InspectWorkspaceFolderRequest(_RequestModel):
@@ -130,7 +133,8 @@ class UpdateProjectRequest(_RequestModel):
 
 
 class SendConversationMessageRequest(_RequestModel):
-    message: str = Field(min_length=1, max_length=16000)
+    message: str = Field(default="", max_length=16000)
+    attachments: list[str] = Field(default_factory=list, max_length=MAX_FILES_PER_MESSAGE)
 
 
 class CreateSkillRequest(_RequestModel):
@@ -186,6 +190,7 @@ class ApiServices:
         events: InMemoryClientEventStream | None = None,
         workspace_root: str | Path | None = None,
         local_workspaces: object | None = None,
+        uploads: object | None = None,
     ) -> None:
         self.security = security or InMemorySecurityService()
         self.execution_application = execution_application
@@ -201,6 +206,7 @@ class ApiServices:
         self.agentic_runtime = agentic_runtime
         self.events = events or InMemoryClientEventStream()
         self.workspace_root = Path(workspace_root) if workspace_root is not None else orin_paths().workspaces
+        self.uploads = uploads
 
 
 def create_app(services: ApiServices) -> FastAPI:
@@ -241,6 +247,10 @@ def create_app(services: ApiServices) -> FastAPI:
     @app.exception_handler(ProviderCredentialRejectedError)
     async def provider_credential_rejected(_: Request, __: ProviderCredentialRejectedError) -> JSONResponse:
         return _error(422, "VALIDATION", "provider_credentials_rejected", retryable=False)
+
+    @app.exception_handler(UploadRejected)
+    async def upload_rejected(_: Request, __: UploadRejected) -> JSONResponse:
+        return _error(422, "VALIDATION", "upload_rejected", retryable=False)
 
     @app.exception_handler(ApplicationNotFoundError)
     async def not_found_error(_: Request, __: ApplicationNotFoundError) -> JSONResponse:
@@ -322,17 +332,52 @@ def create_app(services: ApiServices) -> FastAPI:
         result = require_port(services.execution_application).create(command)  # type: ignore[union-attr]
         return JSONResponse(_receipt(result, execution_id), status_code=202)
 
+    @app.post("/v1/uploads", status_code=201)
+    async def create_upload(request: Request, file: UploadFile = File(...)) -> JSONResponse:
+        principal = principal_for(request, mutable=True)
+        services.security.authorize(principal, action="conversation.send", resource_id=None, purpose="conversation.upload")
+        data = await file.read(MAX_UPLOAD_BYTES + 1)
+        staged = require_port(services.uploads).store(principal.user_id, file.filename or "arquivo", data)  # type: ignore[union-attr]
+        return JSONResponse({
+            "upload_id": staged.upload_id, "filename": staged.filename,
+            "media_type": staged.media_type, "kind": staged.kind, "bytes": staged.bytes,
+        }, status_code=201)
+
+    @app.delete("/v1/uploads/{upload_id}", status_code=204)
+    async def delete_upload(upload_id: str, request: Request) -> JSONResponse:
+        principal = principal_for(request, mutable=True)
+        services.security.authorize(principal, action="conversation.send", resource_id=None, purpose="conversation.upload")
+        if not require_port(services.uploads).discard(principal.user_id, upload_id):  # type: ignore[union-attr]
+            raise ApplicationNotFoundError(upload_id)
+        return JSONResponse(status_code=204, content=None)
+
+    def workspace_for(workspace_id: str, principal: AuthenticatedPrincipal) -> ConversationWorkspace:
+        return resolve_workspace(workspace_id, managed_root=services.workspace_root, local_root=local_root_for(workspace_id, principal))
+
+    def promote(workspace_id: str, principal: AuthenticatedPrincipal, upload_ids: list[str]) -> list[dict[str, object]]:
+        if not upload_ids:
+            return []
+        return promote_uploads(require_port(services.uploads), workspace_for(workspace_id, principal), principal.user_id, upload_ids)
+
     @app.post("/v1/conversations", status_code=201)
     async def create_conversation(payload: CreateConversationRequest, request: Request) -> JSONResponse:
         principal = principal_for(request, mutable=True)
         provider = _provider_name(payload.selection.provider)
         services.security.check_rate_limit(principal, action="conversation.create", origin=request.headers.get("origin"))
         services.security.authorize(principal, action="conversation.create", resource_id=provider, purpose="conversation.create")
-        result = require_port(services.conversation_application).create(
-            ProviderCatalogContext(principal.user_id, "conversation.create"),
-            message=payload.message, provider=provider, model_id=payload.selection.model_id,
-            workspace_id=payload.workspace_id, idempotency_key=_idempotency(request),
-        )
+        application = require_port(services.conversation_application)
+        conversation_id = application.allocate_conversation_id()  # type: ignore[union-attr]
+        attachments = promote(conversation_id, principal, payload.attachments)
+        try:
+            result = application.create(  # type: ignore[union-attr]
+                ProviderCatalogContext(principal.user_id, "conversation.create"),
+                message=payload.message, provider=provider, model_id=payload.selection.model_id,
+                workspace_id=payload.workspace_id, idempotency_key=_idempotency(request),
+                attachments=attachments, new_conversation_id=conversation_id,
+            )
+        except Exception:
+            discard_promoted(workspace_for(conversation_id, principal), attachments)
+            raise
         data = _jsonable(result)
         if not isinstance(data, dict):
             raise ValueError("conversation response is invalid")
@@ -391,11 +436,19 @@ def create_app(services: ApiServices) -> FastAPI:
         project = require_port(services.projects).get(project_id, principal.user_id)
         if project is None: raise ApplicationNotFoundError(project_id)
         provider = _provider_name(payload.selection.provider)
-        result = require_port(services.conversation_application).create(
-            ProviderCatalogContext(principal.user_id, "project.conversation.create"),
-            message=payload.message, provider=provider, model_id=payload.selection.model_id,
-            workspace_id=project.workspace_id, idempotency_key=_idempotency(request), project_id=project_id,
-        )
+        application = require_port(services.conversation_application)
+        conversation_id = application.allocate_conversation_id()  # type: ignore[union-attr]
+        attachments = promote(project.workspace_id, principal, payload.attachments)
+        try:
+            result = application.create(  # type: ignore[union-attr]
+                ProviderCatalogContext(principal.user_id, "project.conversation.create"),
+                message=payload.message, provider=provider, model_id=payload.selection.model_id,
+                workspace_id=project.workspace_id, idempotency_key=_idempotency(request), project_id=project_id,
+                attachments=attachments, new_conversation_id=conversation_id,
+            )
+        except Exception:
+            discard_promoted(workspace_for(project.workspace_id, principal), attachments)
+            raise
         data = _jsonable(result)
         if not isinstance(data, dict): raise ValueError("conversation response is invalid")
         data["project_id"] = project_id
@@ -564,7 +617,16 @@ def create_app(services: ApiServices) -> FastAPI:
     async def send_conversation_message(conversation_id: str, payload: SendConversationMessageRequest, request: Request) -> JSONResponse:
         principal = principal_for(request, mutable=True)
         services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.send")
-        result = require_port(services.conversation_application).send(principal.user_id, conversation_id, payload.message, _idempotency(request))  # type: ignore[union-attr]
+        attachments: list[dict[str, object]] = []
+        workspace_id = conversation_id
+        if payload.attachments:
+            workspace_id, _ = effective_workspace_id(conversation_record(conversation_id, principal), principal)
+            attachments = promote(workspace_id, principal, payload.attachments)
+        try:
+            result = require_port(services.conversation_application).send(principal.user_id, conversation_id, payload.message, _idempotency(request), attachments=attachments)  # type: ignore[union-attr]
+        except Exception:
+            discard_promoted(workspace_for(workspace_id, principal), attachments)
+            raise
         return JSONResponse(_jsonable(result), status_code=201)
 
     @app.post("/v1/conversations/{conversation_id}/cancel", status_code=202)

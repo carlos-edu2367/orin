@@ -55,6 +55,7 @@ from agentos.persistence.postgres.skills import PostgresSkillLibraryService
 from agentos.omniroute import OmniRouteProcessManager, OmniRouteRuntimeSettingsStore
 from agentos.agentic.settings import AgentRuntimeSettingsStore
 from agentos.filesystem.models import FilesystemOperationContext, WorkspacePath
+from agentos.uploads.staging import UploadStaging
 
 
 class ProductionSettings(AgentOSSettings):
@@ -265,6 +266,13 @@ def compose_production_services(engine: Engine, *, localhost_trust_enabled: bool
     cursor_secret = activity_cursor_secret or activity_cursor_fallback(engine)
     provider_repository = PostgresProviderCatalogRepository(engine, cipher=provider_cipher)
     omniroute_runtime = OmniRouteProcessManager(OmniRouteRuntimeSettingsStore())
+    staging = UploadStaging(orin_paths().data / "uploads" / "staging")
+    try:
+        staging.purge()
+    except Exception:
+        # Staging cleanup is best-effort: a failure here must never block the
+        # API from starting, it just leaves stale uploads for the next purge.
+        pass
     return ApiServices(
         security=LoopbackSecurityService() if localhost_trust_enabled else PostgresSecurityService(engine),
         execution_application=ExecutionApplicationAdapter(engine),
@@ -279,6 +287,7 @@ def compose_production_services(engine: Engine, *, localhost_trust_enabled: bool
         agentic_runtime=AgentRuntimeSettingsStore(),
         events=PostgresClientEventStream(engine),  # type: ignore[arg-type]
         local_workspaces=PostgresLocalWorkspaceStore(engine),
+        uploads=staging,
     )
 
 
