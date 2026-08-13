@@ -11,7 +11,6 @@ import {
   PROVIDER_NAMES, getVisionModelSetting, listProviderModels,
   type ProviderModel, type ProviderName, type VisionModelSetting,
 } from '../../api/providers'
-import { deleteUpload, uploadFile } from '../../api/uploads'
 import { attachWorkspaceFolder, detachWorkspaceFolder, inspectWorkspaceFolder, type WorkspaceState } from '../../api/workspace'
 import { CommandPalette } from '../../components/CommandPalette'
 import { Brand } from '../../components/Brand'
@@ -20,7 +19,6 @@ import { WorkspaceNavigation } from '../projects/WorkspaceNavigation'
 import { ActivityStream } from './ActivityStream'
 import { AgentPulse, modeFromEvents } from './AgentPulse'
 import { attachmentNotice } from './attachmentNotice'
-import type { ComposerAttachment } from './AttachmentChips'
 import { Composer } from './Composer'
 import { MarkdownMessage } from './MarkdownMessage'
 import { MessageAttachments } from './MessageAttachments'
@@ -30,6 +28,7 @@ import { WorkspaceFolderButton } from './WorkspaceFolderButton'
 import { activityReducer, createActivityState } from './activityReducer'
 import type { ConversationActivityEvent } from './activityTypes'
 import { buildMessageTimelines } from './turnTimelineFold'
+import { useComposerAttachments } from './useComposerAttachments'
 
 const TOOL_CAPABILITY_NAMES = new Set(['tools', 'tool_use', 'function_calling'])
 
@@ -78,7 +77,7 @@ export function ChatPage() {
   const [conversation, setConversation] = useState<Conversation | null>(null)
   const [chats, setChats] = useState<Array<{ conversation_id: string; title: string; state: string }>>([])
   const [message, setMessage] = useState('')
-  const [attachments, setAttachments] = useState<ComposerAttachment[]>([])
+  const { attachments, onAttach, onRemoveAttachment, canSend: attachmentsReady, readyUploadIds, reset: resetAttachments } = useComposerAttachments(client)
   const [pendingUserMessage, setPendingUserMessage] = useState<ConversationMessage | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
@@ -98,14 +97,6 @@ export function ChatPage() {
   const cursorRef = useRef('0')
   const scrollRef = useRef<HTMLDivElement>(null)
   const pinnedRef = useRef(true)
-  const attachmentsRef = useRef(attachments)
-  useEffect(() => { attachmentsRef.current = attachments }, [attachments])
-
-  // Leaving mid-upload must not leak the preview blob: nothing else ever
-  // revokes a chip's object URL once the page it lives on is gone.
-  useEffect(() => () => {
-    attachmentsRef.current.forEach((item) => { if (item.previewUrl) URL.revokeObjectURL(item.previewUrl) })
-  }, [])
   const showOverview = location.pathname.endsWith('/overview')
 
   const loadSnapshot = useCallback(async (resetActivity: boolean) => {
@@ -288,50 +279,16 @@ export function ChatPage() {
     else element.scrollTop = element.scrollHeight
   }, [messages, activity.events.length, reduced])
 
-  function guessKind(file: File): ComposerAttachment['kind'] {
-    if (file.type.startsWith('image/')) return 'image'
-    if (file.type === 'application/pdf') return 'pdf'
-    if (file.type.includes('officedocument')) return 'office'
-    return 'text'
-  }
-
-  function onAttach(files: File[]) {
-    for (const file of files) {
-      const id = crypto.randomUUID()
-      const previewUrl = file.type.startsWith('image/') ? URL.createObjectURL(file) : undefined
-      setAttachments((current) => [...current, { id, filename: file.name, kind: guessKind(file), bytes: file.size, state: 'uploading', previewUrl }])
-      uploadFile(client, file)
-        .then((uploaded) => {
-          setAttachments((current) => current.map((item) => item.id === id
-            ? { ...item, state: 'ready', upload_id: uploaded.upload_id, kind: uploaded.kind, bytes: uploaded.bytes }
-            : item))
-        })
-        .catch(() => {
-          setAttachments((current) => current.map((item) => item.id === id ? { ...item, state: 'failed', error: 'Não foi possível enviar.' } : item))
-        })
-    }
-  }
-
-  function onRemoveAttachment(id: string) {
-    setAttachments((current) => {
-      const target = current.find((item) => item.id === id)
-      if (target?.previewUrl) URL.revokeObjectURL(target.previewUrl)
-      if (target?.upload_id) void deleteUpload(client, target.upload_id).catch(() => undefined)
-      return current.filter((item) => item.id !== id)
-    })
-  }
-
   async function submit() {
     const text = message.trim()
-    const readyAttachments = attachments.filter((item) => item.state === 'ready')
-    if ((!text && readyAttachments.length === 0) || running) return
+    const readyUploads = readyUploadIds()
+    if ((!text && readyUploads.length === 0) || running) return
     setMessage('')
     setError(null)
     setPendingUserMessage({ message_id: `pending-${Date.now()}`, role: 'user', content: text, status: 'completed', retryable: false, attachments: [] })
     try {
-      await sendConversationMessage(client, conversationId, text, readyAttachments.map((item) => item.upload_id!))
-      attachments.forEach((item) => { if (item.previewUrl) URL.revokeObjectURL(item.previewUrl) })
-      setAttachments([])
+      await sendConversationMessage(client, conversationId, text, readyUploads)
+      resetAttachments()
       await loadSnapshot(false)
       void listConversations(client).then((value) => setChats(value.items)).catch(() => undefined)
     } catch {
@@ -468,7 +425,7 @@ export function ChatPage() {
           attachments={attachments}
           onAttach={onAttach}
           onRemoveAttachment={onRemoveAttachment}
-          canSend={attachments.every((item) => item.state !== 'uploading')}
+          canSend={attachmentsReady}
           notice={notice}
           settings={
             <WorkspaceFolderButton

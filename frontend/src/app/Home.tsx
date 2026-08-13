@@ -11,6 +11,7 @@ import { Brand } from '../components/Brand'
 import { CommandPalette } from '../components/CommandPalette'
 import { ModelPicker } from '../components/ModelPicker'
 import { Composer } from '../features/conversations/Composer'
+import { useComposerAttachments } from '../features/conversations/useComposerAttachments'
 import { WorkspaceNavigation } from '../features/projects/WorkspaceNavigation'
 
 type HomeProps = {
@@ -35,6 +36,7 @@ export function Home({ client, bootstrap }: HomeProps) {
   const session = bootstrap ?? (typeof document === 'undefined' ? { status: 'missing_csrf' as const } : readBrowserSessionBootstrap(document))
 
   const [message, setMessage] = useState('')
+  const { attachments, onAttach, onRemoveAttachment, canSend: attachmentsReady, readyUploadIds, reset: resetAttachments } = useComposerAttachments(apiClient)
   const [provider, setProvider] = useState<ProviderName>(() => readStored(PROVIDER_STORAGE_KEY, 'openrouter') as ProviderName)
   const [models, setModels] = useState<ProviderModel[]>([])
   const [modelId, setModelId] = useState('')
@@ -76,13 +78,15 @@ export function Home({ client, bootstrap }: HomeProps) {
 
   async function submit() {
     const text = message.trim()
-    if (!text || !modelId || submitting || !sessionReady) return
+    const readyUploads = readyUploadIds()
+    if ((!text && readyUploads.length === 0) || !modelId || submitting || !sessionReady) return
     setSubmitting(true)
     setError(null)
     try {
-      const receipt = await createConversation(apiClient, { message: text, provider, model_id: modelId })
+      const receipt = await createConversation(apiClient, { message: text, provider, model_id: modelId, attachments: readyUploads })
       writeStored(PROVIDER_STORAGE_KEY, provider)
       writeStored(MODEL_STORAGE_KEY, modelId)
+      resetAttachments()
       navigate(`/chats/${encodeURIComponent(receipt.conversation_id)}`)
     } catch (caught) {
       setError(errorHeadline(caught))
@@ -135,12 +139,15 @@ export function Home({ client, bootstrap }: HomeProps) {
             onChange={setMessage}
             onSubmit={() => void submit()}
             disabled={submitting}
-            canSend={Boolean(modelId) && sessionReady}
+            canSend={Boolean(modelId) && sessionReady && attachmentsReady}
             autoFocus
             focusSignal={focusSignal}
             hint={submitting ? 'Preparando sua execução…' : undefined}
             notice={sessionReady ? null : 'Não foi possível confirmar sua sessão local. Atualize a página antes de enviar.'}
             error={error}
+            attachments={attachments}
+            onAttach={onAttach}
+            onRemoveAttachment={onRemoveAttachment}
             settings={(
               <ModelPicker
                 providers={[...PROVIDER_NAMES]}
