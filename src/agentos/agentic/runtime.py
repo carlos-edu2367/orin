@@ -243,7 +243,8 @@ class AgenticTurnRuntime:
                             tool_arguments=dict(arguments),
                         )
                 messages.append(self._assistant_tool_message(turn, text_parts, calls, thinking_parts))
-                messages.extend(self._tool_result_message(turn, result) for result in results)
+                for result in results:
+                    messages.extend(self._tool_result_messages(turn, result))
                 self._age_tool_results(messages, keep_recent=len(results))
                 self._life(turn, "running")
                 continue
@@ -532,7 +533,7 @@ class AgenticTurnRuntime:
                 summary=outcome.summary, error_code=outcome.error_code, tool_payload=dict(outcome.payload),
                 tool_arguments=dict(arguments),
             )
-            results.append({"id": call_id, "name": name, "status": outcome.status, "content": outcome.content})
+            results.append({"id": call_id, "name": name, "status": outcome.status, "content": outcome.content, "images": list(outcome.images or [])})
         return results
 
     def _load(self, turn_id: str) -> dict[str, object]:
@@ -594,13 +595,24 @@ class AgenticTurnRuntime:
         return message
 
     @classmethod
-    def _tool_result_message(cls, turn: Mapping[str, object], result: Mapping[str, object]) -> dict[str, object]:
+    def _tool_result_messages(cls, turn: Mapping[str, object], result: Mapping[str, object]) -> list[dict[str, object]]:
+        """The tool's result, plus a user message when it carried images.
+
+        Only Anthropic accepts an image inside a tool result, so the image is
+        appended as an ordinary user message instead: that is understood by
+        every provider this runtime speaks to.
+        """
         # A toolset result carries the content the model asked for; the policy
         # path carries only a summary, which is the whole point of that path.
         content = str(result["content"]) if "content" in result else cls._redacted_result(result)
         if str(turn.get("provider", "")).lower() == "anthropic":
-            return {"role": "user", "content": [{"type": "tool_result", "tool_use_id": str(result.get("id", "")), "content": content}]}
-        return {"role": "tool", "tool_call_id": str(result.get("id", "")), "content": content}
+            messages: list[dict[str, object]] = [{"role": "user", "content": [{"type": "tool_result", "tool_use_id": str(result.get("id", "")), "content": content}]}]
+        else:
+            messages = [{"role": "tool", "tool_call_id": str(result.get("id", "")), "content": content}]
+        images = [dict(item) for item in (result.get("images") or ()) if isinstance(item, Mapping)]
+        if images:
+            messages.append({"role": "user", "content": [{"type": "text", "text": "Conteúdo visual do arquivo solicitado:"}, *images]})
+        return messages
 
     @staticmethod
     def _coerce(event: object) -> NormalizedStreamItem:

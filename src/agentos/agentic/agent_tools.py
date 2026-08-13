@@ -83,6 +83,9 @@ class ToolOutcome:
     content: str
     payload: dict[str, Any] = field(default_factory=dict)
     error_code: str | None = None
+    # Provider-neutral image blocks the runtime appends to the conversation
+    # after this tool's result, so a model that sees can look at them.
+    images: list[dict[str, str]] = field(default_factory=list)
 
 
 def _schema(properties: Mapping[str, Any], required: tuple[str, ...] = ()) -> dict[str, Any]:
@@ -457,7 +460,8 @@ class AgentToolset:
             # rather than growing content past MAX_TOOL_RESULT_CHARS.
             content, _ = _bounded(content, MAX_TOOL_RESULT_CHARS - len(notice))
             content += notice
-        return ToolOutcome("succeeded", str(result.get("summary", f"{name} concluído"))[:240], content, payload)
+        images = [dict(item) for item in (result.get("images") or ()) if isinstance(item, Mapping)]
+        return ToolOutcome("succeeded", str(result.get("summary", f"{name} concluído"))[:240], content, payload, images=images)
 
     @staticmethod
     def _finalize_outcome(outcome: ToolOutcome, kind: str) -> ToolOutcome:
@@ -479,6 +483,7 @@ class AgentToolset:
             content,
             payload,
             outcome.error_code,
+            list(outcome.images or []),
         )
 
     # -- handlers -------------------------------------------------------
