@@ -548,6 +548,24 @@ conversation_tool_records = Table(
 )
 Index("ix_conversation_tool_records_conversation", conversation_tool_records.c.conversation_id, conversation_tool_records.c.sequence)
 
+conversation_message_attachments = Table(
+    "conversation_message_attachments", metadata,
+    Column("id", Integer, primary_key=True), Column("attachment_id", String(255), nullable=False, unique=True),
+    Column("message_id", String(255), nullable=False), Column("conversation_id", String(255), nullable=False),
+    Column("user_id", String(255), nullable=False), Column("path", String(1024), nullable=False),
+    Column("original_name", String(255), nullable=False), Column("media_type", String(128), nullable=False),
+    Column("kind", String(16), nullable=False), Column("bytes", Integer, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+)
+Index("ix_conversation_message_attachments_message", conversation_message_attachments.c.message_id)
+
+vision_model_selections = Table(
+    "vision_model_selections", metadata,
+    Column("id", Integer, primary_key=True), Column("user_id", String(255), nullable=False, unique=True),
+    Column("provider", String(32), nullable=False), Column("model_id", String(512), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+)
+
 conversation_dispatches = Table(
     "conversation_dispatches", metadata,
     Column("id", Integer, primary_key=True), Column("turn_id", String(255), nullable=False, unique=True), Column("state", String(32), nullable=False),
