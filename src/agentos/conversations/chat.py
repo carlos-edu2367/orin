@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
@@ -16,11 +16,28 @@ from agentos.api.contracts import ApplicationNotFoundError
 from agentos.api.events import CursorError
 from agentos.agentic.events import AgentActivityEvent, AgentActivityEventType
 from agentos.persistence.postgres.agentic_activity import ActivityCursorError
-from agentos.persistence.postgres.schema import (conversation_activity_events, conversation_agent_usage, conversation_agents, conversation_dispatches, conversation_events, conversation_messages, conversation_tool_records, conversation_turns, conversations, projects, runtime_heartbeats, workspace_roots)
+from agentos.persistence.postgres.schema import (conversation_activity_events, conversation_agent_usage, conversation_agents, conversation_dispatches, conversation_events, conversation_message_attachments, conversation_messages, conversation_tool_records, conversation_turns, conversations, projects, runtime_heartbeats, workspace_roots)
 
 
 def _id(prefix: str) -> str: return f"{prefix}_{uuid4().hex}"
 def _title(message: str) -> str: return " ".join(message.split())[:80] or "Nova conversa"
+
+
+def _attachment_label(record: Mapping[str, object]) -> str:
+    kinds = {"image": "imagem", "pdf": "PDF", "office": "documento", "text": "texto"}
+    kind = kinds.get(str(record.get("kind") or ""), "arquivo")
+    size = int(record.get("bytes") or 0)
+    return f"{record.get('path')} ({kind}, {max(1, round(size / 1024))} KB)"
+
+
+def _attachment_marker(records: Sequence[Mapping[str, object]]) -> str:
+    """The line appended to a user message so the model knows the files exist."""
+    listed = ", ".join(_attachment_label(record) for record in records)
+    return (
+        f"\n\n[anexos enviados pela pessoa: {listed}]\n"
+        "Use view_file(path=\"…\") para ler o conteúdo de um anexo visual, "
+        "ou read_file para texto."
+    )
 
 
 def _chunks(text: str, size: int) -> list[str]:
@@ -186,9 +203,12 @@ class PostgresChatStore:
         # Stable across turns so the conversation-level graph keeps one root node.
         return f"agent:{turn['conversation_id']}:main"
 
-    def create(self, *, user_id: str, message: str, provider: str, model_id: str, idempotency_key: str, conversation_id: str | None = None, project_id: str | None = None) -> ChatReceipt:
+    def create(self, *, user_id: str, message: str, provider: str, model_id: str, idempotency_key: str, conversation_id: str | None = None, project_id: str | None = None, attachments: Sequence[Mapping[str, object]] = (), new_conversation_id: str | None = None) -> ChatReceipt:
         message = message.strip()
-        if not message or len(message) > 16000: raise ValueError("message must be a bounded non-blank string")
+        attachments = list(attachments)
+        if len(message) > 16000: raise ValueError("message must be a bounded non-blank string")
+        if not message and not attachments: raise ValueError("message must be a bounded non-blank string")
+        title_source = message or str(attachments[0].get("original_name") or "Arquivo enviado")
         now = datetime.now(UTC)
         with self._engine.begin() as c:
             previous = c.execute(select(conversation_turns).where(conversation_turns.c.user_id == user_id, conversation_turns.c.idempotency_key == idempotency_key)).mappings().first()
@@ -196,12 +216,12 @@ class PostgresChatStore:
                 row = c.execute(select(conversations).where(conversations.c.conversation_id == previous["conversation_id"])).mappings().one()
                 return ChatReceipt(previous["conversation_id"], row["title"], previous["turn_id"], previous["assistant_message_id"], previous["state"])
             if conversation_id is None:
-                conversation_id = _id("chat")
+                conversation_id = new_conversation_id or _id("chat")
                 if project_id is not None:
                     from agentos.persistence.postgres.schema import projects
                     project = c.execute(select(projects.c.project_id).where(projects.c.project_id == project_id, projects.c.user_id == user_id, projects.c.archived_at.is_(None))).scalar()
                     if project is None: raise ApplicationNotFoundError(project_id)
-                c.execute(insert(conversations).values(conversation_id=conversation_id, user_id=user_id, title=_title(message), provider=provider, model_id=model_id, project_id=project_id, state="queued", created_at=now, updated_at=now))
+                c.execute(insert(conversations).values(conversation_id=conversation_id, user_id=user_id, title=_title(title_source), provider=provider, model_id=model_id, project_id=project_id, state="queued", created_at=now, updated_at=now))
                 sequence = 1
             else:
                 row = c.execute(select(conversations).where(conversations.c.conversation_id == conversation_id, conversations.c.user_id == user_id)).mappings().first()
@@ -214,11 +234,19 @@ class PostgresChatStore:
                 {"message_id": user_message_id, "conversation_id": conversation_id, "turn_id": turn_id, "user_id": user_id, "role": "user", "content": message, "sequence": sequence, "status": "completed", "retryable": False, "created_at": now, "updated_at": now},
                 {"message_id": assistant_message_id, "conversation_id": conversation_id, "turn_id": turn_id, "user_id": user_id, "role": "assistant", "content": "", "sequence": sequence + 1, "status": "queued", "retryable": False, "created_at": now, "updated_at": now},
             ])
+            if attachments:
+                c.execute(insert(conversation_message_attachments), [{
+                    "attachment_id": _id("att"), "message_id": user_message_id,
+                    "conversation_id": conversation_id, "user_id": user_id,
+                    "path": str(item["path"]), "original_name": str(item["original_name"]),
+                    "media_type": str(item["media_type"]), "kind": str(item["kind"]),
+                    "bytes": int(item["bytes"]), "created_at": now,
+                } for item in attachments])
             c.execute(insert(conversation_turns).values(turn_id=turn_id, conversation_id=conversation_id, user_id=user_id, execution_id=execution_id, user_message_id=user_message_id, assistant_message_id=assistant_message_id, provider=provider, model_id=model_id, state="queued", idempotency_key=idempotency_key, created_at=now, updated_at=now))
             c.execute(insert(conversation_dispatches).values(turn_id=turn_id, state="pending", attempts=0, queued_at=now, updated_at=now))
             c.execute(insert(conversation_events).values(conversation_id=conversation_id, user_id=user_id, event_type="turn.queued", message_id=assistant_message_id, payload={"state": "queued"}, created_at=now))
             c.execute(update(conversations).where(conversations.c.conversation_id == conversation_id).values(state="queued", updated_at=now))
-        receipt = ChatReceipt(conversation_id, _title(message), turn_id, assistant_message_id, "queued")
+        receipt = ChatReceipt(conversation_id, _title(title_source), turn_id, assistant_message_id, "queued")
         self._activity({"conversation_id": conversation_id, "turn_id": turn_id, "execution_id": execution_id, "user_id": user_id}, AgentActivityEventType.TURN_STARTED, "Turn queued")
         return receipt
 
@@ -232,6 +260,13 @@ class PostgresChatStore:
             if conv is None: raise ApplicationNotFoundError(conversation_id)
             messages = c.execute(select(conversation_messages).where(conversation_messages.c.conversation_id == conversation_id).order_by(conversation_messages.c.sequence)).mappings().all()
             turns = c.execute(select(conversation_turns).where(conversation_turns.c.conversation_id == conversation_id).order_by(conversation_turns.c.created_at)).mappings().all()
+            attachment_rows = c.execute(select(conversation_message_attachments).where(conversation_message_attachments.c.conversation_id == conversation_id).order_by(conversation_message_attachments.c.id)).mappings().all()
+        attachments_by_message: dict[str, list[dict[str, object]]] = {}
+        for row in attachment_rows:
+            attachments_by_message.setdefault(str(row["message_id"]), []).append({
+                "path": str(row["path"]), "original_name": str(row["original_name"]),
+                "media_type": str(row["media_type"]), "kind": str(row["kind"]), "bytes": int(row["bytes"]),
+            })
         activities: list[dict[str, object]] = []
         activity_cursor = "0"
         if self.activity_store is not None:
@@ -252,7 +287,7 @@ class PostgresChatStore:
                 activity_cursor = cursor
                 if len(page.events) < 500:
                     break
-        return {"conversation_id": conv["conversation_id"], "title": conv["title"], "state": conv["state"], "provider": conv["provider"], "model_id": conv["model_id"], "project_id": conv["project_id"], "messages": [{"message_id": m["message_id"], "role": m["role"], "content": m["content"], "status": m["status"], "retryable": bool(m["retryable"])} for m in messages], "turns": [{"turn_id": t["turn_id"], "state": t["state"], "created_at": t["created_at"].isoformat(), "started_at": t["started_at"].isoformat() if t["started_at"] else None, "finished_at": t["finished_at"].isoformat() if t["finished_at"] else None} for t in turns], "activities": activities, "activity_cursor": activity_cursor}
+        return {"conversation_id": conv["conversation_id"], "title": conv["title"], "state": conv["state"], "provider": conv["provider"], "model_id": conv["model_id"], "project_id": conv["project_id"], "messages": [{"message_id": m["message_id"], "role": m["role"], "content": m["content"], "status": m["status"], "retryable": bool(m["retryable"]), "attachments": attachments_by_message.get(str(m["message_id"]), [])} for m in messages], "turns": [{"turn_id": t["turn_id"], "state": t["state"], "created_at": t["created_at"].isoformat(), "started_at": t["started_at"].isoformat() if t["started_at"] else None, "finished_at": t["finished_at"].isoformat() if t["finished_at"] else None} for t in turns], "activities": activities, "activity_cursor": activity_cursor}
 
     @staticmethod
     def _public_activity(event: AgentActivityEvent, cursor: str | None = None) -> dict[str, object]:
@@ -328,8 +363,20 @@ class PostgresChatStore:
         return dict(turn)
 
     def history_for_turn(self, turn: dict[str, object]) -> list[dict[str, str]]:
-        with self._engine.connect() as c: rows = c.execute(select(conversation_messages.c.role, conversation_messages.c.content).where(conversation_messages.c.conversation_id == turn["conversation_id"], conversation_messages.c.sequence <= select(conversation_messages.c.sequence).where(conversation_messages.c.message_id == turn["user_message_id"]).scalar_subquery()).order_by(conversation_messages.c.sequence)).mappings().all()
-        return [{"role": str(r["role"]), "content": str(r["content"])} for r in rows]
+        with self._engine.connect() as c:
+            rows = c.execute(select(conversation_messages.c.message_id, conversation_messages.c.role, conversation_messages.c.content).where(conversation_messages.c.conversation_id == turn["conversation_id"], conversation_messages.c.sequence <= select(conversation_messages.c.sequence).where(conversation_messages.c.message_id == turn["user_message_id"]).scalar_subquery()).order_by(conversation_messages.c.sequence)).mappings().all()
+            attachment_rows = c.execute(select(conversation_message_attachments).where(conversation_message_attachments.c.conversation_id == turn["conversation_id"]).order_by(conversation_message_attachments.c.id)).mappings().all()
+        grouped: dict[str, list[dict[str, object]]] = {}
+        for row in attachment_rows:
+            grouped.setdefault(str(row["message_id"]), []).append(dict(row))
+        history: list[dict[str, str]] = []
+        for row in rows:
+            content = str(row["content"])
+            records = grouped.get(str(row["message_id"]), [])
+            if records:
+                content = f"{content}{_attachment_marker(records)}"
+            history.append({"role": str(row["role"]), "content": content})
+        return history
 
     def delta(self, turn: dict[str, object], text: str) -> None:
         if not text: return
@@ -514,12 +561,14 @@ class PostgresChatStore:
 class ChatApplication:
     """Gateway port. Execution persistence remains the source of technical state."""
     def __init__(self, store: PostgresChatStore, executions) -> None: self.store, self._executions = store, executions
-    def create(self, context, *, message: str, provider: str, model_id: str, workspace_id: str | None, idempotency_key: str, project_id: str | None = None):
-        receipt = self.store.create(user_id=context.user_id, message=message, provider=provider, model_id=model_id, idempotency_key=idempotency_key, project_id=project_id)
+    def allocate_conversation_id(self) -> str:
+        return _id("chat")
+    def create(self, context, *, message: str, provider: str, model_id: str, workspace_id: str | None, idempotency_key: str, project_id: str | None = None, attachments=(), new_conversation_id: str | None = None):
+        receipt = self.store.create(user_id=context.user_id, message=message, provider=provider, model_id=model_id, idempotency_key=idempotency_key, project_id=project_id, attachments=attachments, new_conversation_id=new_conversation_id)
         self._ensure_execution(receipt, context.user_id, workspace_id, idempotency_key)
         return receipt
-    def send(self, user_id: str, conversation_id: str, message: str, idempotency_key: str):
-        receipt = self.store.create(user_id=user_id, message=message, provider="", model_id="", idempotency_key=idempotency_key, conversation_id=conversation_id)
+    def send(self, user_id: str, conversation_id: str, message: str, idempotency_key: str, attachments=()):
+        receipt = self.store.create(user_id=user_id, message=message, provider="", model_id="", idempotency_key=idempotency_key, conversation_id=conversation_id, attachments=attachments)
         self._ensure_execution(receipt, user_id, None, idempotency_key)
         return receipt
     def list(self, user_id: str): return self.store.list(user_id)
