@@ -17,6 +17,7 @@
     "appId": "dev.orin.desktop",
     "productName": "Orin Desktop",
     "asar": true,
+    "icon": "electron/assets/orin-logo.ico",
     "files": [
       "electron/**/*",
       "package.json"

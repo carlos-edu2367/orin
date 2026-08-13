@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, shell } = require('electron')
+const { app, BrowserWindow, ipcMain, Menu, shell } = require('electron')
 const { spawn } = require('node:child_process')
 const fs = require('node:fs/promises')
 const path = require('node:path')
@@ -6,6 +6,7 @@ const { pathToFileURL } = require('node:url')
 
 const statusFile = argumentValue('--status-file')
 const devtools = process.argv.includes('--devtools')
+const iconPath = path.join(__dirname, 'assets', 'orin-logo.png')
 let mainWindow = null
 let appUrl = null
 let closing = false
@@ -28,6 +29,9 @@ app.whenReady().then(async () => {
     app.quit()
     return
   }
+  // Orin owns its navigation through the application UI. The stock Electron
+  // File/Edit/View bar is both redundant and visually disconnected from it.
+  Menu.setApplicationMenu(null)
   registerIpc()
   mainWindow = new BrowserWindow({
     width: 1120,
@@ -37,6 +41,14 @@ app.whenReady().then(async () => {
     show: false,
     backgroundColor: '#070611',
     title: 'Orin',
+    icon: iconPath,
+    autoHideMenuBar: true,
+    titleBarStyle: 'hidden',
+    titleBarOverlay: {
+      color: '#0b0a14',
+      symbolColor: '#f5f1ff',
+      height: 40,
+    },
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
