@@ -159,3 +159,47 @@ def test_ollama_ndjson_stream_drives_a_full_tool_round_trip() -> None:
     assert "tools" not in calls[1]
     assert [item.kind for item in second] == [StreamKind.TEXT, StreamKind.USAGE, StreamKind.FINISH]
     assert second[2].finish_reason.value == "STOP"
+
+
+def test_ollama_native_follow_up_uses_native_tool_history_shapes() -> None:
+    """A native Ollama follow-up must not receive OpenAI-only tool history."""
+    payloads: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        payloads.append(payload)
+        if len(payloads) == 1:
+            return httpx.Response(200, text="\n".join([
+                json.dumps({"message": {"tool_calls": [{"function": {"name": "read_file", "arguments": {"path": "a.txt"}}}]}, "done": False}),
+                json.dumps({"done": True, "done_reason": "stop"}),
+            ]))
+        assistant_call = payload["messages"][1]["tool_calls"][0]
+        assert assistant_call["function"]["arguments"] == {"path": "a.txt"}
+        assert payload["messages"][2] == {
+            "role": "tool",
+            "tool_name": "read_file",
+            "content": "file contents",
+        }
+        return httpx.Response(200, text=json.dumps({"message": {"content": "done"}, "done": True, "done_reason": "stop"}) + "\n")
+
+    transport = HTTPProviderStreamTransport(
+        provider="ollama", base_url="http://localhost:11434", api_key="", model="qwen3:8b",
+        client=httpx.Client(transport=httpx.MockTransport(handler)), num_ctx=32_768,
+    )
+    first_request = {
+        "messages": [{"role": "user", "content": "read a.txt"}],
+        "tools": [{"type": "function", "function": {"name": "read_file", "description": "read", "parameters": {"type": "object", "properties": {}}}}],
+    }
+
+    list(transport.stream(first_request))
+    follow_up = {
+        **first_request,
+        "messages": [
+            *first_request["messages"],
+            {"role": "assistant", "content": None, "tool_calls": [{"id": "tool-call:1", "type": "function", "function": {"name": "read_file", "arguments": '{"path":"a.txt"}'}}]},
+            {"role": "tool", "tool_call_id": "tool-call:1", "content": "file contents"},
+        ],
+        "tool_choice": "none",
+    }
+
+    list(transport.stream(follow_up))

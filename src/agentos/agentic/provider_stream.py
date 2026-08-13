@@ -375,8 +375,54 @@ class HTTPProviderStreamTransport:
             headers["authorization"] = f"Bearer {self._api_key}"
         return f"{self.base_url}/chat/completions", headers, payload
 
+    @staticmethod
+    def _ollama_messages(messages: list[dict[str, object]]) -> list[dict[str, object]]:
+        """Adapt the internal tool history to Ollama's native chat shape."""
+        tool_names: dict[str, str] = {}
+        converted: list[dict[str, object]] = []
+        for message in messages:
+            role = message.get("role")
+            if role == "assistant" and isinstance(message.get("tool_calls"), list):
+                calls: list[dict[str, object]] = []
+                for index, item in enumerate(message["tool_calls"]):
+                    if not isinstance(item, Mapping):
+                        continue
+                    function = item.get("function") if isinstance(item.get("function"), Mapping) else {}
+                    name = str(function.get("name") or "")
+                    arguments = function.get("arguments")
+                    if isinstance(arguments, str):
+                        try:
+                            arguments = json.loads(arguments)
+                        except json.JSONDecodeError:
+                            arguments = {}
+                    if not isinstance(arguments, Mapping):
+                        arguments = {}
+                    call_id = item.get("id")
+                    if call_id is not None and name:
+                        tool_names[str(call_id)] = name
+                    calls.append({
+                        "type": "function",
+                        "function": {"index": index, "name": name, "arguments": dict(arguments)},
+                    })
+                native_message: dict[str, object] = {"role": "assistant", "tool_calls": calls}
+                content = message.get("content")
+                if isinstance(content, str) and content:
+                    native_message["content"] = content
+                converted.append(native_message)
+                continue
+            if role == "tool":
+                call_id = str(message.get("tool_call_id") or "")
+                converted.append({
+                    "role": "tool",
+                    "tool_name": tool_names.get(call_id) or str(message.get("tool_name") or call_id),
+                    "content": str(message.get("content") or ""),
+                })
+                continue
+            converted.append(dict(message))
+        return converted
+
     def _ollama_request(self, messages: list, tools: list, tool_choice: object, requested: object) -> tuple[str, dict[str, str], dict[str, object]]:
-        payload: dict[str, object] = {"model": self.model, "messages": messages, "stream": True}
+        payload: dict[str, object] = {"model": self.model, "messages": self._ollama_messages(messages), "stream": True}
         options: dict[str, object] = {}
         # Ollama defaults to a 4096-token window regardless of what the model
         # can hold, which is well under this loop's system prompt plus tool
