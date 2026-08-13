@@ -9,6 +9,7 @@ from agentos.provider_catalog.ollama import (
     OllamaCatalogClient,
     is_ollama_cloud,
     normalize_ollama_base_url,
+    OllamaCloudAuthenticationError,
 )
 
 
@@ -140,6 +141,16 @@ def test_connection_failure_is_a_sanitized_catalog_error() -> None:
 
     assert "cloud-secret" not in str(failure.value)
     assert "cloud-secret" not in repr(client)
+
+
+def test_cloud_authentication_failure_is_distinguished_from_transport_failure() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, json={"error": "forbidden"})
+
+    client = OllamaCatalogClient(client=httpx.Client(transport=httpx.MockTransport(handle)))
+
+    with pytest.raises(OllamaCloudAuthenticationError):
+        client.verify_cloud_access("cloud-secret", base_url="https://ollama.com", model="qwen3:8b")
 
 
 def test_production_composition_registers_the_ollama_upstream() -> None:

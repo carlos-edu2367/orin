@@ -17,6 +17,10 @@ OLLAMA_CLOUD_BASE_URL = "https://ollama.com"
 _CLOUD_HOST = "ollama.com"
 
 
+class OllamaCloudAuthenticationError(RuntimeError):
+    """The hosted Ollama API rejected the supplied credential."""
+
+
 def normalize_ollama_base_url(value: str) -> str:
     """Validate the origin Ollama is served from, without retaining credentials."""
     if not isinstance(value, str) or not value.strip():
@@ -122,6 +126,10 @@ class OllamaCatalogClient:
             response = client.request(method, url, headers=headers, json=body, timeout=self._timeout)
             response.raise_for_status()
             return response.json()
+        except httpx.HTTPStatusError as error:
+            if error.response.status_code in {401, 403}:
+                raise OllamaCloudAuthenticationError("Ollama Cloud credentials rejected") from error
+            raise RuntimeError("Ollama connection failed") from error
         except (httpx.HTTPError, ValueError, TypeError) as error:
             raise RuntimeError("Ollama connection failed") from error
 
@@ -149,6 +157,7 @@ __all__ = [
     "DEFAULT_OLLAMA_BASE_URL",
     "OLLAMA_CLOUD_BASE_URL",
     "OllamaCatalogClient",
+    "OllamaCloudAuthenticationError",
     "is_ollama_cloud",
     "normalize_ollama_base_url",
 ]

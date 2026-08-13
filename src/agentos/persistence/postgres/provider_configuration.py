@@ -40,12 +40,12 @@ from uuid import uuid4
 from sqlalchemy import insert, select, update
 from sqlalchemy.engine import Engine
 
-from agentos.api.contracts import ApplicationNotFoundError
+from agentos.api.contracts import ApplicationNotFoundError, ProviderCredentialRejectedError
 
 from .schema import provider_configurations
 from agentos.persistence.provider_secrets import ProviderSecretCipher
 from agentos.provider_catalog.models import PROVIDERS_WITH_BASE_URL, PROVIDERS_WITH_OPTIONAL_KEY
-from agentos.provider_catalog.ollama import DEFAULT_OLLAMA_BASE_URL, OllamaCatalogClient, is_ollama_cloud, normalize_ollama_base_url
+from agentos.provider_catalog.ollama import DEFAULT_OLLAMA_BASE_URL, OllamaCatalogClient, OllamaCloudAuthenticationError, is_ollama_cloud, normalize_ollama_base_url
 from agentos.provider_catalog.omniroute import DEFAULT_OMNIROUTE_BASE_URL, normalize_omniroute_base_url
 from agentos.provider_catalog.omniroute import OmniRouteCatalogClient
 from agentos.provider_catalog.installation import OmniRouteInstaller
@@ -146,6 +146,8 @@ class PostgresProviderConfigurationAdapter:
                 if not models:
                     raise RuntimeError("Ollama Cloud returned no models")
                 client.verify_cloud_access(str(command["api_key"]), base_url=str(base_url), model=str(models[0]["id"]))
+        except OllamaCloudAuthenticationError as error:
+            raise ProviderCredentialRejectedError from error
         except RuntimeError as error:
             # The adapter only permits the gateway's safe generic response.
             raise ValueError("provider connection failed") from error
@@ -174,7 +176,7 @@ def _base_url(provider: str, value: object) -> str | None:
 
 
 def _api_key(provider: str, value: object, base_url: str | None = None) -> str:
-    api_key = str(value or "")
+    api_key = str(value or "").strip()
     optional = provider in PROVIDERS_WITH_OPTIONAL_KEY
     # Local Ollama needs no credential; the hosted service always does. The
     # host is the only thing that distinguishes the two, so it decides here.

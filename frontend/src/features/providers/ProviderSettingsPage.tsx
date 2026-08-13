@@ -639,6 +639,7 @@ function errorHeadline(error: ApiError, action: ProviderAction): string {
   if (isAuthenticationError(error as unknown)) return 'Sua sessão expirou. Entre novamente para salvar a chave.'
   if (isCsrfAuthorizationError(error as unknown)) return 'Atualize a página para renovar sua sessão.'
   if (error.category === 'RATE_LIMITED') return 'Muitas tentativas; aguarde antes de tentar novamente.'
+  if (error.messageKey === 'provider_credentials_rejected') return 'A chave da Ollama Cloud foi rejeitada. Gere uma nova chave em ollama.com/settings/keys e tente novamente.'
   if (error.status >= 500) return 'O provider não está disponível no momento.'
   if (error.category === 'AUTHENTICATION' || error.category === 'AUTHORIZATION') return 'Sessão não autorizada para esta ação.'
   if (error.category === 'VALIDATION') return 'Não foi possível validar os dados enviados.'

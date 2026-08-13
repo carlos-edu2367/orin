@@ -78,5 +78,9 @@ class ApplicationValidationError(ValueError):
     """Raised when a command is structurally rejected by the domain (HTTP 422)."""
 
 
+class ProviderCredentialRejectedError(RuntimeError):
+    """Raised when an upstream provider rejects credentials (HTTP 422)."""
+
+
 class ApplicationNotFoundError(LookupError):
     """Raised when a referenced execution or resource does not exist for this caller (HTTP 404)."""

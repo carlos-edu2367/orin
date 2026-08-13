@@ -68,6 +68,21 @@ def test_ollama_cloud_is_configured_with_a_key() -> None:
     assert state["base_url"] == "https://ollama.com"
 
 
+def test_ollama_cloud_key_is_trimmed_before_storage() -> None:
+    adapter = _adapter()
+    adapter.configure(_command(base_url="https://ollama.com", api_key="  cloud-secret\n"))
+
+    with adapter._engine.connect() as connection:
+        stored = connection.execute(
+            select(provider_configurations.c.api_key_ciphertext).where(
+                provider_configurations.c.user_id == "user-1",
+                provider_configurations.c.provider == "ollama",
+            )
+        ).scalar_one()
+
+    assert adapter._cipher.decrypt(stored) == "cloud-secret"
+
+
 def test_ollama_cloud_connection_test_verifies_the_key_after_catalog_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
     class FakeOllama:
         def __init__(self) -> None:

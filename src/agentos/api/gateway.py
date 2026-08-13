@@ -21,6 +21,7 @@ from .contracts import (
     ApplicationIndeterminateError,
     ApplicationNotFoundError,
     ApplicationValidationError,
+    ProviderCredentialRejectedError,
     ExecutionApplication,
     ProviderConfigurationApplication,
     ProviderModelCatalogApplication,
@@ -236,6 +237,10 @@ def create_app(services: ApiServices) -> FastAPI:
     @app.exception_handler(ApplicationValidationError)
     async def application_validation_error(_: Request, __: ApplicationValidationError) -> JSONResponse:
         return _error(422, "VALIDATION", "invalid_request", retryable=False)
+
+    @app.exception_handler(ProviderCredentialRejectedError)
+    async def provider_credential_rejected(_: Request, __: ProviderCredentialRejectedError) -> JSONResponse:
+        return _error(422, "VALIDATION", "provider_credentials_rejected", retryable=False)
 
     @app.exception_handler(ApplicationNotFoundError)
     async def not_found_error(_: Request, __: ApplicationNotFoundError) -> JSONResponse:
