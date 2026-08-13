@@ -22,8 +22,6 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Chromium provisioning failed.' }
     $env:ORIN_PLAYWRIGHT_BROWSERS_PATH = $browserRoot
 
-    & $python -m pip install 'pyinstaller>=6.11,<7'
-    if ($LASTEXITCODE -ne 0) { throw 'PyInstaller installation failed.' }
     & $python -m PyInstaller packaging\orin.spec --noconfirm --clean
     if ($LASTEXITCODE -ne 0) { throw 'Frozen runtime build failed.' }
 
