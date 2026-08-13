@@ -32,8 +32,18 @@ def test_view_file_reports_a_missing_file(tmp_path):
         _toolset(tmp_path).view_file("uploads/ausente.pdf")
 
 
+def _real_png_bytes() -> bytes:
+    import io
+
+    from PIL import Image
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (4, 4), color="blue").save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
 def test_view_file_without_a_reader_explains_the_limit_for_an_image(tmp_path):
     toolset = _toolset(tmp_path)
-    (toolset.workspace.root / "foto.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 32)
+    (toolset.workspace.root / "foto.png").write_bytes(_real_png_bytes())
     result = toolset.view_file("foto.png")
     assert "leitura visual" in result["content"].lower()

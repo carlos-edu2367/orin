@@ -31,9 +31,16 @@ from agentos.persistence.postgres.agent_memory import PostgresAgentMemoryStore
 from agentos.persistence.postgres.agentic_activity import PostgresAgenticActivityStore
 from agentos.persistence.postgres.conversation_agents import ConversationAgentStore
 from agentos.persistence.postgres.execution_adapters import ExecutionApplicationAdapter, ExecutionQueryAdapter
-from agentos.persistence.postgres.schema import conversation_dispatches, provider_configurations, provider_model_catalog
+from agentos.persistence.postgres.schema import (
+    conversation_dispatches,
+    provider_configurations,
+    provider_model_catalog,
+    vision_model_selections,
+)
 from agentos.persistence.provider_secrets import ProviderSecretCipher
 from agentos.persistence.postgres.skills import PostgresSkillLibraryService
+from agentos.reading.selection import VisionModel, choose_vision_model
+from agentos.reading.vision import VisionReader
 
 
 _LOGGER = logging.getLogger("agentos.workers.chat")
@@ -241,6 +248,71 @@ class ChatWorker:
         # explicit capability list that omits tools counts as "cannot".
         return not names or "tools" in names or "tool_use" in names or "function_calling" in names
 
+    def _vision_candidates(self, user_id: str) -> list[VisionModel]:
+        """Every catalog model this user has that lists ``image`` as an input modality."""
+        try:
+            with self.store._engine.connect() as c:
+                rows = c.execute(
+                    select(provider_model_catalog.c.provider, provider_model_catalog.c.model_id, provider_model_catalog.c.input_modalities)
+                    .where(provider_model_catalog.c.user_id == user_id)
+                ).mappings().all()
+        except Exception:
+            return []
+        candidates: list[VisionModel] = []
+        for row in rows:
+            modalities = row.get("input_modalities") or ()
+            if isinstance(modalities, str):
+                modalities = [item.strip() for item in modalities.split(",")]
+            if "image" in {str(item).lower() for item in modalities}:
+                candidates.append(VisionModel(str(row["provider"]), str(row["model_id"])))
+        return candidates
+
+    def _vision_override(self, user_id: str) -> VisionModel | None:
+        """The model the person explicitly picked for visual reading, if any."""
+        try:
+            with self.store._engine.connect() as c:
+                row = c.execute(
+                    select(vision_model_selections.c.provider, vision_model_selections.c.model_id)
+                    .where(vision_model_selections.c.user_id == user_id)
+                ).mappings().first()
+        except Exception:
+            return None
+        return VisionModel(str(row["provider"]), str(row["model_id"])) if row else None
+
+    def _vision_reader_factory(self, turn: dict[str, object]) -> Callable[[], VisionReader | None]:
+        """A cheap closure the session calls only once a visual read is actually needed.
+
+        Nothing here touches the database -- or even reads ``turn``'s own
+        fields -- until the returned callable runs: most turns carry no visual
+        attachment and must not pay for a catalog query and a model-selection
+        pass they will never use.
+        """
+
+        def build() -> VisionReader | None:
+            user_id = str(turn["user_id"])
+            turn_provider = str(turn["provider"])
+            candidates = self._vision_candidates(user_id)
+            if not candidates:
+                return None
+            chosen = choose_vision_model(candidates, turn_provider=turn_provider, override=self._vision_override(user_id))
+            if chosen is None:
+                return None
+
+            def transport_factory(model: VisionModel) -> HTTPProviderStreamTransport | None:
+                # A model chosen for visual reading may belong to a different
+                # provider than the turn's own model, so its transport is built
+                # from *its* credential, never the turn's.
+                vision_turn = {"user_id": user_id, "provider": model.provider, "model_id": model.model_id}
+                num_ctx = self._num_ctx_for(vision_turn) if model.provider == "ollama" else None
+                try:
+                    return self._transport_for(user_id, model.provider, model.model_id, num_ctx=num_ctx)
+                except Exception:
+                    return None
+
+            return VisionReader(transport_factory, model=chosen)
+
+        return build
+
     def _max_context_tokens_for(self, turn: dict[str, object]) -> int:
         """Derive the context-trim budget from the turn's actual model window.
 
@@ -276,16 +348,26 @@ class ChatWorker:
             return normalize_ollama_base_url(configured or DEFAULT_OLLAMA_BASE_URL)
         return PROVIDER_BASE_URLS.get(provider, PROVIDER_BASE_URLS["openrouter"])
 
-    def _provider_transport(self, turn: dict[str, object]) -> HTTPProviderStreamTransport:
+    def _transport_for(self, user_id: str, provider: str, model_id: str, num_ctx: int | None = None) -> HTTPProviderStreamTransport:
+        """Build a transport for any (user, provider, model), not just the turn's own.
+
+        This is the credential-handling seam both the turn's own provider
+        (``_provider_transport``) and a visual-reading model on a *different*
+        provider (``_vision_reader_factory``) go through, so a provider's
+        credential is only ever looked up under its own name.
+        """
         with self.store._engine.connect() as c:
-            credential = c.execute(select(provider_configurations.c.api_key, provider_configurations.c.api_key_ciphertext, provider_configurations.c.base_url, provider_configurations.c.enabled).where(provider_configurations.c.user_id == turn["user_id"], provider_configurations.c.provider == turn["provider"])).mappings().first()
+            credential = c.execute(select(provider_configurations.c.api_key, provider_configurations.c.api_key_ciphertext, provider_configurations.c.base_url, provider_configurations.c.enabled).where(provider_configurations.c.user_id == user_id, provider_configurations.c.provider == provider)).mappings().first()
         if credential is None or not credential["enabled"]:
             raise ValueError("provider unavailable")
-        provider, model = str(turn["provider"]), str(turn["model_id"])
-        api_key = self._credential_value(credential, str(turn["user_id"]), provider, allow_empty=provider in PROVIDERS_WITH_BASE_URL)
+        api_key = self._credential_value(credential, user_id, provider, allow_empty=provider in PROVIDERS_WITH_BASE_URL)
         base_url = self._base_url_for(provider, credential)
+        return HTTPProviderStreamTransport(provider=provider, base_url=base_url, api_key=api_key, model=model_id, num_ctx=num_ctx)
+
+    def _provider_transport(self, turn: dict[str, object]) -> HTTPProviderStreamTransport:
+        provider = str(turn["provider"])
         num_ctx = self._num_ctx_for(turn) if provider == "ollama" else None
-        return HTTPProviderStreamTransport(provider=provider, base_url=base_url, api_key=api_key, model=model, num_ctx=num_ctx)
+        return self._transport_for(str(turn["user_id"]), provider, str(turn["model_id"]), num_ctx=num_ctx)
 
     def _credential_value(self, credential, user_id: str, provider: str, *, allow_empty: bool = False) -> str:
         """Read the provider key, upgrading a pre-encryption row in place.
@@ -342,6 +424,7 @@ class ChatWorker:
                 enable_subagents=self._enable_subagents,
                 model_sees_images=self._model_sees_images(turn),
                 model_calls_tools=self._model_calls_tools(turn),
+                vision_reader_factory=self._vision_reader_factory(turn),
             )
             return session.build_runtime()
         except Exception:

@@ -20,6 +20,8 @@ from typing import Callable, Mapping
 
 from agentos.installation import orin_paths
 
+from agentos.reading.vision import VisionUnavailable
+
 from .agent_tools import AgentToolset, ToolOutcome
 from .events import AgentActivityEventType
 from .runtime import AgenticLimits, AgenticTurnRuntime
@@ -38,6 +40,36 @@ SUBAGENT_MAX_ACTIONS = 12
 
 class ProjectWorkspaceResolutionError(RuntimeError):
     """A project turn must never run in a fallback workspace."""
+
+
+class _LazyVisionReader:
+    """Defers building the real vision reader until a tool call actually needs it.
+
+    Most turns carry no visual attachment, so the catalog lookup and model
+    selection a real reader construction requires (see
+    ``ChatWorker._vision_reader_factory``) must not run on every turn. This
+    wraps the worker-supplied factory and only calls it the first time
+    ``transcribe`` is invoked, caching the result (including "no model is
+    available") for the rest of the turn.
+    """
+
+    _UNSET = object()
+
+    def __init__(self, factory: Callable[[], object]) -> None:
+        self._factory = factory
+        self._reader: object = self._UNSET
+
+    def transcribe(self, images, *, instruction: str = "") -> str:
+        if self._reader is self._UNSET:
+            try:
+                self._reader = self._factory()
+            except Exception:
+                # Building the real reader is best-effort: a failure here is a
+                # read that could not happen, never a reason to crash the turn.
+                self._reader = None
+        if self._reader is None:
+            raise VisionUnavailable("no visual reading model is configured")
+        return self._reader.transcribe(images, instruction=instruction)
 
 
 def environment_facts() -> dict[str, str]:
@@ -250,6 +282,7 @@ class TurnSession:
         tool_policy=None,
         model_sees_images: bool = False,
         model_calls_tools: bool = True,
+        vision_reader_factory: Callable[[], object] | None = None,
     ) -> None:
         self.turn = turn
         self.store = store
@@ -266,6 +299,9 @@ class TurnSession:
         self.tool_policy = tool_policy
         self.model_sees_images = bool(model_sees_images)
         self.model_calls_tools = bool(model_calls_tools)
+        # Wrapped once, cheaply: the factory itself is only invoked the first
+        # time a tool call actually needs a visual reading.
+        self._visual_reader = _LazyVisionReader(vision_reader_factory) if vision_reader_factory is not None else None
         local_root = turn.get("workspace_root_path")
         self.workspace_is_local = isinstance(local_root, str) and bool(local_root.strip())
         self.workspace = resolve_workspace(
@@ -555,6 +591,7 @@ class TurnSession:
             browser=self.browser,
             policy=self.tool_policy,
             model_sees_images=self.model_sees_images,
+            visual_reader=self._visual_reader,
         )
 
     def _skill_catalog(self, task: str, toolset: AgentToolset) -> tuple[object, ...]:

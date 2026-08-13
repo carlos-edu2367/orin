@@ -16,13 +16,24 @@ def test_toolset_reports_whether_the_turn_model_sees(tmp_path):
     assert AgentToolset(workspace).model_sees_images is False
 
 
+def _real_png_bytes() -> bytes:
+    import io
+
+    from PIL import Image
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (4, 4), color="red").save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
 def test_view_file_returns_the_image_when_the_model_sees(tmp_path):
     workspace = ConversationWorkspace(tmp_path, "chat_1")
     toolset = AgentToolset(workspace, model_sees_images=True, enable_terminal=False)
-    (workspace.root / "foto.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 32)
+    (workspace.root / "foto.png").write_bytes(_real_png_bytes())
     result = toolset.view_file("foto.png")
     assert result["images"][0]["type"] == "image"
-    assert result["images"][0]["media_type"] == "image/png"
+    # normalize_image always re-encodes as JPEG regardless of the source format.
+    assert result["images"][0]["media_type"] == "image/jpeg"
 
 
 TURN = {

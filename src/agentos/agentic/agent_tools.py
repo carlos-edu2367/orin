@@ -28,6 +28,8 @@ from urllib.parse import urljoin, urlparse
 import httpx
 
 from agentos.reading.extract import extract_text
+from agentos.reading.render import ImageTooLarge, normalize_image, render_pdf_pages
+from agentos.reading.vision import VisionUnavailable
 from .workspace import MAX_LIST_DEPTH, ConversationWorkspace, WorkspaceError
 from .browser_tools import _safe_display_url, sanitize_page_text
 from .file_preview import media_type_for
@@ -212,10 +214,12 @@ class AgentToolset:
         skill_load_recorder: Callable[[object], None] | None = None,
         policy: object | None = None,
         model_sees_images: bool = False,
+        visual_reader: object | None = None,
     ) -> None:
         self.workspace = workspace
         self.memory = memory
         self.model_sees_images = bool(model_sees_images)
+        self._visual_reader = visual_reader
         self._delegate = delegate
         self._delegate_batch = delegate_batch
         self._create_agent = create_agent
@@ -519,6 +523,8 @@ class AgentToolset:
             extracted = extract_text(target, media_type)
         except ValueError as error:
             raise AgentToolError(f"'{path}' ({media_type}) cannot be read as a document.") from error
+        if media_type == "application/pdf" and extracted.pages_without_text and not extracted.text.strip():
+            return self._view_scanned_pdf(path, target, extracted.pages_without_text, question)
         body, truncated = _bounded(extracted.text)
         if not body.strip() and extracted.pages_without_text:
             body = f"[o PDF não tem camada de texto nas páginas {', '.join(str(number) for number in extracted.pages_without_text)}]"
@@ -531,24 +537,68 @@ class AgentToolset:
                         "pages_without_text": list(extracted.pages_without_text)},
         }
 
-    def _view_image(self, path: str, target, media_type: str, question: str) -> dict[str, Any]:
-        if self.model_sees_images:
-            import base64
+    def _visual_read(self, path: str, images: list[tuple[str, str]], question: str) -> str | None:
+        """Transcribe ``images`` or return None when no reader could do it."""
+        if self._visual_reader is None:
+            return None
+        try:
+            return self._visual_reader.transcribe(images, instruction=question)
+        except VisionUnavailable:
+            return None
 
-            data = base64.b64encode(target.read_bytes()).decode("ascii")
+    def _no_visual_reading(self, path: str, media_type: str) -> dict[str, Any]:
+        return {
+            "summary": f"Não foi possível ler {path}",
+            "content": (
+                f"Não há leitura visual disponível para '{path}': o modelo deste turno não enxerga "
+                "e nenhum modelo de leitura visual pôde ser usado. Peça à pessoa para escolher um "
+                "modelo com visão ou configurar o modelo de leitura visual em Configurações."
+            ),
+            "payload": {"path": path, "media_type": media_type, "label": path},
+            "images": [],
+        }
+
+    def _view_image(self, path: str, target, media_type: str, question: str) -> dict[str, Any]:
+        try:
+            data, normalized_type = normalize_image(target)
+        except ImageTooLarge as error:
+            raise AgentToolError(str(error)) from error
+        if self.model_sees_images:
             return {
                 "summary": f"Abriu {path}",
                 "content": f"A imagem '{path}' está anexada logo abaixo.",
                 "payload": {"path": path, "media_type": media_type, "label": path},
-                "images": [image_block(media_type, data)],
+                "images": [image_block(normalized_type, data)],
             }
+        text = self._visual_read(path, [(data, normalized_type)], question)
+        if text is None:
+            return self._no_visual_reading(path, media_type)
         return {
-            "summary": f"Não foi possível ler {path}",
-            "content": (
-                f"'{path}' é uma imagem e este turno não tem leitura visual disponível: "
-                "o modelo atual não enxerga e nenhum modelo de leitura visual está configurado."
-            ),
-            "payload": {"path": path, "media_type": media_type, "label": path},
+            "summary": f"Leitura visual de {path}",
+            "content": f"Leitura visual de '{path}':\n\n{text}",
+            "payload": {"path": path, "media_type": media_type, "label": path, "visual_read": True},
+            "images": [],
+        }
+
+    def _view_scanned_pdf(self, path: str, target, pages: tuple[int, ...], question: str) -> dict[str, Any]:
+        rendered = render_pdf_pages(target, pages)
+        if not rendered:
+            raise AgentToolError(f"'{path}' has no readable page.")
+        if self.model_sees_images:
+            return {
+                "summary": f"Abriu {path}",
+                "content": f"As páginas escaneadas de '{path}' estão anexadas logo abaixo.",
+                "payload": {"path": path, "media_type": "application/pdf", "label": path, "pages": list(pages)},
+                "images": [image_block(media_type, data) for data, media_type in rendered],
+            }
+        text = self._visual_read(path, rendered, question)
+        if text is None:
+            return self._no_visual_reading(path, "application/pdf")
+        return {
+            "summary": f"Leitura visual de {path}",
+            "content": f"Leitura visual de '{path}' ({len(rendered)} página(s)):\n\n{text}",
+            "payload": {"path": path, "media_type": "application/pdf", "label": path, "visual_read": True, "pages": list(pages)},
+            "images": [],
         }
 
     def write_file(self, path: str, content: str, mode: str = "overwrite") -> dict[str, Any]:
