@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -17,6 +18,9 @@ from agentos.api.events import CursorError
 from agentos.agentic.events import AgentActivityEvent, AgentActivityEventType
 from agentos.persistence.postgres.agentic_activity import ActivityCursorError
 from agentos.persistence.postgres.schema import (conversation_activity_events, conversation_agent_usage, conversation_agents, conversation_dispatches, conversation_events, conversation_message_attachments, conversation_messages, conversation_tool_records, conversation_turns, conversations, projects, runtime_heartbeats, workspace_roots)
+
+
+_LOGGER = logging.getLogger("agentos.conversations.chat")
 
 
 def _id(prefix: str) -> str: return f"{prefix}_{uuid4().hex}"
@@ -583,17 +587,33 @@ class ChatApplication:
         return _id("chat")
     def create(self, context, *, message: str, provider: str, model_id: str, workspace_id: str | None, idempotency_key: str, project_id: str | None = None, attachments=(), new_conversation_id: str | None = None):
         receipt = self.store.create(user_id=context.user_id, message=message, provider=provider, model_id=model_id, idempotency_key=idempotency_key, project_id=project_id, attachments=attachments, new_conversation_id=new_conversation_id)
-        self._ensure_execution(receipt, context.user_id, workspace_id, idempotency_key)
+        self._project_execution(receipt, context.user_id, workspace_id, idempotency_key)
         return receipt
     def send(self, user_id: str, conversation_id: str, message: str, idempotency_key: str, attachments=()):
         receipt = self.store.create(user_id=user_id, message=message, provider="", model_id="", idempotency_key=idempotency_key, conversation_id=conversation_id, attachments=attachments)
-        self._ensure_execution(receipt, user_id, None, idempotency_key)
+        self._project_execution(receipt, user_id, None, idempotency_key)
         return receipt
     def list(self, user_id: str): return self.store.list(user_id)
     def get(self, conversation_id: str, user_id: str): return self.store.get(conversation_id, user_id)
     def events(self, conversation_id: str, user_id: str, after: int): return self.store.events(conversation_id, user_id, after)
     def cancel(self, conversation_id: str, user_id: str): return self.store.request_cancel(conversation_id, user_id)
     def overview(self, conversation_id: str, user_id: str): return self.store.overview(conversation_id, user_id)
+    def _project_execution(self, receipt, user_id, workspace_id, key) -> None:
+        """Best-effort execution write; see README "Execution records".
+
+        The turn itself is already durably committed by ``self.store.create``
+        -- conversation, messages, attachment rows, turn and the ``pending``
+        dispatch row, all in one transaction -- and that dispatch row can be
+        claimed by a worker within milliseconds. A failure writing the
+        technical execution projection must never propagate: raising here
+        would reach the gateway route, whose ``except Exception:`` handler
+        deletes the just-promoted attachment files, orphaning a turn that is
+        already live and already eligible to run.
+        """
+        try:
+            self._ensure_execution(receipt, user_id, workspace_id, key)
+        except Exception:
+            _LOGGER.warning("execution projection for turn %s was skipped", receipt.turn_id, exc_info=True)
     def _ensure_execution(self, receipt, user_id, workspace_id, key):
         digest = sha256(f"{user_id}|{receipt.turn_id}".encode()).hexdigest()
         self._executions.create({"operation_id": f"op_{digest}", "context": {"user_id": user_id, "workspace_id": workspace_id, "agent_id": f"chat-agent-{digest[:16]}", "execution_id": PostgresChatStore.execution_id_for(receipt.turn_id), "correlation_id": "", "purpose": "conversation.turn"}, "task_ref": f"conversation-turn:{receipt.turn_id}", "limits": {"max_duration_seconds": 120}, "expected_agent_version": 1, "idempotency_key": f"chat:{key}", "requested_at": datetime.now(UTC)})
