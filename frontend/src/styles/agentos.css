@@ -87,7 +87,14 @@
   grid-template-rows: auto minmax(0, 1fr) auto;
   isolation: isolate;
 }
-.chat { display: block; }
+.chat {
+  grid-template-columns: 264px minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+  isolation: isolate;
+}
 
 .home__backdrop { position: fixed; inset: 0; z-index: 0; pointer-events: none; }
 .home__glow {
@@ -109,13 +116,12 @@
 .home__bar { grid-column: 1 / -1; padding-right: 164px; -webkit-app-region: drag; }
 .home__bar a, .home__bar button, .chat__bar a, .chat__bar button { -webkit-app-region: no-drag; }
 .chat__bar {
-  position: fixed; inset: 0 0 auto; z-index: 20;
+  grid-column: 1 / -1; grid-row: 1; z-index: 3;
   display: grid; grid-template-columns: auto minmax(0, 1fr) auto;
+  padding-right: 164px;
   background: rgb(var(--orin-ink-rgb) / .62); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
-  opacity: 0.46;
-  transition: opacity 0.22s var(--ease), background 0.22s var(--ease);
+  -webkit-app-region: drag;
 }
-.chat__bar:hover, .chat__bar:focus-within { opacity: 1; background: rgb(var(--orin-ink-rgb) / .92); }
 
 .brand { display: inline-flex; align-items: center; gap: 10px; font-weight: 620; letter-spacing: -0.02em; font-size: 14px; }
 .brand__mark { display: grid; place-items: center; width: 22px; height: 22px; overflow: hidden; border: 1px solid var(--signal-dim); border-radius: 7px; box-shadow: 0 0 14px rgb(var(--orin-accent-rgb) / .22); }
@@ -192,9 +198,10 @@
 .project-dialog form > div { display: flex; gap: .5rem; justify-content: flex-end; }
 .workspace-navigation__error { margin: .75rem 0 0; color: var(--danger); font-size: .76rem; }
 @media (max-width: 900px) {
-  .home { grid-template-columns: minmax(0, 1fr); }
+  .home, .chat { grid-template-columns: minmax(0, 1fr); }
   .workspace-navigation { display: none; }
   .home__stage { grid-column: 1; }
+  .chat__body, .chat__foot { grid-column: 1; }
 }
 .project-page { width: min(calc(100% - 48px), 900px); min-height: 100dvh; margin: 0 auto; padding: 24px 0 80px; color: var(--text); }
 .project-page__bar { display: flex; align-items: center; justify-content: space-between; padding-bottom: 28px; border-bottom: 1px solid var(--line); }
@@ -399,9 +406,12 @@ kbd {
 
 /* ---------------------------------------------------------------- chat body */
 
-.chat__body { position: relative; display: grid; grid-template-columns: minmax(0, 1fr); min-height: 100dvh; }
-.chat__scroll { height: 100dvh; overflow-y: auto; scroll-behavior: smooth; }
-.chat__thread { width: min(100%, 760px); margin: 0 auto; padding: 104px 24px 168px; display: flex; flex-direction: column; gap: 14px; }
+.chat__body {
+  position: relative; z-index: 2; grid-column: 2; grid-row: 2;
+  display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; min-height: 0; overflow: hidden;
+}
+.chat__scroll { height: 100%; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scroll-behavior: smooth; }
+.chat__thread { width: min(100%, 760px); margin: 0 auto; padding: 32px 24px 168px; display: flex; flex-direction: column; gap: 14px; }
 .chat__placeholder { color: var(--faint); font-size: 13px; text-align: center; padding: 40px 0; }
 
 .bubble { max-width: 100%; border-radius: var(--radius); }
@@ -453,11 +463,12 @@ kbd {
 .markdown-message td { color: var(--muted); }
 
 .chat__foot {
-  position: fixed; right: 50%; bottom: 0; z-index: 20;
-  width: min(100%, 760px); margin: 0; padding: 8px 24px 22px;
-  transform: translateX(50%);
+  position: relative; z-index: 20; grid-column: 2; grid-row: 2;
+  align-self: end; justify-self: center;
+  width: 100%; margin: 0; padding: 28px 24px 22px;
 }
 .chat__foot > * {
+  width: min(100%, 760px); margin-left: auto; margin-right: auto;
   opacity: 0; transform: translateY(18px); pointer-events: none;
   transition: opacity 0.45s var(--ease), transform 0.45s var(--ease);
 }
@@ -649,7 +660,7 @@ kbd {
 
 @media (max-width: 860px) {
   .home__bar, .chat__bar, .home__foot { padding-left: 16px; padding-right: 16px; }
-  .home__bar { padding-right: 146px; }
+  .home__bar, .chat__bar { padding-right: 146px; }
   .chat__bar { grid-template-columns: auto minmax(0, 1fr); }
   .chat__bar-actions { grid-column: 1 / -1; justify-self: start; }
   .chat__thread, .chat__foot { padding-left: 14px; padding-right: 14px; }
