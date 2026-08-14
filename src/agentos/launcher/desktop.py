@@ -44,7 +44,7 @@ def launch_desktop(
     try:
         process = subprocess.Popen(  # noqa: S603 - paths come from this installation, never a renderer or CLI string
             command,
-            cwd=str(_desktop_root(profile)),
+            cwd=str(_desktop_working_directory(profile)),
             stdin=subprocess.DEVNULL,
             stdout=log,
             stderr=subprocess.STDOUT,
@@ -77,6 +77,22 @@ class _StatusPath:
 
 def _desktop_root(profile: RuntimeProfile) -> Path:
     return (profile.repository or profile.root) / "desktop"
+
+
+def _desktop_working_directory(profile: RuntimeProfile) -> Path:
+    """Return an existing directory owned by the Electron host.
+
+    A frozen launcher is placed in ``resources/runtime`` while Electron Builder
+    puts ``Orin Desktop.exe`` in the ``win-unpacked`` root.  The development
+    package, in contrast, needs its ``desktop`` directory for Electron's app
+    entrypoint.  Using the development path for both made ``subprocess.Popen``
+    fail with WinError 267 before Electron could show its startup window.
+    """
+    if profile.repository is not None:
+        return _desktop_root(profile)
+    if getattr(__import__("sys"), "frozen", False):
+        return profile.root.parent.parent
+    return profile.root
 
 
 def _electron_command(profile: RuntimeProfile) -> tuple[str, ...]:

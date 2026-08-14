@@ -70,7 +70,8 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--version", action="store_true", help="print the Orin version and exit")
-    parser.set_defaults(port=None, no_browser=False, verbose=False, desktop=False, desktop_devtools=False, desktop_reuse=False, command=None)
+    parser.add_argument("--update", action="store_true", help="install the latest verified Orin release")
+    parser.set_defaults(port=None, no_browser=False, verbose=False, desktop=False, desktop_devtools=False, desktop_reuse=False, update=False, command=None)
 
     commands = parser.add_subparsers(dest="command", metavar="command")
     commands.add_parser("start", parents=[shared], help="start the Orin runtime (the default)")
@@ -274,7 +275,7 @@ def main(argv: list[str] | None = None) -> int:
 
     paths = orin_paths()
     console = default_console(verbose=getattr(arguments, "verbose", False))
-    command = getattr(arguments, "command", None)
+    command = "update" if arguments.update else getattr(arguments, "command", None)
 
     try:
         if command in (None, "start"):

@@ -10,7 +10,7 @@ import pytest
 from agentos.installation.paths import OrinPaths
 from agentos.installation.profile import RuntimeProfile
 from agentos.launcher.cli import build_parser
-from agentos.launcher.desktop import _electron_command
+from agentos.launcher.desktop import _desktop_working_directory, _electron_command
 from agentos.launcher.desktop_status import DesktopStatusWriter, SERVICE_ORDER
 from agentos.launcher import supervisor as supervisor_module
 from agentos.launcher.environment import RuntimeEnvironment
@@ -75,6 +75,15 @@ def test_frozen_profile_finds_electron_host_above_resources(tmp_path: Path, monk
     monkeypatch.setattr(sys, "frozen", True, raising=False)
 
     assert _electron_command(profile) == (str(host),)
+    assert _desktop_working_directory(profile) == host.parent
+
+
+def test_update_flag_is_an_alias_for_the_update_command() -> None:
+    parser = build_parser()
+
+    arguments = parser.parse_args(["--update"])
+
+    assert arguments.update is True
 
 
 class _Cp1252Stream(io.StringIO):
