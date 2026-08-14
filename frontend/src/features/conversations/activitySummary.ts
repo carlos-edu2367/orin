@@ -49,6 +49,12 @@ export function isRenderable(event: ConversationActivityEvent, settled: Set<stri
   // A lifecycle "turn started/working" line adds nothing next to the tool rows
   // that follow it, so only terminal lifecycle states earn a row.
   if (event.kind === 'lifecycle' && event.type === 'turn.started') return false
+  // `turn.waiting_user` always accompanies an `ask_user` tool call in the same
+  // turn, and the interactive question card built from that tool call already
+  // shows this state (and, unlike this static line, keeps showing it correctly
+  // once answered). Rendering both leaves a second, stale "waiting for you" row
+  // sitting right after a card that has already moved on.
+  if (event.type === 'turn.waiting_user') return false
   if (event.type === 'tool.requested') return false
   if (event.type === 'tool.started' && event.invocationId && settled.has(event.invocationId)) return false
   // The agent tools already emit their own agent.* events, which read better.

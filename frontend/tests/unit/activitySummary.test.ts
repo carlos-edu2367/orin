@@ -103,6 +103,18 @@ describe('activity grouping', () => {
     expect(groups).toEqual([])
   })
 
+  it('does not render a redundant waiting-for-you line next to the ask_user card', () => {
+    const groups = summarizeActivities([
+      event({ type: 'tool.started', toolName: 'ask_user', toolKind: 'user_input', invocationId: 'call-1', summary: 'Perguntou ao usuário', questions: [{ id: 'q1', question: 'Prints?', mode: 'text', options: [] }] }),
+      event({ type: 'tool.finished', toolName: 'ask_user', toolKind: 'user_input', invocationId: 'call-1', status: 'succeeded', summary: 'Perguntou ao usuário' }),
+      event({ type: 'turn.waiting_user', summary: 'Aguardando sua resposta' }),
+    ])
+
+    expect(groups).toHaveLength(1)
+    expect(groups[0].kind).toBe('tool')
+    expect(groups[0].events[0].toolName).toBe('ask_user')
+  })
+
   it('hides the bookkeeping lifecycle lines but keeps terminal ones', () => {
     const groups = summarizeActivities([
       event({ type: 'turn.started', summary: 'Turn started' }),
