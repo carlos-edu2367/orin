@@ -115,6 +115,36 @@ describe('activity grouping', () => {
     expect(groups[0].events[0].toolName).toBe('ask_user')
   })
 
+  it('keeps a second ask_user in a later turn as its own card instead of merging into the first', () => {
+    const groups = summarizeActivities([
+      event({
+        type: 'tool.started', toolName: 'ask_user', toolKind: 'user_input', invocationId: 'call-1', turnId: 'turn-1',
+        summary: 'Perguntou ao usuário', questions: [{ id: 'q1', question: 'Qual API?', mode: 'text', options: [] }],
+      }),
+      event({
+        type: 'tool.finished', toolName: 'ask_user', toolKind: 'user_input', invocationId: 'call-1', turnId: 'turn-1', status: 'succeeded',
+        summary: 'Perguntou ao usuário', questions: [{ id: 'q1', question: 'Qual API?', mode: 'text', options: [] }],
+      }),
+      event({ type: 'turn.waiting_user', turnId: 'turn-1', summary: 'Aguardando sua resposta' }),
+      // The user answers, a new turn starts, and the agent asks again — a
+      // second, unrelated question with nothing else observable in between.
+      event({
+        type: 'tool.started', toolName: 'ask_user', toolKind: 'user_input', invocationId: 'call-2', turnId: 'turn-2',
+        summary: 'Perguntou ao usuário', questions: [{ id: 'q2', question: 'Qual ambiente?', mode: 'text', options: [] }],
+      }),
+      event({
+        type: 'tool.finished', toolName: 'ask_user', toolKind: 'user_input', invocationId: 'call-2', turnId: 'turn-2', status: 'succeeded',
+        summary: 'Perguntou ao usuário', questions: [{ id: 'q2', question: 'Qual ambiente?', mode: 'text', options: [] }],
+      }),
+      event({ type: 'turn.waiting_user', turnId: 'turn-2', summary: 'Aguardando sua resposta' }),
+    ])
+
+    expect(groups).toHaveLength(2)
+    expect(groups[0].events[0].turnId).toBe('turn-1')
+    expect(groups[1].events[0].turnId).toBe('turn-2')
+    expect(groups[1].events[0].questions?.[0].id).toBe('q2')
+  })
+
   it('hides the bookkeeping lifecycle lines but keeps terminal ones', () => {
     const groups = summarizeActivities([
       event({ type: 'turn.started', summary: 'Turn started' }),

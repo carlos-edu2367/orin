@@ -63,10 +63,15 @@ export function isRenderable(event: ConversationActivityEvent, settled: Set<stri
 }
 
 export function groupingKey(event: ConversationActivityEvent): string {
-  if (event.kind === 'tool') return `tool:${event.agentId}:${event.toolKind ?? event.toolName ?? 'tool'}`
-  if (event.kind === 'agent') return `agent:${event.agentId}:${event.type}:${event.label ?? ''}`
-  if (event.kind === 'artifact') return `artifact:${event.agentId}:${event.label ?? ''}`
-  return `lifecycle:${event.agentId}:${event.type}`
+  // Scoped by turnId so a run of same-family calls *within* one turn still
+  // collapses into one row, but a later turn's call of the same family never
+  // merges into an earlier, already-settled group — that previously left a
+  // second ask_user (or a second same-kind tool/agent/artifact event) stuck
+  // rendering the first one's now-stale card instead of its own.
+  if (event.kind === 'tool') return `tool:${event.agentId}:${event.turnId ?? ''}:${event.toolKind ?? event.toolName ?? 'tool'}`
+  if (event.kind === 'agent') return `agent:${event.agentId}:${event.turnId ?? ''}:${event.type}:${event.label ?? ''}`
+  if (event.kind === 'artifact') return `artifact:${event.agentId}:${event.turnId ?? ''}:${event.label ?? ''}`
+  return `lifecycle:${event.agentId}:${event.turnId ?? ''}:${event.type}`
 }
 
 export function groupLabel(group: ActivityGroup): string {
