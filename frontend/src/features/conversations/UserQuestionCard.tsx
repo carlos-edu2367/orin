@@ -10,32 +10,57 @@ type UserQuestionCardProps = {
   onSubmit: (answers: UserQuestionAnswer[]) => Promise<void>
 }
 
-/** A batch is answered atomically so the agent receives one coherent reply. */
+type AnswerMap = Record<string, UserQuestionAnswer>
+
+/**
+ * Presents a batch as a local wizard. The final answer is still sent atomically
+ * because the waiting-user turn resumes only after the complete batch arrives.
+ */
 export function UserQuestionCard({ questions, active, submitting = false, onSubmit }: UserQuestionCardProps) {
-  const [selected, setSelected] = useState<Record<string, string[]>>({})
-  const [notes, setNotes] = useState<Record<string, string>>({})
+  const [answers, setAnswers] = useState<AnswerMap>({})
+  const [currentIndex, setCurrentIndex] = useState(0)
   const [error, setError] = useState<string | null>(null)
 
+  if (questions.length === 0) return null
+
+  const current = questions[Math.min(currentIndex, questions.length - 1)]
+  const currentAnswer = answers[current.id] ?? emptyAnswer(current.id)
+  const isLast = currentIndex === questions.length - 1
+
   function choose(question: UserQuestion, optionId: string, checked: boolean) {
-    setSelected((current) => {
-      const previous = current[question.id] ?? []
+    setAnswers((currentAnswers) => {
+      const previous = currentAnswers[question.id] ?? emptyAnswer(question.id)
       const next = question.mode === 'single_choice'
         ? (checked ? [optionId] : [])
-        : (checked ? [...new Set([...previous, optionId])] : previous.filter((id) => id !== optionId))
-      return { ...current, [question.id]: next }
+        : (checked ? [...new Set([...previous.selected, optionId])] : previous.selected.filter((id) => id !== optionId))
+      return { ...currentAnswers, [question.id]: { ...previous, selected: next } }
     })
   }
 
-  async function submit(event: FormEvent) {
+  function setNote(questionId: string, note: string) {
+    setAnswers((currentAnswers) => ({
+      ...currentAnswers,
+      [questionId]: { ...(currentAnswers[questionId] ?? emptyAnswer(questionId)), note },
+    }))
+  }
+
+  function edit(index: number) {
+    setError(null)
+    setCurrentIndex(index)
+  }
+
+  async function advance(event: FormEvent) {
     event.preventDefault()
     if (!active || submitting) return
     setError(null)
+
+    if (!isLast) {
+      setCurrentIndex((index) => index + 1)
+      return
+    }
+
     try {
-      await onSubmit(questions.map((question) => ({
-        id: question.id,
-        selected: selected[question.id] ?? [],
-        note: (notes[question.id] ?? '').trim(),
-      })))
+      await onSubmit(questions.map((question) => answers[question.id] ?? emptyAnswer(question.id)))
     } catch {
       setError('Não foi possível enviar as respostas. Tente novamente.')
     }
@@ -43,38 +68,72 @@ export function UserQuestionCard({ questions, active, submitting = false, onSubm
 
   return (
     <section className="user-question-card" data-active={active} aria-label="Perguntas do agente">
-      <header>
-        <span aria-hidden="true">?</span>
-        <div><strong>O agente precisa da sua decisão</strong><p>Responda o que quiser e acrescente uma observação, se necessário.</p></div>
+      <header className="user-question-card__header">
+        <span className="user-question-card__glyph" aria-hidden="true">?</span>
+        <div>
+          <strong>O agente precisa da sua decisão</strong>
+          <p>{active ? 'Uma pergunta por vez. Você pode voltar e ajustar qualquer resposta.' : 'As respostas foram enviadas para o agente.'}</p>
+        </div>
       </header>
-      <form onSubmit={(event) => void submit(event)}>
-        {questions.map((question, index) => (
-          <fieldset key={question.id} disabled={!active || submitting}>
-            <legend>{index + 1}. {question.question}</legend>
-            {question.mode === 'text' ? (
-              <textarea
-                value={notes[question.id] ?? ''}
-                onChange={(event) => setNotes((current) => ({ ...current, [question.id]: event.target.value }))}
-                placeholder={question.placeholder || 'Escreva sua resposta (opcional)'}
-                maxLength={1200}
-              />
-            ) : (
-              <div className="user-question-card__options">
-                {question.options.map((option) => {
-                  const chosen = (selected[question.id] ?? []).includes(option.id)
-                  return <label key={option.id}>
-                    <input type={question.mode === 'checkbox' ? 'checkbox' : 'radio'} name={question.id} checked={chosen} onChange={(event) => choose(question, option.id, event.target.checked)} />
-                    <span>{option.label}</span>
-                  </label>
-                })}
-              </div>
-            )}
-            {question.mode !== 'text' && <textarea value={notes[question.id] ?? ''} onChange={(event) => setNotes((current) => ({ ...current, [question.id]: event.target.value }))} placeholder={question.placeholder || 'Observação adicional (opcional)'} maxLength={1200} />}
-          </fieldset>
-        ))}
-        {active ? <button className="user-question-card__submit" type="submit" disabled={submitting}>{submitting ? 'Enviando…' : 'Enviar respostas'}</button> : <p className="user-question-card__answered">Respondida</p>}
-        {error && <p className="user-question-card__error" role="alert">{error}</p>}
-      </form>
+
+      {active ? (
+        <>
+          <div className="user-question-card__progress" aria-live="polite">
+            <span>Pergunta {currentIndex + 1} de {questions.length}</span>
+            <div aria-hidden="true">{questions.map((question, index) => <i key={question.id} className={index < currentIndex ? 'is-complete' : index === currentIndex ? 'is-current' : ''} />)}</div>
+          </div>
+
+          {questions.slice(0, currentIndex).map((question, index) => <AnsweredQuestion key={question.id} question={question} answer={answers[question.id] ?? emptyAnswer(question.id)} index={index} onEdit={() => edit(index)} />)}
+
+          <form className="user-question-card__step" onSubmit={(event) => void advance(event)}>
+            <fieldset disabled={submitting}>
+              <legend><span>{String(currentIndex + 1).padStart(2, '0')}</span>{current.question}</legend>
+              {current.mode === 'text' ? (
+                <textarea
+                  value={currentAnswer.note}
+                  onChange={(event) => setNote(current.id, event.target.value)}
+                  placeholder={current.placeholder || 'Escreva sua resposta (opcional)'}
+                  maxLength={1200}
+                  autoFocus
+                />
+              ) : (
+                <div className="user-question-card__options">
+                  {current.options.map((option) => {
+                    const chosen = currentAnswer.selected.includes(option.id)
+                    return <label key={option.id} className={chosen ? 'is-selected' : ''}>
+                      <input type={current.mode === 'checkbox' ? 'checkbox' : 'radio'} name={current.id} checked={chosen} onChange={(event) => choose(current, option.id, event.target.checked)} />
+                      <span>{option.label}</span>
+                    </label>
+                  })}
+                </div>
+              )}
+              {current.mode !== 'text' && <textarea value={currentAnswer.note} onChange={(event) => setNote(current.id, event.target.value)} placeholder={current.placeholder || 'Observação adicional (opcional)'} maxLength={1200} />}
+            </fieldset>
+            <footer className="user-question-card__actions">
+              {currentIndex > 0 && <button className="user-question-card__back" type="button" onClick={() => setCurrentIndex((index) => index - 1)}>← Voltar</button>}
+              <button className="user-question-card__submit" type="submit" disabled={submitting}>{submitting ? 'Enviando…' : isLast ? 'Enviar respostas' : 'Continuar →'}</button>
+            </footer>
+            {error && <p className="user-question-card__error" role="alert">{error}</p>}
+          </form>
+        </>
+      ) : (
+        <p className="user-question-card__answered">Respostas enviadas · o agente continuará com este contexto.</p>
+      )}
     </section>
   )
+}
+
+function AnsweredQuestion({ question, answer, index, onEdit }: { question: UserQuestion; answer: UserQuestionAnswer; index: number; onEdit: () => void }) {
+  const selections = answer.selected.map((id) => question.options.find((option) => option.id === id)?.label).filter((label): label is string => Boolean(label))
+  const summaryParts = [...selections]
+  if (answer.note) summaryParts.push(`Obs.: ${answer.note}`)
+  const summary = summaryParts.join(' · ') || 'Sem resposta adicional'
+  return <article className="user-question-card__answered-step">
+    <div><span>{String(index + 1).padStart(2, '0')}</span><strong>{question.question}</strong><p>{summary}</p></div>
+    <button type="button" aria-label={`Editar resposta: ${question.question}`} onClick={onEdit}>Editar</button>
+  </article>
+}
+
+function emptyAnswer(id: string): UserQuestionAnswer {
+  return { id, selected: [], note: '' }
 }

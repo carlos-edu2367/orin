@@ -565,21 +565,40 @@ kbd {
 .browser-activity-card__pending { margin: 0; padding: 10px 13px; color: var(--muted); font-size: 11px; }
 .user-question-card { margin: 8px 0; padding: 15px; border: 1px solid rgb(var(--orin-accent-rgb) / .34); border-radius: var(--radius); background: rgb(var(--orin-accent-rgb) / .055); }
 .user-question-card[data-active="false"] { opacity: .68; border-color: var(--line); }
-.user-question-card > header { display: flex; align-items: flex-start; gap: 10px; }
-.user-question-card > header > span { display: grid; place-items: center; width: 21px; height: 21px; border: 1px solid var(--signal-dim); border-radius: 50%; color: var(--signal); font: 13px var(--mono); }
-.user-question-card strong { color: var(--text); font-size: 13px; font-weight: 600; }
-.user-question-card header p { margin: 3px 0 0; color: var(--muted); font-size: 11.5px; line-height: 1.45; }
-.user-question-card form { display: grid; gap: 14px; margin-top: 15px; }
-.user-question-card fieldset { display: grid; gap: 8px; min-width: 0; margin: 0; padding: 0; border: 0; }
-.user-question-card legend { padding: 0; color: var(--text); font-size: 12.5px; line-height: 1.45; }
-.user-question-card__options { display: grid; gap: 6px; }
-.user-question-card__options label { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; cursor: pointer; }
+.user-question-card__header { display: flex; align-items: flex-start; gap: 10px; }
+.user-question-card__glyph { display: grid; place-items: center; width: 21px; height: 21px; flex: 0 0 21px; border: 1px solid var(--signal-dim); border-radius: 50%; color: var(--signal); font: 13px var(--mono); }
+.user-question-card__header strong { color: var(--text); font-size: 13px; font-weight: 600; }
+.user-question-card__header p { margin: 3px 0 0; color: var(--muted); font-size: 11.5px; line-height: 1.45; }
+.user-question-card__progress { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin: 18px 0 12px; padding-top: 12px; border-top: 1px solid var(--line); color: var(--faint); font: 10px var(--mono); }
+.user-question-card__progress > div { display: flex; align-items: center; gap: 5px; }
+.user-question-card__progress i { display: block; width: 20px; height: 3px; border-radius: 99px; background: var(--line-strong); }
+.user-question-card__progress i.is-complete { background: var(--signal-dim); }
+.user-question-card__progress i.is-current { background: var(--signal); box-shadow: 0 0 8px rgb(var(--orin-accent-rgb) / .55); }
+.user-question-card__step { display: grid; gap: 14px; margin-top: 14px; padding: 17px; border: 1px solid rgb(var(--orin-accent-rgb) / .28); border-radius: var(--radius-sm); background: rgb(var(--orin-ink-rgb) / .28); }
+.user-question-card__step fieldset { display: grid; gap: 12px; min-width: 0; margin: 0; padding: 0; border: 0; }
+.user-question-card__step legend { display: flex; align-items: flex-start; gap: 9px; padding: 0; color: var(--text); font-size: 13px; line-height: 1.45; }
+.user-question-card__step legend > span { display: grid; width: 24px; height: 24px; flex: 0 0 24px; place-items: center; border: 1px solid var(--signal-dim); border-radius: 7px; color: var(--signal); font: 10px var(--mono); }
+.user-question-card__options { display: grid; gap: 7px; }
+.user-question-card__options label { display: flex; align-items: center; gap: 9px; min-height: 34px; padding: 7px 9px; border: 1px solid transparent; border-radius: 7px; color: var(--muted); font-size: 12px; cursor: pointer; transition: background .16s var(--ease), border-color .16s var(--ease), color .16s var(--ease); }
+.user-question-card__options label:hover, .user-question-card__options label.is-selected { border-color: rgb(var(--orin-accent-rgb) / .28); background: rgb(var(--orin-accent-rgb) / .08); color: var(--text); }
 .user-question-card input { accent-color: var(--signal); }
-.user-question-card textarea { width: 100%; min-height: 64px; resize: vertical; padding: 9px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--raised); color: var(--text); font: 12px/1.45 var(--sans); outline: none; }
-.user-question-card textarea:focus { border-color: var(--signal-dim); }
-.user-question-card__submit { justify-self: start; padding: 8px 12px; border: 1px solid var(--signal-dim); border-radius: 8px; background: rgb(var(--orin-accent-rgb) / .12); color: var(--signal); cursor: pointer; font: 11px var(--mono); }
+.user-question-card__step textarea { width: 100%; min-height: 70px; resize: vertical; padding: 10px 11px; border: 1px solid var(--line); border-radius: 8px; background: var(--raised); color: var(--text); font-family: inherit; font-size: 12px; line-height: 1.45; outline: none; }
+.user-question-card__step textarea:focus { border-color: var(--signal-dim); box-shadow: 0 0 0 3px rgb(var(--orin-accent-rgb) / .08); }
+.user-question-card__actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.user-question-card__submit, .user-question-card__back { padding: 8px 12px; border-radius: 8px; cursor: pointer; font: 11px var(--mono); transition: background .16s var(--ease), border-color .16s var(--ease), color .16s var(--ease); }
+.user-question-card__submit { margin-left: auto; border: 1px solid var(--signal-dim); background: rgb(var(--orin-accent-rgb) / .14); color: var(--signal); }
+.user-question-card__submit:hover:not(:disabled) { background: rgb(var(--orin-accent-rgb) / .24); color: var(--text); }
+.user-question-card__back { border: 1px solid var(--line); background: transparent; color: var(--muted); }
+.user-question-card__back:hover { border-color: var(--line-strong); color: var(--text); }
 .user-question-card__submit:disabled { cursor: wait; opacity: .55; }
-.user-question-card__answered, .user-question-card__error { margin: 0; font-size: 11px; }
+.user-question-card__answered-step { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-top: 8px; padding: 10px 11px; border: 1px solid var(--line); border-radius: 9px; background: rgb(var(--orin-text-rgb) / .025); }
+.user-question-card__answered-step > div { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 2px 8px; min-width: 0; align-items: center; }
+.user-question-card__answered-step > div > span { grid-row: span 2; color: var(--signal-dim); font: 10px var(--mono); }
+.user-question-card__answered-step strong { overflow: hidden; color: var(--muted); font-size: 11px; font-weight: 560; text-overflow: ellipsis; white-space: nowrap; }
+.user-question-card__answered-step p { overflow: hidden; grid-column: 2; margin: 0; color: var(--faint); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.user-question-card__answered-step button { flex: 0 0 auto; border: 0; background: transparent; color: var(--signal-dim); cursor: pointer; font: 10px var(--mono); }
+.user-question-card__answered-step button:hover { color: var(--text); }
+.user-question-card__answered, .user-question-card__error { margin: 15px 0 0; font-size: 11px; }
 .user-question-card__answered { color: var(--faint); }
 .user-question-card__error { color: var(--danger); }
 .activity-card__chevron { flex-shrink: 0; color: var(--faint); transition: transform 0.18s var(--ease); }
@@ -753,6 +772,79 @@ kbd {
 }
 .composer__notice { margin: 10px 2px 0; color: var(--warn); font-size: 12px; }
 
+/* ------------------------------------------------------------ schedules */
+.schedules-shell { min-height: 100vh; background: radial-gradient(ellipse 58% 42% at 86% 8%, rgb(var(--orin-accent-rgb) / .1), transparent 72%), var(--surface); }
+.schedules-page { width: min(100%, 1120px); margin: 0 auto; padding: 72px 0 84px; }
+.schedules-page__heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 28px; }
+.schedules-page__heading h1 { max-width: 720px; font-size: clamp(38px, 5vw, 60px); }
+.schedules-page__lede { max-width: 690px; margin: 18px 0 0; color: var(--muted); font-size: 15px; line-height: 1.6; }
+.schedules-page__count { display: grid; flex: 0 0 auto; justify-items: end; gap: 4px; padding: 10px 0 3px 28px; border-left: 1px solid var(--line); }
+.schedules-page__count strong { color: var(--signal); font: 28px/1 var(--mono); letter-spacing: -.08em; }
+.schedules-page__count span { color: var(--faint); font: 9px var(--mono); letter-spacing: .1em; text-transform: uppercase; }
+.schedules-page__error { margin: 28px 0 -8px; color: var(--danger); font-size: 12px; }
+.schedules-page__grid { display: grid; grid-template-columns: minmax(0, 1.38fr) minmax(270px, .82fr); gap: 20px; align-items: start; margin-top: 48px; }
+.schedule-form, .schedule-context-card, .schedule-list-panel { border: 1px solid var(--line); border-radius: var(--radius); background: rgb(var(--orin-text-rgb) / .035); }
+.schedule-form { overflow: hidden; box-shadow: 0 22px 70px rgb(0 0 0 / .18); }
+.schedule-form__header { display: flex; gap: 15px; padding: 24px 26px 22px; border-bottom: 1px solid var(--line); background: linear-gradient(115deg, rgb(var(--orin-accent-rgb) / .1), transparent 54%); }
+.schedule-form__index { display: grid; width: 28px; height: 28px; flex: 0 0 28px; place-items: center; border: 1px solid var(--signal-dim); border-radius: 8px; color: var(--signal); font: 10px var(--mono); }
+.schedule-form__header .eyebrow { margin: 1px 0 7px; }
+.schedule-form__header h2, .schedule-context-card h2, .schedule-list-panel h2 { margin: 0; font-size: 19px; font-weight: 560; letter-spacing: -.025em; }
+.schedule-form__header p:last-child { margin: 7px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.schedule-form__body { display: grid; gap: 18px; padding: 24px 26px 22px; }
+.schedule-form__field { display: grid; min-width: 0; gap: 7px; color: var(--muted); font-size: 11px; }
+.schedule-form__field > span, .schedule-form__label { color: var(--muted); font-size: 11px; }
+.schedule-form__field em { color: var(--faint); font-size: 10px; font-style: normal; }
+.schedule-form__field textarea, .schedule-form__field input, .schedule-form__field select { width: 100%; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--raised); color: var(--text); outline: none; transition: border-color .18s var(--ease), background .18s var(--ease), box-shadow .18s var(--ease); }
+.schedule-form__field textarea { min-height: 112px; padding: 12px 13px; resize: vertical; line-height: 1.5; }
+.schedule-form__field input, .schedule-form__field select { min-height: 42px; padding: 9px 12px; }
+.schedule-form__field select { appearance: none; background-image: linear-gradient(45deg, transparent 50%, var(--faint) 50%), linear-gradient(135deg, var(--faint) 50%, transparent 50%); background-position: calc(100% - 16px) 18px, calc(100% - 12px) 18px; background-repeat: no-repeat; background-size: 4px 4px, 4px 4px; padding-right: 32px; }
+.schedule-form__field textarea::placeholder, .schedule-form__field input::placeholder { color: var(--faint); }
+.schedule-form__field textarea:focus, .schedule-form__field input:focus, .schedule-form__field select:focus { border-color: var(--signal-dim); background: var(--raised-strong); box-shadow: 0 0 0 3px rgb(var(--orin-accent-rgb) / .08); }
+.schedule-form__columns { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.schedule-form__body > .schedule-form__field--wide + .schedule-form__field--wide { margin-top: 1px; }
+.schedule-form__field--wide .model-picker { min-height: 42px; align-content: center; padding: 3px 0; }
+.schedule-form__timing { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 12px; align-items: start; padding: 16px; border: 1px solid rgb(var(--orin-accent-rgb) / .18); border-radius: var(--radius-sm); background: rgb(var(--orin-accent-rgb) / .05); }
+.schedule-form__timing-mark { display: grid; width: 28px; height: 28px; place-items: center; border: 1px solid var(--signal-dim); border-radius: 50%; color: var(--signal); font-size: 15px; }
+.schedule-form__timing-fields { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px 12px; }
+.schedule-form__timing-fields > .schedule-form__label { grid-column: 1 / -1; color: var(--signal-dim); font: 9px var(--mono); letter-spacing: .12em; text-transform: uppercase; }
+.schedule-form__timing-copy { grid-column: 1 / -1; margin: 7px 0 0; color: var(--muted); font-size: 12px; line-height: 1.45; }
+.schedule-form__footer { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px 26px; border-top: 1px solid var(--line); background: rgb(var(--orin-ink-rgb) / .2); }
+.schedule-form__footer > span { overflow: hidden; color: var(--faint); font: 10px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
+.schedule-form__footer strong { color: var(--muted); font-weight: 500; }
+.schedules-page__aside { display: grid; gap: 20px; }
+.schedule-context-card { padding: 22px; background: linear-gradient(155deg, rgb(var(--orin-accent-rgb) / .12), rgb(var(--orin-text-rgb) / .025) 62%); }
+.schedule-context-card__icon { display: grid; width: 34px; height: 34px; margin-bottom: 26px; place-items: center; border: 1px solid var(--signal-dim); border-radius: 10px; color: var(--signal); font-size: 18px; }
+.schedule-context-card .eyebrow { margin-bottom: 8px; }
+.schedule-context-card h2 { max-width: 230px; line-height: 1.2; }
+.schedule-context-card > p:not(.eyebrow) { margin: 12px 0 24px; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.schedule-context-card dl { display: grid; gap: 10px; margin: 0; padding-top: 15px; border-top: 1px solid var(--line); }
+.schedule-context-card dl > div { display: flex; justify-content: space-between; gap: 14px; }
+.schedule-context-card dt { color: var(--faint); font: 9px var(--mono); letter-spacing: .08em; text-transform: uppercase; }
+.schedule-context-card dd { margin: 0; color: var(--muted); font-size: 11px; text-align: right; }
+.schedule-list-panel { overflow: hidden; }
+.schedule-list-panel__header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 20px 22px 16px; border-bottom: 1px solid var(--line); }
+.schedule-list-panel__header .eyebrow { margin-bottom: 7px; }
+.schedule-list-panel__header > span { color: var(--faint); font: 10px var(--mono); }
+.schedule-list { display: grid; margin: 0; padding: 0; list-style: none; }
+.schedule-row { display: grid; grid-template-columns: 7px minmax(0, 1fr); gap: 12px; padding: 15px 18px; border-bottom: 1px solid var(--line); transition: background .18s var(--ease); }
+.schedule-row:last-child { border-bottom: 0; }
+.schedule-row:hover { background: var(--raised); }
+.schedule-row__marker { width: 7px; height: 7px; margin-top: 5px; border-radius: 50%; background: var(--signal); box-shadow: 0 0 10px rgb(var(--orin-accent-rgb) / .52); }
+.schedule-row__content { display: grid; min-width: 0; gap: 5px; }
+.schedule-row__content strong { overflow: hidden; color: var(--text); font-size: 12px; font-weight: 560; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }
+.schedule-row__content span, .schedule-row__content small { overflow: hidden; color: var(--muted); font-size: 10px; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }
+.schedule-row__content small { color: var(--faint); font-family: var(--mono); }
+.schedule-row__actions { display: flex; flex-wrap: wrap; grid-column: 2; align-items: center; gap: 8px; margin-top: 4px; }
+.schedule-row__actions > a, .schedule-row__actions > button { border: 0; background: transparent; color: var(--signal-dim); cursor: pointer; font: 10px var(--mono); padding: 0; }
+.schedule-row__actions > a:hover, .schedule-row__actions > button:hover { color: var(--text); }
+.schedule-row__state { margin-right: auto; color: var(--faint); font: 9px var(--mono); letter-spacing: .04em; text-transform: uppercase; }
+.schedule-row__state--active { color: var(--signal-dim); }
+.schedule-row__state--paused { color: var(--warn); }
+.schedule-list-panel__empty { display: grid; justify-items: center; gap: 7px; padding: 30px 22px 34px; text-align: center; }
+.schedule-list-panel__empty > span { color: var(--signal-dim); font-size: 26px; }
+.schedule-list-panel__empty p { margin: 0; color: var(--muted); font-size: 12px; }
+.schedule-list-panel__empty small { color: var(--faint); font-size: 10px; }
+
 /* ---------------------------------------------------------------- skills */
 
 .skills-shell { background: var(--surface); }
@@ -913,9 +1005,25 @@ body.has-workspace-file-preview { overflow: hidden; }
 }
 
 @media (max-width: 860px) {
+  .schedules-page { padding-top: 44px; }
+  .schedules-page__grid { grid-template-columns: 1fr; }
+  .schedules-page__aside { grid-template-columns: minmax(0, .9fr) minmax(0, 1.1fr); }
   .skills-library, .skills-detail { padding-top: 44px; }
   .skills-library__heading { flex-direction: column; }
   .skill-row { align-items: flex-start; flex-direction: column; gap: 9px; }
   .skill-row__meta { justify-content: flex-start; }
   .agent-skills__load { align-items: stretch; flex-direction: column; }
+}
+
+@media (max-width: 620px) {
+  .schedules-shell { padding-right: 20px; padding-left: 20px; }
+  .schedules-page__heading { align-items: flex-start; flex-direction: column; gap: 20px; }
+  .schedules-page__count { justify-items: start; padding: 0 0 0 12px; border-left: 2px solid var(--signal-dim); }
+  .schedules-page__grid { margin-top: 34px; }
+  .schedule-form__header, .schedule-form__body { padding-right: 18px; padding-left: 18px; }
+  .schedule-form__columns, .schedule-form__timing-fields { grid-template-columns: 1fr; }
+  .schedule-form__timing-fields > .schedule-form__label, .schedule-form__timing-copy { grid-column: auto; }
+  .schedule-form__footer { align-items: stretch; flex-direction: column; padding-right: 18px; padding-left: 18px; }
+  .schedule-form__footer .button { width: 100%; }
+  .schedules-page__aside { grid-template-columns: 1fr; }
 }

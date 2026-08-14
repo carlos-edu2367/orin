@@ -18,6 +18,7 @@ from .security import NetworkPolicy, NetworkPolicyError, validate_url
 
 
 DEFAULT_TIMEOUT_MS = 30_000
+SCREENSHOT_TIMEOUT_MS = 5_000
 MAX_SCREENSHOT_BYTES = 4_000_000
 MAX_HTML_BYTES = 2_000_000
 MAX_SELECTOR_LENGTH = 256
@@ -40,6 +41,30 @@ def _single(page, selector: object):
     if locator.count() != 1:
         raise ValueError("selector must match exactly one visible element")
     return locator
+
+
+def _observation_for_page(page, timeout_error, *, include_html: bool = True) -> dict[str, object]:
+    html = page.content().encode("utf-8") if include_html else b""
+    if len(html) > MAX_HTML_BYTES:
+        html = html[:MAX_HTML_BYTES]
+    # A visual capture is useful feedback, but it must not make a successfully
+    # loaded page unusable. Playwright waits for fonts/animations while taking
+    # a screenshot, and complex or third-party pages can exceed the navigation
+    # timeout here. Keep this best-effort and bounded; the rendered HTML
+    # remains available to the agent when the image cannot be produced.
+    image = b""
+    try:
+        image = page.screenshot(type="png", timeout=SCREENSHOT_TIMEOUT_MS)
+    except timeout_error:
+        pass
+    if len(image) > MAX_SCREENSHOT_BYTES:
+        raise ValueError("screenshot exceeds the configured limit")
+    return {
+        "url": page.url,
+        "title": str(page.title())[:256],
+        "html": html.decode("utf-8", "replace"),
+        "screenshot": base64.b64encode(image).decode("ascii"),
+    }
 
 
 def _host(connection: Connection) -> None:
@@ -69,18 +94,7 @@ def _host(connection: Connection) -> None:
             page.route("**/*", guard)
 
             def observation(*, include_html: bool = True) -> dict[str, object]:
-                html = page.content().encode("utf-8") if include_html else b""
-                if len(html) > MAX_HTML_BYTES:
-                    html = html[:MAX_HTML_BYTES]
-                image = page.screenshot(type="png")
-                if len(image) > MAX_SCREENSHOT_BYTES:
-                    raise ValueError("screenshot exceeds the configured limit")
-                return {
-                    "url": page.url,
-                    "title": str(page.title())[:256],
-                    "html": html.decode("utf-8", "replace"),
-                    "screenshot": base64.b64encode(image).decode("ascii"),
-                }
+                return _observation_for_page(page, PlaywrightTimeoutError, include_html=include_html)
 
             while True:
                 command = connection.recv()
