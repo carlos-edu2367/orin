@@ -10,9 +10,11 @@ back to the model.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+import os
 import re
 from threading import Lock
-from typing import Mapping
+import time
+from typing import Callable, Mapping
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
@@ -32,6 +34,24 @@ from agentos.browser.models import (
 BROWSER_TIMEOUT = timedelta(seconds=30)
 MAX_DOM_BYTES = 2_000_000
 MAX_SCREENSHOT_BYTES = 4_000_000
+
+BROWSER_CAPABILITY_VARIABLE = "AGENTOS_BROWSER_CAPABILITY"
+BROWSER_CAPABILITIES = ("read", "interact", "full")
+# "interact" matches the capability this tool set always had (navigate,
+# observe, click, fill, select, check — never submit); "full" is opt-in.
+DEFAULT_BROWSER_CAPABILITY = "interact"
+
+
+def browser_capability_from_environment() -> str:
+    """The browser capability level for this local install.
+
+    There is no per-conversation UI for this yet, so every conversation on
+    this install shares one level, set once via ``AGENTOS_BROWSER_CAPABILITY``
+    (one of "read", "interact", "full"). An unset or unrecognized value keeps
+    today's behavior instead of silently narrowing or widening it.
+    """
+    raw = os.environ.get(BROWSER_CAPABILITY_VARIABLE, "").strip().lower()
+    return raw if raw in BROWSER_CAPABILITIES else DEFAULT_BROWSER_CAPABILITY
 _SENSITIVE_NAME = r"(?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|password|secret|authorization|cookie|credential)"
 _PRIVATE_KEY_BLOCK = re.compile(r"-----BEGIN [^-]*PRIVATE KEY-----.*?-----END [^-]*PRIVATE KEY-----", re.IGNORECASE | re.DOTALL)
 _AUTHORIZATION_VALUE = re.compile(rf"(?i)(\bauthorization\b\s*[:=]\s*)(?:bearer\s+)?[^\r\n,.;!?]+")
@@ -39,15 +59,30 @@ _SENSITIVE_ASSIGNMENT = re.compile(rf"(?i)([\"']?\b{_SENSITIVE_NAME}\b[\"']?\s*[
 _JWT_VALUE = re.compile(r"(?<![A-Za-z0-9_-])(eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,})(?![A-Za-z0-9_-])")
 
 
-def _safe_display_url(value: str) -> str:
-    parsed = urlsplit(value)
+def _netloc(parsed) -> str:
     host = (parsed.hostname or "").lower()
     if ":" in host:
         host = f"[{host}]"
-    netloc = host
     if parsed.port:
-        netloc += f":{parsed.port}"
-    return urlunsplit((parsed.scheme.lower(), netloc, parsed.path or "/", "", ""))
+        host += f":{parsed.port}"
+    return host
+
+
+def _safe_display_url(value: str) -> str:
+    """Credential- and query-free URL, safe to show in the UI, activity log or ledger."""
+    parsed = urlsplit(value)
+    return urlunsplit((parsed.scheme.lower(), _netloc(parsed), parsed.path or "/", "", ""))
+
+
+def _cache_key_url(value: str) -> str:
+    """Identifies "the same page" for the tab cache.
+
+    Unlike ``_safe_display_url`` this keeps the query string: a search or an
+    item id is a different page from another one at the same path, and must
+    not share a cached observation with it.
+    """
+    parsed = urlsplit(value)
+    return urlunsplit((parsed.scheme.lower(), _netloc(parsed), parsed.path or "/", parsed.query, ""))
 
 
 def sanitize_page_text(value: str) -> str:
@@ -175,7 +210,174 @@ def conversation_browser_for(turn: Mapping[str, object]) -> object | None:
 
     if not playwright_available():
         return None
-    return IsolatedConversationBrowser()
+    return IsolatedConversationBrowser(capability=browser_capability_from_environment())
 
 
-__all__ = ["BROWSER_TIMEOUT", "ConversationBrowser", "MemoryArtifactOutput", "conversation_browser_for"]
+class AgentBrowserView:
+    """Presents one agent's own tab in a browser shared across a turn.
+
+    Concurrent subagents used to fight over one shared page: this is what
+    gives each ``agent_key`` its own isolated ``Page`` on the host side (see
+    ``conversation_worker._AgentPageState``), while ``agent_tools.py`` keeps
+    calling ``navigate``/``click``/... with the exact same signatures it
+    always has — the scoping is invisible to it.
+
+    Deliberately has no ``close()``: an individual agent's view must never be
+    able to tear down a browser session other agents, or a later turn, are
+    still using.
+    """
+
+    def __init__(self, browser: object, agent_key: str) -> None:
+        self._browser = browser
+        self._agent_key = agent_key
+
+    def navigate(self, url: str) -> dict[str, object]:
+        return self._browser.navigate(url, agent_key=self._agent_key)
+
+    def observe(self) -> dict[str, object]:
+        return self._browser.observe(agent_key=self._agent_key)
+
+    def click(self, selector: str) -> dict[str, object]:
+        return self._browser.click(selector, agent_key=self._agent_key)
+
+    def fill(self, selector: str, text: str) -> dict[str, object]:
+        return self._browser.fill(selector, text, agent_key=self._agent_key)
+
+    def press(self, selector: str, key: str) -> dict[str, object]:
+        return self._browser.press(selector, key, agent_key=self._agent_key)
+
+    def select(self, selector: str, values: list[str]) -> dict[str, object]:
+        return self._browser.select(selector, values, agent_key=self._agent_key)
+
+    def check(self, selector: str, checked: bool) -> dict[str, object]:
+        return self._browser.check(selector, checked, agent_key=self._agent_key)
+
+    def screenshot(self) -> dict[str, object]:
+        return self._browser.screenshot(agent_key=self._agent_key)
+
+    def submit(self, selector: str, confirmed: bool) -> dict[str, object]:
+        return self._browser.submit(selector, confirmed, agent_key=self._agent_key)
+
+    def back(self) -> dict[str, object]:
+        return self._browser.back(agent_key=self._agent_key)
+
+    def scroll(self, direction: str) -> dict[str, object]:
+        return self._browser.scroll(direction, agent_key=self._agent_key)
+
+    def wait_for(self, selector: str, state: str) -> dict[str, object]:
+        return self._browser.wait_for(selector, state, agent_key=self._agent_key)
+
+    def render(self, url: str) -> str:
+        return str(self._browser.navigate(url, agent_key=self._agent_key).get("html") or "")
+
+
+def _close_quietly(browser: object | None) -> None:
+    if browser is None:
+        return
+    closer = getattr(browser, "close", None)
+    if callable(closer):
+        try:
+            closer()
+        except Exception:
+            pass
+
+
+class _RegistryEntry:
+    __slots__ = ("browser", "last_used")
+
+    def __init__(self, browser: object, last_used: float) -> None:
+        self.browser = browser
+        self.last_used = last_used
+
+
+class ConversationBrowserRegistry:
+    """Keeps one browser process alive per conversation across turns.
+
+    A browser built fresh every turn starts from a blank tab each message,
+    which makes a login or any multi-step flow impossible to carry across a
+    conversation. This hands out the same browser for repeated turns of one
+    conversation, and only tears it down once it has sat idle past
+    ``idle_seconds`` or once the number of live sessions exceeds
+    ``max_sessions`` (evicting the least-recently-used one first) — so a
+    conversation nobody returns to does not leak a Chromium process forever.
+
+    Eviction is opportunistic: it runs on every ``acquire`` call rather than
+    on a background timer, which is enough for a local, single-user app and
+    needs no extra thread.
+    """
+
+    def __init__(
+        self,
+        *,
+        factory: Callable[[Mapping[str, object]], object | None],
+        idle_seconds: float = 1_800,
+        max_sessions: int = 6,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._factory = factory
+        self._idle_seconds = idle_seconds
+        self._max_sessions = max_sessions
+        self._clock = clock
+        self._lock = Lock()
+        self._entries: dict[str, _RegistryEntry] = {}
+
+    def acquire(self, turn: Mapping[str, object]) -> object | None:
+        conversation_id = str(turn.get("conversation_id") or "")
+        with self._lock:
+            self._evict_idle_locked()
+            entry = self._entries.get(conversation_id)
+            if entry is not None:
+                entry.last_used = self._clock()
+                return entry.browser
+            if not conversation_id:
+                # Nothing to key a session by: behave exactly like before
+                # this registry existed, one unmanaged browser per call.
+                return self._factory(turn)
+            browser = self._factory(turn)
+            if browser is not None:
+                self._evict_lru_locked_to_make_room()
+                self._entries[conversation_id] = _RegistryEntry(browser, self._clock())
+            return browser
+
+    def release(self, turn: Mapping[str, object]) -> None:
+        """Refresh the conversation's idle clock at the end of a turn.
+
+        A turn can run long while actively using the browser; without this,
+        the idle clock would only advance at the *start* of a turn and a
+        long-running one could be evicted by an unrelated conversation's
+        cleanup while still in progress.
+        """
+        conversation_id = str(turn.get("conversation_id") or "")
+        with self._lock:
+            entry = self._entries.get(conversation_id)
+            if entry is not None:
+                entry.last_used = self._clock()
+
+    def discard(self, conversation_id: str) -> None:
+        with self._lock:
+            entry = self._entries.pop(str(conversation_id), None)
+        _close_quietly(entry.browser if entry is not None else None)
+
+    def close_all(self) -> None:
+        with self._lock:
+            entries = list(self._entries.values())
+            self._entries.clear()
+        for entry in entries:
+            _close_quietly(entry.browser)
+
+    def _evict_idle_locked(self) -> None:
+        now = self._clock()
+        stale = [key for key, entry in self._entries.items() if now - entry.last_used > self._idle_seconds]
+        for key in stale:
+            _close_quietly(self._entries.pop(key).browser)
+
+    def _evict_lru_locked_to_make_room(self) -> None:
+        while len(self._entries) >= self._max_sessions:
+            oldest_key = min(self._entries, key=lambda key: self._entries[key].last_used)
+            _close_quietly(self._entries.pop(oldest_key).browser)
+
+
+__all__ = [
+    "AgentBrowserView", "BROWSER_TIMEOUT", "ConversationBrowser", "ConversationBrowserRegistry",
+    "MemoryArtifactOutput", "conversation_browser_for",
+]

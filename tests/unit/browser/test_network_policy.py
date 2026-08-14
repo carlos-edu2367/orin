@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 import socket
 
-from agentos.browser.security import NetworkPolicy, NetworkPolicyError, sanitize_url, validate_redirect, validate_url
+from agentos.browser.security import NetworkPolicy, NetworkPolicyError, navigable_url, sanitize_url, validate_redirect, validate_url
 
 
 def test_network_is_denied_by_default_and_rejects_unsafe_schemes_and_hosts() -> None:
@@ -26,6 +26,18 @@ def test_sanitization_removes_credentials_query_and_fragment() -> None:
     sanitized = sanitize_url("https://user:password@example.com/a?token=secret#fragment")
     assert sanitized == "https://example.com/a"
     assert "password" not in sanitized and "token" not in sanitized
+
+
+def test_navigable_url_keeps_the_query_and_fragment_but_drops_credentials() -> None:
+    navigated = navigable_url("https://user:password@example.com/search?q=neectify+food#top")
+    assert navigated == "https://example.com/search?q=neectify+food#top"
+    assert "password" not in navigated
+
+
+def test_validate_url_returns_a_navigable_url_not_a_display_sanitized_one() -> None:
+    policy = NetworkPolicy(allowed_hosts=("example.com",))
+    result = validate_url("https://example.com/search?q=neectify+food", policy)
+    assert result == "https://example.com/search?q=neectify+food"
 
 
 def test_dns_rebinding_is_revalidated_for_each_hop() -> None:

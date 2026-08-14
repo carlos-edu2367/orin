@@ -112,7 +112,8 @@ def test_model_sees_images_is_false_when_the_catalog_has_no_image_modality():
     assert worker._model_sees_images(turn) is False
 
 
-def test_model_sees_images_is_false_when_the_catalog_has_no_row():
+def test_model_sees_images_stays_true_when_the_catalog_is_unrefreshed_or_empty():
+    """An unrefreshed or empty catalog must never silently disable image reading."""
     engine = _catalog_engine()
 
     class EmptyStore(Store):
@@ -121,7 +122,7 @@ def test_model_sees_images_is_false_when_the_catalog_has_no_row():
     worker = ChatWorker(EmptyStore())
     turn = {**TURN, "provider": "anthropic", "model_id": "claude-opus-5"}
 
-    assert worker._model_sees_images(turn) is False
+    assert worker._model_sees_images(turn) is True
 
 
 def test_model_calls_tools_stays_true_when_the_catalog_is_unrefreshed_or_empty():

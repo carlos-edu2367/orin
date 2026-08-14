@@ -114,6 +114,60 @@ def test_runtime_construction_failure_closes_the_optional_browser(monkeypatch: p
     assert browser.closed == 1
 
 
+def test_runtime_for_reuses_the_same_browser_across_two_turns_of_one_conversation(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Browser:
+        def close(self):
+            pass
+
+    class Settings:
+        def get(self, user_id):
+            return {"max_iterations": 8}
+
+    class SkillLibrary:
+        def registry_for(self, user_id, *, agent_id):
+            return None
+
+    class FakeSession:
+        def __init__(self, **kwargs):
+            pass
+
+        def build_runtime(self):
+            return object()
+
+    built = []
+    monkeypatch.setattr(chat_module, "conversation_browser_for", lambda turn: built.append(Browser()) or built[-1])
+    monkeypatch.setattr(chat_module, "PostgresSkillLibraryService", lambda engine: SkillLibrary())
+    monkeypatch.setattr(chat_module, "ConversationAgentStore", lambda *args, **kwargs: object())
+    monkeypatch.setattr(chat_module, "PostgresAgentMemoryStore", lambda *args, **kwargs: None)
+    monkeypatch.setattr(chat_module, "search_client_from_environment", lambda: None)
+    monkeypatch.setattr(chat_module, "TurnSession", FakeSession)
+    worker = ChatWorker(Store(), runtime_settings=Settings())
+
+    worker._runtime_for(dict(TURN))
+    worker._runtime_for(dict(TURN))
+
+    assert len(built) == 1  # the second turn of the same conversation reused it
+
+
+def test_run_releases_the_browser_registry_so_a_long_turn_is_not_evicted_as_idle() -> None:
+    class Registry:
+        def __init__(self) -> None:
+            self.released: list[dict[str, object]] = []
+
+        def release(self, turn):
+            self.released.append(turn)
+
+    runtime = ClosableRuntime(AgenticRunResult("completed"))
+    registry = Registry()
+    worker = ChatWorker(Store(), runtime_factory=lambda turn: runtime, browser_registry=registry)
+    worker._project = lambda *args, **kwargs: None
+
+    worker.run("turn-1")
+
+    assert len(registry.released) == 1
+    assert registry.released[0]["turn_id"] == "turn-1"
+
+
 def test_unlimited_runtime_setting_removes_the_action_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     class Settings:
         def get(self, user_id):

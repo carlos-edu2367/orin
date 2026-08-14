@@ -38,10 +38,26 @@ class NetworkPolicy:
 
 
 def sanitize_url(value: str) -> str:
+    """A credential-, query- and fragment-free URL safe to display, log or key a cache by."""
     parsed = urlsplit(value)
     if not parsed.scheme or not parsed.hostname:
         raise NetworkPolicyError("URL is not safe")
     return urlunsplit((parsed.scheme.lower(), parsed.hostname.lower() + (f":{parsed.port}" if parsed.port else ""), parsed.path[:2048] or "/", "", ""))
+
+
+def navigable_url(value: str) -> str:
+    """The URL the engine should actually visit: credentials dropped, query and fragment kept.
+
+    A page identified only by its path (a search result, an item id) is a
+    different page from another one at the same path, so navigation must not
+    lose the query string the way ``sanitize_url`` intentionally does for
+    display and logging.
+    """
+    parsed = urlsplit(value)
+    if not parsed.scheme or not parsed.hostname:
+        raise NetworkPolicyError("URL is not safe")
+    netloc = parsed.hostname.lower() + (f":{parsed.port}" if parsed.port else "")
+    return urlunsplit((parsed.scheme.lower(), netloc, parsed.path[:2048] or "/", parsed.query[:2048], parsed.fragment[:2048]))
 
 
 def validate_url(value: str, policy: NetworkPolicy, *, redirect_count: int = 0) -> str:
@@ -68,7 +84,7 @@ def validate_url(value: str, policy: NetworkPolicy, *, redirect_count: int = 0) 
         resolved = ip_address(address)
         if not resolved.is_global:
             raise NetworkPolicyError("destination denied")
-    return sanitize_url(value)
+    return navigable_url(value)
 
 
 def validate_redirect(value: str, policy: NetworkPolicy, previous_url: str, *, redirect_count: int, maximum_redirects: int) -> str:
@@ -96,4 +112,4 @@ def same_context(left: BrowserOperationContext, right: BrowserOperationContext) 
     return left.scope_key() == right.scope_key()
 
 
-__all__ = ["NetworkPolicy", "NetworkPolicyError", "sanitize_url", "validate_url", "validate_redirect", "validate_grants", "same_context"]
+__all__ = ["NetworkPolicy", "NetworkPolicyError", "sanitize_url", "navigable_url", "validate_url", "validate_redirect", "validate_grants", "same_context"]

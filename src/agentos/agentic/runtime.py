@@ -14,6 +14,10 @@ from .provider_stream import NormalizedStreamItem, StreamKind
 
 MAX_PARALLEL_TOOLS = 4
 AGED_TOOL_RESULT_CHARS = 400
+BROWSER_TOOL_NAMES = frozenset({
+    "browse_page", "browser_observe", "browser_click", "browser_fill",
+    "browser_press", "browser_select", "browser_check", "browser_screenshot",
+})
 
 # Sentinel distinguishing "no pin resolved yet" from "resolved, and there is
 # no user message to pin." Used only as the default for the ``_pinned_index``
@@ -622,8 +626,16 @@ class AgenticTurnRuntime:
             messages = [{"role": "tool", "tool_call_id": str(result.get("id", "")), "content": content}]
         images = [dict(item) for item in (result.get("images") or ()) if isinstance(item, Mapping)]
         if images:
-            messages.append({"role": "user", "content": [{"type": "text", "text": "Conteúdo visual do arquivo solicitado:"}, *images]})
+            messages.append({"role": "user", "content": [{"type": "text", "text": cls._image_caption(result, content)}, *images]})
         return messages
+
+    @staticmethod
+    def _image_caption(result: Mapping[str, object], content: str) -> str:
+        """A browser screenshot is not "a file the user requested"; say what it actually is."""
+        if str(result.get("name") or "") not in BROWSER_TOOL_NAMES:
+            return "Conteúdo visual do arquivo solicitado:"
+        first_line = content.split("\n", 1)[0].strip()
+        return f"Captura da página atual ({first_line}):" if first_line else "Captura da página atual:"
 
     @staticmethod
     def _coerce(event: object) -> NormalizedStreamItem:

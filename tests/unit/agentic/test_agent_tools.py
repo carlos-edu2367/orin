@@ -191,6 +191,90 @@ def test_repeated_browse_page_reuses_the_current_tab_and_capture(tmp_path) -> No
 
     assert browser.navigations == 1
     assert first.payload["screenshot_path"] == second.payload["screenshot_path"]
+    assert "artifacts" in first.payload
+    assert second.payload.get("cached") is True
+    assert "artifacts" not in second.payload
+
+
+def test_browse_page_does_not_collide_different_query_strings(tmp_path) -> None:
+    screenshot = base64.b64encode(b"one-capture").decode()
+
+    class Browser:
+        def __init__(self) -> None:
+            self.navigated_urls: list[str] = []
+
+        def navigate(self, url):
+            self.navigated_urls.append(url)
+            return {"url": url, "title": "Search", "html": f"<html><body>results for {url}</body></html>", "screenshot": screenshot}
+
+    browser = Browser()
+    tools = AgentToolset(ConversationWorkspace(tmp_path, "chat_browser_query"), browser=browser)
+
+    first = tools.invoke("browse_page", {"url": "https://example.test/search?q=a"})
+    second = tools.invoke("browse_page", {"url": "https://example.test/search?q=b"})
+
+    assert browser.navigated_urls == ["https://example.test/search?q=a", "https://example.test/search?q=b"]
+    assert first.content != second.content
+    assert second.payload.get("cached") is not True
+
+
+def test_interactive_browser_tools_expose_the_element_inventory_and_ref_selectors(tmp_path: Path) -> None:
+    class Browser:
+        def navigate(self, url):
+            return {
+                "url": url, "title": "Example", "html": "<html><body><button>Criar minha loja</button></body></html>",
+                "screenshot": "", "elements": ['[e1] button "Criar minha loja"', '[e2] a[href] "Planos" href=/planos'],
+            }
+
+        def click(self, selector):
+            # agent_tools passes the selector through untouched; resolving
+            # ref:eN to the tagged DOM attribute happens in the isolated host.
+            assert selector == "ref:e1"
+            return {"url": url_after_click, "title": "Next", "html": "<html><body>done</body></html>", "screenshot": "", "elements": []}
+
+    url_after_click = "https://example.test/next"
+    tools = AgentToolset(ConversationWorkspace(tmp_path, "chat_browser_refs"), browser=Browser())
+
+    opened = tools.invoke("browse_page", {"url": "https://example.test"})
+    assert "[e1] button \"Criar minha loja\"" in opened.content
+    assert "ref:eN" in opened.content
+
+    clicked = tools.invoke("browser_click", {"selector": "ref:e1"})
+    assert clicked.status == "succeeded"
+
+
+def test_screenshot_failure_is_reported_but_does_not_lose_the_page_text(tmp_path: Path) -> None:
+    class Browser:
+        def navigate(self, url):
+            return {
+                "url": url, "title": "Example", "html": "<html><body>usable page text</body></html>",
+                "screenshot": "", "screenshot_error": "screenshot timed out", "elements": [],
+            }
+
+    tools = AgentToolset(ConversationWorkspace(tmp_path, "chat_browser_shot_fail"), browser=Browser())
+
+    outcome = tools.invoke("browse_page", {"url": "https://example.test"})
+
+    assert outcome.status == "succeeded"
+    assert "usable page text" in outcome.content
+    assert "screenshot timed out" in outcome.content
+    assert outcome.payload.get("screenshot_error") == "screenshot timed out"
+    assert "screenshot_path" not in outcome.payload
+
+
+def test_jpeg_screenshot_uses_the_jpeg_media_type_and_extension(tmp_path: Path) -> None:
+    screenshot = base64.b64encode(b"jpeg-bytes").decode()
+
+    class Browser:
+        def navigate(self, url):
+            return {"url": url, "title": "Example", "html": "<html><body>ok</body></html>", "screenshot": screenshot, "screenshot_media_type": "image/jpeg", "elements": []}
+
+    tools = AgentToolset(ConversationWorkspace(tmp_path, "chat_browser_jpeg"), browser=Browser(), model_sees_images=True)
+
+    outcome = tools.invoke("browse_page", {"url": "https://example.test"})
+
+    assert str(outcome.payload["screenshot_path"]).endswith(".jpg")
+    assert outcome.images[0]["media_type"] == "image/jpeg"
 
 
 def test_browse_page_refuses_a_private_address(tmp_path) -> None:
@@ -874,3 +958,146 @@ def test_read_tools_are_declared_read_only_and_write_tools_are_not(toolset: Agen
     assert not toolset.is_read_only("write_file")
     assert not toolset.is_read_only("run_command")
     assert not toolset.is_read_only("unknown_tool")
+
+
+# -- Fase 3: browser capability levels -------------------------------------
+
+
+class _FullBrowser:
+    """A fake browser exercising the interact-vs-full-only tool surface."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, tuple[object, ...]]] = []
+
+    def navigate(self, url):
+        self.calls.append(("navigate", (url,)))
+        return {"url": url, "title": "Form", "html": "<html><body>form page</body></html>", "screenshot": "", "elements": []}
+
+    def press(self, selector, key):
+        self.calls.append(("press", (selector, key)))
+        return {"url": "https://example.test", "title": "t", "html": "<html></html>", "screenshot": "", "elements": []}
+
+    def back(self):
+        self.calls.append(("back", ()))
+        return {"url": "https://example.test/prev", "title": "prev", "html": "<html>back</html>", "screenshot": "", "elements": []}
+
+    def scroll(self, direction):
+        self.calls.append(("scroll", (direction,)))
+        return {"url": "https://example.test", "title": "t", "html": "<html>scrolled</html>", "screenshot": "", "elements": []}
+
+    def wait_for(self, selector, state):
+        self.calls.append(("wait_for", (selector, state)))
+        return {"url": "https://example.test", "title": "t", "html": "<html>waited</html>", "screenshot": "", "elements": []}
+
+    def submit(self, selector, confirmed):
+        self.calls.append(("submit", (selector, confirmed)))
+        if not confirmed:
+            return {
+                "url": "https://example.test/form", "title": "Form", "html": "<html>form</html>", "screenshot": "", "elements": [],
+                "submit_preview": {"action": "/login", "method": "POST", "fields": [
+                    {"name": "email", "type": "email", "value": "a@b.com"},
+                    {"name": "password", "type": "password", "value": "[hidden]"},
+                ]},
+            }
+        return {"url": "https://example.test/welcome", "title": "Welcome", "html": "<html>welcome</html>", "screenshot": "", "elements": []}
+
+
+def test_browser_submit_is_absent_at_the_default_interact_capability(tmp_path) -> None:
+    tools = AgentToolset(ConversationWorkspace(tmp_path, "chat_cap_default"), browser=_FullBrowser())
+    assert "browser_submit" not in {item.name for item in tools.definitions()}
+
+
+def test_browser_submit_is_available_at_full_capability(tmp_path) -> None:
+    tools = AgentToolset(ConversationWorkspace(tmp_path, "chat_cap_full"), browser=_FullBrowser(), browser_capability="full")
+    assert "browser_submit" in {item.name for item in tools.definitions()}
+
+
+def test_browser_submit_handler_refuses_outside_full_capability_even_if_called_directly(tmp_path) -> None:
+    tools = AgentToolset(ConversationWorkspace(tmp_path, "chat_cap_guard"), browser=_FullBrowser())
+    with pytest.raises(AgentToolError, match="full"):
+        tools.browser_submit("ref:e1")
+
+
+def test_browser_submit_preview_never_clicks_and_masks_the_password(tmp_path) -> None:
+    browser = _FullBrowser()
+    tools = AgentToolset(ConversationWorkspace(tmp_path, "chat_submit_preview"), browser=browser, browser_capability="full")
+
+    outcome = tools.invoke("browser_submit", {"selector": "ref:e5"})
+
+    assert outcome.status == "succeeded"
+    assert browser.calls == [("submit", ("ref:e5", False))]
+    assert "NOTHING was submitted" in outcome.content
+    assert "a@b.com" in outcome.content
+    assert "[hidden]" in outcome.content
+    assert outcome.payload.get("requires_confirmation") is True
+
+
+def test_browser_submit_confirmed_true_actually_submits(tmp_path) -> None:
+    browser = _FullBrowser()
+    tools = AgentToolset(ConversationWorkspace(tmp_path, "chat_submit_confirmed"), browser=browser, browser_capability="full")
+
+    outcome = tools.invoke("browser_submit", {"selector": "ref:e5", "confirmed": True})
+
+    assert outcome.status == "succeeded"
+    assert browser.calls == [("submit", ("ref:e5", True))]
+    assert "welcome" in outcome.content.lower()
+    assert "requires_confirmation" not in outcome.payload
+
+
+def test_enter_key_is_not_offered_to_the_model_at_default_capability(tmp_path) -> None:
+    tools = AgentToolset(ConversationWorkspace(tmp_path, "chat_enter_default"), browser=_FullBrowser())
+    definition = tools.resolve("browser_press")
+    assert "Enter" not in definition.parameters["properties"]["key"]["enum"]
+
+
+def test_enter_key_is_offered_to_the_model_at_full_capability(tmp_path) -> None:
+    tools = AgentToolset(ConversationWorkspace(tmp_path, "chat_enter_full"), browser=_FullBrowser(), browser_capability="full")
+    definition = tools.resolve("browser_press")
+    assert "Enter" in definition.parameters["properties"]["key"]["enum"]
+
+
+def test_browser_press_enter_is_refused_outside_full_capability_even_if_called_directly(tmp_path) -> None:
+    tools = AgentToolset(ConversationWorkspace(tmp_path, "chat_enter_guard"), browser=_FullBrowser())
+    with pytest.raises(AgentToolError, match="full"):
+        tools.browser_press("ref:e1", "Enter")
+
+
+def test_browser_press_enter_succeeds_at_full_capability(tmp_path) -> None:
+    browser = _FullBrowser()
+    tools = AgentToolset(ConversationWorkspace(tmp_path, "chat_enter_ok"), browser=browser, browser_capability="full")
+
+    outcome = tools.invoke("browser_press", {"selector": "ref:e1", "key": "Enter"})
+
+    assert outcome.status == "succeeded"
+    assert browser.calls == [("press", ("ref:e1", "Enter"))]
+
+
+def test_browser_back_scroll_wait_for_are_available_at_the_default_capability(tmp_path) -> None:
+    browser = _FullBrowser()
+    tools = AgentToolset(ConversationWorkspace(tmp_path, "chat_safe_verbs"), browser=browser)
+
+    back = tools.invoke("browser_back", {})
+    scrolled = tools.invoke("browser_scroll", {"direction": "down"})
+    waited = tools.invoke("browser_wait_for", {"selector": "ref:e1", "state": "visible"})
+
+    assert back.status == scrolled.status == waited.status == "succeeded"
+    assert browser.calls == [
+        ("back", ()),
+        ("scroll", ("down",)),
+        ("wait_for", ("ref:e1", "visible")),
+    ]
+
+
+def test_browser_wait_for_defaults_the_state_to_visible(tmp_path) -> None:
+    browser = _FullBrowser()
+    tools = AgentToolset(ConversationWorkspace(tmp_path, "chat_wait_default"), browser=browser)
+
+    tools.invoke("browser_wait_for", {"selector": "ref:e1"})
+
+    assert browser.calls == [("wait_for", ("ref:e1", "visible"))]
+
+
+def test_browser_scroll_rejects_an_invalid_direction(tmp_path) -> None:
+    tools = AgentToolset(ConversationWorkspace(tmp_path, "chat_scroll_bad"), browser=_FullBrowser())
+    with pytest.raises(AgentToolError):
+        tools.browser_scroll("sideways")

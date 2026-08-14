@@ -7,7 +7,12 @@ import time
 
 import pytest
 
-from agentos.agentic.browser_tools import ConversationBrowser, MemoryArtifactOutput
+from agentos.agentic.browser_tools import (
+    BROWSER_CAPABILITY_VARIABLE,
+    ConversationBrowser,
+    MemoryArtifactOutput,
+    browser_capability_from_environment,
+)
 from agentos.browser.models import (
     BrowserArtifactRef,
     BrowserErrorCode,
@@ -200,3 +205,19 @@ def test_close_cleans_up_the_session_and_shuts_down_the_adapter() -> None:
 
     assert adapter.cleaned == 1
     assert adapter.closed == 1
+
+
+def test_browser_capability_defaults_to_interact_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(BROWSER_CAPABILITY_VARIABLE, raising=False)
+    assert browser_capability_from_environment() == "interact"
+
+
+@pytest.mark.parametrize("value", ["read", "interact", "full", " FULL ", "Interact"])
+def test_browser_capability_reads_a_recognized_value_case_insensitively(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    monkeypatch.setenv(BROWSER_CAPABILITY_VARIABLE, value)
+    assert browser_capability_from_environment() == value.strip().lower()
+
+
+def test_browser_capability_falls_back_on_an_unrecognized_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(BROWSER_CAPABILITY_VARIABLE, "godmode")
+    assert browser_capability_from_environment() == "interact"

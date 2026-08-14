@@ -21,7 +21,7 @@ from agentos.provider_catalog.omniroute import DEFAULT_OMNIROUTE_BASE_URL, norma
 from agentos.agentic.runtime import AgenticLimits, AgenticTurnRuntime
 from agentos.agentic.settings import AgentRuntimeSettingsStore
 from agentos.agentic.session import TurnSession
-from agentos.agentic.browser_tools import conversation_browser_for
+from agentos.agentic.browser_tools import ConversationBrowserRegistry, browser_capability_from_environment, conversation_browser_for
 from agentos.agentic.web_search import search_client_from_environment
 from agentos.conversations.chat import PostgresChatStore
 from agentos.installation import orin_paths
@@ -138,12 +138,18 @@ class ChatWorker:
         workspace_root: str | None = None,
         enable_subagents: bool = True,
         runtime_settings: AgentRuntimeSettingsStore | None = None,
+        browser_registry: ConversationBrowserRegistry | None = None,
     ) -> None:
         self.store, self._executions, self._queries = store, ExecutionApplicationAdapter(store._engine), ExecutionQueryAdapter(store._engine)
         self._runtime_factory = runtime_factory
         self._workspace_root = workspace_root if workspace_root is not None else str(orin_paths().workspaces)
         self._enable_subagents = enable_subagents
         self._runtime_settings = runtime_settings or AgentRuntimeSettingsStore()
+        # A conversation's browser survives across turns (a login or a
+        # multi-step flow needs the same tab back), bounded by idle eviction
+        # and a cap on concurrent sessions so an abandoned conversation does
+        # not leak a Chromium process forever.
+        self._browser_registry = browser_registry or ConversationBrowserRegistry(factory=conversation_browser_for)
 
     def run(self, turn_id: str) -> None:
         self.store.heartbeat("chat-worker")
@@ -170,6 +176,13 @@ class ChatWorker:
                     closer()
                 except Exception:
                     _LOGGER.exception("chat runtime cleanup for turn %s failed", turn_id)
+            # A long turn only touches the registry's idle clock at
+            # acquire()-time otherwise; this keeps a still-active
+            # conversation from being evicted by an unrelated one's sweep.
+            try:
+                self._browser_registry.release(turn)
+            except Exception:
+                _LOGGER.exception("browser registry release for turn %s failed", turn_id)
         if result.state == "completed":
             self._project(turn, "COMPLETED", "provider_completed", result_ref=f"conversation-message:{turn['assistant_message_id']}")
         elif result.state == "waiting_user":
@@ -241,7 +254,12 @@ class ChatWorker:
         modalities = row.get("input_modalities") or ()
         if isinstance(modalities, str):
             modalities = [item.strip() for item in modalities.split(",")]
-        return "image" in {str(item).lower() for item in modalities}
+        names = {str(item).lower() for item in modalities}
+        # An unrefreshed catalog must not silently disable image reading (a
+        # browser screenshot, an attached photo): only an explicit modality
+        # list that omits "image" counts as "cannot see images". Mirrors
+        # _model_calls_tools below for the same reason.
+        return not names or "image" in names
 
     def _model_calls_tools(self, turn: dict[str, object]) -> bool:
         row = self._catalog_row_for(turn) or {}
@@ -447,7 +465,7 @@ class ChatWorker:
         engine = self.store._engine
         skill_library = PostgresSkillLibraryService(engine)
         configured_limits = self._runtime_settings.get(str(turn["user_id"]))
-        browser = conversation_browser_for(turn)
+        browser = self._browser_registry.acquire(turn)
         try:
             session = TurnSession(
                 turn=turn,
@@ -470,6 +488,7 @@ class ChatWorker:
                 ),
                 search_client=search_client_from_environment(),
                 browser=browser,
+                browser_capability=browser_capability_from_environment(),
                 enable_subagents=self._enable_subagents,
                 model_sees_images=self._model_sees_images(turn),
                 model_calls_tools=self._model_calls_tools(turn),
@@ -483,8 +502,10 @@ class ChatWorker:
             )
             return session.build_runtime()
         except Exception:
+            # Setup failed before the turn ever ran: discard rather than
+            # leave a possibly-broken session cached for the next attempt.
             if browser is not None:
-                browser.close()
+                self._browser_registry.discard(str(turn.get("conversation_id") or ""))
             raise
 
 
