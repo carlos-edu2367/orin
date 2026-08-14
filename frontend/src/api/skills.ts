@@ -50,6 +50,7 @@ export interface SkillsClient {
   get(skillId: string, signal?: AbortSignal): Promise<SkillDetail>
   create(input: CreateSkillInput, intent?: MutationIntent): Promise<SkillSummary>
   update(skillId: string, input: UpdateSkillInput, intent?: MutationIntent): Promise<SkillDetail>
+  removeVersion(skillId: string, version: string, intent?: MutationIntent): Promise<SkillDetail>
   getAgentSkills(agentId: string, signal?: AbortSignal): Promise<AgentSkillAssociation>
   setAgentSkills(agentId: string, input: AgentSkillAssociationInput, intent?: MutationIntent): Promise<AgentSkillAssociation>
   listSkillAgents(skillId: string, signal?: AbortSignal): Promise<SkillAgent[]>
@@ -85,6 +86,11 @@ export function updateSkill(client: ApiClient, skillId: string, input: UpdateSki
   return client.request({ path: skillPath(skillId), method: 'PUT', body: input, intent, parse: parseSkillDetail })
 }
 
+export function removeSkillVersion(client: ApiClient, skillId: string, version: string, intent = client.createMutationIntent()): Promise<SkillDetail> {
+  if (!version.trim()) throw new TypeError('A skill version is required')
+  return client.request({ path: `${skillPath(skillId)}/versions/${encodeURIComponent(version)}`, method: 'DELETE', intent, parse: parseSkillDetail })
+}
+
 export function getAgentSkills(client: ApiClient, agentId: string, signal?: AbortSignal): Promise<AgentSkillAssociation> {
   return client.request({ path: agentSkillsPath(agentId), signal, parse: parseAgentSkillAssociation })
 }
@@ -103,6 +109,7 @@ export function createSkillsClient(client: ApiClient): SkillsClient {
     get: (skillId, signal) => getSkill(client, skillId, signal),
     create: (input, intent) => createSkill(client, input, intent),
     update: (skillId, input, intent) => updateSkill(client, skillId, input, intent),
+    removeVersion: (skillId, version, intent) => removeSkillVersion(client, skillId, version, intent),
     getAgentSkills: (agentId, signal) => getAgentSkills(client, agentId, signal),
     setAgentSkills: (agentId, input, intent) => setAgentSkills(client, agentId, input, intent),
     listSkillAgents: (skillId, signal) => listSkillAgents(client, skillId, signal),

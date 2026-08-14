@@ -207,6 +207,8 @@ function SkillDetailPage({ client, skillId }: { client: SkillsClient; skillId: s
   const [reload, setReload] = useState(0)
   const [editing, setEditing] = useState(false)
   const [usedBy, setUsedBy] = useState<SkillAgent[]>([])
+  const [removingVersion, setRemovingVersion] = useState<string | null>(null)
+  const [removeError, setRemoveError] = useState<string | null>(null)
   useEffect(() => {
     const controller = new AbortController()
     client.get(skillId, controller.signal)
@@ -223,6 +225,21 @@ function SkillDetailPage({ client, skillId }: { client: SkillsClient; skillId: s
     return () => controller.abort()
   }, [client, skillId])
 
+  async function removeVersion(version: string) {
+    if (removingVersion || detail.status !== 'loaded' || version === detail.value.version) return
+    if (!window.confirm(`Desinstalar a versão ${version}? Ela será removida desta instalação.`)) return
+    setRemovingVersion(version)
+    setRemoveError(null)
+    try {
+      const next = await client.removeVersion(skillId, version)
+      setDetail({ status: 'loaded', value: next })
+    } catch {
+      setRemoveError('Não foi possível desinstalar essa versão. Ela pode estar sendo usada por um agente.')
+    } finally {
+      setRemovingVersion(null)
+    }
+  }
+
   return <main className="app-shell skills-shell">
     <header className="topbar">
       <Brand to="/" />
@@ -234,12 +251,12 @@ function SkillDetailPage({ client, skillId }: { client: SkillsClient; skillId: s
       {detail.status === 'error' && <div className="skills-state skills-state--error" role="alert">Não foi possível carregar esta skill.<button type="button" className="button button--secondary" onClick={() => setReload((value) => value + 1)}>Tentar novamente</button></div>}
       {detail.status === 'loaded' && (editing
         ? <EditSkillForm client={client} skill={detail.value} onCancel={() => setEditing(false)} onUpdated={(value) => { setDetail({ status: 'loaded', value }); setEditing(false) }} />
-        : <SkillDetailView skill={detail.value} usedBy={usedBy} onEdit={() => setEditing(true)} />)}
+        : <SkillDetailView skill={detail.value} usedBy={usedBy} onEdit={() => setEditing(true)} onRemoveVersion={(version) => void removeVersion(version)} removingVersion={removingVersion} removeError={removeError} />)}
     </section>
   </main>
 }
 
-function SkillDetailView({ skill, usedBy, onEdit }: { skill: SkillDetail; usedBy: SkillAgent[]; onEdit: () => void }) {
+function SkillDetailView({ skill, usedBy, onEdit, onRemoveVersion, removingVersion, removeError }: { skill: SkillDetail; usedBy: SkillAgent[]; onEdit: () => void; onRemoveVersion: (version: string) => void; removingVersion: string | null; removeError: string | null }) {
   return <>
     <p className="eyebrow">{skill.source} / {skill.available ? 'DISPONÍVEL' : 'INDISPONÍVEL'}</p>
     <h1>{skill.name}</h1>
@@ -252,7 +269,19 @@ function SkillDetailView({ skill, usedBy, onEdit }: { skill: SkillDetail; usedBy
       <Disclosure label="Instruções"><pre className="skills-instructions">{skill.instructions}</pre></Disclosure>
       <Disclosure label="Dependências"><MetadataList items={skill.dependencies} empty="Sem dependências." /></Disclosure>
       <Disclosure label="Uso e ferramentas"><MetadataList items={skill.requires_tools} empty="Sem ferramentas obrigatórias." /></Disclosure>
-      <Disclosure label="Versões"><MetadataList items={skill.versions} empty="Nenhuma versão publicada." /></Disclosure>
+      <Disclosure label={`Versões instaladas · ${skill.versions.length}`}>
+        <div className="skill-versions" aria-label="Versões instaladas">
+          {skill.versions.map((version) => {
+            const current = version === skill.version
+            return <div className={`skill-version-row${current ? ' is-current' : ''}`} key={version}>
+              <div className="skill-version-row__identity"><span className="skill-version-row__dot" aria-hidden="true" /><code>v{version}</code>{current && <span className="skill-version-row__badge">Atual</span>}</div>
+              {current ? <span className="skill-version-row__protected">Em uso</span> : skill.source === 'custom' ? <button type="button" className="skill-version-row__remove" aria-label={`Desinstalar versão ${version}`} onClick={() => onRemoveVersion(version)} disabled={removingVersion !== null}>{removingVersion === version ? 'Desinstalando…' : 'Desinstalar'}</button> : <span className="skill-version-row__protected">Protegida</span>}
+            </div>
+          })}
+        </div>
+        {skill.versions.length < 2 && <p className="skills-metadata__empty">Não há versões antigas instaladas.</p>}
+        {removeError && <p className="skills-form__error" role="alert">{removeError}</p>}
+      </Disclosure>
       {usedBy.length > 0 && <Disclosure label="Usada por"><ul className="skills-metadata">{usedBy.map((agent) => <li key={agent.agent_id}>{agent.agent_id} · {agent.mode}</li>)}</ul></Disclosure>}
     </div>
   </>

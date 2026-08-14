@@ -559,6 +559,44 @@ def test_production_bootstrap_accepts_enabled_provider_with_key_only_and_exposes
         create_production_app(settings, services=ApiServices(), probe=DependencyProbe(lambda: True, lambda: True))
 
 
+def test_production_bootstrap_does_not_wait_for_optional_omniroute() -> None:
+    class DurablePort:
+        pass
+
+    class Runtime:
+        def __init__(self) -> None:
+            self.started = False
+            self.stopped = False
+
+        def start_if_any_enabled_in_background(self) -> dict[str, object]:
+            self.started = True
+            return {"state": "starting", "ownership": "agentos"}
+
+        def stop(self) -> dict[str, object]:
+            self.stopped = True
+            return {"state": "stopped", "ownership": None}
+
+        def start_if_any_enabled(self) -> dict[str, object]:
+            raise AssertionError("production startup must not use the blocking autostart")
+
+    runtime = Runtime()
+    settings = ProductionSettings(
+        DATABASE_URL="postgresql+psycopg://user:password@localhost/agentos",
+        REDIS_URL="redis://localhost:6379/0",
+    )
+    app = create_production_app(
+        settings,
+        services=ApiServices(security=DurablePort(), events=DurablePort(), omniroute_runtime=runtime),
+        probe=DependencyProbe(lambda: True, lambda: True),
+    )
+
+    with TestClient(app):
+        pass
+
+    assert runtime.started is True
+    assert runtime.stopped is True
+
+
 def test_local_spa_marks_the_served_html_as_loopback_without_rebuilding_frontend(tmp_path: Path) -> None:
     """Break caught: local FastAPI served an empty auth marker and blocked its own UI."""
     (tmp_path / "assets").mkdir()

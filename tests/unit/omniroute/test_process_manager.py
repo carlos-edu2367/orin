@@ -79,3 +79,19 @@ def test_a_slow_gateway_is_left_starting_rather_than_killed(tmp_path: Path) -> N
     assert manager.status() == {"state": "starting", "ownership": "agentos"}
     assert manager.stop() == {"state": "stopped", "ownership": None}
     assert process.terminated is True
+
+
+def test_background_autostart_does_not_wait_for_gateway_health(tmp_path: Path) -> None:
+    settings = OmniRouteRuntimeSettingsStore(tmp_path / "runtime.json")
+    settings.set_auto_start("user-a", True)
+    process = Process()
+    manager = OmniRouteProcessManager(
+        settings,
+        command=("omniroute",),
+        health=lambda: False,
+        start_process=lambda _command: process,
+        wait_ready=lambda: (_ for _ in ()).throw(AssertionError("background start must not wait")),
+    )
+
+    assert manager.start_if_any_enabled_in_background() == {"state": "starting", "ownership": "agentos"}
+    assert manager.status() == {"state": "starting", "ownership": "agentos"}

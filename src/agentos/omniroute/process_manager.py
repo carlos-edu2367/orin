@@ -150,6 +150,28 @@ class OmniRouteProcessManager:
             return self.status()
         return self.start()
 
+    def start_if_any_enabled_in_background(self) -> dict[str, object]:
+        """Start the optional gateway without holding up AgentOS readiness.
+
+        The normal ``start`` contract waits for the gateway's model endpoint so
+        an interactive request can report a final state.  That wait can be 45s
+        on a cold machine, which must never run inside FastAPI's startup hook:
+        the local API needs to expose ``/healthz`` while OmniRoute catches up.
+        """
+        if not self._settings.any_enabled():
+            return self.status()
+        with self._lock:
+            if self._healthy():
+                return {"state": "external", "ownership": "external"} if not self._owned_alive() else {"state": "ready", "ownership": "agentos"}
+            if self._owned_alive():
+                return {"state": "starting", "ownership": "agentos"}
+            try:
+                self._process = self._start_process(self._command)
+            except (OSError, ValueError) as error:
+                self._last_failure = str(error) or "OmniRoute could not be started"
+                return {"state": "failed", "ownership": None}
+            return {"state": "starting", "ownership": "agentos"}
+
     def status(self) -> dict[str, object]:
         with self._lock:
             if self._healthy():

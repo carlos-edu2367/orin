@@ -11,6 +11,12 @@ from types import MappingProxyType
 MAX_ACTION_DEPTH = 4
 MAX_ACTION_ITEMS = 64
 MAX_ACTION_TEXT = 512
+# Structured user questions are a bounded public form, not an arbitrary
+# activity payload. They need one extra nesting level for option objects and
+# enough item budget for the documented 8 questions x 12 options contract.
+MAX_USER_QUESTION_DEPTH = MAX_ACTION_DEPTH + 1
+MAX_USER_QUESTION_ITEMS = 384
+MAX_USER_QUESTION_TEXT = MAX_ACTION_TEXT
 REDACTED = "[REDACTED]"
 
 _SENSITIVE_KEY_PARTS = (
@@ -60,36 +66,77 @@ def sanitize_summary(value: str) -> str:
     return _SENSITIVE_SUMMARY.sub(lambda match: f"{match.group(1)}=[REDACTED]", value)
 
 
-def _bounded(value: object, *, depth: int, count: list[int], redact: bool) -> object:
-    if depth > MAX_ACTION_DEPTH:
+def _bounded(
+    value: object,
+    *,
+    depth: int,
+    count: list[int],
+    redact: bool,
+    depth_limit: int = MAX_ACTION_DEPTH,
+    item_limit: int = MAX_ACTION_ITEMS,
+    text_limit: int = MAX_ACTION_TEXT,
+) -> object:
+    if depth > depth_limit:
         raise ValueError("payload exceeds nesting limit")
     if value is None or isinstance(value, (bool, int, float)):
         return value
     if isinstance(value, str):
-        if len(value) > MAX_ACTION_TEXT:
+        if len(value) > text_limit:
             raise ValueError("payload text exceeds limit")
         return value
     if isinstance(value, Mapping):
-        if len(value) > MAX_ACTION_ITEMS:
+        if len(value) > item_limit:
             raise ValueError("payload contains too many entries")
         result: dict[str, object] = {}
         for key, item in value.items():
             if not isinstance(key, str) or not key.strip():
                 raise ValueError("payload keys must be non-blank strings")
             count[0] += 1
-            if count[0] > MAX_ACTION_ITEMS:
+            if count[0] > item_limit:
                 raise ValueError("payload exceeds item limit")
-            result[key] = REDACTED if redact and _sensitive_key(key) else _bounded(
-                item, depth=depth + 1, count=count, redact=redact
-            )
+            if redact and _sensitive_key(key):
+                result[key] = REDACTED
+                continue
+            # The questions field is the one intentionally larger public
+            # structure. Isolate its budget so it cannot make unrelated
+            # activity fields unbounded, while preserving the normal
+            # redaction and scalar limits inside it.
+            if depth == 0 and key == "questions" and isinstance(item, (tuple, list)):
+                result[key] = _bounded(
+                    item,
+                    depth=depth + 1,
+                    count=[0],
+                    redact=redact,
+                    depth_limit=MAX_USER_QUESTION_DEPTH,
+                    item_limit=MAX_USER_QUESTION_ITEMS,
+                    text_limit=MAX_USER_QUESTION_TEXT,
+                )
+            else:
+                result[key] = _bounded(
+                    item,
+                    depth=depth + 1,
+                    count=count,
+                    redact=redact,
+                    depth_limit=depth_limit,
+                    item_limit=item_limit,
+                    text_limit=text_limit,
+                )
         return MappingProxyType(result)
     if isinstance(value, (tuple, list)):
-        if len(value) > MAX_ACTION_ITEMS:
+        if len(value) > item_limit:
             raise ValueError("payload contains too many entries")
         count[0] += len(value)
-        if count[0] > MAX_ACTION_ITEMS:
+        if count[0] > item_limit:
             raise ValueError("payload exceeds item limit")
-        return tuple(_bounded(item, depth=depth + 1, count=count, redact=redact) for item in value)
+        return tuple(_bounded(
+            item,
+            depth=depth + 1,
+            count=count,
+            redact=redact,
+            depth_limit=depth_limit,
+            item_limit=item_limit,
+            text_limit=text_limit,
+        ) for item in value)
     raise ValueError("payload contains an unsupported value")
 
 
@@ -189,6 +236,9 @@ __all__ = [
     "MAX_ACTION_DEPTH",
     "MAX_ACTION_ITEMS",
     "MAX_ACTION_TEXT",
+    "MAX_USER_QUESTION_DEPTH",
+    "MAX_USER_QUESTION_ITEMS",
+    "MAX_USER_QUESTION_TEXT",
     "REDACTED",
     "freeze_action_input",
     "sanitize_public_mapping",

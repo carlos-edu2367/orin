@@ -209,6 +209,30 @@ describe('ChatPage', () => {
     await waitFor(() => expect(cancelled).toHaveBeenCalled())
   })
 
+  it('keeps question answers enabled while the turn waits for the user', async () => {
+    const sent = vi.fn()
+    globalThis.fetch = stubFetch(() => ({
+      state: 'waiting_user',
+      messages: [],
+      activities: [
+        activity(1, 'tool.finished', 'Aguardando sua resposta', {
+          tool_name: 'ask_user', tool_kind: 'user_input', status: 'succeeded', invocation_id: 'call-questions',
+          questions: [{ id: 'name', question: 'Como devo te chamar?', mode: 'text', options: [] }],
+        }),
+        activity(2, 'turn.waiting_user', 'Aguardando sua resposta', { state: 'waiting_user' }),
+      ],
+    }), undefined, sent)
+
+    renderChat()
+
+    expect(await screen.findByRole('button', { name: 'Enviar respostas' })).toBeEnabled()
+    expect(screen.queryByRole('button', { name: 'Parar execuÃ§Ã£o' })).not.toBeInTheDocument()
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Enviar respostas' }))
+
+    await waitFor(() => expect(sent).toHaveBeenCalled())
+    expect(String(sent.mock.calls[0][0])).toContain('Respostas às perguntas do agente:')
+  })
+
   it('leaves the running UI as soon as a terminal event arrives on an open stream', async () => {
     let completed = false
     let closeStream: () => void = () => {}

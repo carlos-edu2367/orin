@@ -33,6 +33,7 @@ from agentos.reading.extract import extract_text
 from agentos.reading.render import ImageTooLarge, normalize_image, render_pdf_pages
 from agentos.reading.vision import VisionUnavailable
 from .workspace import MAX_LIST_DEPTH, ConversationWorkspace, WorkspaceError
+from .models import MAX_USER_QUESTION_ITEMS
 from .browser_tools import _safe_display_url, sanitize_page_text
 from .file_preview import media_type_for
 from .provider_content import image_block
@@ -618,11 +619,11 @@ class AgentToolset:
                 "options": options, "placeholder": placeholder,
             })
             question_ids.add(question_id)
-        # The public activity event is intentionally limited to 64 nested
-        # values. Account for its lifecycle fields as well as this tool's
-        # payload so a valid tool call can never vanish from the UI later.
+        # The public activity event gives this validated form its own bounded
+        # budget. Account for every question/option entry so a valid tool call
+        # can never vanish from the UI later.
         option_count = sum(len(item["options"]) for item in normalized)
-        if 8 + 6 * len(normalized) + 3 * option_count > 64:
+        if 6 * len(normalized) + 3 * option_count > MAX_USER_QUESTION_ITEMS:
             raise AgentToolError("This question batch is too large to display safely; split it into smaller batches.")
         names = ", ".join(item["id"] for item in normalized)
         return ToolOutcome(

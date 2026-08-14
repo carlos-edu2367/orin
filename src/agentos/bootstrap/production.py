@@ -323,7 +323,15 @@ def create_production_app(settings: ProductionSettings, *, services: ApiServices
         if manager is None:
             return
         try:
-            await __import__("fastapi.concurrency", fromlist=["run_in_threadpool"]).run_in_threadpool(manager.start_if_any_enabled)
+            # OmniRoute is optional and may take tens of seconds to expose its
+            # model endpoint on a cold desktop. Starting it synchronously here
+            # blocks Uvicorn before /healthz exists, so launch it without making
+            # AgentOS readiness depend on that gateway.
+            start_in_background = getattr(manager, "start_if_any_enabled_in_background", None)
+            if callable(start_in_background):
+                start_in_background()
+            else:
+                await __import__("fastapi.concurrency", fromlist=["run_in_threadpool"]).run_in_threadpool(manager.start_if_any_enabled)
         except Exception:
             # OmniRoute is optional: a failed local gateway must never make
             # AgentOS unavailable.

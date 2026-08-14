@@ -44,6 +44,24 @@ def test_ask_user_accepts_a_mixed_batch_and_refuses_invalid_choices(toolset: Age
     assert toolset.invoke("ask_user", {"questions": [{"id": "bad", "question": "Escolha", "mode": "single_choice", "options": [{"id": "only", "label": "Apenas uma"}]}]}).status == "failed"
 
 
+def test_ask_user_accepts_the_documented_maximum_batch_with_options(toolset: AgentToolset) -> None:
+    questions = [
+        {
+            "id": f"choice_{index}",
+            "question": f"Qual opcao voce prefere {index}?",
+            "mode": "checkbox",
+            "options": [{"id": f"option_{option}", "label": f"Opcao {option}"} for option in range(12)],
+        }
+        for index in range(8)
+    ]
+
+    outcome = toolset.invoke("ask_user", {"questions": questions})
+
+    assert outcome.status == "succeeded"
+    assert len(outcome.payload["questions"]) == 8
+    assert all(len(item["options"]) == 12 for item in outcome.payload["questions"])
+
+
 def test_agent_can_publish_and_immediately_use_a_versioned_user_skill(tmp_path: Path) -> None:
     library = SkillLibraryService(builtins=())
     tools = AgentToolset(

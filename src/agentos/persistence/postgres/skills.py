@@ -11,7 +11,7 @@ from sqlalchemy.exc import IntegrityError
 
 from agentos.persistence.postgres.schema import agent_skills, execution_skills, skill_versions, skills
 from agentos.skills.builtins import load_builtin_skills
-from agentos.skills.models import Skill, SkillDependencies, SkillScope, SkillSource
+from agentos.skills.models import Skill, SkillDependencies, SkillScope, SkillSource, semver_key
 from agentos.skills.registry import SkillNotFound, SkillRegistry
 from agentos.skills.service import _id
 
@@ -99,7 +99,7 @@ class PostgresSkillLibraryService:
         available = ("read_file", "write_file", "list_files", "run_command", "fetch_url")
         loaded, metadata = registry.load(skill_id, available_tools=available), registry.metadata(skill_id, available_tools=available)
         versions = [skill.version for skill in self._skills_for(user_id) if skill.id == skill_id]
-        return {**self._summary(metadata), "instructions": loaded.instructions, "dependencies": [item.ref.id for item in loaded.dependencies], "requires_tools": list(loaded.skill.required_tools), "versions": sorted(set(versions), reverse=True)}
+        return {**self._summary(metadata), "instructions": loaded.instructions, "dependencies": [item.ref.id for item in loaded.dependencies], "requires_tools": list(loaded.skill.required_tools), "versions": sorted(set(versions), key=semver_key, reverse=True)}
 
     def create(self, command: Mapping[str, object]) -> dict[str, object]:
         skill = self._custom_skill(command, skill_id=_id(str(command["name"])))
@@ -126,6 +126,41 @@ class PostgresSkillLibraryService:
         }
         skill = self._custom_skill(values, skill_id=prior.id)
         self._insert(skill, user_id=user_id)
+        return self.get({"user_id": user_id, "skill_id": skill_id})
+
+    def remove_version(self, command: Mapping[str, object]) -> dict[str, object]:
+        """Remove an old custom version without touching execution evidence."""
+        user_id, skill_id, version = str(command["user_id"]), str(command["skill_id"]), str(command["version"])
+        with self.engine.begin() as connection:
+            identity = (
+                (skills.c.skill_id == skill_id)
+                & (skills.c.scope == SkillScope.USER.value)
+                & (skills.c.user_id == user_id)
+            )
+            record = connection.execute(select(skills.c.id).where(identity).with_for_update()).scalar_one_or_none()
+            if record is None:
+                raise ValueError("skill version was not found in this user scope")
+            rows = connection.execute(
+                select(skill_versions.c.id, skill_versions.c.version)
+                .where(skill_versions.c.skill_record_id == record)
+            ).mappings().all()
+            target = next((row for row in rows if str(row["version"]) == version), None)
+            if target is None:
+                raise ValueError("skill version was not found in this user scope")
+            current = max(rows, key=lambda row: semver_key(str(row["version"])))
+            if str(target["version"]) == str(current["version"]):
+                raise ValueError("the current skill version cannot be uninstalled")
+            pinned = connection.execute(
+                select(agent_skills.c.agent_id)
+                .where(
+                    (agent_skills.c.user_id == user_id)
+                    & (agent_skills.c.skill_version_id == target["id"])
+                )
+                .limit(1)
+            ).scalar_one_or_none()
+            if pinned is not None:
+                raise ValueError("this skill version is still fixed to an agent")
+            connection.execute(delete(skill_versions).where(skill_versions.c.id == target["id"]))
         return self.get({"user_id": user_id, "skill_id": skill_id})
 
     @staticmethod

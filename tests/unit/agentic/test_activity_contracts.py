@@ -65,6 +65,30 @@ def test_activity_event_enforces_bounded_public_text():
         _event(payload={"summary": "x" * 513})
 
 
+def test_activity_event_accepts_the_bounded_structured_question_form():
+    payload = {
+        "tool_name": "ask_user",
+        "tool_kind": "user_input",
+        "status": "succeeded",
+        "invocation_id": "call:questions",
+        "questions": [
+            {
+                "id": f"choice_{index}",
+                "question": f"Qual opcao voce prefere {index}?",
+                "mode": "checkbox",
+                "options": [{"id": f"option_{option}", "label": f"Opcao {option}"} for option in range(12)],
+                "placeholder": "Observacao opcional",
+            }
+            for index in range(8)
+        ],
+    }
+
+    event = _event(payload=payload)
+
+    assert len(event.payload["questions"]) == 8
+    assert len(event.payload["questions"][0]["options"]) == 12
+
+
 def test_action_request_requires_exactly_one_typed_target_and_bounded_input():
     request = AgentActionRequest(
         action_id="action:1",

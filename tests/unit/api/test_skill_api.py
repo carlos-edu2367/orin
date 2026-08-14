@@ -20,6 +20,11 @@ class Skills:
     def update(self, command):
         return self.get({"skill_id": command["skill_id"]})
 
+    def remove_version(self, command):
+        assert command["skill_id"] == "systematic-debugging"
+        assert command["version"] == "0.9.0"
+        return self.get({"skill_id": command["skill_id"]})
+
     def agent_skills(self, query):
         return {"mode": "auto", "items": []}
 
@@ -62,3 +67,14 @@ def test_skills_api_manages_agent_auto_discovery_and_pinned_skills() -> None:
     assert current.json() == {"mode": "auto", "items": []}
     assert pinned.json()["mode"] == "pinned"
     assert used_by.json()["items"] == [{"agent_id": "agent-1", "mode": "pinned"}]
+
+
+def test_skills_api_removes_a_requested_old_version() -> None:
+    client = _client()
+    response = client.delete(
+        "/v1/skills/systematic-debugging/versions/0.9.0",
+        headers={"Authorization": "Bearer pat", "Idempotency-Key": "skill-version-remove-1"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["id"] == "systematic-debugging"

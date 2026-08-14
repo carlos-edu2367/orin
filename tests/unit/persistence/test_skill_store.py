@@ -47,6 +47,18 @@ def test_user_scope_can_override_a_builtin_identity_without_colliding() -> None:
     assert service.get({"user_id": "u1", "skill_id": "testing"})["instructions"] == "# Private workflow"
 
 
+def test_postgres_skill_store_removes_an_old_version_and_keeps_execution_snapshots() -> None:
+    engine = create_engine("sqlite://")
+    metadata.create_all(engine)
+    service = PostgresSkillLibraryService(engine)
+    created = service.create({"user_id": "u1", "name": "Cleanup", "description": "Clean safely.", "version": "1.0.0", "tags": [], "instructions": "# v1"})
+    service.update({"user_id": "u1", "skill_id": created["id"], "description": "Clean safely.", "instructions": "# v2"})
+
+    removed = service.remove_version({"user_id": "u1", "skill_id": created["id"], "version": "1.0.0"})
+
+    assert removed["versions"] == ["1.0.1"]
+
+
 def test_agent_can_switch_between_auto_discovery_and_pinned_skill_versions() -> None:
     engine = create_engine("sqlite://")
     metadata.create_all(engine)

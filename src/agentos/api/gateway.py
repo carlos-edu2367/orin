@@ -827,6 +827,20 @@ def create_app(services: ApiServices) -> FastAPI:
         result = _require_port(services.skills).update({"user_id": principal.user_id, "skill_id": skill_id, **fields, "idempotency_key": _idempotency(request), "purpose": "skills.update"})
         return JSONResponse(_jsonable(result))
 
+    @app.delete("/v1/skills/{skill_id}/versions/{version}")
+    async def remove_skill_version(skill_id: str, version: str, request: Request) -> JSONResponse:
+        principal = principal_for(request, mutable=True)
+        services.security.check_rate_limit(principal, action="skills.version.remove", origin=request.headers.get("origin"))
+        services.security.authorize(principal, action="skills.update", resource_id=f"{skill_id}@{version}", purpose="skills.version.remove")
+        try:
+            result = _require_port(services.skills).remove_version({
+                "user_id": principal.user_id, "skill_id": skill_id, "version": version,
+                "idempotency_key": _idempotency(request), "purpose": "skills.version.remove",
+            })
+        except ValueError as error:
+            raise ApplicationValidationError(str(error)) from error
+        return JSONResponse(_jsonable(result))
+
     @app.get("/v1/skills/{skill_id}/agents")
     async def agents_for_skill(skill_id: str, request: Request) -> JSONResponse:
         principal = principal_for(request)

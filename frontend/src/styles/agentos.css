@@ -798,6 +798,19 @@ kbd {
 .skills-metadata { display: flex; flex-wrap: wrap; gap: 7px; margin: 0; padding: 0; list-style: none; }
 .skills-metadata li { padding: 4px 7px; border: 1px solid var(--line); border-radius: 7px; color: var(--muted); font-family: var(--mono); font-size: 10px; }
 .skills-metadata__empty { margin: 0; color: var(--faint); font-size: 12px; }
+.skill-versions { display: grid; gap: 7px; }
+.skill-version-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: color-mix(in srgb, var(--raised) 72%, transparent); transition: border-color .18s var(--ease), background .18s var(--ease), transform .18s var(--ease); }
+.skill-version-row:hover { border-color: var(--signal-dim); background: var(--raised-strong); transform: translateY(-1px); }
+.skill-version-row.is-current { border-color: color-mix(in srgb, var(--signal-dim) 58%, var(--line)); background: color-mix(in srgb, var(--signal) 7%, var(--raised)); }
+.skill-version-row__identity { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.skill-version-row__identity code { color: var(--text); font-family: var(--mono); font-size: 11px; }
+.skill-version-row__dot { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); box-shadow: 0 0 0 3px color-mix(in srgb, var(--faint) 12%, transparent); }
+.skill-version-row.is-current .skill-version-row__dot { background: var(--signal); box-shadow: 0 0 0 3px color-mix(in srgb, var(--signal) 14%, transparent); }
+.skill-version-row__badge { padding: 3px 7px; border-radius: 99px; background: color-mix(in srgb, var(--signal) 13%, transparent); color: var(--signal-dim); font-size: 10px; }
+.skill-version-row__protected { color: var(--faint); font-size: 11px; }
+.skill-version-row__remove { border: 0; background: transparent; color: var(--muted); cursor: pointer; font-size: 11px; transition: color .18s var(--ease); }
+.skill-version-row__remove:hover:not(:disabled), .skill-version-row__remove:focus-visible { color: var(--danger); }
+.skill-version-row__remove:disabled { cursor: wait; opacity: .55; }
 .skills-form { display: grid; gap: 12px; margin-top: 30px; padding: 22px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--raised); }
 .skills-form__heading { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; }
 .skills-form__heading .eyebrow { margin-bottom: 7px; }

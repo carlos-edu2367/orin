@@ -281,7 +281,10 @@ export function ChatPage() {
     [conversation?.turns],
   )
 
-  const running = RUNNING_STATES.has(conversation?.state ?? '')
+  // A waiting turn is terminal from the worker's perspective and must keep
+  // the question card and normal composer usable even if the conversation
+  // snapshot briefly still reports the preceding running state.
+  const running = RUNNING_STATES.has(conversation?.state ?? '') && openQuestionTurnIds.size === 0
   const mode = useMemo(() => modeFromEvents(activity.events, conversation?.state ?? 'queued'), [activity.events, conversation?.state])
 
   // Track identities rather than render passes. Snapshot reconciliation can
@@ -557,9 +560,10 @@ function conversationLoadHeadline(error: unknown): string {
   return 'A conversa não pôde ser carregada agora. Tente novamente.'
 }
 
-function terminalConversationState(event: ConversationActivityEvent): 'completed' | 'failed' | 'cancelled' | null {
+function terminalConversationState(event: ConversationActivityEvent): 'completed' | 'failed' | 'cancelled' | 'waiting_user' | null {
   if (event.type === 'turn.completed') return 'completed'
   if (event.type === 'turn.failed') return event.state === 'cancelled' ? 'cancelled' : 'failed'
+  if (event.type === 'turn.waiting_user') return 'waiting_user'
   return null
 }
 

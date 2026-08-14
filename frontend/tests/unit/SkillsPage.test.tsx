@@ -18,8 +18,8 @@ const pdf: SkillSummary = {
 
 function detail(): SkillDetail {
   return {
-    ...debugging, instructions: '# Workflow\n\n1. Reproduce the issue.', dependencies: ['testing'],
-    requires_tools: ['run_command'], versions: ['1.0.0'],
+    ...debugging, source: 'custom', version: '1.0.1', instructions: '# Workflow\n\n1. Reproduce the issue.', dependencies: ['testing'],
+    requires_tools: ['run_command'], versions: ['1.0.1', '1.0.0'],
   }
 }
 
@@ -34,6 +34,7 @@ function skillsClient(overrides: Partial<SkillsClient> = {}): SkillsClient {
       id: 'review', name: input.name, description: input.description, version: input.version, tags: input.tags, source: 'user', available: true,
     })),
     update: vi.fn(),
+    removeVersion: vi.fn((skillId: string, version: string) => Promise.resolve({ ...detail(), versions: [skillId === 'systematic-debugging' && version === '1.0.0' ? '1.0.1' : version] })),
     getAgentSkills: vi.fn(() => Promise.resolve({ mode: 'auto' as const, items: [] })),
     setAgentSkills: vi.fn(),
     listSkillAgents: vi.fn(() => Promise.resolve([])),
@@ -212,6 +213,20 @@ describe('SkillsPage', () => {
       instructions: '# Workflow\n\n1. Reproduce the issue.',
     })))
     expect(await screen.findByText(updated.description)).toBeVisible()
+  })
+
+  it('uninstalls an old version without hiding the active version', async () => {
+    const removeVersion = vi.fn().mockResolvedValue({ ...detail(), versions: ['1.0.1'] })
+    const user = userEvent.setup()
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    renderPage(skillsClient({ removeVersion }), '/skills/systematic-debugging')
+
+    await user.click(await screen.findByRole('button', { name: 'Versões instaladas · 2' }))
+    await user.click(screen.getByRole('button', { name: 'Desinstalar versão 1.0.0' }))
+
+    await waitFor(() => expect(removeVersion).toHaveBeenCalledWith('systematic-debugging', '1.0.0'))
+    expect(await screen.findByText('v1.0.1')).toBeVisible()
+    expect(screen.queryByText('v1.0.0')).not.toBeInTheDocument()
   })
 
   it('configures an agent for pinned skills and saves the selected ids', async () => {

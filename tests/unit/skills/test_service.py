@@ -18,3 +18,19 @@ def test_library_service_creates_lists_and_versions_a_user_skill() -> None:
     assert [item["id"] for item in listed["items"]] == [created["id"]]
     assert detail["instructions"].startswith("# Workflow")
     assert detail["requires_tools"] == ["run_command", "read_file"]
+
+
+def test_library_service_removes_only_an_old_user_version() -> None:
+    service = SkillLibraryService(builtins=())
+    created = service.create({"user_id": "u1", "name": "Cleanup", "description": "Clean safely.", "version": "1.0.0", "instructions": "# v1"})
+    service.update({"user_id": "u1", "skill_id": created["id"], "description": "Clean safely.", "instructions": "# v2"})
+
+    removed = service.remove_version({"user_id": "u1", "skill_id": created["id"], "version": "1.0.0"})
+
+    assert removed["versions"] == ["1.0.1"]
+    try:
+        service.remove_version({"user_id": "u1", "skill_id": created["id"], "version": "1.0.1"})
+    except ValueError as error:
+        assert "current" in str(error)
+    else:
+        raise AssertionError("the active version must remain installed")

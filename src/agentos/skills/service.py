@@ -11,7 +11,7 @@ import re
 from typing import Mapping
 
 from .builtins import load_builtin_skills
-from .models import Skill, SkillDependencies, SkillScope, SkillSource
+from .models import Skill, SkillDependencies, SkillScope, SkillSource, semver_key
 from .registry import SkillNotFound, SkillRegistry
 from .retrieval import RetrievalQuery
 
@@ -109,6 +109,22 @@ class SkillLibraryService:
         self._custom.setdefault(user_id, []).append(candidate)
         return self.get({"user_id": user_id, "skill_id": skill_id})
 
+    def remove_version(self, command: Mapping[str, object]) -> dict[str, object]:
+        """Remove one old user-owned version while keeping the active version."""
+        user_id, skill_id, version = str(command["user_id"]), str(command["skill_id"]), str(command["version"])
+        versions = self._all_versions(user_id, skill_id)
+        target = next((skill for skill in versions if skill.version == version), None)
+        if target is None:
+            raise ValueError("skill version was not found in this user scope")
+        current = max(versions, key=lambda skill: semver_key(skill.version))
+        if target.version == current.version:
+            raise ValueError("the current skill version cannot be uninstalled")
+        self._custom[user_id] = [
+            skill for skill in self._custom.get(user_id, ())
+            if not (skill.id == skill_id and skill.version == version)
+        ]
+        return self.get({"user_id": user_id, "skill_id": skill_id})
+
     @staticmethod
     def _custom_skill(command: Mapping[str, object], *, skill_id: str) -> Skill:
         dependencies = command.get("dependencies") or {}
@@ -154,7 +170,7 @@ class SkillLibraryService:
         return {"items": [{"agent_id": agent_id, "mode": mode} for (owner, agent_id), (mode, ids) in self._agent_preferences.items() if owner == user_id and (mode == "auto" or skill_id in ids)]}
 
     def _all_versions(self, user_id: str, skill_id: str) -> list[Skill]:
-        return sorted((skill for skill in self._custom.get(user_id, ()) if skill.id == skill_id), key=lambda item: item.version, reverse=True)
+        return sorted((skill for skill in self._custom.get(user_id, ()) if skill.id == skill_id), key=lambda item: semver_key(item.version), reverse=True)
 
     @staticmethod
     def _next_patch(version: str) -> str:
