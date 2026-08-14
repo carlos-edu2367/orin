@@ -62,6 +62,12 @@ def test_load_refuses_skills_with_unavailable_required_tools() -> None:
         registry.load("pdf", available_tools=())
 
 
+def test_read_instructions_allows_detail_access_for_an_unavailable_skill() -> None:
+    registry = SkillRegistry([skill("pdf", requires_tools=("filesystem.read",))])
+
+    assert registry.read_instructions("pdf") == "# pdf\n\nFollow the procedure."
+
+
 def test_metadata_marks_a_skill_unavailable_when_its_dependency_is_missing() -> None:
     registry = SkillRegistry([skill("pdf", dependencies=("filesystem",))])
 

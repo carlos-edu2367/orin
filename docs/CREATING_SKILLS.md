@@ -67,6 +67,8 @@ Uma Skill deve capturar um procedimento que ja funcionou, nao uma transcricao in
 4. Teste com um caso esperado, um caso parecido que deve ser excluido e um ambiente sem uma ferramenta requerida.
 5. Publique com `create_skill`. Para refinamento posterior, use `edit_skill`, que cria uma nova versao e preserva o historico.
 
+A publicação também é validada no serviço persistente: ferramentas declaradas precisam existir no runtime e cada Skill dependente precisa estar instalada e disponível. Em caso de falha, nada é persistido e o agente recebe o erro de validação.
+
 Quando um usuario disser que o problema foi resolvido, o agente deve perguntar de forma objetiva: "Quer que eu transforme este procedimento em uma Skill para casos parecidos?" A resposta afirmativa e necessaria antes de criar a Skill automaticamente.
 
 ## Fluxo de uso

@@ -1,3 +1,4 @@
+import pytest
 from sqlalchemy import create_engine
 
 from agentos.persistence.postgres.schema import metadata
@@ -21,6 +22,51 @@ def test_custom_skill_survives_a_new_library_service_instance() -> None:
     assert detail["instructions"] == "# Workflow"
     assert detail["requires_tools"] == ["run_command", "read_file"]
     assert created["id"] in [item["id"] for item in reloaded.list({"user_id": "u1", "query": "deploy", "limit": 20})["items"]]
+
+
+def test_postgres_skill_store_returns_detail_for_an_unavailable_skill() -> None:
+    engine = create_engine("sqlite://")
+    metadata.create_all(engine)
+    service = PostgresSkillLibraryService(engine)
+    legacy = service._custom_skill({
+        "user_id": "u1", "name": "PDF Extractor", "description": "Extract PDF data.",
+        "version": "1.0.0", "requires_tools": ["extract_pdf_text"], "instructions": "# Workflow",
+    }, skill_id="pdf-extractor")
+    service._insert(legacy, user_id="u1")
+
+    detail = service.get({"user_id": "u1", "skill_id": "pdf-extractor"})
+
+    assert detail["available"] is False
+    assert detail["instructions"] == "# Workflow"
+    assert detail["requires_tools"] == ["extract_pdf_text"]
+
+
+def test_postgres_skill_store_rejects_unavailable_tools_before_persisting() -> None:
+    engine = create_engine("sqlite://")
+    metadata.create_all(engine)
+    service = PostgresSkillLibraryService(engine)
+
+    with pytest.raises(ValueError, match="requires unavailable tool 'extract_pdf_text'"):
+        service.create({
+            "user_id": "u1", "name": "PDF Extractor", "description": "Extract PDF data.",
+            "version": "1.0.0", "requires_tools": ["extract_pdf_text"], "instructions": "# Workflow",
+        })
+
+    assert service.list({"user_id": "u1", "query": "pdf", "limit": 20})["items"] == []
+
+
+def test_postgres_skill_store_rejects_missing_skill_dependencies_before_persisting() -> None:
+    engine = create_engine("sqlite://")
+    metadata.create_all(engine)
+    service = PostgresSkillLibraryService(engine)
+
+    with pytest.raises(ValueError, match="dependency 'pdf-reading' is not installed"):
+        service.create({
+            "user_id": "u1", "name": "PDF Extractor", "description": "Extract PDF data.",
+            "version": "1.0.0", "dependencies": {"skills": ["pdf-reading"]}, "instructions": "# Workflow",
+        })
+
+    assert service.list({"user_id": "u1", "query": "pdf", "limit": 20})["items"] == []
 
 
 def test_loaded_skill_records_an_immutable_execution_snapshot() -> None:

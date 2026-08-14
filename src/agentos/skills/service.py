@@ -8,12 +8,40 @@ is the local bootstrap implementation; durable adapters can hydrate the same
 from __future__ import annotations
 
 import re
-from typing import Mapping
+from typing import Collection, Mapping
 
 from .builtins import load_builtin_skills
 from .models import Skill, SkillDependencies, SkillScope, SkillSource, semver_key
 from .registry import SkillNotFound, SkillRegistry
 from .retrieval import RetrievalQuery
+
+
+SKILL_RUNTIME_TOOLS = ("read_file", "write_file", "list_files", "run_command", "fetch_url")
+
+
+class SkillValidationError(ValueError):
+    """Raised before publishing a Skill that cannot be used by the runtime."""
+
+
+def validate_skill_definition(skill: Skill, registry: SkillRegistry, *, available_tools: Collection[str] = SKILL_RUNTIME_TOOLS) -> None:
+    """Reject a Skill unless its runtime prerequisites are valid."""
+    missing_tools = sorted(set(skill.required_tools) - set(available_tools))
+    if missing_tools:
+        raise SkillValidationError(
+            f"Skill requires unavailable tool '{missing_tools[0]}'. Available tools: {', '.join(available_tools)}."
+        )
+
+    for dependency_id in skill.dependencies.skills:
+        if dependency_id == skill.id:
+            raise SkillValidationError(f"Skill cannot depend on itself ('{skill.id}').")
+        try:
+            registry.resolve(dependency_id)
+        except SkillNotFound as error:
+            raise SkillValidationError(f"Skill dependency '{dependency_id}' is not installed.") from error
+        dependency = registry.metadata(dependency_id, available_tools=available_tools)
+        if not dependency.available:
+            reason = dependency.unavailable_reason or "it cannot be used by the runtime"
+            raise SkillValidationError(f"Skill dependency '{dependency_id}' is unavailable: {reason}.")
 
 
 def _id(name: str) -> str:
@@ -61,7 +89,7 @@ class SkillLibraryService:
         text = str(query.get("query") or "")
         source = str(query.get("source") or "").lower()
         limit = max(1, min(int(query.get("limit") or 20), 100))
-        available = ("read_file", "write_file", "list_files", "run_command", "fetch_url")
+        available = SKILL_RUNTIME_TOOLS
         if text:
             items = [item.metadata for item in registry.search(RetrievalQuery(text=text, available_tools=available, limit=100)).items]
         else:
@@ -73,17 +101,18 @@ class SkillLibraryService:
     def get(self, query: Mapping[str, object]) -> dict[str, object]:
         user_id, skill_id = str(query["user_id"]), str(query["skill_id"])
         registry = self._registry(user_id)
-        loaded = registry.load(skill_id, available_tools=("read_file", "write_file", "list_files", "run_command", "fetch_url"))
-        meta = registry.metadata(skill_id, available_tools=("read_file", "write_file", "list_files", "run_command", "fetch_url"))
-        return {**self._summary(meta), "instructions": loaded.instructions,
-                "dependencies": [item.ref.id for item in loaded.dependencies],
-                "requires_tools": list(loaded.skill.required_tools),
+        meta = registry.metadata(skill_id, available_tools=SKILL_RUNTIME_TOOLS)
+        skill = registry.resolve(skill_id)
+        return {**self._summary(meta), "instructions": registry.read_instructions(skill_id),
+                "dependencies": list(skill.dependencies.skills),
+                "requires_tools": list(skill.required_tools),
                 "versions": [skill.version for skill in self._all_versions(user_id, skill_id)]}
 
     def create(self, command: Mapping[str, object]) -> dict[str, object]:
         user_id = str(command["user_id"])
         candidate = self._custom_skill(command, skill_id=_id(str(command["name"])))
         registry = self._registry(user_id)
+        validate_skill_definition(candidate, registry)
         try:
             registry.resolve(candidate.id, version=candidate.version, scope=SkillScope.USER)
         except SkillNotFound:
@@ -106,6 +135,7 @@ class SkillLibraryService:
             "dependencies": command.get("dependencies", {"skills": prior.dependencies.skills, "tools": prior.dependencies.tools}),
         }
         candidate = self._custom_skill(values, skill_id=prior.id)
+        validate_skill_definition(candidate, self._registry(user_id))
         self._custom.setdefault(user_id, []).append(candidate)
         return self.get({"user_id": user_id, "skill_id": skill_id})
 
@@ -179,4 +209,4 @@ class SkillLibraryService:
         return f"{major}.{minor}.{patch + 1}"
 
 
-__all__ = ["SkillLibraryService"]
+__all__ = ["SKILL_RUNTIME_TOOLS", "SkillLibraryService", "SkillValidationError", "validate_skill_definition"]

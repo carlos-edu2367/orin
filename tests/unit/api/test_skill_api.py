@@ -1,6 +1,7 @@
 from fastapi.testclient import TestClient
 
 from agentos.api import ApiServices, AuthenticatedPrincipal, InMemorySecurityService, create_app
+from agentos.skills.service import SkillLibraryService
 
 
 class Skills:
@@ -54,6 +55,19 @@ def test_skills_api_lists_compact_metadata_and_creates_a_custom_skill() -> None:
     assert set(listed.json()["items"][0]) == {"id", "name", "description", "version", "tags", "source", "available"}
     assert created.status_code == 201
     assert created.json()["source"] == "custom"
+
+
+def test_skills_api_rejects_a_custom_skill_with_unavailable_requirements() -> None:
+    security = InMemorySecurityService()
+    security.add_pat("pat", AuthenticatedPrincipal("user-1", "credential-1", frozenset({"api"})))
+    client = TestClient(create_app(ApiServices(security=security, skills=SkillLibraryService(builtins=()))))
+    headers = {"Authorization": "Bearer pat", "Idempotency-Key": "skill-unavailable-1"}
+
+    created = client.post(
+        "/v1/skills", headers=headers,
+        json={"name": "PDF Extractor", "description": "Extract PDF data.", "requires_tools": ["extract_pdf_text"], "instructions": "# Workflow"},
+    )
+    assert created.status_code == 422
 
 
 def test_skills_api_manages_agent_auto_discovery_and_pinned_skills() -> None:

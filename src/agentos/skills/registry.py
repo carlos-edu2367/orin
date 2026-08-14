@@ -104,6 +104,16 @@ class SkillRegistry:
         tools = frozenset(available_tools)
         return self._load(self.resolve(skill_id, version=version, scope=scope), tools, (), 0)
 
+    def read_instructions(self, skill_id: str, *, version: str | None = None, scope: SkillScope | None = None) -> str:
+        """Read a skill body without requiring it to be executable now.
+
+        Detail views and diagnostics must remain available for a skill whose
+        required tools are not present in the current runtime.  ``load`` keeps
+        its strict availability checks for execution; this method only applies
+        the normal package-integrity and lazy-content checks.
+        """
+        return self._with_instructions(self.resolve(skill_id, version=version, scope=scope)).instructions
+
     def read_resource(self, skill_id: str, resource_path: str, *, version: str | None = None, available_tools: Collection[str] = (), scope: SkillScope | None = None) -> str:
         """Read a package resource only after ordinary availability checks."""
         loaded = self.load(skill_id, version=version, available_tools=available_tools, scope=scope)

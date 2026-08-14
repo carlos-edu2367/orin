@@ -103,6 +103,11 @@ def test_agent_skill_publishing_requires_validation_and_available_tools(tmp_path
     base["instructions"] += "\n\n## Validation\n\n1. Run a focused test."
     base["requires_tools"] = ["tool-that-does-not-exist"]
     assert tools.invoke("create_skill", base).status == "failed"
+    base["requires_tools"] = []
+    base["dependencies"] = {"skills": ["skill-that-does-not-exist"]}
+    dependency_error = tools.invoke("create_skill", base)
+    assert dependency_error.status == "failed"
+    assert "not installed" in dependency_error.content
 
 
 def test_agent_edits_only_its_custom_skill_as_a_new_version(tmp_path: Path) -> None:

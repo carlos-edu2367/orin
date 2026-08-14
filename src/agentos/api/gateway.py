@@ -815,7 +815,10 @@ def create_app(services: ApiServices) -> FastAPI:
         principal = principal_for(request, mutable=True)
         services.security.check_rate_limit(principal, action="skills.create", origin=request.headers.get("origin"))
         services.security.authorize(principal, action="skills.create", resource_id=None, purpose="skills.create")
-        result = _require_port(services.skills).create({"user_id": principal.user_id, **payload.model_dump(), "idempotency_key": _idempotency(request), "purpose": "skills.create"})
+        try:
+            result = _require_port(services.skills).create({"user_id": principal.user_id, **payload.model_dump(), "idempotency_key": _idempotency(request), "purpose": "skills.create"})
+        except ValueError as error:
+            raise ApplicationValidationError(str(error)) from error
         return JSONResponse(_jsonable(result), status_code=201)
 
     @app.put("/v1/skills/{skill_id}")
@@ -824,7 +827,10 @@ def create_app(services: ApiServices) -> FastAPI:
         services.security.check_rate_limit(principal, action="skills.update", origin=request.headers.get("origin"))
         services.security.authorize(principal, action="skills.update", resource_id=skill_id, purpose="skills.update")
         fields = payload.model_dump(exclude_none=True)
-        result = _require_port(services.skills).update({"user_id": principal.user_id, "skill_id": skill_id, **fields, "idempotency_key": _idempotency(request), "purpose": "skills.update"})
+        try:
+            result = _require_port(services.skills).update({"user_id": principal.user_id, "skill_id": skill_id, **fields, "idempotency_key": _idempotency(request), "purpose": "skills.update"})
+        except ValueError as error:
+            raise ApplicationValidationError(str(error)) from error
         return JSONResponse(_jsonable(result))
 
     @app.delete("/v1/skills/{skill_id}/versions/{version}")

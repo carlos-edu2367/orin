@@ -13,7 +13,7 @@ from agentos.persistence.postgres.schema import agent_skills, execution_skills, 
 from agentos.skills.builtins import load_builtin_skills
 from agentos.skills.models import Skill, SkillDependencies, SkillScope, SkillSource, semver_key
 from agentos.skills.registry import SkillNotFound, SkillRegistry
-from agentos.skills.service import _id
+from agentos.skills.service import SKILL_RUNTIME_TOOLS, _id, validate_skill_definition
 
 
 def _now() -> datetime:
@@ -96,13 +96,15 @@ class PostgresSkillLibraryService:
     def get(self, query: Mapping[str, object]) -> dict[str, object]:
         user_id, skill_id = str(query["user_id"]), str(query["skill_id"])
         registry = self.registry_for(user_id)
-        available = ("read_file", "write_file", "list_files", "run_command", "fetch_url")
-        loaded, metadata = registry.load(skill_id, available_tools=available), registry.metadata(skill_id, available_tools=available)
+        available = SKILL_RUNTIME_TOOLS
+        metadata = registry.metadata(skill_id, available_tools=available)
+        skill = registry.resolve(skill_id)
         versions = [skill.version for skill in self._skills_for(user_id) if skill.id == skill_id]
-        return {**self._summary(metadata), "instructions": loaded.instructions, "dependencies": [item.ref.id for item in loaded.dependencies], "requires_tools": list(loaded.skill.required_tools), "versions": sorted(set(versions), key=semver_key, reverse=True)}
+        return {**self._summary(metadata), "instructions": registry.read_instructions(skill_id), "dependencies": list(skill.dependencies.skills), "requires_tools": list(skill.required_tools), "versions": sorted(set(versions), key=semver_key, reverse=True)}
 
     def create(self, command: Mapping[str, object]) -> dict[str, object]:
         skill = self._custom_skill(command, skill_id=_id(str(command["name"])))
+        validate_skill_definition(skill, self.registry_for(str(command["user_id"])))
         try:
             self._insert(skill, user_id=str(command["user_id"]))
         except IntegrityError as error:
@@ -125,6 +127,7 @@ class PostgresSkillLibraryService:
             "dependencies": command.get("dependencies", {"skills": prior.dependencies.skills, "tools": prior.dependencies.tools}),
         }
         skill = self._custom_skill(values, skill_id=prior.id)
+        validate_skill_definition(skill, self.registry_for(user_id))
         self._insert(skill, user_id=user_id)
         return self.get({"user_id": user_id, "skill_id": skill_id})
 
