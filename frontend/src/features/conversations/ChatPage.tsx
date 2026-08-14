@@ -97,12 +97,15 @@ export function ChatPage() {
   const [turnModelCatalog, setTurnModelCatalog] = useState<ProviderModel | null>(null)
   const [visionCandidates, setVisionCandidates] = useState<ProviderModel[]>([])
   const [visionSetting, setVisionSetting] = useState<VisionModelSetting | null>(null)
+  const [streamedByMessage, setStreamedByMessage] = useState<Map<string, string>>(() => new Map())
 
   const cursorRef = useRef('0')
   const scrollRef = useRef<HTMLDivElement>(null)
   const pinnedRef = useRef(true)
   const observedContentRef = useRef(new Set<string>())
   const observedConversationRef = useRef(conversationId)
+  const streamedDeltaIdsRef = useRef(new Set<string>())
+  const streamedConversationRef = useRef(conversationId)
   const showOverview = location.pathname.endsWith('/overview')
   const conversationPath = projectId === undefined
     ? `/chats/${encodeURIComponent(conversationId)}`
@@ -240,16 +243,33 @@ export function ChatPage() {
     visionModelName: visionModel?.model_id ?? null,
   })
 
-  // Streamed text belongs to the assistant message the deltas name; the durable
-  // snapshot wins as soon as it catches up, so a reload shows the same text.
-  const streamedByMessage = useMemo(() => {
-    const map = new Map<string, string>()
-    for (const event of activity.events) {
-      if (event.type !== 'assistant.delta' || !event.messageId || !event.content) continue
-      map.set(event.messageId, (map.get(event.messageId) ?? '') + event.content)
+  // Keep the streamed text separate from the bounded activity feed. The feed
+  // intentionally retains only its last 500 events, but a long assistant reply
+  // can contain more than 500 deltas before the durable snapshot catches up.
+  useEffect(() => {
+    if (streamedConversationRef.current !== conversationId) {
+      streamedConversationRef.current = conversationId
+      streamedDeltaIdsRef.current = new Set()
+      setStreamedByMessage(new Map())
+      return
     }
-    return map
-  }, [activity.events])
+    const unseen = activity.events.filter((event) => (
+      event.type === 'assistant.delta'
+      && Boolean(event.messageId)
+      && Boolean(event.content)
+      && !streamedDeltaIdsRef.current.has(event.eventId)
+    ))
+    if (unseen.length === 0) return
+    for (const event of unseen) streamedDeltaIdsRef.current.add(event.eventId)
+    setStreamedByMessage((current) => {
+      const next = new Map(current)
+      for (const event of unseen) {
+        const messageId = event.messageId as string
+        next.set(messageId, (next.get(messageId) ?? '') + event.content)
+      }
+      return next
+    })
+  }, [activity.events, conversationId])
 
   const messages = useMemo(() => {
     const base = (conversation?.messages ?? []).map((item) => {
@@ -322,10 +342,11 @@ export function ChatPage() {
     if (!pinnedRef.current) return
     const element = scrollRef.current
     if (!element) return
-    // jsdom has no scrollTo; assigning scrollTop is the portable fallback.
-    if (typeof element.scrollTo === 'function') element.scrollTo({ top: element.scrollHeight, behavior: reduced ? 'auto' : 'smooth' })
-    else element.scrollTop = element.scrollHeight
-  }, [messages, activity.events.length, reduced])
+    // Streaming updates must follow immediately. Repeated smooth animations
+    // compete with a person's wheel/touch scrolling and can leave the viewport
+    // oscillating behind the response.
+    element.scrollTop = element.scrollHeight
+  }, [messages, activity.events.length])
 
   const scrollToLatest = useCallback(() => {
     const element = scrollRef.current

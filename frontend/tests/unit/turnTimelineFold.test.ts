@@ -61,6 +61,20 @@ describe('buildTurnTimeline', () => {
 
     expect(timeline).toEqual([{ id: expect.any(String), kind: 'text', content: 'Deste turno.' }])
   })
+
+  it('prepends text that fell out of the bounded activity window', () => {
+    const events = [
+      event({ type: 'assistant.delta', messageId: 'msg-1', content: 'parte-2' }),
+      event({ type: 'tool.finished', toolName: 'read_file', toolKind: 'filesystem', invocationId: 'call-1', status: 'succeeded', summary: 'Leu a.txt' }),
+      event({ type: 'assistant.delta', messageId: 'msg-1', content: 'parte-3' }),
+    ]
+
+    const timeline = buildTurnTimeline(events, 'turn-1', 'msg-1', 'parte-1parte-2parte-3')
+
+    expect(timeline[0]).toMatchObject({ kind: 'text', content: 'parte-1parte-2' })
+    expect(timeline[1].kind).toBe('activity')
+    expect(timeline[2]).toMatchObject({ kind: 'text', content: 'parte-3' })
+  })
 })
 
 describe('resolveTurnId', () => {

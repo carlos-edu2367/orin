@@ -21,7 +21,7 @@ export function resolveTurnId(events: ConversationActivityEvent[], messageId: st
  * `summarizeActivities` so a run of same-family tool calls still collapses
  * into one card — just interrupted by whatever text fell between them.
  */
-export function buildTurnTimeline(events: ConversationActivityEvent[], turnId: string, messageId: string): TimelineItem[] {
+export function buildTurnTimeline(events: ConversationActivityEvent[], turnId: string, messageId: string, completeContent = ''): TimelineItem[] {
   const turnEvents = events.filter((event) => event.turnId === turnId)
   const settled = new Set(
     turnEvents.filter((event) => event.type === 'tool.finished' && event.invocationId).map((event) => event.invocationId as string),
@@ -70,7 +70,30 @@ export function buildTurnTimeline(events: ConversationActivityEvent[], turnId: s
   }
   flushGroup()
   flushText()
-  return items
+  return reconcileCompleteText(items, completeContent, messageId)
+}
+
+/**
+ * Activity history is intentionally bounded, while the message projection is
+ * durable. When the history window rolls over during a long stream, prepend the
+ * missing text to the first surviving text item instead of showing a truncated
+ * answer. If no text delta survived, place the complete message before the
+ * remaining activity timeline.
+ */
+function reconcileCompleteText(items: TimelineItem[], completeContent: string, messageId: string): TimelineItem[] {
+  if (!completeContent) return items
+  const visibleContent = items.filter((item): item is TimelineTextItem => item.kind === 'text').map((item) => item.content).join('')
+  if (visibleContent === completeContent) return items
+  if (visibleContent && !completeContent.endsWith(visibleContent)) return items
+  const missingPrefix = completeContent.slice(0, completeContent.length - visibleContent.length)
+  if (!missingPrefix) return items
+  const firstTextIndex = items.findIndex((item) => item.kind === 'text')
+  if (firstTextIndex < 0) return [{ id: `text:complete:${messageId}`, kind: 'text', content: completeContent }, ...items]
+  const first = items[firstTextIndex]
+  if (first.kind !== 'text') return items
+  const next = [...items]
+  next[firstTextIndex] = { ...first, content: missingPrefix + first.content }
+  return next
 }
 
 /**
@@ -81,7 +104,7 @@ export function buildTurnTimeline(events: ConversationActivityEvent[], turnId: s
  * existing flat activity stream instead of dropping it.
  */
 export function buildMessageTimelines(
-  messages: { message_id: string; role: string }[],
+  messages: { message_id: string; role: string; content?: string }[],
   events: ConversationActivityEvent[],
 ): { timelines: Map<string, TimelineItem[]>; claimedTurnIds: Set<string> } {
   const timelines = new Map<string, TimelineItem[]>()
@@ -90,7 +113,7 @@ export function buildMessageTimelines(
     if (message.role !== 'assistant') continue
     const turnId = resolveTurnId(events, message.message_id)
     if (!turnId) continue
-    const timeline = buildTurnTimeline(events, turnId, message.message_id)
+    const timeline = buildTurnTimeline(events, turnId, message.message_id, message.content ?? '')
     if (timeline.length === 0) continue
     timelines.set(message.message_id, timeline)
     claimedTurnIds.add(turnId)

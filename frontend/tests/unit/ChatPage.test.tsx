@@ -414,6 +414,92 @@ describe('ChatPage', () => {
     closeStream()
   })
 
+  it('updates a pinned viewport without queuing smooth scroll animations per event', async () => {
+    let emitActivity: () => void = () => {}
+    let closeStream: () => void = () => {}
+    globalThis.fetch = vi.fn<typeof fetch>().mockImplementation(async (input) => {
+      const url = typeof input === 'string' ? input : String(input)
+      if (url.includes('/events?')) {
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            closeStream = () => controller.close()
+            emitActivity = () => controller.enqueue(new TextEncoder().encode(
+              `id: a.10\nevent: tool.started\ndata: ${JSON.stringify(activity(10, 'tool.started', 'Executando busca', { tool_name: 'search', tool_kind: 'web', invocation_id: 'call-10' }))}\n\n`,
+            ))
+          },
+        })
+        return new Response(body, { headers: { 'Content-Type': 'text/event-stream' } })
+      }
+      if (url.endsWith('/v1/projects/sidebar')) return new Response(JSON.stringify({ items: [] }), { headers: { 'Content-Type': 'application/json' } })
+      if (url.endsWith('/v1/conversations')) return new Response(JSON.stringify({ items: [{ conversation_id: CONVERSATION_ID, title: 'Conversa de teste', state: 'running' }] }), { headers: { 'Content-Type': 'application/json' } })
+      if (url.includes(`/v1/conversations/${CONVERSATION_ID}`)) return new Response(JSON.stringify(snapshotBody({
+        state: 'running',
+        messages: [{ message_id: 'msg-1', role: 'assistant', content: 'Resposta.', status: 'streaming', retryable: false }],
+        activities: [],
+      })), { headers: { 'Content-Type': 'application/json' } })
+      return new Response('{}', { headers: { 'Content-Type': 'application/json' } })
+    })
+
+    const { container } = renderChat()
+    await screen.findByText('Resposta.')
+    const scroll = container.querySelector('.chat__scroll') as HTMLDivElement
+    const scrollTo = vi.fn()
+    Object.defineProperties(scroll, {
+      clientHeight: { configurable: true, value: 400 },
+      scrollHeight: { configurable: true, value: 1_000 },
+      scrollTop: { configurable: true, writable: true, value: 600 },
+      scrollTo: { configurable: true, value: scrollTo },
+    })
+    fireEvent.scroll(scroll)
+    scrollTo.mockClear()
+
+    emitActivity()
+
+    await waitFor(() => expect(scroll.scrollTop).toBe(1_000))
+    expect(scrollTo).not.toHaveBeenCalled()
+    closeStream()
+  })
+
+  it('keeps streamed text after the bounded activity window rolls over', async () => {
+    const prefix = Array.from({ length: 499 }, (_, index) => `parte-${index + 1}|`).join('')
+    let emitDelta: (sequence: number) => void = () => {}
+    let closeStream: () => void = () => {}
+    const initialActivities = Array.from({ length: 499 }, (_, index) => activity(index + 1, 'assistant.delta', 'Resposta em andamento', {
+      message_id: 'msg-1', content: `parte-${index + 1}|`,
+    }))
+    globalThis.fetch = vi.fn<typeof fetch>().mockImplementation(async (input) => {
+      const url = typeof input === 'string' ? input : String(input)
+      if (url.includes('/events?')) {
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            closeStream = () => controller.close()
+            emitDelta = (sequence) => controller.enqueue(new TextEncoder().encode(
+              `id: a.${sequence}\nevent: assistant.delta\ndata: ${JSON.stringify(activity(sequence, 'assistant.delta', 'Resposta em andamento', { message_id: 'msg-1', content: `parte-${sequence}|` }))}\n\n`,
+            ))
+          },
+        })
+        return new Response(body, { headers: { 'Content-Type': 'text/event-stream' } })
+      }
+      if (url.endsWith('/v1/projects/sidebar')) return new Response(JSON.stringify({ items: [] }), { headers: { 'Content-Type': 'application/json' } })
+      if (url.endsWith('/v1/conversations')) return new Response(JSON.stringify({ items: [{ conversation_id: CONVERSATION_ID, title: 'Conversa de teste', state: 'running' }] }), { headers: { 'Content-Type': 'application/json' } })
+      if (url.includes(`/v1/conversations/${CONVERSATION_ID}`)) return new Response(JSON.stringify(snapshotBody({
+        state: 'running',
+        messages: [{ message_id: 'msg-1', role: 'assistant', content: '', status: 'streaming', retryable: false }],
+        activities: initialActivities,
+      })), { headers: { 'Content-Type': 'application/json' } })
+      return new Response('{}', { headers: { 'Content-Type': 'application/json' } })
+    })
+
+    renderChat()
+    await waitFor(() => expect(document.querySelector('.bubble--assistant .markdown-message')?.textContent).toContain('parte-1|'))
+
+    emitDelta(500)
+    emitDelta(501)
+
+    await waitFor(() => expect(document.querySelector('.bubble--assistant .markdown-message')?.textContent).toBe(`${prefix}parte-500|parte-501|`))
+    closeStream()
+  })
+
   it('keeps the project chat route when toggling the overview', async () => {
     globalThis.fetch = stubFetch(() => ({ state: 'completed', messages: [], activities: [] }))
 
