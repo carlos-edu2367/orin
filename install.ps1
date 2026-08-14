@@ -36,7 +36,28 @@ function Get-Manifest([string]$RequestedVersion) {
         "download/v$normalized/release.json"
     }
     $uri = "https://github.com/$repository/releases/$asset"
-    return Invoke-RestMethod -Uri $uri -MaximumRedirection 3
+    # GitHub release assets are served as application/octet-stream even when
+    # the filename ends in .json. PowerShell versions can therefore return the
+    # response as text or byte[] instead of deserializing it as JSON. Parse the
+    # body explicitly so `orin update` works on every supported shell.
+    $response = Invoke-WebRequest -Uri $uri -MaximumRedirection 3 -UseBasicParsing
+    $body = if ($response.Content -is [byte[]]) {
+        [System.Text.Encoding]::UTF8.GetString($response.Content)
+    }
+    else {
+        [string]$response.Content
+    }
+    $body = $body.TrimStart([char]0xFEFF)
+    try {
+        $manifest = $body | ConvertFrom-Json -ErrorAction Stop
+    }
+    catch {
+        throw "Release manifest is not valid JSON: $($_.Exception.Message)"
+    }
+    if ($null -eq $manifest -or $manifest -is [string]) {
+        throw 'Release manifest did not contain a JSON object.'
+    }
+    return $manifest
 }
 
 function Get-DesktopPath {

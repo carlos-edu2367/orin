@@ -26,12 +26,14 @@ Remove-Item -LiteralPath $archive -Force -ErrorAction SilentlyContinue
 Compress-Archive -Path (Join-Path $source '*') -DestinationPath $archive -CompressionLevel Optimal
 $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
 
-@{
+$manifest = @{
     version = $Version
     archive_url = "https://github.com/carlos-edu2367/orin/releases/download/v$Version/$archiveName"
     archive_sha256 = $hash
     release_url = "https://github.com/carlos-edu2367/orin/releases/tag/v$Version"
-} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $output 'release.json') -Encoding utf8
+} | ConvertTo-Json
+$manifestPath = Join-Path $output 'release.json'
+[System.IO.File]::WriteAllText($manifestPath, $manifest, [System.Text.UTF8Encoding]::new($false))
 
 Copy-Item -LiteralPath (Join-Path $root 'install.ps1') -Destination (Join-Path $output 'install.ps1') -Force
 Write-Host "Release archive: $archive"
