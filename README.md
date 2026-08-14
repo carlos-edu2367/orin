@@ -72,7 +72,7 @@ irm https://github.com/carlos-edu2367/orin/releases/latest/download/install.ps1 
 
 The installer verifies the release SHA-256 before activation, creates the local
 configuration and asks whether to create an **Orin Desktop** shortcut. The
-shortcut starts the launcher hidden in the background, then opens only the
+shortcut starts a native Windows PowerShell launcher hidden in the background, then opens only the
 desktop app. It adds `orin` to the user PATH. The source-controlled [install.ps1](install.ps1) is
 the same release installer and may be downloaded, reviewed and executed locally
 instead of using a one-liner.

@@ -12,7 +12,8 @@ $programsRoot = Join-Path $env:LOCALAPPDATA 'Programs\Orin'
 $stateRoot = Join-Path $env:LOCALAPPDATA 'Orin'
 $binRoot = Join-Path $stateRoot 'bin'
 $shim = Join-Path $binRoot 'orin.cmd'
-$desktopLauncher = Join-Path $binRoot 'orin-desktop.vbs'
+$desktopLauncher = Join-Path $binRoot 'orin-desktop.ps1'
+$legacyDesktopLauncher = Join-Path $binRoot 'orin-desktop.vbs'
 
 function Set-UserPathEntry([string]$Directory, [bool]$Remove) {
     $existing = [Environment]::GetEnvironmentVariable('Path', 'User')
@@ -48,6 +49,7 @@ if ($Uninstall) {
     }
     Remove-Item -LiteralPath $shim -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $desktopLauncher -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $legacyDesktopLauncher -Force -ErrorAction SilentlyContinue
     $shortcut = Join-Path (Get-DesktopPath) 'Orin Desktop.lnk'
     Remove-Item -LiteralPath $shortcut -Force -ErrorAction SilentlyContinue
     Set-UserPathEntry $binRoot $true
@@ -98,10 +100,11 @@ finally {
 "%LOCALAPPDATA%\Programs\Orin\current\resources\runtime\orin.exe" %*
 "@ | Set-Content -LiteralPath $shim -Encoding Ascii
 
-@"
-Set shell = CreateObject("WScript.Shell")
-shell.Run Chr(34) & shell.ExpandEnvironmentStrings("%LOCALAPPDATA%\Programs\Orin\current\resources\runtime\orin.exe") & Chr(34) & " --desktop", 0, False
-"@ | Set-Content -LiteralPath $desktopLauncher -Encoding Ascii
+@'
+$runtime = Join-Path $env:LOCALAPPDATA 'Programs\Orin\current\resources\runtime\orin.exe'
+Start-Process -FilePath $runtime -ArgumentList '--desktop' -WindowStyle Hidden
+'@ | Set-Content -LiteralPath $desktopLauncher -Encoding Ascii
+Remove-Item -LiteralPath $legacyDesktopLauncher -Force -ErrorAction SilentlyContinue
 Set-UserPathEntry $binRoot $false
 
 $shortcut = Join-Path (Get-DesktopPath) 'Orin Desktop.lnk'
@@ -115,8 +118,8 @@ if (-not $updateDesktopShortcut -and -not $NoDesktopShortcut) {
 if ($updateDesktopShortcut) {
     $shell = New-Object -ComObject WScript.Shell
     $link = $shell.CreateShortcut($shortcut)
-    $link.TargetPath = Join-Path $env:WINDIR 'System32\wscript.exe'
-    $link.Arguments = ('"{0}"' -f $desktopLauncher)
+    $link.TargetPath = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $link.Arguments = ('-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}"' -f $desktopLauncher)
     $link.WorkingDirectory = $binRoot
     $link.IconLocation = (Join-Path $programsRoot 'current\Orin Desktop.exe')
     $link.Save()
