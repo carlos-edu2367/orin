@@ -12,6 +12,7 @@ $programsRoot = Join-Path $env:LOCALAPPDATA 'Programs\Orin'
 $stateRoot = Join-Path $env:LOCALAPPDATA 'Orin'
 $binRoot = Join-Path $stateRoot 'bin'
 $shim = Join-Path $binRoot 'orin.cmd'
+$desktopLauncher = Join-Path $binRoot 'orin-desktop.vbs'
 
 function Set-UserPathEntry([string]$Directory, [bool]$Remove) {
     $existing = [Environment]::GetEnvironmentVariable('Path', 'User')
@@ -46,6 +47,7 @@ if ($Uninstall) {
         if ($answer -notmatch '^(?i:y|yes)$') { return }
     }
     Remove-Item -LiteralPath $shim -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $desktopLauncher -Force -ErrorAction SilentlyContinue
     $shortcut = Join-Path (Get-DesktopPath) 'Orin Desktop.lnk'
     Remove-Item -LiteralPath $shortcut -Force -ErrorAction SilentlyContinue
     Set-UserPathEntry $binRoot $true
@@ -95,20 +97,29 @@ finally {
 @echo off
 "%LOCALAPPDATA%\Programs\Orin\current\resources\runtime\orin.exe" %*
 "@ | Set-Content -LiteralPath $shim -Encoding Ascii
+
+@"
+Set shell = CreateObject("WScript.Shell")
+shell.Run Chr(34) & shell.ExpandEnvironmentStrings("%LOCALAPPDATA%\Programs\Orin\current\resources\runtime\orin.exe") & Chr(34) & " --desktop", 0, False
+"@ | Set-Content -LiteralPath $desktopLauncher -Encoding Ascii
 Set-UserPathEntry $binRoot $false
 
-if (-not $NoDesktopShortcut) {
+$shortcut = Join-Path (Get-DesktopPath) 'Orin Desktop.lnk'
+$updateDesktopShortcut = Test-Path -LiteralPath $shortcut
+if (-not $updateDesktopShortcut -and -not $NoDesktopShortcut) {
     $answer = Read-Host 'Do you want to create a desktop shortcut that opens Orin Desktop automatically? [Y/n]'
     if ($answer -notmatch '^(?i:n|no)$') {
-        $shortcut = Join-Path (Get-DesktopPath) 'Orin Desktop.lnk'
-        $shell = New-Object -ComObject WScript.Shell
-        $link = $shell.CreateShortcut($shortcut)
-        $link.TargetPath = Join-Path $programsRoot 'current\resources\runtime\orin.exe'
-        $link.Arguments = '--desktop'
-        $link.WorkingDirectory = Join-Path $programsRoot 'current\resources\runtime'
-        $link.IconLocation = (Join-Path $programsRoot 'current\Orin Desktop.exe')
-        $link.Save()
+        $updateDesktopShortcut = $true
     }
+}
+if ($updateDesktopShortcut) {
+    $shell = New-Object -ComObject WScript.Shell
+    $link = $shell.CreateShortcut($shortcut)
+    $link.TargetPath = Join-Path $env:WINDIR 'System32\wscript.exe'
+    $link.Arguments = ('"{0}"' -f $desktopLauncher)
+    $link.WorkingDirectory = $binRoot
+    $link.IconLocation = (Join-Path $programsRoot 'current\Orin Desktop.exe')
+    $link.Save()
 }
 
 Write-Host "Orin $installVersion is installed. Run 'orin' or open Orin Desktop." -ForegroundColor Green
