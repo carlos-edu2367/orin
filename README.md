@@ -77,8 +77,18 @@ desktop app. It adds `orin` to the user PATH. The source-controlled [install.ps1
 the same release installer and may be downloaded, reviewed and executed locally
 instead of using a one-liner.
 
-`orin update` will use this same verified release flow. The application may
-recommend an available release, but it never replaces itself in the background.
+`orin update` will use this same verified release flow. The desktop app shows a
+taskbar update flag when it finds a newer verified release, but it never
+replaces itself in the background.
+
+To completely remove an installed copy, including its local data and
+configuration, close the desktop window and run:
+
+```powershell
+orin --uninstall
+```
+
+This command refuses to run from a source checkout.
 
 ## Start from source
 

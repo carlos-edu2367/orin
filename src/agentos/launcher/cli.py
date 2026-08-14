@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import subprocess
 import sys
 from logging.handlers import RotatingFileHandler
@@ -71,7 +72,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--version", action="store_true", help="print the Orin version and exit")
     parser.add_argument("--update", action="store_true", help="install the latest verified Orin release")
-    parser.set_defaults(port=None, no_browser=False, verbose=False, desktop=False, desktop_devtools=False, desktop_reuse=False, update=False, command=None)
+    parser.add_argument("--uninstall", action="store_true", help="completely remove this installed Orin runtime and its local data")
+    parser.set_defaults(port=None, no_browser=False, verbose=False, desktop=False, desktop_devtools=False, desktop_reuse=False, update=False, uninstall=False, command=None)
 
     commands = parser.add_subparsers(dest="command", metavar="command")
     commands.add_parser("start", parents=[shared], help="start the Orin runtime (the default)")
@@ -258,6 +260,34 @@ def command_update(paths: OrinPaths, profile: RuntimeProfile, console: Console) 
     return int(result.returncode)
 
 
+def command_uninstall(paths: OrinPaths, profile: RuntimeProfile, console: Console) -> int:
+    """Remove a packaged installation without ever targeting a source checkout."""
+    if profile.is_development:
+        console.error("--uninstall only applies to an installed Orin runtime. It will not delete this source checkout.")
+        return 2
+    installer = profile.installer
+    if not installer.is_file():
+        console.error(f"The release installer is missing: {installer}. Reinstall Orin to restore it.")
+        return 1
+    if running_instance(paths) is not None:
+        code = command_stop(paths, console)
+        if code != 0:
+            return code
+    console.line("\n  Removing this Orin installation and its local data...")
+    try:
+        result = subprocess.run(
+            [
+                "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(installer),
+                "-Uninstall", "-Force", "-WaitForPid", str(os.getpid()),
+            ],
+            check=False,
+        )
+    except OSError as error:
+        console.error(f"Could not start the uninstaller: {error}")
+        return 1
+    return int(result.returncode)
+
+
 # -- entry point --------------------------------------------------------
 
 
@@ -275,7 +305,7 @@ def main(argv: list[str] | None = None) -> int:
 
     paths = orin_paths()
     console = default_console(verbose=getattr(arguments, "verbose", False))
-    command = "update" if arguments.update else getattr(arguments, "command", None)
+    command = "uninstall" if arguments.uninstall else "update" if arguments.update else getattr(arguments, "command", None)
 
     try:
         if command in (None, "start"):
@@ -286,6 +316,8 @@ def main(argv: list[str] | None = None) -> int:
             return command_restart(arguments, paths, profile, console)
         if command == "update":
             return command_update(paths, profile, console)
+        if command == "uninstall":
+            return command_uninstall(paths, profile, console)
         if command == "status":
             return command_status(paths, profile, console)
         if command == "logs":

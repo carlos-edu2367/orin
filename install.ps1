@@ -3,7 +3,8 @@ param(
     [string]$Version = 'latest',
     [switch]$NoDesktopShortcut,
     [switch]$Force,
-    [switch]$Uninstall
+    [switch]$Uninstall,
+    [int]$WaitForPid = 0
 )
 
 $ErrorActionPreference = 'Stop'
@@ -42,9 +43,43 @@ function Get-DesktopPath {
     return [Environment]::GetFolderPath([Environment+SpecialFolder]::DesktopDirectory)
 }
 
+function Start-DeferredRemoval([int]$ProcessId) {
+    $cleanup = Join-Path ([System.IO.Path]::GetTempPath()) ("orin-uninstall-{0}-{1}.ps1" -f $ProcessId, $PID)
+    @'
+param(
+    [int]$WaitForPid,
+    [string]$ProgramsRoot,
+    [string]$StateRoot
+)
+
+$ErrorActionPreference = 'SilentlyContinue'
+function Test-OrinRoot([string]$Actual, [string]$Relative) {
+    $expected = [System.IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA $Relative)).TrimEnd('\')
+    $candidate = [System.IO.Path]::GetFullPath($Actual).TrimEnd('\')
+    return [string]::Equals($candidate, $expected, [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+if (-not (Test-OrinRoot $ProgramsRoot 'Programs\Orin') -or -not (Test-OrinRoot $StateRoot 'Orin')) { exit 1 }
+if ($WaitForPid -gt 0) {
+    try { Wait-Process -Id $WaitForPid } catch {}
+}
+for ($attempt = 0; $attempt -lt 180; $attempt++) {
+    Remove-Item -LiteralPath $ProgramsRoot -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $StateRoot -Recurse -Force -ErrorAction SilentlyContinue
+    if (-not (Test-Path -LiteralPath $ProgramsRoot) -and -not (Test-Path -LiteralPath $StateRoot)) { exit 0 }
+    Start-Sleep -Seconds 1
+}
+exit 1
+'@ | Set-Content -LiteralPath $cleanup -Encoding utf8
+    Start-Process -FilePath 'powershell.exe' -ArgumentList @(
+        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $cleanup,
+        '-WaitForPid', $ProcessId, '-ProgramsRoot', $programsRoot, '-StateRoot', $stateRoot
+    ) -WindowStyle Hidden
+}
+
 if ($Uninstall) {
     if (-not $Force) {
-        $answer = Read-Host 'Remove the Orin command and desktop shortcut? [y/N]'
+        $answer = Read-Host 'Completely remove Orin, including all local data and configuration? [y/N]'
         if ($answer -notmatch '^(?i:y|yes)$') { return }
     }
     Remove-Item -LiteralPath $shim -Force -ErrorAction SilentlyContinue
@@ -53,7 +88,8 @@ if ($Uninstall) {
     $shortcut = Join-Path (Get-DesktopPath) 'Orin Desktop.lnk'
     Remove-Item -LiteralPath $shortcut -Force -ErrorAction SilentlyContinue
     Set-UserPathEntry $binRoot $true
-    Write-Host 'Orin command removed. Your data and configuration were preserved.' -ForegroundColor Yellow
+    Start-DeferredRemoval $WaitForPid
+    Write-Host 'Orin removal was scheduled. The runtime, local data and configuration will be removed after Orin exits.' -ForegroundColor Yellow
     return
 }
 

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, ipcMain, Menu, shell } = require('electron')
+const { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, shell } = require('electron')
 const { spawn } = require('node:child_process')
 const fs = require('node:fs/promises')
 const path = require('node:path')
@@ -96,28 +96,53 @@ function registerIpc() {
 
 async function checkForUpdate() {
   const cache = path.join(app.getPath('userData'), 'orin-update.json')
+  let prior = null
   try {
-    const prior = JSON.parse(await fs.readFile(cache, 'utf8'))
-    if (prior.checkedAt && Date.now() - Date.parse(prior.checkedAt) < 24 * 60 * 60 * 1000) return
+    prior = JSON.parse(await fs.readFile(cache, 'utf8'))
+    if (prior.checkedAt && Date.now() - Date.parse(prior.checkedAt) < 24 * 60 * 60 * 1000) {
+      const cachedRelease = updateRelease(prior.release)
+      if (cachedRelease && isNewerVersion(cachedRelease.version, app.getVersion())) showUpdateFlag(cachedRelease, false)
+      return
+    }
   } catch {}
   try {
     const response = await fetch('https://github.com/carlos-edu2367/orin/releases/latest/download/release.json', { signal: AbortSignal.timeout(3500) })
     if (!response.ok) return
-    const release = await response.json()
-    await fs.writeFile(cache, JSON.stringify({ checkedAt: new Date().toISOString() }), 'utf8')
-    if (!release || typeof release.version !== 'string' || !isNewerVersion(release.version, app.getVersion())) return
-    const choice = await dialog.showMessageBox(mainWindow, {
-      type: 'info',
-      buttons: ['Later', 'Open update instructions'],
-      defaultId: 0,
-      title: 'Orin update available',
-      message: `Orin ${release.version} is available.`,
-      detail: 'Updates are verified and installed only after you choose to proceed.',
-    })
-    if (choice.response === 1) shell.openExternal(repositoryReleaseUrl(release.release_url))
+    const release = updateRelease(await response.json())
+    await fs.writeFile(cache, JSON.stringify({ checkedAt: new Date().toISOString(), release }), 'utf8')
+    if (!release || !isNewerVersion(release.version, app.getVersion())) return
+    showUpdateFlag(release, true)
   } catch {
     // Updates are advisory. Offline/startup use must never be delayed or fail.
   }
+}
+
+function updateRelease(value) {
+  if (!value || typeof value.version !== 'string') return null
+  return { version: value.version, releaseUrl: repositoryReleaseUrl(value.release_url) }
+}
+
+function showUpdateFlag(release, prompt) {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  const label = `Orin ${release.version} is available. Run orin update to install it.`
+  mainWindow.setTitle(`Orin - Update ${release.version} available`)
+  if (process.platform === 'win32') mainWindow.setOverlayIcon(updateOverlayIcon(), label)
+  if (!prompt) return
+  void dialog.showMessageBox(mainWindow, {
+    type: 'info',
+    buttons: ['Later', 'Open update instructions'],
+    defaultId: 0,
+    title: 'Orin update available',
+    message: `Orin ${release.version} is available.`,
+    detail: 'The taskbar update flag remains visible until you update. Updates are verified and installed only after you choose to proceed.',
+  }).then((choice) => {
+    if (choice.response === 1) shell.openExternal(release.releaseUrl)
+  }).catch(() => {})
+}
+
+function updateOverlayIcon() {
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><circle cx="16" cy="16" r="15" fill="#a855f7"/><path d="M16 7v12m0 0-5-5m5 5 5-5M9 24h14" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+  return nativeImage.createFromDataURL(`data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`)
 }
 
 function repositoryReleaseUrl(value) {

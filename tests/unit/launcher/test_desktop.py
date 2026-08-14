@@ -86,6 +86,14 @@ def test_update_flag_is_an_alias_for_the_update_command() -> None:
     assert arguments.update is True
 
 
+def test_uninstall_flag_is_accepted_by_the_public_launcher() -> None:
+    parser = build_parser()
+
+    arguments = parser.parse_args(["--uninstall"])
+
+    assert arguments.uninstall is True
+
+
 class _Cp1252Stream(io.StringIO):
     encoding = "cp1252"
 

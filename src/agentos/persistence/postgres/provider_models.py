@@ -108,7 +108,11 @@ class PostgresProviderCatalogRepository:
                 input_modalities=tuple(row["input_modalities"]), output_modalities=tuple(row["output_modalities"]),
                 pricing=PricingSummary(row["input_per_million"], row["output_per_million"])
                 if row["input_per_million"] is not None or row["output_per_million"] is not None else None,
-                refreshed_at=row["refreshed_at"], is_favorite=row["favorite_id"] is not None,
+                # SQLite stores ``DateTime(timezone=True)`` values without the
+                # offset.  Catalog records are always written in UTC, so put
+                # that invariant back at this persistence boundary before the
+                # domain model validates it. PostgreSQL values stay untouched.
+                refreshed_at=_utc_datetime(row["refreshed_at"]), is_favorite=row["favorite_id"] is not None,
                 route_kind=str(row.get("route_kind") or "model"),
             )
             for row in rows
@@ -137,6 +141,12 @@ class PostgresProviderCatalogRepository:
             else:
                 connection.execute(delete(provider_model_favorites).where(predicate))
         return next(item for item in self.list(context, provider) if item.model_id == model_id)
+
+
+def _utc_datetime(value: object) -> datetime:
+    if not isinstance(value, datetime):
+        raise ValueError("catalog refreshed_at is invalid")
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value
 
 
 __all__ = ["PostgresProviderCatalogRepository"]
