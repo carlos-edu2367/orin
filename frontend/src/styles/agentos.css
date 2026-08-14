@@ -443,7 +443,7 @@ kbd {
   position: relative; z-index: 2; grid-column: 2; grid-row: 2;
   display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; min-height: 0; overflow: hidden;
 }
-.chat__scroll { height: 100%; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+.chat__scroll { height: 100%; min-height: 0; overflow-y: auto; overscroll-behavior: contain; overflow-anchor: none; }
 .chat__thread { width: min(100%, 760px); margin: 0 auto; padding: 32px 24px 168px; display: flex; flex-direction: column; gap: 14px; }
 .chat__placeholder { color: var(--faint); font-size: 13px; text-align: center; padding: 40px 0; }
 .chat__load-error { display: grid; gap: 12px; max-width: 480px; margin: 52px auto; padding: 24px; border: 1px solid rgb(var(--orin-accent-rgb) / .28); border-radius: var(--radius); background: rgb(var(--orin-accent-rgb) / .045); text-align: center; }

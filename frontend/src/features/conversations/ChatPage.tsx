@@ -1,5 +1,5 @@
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react'
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { createBrowserApiClient } from '../../api/client'
 import {
@@ -338,13 +338,15 @@ export function ChatPage() {
     }
   }, [activity.events, conversationId, messages])
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!pinnedRef.current) return
     const element = scrollRef.current
     if (!element) return
-    // Streaming updates must follow immediately. Repeated smooth animations
-    // compete with a person's wheel/touch scrolling and can leave the viewport
-    // oscillating behind the response.
+    // Run before paint. A passive effect leaves one frame with the previous
+    // offset after each streamed delta/tool event, which is visible as a jump
+    // and can race the browser's scroll anchoring. Pinned streaming updates
+    // are intentionally immediate; smooth scrolling is reserved for the
+    // explicit "Ir para o fim" action below.
     element.scrollTop = element.scrollHeight
   }, [messages, activity.events.length])
 
