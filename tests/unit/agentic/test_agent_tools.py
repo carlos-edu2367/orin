@@ -172,6 +172,27 @@ def test_interactive_browser_tools_save_a_private_visual_capture(tmp_path: Path)
     assert clicked.payload["artifacts"] == [{"path": path, "size_bytes": workspace.resolve(path).stat().st_size}]
 
 
+def test_repeated_browse_page_reuses_the_current_tab_and_capture(tmp_path) -> None:
+    screenshot = base64.b64encode(b"one-capture").decode()
+
+    class Browser:
+        def __init__(self) -> None:
+            self.navigations = 0
+
+        def navigate(self, url):
+            self.navigations += 1
+            return {"url": url, "title": "Example", "html": "<html><body>ready</body></html>", "screenshot": screenshot}
+
+    browser = Browser()
+    tools = AgentToolset(ConversationWorkspace(tmp_path, "chat_browser_reuse"), browser=browser)
+
+    first = tools.invoke("browse_page", {"url": "https://example.test"})
+    second = tools.invoke("browse_page", {"url": "https://example.test/"})
+
+    assert browser.navigations == 1
+    assert first.payload["screenshot_path"] == second.payload["screenshot_path"]
+
+
 def test_browse_page_refuses_a_private_address(tmp_path) -> None:
     class Browser:
         def render(self, url):

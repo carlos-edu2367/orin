@@ -7,6 +7,7 @@ import pytest
 
 from agentos.installation.paths import OrinPaths, find_repository_root
 from agentos.installation.profile import RuntimeProfile
+from agentos.version import __version__
 
 
 @pytest.fixture(autouse=True)
@@ -71,6 +72,10 @@ def test_service_command_reexecutes_the_launcher_not_a_source_tree() -> None:
 
     assert command[-2:] == ("internal-service", "backend")
     assert "uvicorn" not in " ".join(command)
+
+
+def test_runtime_profile_uses_the_embedded_release_version() -> None:
+    assert RuntimeProfile.detect().version == __version__ == "0.1.11"
 
 
 def test_migrations_are_resolved_from_the_package() -> None:

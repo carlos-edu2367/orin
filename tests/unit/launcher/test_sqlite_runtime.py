@@ -49,3 +49,7 @@ def test_frozen_layout_finds_assets_under_pyinstaller_internal_directory(tmp_pat
 
     assert profile.web_dist == internal / "web"
     assert profile.installer == internal / "install.ps1"
+
+    paths = OrinPaths(tmp_path / "config", tmp_path / "data", tmp_path / "logs", tmp_path / "cache", tmp_path / "run").ensure()
+    environment = load_environment(paths, profile)
+    assert Path(environment.values["PLAYWRIGHT_BROWSERS_PATH"]) == (internal / "playwright").resolve()

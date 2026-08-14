@@ -21,15 +21,12 @@ def _package_root() -> Path:
 
 
 def _version() -> str:
-    try:
-        from importlib.metadata import PackageNotFoundError, version
+    # Frozen builds can contain stale ``agentos-*.dist-info`` copied from the
+    # build environment. The package constant is therefore the runtime source
+    # of truth for both source and packaged launchers.
+    from agentos.version import __version__
 
-        try:
-            return version("agentos")
-        except PackageNotFoundError:
-            return "0.0.0+unknown"
-    except Exception:  # pragma: no cover - importlib.metadata is always present
-        return "0.0.0+unknown"
+    return __version__
 
 
 @dataclass(frozen=True, slots=True)

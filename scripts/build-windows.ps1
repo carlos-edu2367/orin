@@ -25,9 +25,33 @@ try {
     & $python -m PyInstaller packaging\orin.spec --noconfirm --clean
     if ($LASTEXITCODE -ne 0) { throw 'Frozen runtime build failed.' }
 
+    $frozenRuntime = Join-Path $root 'dist\runtime'
+    $bundledBrowserRoots = @(
+        (Join-Path $frozenRuntime 'playwright'),
+        (Join-Path $frozenRuntime '_internal\playwright')
+    ) | Where-Object { Test-Path $_ -PathType Container }
+    if (-not $bundledBrowserRoots) { throw 'Frozen runtime was built without the bundled Playwright browser directory.' }
+    $chromium = $bundledBrowserRoots | ForEach-Object {
+        Get-ChildItem -LiteralPath $_ -Recurse -File -Filter 'chrome.exe' -ErrorAction SilentlyContinue
+    } | Select-Object -First 1
+    if (-not $chromium) { throw 'Frozen runtime was built without a Chromium executable.' }
+    Write-Host "Bundled Chromium: $($chromium.FullName)"
+
     if (-not $SkipTests) {
-        & $python -m pytest -q tests\unit
-        if ($LASTEXITCODE -ne 0) { throw 'Python unit tests failed.' }
+        # This variable is only an input to the PyInstaller spec. Do not let it
+        # override the frozen-layout assertions while running the test suite.
+        $packagingBrowserPath = $env:ORIN_PLAYWRIGHT_BROWSERS_PATH
+        $playwrightBrowserPath = $env:PLAYWRIGHT_BROWSERS_PATH
+        Remove-Item Env:ORIN_PLAYWRIGHT_BROWSERS_PATH -ErrorAction SilentlyContinue
+        Remove-Item Env:PLAYWRIGHT_BROWSERS_PATH -ErrorAction SilentlyContinue
+        try {
+            & $python -m pytest -q tests\unit
+            if ($LASTEXITCODE -ne 0) { throw 'Python unit tests failed.' }
+        }
+        finally {
+            if ($null -ne $packagingBrowserPath) { $env:ORIN_PLAYWRIGHT_BROWSERS_PATH = $packagingBrowserPath }
+            if ($null -ne $playwrightBrowserPath) { $env:PLAYWRIGHT_BROWSERS_PATH = $playwrightBrowserPath }
+        }
     }
 
     Push-Location desktop

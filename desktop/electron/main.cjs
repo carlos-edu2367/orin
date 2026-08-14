@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, shell } = require('electron')
+const { app, BrowserWindow, ipcMain, Menu, nativeImage, shell } = require('electron')
 const { spawn } = require('node:child_process')
 const fs = require('node:fs/promises')
 const path = require('node:path')
@@ -11,6 +11,7 @@ let mainWindow = null
 let appUrl = null
 let closing = false
 let retrying = false
+let updating = false
 let lifecycleTimer = null
 
 if (!app.requestSingleInstanceLock()) {
@@ -87,6 +88,7 @@ function registerIpc() {
     return shell.openPath(status.logs_dir)
   })
   ipcMain.handle('desktop:retry', (event) => fromSplash(event) ? retryStartup() : false)
+  ipcMain.handle('desktop:run-update', (event) => fromApp(event) ? runUpdate() : false)
   ipcMain.handle('desktop:close', (event) => {
     if (!fromSplash(event)) return false
     closeWindow()
@@ -101,7 +103,7 @@ async function checkForUpdate() {
     prior = JSON.parse(await fs.readFile(cache, 'utf8'))
     if (prior.checkedAt && Date.now() - Date.parse(prior.checkedAt) < 24 * 60 * 60 * 1000) {
       const cachedRelease = updateRelease(prior.release)
-      if (cachedRelease && isNewerVersion(cachedRelease.version, app.getVersion())) showUpdateFlag(cachedRelease, false)
+      if (cachedRelease && isNewerVersion(cachedRelease.version, app.getVersion())) showUpdateFlag(cachedRelease)
       return
     }
   } catch {}
@@ -111,7 +113,7 @@ async function checkForUpdate() {
     const release = updateRelease(await response.json())
     await fs.writeFile(cache, JSON.stringify({ checkedAt: new Date().toISOString(), release }), 'utf8')
     if (!release || !isNewerVersion(release.version, app.getVersion())) return
-    showUpdateFlag(release, true)
+    showUpdateFlag(release)
   } catch {
     // Updates are advisory. Offline/startup use must never be delayed or fail.
   }
@@ -122,22 +124,47 @@ function updateRelease(value) {
   return { version: value.version, releaseUrl: repositoryReleaseUrl(value.release_url) }
 }
 
-function showUpdateFlag(release, prompt) {
+function showUpdateFlag(release) {
   if (!mainWindow || mainWindow.isDestroyed()) return
+  const currentVersion = app.getVersion()
   const label = `Orin ${release.version} is available. Run orin update to install it.`
   mainWindow.setTitle(`Orin - Update ${release.version} available`)
   if (process.platform === 'win32') mainWindow.setOverlayIcon(updateOverlayIcon(), label)
-  if (!prompt) return
-  void dialog.showMessageBox(mainWindow, {
-    type: 'info',
-    buttons: ['Later', 'Open update instructions'],
-    defaultId: 0,
-    title: 'Orin update available',
-    message: `Orin ${release.version} is available.`,
-    detail: 'The taskbar update flag remains visible until you update. Updates are verified and installed only after you choose to proceed.',
-  }).then((choice) => {
-    if (choice.response === 1) shell.openExternal(release.releaseUrl)
-  }).catch(() => {})
+  mainWindow.webContents.send('desktop:update-available', {
+    currentVersion,
+    latestVersion: release.version,
+  })
+}
+
+async function runUpdate() {
+  if (updating) return false
+  const command = await updateCommand()
+  if (!command) return false
+  try {
+    const child = spawn(command[0], command.slice(1), {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+    })
+    child.unref()
+    updating = true
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function updateCommand() {
+  const status = await readStatus()
+  if (!status || !Array.isArray(status.restart_command) || status.restart_command.length === 0) return null
+  if (!status.restart_command.every((part) => typeof part === 'string' && part.length > 0)) return null
+  const [executable, ...arguments] = status.restart_command
+  try {
+    await fs.access(executable)
+  } catch {
+    return null
+  }
+  return [executable, ...arguments, 'update']
 }
 
 function updateOverlayIcon() {
@@ -246,6 +273,10 @@ async function requestShutdown() {
 
 function fromSplash(event) {
   return event.senderFrame.url === pathToFileURL(path.join(__dirname, 'splash.html')).href
+}
+
+function fromApp(event) {
+  return isLocalOrinUrl(event.senderFrame.url)
 }
 
 function argumentValue(name) {

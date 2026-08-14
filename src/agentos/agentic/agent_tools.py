@@ -233,6 +233,8 @@ class AgentToolset:
         self._http_client = http_client
         self._search_client = search_client
         self._browser = browser
+        self._last_browser_navigation_url: str | None = None
+        self._last_browser_navigation_outcome: ToolOutcome | None = None
         self._enable_terminal = enable_terminal
         self.skills = skills
         # The registry is intentionally read-only.  Publishing must go through
@@ -355,7 +357,7 @@ class AgentToolset:
         if self._browser is not None:
             items.append(ToolDefinition(
                 "browse_page",
-                "Open a public page in the isolated browser and return its rendered text plus a private screenshot visible in the chat. Use it for JavaScript pages.",
+                "Open a public page in the isolated browser and return its rendered text plus one private screenshot visible in the chat. Wait for the page to settle; repeated calls for the same URL reuse the current tab. Use it for JavaScript pages.",
                 _schema({"url": _TEXT}, ("url",)),
                 self.browse_page, "browser", policy_tags=("network",),
             ))
@@ -959,10 +961,16 @@ class AgentToolset:
         if self._browser is None:
             raise AgentToolError("The browser is not available.")
         target = _public_url(url)
+        navigation_key = _safe_display_url(target)
+        if navigation_key == self._last_browser_navigation_url and self._last_browser_navigation_outcome is not None:
+            return self._last_browser_navigation_outcome
         try:
             navigate = getattr(self._browser, "navigate", None)
             if callable(navigate):
-                return self._browser_outcome(navigate(target), action="Abriu")
+                outcome = self._browser_outcome(navigate(target), action="Abriu")
+                self._last_browser_navigation_url = navigation_key
+                self._last_browser_navigation_outcome = outcome
+                return outcome
             html = self._browser.render(target)
         except RuntimeError as error:
             raise AgentToolError(f"The page could not be rendered: {error}") from error
@@ -1008,13 +1016,26 @@ class AgentToolset:
         callback = getattr(self._browser, method, None)
         if not callable(callback):
             raise AgentToolError("This browser does not support interactive actions.")
+        if method not in {"observe", "screenshot"}:
+            self._last_browser_navigation_url = None
+            self._last_browser_navigation_outcome = None
         try:
             result = callback(*arguments)
         except RuntimeError as error:
             raise AgentToolError(f"The browser could not complete the action: {error}") from error
         if not isinstance(result, Mapping):
             raise AgentToolError("The browser returned an invalid observation.")
-        return self._browser_outcome(result, action=action)
+        outcome = self._browser_outcome(result, action=action)
+        if method == "observe":
+            current_url = str(outcome.payload.get("url") or "")
+            self._last_browser_navigation_url = _safe_display_url(current_url) if current_url else None
+            self._last_browser_navigation_outcome = outcome
+        elif method == "screenshot":
+            # The next browse_page should ask the same tab for fresh text and
+            # a fresh capture, while the isolated host still avoids a reload.
+            self._last_browser_navigation_url = None
+            self._last_browser_navigation_outcome = None
+        return outcome
 
     def browser_observe(self) -> ToolOutcome:
         return self._browser_call("observe", action="Observou")

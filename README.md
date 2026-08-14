@@ -78,8 +78,10 @@ the same release installer and may be downloaded, reviewed and executed locally
 instead of using a one-liner.
 
 `orin update` will use this same verified release flow. The desktop app shows a
-taskbar update flag when it finds a newer verified release, but it never
-replaces itself in the background.
+visible update banner with the current and latest versions, plus an **Atualizar**
+button that invokes the packaged `orin update` command. A taskbar flag is also
+shown when a newer verified release is found; the app never replaces itself in
+the background without that explicit action.
 
 To completely remove an installed copy, including its local data and
 configuration, close the desktop window and run:

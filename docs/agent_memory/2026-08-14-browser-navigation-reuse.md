@@ -1,0 +1,6 @@
+# Reuso da aba e espera de carregamento no navegador conversacional
+
+- O processo `IsolatedConversationBrowser` já mantinha uma única `page` por turno, mas `navigate` repetia `page.goto` para a mesma URL e observava logo após `domcontentloaded`. Isso podia abrir novamente o mesmo site e produzir capturas brancas ou incompletas enquanto estilos/fontes ainda carregavam.
+- A navegação agora espera `load` e tenta `networkidle` por no máximo 5 segundos antes da captura. `networkidle` continua best-effort para não bloquear páginas com analytics ou long-polling.
+- Chamadas repetidas para a mesma URL reutilizam a aba e a observação/captura atual. O `AgentToolset` normaliza a URL para o cache, evitando duplicação entre URLs com ou sem `/` final e evitando novos arquivos PNG para a repetição imediata. Clique, preenchimento, teclas, seleção e checkbox invalidam o cache; observação preserva o estado atual; screenshot explícito solicita uma captura nova sem recarregar a aba.
+- Regressão coberta por `tests/unit/browser/test_conversation_worker.py` e `tests/unit/agentic/test_agent_tools.py`. Validação focada: `115 passed, 1 skipped`; `git diff --check` passou. O teste Chromium real permaneceu opcional e foi ignorado neste ambiente.

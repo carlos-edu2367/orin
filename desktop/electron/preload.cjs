@@ -7,4 +7,10 @@ contextBridge.exposeInMainWorld('orinDesktop', Object.freeze({
   openLogs: () => ipcRenderer.invoke('desktop:open-logs'),
   retry: () => ipcRenderer.invoke('desktop:retry'),
   close: () => ipcRenderer.invoke('desktop:close'),
+  onUpdateAvailable: (callback) => {
+    const listener = (_event, update) => callback(update)
+    ipcRenderer.on('desktop:update-available', listener)
+    return () => ipcRenderer.removeListener('desktop:update-available', listener)
+  },
+  runUpdate: () => ipcRenderer.invoke('desktop:run-update'),
 }))

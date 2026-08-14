@@ -18,6 +18,7 @@ from .security import NetworkPolicy, NetworkPolicyError, validate_url
 
 
 DEFAULT_TIMEOUT_MS = 30_000
+PAGE_SETTLE_TIMEOUT_MS = 5_000
 SCREENSHOT_TIMEOUT_MS = 5_000
 MAX_SCREENSHOT_BYTES = 4_000_000
 MAX_HTML_BYTES = 2_000_000
@@ -43,6 +44,19 @@ def _single(page, selector: object):
     return locator
 
 
+def _is_form_submission_control(locator, tag: str, input_type: str) -> bool:
+    """Keep submit/reset controls behind the explicit approval boundary."""
+    if tag == "input":
+        return input_type in {"image", "reset", "submit"}
+    if tag != "button":
+        return False
+    if input_type in {"reset", "submit"}:
+        return True
+    # A button without a type defaults to submit only when it belongs to a
+    # form. Outside a form it is a normal JavaScript/UI action and is allowed.
+    return not input_type and bool(locator.evaluate("el => Boolean(el.form)"))
+
+
 def _observation_for_page(page, timeout_error, *, include_html: bool = True) -> dict[str, object]:
     html = page.content().encode("utf-8") if include_html else b""
     if len(html) > MAX_HTML_BYTES:
@@ -65,6 +79,20 @@ def _observation_for_page(page, timeout_error, *, include_html: bool = True) -> 
         "html": html.decode("utf-8", "replace"),
         "screenshot": base64.b64encode(image).decode("ascii"),
     }
+
+
+def _wait_for_page_ready(page, timeout_error) -> None:
+    """Wait for load and a bounded period of network quiet before capturing."""
+    try:
+        page.wait_for_load_state("load", timeout=PAGE_SETTLE_TIMEOUT_MS)
+    except timeout_error:
+        pass
+    try:
+        # Some pages keep analytics or long-polling requests open forever, so
+        # network idle is useful but intentionally best-effort.
+        page.wait_for_load_state("networkidle", timeout=PAGE_SETTLE_TIMEOUT_MS)
+    except timeout_error:
+        pass
 
 
 def _host(connection: Connection) -> None:
@@ -93,8 +121,22 @@ def _host(connection: Connection) -> None:
 
             page.route("**/*", guard)
 
+            last_navigation_target: str | None = None
+            last_navigation_observation: dict[str, object] | None = None
+
             def observation(*, include_html: bool = True) -> dict[str, object]:
                 return _observation_for_page(page, PlaywrightTimeoutError, include_html=include_html)
+
+            def observation_after_action() -> dict[str, object]:
+                # A click can start a document navigation. Waiting for `load`
+                # is immediate for non-navigating JS controls and bounded for
+                # a real navigation, so the following screenshot sees the
+                # resulting page instead of the old document.
+                try:
+                    page.wait_for_load_state("load", timeout=PAGE_SETTLE_TIMEOUT_MS)
+                except PlaywrightTimeoutError:
+                    pass
+                return observation()
 
             while True:
                 command = connection.recv()
@@ -108,19 +150,38 @@ def _host(connection: Connection) -> None:
                 try:
                     if action == "navigate":
                         target = validate_url(str(command.get("url") or ""), policy)
-                        page.goto(target, wait_until="domcontentloaded", timeout=DEFAULT_TIMEOUT_MS)
-                        result = observation()
+                        if (
+                            target == last_navigation_target
+                            and page.url == target
+                            and last_navigation_observation is not None
+                        ):
+                            # Repeated browse_page calls observe the current
+                            # tab instead of reloading it or creating another
+                            # visual capture.
+                            result = dict(last_navigation_observation)
+                        else:
+                            page.goto(target, wait_until="domcontentloaded", timeout=DEFAULT_TIMEOUT_MS)
+                            _wait_for_page_ready(page, PlaywrightTimeoutError)
+                            result = observation()
+                            last_navigation_target = target
+                            last_navigation_observation = dict(result)
                     elif action == "observe":
                         result = observation()
+                        if last_navigation_target is not None:
+                            last_navigation_observation = dict(result)
                     elif action == "click":
+                        last_navigation_target = None
+                        last_navigation_observation = None
                         locator = _single(page, command.get("selector"))
                         tag = str(locator.evaluate("el => el.tagName.toLowerCase()"))
                         input_type = str(locator.get_attribute("type") or "").lower()
-                        if tag == "button" or (tag == "input" and input_type in {"submit", "image"}):
+                        if _is_form_submission_control(locator, tag, input_type):
                             raise ValueError("form submission requires an explicit user approval and is not automated")
                         locator.click()
-                        result = observation()
+                        result = observation_after_action()
                     elif action == "fill":
+                        last_navigation_target = None
+                        last_navigation_observation = None
                         text = command.get("text")
                         if not isinstance(text, str) or len(text) > MAX_INPUT_LENGTH:
                             raise ValueError("text must contain at most 4000 characters")
@@ -128,14 +189,18 @@ def _host(connection: Connection) -> None:
                         if str(locator.get_attribute("type") or "").lower() == "password":
                             raise ValueError("password fields are not filled by the agent")
                         locator.fill(text)
-                        result = observation()
+                        result = observation_after_action()
                     elif action == "press":
+                        last_navigation_target = None
+                        last_navigation_observation = None
                         key = command.get("key")
                         if key not in _PRESS_KEYS:
                             raise ValueError("key is not allowed")
                         _single(page, command.get("selector")).press(str(key))
-                        result = observation()
+                        result = observation_after_action()
                     elif action == "select":
+                        last_navigation_target = None
+                        last_navigation_observation = None
                         raw_values = command.get("values")
                         if not isinstance(raw_values, list) or not raw_values or len(raw_values) > 10:
                             raise ValueError("values must contain between 1 and 10 options")
@@ -143,16 +208,26 @@ def _host(connection: Connection) -> None:
                         if any(not value or len(value) > 256 for value in values):
                             raise ValueError("select values are invalid")
                         _single(page, command.get("selector")).select_option(values)
-                        result = observation()
+                        result = observation_after_action()
                     elif action == "check":
+                        last_navigation_target = None
+                        last_navigation_observation = None
                         checked = command.get("checked")
                         if not isinstance(checked, bool):
                             raise ValueError("checked must be boolean")
                         locator = _single(page, command.get("selector"))
                         locator.check() if checked else locator.uncheck()
-                        result = observation()
+                        result = observation_after_action()
                     elif action == "screenshot":
                         result = observation(include_html=False)
+                        if last_navigation_target is not None and last_navigation_observation is not None:
+                            refreshed = dict(last_navigation_observation)
+                            refreshed.update({
+                                "url": result.get("url"),
+                                "title": result.get("title"),
+                                "screenshot": result.get("screenshot"),
+                            })
+                            last_navigation_observation = refreshed
                     else:
                         raise ValueError("unsupported browser action")
                     connection.send({"ok": True, "result": result})
