@@ -15,6 +15,7 @@ about was ever written inside it.
 
 from .paths import OrinPaths, orin_paths, reset_cached_paths
 from .profile import RuntimeProfile, reset_cached_profile, runtime_profile
+from .versions import read_installation_status, remove_installed_version
 
 __all__ = [
     "OrinPaths",
@@ -23,4 +24,6 @@ __all__ = [
     "reset_cached_paths",
     "reset_cached_profile",
     "runtime_profile",
+    "read_installation_status",
+    "remove_installed_version",
 ]

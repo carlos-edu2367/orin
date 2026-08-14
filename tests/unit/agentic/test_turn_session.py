@@ -755,14 +755,13 @@ def test_the_browser_section_is_absent_without_browse_page() -> None:
     assert "## Browser" not in prompt
 
 
-def test_the_prompt_says_submission_is_not_automated_without_browser_submit() -> None:
+def test_the_prompt_explains_submission_confirmation_without_browser_submit_tool() -> None:
     prompt = build_system_prompt(
         tool_names=("browse_page", "browser_observe", "browser_click"), memories=[], agents=[],
         workspace_hint="hint", subagents_enabled=False,
     )
 
-    assert "not automated at this conversation's capability level" in prompt
-    assert "confirmed=true" not in prompt
+    assert "confirmed=true" in prompt
 
 
 def test_the_prompt_explains_the_two_step_confirmation_when_browser_submit_is_available() -> None:

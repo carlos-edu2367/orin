@@ -373,10 +373,11 @@ def test_isolated_host_executes_safe_page_actions_in_one_tab(monkeypatch: pytest
         assert "'selected': ['compact']" in result["html"]
         assert "'checked': True" in result["html"]
 
-        parent.send({"action": "click", "selector": "#submit"})
-        rejected = parent.recv()
-        assert rejected["ok"] is False
-        assert "form submission" in rejected["error"]
+        preview = request("click", selector="#submit")
+        assert "submitted" not in preview["html"]
+        assert "submit_preview" in preview
+        confirmed = request("click", selector="#submit", confirmed=True)
+        assert "'clicked': '#submit'" in confirmed["html"]
     finally:
         parent.send({"action": "close"})
         parent.recv()

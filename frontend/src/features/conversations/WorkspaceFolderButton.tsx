@@ -79,15 +79,17 @@ export function WorkspaceFolderButton({ state, onInspect, onAttach, onDetach, on
         className={`workspace-folder__button${state.kind === 'local' ? ' is-attached' : ''}`}
         onClick={() => setOpen((value) => !value)}
         title={state.path ?? undefined}
+        aria-label={state.kind === 'local' ? `Diretório do workspace: ${label}` : 'Adicionar pasta ao workspace'}
         aria-expanded={open}
       >
-        <span aria-hidden="true">🗀</span> {label}
+        <span aria-hidden="true">▰</span> {state.kind === 'local' ? label : 'Adicionar diretório'}
       </button>
 
       {open && (
         <div className="workspace-folder__panel" role="dialog" aria-label="Pasta de trabalho">
           {candidate ? (
             <>
+              <h3>Confirmar diretório</h3>
               <p className="workspace-folder__path">{candidate.path}</p>
               <p className="workspace-folder__meta">{candidate.entryCount}{candidate.entriesTruncated ? '+' : ''} itens no primeiro nível</p>
               {state.scope === 'project' && state.projectName && (
@@ -109,17 +111,21 @@ export function WorkspaceFolderButton({ state, onInspect, onAttach, onDetach, on
             </>
           ) : (
             <>
+              <div>
+                <h3>Workspace local</h3>
+                <p className="workspace-folder__meta">Escolha um diretório para o agente trabalhar neste {state.scope === 'project' ? 'projeto' : 'chat'}.</p>
+              </div>
               {state.kind === 'local' ? (
                 <p className="workspace-folder__path">{state.path}</p>
               ) : (
                 <p className="workspace-folder__meta">Sem pasta local. O agente trabalha na pasta gerenciada pelo Orin.</p>
               )}
-              <button type="button" disabled={busy} onClick={() => void inspect(null)}>Escolher pasta…</button>
+              <button type="button" disabled={busy} onClick={() => void inspect(null)}>Selecionar diretório…</button>
               <label className="workspace-folder__field">
                 Caminho da pasta
-                <input value={typed} onChange={(event) => setTyped(event.target.value)} placeholder="D:\projetos\site" />
+                <input value={typed} onChange={(event) => setTyped(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); if (typed.trim()) void inspect(typed.trim()) } }} placeholder="C:\projetos\meu-app" />
               </label>
-              <button type="button" disabled={busy || !typed.trim()} onClick={() => void inspect(typed.trim())}>Usar</button>
+              <button type="button" disabled={busy || !typed.trim()} onClick={() => void inspect(typed.trim())}>Adicionar diretório</button>
               {state.kind === 'local' && <button type="button" disabled={busy} onClick={() => void detach()}>Remover</button>}
             </>
           )}

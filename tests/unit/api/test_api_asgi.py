@@ -210,6 +210,30 @@ def test_provider_setup_accepts_key_only_on_write_and_never_returns_it() -> None
     assert "model" not in inspected.json()
 
 
+def test_installation_status_and_version_removal_use_the_local_release_boundary(monkeypatch: pytest.MonkeyPatch) -> None:
+    from agentos.api import gateway as gateway_module
+
+    security = InMemorySecurityService()
+    security.add_pat("pat-test", AuthenticatedPrincipal("user-1", "credential-1", frozenset({"api"})))
+    profile = object()
+    status = {
+        "installation_kind": "installed", "current_version": "0.1.12",
+        "installed_versions": [{"version": "0.1.12", "is_current": True, "removable": False}, {"version": "0.1.11", "is_current": False, "removable": True}],
+        "latest_release": {"version": "0.1.12", "url": "https://github.com/carlos-edu2367/orin/releases/tag/v0.1.12"},
+        "latest_release_error": None, "checked_at": "2026-08-14T00:00:00Z",
+    }
+    monkeypatch.setattr(gateway_module, "runtime_profile", lambda: profile)
+    monkeypatch.setattr(gateway_module, "read_installation_status", lambda received: status if received is profile else {})
+    monkeypatch.setattr(gateway_module, "remove_installed_version", lambda version, received: {"removed_version": version} if received is profile else {})
+    client = TestClient(create_app(ApiServices(security=security)))
+
+    inspected = client.get("/v1/installation/status", headers={"Authorization": "Bearer pat-test"})
+    removed = client.delete("/v1/installation/versions/0.1.11", headers={"Authorization": "Bearer pat-test", "Idempotency-Key": "remove-version-1"})
+
+    assert inspected.status_code == 200 and inspected.json()["current_version"] == "0.1.12"
+    assert removed.status_code == 200 and removed.json() == {"removed_version": "0.1.11"}
+
+
 def test_omniroute_setup_accepts_a_public_base_url_without_returning_its_key() -> None:
     class OmniRouteConfiguration(FakeProviderConfiguration):
         def configure(self, command: dict[str, object]) -> dict[str, object]:

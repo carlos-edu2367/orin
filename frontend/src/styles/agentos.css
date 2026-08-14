@@ -53,6 +53,36 @@
 .runtime-settings__field input { width: 100%; border: 1px solid var(--line-strong); border-radius: 9px; padding: 11px; background: var(--ink); color: var(--text); }
 .runtime-settings > p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.55; }
 .runtime-settings__notice { color: var(--signal) !important; }
+.runtime-settings__title { margin: 44px 0 0; font-size: 18px; letter-spacing: -.02em; }
+.button--quiet { padding: 8px 11px; border: 1px solid var(--line-strong); border-radius: 8px; background: transparent; color: var(--muted); cursor: pointer; font: 11px var(--mono); }
+.button--quiet:hover:not(:disabled) { border-color: var(--signal-dim); color: var(--text); }
+.button--quiet:disabled { cursor: wait; opacity: .55; }
+.installation-status { display: grid; gap: 20px; margin-top: 30px; padding: 22px; border: 1px solid var(--line); border-radius: var(--radius); background: linear-gradient(145deg, var(--raised), rgb(var(--orin-surface-rgb) / .72)); }
+.installation-status__heading, .installation-status__versions-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
+.installation-status__heading .eyebrow { margin: 0 0 5px; }
+.installation-status__heading h2 { margin: 0; font-size: 18px; letter-spacing: -.02em; }
+.installation-status__summary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: 0; }
+.installation-status__summary > div { min-width: 0; padding: 13px; border: 1px solid var(--line); border-radius: 10px; background: rgb(var(--orin-ink-rgb) / .24); }
+.installation-status__summary dt, .installation-status__summary dd { margin: 0; }
+.installation-status__summary dt { color: var(--faint); font: 10px var(--mono); letter-spacing: .07em; text-transform: uppercase; }
+.installation-status__summary dd { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 8px; color: var(--text); font-size: 14px; }
+.installation-status__summary a { color: var(--signal); }
+.installation-status__badge { display: inline-flex; align-items: center; min-height: 20px; padding: 2px 7px; border-radius: 99px; background: rgb(var(--orin-accent-rgb) / .12); color: var(--signal); font: 10px var(--mono); }
+.installation-status__update, .installation-status__notice { margin: 0; color: var(--signal); font-size: 12px; }
+.installation-status__muted { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.installation-status__versions { display: grid; gap: 10px; padding-top: 4px; border-top: 1px solid var(--line); }
+.installation-status__versions-heading { align-items: center; }
+.installation-status__versions-heading h3 { margin: 0; font-size: 13px; font-weight: 560; }
+.installation-status__versions-heading > span { color: var(--faint); font: 10px var(--mono); }
+.installation-version-list { display: grid; gap: 7px; }
+.installation-version { display: flex; align-items: center; justify-content: space-between; gap: 14px; min-height: 40px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 9px; background: rgb(var(--orin-ink-rgb) / .18); }
+.installation-version.is-current { border-color: rgb(var(--orin-accent-rgb) / .32); background: rgb(var(--orin-accent-rgb) / .06); }
+.installation-version > div { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.installation-version code, .installation-status code { font: 11px var(--mono); }
+.installation-version button { border: 0; background: transparent; color: var(--danger); cursor: pointer; font: 10px var(--mono); }
+.installation-version button:hover:not(:disabled) { color: var(--text); }
+.installation-version button:disabled { cursor: wait; opacity: .55; }
+.installation-version__protected { color: var(--faint); font: 10px var(--mono); }
 .memory-list { display: grid; border-top: 1px solid var(--line); }
 .memory-list article { position: relative; padding: 16px 90px 16px 0; border-bottom: 1px solid var(--line); }
 .memory-list p { margin: 0 0 7px; line-height: 1.5; }
@@ -315,17 +345,24 @@ kbd {
 .attachment-chip__remove:hover { background: var(--raised-strong); color: var(--text); }
 
 .workspace-folder { position: relative; }
-.workspace-folder__button { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--orin-line); background: transparent; color: var(--orin-muted); font-size: 12px; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.workspace-folder__button:hover { color: var(--orin-ink); border-color: var(--orin-accent-soft); }
-.workspace-folder__button.is-attached { color: var(--orin-ink); border-color: var(--orin-accent-soft); }
-.workspace-folder__panel { position: absolute; bottom: calc(100% + 8px); left: 0; z-index: 20; display: flex; flex-direction: column; gap: 8px; width: 320px; padding: 12px; border-radius: 12px; border: 1px solid var(--orin-line); background: var(--orin-surface); box-shadow: 0 12px 32px rgba(0, 0, 0, 0.28); }
-.workspace-folder__path { font-family: ui-monospace, monospace; font-size: 12px; word-break: break-all; color: var(--orin-ink); }
-.workspace-folder__meta { font-size: 12px; color: var(--orin-muted); }
+.workspace-folder__button { display: inline-flex; align-items: center; gap: 7px; min-height: 30px; padding: 0 11px; border: 1px solid var(--line); border-radius: 9px; background: rgb(var(--orin-surface-rgb) / .55); color: var(--muted); cursor: pointer; font-size: 11px; max-width: 230px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; transition: border-color .16s var(--ease), background .16s var(--ease), color .16s var(--ease); }
+.workspace-folder__button:hover, .workspace-folder__button:focus-visible { border-color: var(--signal-dim); background: var(--raised); color: var(--text); outline: none; }
+.workspace-folder__button.is-attached { border-color: rgb(var(--orin-accent-rgb) / .38); color: var(--signal); }
+.workspace-folder__panel { position: absolute; bottom: calc(100% + 10px); left: 0; z-index: 20; display: grid; gap: 11px; width: min(350px, calc(100vw - 32px)); padding: 16px; border: 1px solid var(--line-strong); border-radius: 14px; background: var(--surface); box-shadow: 0 18px 46px rgb(0 0 0 / .38); }
+.workspace-folder__panel h3 { margin: 0; font-size: 13px; font-weight: 600; }
+.workspace-folder__panel > p { margin: 0; }
+.workspace-folder__path { color: var(--text); font: 11px/1.5 var(--mono); overflow-wrap: anywhere; }
+.workspace-folder__meta { color: var(--muted); font-size: 11px; line-height: 1.45; }
 .workspace-folder__risk { font-size: 12px; color: var(--danger); }
-.workspace-folder__risk-action { border-color: var(--danger); color: var(--danger); }
-.workspace-folder__field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--orin-muted); }
-.workspace-folder__field input { padding: 6px 8px; border-radius: 8px; border: 1px solid var(--orin-line); background: transparent; color: var(--orin-ink); font-family: ui-monospace, monospace; font-size: 12px; }
-.workspace-folder__notice { font-size: 12px; color: var(--orin-muted); }
+.workspace-folder__panel > button { min-height: 32px; padding: 0 10px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--raised); color: var(--text); cursor: pointer; font-size: 11px; }
+.workspace-folder__panel > button:hover:not(:disabled) { border-color: var(--signal-dim); }
+.workspace-folder__panel > button:disabled { cursor: wait; opacity: .55; }
+.workspace-folder__panel > button:first-of-type { border-color: var(--signal-dim); color: var(--signal); }
+.workspace-folder__risk-action { border-color: var(--danger) !important; color: var(--danger) !important; }
+.workspace-folder__field { display: grid; gap: 5px; color: var(--muted); font-size: 11px; }
+.workspace-folder__field input { width: 100%; box-sizing: border-box; padding: 9px 10px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--ink); color: var(--text); font: 11px var(--mono); outline: none; }
+.workspace-folder__field input:focus { border-color: var(--signal-dim); box-shadow: 0 0 0 3px rgb(var(--orin-accent-rgb) / .08); }
+.workspace-folder__notice { color: var(--muted); font-size: 11px; line-height: 1.45; }
 .workspace-folder__error { font-size: 12px; color: var(--danger); }
 .composer__hint { font-family: var(--mono); font-size: 10px; color: var(--faint); }
 

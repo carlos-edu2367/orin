@@ -12,6 +12,7 @@ describe('RuntimeSettingsPage', () => {
   it('lets the user switch an unlimited iteration budget to a numeric limit', async () => {
     const fetchImpl = vi.fn<typeof fetch>()
       .mockResolvedValueOnce(new Response(JSON.stringify({ max_iterations: null }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ installation_kind: 'development', current_version: '0.1.12', installed_versions: [], latest_release: null, latest_release_error: 'unavailable', checked_at: '2026-08-14T00:00:00Z' }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
       .mockResolvedValueOnce(new Response(JSON.stringify({ max_iterations: 48 }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
 
     render(<MemoryRouter><RuntimeSettingsPage client={client(fetchImpl)} /></MemoryRouter>)
@@ -22,8 +23,8 @@ describe('RuntimeSettingsPage', () => {
     fireEvent.change(screen.getByLabelText('Máximo de interações por turno'), { target: { value: '48' } })
     fireEvent.click(screen.getByRole('button', { name: 'Salvar limite' }))
 
-    await waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(2))
-    expect(String(fetchImpl.mock.calls[1][1]?.body)).toBe('{"max_iterations":48}')
+    await waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(3))
+    expect(String(fetchImpl.mock.calls[2][1]?.body)).toBe('{"max_iterations":48}')
     expect(screen.getByText('Limite salvo.')).toBeInTheDocument()
   })
 })

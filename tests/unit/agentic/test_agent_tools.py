@@ -1002,9 +1002,9 @@ class _FullBrowser:
         return {"url": "https://example.test/welcome", "title": "Welcome", "html": "<html>welcome</html>", "screenshot": "", "elements": []}
 
 
-def test_browser_submit_is_absent_at_the_default_interact_capability(tmp_path) -> None:
+def test_browser_submit_is_available_at_the_default_interact_capability(tmp_path) -> None:
     tools = AgentToolset(ConversationWorkspace(tmp_path, "chat_cap_default"), browser=_FullBrowser())
-    assert "browser_submit" not in {item.name for item in tools.definitions()}
+    assert "browser_submit" in {item.name for item in tools.definitions()}
 
 
 def test_browser_submit_is_available_at_full_capability(tmp_path) -> None:
@@ -1012,10 +1012,10 @@ def test_browser_submit_is_available_at_full_capability(tmp_path) -> None:
     assert "browser_submit" in {item.name for item in tools.definitions()}
 
 
-def test_browser_submit_handler_refuses_outside_full_capability_even_if_called_directly(tmp_path) -> None:
+def test_browser_submit_handler_previews_outside_full_capability(tmp_path) -> None:
     tools = AgentToolset(ConversationWorkspace(tmp_path, "chat_cap_guard"), browser=_FullBrowser())
-    with pytest.raises(AgentToolError, match="full"):
-        tools.browser_submit("ref:e1")
+    outcome = tools.browser_submit("ref:e1")
+    assert outcome.payload.get("requires_confirmation") is True
 
 
 def test_browser_submit_preview_never_clicks_and_masks_the_password(tmp_path) -> None:
@@ -1044,10 +1044,10 @@ def test_browser_submit_confirmed_true_actually_submits(tmp_path) -> None:
     assert "requires_confirmation" not in outcome.payload
 
 
-def test_enter_key_is_not_offered_to_the_model_at_default_capability(tmp_path) -> None:
+def test_enter_key_is_offered_to_the_model_at_default_capability(tmp_path) -> None:
     tools = AgentToolset(ConversationWorkspace(tmp_path, "chat_enter_default"), browser=_FullBrowser())
     definition = tools.resolve("browser_press")
-    assert "Enter" not in definition.parameters["properties"]["key"]["enum"]
+    assert "Enter" in definition.parameters["properties"]["key"]["enum"]
 
 
 def test_enter_key_is_offered_to_the_model_at_full_capability(tmp_path) -> None:
@@ -1056,10 +1056,10 @@ def test_enter_key_is_offered_to_the_model_at_full_capability(tmp_path) -> None:
     assert "Enter" in definition.parameters["properties"]["key"]["enum"]
 
 
-def test_browser_press_enter_is_refused_outside_full_capability_even_if_called_directly(tmp_path) -> None:
+def test_browser_press_enter_is_available_outside_full_capability(tmp_path) -> None:
     tools = AgentToolset(ConversationWorkspace(tmp_path, "chat_enter_guard"), browser=_FullBrowser())
-    with pytest.raises(AgentToolError, match="full"):
-        tools.browser_press("ref:e1", "Enter")
+    outcome = tools.browser_press("ref:e1", "Enter")
+    assert outcome.status == "succeeded"
 
 
 def test_browser_press_enter_succeeds_at_full_capability(tmp_path) -> None:

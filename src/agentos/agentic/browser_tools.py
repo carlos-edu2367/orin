@@ -37,8 +37,9 @@ MAX_SCREENSHOT_BYTES = 4_000_000
 
 BROWSER_CAPABILITY_VARIABLE = "AGENTOS_BROWSER_CAPABILITY"
 BROWSER_CAPABILITIES = ("read", "interact", "full")
-# "interact" matches the capability this tool set always had (navigate,
-# observe, click, fill, select, check — never submit); "full" is opt-in.
+# "interact" matches the normal interactive browser capability. Form
+# submission controls are available there too, but their side effect remains
+# behind the explicit preview/confirmation handshake.
 DEFAULT_BROWSER_CAPABILITY = "interact"
 
 
@@ -237,13 +238,17 @@ class AgentBrowserView:
     def observe(self) -> dict[str, object]:
         return self._browser.observe(agent_key=self._agent_key)
 
-    def click(self, selector: str) -> dict[str, object]:
+    def click(self, selector: str, confirmed: bool = False) -> dict[str, object]:
+        if confirmed:
+            return self._browser.click(selector, True, agent_key=self._agent_key)
         return self._browser.click(selector, agent_key=self._agent_key)
 
     def fill(self, selector: str, text: str) -> dict[str, object]:
         return self._browser.fill(selector, text, agent_key=self._agent_key)
 
-    def press(self, selector: str, key: str) -> dict[str, object]:
+    def press(self, selector: str, key: str, confirmed: bool = False) -> dict[str, object]:
+        if confirmed:
+            return self._browser.press(selector, key, True, agent_key=self._agent_key)
         return self._browser.press(selector, key, agent_key=self._agent_key)
 
     def select(self, selector: str, values: list[str]) -> dict[str, object]:

@@ -34,7 +34,7 @@ from agentos.provider_catalog.service import ProviderCatalogUnavailable
 from .events import CursorError, InMemoryClientEventStream
 from .security import AuthenticationError, AuthorizationError, AuthenticatedPrincipal, InMemorySecurityService, RateLimitError
 from agentos.agentic.file_preview import media_type_for, open_in_default_application
-from agentos.installation import orin_paths
+from agentos.installation import orin_paths, read_installation_status, remove_installed_version, runtime_profile
 from agentos.agentic.workspace import ConversationWorkspace, WorkspaceError, resolve_workspace
 from agentos.local_workspace import FolderRejected, choose_folder, inspect_folder
 from agentos.uploads.media import MAX_FILES_PER_MESSAGE, MAX_UPLOAD_BYTES, UploadRejected
@@ -996,6 +996,21 @@ def create_app(services: ApiServices) -> FastAPI:
         services.security.authorize(principal, action="runtime.configure", resource_id="agentic", purpose="runtime.configure")
         _idempotency(request)
         return JSONResponse(_require_port(services.agentic_runtime).set_max_iterations(principal.user_id, payload.max_iterations))
+
+    @app.get("/v1/installation/status")
+    async def get_installation_status(request: Request) -> JSONResponse:
+        principal = principal_for(request)
+        services.security.authorize(principal, action="installation.inspect", resource_id=None, purpose="installation.inspect")
+        status = await run_in_threadpool(read_installation_status, runtime_profile())
+        return JSONResponse(status)
+
+    @app.delete("/v1/installation/versions/{version}")
+    async def delete_installation_version(version: str, request: Request) -> JSONResponse:
+        principal = principal_for(request, mutable=True)
+        services.security.authorize(principal, action="installation.configure", resource_id=version, purpose="installation.version.remove")
+        _idempotency(request)
+        result = await run_in_threadpool(remove_installed_version, version, runtime_profile())
+        return JSONResponse(result)
 
     @app.get("/v1/settings/vision-model")
     async def get_vision_model_setting(request: Request) -> JSONResponse:

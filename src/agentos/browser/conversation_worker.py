@@ -40,10 +40,9 @@ MAX_INVENTORY_ELEMENTS = 150
 # running concurrently, with a little slack.
 MAX_AGENT_PAGES = 6
 _PRESS_KEYS = frozenset({"Escape", "Tab", "Space", "ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight", "Backspace", "Delete", "Home", "End", "PageDown", "PageUp", "Enter"})
-# Enter can submit a form; the agent_tools.py layer only lets the model pass
-# it when the conversation's capability level is "full". The host enforces
-# selectors and form-submission-control blocking either way, so it does not
-# need to know about capability levels itself.
+# Enter can submit a form. The host keeps the final side effect behind the
+# same explicit confirmation used by ``browser_submit``; capability levels
+# control the network policy, not whether the browser can operate a page.
 SCROLL_PX = 800
 WAIT_FOR_TIMEOUT_MS = 10_000
 _WAIT_STATES = frozenset({"visible", "hidden", "attached", "detached"})
@@ -385,10 +384,12 @@ def _host(connection: Connection, capability: str = "interact") -> None:
                         locator = _single(page, command.get("selector"))
                         tag = str(locator.evaluate("el => el.tagName.toLowerCase()"))
                         input_type = str(locator.get_attribute("type") or "").lower()
-                        if _is_form_submission_control(locator, tag, input_type):
-                            raise ValueError("form submission requires an explicit user approval and is not automated")
-                        locator.click()
-                        result = observation_after_action(page)
+                        if _is_form_submission_control(locator, tag, input_type) and command.get("confirmed") is not True:
+                            result = observation(page, include_html=False)
+                            result["submit_preview"] = _describe_form(locator)
+                        else:
+                            locator.click()
+                            result = observation_after_action(page)
                     elif action == "fill":
                         state.last_navigation_target = None
                         state.last_navigation_observation = None
@@ -406,8 +407,14 @@ def _host(connection: Connection, capability: str = "interact") -> None:
                         key = command.get("key")
                         if key not in _PRESS_KEYS:
                             raise ValueError("key is not allowed")
-                        _single(page, command.get("selector")).press(str(key))
-                        result = observation_after_action(page)
+                        locator = _single(page, command.get("selector"))
+                        submits_form = key == "Enter" and bool(locator.evaluate("el => Boolean(el.form && el.tagName.toLowerCase() !== 'textarea')"))
+                        if submits_form and command.get("confirmed") is not True:
+                            result = observation(page, include_html=False)
+                            result["submit_preview"] = _describe_form(locator)
+                        else:
+                            locator.press(str(key))
+                            result = observation_after_action(page)
                     elif action == "select":
                         state.last_navigation_target = None
                         state.last_navigation_observation = None
@@ -444,6 +451,10 @@ def _host(connection: Connection, capability: str = "interact") -> None:
                         # ever clicked, so a model that skips asking the user
                         # cannot cause a submission by construction.
                         locator = _single(page, command.get("selector"))
+                        tag = str(locator.evaluate("el => el.tagName.toLowerCase()"))
+                        input_type = str(locator.get_attribute("type") or "").lower()
+                        if not _is_form_submission_control(locator, tag, input_type):
+                            raise ValueError("selector must identify a form submission control")
                         if command.get("confirmed") is True:
                             state.last_navigation_target = None
                             state.last_navigation_observation = None
@@ -581,14 +592,14 @@ class IsolatedConversationBrowser:
     def observe(self, *, agent_key: str = "main") -> dict[str, object]:
         return self._request("observe", agent_key=agent_key)
 
-    def click(self, selector: str, *, agent_key: str = "main") -> dict[str, object]:
-        return self._request("click", selector=selector, agent_key=agent_key)
+    def click(self, selector: str, confirmed: bool = False, *, agent_key: str = "main") -> dict[str, object]:
+        return self._request("click", selector=selector, confirmed=confirmed, agent_key=agent_key)
 
     def fill(self, selector: str, text: str, *, agent_key: str = "main") -> dict[str, object]:
         return self._request("fill", selector=selector, text=text, agent_key=agent_key)
 
-    def press(self, selector: str, key: str, *, agent_key: str = "main") -> dict[str, object]:
-        return self._request("press", selector=selector, key=key, agent_key=agent_key)
+    def press(self, selector: str, key: str, confirmed: bool = False, *, agent_key: str = "main") -> dict[str, object]:
+        return self._request("press", selector=selector, key=key, confirmed=confirmed, agent_key=agent_key)
 
     def select(self, selector: str, values: list[str], *, agent_key: str = "main") -> dict[str, object]:
         return self._request("select", selector=selector, values=values, agent_key=agent_key)

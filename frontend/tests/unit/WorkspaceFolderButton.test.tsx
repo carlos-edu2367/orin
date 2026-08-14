@@ -29,7 +29,7 @@ describe('WorkspaceFolderButton', () => {
 
   it('falls back to the path when a drive root has no folder name', () => {
     render(<WorkspaceFolderButton {...api({ state: { kind: 'local', path: 'C:\\', folderName: '', scope: 'chat', projectName: null } })} />)
-    const button = screen.getByRole('button', { name: 'C:\\' })
+    const button = screen.getByRole('button', { name: 'Diretório do workspace: C:\\' })
     expect(button).toHaveAttribute('title', 'C:\\')
     // The accessible-name computation falls back to the `title` attribute when
     // visible text is blank, which would let an empty label pass unnoticed.
@@ -42,7 +42,7 @@ describe('WorkspaceFolderButton', () => {
     render(<WorkspaceFolderButton {...props} />)
 
     fireEvent.click(screen.getByRole('button', { name: /pasta/i }))
-    fireEvent.click(screen.getByRole('button', { name: 'Escolher pasta…' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Selecionar diretório…' }))
 
     await waitFor(() => expect(screen.getByText('D:/site')).toBeInTheDocument())
     expect(screen.getByText(/4 itens/)).toBeInTheDocument()
@@ -56,7 +56,7 @@ describe('WorkspaceFolderButton', () => {
     render(<WorkspaceFolderButton {...props} />)
 
     fireEvent.click(screen.getByRole('button', { name: /pasta/i }))
-    fireEvent.click(screen.getByRole('button', { name: 'Escolher pasta…' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Selecionar diretório…' }))
 
     await waitFor(() => expect(screen.getByText(/criar, editar e apagar arquivos em C:\//)).toBeInTheDocument())
     expect(screen.queryByRole('button', { name: 'Usar esta pasta' })).not.toBeInTheDocument()
@@ -70,11 +70,11 @@ describe('WorkspaceFolderButton', () => {
     render(<WorkspaceFolderButton {...props} />)
 
     fireEvent.click(screen.getByRole('button', { name: /pasta/i }))
-    fireEvent.click(screen.getByRole('button', { name: 'Escolher pasta…' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Selecionar diretório…' }))
 
     await waitFor(() => expect(screen.getByText(/não foi possível abrir o seletor/i)).toBeInTheDocument())
     fireEvent.change(screen.getByLabelText('Caminho da pasta'), { target: { value: 'D:/site' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Usar' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Adicionar diretório' }))
 
     await waitFor(() => expect(screen.getByText('D:/site')).toBeInTheDocument())
   })
@@ -84,7 +84,7 @@ describe('WorkspaceFolderButton', () => {
     render(<WorkspaceFolderButton {...props} />)
 
     fireEvent.click(screen.getByRole('button', { name: /pasta/i }))
-    fireEvent.click(screen.getByRole('button', { name: 'Escolher pasta…' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Selecionar diretório…' }))
 
     await waitFor(() => expect(screen.getByText(/todos os chats do projeto Site novo/)).toBeInTheDocument())
   })
