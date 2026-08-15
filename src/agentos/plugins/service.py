@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+import json
 import shutil
 from pathlib import Path
 from typing import Any
@@ -9,12 +10,14 @@ from sqlalchemy import delete, insert, select, update
 from sqlalchemy.engine import Engine
 
 from agentos.persistence.postgres.plugins import row_to_plugin
-from agentos.persistence.postgres.schema import plugin_contributions, plugins
+from agentos.persistence.postgres.schema import plugin_contributions, plugin_marketplaces, plugins
 
 from .activator import PluginActivator
 from .fetcher import PluginFetcher
 from .inspector import inspect_plugin_package
 from .models import PluginState
+from .marketplace import parse_marketplace
+from .models import plugin_id_from_name
 from .sources import resolve_source
 
 
@@ -34,20 +37,51 @@ class PluginService:
         self.activator = activator or PluginActivator(skill_library=skill_library, mcp_service=mcp_service)
 
     def search(self, query: str) -> list[dict[str, Any]]:
-        return []
+        needle = str(query or "").casefold()
+        results: list[dict[str, Any]] = []
+        if not needle or "superpowers" in needle:
+            results.append({"name": "superpowers", "reference": "obra/superpowers", "description": "Skills de processo", "marketplace": "default"})
+        with self.engine.connect() as connection:
+            rows = connection.execute(select(plugin_marketplaces)).mappings().all()
+        for row in rows:
+            if not row["clone_path"]:
+                continue
+            index = Path(str(row["clone_path"])) / "marketplace.json"
+            if not index.is_file():
+                continue
+            try:
+                marketplace = parse_marketplace(json.loads(index.read_text(encoding="utf-8")))
+            except (OSError, ValueError, json.JSONDecodeError):
+                continue
+            for item in marketplace.plugins:
+                if not needle or needle in item.name.casefold() or needle in item.description.casefold():
+                    results.append({"name": item.name, "reference": item.reference, "description": item.description, "marketplace": marketplace.name})
+        return results
 
     def list_marketplaces(self, user_id: str) -> list[dict[str, Any]]:
-        return []
+        with self.engine.connect() as connection:
+            rows = connection.execute(select(plugin_marketplaces).where(plugin_marketplaces.c.user_id == user_id)).mappings().all()
+        return [{"marketplace_id": str(row["marketplace_id"]), "name": str(row["name"]), "reference": str(row["reference"]), "clone_path": str(row["clone_path"])} for row in rows]
 
     def add_marketplace(self, *, user_id: str, reference: str) -> dict[str, Any]:
         if not reference.startswith("https://") and "://" in reference:
             raise PluginServiceError("marketplace reference must use HTTPS")
-        return {"name": Path(reference.rstrip("/")).name or "marketplace", "reference": reference, "user_id": user_id}
+        name = Path(reference.rstrip("/")).name or "marketplace"
+        marketplace_id = plugin_id_from_name(name)
+        now = _now()
+        with self.engine.begin() as connection:
+            connection.execute(delete(plugin_marketplaces).where((plugin_marketplaces.c.marketplace_id == marketplace_id) & (plugin_marketplaces.c.user_id == user_id)))
+            connection.execute(insert(plugin_marketplaces).values(marketplace_id=marketplace_id, user_id=user_id, name=name, reference=reference[:1024], clone_path="", updated_at=now))
+        return {"marketplace_id": marketplace_id, "name": name, "reference": reference, "clone_path": "", "user_id": user_id}
 
     def inspect(self, *, user_id: str, reference: str) -> dict[str, Any]:
         source = resolve_source(reference)
         if source.kind == "marketplace":
-            raise PluginServiceError("plugin name was not found in a configured marketplace")
+            entries = self.search(source.plugin_name or "")
+            candidate = next((item for item in entries if str(item["name"]).casefold() == str(source.plugin_name).casefold()), None)
+            if candidate is None:
+                raise PluginServiceError("plugin name was not found in a configured marketplace")
+            source = resolve_source(str(candidate["reference"]))
         try:
             fetched = self.fetcher.fetch(source)
             inspection = inspect_plugin_package(fetched.path, package_digest=fetched.package_digest)
