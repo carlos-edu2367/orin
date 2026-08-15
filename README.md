@@ -205,7 +205,7 @@ queued forever.
 
 ## Configure a provider
 
-Open **Settings → Providers** (`Ctrl/Cmd + K` → Providers) and paste a key. It is
+Open **Settings → Providers → the provider card** (`Ctrl/Cmd + K` → Providers) and paste a key. It is
 encrypted before it is stored and is never returned by any endpoint, log, or
 event. Do not put provider keys in `.env.local`.
 

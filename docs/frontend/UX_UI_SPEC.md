@@ -40,6 +40,18 @@ Não renderizar cada Event. Normalizar por `event_id`, ordenar por execution+seq
 - Não usar tabelas, cards de métricas ou logs na área principal.
 - Glass apenas em navegação, command palette, menus e inspector.
 - Conexões de agents descrevem delegação/mensagem confirmada; pulso de ida ocorre em `DelegationCreated` ou `AgentMessageCreated`, retorno em `DelegationResultReturned`. Não animar “mensagem” se só houver child execution.
+
+## Settings: índice, sala e gaveta
+
+Settings usa uma única composição: o índice de grupos permanece à esquerda, a sala de conteúdo mantém o mesmo cabeçalho e a gaveta de detalhe preserva a grade atrás dela. Uma seção nunca monta `app-shell` ou `topbar` próprios.
+
+Três decisões sustentam a superfície:
+
+- O status em mono na barra lateral é estado real e degradável; valor desconhecido não vira zero.
+- O ponto violeta de pendência tem nome acessível e significa que uma aprovação aguarda a pessoa.
+- Cards entram em sequência uma única vez, com atraso de 40ms, e respeitam `prefers-reduced-motion`.
+
+Violeta continua racionado: marca o agente, a ação primária e a pendência. Marcas de providers são SVGs locais, inlined no build, e o status do provider permanece em texto para não depender de cor.
 # Composer de conversa e catálogo (2026-08-10)
 
 Na Home, o primeiro campo é a mensagem. Provider e modelo têm rótulos explícitos, o catálogo é pesquisável e favoritos aparecem como atalhos. O botão permanece indisponível até existir um modelo autorizado; catálogo vazio direciona a pessoa para a configuração do provider. A interface nunca mostra identificadores de agente, referências de tarefa ou valores de segredo.
