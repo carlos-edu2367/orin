@@ -75,7 +75,7 @@ def test_service_command_reexecutes_the_launcher_not_a_source_tree() -> None:
 
 
 def test_runtime_profile_uses_the_embedded_release_version() -> None:
-    assert RuntimeProfile.detect().version == __version__ == "0.1.13"
+    assert RuntimeProfile.detect().version == __version__ == "0.1.14"
 
 
 def test_migrations_are_resolved_from_the_package() -> None:

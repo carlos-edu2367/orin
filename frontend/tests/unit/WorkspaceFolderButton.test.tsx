@@ -79,6 +79,25 @@ describe('WorkspaceFolderButton', () => {
     await waitFor(() => expect(screen.getByText('D:/site')).toBeInTheDocument())
   })
 
+  it('keeps the manual path available while the native picker is pending', async () => {
+    let resolveNative!: (outcome: InspectionOutcome) => void
+    const props = api({ onInspect: vi.fn((path: string | null) => path === null
+      ? new Promise<InspectionOutcome>((resolve) => { resolveNative = resolve })
+      : Promise.resolve(plainFolder)) })
+    render(<WorkspaceFolderButton {...props} />)
+
+    fireEvent.click(screen.getByRole('button', { name: /pasta/i }))
+    fireEvent.click(screen.getByRole('button', { name: 'Selecionar diretório…' }))
+    expect(screen.getByLabelText('Caminho da pasta')).not.toBeDisabled()
+    expect(screen.getByText(/seletor do Windows está aberto/i)).toBeInTheDocument()
+
+    fireEvent.change(screen.getByLabelText('Caminho da pasta'), { target: { value: 'D:/site' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Adicionar diretório' }))
+    await waitFor(() => expect(screen.getByText('D:/site')).toBeInTheDocument())
+
+    resolveNative({ kind: 'cancelled' })
+  })
+
   it('says a project folder covers every chat of the project', async () => {
     const props = api({ state: { kind: 'managed', path: null, folderName: null, scope: 'project', projectName: 'Site novo' } })
     render(<WorkspaceFolderButton {...props} />)

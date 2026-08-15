@@ -356,7 +356,7 @@ kbd {
 .workspace-folder__risk { font-size: 12px; color: var(--danger); }
 .workspace-folder__panel > button { min-height: 32px; padding: 0 10px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--raised); color: var(--text); cursor: pointer; font-size: 11px; }
 .workspace-folder__panel > button:hover:not(:disabled) { border-color: var(--signal-dim); }
-.workspace-folder__panel > button:disabled { cursor: wait; opacity: .55; }
+.workspace-folder__panel > button:disabled { cursor: not-allowed; opacity: .55; }
 .workspace-folder__panel > button:first-of-type { border-color: var(--signal-dim); color: var(--signal); }
 .workspace-folder__risk-action { border-color: var(--danger) !important; color: var(--danger) !important; }
 .workspace-folder__field { display: grid; gap: 5px; color: var(--muted); font-size: 11px; }
@@ -489,7 +489,7 @@ kbd {
 .chat__load-error > div { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 4px; }
 .chat__load-error + .chat__placeholder { display: none; }
 .chat__new-activity {
-  position: absolute; z-index: 10; bottom: 20px; left: 50%; transform: translateX(-50%);
+  position: absolute; z-index: 30; right: 24px; bottom: 174px;
   max-width: calc(100% - 32px); min-height: 34px; padding: 0 13px;
   border: 1px solid var(--line-strong); border-radius: 99px;
   background: var(--raised-strong); box-shadow: 0 8px 24px rgb(0 0 0 / .24);
@@ -797,6 +797,7 @@ kbd {
   .chat__bar { grid-template-columns: auto minmax(0, 1fr); }
   .chat__bar-actions { grid-column: 1 / -1; justify-self: start; }
   .chat__thread, .chat__foot { padding-left: 14px; padding-right: 14px; }
+  .chat__new-activity { right: 14px; bottom: 164px; max-width: calc(100% - 28px); }
   .overview { width: 100%; }
   .overview__stats { grid-template-columns: minmax(0, 1fr); }
   .overview__agent-detail dl { grid-template-columns: minmax(0, 1fr); }

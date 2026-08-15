@@ -508,8 +508,10 @@ describe('ChatPage', () => {
 
     await userEvent.setup().click(screen.getByRole('button', { name: 'Visão geral' }))
     expect(screen.getByTestId('current-path')).toHaveTextContent(`/projects/project-e2e/chats/${CONVERSATION_ID}/overview`)
+    expect(screen.queryByTestId('chat-composer')).not.toBeInTheDocument()
     await userEvent.setup().click(screen.getByRole('button', { name: 'Visão geral' }))
     expect(screen.getByTestId('current-path')).toHaveTextContent(`/projects/project-e2e/chats/${CONVERSATION_ID}`)
+    expect(screen.getByTestId('chat-composer')).toBeInTheDocument()
   })
 
   it('keeps a missing conversation out of the composer and gives the person a safe recovery path', async () => {

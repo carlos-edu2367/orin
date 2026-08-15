@@ -1,5 +1,6 @@
 import subprocess
 
+from agentos.local_workspace import picker
 from agentos.local_workspace.picker import PickResult, choose_folder
 
 
@@ -37,3 +38,15 @@ def test_timeout_reads_as_unavailable(monkeypatch) -> None:
 
 def test_no_command_for_the_platform_reads_as_unavailable() -> None:
     assert choose_folder(command=[]) == PickResult(path=None, cancelled=False, available=False)
+
+
+def test_windows_picker_does_not_fall_back_to_legacy_dialog(monkeypatch) -> None:
+    monkeypatch.setattr(picker.sys, "platform", "win32")
+    monkeypatch.setattr(picker, "_choose_windows_folder_with_helper", lambda **_kwargs: None)
+    monkeypatch.setattr(picker, "_choose_windows_folder", lambda: None)
+
+    def unexpected_legacy_dialog(*_args, **_kwargs):
+        raise AssertionError("the legacy FolderBrowserDialog must not be started")
+
+    monkeypatch.setattr(picker.subprocess, "run", unexpected_legacy_dialog)
+    assert picker.choose_folder() == PickResult(path=None, cancelled=False, available=False)

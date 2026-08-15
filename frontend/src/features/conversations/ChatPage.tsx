@@ -533,7 +533,7 @@ export function ChatPage() {
         />
       )}
 
-      {!loadFailure && <footer className="chat__foot" data-testid="chat-composer" data-at-bottom={atBottom}>
+      {!loadFailure && !showOverview && <footer className="chat__foot" data-testid="chat-composer" data-at-bottom={atBottom}>
         {activity.connection === 'degraded' && (
           <p className="chat__connection" role="status">Atualizações em tempo real indisponíveis; tentando reconectar.</p>
         )}

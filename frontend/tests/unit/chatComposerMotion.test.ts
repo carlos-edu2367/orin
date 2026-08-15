@@ -28,4 +28,8 @@ describe('chat composer motion', () => {
     expect(stylesheet).toMatch(/\.chat__foot \{[\s\S]*width: 100%;[\s\S]*padding: 28px 24px 22px;/)
     expect(stylesheet).toMatch(/\.chat__foot > \* \{[\s\S]*width: min\(100%, 760px\);/)
   })
+
+  it('keeps the return-to-latest action above the composer hit area', () => {
+    expect(stylesheet).toMatch(/\.chat__new-activity \{[\s\S]*z-index: 30;[\s\S]*right: 24px;[\s\S]*bottom: 174px;/)
+  })
 })
