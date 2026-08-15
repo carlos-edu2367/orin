@@ -3,6 +3,17 @@
 The model never chooses the binary: only launchers from ALLOWED_COMMANDS may
 start, the argument vector is passed without a shell, and the child gets an
 explicit environment instead of the worker's own.
+
+``shell=False`` alone is not the full story on Windows: npx/uvx/node's own
+package-manager shims resolve to ``.cmd``/``.bat`` files, and the OS loader
+transparently re-invokes ``cmd.exe`` to run those — so anything that ends up on
+that re-parsed command line is subject to cmd.exe's own operator and ``%VAR%``
+expansion rules regardless of ``shell=False``. That is why ``%`` and ``^`` are
+forbidden alongside the POSIX shell metacharacters, and why the check runs
+against the credential *values* the server is launched with, not just the
+command and its arguments: a secret containing ``&`` combined with a literal
+``%SECRET_NAME%`` placeholder in an argument is enough for cmd.exe to expand
+and then re-parse into a second command, once the shim's own script runs it.
 """
 from __future__ import annotations
 
@@ -16,7 +27,7 @@ from typing import Any, Mapping
 from agentos.agentic.agent_tools import _terminate_process_tree
 
 ALLOWED_COMMANDS = frozenset({"npx", "uvx", "node", "python", "python3", "uv", "deno", "bun"})
-FORBIDDEN_CHARACTERS = frozenset(";&|`$><\n\r")
+FORBIDDEN_CHARACTERS = frozenset(";&|`$><^%\n\r")
 DEFAULT_TIMEOUT_SECONDS = 45.0
 MAX_LINE_BYTES = 4_000_000
 
@@ -43,6 +54,12 @@ class StdioTransport:
         for value in (command, *args):
             if FORBIDDEN_CHARACTERS & set(value):
                 raise StdioTransportRefused("the command line carries shell metacharacters")
+        for name, value in env.items():
+            if FORBIDDEN_CHARACTERS & set(value):
+                raise StdioTransportRefused(
+                    f"the credential '{name}' contains a character a launcher shim could reinterpret; "
+                    "the connection cannot be started with this value"
+                )
         self._command = command
         self._args = tuple(args)
         self._env = dict(env)

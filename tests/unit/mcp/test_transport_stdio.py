@@ -25,6 +25,25 @@ def test_a_command_carrying_shell_metacharacters_is_refused():
         StdioTransport(command="npx", args=("thing; rm -rf /",), env={})
 
 
+def test_an_argument_carrying_a_percent_or_caret_is_refused():
+    # On Windows, npx/uvx resolve to .cmd/.bat shims that the OS loader
+    # re-invokes through cmd.exe even with shell=False, so a literal %VAR%
+    # placeholder or a ^ escape in an argument is not inert.
+    with pytest.raises(StdioTransportRefused):
+        StdioTransport(command="npx", args=("%SOME_VAR%",), env={})
+    with pytest.raises(StdioTransportRefused):
+        StdioTransport(command="npx", args=("a^&b",), env={})
+
+
+def test_a_credential_value_carrying_a_shell_metacharacter_is_refused():
+    # The proven attack: a secret value containing '&' combined with a '%VAR%'
+    # placeholder argument lets cmd.exe expand-then-reparse into a second
+    # command once an npx/uvx shim runs. Blocking it here means the malicious
+    # value never reaches a process environment in the first place.
+    with pytest.raises(StdioTransportRefused):
+        StdioTransport(command="npx", args=("run",), env={"TOKEN": "abc&echo INJECTED>marker.txt&xyz"})
+
+
 def test_the_transport_round_trips_a_frame(tmp_path):
     script = tmp_path / "echo_server.py"
     script.write_text(ECHO_SERVER, encoding="utf-8")

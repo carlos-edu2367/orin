@@ -3,6 +3,14 @@
 Endpoint policy is the one the agent's own fetch_url already enforces: public
 HTTPS only. A private, loopback or link-local endpoint is refused before the
 first byte leaves the machine.
+
+The policy check re-resolves DNS on every call, not only once at construction:
+a server the caller does not control the DNS record for could otherwise pass
+validation once and then repoint its domain at a private or loopback address
+for the connection httpx actually opens (a DNS-rebinding race). Re-checking
+immediately before each request closes the "validate once, reuse forever" gap;
+it does not eliminate the much narrower race against httpx's own resolution a
+few milliseconds later, which needs a pinned-IP connection to close fully.
 """
 from __future__ import annotations
 
@@ -30,24 +38,31 @@ class HttpTransport:
 
     def __init__(self, *, url: str, headers: Mapping[str, str],
                  client: httpx.Client | None = None, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> None:
-        try:
-            normalized = _public_url(url, resolve_dns=True)
-        except Exception as error:  # the policy raises its own refusal type
-            raise HttpTransportRefused(str(error)) from error
-        if not normalized.lower().startswith("https://"):
-            raise HttpTransportRefused("an MCP endpoint must use https")
-        self._url = normalized
+        self._url = self._checked(url)
         self._headers = dict(headers)
         self._timeout = timeout
         self._client = client
         self._owns_client = client is None
         self.session_id: str | None = None
 
+    @staticmethod
+    def _checked(url: str) -> str:
+        try:
+            normalized = _public_url(url, resolve_dns=True)
+        except Exception as error:  # the policy raises its own refusal type
+            raise HttpTransportRefused(str(error)) from error
+        if not normalized.lower().startswith("https://"):
+            raise HttpTransportRefused("an MCP endpoint must use https")
+        return normalized
+
     def open(self) -> None:
         if self._client is None:
             self._client = httpx.Client(timeout=self._timeout, follow_redirects=False)
 
     def send(self, frame: Mapping[str, Any]) -> dict[str, Any] | None:
+        # Re-validate immediately before every request; see the module
+        # docstring for why a one-time check at construction is not enough.
+        self._checked(self._url)
         self.open()
         assert self._client is not None
         headers = {

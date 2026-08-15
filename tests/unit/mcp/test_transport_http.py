@@ -31,6 +31,26 @@ def test_the_transport_posts_a_frame_and_returns_the_json_response(monkeypatch):
     assert transport.session_id == "abc"
 
 
+def test_a_dns_rebind_after_construction_is_refused_on_the_next_call(monkeypatch):
+    # Construction sees a public address (the check passes); the record then
+    # "rebinds" to a loopback address before the request is sent. Only a
+    # per-request re-check catches this — a one-time check at construction
+    # would happily reuse the already-validated URL forever.
+    calls: list[str] = []
+
+    def flaky_public_url(url: str, resolve_dns: bool = False) -> str:
+        calls.append(url)
+        if len(calls) == 1:
+            return url
+        raise RuntimeError("Private network addresses cannot be fetched.")
+
+    monkeypatch.setattr("agentos.mcp.transport_http._public_url", flaky_public_url)
+    transport = HttpTransport(url="https://mcp.example.com/v1", headers={})
+    with pytest.raises(HttpTransportRefused):
+        transport.send({"jsonrpc": "2.0", "id": 1, "method": "ping"})
+    assert len(calls) == 2
+
+
 def test_an_sse_response_body_is_decoded_to_the_first_data_frame(monkeypatch):
     monkeypatch.setattr("agentos.mcp.transport_http._public_url", lambda url, resolve_dns=False: url)
     body = 'event: message\ndata: {"jsonrpc":"2.0","id":1,"result":{"ok":true}}\n\n'
