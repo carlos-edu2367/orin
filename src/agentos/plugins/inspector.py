@@ -1,0 +1,59 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from agentos.skills.models import SkillScope, SkillSource
+from agentos.skills.parser import SkillParseError, parse_skill_file
+
+from .manifest import parse_mcp_config, parse_plugin_manifest
+from .models import AgentContribution, PluginInspection, PluginRef, SkillContribution, McpServerContribution, plugin_id_from_name
+
+
+def _manifest(path: Path):
+    target = path / ".claude-plugin" / "plugin.json"
+    if not target.exists():
+        target = path / "plugin.json"
+    return parse_plugin_manifest(json.loads(target.read_text(encoding="utf-8")))
+
+
+def inspect_plugin_package(path: Path, *, package_digest: str) -> PluginInspection:
+    path = Path(path)
+    manifest = _manifest(path)
+    warnings: list[str] = []
+    skills: list[SkillContribution] = []
+    skill_root = path / "skills"
+    if skill_root.is_dir():
+        for skill_file in sorted(skill_root.glob("*/SKILL.md"))[:200]:
+            try:
+                skill = parse_skill_file(skill_file, include_instructions=False, source=SkillSource.PLUGIN, scope=SkillScope.USER)
+            except SkillParseError:
+                warnings.append(f"skill quebrada ignorada: {skill_file.parent.name}")
+                continue
+            skills.append(SkillContribution(f"{manifest.plugin_id}:{skill.id}", skill.name, skill.description, skill_file.relative_to(path).as_posix()))
+        if len(list(skill_root.glob("*/SKILL.md"))) > 200:
+            warnings.append("o plugin declara mais de 200 skills; o restante foi ignorado")
+    mcp_servers: tuple[McpServerContribution, ...] = ()
+    mcp_path = path / ".mcp.json"
+    if mcp_path.exists():
+        raw = parse_mcp_config(json.loads(mcp_path.read_text(encoding="utf-8")))
+        mcp_servers = tuple(McpServerContribution(f"{manifest.plugin_id}-{item.slug}", item.display_name, item.transport, item.command, item.args, item.url, item.secret_names) for item in raw[:16])
+    agents: list[AgentContribution] = []
+    agent_root = path / "agents"
+    for item in sorted(agent_root.glob("*.md"))[:64] if agent_root.is_dir() else ():
+        try:
+            document = item.read_text(encoding="utf-8")
+            if not document.startswith("---\n"):
+                raise ValueError
+            header, body = document[4:].split("\n---\n", 1)
+            values = dict(line.split(":", 1) for line in header.splitlines() if ":" in line)
+            name = values.get("name", item.stem).strip()
+            description = values.get("description", "").strip()
+            agents.append(AgentContribution(f"{manifest.plugin_id}:{plugin_id_from_name(name)}", name, body.strip() or description, item.relative_to(path).as_posix()))
+        except (OSError, ValueError):
+            warnings.append(f"subagente quebrado ignorado: {item.name}")
+    if (path / "hooks").exists():
+        warnings.append("O plugin declara hooks; hooks não são suportados e não serão ativados.")
+    if (path / "commands").exists():
+        warnings.append("comandos declarados não são executados; apenas SKILL.md é suportado")
+    return PluginInspection(PluginRef(manifest.plugin_id, manifest.version), manifest.display_name, manifest.description, manifest.author, manifest.homepage, package_digest, tuple(skills), mcp_servers, tuple(agents), tuple(warnings))
