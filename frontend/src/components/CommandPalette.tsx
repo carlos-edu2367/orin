@@ -2,6 +2,7 @@ import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useNavigate } from 'react-router-dom'
+import { settingsItems } from '../features/settings/sections'
 
 export type PaletteCommand = {
   id: string
@@ -35,10 +36,8 @@ export function CommandPalette({ commands = [], conversations = [] }: CommandPal
 
   const items = useMemo<PaletteCommand[]>(() => [
     { id: 'new', label: 'Nova conversa', hint: 'Começar do zero', group: 'Ir para', run: () => navigate('/') },
-    { id: 'providers', label: 'Providers e modelos', hint: 'Chaves e catálogo', group: 'Ir para', run: () => navigate('/providers') },
     { id: 'settings', label: 'Settings', hint: 'Configurações e gerenciamento', group: 'Ir para', run: () => navigate('/settings') },
-    { id: 'memory', label: 'Memory', hint: 'Memórias globais', group: 'Ir para', run: () => navigate('/settings/memory') },
-    { id: 'skills', label: 'Biblioteca de skills', hint: 'Procedimentos disponíveis', group: 'Ir para', run: () => navigate('/skills') },
+    ...settingsItems().map((item) => ({ id: `settings:${item.id}`, label: item.label, hint: item.lede, group: 'Settings', run: () => navigate(item.path) })),
     ...commands,
     ...conversations.map((item) => ({
       id: `chat:${item.conversation_id}`,
