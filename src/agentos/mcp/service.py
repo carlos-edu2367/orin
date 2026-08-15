@@ -36,6 +36,20 @@ class McpServiceError(ValueError):
     """Raised for any request the MCP server library will not act on."""
 
 
+class McpServerNotFound(McpServiceError):
+    """Raised when a server_id/slug does not resolve to this user's row."""
+
+
+class McpConnectionFailed(McpServiceError):
+    """Raised by approve()/test() when the connect() callable itself failed.
+
+    A distinct type from the general validation error so a caller (the HTTP
+    gateway) can map it to a gateway-style status instead of a plain
+    client-input error — the request was well-formed, the remote server was not
+    reachable or rejected the credential.
+    """
+
+
 def _now() -> datetime:
     return datetime.now(UTC)
 
@@ -56,7 +70,7 @@ class McpServerService:
                 select(mcp_servers).where(mcp_servers.c.server_id == server_id, mcp_servers.c.user_id == user_id)
             ).mappings().first()
         if row is None:
-            raise McpServiceError(f"no MCP server '{server_id}' for this user")
+            raise McpServerNotFound(f"no MCP server '{server_id}' for this user")
         return row
 
     def _tool_count(self, server_id: str) -> int:
@@ -161,7 +175,7 @@ class McpServerService:
                     update(mcp_servers).where(mcp_servers.c.server_id == server_id, mcp_servers.c.user_id == user_id)
                     .values(state_reason=reason, updated_at=_now())
                 )
-            raise McpServiceError(f"could not connect to '{config.display_name}': {reason}") from error
+            raise McpConnectionFailed(f"could not connect to '{config.display_name}': {reason}") from error
 
         ciphertext = _cipher().encrypt(json.dumps(dict(secrets)))
         now = _now()
@@ -212,7 +226,7 @@ class McpServerService:
                 select(mcp_servers).where(mcp_servers.c.user_id == user_id, mcp_servers.c.slug == slug)
             ).mappings().first()
         if row is None:
-            raise McpServiceError(f"no MCP server named '{slug}' for this user")
+            raise McpServerNotFound(f"no MCP server named '{slug}' for this user")
         server_id = str(row["server_id"])
         config = row_to_config(row)
         secrets = self._decrypt_secrets(row["secrets_ciphertext"])
@@ -237,4 +251,4 @@ class McpServerService:
         return {"connected": True, "protocol_version": protocol_version, "tools": [item.name for item in tools], "error": None}
 
 
-__all__ = ["McpServerService", "McpServiceError"]
+__all__ = ["McpConnectionFailed", "McpServerNotFound", "McpServerService", "McpServiceError"]
