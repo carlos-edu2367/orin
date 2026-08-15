@@ -32,6 +32,23 @@ def build_client(config: McpServerConfig, secrets: Mapping[str, str]) -> "McpCli
     return McpClient(transport)
 
 
+def discover(config: McpServerConfig, secrets: Mapping[str, str]) -> tuple[str, tuple[McpToolDescriptor, ...]]:
+    """Open a short-lived session, list its tools, and close.
+
+    This is the one place a proposed or already-approved server gets turned
+    into evidence it actually works: McpServerService.approve() and .test()
+    both take this as their `connect` callable, so there is exactly one
+    implementation of "what a live connection attempt means" in the codebase.
+    """
+    client = build_client(config, secrets)
+    try:
+        negotiation = client.initialize()
+        tools = client.list_tools()
+    finally:
+        client.close()
+    return negotiation.protocol_version, tools
+
+
 class McpToolProvider:
     def __init__(self, bundles: Iterable[ServerBundle],
                  client_factory: Callable[[McpServerConfig, Mapping[str, str]], Any] = build_client) -> None:
@@ -114,4 +131,4 @@ def _render(content: Sequence[Mapping[str, Any]]) -> tuple[str, list[dict[str, s
     return text, images
 
 
-__all__ = ["McpToolProvider", "ServerBundle", "build_client"]
+__all__ = ["McpToolProvider", "ServerBundle", "build_client", "discover"]

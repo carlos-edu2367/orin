@@ -1,6 +1,8 @@
-from agentos.mcp.client import McpCallResult
+import pytest
+
+from agentos.mcp.client import McpCallResult, McpNegotiation
 from agentos.mcp.models import McpServerConfig, McpServerState, McpToolDescriptor, McpTransport
-from agentos.mcp.toolset import McpToolProvider
+from agentos.mcp.toolset import McpToolProvider, discover
 
 
 class FakeClient:
@@ -78,3 +80,42 @@ def test_close_closes_every_open_session():
     provider.close()
     assert client.closed is True
     assert provider.open_session_count == 0
+
+
+class FakeDiscoveryClient:
+    def __init__(self, *, tools=(), fail_list_tools: bool = False) -> None:
+        self.closed = False
+        self._tools = tools
+        self._fail_list_tools = fail_list_tools
+
+    def initialize(self):
+        return McpNegotiation(protocol_version="2025-06-18", server_name="demo", capabilities={})
+
+    def list_tools(self):
+        if self._fail_list_tools:
+            raise RuntimeError("boom")
+        return self._tools
+
+    def close(self):
+        self.closed = True
+
+
+def test_discover_returns_the_negotiated_version_and_the_tool_list(monkeypatch):
+    tools = (McpToolDescriptor(name="search", description="d", input_schema={"type": "object"}),)
+    client = FakeDiscoveryClient(tools=tools)
+    monkeypatch.setattr("agentos.mcp.toolset.build_client", lambda config, secrets: client)
+
+    protocol_version, discovered = discover(_config(), {})
+
+    assert protocol_version == "2025-06-18"
+    assert discovered == tools
+
+
+def test_discover_closes_the_client_even_when_listing_tools_fails(monkeypatch):
+    client = FakeDiscoveryClient(fail_list_tools=True)
+    monkeypatch.setattr("agentos.mcp.toolset.build_client", lambda config, secrets: client)
+
+    with pytest.raises(RuntimeError):
+        discover(_config(), {})
+
+    assert client.closed is True

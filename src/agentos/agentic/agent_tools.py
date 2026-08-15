@@ -1427,7 +1427,9 @@ class AgentToolset:
         )
 
     def test_mcp_server(self, slug: str) -> dict[str, Any]:
-        result = self._mcp_service.test(self._mcp_user_id, str(slug))
+        from agentos.mcp.toolset import discover
+
+        result = self._mcp_service.test(self._mcp_user_id, str(slug), discover)
         return {"summary": f"Testou {slug}", "content": json.dumps(result, ensure_ascii=False),
                 "payload": {**result, "tool_kind": "mcp", "mcp_action": "test"}}
 

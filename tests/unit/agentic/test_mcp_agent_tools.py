@@ -16,6 +16,12 @@ class FakeMcpService:
         return {"server_id": "s2", "slug": command.get("slug") or "notion", "display_name": command["display_name"],
                 "state": "pending_approval", "secret_names": list(command.get("secret_names") or [])}
 
+    def test(self, user_id, slug, connect):
+        assert user_id == "u1"
+        assert slug == "github"
+        assert callable(connect)
+        return {"connected": True, "protocol_version": "2025-06-18", "tools": ["search"], "error": None}
+
 
 def _toolset(tmp_path, service):
     return AgentToolset(ConversationWorkspace(root=tmp_path, conversation_id="c1"),
@@ -57,3 +63,9 @@ def test_configure_mcp_refuses_a_secret_value_in_its_arguments(tmp_path):
 def test_configure_mcp_refuses_an_unknown_catalog_id_without_an_explicit_transport(tmp_path):
     with pytest.raises(AgentToolError):
         _toolset(tmp_path, FakeMcpService()).configure_mcp(catalog_id="nope", display_name="X")
+
+
+def test_test_mcp_server_passes_a_real_connector_to_the_service(tmp_path):
+    result = _toolset(tmp_path, FakeMcpService()).test_mcp_server(slug="github")
+    assert result["payload"]["connected"] is True
+    assert result["payload"]["tools"] == ["search"]

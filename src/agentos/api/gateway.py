@@ -41,6 +41,7 @@ from agentos.uploads.media import MAX_FILES_PER_MESSAGE, MAX_UPLOAD_BYTES, Uploa
 from agentos.uploads.promotion import discard_promoted, promote_uploads
 from agentos.mcp.catalog import search_catalog
 from agentos.mcp.service import McpConnectionFailed, McpServerNotFound, McpServiceError
+from agentos.mcp.toolset import discover as _mcp_connect
 
 
 # Conversation SSE pacing. The active poll is fast enough to feel like token
@@ -1252,19 +1253,6 @@ def _require_port(port: object | None) -> Any:
     if port is None:
         raise RuntimeError("application service is unavailable")
     return port
-
-
-def _mcp_connect(config: Any, secrets: Mapping[str, str]) -> tuple[str, Any]:
-    """The one place a real MCP connection opens: approve/test routes only."""
-    from agentos.mcp.toolset import build_client
-
-    client = build_client(config, secrets)
-    try:
-        negotiation = client.initialize()
-        tools = client.list_tools()
-    finally:
-        client.close()
-    return negotiation.protocol_version, tools
 
 
 def _idempotency(request: Request) -> str:
