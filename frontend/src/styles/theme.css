@@ -11,6 +11,7 @@
   --orin-text-rgb: 245 241 255;
   --orin-muted: rgba(245, 241, 255, .58);
   --orin-faint: rgba(245, 241, 255, .34);
+  --orin-mono-readable: rgba(245, 241, 255, .72);
   --orin-accent: #a66cff;
   --orin-accent-strong: #7c3aed;
   --orin-accent-soft: #d8b4fe;
