@@ -2,6 +2,21 @@ from agentos.mcp.catalog import CATALOG, find_catalog_entry, search_catalog
 from agentos.mcp.models import McpTransport
 
 
+def test_github_entry_uses_the_hosted_endpoint_with_a_pat_no_deprecated_npx_package():
+    # @modelcontextprotocol/server-github is deprecated upstream (confirmed by running
+    # `npx -y @modelcontextprotocol/server-github`, which prints an npm deprecation
+    # warning). GitHub's hosted remote MCP server accepts a Personal Access Token via
+    # `Authorization: Bearer <PAT>` (see docs.github.com "Setting up the GitHub MCP
+    # Server"), so this needs no OAuth: an HTTP entry with a `token` secret is enough —
+    # toolset.py's HTTP connector already turns secrets['token'] into that header.
+    entry = find_catalog_entry("github")
+    assert entry is not None
+    assert entry.transport is McpTransport.HTTP
+    assert entry.url == "https://api.githubcopilot.com/mcp/"
+    assert entry.command is None
+    assert [secret.name for secret in entry.secrets] == ["token"]
+
+
 def test_every_entry_declares_what_the_user_must_provide():
     for entry in CATALOG:
         assert entry.catalog_id and entry.display_name and entry.summary

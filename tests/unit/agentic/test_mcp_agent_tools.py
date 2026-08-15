@@ -51,7 +51,7 @@ def test_configure_mcp_creates_a_pending_server_and_asks_for_approval(tmp_path):
     assert outcome.payload["mcp_approval"] is True
     assert outcome.payload["wait_for_user"] is True
     assert outcome.payload["server"]["state"] == "pending_approval"
-    assert service.proposals[0]["secret_names"] == ["GITHUB_PERSONAL_ACCESS_TOKEN"]
+    assert service.proposals[0]["secret_names"] == ["token"]
 
 
 def test_configure_mcp_refuses_a_secret_value_in_its_arguments(tmp_path):

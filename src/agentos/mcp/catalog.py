@@ -47,14 +47,18 @@ CATALOG: tuple[McpCatalogEntry, ...] = (
         keywords=("arquivos", "files", "pasta", "diretorio"),
     ),
     McpCatalogEntry(
+        # @modelcontextprotocol/server-github (the old npx package) is deprecated
+        # upstream. GitHub's hosted remote server accepts a Personal Access Token via
+        # `Authorization: Bearer <PAT>` (docs.github.com "Setting up the GitHub MCP
+        # Server"), so this needs no OAuth — the `token` secret name is not
+        # arbitrary: toolset.py's HTTP connector special-cases it into that header.
         catalog_id="github",
         display_name="GitHub",
         summary="Issues, pull requests e código dos seus repositórios.",
-        transport=McpTransport.STDIO,
-        command="npx",
-        args=("-y", "@modelcontextprotocol/server-github"),
+        transport=McpTransport.HTTP,
+        url="https://api.githubcopilot.com/mcp/",
         secrets=(McpSecretRequirement(
-            name="GITHUB_PERSONAL_ACCESS_TOKEN",
+            name="token",
             label="Personal access token",
             how_to_obtain="github.com → Settings → Developer settings → Personal access tokens → Fine-grained tokens. Marque só os repositórios que o agente pode ver.",
         ),),
