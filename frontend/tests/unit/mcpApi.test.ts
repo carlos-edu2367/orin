@@ -5,6 +5,7 @@ import {
   approveMcpServer,
   createMcpServer,
   deleteMcpServer,
+  getMcpServer,
   listMcpCatalog,
   listMcpServers,
   setMcpServerEnabled,
@@ -20,6 +21,10 @@ function server(overrides: Record<string, unknown> = {}) {
     args: ['-y', 'server-github'], url: null, secret_names: ['GITHUB_PERSONAL_ACCESS_TOKEN'], catalog_id: 'github',
     state: 'pending_approval', state_reason: '', protocol_version: '', tool_count: 0, ...overrides,
   }
+}
+
+function detail(overrides: Record<string, unknown> = {}) {
+  return { ...server(overrides), tools: [] }
 }
 
 describe('MCP API client', () => {
@@ -51,7 +56,7 @@ describe('MCP API client', () => {
   })
 
   it('creates a pending server and posts only the given fields', async () => {
-    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(json(server(), 201))
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(json(detail(), 201))
     const client = new ApiClient({ fetchImpl, maxAttempts: 1 })
 
     const created = await createMcpServer(client, { display_name: 'GitHub', catalog_id: 'github' })
@@ -64,7 +69,7 @@ describe('MCP API client', () => {
   })
 
   it('approves a server, sending secret values in the body and never logging them back', async () => {
-    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(json(server({ state: 'active', tool_count: 3 })))
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(json(detail({ state: 'active', tool_count: 3 })))
     const client = new ApiClient({ fetchImpl, maxAttempts: 1 })
 
     const approved = await approveMcpServer(client, 's1', { GITHUB_PERSONAL_ACCESS_TOKEN: 'ghp_secret' })
@@ -74,6 +79,21 @@ describe('MCP API client', () => {
     expect(String(url)).toBe('/v1/mcp/servers/s1/approve')
     expect(JSON.parse(String(init?.body))).toEqual({ secrets: { GITHUB_PERSONAL_ACCESS_TOKEN: 'ghp_secret' } })
     expect(JSON.stringify(approved)).not.toContain('ghp_secret')
+  })
+
+  it('parses the cached tool list with its per-tool enabled state', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(json({
+      ...detail({ state: 'active' }),
+      tools: [{ name: 'search', description: 'Search pages', enabled: true }, { name: 'archive', description: '', enabled: false }],
+    }))
+    const client = new ApiClient({ fetchImpl, maxAttempts: 1 })
+
+    const result = await getMcpServer(client, 's1')
+
+    expect(result.tools).toEqual([
+      { name: 'search', description: 'Search pages', enabled: true },
+      { name: 'archive', description: '', enabled: false },
+    ])
   })
 
   it('propagates a 502 from a failed approval as an ApiError', async () => {
@@ -87,7 +107,7 @@ describe('MCP API client', () => {
   })
 
   it('toggles a server enabled state', async () => {
-    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(json(server({ state: 'disabled' })))
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(json(detail({ state: 'disabled' })))
     const client = new ApiClient({ fetchImpl, maxAttempts: 1 })
 
     const updated = await setMcpServerEnabled(client, 's1', false)

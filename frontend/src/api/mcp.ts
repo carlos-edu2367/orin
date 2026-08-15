@@ -32,6 +32,12 @@ export type McpServerSummary = {
   tool_count: number
 }
 
+export type McpToolSummary = { name: string; description: string; enabled: boolean }
+
+/** Every single-server response (get/propose/approve/enable toggles) carries
+ * the cached tool list; only the plural list route stays summary-only. */
+export type McpServerDetail = McpServerSummary & { tools: McpToolSummary[] }
+
 export type CreateMcpServerInput = {
   display_name: string
   catalog_id?: string
@@ -58,29 +64,29 @@ export function listMcpServers(client: ApiClient, signal?: AbortSignal): Promise
   return client.request({ path: '/v1/mcp/servers', signal, parse: parseServerList })
 }
 
-export function getMcpServer(client: ApiClient, serverId: string, signal?: AbortSignal): Promise<McpServerSummary> {
-  return client.request({ path: serverPath(serverId), signal, parse: parseServer })
+export function getMcpServer(client: ApiClient, serverId: string, signal?: AbortSignal): Promise<McpServerDetail> {
+  return client.request({ path: serverPath(serverId), signal, parse: parseServerDetail })
 }
 
-export function createMcpServer(client: ApiClient, input: CreateMcpServerInput, intent = client.createMutationIntent()): Promise<McpServerSummary> {
-  return client.request({ path: '/v1/mcp/servers', method: 'POST', body: input, intent, expectedStatus: 201, parse: parseServer })
+export function createMcpServer(client: ApiClient, input: CreateMcpServerInput, intent = client.createMutationIntent()): Promise<McpServerDetail> {
+  return client.request({ path: '/v1/mcp/servers', method: 'POST', body: input, intent, expectedStatus: 201, parse: parseServerDetail })
 }
 
-export function approveMcpServer(client: ApiClient, serverId: string, secrets: Record<string, string>, intent = client.createMutationIntent()): Promise<McpServerSummary> {
-  return client.request({ path: `${serverPath(serverId)}/approve`, method: 'POST', body: { secrets }, intent, parse: parseServer })
+export function approveMcpServer(client: ApiClient, serverId: string, secrets: Record<string, string>, intent = client.createMutationIntent()): Promise<McpServerDetail> {
+  return client.request({ path: `${serverPath(serverId)}/approve`, method: 'POST', body: { secrets }, intent, parse: parseServerDetail })
 }
 
 export function testMcpServer(client: ApiClient, serverId: string, intent = client.createMutationIntent()): Promise<McpTestResult> {
   return client.request({ path: `${serverPath(serverId)}/test`, method: 'POST', intent, parse: parseTestResult })
 }
 
-export function setMcpServerEnabled(client: ApiClient, serverId: string, enabled: boolean, intent = client.createMutationIntent()): Promise<McpServerSummary> {
-  return client.request({ path: `${serverPath(serverId)}/enabled`, method: 'PUT', body: { enabled }, intent, parse: parseServer })
+export function setMcpServerEnabled(client: ApiClient, serverId: string, enabled: boolean, intent = client.createMutationIntent()): Promise<McpServerDetail> {
+  return client.request({ path: `${serverPath(serverId)}/enabled`, method: 'PUT', body: { enabled }, intent, parse: parseServerDetail })
 }
 
-export function setMcpToolEnabled(client: ApiClient, serverId: string, toolName: string, enabled: boolean, intent = client.createMutationIntent()): Promise<McpServerSummary> {
+export function setMcpToolEnabled(client: ApiClient, serverId: string, toolName: string, enabled: boolean, intent = client.createMutationIntent()): Promise<McpServerDetail> {
   if (!toolName.trim()) throw new TypeError('A tool name is required')
-  return client.request({ path: `${serverPath(serverId)}/tools/${encodeURIComponent(toolName)}/enabled`, method: 'PUT', body: { enabled }, intent, parse: parseServer })
+  return client.request({ path: `${serverPath(serverId)}/tools/${encodeURIComponent(toolName)}/enabled`, method: 'PUT', body: { enabled }, intent, parse: parseServerDetail })
 }
 
 export function deleteMcpServer(client: ApiClient, serverId: string, intent = client.createMutationIntent()): Promise<void> {
@@ -127,6 +133,17 @@ function parseServer(value: unknown): McpServerSummary {
     state: mcpServerState(data.state), state_reason: text(data.state_reason ?? ''), protocol_version: text(data.protocol_version ?? ''),
     tool_count: number(data.tool_count),
   }
+}
+
+function parseServerDetail(value: unknown): McpServerDetail {
+  const data = record(value)
+  if (!Array.isArray(data.tools)) throw invalidResponseError()
+  return { ...parseServer(data), tools: data.tools.map(parseToolSummary) }
+}
+
+function parseToolSummary(value: unknown): McpToolSummary {
+  const data = record(value)
+  return { name: text(data.name), description: text(data.description ?? ''), enabled: data.enabled === true }
 }
 
 function parseTestResult(value: unknown): McpTestResult {
