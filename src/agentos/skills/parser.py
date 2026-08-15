@@ -21,7 +21,18 @@ class SkillParseError(ValueError):
 _ALLOWED = frozenset({"id", "name", "description", "version", "tags", "capabilities", "when_to_use", "when_not_to_use", "dependencies", "requires_tools", "author"})
 
 
-def parse_skill_file(path: Path | str, *, include_instructions: bool = True, source: SkillSource = SkillSource.BUILTIN, scope: SkillScope = SkillScope.SYSTEM) -> Skill:
+_DEFAULT_REQUIRED: frozenset[str] = frozenset({"name", "description", "version"})
+
+
+def parse_skill_file(
+    path: Path | str,
+    *,
+    include_instructions: bool = True,
+    source: SkillSource = SkillSource.BUILTIN,
+    scope: SkillScope = SkillScope.SYSTEM,
+    required_fields: frozenset[str] = _DEFAULT_REQUIRED,
+    default_version: str | None = None,
+) -> Skill:
     target = Path(path)
     if target.is_dir():
         target = target / "SKILL.md"
@@ -29,11 +40,34 @@ def parse_skill_file(path: Path | str, *, include_instructions: bool = True, sou
         document = target.read_text(encoding="utf-8")
     except OSError as error:
         raise SkillParseError(f"cannot read skill package '{target}'") from error
-    skill = parse_skill_markdown(document, include_instructions=include_instructions, source=source, scope=scope)
+    skill = parse_skill_markdown(
+        document,
+        include_instructions=include_instructions,
+        source=source,
+        scope=scope,
+        required_fields=required_fields,
+        default_version=default_version,
+    )
     return replace(skill, package_path=target)
 
 
-def parse_skill_markdown(document: str, *, include_instructions: bool = True, source: SkillSource = SkillSource.BUILTIN, scope: SkillScope = SkillScope.SYSTEM) -> Skill:
+def parse_skill_markdown(
+    document: str,
+    *,
+    include_instructions: bool = True,
+    source: SkillSource = SkillSource.BUILTIN,
+    scope: SkillScope = SkillScope.SYSTEM,
+    required_fields: frozenset[str] = _DEFAULT_REQUIRED,
+    default_version: str | None = None,
+) -> Skill:
+    """Parse a SKILL.md document.
+
+    ``required_fields``/``default_version`` exist for the plugin inspector: real-world
+    plugin skills (e.g. the ecosystem's own `superpowers`) declare only name/description
+    per skill, tracking version once at the plugin level instead. Orin's own skill
+    service keeps the strict default (version required, no substitute) because its
+    skills are versioned individually via `skill_versions`.
+    """
     if not isinstance(document, str) or not document.startswith("---\n"):
         raise SkillParseError("SKILL.md must begin with YAML frontmatter")
     try:
@@ -44,10 +78,13 @@ def parse_skill_markdown(document: str, *, include_instructions: bool = True, so
     unknown = set(values) - _ALLOWED
     if unknown:
         raise SkillParseError(f"unsupported skill frontmatter field: {sorted(unknown)[0]}")
-    required = {"name", "description", "version"}
-    missing = required - set(values)
+    missing = required_fields - set(values)
     if missing:
         raise SkillParseError(f"missing required skill frontmatter field: {sorted(missing)[0]}")
+    if "version" not in values:
+        if default_version is None:
+            raise SkillParseError("missing required skill frontmatter field: version")
+        values["version"] = default_version
     skill_id = str(values.get("id") or _slug(str(values["name"])))
     dependencies = values.get("dependencies", {})
     if not isinstance(dependencies, dict):

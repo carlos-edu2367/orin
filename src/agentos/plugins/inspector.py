@@ -26,7 +26,14 @@ def inspect_plugin_package(path: Path, *, package_digest: str) -> PluginInspecti
     if skill_root.is_dir():
         for skill_file in sorted(skill_root.glob("*/SKILL.md"))[:200]:
             try:
-                skill = parse_skill_file(skill_file, include_instructions=False, source=SkillSource.PLUGIN, scope=SkillScope.USER)
+                skill = parse_skill_file(
+                    skill_file,
+                    include_instructions=False,
+                    source=SkillSource.PLUGIN,
+                    scope=SkillScope.USER,
+                    required_fields=frozenset({"name", "description"}),
+                    default_version=manifest.version,
+                )
             except SkillParseError:
                 warnings.append(f"skill quebrada ignorada: {skill_file.parent.name}")
                 continue
