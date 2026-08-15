@@ -101,7 +101,8 @@
 .settings-shell__bar > a:last-child:hover { color: var(--text); }
 .settings-nav { padding: 26px 14px; gap: 22px; }
 .settings-nav__group { display: grid; gap: 2px; }
-.settings-nav__group-title { margin: 0 0 6px 11px; color: var(--faint); font: 9px var(--mono); letter-spacing: .16em; text-transform: uppercase; }
+.settings-nav__group-title { margin: 0 0 6px 11px; color: var(--muted); font: 9px var(--mono); letter-spacing: .16em; text-transform: uppercase; }
+.settings-shell .eyebrow { color: var(--signal); }
 .settings-nav__item { display: flex; align-items: center; gap: 8px; padding: 8px 11px; border-radius: 8px; color: var(--muted); font-size: 13px; text-decoration: none; transition: background .18s var(--ease), color .18s var(--ease); }
 .settings-nav__item:hover { background: var(--raised); color: var(--text); }
 .settings-nav__item.is-active { background: var(--raised-strong); color: var(--text); }
