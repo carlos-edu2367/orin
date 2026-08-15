@@ -798,6 +798,14 @@ plugin_contributions = Table(
 )
 Index("ix_plugin_contributions_plugin", plugin_contributions.c.user_id, plugin_contributions.c.plugin_id)
 
+oauth_tokens = Table(
+    "oauth_tokens", metadata,
+    Column("user_id", String(255), primary_key=True), Column("provider_id", String(64), primary_key=True),
+    Column("access_token_ciphertext", Text(), nullable=False), Column("refresh_token_ciphertext", Text(), nullable=True),
+    Column("scope", String(1024), nullable=True), Column("expires_at", DateTime(timezone=True), nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False), Column("updated_at", DateTime(timezone=True), nullable=False),
+)
+
 plugin_marketplaces = Table(
     "plugin_marketplaces", metadata,
     Column("marketplace_id", String(64), primary_key=True), Column("user_id", String(255), primary_key=True),
@@ -847,5 +855,6 @@ __all__ = [
     "plugins",
     "plugin_contributions",
     "plugin_marketplaces",
+    "oauth_tokens",
     "create_engine_for_tests",
 ]

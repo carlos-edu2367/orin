@@ -1,4 +1,4 @@
-from agentos.mcp.catalog import CATALOG, find_catalog_entry, search_catalog
+from agentos.mcp.catalog import CATALOG, find_catalog_entry, oauth_configured, search_catalog
 from agentos.mcp.models import McpTransport
 
 
@@ -40,3 +40,38 @@ def test_search_matches_name_and_keywords():
 
 def test_find_catalog_entry_returns_none_for_an_unknown_id():
     assert find_catalog_entry("nope") is None
+
+
+def test_google_drive_entry_declares_an_oauth_requirement_no_secret_field():
+    entry = find_catalog_entry("google-drive")
+    assert entry is not None
+    assert entry.transport is McpTransport.HTTP
+    assert entry.url == "https://drivemcp.googleapis.com/mcp/v1"
+    assert entry.secrets == ()
+    assert entry.oauth is not None
+    assert entry.oauth.scopes == ("https://www.googleapis.com/auth/drive.readonly", "https://www.googleapis.com/auth/drive.file")
+    assert entry.oauth.client_id_env_var == "AGENTOS_OAUTH_GOOGLE_CLIENT_ID"
+
+
+def test_vercel_entry_declares_an_oauth_requirement_and_warns_client_approval_is_needed():
+    entry = find_catalog_entry("vercel")
+    assert entry is not None
+    assert entry.transport is McpTransport.HTTP
+    assert entry.url == "https://mcp.vercel.com"
+    assert entry.oauth is not None
+    assert entry.oauth.client_id_env_var == "AGENTOS_OAUTH_VERCEL_CLIENT_ID"
+    # Vercel MCP only accepts clients it has personally reviewed and approved —
+    # a self-registered client_id is not sufficient the way it is for Google.
+    assert "aprovad" in entry.setup_instructions.lower() or "approv" in entry.setup_instructions.lower()
+
+
+def test_oauth_configured_is_false_without_a_client_id_and_true_once_set(monkeypatch):
+    entry = find_catalog_entry("google-drive")
+    monkeypatch.delenv("AGENTOS_OAUTH_GOOGLE_CLIENT_ID", raising=False)
+    assert oauth_configured(entry) is False
+    monkeypatch.setenv("AGENTOS_OAUTH_GOOGLE_CLIENT_ID", "some-client-id")
+    assert oauth_configured(entry) is True
+
+
+def test_oauth_configured_is_true_for_an_entry_with_no_oauth_requirement():
+    assert oauth_configured(find_catalog_entry("github")) is True
