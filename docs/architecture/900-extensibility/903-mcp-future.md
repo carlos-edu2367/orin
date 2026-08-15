@@ -1,6 +1,6 @@
 # RFC 903 — MCP: posição futura e critérios de adoção
 
-**Estado:** Proposta normativa de fronteira futura; não adotada no lançamento inicial  
+**Estado:** Parcialmente adotada — v1 expõe somente tools; ver [docs/MCP.md](../../MCP.md) e "Estado da implementação" abaixo  
 **Idioma:** PT-BR  
 **Relações:** [RFC 000 — Visão geral](../000-overview.md), [RFC 050 — Princípios de design](../050-design-principles.md), [RFC 060 — Glossário e convenções](../060-glossary-and-conventions.md), [RFC 102 — Ciclo de vida da Execution](../100-kernel/102-execution-lifecycle.md), [RFC 103 — Sistema de eventos](../100-kernel/103-event-system.md), [RFC 104 — Pipeline de contexto](../100-kernel/104-context-pipeline.md), [RFC 401 — Tool Runtime](../400-tools-resources/401-tool-runtime.md), [RFC 402 — Resource Manager](../400-tools-resources/402-resource-manager.md), [RFC 501 — Provider API](../500-providers-models/501-provider-api.md), [RFC 602 — Artifact Storage](../600-platform-data/602-artifact-storage.md), [RFC 702 — Segurança](../700-api-security/702-security.md), [RFC 803 — Observabilidade](../800-operations/803-observability.md), [RFC 901 — Plugin SDK](901-plugin-sdk.md)
 
@@ -21,6 +21,45 @@ Quando adotado, MCP ficará atrás de `McpGatewayAdapter`. O adapter traduz desc
 - Artifact Storage para conteúdo durável;
 - Event System para fatos internos;
 - Security Policy para identidade, autorização, secrets e auditoria.
+
+## Estado da implementação
+
+Esta seção registra o que da posição normativa acima já tem uma implementação
+pragmática (`src/agentos/mcp/`, documentada em [docs/MCP.md](../../MCP.md))
+e o que permanece adiado.
+
+**Atendido:**
+
+- opt-in explícito por servidor: nenhum servidor conecta sem `approve()`
+  explícito do usuário (`McpServerState.PENDING_APPROVAL → ACTIVE`);
+- descoberta não cria grant nem Tool automaticamente: o schema de cada tool
+  remota é saneado (`agentos/mcp/sanitize.py`) antes de virar `ToolDefinition`;
+- servidor, descriptor e resultado remoto são tratados como não confiáveis:
+  nome, schema e conteúdo passam por validação e limite antes de chegar ao
+  modelo;
+- credencial como referência cifrada: um segredo nunca é argumento de tool
+  nem aparece em resposta pública (`ProviderSecretCipher`, a mesma usada para
+  credenciais de provider);
+- egress controlado: `stdio` usa allowlist de launcher e ambiente mínimo;
+  `http` reusa a política de rede pública do `fetch_url` e a reaplica a cada
+  chamada;
+- cancelamento e fail-closed: uma falha de conexão nunca ativa parcialmente
+  um servidor, e uma falha de servidor configurado nunca bloqueia o turno;
+- eventos auditáveis: aprovação, teste e remoção passam pelas mesmas rotas
+  versionadas e autenticadas do restante do gateway.
+
+**Adiado deliberadamente** (não implementado nesta versão):
+
+- `binding_version` por tool — hoje a identidade é o par (servidor, nome da
+  tool); mudança de schema reescreve o cache sem versionamento explícito;
+- quarentena automática por violação repetida de schema;
+- reconciliação de efeito `UNKNOWN` após cancelamento de uma chamada de tool
+  em andamento;
+- resources e prompts do MCP — exigem uma porta local proprietária própria
+  (ver "Mapeamento para contratos atuais" abaixo) que ainda não existe;
+- IP pinning na sessão HTTP — o guard de SSRF revalida a cada chamada, mas
+  ainda há uma corrida estreita contra a resolução DNS interna do `httpx`
+  (ver docs/MCP.md, "The HTTP network policy").
 
 ## Fora de escopo
 

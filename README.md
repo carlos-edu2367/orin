@@ -260,6 +260,16 @@ automatic choice prefers a local Ollama over sending the file off-machine.
 
 `Ctrl/Cmd + K` opens the command palette: conversations, Settings, memory, providers, and new chat. Settings is the single global management area; project memory and workspace controls stay on the relevant project.
 
+## Conectores MCP
+
+Orin conecta a servidores MCP (Model Context Protocol), locais (stdio, ex.:
+`npx`/`uvx`) ou remotos (HTTPS). O próprio agente pode buscar, explicar e
+propor uma conexão durante a conversa — mas nunca ativa nada sozinho: a
+proposta fica `pending_approval` até você digitar a credencial (se houver) em
+um card no chat ou em **Settings → MCP**. Veja [docs/MCP.md](docs/MCP.md) para
+o que é suportado, os limites de segurança e como adicionar um servidor ao
+catálogo curado.
+
 ## What the agent can do
 
 Tools are defined in `src/agentos/agentic/agent_tools.py`.
@@ -272,6 +282,7 @@ Tools are defined in `src/agentos/agentic/agent_tools.py`.
 | `fetch_url` | Public http(s) only; private, loopback and link-local addresses are refused. Returns readable text. |
 | `remember`, `recall` | Durable facts scoped to the user, recalled into later conversations. |
 | `create_agent`, `ask_agent` | Create a specialist and hand it a self-contained task. A subagent cannot create further subagents, and there is a per-turn budget. |
+| `list_mcp_catalog`, `list_mcp_servers`, `configure_mcp`, `test_mcp_server` | Propose and inspect MCP connectors. `configure_mcp` never accepts a credential value — it creates a pending connection and shows the user an approval card; see [docs/MCP.md](docs/MCP.md). Tools an approved server publishes appear alongside these as `mcp__<server>__<tool>`. |
 
 `run_command` is a real shell on your machine. That is the point of a local
 agent workspace, and it is also the reason not to expose this service to a
