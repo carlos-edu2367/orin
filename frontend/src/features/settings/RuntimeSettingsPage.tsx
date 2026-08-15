@@ -3,8 +3,9 @@ import { ApiClient, createBrowserApiClient } from '../../api/client'
 import { getInstallationStatus, removeInstalledVersion, type InstallationStatus } from '../../api/installation'
 import { getAgentRuntimeSettings, setAgentRuntimeSettings } from '../../api/runtime'
 import { SettingsPage } from './SettingsPage'
+import { SettingsSection } from './SettingsSection'
 
-export function RuntimeSettingsPage({ client }: { client?: ApiClient }) {
+export function RuntimeSettingsPage({ client, embedded = false }: { client?: ApiClient; embedded?: boolean }) {
   const apiClient = useMemo(() => client ?? createBrowserApiClient(), [client])
   const [maxIterations, setMaxIterations] = useState<number | null>(null)
   const [draft, setDraft] = useState('24')
@@ -38,7 +39,9 @@ export function RuntimeSettingsPage({ client }: { client?: ApiClient }) {
   }
 
   useEffect(() => {
-    void refreshInstallation()
+    let active = true
+    getInstallationStatus(apiClient).then((value) => { if (active) setInstallation(value) }).catch(() => { if (active) setInstallationNotice('Não foi possível consultar o estado da instalação.') }).finally(() => { if (active) setInstallationLoading(false) })
+    return () => { active = false }
   }, [apiClient])
 
   async function removeVersion(version: string) {
@@ -76,11 +79,8 @@ export function RuntimeSettingsPage({ client }: { client?: ApiClient }) {
     }
   }
 
-  return <SettingsPage>
-    <p className="eyebrow">RUNTIME</p>
-    <h1>General</h1>
-    <p className="settings-content__lede">Estado do Orin nesta instalação e limites de execução do agente.</p>
-    <section className="installation-status" aria-busy={installationLoading} aria-labelledby="installation-status-title">
+  const content = <>
+    {!embedded && <section className="installation-status" aria-busy={installationLoading} aria-labelledby="installation-status-title">
       <div className="installation-status__heading">
         <div><p className="eyebrow">INSTALAÇÃO</p><h2 id="installation-status-title">Estado do Orin</h2></div>
         <button type="button" className="button button--quiet" onClick={() => void refreshInstallation()} disabled={installationLoading || installationBusy}>Verificar release</button>
@@ -104,7 +104,7 @@ export function RuntimeSettingsPage({ client }: { client?: ApiClient }) {
         </div>
       </>}
       {installationNotice && <p className="installation-status__notice" role="status">{installationNotice}</p>}
-    </section>
+    </section>}
     <h2 className="runtime-settings__title">Interações do agente</h2>
     <p className="settings-content__lede">Defina quantas rodadas de ferramentas e raciocínio um turno pode executar. Sem limite remove os tetos de rodadas e ações, inclusive para subagentes; a proteção contra processos travados continua ativa.</p>
     <section className="runtime-settings" aria-busy={loading}>
@@ -114,5 +114,6 @@ export function RuntimeSettingsPage({ client }: { client?: ApiClient }) {
       <button type="button" className="button button--primary" disabled={loading || saving} onClick={() => void save()}>Salvar limite</button>
       {notice && <p role="status" className="runtime-settings__notice">{notice}</p>}
     </section>
-  </SettingsPage>
+  </>
+  return embedded ? <SettingsSection eyebrow="RUNTIME">{content}</SettingsSection> : <SettingsPage><p className="eyebrow">RUNTIME</p><h1>General</h1><p className="settings-content__lede">Estado do Orin nesta instalação e limites de execução do agente.</p>{content}</SettingsPage>
 }
