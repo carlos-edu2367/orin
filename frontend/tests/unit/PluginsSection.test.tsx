@@ -1,5 +1,5 @@
 import { render, screen } from '@testing-library/react'
-import { describe, expect, it, vi } from 'vitest'
+import { expect, it, vi } from 'vitest'
 import { PluginsSection } from '../../src/features/plugins/PluginsSection'
 import { ApiClient } from '../../src/api/client'
 import { MemoryRouter } from 'react-router-dom'

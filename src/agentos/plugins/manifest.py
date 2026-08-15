@@ -61,6 +61,8 @@ def parse_mcp_config(payload: Mapping[str, Any]) -> tuple[McpServerContribution,
         command = _text(raw.get("command"), 512).strip() or None
         declared = _text(raw.get("type"), 16).strip().lower()
         transport = declared if declared in {"stdio", "http"} else ("http" if url else "stdio")
+        if (transport == "http" and url and not url.lower().startswith("https://")):
+            continue
         if (transport == "stdio" and not command) or (transport == "http" and not url):
             continue
         env = raw.get("env") if isinstance(raw.get("env"), Mapping) else {}

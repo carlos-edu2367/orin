@@ -94,11 +94,17 @@ class PluginService:
         contributions = self._contributions(user_id, plugin_id)
         inspection = inspect_plugin_package(Path(record["install_path"]), package_digest=record["package_digest"])
         if enabled:
-            self.activator.activate(user_id=user_id, install_path=Path(record["install_path"]), inspection=inspection)
+            activation = self.activator.activate(user_id=user_id, install_path=Path(record["install_path"]), inspection=inspection)
+            now = _now()
+            with self.engine.begin() as connection:
+                connection.execute(delete(plugin_contributions).where((plugin_contributions.c.plugin_id == plugin_id) & (plugin_contributions.c.user_id == user_id)))
+                for item in activation.contributions:
+                    connection.execute(insert(plugin_contributions).values(plugin_id=plugin_id, user_id=user_id, kind=item["kind"], reference=item["reference"], display_name=item["display_name"], enabled=True, created_at=now))
         else:
             self.activator.deactivate(user_id=user_id, plugin_id=plugin_id, contributions=contributions)
         with self.engine.begin() as connection:
             connection.execute(update(plugins).where((plugins.c.plugin_id == plugin_id) & (plugins.c.user_id == user_id)).values(state=target.value, updated_at=_now()))
+            connection.execute(update(plugin_contributions).where((plugin_contributions.c.plugin_id == plugin_id) & (plugin_contributions.c.user_id == user_id)).values(enabled=enabled))
         return self.get(user_id, plugin_id)
 
     def remove(self, *, user_id: str, plugin_id: str) -> dict[str, Any]:
@@ -134,8 +140,9 @@ class PluginService:
             connection.execute(delete(plugins).where((plugins.c.plugin_id == plugin_id) & (plugins.c.user_id == user_id)))
 
     def _safe_remove(self, path: Path):
-        if path.exists() and path.is_relative_to(self.plugin_root):
-            shutil.rmtree(path)
+        resolved = path.resolve(strict=False)
+        if resolved.exists() and resolved.is_relative_to(self.plugin_root):
+            shutil.rmtree(resolved)
 
     @staticmethod
     def _inspection_result(inspection, values):
