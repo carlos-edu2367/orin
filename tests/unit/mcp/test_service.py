@@ -73,6 +73,25 @@ def test_active_servers_expose_their_cached_tools(service):
     assert secrets["GITHUB_PERSONAL_ACCESS_TOKEN"] == "t"
 
 
+def test_get_includes_the_cached_tools_with_their_enabled_state(service):
+    record = service.propose(_proposal())
+    discovered = (McpToolDescriptor(name="search", description="d", input_schema={"type": "object"}),)
+    service.approve(user_id="u1", server_id=record["server_id"], secrets={"GITHUB_PERSONAL_ACCESS_TOKEN": "t"},
+                    connect=lambda config, secrets: ("2025-06-18", discovered))
+    detail = service.get("u1", record["server_id"])
+    assert detail["tools"] == [{"name": "search", "description": "d", "enabled": True}]
+
+
+def test_set_tool_enabled_is_reflected_in_get(service):
+    record = service.propose(_proposal())
+    discovered = (McpToolDescriptor(name="search", description="d", input_schema={"type": "object"}),)
+    service.approve(user_id="u1", server_id=record["server_id"], secrets={"GITHUB_PERSONAL_ACCESS_TOKEN": "t"},
+                    connect=lambda config, secrets: ("2025-06-18", discovered))
+    service.set_tool_enabled("u1", record["server_id"], "search", enabled=False)
+    detail = service.get("u1", record["server_id"])
+    assert detail["tools"] == [{"name": "search", "description": "d", "enabled": False}]
+
+
 def test_disabling_removes_the_server_from_the_active_set(service):
     record = service.propose(_proposal())
     service.approve(user_id="u1", server_id=record["server_id"], secrets={"GITHUB_PERSONAL_ACCESS_TOKEN": "t"},

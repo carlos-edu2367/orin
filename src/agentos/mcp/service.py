@@ -79,9 +79,17 @@ class McpServerService:
                 select(mcp_server_tools.c.id).where(mcp_server_tools.c.server_id == server_id)
             ).all())
 
+    def _tools(self, server_id: str) -> list[dict[str, Any]]:
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(mcp_server_tools).where(mcp_server_tools.c.server_id == server_id).order_by(mcp_server_tools.c.name)
+            ).mappings().all()
+        return [{"name": str(row["name"]), "description": str(row["description"]), "enabled": bool(row["enabled"])} for row in rows]
+
     def get(self, user_id: str, server_id: str) -> dict[str, Any]:
         row = self._row(user_id, server_id)
-        return public_summary(row, tool_count=self._tool_count(server_id))
+        tools = self._tools(server_id)
+        return {**public_summary(row, tool_count=len(tools)), "tools": tools}
 
     def list(self, user_id: str) -> list[dict[str, Any]]:
         with self.engine.connect() as connection:
