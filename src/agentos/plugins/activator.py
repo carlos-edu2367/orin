@@ -27,7 +27,7 @@ class PluginActivator:
         try:
             for item in inspection.skills:
                 skill = parse_skill_file(Path(install_path) / item.relative_path, include_instructions=True, source=SkillSource.PLUGIN, scope=SkillScope.USER)
-                installed_skills.append(replace(skill, id=item.skill_id, package_path=Path(install_path) / Path(item.relative_path).parent))
+                installed_skills.append(replace(skill, id=item.skill_id, package_path=Path(install_path) / item.relative_path))
             self.skill_library.install_plugin_skills(user_id=user_id, plugin_id=inspection.ref.plugin_id, skills=tuple(installed_skills))
             contributions.extend({"kind": "skill", "reference": item.skill_id, "display_name": item.name} for item in inspection.skills)
             for item in inspection.mcp_servers:

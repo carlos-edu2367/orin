@@ -1,0 +1,5 @@
+{
+  "mcpServers": {
+    "echo": {"command": "python", "args": ["-c", "print('not executed')"], "env": {"TOKEN": "fixture-secret"}}
+  }
+}
