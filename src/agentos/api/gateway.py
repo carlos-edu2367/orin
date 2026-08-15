@@ -42,6 +42,7 @@ from agentos.uploads.promotion import discard_promoted, promote_uploads
 from agentos.mcp.catalog import search_catalog
 from agentos.mcp.service import McpConnectionFailed, McpServerNotFound, McpServiceError
 from agentos.mcp.toolset import discover as _mcp_connect
+from agentos.plugins.service import PluginServiceError
 
 
 # Conversation SSE pacing. The active poll is fast enough to feel like token
@@ -210,6 +211,14 @@ class McpEnabledRequest(_RequestModel):
     enabled: bool
 
 
+class PluginReferenceRequest(_RequestModel):
+    reference: str = Field(min_length=1, max_length=1024)
+
+
+class PluginEnabledRequest(_RequestModel):
+    enabled: bool
+
+
 class OmniRouteRuntimeRequest(_RequestModel):
     auto_start: bool
 
@@ -243,6 +252,7 @@ class ApiServices:
         projects: object | None = None,
         skills: object | None = None,
         mcp: object | None = None,
+        plugins: object | None = None,
         omniroute_runtime: object | None = None,
         agentic_runtime: object | None = None,
         events: InMemoryClientEventStream | None = None,
@@ -262,6 +272,7 @@ class ApiServices:
         self.projects = projects
         self.skills = skills
         self.mcp = mcp
+        self.plugins = plugins
         self.local_workspaces = local_workspaces
         self.omniroute_runtime = omniroute_runtime
         self.agentic_runtime = agentic_runtime
@@ -345,6 +356,10 @@ def create_app(services: ApiServices) -> FastAPI:
     @app.exception_handler(McpServiceError)
     async def mcp_service_error(_: Request, __: McpServiceError) -> JSONResponse:
         return _error(422, "VALIDATION", "invalid_request", retryable=False)
+
+    @app.exception_handler(PluginServiceError)
+    async def plugin_service_error(_: Request, __: PluginServiceError) -> JSONResponse:
+        return _error(409, "CONFLICT", "plugin_operation_rejected", retryable=False)
 
     @app.exception_handler(Exception)
     async def internal_error(_: Request, __: Exception) -> JSONResponse:
@@ -904,6 +919,56 @@ def create_app(services: ApiServices) -> FastAPI:
         services.security.authorize(principal, action="agents.update", resource_id=agent_id, purpose="agents.update")
         result = _require_port(services.skills).set_agent_skills({"user_id": principal.user_id, "agent_id": agent_id, "mode": payload.mode, "skill_ids": payload.skill_ids, "idempotency_key": _idempotency(request)})
         return JSONResponse(_jsonable(result))
+
+    @app.get("/v1/plugins")
+    async def list_plugins(request: Request) -> JSONResponse:
+        principal = principal_for(request)
+        services.security.check_rate_limit(principal, action="plugins.list", origin=request.headers.get("origin"))
+        services.security.authorize(principal, action="plugins.list", resource_id=None, purpose="plugins.read")
+        return JSONResponse(_jsonable(_require_port(services.plugins).list(principal.user_id)))
+
+    @app.post("/v1/plugins/inspect")
+    async def inspect_plugin(payload: PluginReferenceRequest, request: Request) -> JSONResponse:
+        principal = principal_for(request, mutable=True)
+        services.security.check_rate_limit(principal, action="plugins.inspect", origin=request.headers.get("origin"))
+        services.security.authorize(principal, action="plugins.inspect", resource_id=None, purpose="plugins.inspect")
+        return JSONResponse(_jsonable(_require_port(services.plugins).inspect(user_id=principal.user_id, reference=payload.reference)))
+
+    @app.post("/v1/plugins/{plugin_id}/approve")
+    async def approve_plugin(plugin_id: str, request: Request) -> JSONResponse:
+        principal = principal_for(request, mutable=True)
+        services.security.check_rate_limit(principal, action="plugins.approve", origin=request.headers.get("origin"))
+        services.security.authorize(principal, action="plugins.approve", resource_id=plugin_id, purpose="plugins.configure")
+        return JSONResponse(_jsonable(_require_port(services.plugins).approve(user_id=principal.user_id, plugin_id=plugin_id)))
+
+    @app.put("/v1/plugins/{plugin_id}/enabled")
+    async def set_plugin_enabled(plugin_id: str, payload: PluginEnabledRequest, request: Request) -> JSONResponse:
+        principal = principal_for(request, mutable=True)
+        services.security.check_rate_limit(principal, action="plugins.enable", origin=request.headers.get("origin"))
+        services.security.authorize(principal, action="plugins.enable", resource_id=plugin_id, purpose="plugins.configure")
+        return JSONResponse(_jsonable(_require_port(services.plugins).set_enabled(user_id=principal.user_id, plugin_id=plugin_id, enabled=payload.enabled)))
+
+    @app.delete("/v1/plugins/{plugin_id}", status_code=204)
+    async def remove_plugin(plugin_id: str, request: Request) -> JSONResponse:
+        principal = principal_for(request, mutable=True)
+        services.security.check_rate_limit(principal, action="plugins.remove", origin=request.headers.get("origin"))
+        services.security.authorize(principal, action="plugins.remove", resource_id=plugin_id, purpose="plugins.configure")
+        _require_port(services.plugins).remove(user_id=principal.user_id, plugin_id=plugin_id)
+        return JSONResponse(None, status_code=204)
+
+    @app.get("/v1/plugins/marketplaces")
+    async def list_plugin_marketplaces(request: Request) -> JSONResponse:
+        principal = principal_for(request)
+        services.security.check_rate_limit(principal, action="plugins.marketplaces.list", origin=request.headers.get("origin"))
+        services.security.authorize(principal, action="plugins.marketplaces.list", resource_id=None, purpose="plugins.read")
+        return JSONResponse(_jsonable(_require_port(services.plugins).list_marketplaces(principal.user_id)))
+
+    @app.post("/v1/plugins/marketplaces", status_code=201)
+    async def add_plugin_marketplace(payload: PluginReferenceRequest, request: Request) -> JSONResponse:
+        principal = principal_for(request, mutable=True)
+        services.security.check_rate_limit(principal, action="plugins.marketplaces.add", origin=request.headers.get("origin"))
+        services.security.authorize(principal, action="plugins.marketplaces.add", resource_id=None, purpose="plugins.configure")
+        return JSONResponse(_jsonable(_require_port(services.plugins).add_marketplace(user_id=principal.user_id, reference=payload.reference)), status_code=201)
 
     @app.get("/v1/mcp/catalog")
     async def get_mcp_catalog(request: Request, query: str = "") -> JSONResponse:

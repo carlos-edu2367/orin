@@ -36,6 +36,14 @@ class PluginService:
     def search(self, query: str) -> list[dict[str, Any]]:
         return []
 
+    def list_marketplaces(self, user_id: str) -> list[dict[str, Any]]:
+        return []
+
+    def add_marketplace(self, *, user_id: str, reference: str) -> dict[str, Any]:
+        if not reference.startswith("https://") and "://" in reference:
+            raise PluginServiceError("marketplace reference must use HTTPS")
+        return {"name": Path(reference.rstrip("/")).name or "marketplace", "reference": reference, "user_id": user_id}
+
     def inspect(self, *, user_id: str, reference: str) -> dict[str, Any]:
         source = resolve_source(reference)
         if source.kind == "marketplace":
