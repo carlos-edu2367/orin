@@ -932,7 +932,11 @@ def create_app(services: ApiServices) -> FastAPI:
         principal = principal_for(request, mutable=True)
         services.security.check_rate_limit(principal, action="plugins.inspect", origin=request.headers.get("origin"))
         services.security.authorize(principal, action="plugins.inspect", resource_id=None, purpose="plugins.inspect")
-        return JSONResponse(_jsonable(_require_port(services.plugins).inspect(user_id=principal.user_id, reference=payload.reference)))
+        # Fetching a plugin package (git clone) is blocking I/O that can take up to
+        # PluginFetcher's own timeout; keeping it off the event loop matters here
+        # because otherwise it stalls every other request and open SSE stream.
+        result = await run_in_threadpool(_require_port(services.plugins).inspect, user_id=principal.user_id, reference=payload.reference)
+        return JSONResponse(_jsonable(result))
 
     @app.post("/v1/plugins/{plugin_id}/approve")
     async def approve_plugin(plugin_id: str, request: Request) -> JSONResponse:
@@ -1012,7 +1016,12 @@ def create_app(services: ApiServices) -> FastAPI:
         services.security.check_rate_limit(principal, action="mcp.servers.approve", origin=request.headers.get("origin"))
         services.security.authorize(principal, action="mcp.servers.approve", resource_id=server_id, purpose="mcp.configure")
         secrets = {name: value.get_secret_value() for name, value in payload.secrets.items()}
-        result = _require_port(services.mcp).approve(user_id=principal.user_id, server_id=server_id, secrets=secrets, connect=_mcp_connect)
+        # Approving a server opens a real MCP connection (subprocess launch or HTTP
+        # handshake), which is blocking I/O that can take seconds; run it off the
+        # event loop so it doesn't stall every other request and open SSE stream.
+        result = await run_in_threadpool(
+            _require_port(services.mcp).approve, user_id=principal.user_id, server_id=server_id, secrets=secrets, connect=_mcp_connect,
+        )
         return JSONResponse(_jsonable(result))
 
     @app.post("/v1/mcp/servers/{server_id}/test")
@@ -1021,7 +1030,7 @@ def create_app(services: ApiServices) -> FastAPI:
         services.security.check_rate_limit(principal, action="mcp.servers.test", origin=request.headers.get("origin"))
         services.security.authorize(principal, action="mcp.servers.test", resource_id=server_id, purpose="mcp.configure")
         server = _require_port(services.mcp).get(principal.user_id, server_id)
-        result = _require_port(services.mcp).test(principal.user_id, str(server["slug"]), _mcp_connect)
+        result = await run_in_threadpool(_require_port(services.mcp).test, principal.user_id, str(server["slug"]), _mcp_connect)
         return JSONResponse(_jsonable(result))
 
     @app.put("/v1/mcp/servers/{server_id}/enabled")
