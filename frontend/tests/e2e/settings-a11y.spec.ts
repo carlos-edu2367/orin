@@ -30,4 +30,14 @@ test.describe('settings shell accessibility', () => {
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)
     expect(overflow).toBeLessThanOrEqual(1)
   })
+
+  test('keeps the Plugins empty state and installer accessible', async ({ page }) => {
+    await page.goto('/settings/plugins')
+    await expect(page.getByRole('heading', { level: 1, name: 'Plugins' })).toBeVisible()
+    await expect(page.getByRole('heading', { level: 2, name: 'Nenhum plugin instalado' })).toBeVisible()
+    await page.getByRole('button', { name: 'Instalar plugin', exact: true }).click()
+    await expect(page.getByRole('dialog', { name: 'Instalar plugin' })).toBeVisible()
+    const results = await new AxeBuilder({ page }).analyze()
+    expect(results.violations).toEqual([])
+  })
 })

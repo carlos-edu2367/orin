@@ -18,7 +18,9 @@
   --orin-accent-rgb: 166 108 255;
   --orin-accent-dim: rgb(var(--orin-accent-rgb) / .44);
   --orin-danger: #ff9d91;
+  --orin-danger-rgb: 255 157 145;
   --orin-warn: #f4cb7a;
+  --orin-warn-rgb: 244 203 122;
   --orin-success: #86d9a5;
   --orin-info: #9ac7ff;
 }

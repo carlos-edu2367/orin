@@ -1,6 +1,12 @@
 import { expect, test } from '@playwright/test'
 
 test.describe('settings shell visual states', () => {
+  test.beforeEach(async ({ page }) => {
+    // Keep settings baselines deterministic: badges are runtime data and should
+    // not change screenshots merely because the local API happens to be running.
+    await page.route('**/v1/**', (route) => route.abort())
+  })
+
   test('general', async ({ page }) => {
     await page.goto('/settings/general')
     await expect(page.getByRole('heading', { level: 1, name: 'General' })).toBeVisible()
