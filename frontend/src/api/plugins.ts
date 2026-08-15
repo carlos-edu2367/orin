@@ -1,0 +1,27 @@
+import type { ApiClient } from './client'
+import { invalidResponseError } from './errors'
+
+export type PluginContribution = { kind: string; reference: string; display_name: string; enabled?: boolean }
+export type PluginSummary = { plugin_id: string; version: string; display_name: string; description: string; author: string; homepage: string | null; state: 'pending_approval' | 'active' | 'disabled' | 'rejected'; warnings: string[]; contribution_count: number; install_path?: string }
+export type PluginInspectionResult = PluginSummary & { skills: PluginContribution[]; mcp_servers: PluginContribution[]; agents: PluginContribution[]; package_digest: string }
+export type MarketplaceEntry = { name: string; reference: string; owner?: string }
+
+export function listPlugins(client: ApiClient, signal?: AbortSignal): Promise<PluginSummary[]> { return client.request({ path: '/v1/plugins', signal, parse: parseList }) }
+export function inspectPlugin(client: ApiClient, reference: string, intent = client.createMutationIntent()): Promise<PluginInspectionResult> { return client.request({ path: '/v1/plugins/inspect', method: 'POST', body: { reference }, intent, parse: parseInspection }) }
+export function approvePlugin(client: ApiClient, pluginId: string, intent = client.createMutationIntent()): Promise<PluginSummary> { return client.request({ path: pluginPath(pluginId) + '/approve', method: 'POST', intent, parse: parseSummary }) }
+export function setPluginEnabled(client: ApiClient, pluginId: string, enabled: boolean, intent = client.createMutationIntent()): Promise<PluginSummary> { return client.request({ path: pluginPath(pluginId) + '/enabled', method: 'PUT', body: { enabled }, intent, parse: parseSummary }) }
+export function removePlugin(client: ApiClient, pluginId: string, intent = client.createMutationIntent()): Promise<void> { return client.request({ path: pluginPath(pluginId), method: 'DELETE', expectedStatus: 204, intent, parse: () => undefined }) }
+export function listMarketplaces(client: ApiClient, signal?: AbortSignal): Promise<MarketplaceEntry[]> { return client.request({ path: '/v1/plugins/marketplaces', signal, parse: parseMarketplaces }) }
+export function addMarketplace(client: ApiClient, reference: string, intent = client.createMutationIntent()): Promise<MarketplaceEntry> { return client.request({ path: '/v1/plugins/marketplaces', method: 'POST', body: { reference }, expectedStatus: 201, intent, parse: parseMarketplace }) }
+
+function pluginPath(id: string): string { if (!id.trim()) throw new TypeError('A plugin id is required'); return `/v1/plugins/${encodeURIComponent(id)}` }
+function record(value: unknown): Record<string, unknown> { if (typeof value !== 'object' || value === null || Array.isArray(value)) throw invalidResponseError(); return value as Record<string, unknown> }
+function text(value: unknown): string { if (typeof value !== 'string') throw invalidResponseError(); return value }
+function array(value: unknown): string[] { if (!Array.isArray(value) || value.some((item) => typeof item !== 'string')) throw invalidResponseError(); return value }
+function summary(value: unknown): PluginSummary { const data = record(value); const state = text(data.state); if (!['pending_approval', 'active', 'disabled', 'rejected'].includes(state)) throw invalidResponseError(); return { plugin_id: text(data.plugin_id), version: text(data.version), display_name: text(data.display_name), description: text(data.description ?? ''), author: text(data.author ?? ''), homepage: data.homepage === null || data.homepage === undefined ? null : text(data.homepage), state: state as PluginSummary['state'], warnings: array(data.warnings ?? []), contribution_count: typeof data.contribution_count === 'number' ? data.contribution_count : 0, install_path: data.install_path === undefined ? undefined : text(data.install_path) } }
+function parseList(value: unknown): PluginSummary[] { if (!Array.isArray(value)) throw invalidResponseError(); return value.map(summary) }
+function contribution(value: unknown): PluginContribution { const data = record(value); return { kind: text(data.kind ?? 'mcp_server'), reference: text(data.reference ?? data.slug ?? ''), display_name: text(data.display_name ?? data.name ?? ''), enabled: data.enabled === undefined ? undefined : data.enabled === true } }
+function parseInspection(value: unknown): PluginInspectionResult { const data = record(value); return { ...summary(data), package_digest: text(data.package_digest), skills: Array.isArray(data.skills) ? data.skills.map(contribution) : [], mcp_servers: Array.isArray(data.mcp_servers) ? data.mcp_servers.map(contribution) : [], agents: Array.isArray(data.agents) ? data.agents.map(contribution) : [] } }
+function parseSummary(value: unknown): PluginSummary { return summary(value) }
+function parseMarketplace(value: unknown): MarketplaceEntry { const data = record(value); return { name: text(data.name), reference: text(data.reference), owner: data.owner === undefined ? undefined : text(data.owner) } }
+function parseMarketplaces(value: unknown): MarketplaceEntry[] { if (!Array.isArray(value)) throw invalidResponseError(); return value.map(parseMarketplace) }
