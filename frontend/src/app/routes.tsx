@@ -11,7 +11,6 @@ import { VisionModelSetting } from '../features/providers/VisionModelSetting'
 import { PROVIDER_NAMES, type ProviderName } from '../api/providers'
 import { Home } from './Home'
 import { ChatPage } from '../features/conversations/ChatPage'
-import { SkillsPage } from '../features/skills/SkillsPage'
 import { SkillsSection } from '../features/skills/SkillsSection'
 import { ProjectPage } from '../features/projects/ProjectPage'
 import { RuntimeSettingsPage } from '../features/settings/RuntimeSettingsPage'
@@ -54,8 +53,8 @@ export const routes: RouteDefinition[] = [
   { path: '/settings/schedules', element: <SettingsRoute><SchedulesPage embedded /></SettingsRoute> },
   { path: '/settings/about', element: <SettingsRoute><AboutSection /></SettingsRoute> },
   { path: '/providers', element: <Navigate to="/settings/providers" replace /> },
-  { path: '/skills', element: <SkillsPage /> },
-  { path: '/skills/:skillId', element: <SkillsPage /> },
+  { path: '/skills', element: <Navigate to="/settings/skills" replace /> },
+  { path: '/skills/:skillId', element: <Navigate to="/settings/skills" replace /> },
   { path: '/schedules', element: <Navigate to="/settings/schedules" replace /> },
   // Deterministic execution fixtures. They render the legacy execution surface
   // without a backend and exist for visual/a11y regression runs only.

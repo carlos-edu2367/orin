@@ -85,9 +85,10 @@ test('Provider Settings has no critical or serious accessibility violations', as
     }
     await route.abort('failed')
   })
-  await page.goto('/providers')
-  await expect(page.getByRole('article', { name: 'OpenRouter' }).locator('.provider-panel__status')).toHaveText('Não configurado')
-  const results = await new AxeBuilder({ page }).include('article[aria-labelledby="provider-openrouter-title"]').analyze()
+  await page.goto('/settings/providers')
+  const card = page.getByRole('link', { name: /OpenRouter/ })
+  await expect(card).toContainText('Não configurado')
+  const results = await new AxeBuilder({ page }).include('.provider-grid').analyze()
   const blocking = results.violations.filter((violation) => violation.impact === 'critical' || violation.impact === 'serious')
   expect(blocking, JSON.stringify(blocking, null, 2)).toEqual([])
 })

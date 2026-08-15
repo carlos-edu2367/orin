@@ -1,6 +1,7 @@
 import { useState, type CSSProperties } from 'react'
 import type { ApiClient } from '../../api/client'
 import { readBrowserSessionBootstrap, type BrowserSessionBootstrap } from '../../api/browserSession'
+import { isAuthenticationError, isCsrfAuthorizationError } from '../../api/errors'
 import type { ProviderName } from '../../api/providers'
 import { SettingsDrawer } from '../settings/SettingsDrawer'
 import { providerBrand } from './providerBrand'
@@ -23,8 +24,16 @@ export function ProviderDetail({ provider, client, bootstrap, onClose }: { provi
     {provider === 'ollama' && <OllamaSetup mode={state.ollamaMode} enabled={state.enabled} apiKey={state.apiKey} baseUrl={state.baseUrl} action={state.action} canRevoke={state.canRevoke} bootstrap={session} connection={state.connection} onModeChange={(mode) => { state.setOllamaMode(mode); state.setBaseUrl(mode === 'cloud' ? 'https://ollama.com' : 'http://localhost:11434'); state.setApiKey('') }} onTest={() => void state.testConnection()} onSave={(event) => void state.configure(event)} onRevoke={onRevoke} onApiKeyChange={state.setApiKey} onBaseUrlChange={state.setBaseUrl} onEnabledChange={state.setEnabled} />}
     {provider !== 'omniroute' && provider !== 'ollama' && <form className="provider-panel__form" onSubmit={(event) => void state.configure(event)}><label htmlFor={`${provider}-detail-api-key`}>Chave de API</label><input id={`${provider}-detail-api-key`} type="password" autoComplete="off" value={state.apiKey} onChange={(event) => state.setApiKey(event.target.value)} placeholder="Inserir uma nova chave" /><label className="provider-panel__toggle"><input type="checkbox" checked={state.enabled} onChange={(event) => state.setEnabled(event.target.checked)} />Habilitado</label><div className="provider-panel__actions"><button type="submit" className="button button--primary" disabled={state.action.pending || !state.apiKey || session.status === 'missing_csrf'}>Salvar</button><button type="button" className="button button--secondary button--danger" disabled={state.action.pending || !state.canRevoke || session.status === 'missing_csrf'} onClick={onRevoke}>Revogar acesso</button><button type="button" className="button button--secondary" disabled={state.action.pending || !state.canRevoke || session.status === 'missing_csrf'} onClick={() => void state.refreshModels()}>Atualizar catálogo</button></div></form>}
     {state.canRevoke && <section className="provider-panel__catalog" aria-label={`Modelos de ${title}`}><button type="button" className="button button--secondary" onClick={() => void state.loadModels()} disabled={state.catalogLoading}>{state.catalogLoading ? 'Carregando modelos' : 'Ver modelos autorizados'}</button>{state.models.length > 0 && <ul>{state.models.map((model) => <li key={model.model_id}><span>{model.display_name} <code>{model.model_id}</code></span><button type="button" className="button button--secondary" onClick={() => void state.setFavorite(model)} disabled={state.action.pending || session.status === 'missing_csrf'}>{model.is_favorite ? 'Remover favorito' : 'Favoritar'}</button></li>)}</ul>}{state.catalog.error && <p role="alert">Não foi possível carregar o catálogo.</p>}{state.catalog.loaded && !state.catalog.error && state.models.length === 0 && <p role="status">Nenhum modelo no catálogo. Use "Atualizar catálogo" para buscá-los do provider.</p>}</section>}
-    {state.action.error && <p role="alert">Não foi possível concluir esta ação agora.</p>}
+    {state.action.error && <div role="alert"><p>{providerErrorMessage(state.action.error)}</p>{state.action.error.retryAfter !== null && <p>Tente novamente em {state.action.error.retryAfter}s.</p>}</div>}
   </SettingsDrawer>
+}
+
+function providerErrorMessage(error: { status: number; category: string; messageKey: string }): string {
+  if (isAuthenticationError(error)) return 'Sua sessão expirou. Entre novamente para salvar a chave.'
+  if (isCsrfAuthorizationError(error)) return 'Atualize a página para renovar sua sessão.'
+  if (error.category === 'RATE_LIMITED') return 'Muitas tentativas; aguarde antes de tentar novamente.'
+  if (error.status >= 500) return 'O provider não está disponível no momento.'
+  return 'Não foi possível concluir esta ação agora.'
 }
 
 function describeState(load: ReturnType<typeof useProviderState>['load']): string {

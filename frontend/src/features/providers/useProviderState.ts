@@ -57,11 +57,12 @@ export function useProviderState(client: ApiClient = createBrowserApiClient(), p
   const [catalogLoading, setCatalogLoading] = useState(false)
   const [catalog, setCatalog] = useState<{ loaded: boolean; error: ApiError | null }>({ loaded: false, error: null })
   const intents = useRef(new Map<string, MutationIntent>())
+  const mutationRevision = useRef(0)
 
   useEffect(() => {
     const controller = new AbortController()
     inspectProvider(client, provider, controller.signal).then((state) => {
-      if (controller.signal.aborted) return
+      if (controller.signal.aborted || mutationRevision.current > 0) return
       setLoad({ status: 'loaded', state })
       if (state.enabled !== null) setEnabled(state.enabled)
       if (provider === 'omniroute' && typeof state.extra.base_url === 'string') setBaseUrl(state.extra.base_url)
@@ -97,6 +98,7 @@ export function useProviderState(client: ApiClient = createBrowserApiClient(), p
   async function configure(event?: FormEvent<HTMLFormElement>) {
     event?.preventDefault()
     if (action.pending || (!apiKey && requiresApiKey) || bootstrap.status === 'missing_csrf') return
+    mutationRevision.current += 1
     setAction({ pending: true, error: null, kind: 'configure' })
     try {
       const state = await configureProvider(client, provider, { apiKey, enabled, ...(provider === 'omniroute' || provider === 'ollama' ? { baseUrl } : {}) }, intentFor('configure'))
@@ -111,6 +113,7 @@ export function useProviderState(client: ApiClient = createBrowserApiClient(), p
 
   async function revoke() {
     if (action.pending || !canRevoke || bootstrap.status === 'missing_csrf') return
+    mutationRevision.current += 1
     setAction({ pending: true, error: null, kind: 'revoke' })
     try {
       const state = await revokeProvider(client, provider, intentFor('revoke'))

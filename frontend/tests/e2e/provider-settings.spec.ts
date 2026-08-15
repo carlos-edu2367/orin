@@ -1,4 +1,4 @@
-import { expect, test, type Route } from '@playwright/test'
+import { expect, test, type Page, type Route } from '@playwright/test'
 
 // This fake is deliberately test-only and is not a production contract. It simulates
 // only the public responses documented in BACKEND_DISCOVERY.md/BACKEND_CAPABILITY_MATRIX.md:
@@ -56,15 +56,14 @@ test('saves a new API key without asking for a model; the key clears and never r
     await route.abort('failed')
   })
 
-  await page.goto('/providers')
-  const panel = page.getByRole('article', { name: 'OpenAI' })
-  await expect(panel.locator('.provider-panel__status')).toHaveText('Não configurado')
+  const panel = await openProvider(page, 'OpenAI')
+  await expect(panel.locator('.provider-detail__state')).toHaveText('Não configurado')
 
   await panel.getByLabel('Chave de API').fill('sk-test-secret-value')
   await expect(panel.getByLabel('Modelo')).toHaveCount(0)
   await panel.getByRole('button', { name: 'Salvar' }).click()
 
-  await expect(panel.locator('.provider-panel__status')).toHaveText('Habilitado')
+  await expect(panel.locator('.provider-detail__state')).toHaveText('Habilitado')
   await expect(panel.getByLabel('Chave de API')).toHaveValue('')
   expect(putBodies).toHaveLength(1)
   expect(putBodies[0]?.api_key).toBe('sk-test-secret-value')
@@ -101,13 +100,13 @@ test('revokes a configured provider and reflects the resulting public state', as
     await route.abort('failed')
   })
 
-  await page.goto('/providers')
-  const panel = page.getByRole('article', { name: 'Anthropic' })
-  await expect(panel.locator('.provider-panel__status')).toHaveText('Habilitado')
+  const panel = await openProvider(page, 'Anthropic')
+  await expect(panel.locator('.provider-detail__state')).toHaveText('Habilitado')
 
+  page.once('dialog', (dialog) => void dialog.accept())
   await panel.getByRole('button', { name: 'Revogar acesso' }).click()
 
-  await expect(panel.locator('.provider-panel__status')).toHaveText('Desabilitado')
+  await expect(panel.locator('.provider-detail__state')).toHaveText('Desabilitado')
   expect(deleteCalled).toBe(true)
   await expect(panel.getByRole('button', { name: 'Revogar acesso' })).toBeDisabled()
 })
@@ -133,11 +132,11 @@ test('shows only the current public state for every provider and never renders a
     await fulfillJson(route, { provider: 'openrouter', enabled: false })
   })
 
-  await page.goto('/providers')
+  await page.goto('/settings/providers')
 
-  await expect(page.getByRole('article', { name: 'OpenAI' }).locator('.provider-panel__status')).toHaveText('Habilitado')
-  await expect(page.getByRole('article', { name: 'Anthropic' }).locator('.provider-panel__status')).toHaveText('Desabilitado')
-  await expect(page.getByRole('article', { name: 'OpenRouter' }).locator('.provider-panel__status')).toHaveText('Desabilitado')
+  await expect(page.getByRole('link', { name: /OpenAI/ })).toContainText('Configurado')
+  await expect(page.getByRole('link', { name: /Anthropic/ })).toContainText('Desabilitado')
+  await expect(page.getByRole('link', { name: /OpenRouter/ })).toContainText('Desabilitado')
   await expect(page.getByText('sk-leaked-value')).toHaveCount(0)
   await expect(page.getByText('api_key_hint')).toHaveCount(0)
 })
@@ -170,8 +169,7 @@ test('recovers from a CSRF-rejected save and a rate limit, reusing the same Idem
     await route.abort('failed')
   })
 
-  await page.goto('/providers')
-  const panel = page.getByRole('article', { name: 'OpenAI' })
+  const panel = await openProvider(page, 'OpenAI')
 
   await panel.getByLabel('Chave de API').fill('sk-attempt-one')
   await panel.getByRole('button', { name: 'Salvar' }).click()
@@ -186,9 +184,19 @@ test('recovers from a CSRF-rejected save and a rate limit, reusing the same Idem
 
   await panel.getByLabel('Chave de API').fill('sk-attempt-three')
   await panel.getByRole('button', { name: 'Salvar' }).click()
-  await expect(panel.locator('.provider-panel__status')).toHaveText('Habilitado')
+  await expect(panel.locator('.provider-detail__state')).toHaveText('Habilitado')
 
   expect(idempotencyKeys).toHaveLength(3)
   expect(idempotencyKeys[0]).not.toBe('')
   expect(new Set(idempotencyKeys).size).toBe(1)
 })
+
+async function openProvider(page: Page, name: string) {
+  await page.goto('/settings/providers')
+  const card = page.getByRole('link', { name: new RegExp(name) })
+  await expect(card).toBeVisible()
+  await card.click()
+  const panel = page.getByRole('region', { name, exact: true })
+  await expect(panel).toBeVisible()
+  return panel
+}
