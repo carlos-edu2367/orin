@@ -8,6 +8,7 @@ import {
 } from '../../api/conversations'
 import { ApiError } from '../../api/errors'
 import { approveMcpServer } from '../../api/mcp'
+import { approvePlugin } from '../../api/plugins'
 import {
   PROVIDER_NAMES, getVisionModelSetting, listProviderModels,
   type ProviderModel, type ProviderName, type VisionModelSetting,
@@ -425,6 +426,23 @@ export function ChatPage() {
     }
   }, [client, conversationId, loadSnapshot, openQuestionTurnIds, running])
 
+  const submitPluginApproval = useCallback(async (event: ConversationActivityEvent) => {
+    if (!event.pluginApproval || !event.turnId || !openQuestionTurnIds.has(event.turnId) || running) return
+    await approvePlugin(client, event.pluginApproval.plugin_id)
+    const response = `Instalei o plugin ${event.pluginApproval.display_name}.`
+    setPendingUserMessage({ message_id: `pending-${Date.now()}`, role: 'user', content: response, status: 'completed', retryable: false, attachments: [] })
+    await sendConversationMessage(client, conversationId, response)
+    await loadSnapshot(false)
+  }, [client, conversationId, loadSnapshot, openQuestionTurnIds, running])
+
+  const declinePluginApproval = useCallback(async (event: ConversationActivityEvent) => {
+    if (!event.pluginApproval || !event.turnId || !openQuestionTurnIds.has(event.turnId) || running) return
+    const response = `Não quero instalar o plugin ${event.pluginApproval.display_name} agora.`
+    setPendingUserMessage({ message_id: `pending-${Date.now()}`, role: 'user', content: response, status: 'completed', retryable: false, attachments: [] })
+    await sendConversationMessage(client, conversationId, response)
+    await loadSnapshot(false)
+  }, [client, conversationId, loadSnapshot, openQuestionTurnIds, running])
+
   async function submit() {
     const text = message.trim()
     const readyUploads = readyUploadIds()
@@ -517,7 +535,7 @@ export function ChatPage() {
                   transition={{ duration: 0.24, ease: [0.22, 0.61, 0.36, 1] }}
                 >
                   {timeline
-                    ? <TurnTimeline items={timeline} conversationId={conversationId} client={client} onPreview={setPreviewReference} openQuestionTurnIds={openQuestionTurnIds} onAnswer={submitQuestionAnswers} onMcpApprove={submitMcpApproval} onMcpDecline={declineMcpApproval} />
+                    ? <TurnTimeline items={timeline} conversationId={conversationId} client={client} onPreview={setPreviewReference} openQuestionTurnIds={openQuestionTurnIds} onAnswer={submitQuestionAnswers} onMcpApprove={submitMcpApproval} onMcpDecline={declineMcpApproval} onPluginApprove={submitPluginApproval} onPluginDecline={declinePluginApproval} />
                     : item.role === 'assistant' && item.content
                       ? <MarkdownMessage content={item.content} conversationId={conversationId} client={client} onPreview={setPreviewReference} />
                       : <p>{item.content || placeholderFor(item)}</p>}
@@ -529,7 +547,7 @@ export function ChatPage() {
               )
             })}
 
-            {!loadFailure && <ActivityStream events={unclaimedEvents} conversationId={conversationId} onPreview={setPreviewReference} openQuestionTurnIds={openQuestionTurnIds} onAnswer={submitQuestionAnswers} onMcpApprove={submitMcpApproval} onMcpDecline={declineMcpApproval} />}
+            {!loadFailure && <ActivityStream events={unclaimedEvents} conversationId={conversationId} onPreview={setPreviewReference} openQuestionTurnIds={openQuestionTurnIds} onAnswer={submitQuestionAnswers} onMcpApprove={submitMcpApproval} onMcpDecline={declineMcpApproval} onPluginApprove={submitPluginApproval} onPluginDecline={declinePluginApproval} />}
 
             <AnimatePresence>
               {!loadFailure && running && (

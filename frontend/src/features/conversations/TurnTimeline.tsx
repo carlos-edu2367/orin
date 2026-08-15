@@ -16,13 +16,15 @@ type TurnTimelineProps = {
   onAnswer?: (event: ConversationActivityEvent, answers: UserQuestionAnswer[]) => Promise<void>
   onMcpApprove?: (event: ConversationActivityEvent, secrets: Record<string, string>) => Promise<void>
   onMcpDecline?: (event: ConversationActivityEvent) => Promise<void>
+  onPluginApprove?: (event: ConversationActivityEvent) => Promise<void>
+  onPluginDecline?: (event: ConversationActivityEvent) => Promise<void>
 }
 
 /**
  * One assistant turn, told in order: narration and the action it triggered,
  * back to back, instead of the finished text followed by a replayed log.
  */
-export function TurnTimeline({ items, conversationId, client, onPreview, openQuestionTurnIds, onAnswer, onMcpApprove, onMcpDecline }: TurnTimelineProps) {
+export function TurnTimeline({ items, conversationId, client, onPreview, openQuestionTurnIds, onAnswer, onMcpApprove, onMcpDecline, onPluginApprove, onPluginDecline }: TurnTimelineProps) {
   return (
     <div className="turn-timeline">
       <AnimatePresence initial={false}>
@@ -32,7 +34,7 @@ export function TurnTimeline({ items, conversationId, client, onPreview, openQue
               ? <MarkdownMessage content={item.content} conversationId={conversationId} client={client} onPreview={onPreview} />
               : item.group.kind === 'artifact' && item.group.events[0]?.path && conversationId
                 ? <WorkspaceFileCard reference={{ conversationId, path: item.group.events[0].path as string }} client={client} onPreview={onPreview} />
-                : renderActivityGroup(item.group, openQuestionTurnIds, onAnswer, conversationId, onPreview, onMcpApprove, onMcpDecline)}
+                : renderActivityGroup(item.group, openQuestionTurnIds, onAnswer, conversationId, onPreview, onMcpApprove, onMcpDecline, onPluginApprove, onPluginDecline)}
           </div>
         ))}
       </AnimatePresence>

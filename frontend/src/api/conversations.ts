@@ -261,6 +261,8 @@ export function parseConversationActivityEvent(value: unknown, cursor: string): 
   if (questions) event.questions = questions
   const mcpApproval = parseMcpApprovalRequest(payload)
   if (mcpApproval) event.mcpApproval = mcpApproval
+  const pluginApproval = parsePluginApprovalRequest(payload)
+  if (pluginApproval) event.pluginApproval = pluginApproval
   if (errorCode) event.errorCode = errorCode
   if (typeof payload.content === 'string' && payload.content.length <= 16_000) event.content = payload.content
   return event
@@ -374,6 +376,23 @@ function parseMcpApprovalRequest(payload: Record<string, unknown>): Conversation
   if (!server_id || !display_name || !transport) return undefined
   const secret_names = Array.isArray(data.secret_names) ? data.secret_names.filter((item): item is string => typeof item === 'string') : []
   return { server_id, display_name, transport, secret_names, catalog_id: optionalText(data.catalog_id, 64) ?? null }
+}
+
+function parsePluginApprovalRequest(payload: Record<string, unknown>): ConversationActivityEvent['pluginApproval'] | undefined {
+  if (payload.plugin_approval !== true || typeof payload.plugin !== 'object' || payload.plugin === null || Array.isArray(payload.plugin)) return undefined
+  const plugin = payload.plugin as Record<string, unknown>
+  if (typeof plugin.plugin_id !== 'string' || typeof plugin.version !== 'string' || typeof plugin.display_name !== 'string') return undefined
+  const textArray = (value: unknown) => Array.isArray(value) && value.every((item) => typeof item === 'string') ? value as string[] : []
+  const objects = (value: unknown) => Array.isArray(value) ? value.filter((item): item is Record<string, unknown> => typeof item === 'object' && item !== null && !Array.isArray(item)) : []
+  return {
+    plugin_id: plugin.plugin_id, version: plugin.version, display_name: plugin.display_name,
+    description: typeof plugin.description === 'string' ? plugin.description : '', author: typeof plugin.author === 'string' ? plugin.author : '',
+    warnings: textArray(plugin.warnings),
+    skills: objects(plugin.skills).map((item) => ({ skill_id: String(item.skill_id ?? ''), name: String(item.name ?? ''), description: typeof item.description === 'string' ? item.description : undefined })),
+    mcp_servers: objects(plugin.mcp_servers).map((item) => ({ slug: String(item.slug ?? ''), display_name: String(item.display_name ?? ''), transport: String(item.transport ?? ''), secret_names: textArray(item.secret_names) })),
+    agents: objects(plugin.agents).map((item) => ({ agent_id: String(item.agent_id ?? ''), name: String(item.name ?? ''), role: typeof item.role === 'string' ? item.role : undefined })),
+    contribution_count: typeof plugin.contribution_count === 'number' ? plugin.contribution_count : 0,
+  }
 }
 
 function record(value: unknown): Record<string, unknown> {

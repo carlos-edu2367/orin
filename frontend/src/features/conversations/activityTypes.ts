@@ -50,6 +50,7 @@ export type ConversationActivityEvent = {
   errorCode?: string | null
   questions?: UserQuestion[]
   mcpApproval?: McpApprovalRequest
+  pluginApproval?: PluginApprovalRequest
   occurredAt?: string
 }
 
@@ -63,6 +64,18 @@ export type McpApprovalRequest = {
   transport: string
   secret_names: string[]
   catalog_id: string | null
+}
+export type PluginApprovalRequest = {
+  plugin_id: string
+  version: string
+  display_name: string
+  description: string
+  author: string
+  warnings: string[]
+  skills: Array<{ skill_id: string; name: string; description?: string }>
+  mcp_servers: Array<{ slug: string; display_name: string; transport: string; secret_names?: string[] }>
+  agents: Array<{ agent_id: string; name: string; role?: string }>
+  contribution_count: number
 }
 
 /** One rendered row in the chat: a single event or a collapsed run of them. */
