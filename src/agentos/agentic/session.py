@@ -403,6 +403,7 @@ class TurnSession:
         child_model_ids: tuple[str, ...] = (),
         child_model_authorizer: Callable[[str], bool] | None = None,
         child_provider_factory: Callable[[str], object] | None = None,
+        mcp_provider=None,
     ) -> None:
         self.turn = turn
         self.store = store
@@ -418,6 +419,7 @@ class TurnSession:
         self.search_client = search_client
         self.browser = browser
         self.browser_capability = browser_capability
+        self.mcp_provider = mcp_provider
         self.tool_policy = tool_policy
         self.model_sees_images = bool(model_sees_images)
         self.model_calls_tools = bool(model_calls_tools)
@@ -790,6 +792,7 @@ class TurnSession:
             policy=self.tool_policy,
             model_sees_images=self.model_sees_images,
             visual_reader=self._visual_reader,
+            mcp_provider=self.mcp_provider,
         )
 
     def _skill_catalog(self, task: str, toolset: AgentToolset) -> tuple[object, ...]:

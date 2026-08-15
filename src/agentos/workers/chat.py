@@ -25,6 +25,8 @@ from agentos.agentic.browser_tools import ConversationBrowserRegistry, browser_c
 from agentos.agentic.web_search import search_client_from_environment
 from agentos.conversations.chat import PostgresChatStore
 from agentos.installation import orin_paths
+from agentos.mcp.service import McpServerService
+from agentos.mcp.toolset import McpToolProvider
 from agentos.persistence.postgres.agent_memory import PostgresAgentMemoryStore
 from agentos.persistence.postgres.agentic_activity import PostgresAgenticActivityStore
 from agentos.persistence.postgres.conversation_agents import ConversationAgentStore
@@ -466,6 +468,14 @@ class ChatWorker:
         skill_library = PostgresSkillLibraryService(engine)
         configured_limits = self._runtime_settings.get(str(turn["user_id"]))
         browser = self._browser_registry.acquire(turn)
+        mcp_service = McpServerService(engine)
+        # A broken MCP configuration must never stop a turn from running.
+        try:
+            mcp_bundles = mcp_service.active_servers(str(turn["user_id"]))
+        except Exception:
+            _LOGGER.exception("could not load the MCP servers for %s", turn["user_id"])
+            mcp_bundles = []
+        mcp_provider = McpToolProvider(mcp_bundles) if mcp_bundles else None
         try:
             session = TurnSession(
                 turn=turn,
@@ -499,6 +509,7 @@ class ChatWorker:
                     str(turn["user_id"]), str(turn["provider"]), model_id,
                     num_ctx=self._num_ctx_for({**turn, "model_id": model_id}) if str(turn["provider"]) == "ollama" else None,
                 ),
+                mcp_provider=mcp_provider,
             )
             return session.build_runtime()
         except Exception:

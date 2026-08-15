@@ -223,6 +223,7 @@ class AgentToolset:
         model_sees_images: bool = False,
         visual_reader: object | None = None,
         browser_capability: str = "interact",
+        mcp_provider: object | None = None,
     ) -> None:
         self.workspace = workspace
         self.memory = memory
@@ -248,6 +249,7 @@ class AgentToolset:
         self._skill_load_recorder = skill_load_recorder
         self._policy = policy
         self._loaded_skills: set[tuple[str, str]] = set()
+        self._mcp_provider = mcp_provider
         self._definitions: tuple[ToolDefinition, ...] | None = None
         self._by_name: dict[str, ToolDefinition] = {}
 
@@ -484,6 +486,11 @@ class AgentToolset:
                     self.edit_skill, "skill", policy_tags=("mutates",),
                 ),
             ))
+        if self._mcp_provider is not None:
+            # Remote tools come last so a server can never shadow a native tool
+            # name, and the namespace prefix already makes collision impossible.
+            native = {item.name for item in items}
+            items.extend(item for item in self._mcp_provider.definitions() if item.name not in native)
         return tuple(items)
 
     def definitions(self) -> tuple[ToolDefinition, ...]:
@@ -1146,6 +1153,8 @@ class AgentToolset:
                 closer()
             except Exception:
                 pass
+        if self._mcp_provider is not None:
+            self._mcp_provider.close()
 
     def remember(self, fact: str, tags: list[str] | None = None) -> dict[str, Any]:
         if self.memory is None:
