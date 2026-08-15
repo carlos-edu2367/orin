@@ -7,6 +7,7 @@ import {
   type Conversation, type ConversationMessage,
 } from '../../api/conversations'
 import { ApiError } from '../../api/errors'
+import { approveMcpServer } from '../../api/mcp'
 import {
   PROVIDER_NAMES, getVisionModelSetting, listProviderModels,
   type ProviderModel, type ProviderName, type VisionModelSetting,
@@ -385,6 +386,45 @@ export function ChatPage() {
     }
   }, [client, conversationId, loadSnapshot, openQuestionTurnIds, running])
 
+  const submitMcpApproval = useCallback(async (event: ConversationActivityEvent, secrets: Record<string, string>) => {
+    if (!event.mcpApproval || !event.turnId || !openQuestionTurnIds.has(event.turnId) || running) return
+    const server = event.mcpApproval
+    setError(null)
+    try {
+      await approveMcpServer(client, server.server_id, secrets)
+    } catch (caught) {
+      setError(`Não foi possível conectar ${server.display_name}. Tente novamente.`)
+      throw caught
+    }
+    const response = `Conectei o servidor ${server.display_name}.`
+    setPendingUserMessage({ message_id: `pending-${Date.now()}`, role: 'user', content: response, status: 'completed', retryable: false, attachments: [] })
+    try {
+      await sendConversationMessage(client, conversationId, response)
+      await loadSnapshot(false)
+      void listConversations(client).then((value) => setChats(value.items)).catch(() => undefined)
+    } catch (caught) {
+      setPendingUserMessage(null)
+      setError('A conexão foi concluída, mas não foi possível avisar o agente. Tente novamente.')
+      throw caught
+    }
+  }, [client, conversationId, loadSnapshot, openQuestionTurnIds, running])
+
+  const declineMcpApproval = useCallback(async (event: ConversationActivityEvent) => {
+    if (!event.mcpApproval || !event.turnId || !openQuestionTurnIds.has(event.turnId) || running) return
+    const response = `Não quero conectar o servidor ${event.mcpApproval.display_name} agora.`
+    setError(null)
+    setPendingUserMessage({ message_id: `pending-${Date.now()}`, role: 'user', content: response, status: 'completed', retryable: false, attachments: [] })
+    try {
+      await sendConversationMessage(client, conversationId, response)
+      await loadSnapshot(false)
+      void listConversations(client).then((value) => setChats(value.items)).catch(() => undefined)
+    } catch (caught) {
+      setPendingUserMessage(null)
+      setError('Não foi possível registrar a recusa. Tente novamente.')
+      throw caught
+    }
+  }, [client, conversationId, loadSnapshot, openQuestionTurnIds, running])
+
   async function submit() {
     const text = message.trim()
     const readyUploads = readyUploadIds()
@@ -477,7 +517,7 @@ export function ChatPage() {
                   transition={{ duration: 0.24, ease: [0.22, 0.61, 0.36, 1] }}
                 >
                   {timeline
-                    ? <TurnTimeline items={timeline} conversationId={conversationId} client={client} onPreview={setPreviewReference} openQuestionTurnIds={openQuestionTurnIds} onAnswer={submitQuestionAnswers} />
+                    ? <TurnTimeline items={timeline} conversationId={conversationId} client={client} onPreview={setPreviewReference} openQuestionTurnIds={openQuestionTurnIds} onAnswer={submitQuestionAnswers} onMcpApprove={submitMcpApproval} onMcpDecline={declineMcpApproval} />
                     : item.role === 'assistant' && item.content
                       ? <MarkdownMessage content={item.content} conversationId={conversationId} client={client} onPreview={setPreviewReference} />
                       : <p>{item.content || placeholderFor(item)}</p>}
@@ -489,7 +529,7 @@ export function ChatPage() {
               )
             })}
 
-            {!loadFailure && <ActivityStream events={unclaimedEvents} conversationId={conversationId} onPreview={setPreviewReference} openQuestionTurnIds={openQuestionTurnIds} onAnswer={submitQuestionAnswers} />}
+            {!loadFailure && <ActivityStream events={unclaimedEvents} conversationId={conversationId} onPreview={setPreviewReference} openQuestionTurnIds={openQuestionTurnIds} onAnswer={submitQuestionAnswers} onMcpApprove={submitMcpApproval} onMcpDecline={declineMcpApproval} />}
 
             <AnimatePresence>
               {!loadFailure && running && (

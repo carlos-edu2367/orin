@@ -49,12 +49,21 @@ export type ConversationActivityEvent = {
   content?: string
   errorCode?: string | null
   questions?: UserQuestion[]
+  mcpApproval?: McpApprovalRequest
   occurredAt?: string
 }
 
 export type UserQuestionMode = 'checkbox' | 'single_choice' | 'text'
 export type UserQuestionOption = { id: string; label: string }
 export type UserQuestion = { id: string; question: string; mode: UserQuestionMode; options: UserQuestionOption[]; placeholder?: string }
+
+export type McpApprovalRequest = {
+  server_id: string
+  display_name: string
+  transport: string
+  secret_names: string[]
+  catalog_id: string | null
+}
 
 /** One rendered row in the chat: a single event or a collapsed run of them. */
 export type ActivityGroup = {

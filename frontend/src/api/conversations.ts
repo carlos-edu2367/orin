@@ -259,6 +259,8 @@ export function parseConversationActivityEvent(value: unknown, cursor: string): 
   assign('occurredAt', optionalText(item.occurred_at, 64))
   const questions = parseUserQuestions(payload.questions)
   if (questions) event.questions = questions
+  const mcpApproval = parseMcpApprovalRequest(payload)
+  if (mcpApproval) event.mcpApproval = mcpApproval
   if (errorCode) event.errorCode = errorCode
   if (typeof payload.content === 'string' && payload.content.length <= 16_000) event.content = payload.content
   return event
@@ -361,6 +363,18 @@ function parseUserQuestions(value: unknown): ConversationActivityEvent['question
   return parsed.some((item) => item === null) ? undefined : parsed as NonNullable<ConversationActivityEvent['questions']>
 }
 
+
+function parseMcpApprovalRequest(payload: Record<string, unknown>): ConversationActivityEvent['mcpApproval'] | undefined {
+  if (payload.mcp_approval !== true) return undefined
+  if (typeof payload.server !== 'object' || payload.server === null || Array.isArray(payload.server)) return undefined
+  const data = payload.server as Record<string, unknown>
+  const server_id = optionalText(data.server_id, 255)
+  const display_name = optionalText(data.display_name, 255)
+  const transport = optionalText(data.transport, 16)
+  if (!server_id || !display_name || !transport) return undefined
+  const secret_names = Array.isArray(data.secret_names) ? data.secret_names.filter((item): item is string => typeof item === 'string') : []
+  return { server_id, display_name, transport, secret_names, catalog_id: optionalText(data.catalog_id, 64) ?? null }
+}
 
 function record(value: unknown): Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw invalidResponseError()

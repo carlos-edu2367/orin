@@ -638,6 +638,31 @@ kbd {
 .user-question-card__answered, .user-question-card__error { margin: 15px 0 0; font-size: 11px; }
 .user-question-card__answered { color: var(--faint); }
 .user-question-card__error { color: var(--danger); }
+/* Approval card: the same shape as the question card above (waiting-user
+   moments read as one family), used by both MCP servers and plugins. */
+.approval-card { margin: 8px 0; padding: 15px; border: 1px solid rgb(var(--orin-accent-rgb) / .34); border-radius: var(--radius); background: rgb(var(--orin-accent-rgb) / .055); }
+.approval-card[data-active="false"] { opacity: .68; border-color: var(--line); }
+.approval-card__header { display: flex; align-items: flex-start; gap: 10px; }
+.approval-card__glyph { display: grid; place-items: center; width: 21px; height: 21px; flex: 0 0 21px; border: 1px solid var(--signal-dim); border-radius: 50%; color: var(--signal); font: 13px var(--mono); }
+.approval-card__header strong { color: var(--text); font-size: 13px; font-weight: 600; }
+.approval-card__header p { margin: 3px 0 0; color: var(--muted); font-size: 11.5px; line-height: 1.45; }
+.approval-card__form { display: grid; gap: 14px; margin-top: 14px; padding: 17px; border: 1px solid rgb(var(--orin-accent-rgb) / .28); border-radius: var(--radius-sm); background: rgb(var(--orin-ink-rgb) / .28); }
+.approval-card__form fieldset { display: grid; gap: 12px; min-width: 0; margin: 0; padding: 0; border: 0; }
+.approval-card__field { display: grid; gap: 6px; }
+.approval-card__field span { color: var(--faint); font: 10px var(--mono); letter-spacing: .04em; }
+.approval-card__field input { width: 100%; padding: 10px 11px; border: 1px solid var(--line); border-radius: 8px; background: var(--raised); color: var(--text); font-family: inherit; font-size: 12px; outline: none; }
+.approval-card__field input:focus { border-color: var(--signal-dim); box-shadow: 0 0 0 3px rgb(var(--orin-accent-rgb) / .08); }
+.approval-card__hint { margin: 0; color: var(--muted); font-size: 11.5px; }
+.approval-card__actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.approval-card__submit, .approval-card__decline { padding: 8px 12px; border-radius: 8px; cursor: pointer; font: 11px var(--mono); transition: background .16s var(--ease), border-color .16s var(--ease), color .16s var(--ease); }
+.approval-card__submit { margin-left: auto; border: 1px solid var(--signal-dim); background: rgb(var(--orin-accent-rgb) / .14); color: var(--signal); }
+.approval-card__submit:hover:not(:disabled) { background: rgb(var(--orin-accent-rgb) / .24); color: var(--text); }
+.approval-card__decline { border: 1px solid var(--line); background: transparent; color: var(--muted); }
+.approval-card__decline:hover:not(:disabled) { border-color: var(--line-strong); color: var(--text); }
+.approval-card__submit:disabled, .approval-card__decline:disabled { cursor: wait; opacity: .55; }
+.approval-card__settled, .approval-card__error { margin: 15px 0 0; font-size: 11px; }
+.approval-card__settled { color: var(--faint); }
+.approval-card__error { color: var(--danger); }
 .activity-card__chevron { flex-shrink: 0; color: var(--faint); transition: transform 0.18s var(--ease); }
 .activity-card__chevron.is-open { transform: rotate(90deg); }
 
