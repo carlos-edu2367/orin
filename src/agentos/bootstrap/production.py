@@ -49,6 +49,7 @@ from agentos.browser.service import BrowserService
 from agentos.tool_runtime.adapters import BrowserNavigateAtomicTool, FilesystemAtomicTool, TerminalCommandAtomicTool
 from agentos.tool_runtime.production import ProductionToolRuntime
 from agentos.persistence.postgres.skills import PostgresSkillLibraryService
+from agentos.mcp.service import McpServerService
 from agentos.omniroute import OmniRouteProcessManager, OmniRouteRuntimeSettingsStore
 from agentos.agentic.settings import AgentRuntimeSettingsStore
 from agentos.filesystem.models import FilesystemOperationContext, WorkspacePath
@@ -268,6 +269,7 @@ def compose_production_services(engine: Engine, *, localhost_trust_enabled: bool
         execution_query=ExecutionQueryAdapter(engine),
         resource_services={**{name: unavailable for name in ("agents", "capabilities", "tools", "workspaces", "artifacts", "memories")}, "multi_agent": multi_agent_coordinator or unavailable},
         skills=PostgresSkillLibraryService(engine),
+        mcp=McpServerService(engine),
         provider_configuration=PostgresProviderConfigurationAdapter(engine, cipher=provider_cipher),
         provider_catalog=ProviderModelCatalogService(provider_repository, {"openrouter": OpenRouterModelCatalogClient(), "omniroute": OmniRouteCatalogClient(), "ollama": OllamaCatalogClient()}),
         conversation_application=ChatApplication(PostgresChatStore(engine, PostgresAgenticActivityStore(engine, cursor_secret)), ExecutionApplicationAdapter(engine)),

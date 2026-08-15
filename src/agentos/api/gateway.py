@@ -7,7 +7,7 @@ from hashlib import sha256
 from ipaddress import ip_address
 from pathlib import Path
 from time import monotonic
-from typing import Any
+from typing import Any, Mapping
 from uuid import uuid4
 
 from fastapi import FastAPI, File, Request, UploadFile
@@ -39,6 +39,8 @@ from agentos.agentic.workspace import ConversationWorkspace, WorkspaceError, res
 from agentos.local_workspace import FolderRejected, choose_folder, inspect_folder
 from agentos.uploads.media import MAX_FILES_PER_MESSAGE, MAX_UPLOAD_BYTES, UploadRejected
 from agentos.uploads.promotion import discard_promoted, promote_uploads
+from agentos.mcp.catalog import search_catalog
+from agentos.mcp.service import McpConnectionFailed, McpServerNotFound, McpServiceError
 
 
 # Conversation SSE pacing. The active poll is fast enough to feel like token
@@ -188,6 +190,25 @@ class AgentSkillsRequest(_RequestModel):
     skill_ids: list[str] = Field(default_factory=list, max_length=100)
 
 
+class McpProposeServerRequest(_RequestModel):
+    display_name: str = Field(min_length=1, max_length=255)
+    catalog_id: str | None = Field(default=None, max_length=64)
+    slug: str | None = Field(default=None, max_length=32)
+    transport: str | None = Field(default=None, pattern="^(stdio|http)$")
+    command: str | None = Field(default=None, max_length=512)
+    args: list[str] = Field(default_factory=list, max_length=32)
+    url: str | None = Field(default=None, max_length=2048)
+    secret_names: list[str] = Field(default_factory=list, max_length=16)
+
+
+class McpApproveServerRequest(_RequestModel):
+    secrets: dict[str, SecretStr] = Field(default_factory=dict)
+
+
+class McpEnabledRequest(_RequestModel):
+    enabled: bool
+
+
 class OmniRouteRuntimeRequest(_RequestModel):
     auto_start: bool
 
@@ -220,6 +241,7 @@ class ApiServices:
         conversation_application: ConversationApplication | None = None,
         projects: object | None = None,
         skills: object | None = None,
+        mcp: object | None = None,
         omniroute_runtime: object | None = None,
         agentic_runtime: object | None = None,
         events: InMemoryClientEventStream | None = None,
@@ -238,6 +260,7 @@ class ApiServices:
         self.conversation_application = conversation_application
         self.projects = projects
         self.skills = skills
+        self.mcp = mcp
         self.local_workspaces = local_workspaces
         self.omniroute_runtime = omniroute_runtime
         self.agentic_runtime = agentic_runtime
@@ -309,6 +332,18 @@ def create_app(services: ApiServices) -> FastAPI:
         # (frontend/src/api/errors.ts): the client already knows to drop its
         # cursor and open a fresh stream binding on this response.
         return _error(409, "CONFLICT", "cursor_invalid", retryable=True)
+
+    @app.exception_handler(McpServerNotFound)
+    async def mcp_server_not_found(_: Request, __: McpServerNotFound) -> JSONResponse:
+        return _error(404, "NOT_FOUND", "resource_not_found", retryable=False)
+
+    @app.exception_handler(McpConnectionFailed)
+    async def mcp_connection_failed(_: Request, __: McpConnectionFailed) -> JSONResponse:
+        return _error(502, "MCP", "mcp_connection_failed", retryable=True)
+
+    @app.exception_handler(McpServiceError)
+    async def mcp_service_error(_: Request, __: McpServiceError) -> JSONResponse:
+        return _error(422, "VALIDATION", "invalid_request", retryable=False)
 
     @app.exception_handler(Exception)
     async def internal_error(_: Request, __: Exception) -> JSONResponse:
@@ -869,6 +904,84 @@ def create_app(services: ApiServices) -> FastAPI:
         result = _require_port(services.skills).set_agent_skills({"user_id": principal.user_id, "agent_id": agent_id, "mode": payload.mode, "skill_ids": payload.skill_ids, "idempotency_key": _idempotency(request)})
         return JSONResponse(_jsonable(result))
 
+    @app.get("/v1/mcp/catalog")
+    async def get_mcp_catalog(request: Request, query: str = "") -> JSONResponse:
+        principal = principal_for(request)
+        services.security.check_rate_limit(principal, action="mcp.catalog", origin=request.headers.get("origin"))
+        services.security.authorize(principal, action="mcp.catalog", resource_id=None, purpose="mcp.read")
+        entries = [{
+            "catalog_id": entry.catalog_id, "display_name": entry.display_name, "summary": entry.summary,
+            "transport": entry.transport.value, "setup_instructions": entry.setup_instructions,
+            "arguments": list(entry.arguments),
+            "secrets": [{"name": item.name, "label": item.label, "how_to_obtain": item.how_to_obtain} for item in entry.secrets],
+        } for entry in search_catalog(query)]
+        return JSONResponse({"entries": entries})
+
+    @app.get("/v1/mcp/servers")
+    async def list_mcp_servers(request: Request) -> JSONResponse:
+        principal = principal_for(request)
+        services.security.check_rate_limit(principal, action="mcp.servers.list", origin=request.headers.get("origin"))
+        services.security.authorize(principal, action="mcp.servers.list", resource_id=None, purpose="mcp.read")
+        return JSONResponse(_jsonable(_require_port(services.mcp).list(principal.user_id)))
+
+    @app.post("/v1/mcp/servers", status_code=201)
+    async def propose_mcp_server(payload: McpProposeServerRequest, request: Request) -> JSONResponse:
+        principal = principal_for(request, mutable=True)
+        services.security.check_rate_limit(principal, action="mcp.servers.propose", origin=request.headers.get("origin"))
+        services.security.authorize(principal, action="mcp.servers.propose", resource_id=None, purpose="mcp.configure")
+        command = {"user_id": principal.user_id, **payload.model_dump(exclude_none=True)}
+        result = _require_port(services.mcp).propose(command)
+        return JSONResponse(_jsonable(result), status_code=201)
+
+    @app.get("/v1/mcp/servers/{server_id}")
+    async def get_mcp_server(server_id: str, request: Request) -> JSONResponse:
+        principal = principal_for(request)
+        services.security.check_rate_limit(principal, action="mcp.servers.get", origin=request.headers.get("origin"))
+        services.security.authorize(principal, action="mcp.servers.get", resource_id=server_id, purpose="mcp.read")
+        return JSONResponse(_jsonable(_require_port(services.mcp).get(principal.user_id, server_id)))
+
+    @app.post("/v1/mcp/servers/{server_id}/approve")
+    async def approve_mcp_server(server_id: str, payload: McpApproveServerRequest, request: Request) -> JSONResponse:
+        principal = principal_for(request, mutable=True)
+        services.security.check_rate_limit(principal, action="mcp.servers.approve", origin=request.headers.get("origin"))
+        services.security.authorize(principal, action="mcp.servers.approve", resource_id=server_id, purpose="mcp.configure")
+        secrets = {name: value.get_secret_value() for name, value in payload.secrets.items()}
+        result = _require_port(services.mcp).approve(user_id=principal.user_id, server_id=server_id, secrets=secrets, connect=_mcp_connect)
+        return JSONResponse(_jsonable(result))
+
+    @app.post("/v1/mcp/servers/{server_id}/test")
+    async def test_mcp_server(server_id: str, request: Request) -> JSONResponse:
+        principal = principal_for(request, mutable=True)
+        services.security.check_rate_limit(principal, action="mcp.servers.test", origin=request.headers.get("origin"))
+        services.security.authorize(principal, action="mcp.servers.test", resource_id=server_id, purpose="mcp.configure")
+        server = _require_port(services.mcp).get(principal.user_id, server_id)
+        result = _require_port(services.mcp).test(principal.user_id, str(server["slug"]), _mcp_connect)
+        return JSONResponse(_jsonable(result))
+
+    @app.put("/v1/mcp/servers/{server_id}/enabled")
+    async def set_mcp_server_enabled(server_id: str, payload: McpEnabledRequest, request: Request) -> JSONResponse:
+        principal = principal_for(request, mutable=True)
+        services.security.check_rate_limit(principal, action="mcp.servers.enable", origin=request.headers.get("origin"))
+        services.security.authorize(principal, action="mcp.servers.enable", resource_id=server_id, purpose="mcp.configure")
+        result = _require_port(services.mcp).set_enabled(principal.user_id, server_id, enabled=payload.enabled)
+        return JSONResponse(_jsonable(result))
+
+    @app.put("/v1/mcp/servers/{server_id}/tools/{tool_name}/enabled")
+    async def set_mcp_tool_enabled(server_id: str, tool_name: str, payload: McpEnabledRequest, request: Request) -> JSONResponse:
+        principal = principal_for(request, mutable=True)
+        services.security.check_rate_limit(principal, action="mcp.tools.enable", origin=request.headers.get("origin"))
+        services.security.authorize(principal, action="mcp.tools.enable", resource_id=server_id, purpose="mcp.configure")
+        result = _require_port(services.mcp).set_tool_enabled(principal.user_id, server_id, tool_name, enabled=payload.enabled)
+        return JSONResponse(_jsonable(result))
+
+    @app.delete("/v1/mcp/servers/{server_id}", status_code=204)
+    async def remove_mcp_server(server_id: str, request: Request) -> JSONResponse:
+        principal = principal_for(request, mutable=True)
+        services.security.check_rate_limit(principal, action="mcp.servers.remove", origin=request.headers.get("origin"))
+        services.security.authorize(principal, action="mcp.servers.remove", resource_id=server_id, purpose="mcp.configure")
+        _require_port(services.mcp).remove(principal.user_id, server_id)
+        return JSONResponse(status_code=204, content=None)
+
     @app.put("/v1/providers/{provider}")
     async def configure_provider(provider: str, payload: ProviderSetupRequest, request: Request) -> JSONResponse:
         provider_name = _provider_name(provider)
@@ -1139,6 +1252,19 @@ def _require_port(port: object | None) -> Any:
     if port is None:
         raise RuntimeError("application service is unavailable")
     return port
+
+
+def _mcp_connect(config: Any, secrets: Mapping[str, str]) -> tuple[str, Any]:
+    """The one place a real MCP connection opens: approve/test routes only."""
+    from agentos.mcp.toolset import build_client
+
+    client = build_client(config, secrets)
+    try:
+        negotiation = client.initialize()
+        tools = client.list_tools()
+    finally:
+        client.close()
+    return negotiation.protocol_version, tools
 
 
 def _idempotency(request: Request) -> str:
