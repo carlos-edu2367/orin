@@ -226,6 +226,8 @@ class AgentToolset:
         mcp_provider: object | None = None,
         mcp_service: object | None = None,
         mcp_user_id: str | None = None,
+        plugin_service: object | None = None,
+        plugin_user_id: str | None = None,
     ) -> None:
         self.workspace = workspace
         self.memory = memory
@@ -254,6 +256,8 @@ class AgentToolset:
         self._mcp_provider = mcp_provider
         self._mcp_service = mcp_service
         self._mcp_user_id = mcp_user_id
+        self._plugin_service = plugin_service
+        self._plugin_user_id = plugin_user_id
         self._definitions: tuple[ToolDefinition, ...] | None = None
         self._by_name: dict[str, ToolDefinition] = {}
 
@@ -522,6 +526,14 @@ class AgentToolset:
                     "Re-run discovery against an already approved MCP server and report whether it answers and which tools it publishes.",
                     _schema({"slug": _TEXT}, ("slug",)), self.test_mcp_server, "mcp",
                 ),
+            ))
+        if self._plugin_service is not None and self._plugin_user_id:
+            items.extend((
+                ToolDefinition("search_plugin", "Search the plugin marketplaces Orin knows for a plugin by name or subject.", _schema({"query": _TEXT}, ("query",)), self.search_plugin, "plugin", read_only=True),
+                ToolDefinition("inspect_plugin", "Download a plugin and report its skills, MCP servers and subagents without activating anything. Nothing in the package is executed.", _schema({"reference": _TEXT}, ("reference",)), self.inspect_plugin, "plugin"),
+                ToolDefinition("install_plugin", "Propose installing a plugin; the user must approve the contribution card before activation.", _schema({"reference": _TEXT}, ("reference",)), self.install_plugin, "plugin", policy_tags=("mutates",)),
+                ToolDefinition("list_plugins", "List this user's installed plugins and their states.", _schema({}), self.list_plugins, "plugin", read_only=True),
+                ToolDefinition("uninstall_plugin", "Remove an installed plugin after the user explicitly confirmed the removal.", _schema({"plugin_id": _TEXT, "confirmed": {"type": "boolean"}}, ("plugin_id",)), self.uninstall_plugin, "plugin", policy_tags=("mutates",)),
             ))
         if self._mcp_provider is not None:
             # Remote tools come last so a server can never shadow a native tool
@@ -1432,6 +1444,34 @@ class AgentToolset:
         result = self._mcp_service.test(self._mcp_user_id, str(slug), discover)
         return {"summary": f"Testou {slug}", "content": json.dumps(result, ensure_ascii=False),
                 "payload": {**result, "tool_kind": "mcp", "mcp_action": "test"}}
+
+    def search_plugin(self, query: str = "") -> dict[str, Any]:
+        results = self._plugin_service.search(str(query or ""))
+        return {"summary": f"{len(results)} plugin(s) encontrado(s)", "content": json.dumps(results, ensure_ascii=False), "payload": {"results": results, "tool_kind": "plugin"}}
+
+    def inspect_plugin(self, reference: str) -> dict[str, Any]:
+        try:
+            plugin = self._plugin_service.inspect(user_id=self._plugin_user_id, reference=str(reference))
+        except Exception as error:
+            raise AgentToolError(str(error)) from error
+        return {"summary": f"Inspecionou o plugin {plugin.get('display_name', plugin.get('plugin_id', reference))}", "content": json.dumps(plugin, ensure_ascii=False), "payload": {"plugin": plugin, "tool_kind": "plugin"}}
+
+    def install_plugin(self, reference: str) -> ToolOutcome:
+        plugin = self.inspect_plugin(reference)["payload"]["plugin"]
+        return ToolOutcome("succeeded", f"Aguardando aprovação do plugin {plugin.get('display_name', plugin['plugin_id'])}", "The plugin was inspected and is waiting for the user's approval card. Stop here and wait for their next message.", {"plugin_approval": True, "wait_for_user": True, "plugin": plugin, "tool_kind": "plugin"})
+
+    def list_plugins(self) -> dict[str, Any]:
+        results = self._plugin_service.list(self._plugin_user_id)
+        return {"summary": f"{len(results)} plugin(s) instalado(s)", "content": json.dumps(results, ensure_ascii=False), "payload": {"plugins": results, "tool_kind": "plugin"}}
+
+    def uninstall_plugin(self, plugin_id: str, confirmed: bool = False) -> ToolOutcome:
+        if not confirmed:
+            raise AgentToolError("Ask the user to confirm the removal first, then call this again with confirmed=true.")
+        try:
+            result = self._plugin_service.remove(user_id=self._plugin_user_id, plugin_id=str(plugin_id))
+        except Exception as error:
+            raise AgentToolError(str(error)) from error
+        return ToolOutcome("succeeded", f"Removeu o plugin {plugin_id}", json.dumps(result), {**result, "tool_kind": "plugin"})
 
     def create_agent(self, name: str, role: str, model_id: str | None = None) -> ToolOutcome:
         if self._create_agent is None:

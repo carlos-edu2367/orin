@@ -27,6 +27,7 @@ from agentos.conversations.chat import PostgresChatStore
 from agentos.installation import orin_paths
 from agentos.mcp.service import McpServerService
 from agentos.mcp.toolset import McpToolProvider
+from agentos.plugins.service import PluginService
 from agentos.persistence.postgres.agent_memory import PostgresAgentMemoryStore
 from agentos.persistence.postgres.agentic_activity import PostgresAgenticActivityStore
 from agentos.persistence.postgres.conversation_agents import ConversationAgentStore
@@ -469,6 +470,7 @@ class ChatWorker:
         configured_limits = self._runtime_settings.get(str(turn["user_id"]))
         browser = self._browser_registry.acquire(turn)
         mcp_service = McpServerService(engine)
+        plugin_service = PluginService(engine, plugin_root=orin_paths().data / "plugins", skill_library=skill_library, mcp_service=mcp_service)
         # A broken MCP configuration must never stop a turn from running.
         try:
             mcp_bundles = mcp_service.active_servers(str(turn["user_id"]))
@@ -510,6 +512,7 @@ class ChatWorker:
                     num_ctx=self._num_ctx_for({**turn, "model_id": model_id}) if str(turn["provider"]) == "ollama" else None,
                 ),
                 mcp_provider=mcp_provider,
+                plugin_service=plugin_service,
             )
             return session.build_runtime()
         except Exception:

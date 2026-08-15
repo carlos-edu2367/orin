@@ -404,6 +404,7 @@ class TurnSession:
         child_model_authorizer: Callable[[str], bool] | None = None,
         child_provider_factory: Callable[[str], object] | None = None,
         mcp_provider=None,
+        plugin_service=None,
     ) -> None:
         self.turn = turn
         self.store = store
@@ -420,6 +421,7 @@ class TurnSession:
         self.browser = browser
         self.browser_capability = browser_capability
         self.mcp_provider = mcp_provider
+        self.plugin_service = plugin_service
         self.tool_policy = tool_policy
         self.model_sees_images = bool(model_sees_images)
         self.model_calls_tools = bool(model_calls_tools)
@@ -793,6 +795,8 @@ class TurnSession:
             model_sees_images=self.model_sees_images,
             visual_reader=self._visual_reader,
             mcp_provider=self.mcp_provider,
+            plugin_service=self.plugin_service,
+            plugin_user_id=str(self.turn.get("user_id") or "") or None,
         )
 
     def _skill_catalog(self, task: str, toolset: AgentToolset) -> tuple[object, ...]:
