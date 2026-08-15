@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 import re
+from pathlib import Path
 from typing import Mapping
 
 from sqlalchemy import delete, insert, select, update
@@ -38,16 +39,17 @@ class PostgresSkillLibraryService:
     def _metadata(skill: Skill) -> dict[str, object]:
         return {"tags": list(skill.tags), "capabilities": list(skill.capabilities), "when_to_use": list(skill.when_to_use),
                 "when_not_to_use": list(skill.when_not_to_use), "dependencies": list(skill.dependencies.skills),
-                "dependency_tools": list(skill.dependencies.tools), "requires_tools": list(skill.requires_tools), "author": skill.author}
+                "dependency_tools": list(skill.dependencies.tools), "requires_tools": list(skill.requires_tools), "author": skill.author,
+                "package_path": str(skill.package_path) if skill.package_path else None}
 
-    def _insert(self, skill: Skill, *, user_id: str | None) -> None:
+    def _insert(self, skill: Skill, *, user_id: str | None, plugin_id: str | None = None) -> None:
         now = _now()
         with self.engine.begin() as connection:
             identity = (skills.c.skill_id == skill.id) & (skills.c.scope == skill.scope.value)
             identity = identity & (skills.c.user_id.is_(None) if user_id is None else skills.c.user_id == user_id)
             record_id = connection.execute(select(skills.c.id).where(identity)).scalar_one_or_none()
             if record_id is None:
-                record_id = connection.execute(insert(skills).values(skill_id=skill.id, user_id=user_id, workspace_id=None, scope=skill.scope.value, source=skill.source.value, enabled=skill.enabled, created_at=now, updated_at=now)).inserted_primary_key[0]
+                record_id = connection.execute(insert(skills).values(skill_id=skill.id, user_id=user_id, workspace_id=None, scope=skill.scope.value, source=skill.source.value, plugin_id=plugin_id, enabled=skill.enabled, created_at=now, updated_at=now)).inserted_primary_key[0]
             connection.execute(insert(skill_versions).values(skill_record_id=record_id, version=skill.version, name=skill.name, description=skill.description, metadata=self._metadata(skill), instructions=skill.instructions or "", content_digest=skill.digest or "", published_at=now))
 
     def _skills_for(self, user_id: str) -> tuple[Skill, ...]:
@@ -57,8 +59,25 @@ class PostgresSkillLibraryService:
         result: list[Skill] = []
         for row in rows:
             metadata = dict(row["metadata"] or {})
-            result.append(Skill(id=str(row["skill_id"]), name=str(row["name"]), version=str(row["version"]), description=str(row["description"]), instructions=str(row["instructions"]), tags=tuple(metadata.get("tags") or ()), capabilities=tuple(metadata.get("capabilities") or ()), when_to_use=tuple(metadata.get("when_to_use") or ()), when_not_to_use=tuple(metadata.get("when_not_to_use") or ()), dependencies=SkillDependencies(tuple(metadata.get("dependencies") or ()), tuple(metadata.get("dependency_tools") or ())), requires_tools=tuple(metadata.get("requires_tools") or ()), scope=SkillScope(str(row["scope"])), source=SkillSource(str(row["source"])), enabled=bool(row["enabled"]), author=metadata.get("author")))
+            result.append(Skill(id=str(row["skill_id"]), name=str(row["name"]), version=str(row["version"]), description=str(row["description"]), instructions=str(row["instructions"]), tags=tuple(metadata.get("tags") or ()), capabilities=tuple(metadata.get("capabilities") or ()), when_to_use=tuple(metadata.get("when_to_use") or ()), when_not_to_use=tuple(metadata.get("when_not_to_use") or ()), dependencies=SkillDependencies(tuple(metadata.get("dependencies") or ()), tuple(metadata.get("dependency_tools") or ())), requires_tools=tuple(metadata.get("requires_tools") or ()), scope=SkillScope(str(row["scope"])), source=SkillSource(str(row["source"])), enabled=bool(row["enabled"]), author=metadata.get("author"), package_path=Path(metadata["package_path"]) if metadata.get("package_path") else None))
         return tuple(result)
+
+    def install_plugin_skills(self, *, user_id: str, plugin_id: str, skills: tuple[Skill, ...] | list[Skill]) -> None:
+        with self.engine.begin() as connection:
+            table = globals()["skills"]
+            records = connection.execute(select(table.c.id).where((table.c.user_id == user_id) & (table.c.plugin_id == plugin_id))).scalars().all()
+            if records:
+                connection.execute(delete(skill_versions).where(skill_versions.c.skill_record_id.in_(records)))
+                connection.execute(delete(table).where(table.c.id.in_(records)))
+        for skill in skills:
+            self._insert(skill, user_id=user_id, plugin_id=plugin_id)
+
+    def remove_plugin_skills(self, *, user_id: str, plugin_id: str) -> None:
+        with self.engine.begin() as connection:
+            records = connection.execute(select(skills.c.id).where((skills.c.user_id == user_id) & (skills.c.plugin_id == plugin_id))).scalars().all()
+            if records:
+                connection.execute(delete(skill_versions).where(skill_versions.c.skill_record_id.in_(records)))
+                connection.execute(delete(skills).where(skills.c.id.in_(records)))
 
     def registry_for(self, user_id: str, agent_id: str | None = None) -> SkillRegistry:
         registry = SkillRegistry(self._skills_for(user_id))

@@ -13,7 +13,7 @@ from pathlib import Path
 import re
 
 
-_ID = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
+_ID = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?::[a-z][a-z0-9]*(?:-[a-z0-9]+)*)?$")
 _SEMVER = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$")
 
 
@@ -55,6 +55,7 @@ class SkillSource(StrEnum):
     BUILTIN = "builtin"
     CUSTOM = "custom"
     IMPORTED = "imported"
+    PLUGIN = "plugin"
 
 
 @dataclass(frozen=True, slots=True)
