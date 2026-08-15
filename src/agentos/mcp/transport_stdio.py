@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import shutil
 import subprocess
 import threading
@@ -67,6 +68,8 @@ class StdioTransport:
         self._timeout = timeout
         self._process: subprocess.Popen[bytes] | None = None
         self._lock = threading.Lock()
+        self._replies: queue.Queue[bytes] = queue.Queue()
+        self._reader_thread: threading.Thread | None = None
 
     def open(self) -> None:
         if self._process is not None:
@@ -82,6 +85,19 @@ class StdioTransport:
             )
         except OSError as error:
             raise StdioTransportError(f"the MCP server process could not start: {error}") from error
+        self._reader_thread = threading.Thread(target=self._read_loop, args=(self._process,), daemon=True)
+        self._reader_thread.start()
+
+    def _read_loop(self, process: subprocess.Popen[bytes]) -> None:
+        assert process.stdout is not None
+        try:
+            while True:
+                line = process.stdout.readline(MAX_LINE_BYTES)
+                self._replies.put(line)
+                if not line:
+                    return
+        except (OSError, ValueError):
+            self._replies.put(b"")
 
     def send(self, frame: Mapping[str, Any]) -> dict[str, Any] | None:
         process = self._process
@@ -96,7 +112,14 @@ class StdioTransport:
                 raise StdioTransportError(f"the MCP server closed its input: {error}") from error
             if "id" not in frame:
                 return None
-            line = process.stdout.readline(MAX_LINE_BYTES)
+            try:
+                line = self._replies.get(timeout=self._timeout)
+            except queue.Empty:
+                _terminate_process_tree(process)
+                self._process = None
+                raise StdioTransportError(
+                    f"the MCP server did not answer within {self._timeout}s and was terminated"
+                )
         if not line:
             raise StdioTransportError("the MCP server closed before answering")
         try:
