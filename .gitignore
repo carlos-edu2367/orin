@@ -30,4 +30,5 @@ frontend/tests/visual/output/
 data/*.json
 data/*.db
 data/run/
+data/plugins/
 .cache/

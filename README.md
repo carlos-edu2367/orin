@@ -270,6 +270,12 @@ um card no chat ou em **Settings → MCP**. Veja [docs/MCP.md](docs/MCP.md) para
 o que é suportado, os limites de segurança e como adicionar um servidor ao
 catálogo curado.
 
+## Plugins
+
+Plugins declarativos podem adicionar skills, subagentes e propostas de MCP sem
+executar código no processo do Orin. O pacote é inspecionado e só é ativado
+após aprovação no chat ou em Settings → Plugins. Veja [docs/PLUGINS.md](docs/PLUGINS.md).
+
 ## What the agent can do
 
 Tools are defined in `src/agentos/agentic/agent_tools.py`.
@@ -283,6 +289,7 @@ Tools are defined in `src/agentos/agentic/agent_tools.py`.
 | `remember`, `recall` | Durable facts scoped to the user, recalled into later conversations. |
 | `create_agent`, `ask_agent` | Create a specialist and hand it a self-contained task. A subagent cannot create further subagents, and there is a per-turn budget. |
 | `list_mcp_catalog`, `list_mcp_servers`, `configure_mcp`, `test_mcp_server` | Propose and inspect MCP connectors. `configure_mcp` never accepts a credential value — it creates a pending connection and shows the user an approval card; see [docs/MCP.md](docs/MCP.md). Tools an approved server publishes appear alongside these as `mcp__<server>__<tool>`. |
+| `search_plugin`, `inspect_plugin`, `install_plugin`, `list_plugins`, `uninstall_plugin` | Busca, inspeção, proposta e lifecycle de plugins. `install_plugin` nunca ativa sem aprovação explícita; segredos não são argumentos dessas tools. |
 
 `run_command` is a real shell on your machine. That is the point of a local
 agent workspace, and it is also the reason not to expose this service to a

@@ -1,8 +1,20 @@
 # RFC 901 — Plugin SDK
 
-**Estado:** Normativa para o contrato de extensão; implementação futura  
+**Estado:** Parcialmente adotada — v1 aceita contribuições declarativas; ver [docs/PLUGINS.md](../../PLUGINS.md)  
 **Idioma:** PT-BR  
 **Relações:** [RFC 000 — Visão geral](../000-overview.md), [RFC 050 — Princípios de design](../050-design-principles.md), [RFC 060 — Glossário e convenções](../060-glossary-and-conventions.md), [RFC 102 — Ciclo de vida da Execution](../100-kernel/102-execution-lifecycle.md), [RFC 103 — Sistema de eventos](../100-kernel/103-event-system.md), [RFC 401 — Tool Runtime](../400-tools-resources/401-tool-runtime.md), [RFC 402 — Resource Manager](../400-tools-resources/402-resource-manager.md), [RFC 406 — Capabilities](../400-tools-resources/406-capabilities.md), [RFC 604 — Configuração](../600-platform-data/604-configuration.md), [RFC 702 — Segurança](../700-api-security/702-security.md), [RFC 803 — Observabilidade](../800-operations/803-observability.md)
+
+## Estado da implementação
+
+Implementado no v1: descoberta e fetch limitado de pacotes, digest imutável,
+inspeção sem execução, skills de plugin, propostas MCP pendentes de aprovação,
+persistência por usuário, lifecycle de instalação/ativação/desativação/remoção,
+tools do agente, gateway local, card de aprovação e Settings → Plugins.
+
+Adiado: `PluginHost` isolado para contribuições executáveis, assinatura e
+attestation, SBOM/quarentena, lifecycle `DRAINING`, grants granulares e
+contribuições de Provider, Resource e Exporter. Hooks continuam explicitamente
+não suportados no v1.
 
 ## Objetivo
 
