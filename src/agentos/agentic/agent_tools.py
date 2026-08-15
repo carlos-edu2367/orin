@@ -224,6 +224,8 @@ class AgentToolset:
         visual_reader: object | None = None,
         browser_capability: str = "interact",
         mcp_provider: object | None = None,
+        mcp_service: object | None = None,
+        mcp_user_id: str | None = None,
     ) -> None:
         self.workspace = workspace
         self.memory = memory
@@ -250,6 +252,8 @@ class AgentToolset:
         self._policy = policy
         self._loaded_skills: set[tuple[str, str]] = set()
         self._mcp_provider = mcp_provider
+        self._mcp_service = mcp_service
+        self._mcp_user_id = mcp_user_id
         self._definitions: tuple[ToolDefinition, ...] | None = None
         self._by_name: dict[str, ToolDefinition] = {}
 
@@ -484,6 +488,39 @@ class AgentToolset:
                     "Publish a new immutable version of one of this user's custom Skills. Use it to improve a proven procedure; keep its scope and ownership unchanged.",
                     _schema({"skill_id": _TEXT, **skill_fields}, ("skill_id",)),
                     self.edit_skill, "skill", policy_tags=("mutates",),
+                ),
+            ))
+        if self._mcp_service is not None and self._mcp_user_id:
+            items.extend((
+                ToolDefinition(
+                    "list_mcp_catalog",
+                    "List the MCP servers Orin knows how to connect. Use this first when the user asks to connect a tool: each entry explains what the server does and exactly which credential the user has to fetch.",
+                    _schema({"query": {**_TEXT, "description": "Filter by name or subject, e.g. 'github'. Omit for the whole catalog."}}),
+                    self.list_mcp_catalog, "mcp", read_only=True,
+                ),
+                ToolDefinition(
+                    "list_mcp_servers",
+                    "List the MCP servers this user already configured, with their state and tool count.",
+                    _schema({}), self.list_mcp_servers, "mcp", read_only=True,
+                ),
+                ToolDefinition(
+                    "configure_mcp",
+                    "Propose an MCP server connection. This never activates the server and never accepts a credential value: it creates a pending configuration and shows the user an approval card where they type any secret themselves. Explain to the user what the server does and which credential they will need before calling this.",
+                    _schema({
+                        "display_name": {**_TEXT, "description": "How the connection appears in Settings, e.g. 'GitHub'."},
+                        "catalog_id": {**_TEXT, "description": "Id from list_mcp_catalog. Fills transport, command and required secrets."},
+                        "transport": {"type": "string", "enum": ["stdio", "http"], "description": "Only for a server outside the catalog."},
+                        "command": {**_TEXT, "description": "stdio launcher, e.g. 'npx'. Only for a server outside the catalog."},
+                        "args": {"type": "array", "items": _TEXT},
+                        "url": {**_TEXT, "description": "https endpoint. Only for a server outside the catalog."},
+                        "secret_names": {"type": "array", "items": _TEXT, "description": "Names of the credentials the server needs. Names only — never values."},
+                    }, ("display_name",)),
+                    self.configure_mcp, "mcp", policy_tags=("mutates",),
+                ),
+                ToolDefinition(
+                    "test_mcp_server",
+                    "Re-run discovery against an already approved MCP server and report whether it answers and which tools it publishes.",
+                    _schema({"slug": _TEXT}, ("slug",)), self.test_mcp_server, "mcp",
                 ),
             ))
         if self._mcp_provider is not None:
@@ -1334,6 +1371,65 @@ class AgentToolset:
             raise AgentToolError(str(error)) from error
         self._refresh_skill_registry()
         return self._published_skill(result, action="updated")
+
+    def list_mcp_catalog(self, query: str = "") -> dict[str, Any]:
+        from agentos.mcp.catalog import search_catalog
+
+        entries = [{
+            "catalog_id": entry.catalog_id, "display_name": entry.display_name, "summary": entry.summary,
+            "transport": entry.transport.value, "setup_instructions": entry.setup_instructions,
+            "arguments": list(entry.arguments),
+            "secrets": [{"name": item.name, "label": item.label, "how_to_obtain": item.how_to_obtain} for item in entry.secrets],
+        } for entry in search_catalog(str(query or ""))]
+        return {"summary": f"{len(entries)} servidor(es) no catálogo",
+                "content": json.dumps(entries, ensure_ascii=False),
+                "payload": {"entries": entries, "tool_kind": "mcp", "mcp_action": "catalog"}}
+
+    def list_mcp_servers(self) -> dict[str, Any]:
+        servers = self._mcp_service.list(self._mcp_user_id)
+        return {"summary": f"{len(servers)} servidor(es) MCP configurado(s)",
+                "content": json.dumps(servers, ensure_ascii=False),
+                "payload": {"servers": servers, "tool_kind": "mcp", "mcp_action": "list"}}
+
+    def configure_mcp(self, display_name: str, catalog_id: str | None = None, transport: str | None = None,
+                      command: str | None = None, args: list[str] | None = None, url: str | None = None,
+                      secret_names: list[str] | None = None, **rejected: Any) -> ToolOutcome:
+        from agentos.mcp.catalog import find_catalog_entry
+
+        if rejected:
+            raise AgentToolError(
+                "configure_mcp does not accept credential values. Pass secret_names only; the user types the values in the approval card."
+            )
+        command_values: dict[str, object] = {"user_id": self._mcp_user_id, "display_name": str(display_name)}
+        if catalog_id:
+            entry = find_catalog_entry(str(catalog_id))
+            if entry is None:
+                raise AgentToolError(f"'{catalog_id}' is not in the MCP catalog. Call list_mcp_catalog first, or pass transport plus command/url explicitly.")
+            command_values.update({
+                "catalog_id": entry.catalog_id, "transport": entry.transport.value,
+                "command": entry.command, "args": list(entry.args), "url": entry.url,
+                "secret_names": [item.name for item in entry.secrets],
+            })
+        else:
+            if transport not in {"stdio", "http"}:
+                raise AgentToolError("transport must be 'stdio' or 'http' when no catalog_id is given.")
+            command_values.update({"transport": transport, "command": command, "args": list(args or []),
+                                   "url": url, "secret_names": [str(item) for item in (secret_names or [])]})
+        try:
+            server = self._mcp_service.propose(command_values)
+        except Exception as error:
+            raise AgentToolError(str(error)) from error
+        return ToolOutcome(
+            "succeeded",
+            f"Aguardando aprovação da conexão {server['display_name']}",
+            "The connection is proposed and waiting for the user. They will fill in any credential and approve it in the card. Stop here and wait for their next message.",
+            {"server": server, "mcp_approval": True, "wait_for_user": True, "tool_kind": "mcp", "mcp_action": "approval_requested"},
+        )
+
+    def test_mcp_server(self, slug: str) -> dict[str, Any]:
+        result = self._mcp_service.test(self._mcp_user_id, str(slug))
+        return {"summary": f"Testou {slug}", "content": json.dumps(result, ensure_ascii=False),
+                "payload": {**result, "tool_kind": "mcp", "mcp_action": "test"}}
 
     def create_agent(self, name: str, role: str, model_id: str | None = None) -> ToolOutcome:
         if self._create_agent is None:
