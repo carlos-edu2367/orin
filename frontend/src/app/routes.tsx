@@ -13,6 +13,7 @@ import { RuntimeSettingsPage } from '../features/settings/RuntimeSettingsPage'
 import { MemoryPage } from '../features/memory/MemoryPage'
 import { SchedulesPage } from '../features/schedules/SchedulesPage'
 import { McpSection } from '../features/mcp/McpSection'
+import { PluginsSection } from '../features/plugins/PluginsSection'
 
 export type RouteDefinition = {
   path: string
@@ -34,6 +35,7 @@ export const routes: RouteDefinition[] = [
   { path: '/settings/omniroute', element: <ProviderSettingsPage /> },
   { path: '/settings/skills', element: <SkillsPage /> },
   { path: '/settings/mcp', element: <McpSection /> },
+  { path: '/settings/plugins', element: <PluginsSection /> },
   { path: '/settings/agents', element: <SettingsPlaceholder title="Agents" description="Configurações específicas de agentes ficam no contexto de cada agente." /> },
   { path: '/settings/workspace', element: <SettingsPlaceholder title="Workspace" description="Projetos e workspaces continuam contextualizados." /> },
   { path: '/settings/advanced', element: <SettingsPlaceholder title="Advanced" description="Nenhuma opção técnica adicional está exposta sem suporte do runtime." /> },

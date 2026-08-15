@@ -9,6 +9,7 @@ const SECTIONS = [
   ['memory', 'Memory', 'Memórias globais e contextuais'],
   ['skills', 'Skills', 'Biblioteca e associações de agentes'],
   ['mcp', 'MCP', 'Servidores MCP conectados e suas tools'],
+  ['plugins', 'Plugins', 'Pacotes declarativos e suas contribuições'],
   ['agents', 'Agents', 'Configurações por agente'],
   ['workspace', 'Workspace', 'Projetos e arquivos locais'],
   ['advanced', 'Advanced', 'Opções técnicas disponíveis'],
