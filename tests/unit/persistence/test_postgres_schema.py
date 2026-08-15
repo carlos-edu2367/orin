@@ -46,6 +46,8 @@ def test_persistence_schema_contains_only_the_durable_boundary_tables():
             "agent_skills",
             "execution_skills",
             "runtime_heartbeats",
+            "mcp_servers",
+            "mcp_server_tools",
         }
 
 

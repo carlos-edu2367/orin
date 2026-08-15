@@ -736,6 +736,44 @@ runtime_heartbeats = Table(
     Column("component", String(64), primary_key=True), Column("updated_at", DateTime(timezone=True), nullable=False),
 )
 
+mcp_servers = Table(
+    "mcp_servers", metadata,
+    Column("server_id", String(255), primary_key=True),
+    Column("user_id", String(255), nullable=False),
+    Column("slug", String(32), nullable=False),
+    Column("display_name", String(255), nullable=False),
+    Column("catalog_id", String(64)),
+    Column("transport", String(16), nullable=False),
+    Column("command", String(512)),
+    Column("args", JSON(), nullable=False),
+    Column("url", String(2048)),
+    Column("secret_names", JSON(), nullable=False),
+    Column("secrets_ciphertext", Text()),
+    Column("tool_allowlist", JSON()),
+    Column("state", String(32), nullable=False),
+    Column("state_reason", String(512), nullable=False, server_default=""),
+    Column("protocol_version", String(32), nullable=False, server_default=""),
+    Column("tools_digest", String(64), nullable=False, server_default=""),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+    UniqueConstraint("user_id", "slug", name="uq_mcp_servers_slug"),
+)
+Index("ix_mcp_servers_user", mcp_servers.c.user_id, mcp_servers.c.state)
+
+mcp_server_tools = Table(
+    "mcp_server_tools", metadata,
+    Column("id", Integer(), primary_key=True),
+    Column("server_id", String(255), nullable=False),
+    Column("name", String(64), nullable=False),
+    Column("description", Text(), nullable=False),
+    Column("input_schema", JSON(), nullable=False),
+    Column("enabled", Boolean(), nullable=False, server_default="true"),
+    Column("discovered_at", DateTime(timezone=True), nullable=False),
+    UniqueConstraint("server_id", "name", name="uq_mcp_server_tools_ref"),
+    ForeignKeyConstraint(["server_id"], ["mcp_servers.server_id"], name="fk_mcp_tools_server", ondelete="CASCADE"),
+)
+Index("ix_mcp_server_tools_server", mcp_server_tools.c.server_id, mcp_server_tools.c.enabled)
+
 
 def create_engine_for_tests(url: str = "sqlite:///:memory:", **kwargs):
     return create_engine(url, future=True, **kwargs)
@@ -773,5 +811,7 @@ __all__ = [
     "agent_skills",
     "execution_skills",
     "provider_configurations",
+    "mcp_servers",
+    "mcp_server_tools",
     "create_engine_for_tests",
 ]
