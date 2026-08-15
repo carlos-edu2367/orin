@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { ApiClient, createBrowserApiClient } from '../../api/client'
 import { listMcpServers, type McpServerSummary } from '../../api/mcp'
-import { SettingsPage } from '../settings/SettingsPage'
+import { SettingsSection } from '../settings/SettingsSection'
 import { McpServerCard } from './McpServerCard'
 import { McpServerForm } from './McpServerForm'
 
@@ -27,10 +27,8 @@ export function McpSection({ client }: { client?: ApiClient }) {
   useEffect(() => { void refresh() }, [refresh])
 
   return (
-    <SettingsPage>
-      <p className="eyebrow">EXTENSÕES / MCP</p>
-      <h1>Servidores MCP</h1>
-      <p className="settings-content__lede">
+    <SettingsSection eyebrow="EXTENSÕES / MCP" title="MCP" lede="Servidores conectados e as tools que cada um publica. O agente também pode propor uma conexão durante a conversa; ela aparece aqui aguardando aprovação.">
+      <p className="mcp-section__description">
         Servidores conectados e as tools que cada um publica. O agente também pode propor uma conexão durante a
         conversa; ela aparece aqui aguardando aprovação.
       </p>
@@ -56,6 +54,6 @@ export function McpSection({ client }: { client?: ApiClient }) {
           onCreated={() => { setFormOpen(false); void refresh() }}
         />
       )}
-    </SettingsPage>
+    </SettingsSection>
   )
 }

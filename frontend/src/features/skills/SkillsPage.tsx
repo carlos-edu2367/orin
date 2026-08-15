@@ -6,7 +6,7 @@ import { CommandPalette } from '../../components/CommandPalette'
 import { Brand } from '../../components/Brand'
 import { Disclosure } from '../../components/ui/Disclosure'
 
-type SkillsPageProps = { client?: SkillsClient }
+type SkillsPageProps = { client?: SkillsClient; embedded?: boolean }
 
 type ListState =
   | { status: 'loading' }
@@ -18,14 +18,14 @@ type DetailState =
   | { status: 'loaded'; value: SkillDetail }
   | { status: 'error' }
 
-export function SkillsPage({ client }: SkillsPageProps) {
+export function SkillsPage({ client, embedded = false }: SkillsPageProps) {
   const { skillId } = useParams()
   const apiClient = useMemo(() => client ?? createSkillsClient(createBrowserApiClient()), [client])
 
-  return skillId ? <SkillDetailPage client={apiClient} skillId={skillId} /> : <SkillsLibrary client={apiClient} />
+  return skillId ? <SkillDetailPage client={apiClient} skillId={skillId} embedded={embedded} /> : <SkillsLibrary client={apiClient} embedded={embedded} />
 }
 
-function SkillsLibrary({ client }: { client: SkillsClient }) {
+export function SkillsLibrary({ client, embedded = false }: { client: SkillsClient; embedded?: boolean }) {
   const [query, setQuery] = useState('')
   const [source, setSource] = useState('')
   const [list, setList] = useState<ListState>({ status: 'loading' })
@@ -67,6 +67,41 @@ function SkillsLibrary({ client }: { client: SkillsClient }) {
     }
   }
 
+  const content = (
+    <section className="skills-library" aria-labelledby="skills-title">
+      <div className="skills-library__heading">
+        <div>
+          <p className="eyebrow">SKILLS / PROCEDIMENTOS</p>
+          <h1 id="skills-title">Skills</h1>
+          <p>Procedimentos reutilizáveis que os agentes descobrem por metadados e carregam apenas quando necessários.</p>
+        </div>
+        <button type="button" className="button button--primary" onClick={() => setCreating(true)}>Criar skill</button>
+      </div>
+
+      {creating ? <CreateSkillForm
+        client={client}
+        onCancel={() => setCreating(false)}
+        onCreated={(created) => {
+          setList((current) => current.status === 'loaded'
+            ? { status: 'loaded', value: { ...current.value, items: [created, ...current.value.items] } }
+            : current)
+          setCreating(false)
+        }}
+      /> : <>
+        <label className="skills-search" htmlFor="skills-search">
+          <span>Buscar skills</span>
+          <input id="skills-search" type="search" value={query} onChange={(event) => { clearPaginationForBaseRefresh(); setQuery(event.target.value) }} placeholder="Nome, descrição ou tag" />
+        </label>
+        {sources.length > 0 && <div className="skills-filters" aria-label="Filtrar por origem">
+          <button type="button" className={`ghost-button ${source === '' ? 'is-active' : ''}`} aria-pressed={source === ''} onClick={() => { clearPaginationForBaseRefresh(); setSource('') }}>Todas</button>
+          {sources.map((item) => <button key={item} type="button" className={`ghost-button ${source === item ? 'is-active' : ''}`} aria-pressed={source === item} onClick={() => { clearPaginationForBaseRefresh(); setSource(item) }}>{item}</button>)}
+        </div>}
+        <SkillRows state={list} onRetry={() => { clearPaginationForBaseRefresh(); setReload((value) => value + 1) }} onLoadMore={() => void loadMore()} loadingMore={loadingMore} moreError={moreError} embedded={embedded} />
+        <AgentSkillsPanel client={client} skills={list.status === 'loaded' ? list.value.items : []} />
+      </>}
+    </section>
+  )
+  if (embedded) return content
   return (
     <main className="app-shell skills-shell">
       <header className="topbar">
@@ -75,49 +110,18 @@ function SkillsLibrary({ client }: { client: SkillsClient }) {
         <CommandPalette />
       </header>
 
-      <section className="skills-library" aria-labelledby="skills-title">
-        <div className="skills-library__heading">
-          <div>
-            <p className="eyebrow">SKILLS / PROCEDIMENTOS</p>
-            <h1 id="skills-title">Skills</h1>
-            <p>Procedimentos reutilizáveis que os agentes descobrem por metadados e carregam apenas quando necessários.</p>
-          </div>
-          <button type="button" className="button button--primary" onClick={() => setCreating(true)}>Criar skill</button>
-        </div>
-
-        {creating ? <CreateSkillForm
-          client={client}
-          onCancel={() => setCreating(false)}
-          onCreated={(created) => {
-            setList((current) => current.status === 'loaded'
-              ? { status: 'loaded', value: { ...current.value, items: [created, ...current.value.items] } }
-              : current)
-            setCreating(false)
-          }}
-        /> : <>
-          <label className="skills-search" htmlFor="skills-search">
-            <span>Buscar skills</span>
-            <input id="skills-search" type="search" value={query} onChange={(event) => { clearPaginationForBaseRefresh(); setQuery(event.target.value) }} placeholder="Nome, descrição ou tag" />
-          </label>
-          {sources.length > 0 && <div className="skills-filters" aria-label="Filtrar por origem">
-            <button type="button" className={`ghost-button ${source === '' ? 'is-active' : ''}`} aria-pressed={source === ''} onClick={() => { clearPaginationForBaseRefresh(); setSource('') }}>Todas</button>
-            {sources.map((item) => <button key={item} type="button" className={`ghost-button ${source === item ? 'is-active' : ''}`} aria-pressed={source === item} onClick={() => { clearPaginationForBaseRefresh(); setSource(item) }}>{item}</button>)}
-          </div>}
-          <SkillRows state={list} onRetry={() => { clearPaginationForBaseRefresh(); setReload((value) => value + 1) }} onLoadMore={() => void loadMore()} loadingMore={loadingMore} moreError={moreError} />
-          <AgentSkillsPanel client={client} skills={list.status === 'loaded' ? list.value.items : []} />
-        </>}
-      </section>
+      {content}
     </main>
   )
 }
 
-function SkillRows({ state, onRetry, onLoadMore, loadingMore, moreError }: { state: ListState; onRetry: () => void; onLoadMore: () => void; loadingMore: boolean; moreError: boolean }) {
+function SkillRows({ state, onRetry, onLoadMore, loadingMore, moreError, embedded = false }: { state: ListState; onRetry: () => void; onLoadMore: () => void; loadingMore: boolean; moreError: boolean; embedded?: boolean }) {
   if (state.status === 'loading') return <p className="skills-state" role="status">Carregando skills…</p>
   if (state.status === 'error') return <div className="skills-state skills-state--error" role="alert">Não foi possível carregar as skills.<button type="button" className="button button--secondary" onClick={onRetry}>Tentar novamente</button></div>
   if (state.value.items.length === 0) return <p className="skills-state">Nenhuma skill corresponde à busca atual.</p>
   return <><ul className="skills-list" aria-label="Skills instaladas">
     {state.value.items.map((skill) => <li key={skill.id}>
-      <Link className="skill-row" to={`/skills/${encodeURIComponent(skill.id)}`}>
+      <Link className="skill-row" to={`${embedded ? '/settings/skills' : '/skills'}/${encodeURIComponent(skill.id)}`}>
         <span className="skill-row__main"><strong>{skill.name}</strong><span>{skill.description}</span></span>
         <span className="skill-row__meta"><code>v{skill.version}</code><span>{skill.source}</span><span aria-label={skill.available ? 'Disponível' : 'Indisponível'} className={skill.available ? 'skill-row__availability is-available' : 'skill-row__availability'}>{skill.available ? 'Disponível' : 'Indisponível'}</span></span>
       </Link>
@@ -125,7 +129,7 @@ function SkillRows({ state, onRetry, onLoadMore, loadingMore, moreError }: { sta
   </ul>{state.value.next_cursor && <button type="button" className="button button--secondary skills-load-more" onClick={onLoadMore} disabled={loadingMore}>{loadingMore ? 'Carregando…' : 'Carregar mais skills'}</button>}{moreError && <div className="skills-more-error" role="alert">Não foi possível carregar mais skills.<button type="button" className="button button--secondary" onClick={onLoadMore}>Tentar carregar mais</button></div>}</>
 }
 
-function AgentSkillsPanel({ client, skills }: { client: SkillsClient; skills: SkillSummary[] }) {
+export function AgentSkillsPanel({ client, skills }: { client: SkillsClient; skills: SkillSummary[] }) {
   const [agentId, setAgentId] = useState('agent:main')
   const [mode, setMode] = useState<AgentSkillMode>('auto')
   const [pinned, setPinned] = useState<string[]>([])
@@ -202,7 +206,7 @@ function AgentSkillsPanel({ client, skills }: { client: SkillsClient; skills: Sk
   </section>
 }
 
-function SkillDetailPage({ client, skillId }: { client: SkillsClient; skillId: string }) {
+function SkillDetailPage({ client, skillId, embedded = false }: { client: SkillsClient; skillId: string; embedded?: boolean }) {
   const [detail, setDetail] = useState<DetailState>({ status: 'loading' })
   const [reload, setReload] = useState(0)
   const [editing, setEditing] = useState(false)
@@ -240,19 +244,21 @@ function SkillDetailPage({ client, skillId }: { client: SkillsClient; skillId: s
     }
   }
 
-  return <main className="app-shell skills-shell">
-    <header className="topbar">
-      <Brand to="/" />
-      <span className="topbar__context">Detalhe da skill</span>
-      <Link className="topbar__back" to="/skills">Voltar às skills</Link>
-    </header>
-    <section className="skills-detail" aria-live="polite">
+  const content = <section className="skills-detail" aria-live="polite">
       {detail.status === 'loading' && <p className="skills-state" role="status">Carregando skill…</p>}
       {detail.status === 'error' && <div className="skills-state skills-state--error" role="alert">Não foi possível carregar esta skill.<button type="button" className="button button--secondary" onClick={() => setReload((value) => value + 1)}>Tentar novamente</button></div>}
       {detail.status === 'loaded' && (editing
         ? <EditSkillForm client={client} skill={detail.value} onCancel={() => setEditing(false)} onUpdated={(value) => { setDetail({ status: 'loaded', value }); setEditing(false) }} />
         : <SkillDetailView skill={detail.value} usedBy={usedBy} onEdit={() => setEditing(true)} onRemoveVersion={(version) => void removeVersion(version)} removingVersion={removingVersion} removeError={removeError} />)}
     </section>
+  if (embedded) return content
+  return <main className="app-shell skills-shell">
+    <header className="topbar">
+      <Brand to="/" />
+      <span className="topbar__context">Detalhe da skill</span>
+      <Link className="topbar__back" to="/skills">Voltar às skills</Link>
+    </header>
+    {content}
   </main>
 }
 
