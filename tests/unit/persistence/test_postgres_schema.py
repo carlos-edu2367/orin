@@ -48,6 +48,9 @@ def test_persistence_schema_contains_only_the_durable_boundary_tables():
             "runtime_heartbeats",
             "mcp_servers",
             "mcp_server_tools",
+            "plugins",
+            "plugin_contributions",
+            "plugin_marketplaces",
         }
 
 

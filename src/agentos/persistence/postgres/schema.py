@@ -648,6 +648,7 @@ skills = Table(
     Column("workspace_id", String(255), nullable=True),
     Column("scope", String(32), nullable=False),
     Column("source", String(32), nullable=False),
+    Column("plugin_id", String(64), nullable=True),
     Column("enabled", Boolean, nullable=False, server_default="true"),
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),
@@ -774,6 +775,36 @@ mcp_server_tools = Table(
 )
 Index("ix_mcp_server_tools_server", mcp_server_tools.c.server_id, mcp_server_tools.c.enabled)
 
+plugins = Table(
+    "plugins", metadata,
+    Column("plugin_id", String(64), primary_key=True), Column("user_id", String(255), primary_key=True),
+    Column("version", String(64), nullable=False), Column("display_name", String(255), nullable=False),
+    Column("description", Text, nullable=False, server_default=""), Column("author", String(255), nullable=False, server_default=""),
+    Column("homepage", String(512)), Column("source_reference", String(1024), nullable=False),
+    Column("install_path", String(1024), nullable=False), Column("package_digest", String(64), nullable=False),
+    Column("state", String(32), nullable=False), Column("state_reason", String(512), nullable=False, server_default=""),
+    Column("warnings", JSON, nullable=False), Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+    UniqueConstraint("plugin_id", "user_id", name="uq_plugins_identity"),
+)
+Index("ix_plugins_user", plugins.c.user_id, plugins.c.state)
+
+plugin_contributions = Table(
+    "plugin_contributions", metadata,
+    Column("id", Integer, primary_key=True), Column("plugin_id", String(64), nullable=False), Column("user_id", String(255), nullable=False),
+    Column("kind", String(32), nullable=False), Column("reference", String(255), nullable=False), Column("display_name", String(255), nullable=False),
+    Column("enabled", Boolean, nullable=False, server_default="true"), Column("created_at", DateTime(timezone=True), nullable=False),
+    UniqueConstraint("plugin_id", "user_id", "kind", "reference", name="uq_plugin_contributions_ref"),
+)
+Index("ix_plugin_contributions_plugin", plugin_contributions.c.user_id, plugin_contributions.c.plugin_id)
+
+plugin_marketplaces = Table(
+    "plugin_marketplaces", metadata,
+    Column("marketplace_id", String(64), primary_key=True), Column("user_id", String(255), primary_key=True),
+    Column("name", String(255), nullable=False), Column("reference", String(1024), nullable=False),
+    Column("clone_path", String(1024), nullable=False), Column("updated_at", DateTime(timezone=True), nullable=False),
+)
+
 
 def create_engine_for_tests(url: str = "sqlite:///:memory:", **kwargs):
     return create_engine(url, future=True, **kwargs)
@@ -813,5 +844,8 @@ __all__ = [
     "provider_configurations",
     "mcp_servers",
     "mcp_server_tools",
+    "plugins",
+    "plugin_contributions",
+    "plugin_marketplaces",
     "create_engine_for_tests",
 ]
