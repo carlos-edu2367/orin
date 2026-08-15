@@ -17,6 +17,17 @@ MAX_ACTION_TEXT = 512
 MAX_USER_QUESTION_DEPTH = MAX_ACTION_DEPTH + 1
 MAX_USER_QUESTION_ITEMS = 384
 MAX_USER_QUESTION_TEXT = MAX_ACTION_TEXT
+# A plugin/MCP approval card is likewise a bounded public form, not an
+# arbitrary tool payload: it renders exactly what the plugin inspector already
+# capped a package at (200 skills, 16 MCP servers, 64 agents — see
+# src/agentos/plugins/inspector.py), which comfortably exceeds the generic
+# action budget above. Without this carve-out, a real-world plugin's approval
+# event silently failed to record at all (confirmed installing
+# github.com/obra/superpowers, 14 skills already exceeded MAX_ACTION_ITEMS).
+MAX_APPROVAL_DEPTH = MAX_ACTION_DEPTH + 2
+MAX_APPROVAL_ITEMS = 1600
+MAX_APPROVAL_TEXT = 2000
+_LARGE_BUDGET_KEYS = frozenset({"questions", "plugin", "server"})
 REDACTED = "[REDACTED]"
 
 _SENSITIVE_KEY_PARTS = (
@@ -97,19 +108,21 @@ def _bounded(
             if redact and _sensitive_key(key):
                 result[key] = REDACTED
                 continue
-            # The questions field is the one intentionally larger public
-            # structure. Isolate its budget so it cannot make unrelated
-            # activity fields unbounded, while preserving the normal
-            # redaction and scalar limits inside it.
-            if depth == 0 and key == "questions" and isinstance(item, (tuple, list)):
+            # `questions`, `plugin`, and `server` are the intentionally larger
+            # public structures (structured questions and approval cards).
+            # Isolate their budget so it cannot make unrelated activity fields
+            # unbounded, while preserving the normal redaction and scalar
+            # limits inside it.
+            if depth == 0 and key in _LARGE_BUDGET_KEYS and isinstance(item, (Mapping, tuple, list)):
+                is_questions = key == "questions"
                 result[key] = _bounded(
                     item,
                     depth=depth + 1,
                     count=[0],
                     redact=redact,
-                    depth_limit=MAX_USER_QUESTION_DEPTH,
-                    item_limit=MAX_USER_QUESTION_ITEMS,
-                    text_limit=MAX_USER_QUESTION_TEXT,
+                    depth_limit=MAX_USER_QUESTION_DEPTH if is_questions else MAX_APPROVAL_DEPTH,
+                    item_limit=MAX_USER_QUESTION_ITEMS if is_questions else MAX_APPROVAL_ITEMS,
+                    text_limit=MAX_USER_QUESTION_TEXT if is_questions else MAX_APPROVAL_TEXT,
                 )
             else:
                 result[key] = _bounded(
@@ -236,6 +249,9 @@ __all__ = [
     "MAX_ACTION_DEPTH",
     "MAX_ACTION_ITEMS",
     "MAX_ACTION_TEXT",
+    "MAX_APPROVAL_DEPTH",
+    "MAX_APPROVAL_ITEMS",
+    "MAX_APPROVAL_TEXT",
     "MAX_USER_QUESTION_DEPTH",
     "MAX_USER_QUESTION_ITEMS",
     "MAX_USER_QUESTION_TEXT",

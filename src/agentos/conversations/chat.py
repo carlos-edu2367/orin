@@ -124,16 +124,24 @@ class PostgresChatStore:
         # (the runtime emits several events back to back) lose the race on the
         # unique constraint and simply take the next free slot.
         for _ in range(6):
+            sequence = self._next_activity_sequence(str(turn["turn_id"]))
             try:
-                sequence = self._next_activity_sequence(str(turn["turn_id"]))
-                self.activity_store.record_event(AgentActivityEvent(
+                event = AgentActivityEvent(
                     event_id=f"activity:{turn['turn_id']}:{sequence}",
                     conversation_id=str(turn["conversation_id"]), turn_id=str(turn["turn_id"]),
                     execution_id=str(turn["execution_id"]), user_id=str(turn["user_id"]),
                     agent_id=agent_id or self.main_agent_id(turn), parent_agent_id=parent_agent_id,
                     event_type=event_type, sequence=sequence,
                     summary=summary[:512] or "Atividade", payload=payload or {}, created_at=datetime.now(UTC),
-                ))
+                )
+            except ValueError:
+                # The event's own content (payload/summary) failed validation —
+                # retrying with the same content fails identically every time.
+                # This is a different failure than the sequence race below, and
+                # must not burn the retry budget meant for that race.
+                return
+            try:
+                self.activity_store.record_event(event)
                 return
             except ValueError:
                 continue

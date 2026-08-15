@@ -89,6 +89,46 @@ def test_activity_event_accepts_the_bounded_structured_question_form():
     assert len(event.payload["questions"][0]["options"]) == 12
 
 
+def test_activity_event_accepts_a_plugin_approval_at_the_inspector_s_own_worst_case_size():
+    # The plugin inspector caps a package at 200 skills, 16 MCP servers, and 64
+    # agents (src/agentos/plugins/inspector.py) — a real plugin approval card
+    # can legitimately carry that much. Reproduces the exact failure seen when
+    # installing github.com/obra/superpowers (14 skills) in practice: the
+    # generic action bounds (64 items total) are sized for ordinary tool-call
+    # arguments and silently dropped the whole approval event.
+    payload = {
+        "plugin_approval": True,
+        "wait_for_user": True,
+        "tool_kind": "plugin",
+        "plugin": {
+            "plugin_id": "superpowers", "version": "6.3.0", "display_name": "superpowers",
+            "description": "Skills de processo", "author": "obra", "homepage": None,
+            "state": "pending_approval", "install_path": "C:/tmp/superpowers", "package_digest": "a" * 64,
+            "warnings": [],
+            "skills": [
+                {"skill_id": f"superpowers:s{i}", "name": f"skill-{i}",
+                 "description": "A short description of what this skill does and when to use it.",
+                 "relative_path": f"skills/s{i}/SKILL.md"}
+                for i in range(200)
+            ],
+            "mcp_servers": [
+                {"slug": f"srv{i}", "display_name": f"Server {i}", "transport": "stdio",
+                 "secret_names": ["TOKEN_A", "TOKEN_B"]}
+                for i in range(16)
+            ],
+            "agents": [{"agent_id": f"agent{i}", "name": f"Agent {i}", "role": "reviewer"} for i in range(64)],
+            "contribution_count": 280,
+        },
+    }
+
+    event = _event(payload=payload)
+
+    assert len(event.payload["plugin"]["skills"]) == 200
+    assert event.payload["plugin"]["skills"][0]["name"] == "skill-0"
+    assert len(event.payload["plugin"]["mcp_servers"]) == 16
+    assert len(event.payload["plugin"]["agents"]) == 64
+
+
 def test_action_request_requires_exactly_one_typed_target_and_bounded_input():
     request = AgentActionRequest(
         action_id="action:1",
