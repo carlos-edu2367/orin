@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { ApiClient, type MutationIntent } from '../../api/client'
-import type { BrowserSessionBootstrap } from '../../api/browserSession'
+import { readBrowserSessionBootstrap, type BrowserSessionBootstrap } from '../../api/browserSession'
 import { ApiError } from '../../api/errors'
 import {
   PROVIDER_NAMES,
@@ -16,7 +16,7 @@ const AUTOMATIC_VALUE = 'automatic'
 
 type VisionModelSettingProps = {
   client: ApiClient
-  bootstrap: BrowserSessionBootstrap
+  bootstrap?: BrowserSessionBootstrap
 }
 
 /**
@@ -27,7 +27,8 @@ type VisionModelSettingProps = {
  * `/v1/models`) and filtered down to models the gateway's `input_modalities`
  * marks as accepting `image` — never by guessing from the model's name.
  */
-export function VisionModelSetting({ client, bootstrap }: VisionModelSettingProps) {
+export function VisionModelSetting({ client, bootstrap: providedBootstrap }: VisionModelSettingProps) {
+  const bootstrap = providedBootstrap ?? (typeof document === 'undefined' ? { status: 'missing_csrf' as const } : readBrowserSessionBootstrap(document))
   const [models, setModels] = useState<ProviderModel[]>([])
   const [modelsLoaded, setModelsLoaded] = useState(false)
   const [setting, setSetting] = useState<VisionModelSettingValue | null>(null)
