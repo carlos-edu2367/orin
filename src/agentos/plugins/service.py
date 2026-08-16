@@ -14,7 +14,7 @@ from agentos.persistence.postgres.schema import plugin_contributions, plugin_mar
 
 from .activator import PluginActivator
 from .discovery import PluginDiscoveryService
-from .fetcher import PluginFetcher
+from .fetcher import FetchRejected, PluginFetcher
 from .inspector import inspect_plugin_package
 from .models import PluginState
 from .marketplace import parse_marketplace
@@ -23,7 +23,9 @@ from .sources import resolve_source
 
 
 class PluginServiceError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, code: str = "plugin_operation_rejected") -> None:
+        super().__init__(message)
+        self.code = code
 
 
 def _now():
@@ -97,6 +99,8 @@ class PluginService:
         except Exception as error:
             if isinstance(error, PluginServiceError):
                 raise
+            if isinstance(error, FetchRejected) and "no valid manifest" in str(error):
+                raise PluginServiceError(str(error), code="plugin_no_manifest") from error
             raise PluginServiceError("plugin could not be inspected") from error
         if not inspection.is_installable:
             raise PluginServiceError("this package contributes nothing Orin can use")

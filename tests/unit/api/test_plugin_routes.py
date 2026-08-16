@@ -38,3 +38,14 @@ def test_plugin_library_route_forwards_the_query_and_trims_blanks():
     assert client.get("/v1/plugins/library?q=obsidian").json()["query_seen"] == "obsidian"
     assert client.get("/v1/plugins/library?q=  ").json()["query_seen"] is None
     assert client.get("/v1/plugins/library").json()["query_seen"] is None
+
+class RejectingPlugins(Plugins):
+    def inspect(self, **kwargs):
+        from agentos.plugins.service import PluginServiceError
+        raise PluginServiceError("plugin package has no valid manifest", code="plugin_no_manifest")
+
+def test_plugin_inspect_route_surfaces_the_no_manifest_code():
+    client = TestClient(create_app(ApiServices(security=Security(), plugins=RejectingPlugins())))
+    response = client.post("/v1/plugins/inspect", json={"reference": "acme/no-manifest"})
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "plugin_no_manifest"

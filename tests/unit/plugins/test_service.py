@@ -42,3 +42,24 @@ def test_discover_library_returns_registry_entries(tmp_path):
     assert library["web_search_available"] is False
     assert library["entries"][0]["name"] == "superpowers"
     assert library["entries"][0]["origin"] == "registry"
+
+def test_inspect_reports_a_distinct_code_when_the_repository_has_no_manifest(tmp_path):
+    service = _service(tmp_path)
+    no_manifest_repo = tmp_path / "no-manifest"
+    no_manifest_repo.mkdir()
+    (no_manifest_repo / "README.md").write_text("just a readme", encoding="utf-8")
+    try:
+        service.inspect(user_id="u1", reference=str(no_manifest_repo))
+    except PluginServiceError as error:
+        assert error.code == "plugin_no_manifest"
+    else:
+        raise AssertionError("expected inspect() to reject a repository with no manifest")
+
+def test_other_inspect_failures_keep_the_generic_code(tmp_path):
+    service = _service(tmp_path)
+    try:
+        service.inspect(user_id="u1", reference="not-a-real/repo-shape!!!")
+    except PluginServiceError as error:
+        assert error.code == "plugin_operation_rejected"
+    else:
+        raise AssertionError("expected inspect() to reject a malformed reference")

@@ -359,8 +359,8 @@ def create_app(services: ApiServices) -> FastAPI:
         return _error(422, "VALIDATION", "invalid_request", retryable=False)
 
     @app.exception_handler(PluginServiceError)
-    async def plugin_service_error(_: Request, __: PluginServiceError) -> JSONResponse:
-        return _error(409, "CONFLICT", "plugin_operation_rejected", retryable=False)
+    async def plugin_service_error(_: Request, exc: PluginServiceError) -> JSONResponse:
+        return _error(409, "CONFLICT", exc.code, retryable=False)
 
     @app.exception_handler(Exception)
     async def internal_error(_: Request, __: Exception) -> JSONResponse:
