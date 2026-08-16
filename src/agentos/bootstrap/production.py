@@ -17,6 +17,7 @@ from pydantic_settings import SettingsConfigDict
 
 from sqlalchemy.engine import Engine
 
+from agentos.agentic.web_search import search_client_from_environment
 from agentos.api.gateway import ApiServices, create_app
 from agentos.api.security import AuthenticationError, LoopbackSecurityService
 from agentos.conversations.chat import ChatApplication, PostgresChatStore
@@ -273,7 +274,7 @@ def compose_production_services(engine: Engine, *, localhost_trust_enabled: bool
         resource_services={**{name: unavailable for name in ("agents", "capabilities", "tools", "workspaces", "artifacts", "memories")}, "multi_agent": multi_agent_coordinator or unavailable},
         skills=skill_library,
         mcp=mcp_service,
-        plugins=PluginService(engine, plugin_root=orin_paths().data / "plugins", skill_library=skill_library, mcp_service=mcp_service),
+        plugins=PluginService(engine, plugin_root=orin_paths().data / "plugins", skill_library=skill_library, mcp_service=mcp_service, search_client=search_client_from_environment()),
         provider_configuration=PostgresProviderConfigurationAdapter(engine, cipher=provider_cipher),
         provider_catalog=ProviderModelCatalogService(provider_repository, {"openrouter": OpenRouterModelCatalogClient(), "omniroute": OmniRouteCatalogClient(), "ollama": OllamaCatalogClient()}),
         conversation_application=ChatApplication(PostgresChatStore(engine, PostgresAgenticActivityStore(engine, cursor_secret)), ExecutionApplicationAdapter(engine)),
