@@ -3,6 +3,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import create_engine, insert, select
 
 from agentos.persistence.postgres.schema import conversation_turns, metadata, provider_configurations, provider_model_catalog, scheduled_chat_tasks
+from agentos.persistence.sqlite import create_local_engine
 from agentos.scheduler.scheduled_chats import ScheduledChatInput, ScheduledChatService
 
 
@@ -20,7 +21,7 @@ def _ready(engine, now):
 
 def test_hourly_scheduled_chat_materializes_normal_marked_turns_in_one_shared_conversation():
     now = datetime(2026, 8, 13, 12, tzinfo=UTC)
-    engine = create_engine("sqlite://", future=True)
+    engine = create_local_engine("sqlite+pysqlite://")
     metadata.create_all(engine)
     _ready(engine, now)
     service = ScheduledChatService(engine, clock=lambda: now)

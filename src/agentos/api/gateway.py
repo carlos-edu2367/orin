@@ -497,16 +497,19 @@ def create_app(services: ApiServices) -> FastAPI:
         services.security.check_rate_limit(principal, action="schedule.create", origin=request.headers.get("origin"))
         services.security.authorize(principal, action="schedule.create", resource_id=payload.project_id, purpose="schedule.create")
         provider = _provider_name(payload.selection.provider)
-        result = require_port(services.scheduled_chats).create(  # type: ignore[union-attr]
-            principal.user_id,
-            ScheduledChatInput(
-                message=payload.message, provider=provider, model_id=payload.selection.model_id,
-                timezone=payload.timezone, recurrence=payload.recurrence.kind,
-                fire_at=payload.recurrence.fire_at, time_of_day=payload.recurrence.time_of_day,
-                weekday=payload.recurrence.weekday, project_id=payload.project_id,
-            ),
-            idempotency_key=_idempotency(request),
-        )
+        try:
+            result = require_port(services.scheduled_chats).create(  # type: ignore[union-attr]
+                principal.user_id,
+                ScheduledChatInput(
+                    message=payload.message, provider=provider, model_id=payload.selection.model_id,
+                    timezone=payload.timezone, recurrence=payload.recurrence.kind,
+                    fire_at=payload.recurrence.fire_at, time_of_day=payload.recurrence.time_of_day,
+                    weekday=payload.recurrence.weekday, project_id=payload.project_id,
+                ),
+                idempotency_key=_idempotency(request),
+            )
+        except ValueError as error:
+            raise ApplicationValidationError(str(error)) from error
         return JSONResponse(_jsonable(result), status_code=201)
 
     @app.get("/v1/schedules")

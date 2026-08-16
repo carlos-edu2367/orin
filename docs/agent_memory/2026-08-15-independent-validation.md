@@ -1,0 +1,6 @@
+# Validação independente de Home e tarefas agendadas
+
+- Em 15/08/2026, a Home foi medida no runtime local em 1280x720 e 390x844. Nos dois viewports, `document.scrollHeight` e `clientHeight` foram iguais ao viewport; `.home` ocupou exatamente o viewport com `overflow-y: hidden`; `.workspace-navigation` e `.home__stage` ficaram como regiões internas com `overflow-y: auto`; a navegação foi ocultada em 390px.
+- A validação HTTP real contra `http://127.0.0.1:8000` criou uma agenda Ollama/modelo autorizado com `POST /v1/schedules` 201, listou como `ACTIVE`, cancelou com `DELETE` 204 e confirmou `CANCELLED` e `next_fire_at: null` no GET seguinte. O corpo não continha credenciais.
+- Na UI de `/settings/schedules`, após preencher instrução, provider `ollama`, modelo `deepseek-v4-flash:0731` e data futura, o clique em `Criar tarefa` deixou o formulário preenchido sem item ou alerta observável. O navegador usado não ofereceu interceptação de rede; portanto, a ausência de POST não foi afirmada como fato, e o fluxo HTTP equivalente foi usado para evidência de status/body.
+- Testes focados passaram: 14 testes Python de scheduler/launcher e 18 testes frontend de Home/layout/navegação. A suíte completa não foi executada nesta validação.

@@ -13,6 +13,7 @@ describe('chat composer motion', () => {
   })
 
   it('keeps the two chat panes independently scrollable in a viewport-height shell', () => {
+    expect(stylesheet).toMatch(/\.home \{[\s\S]*height: 100dvh;[\s\S]*overflow: hidden;/)
     expect(stylesheet).toMatch(/\.chat \{[\s\S]*height: 100dvh;[\s\S]*overflow: hidden;/)
     expect(stylesheet).toMatch(/\.workspace-navigation \{[\s\S]*overflow-y: auto;/)
     expect(stylesheet).toMatch(/\.chat__scroll \{[^}]*height: 100%;[^}]*overflow-y: auto;/)

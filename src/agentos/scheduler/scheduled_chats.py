@@ -150,11 +150,9 @@ class ScheduledChatService:
             )).scalar_one_or_none()
             if provider is None:
                 raise ValueError("provider is not enabled")
-            connection.execute(insert(scheduled_chat_tasks).values(
-                task_id=task_id, schedule_id=schedule_id, user_id=user_id, message=message,
-                provider=request.provider, model_id=request.model_id, project_id=request.project_id,
-                conversation_id=None, created_at=now, updated_at=now,
-            ))
+            # The task points back to its schedule through a foreign key. Create
+            # the schedule first, then its task, while keeping both writes in
+            # this transaction so a partial schedule can never be committed.
             connection.execute(insert(schedules).values(
                 schedule_id=schedule_id, user_id=user_id, workspace_id=workspace_id,
                 agent_id=f"agent:schedule:{schedule_id}", schedule_type="FUTURE_EXECUTION",
@@ -163,6 +161,11 @@ class ScheduledChatService:
                 policies={"misfire": {"kind": "FIRE_ONCE_NOW", "grace_seconds": 0, "max_occurrences": 1}, "overlap": {"kind": "SERIALIZE", "max_active": 1}},
                 state="ACTIVE", version=1, next_fire_at=next_fire, starts_at=now, ends_at=None,
                 idempotency_key=idempotency_key, created_at=now, updated_at=now,
+            ))
+            connection.execute(insert(scheduled_chat_tasks).values(
+                task_id=task_id, schedule_id=schedule_id, user_id=user_id, message=message,
+                provider=request.provider, model_id=request.model_id, project_id=request.project_id,
+                conversation_id=None, created_at=now, updated_at=now,
             ))
         return {"schedule_id": schedule_id, "state": "ACTIVE", "next_fire_at": next_fire.isoformat(), "recurrence": request.recurrence}
 
