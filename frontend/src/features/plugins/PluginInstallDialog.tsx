@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { approvePlugin, inspectPlugin, type PluginInspectionResult } from '../../api/plugins'
+import { ApiError } from '../../api/errors'
 import type { ApiClient } from '../../api/client'
 
-export function PluginInstallDialog({ client, onClose, onInstalled, initialReference }: { client: ApiClient; onClose: () => void; onInstalled: () => void; initialReference?: string }) {
+export function PluginInstallDialog({ client, onClose, onInstalled, initialReference, onNoManifest }: { client: ApiClient; onClose: () => void; onInstalled: () => void; initialReference?: string; onNoManifest?: () => void }) {
   const dialogRef = useRef<HTMLDivElement>(null)
   const [reference, setReference] = useState(initialReference ?? '')
   const [inspection, setInspection] = useState<PluginInspectionResult | null>(null)
@@ -14,7 +15,17 @@ export function PluginInstallDialog({ client, onClose, onInstalled, initialRefer
     document.addEventListener('keydown', onKeyDown)
     return () => document.removeEventListener('keydown', onKeyDown)
   }, [onClose])
-  async function runInspection(value: string) { setBusy(true); setError(null); try { setInspection(await inspectPlugin(client, value)) } catch { setError('Não foi possível inspecionar este plugin.') } finally { setBusy(false) } }
+  async function runInspection(value: string) {
+    setBusy(true); setError(null)
+    try {
+      setInspection(await inspectPlugin(client, value))
+    } catch (caught) {
+      if (onNoManifest && caught instanceof ApiError && caught.code === 'plugin_no_manifest') { onNoManifest(); return }
+      setError('Não foi possível inspecionar este plugin.')
+    } finally {
+      setBusy(false)
+    }
+  }
   useEffect(() => { if (initialReference) void runInspection(initialReference) }, [initialReference])
   async function inspect(event: FormEvent) { event.preventDefault(); if (!reference.trim()) return; void runInspection(reference.trim()) }
   async function install() { if (!inspection) return; setBusy(true); try { await approvePlugin(client, inspection.plugin_id); onInstalled() } catch { setError('Não foi possível instalar o plugin.') } finally { setBusy(false) } }
