@@ -945,6 +945,15 @@ def create_app(services: ApiServices) -> FastAPI:
         services.security.authorize(principal, action="plugins.list", resource_id=None, purpose="plugins.read")
         return JSONResponse(_jsonable(_require_port(services.plugins).list(principal.user_id)))
 
+    @app.get("/v1/plugins/library")
+    async def get_plugin_library(request: Request, refresh: bool = False) -> JSONResponse:
+        principal = principal_for(request)
+        services.security.check_rate_limit(principal, action="plugins.library", origin=request.headers.get("origin"))
+        services.security.authorize(principal, action="plugins.library", resource_id=None, purpose="plugins.read")
+        # Web search is blocking I/O just like plugin inspection, so keep it off the event loop.
+        result = await run_in_threadpool(_require_port(services.plugins).discover_library, refresh=refresh)
+        return JSONResponse(_jsonable(result))
+
     @app.post("/v1/plugins/inspect")
     async def inspect_plugin(payload: PluginReferenceRequest, request: Request) -> JSONResponse:
         principal = principal_for(request, mutable=True)
@@ -961,7 +970,14 @@ def create_app(services: ApiServices) -> FastAPI:
         principal = principal_for(request, mutable=True)
         services.security.check_rate_limit(principal, action="plugins.approve", origin=request.headers.get("origin"))
         services.security.authorize(principal, action="plugins.approve", resource_id=plugin_id, purpose="plugins.configure")
-        return JSONResponse(_jsonable(_require_port(services.plugins).approve(user_id=principal.user_id, plugin_id=plugin_id)))
+        # Activation parses and registers every contribution (and may propose
+        # MCP servers), so it is blocking work just like inspection.
+        result = await run_in_threadpool(
+            _require_port(services.plugins).approve,
+            user_id=principal.user_id,
+            plugin_id=plugin_id,
+        )
+        return JSONResponse(_jsonable(result))
 
     @app.put("/v1/plugins/{plugin_id}/enabled")
     async def set_plugin_enabled(plugin_id: str, payload: PluginEnabledRequest, request: Request) -> JSONResponse:

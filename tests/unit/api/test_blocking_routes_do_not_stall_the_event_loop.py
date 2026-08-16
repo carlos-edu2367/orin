@@ -40,6 +40,14 @@ class SlowPlugins:
     def list(self, user_id):
         return []
 
+    def approve(self, *, user_id, plugin_id):
+        time.sleep(SLOW_SECONDS)
+        return {"plugin_id": plugin_id, "state": "active"}
+
+    def discover_library(self, *, refresh=False):
+        time.sleep(SLOW_SECONDS)
+        return {"entries": [], "web_search_available": False}
+
 
 def _headers(key: str = "k-1") -> dict[str, str]:
     return {"Authorization": "Bearer pat", "Idempotency-Key": key}
@@ -111,4 +119,34 @@ def test_plugin_inspect_does_not_block_a_concurrent_simple_request():
     fast_completed_at = asyncio.run(_fast_request_completes_while_slow_one_is_in_flight(app, slow_call, fast_call))
     assert fast_completed_at < SLOW_SECONDS / 2, (
         "a concurrent GET should not wait for a slow /inspect to finish — the event loop is blocked"
+    )
+
+
+def test_plugin_approve_does_not_block_a_concurrent_simple_request():
+    app = _app(plugins=SlowPlugins())
+
+    async def slow_call(client):
+        return await client.post("/v1/plugins/demo/approve", headers=_headers())
+
+    async def fast_call(client):
+        return await client.get("/v1/plugins", headers=_headers())
+
+    fast_completed_at = asyncio.run(_fast_request_completes_while_slow_one_is_in_flight(app, slow_call, fast_call))
+    assert fast_completed_at < SLOW_SECONDS / 2, (
+        "a concurrent GET should not wait for a slow plugin /approve to finish — the event loop is blocked"
+    )
+
+
+def test_plugin_library_does_not_block_a_concurrent_simple_request():
+    app = _app(plugins=SlowPlugins())
+
+    async def slow_call(client):
+        return await client.get("/v1/plugins/library", headers=_headers())
+
+    async def fast_call(client):
+        return await client.get("/v1/plugins", headers=_headers())
+
+    fast_completed_at = asyncio.run(_fast_request_completes_while_slow_one_is_in_flight(app, slow_call, fast_call))
+    assert fast_completed_at < SLOW_SECONDS / 2, (
+        "a concurrent GET should not wait for a slow /library to finish — the event loop is blocked"
     )
