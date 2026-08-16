@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState, type FormEvent } from 'react'
 import { fetchPluginLibrary, type PluginLibraryEntry } from '../../api/plugins'
 import type { ApiClient } from '../../api/client'
 import { PluginInstallDialog } from './PluginInstallDialog'
+import { McpFromRepoDialog } from './McpFromRepoDialog'
 
 const ORIGIN_LABEL: Record<PluginLibraryEntry['origin'], string> = { registry: 'Registro', web: 'Web' }
 
@@ -14,6 +15,7 @@ export function PluginLibrarySection({ client, onInstalled }: { client: ApiClien
   const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [installing, setInstalling] = useState<string | null>(null)
+  const [addingMcpFor, setAddingMcpFor] = useState<string | null>(null)
   const [query, setQuery] = useState('')
   const [activeQuery, setActiveQuery] = useState('')
   const load = useCallback((refresh: boolean, q: string) => {
@@ -58,11 +60,14 @@ export function PluginLibrarySection({ client, onInstalled }: { client: ApiClien
         <p className="plugin-library-card__description">{entry.description || 'Sem descrição disponível.'}</p>
         <div className="plugin-library-card__actions">
           <a className="button button--quiet" href={githubUrl(entry.source_url)} target="_blank" rel="noreferrer">Ver no GitHub <span aria-hidden="true">↗</span></a>
-          <button type="button" className="button button--primary" onClick={() => setInstalling(entry.source_url)}>Instalar</button>
+          {entry.installable_kind === 'mcp_raw'
+            ? <button type="button" className="button button--primary" onClick={() => setAddingMcpFor(entry.source_url)}>Adicionar como servidor MCP</button>
+            : <button type="button" className="button button--primary" onClick={() => setInstalling(entry.source_url)}>Instalar</button>}
         </div>
       </article>)}
       {!loading && !error && entries.length === 0 && <p className="plugin-library__empty">Nenhum plugin encontrado no momento.</p>}
     </div>
-    {installing && <PluginInstallDialog key={installing} client={client} initialReference={installing} onClose={() => setInstalling(null)} onInstalled={() => { setInstalling(null); onInstalled() }} />}
+    {installing && <PluginInstallDialog key={installing} client={client} initialReference={installing} onClose={() => setInstalling(null)} onInstalled={() => { setInstalling(null); onInstalled() }} onNoManifest={() => { setAddingMcpFor(installing); setInstalling(null) }} />}
+    {addingMcpFor && <McpFromRepoDialog key={addingMcpFor} client={client} sourceUrl={addingMcpFor} onClose={() => setAddingMcpFor(null)} onAdded={() => { setAddingMcpFor(null); onInstalled() }} />}
   </div>
 }

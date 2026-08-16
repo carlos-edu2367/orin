@@ -40,3 +40,30 @@ it('lets the user search by a free-text query', async () => {
   fireEvent.click(screen.getByRole('button', { name: 'Buscar' }))
   expect(await screen.findByText('obsidian-second-brain')).toBeInTheDocument()
 })
+
+it('offers "Adicionar como servidor MCP" for an mcp_raw entry instead of Instalar', async () => {
+  const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(response({
+    entries: [{ name: 'Raw MCP', description: 'd', source_url: 'https://github.com/acme/raw-mcp.git', origin: 'web', installable_kind: 'mcp_raw' }],
+    web_search_available: true,
+  }))
+  render(<PluginLibrarySection client={new ApiClient({ fetchImpl, maxAttempts: 1 })} onInstalled={() => {}} />)
+  expect(await screen.findByText('Raw MCP')).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Adicionar como servidor MCP' })).toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: 'Instalar' })).not.toBeInTheDocument()
+})
+
+it('falls back to the MCP dialog when an unknown-kind entry turns out to have no manifest', async () => {
+  const sourceUrl = 'https://github.com/acme/unknown-kind.git'
+  const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+    if (String(input).includes('/v1/plugins/inspect')) {
+      return new Response(JSON.stringify({ error: { code: 'plugin_no_manifest', category: 'CONFLICT', message_key: 'plugin_no_manifest', correlation_id: 'c1', retryable: false, retry_after: null } }), { status: 409, headers: { 'Content-Type': 'application/json' } })
+    }
+    if (String(input).includes('/v1/plugins/library/infer-mcp')) {
+      return response({ display_name: 'unknown-kind', transport: 'stdio', command: 'npx', args: ['-y', 'unknown-kind'], url: null, secret_names: [], confidence: 'structured' })
+    }
+    return response({ entries: [{ name: 'unknown-kind', description: 'd', source_url: sourceUrl, origin: 'web', installable_kind: 'unknown' }], web_search_available: true })
+  })
+  render(<PluginLibrarySection client={new ApiClient({ fetchImpl, maxAttempts: 1 })} onInstalled={() => {}} />)
+  fireEvent.click(await screen.findByRole('button', { name: 'Instalar' }))
+  expect(await screen.findByRole('heading', { name: 'Adicionar como servidor MCP' })).toBeInTheDocument()
+})
