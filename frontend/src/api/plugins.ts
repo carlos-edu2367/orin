@@ -15,7 +15,7 @@ export function setPluginEnabled(client: ApiClient, pluginId: string, enabled: b
 export function removePlugin(client: ApiClient, pluginId: string, intent = client.createMutationIntent()): Promise<void> { return client.request({ path: pluginPath(pluginId), method: 'DELETE', expectedStatus: 204, intent, parse: () => undefined }) }
 export function listMarketplaces(client: ApiClient, signal?: AbortSignal): Promise<MarketplaceEntry[]> { return client.request({ path: '/v1/plugins/marketplaces', signal, parse: parseMarketplaces }) }
 export function addMarketplace(client: ApiClient, reference: string, intent = client.createMutationIntent()): Promise<MarketplaceEntry> { return client.request({ path: '/v1/plugins/marketplaces', method: 'POST', body: { reference }, expectedStatus: 201, intent, parse: parseMarketplace }) }
-export function fetchPluginLibrary(client: ApiClient, refresh = false, signal?: AbortSignal): Promise<PluginLibraryResult> { return client.request({ path: '/v1/plugins/library', query: { refresh: refresh || undefined }, signal, parse: parseLibrary }) }
+export function fetchPluginLibrary(client: ApiClient, refresh = false, query?: string, signal?: AbortSignal): Promise<PluginLibraryResult> { return client.request({ path: '/v1/plugins/library', query: { refresh: refresh || undefined, q: query?.trim() || undefined }, signal, parse: parseLibrary }) }
 
 function pluginPath(id: string): string { if (!id.trim()) throw new TypeError('A plugin id is required'); return `/v1/plugins/${encodeURIComponent(id)}` }
 function record(value: unknown): Record<string, unknown> { if (typeof value !== 'object' || value === null || Array.isArray(value)) throw invalidResponseError(); return value as Record<string, unknown> }

@@ -32,4 +32,11 @@ describe('plugins api', () => {
     await fetchPluginLibrary(client(fetchImpl))
     expect(String(fetchImpl.mock.calls[1][0])).not.toContain('refresh')
   })
+  it('forwards a trimmed query as a query parameter', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async () => response({ entries: [], web_search_available: false }))
+    await fetchPluginLibrary(client(fetchImpl), false, '  obsidian  ')
+    expect(String(fetchImpl.mock.calls[0][0])).toContain('q=obsidian')
+    await fetchPluginLibrary(client(fetchImpl), false, '   ')
+    expect(String(fetchImpl.mock.calls[1][0])).not.toContain('q=')
+  })
 })
