@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import asdict
 from datetime import UTC, datetime
 import json
 import shutil
@@ -16,6 +17,7 @@ from .activator import PluginActivator
 from .discovery import PluginDiscoveryService
 from .fetcher import FetchRejected, PluginFetcher
 from .inspector import inspect_plugin_package
+from .mcp_inference import infer_mcp_launch as _infer_mcp_launch
 from .models import PluginState
 from .marketplace import parse_marketplace
 from .models import plugin_id_from_name
@@ -68,6 +70,17 @@ class PluginService:
             "entries": [{"name": e.name, "description": e.description, "source_url": e.source_url, "origin": e.origin, "installable_kind": e.installable_kind} for e in entries],
             "web_search_available": web_available,
         }
+
+    def infer_mcp_launch(self, *, source_url: str) -> dict[str, Any]:
+        source = resolve_source(source_url)
+        if source.kind not in ("git", "path"):
+            raise PluginServiceError("only a public GitHub repository can be added as an MCP server", code="plugin_invalid_source")
+        try:
+            with self.fetcher.fetch_raw(source) as path:
+                guess = _infer_mcp_launch(path, suggested_name=source.suggested_name)
+        except FetchRejected as error:
+            raise PluginServiceError(str(error), code="plugin_fetch_failed") from error
+        return asdict(guess)
 
     def list_marketplaces(self, user_id: str) -> list[dict[str, Any]]:
         with self.engine.connect() as connection:

@@ -68,3 +68,37 @@ def test_other_inspect_failures_keep_the_generic_code(tmp_path):
         assert error.code == "plugin_operation_rejected"
     else:
         raise AssertionError("expected inspect() to reject a malformed reference")
+
+def test_infer_mcp_launch_reads_package_json_from_the_clone(tmp_path):
+    service = _service(tmp_path)
+    source_dir = tmp_path / "raw-repo"
+    source_dir.mkdir()
+    (source_dir / "package.json").write_text(json.dumps({"name": "demo-mcp", "bin": "./cli.js"}), encoding="utf-8")
+    guess = service.infer_mcp_launch(source_url=str(source_dir))
+    assert guess["command"] == "npx"
+    assert guess["args"] == ("-y", "demo-mcp")
+    assert guess["confidence"] == "structured"
+
+def test_infer_mcp_launch_rejects_a_non_git_source(tmp_path):
+    service = _service(tmp_path)
+    try:
+        service.infer_mcp_launch(source_url="not-a-git-source")
+    except PluginServiceError as error:
+        assert error.code == "plugin_invalid_source"
+    else:
+        raise AssertionError("expected a marketplace-name source to be rejected")
+
+def test_infer_mcp_launch_reports_a_fetch_failure(tmp_path):
+    import socket
+    try:
+        socket.create_connection(("github.com", 443), timeout=3).close()
+    except OSError:
+        import pytest
+        pytest.skip("no network access to GitHub in this environment")
+    service = _service(tmp_path)
+    try:
+        service.infer_mcp_launch(source_url="https://github.com/this-owner-does-not-exist-orin-test/this-repo-does-not-exist")
+    except PluginServiceError as error:
+        assert error.code == "plugin_fetch_failed"
+    else:
+        raise AssertionError("expected fetching a nonexistent repository to fail")
