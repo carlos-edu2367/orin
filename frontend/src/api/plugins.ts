@@ -5,6 +5,8 @@ export type PluginContribution = { kind: string; reference: string; display_name
 export type PluginSummary = { plugin_id: string; version: string; display_name: string; description: string; author: string; homepage: string | null; state: 'pending_approval' | 'active' | 'disabled' | 'rejected'; warnings: string[]; contribution_count: number; install_path?: string }
 export type PluginInspectionResult = PluginSummary & { skills: PluginContribution[]; mcp_servers: PluginContribution[]; agents: PluginContribution[]; package_digest: string }
 export type MarketplaceEntry = { name: string; reference: string; owner?: string }
+export type PluginLibraryEntry = { name: string; description: string; source_url: string; origin: 'registry' | 'web' }
+export type PluginLibraryResult = { entries: PluginLibraryEntry[]; web_search_available: boolean }
 
 export function listPlugins(client: ApiClient, signal?: AbortSignal): Promise<PluginSummary[]> { return client.request({ path: '/v1/plugins', signal, parse: parseList }) }
 export function inspectPlugin(client: ApiClient, reference: string, intent = client.createMutationIntent()): Promise<PluginInspectionResult> { return client.request({ path: '/v1/plugins/inspect', method: 'POST', body: { reference }, intent, parse: parseInspection }) }
@@ -13,6 +15,7 @@ export function setPluginEnabled(client: ApiClient, pluginId: string, enabled: b
 export function removePlugin(client: ApiClient, pluginId: string, intent = client.createMutationIntent()): Promise<void> { return client.request({ path: pluginPath(pluginId), method: 'DELETE', expectedStatus: 204, intent, parse: () => undefined }) }
 export function listMarketplaces(client: ApiClient, signal?: AbortSignal): Promise<MarketplaceEntry[]> { return client.request({ path: '/v1/plugins/marketplaces', signal, parse: parseMarketplaces }) }
 export function addMarketplace(client: ApiClient, reference: string, intent = client.createMutationIntent()): Promise<MarketplaceEntry> { return client.request({ path: '/v1/plugins/marketplaces', method: 'POST', body: { reference }, expectedStatus: 201, intent, parse: parseMarketplace }) }
+export function fetchPluginLibrary(client: ApiClient, refresh = false, signal?: AbortSignal): Promise<PluginLibraryResult> { return client.request({ path: '/v1/plugins/library', query: { refresh: refresh || undefined }, signal, parse: parseLibrary }) }
 
 function pluginPath(id: string): string { if (!id.trim()) throw new TypeError('A plugin id is required'); return `/v1/plugins/${encodeURIComponent(id)}` }
 function record(value: unknown): Record<string, unknown> { if (typeof value !== 'object' || value === null || Array.isArray(value)) throw invalidResponseError(); return value as Record<string, unknown> }
@@ -25,3 +28,5 @@ function parseInspection(value: unknown): PluginInspectionResult { const data = 
 function parseSummary(value: unknown): PluginSummary { return summary(value) }
 function parseMarketplace(value: unknown): MarketplaceEntry { const data = record(value); return { name: text(data.name), reference: text(data.reference), owner: data.owner === undefined ? undefined : text(data.owner) } }
 function parseMarketplaces(value: unknown): MarketplaceEntry[] { if (!Array.isArray(value)) throw invalidResponseError(); return value.map(parseMarketplace) }
+function libraryEntry(value: unknown): PluginLibraryEntry { const data = record(value); const origin = text(data.origin); if (origin !== 'registry' && origin !== 'web') throw invalidResponseError(); return { name: text(data.name), description: text(data.description ?? ''), source_url: text(data.source_url), origin } }
+function parseLibrary(value: unknown): PluginLibraryResult { const data = record(value); if (!Array.isArray(data.entries)) throw invalidResponseError(); return { entries: data.entries.map(libraryEntry), web_search_available: data.web_search_available === true } }
