@@ -10,8 +10,8 @@ from .sources import SourceRejected, resolve_source
 
 CACHE_TTL = timedelta(minutes=15)
 DISCOVERY_QUERIES = (
-    "topic:mcp-server",
-    "topic:claude-plugin",
+    "topic:mcp-server stars:>=3",
+    "topic:claude-plugin stars:>=3",
 )
 
 

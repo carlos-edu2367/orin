@@ -36,7 +36,10 @@ class GithubRepositorySearchClient:
         bounded = max(1, min(int(limit), MAX_SEARCH_RESULTS))
         response = self._client.get(
             self._endpoint,
-            params={"q": str(query)[:400], "per_page": bounded, "sort": "updated"},
+            # Sorting by stars (rather than recency) matters here: repos that game
+            # topic tags to advertise unrelated products tend to self-update
+            # frequently to stay near the top of a "recently updated" sort.
+            params={"q": str(query)[:400], "per_page": bounded, "sort": "stars"},
             headers={
                 "Accept": "application/vnd.github+json",
                 "X-GitHub-Api-Version": "2022-11-28",
