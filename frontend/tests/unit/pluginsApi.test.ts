@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { ApiClient } from '../../src/api/client'
-import { approvePlugin, fetchPluginLibrary, inspectPlugin, listPlugins, removePlugin } from '../../src/api/plugins'
+import { approvePlugin, fetchPluginLibrary, inferMcpLaunch, inspectPlugin, listPlugins, removePlugin } from '../../src/api/plugins'
 
 function client(fetchImpl: typeof fetch) { return new ApiClient({ fetchImpl, maxAttempts: 1 }) }
 function response(body: unknown, status = 200) { return new Response(status === 204 ? null : JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } }) }
@@ -20,7 +20,7 @@ describe('plugins api', () => {
     expect(fetchImpl).toHaveBeenCalledTimes(2)
   })
   it('parses the plugin library response', async () => {
-    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(response({ entries: [{ name: 'superpowers', description: 'd', source_url: 'https://github.com/obra/superpowers.git', origin: 'registry' }], web_search_available: false }))
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(response({ entries: [{ name: 'superpowers', description: 'd', source_url: 'https://github.com/obra/superpowers.git', origin: 'registry', installable_kind: 'plugin' }], web_search_available: false }))
     const library = await fetchPluginLibrary(client(fetchImpl))
     expect(library.entries[0].origin).toBe('registry')
     expect(library.web_search_available).toBe(false)
@@ -38,5 +38,27 @@ describe('plugins api', () => {
     expect(String(fetchImpl.mock.calls[0][0])).toContain('q=obsidian')
     await fetchPluginLibrary(client(fetchImpl), false, '   ')
     expect(String(fetchImpl.mock.calls[1][0])).not.toContain('q=')
+  })
+  it('rejects an invalid installable_kind on a library entry', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(response({
+      entries: [{ name: 'demo', description: 'd', source_url: 'https://github.com/acme/demo.git', origin: 'web', installable_kind: 'bogus' }],
+      web_search_available: true,
+    }))
+    await expect(fetchPluginLibrary(client(fetchImpl))).rejects.toThrow()
+  })
+  it('parses an inferred MCP launch guess', async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
+      expect(String(input)).toContain('/v1/plugins/library/infer-mcp')
+      expect(JSON.parse(String(init?.body))).toEqual({ source_url: 'https://github.com/acme/demo.git' })
+      return response({ display_name: 'demo', transport: 'stdio', command: 'npx', args: ['-y', 'demo'], url: null, secret_names: [], confidence: 'structured' })
+    })
+    const guess = await inferMcpLaunch(client(fetchImpl), 'https://github.com/acme/demo.git')
+    expect(guess).toEqual({ display_name: 'demo', transport: 'stdio', command: 'npx', args: ['-y', 'demo'], url: null, secret_names: [], confidence: 'structured' })
+  })
+  it('parses a launch guess with no signal found', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(response({ display_name: 'demo', transport: null, command: null, args: [], url: null, secret_names: [], confidence: 'none' }))
+    const guess = await inferMcpLaunch(client(fetchImpl), 'https://github.com/acme/demo.git')
+    expect(guess.transport).toBeNull()
+    expect(guess.confidence).toBe('none')
   })
 })
