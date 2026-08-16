@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 import hashlib
 import json
@@ -30,32 +31,7 @@ class PluginFetcher:
 
     def fetch(self, source: PluginSource) -> FetchedPlugin:
         with tempfile.TemporaryDirectory(prefix="orin-plugin-") as temporary:
-            staging = Path(temporary) / "package"
-            if source.kind == "path":
-                self._validate(Path(source.path or ""))
-                shutil.copytree(Path(source.path or ""), staging, symlinks=False)
-            elif source.kind == "git":
-                command = ["git", "clone", "--depth", "1", "--no-tags", "--recurse-submodules=no", "--config", "core.symlinks=false"]
-                if source.ref:
-                    command += ["--branch", source.ref]
-                command += [source.url or "", str(staging)]
-                try:
-                    subprocess.run(command, check=True, shell=False, timeout=self.timeout, capture_output=True, text=True)
-                except (OSError, subprocess.SubprocessError) as error:
-                    raise FetchRejected("plugin repository could not be fetched") from error
-                if source.subdirectory:
-                    selected = staging / source.subdirectory
-                    if not selected.is_dir() or not selected.resolve().is_relative_to(staging.resolve()):
-                        raise FetchRejected("plugin subdirectory escapes the repository")
-                    package = Path(temporary) / "selected"
-                    shutil.copytree(selected, package, symlinks=False)
-                    shutil.rmtree(staging, ignore_errors=True)
-                    staging = package
-            else:
-                raise FetchRejected("source must be resolved to a git or path source before fetching")
-            git_dir = staging / ".git"
-            if git_dir.exists():
-                shutil.rmtree(git_dir, ignore_errors=True)
+            staging = self._clone_into(source, temporary)
             manifest_path = staging / ".claude-plugin" / "plugin.json"
             if not manifest_path.exists():
                 manifest_path = staging / "plugin.json"
@@ -66,13 +42,63 @@ class PluginFetcher:
             self._validate(staging)
             digest = self._digest(staging)
             destination = self.root / manifest.plugin_id / manifest.version
+            if destination.exists() and self._digest(destination) != digest:
+                # Some real-world plugin repositories republish a version tag
+                # after release. Keep the old package immutable, but allow the
+                # newly fetched digest to be inspected and explicitly approved
+                # instead of turning the cache collision into a generic
+                # "plugin could not be inspected" error.
+                destination = destination.parent / f"{manifest.version}-{digest}"
             if destination.exists():
                 if self._digest(destination) != digest:
-                    raise FetchRejected("published plugin version already exists with a different digest")
+                    raise FetchRejected("plugin cache contains a conflicting digest")
                 return FetchedPlugin(destination, digest, manifest)
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copytree(staging, destination, symlinks=False)
             return FetchedPlugin(destination, digest, manifest)
+
+    @contextmanager
+    def fetch_raw(self, source: PluginSource):
+        """Clone-only variant of ``fetch`` for repositories with no plugin manifest.
+
+        Applies the same clone and validation guards as ``fetch`` but never reads
+        a manifest and never persists into ``self.root`` — the yielded path is
+        only valid for the lifetime of this context, long enough to read a
+        handful of config files before the clone is discarded.
+        """
+        with tempfile.TemporaryDirectory(prefix="orin-plugin-raw-") as temporary:
+            staging = self._clone_into(source, temporary)
+            self._validate(staging)
+            yield staging
+
+    def _clone_into(self, source: PluginSource, temporary: str) -> Path:
+        staging = Path(temporary) / "package"
+        if source.kind == "path":
+            self._validate(Path(source.path or ""))
+            shutil.copytree(Path(source.path or ""), staging, symlinks=False)
+        elif source.kind == "git":
+            command = ["git", "clone", "--depth", "1", "--no-tags", "--recurse-submodules=no", "--config", "core.symlinks=false"]
+            if source.ref:
+                command += ["--branch", source.ref]
+            command += [source.url or "", str(staging)]
+            try:
+                subprocess.run(command, check=True, shell=False, timeout=self.timeout, capture_output=True, text=True)
+            except (OSError, subprocess.SubprocessError) as error:
+                raise FetchRejected("plugin repository could not be fetched") from error
+            if source.subdirectory:
+                selected = staging / source.subdirectory
+                if not selected.is_dir() or not selected.resolve().is_relative_to(staging.resolve()):
+                    raise FetchRejected("plugin subdirectory escapes the repository")
+                package = Path(temporary) / "selected"
+                shutil.copytree(selected, package, symlinks=False)
+                shutil.rmtree(staging, ignore_errors=True)
+                staging = package
+        else:
+            raise FetchRejected("source must be resolved to a git or path source before fetching")
+        git_dir = staging / ".git"
+        if git_dir.exists():
+            shutil.rmtree(git_dir, ignore_errors=True)
+        return staging
 
     def _validate(self, path: Path) -> None:
         if not path.is_dir():
