@@ -946,12 +946,12 @@ def create_app(services: ApiServices) -> FastAPI:
         return JSONResponse(_jsonable(_require_port(services.plugins).list(principal.user_id)))
 
     @app.get("/v1/plugins/library")
-    async def get_plugin_library(request: Request, refresh: bool = False) -> JSONResponse:
+    async def get_plugin_library(request: Request, refresh: bool = False, q: str = "") -> JSONResponse:
         principal = principal_for(request)
         services.security.check_rate_limit(principal, action="plugins.library", origin=request.headers.get("origin"))
         services.security.authorize(principal, action="plugins.library", resource_id=None, purpose="plugins.read")
         # Web search is blocking I/O just like plugin inspection, so keep it off the event loop.
-        result = await run_in_threadpool(_require_port(services.plugins).discover_library, refresh=refresh)
+        result = await run_in_threadpool(_require_port(services.plugins).discover_library, refresh=refresh, query=q.strip() or None)
         return JSONResponse(_jsonable(result))
 
     @app.post("/v1/plugins/inspect")

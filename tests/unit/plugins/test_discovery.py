@@ -10,9 +10,11 @@ class FakePluginService:
     def __init__(self, entries):
         self._entries = entries
         self.search_calls = 0
+        self.queries: list[str] = []
 
     def search(self, query):
         self.search_calls += 1
+        self.queries.append(query)
         return self._entries
 
 
@@ -77,3 +79,31 @@ def test_results_are_cached_until_refresh():
     assert plugin_service.search_calls == 1
     discovery.entries(refresh=True)
     assert plugin_service.search_calls == 2
+
+
+def test_a_query_searches_directly_instead_of_the_fixed_topics():
+    plugin_service = FakePluginService(REGISTRY)
+    results = {"obsidian": [SearchResult("acme/obsidian-thing", "https://github.com/acme/obsidian-thing", "an obsidian plugin")]}
+    discovery = PluginDiscoveryService(plugin_service, search_client=FakeSearchClient(results))
+    entries, web_available = discovery.entries(query="obsidian")
+    assert plugin_service.queries[-1] == "obsidian"
+    assert web_available is True
+    assert "https://github.com/acme/obsidian-thing.git" in [e.source_url for e in entries]
+
+
+def test_a_query_bypasses_the_cached_default_listing():
+    plugin_service = FakePluginService(REGISTRY)
+    discovery = PluginDiscoveryService(plugin_service, search_client=None)
+    discovery.entries()
+    assert plugin_service.search_calls == 1
+    discovery.entries(query="obsidian")
+    assert plugin_service.search_calls == 2
+    assert plugin_service.queries[-1] == "obsidian"
+
+
+def test_a_blank_query_falls_back_to_the_cached_default_listing():
+    plugin_service = FakePluginService(REGISTRY)
+    discovery = PluginDiscoveryService(plugin_service, search_client=None)
+    discovery.entries()
+    discovery.entries(query="   ")
+    assert plugin_service.search_calls == 1

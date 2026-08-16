@@ -36,18 +36,25 @@ class PluginDiscoveryService:
         self._cache: tuple[list[PluginLibraryEntry], bool] | None = None
         self._cache_at: datetime | None = None
 
-    def entries(self, *, refresh: bool = False) -> tuple[list[PluginLibraryEntry], bool]:
+    def entries(self, *, refresh: bool = False, query: str | None = None) -> tuple[list[PluginLibraryEntry], bool]:
+        needle = (query or "").strip()
+        if needle:
+            # An explicit query always searches live — it's cheap (one registry
+            # scan, one web call) and caching per free-text query isn't worth it.
+            registry = self._registry_entries(needle)
+            web, web_available = self._web_entries((needle,), limit=8)
+            return self._merge(registry, web), web_available
         if not refresh and self._cache is not None and self._cache_at is not None and _now() - self._cache_at < CACHE_TTL:
             return self._cache
-        registry = self._registry_entries()
-        web, web_available = self._web_entries()
+        registry = self._registry_entries("")
+        web, web_available = self._web_entries(DISCOVERY_QUERIES, limit=5)
         merged = self._merge(registry, web)
         self._cache, self._cache_at = (merged, web_available), _now()
         return self._cache
 
-    def _registry_entries(self) -> list[PluginLibraryEntry]:
+    def _registry_entries(self, needle: str) -> list[PluginLibraryEntry]:
         entries: list[PluginLibraryEntry] = []
-        for item in self._plugin_service.search(""):
+        for item in self._plugin_service.search(needle):
             try:
                 source = resolve_source(str(item["reference"]))
             except SourceRejected:
@@ -60,13 +67,13 @@ class PluginDiscoveryService:
             entries.append(PluginLibraryEntry(str(item["name"]), str(item.get("description") or ""), source.url, "registry"))
         return entries
 
-    def _web_entries(self) -> tuple[list[PluginLibraryEntry], bool]:
+    def _web_entries(self, queries: tuple[str, ...], *, limit: int) -> tuple[list[PluginLibraryEntry], bool]:
         if self._search_client is None:
             return [], False
         entries: list[PluginLibraryEntry] = []
-        for query in DISCOVERY_QUERIES:
+        for query in queries:
             try:
-                results = self._search_client.search(query, limit=5)
+                results = self._search_client.search(query, limit=limit)
             except httpx.HTTPError:
                 # A configured client that failed this round is still "available" —
                 # the frontend note is only for the no-client case.

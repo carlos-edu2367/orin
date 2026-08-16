@@ -60,8 +60,8 @@ class PluginService:
                     results.append({"name": item.name, "reference": item.reference, "description": item.description, "marketplace": marketplace.name})
         return results
 
-    def discover_library(self, *, refresh: bool = False) -> dict[str, Any]:
-        entries, web_available = self.discovery.entries(refresh=refresh)
+    def discover_library(self, *, refresh: bool = False, query: str | None = None) -> dict[str, Any]:
+        entries, web_available = self.discovery.entries(refresh=refresh, query=query)
         return {
             "entries": [{"name": e.name, "description": e.description, "source_url": e.source_url, "origin": e.origin} for e in entries],
             "web_search_available": web_available,
