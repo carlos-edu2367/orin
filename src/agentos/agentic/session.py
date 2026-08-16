@@ -295,6 +295,13 @@ def build_system_prompt(
     return "\n".join(lines)
 
 
+def _skill_prompt_tokens(skill_catalog: tuple[object, ...]) -> int:
+    if not skill_catalog:
+        return 0
+    text = "\n".join(f"- {item.name} (`{item.id}`): {item.description}" for item in skill_catalog)
+    return max(1, len(text) // 4)
+
+
 class _SubagentStore:
     """Turn-store view for a subagent run.
 
@@ -475,6 +482,15 @@ class TurnSession:
         base: dict[str, object] = {"state": state}
         if agent_name:
             base["agent_name"] = agent_name
+        if state == "context_updated":
+            self._record(AgentActivityEventType.CONTEXT_UPDATED, "Contexto atualizado", dict(payload), agent_id=actor)
+            return
+        if state == "context_compacting":
+            self._record(AgentActivityEventType.CONTEXT_UPDATED, "Compactando contexto", {"compacting": True, **payload}, agent_id=actor)
+            return
+        if state == "context_compacted":
+            self._record(AgentActivityEventType.CONTEXT_COMPACTED, "Contexto compactado automaticamente", {"compacting": False, **payload}, agent_id=actor)
+            return
         if state == "tool_started":
             name = str(payload.get("tool_name") or "tool")
             self._record(AgentActivityEventType.TOOL_STARTED, f"Executando {name}", {
@@ -835,6 +851,7 @@ class TurnSession:
             environment = {}
         history = self.store.history_for_turn(self.turn)
         task = next((str(item.get("content") or "") for item in reversed(history) if item.get("role") == "user"), "")
+        skill_catalog = self._skill_catalog(task, toolset)
         prompt = build_system_prompt(
             tool_names=tuple(item.name for item in toolset.definitions()),
             memories=memories,
@@ -847,11 +864,12 @@ class TurnSession:
             ),
             subagents_enabled=self.enable_subagents,
             child_model_ids=self.child_model_ids,
-            skill_catalog=self._skill_catalog(task, toolset),
+            skill_catalog=skill_catalog,
             tool_ledger=ledger,
             environment=environment,
             workspace_tree=tree,
         )
+        definitions = toolset.definitions()
         # OmniRoute's public OpenAI-compatible response does not guarantee the
         # selected upstream/provider. Record the requested route only; never
         # infer a fallback or selected model from a gateway-side guess.
@@ -864,6 +882,9 @@ class TurnSession:
         return AgenticTurnRuntime(
             store=_MainAgentStore(self, self.store, toolset), provider=self.provider_factory(), toolset=toolset,
             system_prompt=prompt, limits=self.limits, cancelled=self.cancelled,
+            tool_kinds={item.name: item.kind for item in definitions},
+            skill_prompt_tokens=_skill_prompt_tokens(skill_catalog),
+            context_reporting=True,
         )
 
 

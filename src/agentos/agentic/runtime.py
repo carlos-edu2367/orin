@@ -14,6 +14,8 @@ from .provider_stream import NormalizedStreamItem, StreamKind
 
 MAX_PARALLEL_TOOLS = 4
 AGED_TOOL_RESULT_CHARS = 400
+CONTEXT_COMPACTION_THRESHOLD = 0.82
+CONTEXT_COMPACTION_KEEP_UNITS = 6
 BROWSER_TOOL_NAMES = frozenset({
     "browse_page", "browser_observe", "browser_click", "browser_fill",
     "browser_press", "browser_select", "browser_check", "browser_screenshot",
@@ -45,11 +47,15 @@ class AgenticLimits:
     # the model cannot recover from beyond splitting the payload.
     max_output_tokens: int | None = None
     max_context_tokens: int = 60_000
+    # The actual provider window, when the catalog knows it. The trim budget
+    # above deliberately leaves room for system/tool overhead; this value is
+    # what the UI should present as the model's full context window.
+    context_window_tokens: int | None = None
 
     def __post_init__(self) -> None:
         if (self.max_actions is not None and self.max_actions < 0) or (self.max_iterations is not None and self.max_iterations < 1) or self.max_provider_retries < 0 or self.deadline <= timedelta(0):
             raise ValueError("agentic limits are invalid")
-        if (self.max_output_tokens is not None and self.max_output_tokens < 1) or self.max_context_tokens < 1_000:
+        if (self.max_output_tokens is not None and self.max_output_tokens < 1) or self.max_context_tokens < 1_000 or (self.context_window_tokens is not None and self.context_window_tokens < 1_000):
             raise ValueError("agentic limits are invalid")
 
 
@@ -77,6 +83,9 @@ class AgenticTurnRuntime:
         cancelled: Callable[[Mapping[str, object]], bool] | None = None,
         toolset: object | None = None,
         system_prompt: str | None = None,
+        tool_kinds: Mapping[str, str] | None = None,
+        skill_prompt_tokens: int = 0,
+        context_reporting: bool = False,
     ) -> None:
         self.store, self.provider = store, provider
         # ``toolset`` is the agent-facing path: its results are returned to the
@@ -88,6 +97,10 @@ class AgenticTurnRuntime:
         self.clock = clock or (lambda: datetime.now(UTC))
         self.cancelled = cancelled or (lambda _turn: False)
         self.system_prompt = system_prompt
+        self.tool_kinds = dict(tool_kinds or {})
+        self.skill_prompt_tokens = max(0, int(skill_prompt_tokens))
+        self.context_reporting = bool(context_reporting)
+        self._compaction_count = 0
         self._closed = False
 
     def close(self) -> None:
@@ -129,12 +142,17 @@ class AgenticTurnRuntime:
             if remaining_tokens is not None and remaining_tokens <= 0:
                 return self._fail(turn, "PROVIDER_TOKEN_LIMIT", iteration, action_count)
             final_iteration = self.limits.max_iterations is not None and iteration == self.limits.max_iterations
+            tool_schemas = self._tool_schemas(turn)
+            self._maybe_compact(messages, turn, tool_schemas)
             window = self._request_messages(messages)
             if final_iteration:
                 window = [*window, {"role": "system", "content": CLOSING_INSTRUCTION}]
+            context = self._context_usage(messages, window, tool_schemas)
+            if self.context_reporting:
+                self._life(turn, "context_updated", **context)
             request = {
                 "turn_id": turn_id, "provider": str(turn.get("provider", "")), "model": str(turn.get("model_id", "")),
-                "messages": window, "tools": self._tool_schemas(turn),
+                "messages": window, "tools": tool_schemas,
                 "max_output_tokens": min([value for value in (self.limits.max_output_tokens, remaining_tokens) if value is not None], default=None),
             }
             if final_iteration:
@@ -275,6 +293,156 @@ class AgenticTurnRuntime:
         if self.toolset is not None:
             return self.toolset.schemas()
         return self.actions.tool_schemas(turn)
+
+    def _context_usage(
+        self,
+        messages: list[dict[str, object]],
+        window: list[dict[str, object]],
+        tool_schemas: list[dict[str, object]],
+    ) -> dict[str, object]:
+        """Return bounded, provider-neutral context accounting for the UI.
+
+        The counts use the same conservative four-characters-per-token estimate
+        used by the trim algorithm. Provider-reported usage is intentionally not
+        substituted here: it arrives after a request and cannot explain which
+        local prompt component consumed the window.
+        """
+        full_system = self._estimated_tokens({"role": "system", "content": self.system_prompt}) if self.system_prompt else 0
+        skills = self.skill_prompt_tokens
+        tools = 0
+        mcps = 0
+        for schema in tool_schemas:
+            name = str(((schema.get("function") or {}).get("name") if isinstance(schema.get("function"), Mapping) else "") or "")
+            tokens = self._estimated_tokens(schema)
+            kind = self.tool_kinds.get(name, "tool")
+            if kind == "mcp":
+                mcps += tokens
+            elif kind == "skill":
+                skills += tokens
+            else:
+                tools += tokens
+        system_extras = sum(
+            self._estimated_tokens(item) for item in window
+            if item.get("role") == "system" and item.get("content") != self.system_prompt
+        )
+        system = max(0, full_system - self.skill_prompt_tokens) + system_extras
+        pinned = getattr(self, "_pinned_index", None)
+        pinned_message = messages[pinned] if isinstance(pinned, int) and 0 <= pinned < len(messages) else None
+        input_tokens = 0
+        history = 0
+        for item in window:
+            if item.get("role") == "system":
+                continue
+            tokens = self._estimated_tokens(item)
+            if pinned_message is not None and item is pinned_message:
+                input_tokens += tokens
+            else:
+                history += tokens
+        used = system + history + input_tokens + tools + skills + mcps
+        limit = self.limits.context_window_tokens or self.limits.max_context_tokens
+        kept_message_ids = {id(item) for item in window if item.get("role") != "system"}
+        omitted = max(0, len(messages) - sum(1 for item in messages if id(item) in kept_message_ids))
+        return {
+            "used_tokens": used,
+            "limit_tokens": limit,
+            "percentage": min(100, round(used / limit * 100)) if limit else 0,
+            "system_prompt_tokens": system,
+            "history_tokens": history,
+            "input_tokens": input_tokens,
+            "tools_tokens": tools,
+            "skills_tokens": skills,
+            "mcps_tokens": mcps,
+            "omitted_messages": omitted,
+            "compaction_count": self._compaction_count,
+            "compaction_enabled": True,
+        }
+
+    def _maybe_compact(self, messages: list[dict[str, object]], turn: Mapping[str, object], tool_schemas: list[dict[str, object]]) -> None:
+        """Summarize old exchanges before ordinary trimming becomes lossy."""
+        if self._compaction_count >= 8 or len(messages) < CONTEXT_COMPACTION_KEEP_UNITS + 2:
+            return
+        estimate = self._estimated_tokens({"messages": messages, "tools": tool_schemas})
+        limit = self.limits.max_context_tokens
+        if estimate < int(limit * CONTEXT_COMPACTION_THRESHOLD):
+            return
+        units = self._group_tool_units(messages)
+        pinned = getattr(self, "_pinned_index", _PIN_UNSET)
+        eligible = [unit for unit in units if pinned is _PIN_UNSET or pinned not in unit]
+        if len(eligible) <= CONTEXT_COMPACTION_KEEP_UNITS:
+            return
+        compact_units = eligible[:-CONTEXT_COMPACTION_KEEP_UNITS]
+        compact_indices = {index for unit in compact_units for index in unit}
+        if not compact_indices:
+            return
+        if self.context_reporting:
+            self._life(turn, "context_compacting", removed_messages=len(compact_indices), compaction_count=self._compaction_count + 1)
+        source = self._compact_source(messages, compact_indices)
+        summary = self._request_compaction_summary(source, turn)
+        if not summary:
+            summary = self._fallback_compaction_summary(messages, compact_indices)
+        insert_at = min(compact_indices)
+        pinned_item = messages[pinned] if isinstance(pinned, int) and 0 <= pinned < len(messages) else None
+        replacement = {
+            "role": "system",
+            "content": "[Resumo automático do contexto anterior — use os arquivos e ferramentas para confirmar detalhes]\n" + summary[:8_000],
+        }
+        retained = [item for index, item in enumerate(messages) if index not in compact_indices]
+        original_to_retained = [(index, item) for index, item in enumerate(messages) if index not in compact_indices]
+        position = next((offset for offset, (index, _item) in enumerate(original_to_retained) if index > insert_at), len(retained))
+        retained.insert(position, replacement)
+        messages[:] = retained
+        if pinned_item is not None:
+            self._pinned_index = next((index for index, item in enumerate(messages) if item is pinned_item), None)
+        self._compaction_count += 1
+        if self.context_reporting:
+            self._life(turn, "context_compacted", removed_messages=len(compact_indices), summary_tokens=self._estimated_tokens(replacement), compaction_count=self._compaction_count)
+
+    def _compact_source(self, messages: list[dict[str, object]], indices: set[int]) -> str:
+        parts: list[str] = []
+        # Keep the summarizer request below even a small model's window. The
+        # normal turn budget is not the provider's full window, so this is a
+        # deliberately conservative fraction rather than another full-sized
+        # prompt.
+        remaining = min(48_000, max(4_000, 2 * self.limits.max_context_tokens))
+        for index in sorted(indices):
+            try:
+                encoded = json.dumps(messages[index], ensure_ascii=False, default=str)
+            except (TypeError, ValueError):
+                encoded = str(messages[index])
+            if remaining <= 0:
+                break
+            parts.append(encoded[:remaining])
+            remaining -= len(parts[-1])
+        return "\n".join(parts)
+
+    def _request_compaction_summary(self, source: str, turn: Mapping[str, object]) -> str:
+        try:
+            events = self.provider.stream({
+                "turn_id": str(turn.get("turn_id") or "") + ":context-compaction",
+                "provider": str(turn.get("provider") or ""),
+                "model": str(turn.get("model_id") or ""),
+                "messages": [{"role": "system", "content": "Summarize the prior conversation for another agent. Preserve decisions, constraints, file paths, pending work and unresolved questions. Be concise and do not invent facts."}, {"role": "user", "content": source}],
+                "tools": [],
+                "max_output_tokens": min(1_600, max(256, self.limits.max_context_tokens // 4)),
+            })
+            parts: list[str] = []
+            for raw in events:
+                event = self._coerce(raw)
+                if event.kind is StreamKind.TEXT and event.text:
+                    parts.append(event.text)
+            return "".join(parts).strip()
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _fallback_compaction_summary(messages: list[dict[str, object]], indices: set[int]) -> str:
+        lines = ["A compactação semântica não ficou disponível; mensagens anteriores foram reduzidas."]
+        for index in sorted(indices)[-8:]:
+            item = messages[index]
+            role = str(item.get("role") or "message")
+            content = str(item.get("content") or "").replace("\n", " ")
+            lines.append(f"{role}: {content[:240]}")
+        return "\n".join(lines)
 
     @staticmethod
     def _estimated_tokens(message: Mapping[str, object]) -> int:

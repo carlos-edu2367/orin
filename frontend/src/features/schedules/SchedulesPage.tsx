@@ -9,6 +9,20 @@ import { Brand } from '../../components/Brand'
 import { ModelPicker } from '../../components/ModelPicker'
 import { SettingsSection } from '../settings/SettingsSection'
 
+const DEFAULT_TIMEZONE = 'America/Sao_Paulo'
+const TIMEZONE_OPTIONS = [
+  ['America/Sao_Paulo', 'São Paulo (UTC−03:00)'],
+  ['America/New_York', 'Nova York'],
+  ['America/Los_Angeles', 'Los Angeles'],
+  ['America/Mexico_City', 'Cidade do México'],
+  ['UTC', 'UTC'],
+  ['Europe/Lisbon', 'Lisboa'],
+  ['Europe/London', 'Londres'],
+  ['Europe/Paris', 'Paris'],
+  ['Asia/Tokyo', 'Tóquio'],
+  ['Australia/Sydney', 'Sydney'],
+] as const
+
 export function SchedulesPage({ embedded = false }: { embedded?: boolean }) {
   const client = useMemo(() => createBrowserApiClient(), [])
   const [items, setItems] = useState<ScheduledChat[]>([])
@@ -23,7 +37,7 @@ export function SchedulesPage({ embedded = false }: { embedded?: boolean }) {
   const [time, setTime] = useState('09:00')
   const [weekday, setWeekday] = useState('0')
   const [error, setError] = useState<string | null>(null)
-  const timezone = useMemo(() => Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC', [])
+  const [timezone, setTimezone] = useState(DEFAULT_TIMEZONE)
 
   const reload = useCallback(
     () => Promise.all([listScheduledChats(client), listProjects(client)]).then(([schedules, availableProjects]) => {
@@ -67,7 +81,7 @@ export function SchedulesPage({ embedded = false }: { embedded?: boolean }) {
     setError(null)
     if (!message.trim() || !modelId || (kind === 'once' && !fireAt)) return
     const recurrence: ScheduleRecurrence = kind === 'once'
-      ? { kind, fire_at: new Date(fireAt).toISOString() }
+      ? { kind, fire_at: fireAt }
       : kind === 'hourly' ? { kind } : kind === 'daily' ? { kind, time_of_day: time } : { kind, time_of_day: time, weekday: Number(weekday) }
     try {
       await createScheduledChat(client, { message: message.trim(), provider, model_id: modelId, timezone, recurrence, project_id: projectId || null })
@@ -112,9 +126,9 @@ export function SchedulesPage({ embedded = false }: { embedded?: boolean }) {
             <label className="schedule-form__field schedule-form__field--wide" htmlFor="schedule-message"><span>Instrução</span><textarea id="schedule-message" value={message} onChange={(event) => setMessage(event.target.value)} placeholder="Ex.: revise as tarefas abertas do projeto e me traga um resumo" /></label>
             <div className="schedule-form__field schedule-form__field--wide"><span className="schedule-form__label">Provider e modelo</span><ModelPicker providers={[...PROVIDER_NAMES]} provider={provider} onProviderChange={changeProvider} models={models} modelId={modelId} onModelChange={setModelId} /></div>
             <div className="schedule-form__columns"><label className="schedule-form__field" htmlFor="schedule-project"><span>Projeto <em>opcional</em></span><select id="schedule-project" value={projectId} onChange={(event) => setProjectId(event.target.value)}><option value="">Chat independente</option>{projects.map((project) => <option key={project.project_id} value={project.project_id}>{project.name}</option>)}</select></label><label className="schedule-form__field" htmlFor="schedule-recurrence"><span>Frequência</span><select id="schedule-recurrence" value={kind} onChange={(event) => setKind(event.target.value as ScheduleRecurrence['kind'])}><option value="once">Uma vez</option><option value="hourly">A cada hora</option><option value="daily">Todos os dias</option><option value="weekly">Toda semana</option></select></label></div>
-            <div className="schedule-form__timing"><span className="schedule-form__timing-mark" aria-hidden="true">↗</span><div className="schedule-form__timing-fields"><p className="schedule-form__label">Próximo disparo</p>{kind === 'once' && <label className="schedule-form__field" htmlFor="schedule-fire-at"><span>Data e hora</span><input id="schedule-fire-at" type="datetime-local" value={fireAt} onChange={(event) => setFireAt(event.target.value)} required /></label>}{(kind === 'daily' || kind === 'weekly') && <label className="schedule-form__field" htmlFor="schedule-time"><span>Horário</span><input id="schedule-time" type="time" value={time} onChange={(event) => setTime(event.target.value)} required /></label>}{kind === 'hourly' && <p className="schedule-form__timing-copy">A tarefa será executada no início de cada hora.</p>}{kind === 'weekly' && <label className="schedule-form__field" htmlFor="schedule-weekday"><span>Dia da semana</span><select id="schedule-weekday" value={weekday} onChange={(event) => setWeekday(event.target.value)}>{['Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado', 'Domingo'].map((day, index) => <option key={day} value={index}>{day}</option>)}</select></label>}</div></div>
+            <div className="schedule-form__timing"><span className="schedule-form__timing-mark" aria-hidden="true">↗</span><div className="schedule-form__timing-fields"><p className="schedule-form__label">Próximo disparo</p><label className="schedule-form__field" htmlFor="schedule-timezone"><span>Fuso horário</span><select id="schedule-timezone" value={timezone} onChange={(event) => setTimezone(event.target.value)}>{TIMEZONE_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>{kind === 'once' && <label className="schedule-form__field" htmlFor="schedule-fire-at"><span>Data e hora</span><input id="schedule-fire-at" type="datetime-local" value={fireAt} onChange={(event) => setFireAt(event.target.value)} required /></label>}{(kind === 'daily' || kind === 'weekly') && <label className="schedule-form__field" htmlFor="schedule-time"><span>Horário</span><input id="schedule-time" type="time" value={time} onChange={(event) => setTime(event.target.value)} required /></label>}{kind === 'hourly' && <p className="schedule-form__timing-copy">A tarefa será executada no início de cada hora.</p>}{kind === 'weekly' && <label className="schedule-form__field" htmlFor="schedule-weekday"><span>Dia da semana</span><select id="schedule-weekday" value={weekday} onChange={(event) => setWeekday(event.target.value)}>{['Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado', 'Domingo'].map((day, index) => <option key={day} value={index}>{day}</option>)}</select></label>}</div></div>
           </div>
-          <footer className="schedule-form__footer"><span>Fuso local: <strong>{timezone}</strong></span><button className="button button--primary" type="submit">Criar tarefa</button></footer>
+          <footer className="schedule-form__footer"><span>Fuso da tarefa: <strong>{timezone}</strong></span><button className="button button--primary" type="submit">Criar tarefa</button></footer>
         </form>
         <aside className="schedules-page__aside"><section className="schedule-context-card"><div className="schedule-context-card__icon" aria-hidden="true">↗</div><p className="eyebrow">COMO FUNCIONA</p><h2>Automação que continua no chat</h2><p>Recorrências reutilizam a mesma conversa. O agente recebe o contexto do projeto e trabalha no workspace já conhecido.</p><dl><div><dt>Execução</dt><dd>Turno de chat normal</dd></div><div><dt>Fuso horário</dt><dd>{timezone}</dd></div></dl></section><section className="schedule-list-panel" aria-labelledby="schedule-list-title"><header className="schedule-list-panel__header"><div><p className="eyebrow">SEU FLUXO</p><h2 id="schedule-list-title">Tarefas ativas</h2></div><span>{items.length.toString().padStart(2, '0')}</span></header>{items.length === 0 ? <div className="schedule-list-panel__empty"><span aria-hidden="true">○</span><p>Nenhuma tarefa agendada ainda.</p><small>As tarefas que você criar aparecerão aqui.</small></div> : <ul className="schedule-list">{items.map((item) => <ScheduleRow key={item.schedule_id} item={item} onCancel={cancel} />)}</ul>}</section></aside>
       </div>

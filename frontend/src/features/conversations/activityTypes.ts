@@ -52,6 +52,22 @@ export type ConversationActivityEvent = {
   mcpApproval?: McpApprovalRequest
   pluginApproval?: PluginApprovalRequest
   occurredAt?: string
+  contextUsage?: ContextUsage
+}
+
+export type ContextUsage = {
+  used_tokens: number
+  limit_tokens: number
+  percentage: number
+  system_prompt_tokens: number
+  history_tokens: number
+  input_tokens: number
+  tools_tokens: number
+  skills_tokens: number
+  mcps_tokens: number
+  omitted_messages: number
+  compaction_count: number
+  compaction_enabled: boolean
 }
 
 export type UserQuestionMode = 'checkbox' | 'single_choice' | 'text'

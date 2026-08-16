@@ -89,6 +89,7 @@ class FakeAgentRuntimeSettings:
 class FakeConversationApplication:
     def __init__(self) -> None:
         self.create_calls = 0
+        self.send_calls: list[dict[str, object]] = []
 
     def allocate_conversation_id(self) -> str:
         return "conv-1"
@@ -98,6 +99,10 @@ class FakeConversationApplication:
         assert context.user_id == "user-1"
         assert (message, provider, model_id, workspace_id) == ("Organize este projeto", "openrouter", "anthropic/test-model", None)
         return {"conversation_id": "conv-1", "title": "Organize este projeto", "turn_id": "turn-1", "message_id": "msg-1", "state": "queued", "task_ref": "must-not-leak"}
+
+    def send(self, user_id, conversation_id, message, idempotency_key, attachments=(), provider="", model_id=""):
+        self.send_calls.append({"user_id": user_id, "conversation_id": conversation_id, "message": message, "provider": provider, "model_id": model_id})
+        return {"conversation_id": conversation_id, "title": "Conversa", "turn_id": "turn-2", "message_id": "msg-2", "state": "queued"}
 
 
 def _client() -> TestClient:
@@ -563,6 +568,51 @@ def test_conversation_endpoint_accepts_message_and_selection_without_returning_t
     assert response.json()["conversation_id"] == "conv-1"
     assert "execution_id" not in response.text
     assert "task_ref" not in response.text
+
+
+def test_conversation_message_accepts_a_new_authorized_model_selection() -> None:
+    security = InMemorySecurityService()
+    security.add_pat("pat-test", AuthenticatedPrincipal("user-1", "credential-1", frozenset({"api"})))
+    conversation_application = FakeConversationApplication()
+    app = create_app(ApiServices(
+        security=security,
+        execution_application=FakeExecutionApplication(),
+        conversation_application=conversation_application,
+        provider_catalog=FakeProviderCatalog(),
+    ))
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/conversations/conv-1/messages",
+        headers={"Authorization": "Bearer pat-test", "Idempotency-Key": "conversation-switch-1"},
+        json={"message": "Use outro modelo", "attachments": [], "selection": {"provider": "openrouter", "model_id": "anthropic/test-model"}},
+    )
+
+    assert response.status_code == 201
+    assert conversation_application.send_calls[-1]["provider"] == "openrouter"
+    assert conversation_application.send_calls[-1]["model_id"] == "anthropic/test-model"
+
+
+def test_conversation_message_rejects_a_model_outside_the_authorized_catalog() -> None:
+    security = InMemorySecurityService()
+    security.add_pat("pat-test", AuthenticatedPrincipal("user-1", "credential-1", frozenset({"api"})))
+    conversation_application = FakeConversationApplication()
+    app = create_app(ApiServices(
+        security=security,
+        execution_application=FakeExecutionApplication(),
+        conversation_application=conversation_application,
+        provider_catalog=FakeProviderCatalog(),
+    ))
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/conversations/conv-1/messages",
+        headers={"Authorization": "Bearer pat-test", "Idempotency-Key": "conversation-switch-2"},
+        json={"message": "Use um modelo não autorizado", "selection": {"provider": "openrouter", "model_id": "not-in-catalog"}},
+    )
+
+    assert response.status_code == 422
+    assert conversation_application.send_calls == []
 
 
 def test_production_bootstrap_accepts_enabled_provider_with_key_only_and_exposes_sanitized_unready_status() -> None:

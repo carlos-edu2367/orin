@@ -13,12 +13,13 @@ describe('SchedulesPage', () => {
 
   it('creates, lists, and cancels a task through the form', async () => {
     let created = false
-    const requests: Array<{ method: string; path: string }> = []
+    const requests: Array<{ method: string; path: string; body?: Record<string, unknown> }> = []
     const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async (input, init) => {
       const url = typeof input === 'string' ? input : String(input)
       const path = new URL(url, 'http://test.local').pathname
       const method = String(init?.method ?? 'GET').toUpperCase()
-      requests.push({ method, path })
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : undefined
+      requests.push({ method, path, body })
 
       if (path === '/v1/providers/openrouter/models') {
         return json({ items: [{ provider: 'openrouter', model_id: 'model-1', display_name: 'Model 1', context_window: 128000, capabilities: ['tools'], input_modalities: ['text'], output_modalities: ['text'], pricing: null, is_favorite: true, refreshed_at: null, route_kind: 'model' }] })
@@ -43,13 +44,19 @@ describe('SchedulesPage', () => {
     const user = userEvent.setup()
 
     await user.type(await screen.findByLabelText('Instrução'), 'Verifique o relatório')
+    expect(screen.getByLabelText('Fuso horário')).toHaveValue('America/Sao_Paulo')
+    await user.selectOptions(screen.getByLabelText('Fuso horário'), 'UTC')
     fireEvent.change(screen.getByLabelText('Data e hora'), { target: { value: '2026-08-16T12:00' } })
     await user.click(screen.getByRole('button', { name: 'Criar tarefa' }))
 
-    await waitFor(() => expect(requests).toContainEqual({ method: 'POST', path: '/v1/schedules' }))
+    await waitFor(() => expect(requests.some((request) => request.method === 'POST' && request.path === '/v1/schedules')).toBe(true))
+    expect(requests.find((request) => request.method === 'POST')?.body).toMatchObject({
+      timezone: 'UTC',
+      recurrence: { kind: 'once', fire_at: '2026-08-16T12:00' },
+    })
     expect(await screen.findByText('Verifique o relatório')).toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: 'Cancelar' }))
-    await waitFor(() => expect(requests).toContainEqual({ method: 'DELETE', path: '/v1/schedules/schedule-1' }))
+    await waitFor(() => expect(requests.some((request) => request.method === 'DELETE' && request.path === '/v1/schedules/schedule-1')).toBe(true))
   })
 })

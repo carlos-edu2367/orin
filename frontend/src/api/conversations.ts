@@ -2,7 +2,7 @@ import type { ApiClient } from './client'
 import { invalidResponseError, parseApiErrorResponse } from './errors'
 import type { ProviderName } from './providers'
 import { parseWorkspaceState, type WorkspaceState } from './workspace'
-import { kindFor, stateFor, type ConversationActivityEvent } from '../features/conversations/activityTypes'
+import { kindFor, stateFor, type ContextUsage, type ConversationActivityEvent } from '../features/conversations/activityTypes'
 
 export type CreateConversationInput = {
   message: string
@@ -22,7 +22,7 @@ export type ConversationReceipt = {
 
 export type MessageAttachment = { path: string; original_name: string; media_type: string; kind: string; bytes: number }
 
-export type Conversation = { conversation_id: string; title: string; state: string; messages: ConversationMessage[]; turns: ConversationTurn[]; provider: string; model_id: string; activities: ConversationActivityEvent[]; activity_cursor: string; workspace: WorkspaceState }
+export type Conversation = { conversation_id: string; title: string; state: string; messages: ConversationMessage[]; turns: ConversationTurn[]; provider: string; model_id: string; activities: ConversationActivityEvent[]; activity_cursor: string; workspace: WorkspaceState; context_usage: ContextUsage | null }
 export type ConversationMessage = { message_id: string; role: 'user' | 'assistant'; content: string; status: string; retryable: boolean; attachments: MessageAttachment[] }
 export type ConversationTurn = { turn_id: string; state: string; created_at: string; started_at: string | null; finished_at: string | null; scheduled_by_schedule_id: string | null }
 
@@ -51,8 +51,11 @@ export function listConversations(client: ApiClient): Promise<{ items: Array<Pic
   } })
 }
 
-export function sendConversationMessage(client: ApiClient, id: string, message: string, attachments: string[] = [], intent = client.createMutationIntent()): Promise<ConversationReceipt> {
-  return client.request({ path: `/v1/conversations/${encodeURIComponent(id)}/messages`, method: 'POST', expectedStatus: 201, intent, body: { message, attachments }, parse: parseConversationReceipt })
+export function sendConversationMessage(client: ApiClient, id: string, message: string, attachments: string[] = [], selection?: Pick<CreateConversationInput, 'provider' | 'model_id'>, intent = client.createMutationIntent()): Promise<ConversationReceipt> {
+  return client.request({
+    path: `/v1/conversations/${encodeURIComponent(id)}/messages`, method: 'POST', expectedStatus: 201, intent,
+    body: { message, attachments, ...(selection ? { selection } : {}) }, parse: parseConversationReceipt,
+  })
 }
 
 export function cancelConversation(client: ApiClient, id: string, intent = client.createMutationIntent()): Promise<{ cancelling: string[] }> {
@@ -257,6 +260,8 @@ export function parseConversationActivityEvent(value: unknown, cursor: string): 
   assign('path', optionalText(payload.path, 512))
   assign('screenshotPath', optionalWorkspacePath(payload.screenshot_path))
   assign('occurredAt', optionalText(item.occurred_at, 64))
+  const contextUsage = parseContextUsage(payload)
+  if (contextUsage) event.contextUsage = contextUsage
   const questions = parseUserQuestions(payload.questions)
   if (questions) event.questions = questions
   const mcpApproval = parseMcpApprovalRequest(payload)
@@ -274,7 +279,24 @@ export function parseConversation(value: unknown): Conversation {
   if (!Array.isArray(data.messages) || !Array.isArray(data.turns)) throw invalidResponseError()
   const activities = parseSnapshotActivities(data.activities)
   const activityCursor = data.activity_cursor === undefined ? (activities[activities.length - 1]?.cursor ?? '0') : publicId(data.activity_cursor)
-  return { conversation_id: string(data.conversation_id), title: string(data.title), state: string(data.state), provider: string(data.provider), model_id: string(data.model_id), activities, activity_cursor: activityCursor, workspace: parseWorkspaceState(data.workspace ?? {}), messages: data.messages.map((item) => { const m = item as Record<string, unknown>; const role = string(m.role); if (role !== 'user' && role !== 'assistant') throw invalidResponseError(); return { message_id: string(m.message_id), role, content: typeof m.content === 'string' ? m.content : '', status: string(m.status), retryable: m.retryable === true, attachments: parseMessageAttachments(m.attachments) } }), turns: data.turns.map((item) => { const t = item as Record<string, unknown>; return { turn_id: string(t.turn_id), state: string(t.state), created_at: string(t.created_at), started_at: typeof t.started_at === 'string' ? t.started_at : null, finished_at: typeof t.finished_at === 'string' ? t.finished_at : null, scheduled_by_schedule_id: typeof t.scheduled_by_schedule_id === 'string' ? t.scheduled_by_schedule_id : null } }) }
+  return { conversation_id: string(data.conversation_id), title: string(data.title), state: string(data.state), provider: string(data.provider), model_id: string(data.model_id), activities, activity_cursor: activityCursor, workspace: parseWorkspaceState(data.workspace ?? {}), context_usage: parseContextUsage(data.context_usage), messages: data.messages.map((item) => { const m = item as Record<string, unknown>; const role = string(m.role); if (role !== 'user' && role !== 'assistant') throw invalidResponseError(); return { message_id: string(m.message_id), role, content: typeof m.content === 'string' ? m.content : '', status: string(m.status), retryable: m.retryable === true, attachments: parseMessageAttachments(m.attachments) } }), turns: data.turns.map((item) => { const t = item as Record<string, unknown>; return { turn_id: string(t.turn_id), state: string(t.state), created_at: string(t.created_at), started_at: typeof t.started_at === 'string' ? t.started_at : null, finished_at: typeof t.finished_at === 'string' ? t.finished_at : null, scheduled_by_schedule_id: typeof t.scheduled_by_schedule_id === 'string' ? t.scheduled_by_schedule_id : null } }) }
+}
+
+function parseContextUsage(value: unknown): ContextUsage | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null
+  const data = value as Record<string, unknown>
+  const count = (key: string): number | null => {
+    const value = data[key]
+    return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null
+  }
+  const values = ['used_tokens', 'limit_tokens', 'percentage', 'system_prompt_tokens', 'history_tokens', 'input_tokens', 'tools_tokens', 'skills_tokens', 'mcps_tokens', 'omitted_messages', 'compaction_count'].map(count)
+  if (values.some((item) => item === null)) return null
+  return {
+    used_tokens: values[0]!, limit_tokens: values[1]!, percentage: Math.min(100, values[2]!),
+    system_prompt_tokens: values[3]!, history_tokens: values[4]!, input_tokens: values[5]!,
+    tools_tokens: values[6]!, skills_tokens: values[7]!, mcps_tokens: values[8]!,
+    omitted_messages: values[9]!, compaction_count: values[10]!, compaction_enabled: data.compaction_enabled === true,
+  }
 }
 
 function parseMessageAttachments(value: unknown): MessageAttachment[] {

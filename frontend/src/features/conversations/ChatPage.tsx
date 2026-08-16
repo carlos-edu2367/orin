@@ -13,15 +13,18 @@ import {
   PROVIDER_NAMES, getVisionModelSetting, listProviderModels,
   type ProviderModel, type ProviderName, type VisionModelSetting,
 } from '../../api/providers'
+import { deleteUpload, uploadFile } from '../../api/uploads'
 import { attachWorkspaceFolder, detachWorkspaceFolder, inspectWorkspaceFolder, type WorkspaceState } from '../../api/workspace'
 import { CommandPalette } from '../../components/CommandPalette'
 import { Brand } from '../../components/Brand'
+import { ModelPicker } from '../../components/ModelPicker'
 import { OverviewPanel } from '../overview/OverviewPanel'
 import { WorkspaceNavigation } from '../projects/WorkspaceNavigation'
 import { ActivityStream } from './ActivityStream'
 import { AgentPulse, modeFromEvents } from './AgentPulse'
 import { attachmentNotice } from './attachmentNotice'
 import { Composer } from './Composer'
+import { ContextIndicator } from './ContextIndicator'
 import { MarkdownMessage } from './MarkdownMessage'
 import { MessageAttachments } from './MessageAttachments'
 import { TurnTimeline } from './TurnTimeline'
@@ -34,6 +37,7 @@ import { buildMessageTimelines } from './turnTimelineFold'
 import { useComposerAttachments } from './useComposerAttachments'
 
 const TOOL_CAPABILITY_NAMES = new Set(['tools', 'tool_use', 'function_calling'])
+const MAX_MESSAGE_CHARACTERS = 16000
 
 /** Mirrors the worker's own `_model_calls_tools`: an unrefreshed catalog must not silently disable tools. */
 function modelCallsTools(capabilities: string[]): boolean {
@@ -61,6 +65,10 @@ function chooseVisionModel(candidates: ProviderModel[], turnProvider: string, ov
 const MANAGED_WORKSPACE: WorkspaceState = { kind: 'managed', path: null, folderName: null, scope: 'chat', projectName: null }
 
 const RUNNING_STATES = new Set(['queued', 'starting', 'running', 'streaming', 'cancelling'])
+
+function asProviderName(value: string): ProviderName | null {
+  return PROVIDER_NAMES.includes(value as ProviderName) ? value as ProviderName : null
+}
 
 /**
  * The conversation itself.
@@ -99,7 +107,14 @@ export function ChatPage() {
   const [turnModelCatalog, setTurnModelCatalog] = useState<ProviderModel | null>(null)
   const [visionCandidates, setVisionCandidates] = useState<ProviderModel[]>([])
   const [visionSetting, setVisionSetting] = useState<VisionModelSetting | null>(null)
+  const [chatProvider, setChatProvider] = useState<ProviderName | null>(null)
+  const [chatModelId, setChatModelId] = useState('')
+  const [chatModels, setChatModels] = useState<ProviderModel[]>([])
+  const [chatModelsLoading, setChatModelsLoading] = useState(false)
+  const [chatModelsFailed, setChatModelsFailed] = useState(false)
   const [streamedByMessage, setStreamedByMessage] = useState<Map<string, string>>(() => new Map())
+  const [oversizedInput, setOversizedInput] = useState<{ text: string; attachments: string[] } | null>(null)
+  const [sendingOversizedInput, setSendingOversizedInput] = useState(false)
 
   const cursorRef = useRef('0')
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -108,6 +123,7 @@ export function ChatPage() {
   const observedConversationRef = useRef(conversationId)
   const streamedDeltaIdsRef = useRef(new Set<string>())
   const streamedConversationRef = useRef(conversationId)
+  const selectionConversationRef = useRef('')
   const showOverview = location.pathname.endsWith('/overview')
   const conversationPath = projectId === undefined
     ? `/chats/${encodeURIComponent(conversationId)}`
@@ -221,6 +237,66 @@ export function ChatPage() {
   // way the worker's own capability check does.
   const provider = conversation?.provider
   const modelId = conversation?.model_id
+  const effectiveChatProvider = chatProvider ?? asProviderName(provider ?? '')
+  const effectiveChatModelId = chatProvider ? chatModelId : modelId ?? ''
+
+  useEffect(() => {
+    selectionConversationRef.current = ''
+    setChatProvider(null)
+    setChatModelId('')
+    setChatModels([])
+  }, [conversationId])
+
+  useEffect(() => {
+    if (!conversation || conversation.conversation_id !== conversationId || selectionConversationRef.current === conversationId) return
+    const initialProvider = asProviderName(conversation.provider)
+    if (!initialProvider) return
+    selectionConversationRef.current = conversationId
+    setChatProvider(initialProvider)
+    setChatModelId(conversation.model_id)
+  }, [conversation, conversationId])
+
+  useEffect(() => {
+    if (!effectiveChatProvider) return
+    const controller = new AbortController()
+    setChatModelsLoading(true)
+    setChatModelsFailed(false)
+    listProviderModels(client, effectiveChatProvider, controller.signal)
+      .then((items) => {
+        if (controller.signal.aborted) return
+        setChatModels(items)
+        setChatModelId((current) => items.some((item) => item.model_id === current)
+          ? current
+          : items.find((item) => item.is_favorite)?.model_id ?? items[0]?.model_id ?? '')
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) {
+          setChatModels([])
+          setChatModelsFailed(true)
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setChatModelsLoading(false)
+      })
+    return () => controller.abort()
+  }, [client, effectiveChatProvider])
+
+  const changeChatProvider = useCallback((next: ProviderName) => {
+    setChatProvider(next)
+    setChatModelId('')
+    setChatModels([])
+  }, [])
+
+  const chatSelection = useMemo(
+    () => effectiveChatProvider && effectiveChatModelId ? { provider: effectiveChatProvider, model_id: effectiveChatModelId } : undefined,
+    [effectiveChatModelId, effectiveChatProvider],
+  )
+
+  const sendChatMessage = useCallback(
+    (text: string, attachments: string[] = []) => sendConversationMessage(client, conversationId, text, attachments, chatSelection),
+    [chatSelection, client, conversationId],
+  )
+
   useEffect(() => {
     if (!provider || !modelId || !PROVIDER_NAMES.includes(provider as ProviderName)) return
     const controller = new AbortController()
@@ -237,11 +313,13 @@ export function ChatPage() {
   const turnModel = turnModelCatalog?.model_id === modelId ? turnModelCatalog : null
 
   const hasVisualAttachment = attachments.some((item) => item.kind === 'image' || item.kind === 'pdf')
-  const visionModel = chooseVisionModel(visionCandidates, provider ?? '', visionSetting)
+  const selectedChatModel = chatModels.find((item) => item.model_id === effectiveChatModelId)
+  const composerModel = selectedChatModel?.provider === effectiveChatProvider ? selectedChatModel : turnModel
+  const visionModel = chooseVisionModel(visionCandidates, effectiveChatProvider ?? provider ?? '', visionSetting)
   const notice = attachmentNotice({
     hasVisualAttachment,
-    modelSeesImages: turnModel?.input_modalities.includes('image') ?? false,
-    modelCallsTools: turnModel ? modelCallsTools(turnModel.capabilities) : true,
+    modelSeesImages: composerModel?.input_modalities.includes('image') ?? false,
+    modelCallsTools: composerModel ? modelCallsTools(composerModel.capabilities) : true,
     visionModelName: visionModel?.model_id ?? null,
   })
 
@@ -295,8 +373,12 @@ export function ChatPage() {
     [messages, activity.events],
   )
   const unclaimedEvents = useMemo(
-    () => activity.events.filter((event) => !claimedTurnIds.has(event.turnId ?? '')),
+    () => activity.events.filter((event) => !claimedTurnIds.has(event.turnId ?? '') && !event.type.startsWith('context.')),
     [activity.events, claimedTurnIds],
+  )
+  const contextUsage = useMemo(
+    () => [...activity.events].reverse().find((event) => event.contextUsage)?.contextUsage ?? conversation?.context_usage ?? null,
+    [activity.events, conversation?.context_usage],
   )
   const openQuestionTurnIds = useMemo(
     () => new Set((conversation?.turns ?? []).filter((turn) => turn.state === 'waiting_user').map((turn) => turn.turn_id)),
@@ -377,7 +459,7 @@ export function ChatPage() {
     setError(null)
     setPendingUserMessage({ message_id: `pending-${Date.now()}`, role: 'user', content: response, status: 'completed', retryable: false, attachments: [] })
     try {
-      await sendConversationMessage(client, conversationId, response)
+      await sendChatMessage(response)
       await loadSnapshot(false)
       void listConversations(client).then((value) => setChats(value.items)).catch(() => undefined)
     } catch (caught) {
@@ -385,7 +467,7 @@ export function ChatPage() {
       setError('Não foi possível enviar as respostas. Tente novamente.')
       throw caught
     }
-  }, [client, conversationId, loadSnapshot, openQuestionTurnIds, running])
+  }, [client, loadSnapshot, openQuestionTurnIds, running, sendChatMessage])
 
   const submitMcpApproval = useCallback(async (event: ConversationActivityEvent, secrets: Record<string, string>) => {
     if (!event.mcpApproval || !event.turnId || !openQuestionTurnIds.has(event.turnId) || running) return
@@ -400,7 +482,7 @@ export function ChatPage() {
     const response = `Conectei o servidor ${server.display_name}.`
     setPendingUserMessage({ message_id: `pending-${Date.now()}`, role: 'user', content: response, status: 'completed', retryable: false, attachments: [] })
     try {
-      await sendConversationMessage(client, conversationId, response)
+      await sendChatMessage(response)
       await loadSnapshot(false)
       void listConversations(client).then((value) => setChats(value.items)).catch(() => undefined)
     } catch (caught) {
@@ -408,7 +490,7 @@ export function ChatPage() {
       setError('A conexão foi concluída, mas não foi possível avisar o agente. Tente novamente.')
       throw caught
     }
-  }, [client, conversationId, loadSnapshot, openQuestionTurnIds, running])
+  }, [client, loadSnapshot, openQuestionTurnIds, running, sendChatMessage])
 
   const declineMcpApproval = useCallback(async (event: ConversationActivityEvent) => {
     if (!event.mcpApproval || !event.turnId || !openQuestionTurnIds.has(event.turnId) || running) return
@@ -416,7 +498,7 @@ export function ChatPage() {
     setError(null)
     setPendingUserMessage({ message_id: `pending-${Date.now()}`, role: 'user', content: response, status: 'completed', retryable: false, attachments: [] })
     try {
-      await sendConversationMessage(client, conversationId, response)
+      await sendChatMessage(response)
       await loadSnapshot(false)
       void listConversations(client).then((value) => setChats(value.items)).catch(() => undefined)
     } catch (caught) {
@@ -424,34 +506,38 @@ export function ChatPage() {
       setError('Não foi possível registrar a recusa. Tente novamente.')
       throw caught
     }
-  }, [client, conversationId, loadSnapshot, openQuestionTurnIds, running])
+  }, [client, loadSnapshot, openQuestionTurnIds, running, sendChatMessage])
 
   const submitPluginApproval = useCallback(async (event: ConversationActivityEvent) => {
     if (!event.pluginApproval || !event.turnId || !openQuestionTurnIds.has(event.turnId) || running) return
     await approvePlugin(client, event.pluginApproval.plugin_id)
     const response = `Instalei o plugin ${event.pluginApproval.display_name}.`
     setPendingUserMessage({ message_id: `pending-${Date.now()}`, role: 'user', content: response, status: 'completed', retryable: false, attachments: [] })
-    await sendConversationMessage(client, conversationId, response)
+    await sendChatMessage(response)
     await loadSnapshot(false)
-  }, [client, conversationId, loadSnapshot, openQuestionTurnIds, running])
+  }, [client, loadSnapshot, openQuestionTurnIds, running, sendChatMessage])
 
   const declinePluginApproval = useCallback(async (event: ConversationActivityEvent) => {
     if (!event.pluginApproval || !event.turnId || !openQuestionTurnIds.has(event.turnId) || running) return
     const response = `Não quero instalar o plugin ${event.pluginApproval.display_name} agora.`
     setPendingUserMessage({ message_id: `pending-${Date.now()}`, role: 'user', content: response, status: 'completed', retryable: false, attachments: [] })
-    await sendConversationMessage(client, conversationId, response)
+    await sendChatMessage(response)
     await loadSnapshot(false)
-  }, [client, conversationId, loadSnapshot, openQuestionTurnIds, running])
+  }, [loadSnapshot, openQuestionTurnIds, running, sendChatMessage])
 
   async function submit() {
     const text = message.trim()
     const readyUploads = readyUploadIds()
     if ((!text && readyUploads.length === 0) || running) return
+    if (text.length > MAX_MESSAGE_CHARACTERS) {
+      setOversizedInput({ text, attachments: readyUploads })
+      return
+    }
     setMessage('')
     setError(null)
     setPendingUserMessage({ message_id: `pending-${Date.now()}`, role: 'user', content: text, status: 'completed', retryable: false, attachments: [] })
     try {
-      await sendConversationMessage(client, conversationId, text, readyUploads)
+      await sendChatMessage(text, readyUploads)
       resetAttachments()
       await loadSnapshot(false)
       void listConversations(client).then((value) => setChats(value.items)).catch(() => undefined)
@@ -459,6 +545,38 @@ export function ChatPage() {
       setMessage(text)
       setPendingUserMessage(null)
       setError('Não foi possível enviar. Tente novamente.')
+    }
+  }
+
+  async function sendOversizedInputAsFile() {
+    if (!oversizedInput || sendingOversizedInput || running) return
+    setSendingOversizedInput(true)
+    setError(null)
+    const draft = oversizedInput
+    let uploadedId: string | null = null
+    let sent = false
+    try {
+      const uploaded = await uploadFile(client, new File([draft.text], 'mensagem.txt', { type: 'text/plain' }))
+      uploadedId = uploaded.upload_id
+      const prompt = 'Enviei o conteúdo extenso no arquivo mensagem.txt. Leia o arquivo anexado antes de responder.'
+      setOversizedInput(null)
+      setMessage('')
+      setPendingUserMessage({ message_id: `pending-${Date.now()}`, role: 'user', content: prompt, status: 'completed', retryable: false, attachments: [] })
+      await sendChatMessage(prompt, [...draft.attachments, uploaded.upload_id])
+      sent = true
+      resetAttachments()
+      await loadSnapshot(false)
+      void listConversations(client).then((value) => setChats(value.items)).catch(() => undefined)
+    } catch {
+      if (uploadedId && !sent) void deleteUpload(client, uploadedId).catch(() => undefined)
+      if (!sent) {
+        setOversizedInput(draft)
+        setMessage(draft.text)
+        setPendingUserMessage(null)
+      }
+      setError('Não foi possível enviar o input como arquivo .txt. Tente novamente.')
+    } finally {
+      setSendingOversizedInput(false)
     }
   }
 
@@ -483,6 +601,7 @@ export function ChatPage() {
           <h1>{conversation?.title ?? 'Conversa'}</h1>
           {conversation?.turns.some((turn) => turn.scheduled_by_schedule_id) && <span className="chat__model">execuções agendadas</span>}
           {conversation && <span className="chat__model">{conversation.provider} · {conversation.model_id}</span>}
+          <ContextIndicator usage={contextUsage} />
         </div>
         <div className="chat__bar-actions">
           <button
@@ -610,16 +729,42 @@ export function ChatPage() {
           canSend={attachmentsReady}
           notice={notice}
           settings={
-            <WorkspaceFolderButton
-              state={conversation?.workspace ?? MANAGED_WORKSPACE}
-              onInspect={(path) => inspectWorkspaceFolder(client, conversationId, path)}
-              onAttach={(path, acknowledged) => attachWorkspaceFolder(client, conversationId, path, acknowledged)}
-              onDetach={() => detachWorkspaceFolder(client, conversationId)}
-              onChange={(next) => setConversation((current) => (current ? { ...current, workspace: next } : current))}
-            />
+            <>
+              {effectiveChatProvider && <ModelPicker
+                providers={[...PROVIDER_NAMES]}
+                provider={effectiveChatProvider}
+                onProviderChange={changeChatProvider}
+                models={chatModels}
+                modelId={effectiveChatModelId}
+                onModelChange={setChatModelId}
+                loading={chatModelsLoading}
+                failed={chatModelsFailed}
+                disabled={running || stopping}
+              />}
+              <WorkspaceFolderButton
+                state={conversation?.workspace ?? MANAGED_WORKSPACE}
+                onInspect={(path) => inspectWorkspaceFolder(client, conversationId, path)}
+                onAttach={(path, acknowledged) => attachWorkspaceFolder(client, conversationId, path, acknowledged)}
+                onDetach={() => detachWorkspaceFolder(client, conversationId)}
+                onChange={(next) => setConversation((current) => (current ? { ...current, workspace: next } : current))}
+              />
+            </>
           }
         />
       </footer>}
+      {oversizedInput && (
+        <div className="input-limit-dialog__backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !sendingOversizedInput) setOversizedInput(null) }}>
+          <section className="input-limit-dialog" role="dialog" aria-modal="true" aria-labelledby="input-limit-title">
+            <span className="eyebrow">INPUT LIMIT</span>
+            <h2 id="input-limit-title">Seu input é muito extenso</h2>
+            <p>Reduza a mensagem para até {MAX_MESSAGE_CHARACTERS.toLocaleString('pt-BR')} caracteres ou envie o conteúdo completo como um arquivo .txt.</p>
+            <div className="input-limit-dialog__actions">
+              <button type="button" className="ghost-button" disabled={sendingOversizedInput} onClick={() => setOversizedInput(null)}>Voltar e reduzir</button>
+              <button type="button" className="button button--primary" disabled={sendingOversizedInput} onClick={() => void sendOversizedInputAsFile()}>{sendingOversizedInput ? 'Enviando arquivo…' : 'Enviar mesmo assim como arquivo .txt'}</button>
+            </div>
+          </section>
+        </div>
+      )}
     </main>
   )
 }

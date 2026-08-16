@@ -35,6 +35,45 @@ def test_a_short_conversation_is_returned_untouched() -> None:
     assert window == [{"role": "system", "content": "prompt"}, *messages]
 
 
+def test_context_usage_breaks_down_the_same_request_into_visible_components() -> None:
+    runtime = AgenticTurnRuntime(
+        store=object(), provider=object(), system_prompt="system rules", skill_prompt_tokens=7,
+        tool_kinds={"read_file": "tool", "mcp_lookup": "mcp"},
+        limits=AgenticLimits(max_context_tokens=2_000, context_window_tokens=4_000),
+    )
+    messages = [{"role": "user", "content": "old context"}, {"role": "user", "content": "current request"}]
+    runtime._pinned_index = 1
+    usage = runtime._context_usage(
+        messages,
+        runtime._request_messages(messages),
+        [
+            {"type": "function", "function": {"name": "read_file", "parameters": {}}},
+            {"type": "function", "function": {"name": "mcp_lookup", "parameters": {}}},
+        ],
+    )
+
+    assert usage["limit_tokens"] == 4_000
+    assert usage["input_tokens"] > 0
+    assert usage["tools_tokens"] > 0
+    assert usage["mcps_tokens"] > 0
+    assert usage["skills_tokens"] == 7
+    assert usage["used_tokens"] == sum(usage[key] for key in ("system_prompt_tokens", "history_tokens", "input_tokens", "tools_tokens", "skills_tokens", "mcps_tokens"))
+
+
+def test_auto_compaction_keeps_the_current_request_and_reduces_old_units() -> None:
+    runtime = _runtime(max_context_tokens=1_000)
+    messages = [{"role": "user", "content": f"old request {index} " + "x" * 500} for index in range(8)]
+    messages.append({"role": "user", "content": "current request"})
+    runtime._pinned_index = len(messages) - 1
+
+    runtime._maybe_compact(messages, {"turn_id": "turn-1"}, [])
+
+    assert runtime._compaction_count == 1
+    assert any(item.get("content") == "current request" for item in messages)
+    assert any("Resumo automático do contexto anterior" in str(item.get("content")) for item in messages)
+    assert len(messages) < 9
+
+
 def test_the_current_turns_request_is_pinned_not_a_stale_first_turn_request() -> None:
     """``messages`` spans the whole conversation, not just this turn (see
     ``history_for_turn``). The pin must lock onto the current (last) user

@@ -238,7 +238,17 @@ class PostgresChatStore:
             else:
                 row = c.execute(select(conversations).where(conversations.c.conversation_id == conversation_id, conversations.c.user_id == user_id)).mappings().first()
                 if row is None: raise ApplicationNotFoundError(conversation_id)
-                provider, model_id = row["provider"], row["model_id"]
+                requested_provider, requested_model_id = provider.strip(), model_id.strip()
+                if bool(requested_provider) != bool(requested_model_id):
+                    raise ValueError("provider and model_id must be provided together")
+                if requested_provider:
+                    provider, model_id = requested_provider, requested_model_id
+                    c.execute(update(conversations).where(
+                        conversations.c.conversation_id == conversation_id,
+                        conversations.c.user_id == user_id,
+                    ).values(provider=provider, model_id=model_id))
+                else:
+                    provider, model_id = row["provider"], row["model_id"]
                 sequence = int(c.execute(select(func.max(conversation_messages.c.sequence)).where(conversation_messages.c.conversation_id == conversation_id)).scalar() or 0) + 1
                 # A normal follow-up message is also a valid answer to the
                 # last structured prompt. Close it before queuing the next
@@ -316,7 +326,11 @@ class PostgresChatStore:
                 activity_cursor = cursor
                 if len(page.events) < 500:
                     break
-        return {"conversation_id": conv["conversation_id"], "title": conv["title"], "state": conv["state"], "provider": conv["provider"], "model_id": conv["model_id"], "project_id": conv["project_id"], "messages": [{"message_id": m["message_id"], "role": m["role"], "content": m["content"], "status": m["status"], "retryable": bool(m["retryable"]), "attachments": attachments_by_message.get(str(m["message_id"]), [])} for m in messages], "turns": [{"turn_id": t["turn_id"], "state": t["state"], "created_at": t["created_at"].isoformat(), "started_at": t["started_at"].isoformat() if t["started_at"] else None, "finished_at": t["finished_at"].isoformat() if t["finished_at"] else None, "scheduled_by_schedule_id": t["scheduled_by_schedule_id"]} for t in turns], "activities": activities, "activity_cursor": activity_cursor}
+        context_usage = next(
+            (dict(item.get("payload") or {}) for item in reversed(activities) if item.get("event_type") in {AgentActivityEventType.CONTEXT_UPDATED.value, AgentActivityEventType.CONTEXT_COMPACTED.value} and isinstance(item.get("payload"), Mapping) and "used_tokens" in item["payload"]),
+            None,
+        )
+        return {"conversation_id": conv["conversation_id"], "title": conv["title"], "state": conv["state"], "provider": conv["provider"], "model_id": conv["model_id"], "project_id": conv["project_id"], "messages": [{"message_id": m["message_id"], "role": m["role"], "content": m["content"], "status": m["status"], "retryable": bool(m["retryable"]), "attachments": attachments_by_message.get(str(m["message_id"]), [])} for m in messages], "turns": [{"turn_id": t["turn_id"], "state": t["state"], "created_at": t["created_at"].isoformat(), "started_at": t["started_at"].isoformat() if t["started_at"] else None, "finished_at": t["finished_at"].isoformat() if t["finished_at"] else None, "scheduled_by_schedule_id": t["scheduled_by_schedule_id"]} for t in turns], "activities": activities, "activity_cursor": activity_cursor, "context_usage": context_usage}
 
     @staticmethod
     def _public_activity(event: AgentActivityEvent, cursor: str | None = None) -> dict[str, object]:
@@ -615,8 +629,8 @@ class ChatApplication:
         receipt = self.store.create(user_id=context.user_id, message=message, provider=provider, model_id=model_id, idempotency_key=idempotency_key, project_id=project_id, attachments=attachments, new_conversation_id=new_conversation_id)
         self._project_execution(receipt, context.user_id, workspace_id, idempotency_key)
         return receipt
-    def send(self, user_id: str, conversation_id: str, message: str, idempotency_key: str, attachments=()):
-        receipt = self.store.create(user_id=user_id, message=message, provider="", model_id="", idempotency_key=idempotency_key, conversation_id=conversation_id, attachments=attachments)
+    def send(self, user_id: str, conversation_id: str, message: str, idempotency_key: str, attachments=(), provider: str = "", model_id: str = ""):
+        receipt = self.store.create(user_id=user_id, message=message, provider=provider, model_id=model_id, idempotency_key=idempotency_key, conversation_id=conversation_id, attachments=attachments)
         self._project_execution(receipt, user_id, None, idempotency_key)
         return receipt
     def list(self, user_id: str): return self.store.list(user_id)

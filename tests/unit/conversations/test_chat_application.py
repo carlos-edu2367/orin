@@ -79,3 +79,25 @@ def test_send_returns_a_receipt_even_when_the_execution_projection_fails() -> No
 
     assert receipt.state == "queued"
     assert receipt.turn_id != first.turn_id
+
+
+def test_send_can_change_the_provider_and_model_for_the_conversation() -> None:
+    store = _store()
+    application = ChatApplication(store, _RaisingExecutions())
+    first = application.create(
+        ProviderCatalogContext("user-1", "conversation.create"),
+        message="abrir conversa", provider="openrouter", model_id="model-a",
+        workspace_id=None, idempotency_key="key-switch-1",
+    )
+
+    receipt = application.send(
+        user_id="user-1", conversation_id=first.conversation_id, message="usar outro modelo",
+        idempotency_key="key-switch-2", provider="ollama", model_id="model-b",
+    )
+
+    snapshot = store.get(first.conversation_id, "user-1")
+    turn = store.claim(receipt.turn_id)
+    assert snapshot["provider"] == "ollama"
+    assert snapshot["model_id"] == "model-b"
+    assert turn["provider"] == "ollama"
+    assert turn["model_id"] == "model-b"

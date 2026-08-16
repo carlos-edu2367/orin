@@ -45,6 +45,7 @@ export function summarizeActivities(events: ConversationActivityEvent[]): Activi
 }
 
 export function isRenderable(event: ConversationActivityEvent, settled: Set<string>): boolean {
+  if (event.type.startsWith('context.')) return false
   if (event.kind === 'message') return false
   // A lifecycle "turn started/working" line adds nothing next to the tool rows
   // that follow it, so only terminal lifecycle states earn a row.

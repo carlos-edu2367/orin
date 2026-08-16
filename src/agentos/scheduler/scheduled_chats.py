@@ -47,6 +47,13 @@ def _stored_utc(value: datetime) -> datetime:
     return value.replace(tzinfo=UTC) if value.tzinfo is None or value.utcoffset() is None else value.astimezone(UTC)
 
 
+def _iso_utc(value: datetime | None) -> str | None:
+    """Serialize stored UTC timestamps with an explicit offset for clients."""
+    if value is None:
+        return None
+    return _stored_utc(value).isoformat().replace("+00:00", "Z")
+
+
 def _clock_now() -> datetime:
     return datetime.now(UTC)
 
@@ -91,7 +98,14 @@ class ScheduledChatService:
         if request.recurrence == "once":
             if request.fire_at is None:
                 raise ValueError("once schedules require fire_at")
-            fire_at = _utc(request.fire_at)
+            # A datetime-local value has no offset. In that case it is a wall
+            # clock value in the schedule's selected IANA timezone, not in the
+            # server or browser timezone.
+            fire_at = request.fire_at
+            if fire_at.tzinfo is None or fire_at.utcoffset() is None:
+                fire_at = fire_at.replace(tzinfo=zone).astimezone(UTC)
+            else:
+                fire_at = _utc(fire_at)
             if fire_at <= now:
                 raise ValueError("fire_at must be in the future")
             return fire_at
@@ -167,12 +181,12 @@ class ScheduledChatService:
                 provider=request.provider, model_id=request.model_id, project_id=request.project_id,
                 conversation_id=None, created_at=now, updated_at=now,
             ))
-        return {"schedule_id": schedule_id, "state": "ACTIVE", "next_fire_at": next_fire.isoformat(), "recurrence": request.recurrence}
+        return {"schedule_id": schedule_id, "state": "ACTIVE", "next_fire_at": _iso_utc(next_fire), "recurrence": request.recurrence}
 
     @staticmethod
     def _rule(request: ScheduledChatInput, next_fire: datetime) -> dict[str, object]:
         return {
-            "kind": request.recurrence, "fire_at": request.fire_at.astimezone(UTC).isoformat() if request.fire_at else None,
+            "kind": request.recurrence, "fire_at": next_fire.isoformat() if request.fire_at else None,
             "time_of_day": request.time_of_day, "weekday": request.weekday,
             "anchor_at": next_fire.isoformat(),
         }
@@ -180,7 +194,7 @@ class ScheduledChatService:
     @staticmethod
     def _public(row) -> dict[str, object]:
         rule = dict(row["rule"] or {})
-        return {"schedule_id": str(row["schedule_id"]), "state": str(row["state"]), "next_fire_at": row["next_fire_at"].isoformat() if row["next_fire_at"] else None, "recurrence": str(rule.get("kind") or "once"), "project_id": None}
+        return {"schedule_id": str(row["schedule_id"]), "state": str(row["state"]), "next_fire_at": _iso_utc(row["next_fire_at"]), "recurrence": str(rule.get("kind") or "once"), "project_id": None}
 
     def list(self, user_id: str) -> dict[str, object]:
         with self._engine.connect() as connection:

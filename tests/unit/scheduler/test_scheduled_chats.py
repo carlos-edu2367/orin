@@ -40,4 +40,26 @@ def test_daily_rule_keeps_local_civil_time():
     now = datetime(2026, 8, 13, 12, tzinfo=UTC)
     service = ScheduledChatService(create_engine("sqlite://", future=True), clock=lambda: now)
     request = ScheduledChatInput("x", "p", "m", "America/Sao_Paulo", "daily", time_of_day="09:30")
-    assert service.next_fire(request).astimezone(__import__("zoneinfo").ZoneInfo("America/Sao_Paulo")).strftime("%H:%M") == "09:30"
+    from zoneinfo import ZoneInfo
+
+    assert service.next_fire(request).astimezone(ZoneInfo("America/Sao_Paulo")).strftime("%H:%M") == "09:30"
+
+
+def test_list_serializes_once_schedule_as_explicit_utc_for_local_display():
+    now = datetime(2026, 8, 15, 12, tzinfo=UTC)
+    engine = create_engine("sqlite://", future=True)
+    metadata.create_all(engine)
+    _ready(engine, now)
+    service = ScheduledChatService(engine, clock=lambda: now)
+    service.create(
+        "user-1",
+        ScheduledChatInput(
+            "x", "openrouter", "model-1", "America/Sao_Paulo", "once",
+            fire_at=datetime(2026, 8, 15, 23, 50),
+        ),
+        idempotency_key="schedule-local-once",
+    )
+
+    listed = service.list("user-1")
+
+    assert listed["items"][0]["next_fire_at"] == "2026-08-16T02:50:00Z"

@@ -154,6 +154,7 @@ class UpdateProjectRequest(_RequestModel):
 class SendConversationMessageRequest(_RequestModel):
     message: str = Field(default="", max_length=16000)
     attachments: list[str] = Field(default_factory=list, max_length=MAX_FILES_PER_MESSAGE)
+    selection: ConversationSelectionRequest | None = None
 
 
 class SkillDependenciesRequest(_RequestModel):
@@ -756,13 +757,27 @@ def create_app(services: ApiServices) -> FastAPI:
         principal = principal_for(request, mutable=True)
         services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.send")
         require_content(payload.message, payload.attachments)
+        provider = ""
+        model_id = ""
+        if payload.selection is not None:
+            provider = _provider_name(payload.selection.provider)
+            model_id = payload.selection.model_id
+            if services.provider_catalog is not None:
+                available = _require_port(services.provider_catalog).list(
+                    ProviderCatalogContext(principal.user_id, "conversation.send"), provider,
+                )
+                if not any(_catalog_model_id(item) == model_id for item in available):
+                    raise ApplicationValidationError("model is not authorized for this conversation")
         attachments: list[dict[str, object]] = []
         workspace_id = conversation_id
         if payload.attachments:
             workspace_id, _ = effective_workspace_id(conversation_record(conversation_id, principal), principal)
             attachments = promote(workspace_id, principal, payload.attachments)
         try:
-            result = require_port(services.conversation_application).send(principal.user_id, conversation_id, payload.message, _idempotency(request), attachments=attachments)  # type: ignore[union-attr]
+            result = require_port(services.conversation_application).send(
+                principal.user_id, conversation_id, payload.message, _idempotency(request),
+                attachments=attachments, provider=provider, model_id=model_id,
+            )  # type: ignore[union-attr]
         except Exception:
             discard_promoted(workspace_for(workspace_id, principal), attachments)
             raise
@@ -1353,6 +1368,12 @@ def _provider_name(value: str) -> str:
     if normalized not in {"openai", "anthropic", "openrouter", "omniroute", "ollama"}:
         raise ValueError("unsupported provider")
     return normalized
+
+
+def _catalog_model_id(item: object) -> object:
+    if isinstance(item, Mapping):
+        return item.get("model_id")
+    return getattr(item, "model_id", None)
 
 
 def _provider_public(value: object) -> dict[str, object]:

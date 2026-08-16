@@ -1,0 +1,8 @@
+# Chat context telemetry, auto-compaction and long-input fallback
+
+- The agent runtime already owns the authoritative prompt composition and conservative four-characters-per-token trim estimate. Context telemetry is emitted from that same request construction as bounded `context.updated` activity payloads; it reports system prompt, history, current input, native tools, Skills, MCPs, omitted messages, limit and compaction count.
+- `AgenticLimits.max_context_tokens` remains the trim budget. `context_window_tokens` is optional and carries the model catalog's full window for UI percentage display; the worker reserves overhead before deriving the trim budget.
+- Automatic compaction runs before ordinary message trimming when the local history estimate reaches 82% of the trim budget. It preserves the current user request and atomic tool-call/result units, asks the selected provider for a bounded summary without tools, and falls back to a bounded deterministic summary if that call fails. Compaction changes only the in-memory turn request, never durable chat history.
+- The chat header renders context details on hover/focus. `context.*` activities are filtered from the normal activity/timeline rows while the latest usage is retained in the conversation snapshot.
+- The public chat input contract remains 16,000 characters. The chat UI intercepts longer drafts with a modal and can upload the exact draft as authenticated `mensagem.txt`, sending a short instruction plus the staged text attachment. Failed fallback uploads are discarded when possible.
+- Validation completed: focused Python agent/conversation tests (87 passed), focused React chat/context tests (30 passed), frontend production build, Python compileall and `git diff --check`.

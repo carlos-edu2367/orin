@@ -339,7 +339,55 @@ describe('ChatPage', () => {
 
     await waitFor(() => expect(sent).toHaveBeenCalled())
     const body = JSON.parse(String(sent.mock.calls[0][0]))
-    expect(body).toEqual({ message: '', attachments: ['upl_1'] })
+    expect(body).toEqual({
+      message: '', attachments: ['upl_1'],
+      selection: { provider: 'openrouter', model_id: 'model-a' },
+    })
+  })
+
+  it('changes the provider and model used by the next turn', async () => {
+    const sent = vi.fn()
+    let currentProvider = 'openrouter'
+    let currentModel = 'model-a'
+    globalThis.fetch = vi.fn<typeof fetch>().mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : String(input)
+      const method = (init?.method ?? 'GET').toUpperCase()
+      if (url.includes('/events?')) return new Response('event: heartbeat\ndata: {"cursor":"a.9"}\n\n', { headers: { 'Content-Type': 'text/event-stream' } })
+      if (url.includes('/v1/providers/') && url.endsWith('/models')) {
+        const provider = url.split('/v1/providers/')[1].split('/')[0]
+        const items = provider === 'ollama'
+          ? [{ provider: 'ollama', model_id: 'model-b', display_name: 'Modelo B', context_window: 128000, capabilities: ['tools'], input_modalities: ['text'], output_modalities: ['text'], pricing: null, is_favorite: true, refreshed_at: null, route_kind: 'model' }]
+          : [{ provider: 'openrouter', model_id: 'model-a', display_name: 'Modelo A', context_window: 128000, capabilities: ['tools'], input_modalities: ['text'], output_modalities: ['text'], pricing: null, is_favorite: true, refreshed_at: null, route_kind: 'model' }]
+        return new Response(JSON.stringify({ items }), { headers: { 'Content-Type': 'application/json' } })
+      }
+      if (url.includes('/messages') && method === 'POST') {
+        const body = JSON.parse(String(init?.body ?? '{}')) as { selection?: { provider: string; model_id: string } }
+        sent(body)
+        currentProvider = body.selection?.provider ?? currentProvider
+        currentModel = body.selection?.model_id ?? currentModel
+        return new Response(JSON.stringify({ conversation_id: CONVERSATION_ID, title: 't', turn_id: 'turn-2', message_id: 'msg-3', state: 'queued' }), { status: 201, headers: { 'Content-Type': 'application/json' } })
+      }
+      if (url.endsWith('/v1/projects/sidebar') || url.endsWith('/v1/conversations')) return new Response(JSON.stringify({ items: [] }), { headers: { 'Content-Type': 'application/json' } })
+      if (url.includes(`/v1/conversations/${CONVERSATION_ID}`)) {
+        return new Response(JSON.stringify({ ...snapshotBody({ state: 'completed', messages: [{ message_id: 'msg-1', role: 'assistant', content: 'Feito.', status: 'completed', retryable: false }], activities: [] }), provider: currentProvider, model_id: currentModel }), { headers: { 'Content-Type': 'application/json' } })
+      }
+      return new Response('{}', { headers: { 'Content-Type': 'application/json' } })
+    })
+
+    renderChat()
+    const user = userEvent.setup()
+    await screen.findByText('Feito.')
+    await user.click(screen.getByRole('button', { name: /openrouter/i }))
+    await user.click(screen.getByRole('option', { name: 'ollama' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Modelo B' })).toBeInTheDocument())
+    await user.click(screen.getByRole('button', { name: 'Modelo B' }))
+    await user.click(await screen.findByRole('option', { name: /Modelo B/ }))
+    await user.type(screen.getByRole('textbox', { name: 'Mensagem' }), 'troquei de modelo')
+    await user.click(screen.getByRole('button', { name: 'Enviar mensagem' }))
+
+    await waitFor(() => expect(sent).toHaveBeenCalledWith({
+      message: 'troquei de modelo', attachments: [], selection: { provider: 'ollama', model_id: 'model-b' },
+    }))
   })
 
   it('keeps the fixed composer fully revealed when reading the latest message', async () => {
