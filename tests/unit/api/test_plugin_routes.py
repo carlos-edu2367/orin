@@ -19,6 +19,7 @@ class Plugins:
     def list_marketplaces(self, user_id): return []
     def add_marketplace(self, **kwargs): return {"name":"community"}
     def discover_library(self, *, refresh=False, query=None): return {"entries": [], "web_search_available": refresh, "query_seen": query}
+    def infer_mcp_launch(self, *, source_url): return {"display_name": "demo-mcp", "transport": "stdio", "command": "npx", "args": ["-y", "demo-mcp"], "url": None, "secret_names": [], "confidence": "structured", "source_url_seen": source_url}
 
 def test_plugin_routes_apply_the_user_boundary():
     client = TestClient(create_app(ApiServices(security=Security(), plugins=Plugins())))
@@ -49,3 +50,11 @@ def test_plugin_inspect_route_surfaces_the_no_manifest_code():
     response = client.post("/v1/plugins/inspect", json={"reference": "acme/no-manifest"})
     assert response.status_code == 409
     assert response.json()["error"]["code"] == "plugin_no_manifest"
+
+def test_infer_mcp_route_forwards_the_source_url():
+    client = TestClient(create_app(ApiServices(security=Security(), plugins=Plugins())))
+    response = client.post("/v1/plugins/library/infer-mcp", json={"source_url": "https://github.com/acme/demo-mcp.git"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["command"] == "npx"
+    assert body["source_url_seen"] == "https://github.com/acme/demo-mcp.git"

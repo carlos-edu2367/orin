@@ -216,6 +216,10 @@ class PluginReferenceRequest(_RequestModel):
     reference: str = Field(min_length=1, max_length=1024)
 
 
+class PluginInferMcpRequest(_RequestModel):
+    source_url: str = Field(min_length=1, max_length=2048)
+
+
 class PluginEnabledRequest(_RequestModel):
     enabled: bool
 
@@ -963,6 +967,15 @@ def create_app(services: ApiServices) -> FastAPI:
         # PluginFetcher's own timeout; keeping it off the event loop matters here
         # because otherwise it stalls every other request and open SSE stream.
         result = await run_in_threadpool(_require_port(services.plugins).inspect, user_id=principal.user_id, reference=payload.reference)
+        return JSONResponse(_jsonable(result))
+
+    @app.post("/v1/plugins/library/infer-mcp")
+    async def infer_mcp_from_repository(payload: PluginInferMcpRequest, request: Request) -> JSONResponse:
+        principal = principal_for(request, mutable=True)
+        services.security.check_rate_limit(principal, action="plugins.library.infer_mcp", origin=request.headers.get("origin"))
+        services.security.authorize(principal, action="plugins.library.infer_mcp", resource_id=None, purpose="plugins.inspect")
+        # Cloning a repository to read its config files is blocking I/O, same as plugin inspection.
+        result = await run_in_threadpool(_require_port(services.plugins).infer_mcp_launch, source_url=payload.source_url)
         return JSONResponse(_jsonable(result))
 
     @app.post("/v1/plugins/{plugin_id}/approve")
