@@ -18,6 +18,7 @@ class Plugins:
     def remove(self, **kwargs): return {"removed":True}
     def list_marketplaces(self, user_id): return []
     def add_marketplace(self, **kwargs): return {"name":"community"}
+    def discover_library(self, *, refresh=False): return {"entries": [], "web_search_available": refresh}
 
 def test_plugin_routes_apply_the_user_boundary():
     client = TestClient(create_app(ApiServices(security=Security(), plugins=Plugins())))
@@ -26,3 +27,8 @@ def test_plugin_routes_apply_the_user_boundary():
     assert client.post("/v1/plugins/demo/approve").json()["state"] == "active"
     assert client.put("/v1/plugins/demo/enabled", json={"enabled":False}).json()["state"] == "disabled"
     assert client.delete("/v1/plugins/demo").status_code == 204
+
+def test_plugin_library_route_forwards_the_refresh_flag():
+    client = TestClient(create_app(ApiServices(security=Security(), plugins=Plugins())))
+    assert client.get("/v1/plugins/library").json()["web_search_available"] is False
+    assert client.get("/v1/plugins/library?refresh=true").json()["web_search_available"] is True

@@ -52,8 +52,12 @@ class PluginDiscoveryService:
                 source = resolve_source(str(item["reference"]))
             except SourceRejected:
                 continue
-            url = source.url or str(item["reference"])
-            entries.append(PluginLibraryEntry(str(item["name"]), str(item.get("description") or ""), url, "registry"))
+            if source.kind != "git" or not source.url:
+                # Local-path and bare-name registry entries aren't installable via a
+                # public reference; skip them rather than leaking a raw filesystem
+                # path or unresolved name into the API response.
+                continue
+            entries.append(PluginLibraryEntry(str(item["name"]), str(item.get("description") or ""), source.url, "registry"))
         return entries
 
     def _web_entries(self) -> tuple[list[PluginLibraryEntry], bool]:

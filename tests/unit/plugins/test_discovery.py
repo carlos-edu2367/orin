@@ -56,6 +56,19 @@ def test_web_search_failure_keeps_registry_results_and_stays_available():
     assert [e.origin for e in entries] == ["registry"]
 
 
+def test_registry_entries_that_are_not_installable_git_sources_are_skipped(tmp_path):
+    local_dir = tmp_path / "local-plugin"
+    local_dir.mkdir()
+    registry = [
+        {"name": "local", "reference": str(local_dir), "description": "a local path, must not leak"},
+        {"name": "bare-name", "reference": "not-a-repo-reference", "description": "no owner/repo shape"},
+        {"name": "superpowers", "reference": "obra/superpowers", "description": "Skills de processo"},
+    ]
+    discovery = PluginDiscoveryService(FakePluginService(registry), search_client=None)
+    entries, _ = discovery.entries()
+    assert [e.name for e in entries] == ["superpowers"]
+
+
 def test_results_are_cached_until_refresh():
     plugin_service = FakePluginService(REGISTRY)
     discovery = PluginDiscoveryService(plugin_service, search_client=None)
