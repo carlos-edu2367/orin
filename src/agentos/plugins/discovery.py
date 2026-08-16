@@ -10,8 +10,8 @@ from .sources import SourceRejected, resolve_source
 
 CACHE_TTL = timedelta(minutes=15)
 DISCOVERY_QUERIES = (
-    '"mcp server" plugin.json github',
-    'claude code plugin marketplace github',
+    "topic:mcp-server",
+    "topic:claude-plugin",
 )
 
 
