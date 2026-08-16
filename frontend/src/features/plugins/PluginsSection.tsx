@@ -4,6 +4,7 @@ import { listPlugins, type PluginSummary } from '../../api/plugins'
 import { SettingsSection } from '../settings/SettingsSection'
 import { PluginCard } from './PluginCard'
 import { PluginInstallDialog } from './PluginInstallDialog'
+import { PluginLibrarySection } from './PluginLibrarySection'
 
 export function PluginsSection({ client }: { client?: ApiClient }) {
   const apiClient = useMemo(() => client ?? createBrowserApiClient(), [client])
@@ -11,6 +12,7 @@ export function PluginsSection({ client }: { client?: ApiClient }) {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [dialog, setDialog] = useState(false)
+  const [tab, setTab] = useState<'installed' | 'library'>('installed')
   const refresh = useCallback(() => listPlugins(apiClient).then((value) => { setPlugins(value); setError(null) }).catch(() => setError('Não foi possível carregar os plugins.')).finally(() => setLoading(false)), [apiClient])
   useEffect(() => { void refresh() }, [refresh])
   const activeCount = plugins.filter((plugin) => plugin.state === 'active').length
@@ -35,12 +37,21 @@ export function PluginsSection({ client }: { client?: ApiClient }) {
         </dl>
       </section>
 
-      {loading && plugins.length === 0 && <div className="plugins-section__loading" aria-label="Carregando plugins"><span /><span /><span /></div>}
-      {error && <div className="plugins-section__error" role="alert"><span className="plugins-section__status-mark" aria-hidden="true">!</span><div><strong>Não foi possível carregar os plugins</strong><p>{error}</p></div><button type="button" className="button button--secondary" onClick={() => { setLoading(true); void refresh() }}>Tentar novamente</button></div>}
-      <div className="plugins-section__list" aria-label="Plugins instalados">
-        {plugins.map((plugin) => <PluginCard key={plugin.plugin_id} plugin={plugin} client={apiClient} onChanged={() => void refresh()} />)}
-        {!loading && !error && plugins.length === 0 && <div className="plugins-section__empty"><span className="plugins-section__empty-icon" aria-hidden="true">✦</span><div><h2>Nenhum plugin instalado</h2><p>Instale um pacote para adicionar Skills, servidores MCP ou agentes ao seu workspace.</p></div><button type="button" className="button button--secondary" onClick={() => setDialog(true)}>Explorar um plugin</button></div>}
+      <div className="plugins-section__tabs" role="tablist" aria-label="Seções de plugins">
+        <button type="button" role="tab" aria-selected={tab === 'installed'} className={`plugins-section__tab ${tab === 'installed' ? 'is-active' : ''}`} onClick={() => setTab('installed')}>Instalados</button>
+        <button type="button" role="tab" aria-selected={tab === 'library'} className={`plugins-section__tab ${tab === 'library' ? 'is-active' : ''}`} onClick={() => setTab('library')}>Biblioteca</button>
       </div>
+
+      {tab === 'installed' && <>
+        {loading && plugins.length === 0 && <div className="plugins-section__loading" aria-label="Carregando plugins"><span /><span /><span /></div>}
+        {error && <div className="plugins-section__error" role="alert"><span className="plugins-section__status-mark" aria-hidden="true">!</span><div><strong>Não foi possível carregar os plugins</strong><p>{error}</p></div><button type="button" className="button button--secondary" onClick={() => { setLoading(true); void refresh() }}>Tentar novamente</button></div>}
+        <div className="plugins-section__list" aria-label="Plugins instalados">
+          {plugins.map((plugin) => <PluginCard key={plugin.plugin_id} plugin={plugin} client={apiClient} onChanged={() => void refresh()} />)}
+          {!loading && !error && plugins.length === 0 && <div className="plugins-section__empty"><span className="plugins-section__empty-icon" aria-hidden="true">✦</span><div><h2>Nenhum plugin instalado</h2><p>Instale um pacote para adicionar Skills, servidores MCP ou agentes ao seu workspace.</p></div><button type="button" className="button button--secondary" onClick={() => setDialog(true)}>Explorar um plugin</button></div>}
+        </div>
+      </>}
+
+      {tab === 'library' && <PluginLibrarySection client={apiClient} onInstalled={() => void refresh()} />}
     </div>
     {dialog && <PluginInstallDialog client={apiClient} onClose={() => setDialog(false)} onInstalled={() => { setDialog(false); void refresh() }} />}
   </SettingsSection>
