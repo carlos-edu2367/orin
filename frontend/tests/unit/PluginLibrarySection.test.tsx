@@ -11,7 +11,7 @@ it('lists library entries and opens the install dialog pre-filled and inspected'
     if (String(input).includes('/v1/plugins/inspect')) {
       return response({ plugin_id: 'other-mcp', version: '1.0.0', display_name: 'Other MCP Inspected', description: 'd', author: 'a', homepage: null, state: 'pending_approval', warnings: [], contribution_count: 1, package_digest: 'x', skills: [], mcp_servers: [], agents: [] })
     }
-    return response({ entries: [{ name: 'Other MCP', description: 'd', source_url: sourceUrl, origin: 'web' }], web_search_available: true })
+    return response({ entries: [{ name: 'Other MCP', description: 'd', source_url: sourceUrl, origin: 'web', installable_kind: 'plugin' }], web_search_available: true })
   })
   render(<PluginLibrarySection client={new ApiClient({ fetchImpl, maxAttempts: 1 })} onInstalled={() => {}} />)
   expect(await screen.findByText('Other MCP')).toBeInTheDocument()
@@ -30,7 +30,7 @@ it('shows a note when web search is unavailable', async () => {
 it('lets the user search by a free-text query', async () => {
   const fetchImpl = vi.fn<typeof fetch>(async (input) => {
     if (String(input).includes('q=obsidian')) {
-      return response({ entries: [{ name: 'obsidian-second-brain', description: 'd', source_url: 'https://github.com/acme/obsidian-second-brain.git', origin: 'web' }], web_search_available: true })
+      return response({ entries: [{ name: 'obsidian-second-brain', description: 'd', source_url: 'https://github.com/acme/obsidian-second-brain.git', origin: 'web', installable_kind: 'plugin' }], web_search_available: true })
     }
     return response({ entries: [], web_search_available: true })
   })
