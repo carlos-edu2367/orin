@@ -55,6 +55,11 @@ def test_inspect_reports_a_distinct_code_when_the_repository_has_no_manifest(tmp
     else:
         raise AssertionError("expected inspect() to reject a repository with no manifest")
 
+def test_discover_library_passes_installable_kind_through(tmp_path):
+    service = _service(tmp_path)
+    library = service.discover_library()
+    assert library["entries"][0]["installable_kind"] == "plugin"
+
 def test_other_inspect_failures_keep_the_generic_code(tmp_path):
     service = _service(tmp_path)
     try:

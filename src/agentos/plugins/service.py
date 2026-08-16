@@ -33,12 +33,12 @@ def _now():
 
 
 class PluginService:
-    def __init__(self, engine: Engine, *, plugin_root: Path, skill_library, mcp_service, fetcher=None, activator=None, search_client=None) -> None:
+    def __init__(self, engine: Engine, *, plugin_root: Path, skill_library, mcp_service, fetcher=None, activator=None, search_client=None, manifest_probe=None) -> None:
         self.engine, self.plugin_root = engine, Path(plugin_root).resolve()
         self.skill_library, self.mcp_service = skill_library, mcp_service
         self.fetcher = fetcher or PluginFetcher(self.plugin_root)
         self.activator = activator or PluginActivator(skill_library=skill_library, mcp_service=mcp_service)
-        self.discovery = PluginDiscoveryService(self, search_client=search_client)
+        self.discovery = PluginDiscoveryService(self, search_client=search_client, manifest_probe=manifest_probe)
 
     def search(self, query: str) -> list[dict[str, Any]]:
         needle = str(query or "").casefold()
@@ -65,7 +65,7 @@ class PluginService:
     def discover_library(self, *, refresh: bool = False, query: str | None = None) -> dict[str, Any]:
         entries, web_available = self.discovery.entries(refresh=refresh, query=query)
         return {
-            "entries": [{"name": e.name, "description": e.description, "source_url": e.source_url, "origin": e.origin} for e in entries],
+            "entries": [{"name": e.name, "description": e.description, "source_url": e.source_url, "origin": e.origin, "installable_kind": e.installable_kind} for e in entries],
             "web_search_available": web_available,
         }
 

@@ -1,9 +1,24 @@
+from datetime import UTC, datetime, timedelta
+
 import httpx
 
 from agentos.agentic.web_search import SearchResult
 from agentos.plugins.discovery import DISCOVERY_QUERIES, PluginDiscoveryService
 
 REGISTRY = [{"name": "superpowers", "reference": "obra/superpowers", "description": "Skills de processo"}]
+
+
+class FakeManifestProbe:
+    def __init__(self, result_by_repo=None, *, error=False):
+        self._result_by_repo = result_by_repo or {}
+        self._error = error
+        self.calls: list[tuple[str, str]] = []
+
+    def probe(self, owner, repo):
+        self.calls.append((owner, repo))
+        if self._error:
+            return None
+        return self._result_by_repo.get(f"{owner}/{repo}")
 
 
 class FakePluginService:
@@ -107,3 +122,56 @@ def test_a_blank_query_falls_back_to_the_cached_default_listing():
     discovery.entries()
     discovery.entries(query="   ")
     assert plugin_service.search_calls == 1
+
+
+def test_registry_entries_are_always_plugin_kind_and_skip_the_probe():
+    probe = FakeManifestProbe({"obra/superpowers": False})
+    discovery = PluginDiscoveryService(FakePluginService(REGISTRY), search_client=None, manifest_probe=probe)
+    entries, _ = discovery.entries()
+    assert entries[0].installable_kind == "plugin"
+    assert probe.calls == []
+
+
+def test_web_entries_are_tagged_plugin_or_mcp_raw_from_the_probe():
+    results = {
+        DISCOVERY_QUERIES[0]: [SearchResult("Has Manifest", "https://github.com/acme/has-manifest", "d")],
+        DISCOVERY_QUERIES[1]: [SearchResult("No Manifest", "https://github.com/acme/no-manifest", "d")],
+    }
+    probe = FakeManifestProbe({"acme/has-manifest": True, "acme/no-manifest": False})
+    discovery = PluginDiscoveryService(FakePluginService([]), search_client=FakeSearchClient(results), manifest_probe=probe)
+    entries, _ = discovery.entries()
+    by_url = {e.source_url: e for e in entries}
+    assert by_url["https://github.com/acme/has-manifest.git"].installable_kind == "plugin"
+    assert by_url["https://github.com/acme/no-manifest.git"].installable_kind == "mcp_raw"
+
+
+def test_web_entries_are_unknown_kind_when_the_probe_is_disabled_or_fails():
+    results = {DISCOVERY_QUERIES[0]: [SearchResult("Web Thing", "https://github.com/acme/web-thing", "d")]}
+    no_probe = PluginDiscoveryService(FakePluginService([]), search_client=FakeSearchClient(results), manifest_probe=None)
+    entries, _ = no_probe.entries()
+    assert entries[0].installable_kind == "unknown"
+
+    failing_probe = FakeManifestProbe(error=True)
+    with_failing_probe = PluginDiscoveryService(FakePluginService([]), search_client=FakeSearchClient(results), manifest_probe=failing_probe)
+    entries, _ = with_failing_probe.entries()
+    assert entries[0].installable_kind == "unknown"
+
+
+def test_manifest_probe_result_is_cached_for_24_hours():
+    results = {DISCOVERY_QUERIES[0]: [SearchResult("Web Thing", "https://github.com/acme/web-thing", "d")]}
+    probe = FakeManifestProbe({"acme/web-thing": True})
+    discovery = PluginDiscoveryService(FakePluginService([]), search_client=FakeSearchClient(results), manifest_probe=probe)
+    discovery.entries(refresh=True)
+    discovery.entries(refresh=True)
+    assert probe.calls == [("acme", "web-thing")]
+
+
+def test_manifest_probe_cache_expires_after_24_hours():
+    results = {DISCOVERY_QUERIES[0]: [SearchResult("Web Thing", "https://github.com/acme/web-thing", "d")]}
+    probe = FakeManifestProbe({"acme/web-thing": True})
+    discovery = PluginDiscoveryService(FakePluginService([]), search_client=FakeSearchClient(results), manifest_probe=probe)
+    discovery.entries(refresh=True)
+    stale_url = "https://github.com/acme/web-thing.git"
+    discovery._manifest_cache[stale_url] = (discovery._manifest_cache[stale_url][0], datetime.now(UTC) - timedelta(hours=25))
+    discovery.entries(refresh=True)
+    assert probe.calls == [("acme", "web-thing"), ("acme", "web-thing")]
