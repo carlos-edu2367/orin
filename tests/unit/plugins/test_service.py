@@ -35,3 +35,10 @@ def test_different_version_replaces_pending_record(tmp_path):
     (source / ".claude-plugin" / "plugin.json").write_text(json.dumps({"name":"demo","version":"1.1.0"}), encoding="utf-8")
     assert service.inspect(user_id="u1", reference=str(source))["version"] == "1.1.0"
     assert len(service.list("u1")) == 1
+
+def test_discover_library_returns_registry_entries(tmp_path):
+    service = _service(tmp_path)
+    library = service.discover_library()
+    assert library["web_search_available"] is False
+    assert library["entries"][0]["name"] == "superpowers"
+    assert library["entries"][0]["origin"] == "registry"

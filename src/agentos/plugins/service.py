@@ -13,6 +13,7 @@ from agentos.persistence.postgres.plugins import row_to_plugin
 from agentos.persistence.postgres.schema import plugin_contributions, plugin_marketplaces, plugins
 
 from .activator import PluginActivator
+from .discovery import PluginDiscoveryService
 from .fetcher import PluginFetcher
 from .inspector import inspect_plugin_package
 from .models import PluginState
@@ -30,11 +31,12 @@ def _now():
 
 
 class PluginService:
-    def __init__(self, engine: Engine, *, plugin_root: Path, skill_library, mcp_service, fetcher=None, activator=None) -> None:
+    def __init__(self, engine: Engine, *, plugin_root: Path, skill_library, mcp_service, fetcher=None, activator=None, search_client=None) -> None:
         self.engine, self.plugin_root = engine, Path(plugin_root).resolve()
         self.skill_library, self.mcp_service = skill_library, mcp_service
         self.fetcher = fetcher or PluginFetcher(self.plugin_root)
         self.activator = activator or PluginActivator(skill_library=skill_library, mcp_service=mcp_service)
+        self.discovery = PluginDiscoveryService(self, search_client=search_client)
 
     def search(self, query: str) -> list[dict[str, Any]]:
         needle = str(query or "").casefold()
@@ -57,6 +59,13 @@ class PluginService:
                 if not needle or needle in item.name.casefold() or needle in item.description.casefold():
                     results.append({"name": item.name, "reference": item.reference, "description": item.description, "marketplace": marketplace.name})
         return results
+
+    def discover_library(self, *, refresh: bool = False) -> dict[str, Any]:
+        entries, web_available = self.discovery.entries(refresh=refresh)
+        return {
+            "entries": [{"name": e.name, "description": e.description, "source_url": e.source_url, "origin": e.origin} for e in entries],
+            "web_search_available": web_available,
+        }
 
     def list_marketplaces(self, user_id: str) -> list[dict[str, Any]]:
         with self.engine.connect() as connection:
