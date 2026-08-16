@@ -25,4 +25,11 @@ describe('plugins api', () => {
     expect(library.entries[0].origin).toBe('registry')
     expect(library.web_search_available).toBe(false)
   })
+  it('forwards the refresh flag as a query parameter', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async () => response({ entries: [], web_search_available: false }))
+    await fetchPluginLibrary(client(fetchImpl), true)
+    expect(String(fetchImpl.mock.calls[0][0])).toContain('refresh=true')
+    await fetchPluginLibrary(client(fetchImpl))
+    expect(String(fetchImpl.mock.calls[1][0])).not.toContain('refresh')
+  })
 })

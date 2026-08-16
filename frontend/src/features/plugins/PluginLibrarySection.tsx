@@ -39,6 +39,6 @@ export function PluginLibrarySection({ client, onInstalled }: { client: ApiClien
       </article>)}
       {!loading && !error && entries.length === 0 && <p className="plugin-library__empty">Nenhum plugin encontrado no momento.</p>}
     </div>
-    {installing && <PluginInstallDialog client={client} initialReference={installing} onClose={() => setInstalling(null)} onInstalled={() => { setInstalling(null); onInstalled() }} />}
+    {installing && <PluginInstallDialog key={installing} client={client} initialReference={installing} onClose={() => setInstalling(null)} onInstalled={() => { setInstalling(null); onInstalled() }} />}
   </div>
 }
