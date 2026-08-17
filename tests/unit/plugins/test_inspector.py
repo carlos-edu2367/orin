@@ -34,6 +34,20 @@ def test_mcp_json_wins_a_slug_collision_with_the_manifest(tmp_path):
     assert result.mcp_servers[0].command == "from-mcp-json"
 
 
+def test_a_commands_only_plugin_is_inspectable_and_installable(tmp_path):
+    _manifest(tmp_path, {"name": "demo", "version": "1.0.0", "commands": "./commands/"})
+    (tmp_path / "commands").mkdir()
+    (tmp_path / "commands" / "daily.md").write_text(
+        "---\ndescription: Daily note\n---\n\nbody", encoding="utf-8"
+    )
+
+    result = inspect_plugin_package(tmp_path, package_digest="abc")
+
+    assert [item.command_id for item in result.commands] == ["demo:daily"]
+    assert result.is_installable
+    assert not any("comandos declarados não são executados" in w for w in result.warnings)
+
+
 def test_inspector_reports_declarative_contributions_and_warnings(tmp_path):
     (tmp_path / ".claude-plugin").mkdir()
     (tmp_path / ".claude-plugin" / "plugin.json").write_text(json.dumps({"name":"demo","version":"1.0.0"}), encoding="utf-8")
