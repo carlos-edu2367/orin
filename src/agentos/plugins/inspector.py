@@ -76,4 +76,8 @@ def inspect_plugin_package(path: Path, *, package_digest: str) -> PluginInspecti
         warnings.append("O plugin declara hooks; hooks não são suportados e não serão ativados.")
     if (path / "commands").exists():
         warnings.append("comandos declarados não são executados; apenas SKILL.md é suportado")
-    return PluginInspection(PluginRef(manifest.plugin_id, manifest.version), manifest.display_name, manifest.description, manifest.author, manifest.homepage, package_digest, tuple(skills), mcp_servers, tuple(agents), tuple(warnings))
+    return PluginInspection(
+        PluginRef(manifest.plugin_id, manifest.version), manifest.display_name, manifest.description,
+        manifest.author, manifest.homepage, package_digest, skills=tuple(skills), mcp_servers=mcp_servers,
+        agents=tuple(agents), warnings=tuple(warnings),
+    )

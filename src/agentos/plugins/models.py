@@ -71,6 +71,15 @@ class AgentContribution:
 
 
 @dataclass(frozen=True, slots=True)
+class CommandContribution:
+    command_id: str        # "{plugin_id}:{slug}"
+    slug: str
+    description: str
+    argument_hint: str
+    relative_path: str
+
+
+@dataclass(frozen=True, slots=True)
 class PluginInspection:
     ref: PluginRef
     display_name: str
@@ -81,11 +90,12 @@ class PluginInspection:
     skills: tuple[SkillContribution, ...] = ()
     mcp_servers: tuple[McpServerContribution, ...] = ()
     agents: tuple[AgentContribution, ...] = ()
+    commands: tuple[CommandContribution, ...] = ()
     warnings: tuple[str, ...] = ()
 
     @property
     def contribution_count(self) -> int:
-        return len(self.skills) + len(self.mcp_servers) + len(self.agents)
+        return len(self.skills) + len(self.mcp_servers) + len(self.agents) + len(self.commands)
 
     @property
     def is_installable(self) -> bool:
