@@ -26,7 +26,19 @@ class PluginActivator:
         contributions: list[dict[str, Any]] = []
         try:
             for item in inspection.skills:
-                skill = parse_skill_file(Path(install_path) / item.relative_path, include_instructions=True, source=SkillSource.PLUGIN, scope=SkillScope.USER)
+                # Claude Code plugin skills version the plugin in plugin.json,
+                # rather than repeating a version in every SKILL.md.  The
+                # inspector already validated that shape and synthesized the
+                # version from the manifest; activation must use the same
+                # contract when it loads the full instructions.
+                skill = parse_skill_file(
+                    Path(install_path) / item.relative_path,
+                    include_instructions=True,
+                    source=SkillSource.PLUGIN,
+                    scope=SkillScope.USER,
+                    required_fields=frozenset({"name", "description"}),
+                    default_version=inspection.ref.version,
+                )
                 installed_skills.append(replace(skill, id=item.skill_id, package_path=Path(install_path) / item.relative_path))
             self.skill_library.install_plugin_skills(user_id=user_id, plugin_id=inspection.ref.plugin_id, skills=tuple(installed_skills))
             contributions.extend({"kind": "skill", "reference": item.skill_id, "display_name": item.name} for item in inspection.skills)

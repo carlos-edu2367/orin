@@ -37,7 +37,11 @@ def inspect_plugin_package(path: Path, *, package_digest: str) -> PluginInspecti
             except SkillParseError:
                 warnings.append(f"skill quebrada ignorada: {skill_file.parent.name}")
                 continue
-            skills.append(SkillContribution(f"{manifest.plugin_id}:{skill.id}", skill.name, skill.description, skill_file.relative_to(path).as_posix()))
+            # Plugin skill identities are namespaced by the plugin and use the
+            # skill's public name.  Do not let an optional local `id` field in
+            # SKILL.md change that cross-plugin reference.
+            skill_id = f"{manifest.plugin_id}:{plugin_id_from_name(skill.name)}"
+            skills.append(SkillContribution(skill_id, skill.name, skill.description, skill_file.relative_to(path).as_posix()))
         if len(list(skill_root.glob("*/SKILL.md"))) > 200:
             warnings.append("o plugin declara mais de 200 skills; o restante foi ignorado")
     mcp_servers: tuple[McpServerContribution, ...] = ()

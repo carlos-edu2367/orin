@@ -12,6 +12,20 @@ def test_inspector_reports_declarative_contributions_and_warnings(tmp_path):
     assert any("hook" in warning.lower() for warning in result.warnings)
 
 
+def test_plugin_skill_id_is_namespaced_by_normalized_plugin_and_skill_names(tmp_path):
+    (tmp_path / ".claude-plugin").mkdir()
+    (tmp_path / ".claude-plugin" / "plugin.json").write_text(json.dumps({"name": "Demo Tools", "version": "1.0.0"}), encoding="utf-8")
+    (tmp_path / "skills" / "custom").mkdir(parents=True)
+    (tmp_path / "skills" / "custom" / "SKILL.md").write_text(
+        "---\nid: legacy-id\nname: Deploy Safely\nversion: 1.0.0\ndescription: d\n---\n\nbody",
+        encoding="utf-8",
+    )
+
+    result = inspect_plugin_package(tmp_path, package_digest="abc")
+
+    assert result.skills[0].skill_id == "demo-tools:deploy-safely"
+
+
 # Real SKILL.md content from github.com/obra/superpowers, skills/brainstorming/SKILL.md
 # at tag 5.1.0. No `version` field: real-world plugin skills declare only name/description,
 # with version tracked once at the plugin level (plugin.json), not per skill.

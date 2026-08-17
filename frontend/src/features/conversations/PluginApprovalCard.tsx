@@ -6,6 +6,11 @@ type Props = { plugin: PluginApprovalRequest; active: boolean; onApprove: () => 
 export function PluginApprovalCard({ plugin, active, onApprove, onDecline }: Props) {
   const [busy, setBusy] = useState<'approve' | 'decline' | null>(null)
   const [error, setError] = useState<string | null>(null)
+
+  // A resolved approval is already part of the activity history. Do not keep
+  // the large contribution dialog mounted after the turn leaves waiting_user.
+  if (!active) return null
+
   async function act(kind: 'approve' | 'decline') {
     if (!active || busy) return
     setBusy(kind); setError(null)

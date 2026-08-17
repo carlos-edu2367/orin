@@ -23,3 +23,15 @@ def test_activation_failure_removes_skills(tmp_path):
     except ActivationFailed: pass
     else: raise AssertionError("activation should fail")
     assert library.installed == {}
+
+def test_activation_accepts_plugin_skill_without_per_skill_version(tmp_path):
+    (tmp_path / "skills" / "s").mkdir(parents=True)
+    (tmp_path / "skills" / "s" / "SKILL.md").write_text("---\nname: s\ndescription: d\n---\n\nbody", encoding="utf-8")
+    library, mcp = FakeSkillLibrary(), FakeMcpService()
+    activator = PluginActivator(skill_library=library, mcp_service=mcp)
+    inspection = _inspection()
+
+    result = activator.activate(user_id="u1", install_path=tmp_path, inspection=inspection)
+
+    assert result.contributions[0]["reference"] == "demo:s"
+    assert library.installed["demo"][0].version == "1.0.0"
