@@ -211,6 +211,38 @@ class SqliteChunkStore:
         self._matrix_cache = (chunk_ids, matrix)
         return self._matrix_cache  # type: ignore[return-value]
 
+    # -- import graph ---------------------------------------------------
+
+    def replace_imports(self, path: str, targets: tuple[str, ...]) -> None:
+        with self._connection:
+            self._connection.execute("DELETE FROM imports WHERE path = ?", (path,))
+            for target in targets:
+                self._connection.execute("INSERT OR IGNORE INTO imports(path, target) VALUES(?, ?)", (path, target))
+
+    def neighbours_of(self, paths: list[str]) -> set[str]:
+        """Files this set imports, plus files that import this set."""
+        if not paths:
+            return set()
+        placeholders = ",".join("?" for _ in paths)
+        outgoing = self._connection.execute(f"SELECT target FROM imports WHERE path IN ({placeholders})", paths)
+        incoming = self._connection.execute(f"SELECT path FROM imports WHERE target IN ({placeholders})", paths)
+        found = {row["target"] for row in outgoing} | {row["path"] for row in incoming}
+        return found - set(paths)
+
+    def most_imported(self, *, limit: int) -> list[tuple[str, int]]:
+        rows = self._connection.execute(
+            "SELECT target, COUNT(*) AS total FROM imports GROUP BY target ORDER BY total DESC, target ASC LIMIT ?",
+            (int(limit),),
+        )
+        return [(row["target"], int(row["total"])) for row in rows]
+
+    def symbols_of(self, path: str, *, limit: int) -> list[str]:
+        rows = self._connection.execute(
+            "SELECT DISTINCT symbol FROM chunks WHERE path = ? AND symbol IS NOT NULL ORDER BY start_line LIMIT ?",
+            (path, int(limit)),
+        )
+        return [row["symbol"] for row in rows]
+
     # -- reads ----------------------------------------------------------
 
     def known_files(self) -> dict[str, tuple[str, int]]:
