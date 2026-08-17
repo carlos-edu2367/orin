@@ -21,6 +21,7 @@ class PluginManifest:
     description: str
     author: str
     homepage: str | None
+    mcp_servers: tuple[McpServerContribution, ...] = ()
 
 
 def _text(value: Any, limit: int = 1024) -> str:
@@ -42,7 +43,10 @@ def parse_plugin_manifest(payload: Mapping[str, Any]) -> PluginManifest:
     homepage = _text(payload.get("homepage"), 512).strip() or None
     if homepage and not homepage.lower().startswith("https://"):
         homepage = None
-    return PluginManifest(plugin_id_from_name(name), name, version, _text(payload.get("description")), _text(author, 120), homepage)
+    return PluginManifest(
+        plugin_id_from_name(name), name, version, _text(payload.get("description")),
+        _text(author, 120), homepage, parse_mcp_config(payload),
+    )
 
 
 def parse_mcp_config(payload: Mapping[str, Any]) -> tuple[McpServerContribution, ...]:
