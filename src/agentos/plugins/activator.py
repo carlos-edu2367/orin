@@ -45,9 +45,18 @@ class PluginActivator:
             self.skill_library.install_plugin_skills(user_id=user_id, plugin_id=inspection.ref.plugin_id, skills=tuple(installed_skills))
             contributions.extend({"kind": "skill", "reference": item.skill_id, "display_name": item.name} for item in inspection.skills)
             for item in inspection.mcp_servers:
+                # Claude Code plugins may declare their MCP launch command with
+                # ${CLAUDE_PLUGIN_ROOT}, exactly like hooks do (see
+                # hook_executor.py's own substitution). Left unresolved, the
+                # literal "$" is indistinguishable from a shell metacharacter
+                # to StdioTransport's launch-safety check and the connection
+                # is refused outright.
+                root = str(Path(install_path))
+                command = item.command.replace("${CLAUDE_PLUGIN_ROOT}", root) if item.command else item.command
+                args = tuple(value.replace("${CLAUDE_PLUGIN_ROOT}", root) for value in item.args)
                 proposed = self.mcp_service.propose({
                     "user_id": user_id, "slug": item.slug, "display_name": item.display_name,
-                    "transport": item.transport, "command": item.command, "args": list(item.args), "url": item.url,
+                    "transport": item.transport, "command": command, "args": list(args), "url": item.url,
                     "secret_names": list(item.secret_names), "catalog_id": None, "tool_allowlist": None,
                 })
                 server_id = str(proposed["server_id"])
