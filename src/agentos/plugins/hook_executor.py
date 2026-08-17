@@ -16,12 +16,17 @@ this module's return type.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
+import json
 import os
 from pathlib import Path
 import shlex
+import subprocess
 
 DENIED_TOKENS = ("|", ";", "&&", "||", ">", "<", "`", "$(", "\n", "\r")
 INTERPRETERS = frozenset({"python", "python3", "node", "sh", "bash"})
+MAX_OUTPUT = 12_000
+ENVIRONMENT_ALLOWLIST = ("PATH", "HOME", "USERPROFILE", "SYSTEMROOT", "SystemRoot", "TMPDIR", "TEMP", "LANG")
 
 
 class HookRejected(ValueError):
@@ -57,3 +62,51 @@ def resolve_argv(command: str, *, install_path: Path) -> list[str]:
             raise HookRejected("an interpreter hook may not take inline flags such as -c")
         return [argv[0], str(_inside(Path(argv[1]), Path(install_path))), *argv[2:]]
     return [str(_inside(Path(argv[0]), Path(install_path))), *argv[1:]]
+
+
+@dataclass(frozen=True, slots=True)
+class HookOutcome:
+    """The complete result of a hook. Note what is absent: nothing here can deny."""
+
+    hook_id: str
+    status: str            # ok | failed | timeout | rejected
+    stdout: str
+    stderr: str
+    exit_code: int | None
+    detail: str = ""
+
+
+class HookExecutor:
+    def __init__(self, *, interpreter: str | None = None) -> None:
+        # Tests substitute the running interpreter for "python3", which is not
+        # necessarily on PATH under this name on every host.
+        self.interpreter = interpreter
+
+    def run(self, *, command: str, install_path: Path, payload: dict, timeout_seconds: int, hook_id: str = "") -> HookOutcome:
+        try:
+            argv = resolve_argv(command, install_path=Path(install_path))
+        except HookRejected as error:
+            return HookOutcome(hook_id, "rejected", "", "", None, str(error))
+        if self.interpreter and os.path.basename(argv[0]).lower().startswith("python"):
+            argv = [self.interpreter, *argv[1:]]
+        try:
+            completed = subprocess.run(
+                argv, cwd=str(Path(install_path)), env=self._environment(Path(install_path)),
+                input=json.dumps(payload, ensure_ascii=False), capture_output=True, text=True,
+                timeout=timeout_seconds, shell=False, start_new_session=True, check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return HookOutcome(hook_id, "timeout", "", "", None, f"hook excedeu {timeout_seconds}s")
+        except (OSError, ValueError) as error:
+            return HookOutcome(hook_id, "failed", "", "", None, f"{type(error).__name__}: {error}")
+        return HookOutcome(
+            hook_id, "ok" if completed.returncode == 0 else "failed",
+            (completed.stdout or "")[:MAX_OUTPUT], (completed.stderr or "")[:MAX_OUTPUT],
+            completed.returncode,
+        )
+
+    @staticmethod
+    def _environment(install_path: Path) -> dict[str, str]:
+        environment = {name: os.environ[name] for name in ENVIRONMENT_ALLOWLIST if name in os.environ}
+        environment["CLAUDE_PLUGIN_ROOT"] = str(install_path.resolve(strict=False))
+        return environment
