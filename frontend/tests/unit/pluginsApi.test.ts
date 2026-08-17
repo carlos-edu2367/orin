@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { ApiClient } from '../../src/api/client'
-import { approvePlugin, fetchPluginLibrary, inferMcpLaunch, inspectPlugin, listPlugins, removePlugin } from '../../src/api/plugins'
+import { approvePlugin, fetchPluginLibrary, inferMcpLaunch, inspectPlugin, listPluginCommands, listPlugins, removePlugin } from '../../src/api/plugins'
 
 function client(fetchImpl: typeof fetch) { return new ApiClient({ fetchImpl, maxAttempts: 1 }) }
 function response(body: unknown, status = 200) { return new Response(status === 204 ? null : JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } }) }
@@ -60,5 +60,19 @@ describe('plugins api', () => {
     const guess = await inferMcpLaunch(client(fetchImpl), 'https://github.com/acme/demo.git')
     expect(guess.transport).toBeNull()
     expect(guess.confidence).toBe('none')
+  })
+  it('lists the active plugin commands', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(response([
+      { command_id: 'demo:daily', slug: 'daily', plugin_id: 'demo', description: 'd', argument_hint: '', qualified: false },
+    ]))
+    const commands = await listPluginCommands(client(fetchImpl))
+    expect(commands).toEqual([
+      { command_id: 'demo:daily', slug: 'daily', plugin_id: 'demo', description: 'd', argument_hint: '', qualified: false },
+    ])
+    expect(String(fetchImpl.mock.calls[0][0])).toContain('/v1/plugins/commands')
+  })
+  it('rejects a malformed command payload', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(response([{ slug: 42 }]))
+    await expect(listPluginCommands(client(fetchImpl))).rejects.toThrow()
   })
 })
