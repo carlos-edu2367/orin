@@ -203,7 +203,7 @@
   border-bottom: 1px solid var(--line);
 }
 .home__bar { grid-column: 1 / -1; padding-right: 164px; -webkit-app-region: drag; }
-.home__bar a, .home__bar button, .chat__bar a, .chat__bar button { -webkit-app-region: no-drag; }
+.home__bar a, .home__bar button, .chat__bar a, .chat__bar button, .chat__bar .context-indicator, .home__bar .context-indicator { -webkit-app-region: no-drag; }
 .chat__bar {
   grid-column: 1 / -1; grid-row: 1; z-index: 3;
   display: grid; grid-template-columns: auto minmax(0, 1fr) auto;

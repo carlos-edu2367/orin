@@ -6,6 +6,12 @@
       "runtimeExecutable": "npm",
       "runtimeArgs": ["run", "dev", "--prefix", "frontend"],
       "port": 4173
+    },
+    {
+      "name": "orin-backend",
+      "runtimeExecutable": "C:\\Users\\Carlos\\Documents\\CarlosEduardo\\agentes\\Orin\\.venv\\Scripts\\python.exe",
+      "runtimeArgs": ["-m", "agentos.launcher", "--port", "8000", "--no-browser"],
+      "port": 8000
     }
   ]
 }

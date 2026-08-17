@@ -33,4 +33,5 @@ data/*.db-shm
 data/*.db-wal
 data/run/
 data/plugins/
+data/retrieval/
 .cache/
