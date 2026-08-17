@@ -958,6 +958,13 @@ def create_app(services: ApiServices) -> FastAPI:
         result = await run_in_threadpool(_require_port(services.plugins).discover_library, refresh=refresh, query=q.strip() or None)
         return JSONResponse(_jsonable(result))
 
+    @app.get("/v1/plugins/commands")
+    async def list_plugin_commands(request: Request) -> JSONResponse:
+        principal = principal_for(request)
+        services.security.check_rate_limit(principal, action="plugins.commands", origin=request.headers.get("origin"))
+        services.security.authorize(principal, action="plugins.commands", resource_id=None, purpose="plugins.read")
+        return JSONResponse(_jsonable(_require_port(services.plugins).list_commands(principal.user_id)))
+
     @app.post("/v1/plugins/inspect")
     async def inspect_plugin(payload: PluginReferenceRequest, request: Request) -> JSONResponse:
         principal = principal_for(request, mutable=True)

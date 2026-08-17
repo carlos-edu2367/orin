@@ -193,6 +193,10 @@ class PluginService:
             rows = connection.execute(select(plugins).where(plugins.c.user_id == user_id).order_by(plugins.c.display_name)).mappings().all()
         return [{**row_to_plugin(row), "contribution_count": len(self._contributions(user_id, str(row["plugin_id"]))) } for row in rows]
 
+    def list_commands(self, user_id: str) -> list[dict[str, Any]]:
+        library = getattr(self.activator, "command_library", None)
+        return [dict(item) for item in library.list(user_id)] if library is not None else []
+
     def _contributions(self, user_id, plugin_id):
         with self.engine.connect() as connection:
             return [dict(row) for row in connection.execute(select(plugin_contributions).where((plugin_contributions.c.user_id == user_id) & (plugin_contributions.c.plugin_id == plugin_id))).mappings()]
