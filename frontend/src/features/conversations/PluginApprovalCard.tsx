@@ -18,9 +18,14 @@ export function PluginApprovalCard({ plugin, active, onApprove, onDecline }: Pro
   }
   return <section className="approval-card" data-active={active} aria-label={`Instalar ${plugin.display_name}`}>
     <header className="approval-card__header"><span className="approval-card__glyph" aria-hidden="true">✦</span><div><strong>{plugin.display_name} · v{plugin.version}</strong><p>{plugin.description || 'Plugin declarativo'} · {plugin.author || 'autor não informado'}</p></div></header>
-    {plugin.skills.length + plugin.mcp_servers.length + plugin.agents.length + plugin.commands.length === 0 ? <p className="approval-card__error">Este plugin não oferece contribuições compatíveis com o Orin.</p> : <div className="approval-card__form">
+    {plugin.skills.length + plugin.mcp_servers.length + plugin.agents.length + plugin.commands.length + plugin.hooks.length === 0 ? <p className="approval-card__error">Este plugin não oferece contribuições compatíveis com o Orin.</p> : <div className="approval-card__form">
       <p className="approval-card__hint">Contribuições que serão adicionadas:</p>
       <ul>{plugin.skills.map((item) => <li key={item.skill_id}>Skill · {item.name}</li>)}{plugin.mcp_servers.map((item) => <li key={item.slug}>MCP · {item.display_name} <small>(precisa de aprovação separada)</small></li>)}{plugin.agents.map((item) => <li key={item.agent_id}>Subagente · {item.name}</li>)}{plugin.commands.map((item) => <li key={item.command_id}>Comando · /{item.slug}</li>)}</ul>
+      {plugin.hooks.length > 0 && <section className="approval-card__hooks">
+        <h4>Hooks</h4>
+        <p className="approval-card__notice">Aprovar instala estes hooks, mas <strong>não autoriza a execução</strong>. Ligue-os depois, em Plugins, se confiar neste código.</p>
+        <ul>{plugin.hooks.map((item) => <li key={item.hook_id}><span className="approval-card__hook-event">{item.event}</span>{item.matcher && <span className="approval-card__hook-matcher">{item.matcher}</span>}<code className="approval-card__hook-command">{item.command}</code></li>)}</ul>
+      </section>}
       {plugin.warnings.map((warning) => <p className="approval-card__error" role="alert" key={warning}>{warning}</p>)}
       {active && <footer className="approval-card__actions"><button type="button" className="approval-card__decline" onClick={() => void act('decline')} disabled={busy !== null}>{busy === 'decline' ? 'Recusando…' : 'Recusar'}</button><button type="button" className="approval-card__submit" onClick={() => void act('approve')} disabled={busy !== null}>{busy === 'approve' ? 'Instalando…' : 'Instalar'}</button></footer>}
       {error && <p className="approval-card__error" role="alert">{error}</p>}

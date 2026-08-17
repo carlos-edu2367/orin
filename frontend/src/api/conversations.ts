@@ -414,6 +414,10 @@ function parsePluginApprovalRequest(payload: Record<string, unknown>): Conversat
     mcp_servers: objects(plugin.mcp_servers).map((item) => ({ slug: String(item.slug ?? ''), display_name: String(item.display_name ?? ''), transport: String(item.transport ?? ''), secret_names: textArray(item.secret_names) })),
     agents: objects(plugin.agents).map((item) => ({ agent_id: String(item.agent_id ?? ''), name: String(item.name ?? ''), role: typeof item.role === 'string' ? item.role : undefined })),
     commands: objects(plugin.commands).map((item) => ({ command_id: String(item.command_id ?? ''), slug: String(item.slug ?? ''), description: typeof item.description === 'string' ? item.description : undefined })),
+    hooks: objects(plugin.hooks).map((item) => ({
+      hook_id: String(item.hook_id ?? ''), event: String(item.event ?? ''), matcher: String(item.matcher ?? ''),
+      command: String(item.command ?? ''), timeout_seconds: typeof item.timeout_seconds === 'number' ? item.timeout_seconds : 10,
+    })),
     contribution_count: typeof plugin.contribution_count === 'number' ? plugin.contribution_count : 0,
   }
 }

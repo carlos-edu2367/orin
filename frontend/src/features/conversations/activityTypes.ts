@@ -92,6 +92,7 @@ export type PluginApprovalRequest = {
   mcp_servers: Array<{ slug: string; display_name: string; transport: string; secret_names?: string[] }>
   agents: Array<{ agent_id: string; name: string; role?: string }>
   commands: Array<{ command_id: string; slug: string; description?: string }>
+  hooks: Array<{ hook_id: string; event: string; matcher: string; command: string; timeout_seconds: number }>
   contribution_count: number
 }
 
