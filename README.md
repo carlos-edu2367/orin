@@ -54,6 +54,16 @@ camera and geolocation are intentionally unavailable. They require an
 explicit future approval/profile flow rather than a model-controlled tool
 argument.
 
+## Semantic code search
+
+When a project is bound to a local folder, Orin indexes it and gives the agent
+a `search_code` tool that finds code by meaning rather than by regex, plus a
+`project_map` tool for orienting in an unfamiliar codebase. Embeddings come
+from a local Ollama instance by default, so nothing leaves the machine; without
+one, the search degrades to keyword ranking and says so.
+
+See [docs/RETRIEVAL.md](docs/RETRIEVAL.md).
+
 ## Requirements
 
 The Windows release includes the runtime, SQLite and Chromium. It does not need
