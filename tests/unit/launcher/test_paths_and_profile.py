@@ -75,7 +75,11 @@ def test_service_command_reexecutes_the_launcher_not_a_source_tree() -> None:
 
 
 def test_runtime_profile_uses_the_embedded_release_version() -> None:
-    assert RuntimeProfile.detect().version == __version__ == "0.2.1"
+    # A literal expected version here goes stale on every release (found live:
+    # this asserted "0.2.1" while the package had already moved past 0.2.2).
+    # __version__ is the thing under test elsewhere; here only the detector's
+    # agreement with it matters.
+    assert RuntimeProfile.detect().version == __version__
 
 
 def test_migrations_are_resolved_from_the_package() -> None:
