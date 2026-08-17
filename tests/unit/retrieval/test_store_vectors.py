@@ -67,3 +67,19 @@ def test_reopening_with_the_same_identity_keeps_the_vectors(tmp_path: Path) -> N
     first.close()
 
     assert SqliteChunkStore(database, identity).status().vectors == 1
+
+
+def test_a_zero_magnitude_vector_is_still_stored_so_it_is_not_re_embedded_forever(tmp_path: Path) -> None:
+    store = SqliteChunkStore(tmp_path / "index.db", EmbedderIdentity("fake", "test", 3))
+    _seed(store)
+
+    store.store_vectors({"src/a.py:1-2": [0.0, 0.0, 0.0], "src/a.py:5-6": [1.0, 0.0, 0.0]})
+
+    # A zero vector must count as "handled" — otherwise chunk_ids_without_vectors
+    # keeps returning it and ProjectIndexer._embed_pending loops forever.
+    assert store.chunk_ids_without_vectors(limit=10) == []
+    # It still shows up in search results, but scores 0 and never outranks a
+    # real match — harmless, just never useful.
+    results = dict(store.search_vector([1.0, 0.0, 0.0], limit=10))
+    assert results["src/a.py:5-6"] == 1.0
+    assert results["src/a.py:1-2"] == 0.0

@@ -137,3 +137,19 @@ def test_indexing_survives_an_embedder_outage_and_keeps_the_text_searchable(tmp_
     assert store.status().chunks >= 1
     assert store.status().vectors == 0
     assert store.search_lexical("authorize", limit=5)
+
+
+def test_a_zero_vector_from_the_embedder_does_not_hang_the_scan(tmp_path: Path) -> None:
+    class ZeroVectorEmbedder(CountingEmbedder):
+        def embed(self, texts):
+            self.calls.append(list(texts))
+            return [[0.0, 0.0, 0.0, 0.0] for _ in texts]
+
+    embedder = ZeroVectorEmbedder()
+    indexer, store = _indexer(tmp_path, embedder)
+    (indexer.root / "a.py").write_text("def authorize():\n    return 1\n", encoding="utf-8")
+
+    indexer.scan()
+
+    assert store.status().vectors == store.status().chunks
+    assert store.chunk_ids_without_vectors(limit=10) == []
