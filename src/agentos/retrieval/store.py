@@ -11,6 +11,8 @@ from pathlib import Path
 import re
 import sqlite3
 
+import numpy as np
+
 from .models import Chunk, EmbedderIdentity, IndexStatus
 
 
@@ -149,6 +151,65 @@ class SqliteChunkStore:
                 "INSERT INTO index_meta(key, value) VALUES('last_scan_at', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 (moment.isoformat(),),
             )
+
+    # -- vectors ----------------------------------------------------------
+
+    def store_vectors(self, vectors: dict[str, list[float]]) -> None:
+        """Persist embeddings, normalised, so cosine similarity is a dot product."""
+        with self._connection:
+            for chunk_id, values in vectors.items():
+                vector = np.asarray(values, dtype=np.float32)
+                magnitude = float(np.linalg.norm(vector))
+                if magnitude == 0.0:
+                    continue
+                payload = (vector / magnitude).astype(np.float32).tobytes()
+                self._connection.execute(
+                    "INSERT INTO vectors(chunk_id, embedding) VALUES(?, ?) ON CONFLICT(chunk_id) DO UPDATE SET embedding=excluded.embedding",
+                    (chunk_id, payload),
+                )
+        self._matrix_cache = None
+
+    def chunk_ids_without_vectors(self, *, limit: int) -> list[str]:
+        rows = self._connection.execute(
+            "SELECT chunks.chunk_id AS chunk_id FROM chunks LEFT JOIN vectors USING (chunk_id) WHERE vectors.chunk_id IS NULL LIMIT ?",
+            (int(limit),),
+        )
+        return [row["chunk_id"] for row in rows]
+
+    def search_vector(self, query_vector: list[float], *, limit: int) -> list[tuple[str, float]]:
+        chunk_ids, matrix = self._vector_matrix()
+        if not chunk_ids:
+            return []
+        query = np.asarray(query_vector, dtype=np.float32)
+        magnitude = float(np.linalg.norm(query))
+        if magnitude == 0.0 or query.shape[0] != matrix.shape[1]:
+            return []
+        scores = matrix @ (query / magnitude)
+        count = min(int(limit), scores.shape[0])
+        best = np.argpartition(-scores, count - 1)[:count] if count < scores.shape[0] else np.arange(scores.shape[0])
+        ordered = best[np.argsort(-scores[best])]
+        return [(chunk_ids[index], float(scores[index])) for index in ordered]
+
+    def _vector_matrix(self) -> tuple[list[str], np.ndarray]:
+        """The whole vector table as one matrix, cached until the next write.
+
+        At the 50k-chunk ceiling with 768 dimensions this is about 150 MB of
+        float32 — the reason the ceiling exists.
+        """
+        cached = self._matrix_cache
+        if cached is not None:
+            return cached  # type: ignore[return-value]
+        chunk_ids: list[str] = []
+        rows: list[np.ndarray] = []
+        for row in self._connection.execute("SELECT chunk_id, embedding FROM vectors ORDER BY chunk_id"):
+            values = np.frombuffer(row["embedding"], dtype=np.float32)
+            if rows and values.shape[0] != rows[0].shape[0]:
+                continue
+            chunk_ids.append(row["chunk_id"])
+            rows.append(values)
+        matrix = np.vstack(rows) if rows else np.zeros((0, 0), dtype=np.float32)
+        self._matrix_cache = (chunk_ids, matrix)
+        return self._matrix_cache  # type: ignore[return-value]
 
     # -- reads ----------------------------------------------------------
 
