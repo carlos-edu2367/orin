@@ -80,6 +80,15 @@ class CommandContribution:
 
 
 @dataclass(frozen=True, slots=True)
+class HookContribution:
+    hook_id: str            # "{plugin_id}:{event}:{index}" in declaration order
+    event: str               # SessionStart | PostToolUse | PostCompact
+    matcher: str              # regex over the tool name; "" matches everything
+    command: str               # raw declared string, ${CLAUDE_PLUGIN_ROOT} unresolved
+    timeout_seconds: int
+
+
+@dataclass(frozen=True, slots=True)
 class PluginInspection:
     ref: PluginRef
     display_name: str
@@ -91,11 +100,12 @@ class PluginInspection:
     mcp_servers: tuple[McpServerContribution, ...] = ()
     agents: tuple[AgentContribution, ...] = ()
     commands: tuple[CommandContribution, ...] = ()
+    hooks: tuple[HookContribution, ...] = ()
     warnings: tuple[str, ...] = ()
 
     @property
     def contribution_count(self) -> int:
-        return len(self.skills) + len(self.mcp_servers) + len(self.agents) + len(self.commands)
+        return len(self.skills) + len(self.mcp_servers) + len(self.agents) + len(self.commands) + len(self.hooks)
 
     @property
     def is_installable(self) -> bool:
