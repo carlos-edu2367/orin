@@ -175,6 +175,21 @@ def test_hook_consent_survives_a_disable_then_enable_cycle(tmp_path):
     assert rows["hook"] is True
 
 
+def test_get_and_list_expose_the_contribution_rows(tmp_path):
+    service = _service(tmp_path)
+    service.inspect(user_id="u1", reference=str(_hooks_package(tmp_path / "src")))
+    service.approve(user_id="u1", plugin_id="demo")
+
+    record = service.get("u1", "demo")
+    kinds = {item["kind"]: item for item in record["contributions"]}
+    assert kinds["hook"]["reference"] == "demo:SessionStart:0"
+    assert kinds["hook"]["enabled"] is False
+    assert kinds["skill"]["enabled"] is True
+
+    listed = service.list("u1")
+    assert {item["kind"] for item in listed[0]["contributions"]} == {"skill", "hook"}
+
+
 def test_infer_mcp_launch_reports_a_fetch_failure(tmp_path):
     import socket
     try:

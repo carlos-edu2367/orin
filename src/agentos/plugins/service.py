@@ -197,13 +197,26 @@ class PluginService:
             if missing_ok: return None
             raise PluginServiceError("plugin was not found")
         result = row_to_plugin(row)
-        result["contribution_count"] = len(self._contributions(user_id, plugin_id))
+        contributions = self._contributions(user_id, plugin_id)
+        result["contribution_count"] = len(contributions)
+        result["contributions"] = self._public_contributions(contributions)
         return result
 
     def list(self, user_id: str) -> list[dict[str, Any]]:
         with self.engine.connect() as connection:
             rows = connection.execute(select(plugins).where(plugins.c.user_id == user_id).order_by(plugins.c.display_name)).mappings().all()
-        return [{**row_to_plugin(row), "contribution_count": len(self._contributions(user_id, str(row["plugin_id"]))) } for row in rows]
+        results = []
+        for row in rows:
+            contributions = self._contributions(user_id, str(row["plugin_id"]))
+            results.append({**row_to_plugin(row), "contribution_count": len(contributions), "contributions": self._public_contributions(contributions)})
+        return results
+
+    @staticmethod
+    def _public_contributions(contributions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            {"kind": str(item["kind"]), "reference": str(item["reference"]), "display_name": str(item["display_name"]), "enabled": bool(item["enabled"])}
+            for item in contributions
+        ]
 
     def list_commands(self, user_id: str) -> list[dict[str, Any]]:
         library = getattr(self.activator, "command_library", None)
