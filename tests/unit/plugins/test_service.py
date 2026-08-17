@@ -1,6 +1,7 @@
 import json
 from sqlalchemy import create_engine
 from agentos.persistence.postgres.schema import metadata
+from agentos.plugins.command_library import CommandLibrary
 from agentos.plugins.service import PluginService, PluginServiceError
 from tests.unit.plugins.fakes import FakeMcpService, FakeSkillLibrary
 
@@ -15,6 +16,26 @@ def _service(tmp_path):
     engine = create_engine("sqlite+pysqlite:///:memory:")
     metadata.create_all(engine)
     return PluginService(engine, plugin_root=tmp_path / "plugins", skill_library=FakeSkillLibrary(), mcp_service=FakeMcpService())
+
+def test_service_threads_a_provided_command_library_into_its_default_activator(tmp_path):
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    metadata.create_all(engine)
+    command_library = CommandLibrary()
+    service = PluginService(
+        engine, plugin_root=tmp_path / "plugins", skill_library=FakeSkillLibrary(),
+        mcp_service=FakeMcpService(), command_library=command_library,
+    )
+    source = tmp_path / "src"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin" / "plugin.json").write_text(json.dumps({"name": "demo", "version": "1.0.0"}), encoding="utf-8")
+    (source / "commands").mkdir()
+    (source / "commands" / "daily.md").write_text("body", encoding="utf-8")
+
+    service.inspect(user_id="u1", reference=str(source))
+    service.approve(user_id="u1", plugin_id="demo")
+
+    assert command_library.resolve("u1", "daily").command_id == "demo:daily"
+
 
 def test_service_inspects_approves_and_removes(tmp_path):
     service = _service(tmp_path)

@@ -50,6 +50,7 @@ from agentos.tool_runtime.adapters import BrowserNavigateAtomicTool, FilesystemA
 from agentos.tool_runtime.production import ProductionToolRuntime
 from agentos.persistence.postgres.skills import PostgresSkillLibraryService
 from agentos.mcp.service import McpServerService
+from agentos.plugins.command_library import CommandLibrary
 from agentos.plugins.github_search import GithubRepositorySearchClient
 from agentos.plugins.manifest_probe import GithubManifestProbe
 from agentos.plugins.service import PluginService
@@ -260,6 +261,7 @@ def compose_production_services(engine: Engine, *, localhost_trust_enabled: bool
     provider_repository = PostgresProviderCatalogRepository(engine, cipher=provider_cipher)
     skill_library = PostgresSkillLibraryService(engine)
     mcp_service = McpServerService(engine)
+    command_library = CommandLibrary()
     omniroute_runtime = OmniRouteProcessManager(OmniRouteRuntimeSettingsStore())
     staging = UploadStaging(orin_paths().data / "uploads" / "staging")
     try:
@@ -275,10 +277,10 @@ def compose_production_services(engine: Engine, *, localhost_trust_enabled: bool
         resource_services={**{name: unavailable for name in ("agents", "capabilities", "tools", "workspaces", "artifacts", "memories")}, "multi_agent": multi_agent_coordinator or unavailable},
         skills=skill_library,
         mcp=mcp_service,
-        plugins=PluginService(engine, plugin_root=orin_paths().data / "plugins", skill_library=skill_library, mcp_service=mcp_service, search_client=GithubRepositorySearchClient(), manifest_probe=GithubManifestProbe()),
+        plugins=PluginService(engine, plugin_root=orin_paths().data / "plugins", skill_library=skill_library, mcp_service=mcp_service, search_client=GithubRepositorySearchClient(), manifest_probe=GithubManifestProbe(), command_library=command_library),
         provider_configuration=PostgresProviderConfigurationAdapter(engine, cipher=provider_cipher),
         provider_catalog=ProviderModelCatalogService(provider_repository, {"openrouter": OpenRouterModelCatalogClient(), "omniroute": OmniRouteCatalogClient(), "ollama": OllamaCatalogClient()}),
-        conversation_application=ChatApplication(PostgresChatStore(engine, PostgresAgenticActivityStore(engine, cursor_secret)), ExecutionApplicationAdapter(engine)),
+        conversation_application=ChatApplication(PostgresChatStore(engine, PostgresAgenticActivityStore(engine, cursor_secret), command_library=command_library), ExecutionApplicationAdapter(engine)),
         projects=PostgresProjectStore(engine),
         omniroute_runtime=omniroute_runtime,
         agentic_runtime=AgentRuntimeSettingsStore(),
