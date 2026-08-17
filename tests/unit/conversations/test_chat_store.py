@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 
 from agentos.agentic.events import AgentActivityEventType
 from agentos.conversations.chat import PostgresChatStore
 from agentos.persistence.postgres.agentic_activity import PostgresAgenticActivityStore
 from agentos.persistence.postgres.conversation_agents import ConversationAgentStore
-from agentos.persistence.postgres.schema import metadata
+from agentos.persistence.postgres.schema import conversation_messages, conversation_turns, metadata
+from agentos.plugins.command_library import CommandLibrary
+from agentos.plugins.models import CommandContribution
 
 
 def test_overview_returns_model_and_usage_for_each_agent_and_the_whole_conversation() -> None:
@@ -160,6 +162,109 @@ def test_reopened_conversation_repairs_context_prompt_count_from_legacy_redacted
     assert snapshot["context_usage"]["system_prompt_tokens"] == 700
     context_event = next(item for item in snapshot["activities"] if item["event_type"] == "context.updated")
     assert context_event["payload"]["system_prompt_tokens"] == 700
+
+
+def _user_message_id(engine, turn_id):
+    with engine.connect() as c:
+        return c.execute(select(conversation_turns.c.user_message_id).where(conversation_turns.c.turn_id == turn_id)).scalar_one()
+
+
+def _content(engine, turn_id):
+    with engine.connect() as c:
+        return c.execute(
+            select(conversation_messages.c.content).where(
+                conversation_messages.c.message_id == _user_message_id(engine, turn_id)
+            )
+        ).scalar_one()
+
+
+def _store_with_command(engine, tmp_path, body="Daily note for $ARGUMENTS."):
+    (tmp_path / "commands").mkdir(exist_ok=True)
+    (tmp_path / "commands" / "daily.md").write_text(body, encoding="utf-8")
+    library = CommandLibrary()
+    library.install_plugin_commands(
+        user_id="user-1", plugin_id="demo", install_path=tmp_path,
+        commands=(CommandContribution("demo:daily", "daily", "d", "", "daily.md"),),
+    )
+    return PostgresChatStore(engine, command_library=library)
+
+
+def test_a_command_message_stores_what_the_person_typed(tmp_path) -> None:
+    engine = create_engine("sqlite://", future=True)
+    metadata.create_all(engine)
+    store = _store_with_command(engine, tmp_path)
+
+    receipt = store.create(
+        user_id="user-1", message="/daily amanhã", provider="anthropic",
+        model_id="claude-opus-5", idempotency_key="request-1",
+    )
+
+    history = store.history_for_turn({
+        "conversation_id": receipt.conversation_id,
+        "user_message_id": _user_message_id(engine, receipt.turn_id),
+    })
+    assert history[-1]["content"] == "Daily note for amanhã."
+    assert _content(engine, receipt.turn_id) == "/daily amanhã"
+
+
+def test_a_slash_message_that_is_not_a_command_passes_through_untouched(tmp_path) -> None:
+    engine = create_engine("sqlite://", future=True)
+    metadata.create_all(engine)
+    store = _store_with_command(engine, tmp_path)
+
+    receipt = store.create(
+        user_id="user-1", message="/usr/local/bin exists?", provider="anthropic",
+        model_id="claude-opus-5", idempotency_key="request-2",
+    )
+
+    assert _content(engine, receipt.turn_id) == "/usr/local/bin exists?"
+    history = store.history_for_turn({
+        "conversation_id": receipt.conversation_id,
+        "user_message_id": _user_message_id(engine, receipt.turn_id),
+    })
+    assert history[-1]["content"] == "/usr/local/bin exists?"
+
+
+def test_arguments_are_appended_when_the_body_has_no_placeholder(tmp_path) -> None:
+    engine = create_engine("sqlite://", future=True)
+    metadata.create_all(engine)
+    store = _store_with_command(engine, tmp_path, body="Just do the thing.")
+
+    receipt = store.create(
+        user_id="user-1", message="/daily amanhã", provider="anthropic",
+        model_id="claude-opus-5", idempotency_key="request-3",
+    )
+
+    history = store.history_for_turn({
+        "conversation_id": receipt.conversation_id,
+        "user_message_id": _user_message_id(engine, receipt.turn_id),
+    })
+    assert history[-1]["content"] == "Just do the thing.\n\nArgumentos: amanhã"
+
+
+def test_expansion_survives_the_plugin_being_removed(tmp_path) -> None:
+    engine = create_engine("sqlite://", future=True)
+    metadata.create_all(engine)
+    library = CommandLibrary()
+    (tmp_path / "commands").mkdir(exist_ok=True)
+    (tmp_path / "commands" / "daily.md").write_text("Body.", encoding="utf-8")
+    library.install_plugin_commands(
+        user_id="user-1", plugin_id="demo", install_path=tmp_path,
+        commands=(CommandContribution("demo:daily", "daily", "d", "", "daily.md"),),
+    )
+    store = PostgresChatStore(engine, command_library=library)
+    receipt = store.create(
+        user_id="user-1", message="/daily", provider="anthropic",
+        model_id="claude-opus-5", idempotency_key="request-4",
+    )
+
+    library.remove_plugin_commands(user_id="user-1", plugin_id="demo")
+
+    history = store.history_for_turn({
+        "conversation_id": receipt.conversation_id,
+        "user_message_id": _user_message_id(engine, receipt.turn_id),
+    })
+    assert history[-1]["content"] == "Body."
 
 
 def test_a_follow_up_message_closes_a_waiting_user_turn() -> None:

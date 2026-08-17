@@ -17,7 +17,7 @@ from agentos.api.contracts import ApplicationNotFoundError
 from agentos.api.events import CursorError
 from agentos.agentic.events import AgentActivityEvent, AgentActivityEventType
 from agentos.persistence.postgres.agentic_activity import ActivityCursorError
-from agentos.persistence.postgres.schema import (conversation_activity_events, conversation_agent_usage, conversation_agents, conversation_dispatches, conversation_events, conversation_message_attachments, conversation_messages, conversation_tool_records, conversation_turns, conversations, projects, runtime_heartbeats, workspace_roots)
+from agentos.persistence.postgres.schema import (conversation_activity_events, conversation_agent_usage, conversation_agents, conversation_dispatches, conversation_events, conversation_message_attachments, conversation_message_commands, conversation_messages, conversation_tool_records, conversation_turns, conversations, projects, runtime_heartbeats, workspace_roots)
 
 
 _LOGGER = logging.getLogger("agentos.conversations.chat")
@@ -86,6 +86,37 @@ def _repair_context_usage(payload: Mapping[str, object]) -> dict[str, object]:
     return repaired
 
 
+MAX_EXPANDED_COMMAND_BODY = 200_000
+
+
+def _expand_command(library, user_id: str, message: str) -> tuple[object, str, str] | None:
+    """Resolve a leading ``/token`` to a command, or return None.
+
+    Deliberately conservative: only a first token of the exact shape ``/slug``
+    or ``/plugin-id:slug`` is considered, so an ordinary message that happens
+    to start with a path or a regex is never hijacked.
+    """
+    if library is None or not message.startswith("/"):
+        return None
+    token, _, remainder = message.partition(" ")
+    name = token[1:]
+    if not name or "/" in name:
+        return None
+    resolved = library.resolve(user_id, name)
+    if resolved is None:
+        return None
+    try:
+        body = resolved.path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    arguments = remainder.strip()
+    if "$ARGUMENTS" in body:
+        body = body.replace("$ARGUMENTS", arguments)
+    elif arguments:
+        body = f"{body.rstrip()}\n\nArgumentos: {arguments}"
+    return resolved, arguments, body.strip()[:MAX_EXPANDED_COMMAND_BODY]
+
+
 def _unavailable_token_usage() -> dict[str, object]:
     return {
         "input_tokens": None,
@@ -131,9 +162,10 @@ class ChatReceipt:
 
 
 class PostgresChatStore:
-    def __init__(self, engine: Engine, activity_store=None) -> None:
+    def __init__(self, engine: Engine, activity_store=None, command_library=None) -> None:
         self._engine = engine
         self.activity_store = activity_store
+        self._command_library = command_library
 
     def _activity(
         self,
@@ -246,6 +278,7 @@ class PostgresChatStore:
     def create(self, *, user_id: str, message: str, provider: str, model_id: str, idempotency_key: str, conversation_id: str | None = None, project_id: str | None = None, attachments: Sequence[Mapping[str, object]] = (), new_conversation_id: str | None = None, scheduled_by_schedule_id: str | None = None) -> ChatReceipt:
         message = message.strip()
         attachments = list(attachments)
+        expansion = _expand_command(self._command_library, user_id, message)
         if len(message) > 16000: raise ValueError("message must be a bounded non-blank string")
         if not message and not attachments: raise ValueError("message must be a bounded non-blank string")
         title_source = message or str(attachments[0].get("original_name") or "Arquivo enviado")
@@ -301,6 +334,13 @@ class PostgresChatStore:
                 {"message_id": user_message_id, "conversation_id": conversation_id, "turn_id": turn_id, "user_id": user_id, "role": "user", "content": message, "sequence": sequence, "status": "completed", "retryable": False, "created_at": now, "updated_at": now},
                 {"message_id": assistant_message_id, "conversation_id": conversation_id, "turn_id": turn_id, "user_id": user_id, "role": "assistant", "content": "", "sequence": sequence + 1, "status": "queued", "retryable": False, "created_at": now, "updated_at": now},
             ])
+            if expansion is not None:
+                resolved, arguments, expanded_body = expansion
+                c.execute(insert(conversation_message_commands).values(
+                    message_id=user_message_id, conversation_id=conversation_id, user_id=user_id,
+                    plugin_id=resolved.plugin_id, command_id=resolved.command_id,
+                    arguments=arguments, expanded_body=expanded_body, created_at=now,
+                ))
             if attachments:
                 c.execute(insert(conversation_message_attachments), [{
                     "attachment_id": _id("att"), "message_id": user_message_id,
@@ -440,12 +480,16 @@ class PostgresChatStore:
         with self._engine.connect() as c:
             rows = c.execute(select(conversation_messages.c.message_id, conversation_messages.c.role, conversation_messages.c.content).where(conversation_messages.c.conversation_id == turn["conversation_id"], conversation_messages.c.sequence <= select(conversation_messages.c.sequence).where(conversation_messages.c.message_id == turn["user_message_id"]).scalar_subquery()).order_by(conversation_messages.c.sequence)).mappings().all()
             attachment_rows = c.execute(select(conversation_message_attachments).where(conversation_message_attachments.c.conversation_id == turn["conversation_id"]).order_by(conversation_message_attachments.c.id)).mappings().all()
+            command_rows = c.execute(select(
+                conversation_message_commands.c.message_id, conversation_message_commands.c.expanded_body
+            ).where(conversation_message_commands.c.conversation_id == turn["conversation_id"])).mappings().all()
         grouped: dict[str, list[dict[str, object]]] = {}
         for row in attachment_rows:
             grouped.setdefault(str(row["message_id"]), []).append(dict(row))
+        expansions = {str(row["message_id"]): str(row["expanded_body"]) for row in command_rows}
         history: list[dict[str, str]] = []
         for row in rows:
-            content = str(row["content"])
+            content = expansions.get(str(row["message_id"]), str(row["content"]))
             records = grouped.get(str(row["message_id"]), [])
             if records:
                 content = f"{content}{_attachment_marker(records)}"
