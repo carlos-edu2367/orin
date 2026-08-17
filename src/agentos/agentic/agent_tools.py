@@ -17,6 +17,7 @@ import base64
 from html.parser import HTMLParser
 from ipaddress import ip_address
 import json
+import logging
 import os
 import re
 import shlex
@@ -38,6 +39,8 @@ from .browser_tools import _cache_key_url, _safe_display_url, sanitize_page_text
 from .file_preview import media_type_for
 from .provider_content import image_block
 
+
+logger = logging.getLogger(__name__)
 
 MAX_TOOL_RESULT_CHARS = 12_000
 COMMAND_TIMEOUT_SECONDS = 45
@@ -986,8 +989,11 @@ class AgentToolset:
             return
         try:
             self._retrieval_reindex(paths)
-        except Exception:  # noqa: BLE001 - indexing never breaks the tool that ran
-            pass
+        except Exception:
+            # Never breaks the tool call that ran, but a silent swallow here
+            # would mean the index stops updating for the rest of the session
+            # with zero trace anywhere — same risk IndexWorker._run logs for.
+            logger.exception("could not queue a reindex for %s", paths)
 
     def run_command(self, command: str, background: bool = False) -> dict[str, Any]:
         if not isinstance(command, str) or not command.strip():

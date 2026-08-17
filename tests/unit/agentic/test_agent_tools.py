@@ -1190,3 +1190,16 @@ def test_a_mutating_tool_without_a_reindex_queue_does_not_raise(tmp_path) -> Non
     outcome = tools.invoke("write_file", {"path": "notes/plan.md", "content": "step one"})
 
     assert outcome.status == "succeeded"
+
+
+def test_a_broken_reindex_queue_does_not_fail_the_tool_but_is_logged(tmp_path, caplog) -> None:
+    def broken(paths: list[str]) -> None:
+        raise RuntimeError("queue is gone")
+
+    tools = AgentToolset(ConversationWorkspace(tmp_path, "chat_rag_write_broken"), retrieval=_FakeRetrieval(), retrieval_reindex=broken)
+
+    with caplog.at_level("ERROR", logger="agentos.agentic.agent_tools"):
+        outcome = tools.invoke("write_file", {"path": "notes/plan.md", "content": "step one"})
+
+    assert outcome.status == "succeeded"
+    assert any("reindex" in record.message for record in caplog.records)
