@@ -1,6 +1,6 @@
 from agentos.plugins.activator import ActivationFailed, PluginActivator
-from agentos.plugins.models import McpServerContribution, PluginInspection, PluginRef, SkillContribution
-from tests.unit.plugins.fakes import FakeMcpService, FakeSkillLibrary
+from agentos.plugins.models import CommandContribution, McpServerContribution, PluginInspection, PluginRef, SkillContribution
+from tests.unit.plugins.fakes import FakeCommandLibrary, FakeMcpService, FakeSkillLibrary
 
 def _inspection():
     return PluginInspection(PluginRef("demo", "1.0.0"), "Demo", "", "", None, "abc", skills=(SkillContribution("demo:s", "s", "d", "skills/s/SKILL.md"),), mcp_servers=(McpServerContribution("demo-mcp", "MCP", "stdio", "npx", ("-y", "x"), None, ("TOKEN",)),))
@@ -35,3 +35,40 @@ def test_activation_accepts_plugin_skill_without_per_skill_version(tmp_path):
 
     assert result.contributions[0]["reference"] == "demo:s"
     assert library.installed["demo"][0].version == "1.0.0"
+
+
+def test_activation_registers_commands_and_deactivation_removes_them(tmp_path):
+    (tmp_path / "commands").mkdir()
+    (tmp_path / "commands" / "daily.md").write_text("body", encoding="utf-8")
+    inspection = PluginInspection(
+        PluginRef("demo", "1.0.0"), "Demo", "", "", None, "abc",
+        commands=(CommandContribution("demo:daily", "daily", "d", "", "daily.md"),),
+    )
+    commands = FakeCommandLibrary()
+    activator = PluginActivator(
+        skill_library=FakeSkillLibrary(), mcp_service=FakeMcpService(), command_library=commands
+    )
+
+    result = activator.activate(user_id="u1", install_path=tmp_path, inspection=inspection)
+
+    assert commands.installed["u1/demo"][0].command_id == "demo:daily"
+    assert {item["kind"] for item in result.contributions} == {"command"}
+    assert result.contributions[0]["reference"] == "demo:daily"
+
+    activator.deactivate(user_id="u1", plugin_id="demo", contributions=result.contributions)
+
+    assert commands.installed == {}
+
+
+def test_activation_works_without_a_command_library(tmp_path):
+    """The library is optional, exactly like agent_templates."""
+    inspection = PluginInspection(
+        PluginRef("demo", "1.0.0"), "Demo", "", "", None, "abc",
+        commands=(CommandContribution("demo:daily", "daily", "d", "", "daily.md"),),
+    )
+
+    result = PluginActivator(skill_library=FakeSkillLibrary(), mcp_service=FakeMcpService()).activate(
+        user_id="u1", install_path=tmp_path, inspection=inspection
+    )
+
+    assert result.contributions[0]["kind"] == "command"

@@ -15,10 +15,12 @@ class ActivationFailed(RuntimeError):
 
 
 class PluginActivator:
-    def __init__(self, *, skill_library, mcp_service, agent_templates=None) -> None:
+    def __init__(self, *, skill_library, mcp_service, agent_templates=None, command_library=None, commands_path: str = "commands") -> None:
         self.skill_library = skill_library
         self.mcp_service = mcp_service
         self.agent_templates = agent_templates
+        self.command_library = command_library
+        self.commands_path = commands_path
 
     def activate(self, *, user_id: str, install_path: Path, inspection: PluginInspection):
         installed_skills = []
@@ -56,11 +58,27 @@ class PluginActivator:
                 contributions.append(contribution)
                 if self.agent_templates is not None and hasattr(self.agent_templates, "register"):
                     self.agent_templates.register(user_id=user_id, plugin_id=inspection.ref.plugin_id, agent_id=item.agent_id, name=item.name, role=item.role, path=str(Path(install_path) / item.relative_path))
+            if inspection.commands:
+                contributions.extend(
+                    {"kind": "command", "reference": item.command_id, "display_name": item.slug}
+                    for item in inspection.commands
+                )
+                if self.command_library is not None:
+                    self.command_library.install_plugin_commands(
+                        user_id=user_id, plugin_id=inspection.ref.plugin_id,
+                        install_path=Path(install_path), commands=inspection.commands,
+                        commands_path=self.commands_path,
+                    )
             return type("ActivationResult", (), {"contributions": contributions})()
         except Exception as error:
             for server_id in reversed(server_ids):
                 try:
                     self.mcp_service.remove(user_id, server_id)
+                except Exception:
+                    pass
+            if self.command_library is not None:
+                try:
+                    self.command_library.remove_plugin_commands(user_id=user_id, plugin_id=inspection.ref.plugin_id)
                 except Exception:
                     pass
             try:
@@ -76,4 +94,6 @@ class PluginActivator:
                     self.mcp_service.remove(user_id, str(item["reference"]))
                 except Exception:
                     pass
+        if self.command_library is not None:
+            self.command_library.remove_plugin_commands(user_id=user_id, plugin_id=plugin_id)
         self.skill_library.remove_plugin_skills(user_id=user_id, plugin_id=plugin_id)

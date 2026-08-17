@@ -10,3 +10,13 @@ class FakeMcpService:
         self.proposed.append(dict(command))
         return {"server_id": f"srv-{len(self.proposed)}", "state": "pending_approval"}
     def remove(self, user_id, server_id): self.removed.append(server_id)
+
+class FakeCommandLibrary:
+    def __init__(self) -> None:
+        self.installed: dict[str, tuple] = {}
+
+    def install_plugin_commands(self, *, user_id, plugin_id, install_path, commands, commands_path="commands"):
+        self.installed[f"{user_id}/{plugin_id}"] = tuple(commands)
+
+    def remove_plugin_commands(self, *, user_id, plugin_id):
+        self.installed.pop(f"{user_id}/{plugin_id}", None)
