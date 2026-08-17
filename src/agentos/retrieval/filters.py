@@ -20,9 +20,19 @@ DENIED_SEGMENTS = frozenset({
     ".git", ".hg", ".svn", "node_modules", ".venv", "venv", "__pycache__",
     "dist", "build", ".next", ".turbo", ".pytest_cache", ".mypy_cache",
     ".ruff_cache", "target", "vendor", ".tox", "site-packages",
+    ".aws", ".ssh",
 })
 
 DENIED_NAMES = frozenset({"uv.lock", "package-lock.json", "poetry.lock", "yarn.lock", "Cargo.lock"})
+
+# Exact, case-insensitive filenames rejected regardless of extension. These
+# are conventional credential filenames that carry no distinguishing prefix or
+# suffix of their own — a Google Cloud service-account key is credentials.json,
+# an SSH authorized-keys file has no extension at all.
+SECRET_NAMES = frozenset({
+    "credentials", "credentials.json", "authorized_keys",
+    "secrets.yaml", "secrets.yml", "secrets.json",
+})
 
 # Prefix/suffix rules for material that must never be embedded. Checked against
 # the file name only, so a directory called ``keys`` is not itself excluded.
@@ -110,7 +120,9 @@ class IndexFilter:
         lowered = name.lower()
         if lowered.endswith(SECRET_EXEMPT_SUFFIXES):
             return False
+        if lowered in SECRET_NAMES:
+            return True
         return lowered.startswith(SECRET_PREFIXES) or lowered.endswith(SECRET_SUFFIXES)
 
 
-__all__ = ["DENIED_NAMES", "DENIED_SEGMENTS", "GitignoreFilter", "IndexFilter"]
+__all__ = ["DENIED_NAMES", "DENIED_SEGMENTS", "GitignoreFilter", "IndexFilter", "SECRET_NAMES"]

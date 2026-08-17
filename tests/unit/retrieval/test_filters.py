@@ -25,6 +25,19 @@ def test_secrets_are_rejected_before_anything_reads_them() -> None:
     assert not index_filter.rejects(".env.example")
 
 
+def test_common_credential_filenames_are_rejected() -> None:
+    # Code review finding: these carry no distinguishing prefix/suffix of
+    # their own, so the prefix/suffix rules alone missed them.
+    index_filter = IndexFilter(GitignoreFilter(()))
+
+    assert index_filter.rejects("deploy/credentials.json")
+    assert index_filter.rejects("secrets.yaml")
+    assert index_filter.rejects("secrets.yml")
+    assert index_filter.rejects(".ssh/authorized_keys")
+    assert index_filter.rejects(".aws/credentials")
+    assert index_filter.rejects("CREDENTIALS.JSON")
+
+
 def test_gitignore_patterns_are_honoured() -> None:
     ignore = GitignoreFilter.parse("# comment\n\ndist/\n*.log\n/root-only.txt\n!keep.log\n")
 
