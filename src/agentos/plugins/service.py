@@ -36,11 +36,11 @@ def _now():
 
 
 class PluginService:
-    def __init__(self, engine: Engine, *, plugin_root: Path, skill_library, mcp_service, fetcher=None, activator=None, search_client=None, manifest_probe=None, command_library=None) -> None:
+    def __init__(self, engine: Engine, *, plugin_root: Path, skill_library, mcp_service, fetcher=None, activator=None, search_client=None, manifest_probe=None, command_library=None, hook_engine=None) -> None:
         self.engine, self.plugin_root = engine, Path(plugin_root).resolve()
         self.skill_library, self.mcp_service = skill_library, mcp_service
         self.fetcher = fetcher or PluginFetcher(self.plugin_root)
-        self.activator = activator or PluginActivator(skill_library=skill_library, mcp_service=mcp_service, command_library=command_library)
+        self.activator = activator or PluginActivator(skill_library=skill_library, mcp_service=mcp_service, command_library=command_library, hook_engine=hook_engine)
         self.discovery = PluginDiscoveryService(self, search_client=search_client, manifest_probe=manifest_probe)
 
     def search(self, query: str) -> list[dict[str, Any]]:

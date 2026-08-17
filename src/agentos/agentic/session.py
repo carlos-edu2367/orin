@@ -563,6 +563,13 @@ class TurnSession:
         if state == "cancelled":
             self._record(AgentActivityEventType.TURN_FAILED, "Cancelado", {**base, "error_code": "TURN_CANCELLED"}, agent_id=actor)
             return
+        if state == "plugin_hook":
+            hook_id = str(payload.get("hook_id") or "")
+            summary = str(payload.get("summary") or "") or f"Hook {hook_id} executado"
+            self._record(AgentActivityEventType.PLUGIN_HOOK_EXECUTED, summary, {
+                **base, "hook_id": hook_id, "hook_event": payload.get("hook_event"), "status": payload.get("status"),
+            }, agent_id=actor)
+            return
         if state == "running" and agent_id is not None:
             self._record(AgentActivityEventType.TURN_STARTED, f"{agent_name or 'Subagente'} trabalhando", base, agent_id=actor)
             return
@@ -925,6 +932,7 @@ class TurnSession:
             tool_kinds={item.name: item.kind for item in definitions},
             skill_prompt_tokens=_skill_prompt_tokens(skill_catalog),
             context_reporting=True,
+            hook_engine=self.hook_engine,
         )
 
 

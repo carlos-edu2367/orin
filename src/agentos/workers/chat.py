@@ -27,6 +27,8 @@ from agentos.conversations.chat import PostgresChatStore
 from agentos.installation import orin_paths
 from agentos.mcp.service import McpServerService
 from agentos.mcp.toolset import McpToolProvider
+from agentos.plugins.hook_engine import HookEngine
+from agentos.plugins.rehydrate import rehydrate_hooks
 from agentos.plugins.service import PluginService
 from agentos.persistence.postgres.agent_memory import PostgresAgentMemoryStore
 from agentos.persistence.postgres.agentic_activity import PostgresAgenticActivityStore
@@ -153,6 +155,10 @@ class ChatWorker:
         # and a cap on concurrent sessions so an abandoned conversation does
         # not leak a Chromium process forever.
         self._browser_registry = browser_registry or ConversationBrowserRegistry(factory=conversation_browser_for)
+        # Kept for the whole worker process (unlike skill_library/plugin_service,
+        # which are cheap DB-backed rebuilds per turn): registrations here are an
+        # in-process index, and are refreshed per-user before each turn below.
+        self._hook_engine = HookEngine()
 
     def run(self, turn_id: str) -> None:
         self.store.heartbeat("chat-worker")
@@ -470,7 +476,14 @@ class ChatWorker:
         configured_limits = self._runtime_settings.get(str(turn["user_id"]))
         browser = self._browser_registry.acquire(turn)
         mcp_service = McpServerService(engine)
-        plugin_service = PluginService(engine, plugin_root=orin_paths().data / "plugins", skill_library=skill_library, mcp_service=mcp_service)
+        plugin_service = PluginService(engine, plugin_root=orin_paths().data / "plugins", skill_library=skill_library, mcp_service=mcp_service, hook_engine=self._hook_engine)
+        # A worker process's hook index starts empty; refresh this user's
+        # active, consented hooks before every turn so a plugin approved (or a
+        # consent flipped) from the API process is picked up without a restart.
+        try:
+            rehydrate_hooks(plugin_service, self._hook_engine, user_id=str(turn["user_id"]))
+        except Exception:
+            _LOGGER.exception("could not rehydrate plugin hooks for %s", turn["user_id"])
         # A broken MCP configuration must never stop a turn from running.
         try:
             mcp_bundles = mcp_service.active_servers(str(turn["user_id"]))
@@ -513,6 +526,7 @@ class ChatWorker:
                 ),
                 mcp_provider=mcp_provider,
                 plugin_service=plugin_service,
+                hook_engine=self._hook_engine,
             )
             return session.build_runtime()
         except Exception:

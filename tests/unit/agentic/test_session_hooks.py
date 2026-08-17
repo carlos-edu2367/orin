@@ -125,3 +125,12 @@ def test_no_hook_engine_means_no_context_and_no_error():
     runtime = session.build_runtime()
 
     assert "hooks de plugin" not in runtime.system_prompt
+
+
+def test_build_runtime_threads_the_hook_engine_through_for_post_tool_use_and_post_compact():
+    engine = RecordingEngine(body="")
+    session = _session(_turn(), Store(), hook_engine=engine)
+
+    runtime = session.build_runtime()
+
+    assert runtime.hook_engine is engine

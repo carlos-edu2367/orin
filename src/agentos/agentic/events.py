@@ -40,6 +40,7 @@ class AgentActivityEventType(StrEnum):
     TURN_WAITING_USER = "turn.waiting_user"
     TURN_COMPLETED = "turn.completed"
     TURN_FAILED = "turn.failed"
+    PLUGIN_HOOK_EXECUTED = "plugin.hook_executed"
 
 
 class ActivityVisibility(StrEnum):

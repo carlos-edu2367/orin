@@ -86,8 +86,10 @@ class AgenticTurnRuntime:
         tool_kinds: Mapping[str, str] | None = None,
         skill_prompt_tokens: int = 0,
         context_reporting: bool = False,
+        hook_engine=None,
     ) -> None:
         self.store, self.provider = store, provider
+        self.hook_engine = hook_engine
         # ``toolset`` is the agent-facing path: its results are returned to the
         # model verbatim. ``actions`` remains the policy-projected path used by
         # the tool-runtime contract tests, where results are summaries only.
@@ -396,6 +398,7 @@ class AgenticTurnRuntime:
         self._compaction_count += 1
         if self.context_reporting:
             self._life(turn, "context_compacted", removed_messages=len(compact_indices), summary_tokens=self._estimated_tokens(replacement), compaction_count=self._compaction_count)
+        self._hooks(turn, "PostCompact", compaction_count=self._compaction_count)
 
     def _compact_source(self, messages: list[dict[str, object]], indices: set[int]) -> str:
         parts: list[str] = []
@@ -712,6 +715,7 @@ class AgenticTurnRuntime:
                 summary=outcome.summary, error_code=outcome.error_code, tool_payload=dict(outcome.payload),
                 tool_arguments=dict(arguments),
             )
+            self._hooks(turn, "PostToolUse", tool_name=name, status=outcome.status)
             results.append({
                 "id": call_id, "name": name, "status": outcome.status,
                 "content": outcome.content, "images": list(outcome.images or []),
@@ -729,6 +733,21 @@ class AgenticTurnRuntime:
     def _life(self, turn: dict[str, object], state: str, **payload: object) -> None:
         if hasattr(self.store, "lifecycle"):
             self.store.lifecycle(turn, state, **payload)
+
+    def _hooks(self, turn: Mapping[str, object], event: str, **payload: object) -> None:
+        """Notify plugin hooks and surface their result. Never raises, never influences the turn."""
+        if self.hook_engine is None:
+            return
+        try:
+            outcomes = self.hook_engine.dispatch(user_id=str(turn.get("user_id") or ""), event=event, payload=dict(payload))
+        except Exception:  # noqa: BLE001 - a hook never breaks the turn
+            return
+        for outcome in outcomes or ():
+            summary = (getattr(outcome, "stdout", "") or "").strip() or getattr(outcome, "detail", "") or (getattr(outcome, "stderr", "") or "").strip()
+            self._life(
+                turn, "plugin_hook", hook_id=getattr(outcome, "hook_id", ""), hook_event=event,
+                status=getattr(outcome, "status", ""), summary=summary[:2000],
+            )
 
     def _fail(self, turn: dict[str, object], code: str, iteration: int, actions: int) -> AgenticRunResult:
         self._life(turn, "failed", code=code)
