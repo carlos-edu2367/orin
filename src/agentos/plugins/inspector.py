@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 from agentos.skills.models import SkillScope, SkillSource
@@ -76,6 +77,16 @@ def inspect_plugin_package(path: Path, *, package_digest: str) -> PluginInspecti
             warnings.append(f"subagente quebrado ignorado: {item.name}")
     commands, command_warnings = parse_commands(path / manifest.commands_path, plugin_id=manifest.plugin_id)
     warnings.extend(command_warnings)
+    # parse_commands only sees the commands directory, so relative_path comes
+    # back relative to it (e.g. "daily.md"). Rewrite it here, relative to the
+    # package root instead, matching how skills and agents already report
+    # their own relative_path — so a CommandLibrary can resolve
+    # install_path / relative_path directly and never needs to separately
+    # track (and risk drifting from) the manifest's declared commands path.
+    commands = tuple(
+        replace(item, relative_path=f"{manifest.commands_path}/{item.relative_path}")
+        for item in commands
+    )
     hooks, hook_warnings = parse_hooks(path / manifest.hooks_path, plugin_id=manifest.plugin_id)
     warnings.extend(hook_warnings)
     return PluginInspection(

@@ -44,7 +44,13 @@ def rehydrate_hooks(plugin_service, hook_engine, *, user_id: str) -> None:
         if not inspection.hooks:
             continue
         contributions = plugin_service._contributions(user_id, plugin_id)
-        hooks_enabled = any(item.get("kind") == "hook" and bool(item.get("enabled")) for item in contributions)
+        # Consent is granted or revoked for every hook row of a plugin at once
+        # (see PluginService.set_hooks_enabled); require all rather than any
+        # so a partially-consented state (a partial write, a manual edit) is
+        # never mistaken for consent. Matches the same all(...) PluginService
+        # already uses for this question.
+        hook_rows = [item for item in contributions if item.get("kind") == "hook"]
+        hooks_enabled = bool(hook_rows) and all(bool(item.get("enabled")) for item in hook_rows)
         hook_engine.register(
             user_id=user_id, plugin_id=plugin_id, install_path=Path(str(record["install_path"])),
             hooks=inspection.hooks, enabled=hooks_enabled,

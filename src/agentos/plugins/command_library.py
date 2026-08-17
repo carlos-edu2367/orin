@@ -34,13 +34,16 @@ class CommandLibrary:
         self._entries: dict[str, dict[str, _Entry]] = {}
         self._lock = RLock()
 
-    def install_plugin_commands(self, *, user_id: str, plugin_id: str, install_path: Path, commands, commands_path: str = "commands") -> None:
+    def install_plugin_commands(self, *, user_id: str, plugin_id: str, install_path: Path, commands) -> None:
         with self._lock:
             registry = self._entries.setdefault(user_id, {})
             for item in commands:
+                # item.relative_path is already package-root-relative (see
+                # inspect_plugin_package), so no separately tracked "commands
+                # directory" name is needed here.
                 registry[item.command_id] = _Entry(
                     plugin_id, item.slug, item.description, item.argument_hint,
-                    Path(install_path) / commands_path / item.relative_path,
+                    Path(install_path) / item.relative_path,
                 )
 
     def remove_plugin_commands(self, *, user_id: str, plugin_id: str) -> None:

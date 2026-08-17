@@ -179,7 +179,12 @@ class PluginService:
             self.activator.deactivate(user_id=user_id, plugin_id=plugin_id, contributions=contributions)
         with self.engine.begin() as connection:
             connection.execute(update(plugins).where((plugins.c.plugin_id == plugin_id) & (plugins.c.user_id == user_id)).values(state=target.value, updated_at=_now()))
-            connection.execute(update(plugin_contributions).where((plugin_contributions.c.plugin_id == plugin_id) & (plugin_contributions.c.user_id == user_id)).values(enabled=enabled))
+            # Hook rows carry their own independently revocable consent (see
+            # set_hooks_enabled) and are excluded here: this blanket toggle is
+            # for the other contribution kinds only, so pausing/resuming a
+            # plugin can never grant hook-execution consent that was never
+            # explicitly given.
+            connection.execute(update(plugin_contributions).where((plugin_contributions.c.plugin_id == plugin_id) & (plugin_contributions.c.user_id == user_id) & (plugin_contributions.c.kind != "hook")).values(enabled=enabled))
         return self.get(user_id, plugin_id)
 
     def remove(self, *, user_id: str, plugin_id: str) -> dict[str, Any]:

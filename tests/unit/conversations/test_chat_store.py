@@ -184,7 +184,7 @@ def _store_with_command(engine, tmp_path, body="Daily note for $ARGUMENTS."):
     library = CommandLibrary()
     library.install_plugin_commands(
         user_id="user-1", plugin_id="demo", install_path=tmp_path,
-        commands=(CommandContribution("demo:daily", "daily", "d", "", "daily.md"),),
+        commands=(CommandContribution("demo:daily", "daily", "d", "", "commands/daily.md"),),
     )
     return PostgresChatStore(engine, command_library=library)
 
@@ -293,7 +293,7 @@ def test_expansion_survives_the_plugin_being_removed(tmp_path) -> None:
     (tmp_path / "commands" / "daily.md").write_text("Body.", encoding="utf-8")
     library.install_plugin_commands(
         user_id="user-1", plugin_id="demo", install_path=tmp_path,
-        commands=(CommandContribution("demo:daily", "daily", "d", "", "daily.md"),),
+        commands=(CommandContribution("demo:daily", "daily", "d", "", "commands/daily.md"),),
     )
     store = PostgresChatStore(engine, command_library=library)
     receipt = store.create(

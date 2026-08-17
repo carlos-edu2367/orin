@@ -846,7 +846,10 @@ class TurnSession:
         if not conversation_id or not user_id:
             return ""
         reader = getattr(self.store, "hook_context", None)
-        stored = reader(conversation_id) if callable(reader) else None
+        try:
+            stored = reader(conversation_id) if callable(reader) else None
+        except Exception:  # noqa: BLE001 - a hook never breaks prompt assembly
+            stored = None
         if stored is not None:
             return stored
         try:
@@ -858,7 +861,10 @@ class TurnSession:
         body = "\n\n".join(outcome.stdout.strip() for outcome in outcomes if outcome.status == "ok" and outcome.stdout.strip())
         recorder = getattr(self.store, "record_hook_context", None)
         if callable(recorder):
-            recorder(conversation_id, body, user_id=user_id)
+            try:
+                recorder(conversation_id, body, user_id=user_id)
+            except Exception:  # noqa: BLE001 - a hook never breaks prompt assembly
+                pass
         return body
 
     def _skill_catalog(self, task: str, toolset: AgentToolset) -> tuple[object, ...]:

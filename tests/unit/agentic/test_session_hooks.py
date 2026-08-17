@@ -119,6 +119,30 @@ def test_a_failing_session_start_hook_does_not_break_the_prompt():
     assert isinstance(runtime.system_prompt, str) and runtime.system_prompt
 
 
+def test_a_failing_hook_context_read_does_not_break_the_prompt():
+    class FailingContextRead(Store):
+        def hook_context(self, conversation_id):
+            raise RuntimeError("db unavailable")
+
+    session = _session(_turn(), FailingContextRead(), hook_engine=RecordingEngine())
+
+    runtime = session.build_runtime()
+
+    assert isinstance(runtime.system_prompt, str) and runtime.system_prompt
+
+
+def test_a_failing_hook_context_write_does_not_break_the_prompt():
+    class FailingContextWrite(Store):
+        def record_hook_context(self, conversation_id, body, **kwargs):
+            raise RuntimeError("uq_conversation_hook_context violated")
+
+    session = _session(_turn(), FailingContextWrite(), hook_engine=RecordingEngine())
+
+    runtime = session.build_runtime()
+
+    assert isinstance(runtime.system_prompt, str) and runtime.system_prompt
+
+
 def test_no_hook_engine_means_no_context_and_no_error():
     session = _session(_turn(), Store(), hook_engine=None)
 

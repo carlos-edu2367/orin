@@ -175,6 +175,26 @@ def test_hook_consent_survives_a_disable_then_enable_cycle(tmp_path):
     assert rows["hook"] is True
 
 
+def test_a_disable_then_enable_cycle_never_grants_hook_consent_that_was_not_given(tmp_path):
+    """A plugin whose hooks were never authorized must not gain authorization
+    merely by being paused and resumed. See finding #1 of the review at
+    docs/superpowers/plans/2026-08-16-plugin-hooks-and-commands.md: the
+    trailing blanket UPDATE in set_enabled used to overwrite every
+    contribution row, including hooks, undoing the per-row consent it had
+    just computed two lines above."""
+    service = _service(tmp_path)
+    service.inspect(user_id="u1", reference=str(_hooks_package(tmp_path / "src")))
+    service.approve(user_id="u1", plugin_id="demo")
+    # No set_hooks_enabled call: consent was never granted.
+
+    service.set_enabled(user_id="u1", plugin_id="demo", enabled=False)
+    service.set_enabled(user_id="u1", plugin_id="demo", enabled=True)
+
+    rows = {row["kind"]: row["enabled"] for row in service._contributions("u1", "demo")}
+    assert rows["hook"] is False
+    assert rows["skill"] is True
+
+
 def test_get_and_list_expose_the_contribution_rows(tmp_path):
     service = _service(tmp_path)
     service.inspect(user_id="u1", reference=str(_hooks_package(tmp_path / "src")))

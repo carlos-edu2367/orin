@@ -104,6 +104,27 @@ def test_rehydrate_hooks_respects_disabled_consent(tmp_path):
     assert engine.dispatch(user_id="u1", event="SessionStart", payload={}) == ()
 
 
+def test_rehydrate_hooks_fails_closed_on_partially_consented_rows(tmp_path):
+    """Consent is granted or revoked for every hook row of a plugin at once
+    (see PluginService.set_hooks_enabled), so heterogeneous rows should never
+    occur in practice — but if they somehow did (a partial write, a manual
+    edit), rehydration must not treat that as consent. Mirrors the `all(...)`
+    PluginService.set_enabled already uses for the same question."""
+    package = _hooks_package(tmp_path / "pkg")
+    service = FakePluginService(
+        [{"plugin_id": "demo", "state": "active", "install_path": str(package), "package_digest": "abc"}],
+        contributions={"demo": [
+            {"kind": "hook", "reference": "demo:SessionStart:0", "enabled": True},
+            {"kind": "hook", "reference": "demo:SessionStart:1", "enabled": False},
+        ]},
+    )
+    engine = HookEngine()
+
+    rehydrate_hooks(service, engine, user_id="u1")
+
+    assert engine.dispatch(user_id="u1", event="SessionStart", payload={}) == ()
+
+
 def test_rehydrate_hooks_ignores_inactive_plugins(tmp_path):
     package = _hooks_package(tmp_path / "pkg")
     service = FakePluginService(

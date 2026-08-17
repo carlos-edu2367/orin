@@ -5,7 +5,7 @@ from agentos.plugins.models import CommandContribution
 
 
 def _command(plugin_id, slug):
-    return CommandContribution(f"{plugin_id}:{slug}", slug, "d", "", f"{slug}.md")
+    return CommandContribution(f"{plugin_id}:{slug}", slug, "d", "", f"commands/{slug}.md")
 
 
 def test_resolves_a_bare_slug_when_it_is_unique():

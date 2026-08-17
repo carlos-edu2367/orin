@@ -15,12 +15,11 @@ class ActivationFailed(RuntimeError):
 
 
 class PluginActivator:
-    def __init__(self, *, skill_library, mcp_service, agent_templates=None, command_library=None, commands_path: str = "commands", hook_engine=None) -> None:
+    def __init__(self, *, skill_library, mcp_service, agent_templates=None, command_library=None, hook_engine=None) -> None:
         self.skill_library = skill_library
         self.mcp_service = mcp_service
         self.agent_templates = agent_templates
         self.command_library = command_library
-        self.commands_path = commands_path
         self.hook_engine = hook_engine
 
     def activate(self, *, user_id: str, install_path: Path, inspection: PluginInspection):
@@ -68,7 +67,6 @@ class PluginActivator:
                     self.command_library.install_plugin_commands(
                         user_id=user_id, plugin_id=inspection.ref.plugin_id,
                         install_path=Path(install_path), commands=inspection.commands,
-                        commands_path=self.commands_path,
                     )
             if inspection.hooks:
                 # Installing is not authorizing execution: hook rows start

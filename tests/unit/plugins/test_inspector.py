@@ -48,6 +48,21 @@ def test_a_commands_only_plugin_is_inspectable_and_installable(tmp_path):
     assert not any("comandos declarados não são executados" in w for w in result.warnings)
 
 
+def test_a_command_relative_path_resolves_against_the_package_root_not_the_default(tmp_path):
+    """CommandContribution.relative_path must be package-root-relative so a
+    CommandLibrary can resolve it as install_path / relative_path directly,
+    with no separately tracked "commands directory" name that could drift
+    out of sync with a manifest-declared custom path."""
+    _manifest(tmp_path, {"name": "demo", "version": "1.0.0", "commands": "cmds"})
+    (tmp_path / "cmds").mkdir()
+    (tmp_path / "cmds" / "daily.md").write_text("body", encoding="utf-8")
+
+    result = inspect_plugin_package(tmp_path, package_digest="abc")
+
+    assert result.commands[0].relative_path == "cmds/daily.md"
+    assert (tmp_path / result.commands[0].relative_path).is_file()
+
+
 def test_a_hooks_only_plugin_is_installable(tmp_path):
     _manifest(tmp_path, {"name": "demo", "version": "1.0.0"})
     (tmp_path / "hooks").mkdir()
