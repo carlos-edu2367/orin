@@ -32,6 +32,8 @@ def test_persistence_schema_contains_only_the_durable_boundary_tables():
             "workspace_roots",
             "conversation_messages",
             "conversation_message_attachments",
+            "conversation_message_commands",
+            "conversation_hook_context",
             "conversation_turns",
             "conversation_dispatches",
             "conversation_events",

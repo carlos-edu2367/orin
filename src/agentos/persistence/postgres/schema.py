@@ -524,6 +524,25 @@ conversation_messages = Table(
 )
 Index("ix_conversation_messages_history", conversation_messages.c.conversation_id, conversation_messages.c.sequence)
 
+conversation_message_commands = Table(
+    "conversation_message_commands", metadata,
+    Column("id", Integer, primary_key=True), Column("message_id", String(255), nullable=False, unique=True),
+    Column("conversation_id", String(255), nullable=False), Column("user_id", String(255), nullable=False),
+    Column("plugin_id", String(64), nullable=False), Column("command_id", String(255), nullable=False),
+    Column("arguments", Text(), nullable=False), Column("expanded_body", Text(), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+)
+Index("ix_conversation_message_commands_conversation", conversation_message_commands.c.conversation_id)
+
+conversation_hook_context = Table(
+    "conversation_hook_context", metadata,
+    Column("id", Integer, primary_key=True), Column("conversation_id", String(255), nullable=False),
+    Column("user_id", String(255), nullable=False), Column("plugin_id", String(64), nullable=False),
+    Column("hook_id", String(255), nullable=False), Column("body", Text(), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    UniqueConstraint("conversation_id", "hook_id", name="uq_conversation_hook_context"),
+)
+
 conversation_turns = Table(
     "conversation_turns", metadata,
     Column("id", Integer, primary_key=True), Column("turn_id", String(255), nullable=False, unique=True),
