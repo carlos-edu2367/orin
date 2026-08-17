@@ -328,7 +328,7 @@ class AgentToolset:
             ),
             ToolDefinition(
                 "search_files",
-                "Search file contents in the conversation workspace with a regular expression. Use this when you know the exact text: a symbol name, a literal string, a TODO. When you do not know where something is, use search_code instead if it is available.",
+                "Search file contents in the conversation workspace with a regular expression. Use this when you know the exact text: a symbol name, a literal string, a TODO. It is also the tool to use when you do not know where something is, unless search_code appears in your tool list — prefer that one when it does, since it searches by meaning instead of by text.",
                 _schema({
                     "pattern": {**_TEXT, "description": "Python regular expression."},
                     "glob": {**_TEXT, "description": "Relative glob filter, e.g. '**/*.py'. Defaults to every file."},
