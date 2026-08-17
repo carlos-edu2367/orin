@@ -7,6 +7,7 @@ from agentos.skills.models import SkillScope, SkillSource
 from agentos.skills.parser import SkillParseError, parse_skill_file
 
 from .commands import parse_commands
+from .hooks_manifest import parse_hooks
 from .manifest import parse_mcp_config, parse_plugin_manifest
 from .models import AgentContribution, PluginInspection, PluginRef, SkillContribution, McpServerContribution, plugin_id_from_name
 
@@ -75,10 +76,10 @@ def inspect_plugin_package(path: Path, *, package_digest: str) -> PluginInspecti
             warnings.append(f"subagente quebrado ignorado: {item.name}")
     commands, command_warnings = parse_commands(path / manifest.commands_path, plugin_id=manifest.plugin_id)
     warnings.extend(command_warnings)
-    if (path / "hooks").exists():
-        warnings.append("O plugin declara hooks; hooks não são suportados e não serão ativados.")
+    hooks, hook_warnings = parse_hooks(path / manifest.hooks_path, plugin_id=manifest.plugin_id)
+    warnings.extend(hook_warnings)
     return PluginInspection(
         PluginRef(manifest.plugin_id, manifest.version), manifest.display_name, manifest.description,
         manifest.author, manifest.homepage, package_digest, skills=tuple(skills), mcp_servers=mcp_servers,
-        agents=tuple(agents), commands=commands, warnings=tuple(warnings),
+        agents=tuple(agents), commands=commands, hooks=hooks, warnings=tuple(warnings),
     )

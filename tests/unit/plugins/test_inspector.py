@@ -48,6 +48,20 @@ def test_a_commands_only_plugin_is_inspectable_and_installable(tmp_path):
     assert not any("comandos declarados não são executados" in w for w in result.warnings)
 
 
+def test_a_hooks_only_plugin_is_installable(tmp_path):
+    _manifest(tmp_path, {"name": "demo", "version": "1.0.0"})
+    (tmp_path / "hooks").mkdir()
+    (tmp_path / "hooks" / "hooks.json").write_text(json.dumps({"hooks": {"SessionStart": [
+        {"matcher": "", "hooks": [{"type": "command", "command": "python3 x.py"}]}
+    ]}}), encoding="utf-8")
+
+    result = inspect_plugin_package(tmp_path, package_digest="abc")
+
+    assert [item.hook_id for item in result.hooks] == ["demo:SessionStart:0"]
+    assert result.is_installable
+    assert not any("hooks não são suportados" in warning for warning in result.warnings)
+
+
 def test_inspector_reports_declarative_contributions_and_warnings(tmp_path):
     (tmp_path / ".claude-plugin").mkdir()
     (tmp_path / ".claude-plugin" / "plugin.json").write_text(json.dumps({"name":"demo","version":"1.0.0"}), encoding="utf-8")
@@ -56,7 +70,6 @@ def test_inspector_reports_declarative_contributions_and_warnings(tmp_path):
     (tmp_path / "hooks").mkdir()
     result = inspect_plugin_package(tmp_path, package_digest="abc")
     assert result.skills[0].skill_id == "demo:s"
-    assert any("hook" in warning.lower() for warning in result.warnings)
 
 
 def test_plugin_skill_id_is_namespaced_by_normalized_plugin_and_skill_names(tmp_path):
