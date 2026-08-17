@@ -91,6 +91,7 @@ export type PluginApprovalRequest = {
   skills: Array<{ skill_id: string; name: string; description?: string }>
   mcp_servers: Array<{ slug: string; display_name: string; transport: string; secret_names?: string[] }>
   agents: Array<{ agent_id: string; name: string; role?: string }>
+  commands: Array<{ command_id: string; slug: string; description?: string }>
   contribution_count: number
 }
 

@@ -413,6 +413,7 @@ function parsePluginApprovalRequest(payload: Record<string, unknown>): Conversat
     skills: objects(plugin.skills).map((item) => ({ skill_id: String(item.skill_id ?? ''), name: String(item.name ?? ''), description: typeof item.description === 'string' ? item.description : undefined })),
     mcp_servers: objects(plugin.mcp_servers).map((item) => ({ slug: String(item.slug ?? ''), display_name: String(item.display_name ?? ''), transport: String(item.transport ?? ''), secret_names: textArray(item.secret_names) })),
     agents: objects(plugin.agents).map((item) => ({ agent_id: String(item.agent_id ?? ''), name: String(item.name ?? ''), role: typeof item.role === 'string' ? item.role : undefined })),
+    commands: objects(plugin.commands).map((item) => ({ command_id: String(item.command_id ?? ''), slug: String(item.slug ?? ''), description: typeof item.description === 'string' ? item.description : undefined })),
     contribution_count: typeof plugin.contribution_count === 'number' ? plugin.contribution_count : 0,
   }
 }

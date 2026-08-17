@@ -81,7 +81,7 @@ describe('activity grouping', () => {
         summary: 'Aguardando aprovação do plugin superpowers',
         pluginApproval: {
           plugin_id: 'superpowers', version: '6.3.0', display_name: 'superpowers', description: '', author: '', warnings: [],
-          skills: [{ skill_id: 'superpowers:brainstorming', name: 'brainstorming' }], mcp_servers: [], agents: [], contribution_count: 1,
+          skills: [{ skill_id: 'superpowers:brainstorming', name: 'brainstorming' }], mcp_servers: [], agents: [], commands: [], contribution_count: 1,
         },
       }),
     ])
