@@ -17,7 +17,7 @@ from agentos.api.contracts import ApplicationNotFoundError
 from agentos.api.events import CursorError
 from agentos.agentic.events import AgentActivityEvent, AgentActivityEventType
 from agentos.persistence.postgres.agentic_activity import ActivityCursorError
-from agentos.persistence.postgres.schema import (conversation_activity_events, conversation_agent_usage, conversation_agents, conversation_dispatches, conversation_events, conversation_message_attachments, conversation_message_commands, conversation_messages, conversation_tool_records, conversation_turns, conversations, projects, runtime_heartbeats, workspace_roots)
+from agentos.persistence.postgres.schema import (conversation_activity_events, conversation_agent_usage, conversation_agents, conversation_dispatches, conversation_events, conversation_hook_context, conversation_message_attachments, conversation_message_commands, conversation_messages, conversation_tool_records, conversation_turns, conversations, projects, runtime_heartbeats, workspace_roots)
 
 
 _LOGGER = logging.getLogger("agentos.conversations.chat")
@@ -495,6 +495,20 @@ class PostgresChatStore:
                 content = f"{content}{_attachment_marker(records)}"
             history.append({"role": str(row["role"]), "content": content})
         return history
+
+    def hook_context(self, conversation_id: str) -> str | None:
+        with self._engine.connect() as c:
+            rows = c.execute(select(conversation_hook_context.c.body).where(
+                conversation_hook_context.c.conversation_id == conversation_id
+            ).order_by(conversation_hook_context.c.id)).scalars().all()
+        return "\n\n".join(str(row) for row in rows) if rows else None
+
+    def record_hook_context(self, conversation_id: str, body: str, *, user_id: str = "", plugin_id: str = "", hook_id: str = "session-start") -> None:
+        with self._engine.begin() as c:
+            c.execute(insert(conversation_hook_context).values(
+                conversation_id=conversation_id, user_id=user_id, plugin_id=plugin_id,
+                hook_id=hook_id, body=body, created_at=datetime.now(UTC),
+            ))
 
     def attachments_for_turn(self, turn: Mapping[str, object]) -> list[dict[str, object]]:
         """The attachment records of this turn's own user message, insertion order.

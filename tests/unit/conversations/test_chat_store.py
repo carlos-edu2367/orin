@@ -189,6 +189,19 @@ def _store_with_command(engine, tmp_path, body="Daily note for $ARGUMENTS."):
     return PostgresChatStore(engine, command_library=library)
 
 
+def test_hook_context_round_trips_and_accumulates_per_conversation() -> None:
+    engine = create_engine("sqlite://", future=True)
+    metadata.create_all(engine)
+    store = PostgresChatStore(engine)
+
+    assert store.hook_context("conversation-1") is None
+
+    store.record_hook_context("conversation-1", "VAULT CONTEXT", user_id="user-1", plugin_id="demo", hook_id="demo:SessionStart:0")
+
+    assert store.hook_context("conversation-1") == "VAULT CONTEXT"
+    assert store.hook_context("conversation-2") is None
+
+
 def test_a_command_message_stores_what_the_person_typed(tmp_path) -> None:
     engine = create_engine("sqlite://", future=True)
     metadata.create_all(engine)
