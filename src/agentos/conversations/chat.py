@@ -368,12 +368,20 @@ class PostgresChatStore:
             messages = c.execute(select(conversation_messages).where(conversation_messages.c.conversation_id == conversation_id).order_by(conversation_messages.c.sequence)).mappings().all()
             turns = c.execute(select(conversation_turns).where(conversation_turns.c.conversation_id == conversation_id).order_by(conversation_turns.c.created_at)).mappings().all()
             attachment_rows = c.execute(select(conversation_message_attachments).where(conversation_message_attachments.c.conversation_id == conversation_id).order_by(conversation_message_attachments.c.id)).mappings().all()
+            command_rows = c.execute(select(conversation_message_commands).where(conversation_message_commands.c.conversation_id == conversation_id)).mappings().all()
         attachments_by_message: dict[str, list[dict[str, object]]] = {}
         for row in attachment_rows:
             attachments_by_message.setdefault(str(row["message_id"]), []).append({
                 "path": str(row["path"]), "original_name": str(row["original_name"]),
                 "media_type": str(row["media_type"]), "kind": str(row["kind"]), "bytes": int(row["bytes"]),
             })
+        command_by_message: dict[str, dict[str, object]] = {
+            str(row["message_id"]): {
+                "command_id": str(row["command_id"]), "slug": str(row["command_id"]).split(":", 1)[-1],
+                "arguments": str(row["arguments"]),
+            }
+            for row in command_rows
+        }
         activities: list[dict[str, object]] = []
         activity_cursor = "0"
         if self.activity_store is not None:
@@ -398,7 +406,7 @@ class PostgresChatStore:
             (dict(item.get("payload") or {}) for item in reversed(activities) if item.get("event_type") in {AgentActivityEventType.CONTEXT_UPDATED.value, AgentActivityEventType.CONTEXT_COMPACTED.value} and isinstance(item.get("payload"), Mapping) and "used_tokens" in item["payload"]),
             None,
         )
-        return {"conversation_id": conv["conversation_id"], "title": conv["title"], "state": conv["state"], "provider": conv["provider"], "model_id": conv["model_id"], "project_id": conv["project_id"], "messages": [{"message_id": m["message_id"], "role": m["role"], "content": m["content"], "status": m["status"], "retryable": bool(m["retryable"]), "attachments": attachments_by_message.get(str(m["message_id"]), [])} for m in messages], "turns": [{"turn_id": t["turn_id"], "state": t["state"], "created_at": t["created_at"].isoformat(), "started_at": t["started_at"].isoformat() if t["started_at"] else None, "finished_at": t["finished_at"].isoformat() if t["finished_at"] else None, "scheduled_by_schedule_id": t["scheduled_by_schedule_id"]} for t in turns], "activities": activities, "activity_cursor": activity_cursor, "context_usage": context_usage}
+        return {"conversation_id": conv["conversation_id"], "title": conv["title"], "state": conv["state"], "provider": conv["provider"], "model_id": conv["model_id"], "project_id": conv["project_id"], "messages": [{"message_id": m["message_id"], "role": m["role"], "content": m["content"], "status": m["status"], "retryable": bool(m["retryable"]), "attachments": attachments_by_message.get(str(m["message_id"]), []), "command": command_by_message.get(str(m["message_id"]))} for m in messages], "turns": [{"turn_id": t["turn_id"], "state": t["state"], "created_at": t["created_at"].isoformat(), "started_at": t["started_at"].isoformat() if t["started_at"] else None, "finished_at": t["finished_at"].isoformat() if t["finished_at"] else None, "scheduled_by_schedule_id": t["scheduled_by_schedule_id"]} for t in turns], "activities": activities, "activity_cursor": activity_cursor, "context_usage": context_usage}
 
     @staticmethod
     def _public_activity(event: AgentActivityEvent, cursor: str | None = None) -> dict[str, object]:

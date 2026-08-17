@@ -202,6 +202,36 @@ def test_hook_context_round_trips_and_accumulates_per_conversation() -> None:
     assert store.hook_context("conversation-2") is None
 
 
+def test_the_conversation_payload_reports_the_command_behind_a_message(tmp_path) -> None:
+    engine = create_engine("sqlite://", future=True)
+    metadata.create_all(engine)
+    store = _store_with_command(engine, tmp_path)
+    receipt = store.create(
+        user_id="user-1", message="/daily amanhã", provider="anthropic",
+        model_id="claude-opus-5", idempotency_key="request-5",
+    )
+
+    payload = store.get(receipt.conversation_id, "user-1")
+
+    user_message = next(item for item in payload["messages"] if item["role"] == "user")
+    assert user_message["command"] == {"command_id": "demo:daily", "slug": "daily", "arguments": "amanhã"}
+
+
+def test_an_ordinary_message_reports_no_command(tmp_path) -> None:
+    engine = create_engine("sqlite://", future=True)
+    metadata.create_all(engine)
+    store = _store_with_command(engine, tmp_path)
+    receipt = store.create(
+        user_id="user-1", message="olá", provider="anthropic",
+        model_id="claude-opus-5", idempotency_key="request-6",
+    )
+
+    payload = store.get(receipt.conversation_id, "user-1")
+
+    user_message = next(item for item in payload["messages"] if item["role"] == "user")
+    assert user_message["command"] is None
+
+
 def test_a_command_message_stores_what_the_person_typed(tmp_path) -> None:
     engine = create_engine("sqlite://", future=True)
     metadata.create_all(engine)
