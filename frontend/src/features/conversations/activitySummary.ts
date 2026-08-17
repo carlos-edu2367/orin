@@ -69,7 +69,15 @@ export function groupingKey(event: ConversationActivityEvent): string {
   // merges into an earlier, already-settled group — that previously left a
   // second ask_user (or a second same-kind tool/agent/artifact event) stuck
   // rendering the first one's now-stale card instead of its own.
-  if (event.kind === 'tool') return `tool:${event.agentId}:${event.turnId ?? ''}:${event.toolKind ?? event.toolName ?? 'tool'}`
+  if (event.kind === 'tool') {
+    // Approval cards are interactive state, not ordinary tool telemetry. Keep
+    // them separate from preceding search/inspect calls of the same tool
+    // family; otherwise the first event wins rendering and the approval card
+    // disappears inside a collapsed group.
+    if (event.pluginApproval) return `approval:plugin:${event.agentId}:${event.turnId ?? ''}:${event.invocationId ?? event.eventId}`
+    if (event.mcpApproval || event.questions) return `approval:user:${event.agentId}:${event.turnId ?? ''}:${event.invocationId ?? event.eventId}`
+    return `tool:${event.agentId}:${event.turnId ?? ''}:${event.toolKind ?? event.toolName ?? 'tool'}`
+  }
   if (event.kind === 'agent') return `agent:${event.agentId}:${event.turnId ?? ''}:${event.type}:${event.label ?? ''}`
   if (event.kind === 'artifact') return `artifact:${event.agentId}:${event.turnId ?? ''}:${event.label ?? ''}`
   return `lifecycle:${event.agentId}:${event.turnId ?? ''}:${event.type}`

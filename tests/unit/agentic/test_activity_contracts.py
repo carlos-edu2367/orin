@@ -57,6 +57,28 @@ def test_activity_event_redacts_secret_like_summary_fragments():
     assert "[REDACTED]" in event.summary
 
 
+def test_activity_event_preserves_bounded_context_telemetry_but_redacts_generic_tokens():
+    event = _event(
+        event_type=AgentActivityEventType.CONTEXT_UPDATED,
+        payload={
+            "used_tokens": 4200,
+            "system_prompt_tokens": 700,
+            "history_tokens": 1900,
+            "compaction_enabled": True,
+            "token": "provider-secret",
+            "system_prompt_tokens_invalid": "prompt contents",
+        },
+    )
+
+    payload = dict(event.payload)
+    assert payload["used_tokens"] == 4200
+    assert payload["system_prompt_tokens"] == 700
+    assert payload["history_tokens"] == 1900
+    assert payload["compaction_enabled"] is True
+    assert payload["token"] == "[REDACTED]"
+    assert payload["system_prompt_tokens_invalid"] == "[REDACTED]"
+
+
 def test_activity_event_enforces_bounded_public_text():
     with pytest.raises(ValueError, match="summary"):
         _event(summary="x" * 513)

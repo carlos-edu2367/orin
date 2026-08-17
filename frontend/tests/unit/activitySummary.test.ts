@@ -73,6 +73,25 @@ describe('activity grouping', () => {
     expect(groups).toHaveLength(2)
   })
 
+  it('keeps a plugin approval card separate from plugin search activity', () => {
+    const groups = summarizeActivities([
+      event({ type: 'tool.finished', toolName: 'search_plugin', toolKind: 'plugin', invocationId: 'search-1', status: 'succeeded', summary: '1 plugin encontrado(s)' }),
+      event({
+        type: 'tool.finished', toolName: 'install_plugin', toolKind: 'plugin', invocationId: 'install-1', status: 'succeeded',
+        summary: 'Aguardando aprovação do plugin superpowers',
+        pluginApproval: {
+          plugin_id: 'superpowers', version: '6.3.0', display_name: 'superpowers', description: '', author: '', warnings: [],
+          skills: [{ skill_id: 'superpowers:brainstorming', name: 'brainstorming' }], mcp_servers: [], agents: [], contribution_count: 1,
+        },
+      }),
+    ])
+
+    expect(groups).toHaveLength(2)
+    expect(groups[0].events[0].toolName).toBe('search_plugin')
+    expect(groups[1].events[0].toolName).toBe('install_plugin')
+    expect(groups[1].events[0].pluginApproval?.plugin_id).toBe('superpowers')
+  })
+
   it('marks a group as failed when any member failed', () => {
     const groups = summarizeActivities([
       ...toolPair('run_command', 'terminal', '$ ok', 'call-1'),

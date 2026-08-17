@@ -3,6 +3,14 @@ import { describe, expect, it } from 'vitest'
 import { ContextIndicator } from '../../src/features/conversations/ContextIndicator'
 
 describe('ContextIndicator', () => {
+  it('stays visible before the first context snapshot is available', () => {
+    render(<ContextIndicator usage={null} />)
+
+    expect(screen.getByLabelText('Contexto: aguardando cálculo')).toBeInTheDocument()
+    expect(screen.getByText('Contexto —')).toBeInTheDocument()
+    expect(screen.getByText('O uso detalhado será calculado quando esta conversa executar a próxima mensagem.')).toBeInTheDocument()
+  })
+
   it('shows the total and detailed prompt components on focus', () => {
     render(<ContextIndicator usage={{
       used_tokens: 4200, limit_tokens: 16000, percentage: 26,

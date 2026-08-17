@@ -51,6 +51,25 @@ _SENSITIVE_KEY_PARTS = (
     "stderr",
 )
 
+# These fields are bounded numeric telemetry, not prompt contents or provider
+# usage credentials. Keep them public so the context indicator can consume the
+# breakdown without weakening redaction for generic keys such as ``token`` or
+# ``prompt``.
+_PUBLIC_CONTEXT_TELEMETRY_KEYS = frozenset({
+    "used_tokens",
+    "limit_tokens",
+    "percentage",
+    "system_prompt_tokens",
+    "history_tokens",
+    "input_tokens",
+    "tools_tokens",
+    "skills_tokens",
+    "mcps_tokens",
+    "omitted_messages",
+    "compaction_count",
+    "compaction_enabled",
+})
+
 
 class AgentActionKind(StrEnum):
     TOOL = "tool"
@@ -105,6 +124,12 @@ def _bounded(
             count[0] += 1
             if count[0] > item_limit:
                 raise ValueError("payload exceeds item limit")
+            normalized_key = key.strip().lower().replace("-", "_")
+            if redact and normalized_key in _PUBLIC_CONTEXT_TELEMETRY_KEYS:
+                is_boolean_flag = normalized_key == "compaction_enabled" and isinstance(item, bool)
+                is_numeric = isinstance(item, (int, float)) and not isinstance(item, bool)
+                result[key] = item if is_boolean_flag or is_numeric else REDACTED
+                continue
             if redact and _sensitive_key(key):
                 result[key] = REDACTED
                 continue

@@ -58,6 +58,34 @@ def _plain(value: object) -> object:
     return value
 
 
+_CONTEXT_USAGE_COMPONENTS = (
+    "history_tokens",
+    "input_tokens",
+    "tools_tokens",
+    "skills_tokens",
+    "mcps_tokens",
+)
+
+
+def _repair_context_usage(payload: Mapping[str, object]) -> dict[str, object]:
+    """Recover the prompt count from events written before telemetry redaction was fixed."""
+    repaired = {str(key): value for key, value in payload.items()}
+    system_prompt_tokens = repaired.get("system_prompt_tokens")
+    if isinstance(system_prompt_tokens, (int, float)) and not isinstance(system_prompt_tokens, bool):
+        return repaired
+
+    used_tokens = repaired.get("used_tokens")
+    components = [repaired.get(key) for key in _CONTEXT_USAGE_COMPONENTS]
+    if not isinstance(used_tokens, (int, float)) or isinstance(used_tokens, bool):
+        return repaired
+    if any(not isinstance(value, (int, float)) or isinstance(value, bool) for value in components):
+        return repaired
+    inferred = int(used_tokens) - sum(int(value) for value in components)
+    if inferred >= 0:
+        repaired["system_prompt_tokens"] = inferred
+    return repaired
+
+
 def _unavailable_token_usage() -> dict[str, object]:
     return {
         "input_tokens": None,
@@ -337,12 +365,15 @@ class PostgresChatStore:
         # The whole payload is already bounded and secret-redacted by
         # AgentActivityEvent, so it can be published as-is rather than through a
         # hand-maintained key allowlist that silently drops new event fields.
+        payload = _plain(event.payload)
+        if event.event_type in {AgentActivityEventType.CONTEXT_UPDATED, AgentActivityEventType.CONTEXT_COMPACTED} and isinstance(payload, Mapping):
+            payload = _repair_context_usage(payload)
         return {
             "event_id": event.event_id,
             "event_type": event.event_type.value,
             "sequence": event.sequence,
             "summary": event.summary,
-            "payload": _plain(event.payload),
+            "payload": payload,
             "occurred_at": event.created_at.isoformat(),
             "turn_id": event.turn_id,
             "execution_id": event.execution_id,

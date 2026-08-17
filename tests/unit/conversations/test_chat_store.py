@@ -126,6 +126,42 @@ def test_reopened_conversation_keeps_text_deltas_interleaved_with_activity() -> 
     ]
 
 
+def test_reopened_conversation_repairs_context_prompt_count_from_legacy_redacted_activity() -> None:
+    engine = create_engine("sqlite://", future=True)
+    metadata.create_all(engine)
+    store = PostgresChatStore(engine, PostgresAgenticActivityStore(engine, "test-cursor-secret"))
+    receipt = store.create(
+        user_id="user-1", message="Mostre o contexto.", provider="ollama", model_id="model-a", idempotency_key="request-1",
+    )
+    turn = store.claim(receipt.turn_id)
+    assert turn is not None
+
+    store.record(
+        turn,
+        AgentActivityEventType.CONTEXT_UPDATED,
+        "Contexto atualizado",
+        {
+            "used_tokens": 4200,
+            "limit_tokens": 16000,
+            "system_prompt_tokens": "[REDACTED]",
+            "history_tokens": 1900,
+            "input_tokens": 300,
+            "tools_tokens": 800,
+            "skills_tokens": 300,
+            "mcps_tokens": 200,
+            "omitted_messages": 0,
+            "compaction_count": 0,
+            "compaction_enabled": True,
+        },
+    )
+
+    snapshot = store.get(receipt.conversation_id, "user-1")
+
+    assert snapshot["context_usage"]["system_prompt_tokens"] == 700
+    context_event = next(item for item in snapshot["activities"] if item["event_type"] == "context.updated")
+    assert context_event["payload"]["system_prompt_tokens"] == 700
+
+
 def test_a_follow_up_message_closes_a_waiting_user_turn() -> None:
     engine = create_engine("sqlite://", future=True)
     metadata.create_all(engine)
