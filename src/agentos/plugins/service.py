@@ -17,6 +17,7 @@ from .activator import PluginActivator
 from .discovery import PluginDiscoveryService
 from .fetcher import FetchRejected, PluginFetcher
 from .inspector import inspect_plugin_package
+from .manifest import ManifestRejected
 from .mcp_inference import infer_mcp_launch as _infer_mcp_launch
 from .models import PluginState
 from .marketplace import parse_marketplace
@@ -112,6 +113,8 @@ class PluginService:
         except Exception as error:
             if isinstance(error, PluginServiceError):
                 raise
+            if isinstance(error, ManifestRejected):
+                raise PluginServiceError(str(error), code="plugin_manifest_path_rejected") from error
             if isinstance(error, FetchRejected) and "no valid manifest" in str(error):
                 raise PluginServiceError(str(error), code="plugin_no_manifest") from error
             raise PluginServiceError("plugin could not be inspected") from error

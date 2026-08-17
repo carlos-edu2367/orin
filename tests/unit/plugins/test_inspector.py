@@ -1,6 +1,39 @@
 import json
 from agentos.plugins.inspector import inspect_plugin_package
 
+
+def _manifest(tmp_path, payload):
+    (tmp_path / ".claude-plugin").mkdir(exist_ok=True)
+    (tmp_path / ".claude-plugin" / "plugin.json").write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_inspector_contributes_mcp_servers_declared_inline_in_the_manifest(tmp_path):
+    _manifest(tmp_path, {
+        "name": "obsidian-second-brain", "version": "0.14.0",
+        "mcpServers": {"vault": {"command": "uv", "args": ["run", "server.py"]}},
+    })
+
+    result = inspect_plugin_package(tmp_path, package_digest="abc")
+
+    assert [item.slug for item in result.mcp_servers] == ["obsidian-second-brain-vault"]
+    assert result.contribution_count == 1
+
+
+def test_mcp_json_wins_a_slug_collision_with_the_manifest(tmp_path):
+    _manifest(tmp_path, {
+        "name": "demo", "version": "1.0.0",
+        "mcpServers": {"vault": {"command": "from-manifest"}},
+    })
+    (tmp_path / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"vault": {"command": "from-mcp-json"}}}), encoding="utf-8"
+    )
+
+    result = inspect_plugin_package(tmp_path, package_digest="abc")
+
+    assert len(result.mcp_servers) == 1
+    assert result.mcp_servers[0].command == "from-mcp-json"
+
+
 def test_inspector_reports_declarative_contributions_and_warnings(tmp_path):
     (tmp_path / ".claude-plugin").mkdir()
     (tmp_path / ".claude-plugin" / "plugin.json").write_text(json.dumps({"name":"demo","version":"1.0.0"}), encoding="utf-8")

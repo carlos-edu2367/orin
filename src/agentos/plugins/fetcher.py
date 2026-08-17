@@ -9,7 +9,7 @@ import shutil
 import subprocess
 import tempfile
 
-from .manifest import PluginManifest, parse_plugin_manifest
+from .manifest import ManifestRejected, PluginManifest, parse_plugin_manifest
 from .sources import PluginSource
 
 
@@ -37,6 +37,13 @@ class PluginFetcher:
                 manifest_path = staging / "plugin.json"
             try:
                 manifest = parse_plugin_manifest(json.loads(manifest_path.read_text(encoding="utf-8")))
+            except ManifestRejected as error:
+                # A path escaping the package is a distinct, more actionable
+                # failure than "no manifest at all"; let it propagate as-is so
+                # the service layer can surface its own error code for it.
+                if "escape the plugin package" in str(error) or "relative to the plugin package" in str(error):
+                    raise
+                raise FetchRejected("plugin package has no valid manifest") from error
             except (OSError, ValueError, json.JSONDecodeError) as error:
                 raise FetchRejected("plugin package has no valid manifest") from error
             self._validate(staging)

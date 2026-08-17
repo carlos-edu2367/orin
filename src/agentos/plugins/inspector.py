@@ -44,11 +44,20 @@ def inspect_plugin_package(path: Path, *, package_digest: str) -> PluginInspecti
             skills.append(SkillContribution(skill_id, skill.name, skill.description, skill_file.relative_to(path).as_posix()))
         if len(list(skill_root.glob("*/SKILL.md"))) > 200:
             warnings.append("o plugin declara mais de 200 skills; o restante foi ignorado")
-    mcp_servers: tuple[McpServerContribution, ...] = ()
+    def _namespaced(item: McpServerContribution) -> McpServerContribution:
+        return McpServerContribution(
+            f"{manifest.plugin_id}-{item.slug}", item.display_name, item.transport,
+            item.command, item.args, item.url, item.secret_names,
+        )
+
+    # A separate .mcp.json is the more specific declaration, so it wins a slug
+    # collision with a server declared inline in plugin.json.
+    merged: dict[str, McpServerContribution] = {item.slug: item for item in manifest.mcp_servers}
     mcp_path = path / ".mcp.json"
     if mcp_path.exists():
-        raw = parse_mcp_config(json.loads(mcp_path.read_text(encoding="utf-8")))
-        mcp_servers = tuple(McpServerContribution(f"{manifest.plugin_id}-{item.slug}", item.display_name, item.transport, item.command, item.args, item.url, item.secret_names) for item in raw[:16])
+        for item in parse_mcp_config(json.loads(mcp_path.read_text(encoding="utf-8"))):
+            merged[item.slug] = item
+    mcp_servers = tuple(_namespaced(item) for item in list(merged.values())[:16])
     agents: list[AgentContribution] = []
     agent_root = path / "agents"
     for item in sorted(agent_root.glob("*.md"))[:64] if agent_root.is_dir() else ():

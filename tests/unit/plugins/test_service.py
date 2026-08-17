@@ -60,6 +60,20 @@ def test_discover_library_passes_installable_kind_through(tmp_path):
     library = service.discover_library()
     assert library["entries"][0]["installable_kind"] == "plugin"
 
+def test_inspect_reports_a_distinct_code_when_a_manifest_path_escapes_the_package(tmp_path):
+    service = _service(tmp_path)
+    root = tmp_path / "escaping-path"
+    (root / ".claude-plugin").mkdir(parents=True)
+    (root / ".claude-plugin" / "plugin.json").write_text(
+        json.dumps({"name": "demo", "version": "1.0.0", "commands": "../outside"}), encoding="utf-8"
+    )
+    try:
+        service.inspect(user_id="u1", reference=str(root))
+    except PluginServiceError as error:
+        assert error.code == "plugin_manifest_path_rejected"
+    else:
+        raise AssertionError("expected inspect() to reject a manifest path escaping the package")
+
 def test_other_inspect_failures_keep_the_generic_code(tmp_path):
     service = _service(tmp_path)
     try:
