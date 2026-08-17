@@ -102,6 +102,9 @@ class RetrievalService:
     def status(self) -> IndexStatus:
         return self._store.status()
 
+    def close(self) -> None:
+        self._store.close()
+
     def project_map(self, *, limit: int = 20) -> list[dict[str, object]]:
         """The files most depended on, with their top-level symbols.
 

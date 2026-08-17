@@ -149,6 +149,51 @@ def test_runtime_for_reuses_the_same_browser_across_two_turns_of_one_conversatio
     assert len(built) == 1  # the second turn of the same conversation reused it
 
 
+def test_runtime_for_reuses_the_same_retrieval_bundle_across_two_turns_of_one_project(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression test: a bundle built fresh every turn leaked a thread and a
+    sqlite connection per turn, since nothing ever tore the previous one down."""
+    from agentos.retrieval.registry import RetrievalRegistry
+
+    class Settings:
+        def get(self, user_id):
+            return {"max_iterations": 8}
+
+    class SkillLibrary:
+        def registry_for(self, user_id, *, agent_id):
+            return None
+
+    captured = []
+
+    class FakeSession:
+        def __init__(self, **kwargs):
+            captured.append(kwargs.get("retrieval_bundle"))
+
+        def build_runtime(self):
+            return object()
+
+    built = []
+
+    def factory(workspace_id, local_root):
+        bundle = object()
+        built.append(bundle)
+        return bundle
+
+    registry = RetrievalRegistry(factory=factory)
+    monkeypatch.setattr(chat_module, "conversation_browser_for", lambda turn: None)
+    monkeypatch.setattr(chat_module, "PostgresSkillLibraryService", lambda engine: SkillLibrary())
+    monkeypatch.setattr(chat_module, "ConversationAgentStore", lambda *args, **kwargs: object())
+    monkeypatch.setattr(chat_module, "PostgresAgentMemoryStore", lambda *args, **kwargs: None)
+    monkeypatch.setattr(chat_module, "search_client_from_environment", lambda: None)
+    monkeypatch.setattr(chat_module, "TurnSession", FakeSession)
+    worker = ChatWorker(Store(), runtime_settings=Settings(), retrieval_registry=registry)
+
+    worker._runtime_for(dict(TURN))
+    worker._runtime_for(dict(TURN))
+
+    assert len(built) == 1  # the second turn of the same project reused it
+    assert captured[0] is captured[1] is built[0]
+
+
 def test_run_releases_the_browser_registry_so_a_long_turn_is_not_evicted_as_idle() -> None:
     class Registry:
         def __init__(self) -> None:

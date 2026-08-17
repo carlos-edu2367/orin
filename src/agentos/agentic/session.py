@@ -12,7 +12,6 @@ import os
 import platform
 import shutil
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Lock
@@ -22,8 +21,8 @@ from typing import Callable, Mapping
 from agentos.installation import orin_paths
 
 from agentos.reading.vision import VisionUnavailable
+from agentos.retrieval.bundle import RetrievalBundle
 from agentos.retrieval.factory import retrieval_service_for
-from agentos.retrieval.service import RetrievalService
 from agentos.retrieval.worker import IndexWorker
 
 from .agent_tools import AgentToolset, ToolOutcome
@@ -181,21 +180,20 @@ def resolve_effective_workspace_id(turn: Mapping[str, object]) -> str:
     return conversation_id
 
 
-@dataclass(frozen=True, slots=True)
-class RetrievalBundle:
-    """The service the tools call, plus the thread that keeps its index fresh."""
-
-    service: RetrievalService
-    worker: IndexWorker
-
-
 def build_retrieval_for_turn(*, workspace_id: str, local_root: str | None, data_root: Path | None = None) -> RetrievalBundle | None:
-    """Retrieval for this turn, or None.
+    """Build one retrieval bundle, or None.
 
     Never raises. A misconfigured embedder, an unreadable index file or a
     vanished folder must cost the turn its code search, not the turn itself.
     A managed workspace (no bound local folder) also returns None: it holds one
     conversation's artefacts, not a codebase worth indexing.
+
+    This builds a *new* bundle every call — a fresh sqlite connection, a fresh
+    embedder HTTP client, a fresh background thread. A caller on the turn path
+    (``ChatWorker``) should use this only as a ``RetrievalRegistry`` factory,
+    which reuses the same bundle across every turn of the same workspace and
+    only rebuilds it when the bound folder changes; calling this directly once
+    per turn is exactly the leak that registry exists to prevent.
     """
     try:
         service = retrieval_service_for(workspace_id=workspace_id, local_root=local_root, data_root=data_root)
@@ -441,6 +439,7 @@ class TurnSession:
         skill_library=None,
         skill_load_recorder: Callable[[object], None] | None = None,
         search_client=None,
+        retrieval_bundle: RetrievalBundle | None = None,
         browser=None,
         browser_capability: str = "interact",
         tool_policy=None,
@@ -496,11 +495,13 @@ class TurnSession:
             managed_root=workspace_root or orin_paths().workspaces,
             local_root=local_root if isinstance(local_root, str) else None,
         )
-        self._retrieval_bundle = build_retrieval_for_turn(
-            workspace_id=resolve_effective_workspace_id(turn),
-            local_root=local_root if isinstance(local_root, str) else None,
-        )
-        self.retrieval = self._retrieval_bundle.service if self._retrieval_bundle is not None else None
+        # Pre-acquired by the caller (typically from a RetrievalRegistry kept
+        # for the whole worker process), the same way ``browser`` is: an index
+        # is scoped to the project, and every turn about it should share the
+        # same sqlite connection, embedder client and background thread rather
+        # than each turn building and leaking a fresh set of its own.
+        self._retrieval_bundle = retrieval_bundle
+        self.retrieval = retrieval_bundle.service if retrieval_bundle is not None else None
         self._subagent_runs = 0
         self._subagent_lock = Lock()
         self.main_agent_id = store.main_agent_id(turn) if hasattr(store, "main_agent_id") else str(turn.get("agent_id", "agent:main"))

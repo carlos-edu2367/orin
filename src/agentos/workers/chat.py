@@ -20,9 +20,10 @@ from agentos.provider_catalog.ollama import DEFAULT_OLLAMA_BASE_URL, normalize_o
 from agentos.provider_catalog.omniroute import DEFAULT_OMNIROUTE_BASE_URL, normalize_omniroute_base_url
 from agentos.agentic.runtime import AgenticLimits, AgenticTurnRuntime
 from agentos.agentic.settings import AgentRuntimeSettingsStore
-from agentos.agentic.session import TurnSession
+from agentos.agentic.session import TurnSession, build_retrieval_for_turn, resolve_effective_workspace_id
 from agentos.agentic.browser_tools import ConversationBrowserRegistry, browser_capability_from_environment, conversation_browser_for
 from agentos.agentic.web_search import search_client_from_environment
+from agentos.retrieval.registry import RetrievalRegistry
 from agentos.conversations.chat import PostgresChatStore
 from agentos.installation import orin_paths
 from agentos.mcp.service import McpServerService
@@ -144,6 +145,7 @@ class ChatWorker:
         enable_subagents: bool = True,
         runtime_settings: AgentRuntimeSettingsStore | None = None,
         browser_registry: ConversationBrowserRegistry | None = None,
+        retrieval_registry: RetrievalRegistry | None = None,
     ) -> None:
         self.store, self._executions, self._queries = store, ExecutionApplicationAdapter(store._engine), ExecutionQueryAdapter(store._engine)
         self._runtime_factory = runtime_factory
@@ -155,6 +157,14 @@ class ChatWorker:
         # and a cap on concurrent sessions so an abandoned conversation does
         # not leak a Chromium process forever.
         self._browser_registry = browser_registry or ConversationBrowserRegistry(factory=conversation_browser_for)
+        # A project's retrieval index likewise survives across turns (and
+        # across every conversation about that project): building it fresh per
+        # turn would open a new sqlite connection, a new embedder HTTP client
+        # and a new background indexing thread every single time with nothing
+        # ever closing the previous one.
+        self._retrieval_registry = retrieval_registry or RetrievalRegistry(
+            factory=lambda workspace_id, local_root: build_retrieval_for_turn(workspace_id=workspace_id, local_root=local_root)
+        )
         # Kept for the whole worker process (unlike skill_library/plugin_service,
         # which are cheap DB-backed rebuilds per turn): registrations here are an
         # in-process index, and are refreshed per-user before each turn below.
@@ -475,6 +485,17 @@ class ChatWorker:
         skill_library = PostgresSkillLibraryService(engine)
         configured_limits = self._runtime_settings.get(str(turn["user_id"]))
         browser = self._browser_registry.acquire(turn)
+        local_root = turn.get("workspace_root_path")
+        try:
+            retrieval_bundle = self._retrieval_registry.acquire(
+                workspace_id=resolve_effective_workspace_id(turn),
+                local_root=local_root if isinstance(local_root, str) else None,
+            )
+        except Exception:
+            # A malformed turn record must not cost the turn its code search
+            # any more loudly than it already costs everything else below.
+            _LOGGER.exception("could not acquire the retrieval index for %s", turn.get("conversation_id"))
+            retrieval_bundle = None
         mcp_service = McpServerService(engine)
         plugin_service = PluginService(engine, plugin_root=orin_paths().data / "plugins", skill_library=skill_library, mcp_service=mcp_service, hook_engine=self._hook_engine)
         # A worker process's hook index starts empty; refresh this user's
@@ -512,6 +533,7 @@ class ChatWorker:
                     agent_id=str(self.store.main_agent_id(turn)), loaded=loaded,
                 ),
                 search_client=search_client_from_environment(),
+                retrieval_bundle=retrieval_bundle,
                 browser=browser,
                 browser_capability=browser_capability_from_environment(),
                 enable_subagents=self._enable_subagents,
