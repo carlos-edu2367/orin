@@ -123,6 +123,58 @@ def test_infer_mcp_launch_rejects_a_non_git_source(tmp_path):
     else:
         raise AssertionError("expected a marketplace-name source to be rejected")
 
+def _hooks_package(root):
+    (root / ".claude-plugin").mkdir(parents=True)
+    (root / ".claude-plugin" / "plugin.json").write_text(json.dumps({"name": "demo", "version": "1.0.0"}), encoding="utf-8")
+    (root / "skills" / "s").mkdir(parents=True)
+    (root / "skills" / "s" / "SKILL.md").write_text("---\nname: s\nversion: 1.0.0\ndescription: d\n---\n\nbody", encoding="utf-8")
+    (root / "hooks").mkdir()
+    (root / "hooks" / "hooks.json").write_text(json.dumps({"hooks": {"SessionStart": [
+        {"matcher": "", "hooks": [{"type": "command", "command": "x"}]}
+    ]}}), encoding="utf-8")
+    return root
+
+
+def test_hooks_are_inserted_disabled_and_do_not_disturb_other_kinds(tmp_path):
+    service = _service(tmp_path)
+    service.inspect(user_id="u1", reference=str(_hooks_package(tmp_path / "src")))
+    approved = service.approve(user_id="u1", plugin_id="demo")
+
+    rows = {row["kind"]: row["enabled"] for row in service._contributions("u1", "demo")}
+    assert rows["hook"] is False
+    assert rows["skill"] is True
+    assert approved["contribution_count"] == 2
+
+
+def test_set_hooks_enabled_flips_only_the_hook_rows(tmp_path):
+    service = _service(tmp_path)
+    service.inspect(user_id="u1", reference=str(_hooks_package(tmp_path / "src")))
+    service.approve(user_id="u1", plugin_id="demo")
+
+    service.set_hooks_enabled(user_id="u1", plugin_id="demo", enabled=True)
+    rows = {row["kind"]: row["enabled"] for row in service._contributions("u1", "demo")}
+    assert rows["hook"] is True
+    assert rows["skill"] is True
+
+    service.set_hooks_enabled(user_id="u1", plugin_id="demo", enabled=False)
+    rows = {row["kind"]: row["enabled"] for row in service._contributions("u1", "demo")}
+    assert rows["hook"] is False
+    assert rows["skill"] is True
+
+
+def test_hook_consent_survives_a_disable_then_enable_cycle(tmp_path):
+    service = _service(tmp_path)
+    service.inspect(user_id="u1", reference=str(_hooks_package(tmp_path / "src")))
+    service.approve(user_id="u1", plugin_id="demo")
+    service.set_hooks_enabled(user_id="u1", plugin_id="demo", enabled=True)
+
+    service.set_enabled(user_id="u1", plugin_id="demo", enabled=False)
+    service.set_enabled(user_id="u1", plugin_id="demo", enabled=True)
+
+    rows = {row["kind"]: row["enabled"] for row in service._contributions("u1", "demo")}
+    assert rows["hook"] is True
+
+
 def test_infer_mcp_launch_reports_a_fetch_failure(tmp_path):
     import socket
     try:

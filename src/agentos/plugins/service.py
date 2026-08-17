@@ -144,7 +144,7 @@ class PluginService:
         with self.engine.begin() as connection:
             connection.execute(delete(plugin_contributions).where((plugin_contributions.c.plugin_id == plugin_id) & (plugin_contributions.c.user_id == user_id)))
             for item in result.contributions:
-                connection.execute(insert(plugin_contributions).values(plugin_id=plugin_id, user_id=user_id, kind=item["kind"], reference=item["reference"], display_name=item["display_name"], enabled=True, created_at=now))
+                connection.execute(insert(plugin_contributions).values(plugin_id=plugin_id, user_id=user_id, kind=item["kind"], reference=item["reference"], display_name=item["display_name"], enabled=bool(item.get("enabled", True)), created_at=now))
             connection.execute(update(plugins).where((plugins.c.plugin_id == plugin_id) & (plugins.c.user_id == user_id)).values(state=PluginState.ACTIVE.value, state_reason="", updated_at=now))
         return self.get(user_id, plugin_id)
 
@@ -157,12 +157,24 @@ class PluginService:
         contributions = self._contributions(user_id, plugin_id)
         inspection = inspect_plugin_package(Path(record["install_path"]), package_digest=record["package_digest"])
         if enabled:
+            # A hook's execution consent is a separate, explicitly revocable
+            # decision (see set_hooks_enabled) and is always granted or revoked
+            # for the whole plugin at once; re-activating after a disable must
+            # not silently reset a prior "yes" back to "not authorized".
+            prior_hook_rows = [item for item in contributions if item.get("kind") == "hook"]
+            hooks_were_enabled = bool(prior_hook_rows) and all(bool(item["enabled"]) for item in prior_hook_rows)
             activation = self.activator.activate(user_id=user_id, install_path=Path(record["install_path"]), inspection=inspection)
             now = _now()
             with self.engine.begin() as connection:
                 connection.execute(delete(plugin_contributions).where((plugin_contributions.c.plugin_id == plugin_id) & (plugin_contributions.c.user_id == user_id)))
                 for item in activation.contributions:
-                    connection.execute(insert(plugin_contributions).values(plugin_id=plugin_id, user_id=user_id, kind=item["kind"], reference=item["reference"], display_name=item["display_name"], enabled=True, created_at=now))
+                    row_enabled = hooks_were_enabled if item["kind"] == "hook" else bool(item.get("enabled", True))
+                    connection.execute(insert(plugin_contributions).values(plugin_id=plugin_id, user_id=user_id, kind=item["kind"], reference=item["reference"], display_name=item["display_name"], enabled=row_enabled, created_at=now))
+            if self.activator.hook_engine is not None and hooks_were_enabled:
+                self.activator.hook_engine.register(
+                    user_id=user_id, plugin_id=plugin_id, install_path=Path(record["install_path"]),
+                    hooks=inspection.hooks, enabled=True,
+                )
         else:
             self.activator.deactivate(user_id=user_id, plugin_id=plugin_id, contributions=contributions)
         with self.engine.begin() as connection:
@@ -196,6 +208,28 @@ class PluginService:
     def list_commands(self, user_id: str) -> list[dict[str, Any]]:
         library = getattr(self.activator, "command_library", None)
         return [dict(item) for item in library.list(user_id)] if library is not None else []
+
+    def set_hooks_enabled(self, *, user_id: str, plugin_id: str, enabled: bool) -> dict[str, Any]:
+        """Authorize, or revoke authorization for, this plugin's hooks.
+
+        Separate from ``set_enabled`` on purpose: approving an install and
+        allowing third-party code to run are two decisions, revocable apart.
+        """
+        record = self.get(user_id, plugin_id)
+        with self.engine.begin() as connection:
+            connection.execute(update(plugin_contributions).where(
+                (plugin_contributions.c.plugin_id == plugin_id)
+                & (plugin_contributions.c.user_id == user_id)
+                & (plugin_contributions.c.kind == "hook")
+            ).values(enabled=enabled))
+        hook_engine = getattr(self.activator, "hook_engine", None)
+        if hook_engine is not None:
+            inspection = inspect_plugin_package(Path(record["install_path"]), package_digest=record["package_digest"])
+            hook_engine.register(
+                user_id=user_id, plugin_id=plugin_id, install_path=Path(record["install_path"]),
+                hooks=inspection.hooks, enabled=enabled,
+            )
+        return self.get(user_id, plugin_id)
 
     def _contributions(self, user_id, plugin_id):
         with self.engine.connect() as connection:

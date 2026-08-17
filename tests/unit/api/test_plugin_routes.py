@@ -21,6 +21,14 @@ class Plugins:
     def discover_library(self, *, refresh=False, query=None): return {"entries": [], "web_search_available": refresh, "query_seen": query}
     def infer_mcp_launch(self, *, source_url): return {"display_name": "demo-mcp", "transport": "stdio", "command": "npx", "args": ["-y", "demo-mcp"], "url": None, "secret_names": [], "confidence": "structured", "source_url_seen": source_url}
     def list_commands(self, user_id): return [{"command_id": "demo:daily", "slug": "daily", "plugin_id": "demo", "description": "d", "argument_hint": "", "qualified": False}]
+    def set_hooks_enabled(self, **kwargs): return {"plugin_id": "demo", "state": "active", "hooks_enabled_seen": kwargs.get("enabled")}
+
+
+def test_hooks_enabled_route_forwards_the_flag():
+    client = TestClient(create_app(ApiServices(security=Security(), plugins=Plugins())))
+    response = client.put("/v1/plugins/demo/hooks-enabled", json={"enabled": True})
+    assert response.status_code == 200
+    assert response.json()["hooks_enabled_seen"] is True
 
 
 def test_commands_route_returns_the_active_commands():

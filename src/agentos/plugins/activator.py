@@ -15,12 +15,13 @@ class ActivationFailed(RuntimeError):
 
 
 class PluginActivator:
-    def __init__(self, *, skill_library, mcp_service, agent_templates=None, command_library=None, commands_path: str = "commands") -> None:
+    def __init__(self, *, skill_library, mcp_service, agent_templates=None, command_library=None, commands_path: str = "commands", hook_engine=None) -> None:
         self.skill_library = skill_library
         self.mcp_service = mcp_service
         self.agent_templates = agent_templates
         self.command_library = command_library
         self.commands_path = commands_path
+        self.hook_engine = hook_engine
 
     def activate(self, *, user_id: str, install_path: Path, inspection: PluginInspection):
         installed_skills = []
@@ -69,6 +70,18 @@ class PluginActivator:
                         install_path=Path(install_path), commands=inspection.commands,
                         commands_path=self.commands_path,
                     )
+            if inspection.hooks:
+                # Installing is not authorizing execution: hook rows start
+                # disabled and only the explicit consent action turns them on.
+                contributions.extend(
+                    {"kind": "hook", "reference": item.hook_id, "display_name": item.event, "enabled": False}
+                    for item in inspection.hooks
+                )
+                if self.hook_engine is not None:
+                    self.hook_engine.register(
+                        user_id=user_id, plugin_id=inspection.ref.plugin_id,
+                        install_path=Path(install_path), hooks=inspection.hooks, enabled=False,
+                    )
             return type("ActivationResult", (), {"contributions": contributions})()
         except Exception as error:
             for server_id in reversed(server_ids):
@@ -79,6 +92,11 @@ class PluginActivator:
             if self.command_library is not None:
                 try:
                     self.command_library.remove_plugin_commands(user_id=user_id, plugin_id=inspection.ref.plugin_id)
+                except Exception:
+                    pass
+            if self.hook_engine is not None:
+                try:
+                    self.hook_engine.unregister(user_id=user_id, plugin_id=inspection.ref.plugin_id)
                 except Exception:
                     pass
             try:
@@ -96,4 +114,6 @@ class PluginActivator:
                     pass
         if self.command_library is not None:
             self.command_library.remove_plugin_commands(user_id=user_id, plugin_id=plugin_id)
+        if self.hook_engine is not None:
+            self.hook_engine.unregister(user_id=user_id, plugin_id=plugin_id)
         self.skill_library.remove_plugin_skills(user_id=user_id, plugin_id=plugin_id)

@@ -1,6 +1,6 @@
 from agentos.plugins.activator import ActivationFailed, PluginActivator
-from agentos.plugins.models import CommandContribution, McpServerContribution, PluginInspection, PluginRef, SkillContribution
-from tests.unit.plugins.fakes import FakeCommandLibrary, FakeMcpService, FakeSkillLibrary
+from agentos.plugins.models import CommandContribution, HookContribution, McpServerContribution, PluginInspection, PluginRef, SkillContribution
+from tests.unit.plugins.fakes import FakeCommandLibrary, FakeHookEngine, FakeMcpService, FakeSkillLibrary
 
 def _inspection():
     return PluginInspection(PluginRef("demo", "1.0.0"), "Demo", "", "", None, "abc", skills=(SkillContribution("demo:s", "s", "d", "skills/s/SKILL.md"),), mcp_servers=(McpServerContribution("demo-mcp", "MCP", "stdio", "npx", ("-y", "x"), None, ("TOKEN",)),))
@@ -72,3 +72,37 @@ def test_activation_works_without_a_command_library(tmp_path):
     )
 
     assert result.contributions[0]["kind"] == "command"
+
+
+def test_hooks_are_installed_without_consent_to_execute(tmp_path):
+    inspection = PluginInspection(
+        PluginRef("demo", "1.0.0"), "Demo", "", "", None, "abc",
+        hooks=(HookContribution("demo:SessionStart:0", "SessionStart", "", "cmd", 10),),
+    )
+
+    result = PluginActivator(skill_library=FakeSkillLibrary(), mcp_service=FakeMcpService()).activate(
+        user_id="u1", install_path=tmp_path, inspection=inspection
+    )
+
+    hook = next(item for item in result.contributions if item["kind"] == "hook")
+    assert hook["reference"] == "demo:SessionStart:0"
+    assert hook["enabled"] is False
+    assert hook["display_name"] == "SessionStart"
+
+
+def test_activation_registers_hooks_disabled_and_deactivation_unregisters_them(tmp_path):
+    inspection = PluginInspection(
+        PluginRef("demo", "1.0.0"), "Demo", "", "", None, "abc",
+        hooks=(HookContribution("demo:SessionStart:0", "SessionStart", "", "cmd", 10),),
+    )
+    hook_engine = FakeHookEngine()
+    activator = PluginActivator(skill_library=FakeSkillLibrary(), mcp_service=FakeMcpService(), hook_engine=hook_engine)
+
+    result = activator.activate(user_id="u1", install_path=tmp_path, inspection=inspection)
+
+    assert hook_engine.registered["u1/demo"][0].hook_id == "demo:SessionStart:0"
+    assert hook_engine.enabled["u1/demo"] is False
+
+    activator.deactivate(user_id="u1", plugin_id="demo", contributions=result.contributions)
+
+    assert "u1/demo" not in hook_engine.registered

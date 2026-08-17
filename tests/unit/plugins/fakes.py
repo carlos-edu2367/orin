@@ -20,3 +20,18 @@ class FakeCommandLibrary:
 
     def remove_plugin_commands(self, *, user_id, plugin_id):
         self.installed.pop(f"{user_id}/{plugin_id}", None)
+
+class FakeHookEngine:
+    def __init__(self) -> None:
+        self.registered: dict[str, tuple] = {}
+        self.enabled: dict[str, bool] = {}
+
+    def register(self, *, user_id, plugin_id, install_path, hooks, enabled):
+        key = f"{user_id}/{plugin_id}"
+        self.registered[key] = tuple(hooks)
+        self.enabled[key] = enabled
+
+    def unregister(self, *, user_id, plugin_id):
+        key = f"{user_id}/{plugin_id}"
+        self.registered.pop(key, None)
+        self.enabled.pop(key, None)

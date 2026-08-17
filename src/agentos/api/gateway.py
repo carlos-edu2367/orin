@@ -1006,6 +1006,15 @@ def create_app(services: ApiServices) -> FastAPI:
         services.security.authorize(principal, action="plugins.enable", resource_id=plugin_id, purpose="plugins.configure")
         return JSONResponse(_jsonable(_require_port(services.plugins).set_enabled(user_id=principal.user_id, plugin_id=plugin_id, enabled=payload.enabled)))
 
+    @app.put("/v1/plugins/{plugin_id}/hooks-enabled")
+    async def set_plugin_hooks_enabled(plugin_id: str, payload: PluginEnabledRequest, request: Request) -> JSONResponse:
+        principal = principal_for(request, mutable=True)
+        services.security.check_rate_limit(principal, action="plugins.hooks_enabled", origin=request.headers.get("origin"))
+        services.security.authorize(principal, action="plugins.hooks_enabled", resource_id=plugin_id, purpose="plugins.configure")
+        return JSONResponse(_jsonable(_require_port(services.plugins).set_hooks_enabled(
+            user_id=principal.user_id, plugin_id=plugin_id, enabled=payload.enabled
+        )))
+
     @app.delete("/v1/plugins/{plugin_id}", status_code=204)
     async def remove_plugin(plugin_id: str, request: Request) -> JSONResponse:
         principal = principal_for(request, mutable=True)
