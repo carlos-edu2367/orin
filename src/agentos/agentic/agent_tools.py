@@ -212,6 +212,8 @@ class AgentToolset:
         create_agent: Callable[[str, str, str | None], ToolOutcome] | None = None,
         http_client: httpx.Client | None = None,
         search_client: object | None = None,
+        retrieval: object | None = None,
+        retrieval_reindex: Callable[[list[str]], None] | None = None,
         browser: object | None = None,
         enable_terminal: bool = True,
         skills=None,
@@ -238,6 +240,8 @@ class AgentToolset:
         self._create_agent = create_agent
         self._http_client = http_client
         self._search_client = search_client
+        self._retrieval = retrieval
+        self._retrieval_reindex = retrieval_reindex
         self._browser = browser
         self.browser_capability = browser_capability
         self._last_browser_navigation_url: str | None = None
@@ -324,7 +328,7 @@ class AgentToolset:
             ),
             ToolDefinition(
                 "search_files",
-                "Search file contents in the conversation workspace with a regular expression. Use this before reading files when you do not know where something is.",
+                "Search file contents in the conversation workspace with a regular expression. Use this when you know the exact text: a symbol name, a literal string, a TODO. When you do not know where something is, use search_code instead if it is available.",
                 _schema({
                     "pattern": {**_TEXT, "description": "Python regular expression."},
                     "glob": {**_TEXT, "description": "Relative glob filter, e.g. '**/*.py'. Defaults to every file."},
@@ -365,6 +369,27 @@ class AgentToolset:
                 "Search the public web and return titles, URLs and snippets. Use this to find an address, then fetch_url to read it.",
                 _schema({"query": _TEXT, "limit": {"type": "integer", "minimum": 1, "maximum": 10}}, ("query",)),
                 self.web_search, "web", read_only=True, policy_tags=("network",),
+            ))
+        if self._retrieval is not None:
+            # The tag follows the embedder, not the tool: with a local Ollama
+            # nothing leaves the machine, but the remote embedder makes every
+            # search an outbound request carrying file content.
+            remote_embedder = os.getenv("ORIN_RETRIEVAL_EMBEDDER", "").strip().lower() == "remote"
+            retrieval_tags: tuple[str, ...] = ("network",) if remote_embedder else ()
+            items.append(ToolDefinition(
+                "search_code",
+                "Search the project by meaning, not by text. Use this when you do not know where something lives, or when you want to understand how a flow works. Returns whole definitions with path:line so you can open and confirm them.",
+                _schema({
+                    "query": {**_TEXT, "description": "What you are looking for, in plain language."},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 20, "description": "How many results to return. Defaults to 8."},
+                }, ("query",)),
+                self.search_code, "filesystem", read_only=True, policy_tags=retrieval_tags,
+            ))
+            items.append(ToolDefinition(
+                "project_map",
+                "List the files the project depends on most, with their top-level symbols. Use this once to orient yourself in an unfamiliar codebase.",
+                _schema({"limit": {"type": "integer", "minimum": 1, "maximum": 50}}),
+                self.project_map, "filesystem", read_only=True,
             ))
         if self._browser is not None:
             items.append(ToolDefinition(
@@ -820,10 +845,12 @@ class AgentToolset:
         else:
             written = total = self.workspace.write_text(path, content)
             body = f"Wrote {written} bytes to {path}."
+        artifacts = [self.workspace.file_metadata(path)]
+        self._queue_reindex(artifacts)
         return {
             "summary": f"{'Acrescentou a' if mode == 'append' else 'Escreveu'} {path}",
             "content": body,
-            "payload": {"path": path, "bytes_written": written, "bytes_total": total, "mode": mode, "label": path, "artifacts": [self.workspace.file_metadata(path)]},
+            "payload": {"path": path, "bytes_written": written, "bytes_total": total, "mode": mode, "label": path, "artifacts": artifacts},
         }
 
     @staticmethod
@@ -868,10 +895,12 @@ class AgentToolset:
                 raise AgentToolError(f"edit {index + 1}: old_text occurs {matches} times; add surrounding text or set replace_all=true.")
             draft = draft.replace(current, replacement) if replace_all else draft.replace(current, replacement, 1)
         written = self.workspace.write_text(path, draft)
+        artifacts = [self.workspace.file_metadata(path)]
+        self._queue_reindex(artifacts)
         return {
             "summary": f"Editou {path}",
             "content": f"Applied {len(operations)} edit(s) to {path} ({written} bytes).",
-            "payload": {"path": path, "bytes_written": written, "edits_applied": len(operations), "label": path, "artifacts": [self.workspace.file_metadata(path)]},
+            "payload": {"path": path, "bytes_written": written, "edits_applied": len(operations), "label": path, "artifacts": artifacts},
         }
 
     def list_files(self, path: str = "", depth: int = 1) -> dict[str, Any]:
@@ -898,6 +927,68 @@ class AgentToolset:
             "payload": {"pattern": pattern[:200], "count": len(matches), "label": pattern[:80]},
         }
 
+    def search_code(self, query: str, limit: int = 8) -> dict[str, Any]:
+        if not isinstance(query, str) or not query.strip():
+            raise AgentToolError("query must be a non-blank string")
+        try:
+            result = self._retrieval.search(query, limit=max(1, min(int(limit), 20)))
+        except Exception as error:  # noqa: BLE001 - retrieval degrades, it never fails a turn
+            raise AgentToolError(f"code search is unavailable: {error}") from error
+        if not result.hits:
+            body = "[no match]"
+        else:
+            body = "\n\n".join(
+                f"{hit.location}{f' — {hit.symbol}' if hit.symbol else ''}\n{hit.text}"
+                for hit in result.hits
+            )
+        if result.mode == "lexical":
+            body = f"[lexical mode: no embedder available, results are keyword-based]\n\n{body}"
+        return {
+            "summary": f"Buscou no código '{query[:40]}': {len(result.hits)} {'trecho' if len(result.hits) == 1 else 'trechos'}",
+            "content": body,
+            "payload": {
+                "query": query[:200], "count": len(result.hits), "mode": result.mode,
+                "label": query[:80], "indexed_files": result.status.files, "indexed_chunks": result.status.chunks,
+            },
+        }
+
+    def project_map(self, limit: int = 20) -> dict[str, Any]:
+        try:
+            entries = self._retrieval.project_map(limit=max(1, min(int(limit), 50)))
+        except Exception as error:  # noqa: BLE001
+            raise AgentToolError(f"the project map is unavailable: {error}") from error
+        if not entries:
+            body = "[the project index is empty]"
+        else:
+            body = "\n".join(
+                f"{entry['path']} (imported by {entry['imported_by']}): {', '.join(entry['symbols']) or '—'}"
+                for entry in entries
+            )
+        return {
+            "summary": f"Mapeou {len(entries)} {'arquivo' if len(entries) == 1 else 'arquivos'} centrais",
+            "content": body,
+            "payload": {"count": len(entries), "label": "project map"},
+        }
+
+    def _queue_reindex(self, changed: list[dict[str, Any]]) -> None:
+        """Feed the index from the artefact list a mutating tool already computed.
+
+        This must never call ``RetrievalService.reindex`` directly: that method
+        re-embeds every chunk in the project still missing a vector, not just the
+        ones just written, and would block the tool call on however much of the
+        initial scan has not finished yet. ``_retrieval_reindex`` is the
+        background worker's non-blocking queue instead.
+        """
+        if self._retrieval_reindex is None or not changed:
+            return
+        paths = [str(item["path"]) for item in changed if isinstance(item, Mapping) and item.get("path")]
+        if not paths:
+            return
+        try:
+            self._retrieval_reindex(paths)
+        except Exception:  # noqa: BLE001 - indexing never breaks the tool that ran
+            pass
+
     def run_command(self, command: str, background: bool = False) -> dict[str, Any]:
         if not isinstance(command, str) or not command.strip():
             raise AgentToolError("command must be a non-blank string")
@@ -920,10 +1011,12 @@ class AgentToolset:
             process_options["start_new_session"] = True
         process = subprocess.Popen(command, **process_options)  # noqa: S602 - a local agent shell is the feature
         if background:
+            artifacts = self.workspace.changed_files(before)
+            self._queue_reindex(artifacts)
             return {
                 "summary": f"Iniciou em segundo plano: {command[:80]}",
                 "content": f"Started background process {process.pid}. It is running from the workspace.",
-                "payload": {"command": command[:400], "label": command[:120], "background": True, "pid": process.pid, "artifacts": self.workspace.changed_files(before)},
+                "payload": {"command": command[:400], "label": command[:120], "background": True, "pid": process.pid, "artifacts": artifacts},
             }
         try:
             stdout_bytes, stderr_bytes = process.communicate(timeout=COMMAND_TIMEOUT_SECONDS)
@@ -935,13 +1028,15 @@ class AgentToolset:
         stderr = stderr_bytes.decode("utf-8", "replace").strip()
         body = "\n".join(part for part in (stdout, f"[stderr]\n{stderr}" if stderr else "") if part) or "[no output]"
         succeeded = process.returncode == 0
+        artifacts = self.workspace.changed_files(before)
+        self._queue_reindex(artifacts)
         return {
             "summary": f"$ {command[:80]}",
             "content": f"exit={process.returncode}\n{body}",
             "payload": {
                 "command": command[:400], "exit_code": process.returncode,
                 "label": command[:120], "failed": not succeeded,
-                "artifacts": self.workspace.changed_files(before),
+                "artifacts": artifacts,
             },
         }
 

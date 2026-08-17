@@ -1101,3 +1101,92 @@ def test_browser_scroll_rejects_an_invalid_direction(tmp_path) -> None:
     tools = AgentToolset(ConversationWorkspace(tmp_path, "chat_scroll_bad"), browser=_FullBrowser())
     with pytest.raises(AgentToolError):
         tools.browser_scroll("sideways")
+
+
+class _FakeRetrieval:
+    """Stands in for RetrievalService with the same shape the toolset uses."""
+
+    def __init__(self, mode: str = "semantic") -> None:
+        from agentos.retrieval.models import IndexStatus, SearchHit
+
+        self.queries: list[str] = []
+        self._mode = mode
+        self._status = IndexStatus(files=2, chunks=9, vectors=9 if mode == "semantic" else 0, last_scan_at=None)
+        self._hit = SearchHit(path="src/policy.py", start_line=10, end_line=20, symbol="authorize", score=0.42, text="def authorize():\n    return True")
+
+    def search(self, query: str, *, limit: int = 8):
+        from agentos.retrieval.service import SearchResult
+
+        self.queries.append(query)
+        return SearchResult(hits=[self._hit], mode=self._mode, status=self._status)
+
+    def project_map(self, *, limit: int = 20):
+        return [{"path": "src/policy.py", "imported_by": 3, "symbols": ["authorize"]}]
+
+    def status(self):
+        return self._status
+
+
+def test_search_code_is_absent_without_a_retrieval_service(toolset: AgentToolset) -> None:
+    names = [item.name for item in toolset.definitions()]
+
+    assert "search_code" not in names
+    assert "project_map" not in names
+    # The regex tool is never replaced by the semantic one.
+    assert "search_files" in names
+
+
+def test_search_code_returns_citable_locations_to_the_model(tmp_path) -> None:
+    retrieval = _FakeRetrieval()
+    tools = AgentToolset(ConversationWorkspace(tmp_path, "chat_rag"), retrieval=retrieval)
+
+    outcome = tools.invoke("search_code", {"query": "onde a permissão de ferramenta é decidida"})
+
+    assert outcome.status == "succeeded"
+    assert "src/policy.py:10-20" in outcome.content
+    assert "authorize" in outcome.content
+    assert outcome.payload["mode"] == "semantic"
+    assert tools.is_read_only("search_code")
+    assert retrieval.queries == ["onde a permissão de ferramenta é decidida"]
+
+
+def test_search_code_announces_the_lexical_degradation(tmp_path) -> None:
+    tools = AgentToolset(ConversationWorkspace(tmp_path, "chat_rag_lexical"), retrieval=_FakeRetrieval(mode="lexical"))
+
+    outcome = tools.invoke("search_code", {"query": "authorize"})
+
+    assert outcome.payload["mode"] == "lexical"
+    assert "lexical" in outcome.content.lower()
+
+
+def test_search_code_refuses_a_blank_query(tmp_path) -> None:
+    tools = AgentToolset(ConversationWorkspace(tmp_path, "chat_rag_blank"), retrieval=_FakeRetrieval())
+
+    assert tools.invoke("search_code", {"query": "   "}).status == "failed"
+
+
+def test_project_map_reports_the_most_imported_files(tmp_path) -> None:
+    tools = AgentToolset(ConversationWorkspace(tmp_path, "chat_rag_map"), retrieval=_FakeRetrieval())
+
+    outcome = tools.invoke("project_map", {})
+
+    assert outcome.status == "succeeded"
+    assert "src/policy.py" in outcome.content
+    assert outcome.payload["count"] == 1
+
+
+def test_a_mutating_tool_queues_the_changed_paths_for_reindexing(tmp_path) -> None:
+    queued: list[list[str]] = []
+    tools = AgentToolset(ConversationWorkspace(tmp_path, "chat_rag_write"), retrieval=_FakeRetrieval(), retrieval_reindex=queued.append)
+
+    tools.invoke("write_file", {"path": "notes/plan.md", "content": "step one"})
+
+    assert queued == [["notes/plan.md"]]
+
+
+def test_a_mutating_tool_without_a_reindex_queue_does_not_raise(tmp_path) -> None:
+    tools = AgentToolset(ConversationWorkspace(tmp_path, "chat_rag_write_noqueue"), retrieval=_FakeRetrieval())
+
+    outcome = tools.invoke("write_file", {"path": "notes/plan.md", "content": "step one"})
+
+    assert outcome.status == "succeeded"
