@@ -12,6 +12,7 @@ import os
 import platform
 import shutil
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Lock
@@ -21,6 +22,9 @@ from typing import Callable, Mapping
 from agentos.installation import orin_paths
 
 from agentos.reading.vision import VisionUnavailable
+from agentos.retrieval.factory import retrieval_service_for
+from agentos.retrieval.service import RetrievalService
+from agentos.retrieval.worker import IndexWorker
 
 from .agent_tools import AgentToolset, ToolOutcome
 from .browser_tools import AgentBrowserView
@@ -175,6 +179,34 @@ def resolve_effective_workspace_id(turn: Mapping[str, object]) -> str:
     if not isinstance(conversation_id, str) or not conversation_id.strip():
         raise ValueError("conversation_id must be non-blank")
     return conversation_id
+
+
+@dataclass(frozen=True, slots=True)
+class RetrievalBundle:
+    """The service the tools call, plus the thread that keeps its index fresh."""
+
+    service: RetrievalService
+    worker: IndexWorker
+
+
+def build_retrieval_for_turn(*, workspace_id: str, local_root: str | None, data_root: Path | None = None) -> RetrievalBundle | None:
+    """Retrieval for this turn, or None.
+
+    Never raises. A misconfigured embedder, an unreadable index file or a
+    vanished folder must cost the turn its code search, not the turn itself.
+    A managed workspace (no bound local folder) also returns None: it holds one
+    conversation's artefacts, not a codebase worth indexing.
+    """
+    try:
+        service = retrieval_service_for(workspace_id=workspace_id, local_root=local_root, data_root=data_root)
+    except Exception:  # noqa: BLE001
+        return None
+    if service is None:
+        return None
+    worker = IndexWorker(service)
+    worker.start()
+    worker.enqueue_full_scan()
+    return RetrievalBundle(service=service, worker=worker)
 
 
 def build_system_prompt(
@@ -464,6 +496,11 @@ class TurnSession:
             managed_root=workspace_root or orin_paths().workspaces,
             local_root=local_root if isinstance(local_root, str) else None,
         )
+        self._retrieval_bundle = build_retrieval_for_turn(
+            workspace_id=resolve_effective_workspace_id(turn),
+            local_root=local_root if isinstance(local_root, str) else None,
+        )
+        self.retrieval = self._retrieval_bundle.service if self._retrieval_bundle is not None else None
         self._subagent_runs = 0
         self._subagent_lock = Lock()
         self.main_agent_id = store.main_agent_id(turn) if hasattr(store, "main_agent_id") else str(turn.get("agent_id", "agent:main"))
@@ -822,6 +859,8 @@ class TurnSession:
             skill_agent_id=self.main_agent_id,
             skill_load_recorder=self.skill_load_recorder,
             search_client=self.search_client,
+            retrieval=self.retrieval,
+            retrieval_reindex=self._retrieval_bundle.worker.enqueue_paths if self._retrieval_bundle is not None else None,
             browser=browser,
             browser_capability=self.browser_capability,
             policy=self.tool_policy,
