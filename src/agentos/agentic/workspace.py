@@ -11,6 +11,8 @@ from hashlib import sha256
 from pathlib import Path
 import re
 
+from agentos.pathsafety import resolve_contained
+
 
 MAX_READ_BYTES = 200_000
 MAX_WRITE_BYTES = 1_000_000
@@ -168,12 +170,10 @@ class ConversationWorkspace:
                 return
             # A directory-shaped symlink planted inside the workspace can point
             # outside ``root``; resolving and re-checking containment here (same
-            # pattern as ``search``/``file_snapshot``) keeps the recursion from
-            # walking out of the sandbox.
-            try:
-                resolved = item.resolve()
-                resolved.relative_to(self.root)
-            except (OSError, ValueError):
+            # guard used by ``search``/``file_snapshot``) keeps the recursion
+            # from walking out of the sandbox.
+            resolved = resolve_contained(item, self.root)
+            if resolved is None:
                 continue
             is_file = resolved.is_file()
             entries.append({
@@ -204,8 +204,10 @@ class ConversationWorkspace:
         for item in sorted(self.root.glob(glob)):
             if len(matches) >= limit:
                 break
+            resolved = resolve_contained(item, self.root)
+            if resolved is None:
+                continue
             try:
-                resolved = item.resolve()
                 relative = resolved.relative_to(self.root).as_posix()
                 if not resolved.is_file() or resolved.stat().st_size > MAX_SEARCH_FILE_BYTES:
                     continue
@@ -225,8 +227,10 @@ class ConversationWorkspace:
         for item in self.root.rglob("*"):
             if len(snapshot) >= MAX_SNAPSHOT_FILES:
                 break
+            resolved = resolve_contained(item, self.root)
+            if resolved is None:
+                continue
             try:
-                resolved = item.resolve()
                 relative = resolved.relative_to(self.root).as_posix()
                 if not resolved.is_file():
                     continue

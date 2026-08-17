@@ -11,6 +11,8 @@ from datetime import UTC, datetime
 from hashlib import blake2b
 from pathlib import Path
 
+from agentos.pathsafety import resolve_contained
+
 from .filters import GitignoreFilter, IndexFilter
 from .ports import Chunker, EmbeddingPort, EmbeddingUnavailable
 from .store import SqliteChunkStore
@@ -75,13 +77,14 @@ class ProjectIndexer:
         return self._resolve_absolute(self.root / relative_path)
 
     def _resolve_absolute(self, item: Path) -> Path | None:
-        """Resolve and re-check containment, the same guard the workspace search uses."""
+        """Resolve via the shared sandbox guard, the same one the workspace search uses."""
+        resolved = resolve_contained(item, self.root)
+        if resolved is None:
+            return None
         try:
-            resolved = item.resolve()
-            resolved.relative_to(self.root)
             if not resolved.is_file() or resolved.stat().st_size > MAX_FILE_BYTES:
                 return None
-        except (OSError, ValueError):
+        except OSError:
             return None
         return resolved
 
