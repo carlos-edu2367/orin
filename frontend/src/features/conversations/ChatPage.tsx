@@ -26,6 +26,7 @@ import { attachmentNotice } from './attachmentNotice'
 import { Composer } from './Composer'
 import { ContextIndicator } from './ContextIndicator'
 import { MarkdownMessage } from './MarkdownMessage'
+import { MessageCommandChip } from './MessageCommandChip'
 import { MessageAttachments } from './MessageAttachments'
 import { TurnTimeline } from './TurnTimeline'
 import { WorkspaceFilePreview, type WorkspaceFileReference } from './WorkspaceFileCard'
@@ -469,7 +470,7 @@ export function ChatPage() {
     }
     const response = text.join('\n')
     setError(null)
-    setPendingUserMessage({ message_id: `pending-${Date.now()}`, role: 'user', content: response, status: 'completed', retryable: false, attachments: [] })
+    setPendingUserMessage({ message_id: `pending-${Date.now()}`, role: 'user', content: response, status: 'completed', retryable: false, attachments: [], command: null })
     try {
       await sendChatMessage(response)
       await loadSnapshot(false)
@@ -492,7 +493,7 @@ export function ChatPage() {
       throw caught
     }
     const response = `Conectei o servidor ${server.display_name}.`
-    setPendingUserMessage({ message_id: `pending-${Date.now()}`, role: 'user', content: response, status: 'completed', retryable: false, attachments: [] })
+    setPendingUserMessage({ message_id: `pending-${Date.now()}`, role: 'user', content: response, status: 'completed', retryable: false, attachments: [], command: null })
     try {
       await sendChatMessage(response)
       await loadSnapshot(false)
@@ -508,7 +509,7 @@ export function ChatPage() {
     if (!event.mcpApproval || !event.turnId || !openQuestionTurnIds.has(event.turnId) || running) return
     const response = `Não quero conectar o servidor ${event.mcpApproval.display_name} agora.`
     setError(null)
-    setPendingUserMessage({ message_id: `pending-${Date.now()}`, role: 'user', content: response, status: 'completed', retryable: false, attachments: [] })
+    setPendingUserMessage({ message_id: `pending-${Date.now()}`, role: 'user', content: response, status: 'completed', retryable: false, attachments: [], command: null })
     try {
       await sendChatMessage(response)
       await loadSnapshot(false)
@@ -524,7 +525,7 @@ export function ChatPage() {
     if (!event.pluginApproval || !event.turnId || !openQuestionTurnIds.has(event.turnId) || running) return
     await approvePlugin(client, event.pluginApproval.plugin_id)
     const response = `Instalei o plugin ${event.pluginApproval.display_name}.`
-    setPendingUserMessage({ message_id: `pending-${Date.now()}`, role: 'user', content: response, status: 'completed', retryable: false, attachments: [] })
+    setPendingUserMessage({ message_id: `pending-${Date.now()}`, role: 'user', content: response, status: 'completed', retryable: false, attachments: [], command: null })
     await sendChatMessage(response)
     await loadSnapshot(false)
   }, [client, loadSnapshot, openQuestionTurnIds, running, sendChatMessage])
@@ -532,7 +533,7 @@ export function ChatPage() {
   const declinePluginApproval = useCallback(async (event: ConversationActivityEvent) => {
     if (!event.pluginApproval || !event.turnId || !openQuestionTurnIds.has(event.turnId) || running) return
     const response = `Não quero instalar o plugin ${event.pluginApproval.display_name} agora.`
-    setPendingUserMessage({ message_id: `pending-${Date.now()}`, role: 'user', content: response, status: 'completed', retryable: false, attachments: [] })
+    setPendingUserMessage({ message_id: `pending-${Date.now()}`, role: 'user', content: response, status: 'completed', retryable: false, attachments: [], command: null })
     await sendChatMessage(response)
     await loadSnapshot(false)
   }, [loadSnapshot, openQuestionTurnIds, running, sendChatMessage])
@@ -547,7 +548,7 @@ export function ChatPage() {
     }
     setMessage('')
     setError(null)
-    setPendingUserMessage({ message_id: `pending-${Date.now()}`, role: 'user', content: text, status: 'completed', retryable: false, attachments: [] })
+    setPendingUserMessage({ message_id: `pending-${Date.now()}`, role: 'user', content: text, status: 'completed', retryable: false, attachments: [], command: null })
     try {
       await sendChatMessage(text, readyUploads)
       resetAttachments()
@@ -573,7 +574,7 @@ export function ChatPage() {
       const prompt = 'Enviei o conteúdo extenso no arquivo mensagem.txt. Leia o arquivo anexado antes de responder.'
       setOversizedInput(null)
       setMessage('')
-      setPendingUserMessage({ message_id: `pending-${Date.now()}`, role: 'user', content: prompt, status: 'completed', retryable: false, attachments: [] })
+      setPendingUserMessage({ message_id: `pending-${Date.now()}`, role: 'user', content: prompt, status: 'completed', retryable: false, attachments: [], command: null })
       await sendChatMessage(prompt, [...draft.attachments, uploaded.upload_id])
       sent = true
       resetAttachments()
@@ -669,7 +670,9 @@ export function ChatPage() {
                     ? <TurnTimeline items={timeline} conversationId={conversationId} client={client} onPreview={setPreviewReference} openQuestionTurnIds={openQuestionTurnIds} onAnswer={submitQuestionAnswers} onMcpApprove={submitMcpApproval} onMcpDecline={declineMcpApproval} onPluginApprove={submitPluginApproval} onPluginDecline={declinePluginApproval} />
                     : item.role === 'assistant' && item.content
                       ? <MarkdownMessage content={item.content} conversationId={conversationId} client={client} onPreview={setPreviewReference} />
-                      : <p>{item.content || placeholderFor(item)}</p>}
+                      : item.command
+                        ? <MessageCommandChip command={item.command} />
+                        : <p>{item.content || placeholderFor(item)}</p>}
                   {item.role === 'user' && item.attachments.length > 0 && (
                     <MessageAttachments conversationId={conversationId} items={item.attachments} client={client} onPreview={setPreviewReference} />
                   )}
