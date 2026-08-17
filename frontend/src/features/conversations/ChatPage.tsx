@@ -8,7 +8,7 @@ import {
 } from '../../api/conversations'
 import { ApiError } from '../../api/errors'
 import { approveMcpServer } from '../../api/mcp'
-import { approvePlugin } from '../../api/plugins'
+import { approvePlugin, listPluginCommands, type PluginCommand } from '../../api/plugins'
 import {
   PROVIDER_NAMES, getVisionModelSetting, listProviderModels,
   type ProviderModel, type ProviderName, type VisionModelSetting,
@@ -106,6 +106,7 @@ export function ChatPage() {
   // `VisionModelSetting` already reads.
   const [turnModelCatalog, setTurnModelCatalog] = useState<ProviderModel | null>(null)
   const [visionCandidates, setVisionCandidates] = useState<ProviderModel[]>([])
+  const [pluginCommands, setPluginCommands] = useState<PluginCommand[]>([])
   const [visionSetting, setVisionSetting] = useState<VisionModelSetting | null>(null)
   const [chatProvider, setChatProvider] = useState<ProviderName | null>(null)
   const [chatModelId, setChatModelId] = useState('')
@@ -228,6 +229,17 @@ export function ChatPage() {
     getVisionModelSetting(client, controller.signal)
       .then((value) => { if (!controller.signal.aborted) setVisionSetting(value) })
       .catch(() => { if (!controller.signal.aborted) setVisionSetting({ provider: null, modelId: null, mode: 'automatic' }) })
+    return () => controller.abort()
+  }, [client])
+
+  // Fetched once, best-effort: the plugin commands the `/` picker offers. A
+  // failure here must never block the chat itself — it only means the picker
+  // stays empty until the next load.
+  useEffect(() => {
+    const controller = new AbortController()
+    listPluginCommands(client, controller.signal)
+      .then((items) => { if (!controller.signal.aborted) setPluginCommands(items) })
+      .catch(() => { if (!controller.signal.aborted) setPluginCommands([]) })
     return () => controller.abort()
   }, [client])
 
@@ -728,6 +740,7 @@ export function ChatPage() {
           onRemoveAttachment={onRemoveAttachment}
           canSend={attachmentsReady}
           notice={notice}
+          commands={pluginCommands}
           settings={
             <>
               {effectiveChatProvider && <ModelPicker

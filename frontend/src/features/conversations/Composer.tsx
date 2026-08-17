@@ -1,6 +1,8 @@
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
 import { useEffect, useRef, useState, type ClipboardEvent, type DragEvent, type FormEvent, type KeyboardEvent, type ReactNode } from 'react'
+import type { PluginCommand } from '../../api/plugins'
 import { AttachmentChips, type ComposerAttachment } from './AttachmentChips'
+import { CommandPicker, commandToken } from './CommandPicker'
 
 export type ComposerProps = {
   value: string
@@ -28,6 +30,8 @@ export type ComposerProps = {
   attachments?: ComposerAttachment[]
   onAttach?: (files: File[]) => void
   onRemoveAttachment?: (id: string) => void
+  /** Active plugin commands offered by the `/` picker. Empty disables it. */
+  commands?: PluginCommand[]
 }
 
 const MAX_ROWS_HEIGHT = 260
@@ -43,12 +47,28 @@ const MAX_ROWS_HEIGHT = 260
 export function Composer({
   value, onChange, onSubmit, onStop, running = false, disabled = false,
   placeholder = 'Descreva o que você precisa…', settings, hint, error, autoFocus, notice, focusSignal = 0, canSend = true,
-  attachments = [], onAttach = () => {}, onRemoveAttachment = () => {},
+  attachments = [], onAttach = () => {}, onRemoveAttachment = () => {}, commands = [],
 }: ComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [focused, setFocused] = useState(false)
   const reduced = useReducedMotion()
+
+  // The picker only claims the keyboard while the message is exactly a
+  // command being typed from the very start. Anything else — a path, a
+  // regex, a second word — leaves Enter-to-send alone.
+  const commandQuery = /^\/[^\s/]*$/.test(value) ? value.slice(1) : null
+  const [dismissed, setDismissed] = useState(false)
+  // A dismissal (Escape, or picking a command) only applies to the command
+  // being typed at that moment; once the person leaves and re-enters command
+  // shape, the picker is available again. Adjusted during render, React's
+  // documented pattern for this, rather than in an effect.
+  const [previousCommandQuery, setPreviousCommandQuery] = useState(commandQuery)
+  if (commandQuery !== previousCommandQuery) {
+    setPreviousCommandQuery(commandQuery)
+    if (commandQuery === null) setDismissed(false)
+  }
+  const pickerOpen = commandQuery !== null && !dismissed && commands.length > 0
 
   useEffect(() => {
     const element = textareaRef.current
@@ -74,6 +94,7 @@ export function Composer({
   }
 
   function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (pickerOpen && ['Enter', 'ArrowUp', 'ArrowDown', 'Escape'].includes(event.key)) return
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault()
       if (running || !canSend) return
@@ -106,6 +127,14 @@ export function Composer({
       <div className="composer__surface">
         <label className="visually-hidden" htmlFor="composer-message">Mensagem</label>
         <AttachmentChips items={attachments} onRemove={onRemoveAttachment} />
+        {pickerOpen && (
+          <CommandPicker
+            commands={commands}
+            query={commandQuery ?? ''}
+            onSelect={(command) => { onChange(`/${commandToken(command)} `); setDismissed(true) }}
+            onDismiss={() => setDismissed(true)}
+          />
+        )}
         <textarea
           id="composer-message"
           ref={textareaRef}
