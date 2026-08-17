@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 import re
 from typing import Any, Mapping
 
@@ -22,10 +23,31 @@ class PluginManifest:
     author: str
     homepage: str | None
     mcp_servers: tuple[McpServerContribution, ...] = ()
+    commands_path: str = "commands"
+    hooks_path: str = "hooks"
 
 
 def _text(value: Any, limit: int = 1024) -> str:
     return str(value or "")[:limit]
+
+
+def _package_relative_path(value: Any, default: str) -> str:
+    """A manifest-declared subdirectory, guaranteed to stay inside the package.
+
+    Validation is textual and happens before any filesystem access, so a
+    hostile manifest is refused without the package being touched. Symlink
+    escapes are caught later, at read time, by resolving against the root.
+    """
+    raw = _text(value, 512).strip().replace("\\", "/")
+    if not raw:
+        return default
+    candidate = PurePosixPath(raw)
+    if candidate.is_absolute() or (len(raw) > 1 and raw[1] == ":"):
+        raise ManifestRejected(f"path '{raw}' must be relative to the plugin package")
+    parts = [part for part in candidate.parts if part not in (".",)]
+    if any(part == ".." for part in parts):
+        raise ManifestRejected(f"path '{raw}' must not escape the plugin package")
+    return "/".join(parts) or default
 
 
 def parse_plugin_manifest(payload: Mapping[str, Any]) -> PluginManifest:
@@ -46,6 +68,8 @@ def parse_plugin_manifest(payload: Mapping[str, Any]) -> PluginManifest:
     return PluginManifest(
         plugin_id_from_name(name), name, version, _text(payload.get("description")),
         _text(author, 120), homepage, parse_mcp_config(payload),
+        _package_relative_path(payload.get("commands"), "commands"),
+        _package_relative_path(payload.get("hooks"), "hooks"),
     )
 
 

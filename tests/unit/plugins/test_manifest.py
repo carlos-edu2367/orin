@@ -23,3 +23,26 @@ def test_manifest_reads_inline_mcp_servers():
 
 def test_manifest_without_mcp_servers_is_empty_not_none():
     assert parse_plugin_manifest({"name": "demo", "version": "1.0.0"}).mcp_servers == ()
+
+
+def test_manifest_path_fields_default_to_conventional_directories():
+    manifest = parse_plugin_manifest({"name": "demo", "version": "1.0.0"})
+
+    assert manifest.commands_path == "commands"
+    assert manifest.hooks_path == "hooks"
+
+
+def test_manifest_path_fields_are_normalized():
+    manifest = parse_plugin_manifest({
+        "name": "demo", "version": "1.0.0",
+        "commands": "./commands/", "hooks": "./config/hooks",
+    })
+
+    assert manifest.commands_path == "commands"
+    assert manifest.hooks_path == "config/hooks"
+
+
+@pytest.mark.parametrize("value", ["../outside", "/etc", "commands/../../escape", "C:\\\\windows"])
+def test_manifest_rejects_a_path_escaping_the_package(value):
+    with pytest.raises(ManifestRejected):
+        parse_plugin_manifest({"name": "demo", "version": "1.0.0", "commands": value})
