@@ -32,6 +32,26 @@ def test_an_unknown_embedder_name_falls_back_to_lexical(monkeypatch: pytest.Monk
     assert isinstance(build_embedder(), LexicalOnlyEmbedder)
 
 
+def test_a_pasted_v1_suffixed_ollama_url_is_normalised_away(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Code review finding: this base URL is what a user copies out of the
+    # Ollama docs, or out of configuring another provider's OpenAI-compatible
+    # endpoint. Left unnormalised, every embedding request 404s.
+    monkeypatch.delenv("ORIN_RETRIEVAL_EMBEDDER", raising=False)
+    monkeypatch.setenv("ORIN_RETRIEVAL_BASE_URL", "http://localhost:11434/v1")
+
+    embedder = build_embedder()
+
+    assert isinstance(embedder, OllamaEmbedder)
+    assert embedder._base_url == "http://localhost:11434"  # noqa: SLF001
+
+
+def test_a_malformed_ollama_url_falls_back_to_lexical_rather_than_raising(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("ORIN_RETRIEVAL_EMBEDDER", raising=False)
+    monkeypatch.setenv("ORIN_RETRIEVAL_BASE_URL", "not a url")
+
+    assert isinstance(build_embedder(), LexicalOnlyEmbedder)
+
+
 def test_the_index_path_is_derived_from_the_workspace_id(tmp_path: Path) -> None:
     path = index_path_for("workspace:project_abc123", data_root=tmp_path)
 

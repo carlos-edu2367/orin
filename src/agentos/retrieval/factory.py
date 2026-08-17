@@ -12,6 +12,7 @@ from pathlib import Path
 import re
 
 from agentos.installation.paths import orin_paths
+from agentos.provider_catalog.ollama import DEFAULT_OLLAMA_BASE_URL, normalize_ollama_base_url
 
 from .chunking import HeuristicChunker
 from .embeddings.lexical import LexicalOnlyEmbedder
@@ -27,7 +28,6 @@ EMBEDDER_VARIABLE = "ORIN_RETRIEVAL_EMBEDDER"
 MODEL_VARIABLE = "ORIN_RETRIEVAL_MODEL"
 BASE_URL_VARIABLE = "ORIN_RETRIEVAL_BASE_URL"
 API_KEY_VARIABLE = "ORIN_RETRIEVAL_API_KEY"
-DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434"
 
 _UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
 
@@ -35,8 +35,17 @@ _UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
 def build_embedder() -> EmbeddingPort:
     choice = os.getenv(EMBEDDER_VARIABLE, "ollama").strip().lower() or "ollama"
     if choice == "ollama":
+        # Reuses provider_catalog's own Ollama default and normalization
+        # rather than defining a second, divergent one: a pasted base URL
+        # with a trailing /v1 or /api (what users copy out of the Ollama
+        # docs, or out of configuring the chat provider) would otherwise
+        # silently break every embedding request.
+        try:
+            base_url = normalize_ollama_base_url(os.getenv(BASE_URL_VARIABLE, "").strip() or DEFAULT_OLLAMA_BASE_URL)
+        except ValueError:
+            return LexicalOnlyEmbedder()
         return OllamaEmbedder(
-            base_url=os.getenv(BASE_URL_VARIABLE, "").strip() or DEFAULT_OLLAMA_BASE_URL,
+            base_url=base_url,
             model=os.getenv(MODEL_VARIABLE, "").strip() or OLLAMA_MODEL,
         )
     if choice == "remote":
