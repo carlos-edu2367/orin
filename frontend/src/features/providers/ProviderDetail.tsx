@@ -16,6 +16,7 @@ export function ProviderDetail({ provider, client, bootstrap, onClose }: { provi
   const state = useProviderState(client, provider, session)
   const keysState = useProviderKeysState(client, provider, session)
   const [cooldownSeconds, setCooldownSeconds] = useState(60)
+  const [cooldownError, setCooldownError] = useState(false)
   useEffect(() => {
     const loaded = state.load.status === 'loaded' ? state.load.state.extra.key_cooldown_seconds : undefined
     if (typeof loaded === 'number') setCooldownSeconds(loaded)
@@ -23,8 +24,16 @@ export function ProviderDetail({ provider, client, bootstrap, onClose }: { provi
 
   async function saveCooldownSeconds(seconds: number) {
     if (session.status === 'missing_csrf') return
-    setCooldownSeconds(seconds)
-    await setProviderKeyCooldownSeconds(client, provider, seconds)
+    setCooldownError(false)
+    try {
+      // Only reflects the new value once the server confirms it: setting
+      // this before the request settles left the field showing a value the
+      // server never actually received whenever the save failed.
+      await setProviderKeyCooldownSeconds(client, provider, seconds)
+      setCooldownSeconds(seconds)
+    } catch {
+      setCooldownError(true)
+    }
   }
   const brand = providerBrand(provider)
   const [omniOpen, setOmniOpen] = useState(false)
@@ -41,13 +50,14 @@ export function ProviderDetail({ provider, client, bootstrap, onClose }: { provi
       keys={keysState.keys}
       pending={keysState.action.pending}
       cooldownSeconds={cooldownSeconds}
-      onAdd={(apiKey, label) => void keysState.add(apiKey, label)}
+      onAdd={(apiKey, label) => keysState.add(apiKey, label)}
       onRename={(keyId, label) => void keysState.rename(keyId, label)}
       onRemove={(keyId) => void keysState.remove(keyId)}
       onMoveUp={(keyId) => void keysState.moveUp(keyId)}
       onMoveDown={(keyId) => void keysState.moveDown(keyId)}
       onCooldownSecondsChange={(seconds) => void saveCooldownSeconds(seconds)}
     />
+    {cooldownError && <p role="alert">Não foi possível salvar o tempo de cooldown.</p>}
     {state.canRevoke && <section className="provider-panel__catalog" aria-label={`Modelos de ${title}`}>{(provider === 'omniroute' || provider === 'ollama') && <button type="button" className="button button--secondary" disabled={state.action.pending || session.status === 'missing_csrf'} onClick={() => void state.refreshModels()}>{state.action.pending && state.action.kind === 'refresh' ? 'Atualizando…' : 'Atualizar catálogo'}</button>}<button type="button" className="button button--secondary" onClick={() => void state.loadModels()} disabled={state.catalogLoading}>{state.catalogLoading ? 'Carregando modelos' : 'Ver modelos autorizados'}</button>{state.models.length > 0 && <ul>{state.models.map((model) => <li key={model.model_id}><span>{model.display_name} <code>{model.model_id}</code></span><button type="button" className="button button--secondary" onClick={() => void state.setFavorite(model)} disabled={state.action.pending || session.status === 'missing_csrf'}>{model.is_favorite ? 'Remover favorito' : 'Favoritar'}</button></li>)}</ul>}{state.catalog.error && <p role="alert">Não foi possível carregar o catálogo.</p>}{state.catalog.loaded && !state.catalog.error && state.models.length === 0 && <p role="status">Nenhum modelo no catálogo. Use "Atualizar catálogo" para buscá-los do provider.</p>}</section>}
     {state.action.error && <div role="alert"><p>{providerErrorMessage(state.action.error)}</p>{state.action.error.retryAfter !== null && <p>Tente novamente em {state.action.error.retryAfter}s.</p>}</div>}
   </SettingsDrawer>

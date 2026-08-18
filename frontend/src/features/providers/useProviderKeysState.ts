@@ -16,8 +16,8 @@ export type ProviderKeysState = {
   load: ProviderKeysLoadState
   keys: ProviderApiKeyState[]
   action: ProviderKeysActionState
-  add: (apiKey: string, label?: string) => Promise<void>
-  rename: (keyId: number, label: string | null) => Promise<void>
+  add: (apiKey: string, label?: string) => Promise<boolean>
+  rename: (keyId: number, label: string | null) => Promise<boolean>
   remove: (keyId: number) => Promise<void>
   moveUp: (keyId: number) => Promise<void>
   moveDown: (keyId: number) => Promise<void>
@@ -50,29 +50,33 @@ export function useProviderKeysState(client: ApiClient, provider: ProviderName, 
     return intent
   }
 
-  async function add(apiKey: string, label?: string) {
-    if (action.pending || !apiKey || bootstrap.status === 'missing_csrf') return
+  async function add(apiKey: string, label?: string): Promise<boolean> {
+    if (action.pending || !apiKey || bootstrap.status === 'missing_csrf') return false
     setAction({ pending: true, error: null, kind: 'add' })
     try {
       const created = await addProviderKey(client, provider, { apiKey, label }, intentFor('add'))
       intents.current.delete('add')
       setKeys((current) => [...current, created])
       setAction({ pending: false, error: null, kind: null })
+      return true
     } catch (error) {
       setAction({ pending: false, error: toApiError(error), kind: 'add' })
+      return false
     }
   }
 
-  async function rename(keyId: number, label: string | null) {
-    if (action.pending || bootstrap.status === 'missing_csrf') return
+  async function rename(keyId: number, label: string | null): Promise<boolean> {
+    if (action.pending || bootstrap.status === 'missing_csrf') return false
     setAction({ pending: true, error: null, kind: 'rename' })
     try {
       const updated = await renameProviderKey(client, provider, keyId, label, intentFor(`rename:${keyId}`))
       intents.current.delete(`rename:${keyId}`)
       setKeys((current) => current.map((key) => key.id === updated.id ? updated : key))
       setAction({ pending: false, error: null, kind: null })
+      return true
     } catch (error) {
       setAction({ pending: false, error: toApiError(error), kind: 'rename' })
+      return false
     }
   }
 

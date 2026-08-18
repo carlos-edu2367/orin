@@ -39,6 +39,16 @@ describe('AboutSection', () => {
     expect(screen.queryByRole('button', { name: /Instalar/ })).not.toBeInTheDocument()
   })
 
+  it('hides the install button on a development checkout even if the version string compares lower', async () => {
+    const fetchImpl = vi.fn<typeof fetch>(() => Promise.resolve(json(status({ installation_kind: 'development' }))))
+    const client = new ApiClient({ fetchImpl, maxAttempts: 1 })
+
+    render(<MemoryRouter><AboutSection client={client} /></MemoryRouter>)
+
+    await screen.findByText('Versões instaladas')
+    expect(screen.queryByRole('button', { name: /Instalar/ })).not.toBeInTheDocument()
+  })
+
   it('starts the install and reports success', async () => {
     const fetchImpl = vi.fn<typeof fetch>((input, init) => {
       if (init?.method === 'POST') return Promise.resolve(json({ started: true }))

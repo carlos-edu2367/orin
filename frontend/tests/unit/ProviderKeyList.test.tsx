@@ -12,19 +12,20 @@ function keys(): ProviderApiKeyState[] {
 }
 
 const noop = () => {}
+const noopAdd = async () => false
 
 describe('ProviderKeyList', () => {
   it('labels the first key as principal and shows the cooldown status of the second', () => {
-    render(<ProviderKeyList keys={keys()} pending={false} cooldownSeconds={60} onAdd={noop} onRename={noop} onRemove={noop} onMoveUp={noop} onMoveDown={noop} onCooldownSecondsChange={noop} />)
+    render(<ProviderKeyList keys={keys()} pending={false} cooldownSeconds={60} onAdd={noopAdd} onRename={noop} onRemove={noop} onMoveUp={noop} onMoveDown={noop} onCooldownSecondsChange={noop} />)
 
     expect(screen.getByText('conta free 1')).toBeInTheDocument()
     expect(screen.getByText('Principal')).toBeInTheDocument()
     expect(screen.getByText(/Em cooldown/)).toBeInTheDocument()
   })
 
-  it('submits the new key and label, then clears the input', async () => {
+  it('submits the new key and label, then clears the input once it is saved', async () => {
     const user = userEvent.setup()
-    const onAdd = vi.fn()
+    const onAdd = vi.fn().mockResolvedValue(true)
     render(<ProviderKeyList keys={[]} pending={false} cooldownSeconds={60} onAdd={onAdd} onRename={noop} onRemove={noop} onMoveUp={noop} onMoveDown={noop} onCooldownSecondsChange={noop} />)
 
     await user.type(screen.getByLabelText('Nova chave'), 'sk-second-key')
@@ -32,10 +33,50 @@ describe('ProviderKeyList', () => {
     await user.click(screen.getByRole('button', { name: 'Adicionar chave' }))
 
     expect(onAdd).toHaveBeenCalledWith('sk-second-key', 'conta paga')
+    expect(await screen.findByLabelText('Nova chave')).toHaveValue('')
+    expect(screen.getByLabelText('Apelido (opcional)')).toHaveValue('')
+  })
+
+  it('keeps the typed key in the field when adding it fails', async () => {
+    const user = userEvent.setup()
+    const onAdd = vi.fn().mockResolvedValue(false)
+    render(<ProviderKeyList keys={[]} pending={false} cooldownSeconds={60} onAdd={onAdd} onRename={noop} onRemove={noop} onMoveUp={noop} onMoveDown={noop} onCooldownSecondsChange={noop} />)
+
+    await user.type(screen.getByLabelText('Nova chave'), 'sk-rejected-key')
+    await user.click(screen.getByRole('button', { name: 'Adicionar chave' }))
+
+    expect(onAdd).toHaveBeenCalledWith('sk-rejected-key', undefined)
+    expect(await screen.findByLabelText('Nova chave')).toHaveValue('sk-rejected-key')
+  })
+
+  it('only renames a key once the label field loses focus, not on every keystroke', async () => {
+    const user = userEvent.setup()
+    const onRename = vi.fn()
+    render(<ProviderKeyList keys={keys()} pending={false} cooldownSeconds={60} onAdd={noopAdd} onRename={onRename} onRemove={noop} onMoveUp={noop} onMoveDown={noop} onCooldownSecondsChange={noop} />)
+
+    const label = screen.getAllByLabelText('Apelido')[0]
+    await user.clear(label)
+    await user.type(label, 'renamed')
+    expect(onRename).not.toHaveBeenCalled()
+
+    await user.tab()
+    expect(onRename).toHaveBeenCalledTimes(1)
+    expect(onRename).toHaveBeenCalledWith(1, 'renamed')
+  })
+
+  it('does not rename when the label field is blurred unchanged', async () => {
+    const user = userEvent.setup()
+    const onRename = vi.fn()
+    render(<ProviderKeyList keys={keys()} pending={false} cooldownSeconds={60} onAdd={noopAdd} onRename={onRename} onRemove={noop} onMoveUp={noop} onMoveDown={noop} onCooldownSecondsChange={noop} />)
+
+    await screen.getAllByLabelText('Apelido')[0].focus()
+    await user.tab()
+
+    expect(onRename).not.toHaveBeenCalled()
   })
 
   it('disables moving the first key up and the last key down', () => {
-    render(<ProviderKeyList keys={keys()} pending={false} cooldownSeconds={60} onAdd={noop} onRename={noop} onRemove={noop} onMoveUp={noop} onMoveDown={noop} onCooldownSecondsChange={noop} />)
+    render(<ProviderKeyList keys={keys()} pending={false} cooldownSeconds={60} onAdd={noopAdd} onRename={noop} onRemove={noop} onMoveUp={noop} onMoveDown={noop} onCooldownSecondsChange={noop} />)
 
     const rows = screen.getAllByRole('listitem')
     expect(within(rows[0]).getByRole('button', { name: 'Mover para cima' })).toBeDisabled()
@@ -45,7 +86,7 @@ describe('ProviderKeyList', () => {
   it('submits a new cooldown value', async () => {
     const user = userEvent.setup()
     const onCooldownSecondsChange = vi.fn()
-    render(<ProviderKeyList keys={keys()} pending={false} cooldownSeconds={60} onAdd={noop} onRename={noop} onRemove={noop} onMoveUp={noop} onMoveDown={noop} onCooldownSecondsChange={onCooldownSecondsChange} />)
+    render(<ProviderKeyList keys={keys()} pending={false} cooldownSeconds={60} onAdd={noopAdd} onRename={noop} onRemove={noop} onMoveUp={noop} onMoveDown={noop} onCooldownSecondsChange={onCooldownSecondsChange} />)
 
     const input = screen.getByLabelText('Tempo de cooldown (s)')
     await user.clear(input)
