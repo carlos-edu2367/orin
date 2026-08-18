@@ -23,6 +23,7 @@ from .contracts import (
     ApplicationValidationError,
     ProviderCredentialRejectedError,
     ExecutionApplication,
+    ProviderApiKeyApplication,
     ProviderConfigurationApplication,
     ProviderModelCatalogApplication,
     ConversationApplication,
@@ -103,6 +104,23 @@ class ProviderSetupRequest(_RequestModel):
     base_url: str | None = Field(default=None, min_length=8, max_length=2048)
     enabled: bool = True
     purpose: str = Field(default="provider.configure", min_length=1, max_length=128)
+
+
+class ProviderApiKeyCreateRequest(_RequestModel):
+    api_key: SecretStr = Field(min_length=4, max_length=4096)
+    label: str | None = Field(default=None, max_length=255)
+
+
+class ProviderApiKeyRenameRequest(_RequestModel):
+    label: str | None = Field(default=None, max_length=255)
+
+
+class ProviderApiKeyReorderRequest(_RequestModel):
+    ordered_ids: list[int] = Field(min_length=1, max_length=64)
+
+
+class ProviderKeyCooldownRequest(_RequestModel):
+    seconds: int = Field(ge=1, le=86400)
 
 
 class ConversationSelectionRequest(_RequestModel):
@@ -260,6 +278,7 @@ class ApiServices:
         execution_query: ResourceApplication | None = None,
         resource_services: dict[str, ResourceApplication] | None = None,
         provider_configuration: ProviderConfigurationApplication | None = None,
+        provider_api_keys: ProviderApiKeyApplication | None = None,
         provider_catalog: ProviderModelCatalogApplication | None = None,
         conversation_application: ConversationApplication | None = None,
         projects: object | None = None,
@@ -280,6 +299,7 @@ class ApiServices:
         self.execution_query = execution_query
         self.resource_services = resource_services or {}
         self.provider_configuration = provider_configuration
+        self.provider_api_keys = provider_api_keys
         self.provider_catalog = provider_catalog
         self.conversation_application = conversation_application
         self.projects = projects
@@ -1218,6 +1238,76 @@ def create_app(services: ApiServices) -> FastAPI:
         result = _require_port(services.provider_configuration).revoke({"operation_id": f"op_{uuid4().hex}", "provider": provider_name, "user_id": principal.user_id, "purpose": "provider.revoke", "idempotency_key": _idempotency(request)})
         return JSONResponse(_provider_public(result))
 
+    @app.get("/v1/providers/{provider}/keys")
+    async def list_provider_keys(provider: str, request: Request) -> JSONResponse:
+        provider_name = _provider_name(provider)
+        principal = principal_for(request)
+        services.security.check_rate_limit(principal, action="provider.keys.list", origin=request.headers.get("origin"))
+        services.security.authorize(principal, action="provider.keys.list", resource_id=provider_name, purpose="provider.keys.list")
+        result = _require_port(services.provider_api_keys).list_keys({"provider": provider_name, "user_id": principal.user_id})
+        return JSONResponse([_provider_key_public(item) for item in result])
+
+    @app.post("/v1/providers/{provider}/keys", status_code=201)
+    async def add_provider_key(provider: str, payload: ProviderApiKeyCreateRequest, request: Request) -> JSONResponse:
+        provider_name = _provider_name(provider)
+        principal = principal_for(request, mutable=True)
+        services.security.check_rate_limit(principal, action="provider.keys.add", origin=request.headers.get("origin"))
+        services.security.authorize(principal, action="provider.keys.add", resource_id=provider_name, purpose="provider.keys.add")
+        result = _require_port(services.provider_api_keys).add_key({
+            "provider": provider_name, "user_id": principal.user_id,
+            "api_key": payload.api_key.get_secret_value(), "label": payload.label,
+            "idempotency_key": _idempotency(request),
+        })
+        return JSONResponse(_provider_key_public(result), status_code=201)
+
+    @app.patch("/v1/providers/{provider}/keys/{key_id}")
+    async def rename_provider_key(provider: str, key_id: int, payload: ProviderApiKeyRenameRequest, request: Request) -> JSONResponse:
+        provider_name = _provider_name(provider)
+        principal = principal_for(request, mutable=True)
+        services.security.check_rate_limit(principal, action="provider.keys.rename", origin=request.headers.get("origin"))
+        services.security.authorize(principal, action="provider.keys.rename", resource_id=provider_name, purpose="provider.keys.rename")
+        result = _require_port(services.provider_api_keys).rename_key({
+            "provider": provider_name, "user_id": principal.user_id, "key_id": key_id, "label": payload.label,
+            "idempotency_key": _idempotency(request),
+        })
+        return JSONResponse(_provider_key_public(result))
+
+    @app.delete("/v1/providers/{provider}/keys/{key_id}", status_code=204)
+    async def remove_provider_key(provider: str, key_id: int, request: Request) -> JSONResponse:
+        provider_name = _provider_name(provider)
+        principal = principal_for(request, mutable=True)
+        services.security.check_rate_limit(principal, action="provider.keys.remove", origin=request.headers.get("origin"))
+        services.security.authorize(principal, action="provider.keys.remove", resource_id=provider_name, purpose="provider.keys.remove")
+        _require_port(services.provider_api_keys).remove_key({
+            "provider": provider_name, "user_id": principal.user_id, "key_id": key_id,
+            "idempotency_key": _idempotency(request),
+        })
+        return JSONResponse(status_code=204, content=None)
+
+    @app.put("/v1/providers/{provider}/keys:reorder")
+    async def reorder_provider_keys(provider: str, payload: ProviderApiKeyReorderRequest, request: Request) -> JSONResponse:
+        provider_name = _provider_name(provider)
+        principal = principal_for(request, mutable=True)
+        services.security.check_rate_limit(principal, action="provider.keys.reorder", origin=request.headers.get("origin"))
+        services.security.authorize(principal, action="provider.keys.reorder", resource_id=provider_name, purpose="provider.keys.reorder")
+        result = _require_port(services.provider_api_keys).reorder_keys({
+            "provider": provider_name, "user_id": principal.user_id,
+            "ordered_ids": payload.ordered_ids, "idempotency_key": _idempotency(request),
+        })
+        return JSONResponse([_provider_key_public(item) for item in result])
+
+    @app.put("/v1/providers/{provider}/keys:cooldown")
+    async def set_provider_key_cooldown(provider: str, payload: ProviderKeyCooldownRequest, request: Request) -> JSONResponse:
+        provider_name = _provider_name(provider)
+        principal = principal_for(request, mutable=True)
+        services.security.check_rate_limit(principal, action="provider.configure", origin=request.headers.get("origin"))
+        services.security.authorize(principal, action="provider.configure", resource_id=provider_name, purpose="provider.configure")
+        result = _require_port(services.provider_configuration).set_key_cooldown_seconds({
+            "provider": provider_name, "user_id": principal.user_id, "seconds": payload.seconds,
+            "idempotency_key": _idempotency(request),
+        })
+        return JSONResponse(_provider_public(result))
+
     @app.post("/v1/providers/omniroute/test")
     async def test_omniroute_connection(payload: ProviderSetupRequest, request: Request) -> JSONResponse:
         principal = principal_for(request, mutable=True)
@@ -1494,6 +1584,20 @@ def _provider_public(value: object) -> dict[str, object]:
             continue
         public[key_text] = item.isoformat() if isinstance(item, datetime) else item
     return public
+
+
+def _provider_key_public(value: object) -> dict[str, object]:
+    data = _jsonable(value)
+    if not isinstance(data, dict) or not isinstance(data.get("id"), int):
+        raise ValueError("provider key response is invalid")
+    cooldown_until = data.get("cooldown_until")
+    return {
+        "id": data["id"],
+        "label": data.get("label"),
+        "position": data.get("position"),
+        "status": data.get("status"),
+        "cooldown_until": cooldown_until.isoformat() if isinstance(cooldown_until, datetime) else None,
+    }
 
 
 def _catalog_refresh_public(value: object) -> dict[str, object]:
