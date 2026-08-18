@@ -41,6 +41,15 @@ class RateLimitInfo:
     limit: int | None = None
 
 
+class ProviderKeyRejected(Exception):
+    """The response indicates the credential itself is the problem: an
+    authentication/authorization/rate-limit HTTP status, or the connection
+    could not be established at all. A caller with more than one API key
+    for this provider can retry with a different one; any other error (a
+    bad request, a provider-side failure, a mid-stream drop after content
+    already flowed) is not this."""
+
+
 @dataclass(frozen=True, slots=True)
 class NormalizedStreamItem:
     kind: StreamKind
@@ -520,22 +529,30 @@ class HTTPProviderStreamTransport:
             request.get("tool_choice"),
             request.get("max_output_tokens"),
         )
-        with self._client.stream("POST", endpoint, headers=headers, json=payload) as response:
-            response.raise_for_status()
-            limit = project_rate_limit_headers(response.headers)
-            has_limit = any(value is not None for value in (limit.remaining, limit.reset_after_seconds, limit.limit))
-            if has_limit:
-                yield NormalizedStreamItem(StreamKind.RATE_LIMIT, 1, rate_limit=limit)
-            events = (
-                normalize_ndjson(response.iter_lines()) if self.provider == "ollama"
-                else normalize_sse(response.iter_lines(), provider=self.provider)
-            )
-            for item in events:
-                yield replace(item, sequence=item.sequence + (1 if has_limit else 0))
+        try:
+            with self._client.stream("POST", endpoint, headers=headers, json=payload) as response:
+                try:
+                    response.raise_for_status()
+                except httpx.HTTPStatusError as error:
+                    if error.response.status_code in (401, 403, 429):
+                        raise ProviderKeyRejected(str(error)) from error
+                    raise
+                limit = project_rate_limit_headers(response.headers)
+                has_limit = any(value is not None for value in (limit.remaining, limit.reset_after_seconds, limit.limit))
+                if has_limit:
+                    yield NormalizedStreamItem(StreamKind.RATE_LIMIT, 1, rate_limit=limit)
+                events = (
+                    normalize_ndjson(response.iter_lines()) if self.provider == "ollama"
+                    else normalize_sse(response.iter_lines(), provider=self.provider)
+                )
+                for item in events:
+                    yield replace(item, sequence=item.sequence + (1 if has_limit else 0))
+        except httpx.TransportError as error:
+            raise ProviderKeyRejected(str(error)) from error
 
     def close(self) -> None:
         if self._owns_client:
             self._client.close()
 
 
-__all__ = ["ANTHROPIC_REQUIRED_MAX_TOKENS", "HTTPProviderStreamTransport", "NormalizedStreamItem", "RateLimitInfo", "StreamKind", "normalize_ndjson", "normalize_sse", "project_rate_limit_headers"]
+__all__ = ["ANTHROPIC_REQUIRED_MAX_TOKENS", "HTTPProviderStreamTransport", "NormalizedStreamItem", "ProviderKeyRejected", "RateLimitInfo", "StreamKind", "normalize_ndjson", "normalize_sse", "project_rate_limit_headers"]
