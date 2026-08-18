@@ -132,10 +132,19 @@ def start_update(profile: RuntimeProfile | None = None) -> dict[str, Any]:
     installer = profile.installer
     if not installer.is_file():
         raise ValueError(f"the release installer is missing: {installer}")
-    result = subprocess.run(
-        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(installer)],
-        check=False, capture_output=True, text=True,
-    )
+    try:
+        result = subprocess.run(
+            # -NoDesktopShortcut: this call has no attached terminal (it runs
+            # from an API request's threadpool worker), so install.ps1's
+            # "create a desktop shortcut? [Y/n]" Read-Host prompt -- which
+            # only fires when this flag is absent and no shortcut exists yet
+            # -- would otherwise block reading from whatever this process's
+            # stdin happens to be, indefinitely or with unpredictable answers.
+            ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(installer), "-NoDesktopShortcut"],
+            check=False, capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=300,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError("the installer did not finish within 5 minutes") from error
     if result.returncode != 0:
         raise RuntimeError((result.stderr or result.stdout or "the installer failed").strip()[:2000])
     return {"started": True}

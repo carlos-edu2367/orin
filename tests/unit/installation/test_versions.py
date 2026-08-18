@@ -81,14 +81,19 @@ def test_start_update_runs_the_installer_and_reports_started(tmp_path: Path, mon
     installer.write_text("# fake installer", encoding="utf-8")
     captured: dict[str, object] = {}
 
-    def fake_run(command, *, check, capture_output, text):
+    def fake_run(command, *, check, capture_output, text, stdin, timeout):
         captured["command"] = command
+        captured["stdin"] = stdin
         return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
 
     monkeypatch.setattr(versions.subprocess, "run", fake_run)
 
     assert versions.start_update(profile) == {"started": True}
-    assert captured["command"][-1] == str(installer)
+    assert str(installer) in captured["command"]
+    # -NoDesktopShortcut: this call has no terminal attached to answer
+    # install.ps1's "create a shortcut?" prompt; must skip it, not hang on it.
+    assert "-NoDesktopShortcut" in captured["command"]
+    assert captured["stdin"] is versions.subprocess.DEVNULL
 
 
 def test_start_update_is_unavailable_outside_a_packaged_install() -> None:
@@ -103,8 +108,21 @@ def test_start_update_surfaces_the_installer_stderr_on_failure(tmp_path: Path, m
     (profile.root / "install.ps1").write_text("# fake installer", encoding="utf-8")
     monkeypatch.setattr(
         versions.subprocess, "run",
-        lambda command, *, check, capture_output, text: type("Result", (), {"returncode": 1, "stdout": "", "stderr": "hash mismatch"})(),
+        lambda command, *, check, capture_output, text, stdin, timeout: type("Result", (), {"returncode": 1, "stdout": "", "stderr": "hash mismatch"})(),
     )
 
     with pytest.raises(RuntimeError, match="hash mismatch"):
+        versions.start_update(profile)
+
+
+def test_start_update_turns_an_installer_timeout_into_a_clear_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    profile, _root = _profile(tmp_path)
+    (profile.root / "install.ps1").write_text("# fake installer", encoding="utf-8")
+
+    def fake_run(command, *, check, capture_output, text, stdin, timeout):
+        raise versions.subprocess.TimeoutExpired(cmd=command, timeout=timeout)
+
+    monkeypatch.setattr(versions.subprocess, "run", fake_run)
+
+    with pytest.raises(RuntimeError, match="5 minutes"):
         versions.start_update(profile)
