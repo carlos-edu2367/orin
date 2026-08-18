@@ -390,16 +390,41 @@ provider_configurations = Table(
     # Retained only for migration compatibility. New credential records never
     # store or interpret a selected model; agent revisions own that selection.
     Column("model", String(255), nullable=True),
-      Column("api_key", String(4096), nullable=True),  # legacy rotation column; never written for new credentials
-    Column("api_key_ciphertext", String(8192), nullable=True),
     Column("base_url", String(2048), nullable=True),
     Column("secret_ref", String(255), nullable=False),
+    # Applied to a key in provider_api_keys after a key-shaped failure
+    # (401/403/429/timeout/connection) before it is tried again.
+    Column("key_cooldown_seconds", Integer, nullable=False, server_default="60"),
     Column("catalog_refreshed_at", DateTime(timezone=True), nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),
     UniqueConstraint("user_id", "provider", name="uq_provider_configurations_user_provider"),
 )
 Index("ix_provider_configurations_user", provider_configurations.c.user_id)
+
+
+# Sibling of provider_configurations: N credentials per (user_id, provider),
+# ordered by `position` (0 = principal, tried first on every new request).
+# A key with status='cooldown' is skipped by
+# PostgresProviderApiKeyAdapter.next_available_key until cooldown_until
+# passes; see docs/superpowers/specs/
+# 2026-08-18-multi-api-key-provider-fallback-design.md.
+provider_api_keys = Table(
+    "provider_api_keys", metadata,
+    Column("id", Integer, primary_key=True),
+    Column("user_id", String(255), nullable=False),
+    Column("provider", String(32), nullable=False),
+    Column("label", String(255), nullable=True),
+    Column("api_key_ciphertext", String(8192), nullable=False),
+    Column("secret_ref", String(255), nullable=False),
+    Column("position", Integer, nullable=False),
+    Column("status", String(16), nullable=False),
+    Column("cooldown_until", DateTime(timezone=True), nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+    UniqueConstraint("user_id", "provider", "position", name="uq_provider_api_keys_user_provider_position"),
+)
+Index("ix_provider_api_keys_user_provider", provider_api_keys.c.user_id, provider_api_keys.c.provider)
 
 
 provider_model_catalog = Table(
@@ -869,6 +894,7 @@ __all__ = [
     "agent_skills",
     "execution_skills",
     "provider_configurations",
+    "provider_api_keys",
     "mcp_servers",
     "mcp_server_tools",
     "plugins",
