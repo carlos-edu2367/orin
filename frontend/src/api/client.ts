@@ -18,7 +18,7 @@ type BrowserApiClientOptions = Pick<ApiClientOptions, 'baseUrl' | 'fetchImpl'>
 type RequestOptions<T> = {
   path: string
   query?: Record<string, string | number | boolean | null | undefined>
-  method?: 'GET' | 'POST' | 'PUT' | 'DELETE'
+  method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
   expectedStatus?: number
   body?: unknown
   intent?: MutationIntent
