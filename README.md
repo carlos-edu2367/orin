@@ -1,402 +1,281 @@
-# Orin (AgentOS)
+# Orin
 
-A local-first agent workspace. You describe what you need; Orin works on it with
-real tools — files, a terminal, the web, memory — and can create subagents for
-parts of the job. The interface stays a chat; everything the agents did is
-visible in it, summarized, and expandable when you want the detail.
+## Seu workspace local-first para transformar pedidos em execução visível
 
-Everything runs on your machine. Nothing leaves it except the provider calls you
-configure.
+Orin é um workspace de agentes de IA orientado a conversas, projetos e execução rastreável. Você descreve o que precisa, acompanha as decisões e as ferramentas em tempo real e mantém o contexto organizado no seu próprio computador.
 
-## License
+Ele combina chat durável, ferramentas para arquivos e comandos, busca semântica no código, memória, multiagentes, Skills, MCP, browser isolado e provedores de modelos em uma única experiência.
 
-This project is licensed under the [MIT License](LICENSE).
+[Instalar no Windows](#download-e-instalação) · [Ver releases](https://github.com/carlos-edu2367/orin/releases) · [Arquitetura](#arquitetura)
 
-## Status
+> Status: projeto ativo em desenvolvimento. O perfil local é adequado para uso local; não é uma declaração de prontidão para produção ou de segurança completa.
 
-This repository is intentionally being published while the project is still in
-active development. It is a working foundation, not a production release or a
-security-complete product yet.
+![Tela inicial do Orin](docs/images/readme/home.png)
 
-The current version includes the agent/tool loop, durable conversations and
-turns, context continuity, memory, subagent delegation, provider catalog and
-credential encryption, web access, browser policy controls, and the execution
-overview in the frontend.
+*A conversa é o ponto de partida: projeto, contexto e ações ficam próximos do pedido.*
 
-Known limitations before using it beyond a local development machine:
+## Por que usar o Orin?
 
-- SSRF hardening is not complete for every shared-address edge case, including
-  the CGNAT range (`100.64.0.0/10`). Keep the service bound to `127.0.0.1` and
-  do not expose it through a reverse proxy or port forward.
-- The latest local validation still has two known persistence-test failures:
-  one migration downgrade expectation and one schema metadata expectation.
-- Playwright-based visual checks are optional and are skipped when the browser
-  dependency is unavailable.
+- **Execução visível:** cada turno pode mostrar ferramentas, subagentes, arquivos alterados e atividade em streaming. A ação de parar fica disponível durante a execução.
+- **Local-first:** dados, conversas, memória e índices ficam no ambiente local. Somente chamadas aos provedores que você configurar saem da máquina.
+- **Um workspace para o trabalho real:** projetos podem apontar para uma pasta local, compartilhar contexto com conversas e servir de base para busca, comandos e tarefas agendadas.
+- **Liberdade de modelo:** o catálogo e as portas de provedor uniformizam streaming, tool calls, visão, cancelamento, uso e erros sem prender o fluxo a uma única API.
+- **Instalação simples:** a release para Windows já inclui runtime, SQLite e Chromium. O uso instalado não exige Python, Node.js, Docker, PostgreSQL ou Redis.
+- **Extensível:** ferramentas nativas, Skills versionadas, MCP, plugins e browser isolado permitem adaptar o agente ao seu processo.
 
-## Browser for agents
+## Veja o Orin em ação
 
-Orin can open public HTTPS pages in an isolated Chromium process for each
-agent turn. The browser can observe a page, click non-submit controls, fill
-non-password fields, select options, toggle controls, use safe navigation
-keys and capture the current screen. Each observation creates a private PNG
-in the conversation workspace; the chat renders it as a browser activity
-card and the file endpoint applies the usual conversation authorization.
+### Configure seus provedores
 
-The release package includes Chromium. For source development,
-`scripts/run-local.ps1` provisions it automatically; to provision it separately:
+O Orin organiza os provedores em um catálogo visual, separa local/cloud e mostra o estado de cada conexão.
 
-```powershell
-.\scripts\install-browser.ps1
-```
+![Catálogo de provedores do Orin](docs/images/readme/providers.png)
 
-Form submission, password entry, arbitrary JavaScript, cookies, clipboard,
-camera and geolocation are intentionally unavailable. They require an
-explicit future approval/profile flow rather than a model-controlled tool
-argument.
+As credenciais são armazenadas de forma criptografada e os campos de chave são write-only. Ao cadastrar mais de uma chave de API, o fallback automático pode ser ativado para manter o fluxo resiliente.
 
-## Semantic code search
+![Detalhes de um provedor no Orin](docs/images/readme/provider-detail.png)
 
-When a project is bound to a local folder, Orin indexes it and gives the agent
-a `search_code` tool that finds code by meaning rather than by regex, plus a
-`project_map` tool for orienting in an unfamiliar codebase. Embeddings come
-from a local Ollama instance by default, so nothing leaves the machine; without
-one, the search degrades to keyword ranking and says so.
+### Acesse ações rapidamente
 
-See [docs/RETRIEVAL.md](docs/RETRIEVAL.md).
+O command palette concentra navegação, conversas, projetos e ações frequentes sem tirar o foco do trabalho.
 
-## Requirements
+![Command palette do Orin](docs/images/readme/command-palette.png)
 
-The Windows release includes the runtime, SQLite and Chromium. It does not need
-Python, Node.js, Docker, PostgreSQL or Redis. You only need a provider account
-when you choose to configure one in Settings. Python and Node remain source
-development requirements only.
+## Download e instalação
 
-## Install on Windows
-
-After releases are published, install the complete release from
-PowerShell:
+O caminho recomendado para Windows é instalar a release mais recente diretamente pelo PowerShell:
 
 ```powershell
 irm https://github.com/carlos-edu2367/orin/releases/latest/download/install.ps1 | iex
 ```
 
-The installer verifies the release SHA-256 before activation, creates the local
-configuration and asks whether to create an **Orin Desktop** shortcut. The
-shortcut starts a native Windows PowerShell launcher hidden in the background, then opens only the
-desktop app. It adds `orin` to the user PATH. The source-controlled [install.ps1](install.ps1) is
-the same release installer and may be downloaded, reviewed and executed locally
-instead of using a one-liner.
+O instalador:
 
-`orin update` will use this same verified release flow. The desktop app shows a
-visible update banner with the current and latest versions, plus an **Atualizar**
-button that invokes the packaged `orin update` command. A taskbar flag is also
-shown when a newer verified release is found; the app never replaces itself in
-the background without that explicit action.
+1. baixa a release estável mais recente;
+2. valida o hash SHA-256 dos artefatos;
+3. instala o runtime local e o Chromium usado pelo browser do agente;
+4. oferece a criação de atalho na Área de Trabalho;
+5. adiciona `orin` ao PATH do usuário.
 
-To completely remove an installed copy, including its local data and
-configuration, close the desktop window and run:
-
-```powershell
-orin --uninstall
-```
-
-This command refuses to run from a source checkout.
-
-## Start from source
-
-```powershell
-Copy-Item .env.local.example .env.local
-Copy-Item frontend/.env.local.example frontend/.env.local
-```
-
-Put a real value in `AGENTOS_PROVIDER_ENCRYPTION_KEY` in `.env.local` — it
-encrypts provider credentials at rest:
-
-```powershell
-python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-```
-
-Build the web client once, then register the command:
-
-```powershell
-npm --prefix frontend ci
-npm --prefix frontend run build
-.\scripts\install-orin.ps1
-```
-
-Open a new terminal — any terminal, any directory — and run:
+Abra um novo terminal e inicie o workspace:
 
 ```powershell
 orin
 ```
 
-Orin opens its local SQLite database, applies migrations, starts the backend and
-worker, starts OmniRouter only if you already installed/enabled it with npm, waits until the interface actually
-answers, and opens it in your browser. `Ctrl+C` stops everything it started.
+O launcher prepara o SQLite local, executa as migrações, inicia a API, os workers, o scheduler e a interface web. Em seguida, aguarda as verificações de prontidão e abre o navegador.
+
+Comandos úteis:
+
+```powershell
+orin status       # mostra o estado dos serviços
+orin logs         # acompanha os logs do launcher e serviços
+orin restart      # reinicia o perfil local
+orin stop         # encerra os serviços
+orin --desktop    # abre a mesma aplicação no Electron
+orin --uninstall  # remove a instalação
+```
+
+As versões e os artefatos assinados por hash ficam na página de [releases do Orin](https://github.com/carlos-edu2367/orin/releases). A release para Windows é independente de uma instalação local de Python, Node.js ou Docker.
+
+## Primeiro fluxo
+
+1. Instale e execute `orin`.
+2. Crie ou selecione um projeto e associe a pasta de trabalho quando precisar operar sobre código ou arquivos.
+3. Abra **Settings → Providers**, configure um provedor e atualize o catálogo de modelos.
+4. Inicie uma conversa explicando o objetivo, restrições e resultado esperado.
+5. Observe o agente analisar contexto, chamar ferramentas, consultar memória ou delegar partes do trabalho.
+6. Revise a atividade, os arquivos e a resposta final. Durante um turno, use **Stop** para interromper a execução.
+
+O turno é persistido. Se a página for recarregada, a conversa continua disponível; o histórico e a atividade ao vivo são tratados como partes diferentes da experiência, evitando que a execução esconda a conversa.
+
+## Fluxos do Orin
+
+### Conversa normal
+
+```mermaid
+flowchart LR
+    U[Pedido no chat] --> C[Conversation e Turn duráveis]
+    C --> Q[Fila e publisher]
+    Q --> R[Runtime agentic]
+    R --> M[Model Catalog e ProviderPort]
+    M --> P[Provedor configurado]
+    R --> T[Ferramentas]
+    T --> W[Workspace, arquivos e memória]
+    T --> B[Browser isolado]
+    R --> A[Atividade persistida]
+    A --> S[SSE]
+    S --> UI[Interface]
+```
+
+A API recebe e persiste o pedido. O worker publica e executa o turno fora do processo HTTP. O runtime monta o contexto, resolve o modelo, chama o provedor, executa ferramentas e registra eventos. A interface observa a atividade por SSE.
+
+### Projetos e arquivos
+
+Um projeto pode ser vinculado a uma pasta local. A busca, os comandos, os anexos e as tarefas agendadas podem usar esse workspace compartilhado. Arquivos criados ou alterados ficam sujeitos às permissões e aos limites definidos pelo runtime; o texto de uma resposta do modelo não é a fonte de verdade para autorização.
+
+### Tarefas agendadas
+
+Uma tarefa agendada materializa um novo turno na conversa e no workspace escolhidos. O scheduler não executa o agente diretamente: ele cria a ocorrência durável, e o mesmo publisher/worker/runtime usado pelo chat normal processa o turno. Isso mantém o comportamento, as ferramentas e o histórico alinhados entre execução manual e automática.
+
+### Multiagentes
+
+Um agente principal pode criar especialistas e delegar tarefas com `create_agent`, `ask_agent` e `ask_agents`. Cada subagente recebe um contexto próprio e retorna mensagens ou resultados ao fluxo pai; ele não recebe automaticamente toda a conversa do usuário. Isso permite dividir pesquisa, implementação, revisão ou análise sem perder a visão do trabalho principal.
+
+### Anexos e visão
+
+Anexos entram no contexto como referências locais. Texto pode ser extraído localmente; imagens e páginas digitalizadas podem ser enviadas ao modelo configurado quando o provedor suporta visão. O transporte respeita o provedor e o modelo selecionados, sem expor chaves na interface, nos eventos ou nos logs.
+
+### Browser isolado
+
+Quando habilitado, cada turno usa um Chromium isolado para navegar e produzir atividade visual. O conjunto de ações é limitado: o agente não recebe um navegador pessoal, cookies da sua sessão ou acesso irrestrito ao computador. A interface pode exibir capturas e metadados seguros do trabalho realizado.
+
+### Skills, MCP e plugins
+
+Skills descrevem workflows reutilizáveis e versionados. MCP e plugins acrescentam ferramentas externas por meio de contratos próprios, com aprovação e escopo controlados pelo runtime. Credenciais são fornecidas pelo usuário nas configurações da integração; uma descrição em prompt não concede permissão.
+
+## Diferenciais técnicos
+
+| Capacidade | O que existe no Orin |
+| --- | --- |
+| Busca semântica | `search_code` e `project_map` indexam o workspace e permitem encontrar trechos pelo significado, não apenas por texto literal. |
+| Embeddings e vetores | O modo padrão usa o Ollama local com `nomic-embed-text`; os vetores derivados ficam em um SQLite separado por projeto. O índice é incremental e não substitui a fonte original dos arquivos. |
+| Fallback de retrieval | Se o embedder não estiver disponível, o sistema usa BM25 lexical e sinaliza essa condição. O modo remoto é explícito e envia conteúdo indexado para o endpoint configurado. |
+| Memória durável | `remember` e `recall` armazenam e recuperam fatos relevantes dentro do escopo do usuário, sem misturar automaticamente o contexto de outros usuários. |
+| Multiagentes | Criação, delegação e consulta de subagentes com contexto isolado e retorno para o agente pai. |
+| Catálogo de modelos | Descritores de modelo e capacidades orientam seleção, streaming, tool calls, visão, custo, status, primário/fallback e explicação da escolha. |
+| Provedores | Adapters para OpenAI, Anthropic, OpenRouter, Ollama Local/Cloud e OmniRoute, preservando uma interface comum para o runtime. |
+| Execução observável | Turnos, atividade, uso de ferramentas, cancelamento e streaming são tratados como partes duráveis/observáveis do fluxo. |
+| Browser seguro | Chromium isolado por turno, com ações deliberadamente restritas e feedback visual. |
+| Extensibilidade | Skills, MCP e plugins podem ampliar capacidades sem acoplar o núcleo a uma integração única. |
+
+### Embeddings locais, com transparência
+
+Para habilitar a busca semântica no perfil local, instale o Ollama e baixe o modelo de embedding:
+
+```powershell
+ollama pull nomic-embed-text
+```
+
+O padrão é `ORIN_RETRIEVAL_EMBEDDER=ollama`, com chamadas para o Ollama local. O indexador ignora, entre outros, arquivos `.env*`, `.git`, `node_modules`, ambientes virtuais, builds e lockfiles. Há limites por arquivo e por projeto para manter o índice previsível.
+
+Se você configurar `ORIN_RETRIEVAL_EMBEDDER=remote`, o conteúdo necessário para indexar será enviado ao endpoint remoto definido. Essa é uma decisão explícita de privacidade, não um comportamento oculto do modo local. Consulte [docs/RETRIEVAL.md](docs/RETRIEVAL.md) para todos os parâmetros.
+
+## Arquitetura
 
 ```text
-  ORIN
-
-  ✓ Services
-  ✓ Backend
-  ✓ Workers
-  ✓ Frontend
-
-  Orin is ready
-  http://127.0.0.1:49200
+Browser web / Electron
+          │ HTTP + SSE
+          ▼
+FastAPI gateway ────────► SQLite local + migrações
+          │                         ▲
+          │                         │ conversas, turnos, atividade,
+          │                         │ memória, agentes e fila
+          ▼                         │
+Publisher ─────► Chat worker ───────┘
+                     │
+                     ▼
+              Agentic Session / Runtime
+                 ├── Model Catalog → ProviderPort → provedor
+                 ├── Tool Runtime → arquivos, comandos, memória
+                 ├── Subagentes
+                 ├── Browser worker isolado
+                 └── MCP / plugins / Skills
+                     │
+                     ▼
+              atividade persistida → SSE → interface
 ```
 
-`orin status`, `orin logs`, `orin stop` and `orin restart` are there when you
-need them. See [docs/LAUNCHER.md](docs/LAUNCHER.md) for readiness checks,
-single-instance detection, process lifecycle, paths, and how this becomes an
-installable `orin.exe`.
+As fronteiras principais são:
 
-### Orin Desktop
+- **Gateway:** valida requisições, expõe API/SSE e serve a aplicação web; não executa turnos longos dentro do request HTTP.
+- **Persistência:** no runtime instalado, SQLite é a base durável local para conversas, turnos, atividade, memória, agentes e fila. O retrieval usa um índice derivado separado por projeto.
+- **Publisher, worker e scheduler:** o publisher coloca turnos no fluxo durável, o worker executa conversas e o scheduler materializa ocorrências de chats agendados.
+- **Runtime:** monta contexto, resolve modelo, chama o adapter do provedor, executa ações de ferramenta, registra checkpoints e finaliza o turno.
+- **ProviderPort/Model Catalog:** mantém o núcleo independente do formato específico de cada provedor e centraliza capacidades e políticas de seleção.
+- **Atividade/SSE:** eventos seguros e limitados são persistidos e transmitidos para a UI; a UI observa o estado, mas não é a autoridade de autorização.
+- **Electron:** é uma casca opcional para a mesma aplicação servida pela API local. O launcher continua responsável pelo ciclo de vida dos serviços; o desktop não carrega uma página `file://` isolada.
 
-The browser version remains the default. To host that exact same local web app
-in an Electron window instead, install the small desktop shell once and run:
+As decisões de arquitetura e os contratos de evolução estão documentados em [docs/adr](docs/adr), [docs/architecture](docs/architecture) e [docs/LAUNCHER.md](docs/LAUNCHER.md).
+
+### Estrutura do código
+
+```text
+src/agentos/api/             gateway HTTP, SSE e rotas
+src/agentos/conversations/   conversas e turnos duráveis
+src/agentos/agentic/         sessão, runtime, ferramentas e agentes
+src/agentos/workers/         publisher, chat worker e scheduler
+src/agentos/retrieval/       indexação semântica e lexical
+frontend/                    SPA React/Vite
+desktop/                     shell Electron opcional
+docs/                        arquitetura, ADRs e runbooks
+```
+
+## Segurança e limites importantes
+
+- O perfil local escuta em `127.0.0.1` por padrão. Não exponha a porta por proxy reverso, túnel ou encaminhamento sem revisar autenticação, autorização, CSRF e isolamento de dados.
+- Chaves de provedores são criptografadas em repouso, write-only na API e não devem aparecer em respostas, eventos ou logs. Proteja `AGENTOS_PROVIDER_ENCRYPTION_KEY` como um segredo do ambiente.
+- Páginas abertas pelo browser do agente são conteúdo não confiável. O conjunto local de ações não permite usar senhas pessoais, cookies da sua sessão, submissões arbitrárias ou JavaScript irrestrito.
+- A busca remota de embeddings envia conteúdo indexado para o endpoint escolhido. Use o modo Ollama local quando esse conteúdo não puder sair da máquina.
+- O projeto ainda está em desenvolvimento ativo. Revise o perfil de implantação e o [runbook de E2E](docs/agentic/E2E_RUNBOOK.md) antes de avaliar uso em produção.
+
+## Desenvolvimento a partir do código-fonte
+
+Para desenvolvimento, use Python 3.13+, Node.js 20+ e Docker Desktop quando precisar dos serviços de integração documentados. Para o perfil local completo:
 
 ```powershell
-Set-Location desktop
+Copy-Item .env.local.example .env.local
+Copy-Item frontend/.env.local.example frontend/.env.local
+.\scripts\install-orin.ps1
+orin
+```
+
+O script cria o ambiente Python, instala o projeto, prepara o frontend e configura o runtime local. A chave de criptografia pode ser gerada com:
+
+```powershell
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
+
+Para trabalhar apenas no frontend:
+
+```powershell
+Set-Location frontend
 npm ci
-Set-Location ..
-orin --desktop
+npm run dev -- --host 127.0.0.1
 ```
 
-The Electron window appears immediately with a live startup screen. The Python
-launcher remains the single owner of SQLite, migrations, the API, scheduler and
-worker; Electron only observes its local startup snapshot
-and loads the API-served application after `/healthz`, `/readyz`, and the
-frontend probe pass. The main web UI is never loaded from `file://`.
-
-If the local database or another startup step fails, the window keeps the
-concise error and offers to retry, open the existing Orin logs, or close.
-Closing the window asks the same cooperative launcher shutdown path used by
-`orin stop`.
-
-For Electron development, use the same command with DevTools enabled:
+## Validação
 
 ```powershell
-orin --desktop --desktop-devtools
-```
-
-The shell can also be packaged as a starting point for a Windows installer:
-
-```powershell
-Set-Location desktop
-npm run build
-```
-
-`scripts/build-windows.ps1` builds the complete release layout: frozen launcher,
-Electron host, frontend, SQLite migrations and Chromium. Release publication is
-handled separately from the build.
-
-Rebuild the web client after changing the frontend:
-
-```powershell
-npm --prefix frontend run build
-```
-
-`scripts\run-local.ps1` and `scripts\stop-local.ps1` still exist for driving the
-individual processes during development.
-
-### Why three local processes
-
-| Process | Responsibility |
-| --- | --- |
-| `uvicorn agentos.api.asgi:app` | HTTP + SSE. Accepts a turn, persists it, serves the built client. Never calls a provider. |
-| `agentos.workers.publisher` | Polls and claims the durable SQLite turn queue, runs the provider/tool loop. |
-| `agentos.workers.scheduler` | Materializes due scheduled chats as normal durable turns. |
-
-Keeping the worker out of the HTTP process is what lets a long turn run without
-blocking the API, and what lets you restart the UI without killing a run in
-flight. A turn nobody claims is failed by the worker watchdog rather than left
-queued forever.
-
-## Configure a provider
-
-Open **Settings → Providers → the provider card** (`Ctrl/Cmd + K` → Providers) and paste a key. It is
-encrypted before it is stored and is never returned by any endpoint, log, or
-event. Do not put provider keys in `.env.local`.
-
-Refresh the catalog after saving; the composer's model picker only offers models
-the server actually authorized.
-
-## Repository and secrets
-
-Only source, tests, public examples, and project documentation belong in this
-repository. Local credentials and runtime output are intentionally excluded:
-
-- `.env.local` is ignored; never commit real provider keys or database secrets.
-- `.env.example` and `.env.local.example` are safe templates for configuration.
-- `.superpowers/`, caches, `data/`, build output, and local test artifacts are
-  local-only files and are not part of the product snapshot.
-
-Provider credentials entered in the UI are encrypted at rest with
-`AGENTOS_PROVIDER_ENCRYPTION_KEY`. Treat that key like a secret and generate a
-new one for each local environment.
-
-### Configure web search
-
-| Variable | Description |
-| --- | --- |
-| `AGENTOS_SEARCH_API_KEY` | Chave da API de busca (Brave Search por padrão). Sem ela a tool `web_search` não é registrada. |
-| `AGENTOS_SEARCH_ENDPOINT` | Endpoint alternativo compatível com o formato do Brave Search. Opcional. |
-
-## Using it
-
-Type what you need and press Enter. While the agent works you will see:
-
-- **grouped tool activity** — "3 operações em arquivos", "Terminal · 2 comandos".
-  Click any row for the individual calls, their arguments' effects, status and
-  timing.
-- **agent creation** — a short animation when the main agent spawns a specialist.
-- **agent-to-agent messages** — direction, preview, and the full text on click.
-- **Stop** — replaces Send while a turn is running and actually cancels the run,
-  not just the spinner.
-- **Visão geral** — the execution as an orbital map: agents, links, live pulses,
-  plus model, provider, duration, tool counts and errors.
-
-**Attaching a file** — use the composer's attach button, drag a file onto it, or
-paste one from the clipboard. The file is written to `uploads/` inside the
-conversation's workspace, same as anything else the agent creates — including
-when that workspace is a local folder you picked, not the managed
-`data/workspaces/<conversation_id>` directory. Reading it back is `view_file`
-(see the tool table above): a document's text is extracted locally, but
-reading an image or a scanned page visually sends the file's bytes to the
-provider of whichever model does the reading — the turn's own model when it
-can see, otherwise the configured visual-reading model — which is why the
-automatic choice prefers a local Ollama over sending the file off-machine.
-
-`Ctrl/Cmd + K` opens the command palette: conversations, Settings, memory, providers, and new chat. Settings is the single global management area; project memory and workspace controls stay on the relevant project.
-
-## Conectores MCP
-
-Orin conecta a servidores MCP (Model Context Protocol), locais (stdio, ex.:
-`npx`/`uvx`) ou remotos (HTTPS). O próprio agente pode buscar, explicar e
-propor uma conexão durante a conversa — mas nunca ativa nada sozinho: a
-proposta fica `pending_approval` até você digitar a credencial (se houver) em
-um card no chat ou em **Settings → MCP**. Veja [docs/MCP.md](docs/MCP.md) para
-o que é suportado, os limites de segurança e como adicionar um servidor ao
-catálogo curado.
-
-## Plugins
-
-Plugins declarativos podem adicionar skills, subagentes e propostas de MCP sem
-executar código no processo do Orin. O pacote é inspecionado e só é ativado
-após aprovação no chat ou em Settings → Plugins. Veja [docs/PLUGINS.md](docs/PLUGINS.md).
-
-## What the agent can do
-
-Tools are defined in `src/agentos/agentic/agent_tools.py`.
-
-| Tool | Notes |
-| --- | --- |
-| `read_file`, `write_file`, `edit_file`, `list_files` | Confined to `data/workspaces/<conversation_id>`. `edit_file` replaces exactly one matching fragment, preventing ambiguous edits. Path traversal and symlinks out of the sandbox are rejected. |
-| `view_file` | Lê um documento (PDF, Word, Excel, PowerPoint, texto) ou uma imagem do workspace. Texto nativo é extraído sem custo de modelo; imagem e página escaneada vão para o modelo do turno quando ele enxerga, ou para o modelo de leitura visual configurado. |
-| `run_command` | Runs in that same directory, 45s timeout. A denylist blocks host-destroying commands (`shutdown`, `mkfs`, `rm -rf /`, …). |
-| `fetch_url` | Public http(s) only; private, loopback and link-local addresses are refused. Returns readable text. |
-| `remember`, `recall` | Durable facts scoped to the user, recalled into later conversations. |
-| `create_agent`, `ask_agent` | Create a specialist and hand it a self-contained task. A subagent cannot create further subagents, and there is a per-turn budget. |
-| `list_mcp_catalog`, `list_mcp_servers`, `configure_mcp`, `test_mcp_server` | Propose and inspect MCP connectors. `configure_mcp` never accepts a credential value — it creates a pending connection and shows the user an approval card; see [docs/MCP.md](docs/MCP.md). Tools an approved server publishes appear alongside these as `mcp__<server>__<tool>`. |
-| `search_plugin`, `inspect_plugin`, `install_plugin`, `list_plugins`, `uninstall_plugin` | Busca, inspeção, proposta e lifecycle de plugins. `install_plugin` nunca ativa sem aprovação explícita; segredos não são argumentos dessas tools. |
-
-`run_command` is a real shell on your machine. That is the point of a local
-agent workspace, and it is also the reason not to expose this service to a
-network.
-
-## Architecture
-
-```
-browser ── HTTP/SSE ──► FastAPI gateway ──► SQLite (conversations, turns,
-   ▲                                        activity, memory, agents, queue)
-   │                                             ▲
-   └──── activity stream ◄──── worker ──────────┴─► provider
-                                                      │
-                                                      └─► tools
-```
-
-- **Conversation / turn** (`src/agentos/conversations/chat.py`) is the durable
-  authority for what the user sees. A turn is created, queued, claimed, and
-  reaches exactly one terminal state: `completed`, `failed`, or `cancelled`.
-- **Turn session** (`src/agentos/agentic/session.py`) composes the system prompt,
-  the toolset, memory, and the subagent lifecycle for one turn.
-- **Turn runtime** (`src/agentos/agentic/runtime.py`) is the provider/tool loop:
-  stream, collect tool calls, execute, feed results back, repeat within limits.
-- **Execution records** are a *technical projection* of a turn. A failure to
-  write one never changes the answer the user sees.
-
-### Events
-
-Everything observable is one append-only activity log per conversation, read by
-the client through `GET /v1/conversations/{id}/events` (SSE) and replayed from
-`GET /v1/conversations/{id}`.
-
-Each event carries a type (`tool.started`, `tool.finished`, `agent.created`,
-`agent.message_sent`, `agent.message_received`, `assistant.delta`,
-`turn.completed`, …), the agent that produced it, its parent agent, a
-human-readable summary, a bounded payload, a timestamp and a signed cursor.
-Payloads are redacted and size-bounded at construction, so the log is safe to
-render directly.
-
-The snapshot deliberately omits `assistant.delta` events — the assistant
-message already holds that text — while the live stream includes them so a reply
-appears as it is written.
-
-### Memory and context
-
-Context per provider call is: the system prompt (identity, available tools,
-workspace, remembered facts, existing subagents), the last 32 messages of the
-conversation, and the tool results from the current turn. Subagents get their own
-context and cannot see the user's conversation, so their work never contaminates
-it. Memory is scoped to the user and retrieved by relevance into the prompt.
-
-## Tests
-
-```powershell
+# Backend unitário
 python -m pytest -q tests/unit
-```
 
-```powershell
-.\scripts\stop-local.ps1     # the suite shares this database; see the note below
+# Frontend
+Set-Location frontend
+npm test
+npm run lint
+npm run build
+npm run test:e2e
+
+# Volte à raiz para cenários de integração, quando o ambiente estiver preparado
+Set-Location ..
 python -m pytest -q tests/integration
 ```
 
-The integration suite uses an isolated SQLite database. Stop an active Orin
-instance before tests that exercise durable turn recovery.
+Os cenários de integração que dependem de serviços adicionais e os testes visuais estão descritos em [docs/agentic/E2E_RUNBOOK.md](docs/agentic/E2E_RUNBOOK.md). O ambiente usado para validar uma mudança local pode não conter todos esses serviços.
 
-```powershell
-Set-Location frontend
-npm test          # component and reducer tests
-npm run test:e2e  # Playwright against mocked backends
-npm run lint
-npm run build
-```
+## Documentação útil
 
-Visual checks run against a live stack (start it first):
+- [Launcher e ciclo de vida local](docs/LAUNCHER.md)
+- [Busca semântica, embeddings e vetores](docs/RETRIEVAL.md)
+- [MCP](docs/MCP.md)
+- [Plugins](docs/PLUGINS.md)
+- [Criação de Skills](docs/CREATING_SKILLS.md)
+- [Provider ports e catálogo de modelos](docs/adr/010-provider-ports-and-model-catalog.md)
+- [Contratos de API e SSE](docs/architecture/700-api-security/701-api-sse.md)
+- [Runtime](docs/architecture/100-kernel/101-runtime.md)
+- [Issues e releases](https://github.com/carlos-edu2367/orin)
 
-```powershell
-Set-Location frontend
-npx playwright test --config=playwright.visual.config.ts
-```
+## Licença
 
-Screenshots land in `frontend/tests/visual/output/`. Baseline images are
-compared pixel-wise; after a deliberate visual change, re-record them with
-`--update-snapshots`.
-
-To exercise the real provider end to end:
-
-```powershell
-python scripts/smoke_chat.py "crie um arquivo teste.txt e leia de volta"
-```
-
-It prints the messages, every activity row, and the overview aggregation, and
-exits non-zero if the turn did not complete.
-
-## Notes on the local profile
-
-`LOCALHOST_TRUST_ENABLED=true` means there is no login: the API authenticates
-the loopback TCP peer and refuses anything else. Keep the bind on `127.0.0.1`,
-do not put a reverse proxy or port forward in front of it, and do not enable this
-profile outside `AGENTOS_ENV=local`/`development` — the service refuses to start
-if you try.
+Orin é distribuído sob a [licença MIT](LICENSE).
