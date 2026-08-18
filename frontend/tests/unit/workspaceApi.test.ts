@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { ApiClient } from '../../src/api/client'
-import { attachWorkspaceFolder, detachWorkspaceFolder, inspectWorkspaceFolder } from '../../src/api/workspace'
+import { attachWorkspaceFolder, detachWorkspaceFolder, inspectNewWorkspaceFolder, inspectWorkspaceFolder } from '../../src/api/workspace'
 
 function clientWith(response: unknown, status = 200) {
   const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async () => new Response(JSON.stringify(response), { status, headers: { 'Content-Type': 'application/json' } }))
@@ -8,6 +8,17 @@ function clientWith(response: unknown, status = 200) {
 }
 
 describe('workspace api', () => {
+  it('inspects a folder before a conversation exists and keeps project scope explicit', async () => {
+    let body: unknown
+    const client = new ApiClient({ fetchImpl: async (input, init) => {
+      body = JSON.parse(String(init?.body ?? '{}'))
+      return new Response(JSON.stringify({ path: 'D:/site', exists: true, is_directory: true, writable: true, entry_count: 1, entries_truncated: false, risk: 'none' }), { headers: { 'Content-Type': 'application/json' } })
+    }, maxAttempts: 1 })
+
+    expect(await inspectNewWorkspaceFolder(client, 'D:/site', 'project-a')).toMatchObject({ path: 'D:/site', kind: 'folder' })
+    expect(body).toEqual({ path: 'D:/site', project_id: 'project-a' })
+  })
+
   it('reads an inspection', async () => {
     const { client } = clientWith({ path: 'D:/site', exists: true, is_directory: true, writable: true, entry_count: 3, entries_truncated: false, risk: 'none' })
 

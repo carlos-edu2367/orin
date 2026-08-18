@@ -31,6 +31,7 @@ export type RouteDefinition = {
 
 export const routes: RouteDefinition[] = [
   { path: '/', element: <Home /> },
+  { path: '/projects/:projectId/new', element: <Home /> },
   { path: '/chats/:conversationId', element: <ConversationRoute /> },
   { path: '/chats/:conversationId/overview', element: <ConversationRoute /> },
   { path: '/projects/:projectId/chats/:conversationId', element: <ConversationRoute /> },

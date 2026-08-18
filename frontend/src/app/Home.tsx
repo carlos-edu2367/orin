@@ -1,9 +1,10 @@
 import { motion, useReducedMotion } from 'motion/react'
 import { useEffect, useMemo, useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useNavigate, useParams } from 'react-router-dom'
 import { readBrowserSessionBootstrap, type BrowserSessionBootstrap } from '../api/browserSession'
 import { ApiClient, createBrowserApiClient } from '../api/client'
 import { createConversation } from '../api/conversations'
+import { listProjectSidebar } from '../api/projects'
 import { ApiError, isAuthenticationError, isCsrfAuthorizationError } from '../api/errors'
 import { PROVIDER_NAMES, listProviderModels, type ProviderModel, type ProviderName } from '../api/providers'
 import { AmbientField } from '../components/three/AmbientField'
@@ -12,6 +13,8 @@ import { CommandPalette } from '../components/CommandPalette'
 import { ModelPicker } from '../components/ModelPicker'
 import { Composer } from '../features/conversations/Composer'
 import { useComposerAttachments } from '../features/conversations/useComposerAttachments'
+import { WorkspaceFolderButton } from '../features/conversations/WorkspaceFolderButton'
+import { inspectNewWorkspaceFolder, type WorkspaceState } from '../api/workspace'
 import { WorkspaceNavigation } from '../features/projects/WorkspaceNavigation'
 
 type HomeProps = {
@@ -30,6 +33,7 @@ const MODEL_STORAGE_KEY = 'agentos.model'
  * describing what you need.
  */
 export function Home({ client, bootstrap }: HomeProps) {
+  const { projectId } = useParams()
   const navigate = useNavigate()
   const reduced = useReducedMotion()
   const apiClient = useMemo(() => client ?? createBrowserApiClient(), [client])
@@ -45,7 +49,20 @@ export function Home({ client, bootstrap }: HomeProps) {
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [focusSignal, setFocusSignal] = useState(0)
+  const [projectName, setProjectName] = useState<string | null>(null)
+  const [workspacePath, setWorkspacePath] = useState<string | null>(null)
+  const [workspaceAcknowledgedRisk, setWorkspaceAcknowledgedRisk] = useState(false)
   const [chats, setChats] = useState<Array<{ conversation_id: string; title: string; state: string }>>([])
+  const activeProjectName = projectId ? projectName : null
+
+  useEffect(() => {
+    if (!projectId) return
+    let active = true
+    void listProjectSidebar(apiClient).then((sidebar) => {
+      if (active) setProjectName(sidebar.items.find((item) => item.project_id === projectId)?.name ?? null)
+    }).catch(() => { if (active) setProjectName(null) })
+    return () => { active = false }
+  }, [apiClient, projectId])
   useEffect(() => {
     const controller = new AbortController()
     listProviderModels(apiClient, provider, controller.signal)
@@ -83,11 +100,21 @@ export function Home({ client, bootstrap }: HomeProps) {
     setSubmitting(true)
     setError(null)
     try {
-      const receipt = await createConversation(apiClient, { message: text, provider, model_id: modelId, attachments: readyUploads })
+      const receipt = await createConversation(apiClient, {
+        message: text,
+        provider,
+        model_id: modelId,
+        project_id: projectId,
+        workspace_path: workspacePath,
+        workspace_acknowledged_risk: workspaceAcknowledgedRisk,
+        attachments: readyUploads,
+      })
       writeStored(PROVIDER_STORAGE_KEY, provider)
       writeStored(MODEL_STORAGE_KEY, modelId)
       resetAttachments()
-      navigate(`/chats/${encodeURIComponent(receipt.conversation_id)}`)
+      navigate(projectId
+        ? `/projects/${encodeURIComponent(projectId)}/chats/${encodeURIComponent(receipt.conversation_id)}`
+        : `/chats/${encodeURIComponent(receipt.conversation_id)}`)
     } catch (caught) {
       setError(errorHeadline(caught))
       setSubmitting(false)
@@ -113,8 +140,14 @@ export function Home({ client, bootstrap }: HomeProps) {
           client={apiClient}
           onChatsChange={setChats}
           onNewConversation={() => {
+            if (projectId) {
+              navigate('/')
+              return
+            }
             setMessage('')
             resetAttachments()
+            setWorkspacePath(null)
+            setWorkspaceAcknowledgedRisk(false)
             setError(null)
             setFocusSignal((value) => value + 1)
           }}
@@ -128,14 +161,14 @@ export function Home({ client, bootstrap }: HomeProps) {
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.4 }}
         >
-          ambiente local · {chats.length} {chats.length === 1 ? 'conversa' : 'conversas'}
+          {activeProjectName ? `projeto · ${activeProjectName}` : `ambiente local · ${chats.length} ${chats.length === 1 ? 'conversa' : 'conversas'}`}
         </motion.p>
         <motion.h1
           initial={reduced ? false : { opacity: 0, y: 14 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.5, delay: 0.06 }}
         >
-          O que vamos resolver?
+          {activeProjectName ? 'O que vamos resolver neste projeto?' : 'O que vamos resolver?'}
         </motion.h1>
 
         <motion.div
@@ -159,6 +192,7 @@ export function Home({ client, bootstrap }: HomeProps) {
             onAttach={onAttach}
             onRemoveAttachment={onRemoveAttachment}
             settings={(
+              <>
               <ModelPicker
                 providers={[...PROVIDER_NAMES]}
                 provider={provider}
@@ -170,6 +204,22 @@ export function Home({ client, bootstrap }: HomeProps) {
                 failed={catalogFailed}
                 disabled={submitting}
               />
+              <WorkspaceFolderButton
+                state={workspaceState(workspacePath, projectId, activeProjectName)}
+                onInspect={(path) => inspectNewWorkspaceFolder(apiClient, path, projectId)}
+                onAttach={async (path, acknowledgedRisk) => {
+                  setWorkspacePath(path)
+                  setWorkspaceAcknowledgedRisk(acknowledgedRisk)
+                  return workspaceState(path, projectId, activeProjectName)
+                }}
+                onDetach={async () => {
+                  setWorkspacePath(null)
+                  setWorkspaceAcknowledgedRisk(false)
+                  return workspaceState(null, projectId, activeProjectName)
+                }}
+                onChange={() => {}}
+              />
+              </>
             )}
           />
         </motion.div>
@@ -206,6 +256,16 @@ function readStored(key: string, fallback: string): string {
 
 function writeStored(key: string, value: string): void {
   try { window.localStorage.setItem(key, value) } catch { /* private mode: the preference is not essential */ }
+}
+
+function workspaceState(path: string | null, projectId: string | undefined, projectName: string | null): WorkspaceState {
+  return {
+    kind: path ? 'local' : 'managed',
+    path,
+    folderName: path ? path.split(/[\\/]/).filter(Boolean).at(-1) ?? path : null,
+    scope: projectId ? 'project' : 'chat',
+    projectName: projectId ? projectName : null,
+  }
 }
 
 function errorHeadline(error: unknown): string {

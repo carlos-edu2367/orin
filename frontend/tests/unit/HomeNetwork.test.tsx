@@ -27,13 +27,15 @@ function router(routes: Record<string, () => Response>) {
   })
 }
 
-function renderHome(fetchImpl: ReturnType<typeof router>) {
+function renderHome(fetchImpl: ReturnType<typeof router>, initialEntry = '/') {
   const client = new ApiClient({ fetchImpl, maxAttempts: 1 })
   return render(
-    <MemoryRouter initialEntries={['/']}>
+    <MemoryRouter initialEntries={[initialEntry]}>
       <Routes>
         <Route path="/" element={<Home client={client} bootstrap={READY_SESSION} />} />
+        <Route path="/projects/:projectId/new" element={<Home client={client} bootstrap={READY_SESSION} />} />
         <Route path="/chats/:conversationId" element={<p>Chat aberto</p>} />
+        <Route path="/projects/:projectId/chats/:conversationId" element={<p>Chat de projeto aberto</p>} />
         <Route path="/providers" element={<p>Providers</p>} />
       </Routes>
     </MemoryRouter>,
@@ -178,6 +180,37 @@ describe('Home', () => {
     const body = JSON.parse(created.mock.calls[0][0] as string)
     expect(body).toMatchObject({ message: '', attachments: ['upl_1'] })
     expect(await screen.findByText('Chat aberto')).toBeInTheDocument()
+  })
+
+  it('uses the normal composer to start a project chat with a folder on the first message', async () => {
+    const created = vi.fn()
+    const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : String(input)
+      const method = (init?.method ?? 'GET').toUpperCase()
+      if (url.includes('/models')) return json({ items: [MODEL] })
+      if (url.includes('/v1/projects/sidebar')) return json({ items: [{ project_id: 'project-a', name: 'AgentOS', description: null, chats: [] }] })
+      if (url.includes('/v1/workspaces/inspect')) return json({ path: 'D:/site', exists: true, is_directory: true, writable: true, entry_count: 2, entries_truncated: false, risk: 'none' })
+      if (url.endsWith('/v1/conversations') && method === 'POST') {
+        created(JSON.parse(String(init?.body ?? '{}')))
+        return json({ conversation_id: 'project-chat', title: 'Nova', turn_id: 't', message_id: 'm', state: 'queued' }, 201)
+      }
+      return json({ items: [] })
+    })
+    renderHome(fetchImpl as ReturnType<typeof router>, '/projects/project-a/new')
+
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: 'Adicionar pasta ao workspace' }))
+    await user.type(screen.getByRole('textbox', { name: 'Caminho da pasta' }), 'D:/site')
+    await user.click(screen.getByRole('button', { name: 'Adicionar diretório' }))
+    await user.click(await screen.findByRole('button', { name: 'Usar esta pasta' }))
+    await user.type(await screen.findByRole('textbox', { name: 'Mensagem' }), 'Organizar este projeto')
+    await user.click(screen.getByRole('button', { name: 'Enviar mensagem' }))
+
+    await waitFor(() => expect(created).toHaveBeenCalled())
+    expect(created).toHaveBeenCalledWith(expect.objectContaining({
+      message: 'Organizar este projeto', project_id: 'project-a', workspace_path: 'D:/site', workspace_acknowledged_risk: false,
+    }))
+    expect(await screen.findByText('Chat de projeto aberto')).toBeInTheDocument()
   })
 
   it('blocks sending while an upload is still in flight', async () => {

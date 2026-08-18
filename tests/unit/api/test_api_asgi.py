@@ -105,6 +105,28 @@ class FakeConversationApplication:
         return {"conversation_id": conversation_id, "title": "Conversa", "turn_id": "turn-2", "message_id": "msg-2", "state": "queued"}
 
 
+class FakeProjectStore:
+    def __init__(self, workspace_id: str = "project-workspace") -> None:
+        self.project = type("Project", (), {"project_id": "project-a", "workspace_id": workspace_id, "name": "AgentOS"})()
+
+    def get(self, project_id: str, user_id: str):
+        return self.project if project_id == "project-a" and user_id == "user-1" else None
+
+
+class FakeLocalWorkspaceStore:
+    def __init__(self) -> None:
+        self.roots: dict[tuple[str, str], str] = {}
+
+    def root_for(self, workspace_id: str, user_id: str) -> str | None:
+        return self.roots.get((workspace_id, user_id))
+
+    def set_root(self, workspace_id: str, user_id: str, root_path: str) -> None:
+        self.roots[(workspace_id, user_id)] = root_path
+
+    def clear_root(self, workspace_id: str, user_id: str) -> bool:
+        return self.roots.pop((workspace_id, user_id), None) is not None
+
+
 def _client() -> TestClient:
     security = InMemorySecurityService()
     security.add_pat("pat-test", AuthenticatedPrincipal("user-1", "credential-1", frozenset({"api"})))
@@ -568,6 +590,33 @@ def test_conversation_endpoint_accepts_message_and_selection_without_returning_t
     assert response.json()["conversation_id"] == "conv-1"
     assert "execution_id" not in response.text
     assert "task_ref" not in response.text
+
+
+def test_conversation_endpoint_creates_project_chat_with_initial_workspace(tmp_path: Path) -> None:
+    security = InMemorySecurityService()
+    security.add_pat("pat-test", AuthenticatedPrincipal("user-1", "credential-1", frozenset({"api"})))
+    local_workspaces = FakeLocalWorkspaceStore()
+    app = create_app(ApiServices(
+        security=security,
+        execution_application=FakeExecutionApplication(),
+        conversation_application=FakeConversationApplication(),
+        projects=FakeProjectStore(),
+        local_workspaces=local_workspaces,
+    ))
+
+    response = TestClient(app).post(
+        "/v1/conversations",
+        headers={"Authorization": "Bearer pat-test", "Idempotency-Key": "project-conversation-1"},
+        json={
+            "message": "Organize este projeto",
+            "selection": {"provider": "openrouter", "model_id": "anthropic/test-model"},
+            "project_id": "project-a",
+            "workspace_path": str(tmp_path),
+        },
+    )
+
+    assert response.status_code == 201
+    assert local_workspaces.roots[("project-workspace", "user-1")] == str(tmp_path)
 
 
 def test_conversation_message_accepts_a_new_authorized_model_selection() -> None:

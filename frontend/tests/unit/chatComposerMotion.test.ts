@@ -22,7 +22,7 @@ describe('chat composer motion', () => {
   it('keeps sidebar actions outside the scrollable navigation list', () => {
     expect(stylesheet).toMatch(/\.project-navigation \{[^}]*display: flex;[^}]*flex-direction: column;/)
     expect(stylesheet).toMatch(/\.project-navigation__scroll \{[^}]*flex: 1;[^}]*overflow-y: auto;/)
-    expect(stylesheet).toMatch(/\.project-navigation__actions \{[^}]*border-top: 1px solid var\(--line\)/)
+    expect(stylesheet).toMatch(/\.project-navigation__actions \{[^}]*border-top: 1px solid var\(--line\)[^}]*background: transparent;/)
   })
 
   it('uses the full bottom of the chat column as the composer reveal target', () => {

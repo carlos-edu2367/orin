@@ -114,7 +114,15 @@ class CreateConversationRequest(_RequestModel):
     message: str = Field(default="", max_length=16000)
     selection: ConversationSelectionRequest
     workspace_id: str | None = Field(default=None, min_length=1, max_length=255)
+    project_id: str | None = Field(default=None, min_length=1, max_length=255)
+    workspace_path: str | None = Field(default=None, max_length=4096)
+    workspace_acknowledged_risk: bool = False
     attachments: list[str] = Field(default_factory=list, max_length=MAX_FILES_PER_MESSAGE)
+
+
+class InspectNewWorkspaceFolderRequest(_RequestModel):
+    path: str | None = Field(default=None, max_length=4096)
+    project_id: str | None = Field(default=None, min_length=1, max_length=255)
 
 
 class ScheduleRecurrenceRequest(_RequestModel):
@@ -464,6 +472,34 @@ def create_app(services: ApiServices) -> FastAPI:
         if not message.strip() and not attachments:
             raise ApplicationValidationError("message must include text or at least one attachment")
 
+    @app.post("/v1/workspaces/inspect")
+    async def inspect_new_workspace(payload: InspectNewWorkspaceFolderRequest, request: Request) -> JSONResponse:
+        principal = principal_for(request, mutable=True)
+        if payload.project_id is not None:
+            project = require_port(services.projects).get(payload.project_id, principal.user_id)
+            if project is None:
+                raise ApplicationNotFoundError(payload.project_id)
+            resource_id = payload.project_id
+        else:
+            resource_id = None
+        services.security.authorize(principal, action="conversation.create", resource_id=resource_id, purpose="conversation.workspace.inspect")
+        chosen = payload.path
+        if chosen is None:
+            client_host = request.client.host if request.client is not None else None
+            if not _is_loopback_client(client_host):
+                return JSONResponse({"dialog_unavailable": True}, status_code=200)
+            result = await run_in_threadpool(choose_folder)
+            if not result.available:
+                return JSONResponse({"dialog_unavailable": True}, status_code=200)
+            if result.cancelled or not result.path:
+                return JSONResponse({"cancelled": True}, status_code=200)
+            chosen = result.path
+        try:
+            inspection = inspect_folder(chosen, home=Path.home(), orin_data=orin_paths().data)
+        except FolderRejected as error:
+            raise ApplicationValidationError("invalid workspace folder") from error
+        return JSONResponse(asdict(inspection))
+
     @app.post("/v1/conversations", status_code=201)
     async def create_conversation(payload: CreateConversationRequest, request: Request) -> JSONResponse:
         principal = principal_for(request, mutable=True)
@@ -473,16 +509,42 @@ def create_app(services: ApiServices) -> FastAPI:
         require_content(payload.message, payload.attachments)
         application = require_port(services.conversation_application)
         conversation_id = application.allocate_conversation_id()  # type: ignore[union-attr]
-        attachments = promote(conversation_id, principal, payload.attachments)
+        project = None
+        if payload.project_id is not None:
+            project = require_port(services.projects).get(payload.project_id, principal.user_id)
+            if project is None:
+                raise ApplicationNotFoundError(payload.project_id)
+        workspace_root_id = project.workspace_id if project is not None else conversation_id
+        attachment_workspace_id = workspace_root_id
+        previous_root = local_root_for(workspace_root_id, principal) if payload.workspace_path else None
+        if payload.workspace_path:
+            try:
+                inspection = inspect_folder(payload.workspace_path, home=Path.home(), orin_data=orin_paths().data)
+            except FolderRejected as error:
+                raise ApplicationValidationError("invalid workspace folder") from error
+            if not inspection.is_directory:
+                raise ApplicationValidationError("workspace folder does not exist")
+            if not inspection.writable:
+                raise ApplicationValidationError("workspace folder is not writable")
+            if inspection.risk != "none" and not payload.workspace_acknowledged_risk:
+                return _error(409, "CONFLICT", "workspace_risk_acknowledgement_required", retryable=False)
+            _require_port(services.local_workspaces).set_root(workspace_root_id, principal.user_id, inspection.path)
+        attachments: list[dict[str, object]] = []
         try:
+            attachments = promote(attachment_workspace_id, principal, payload.attachments)
             result = application.create(  # type: ignore[union-attr]
                 ProviderCatalogContext(principal.user_id, "conversation.create"),
                 message=payload.message, provider=provider, model_id=payload.selection.model_id,
-                workspace_id=payload.workspace_id, idempotency_key=_idempotency(request),
+                workspace_id=payload.workspace_id, project_id=payload.project_id, idempotency_key=_idempotency(request),
                 attachments=attachments, new_conversation_id=conversation_id,
             )
         except Exception:
-            discard_promoted(workspace_for(conversation_id, principal), attachments)
+            discard_promoted(workspace_for(attachment_workspace_id, principal), attachments)
+            if payload.workspace_path:
+                if previous_root:
+                    _require_port(services.local_workspaces).set_root(workspace_root_id, principal.user_id, previous_root)
+                else:
+                    _require_port(services.local_workspaces).clear_root(workspace_root_id, principal.user_id)
             raise
         data = _jsonable(result)
         if not isinstance(data, dict):

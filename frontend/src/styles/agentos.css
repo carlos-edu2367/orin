@@ -342,7 +342,7 @@
 .project-navigation__chat-state[data-state="failed"] { background: var(--danger); }
 .project-navigation__empty { margin: 22px 9px; color: var(--faint); font-size: 12px; line-height: 1.55; }
 .project-navigation__empty--project { margin: 7px 8px 8px 37px; font-size: 11px; }
-.project-navigation__actions { display: grid; gap: 7px; margin-top: auto; padding: 14px 4px 0 0; border-top: 1px solid var(--line); background: linear-gradient(var(--surface), var(--surface) 70%); }
+.project-navigation__actions { display: grid; gap: 7px; margin-top: auto; padding: 14px 4px 0 0; border-top: 1px solid var(--line); background: transparent; }
 .project-navigation__action { display: flex; align-items: center; min-height: 38px; gap: 9px; border: 1px solid transparent; border-radius: 9px; color: var(--muted); cursor: pointer; font: inherit; padding: 8px 10px; text-decoration: none; transition: border-color .18s var(--ease), background .18s var(--ease), color .18s var(--ease), transform .18s var(--ease); }
 .project-navigation__action:hover { border-color: var(--line-strong); background: var(--raised); color: var(--text); transform: translateY(-1px); }
 .project-navigation__action--primary { border-color: rgb(var(--orin-accent-rgb) / .35); background: rgb(var(--orin-accent-rgb) / .12); color: var(--text); }

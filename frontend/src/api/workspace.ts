@@ -25,6 +25,14 @@ export type FolderInspection = {
 /** The dialog was closed without a choice, or it could not be opened at all. */
 export type InspectionOutcome = FolderInspection | { kind: 'cancelled' } | { kind: 'unavailable' }
 
+export function inspectNewWorkspaceFolder(client: ApiClient, path: string | null, projectId?: string, intent = client.createMutationIntent()): Promise<InspectionOutcome> {
+  return client.request({
+    path: '/v1/workspaces/inspect', method: 'POST', intent,
+    body: { path, project_id: projectId ?? null },
+    parse: parseInspection,
+  })
+}
+
 export function inspectWorkspaceFolder(client: ApiClient, conversationId: string, path: string | null, intent = client.createMutationIntent()): Promise<InspectionOutcome> {
   return client.request({
     path: `/v1/conversations/${encodeURIComponent(conversationId)}/workspace/inspect`, method: 'POST', intent,

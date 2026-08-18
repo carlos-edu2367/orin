@@ -10,6 +10,9 @@ export type CreateConversationInput = {
   provider: ProviderName
   model_id: string
   workspace_id?: string | null
+  project_id?: string | null
+  workspace_path?: string | null
+  workspace_acknowledged_risk?: boolean
   attachments?: string[]
 }
 
@@ -30,7 +33,15 @@ export type ConversationTurn = { turn_id: string; state: string; created_at: str
 export function createConversation(client: ApiClient, input: CreateConversationInput, intent = client.createMutationIntent()): Promise<ConversationReceipt> {
   return client.request({
     path: '/v1/conversations', method: 'POST', expectedStatus: 201, intent,
-    body: { message: input.message, selection: { provider: input.provider, model_id: input.model_id }, workspace_id: input.workspace_id ?? null, attachments: input.attachments ?? [] },
+    body: {
+      message: input.message,
+      selection: { provider: input.provider, model_id: input.model_id },
+      workspace_id: input.workspace_id ?? null,
+      project_id: input.project_id ?? null,
+      workspace_path: input.workspace_path ?? null,
+      workspace_acknowledged_risk: input.workspace_acknowledged_risk ?? false,
+      attachments: input.attachments ?? [],
+    },
     parse: parseConversationReceipt,
   })
 }
