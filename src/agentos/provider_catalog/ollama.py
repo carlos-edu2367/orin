@@ -84,7 +84,7 @@ class OllamaCatalogClient:
         authenticated when the request reaches ``/api/chat``.
         """
         if not api_key.strip():
-            raise RuntimeError("Ollama Cloud API key is required")
+            raise OllamaCloudAuthenticationError("Ollama Cloud API key is required")
         base = normalize_ollama_base_url(base_url)
         client = self._client or httpx.Client(timeout=self._timeout)
         try:

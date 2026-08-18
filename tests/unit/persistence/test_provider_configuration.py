@@ -154,3 +154,28 @@ def test_ollama_cloud_connection_test_skips_a_model_that_rejects_access(monkeypa
 def test_a_rejected_provider_still_cannot_be_connection_tested() -> None:
     with pytest.raises(ValueError):
         _adapter().test_connection({"provider": "openai", "api_key": "k", "base_url": None})
+
+
+def test_ollama_cloud_connection_test_with_no_key_is_a_credential_error_not_an_internal_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Testing Cloud with a blank key is a rejected credential, not a 500.
+
+    The gateway only maps ``ProviderCredentialRejectedError`` to its 422
+    "credentials rejected" response; any other exception the adapter lets
+    through (a plain ``RuntimeError``/``ValueError``) falls to the generic
+    500 handler and reads to the user as "the provider is unavailable".
+    """
+    from agentos.api.contracts import ProviderCredentialRejectedError
+    from agentos.provider_catalog.ollama import OllamaCloudAuthenticationError
+
+    class FakeOllama:
+        def fetch(self, api_key: str, *, base_url: str) -> list[dict[str, object]]:
+            return [{"id": "gemma4:31b"}]
+
+        def verify_cloud_access(self, api_key: str, *, base_url: str, model: str) -> None:
+            if not api_key.strip():
+                raise OllamaCloudAuthenticationError("Ollama Cloud API key is required")
+
+    monkeypatch.setattr("agentos.persistence.postgres.provider_configuration.OllamaCatalogClient", FakeOllama)
+
+    with pytest.raises(ProviderCredentialRejectedError):
+        _adapter().test_connection({"provider": "ollama", "api_key": "", "base_url": "https://ollama.com"})

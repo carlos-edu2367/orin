@@ -153,6 +153,23 @@ def test_cloud_authentication_failure_is_distinguished_from_transport_failure() 
         client.verify_cloud_access("cloud-secret", base_url="https://ollama.com", model="qwen3:8b")
 
 
+def test_a_missing_cloud_key_is_an_authentication_error_not_a_generic_failure() -> None:
+    """A blank key must surface the same way a rejected key does.
+
+    ``test_connection`` only turns ``OllamaCloudAuthenticationError`` into the
+    422 "credentials rejected" response; any other ``RuntimeError`` becomes an
+    unhandled 500. A missing key is a credential problem, not a transport
+    one, so it must raise the same exception type as a rejected key.
+    """
+    def handle(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("no request should be made without a key")
+
+    client = OllamaCatalogClient(client=httpx.Client(transport=httpx.MockTransport(handle)))
+
+    with pytest.raises(OllamaCloudAuthenticationError):
+        client.verify_cloud_access("", base_url="https://ollama.com", model="qwen3:8b")
+
+
 def test_production_composition_registers_the_ollama_upstream() -> None:
     """A provider absent from the composed upstreams can never refresh."""
     import inspect
