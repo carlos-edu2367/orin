@@ -4,14 +4,14 @@ from sqlalchemy import create_engine, insert, update
 
 from agentos.persistence.postgres.provider_models import PostgresProviderCatalogRepository
 from agentos.persistence.postgres.provider_configuration import PostgresProviderConfigurationAdapter
-from agentos.persistence.postgres.schema import metadata, provider_configurations, provider_model_catalog, provider_model_favorites
+from agentos.persistence.postgres.schema import metadata, provider_api_keys, provider_configurations, provider_model_catalog, provider_model_favorites
 from agentos.persistence.provider_secrets import ProviderSecretCipher
 from agentos.provider_catalog.models import ProviderCatalogContext
 
 
 def test_catalog_rows_are_hidden_when_the_saved_url_does_not_match_the_catalog_source() -> None:
     engine = create_engine("sqlite://")
-    metadata.create_all(engine, tables=[provider_configurations, provider_model_catalog, provider_model_favorites])
+    metadata.create_all(engine, tables=[provider_configurations, provider_api_keys, provider_model_catalog, provider_model_favorites])
     cipher = ProviderSecretCipher(b"0" * 32)
     configuration = PostgresProviderConfigurationAdapter(engine, cipher=cipher)
     configuration.configure({
@@ -40,7 +40,7 @@ def test_catalog_rows_are_hidden_when_the_saved_url_does_not_match_the_catalog_s
 def test_catalog_rows_read_from_sqlite_restore_their_utc_timezone() -> None:
     """SQLite drops a datetime offset even when the schema requests one."""
     engine = create_engine("sqlite://")
-    metadata.create_all(engine, tables=[provider_configurations, provider_model_catalog, provider_model_favorites])
+    metadata.create_all(engine, tables=[provider_configurations, provider_api_keys, provider_model_catalog, provider_model_favorites])
     cipher = ProviderSecretCipher(b"0" * 32)
     configuration = PostgresProviderConfigurationAdapter(engine, cipher=cipher)
     configuration.configure({

@@ -22,6 +22,7 @@ def test_persistence_schema_contains_only_the_durable_boundary_tables():
         "tool_activity_events",
         "tool_invocations",
         "provider_configurations",
+        "provider_api_keys",
         "provider_model_catalog",
         "provider_model_favorites",
         "provider_model_selections",

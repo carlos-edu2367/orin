@@ -14,6 +14,7 @@ from sqlalchemy import create_engine, insert
 
 from agentos.persistence.postgres.schema import (
     metadata,
+    provider_api_keys,
     provider_configurations,
     provider_model_catalog,
     vision_model_selections,
@@ -81,10 +82,15 @@ def _credential(engine, *, user_id: str, provider: str, plaintext_api_key: str, 
     with engine.begin() as c:
         c.execute(insert(provider_configurations), [{
             "user_id": user_id, "provider": provider, "enabled": True,
-            "api_key": None, "api_key_ciphertext": cipher.encrypt(plaintext_api_key, allow_empty=True),
-            "base_url": base_url, "secret_ref": f"{provider}:{user_id}",
+            "base_url": base_url, "secret_ref": f"{provider}:{user_id}", "key_cooldown_seconds": 60,
             "catalog_refreshed_at": None, "created_at": now, "updated_at": now,
         }])
+        if plaintext_api_key:
+            c.execute(insert(provider_api_keys), [{
+                "user_id": user_id, "provider": provider, "label": None,
+                "api_key_ciphertext": cipher.encrypt(plaintext_api_key), "secret_ref": f"{provider}:{user_id}:key",
+                "position": 0, "status": "active", "cooldown_until": None, "created_at": now, "updated_at": now,
+            }])
 
 
 def _override(engine, *, user_id: str, provider: str, model_id: str) -> None:

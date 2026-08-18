@@ -15,6 +15,8 @@ from sqlalchemy import select
 
 from agentos.bootstrap.production import ProductionSettings, activity_cursor_fallback
 from agentos.agentic.provider_stream import HTTPProviderStreamTransport
+from agentos.agentic.provider_key_fallback import MultiKeyProviderStreamTransport
+from agentos.persistence.postgres.provider_api_keys import PostgresProviderApiKeyAdapter
 from agentos.provider_catalog.models import PROVIDERS_WITH_BASE_URL
 from agentos.provider_catalog.ollama import DEFAULT_OLLAMA_BASE_URL, normalize_ollama_base_url
 from agentos.provider_catalog.omniroute import DEFAULT_OMNIROUTE_BASE_URL, normalize_omniroute_base_url
@@ -42,7 +44,6 @@ from agentos.persistence.postgres.schema import (
     provider_model_favorites,
     vision_model_selections,
 )
-from agentos.persistence.provider_secrets import ProviderSecretCipher
 from agentos.persistence.postgres.skills import PostgresSkillLibraryService
 from agentos.reading.selection import VisionModel, choose_vision_model
 from agentos.reading.vision import VisionReader
@@ -393,23 +394,55 @@ class ChatWorker:
     def _transport_for(self, user_id: str, provider: str, model_id: str, num_ctx: int | None = None) -> HTTPProviderStreamTransport:
         """Build a transport for any (user, provider, model), not just the turn's own.
 
-        This is the credential-handling seam both the turn's own provider
-        (``_provider_transport``) and a visual-reading model on a *different*
-        provider (``_vision_reader_factory``) go through, so a provider's
-        credential is only ever looked up under its own name.
+        This is the credential-handling seam a visual-reading model on a
+        *different* provider (``_vision_reader_factory``) and a subagent's
+        favorite-model override (``child_provider_factory``) go through, so a
+        provider's credential is only ever looked up under its own name. It
+        always uses the principal key (no fallback rotation): unlike the
+        turn's own provider (``_provider_transport``), these calls are
+        secondary reads a turn can already recover from without a key-swap.
         """
         with self.store._engine.connect() as c:
-            credential = c.execute(select(provider_configurations.c.api_key, provider_configurations.c.api_key_ciphertext, provider_configurations.c.base_url, provider_configurations.c.enabled).where(provider_configurations.c.user_id == user_id, provider_configurations.c.provider == provider)).mappings().first()
+            credential = c.execute(select(provider_configurations.c.base_url, provider_configurations.c.enabled).where(provider_configurations.c.user_id == user_id, provider_configurations.c.provider == provider)).mappings().first()
         if credential is None or not credential["enabled"]:
             raise ValueError("provider unavailable")
-        api_key = self._credential_value(credential, user_id, provider, allow_empty=provider in PROVIDERS_WITH_BASE_URL)
+        chosen = PostgresProviderApiKeyAdapter(self.store._engine).next_available_key(user_id, provider)
+        if chosen is None:
+            if provider not in PROVIDERS_WITH_BASE_URL:
+                raise ValueError("provider credential is missing")
+            api_key = ""
+        else:
+            api_key = chosen.plaintext
         base_url = self._base_url_for(provider, credential)
         return HTTPProviderStreamTransport(provider=provider, base_url=base_url, api_key=api_key, model=model_id, num_ctx=num_ctx)
 
-    def _provider_transport(self, turn: dict[str, object]) -> HTTPProviderStreamTransport:
+    def _provider_transport(self, turn: dict[str, object]) -> object:
         provider = str(turn["provider"])
+        user_id = str(turn["user_id"])
         num_ctx = self._num_ctx_for(turn) if provider == "ollama" else None
-        return self._transport_for(str(turn["user_id"]), provider, str(turn["model_id"]), num_ctx=num_ctx)
+        model_id = str(turn["model_id"])
+        with self.store._engine.connect() as c:
+            config = c.execute(
+                select(provider_configurations.c.base_url, provider_configurations.c.enabled, provider_configurations.c.key_cooldown_seconds)
+                .where(provider_configurations.c.user_id == user_id, provider_configurations.c.provider == provider)
+            ).mappings().first()
+        if config is None or not config["enabled"]:
+            raise ValueError("provider unavailable")
+        base_url = self._base_url_for(provider, {"base_url": config["base_url"]})
+        keys = PostgresProviderApiKeyAdapter(self.store._engine)
+
+        def build(api_key: str) -> HTTPProviderStreamTransport:
+            return HTTPProviderStreamTransport(provider=provider, base_url=base_url, api_key=api_key, model=model_id, num_ctx=num_ctx)
+
+        has_any_key = keys.next_available_key(user_id, provider) is not None
+        if not has_any_key:
+            if provider not in PROVIDERS_WITH_BASE_URL:
+                raise ValueError("provider credential is missing")
+            return build("")
+        return MultiKeyProviderStreamTransport(
+            key_pool=keys, user_id=user_id, provider=provider,
+            cooldown_seconds=int(config["key_cooldown_seconds"]), transport_factory=build,
+        )
 
     def _favorite_child_model_ids(self, turn: dict[str, object]) -> tuple[str, ...]:
         """Return this user's favorites, limited to the provider of the active turn."""
@@ -453,30 +486,6 @@ class ChatWorker:
                 ).scalar_one_or_none() is not None
         except Exception:
             return False
-
-    def _credential_value(self, credential, user_id: str, provider: str, *, allow_empty: bool = False) -> str:
-        """Read the provider key, upgrading a pre-encryption row in place.
-
-        Installations that saved a key before credential encryption existed hold
-        it as cleartext. Refusing to run would strand a working install behind a
-        key the UI never shows again, so the value is accepted once and
-        immediately rewritten as ciphertext.
-        """
-        cipher = ProviderSecretCipher.from_environment(required=True)
-        ciphertext = credential["api_key_ciphertext"]
-        if ciphertext:
-            return cipher.decrypt(str(ciphertext))
-        legacy = str(credential["api_key"] or "")
-        if not legacy and not allow_empty:
-            raise ValueError("provider credential is missing")
-        with self.store._engine.begin() as connection:
-            connection.execute(
-                provider_configurations.update()
-                .where(provider_configurations.c.user_id == user_id, provider_configurations.c.provider == provider)
-                .values(api_key=None, api_key_ciphertext=cipher.encrypt(legacy), updated_at=datetime.now(UTC))
-            )
-        _LOGGER.info("migrated the %s credential for %s to encrypted storage", provider, user_id)
-        return legacy
 
     def _runtime_for(self, turn: dict[str, object]) -> AgenticTurnRuntime:
         if self._runtime_factory is not None:

@@ -14,8 +14,8 @@ def _ready(engine, now):
             capabilities=[], input_modalities=[], output_modalities=[], refreshed_at=now, created_at=now, updated_at=now,
         ))
         connection.execute(insert(provider_configurations).values(
-            user_id="user-1", provider="openrouter", enabled=True, model=None, api_key=None,
-            api_key_ciphertext=None, base_url=None, secret_ref="test", catalog_refreshed_at=now, created_at=now, updated_at=now,
+            user_id="user-1", provider="openrouter", enabled=True, model=None,
+            base_url=None, secret_ref="test", key_cooldown_seconds=60, catalog_refreshed_at=now, created_at=now, updated_at=now,
         ))
 
 
