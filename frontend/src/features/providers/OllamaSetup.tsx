@@ -9,9 +9,32 @@ export function OllamaSetup({ mode, enabled, apiKey, baseUrl, action, canRevoke,
   const cloud = mode === 'cloud'
   const unavailable = bootstrap.status === 'missing_csrf'
   return <form className="ollama-flow" onSubmit={onSave}>
-    <div className="ollama-flow__modes" role="radiogroup" aria-label="Modo do Ollama"><button type="button" role="radio" aria-checked={!cloud} className={!cloud ? 'chip is-selected' : 'chip'} onClick={() => onModeChange('local')}>Local</button><button type="button" role="radio" aria-checked={cloud} className={cloud ? 'chip is-selected' : 'chip'} onClick={() => onModeChange('cloud')}>Cloud</button></div>
-    <div className="ollama-flow__fields"><label htmlFor="ollama-base-url">URL do servidor</label><input id="ollama-base-url" type="url" value={baseUrl} onChange={(event) => onBaseUrlChange(event.target.value)} />{cloud && <><label htmlFor="ollama-api-key">Chave de API</label><input id="ollama-api-key" type="password" autoComplete="off" value={apiKey} onChange={(event) => onApiKeyChange(event.target.value)} /></>}</div>
-    <div className="ollama-flow__actions"><label className="provider-panel__toggle"><input type="checkbox" checked={enabled} onChange={(event) => onEnabledChange(event.target.checked)} />Disponibilizar para os agentes</label><button type="button" className="button button--secondary" disabled={action.pending || unavailable} onClick={onTest}>{action.kind === 'test' ? 'Testando conexão…' : 'Testar conexão'}</button><button type="submit" className="button button--primary" disabled={action.pending || unavailable || (cloud && !apiKey)}>{action.kind === 'configure' ? 'Salvando…' : 'Salvar e ativar'}</button><button type="button" className="button button--secondary button--danger" disabled={action.pending || !canRevoke || unavailable} onClick={onRevoke}>Desativar acesso</button></div>
+    <section className="ollama-flow__overview">
+      <div className="ollama-flow__overview-copy">
+        <p className="ollama-flow__kicker">CONEXÃO OLLAMA</p>
+        <h3>Escolha onde o Ollama está rodando</h3>
+        <p>Use um servidor local para manter tudo no dispositivo ou conecte sua conta do Ollama Cloud para acessar modelos hospedados.</p>
+      </div>
+      <span className="ollama-flow__status" role="status">{cloud ? 'Ollama Cloud' : 'Servidor local'}</span>
+    </section>
+    <section className="ollama-flow__connection" aria-labelledby="ollama-connection-title">
+      <div className="ollama-flow__section-heading">
+        <div><p className="ollama-flow__kicker">ENDPOINT E ACESSO</p><h3 id="ollama-connection-title">Configuração de conexão</h3></div>
+        <span>{cloud ? 'URL + chave de API' : 'Somente URL'}</span>
+      </div>
+      <div className="ollama-flow__mode-field">
+        <span className="ollama-flow__field-label">Ambiente</span>
+        <div className="ollama-flow__modes" role="radiogroup" aria-label="Modo do Ollama"><button type="button" role="radio" aria-checked={!cloud} className={!cloud ? 'chip is-selected' : 'chip'} onClick={() => onModeChange('local')}>Local</button><button type="button" role="radio" aria-checked={cloud} className={cloud ? 'chip is-selected' : 'chip'} onClick={() => onModeChange('cloud')}>Cloud</button></div>
+      </div>
+      <div className="ollama-flow__fields">
+        <div className="ollama-flow__field"><label htmlFor="ollama-base-url">URL do servidor</label><input id="ollama-base-url" type="url" value={baseUrl} onChange={(event) => onBaseUrlChange(event.target.value)} /><small>{cloud ? 'Endpoint oficial do Ollama Cloud.' : 'Endereço do Ollama em execução neste dispositivo.'}</small></div>
+        {cloud && <div className="ollama-flow__field"><label htmlFor="ollama-api-key">Chave de API</label><input id="ollama-api-key" type="password" autoComplete="off" value={apiKey} onChange={(event) => onApiKeyChange(event.target.value)} placeholder="Cole uma nova chave" /><small>A chave é usada somente para salvar e testar a conexão.</small></div>}
+      </div>
+      <div className="ollama-flow__footer">
+        <label className="provider-panel__toggle"><input type="checkbox" checked={enabled} onChange={(event) => onEnabledChange(event.target.checked)} /><span><strong>Disponibilizar para os agentes</strong><small>Permite selecionar este provider em novas conversas.</small></span></label>
+        <div className="ollama-flow__actions"><button type="button" className="button button--secondary" disabled={action.pending || unavailable} onClick={onTest}>{action.kind === 'test' ? 'Testando conexão…' : 'Testar conexão'}</button><button type="submit" className="button button--primary" disabled={action.pending || unavailable || (cloud && !apiKey)}>{action.kind === 'configure' ? 'Salvando…' : 'Salvar e ativar'}</button><button type="button" className="button button--secondary button--danger" disabled={action.pending || !canRevoke || unavailable} onClick={onRevoke}>Desativar acesso</button></div>
+      </div>
+    </section>
     {connection?.connected && <p className="omniroute-step__success" role="status">Conexão pronta{connection.models === null ? '' : ` · ${connection.models} modelos disponíveis`}.</p>}
   </form>
 }

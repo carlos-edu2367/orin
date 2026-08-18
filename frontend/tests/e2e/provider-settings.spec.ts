@@ -61,7 +61,7 @@ test('saves a new API key without asking for a model; the key clears and never r
 
   await panel.getByLabel('Chave de API').fill('sk-test-secret-value')
   await expect(panel.getByLabel('Modelo')).toHaveCount(0)
-  await panel.getByRole('button', { name: 'Salvar' }).click()
+  await panel.getByRole('button', { name: 'Salvar', exact: true }).click()
 
   await expect(panel.locator('.provider-detail__state')).toHaveText('Habilitado')
   await expect(panel.getByLabel('Chave de API')).toHaveValue('')
@@ -172,18 +172,18 @@ test('recovers from a CSRF-rejected save and a rate limit, reusing the same Idem
   const panel = await openProvider(page, 'OpenAI')
 
   await panel.getByLabel('Chave de API').fill('sk-attempt-one')
-  await panel.getByRole('button', { name: 'Salvar' }).click()
+  await panel.getByRole('button', { name: 'Salvar', exact: true }).click()
   await expect(panel.getByText('Atualize a página para renovar sua sessão.')).toBeVisible()
   await expect(panel.getByLabel('Chave de API')).toHaveValue('sk-attempt-one')
 
   await panel.getByLabel('Chave de API').fill('sk-attempt-two')
-  await panel.getByRole('button', { name: 'Salvar' }).click()
+  await panel.getByRole('button', { name: 'Salvar', exact: true }).click()
   await expect(panel.getByText('Muitas tentativas; aguarde antes de tentar novamente.')).toBeVisible()
   await expect(panel.getByText('Tente novamente em 30s.')).toBeVisible()
   await expect(panel.getByLabel('Chave de API')).toHaveValue('sk-attempt-two')
 
   await panel.getByLabel('Chave de API').fill('sk-attempt-three')
-  await panel.getByRole('button', { name: 'Salvar' }).click()
+  await panel.getByRole('button', { name: 'Salvar', exact: true }).click()
   await expect(panel.locator('.provider-detail__state')).toHaveText('Habilitado')
 
   expect(idempotencyKeys).toHaveLength(3)
