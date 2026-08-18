@@ -3,11 +3,11 @@ from datetime import UTC, datetime
 from sqlalchemy import create_engine, select, update
 
 from agentos.persistence.postgres.provider_configuration import PostgresProviderConfigurationAdapter
-from agentos.persistence.postgres.schema import metadata, provider_configurations
+from agentos.persistence.postgres.schema import metadata, provider_api_keys, provider_configurations
 from agentos.persistence.provider_secrets import ProviderSecretCipher
 
 
-def test_omniroute_configuration_persists_an_empty_gateway_key_encrypted() -> None:
+def test_omniroute_configuration_with_an_empty_key_creates_no_key_row() -> None:
     engine = create_engine("sqlite://")
     metadata.create_all(engine)
     cipher = ProviderSecretCipher("unit-test-provider-key")
@@ -22,21 +22,20 @@ def test_omniroute_configuration_persists_an_empty_gateway_key_encrypted() -> No
     })
 
     with engine.connect() as connection:
-        stored = connection.execute(
-            select(provider_configurations.c.api_key_ciphertext).where(
-                provider_configurations.c.user_id == "local-user",
-                provider_configurations.c.provider == "omniroute",
+        keys = connection.execute(
+            select(provider_api_keys).where(
+                provider_api_keys.c.user_id == "local-user",
+                provider_api_keys.c.provider == "omniroute",
             )
-        ).scalar_one()
+        ).mappings().all()
 
     assert saved["enabled"] is True
-    assert stored.startswith("enc:v1:")
-    assert cipher.decrypt(stored) == ""
+    assert keys == []
 
 
 def _adapter() -> PostgresProviderConfigurationAdapter:
     engine = create_engine("sqlite://")
-    metadata.create_all(engine, tables=[provider_configurations])
+    metadata.create_all(engine, tables=[provider_configurations, provider_api_keys])
     return PostgresProviderConfigurationAdapter(engine, cipher=ProviderSecretCipher(b"0" * 32))
 
 
@@ -75,9 +74,10 @@ def test_ollama_cloud_key_is_trimmed_before_storage() -> None:
 
     with adapter._engine.connect() as connection:
         stored = connection.execute(
-            select(provider_configurations.c.api_key_ciphertext).where(
-                provider_configurations.c.user_id == "user-1",
-                provider_configurations.c.provider == "ollama",
+            select(provider_api_keys.c.api_key_ciphertext).where(
+                provider_api_keys.c.user_id == "user-1",
+                provider_api_keys.c.provider == "ollama",
+                provider_api_keys.c.position == 0,
             )
         ).scalar_one()
 

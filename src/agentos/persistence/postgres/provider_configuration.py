@@ -8,10 +8,20 @@ it is configured once per user, independent of any execution), so this does
 not reuse ``persistence_records``'s execution-shaped ownership tuple (see
 "Decisões locais" in docs/frontend/IMPLEMENTATION_PLAN.md, Fase D).
 
+This table holds only provider-level settings: ``enabled``/``base_url``/
+``key_cooldown_seconds``. Credentials live in ``provider_api_keys``
+(``agentos.persistence.postgres.provider_api_keys``), one row per key, so a
+provider can have more than one — see docs/superpowers/specs/
+2026-08-18-multi-api-key-provider-fallback-design.md. ``configure()``'s
+``api_key`` field is kept for backward compatibility: it upserts the
+position-0 ("principal") key through ``PostgresProviderApiKeyAdapter``.
+Every credential is encrypted at rest via ``ProviderSecretCipher``
+(``enc:v1:...``); a plaintext value is never stored.
+
 The API key is never included in any returned dict: ``configure``/
 ``inspect``/``revoke`` all return a small public projection
-  (``provider``/``enabled``/``secret_ref``), matching the shape
-``FakeProviderConfiguration`` already establishes in
+  (``provider``/``enabled``/``secret_ref``/``key_cooldown_seconds``),
+matching the shape ``FakeProviderConfiguration`` already establishes in
 ``tests/unit/api/test_api_asgi.py``. ``agentos.api.gateway._provider_public``
 additionally strips any field whose name contains ``api_key``/``secret``/
 ``token``/``password``/``credential`` server-side, so this is defense in
@@ -23,13 +33,6 @@ the same stored state), so there is no separate idempotency-key ledger here
 — unlike execution commands, a provider configuration has no
 non-execution-scoped idempotency store to reuse, and inventing one for a
 single-row upsert would add nothing PUT doesn't already give for free.
-
-Storing the API key in cleartext (rather than encrypted at rest) mirrors
-this codebase's only other place a provider API key is configured today —
-``agentos.bootstrap.production.ProductionSettings`` reads it from a plain
-environment variable, with no field-level encryption. No encryption-at-rest
-utility exists anywhere in this codebase to reuse or extend within Fase D's
-scope; adding one would be new infrastructure beyond what Fase D asks for.
 """
 
 from __future__ import annotations
@@ -43,6 +46,7 @@ from sqlalchemy.engine import Engine
 from agentos.api.contracts import ApplicationNotFoundError, ProviderCredentialRejectedError
 
 from .schema import provider_configurations
+from .provider_api_keys import PostgresProviderApiKeyAdapter
 from agentos.persistence.provider_secrets import ProviderSecretCipher
 from agentos.provider_catalog.models import PROVIDERS_WITH_BASE_URL, PROVIDERS_WITH_OPTIONAL_KEY
 from agentos.provider_catalog.ollama import DEFAULT_OLLAMA_BASE_URL, OllamaCatalogClient, OllamaCloudAuthenticationError, is_ollama_cloud, normalize_ollama_base_url
@@ -56,6 +60,7 @@ def _public(row) -> dict[str, object]:
         "provider": str(row["provider"]),
         "enabled": bool(row["enabled"]),
         "secret_ref": str(row["secret_ref"]),
+        "key_cooldown_seconds": int(row["key_cooldown_seconds"]),
         "catalog_refreshed_at": row.get("catalog_refreshed_at"),
         **({"base_url": row["base_url"]} if str(row["provider"]) in PROVIDERS_WITH_BASE_URL and row.get("base_url") else {}),
     }
@@ -64,10 +69,11 @@ def _public(row) -> dict[str, object]:
 class PostgresProviderConfigurationAdapter:
     """Production adapter for the ``ProviderConfigurationApplication`` port (frontend Fase D)."""
 
-    def __init__(self, engine: Engine, *, cipher: ProviderSecretCipher | None = None, installer: OmniRouteInstaller | None = None) -> None:
+    def __init__(self, engine: Engine, *, cipher: ProviderSecretCipher | None = None, installer: OmniRouteInstaller | None = None, keys: PostgresProviderApiKeyAdapter | None = None) -> None:
         self._engine = engine
         self._cipher = cipher or ProviderSecretCipher.from_environment()
         self._installer = installer or OmniRouteInstaller()
+        self._keys = keys or PostgresProviderApiKeyAdapter(engine, cipher=self._cipher)
 
     def configure(self, command: dict[str, object]) -> dict[str, object]:
         provider = str(command["provider"])
@@ -88,18 +94,45 @@ class PostgresProviderConfigurationAdapter:
                 connection.execute(
                     insert(provider_configurations).values(
                         user_id=user_id, provider=provider, enabled=enabled,
-                        api_key=None, api_key_ciphertext=self._cipher.encrypt(api_key, allow_empty=provider in PROVIDERS_WITH_OPTIONAL_KEY), base_url=base_url, secret_ref=secret_ref, catalog_refreshed_at=None, created_at=now, updated_at=now,
+                        base_url=base_url, secret_ref=secret_ref, key_cooldown_seconds=60,
+                        catalog_refreshed_at=None, created_at=now, updated_at=now,
                     )
                 )
-                row = {"provider": provider, "enabled": enabled, "base_url": base_url, "secret_ref": secret_ref, "catalog_refreshed_at": None}
+                row = {"provider": provider, "enabled": enabled, "base_url": base_url, "secret_ref": secret_ref, "key_cooldown_seconds": 60, "catalog_refreshed_at": None}
             else:
                 connection.execute(
                     update(provider_configurations).where(provider_configurations.c.id == existing["id"]).values(
-                        enabled=enabled, api_key=None, api_key_ciphertext=self._cipher.encrypt(api_key, allow_empty=provider in PROVIDERS_WITH_OPTIONAL_KEY), base_url=base_url, catalog_refreshed_at=None, updated_at=now,
+                        enabled=enabled, base_url=base_url, catalog_refreshed_at=None, updated_at=now,
                     )
                 )
-                row = {"provider": provider, "enabled": enabled, "base_url": base_url, "secret_ref": existing["secret_ref"], "catalog_refreshed_at": None}
+                row = {"provider": provider, "enabled": enabled, "base_url": base_url, "secret_ref": existing["secret_ref"], "key_cooldown_seconds": existing["key_cooldown_seconds"], "catalog_refreshed_at": None}
+        if api_key:
+            self._keys.set_primary_key({"provider": provider, "user_id": user_id, "api_key": api_key})
+        else:
+            self._keys.clear_primary_key({"provider": provider, "user_id": user_id})
         return _public(row)
+
+    def set_key_cooldown_seconds(self, command: dict[str, object]) -> dict[str, object]:
+        provider = str(command["provider"])
+        user_id = str(command["user_id"])
+        seconds = int(command["seconds"])
+        if seconds < 1:
+            raise ValueError("key cooldown must be at least one second")
+        with self._engine.begin() as connection:
+            existing = connection.execute(
+                select(provider_configurations).where(
+                    provider_configurations.c.user_id == user_id,
+                    provider_configurations.c.provider == provider,
+                )
+            ).mappings().first()
+            if existing is None:
+                raise ApplicationNotFoundError(provider)
+            connection.execute(
+                update(provider_configurations).where(provider_configurations.c.id == existing["id"]).values(
+                    key_cooldown_seconds=seconds, updated_at=datetime.now(UTC),
+                )
+            )
+        return _public({**existing, "key_cooldown_seconds": seconds})
 
     def inspect(self, query: dict[str, object]) -> dict[str, object]:
         provider = str(query["provider"])
