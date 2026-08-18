@@ -106,10 +106,15 @@ class PostgresProviderConfigurationAdapter:
                     )
                 )
                 row = {"provider": provider, "enabled": enabled, "base_url": base_url, "secret_ref": existing["secret_ref"], "key_cooldown_seconds": existing["key_cooldown_seconds"], "catalog_refreshed_at": None}
-        if api_key:
-            self._keys.set_primary_key({"provider": provider, "user_id": user_id, "api_key": api_key})
-        else:
-            self._keys.clear_primary_key({"provider": provider, "user_id": user_id})
+            # Sharing this connection/transaction with the key write below
+            # means the provider_configurations row and its principal key
+            # commit -- or fail -- together, instead of a crash between two
+            # separate transactions leaving a provider that reads as
+            # configured with no key behind it.
+            if api_key:
+                self._keys.set_primary_key({"provider": provider, "user_id": user_id, "api_key": api_key}, connection=connection)
+            else:
+                self._keys.clear_primary_key({"provider": provider, "user_id": user_id}, connection=connection)
         return _public(row)
 
     def set_key_cooldown_seconds(self, command: dict[str, object]) -> dict[str, object]:

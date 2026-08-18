@@ -48,6 +48,13 @@ class MultiKeyProviderStreamTransport:
                 for item in transport.stream(request):
                     yielded = True
                     yield item
+                # A key that just served a full turn is proof it works now,
+                # even if a past failure had it sitting in cooldown -- without
+                # this, next_available_key's own timestamp check would still
+                # let it be picked again once cooldown_until passes, but the
+                # DB row (and the UI reading it) would claim "cooldown"
+                # forever for a key quietly carrying every request.
+                self._key_pool.mark_active(credential.id)
                 return
             except ProviderKeyRejected:
                 if yielded:

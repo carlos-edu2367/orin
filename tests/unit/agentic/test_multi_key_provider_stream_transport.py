@@ -11,6 +11,7 @@ class _FakeKeyPool:
     def __init__(self, credentials: list[ProviderApiKeyCredential]) -> None:
         self._order = list(credentials)
         self.cooldowns: list[tuple[int, int]] = []
+        self.activated: list[int] = []
 
     def next_available_key(self, user_id: str, provider: str, *, exclude: frozenset[int] = frozenset()):
         for credential in self._order:
@@ -20,6 +21,9 @@ class _FakeKeyPool:
 
     def mark_cooldown(self, key_id: int, cooldown_seconds: int) -> None:
         self.cooldowns.append((key_id, cooldown_seconds))
+
+    def mark_active(self, key_id: int) -> None:
+        self.activated.append(key_id)
 
 
 class _FakeTransport:
@@ -61,6 +65,7 @@ def test_the_principal_key_is_used_when_it_succeeds() -> None:
     assert built == ["sk-principal"]
     assert items == [_text("hi")]
     assert pool.cooldowns == []
+    assert pool.activated == [1]
 
 
 def test_a_key_rejected_before_any_output_rotates_to_the_next_key() -> None:
@@ -82,6 +87,17 @@ def test_a_key_rejected_before_any_output_rotates_to_the_next_key() -> None:
     assert built == ["sk-first", "sk-second"]
     assert items == [_text("hi")]
     assert pool.cooldowns == [(1, 45)]
+    assert pool.activated == [2]
+
+
+def test_a_key_recovering_from_cooldown_is_marked_active_again_on_success() -> None:
+    key = ProviderApiKeyCredential(id=1, plaintext="sk-only")
+    pool = _FakeKeyPool([key])
+
+    transport = MultiKeyProviderStreamTransport(key_pool=pool, user_id="u", provider="openai", cooldown_seconds=60, transport_factory=lambda plaintext: _FakeTransport(items=[_text("hi")]))
+    list(transport.stream({}))
+
+    assert pool.activated == [1]
 
 
 def test_a_key_rejected_after_output_already_started_does_not_rotate() -> None:

@@ -219,5 +219,18 @@ def test_clear_primary_key_removes_only_position_zero() -> None:
     assert [row["id"] for row in remaining] == [second["id"]]
 
 
+def test_clear_primary_key_renumbers_the_remaining_keys_so_position_zero_stays_the_principal() -> None:
+    adapter = _adapter()
+    adapter.set_primary_key(_query(api_key="sk-primary"))
+    second = adapter.add_key(_query(api_key="sk-second"))
+    third = adapter.add_key(_query(api_key="sk-third"))
+
+    adapter.clear_primary_key(_query())
+
+    remaining = adapter.list_keys(_query())
+    assert [(row["id"], row["position"]) for row in remaining] == [(second["id"], 0), (third["id"], 1)]
+    assert adapter.next_available_key("user-1", "openai").plaintext == "sk-second"
+
+
 def test_clear_primary_key_on_a_provider_with_no_keys_is_a_no_op() -> None:
     _adapter().clear_primary_key(_query())

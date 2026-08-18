@@ -14,12 +14,13 @@ those fields server-side, so this is defense in depth, not the only guard.
 """
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 from sqlalchemy import delete, func, insert, select, update
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Connection, Engine
 
 from agentos.api.contracts import ApplicationNotFoundError
 
@@ -57,6 +58,10 @@ class PostgresProviderApiKeyAdapter:
     def __init__(self, engine: Engine, *, cipher: ProviderSecretCipher | None = None) -> None:
         self._engine = engine
         self._cipher = cipher or ProviderSecretCipher.from_environment()
+
+    def _scope(self, connection: Connection | None):
+        """A transaction of our own, unless the caller already opened one."""
+        return nullcontext(connection) if connection is not None else self._engine.begin()
 
     def list_keys(self, query: dict[str, object]) -> list[dict[str, object]]:
         provider, user_id = str(query["provider"]), str(query["user_id"])
@@ -122,16 +127,20 @@ class PostgresProviderApiKeyAdapter:
             if existing is None:
                 raise ApplicationNotFoundError(str(key_id))
             connection.execute(delete(provider_api_keys).where(provider_api_keys.c.id == key_id))
-            remaining = connection.execute(
-                select(provider_api_keys).where(
-                    provider_api_keys.c.user_id == user_id, provider_api_keys.c.provider == provider,
-                ).order_by(provider_api_keys.c.position)
-            ).mappings().all()
-            for new_position, row in enumerate(remaining):
-                if row["position"] != new_position:
-                    connection.execute(
-                        update(provider_api_keys).where(provider_api_keys.c.id == row["id"]).values(position=new_position)
-                    )
+            self._renumber(connection, user_id, provider)
+
+    @staticmethod
+    def _renumber(connection, user_id: str, provider: str) -> None:
+        remaining = connection.execute(
+            select(provider_api_keys).where(
+                provider_api_keys.c.user_id == user_id, provider_api_keys.c.provider == provider,
+            ).order_by(provider_api_keys.c.position)
+        ).mappings().all()
+        for new_position, row in enumerate(remaining):
+            if row["position"] != new_position:
+                connection.execute(
+                    update(provider_api_keys).where(provider_api_keys.c.id == row["id"]).values(position=new_position)
+                )
 
     def reorder_keys(self, command: dict[str, object]) -> list[dict[str, object]]:
         provider, user_id = str(command["provider"]), str(command["user_id"])
@@ -189,14 +198,19 @@ class PostgresProviderApiKeyAdapter:
                 )
             )
 
-    def set_primary_key(self, command: dict[str, object]) -> dict[str, object]:
+    def set_primary_key(self, command: dict[str, object], *, connection: Connection | None = None) -> dict[str, object]:
         """Upsert the position-0 key. The seam ``configure()``'s legacy single-key
         ``apiKey`` field targets, so ``PUT /v1/providers/{provider}`` keeps working
-        exactly as it did before this feature existed."""
+        exactly as it did before this feature existed.
+
+        Pass an open ``connection`` (already inside the caller's own
+        ``engine.begin()``) to make this write part of that same transaction
+        -- ``configure()`` does, so the provider_configurations row and its
+        principal key either both commit or neither does."""
         provider, user_id = str(command["provider"]), str(command["user_id"])
         api_key = str(command["api_key"])
         now = datetime.now(UTC)
-        with self._engine.begin() as connection:
+        with self._scope(connection) as connection:
             existing = connection.execute(
                 select(provider_api_keys).where(
                     provider_api_keys.c.user_id == user_id, provider_api_keys.c.provider == provider, provider_api_keys.c.position == 0,
@@ -222,16 +236,23 @@ class PostgresProviderApiKeyAdapter:
                 row_id = existing["id"]
         return _public({"id": row_id, "label": None, "position": 0, "status": "active", "cooldown_until": None})
 
-    def clear_primary_key(self, command: dict[str, object]) -> None:
+    def clear_primary_key(self, command: dict[str, object], *, connection: Connection | None = None) -> None:
         """Delete the position-0 key, mirroring ``configure()`` being called with
-        an empty key for a provider whose key is optional (local Ollama, OmniRoute)."""
+        an empty key for a provider whose key is optional (local Ollama, OmniRoute).
+        Renumbers what remains so position 0 is always the principal, the same
+        way ``remove_key`` does -- otherwise a fallback key could be left
+        occupying position 1 with nothing at 0.
+
+        Pass an open ``connection`` to share the caller's transaction; see
+        ``set_primary_key``."""
         provider, user_id = str(command["provider"]), str(command["user_id"])
-        with self._engine.begin() as connection:
+        with self._scope(connection) as connection:
             connection.execute(
                 delete(provider_api_keys).where(
                     provider_api_keys.c.user_id == user_id, provider_api_keys.c.provider == provider, provider_api_keys.c.position == 0,
                 )
             )
+            self._renumber(connection, user_id, provider)
 
 
 __all__ = ["PostgresProviderApiKeyAdapter", "ProviderApiKeyCredential"]
