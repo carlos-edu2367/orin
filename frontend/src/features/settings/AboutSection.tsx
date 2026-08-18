@@ -4,7 +4,13 @@ import { getInstallationStatus, installLatestRelease, removeInstalledVersion, ty
 import { SettingsSection } from './SettingsSection'
 
 export function AboutSection({ client: providedClient }: { client?: ApiClient }) {
-  const client = providedClient ?? createBrowserApiClient()
+  // createBrowserApiClient() builds a new instance every call; falling back to
+  // it inline here would give the effect below a new `client` identity on
+  // every render (its own setStatus/setError already trigger one), looping
+  // forever. The lazy useState initializer runs createBrowserApiClient() at
+  // most once, on mount, so the fallback client stays stable across renders
+  // exactly like an explicitly passed one.
+  const [client] = useState(() => providedClient ?? createBrowserApiClient())
   const [status, setStatus] = useState<InstallationStatus | null>(null)
   const [error, setError] = useState(false)
   const [busy, setBusy] = useState(false)
