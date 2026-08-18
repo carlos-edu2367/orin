@@ -1,4 +1,4 @@
-import { render, screen, within } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { describe, expect, it, vi } from 'vitest'
@@ -32,6 +32,20 @@ describe('ProviderDetail', () => {
 
     expect(fetchImpl.mock.calls.some(([requestInput]) => String(requestInput).endsWith('/models:refresh'))).toBe(true)
     expect(await within(region).findByText('cloud-only-model')).toBeInTheDocument()
+  })
+
+  it('renders the key fallback list under the provider form', async () => {
+    const fetchImpl = vi.fn<typeof fetch>((input) => {
+      const url = String(input)
+      if (url.endsWith('/keys')) return Promise.resolve(json([{ id: 1, label: 'conta free 1', position: 0, status: 'active', cooldown_until: null }]))
+      return Promise.resolve(json({ provider: 'openai', enabled: true, key_cooldown_seconds: 90 }))
+    })
+    const client = new ApiClient({ fetchImpl, maxAttempts: 1 })
+    render(<MemoryRouter><ProviderDetail provider="openai" client={client} bootstrap={{ status: 'ready', csrfToken: 'csrf' }} onClose={() => {}} /></MemoryRouter>)
+
+    expect(await screen.findByText('conta free 1')).toBeInTheDocument()
+    expect(screen.getByText('Principal')).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByLabelText('Tempo de cooldown (s)')).toHaveValue(90))
   })
 })
 
