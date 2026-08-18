@@ -31,6 +31,7 @@ from agentos.persistence.postgres.tool_activity import PostgresToolActivitySink
 from agentos.persistence.postgres.tool_invocations import PostgresToolInvocationStore
 from agentos.persistence.postgres.execution_adapters import ExecutionApplicationAdapter, ExecutionQueryAdapter
 from agentos.persistence.postgres.provider_configuration import PostgresProviderConfigurationAdapter
+from agentos.persistence.postgres.provider_api_keys import PostgresProviderApiKeyAdapter
 from agentos.persistence.provider_secrets import ProviderSecretCipher
 from agentos.persistence.postgres.provider_models import PostgresProviderCatalogRepository
 from agentos.persistence.postgres.security import PostgresSecurityService
@@ -281,6 +282,7 @@ def compose_production_services(engine: Engine, *, localhost_trust_enabled: bool
         mcp=mcp_service,
         plugins=PluginService(engine, plugin_root=orin_paths().data / "plugins", skill_library=skill_library, mcp_service=mcp_service, search_client=GithubRepositorySearchClient(), manifest_probe=GithubManifestProbe(), command_library=command_library, hook_engine=hook_engine),
         provider_configuration=PostgresProviderConfigurationAdapter(engine, cipher=provider_cipher),
+        provider_api_keys=PostgresProviderApiKeyAdapter(engine, cipher=provider_cipher),
         provider_catalog=ProviderModelCatalogService(provider_repository, {"openrouter": OpenRouterModelCatalogClient(), "omniroute": OmniRouteCatalogClient(), "ollama": OllamaCatalogClient()}),
         conversation_application=ChatApplication(PostgresChatStore(engine, PostgresAgenticActivityStore(engine, cursor_secret), command_library=command_library), ExecutionApplicationAdapter(engine)),
         projects=PostgresProjectStore(engine),
