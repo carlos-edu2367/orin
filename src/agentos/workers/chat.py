@@ -44,6 +44,7 @@ from agentos.persistence.postgres.schema import (
     provider_model_favorites,
     vision_model_selections,
 )
+from agentos.persistence.provider_secrets import ProviderSecretCipher
 from agentos.persistence.postgres.skills import PostgresSkillLibraryService
 from agentos.reading.selection import VisionModel, choose_vision_model
 from agentos.reading.vision import VisionReader
@@ -406,7 +407,7 @@ class ChatWorker:
             credential = c.execute(select(provider_configurations.c.base_url, provider_configurations.c.enabled).where(provider_configurations.c.user_id == user_id, provider_configurations.c.provider == provider)).mappings().first()
         if credential is None or not credential["enabled"]:
             raise ValueError("provider unavailable")
-        chosen = PostgresProviderApiKeyAdapter(self.store._engine).next_available_key(user_id, provider)
+        chosen = PostgresProviderApiKeyAdapter(self.store._engine, cipher=ProviderSecretCipher.from_environment(required=True)).next_available_key(user_id, provider)
         if chosen is None:
             if provider not in PROVIDERS_WITH_BASE_URL:
                 raise ValueError("provider credential is missing")
@@ -429,15 +430,21 @@ class ChatWorker:
         if config is None or not config["enabled"]:
             raise ValueError("provider unavailable")
         base_url = self._base_url_for(provider, {"base_url": config["base_url"]})
-        keys = PostgresProviderApiKeyAdapter(self.store._engine)
+        keys = PostgresProviderApiKeyAdapter(self.store._engine, cipher=ProviderSecretCipher.from_environment(required=True))
 
         def build(api_key: str) -> HTTPProviderStreamTransport:
             return HTTPProviderStreamTransport(provider=provider, base_url=base_url, api_key=api_key, model=model_id, num_ctx=num_ctx)
 
-        has_any_key = keys.next_available_key(user_id, provider) is not None
-        if not has_any_key:
-            if provider not in PROVIDERS_WITH_BASE_URL:
-                raise ValueError("provider credential is missing")
+        if provider not in PROVIDERS_WITH_BASE_URL:
+            # configure()'s validation never lets a required-key provider stay
+            # enabled with zero keys, so there is no need to spend a query
+            # confirming one exists before wrapping -- MultiKeyProviderStreamTransport
+            # already raises its own clear error if that invariant is ever violated.
+            return MultiKeyProviderStreamTransport(
+                key_pool=keys, user_id=user_id, provider=provider,
+                cooldown_seconds=int(config["key_cooldown_seconds"]), transport_factory=build,
+            )
+        if keys.next_available_key(user_id, provider) is None:
             return build("")
         return MultiKeyProviderStreamTransport(
             key_pool=keys, user_id=user_id, provider=provider,
