@@ -26,6 +26,14 @@ export type ConfigureProviderInput = {
   baseUrl?: string
 }
 
+export type ProviderApiKeyState = {
+  id: number
+  label: string | null
+  position: number
+  status: 'active' | 'cooldown'
+  cooldownUntil: string | null
+}
+
 export type ProviderModel = {
   provider: ProviderName
   model_id: string
@@ -42,6 +50,76 @@ export type ProviderModel = {
 
 function providerPath(provider: ProviderName): string {
   return `/v1/providers/${encodeURIComponent(provider)}`
+}
+
+function providerKeysPath(provider: ProviderName): string {
+  return `${providerPath(provider)}/keys`
+}
+
+export function listProviderKeys(client: ApiClient, provider: ProviderName, signal?: AbortSignal): Promise<ProviderApiKeyState[]> {
+  return client.request({
+    path: providerKeysPath(provider), signal,
+    parse: (value) => {
+      if (!Array.isArray(value)) throw invalidResponseError()
+      return value.map(parseProviderApiKeyState)
+    },
+  })
+}
+
+export function addProviderKey(client: ApiClient, provider: ProviderName, input: { apiKey: string; label?: string }, intent = client.createMutationIntent()): Promise<ProviderApiKeyState> {
+  return client.request({
+    path: providerKeysPath(provider), method: 'POST', intent,
+    body: { api_key: input.apiKey, ...(input.label ? { label: input.label } : {}) },
+    parse: parseProviderApiKeyState,
+  })
+}
+
+export function renameProviderKey(client: ApiClient, provider: ProviderName, keyId: number, label: string | null, intent = client.createMutationIntent()): Promise<ProviderApiKeyState> {
+  return client.request({
+    path: `${providerKeysPath(provider)}/${keyId}`, method: 'PATCH', intent,
+    body: { label },
+    parse: parseProviderApiKeyState,
+  })
+}
+
+export function removeProviderKey(client: ApiClient, provider: ProviderName, keyId: number, intent = client.createMutationIntent()): Promise<void> {
+  return client.request({
+    path: `${providerKeysPath(provider)}/${keyId}`, method: 'DELETE', intent,
+    parse: () => undefined,
+  })
+}
+
+export function reorderProviderKeys(client: ApiClient, provider: ProviderName, orderedIds: number[], intent = client.createMutationIntent()): Promise<ProviderApiKeyState[]> {
+  return client.request({
+    path: `${providerKeysPath(provider)}:reorder`, method: 'PUT', intent,
+    body: { ordered_ids: orderedIds },
+    parse: (value) => {
+      if (!Array.isArray(value)) throw invalidResponseError()
+      return value.map(parseProviderApiKeyState)
+    },
+  })
+}
+
+export function setProviderKeyCooldownSeconds(client: ApiClient, provider: ProviderName, seconds: number, intent = client.createMutationIntent()): Promise<ProviderPublicState> {
+  return client.request({
+    path: `${providerKeysPath(provider)}:cooldown`, method: 'PUT', intent,
+    body: { seconds },
+    parse: parseProviderPublicState,
+  })
+}
+
+function parseProviderApiKeyState(value: unknown): ProviderApiKeyState {
+  const data = record(value)
+  if (!Number.isInteger(data.id)) throw invalidResponseError()
+  if (data.status !== 'active' && data.status !== 'cooldown') throw invalidResponseError()
+  if (!Number.isInteger(data.position) || (data.position as number) < 0) throw invalidResponseError()
+  return {
+    id: data.id as number,
+    label: nullableString(data.label),
+    position: data.position as number,
+    status: data.status,
+    cooldownUntil: nullableString(data.cooldown_until),
+  }
 }
 
 export function configureProvider(
