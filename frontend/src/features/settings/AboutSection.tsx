@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { ApiClient, createBrowserApiClient } from '../../api/client'
-import { getInstallationStatus, removeInstalledVersion, type InstallationStatus } from '../../api/installation'
+import { getInstallationStatus, installLatestRelease, removeInstalledVersion, type InstallationStatus } from '../../api/installation'
 import { SettingsSection } from './SettingsSection'
 
 export function AboutSection({ client: providedClient }: { client?: ApiClient }) {
@@ -8,7 +8,8 @@ export function AboutSection({ client: providedClient }: { client?: ApiClient })
   const [status, setStatus] = useState<InstallationStatus | null>(null)
   const [error, setError] = useState(false)
   const [busy, setBusy] = useState(false)
-  const load = () => { setError(false); void getInstallationStatus(client).then(setStatus).catch(() => setError(true)) }
+  const [installState, setInstallState] = useState<'idle' | 'installing' | 'installed' | 'failed'>('idle')
+  const load = () => { setError(false); setInstallState('idle'); void getInstallationStatus(client).then(setStatus).catch(() => setError(true)) }
   useEffect(() => {
     let active = true
     getInstallationStatus(client).then((value) => { if (active) setStatus(value) }).catch(() => { if (active) setError(true) })
@@ -19,5 +20,10 @@ export function AboutSection({ client: providedClient }: { client?: ApiClient })
     setBusy(true)
     try { await removeInstalledVersion(client, version); load() } catch { setError(true) } finally { setBusy(false) }
   }
-  return <SettingsSection eyebrow="SISTEMA / INSTALAÇÃO"><section className="installation-status" aria-labelledby="about-installation-title"><div className="installation-status__heading"><div><p className="eyebrow">SOBRE</p><h2 id="about-installation-title">Estado do Orin</h2></div><button type="button" className="button button--quiet" onClick={load} disabled={busy}>Verificar release</button></div>{error && <p role="alert">Não foi possível consultar a instalação.</p>}{status && <><dl className="installation-status__summary"><div><dt>Versão atual</dt><dd><code>v{status.current_version}</code></dd></div><div><dt>Release mais recente</dt><dd>{status.latest_release ? <a href={status.latest_release.url} target="_blank" rel="noreferrer"><code>v{status.latest_release.version}</code></a> : 'Indisponível no momento'}</dd></div></dl><div className="installation-status__versions"><h3>Versões instaladas</h3>{status.installed_versions.map((item) => <div className={`installation-version${item.is_current ? ' is-current' : ''}`} key={item.version}><code>v{item.version}</code>{item.removable ? <button type="button" onClick={() => void remove(item.version)} disabled={busy}>Excluir versão antiga</button> : <span className="installation-version__protected">Protegida</span>}</div>)}</div></>}</section></SettingsSection>
+  async function install() {
+    if (busy || installState === 'installing' || !status?.latest_release) return
+    setInstallState('installing')
+    try { await installLatestRelease(client); setInstallState('installed') } catch { setInstallState('failed') }
+  }
+  return <SettingsSection eyebrow="SISTEMA / INSTALAÇÃO"><section className="installation-status" aria-labelledby="about-installation-title"><div className="installation-status__heading"><div><p className="eyebrow">SOBRE</p><h2 id="about-installation-title">Estado do Orin</h2></div><button type="button" className="button button--quiet" onClick={load} disabled={busy}>Verificar release</button></div>{error && <p role="alert">Não foi possível consultar a instalação.</p>}{status && <><dl className="installation-status__summary"><div><dt>Versão atual</dt><dd><code>v{status.current_version}</code></dd></div><div><dt>Release mais recente</dt><dd>{status.latest_release ? <a href={status.latest_release.url} target="_blank" rel="noreferrer"><code>v{status.latest_release.version}</code></a> : 'Indisponível no momento'}</dd></div></dl>{status.update_available && installState !== 'installed' && <div className="installation-status__update"><button type="button" className="button button--primary" onClick={() => void install()} disabled={installState === 'installing'}>{installState === 'installing' ? 'Instalando…' : `Instalar v${status.latest_release?.version}`}</button>{installState === 'failed' && <p role="alert">Não foi possível instalar a nova versão.</p>}</div>}{installState === 'installed' && <p role="status">Nova versão instalada. Feche e abra o Orin novamente para usá-la.</p>}<div className="installation-status__versions"><h3>Versões instaladas</h3>{status.installed_versions.map((item) => <div className={`installation-version${item.is_current ? ' is-current' : ''}`} key={item.version}><code>v{item.version}</code>{item.removable ? <button type="button" onClick={() => void remove(item.version)} disabled={busy}>Excluir versão antiga</button> : <span className="installation-version__protected">Protegida</span>}</div>)}</div></>}</section></SettingsSection>
 }

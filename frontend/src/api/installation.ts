@@ -9,6 +9,7 @@ export type InstallationStatus = {
   installed_versions: InstalledVersion[]
   latest_release: LatestRelease | null
   latest_release_error: 'unavailable' | null
+  update_available: boolean
   checked_at: string
 }
 
@@ -32,7 +33,12 @@ function parseStatus(value: unknown): InstallationStatus {
     latest_release = { version: release.version, url: release.url, ...(typeof release.published_at === 'string' ? { published_at: release.published_at } : {}) }
   }
   if (data.latest_release_error !== null && data.latest_release_error !== 'unavailable') throw invalidResponseError()
-  return { installation_kind: data.installation_kind, current_version: data.current_version, installed_versions, latest_release, latest_release_error: data.latest_release_error, checked_at: data.checked_at }
+  if (typeof data.update_available !== 'boolean') throw invalidResponseError()
+  return {
+    installation_kind: data.installation_kind, current_version: data.current_version, installed_versions,
+    latest_release, latest_release_error: data.latest_release_error, update_available: data.update_available,
+    checked_at: data.checked_at,
+  }
 }
 
 export function getInstallationStatus(client: ApiClient, signal?: AbortSignal): Promise<InstallationStatus> {
@@ -43,5 +49,12 @@ export function removeInstalledVersion(client: ApiClient, version: string, inten
   return client.request({ path: `/v1/installation/versions/${encodeURIComponent(version)}`, method: 'DELETE', intent, parse: (value) => {
     if (!value || typeof value !== 'object' || Array.isArray(value) || typeof (value as Record<string, unknown>).removed_version !== 'string') throw invalidResponseError()
     return { removed_version: (value as Record<string, unknown>).removed_version as string }
+  } })
+}
+
+export function installLatestRelease(client: ApiClient, intent = client.createMutationIntent()): Promise<{ started: boolean }> {
+  return client.request({ path: '/v1/installation/update', method: 'POST', intent, parse: (value) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value) || (value as Record<string, unknown>).started !== true) throw invalidResponseError()
+    return { started: true }
   } })
 }
