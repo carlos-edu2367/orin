@@ -1,4 +1,4 @@
-"""Read-only release state and safe cleanup for packaged installations."""
+"""Release state, install, and safe cleanup for packaged installations."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import subprocess
 import sys
 from typing import Any
 from urllib.error import URLError
@@ -94,14 +95,50 @@ def read_installation_status(profile: RuntimeProfile | None = None) -> dict[str,
     except (OSError, URLError, TimeoutError, ValueError, json.JSONDecodeError):
         latest = None
         latest_error = "unavailable"
+    update_available = False
+    if latest is not None:
+        try:
+            update_available = _version_key(latest["version"]) > _version_key(profile.version)
+        except ValueError:
+            update_available = False
     return {
         "installation_kind": profile.kind,
         "current_version": profile.version,
         "installed_versions": _installed_versions(profile),
         "latest_release": latest,
         "latest_release_error": latest_error,
+        "update_available": update_available,
         "checked_at": datetime.now(UTC).isoformat(),
     }
+
+
+def start_update(profile: RuntimeProfile | None = None) -> dict[str, Any]:
+    """Install the latest verified release side by side with the running one.
+
+    Downloads and verifies the release exactly the way ``orin update`` does
+    (``install.ps1``'s SHA-256 check against its signed manifest), but --
+    unlike ``orin update`` -- never stops the process handling this request.
+    A packaged install is versioned side by side (see this package's module
+    docstring): the new version lands in its own directory and only the
+    ``current`` pointer changes, which a process already running from the
+    old resolved path does not need to still exist for. The user still has
+    to close and reopen Orin afterward to actually run the new version --
+    the CLI's own ``orin update`` leaves that same follow-up step to the
+    user, it just also stops the old process first.
+    """
+    profile = profile or RuntimeProfile.detect()
+    if profile.kind != "installed":
+        raise ValueError("installing a release is only available for a packaged installation")
+    installer = profile.installer
+    if not installer.is_file():
+        raise ValueError(f"the release installer is missing: {installer}")
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(installer)],
+        check=False, capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError((result.stderr or result.stdout or "the installer failed").strip()[:2000])
+    return {"started": True}
 
 
 def remove_installed_version(version: str, profile: RuntimeProfile | None = None) -> dict[str, Any]:
@@ -121,4 +158,4 @@ def remove_installed_version(version: str, profile: RuntimeProfile | None = None
     return {"removed_version": version}
 
 
-__all__ = ["read_installation_status", "remove_installed_version"]
+__all__ = ["read_installation_status", "remove_installed_version", "start_update"]

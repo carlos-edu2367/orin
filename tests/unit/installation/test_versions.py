@@ -50,3 +50,61 @@ def test_development_status_does_not_advertise_removable_versions(monkeypatch: p
 
     assert status["installation_kind"] == "development"
     assert status["installed_versions"] == []
+
+
+def test_status_flags_an_update_when_the_latest_release_is_newer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    profile, _root = _profile(tmp_path, version="0.1.11")
+    monkeypatch.setattr(versions.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(versions, "_latest_release", lambda: {"version": "0.1.12", "url": "https://example.test"})
+
+    assert versions.read_installation_status(profile)["update_available"] is True
+
+
+def test_status_does_not_flag_an_update_when_already_current(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    profile, _root = _profile(tmp_path, version="0.1.12")
+    monkeypatch.setattr(versions.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(versions, "_latest_release", lambda: {"version": "0.1.12", "url": "https://example.test"})
+
+    assert versions.read_installation_status(profile)["update_available"] is False
+
+
+def test_status_does_not_flag_an_update_when_the_release_lookup_failed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    profile, _root = _profile(tmp_path, version="0.1.12")
+    monkeypatch.setattr(versions, "_latest_release", lambda: None)
+
+    assert versions.read_installation_status(profile)["update_available"] is False
+
+
+def test_start_update_runs_the_installer_and_reports_started(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    profile, _root = _profile(tmp_path)
+    installer = profile.root / "install.ps1"
+    installer.write_text("# fake installer", encoding="utf-8")
+    captured: dict[str, object] = {}
+
+    def fake_run(command, *, check, capture_output, text):
+        captured["command"] = command
+        return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    monkeypatch.setattr(versions.subprocess, "run", fake_run)
+
+    assert versions.start_update(profile) == {"started": True}
+    assert captured["command"][-1] == str(installer)
+
+
+def test_start_update_is_unavailable_outside_a_packaged_install() -> None:
+    profile = RuntimeProfile("development", Path("C:/repo"), "0.1.12", Path("C:/repo"))
+
+    with pytest.raises(ValueError, match="packaged"):
+        versions.start_update(profile)
+
+
+def test_start_update_surfaces_the_installer_stderr_on_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    profile, _root = _profile(tmp_path)
+    (profile.root / "install.ps1").write_text("# fake installer", encoding="utf-8")
+    monkeypatch.setattr(
+        versions.subprocess, "run",
+        lambda command, *, check, capture_output, text: type("Result", (), {"returncode": 1, "stdout": "", "stderr": "hash mismatch"})(),
+    )
+
+    with pytest.raises(RuntimeError, match="hash mismatch"):
+        versions.start_update(profile)

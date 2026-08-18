@@ -35,7 +35,7 @@ from agentos.provider_catalog.service import ProviderCatalogUnavailable
 from .events import CursorError, InMemoryClientEventStream
 from .security import AuthenticationError, AuthorizationError, AuthenticatedPrincipal, InMemorySecurityService, RateLimitError
 from agentos.agentic.file_preview import media_type_for, open_in_default_application
-from agentos.installation import orin_paths, read_installation_status, remove_installed_version, runtime_profile
+from agentos.installation import orin_paths, read_installation_status, remove_installed_version, runtime_profile, start_update
 from agentos.agentic.workspace import ConversationWorkspace, WorkspaceError, resolve_workspace
 from agentos.local_workspace import FolderRejected, choose_folder, inspect_folder
 from agentos.uploads.media import MAX_FILES_PER_MESSAGE, MAX_UPLOAD_BYTES, UploadRejected
@@ -1413,6 +1413,17 @@ def create_app(services: ApiServices) -> FastAPI:
         services.security.authorize(principal, action="installation.configure", resource_id=version, purpose="installation.version.remove")
         _idempotency(request)
         result = await run_in_threadpool(remove_installed_version, version, runtime_profile())
+        return JSONResponse(result)
+
+    @app.post("/v1/installation/update")
+    async def install_latest_release(request: Request) -> JSONResponse:
+        principal = principal_for(request, mutable=True)
+        services.security.authorize(principal, action="installation.configure", resource_id=None, purpose="installation.update")
+        _idempotency(request)
+        # The download + SHA-256 verify + extract this runs (agentos.installation.start_update)
+        # is real, network-bound I/O; off the event loop for the same reason the
+        # Ollama connection test above is.
+        result = await run_in_threadpool(start_update, runtime_profile())
         return JSONResponse(result)
 
     @app.get("/v1/settings/vision-model")

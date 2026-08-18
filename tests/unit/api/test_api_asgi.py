@@ -261,6 +261,24 @@ def test_installation_status_and_version_removal_use_the_local_release_boundary(
     assert removed.status_code == 200 and removed.json() == {"removed_version": "0.1.11"}
 
 
+def test_installation_update_starts_the_verified_installer(monkeypatch: pytest.MonkeyPatch) -> None:
+    from agentos.api import gateway as gateway_module
+
+    security = InMemorySecurityService()
+    security.add_pat("pat-test", AuthenticatedPrincipal("user-1", "credential-1", frozenset({"api"})))
+    profile = object()
+    received_profiles: list[object] = []
+    monkeypatch.setattr(gateway_module, "runtime_profile", lambda: profile)
+    monkeypatch.setattr(gateway_module, "start_update", lambda received: received_profiles.append(received) or {"started": True})
+    client = TestClient(create_app(ApiServices(security=security)))
+
+    response = client.post("/v1/installation/update", headers={"Authorization": "Bearer pat-test", "Idempotency-Key": "update-1"})
+
+    assert response.status_code == 200
+    assert response.json() == {"started": True}
+    assert received_profiles == [profile]
+
+
 def test_omniroute_setup_accepts_a_public_base_url_without_returning_its_key() -> None:
     class OmniRouteConfiguration(FakeProviderConfiguration):
         def configure(self, command: dict[str, object]) -> dict[str, object]:
