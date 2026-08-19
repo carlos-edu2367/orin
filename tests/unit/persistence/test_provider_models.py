@@ -6,7 +6,7 @@ from agentos.persistence.postgres.provider_models import PostgresProviderCatalog
 from agentos.persistence.postgres.provider_configuration import PostgresProviderConfigurationAdapter
 from agentos.persistence.postgres.schema import metadata, provider_api_keys, provider_configurations, provider_model_catalog, provider_model_favorites
 from agentos.persistence.provider_secrets import ProviderSecretCipher
-from agentos.provider_catalog.models import ProviderCatalogContext
+from agentos.provider_catalog.models import ProviderCatalogContext, ProviderModelRecord
 
 
 def test_catalog_rows_are_hidden_when_the_saved_url_does_not_match_the_catalog_source() -> None:
@@ -63,3 +63,29 @@ def test_catalog_rows_read_from_sqlite_restore_their_utc_timezone() -> None:
 
     assert item.refreshed_at == refreshed_at
     assert item.refreshed_at.tzinfo is UTC
+
+
+def test_custom_model_is_visible_before_refresh_and_survives_upstream_replacement() -> None:
+    engine = create_engine("sqlite://")
+    metadata.create_all(engine, tables=[provider_configurations, provider_api_keys, provider_model_catalog, provider_model_favorites])
+    cipher = ProviderSecretCipher(b"0" * 32)
+    configuration = PostgresProviderConfigurationAdapter(engine, cipher=cipher)
+    configuration.configure({"provider": "ollama", "user_id": "user-1", "enabled": True, "api_key": "cloud-key", "base_url": "https://ollama.com"})
+    repository = PostgresProviderCatalogRepository(engine, cipher=cipher)
+    context = ProviderCatalogContext("user-1", "provider.catalog.custom.add")
+    manual = ProviderModelRecord(
+        "ollama", "deepseek-v4-flash", "deepseek-v4-flash", None, (), ("text",), ("text",), None,
+        datetime(2026, 8, 19, tzinfo=UTC), is_custom=True,
+    )
+
+    repository.add_custom(context, "ollama", manual)
+    assert [item.model_id for item in repository.list(context, "ollama")] == ["deepseek-v4-flash"]
+
+    upstream = ProviderModelRecord(
+        "ollama", "deepseek-v4-flash:preview", "deepseek-v4-flash:preview", None, (), ("text",), ("text",), None,
+        datetime(2026, 8, 19, 1, tzinfo=UTC),
+    )
+    repository.replace(context, "ollama", [upstream], upstream.refreshed_at)
+    items = repository.list(context, "ollama")
+    assert {item.model_id for item in items} == {"deepseek-v4-flash", "deepseek-v4-flash:preview"}
+    assert next(item for item in items if item.model_id == "deepseek-v4-flash").is_custom is True

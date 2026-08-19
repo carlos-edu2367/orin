@@ -36,14 +36,26 @@ class PostgresProviderCatalogRepository:
     def replace(self, context: ProviderCatalogContext, provider: str, records: list[ProviderModelRecord], refreshed_at: datetime) -> None:
         now = datetime.now(UTC)
         with self._engine.begin() as connection:
-            base_url = connection.execute(select(provider_configurations.c.base_url).where(
+            configuration = connection.execute(select(
+                provider_configurations.c.enabled, provider_configurations.c.base_url,
+            ).where(
                 provider_configurations.c.user_id == context.user_id,
                 provider_configurations.c.provider == provider,
-            )).scalar_one_or_none()
+            )).mappings().first()
+            if configuration is None or configuration["enabled"] is not True:
+                raise LookupError("provider is not enabled")
+            base_url = configuration["base_url"]
+            custom_ids = set(connection.execute(select(provider_model_catalog.c.model_id).where(
+                provider_model_catalog.c.user_id == context.user_id,
+                provider_model_catalog.c.provider == provider,
+                provider_model_catalog.c.is_custom.is_(True),
+            )).scalars())
             connection.execute(delete(provider_model_catalog).where(
                 provider_model_catalog.c.user_id == context.user_id,
                 provider_model_catalog.c.provider == provider,
+                provider_model_catalog.c.is_custom.is_(False),
             ))
+            records = [record for record in records if record.model_id not in custom_ids]
             if records:
                 connection.execute(insert(provider_model_catalog), [
                     {
@@ -59,6 +71,7 @@ class PostgresProviderCatalogRepository:
                         "input_per_million": record.pricing.input_per_million if record.pricing else None,
                         "output_per_million": record.pricing.output_per_million if record.pricing else None,
                         "route_kind": record.route_kind,
+                        "is_custom": False,
                         "refreshed_at": record.refreshed_at,
                         "created_at": now,
                         "updated_at": now,
@@ -87,7 +100,10 @@ class PostgresProviderCatalogRepository:
             provider_model_catalog.c.user_id == context.user_id,
             provider_model_catalog.c.provider == provider,
             provider_configurations.c.enabled.is_(True),
-            provider_configurations.c.catalog_refreshed_at.is_not(None),
+            (
+                provider_model_catalog.c.is_custom.is_(True)
+                | provider_configurations.c.catalog_refreshed_at.is_not(None)
+            ),
             (
                 (provider_model_catalog.c.catalog_base_url == provider_configurations.c.base_url)
                 | (
@@ -114,6 +130,7 @@ class PostgresProviderCatalogRepository:
                 # domain model validates it. PostgreSQL values stay untouched.
                 refreshed_at=_utc_datetime(row["refreshed_at"]), is_favorite=row["favorite_id"] is not None,
                 route_kind=str(row.get("route_kind") or "model"),
+                is_custom=bool(row.get("is_custom")),
             )
             for row in rows
         ]
@@ -141,6 +158,65 @@ class PostgresProviderCatalogRepository:
             else:
                 connection.execute(delete(provider_model_favorites).where(predicate))
         return next(item for item in self.list(context, provider) if item.model_id == model_id)
+
+    def add_custom(self, context: ProviderCatalogContext, provider: str, record: ProviderModelRecord) -> ProviderModelRecord:
+        now = datetime.now(UTC)
+        with self._engine.begin() as connection:
+            configuration = connection.execute(select(
+                provider_configurations.c.enabled, provider_configurations.c.base_url,
+            ).where(
+                provider_configurations.c.user_id == context.user_id,
+                provider_configurations.c.provider == provider,
+            )).mappings().first()
+            if configuration is None or configuration["enabled"] is not True:
+                raise LookupError("provider is not enabled")
+            base_url = configuration["base_url"]
+            existing = connection.execute(select(provider_model_catalog.c.id).where(
+                provider_model_catalog.c.user_id == context.user_id,
+                provider_model_catalog.c.provider == provider,
+                provider_model_catalog.c.model_id == record.model_id,
+            )).scalar_one_or_none()
+            values = {
+                "catalog_base_url": base_url,
+                "display_name": record.display_name,
+                "context_window": record.context_window,
+                "capabilities": list(record.capabilities),
+                "input_modalities": list(record.input_modalities),
+                "output_modalities": list(record.output_modalities),
+                "input_per_million": None,
+                "output_per_million": None,
+                "route_kind": record.route_kind,
+                "is_custom": True,
+                "refreshed_at": record.refreshed_at,
+                "updated_at": now,
+            }
+            if existing is None:
+                connection.execute(insert(provider_model_catalog).values(
+                    user_id=context.user_id, provider=provider, model_id=record.model_id,
+                    created_at=now, **values,
+                ))
+            else:
+                connection.execute(update(provider_model_catalog).where(
+                    provider_model_catalog.c.id == existing,
+                ).values(**values))
+        return next(item for item in self.list(context, provider) if item.model_id == record.model_id)
+
+    def remove_custom(self, context: ProviderCatalogContext, provider: str, model_id: str) -> None:
+        with self._engine.begin() as connection:
+            known = connection.execute(select(provider_model_catalog.c.id).where(
+                provider_model_catalog.c.user_id == context.user_id,
+                provider_model_catalog.c.provider == provider,
+                provider_model_catalog.c.model_id == model_id,
+                provider_model_catalog.c.is_custom.is_(True),
+            )).scalar_one_or_none()
+            if known is None:
+                raise LookupError(model_id)
+            connection.execute(delete(provider_model_favorites).where(
+                provider_model_favorites.c.user_id == context.user_id,
+                provider_model_favorites.c.provider == provider,
+                provider_model_favorites.c.model_id == model_id,
+            ))
+            connection.execute(delete(provider_model_catalog).where(provider_model_catalog.c.id == known))
 
 
 def _utc_datetime(value: object) -> datetime:

@@ -41,6 +41,8 @@ class ProviderModelRecord:
     # its dynamic ``auto/*`` routes, but does not promise a combo discriminator
     # for arbitrary user-defined combo IDs, so unknown IDs remain ``model``.
     route_kind: str = "model"
+    # Entered by the owner instead of discovered from the provider catalog.
+    is_custom: bool = False
 
     def __post_init__(self) -> None:
         for name, value in (("provider", self.provider), ("model_id", self.model_id), ("display_name", self.display_name)):

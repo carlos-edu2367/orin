@@ -61,6 +61,25 @@ class ProviderModelCatalogService:
             raise LookupError("model_id is required")
         return self._repository.set_favorite(context, _provider(provider), model_id, favorite)
 
+    def add_custom(self, context: ProviderCatalogContext, provider: str, model_id: str, display_name: str | None = None) -> ProviderModelRecord:
+        normalized_provider = _provider(provider)
+        normalized_id = _bounded_text(model_id, "model_id", 512)
+        normalized_name = _bounded_text(display_name, "display_name", 512) if display_name is not None else normalized_id
+        return self._repository.add_custom(
+            context,
+            normalized_provider,
+            ProviderModelRecord(
+                provider=normalized_provider, model_id=normalized_id, display_name=normalized_name,
+                context_window=None, capabilities=(), input_modalities=("text",), output_modalities=("text",),
+                pricing=None, refreshed_at=self._now(), is_custom=True,
+            ),
+        )
+
+    def remove_custom(self, context: ProviderCatalogContext, provider: str, model_id: str) -> None:
+        if not isinstance(model_id, str) or not model_id.strip():
+            raise LookupError("model_id is required")
+        self._repository.remove_custom(context, _provider(provider), model_id.strip())
+
 
 def _provider(value: str) -> str:
     normalized = value.strip().lower()
@@ -143,6 +162,13 @@ def _list(value: object) -> list[object]:
 
 def _text(value: object) -> str | None:
     return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _bounded_text(value: object, name: str, maximum: int) -> str:
+    text = _text(value)
+    if text is None or len(text) > maximum:
+        raise ValueError(f"{name} must be a bounded non-blank string")
+    return text
 
 
 def _modalities(value: object) -> tuple[str, ...]:

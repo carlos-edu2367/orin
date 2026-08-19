@@ -4,8 +4,8 @@ import { ApiClient, createBrowserApiClient, type MutationIntent } from '../../ap
 import { readBrowserSessionBootstrap, type BrowserSessionBootstrap } from '../../api/browserSession'
 import { ApiError } from '../../api/errors'
 import {
-  configureProvider, getOmniRouteInstallationStatus, inspectProvider, installOmniRoute, listProviderModels,
-  refreshProviderModels, revokeProvider, setProviderModelFavorite, testOllamaConnection, testOmniRouteConnection,
+  addProviderCustomModel, configureProvider, getOmniRouteInstallationStatus, inspectProvider, installOmniRoute, listProviderModels,
+  refreshProviderModels, removeProviderCustomModel, revokeProvider, setProviderModelFavorite, testOllamaConnection, testOmniRouteConnection,
   type ProviderModel, type ProviderName, type ProviderPublicState,
 } from '../../api/providers'
 
@@ -13,7 +13,7 @@ export type ProviderLoadState =
   | { status: 'loading' }
   | { status: 'loaded'; state: ProviderPublicState }
   | { status: 'unavailable'; error: ApiError }
-export type ProviderAction = 'configure' | 'revoke' | 'refresh' | 'test' | 'install' | 'favorite' | null
+export type ProviderAction = 'configure' | 'revoke' | 'refresh' | 'test' | 'install' | 'favorite' | 'custom-model' | null
 export type ProviderActionState = { pending: boolean; error: ApiError | null; kind: ProviderAction }
 
 export type ProviderState = {
@@ -39,6 +39,8 @@ export type ProviderState = {
   refreshModels: () => Promise<void>
   loadModels: () => Promise<void>
   setFavorite: (model: ProviderModel) => Promise<void>
+  addCustomModel: (modelId: string) => Promise<boolean>
+  removeCustomModel: (modelId: string) => Promise<boolean>
   testConnection: () => Promise<void>
   install: () => Promise<void>
 }
@@ -147,6 +149,32 @@ export function useProviderState(client: ApiClient = createBrowserApiClient(), p
     } catch (error) { setAction({ pending: false, error: toApiError(error), kind: 'favorite' }) }
   }
 
+  async function addCustomModel(modelId: string): Promise<boolean> {
+    if (action.pending || !canRevoke || bootstrap.status === 'missing_csrf') return false
+    setAction({ pending: true, error: null, kind: 'custom-model' })
+    try {
+      const key = `custom-model:add:${modelId}`
+      await addProviderCustomModel(client, provider, modelId, undefined, intentFor(key))
+      intents.current.delete(key)
+      await loadModels()
+      setAction({ pending: false, error: null, kind: null })
+      return true
+    } catch (error) { setAction({ pending: false, error: toApiError(error), kind: 'custom-model' }); return false }
+  }
+
+  async function removeCustomModel(modelId: string): Promise<boolean> {
+    if (action.pending || !canRevoke || bootstrap.status === 'missing_csrf') return false
+    setAction({ pending: true, error: null, kind: 'custom-model' })
+    try {
+      const key = `custom-model:remove:${modelId}`
+      await removeProviderCustomModel(client, provider, modelId, intentFor(key))
+      intents.current.delete(key)
+      await loadModels()
+      setAction({ pending: false, error: null, kind: null })
+      return true
+    } catch (error) { setAction({ pending: false, error: toApiError(error), kind: 'custom-model' }); return false }
+  }
+
   async function testConnection() {
     if (action.pending || bootstrap.status === 'missing_csrf') return
     setAction({ pending: true, error: null, kind: 'test' })
@@ -161,7 +189,7 @@ export function useProviderState(client: ApiClient = createBrowserApiClient(), p
     catch (error) { setAction({ pending: false, error: toApiError(error), kind: 'install' }) }
   }
 
-  return { load, action, apiKey, setApiKey, baseUrl, setBaseUrl, enabled, setEnabled, ollamaMode, setOllamaMode, connection, installed, models, catalog, catalogLoading, canRevoke, requiresApiKey, configure, revoke, refreshModels, loadModels, setFavorite, testConnection, install }
+  return { load, action, apiKey, setApiKey, baseUrl, setBaseUrl, enabled, setEnabled, ollamaMode, setOllamaMode, connection, installed, models, catalog, catalogLoading, canRevoke, requiresApiKey, configure, revoke, refreshModels, loadModels, setFavorite, addCustomModel, removeCustomModel, testConnection, install }
 }
 
 export function toApiError(error: unknown): ApiError {

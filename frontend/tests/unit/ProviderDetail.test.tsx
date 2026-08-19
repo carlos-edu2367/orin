@@ -34,6 +34,33 @@ describe('ProviderDetail', () => {
     expect(await within(region).findByText('cloud-only-model')).toBeInTheDocument()
   })
 
+  it('registers a model manually and reloads it into the authorized catalog', async () => {
+    let added = false
+    const fetchImpl = vi.fn<typeof fetch>((input, init) => {
+      const url = String(input)
+      if (url.endsWith('/models') && init?.method === 'POST') {
+        added = true
+        return Promise.resolve(json({ ...model(), provider: 'openai', model_id: 'deepseek-v4-flash', display_name: 'deepseek-v4-flash', is_custom: true }))
+      }
+      if (url.endsWith('/models') && init?.method === 'GET') {
+        return Promise.resolve(json({ items: added ? [{ ...model(), provider: 'openai', model_id: 'deepseek-v4-flash', display_name: 'deepseek-v4-flash', is_custom: true }] : [] }))
+      }
+      if (init?.method === 'GET') return Promise.resolve(json({ provider: 'openai', enabled: true }))
+      return Promise.resolve(json({}))
+    })
+    const client = new ApiClient({ fetchImpl, csrfToken: 'csrf-test', maxAttempts: 1, createIdempotencyKey: () => 'intent-test' })
+    const user = userEvent.setup()
+    render(<MemoryRouter><ProviderDetail provider="openai" client={client} bootstrap={{ status: 'ready', csrfToken: 'csrf-test' }} onClose={() => {}} /></MemoryRouter>)
+
+    const region = await screen.findByRole('region', { name: 'OpenAI' })
+    await user.type(within(region).getByLabelText('Adicionar modelo manualmente'), 'deepseek-v4-flash')
+    await user.click(within(region).getByRole('button', { name: 'Adicionar modelo' }))
+
+    expect((await within(region).findAllByText('deepseek-v4-flash')).length).toBeGreaterThan(0)
+    const request = fetchImpl.mock.calls.find(([input, init]) => String(input).endsWith('/models') && init?.method === 'POST')
+    expect(JSON.parse(String(request?.[1]?.body))).toEqual({ model_id: 'deepseek-v4-flash' })
+  })
+
   it('renders the key fallback list under the provider form', async () => {
     const fetchImpl = vi.fn<typeof fetch>((input) => {
       const url = String(input)

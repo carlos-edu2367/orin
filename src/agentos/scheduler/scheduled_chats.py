@@ -150,10 +150,26 @@ class ScheduledChatService:
             else:
                 workspace_id = None
             # Do not allow a stale or forged UI model selection to persist.
-            model = connection.execute(select(provider_model_catalog.c.id).where(
+            model = connection.execute(select(provider_model_catalog.c.id).join(
+                provider_configurations,
+                (provider_configurations.c.user_id == provider_model_catalog.c.user_id)
+                & (provider_configurations.c.provider == provider_model_catalog.c.provider),
+            ).where(
                 provider_model_catalog.c.user_id == user_id,
                 provider_model_catalog.c.provider == request.provider,
                 provider_model_catalog.c.model_id == request.model_id,
+                provider_configurations.c.enabled.is_(True),
+                (
+                    provider_model_catalog.c.is_custom.is_(True)
+                    | provider_configurations.c.catalog_refreshed_at.is_not(None)
+                ),
+                (
+                    (provider_model_catalog.c.catalog_base_url == provider_configurations.c.base_url)
+                    | (
+                        provider_model_catalog.c.catalog_base_url.is_(None)
+                        & provider_configurations.c.base_url.is_(None)
+                    )
+                ),
             )).scalar_one_or_none()
             if model is None:
                 raise ValueError("model is not authorized")

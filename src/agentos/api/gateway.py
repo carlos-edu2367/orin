@@ -123,6 +123,11 @@ class ProviderKeyCooldownRequest(_RequestModel):
     seconds: int = Field(ge=1, le=86400)
 
 
+class ProviderCustomModelRequest(_RequestModel):
+    model_id: str = Field(min_length=1, max_length=512)
+    display_name: str | None = Field(default=None, min_length=1, max_length=512)
+
+
 class ConversationSelectionRequest(_RequestModel):
     provider: str = Field(min_length=1, max_length=32)
     model_id: str = Field(min_length=1, max_length=512)
@@ -1469,6 +1474,31 @@ def create_app(services: ApiServices) -> FastAPI:
         refreshed_at = public_items[0]["refreshed_at"] if public_items else None
         return JSONResponse({"items": public_items, "refreshed_at": refreshed_at})
 
+    @app.post("/v1/providers/{provider}/models", status_code=201)
+    async def add_provider_custom_model(provider: str, payload: ProviderCustomModelRequest, request: Request) -> JSONResponse:
+        provider_name = _provider_name(provider)
+        principal = principal_for(request, mutable=True)
+        services.security.check_rate_limit(principal, action="provider.catalog.custom.add", origin=request.headers.get("origin"))
+        services.security.authorize(principal, action="provider.catalog.custom.add", resource_id=provider_name, purpose="provider.catalog.custom.add")
+        _idempotency(request)
+        result = _require_port(services.provider_catalog).add_custom(
+            ProviderCatalogContext(principal.user_id, "provider.catalog.custom.add"), provider_name,
+            payload.model_id, payload.display_name,
+        )
+        return JSONResponse(_catalog_model_public(result), status_code=201)
+
+    @app.delete("/v1/providers/{provider}/custom-models/{model_id:path}", status_code=204)
+    async def remove_provider_custom_model(provider: str, model_id: str, request: Request) -> JSONResponse:
+        provider_name = _provider_name(provider)
+        principal = principal_for(request, mutable=True)
+        services.security.check_rate_limit(principal, action="provider.catalog.custom.remove", origin=request.headers.get("origin"))
+        services.security.authorize(principal, action="provider.catalog.custom.remove", resource_id=provider_name, purpose="provider.catalog.custom.remove")
+        _idempotency(request)
+        _require_port(services.provider_catalog).remove_custom(
+            ProviderCatalogContext(principal.user_id, "provider.catalog.custom.remove"), provider_name, model_id,
+        )
+        return JSONResponse(status_code=204, content=None)
+
     @app.put("/v1/providers/{provider}/favorites/{model_id:path}")
     async def favorite_provider_model(provider: str, model_id: str, request: Request) -> JSONResponse:
         return _set_provider_favorite(provider, model_id, True, request)
@@ -1644,7 +1674,7 @@ def _catalog_model_public(value: object) -> dict[str, object]:
         "provider": data.get("provider"), "model_id": data.get("model_id"), "display_name": data.get("display_name"),
         "context_window": data.get("context_window"), "capabilities": data.get("capabilities", []),
         "input_modalities": data.get("input_modalities", []), "output_modalities": data.get("output_modalities", []),
-        "pricing": public_pricing, "is_favorite": bool(data.get("is_favorite")),
+        "pricing": public_pricing, "is_favorite": bool(data.get("is_favorite")), "is_custom": bool(data.get("is_custom")),
         "refreshed_at": refreshed_at.isoformat() if isinstance(refreshed_at, datetime) else None,
         "route_kind": data.get("route_kind") if data.get("route_kind") in {"model", "auto"} else "model",
     }

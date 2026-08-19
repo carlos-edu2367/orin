@@ -328,6 +328,11 @@ h1 { margin: 0; color: var(--orin-text); font-size: clamp(42px, 6vw, 76px); font
 .provider-panel__catalog li > div { display: grid; gap: 4px; min-width: 0; }
 .provider-panel__catalog li strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .provider-panel__catalog li code { width: fit-content; max-width: 100%; overflow: hidden; text-overflow: ellipsis; padding: 2px 5px; border-radius: 5px; background: rgb(var(--orin-text-rgb) / .07); color: rgb(var(--orin-text-rgb) / .48); font: 10px var(--orin-mono); }
+.provider-panel__custom-model { display: flex; align-items: end; gap: 9px; margin-top: 14px; }
+.provider-panel__custom-model label { display: grid; flex: 1; gap: 6px; color: rgb(var(--orin-text-rgb) / .45); font-size: 10px; }
+.provider-panel__custom-model input { min-width: 0; padding: 9px 10px; border: 1px solid rgb(var(--orin-text-rgb) / .12); border-radius: 8px; background: rgb(var(--orin-text-rgb) / .03); color: var(--orin-text); font: 12px var(--orin-mono); }
+.provider-panel__model-badge { margin-left: 7px; color: var(--orin-accent); font-size: 10px; }
+.provider-panel__model-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
 
 .ollama-flow { gap: 14px; }
 .ollama-flow__overview { grid-template-columns: minmax(0, 1fr) auto; padding: 18px 20px; }
@@ -384,6 +389,7 @@ h1 { margin: 0; color: var(--orin-text); font-size: clamp(42px, 6vw, 76px); font
   .ollama-flow__actions, .provider-panel__actions { justify-content: stretch; flex-direction: column; }
   .ollama-flow__actions .button, .provider-panel__actions .button { width: 100%; }
   .provider-key-list__fields, .provider-key-list__cooldown { grid-template-columns: 1fr; }
+  .provider-panel__custom-model { align-items: stretch; flex-direction: column; }
   .provider-key-list__cooldown-controls { align-items: stretch; flex-direction: column; }
   .provider-key-list__cooldown-controls input { width: 100%; }
   .provider-key-list__cooldown-controls .button { width: 100%; }

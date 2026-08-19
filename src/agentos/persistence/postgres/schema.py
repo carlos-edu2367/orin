@@ -442,6 +442,7 @@ provider_model_catalog = Table(
     Column("input_per_million", String(64), nullable=True),
     Column("output_per_million", String(64), nullable=True),
     Column("route_kind", String(32), nullable=False, server_default="model"),
+    Column("is_custom", Boolean, nullable=False, server_default="0"),
     Column("refreshed_at", DateTime(timezone=True), nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),

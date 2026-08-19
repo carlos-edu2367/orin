@@ -44,6 +44,7 @@ export type ProviderModel = {
   output_modalities: string[]
   pricing: { input_per_million: string | null; output_per_million: string | null } | null
   is_favorite: boolean
+  is_custom: boolean
   refreshed_at: string | null
   route_kind: 'model' | 'auto'
 }
@@ -269,6 +270,27 @@ export function setProviderModelFavorite(client: ApiClient, provider: ProviderNa
   })
 }
 
+export function addProviderCustomModel(
+  client: ApiClient,
+  provider: ProviderName,
+  modelId: string,
+  displayName?: string,
+  intent = client.createMutationIntent(),
+): Promise<ProviderModel> {
+  return client.request({
+    path: `${providerPath(provider)}/models`, method: 'POST', intent,
+    body: { model_id: modelId, ...(displayName ? { display_name: displayName } : {}) },
+    parse: parseProviderModel,
+  })
+}
+
+export function removeProviderCustomModel(client: ApiClient, provider: ProviderName, modelId: string, intent = client.createMutationIntent()): Promise<void> {
+  return client.request({
+    path: `${providerPath(provider)}/custom-models/${encodeURIComponent(modelId)}`,
+    method: 'DELETE', intent, parse: () => undefined,
+  })
+}
+
 /**
  * The model chosen to perform visual reading (`src/agentos/reading/selection.py`)
  * when the turn's own model cannot see an attachment. `mode: 'automatic'` means
@@ -336,6 +358,7 @@ function parseProviderModel(value: unknown): ProviderModel {
     input_modalities: stringArray(data.input_modalities),
     output_modalities: stringArray(data.output_modalities),
     pricing: parsePricing(data.pricing), is_favorite: data.is_favorite === true,
+    is_custom: data.is_custom === true,
     refreshed_at: nullableString(data.refreshed_at),
     route_kind: data.route_kind === 'auto' ? 'auto' : 'model',
   }

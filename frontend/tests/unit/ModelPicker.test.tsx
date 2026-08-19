@@ -9,7 +9,7 @@ function model(overrides: Partial<ProviderModel>): ProviderModel {
   return {
     provider: 'ollama', model_id: 'm', display_name: 'M', context_window: 8192,
     capabilities: ['completion', 'tools'], input_modalities: ['text'], output_modalities: ['text'],
-    pricing: null, is_favorite: false, refreshed_at: null, route_kind: 'model', ...overrides,
+    pricing: null, is_favorite: false, is_custom: false, refreshed_at: null, route_kind: 'model', ...overrides,
   }
 }
 

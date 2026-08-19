@@ -71,6 +71,20 @@ class FakeProviderCatalog:
             "refreshed_at": datetime(2026, 8, 10, tzinfo=UTC), "is_favorite": favorite,
         }
 
+    def add_custom(self, context, provider: str, model_id: str, display_name: str | None = None):
+        assert context.user_id == "user-1"
+        return {
+            "provider": provider, "model_id": model_id, "display_name": display_name or model_id,
+            "context_window": None, "capabilities": (), "input_modalities": ("text",),
+            "output_modalities": ("text",), "pricing": None,
+            "refreshed_at": datetime(2026, 8, 10, tzinfo=UTC), "is_favorite": False, "is_custom": True,
+        }
+
+    def remove_custom(self, context, provider: str, model_id: str):
+        assert context.user_id == "user-1"
+        assert provider == "openrouter"
+        assert model_id == "custom/model"
+
 
 class FakeAgentRuntimeSettings:
     def __init__(self) -> None:
@@ -594,6 +608,21 @@ def test_provider_favorite_requires_an_authorized_catalog_identity() -> None:
 
     assert favorited.status_code == 200 and favorited.json()["is_favorite"] is True
     assert unfavorited.status_code == 200 and unfavorited.json()["is_favorite"] is False
+
+
+def test_provider_custom_model_routes_are_authenticated_and_sanitized() -> None:
+    security = InMemorySecurityService()
+    security.add_pat("pat-test", AuthenticatedPrincipal("user-1", "credential-1", frozenset({"api"})))
+    app = create_app(ApiServices(security=security, execution_application=FakeExecutionApplication(), provider_catalog=FakeProviderCatalog()))
+    client = TestClient(app)
+    headers = {"Authorization": "Bearer pat-test", "Idempotency-Key": "custom-model-1"}
+
+    added = client.post("/v1/providers/openrouter/models", headers=headers, json={"model_id": "custom/model"})
+    removed = client.delete("/v1/providers/openrouter/custom-models/custom%2Fmodel", headers={**headers, "Idempotency-Key": "custom-model-2"})
+
+    assert added.status_code == 201
+    assert added.json()["is_custom"] is True
+    assert removed.status_code == 204
 
 
 def test_conversation_endpoint_accepts_message_and_selection_without_returning_task_reference() -> None:

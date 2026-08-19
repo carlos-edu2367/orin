@@ -1,4 +1,4 @@
-import { useEffect, useState, type CSSProperties } from 'react'
+import { useEffect, useState, type CSSProperties, type FormEvent } from 'react'
 import type { ApiClient } from '../../api/client'
 import { readBrowserSessionBootstrap, type BrowserSessionBootstrap } from '../../api/browserSession'
 import { isAuthenticationError, isCsrfAuthorizationError } from '../../api/errors'
@@ -37,9 +37,16 @@ export function ProviderDetail({ provider, client, bootstrap, onClose }: { provi
   }
   const brand = providerBrand(provider)
   const [omniOpen, setOmniOpen] = useState(false)
+  const [manualModelId, setManualModelId] = useState('')
   const title = brand.label
   function onRevoke() {
     if (window.confirm(`Revogar o acesso de ${brand.label}?`)) void state.revoke()
+  }
+  async function addManualModel(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    const modelId = manualModelId.trim()
+    if (!modelId) return
+    if (await state.addCustomModel(modelId)) setManualModelId('')
   }
   return <SettingsDrawer title={title} onClose={onClose}>
     <div className="provider-detail__identity"><span className="provider-card__mark" style={{ '--card-accent': brand.accent } as CSSProperties} aria-hidden="true" dangerouslySetInnerHTML={{ __html: brand.mark }} /><div><p className="eyebrow">PROVIDER / CONEXÃO</p><p className="provider-detail__state" role="status">{describeState(state.load)}</p></div></div>
@@ -58,7 +65,7 @@ export function ProviderDetail({ provider, client, bootstrap, onClose }: { provi
       onCooldownSecondsChange={(seconds) => void saveCooldownSeconds(seconds)}
     />
     {cooldownError && <p role="alert">Não foi possível salvar o tempo de cooldown.</p>}
-    {state.canRevoke && <section className="provider-panel__catalog" aria-label={`Modelos de ${title}`}><div className="provider-panel__section-heading"><div><p className="eyebrow">CATÁLOGO</p><h3>Modelos disponíveis</h3></div><span>Atualizado sob demanda</span></div><div className="provider-panel__catalog-actions">{(provider === 'omniroute' || provider === 'ollama') && <button type="button" className="button button--secondary" disabled={state.action.pending || session.status === 'missing_csrf'} onClick={() => void state.refreshModels()}>{state.action.pending && state.action.kind === 'refresh' ? 'Atualizando…' : 'Atualizar catálogo'}</button>}<button type="button" className="button button--secondary" onClick={() => void state.loadModels()} disabled={state.catalogLoading}>{state.catalogLoading ? 'Carregando modelos' : 'Ver modelos autorizados'}</button></div>{state.models.length > 0 && <ul>{state.models.map((model) => <li key={model.model_id}><div><strong>{model.display_name}</strong><code>{model.model_id}</code></div><button type="button" className="button button--secondary" onClick={() => void state.setFavorite(model)} disabled={state.action.pending || session.status === 'missing_csrf'}>{model.is_favorite ? 'Remover favorito' : 'Favoritar'}</button></li>)}</ul>}{state.catalog.error && <p role="alert">Não foi possível carregar o catálogo.</p>}{state.catalog.loaded && !state.catalog.error && state.models.length === 0 && <p role="status">Nenhum modelo no catálogo. Use "Atualizar catálogo" para buscá-los do provider.</p>}</section>}
+    {state.canRevoke && <section className="provider-panel__catalog" aria-label={`Modelos de ${title}`}><div className="provider-panel__section-heading"><div><p className="eyebrow">CATÁLOGO</p><h3>Modelos disponíveis</h3></div><span>Atualizado sob demanda</span></div><div className="provider-panel__catalog-actions">{(provider === 'omniroute' || provider === 'ollama') && <button type="button" className="button button--secondary" disabled={state.action.pending || session.status === 'missing_csrf'} onClick={() => void state.refreshModels()}>{state.action.pending && state.action.kind === 'refresh' ? 'Atualizando…' : 'Atualizar catálogo'}</button>}<button type="button" className="button button--secondary" onClick={() => void state.loadModels()} disabled={state.catalogLoading}>{state.catalogLoading ? 'Carregando modelos' : 'Ver modelos autorizados'}</button></div><form className="provider-panel__custom-model" onSubmit={(event) => void addManualModel(event)}><label htmlFor={`${provider}-custom-model`}>Adicionar modelo manualmente<input id={`${provider}-custom-model`} value={manualModelId} onChange={(event) => setManualModelId(event.target.value)} placeholder="Ex.: deepseek-v4-flash" /></label><button type="submit" className="button button--secondary" disabled={state.action.pending || !manualModelId.trim() || session.status === 'missing_csrf'}>Adicionar modelo</button></form>{state.models.length > 0 && <ul>{state.models.map((model) => <li key={model.model_id}><div><strong>{model.display_name}</strong>{model.is_custom && <span className="provider-panel__model-badge">Manual</span>}<code>{model.model_id}</code></div><div className="provider-panel__model-actions"><button type="button" className="button button--secondary" onClick={() => void state.setFavorite(model)} disabled={state.action.pending || session.status === 'missing_csrf'}>{model.is_favorite ? 'Remover favorito' : 'Favoritar'}</button>{model.is_custom && <button type="button" className="button button--secondary button--danger" onClick={() => { if (window.confirm(`Remover o modelo ${model.model_id}?`)) void state.removeCustomModel(model.model_id) }} disabled={state.action.pending || session.status === 'missing_csrf'}>Remover modelo</button>}</div></li>)}</ul>}{state.catalog.error && <p role="alert">Não foi possível carregar o catálogo.</p>}{state.catalog.loaded && !state.catalog.error && state.models.length === 0 && <p role="status">Nenhum modelo no catálogo. Use "Atualizar catálogo" para buscá-los do provider.</p>}</section>}
     {state.action.error && <div className="provider-panel__error" role="alert"><div><strong>Não foi possível concluir a ação</strong><p>{providerErrorMessage(state.action.error)}{state.action.error.retryAfter !== null && ` Tente novamente em ${state.action.error.retryAfter}s.`}</p></div></div>}
   </SettingsDrawer>
 }
