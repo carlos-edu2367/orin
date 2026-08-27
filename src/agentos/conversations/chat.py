@@ -292,7 +292,6 @@ class PostgresChatStore:
             if conversation_id is None:
                 conversation_id = new_conversation_id or _id("chat")
                 if project_id is not None:
-                    from agentos.persistence.postgres.schema import projects
                     project = c.execute(select(projects.c.project_id, projects.c.workspace_id).where(projects.c.project_id == project_id, projects.c.user_id == user_id, projects.c.archived_at.is_(None))).mappings().first()
                     if project is None: raise ApplicationNotFoundError(project_id)
                     workspace_id = str(project["workspace_id"]) if project["workspace_id"] is not None else workspace_id

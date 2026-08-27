@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-from sqlalchemy import create_engine, select
+from datetime import UTC, datetime
+
+from sqlalchemy import create_engine, insert, select
 
 from agentos.agentic.events import AgentActivityEventType
 from agentos.conversations.chat import PostgresChatStore
 from agentos.persistence.postgres.agentic_activity import PostgresAgenticActivityStore
 from agentos.persistence.postgres.conversation_agents import ConversationAgentStore
-from agentos.persistence.postgres.schema import conversation_messages, conversation_turns, metadata
+from agentos.persistence.postgres.schema import conversation_messages, conversation_turns, metadata, projects
 from agentos.plugins.command_library import CommandLibrary
 from agentos.plugins.models import CommandContribution
 
@@ -329,3 +331,31 @@ def test_a_follow_up_message_closes_a_waiting_user_turn() -> None:
     assert follow_up.state == "queued"
     assert snapshot["turns"][0]["state"] == "completed"
     assert snapshot["state"] == "queued"
+
+
+def test_a_follow_up_message_in_a_project_queues_a_new_turn() -> None:
+    engine = create_engine("sqlite://", future=True)
+    metadata.create_all(engine)
+    store = PostgresChatStore(engine)
+    now = datetime.now(UTC)
+    with engine.begin() as connection:
+        connection.execute(insert(projects).values(
+            project_id="project-1", user_id="user-1", workspace_id="workspace-1",
+            name="Projeto", description=None, created_at=now, updated_at=now, archived_at=None,
+        ))
+
+    first = store.create(
+        user_id="user-1", project_id="project-1", message="Leia o arquivo.",
+        provider="ollama", model_id="model-a", idempotency_key="project-request-1",
+    )
+    follow_up = store.create(
+        user_id="user-1", conversation_id=first.conversation_id, message="Continue.",
+        provider="", model_id="", idempotency_key="project-request-2",
+    )
+
+    assert follow_up.state == "queued"
+    with engine.connect() as connection:
+        execution_id = connection.execute(
+            select(conversation_turns.c.execution_id).where(conversation_turns.c.turn_id == follow_up.turn_id)
+        ).scalar_one()
+    assert execution_id
