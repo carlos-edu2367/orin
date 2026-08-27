@@ -1,0 +1,8 @@
+# Criação atômica de chat e Execution — 2026-08-26
+
+- `PostgresChatStore.create()` agora cria a conversa, mensagens, turno, dispatch, `Execution` canônica e outbox na mesma transação. `ChatApplication` manteve o parâmetro `executions` apenas para compatibilidade de chamadas, mas não faz mais projeção best-effort depois do commit.
+- `PostgresTransactionalPersistence` aceita uma `Connection` externa e usa savepoint; isso permite que `ExecutionApplicationAdapter` participe da transação da conversa sem commit independente. O fallback estreito para `persistence_clock` inicializa o singleton somente quando uma fixture/local installation ainda não o possui; migrations continuam sendo a forma normal de seed.
+- `ChatWorker` ainda usa `AgenticTurnRuntime`, mas as transições iniciais `STARTING` e `RUNNING` deixaram de ser silenciosamente descartáveis: se não puder iniciar a `Execution` canônica, o provider não é chamado e o turno falha com `execution_lifecycle_unavailable`.
+- `ChatApplication.cancel()` agora transiciona primeiro todas as `Execution` canônicas ativas para `CANCELLED`, usando versão otimista e chave idempotente por turn; somente depois atualiza a projeção de conversa. Em conflito com o worker, a chamada falha em vez de produzir um cancelamento somente na conversa.
+- Cobertura em 2026-08-26: `137 passed` para conversations/worker/chat/persistence/execution e `15 passed` para migration/schema/contracts. O teste de chat prova que uma falha após a escrita da Execution reverte tanto o transcript quanto a Execution.
+- Próximo passo do plano: substituir `conversation_dispatches` por dispatch com lease/fencing e integrar journal de efeitos/checkpoints persistentes antes de mover o loop completo para `RuntimeService`.

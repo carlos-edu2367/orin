@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 from typing import Callable
 
 from sqlalchemy import select
@@ -20,7 +21,7 @@ from agentos.persistence.postgres.provider_api_keys import PostgresProviderApiKe
 from agentos.provider_catalog.models import PROVIDERS_WITH_BASE_URL
 from agentos.provider_catalog.ollama import DEFAULT_OLLAMA_BASE_URL, normalize_ollama_base_url
 from agentos.provider_catalog.omniroute import DEFAULT_OMNIROUTE_BASE_URL, normalize_omniroute_base_url
-from agentos.agentic.runtime import AgenticLimits, AgenticTurnRuntime
+from agentos.agentic.runtime import AgenticLimits, AgenticRunResult, AgenticTurnRuntime
 from agentos.agentic.settings import AgentRuntimeSettingsStore
 from agentos.agentic.session import TurnSession, build_retrieval_for_turn, resolve_effective_workspace_id
 from agentos.agentic.browser_tools import ConversationBrowserRegistry, browser_capability_from_environment, conversation_browser_for
@@ -37,6 +38,33 @@ from agentos.persistence.postgres.agent_memory import PostgresAgentMemoryStore
 from agentos.persistence.postgres.agentic_activity import PostgresAgenticActivityStore
 from agentos.persistence.postgres.conversation_agents import ConversationAgentStore
 from agentos.persistence.postgres.execution_adapters import ExecutionApplicationAdapter, ExecutionQueryAdapter
+from agentos.persistence.postgres.execution_journal import PostgresExecutionJournal
+from agentos.execution.journal import (
+    ExecutionCheckpoint,
+    ExecutionEffect,
+    ExecutionEffectKind,
+    ExecutionEffectRetryability,
+    ExecutionEffectState,
+    ExecutionJournalScope,
+)
+from agentos.execution.models import CancellationReason, CancellationReasonCode, ExecutionState
+from agentos.runtime.models import (
+    ContextSnapshot,
+    ModelSelection,
+    ProviderCancelled,
+    ProviderFailed,
+    ProviderFinal,
+    ProviderIndeterminate,
+    ProviderUserInputRequest,
+    CompletedOutcome,
+    CancelledOutcome,
+    FailedOutcome,
+    WaitingOutcome,
+    RuntimeErrorCategory,
+    RuntimeErrorInfo,
+    RuntimeRequest,
+)
+from agentos.runtime.service import RuntimeService
 from agentos.persistence.postgres.schema import (
     conversation_dispatches,
     provider_configurations,
@@ -86,8 +114,8 @@ TURN_DEADLINE = timedelta(seconds=3600)
 class _RuntimeStore:
     """Worker-scoped view that keeps the chat store outside the runtime API.
 
-    It is also the seam where a runtime lifecycle callback becomes two things:
-    a technical execution transition, and a public activity event that the UI
+    It is also the seam where a runtime lifecycle callback becomes the
+    canonical execution transition alongside the public activity event the UI
     renders.
     """
 
@@ -111,22 +139,32 @@ class _RuntimeStore:
         self._store.delta(turn, text)
 
     def finish(self, turn: dict[str, object], *, failed: bool = False, code: str | None = None) -> None:
-        self._store.finish(turn, failed=failed, code=code)
+        if not self._worker._kernel_manages(turn):
+            self._store.finish(turn, failed=failed, code=code)
 
     def lifecycle(self, turn: dict[str, object], state: str, **payload: object) -> None:
-        # Public activity is published by the session before this is called; the
-        # only job left here is the technical execution projection.
+        # Public activity is published by the session before this is called;
+        # this is the authoritative lifecycle commit for the current turn.
+        if self._worker._kernel_manages(turn):
+            return
         target = {
-            "running": "RUNNING", "waiting_tool": "WAITING_TOOL", "tool_started": "RUNNING",
-            "tool_finished": "RUNNING", "retrying": "RUNNING", "waiting_user": "WAITING_USER",
+            "running": "RUNNING", "waiting_tool": "WAITING_TOOL", "retrying": "RUNNING",
+            "waiting_user": "WAITING_USER",
         }.get(state)
         if target is not None:
-            try:
-                self._worker._transition(turn, target, f"agentic_{state}", result_ref=str(payload["result_ref"]) if payload.get("result_ref") else None)
-            except Exception:
-                # The durable chat finish remains authoritative if a duplicate
-                # execution projection races with another worker attempt.
-                pass
+            self._worker._transition(
+                turn, target, f"agentic_{state}",
+                result_ref=str(payload["result_ref"]) if payload.get("result_ref") else None,
+            )
+
+    def effect_started(self, turn: dict[str, object], *, kind: str, invocation_ref: str, request_ref: str) -> str:
+        return self._worker._effect_started(turn, kind=kind, invocation_ref=invocation_ref, request_ref=request_ref)
+
+    def effect_finished(self, turn: dict[str, object], *, effect_id: str, state: str, result_ref: str | None = None, error_code: str | None = None, private_result=None) -> None:
+        self._worker._effect_finished(
+            turn, effect_id=effect_id, state=state, result_ref=result_ref,
+            error_code=error_code, private_result=private_result,
+        )
 
     # -- session seams ---------------------------------------------------
 
@@ -135,6 +173,120 @@ class _RuntimeStore:
 
     def main_agent_id(self, turn) -> str:
         return self._store.main_agent_id(turn)
+
+
+class _ConversationContextManager:
+    """Reference-only context adapter for the conversational Kernel boundary."""
+
+    def __init__(self, turn: dict[str, object]) -> None:
+        self._turn = turn
+
+    def assemble(self, request):
+        ref = f"conversation-turn:{self._turn['turn_id']}:transcript"
+        return ContextSnapshot(ref, ref)
+
+    def apply_turn(self, request):
+        return ContextSnapshot(request.context_ref, request.manifest_ref or request.context_ref)
+
+    def finalize(self, execution_id, disposition) -> None:
+        return None
+
+
+class _ConversationModelResolver:
+    def __init__(self, turn: dict[str, object]) -> None:
+        self._turn = turn
+
+    def resolve(self, request):
+        ref = f"conversation-model:{self._turn['provider']}:{self._turn['model_id']}"
+        return ModelSelection(ref, ref)
+
+
+class _ConversationCheckpointPort:
+    """Adapts the durable journal to the generic Kernel checkpoint port."""
+
+    def __init__(self, worker: "ChatWorker", turn: dict[str, object]) -> None:
+        self._worker, self._turn = worker, turn
+
+    def load(self, checkpoint_ref, context):
+        scope = self._worker._journal_scope(self._turn)
+        checkpoint = self._worker._journal.latest_safe(scope)
+        if checkpoint is None or checkpoint.checkpoint_id != checkpoint_ref:
+            raise LookupError("checkpoint not found or not safe")
+        from agentos.runtime.models import CheckpointSnapshot
+
+        return CheckpointSnapshot(
+            checkpoint.checkpoint_id, checkpoint.scope.execution_id,
+            checkpoint.execution_state_version, checkpoint.sequence,
+            checkpoint.context_manifest_ref,
+            checkpoint.pending_effect_id,
+        )
+
+    def latest_safe(self, execution_id, context):
+        scope = self._worker._journal_scope(self._turn)
+        checkpoint = self._worker._journal.latest_safe(scope)
+        if checkpoint is None:
+            return None
+        from agentos.runtime.models import CheckpointSnapshot
+
+        return CheckpointSnapshot(
+            checkpoint.checkpoint_id, checkpoint.scope.execution_id,
+            checkpoint.execution_state_version, checkpoint.sequence,
+            checkpoint.context_manifest_ref, checkpoint.pending_effect_id,
+        )
+
+
+class _ConversationBudgetPolicy:
+    def evaluate(self, request):
+        from agentos.runtime.models import BudgetDecision, BudgetEvaluation
+
+        return BudgetEvaluation(BudgetDecision.CONTINUE)
+
+
+class _ConversationClock:
+    def now(self):
+        return datetime.now(UTC)
+
+    def monotonic(self):
+        import time
+
+        return time.monotonic()
+
+
+class _UnusedActionPort:
+    def invoke(self, request):
+        raise AssertionError("the conversational provider owns tool dispatch")
+
+
+class _ConversationProviderPort:
+    """Compatibility adapter: stream/tool formatting stays in AgenticTurnRuntime.
+
+    It deliberately has no lifecycle authority. RuntimeService owns acquisition,
+    running/waiting/terminal states and outbox commits around this adapter.
+    """
+
+    def __init__(self, runtime: AgenticTurnRuntime, turn: dict[str, object]) -> None:
+        self._runtime, self._turn = runtime, turn
+        self.reconciliation_required = False
+
+    def generate(self, request):
+        result = self._runtime.run(str(self._turn["turn_id"]))
+        if result.state == "completed":
+            return ProviderFinal(f"conversation-message:{self._turn['assistant_message_id']}")
+        if result.state == "waiting_user":
+            return ProviderUserInputRequest(f"conversation-turn:{self._turn['turn_id']}:input")
+        if result.state == "cancelled":
+            return ProviderCancelled(CancellationReason(CancellationReasonCode.USER_REQUESTED))
+        if result.state == "reconciliation_required":
+            self.reconciliation_required = True
+            # The generic Kernel has a first-class WAITING_USER transition but
+            # not a dedicated reconciliation state. It commits that durable
+            # stop first; the chat adapter immediately projects it to PAUSED,
+            # preserving the no-retry invariant without changing the generic
+            # ProviderIndeterminate contract used by other runtimes.
+            return ProviderUserInputRequest(f"conversation-turn:{self._turn['turn_id']}:reconciliation")
+        return ProviderFailed(RuntimeErrorInfo(
+            RuntimeErrorCategory.PROVIDER, result.error_code or "CONVERSATION_RUNTIME_FAILED"
+        ))
 
 
 class ChatWorker:
@@ -150,6 +302,9 @@ class ChatWorker:
         retrieval_registry: RetrievalRegistry | None = None,
     ) -> None:
         self.store, self._executions, self._queries = store, ExecutionApplicationAdapter(store._engine), ExecutionQueryAdapter(store._engine)
+        self._journal = PostgresExecutionJournal(store._engine)
+        self._reconciliation_turns: set[str] = set()
+        self._kernel_turns: set[str] = set()
         self._runtime_factory = runtime_factory
         self._workspace_root = workspace_root if workspace_root is not None else str(orin_paths().workspaces)
         self._enable_subagents = enable_subagents
@@ -177,20 +332,70 @@ class ChatWorker:
         turn = self.store.claim(turn_id)
         if turn is None:
             return
-        self._project(turn, "STARTING", "worker_acquired")
-        self._project(turn, "RUNNING", "provider_started")
+        kernel_managed = self._runtime_factory is None
+        if not kernel_managed:
+            try:
+                self._project(turn, "STARTING", "worker_acquired")
+                self._project(turn, "RUNNING", "provider_started")
+            except Exception:
+                # Compatibility factories exist for tests and integrations
+                # still exercising the old seam. Production never enters it.
+                _LOGGER.exception("execution lifecycle could not start for chat turn %s", turn_id)
+                self.store.finish(turn, failed=True, code="execution_lifecycle_unavailable")
+                return
+        if kernel_managed:
+            self._kernel_turns.add(str(turn_id))
         runtime = None
         try:
             runtime = self._runtime_for(turn)
-            result = runtime.run(str(turn_id))
+            if kernel_managed:
+                control, context = self._executions.trusted_control_context(
+                    execution_id=str(turn["execution_id"]), user_id=str(turn["user_id"]),
+                )
+                provider_port = _ConversationProviderPort(runtime, turn)
+                outcome = RuntimeService(
+                    control=control,
+                    context_manager=_ConversationContextManager(turn),
+                    model_resolver=_ConversationModelResolver(turn),
+                    provider=provider_port,
+                    action_port=_UnusedActionPort(),
+                    checkpoint_port=_ConversationCheckpointPort(self, turn),
+                    clock=_ConversationClock(), budget_policy=_ConversationBudgetPolicy(),
+                ).execute(RuntimeRequest(
+                    execution_id=context.execution_id, user_id=context.user_id,
+                    workspace_id=context.workspace_id, agent_id=context.agent_id,
+                    actor_ref="chat-worker", worker_ref="chat-worker",
+                    correlation_id=context.correlation_id, purpose=context.purpose,
+                    model_requirements_ref=f"conversation-model:{turn['provider']}:{turn['model_id']}",
+                ))
+                if isinstance(outcome, CompletedOutcome):
+                    result = AgenticRunResult("completed")
+                elif isinstance(outcome, WaitingOutcome):
+                    result = AgenticRunResult(
+                        "reconciliation_required" if provider_port.reconciliation_required or outcome.state is ExecutionState.PAUSED else "waiting_user",
+                        error_code="EFFECT_RECONCILIATION_REQUIRED" if provider_port.reconciliation_required or outcome.state is ExecutionState.PAUSED else None,
+                    )
+                elif isinstance(outcome, CancelledOutcome):
+                    result = AgenticRunResult("cancelled")
+                elif isinstance(outcome, FailedOutcome):
+                    result = AgenticRunResult("failed", error_code=outcome.error.code)
+                else:
+                    raise AssertionError("unknown conversational Kernel outcome")
+            else:
+                result = runtime.run(str(turn_id))
         except Exception:
+            # A newly created turn always has its Execution now.  Do not run
             # A turn that dies silently is the single worst failure mode for a
             # local install: the UI shows "failed" with no way to learn why.
             _LOGGER.exception("chat turn %s failed", turn_id)
-            self._project(turn, "FAILED", "provider_failed")
+            try:
+                self._project(turn, "FAILED", "provider_failed")
+            except Exception:
+                _LOGGER.exception("execution failure transition could not be committed for chat turn %s", turn_id)
             self.store.finish(turn, failed=True, code="provider_unavailable")
             return
         finally:
+            self._kernel_turns.discard(str(turn_id))
             closer = getattr(runtime, "close", None)
             if callable(closer):
                 try:
@@ -206,28 +411,97 @@ class ChatWorker:
                 _LOGGER.exception("browser registry release for turn %s failed", turn_id)
         if result.state == "completed":
             self._project(turn, "COMPLETED", "provider_completed", result_ref=f"conversation-message:{turn['assistant_message_id']}")
+            if kernel_managed:
+                self.store.finish(turn)
         elif result.state == "waiting_user":
             self._project(turn, "WAITING_USER", "agent_requested_user_input")
+            if kernel_managed:
+                self.store.finish(turn, code="WAITING_USER")
         elif result.state == "cancelled":
             self._project(turn, "CANCELLED", "user_cancelled")
+            if kernel_managed:
+                self.store.finish(turn, failed=True, code="TURN_CANCELLED")
+        elif result.state == "reconciliation_required":
+            self._project(turn, "PAUSED", "effect_reconciliation_required")
+            self.store.pause_for_reconciliation(turn, code=result.error_code or "EFFECT_RECONCILIATION_REQUIRED")
         else:
             self._project(turn, "FAILED", result.error_code or "agentic_runtime_failed")
+            if kernel_managed:
+                self.store.finish(turn, failed=True, code=result.error_code or "agentic_runtime_failed")
+
+    def _kernel_manages(self, turn: dict[str, object]) -> bool:
+        return str(turn["turn_id"]) in self._kernel_turns
 
     def _project(self, turn: dict[str, object], target: str, reason: str, result_ref: str | None = None) -> None:
-        """Best-effort execution projection.
+        """Commit the canonical execution lifecycle before the provider runs.
 
-        The conversation record is the authority for what the user sees. A stale
-        or conflicting execution row must never turn a finished answer into a
-        failed one, so a projection error is logged and dropped.
+        The method name is retained temporarily for test and call-site
+        compatibility.  It is no longer a lossy best-effort projection: the
+        initial transitions gate provider execution and terminal transition
+        failures surface to the worker for recovery/alerting.
         """
-        try:
-            self._transition(turn, target, reason, result_ref=result_ref)
-        except Exception as error:
-            _LOGGER.warning("execution projection %s for turn %s was skipped: %s", target, turn["turn_id"], error)
+        self._transition(turn, target, reason, result_ref=result_ref)
 
     def _transition(self, turn: dict[str, object], target: str, reason: str, result_ref: str | None = None) -> None:
         view = self._queries.get({"resource_id": turn["execution_id"], "user_id": turn["user_id"], "purpose": "execution.read"})
+        if view["state"] == target:
+            return
         self._executions.transition({"execution_id": turn["execution_id"], "user_id": turn["user_id"], "target_state": target, "reason_code": reason, "result_ref": result_ref, "expected_state_version": view["state_version"], "idempotency_key": f"chat-worker:{turn['turn_id']}:{target}", "requested_at": datetime.now(UTC)})
+
+    def _journal_scope(self, turn: dict[str, object]) -> ExecutionJournalScope:
+        return ExecutionJournalScope(
+            execution_id=str(turn["execution_id"]), user_id=str(turn["user_id"]),
+            workspace_id=(str(turn["project_workspace_id"]) if turn.get("project_workspace_id") else None),
+            agent_id=str(self.store.main_agent_id(turn)), correlation_id=f"corr_{turn['execution_id']}",
+        )
+
+    def _effect_started(self, turn: dict[str, object], *, kind: str, invocation_ref: str, request_ref: str) -> str:
+        scope = self._journal_scope(turn)
+        now = datetime.now(UTC)
+        effect_id = f"eff_{uuid4().hex}"
+        effect = self._journal.prepare(ExecutionEffect(
+            effect_id=effect_id, scope=scope, kind=ExecutionEffectKind(kind.upper()),
+            invocation_ref=invocation_ref, request_ref=request_ref,
+            idempotency_key=f"{turn['execution_id']}:{invocation_ref}",
+            state=ExecutionEffectState.PREPARED, retryability=ExecutionEffectRetryability.NEVER,
+            attempt=1, prepared_at=now,
+        ))
+        self._checkpoint(turn, scope, next_decision=kind, is_safe=False, pending_effect_id=effect.effect_id)
+        # This write is deliberately immediately before handing control to the
+        # gateway. A crash after it is not retried automatically; recovery
+        # classifies it as UNKNOWN unless a reconciler supplies a receipt.
+        self._journal.mark_in_flight(effect.effect_id, scope, now=now)
+        return effect.effect_id
+
+    def _effect_finished(self, turn: dict[str, object], *, effect_id: str, state: str, result_ref: str | None, error_code: str | None, private_result) -> None:
+        scope = self._journal_scope(turn)
+        resolved = self._journal.resolve(
+            effect_id, scope, state=ExecutionEffectState(state), now=datetime.now(UTC),
+            result_ref=result_ref, error_code=error_code,
+            private_result=private_result if isinstance(private_result, dict) else None,
+        )
+        if resolved.state is ExecutionEffectState.UNKNOWN:
+            self._reconciliation_turns.add(str(turn["turn_id"]))
+            return
+        self._checkpoint(turn, scope, next_decision="continue", is_safe=True, pending_effect_id=None)
+
+    def _checkpoint(self, turn: dict[str, object], scope: ExecutionJournalScope, *, next_decision: str, is_safe: bool, pending_effect_id: str | None) -> None:
+        # Querying the canonical version makes a checkpoint auditable against
+        # the exact lifecycle decision it can resume from. The journal itself
+        # only stores references, never prompt, credentials or raw tool args.
+        view = self._queries.get({"resource_id": turn["execution_id"], "user_id": turn["user_id"], "purpose": "execution.read"})
+        sequence = self._journal.next_checkpoint_sequence(scope)
+        self._journal.save_checkpoint(ExecutionCheckpoint(
+            checkpoint_id=f"chk_{uuid4().hex}", scope=scope, sequence=sequence,
+            execution_state_version=int(view["state_version"]),
+            context_manifest_ref=f"conversation-turn:{turn['turn_id']}:transcript",
+            next_decision=next_decision, is_safe=is_safe, pending_effect_id=pending_effect_id,
+            snapshot={"turn_id": str(turn["turn_id"]), "assistant_message_id": str(turn["assistant_message_id"])},
+            created_at=datetime.now(UTC),
+        ))
+
+    def _reconciliation_required(self, turn: dict[str, object]) -> bool:
+        return str(turn["turn_id"]) in self._reconciliation_turns
 
     def watchdog(self, *, maximum_age: timedelta = timedelta(seconds=30)) -> tuple[str, ...]:
         """Mark unacquired jobs terminal so the UI never waits indefinitely."""
@@ -242,6 +516,29 @@ class ChatWorker:
                     self.store.finish(turn, failed=True, code="worker_unavailable")
                     expired.append(str(row["turn_id"]))
         return tuple(expired)
+
+    def recover_stale(self, *, maximum_age: timedelta) -> tuple[str, ...]:
+        """Recover only executions whose journal proves no effect is in doubt."""
+        recovered: list[str] = []
+        for turn in self.store.stale_turns(maximum_age=maximum_age):
+            scope = self._journal_scope(turn)
+            effects = self._journal.mark_unresolved_unknown(scope, now=datetime.now(UTC))
+            if any(effect.state is ExecutionEffectState.UNKNOWN for effect in effects):
+                self._transition(turn, "PAUSED", "effect_reconciliation_required")
+                self.store.pause_for_reconciliation(turn, code="EFFECT_RECONCILIATION_REQUIRED")
+                continue
+            # With no recorded external boundary, restarting from the durable
+            # conversation input is safe. Once an effect has a terminal record,
+            # a future resume adapter must consume its result reference; it is
+            # never sent through the old fresh-turn loop.
+            if self._journal.next_checkpoint_sequence(scope) == 1:
+                self._transition(turn, "QUEUED", "worker_recovered_before_effect")
+                if self.store.requeue_recovered(turn, reason="worker_recovered_before_effect"):
+                    recovered.append(str(turn["turn_id"]))
+            else:
+                self._transition(turn, "PAUSED", "checkpoint_resume_required")
+                self.store.pause_for_reconciliation(turn, code="CHECKPOINT_RESUME_REQUIRED")
+        return tuple(recovered)
 
     def _catalog_row_for(self, turn: dict[str, object]) -> dict[str, object] | None:
         """The turn model's provider-catalog row, or None if it is unknown.
@@ -541,6 +838,7 @@ class ChatWorker:
                 provider_factory=lambda: self._provider_transport(turn),
                 workspace_root=self._workspace_root,
                 cancelled=lambda current: self.store.cancel_requested(str(current["turn_id"])),
+                reconciliation_required=self._reconciliation_required,
                 limits=AgenticLimits(deadline=TURN_DEADLINE, max_iterations=configured_limits["max_iterations"], max_actions=None if configured_limits["max_iterations"] is None else 24, max_context_tokens=self._max_context_tokens_for(turn), context_window_tokens=self._context_window_for(turn)),
                 skills=skill_library.registry_for(str(turn["user_id"]), agent_id=str(self.store.main_agent_id(turn))),
                 skill_library=skill_library,

@@ -75,13 +75,25 @@ class PostgresTransactionalPersistence:
         engine_options: Mapping[str, object] | None = None,
         cursor_secret: bytes | str | None = None,
     ) -> None:
+        self._connection: Connection | None = None
         if isinstance(engine_or_dsn, str):
             self.engine = create_engine(engine_or_dsn, future=True, **dict(engine_options or {}))
         elif isinstance(engine_or_dsn, Engine):
             self.engine = engine_or_dsn
         else:
             self.engine = engine_or_dsn.engine
-        self._Session = session_factory or sessionmaker(bind=self.engine, expire_on_commit=False, future=True)
+            # A conversation command needs to commit its durable transcript,
+            # canonical Execution and outbox together.  Binding sessions to the
+            # caller's connection joins its transaction rather than opening a
+            # second, independently committed transaction.
+            self._connection = engine_or_dsn
+        session_options = {"bind": self._connection or self.engine, "expire_on_commit": False, "future": True}
+        if self._connection is not None:
+            # The outer command owns the connection transaction.  A savepoint
+            # lets the canonical persistence adapter preserve its normal
+            # commit/rollback protocol without committing that outer command.
+            session_options["join_transaction_mode"] = "create_savepoint"
+        self._Session = session_factory or sessionmaker(**session_options)
         self._commit_hook = commit_hook
         self._cursor_secret = (
             cursor_secret.encode("utf-8")
@@ -799,7 +811,15 @@ class PostgresTransactionalPersistence:
             select(persistence_clock.c.revision)
             .where(persistence_clock.c.id == 1)
             .with_for_update()
-        ).scalar_one()
+        ).scalar_one_or_none()
+        # Migrations seed the singleton.  Keeping this narrow fallback makes
+        # the canonical command usable by isolated SQLite metadata fixtures
+        # and brand-new local installations before an administrative upgrade
+        # has had a chance to seed it; a production race still resolves via
+        # the existing transaction/constraint handling.
+        if current is None:
+            session.execute(persistence_clock.insert().values(id=1, revision=1))
+            return 1
         next_revision = int(current) + 1
         session.execute(
             persistence_clock.update()

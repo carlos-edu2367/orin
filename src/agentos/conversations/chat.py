@@ -17,6 +17,7 @@ from agentos.api.contracts import ApplicationNotFoundError
 from agentos.api.events import CursorError
 from agentos.agentic.events import AgentActivityEvent, AgentActivityEventType
 from agentos.persistence.postgres.agentic_activity import ActivityCursorError
+from agentos.persistence.postgres.execution_adapters import ExecutionApplicationAdapter, ExecutionQueryAdapter
 from agentos.persistence.postgres.schema import (conversation_activity_events, conversation_agent_usage, conversation_agents, conversation_dispatches, conversation_events, conversation_hook_context, conversation_message_attachments, conversation_message_commands, conversation_messages, conversation_tool_records, conversation_turns, conversations, projects, runtime_heartbeats, workspace_roots)
 
 
@@ -275,7 +276,7 @@ class PostgresChatStore:
         # Stable across turns so the conversation-level graph keeps one root node.
         return f"agent:{turn['conversation_id']}:main"
 
-    def create(self, *, user_id: str, message: str, provider: str, model_id: str, idempotency_key: str, conversation_id: str | None = None, project_id: str | None = None, attachments: Sequence[Mapping[str, object]] = (), new_conversation_id: str | None = None, scheduled_by_schedule_id: str | None = None) -> ChatReceipt:
+    def create(self, *, user_id: str, message: str, provider: str, model_id: str, idempotency_key: str, conversation_id: str | None = None, project_id: str | None = None, workspace_id: str | None = None, attachments: Sequence[Mapping[str, object]] = (), new_conversation_id: str | None = None, scheduled_by_schedule_id: str | None = None) -> ChatReceipt:
         message = message.strip()
         attachments = list(attachments)
         expansion = _expand_command(self._command_library, user_id, message)
@@ -292,8 +293,9 @@ class PostgresChatStore:
                 conversation_id = new_conversation_id or _id("chat")
                 if project_id is not None:
                     from agentos.persistence.postgres.schema import projects
-                    project = c.execute(select(projects.c.project_id).where(projects.c.project_id == project_id, projects.c.user_id == user_id, projects.c.archived_at.is_(None))).scalar()
+                    project = c.execute(select(projects.c.project_id, projects.c.workspace_id).where(projects.c.project_id == project_id, projects.c.user_id == user_id, projects.c.archived_at.is_(None))).mappings().first()
                     if project is None: raise ApplicationNotFoundError(project_id)
+                    workspace_id = str(project["workspace_id"]) if project["workspace_id"] is not None else workspace_id
                 c.execute(insert(conversations).values(conversation_id=conversation_id, user_id=user_id, title=_title(title_source), provider=provider, model_id=model_id, project_id=project_id, state="queued", created_at=now, updated_at=now))
                 sequence = 1
             else:
@@ -328,6 +330,11 @@ class PostgresChatStore:
                     c.execute(update(conversation_messages).where(
                         conversation_messages.c.message_id.in_(waiting)
                     ).values(status="completed", updated_at=now))
+                if workspace_id is None and row["project_id"] is not None:
+                    project_workspace = c.execute(select(projects.c.workspace_id).where(
+                        projects.c.project_id == row["project_id"], projects.c.user_id == user_id,
+                    )).scalar_one_or_none()
+                    workspace_id = str(project_workspace) if project_workspace is not None else None
             turn_id, user_message_id, assistant_message_id = _id("turn"), _id("msg"), _id("msg")
             execution_id = self.execution_id_for(turn_id)
             c.execute(insert(conversation_messages), [
@@ -353,6 +360,29 @@ class PostgresChatStore:
             c.execute(insert(conversation_dispatches).values(turn_id=turn_id, state="pending", attempts=0, queued_at=now, updated_at=now))
             c.execute(insert(conversation_events).values(conversation_id=conversation_id, user_id=user_id, event_type="turn.queued", message_id=assistant_message_id, payload={"state": "queued"}, created_at=now))
             c.execute(update(conversations).where(conversations.c.conversation_id == conversation_id).values(state="queued", updated_at=now))
+            # The Execution is not a best-effort mirror of the turn.  Bind the
+            # canonical persistence adapter to this very transaction so a
+            # committed chat turn always has its Execution, command receipt and
+            # outbox record, while a failure rolls all of them back together.
+            digest = sha256(f"{user_id}|{turn_id}".encode()).hexdigest()
+            execution_result = ExecutionApplicationAdapter(c).create({
+                "operation_id": f"op_{digest}",
+                "context": {
+                    "user_id": user_id,
+                    "workspace_id": workspace_id,
+                    "agent_id": f"chat-agent-{digest[:16]}",
+                    "execution_id": execution_id,
+                    "correlation_id": "",
+                    "purpose": "conversation.turn",
+                },
+                "task_ref": f"conversation-turn:{turn_id}",
+                "limits": {"max_duration_seconds": 3600},
+                "expected_agent_version": 1,
+                "idempotency_key": f"chat:{idempotency_key}",
+                "requested_at": now,
+            })
+            if execution_result.get("outcome") not in {"accepted", "already_applied"}:
+                raise RuntimeError("canonical execution creation was not accepted")
         receipt = ChatReceipt(conversation_id, _title(title_source), turn_id, assistant_message_id, "queued")
         self._activity({"conversation_id": conversation_id, "turn_id": turn_id, "execution_id": execution_id, "user_id": user_id}, AgentActivityEventType.TURN_STARTED, "Execução agendada na fila" if scheduled_by_schedule_id else "Turn queued", {"scheduled_by_schedule_id": scheduled_by_schedule_id} if scheduled_by_schedule_id else None)
         return receipt
@@ -578,6 +608,35 @@ class PostgresChatStore:
             {"state": state, "retryable": retryable, "error_code": code},
         )
 
+    def pause_for_reconciliation(self, turn: Mapping[str, object], *, code: str) -> None:
+        """Expose an unknown external effect without converting it to a retry.
+
+        The canonical Execution remains PAUSED. This is only its chat read
+        model, so the next worker cannot claim and accidentally repeat it.
+        """
+        now = datetime.now(UTC)
+        with self._engine.begin() as c:
+            c.execute(update(conversation_dispatches).where(
+                conversation_dispatches.c.turn_id == turn["turn_id"],
+            ).values(state="paused", last_error=code, updated_at=now))
+            c.execute(update(conversation_turns).where(
+                conversation_turns.c.turn_id == turn["turn_id"],
+            ).values(state="paused", updated_at=now))
+            c.execute(update(conversation_messages).where(
+                conversation_messages.c.message_id == turn["assistant_message_id"],
+            ).values(status="paused", updated_at=now))
+            c.execute(update(conversations).where(
+                conversations.c.conversation_id == turn["conversation_id"],
+            ).values(state="paused", updated_at=now))
+            c.execute(insert(conversation_events).values(
+                conversation_id=turn["conversation_id"], user_id=turn["user_id"], event_type="turn.reconciliation_required",
+                message_id=turn["assistant_message_id"], payload={"state": "paused", "code": code}, created_at=now,
+            ))
+        self._activity(
+            dict(turn), AgentActivityEventType.TURN_FAILED, "Aguardando reconciliação de efeito externo",
+            {"state": "paused", "retryable": False, "error_code": code},
+        )
+
     def overview(self, conversation_id: str, user_id: str) -> dict[str, object]:
         """Aggregate one conversation into the shape the overview scene draws."""
         with self._engine.connect() as c:
@@ -676,6 +735,15 @@ class PostgresChatStore:
             state = c.execute(select(conversation_turns.c.state).where(conversation_turns.c.turn_id == turn_id)).scalar()
         return str(state) == "cancelling"
 
+    def waiting_execution_ids(self, conversation_id: str, user_id: str) -> tuple[str, ...]:
+        with self._engine.connect() as c:
+            rows = c.execute(select(conversation_turns.c.execution_id).where(
+                conversation_turns.c.conversation_id == conversation_id,
+                conversation_turns.c.user_id == user_id,
+                conversation_turns.c.state == "waiting_user",
+            )).scalars().all()
+        return tuple(str(row) for row in rows)
+
     def recover_stale(self, *, maximum_age: timedelta = timedelta(seconds=120)) -> tuple[str, ...]:
         """Requeue active dispatches whose worker heartbeat was lost."""
         cutoff = datetime.now(UTC) - maximum_age
@@ -705,6 +773,40 @@ class PostgresChatStore:
                     recovered.append(str(turn_id))
         return tuple(recovered)
 
+    def stale_turns(self, *, maximum_age: timedelta) -> tuple[dict[str, object], ...]:
+        cutoff = datetime.now(UTC) - maximum_age
+        with self._engine.connect() as c:
+            rows = c.execute(
+                select(conversation_turns, projects.c.workspace_id.label("project_workspace_id"))
+                .join(conversations, conversations.c.conversation_id == conversation_turns.c.conversation_id)
+                .outerjoin(projects, projects.c.project_id == conversations.c.project_id)
+                .join(conversation_dispatches, conversation_dispatches.c.turn_id == conversation_turns.c.turn_id)
+                .where(
+                    conversation_dispatches.c.state == "active",
+                    conversation_dispatches.c.acquired_at.is_not(None),
+                    conversation_dispatches.c.acquired_at < cutoff,
+                )
+            ).mappings().all()
+        return tuple(dict(row) for row in rows)
+
+    def requeue_recovered(self, turn: Mapping[str, object], *, reason: str) -> bool:
+        now = datetime.now(UTC)
+        with self._engine.begin() as c:
+            changed = c.execute(update(conversation_dispatches).where(
+                conversation_dispatches.c.turn_id == turn["turn_id"],
+                conversation_dispatches.c.state == "active",
+            ).values(state="pending", last_error=reason, queued_at=now, acquired_at=None, updated_at=now))
+            if not changed.rowcount:
+                return False
+            c.execute(update(conversation_turns).where(conversation_turns.c.turn_id == turn["turn_id"]).values(state="queued", updated_at=now))
+            c.execute(update(conversation_messages).where(conversation_messages.c.message_id == turn["assistant_message_id"]).values(status="queued", updated_at=now))
+            c.execute(update(conversations).where(conversations.c.conversation_id == turn["conversation_id"]).values(state="queued", updated_at=now))
+            c.execute(insert(conversation_events).values(
+                conversation_id=turn["conversation_id"], user_id=turn["user_id"], event_type="turn.recovered",
+                message_id=turn["assistant_message_id"], payload={"state": "queued", "reason": reason}, created_at=now,
+            ))
+        return True
+
     def heartbeat(self, component: str) -> None:
         now = datetime.now(UTC)
         with self._engine.begin() as c:
@@ -718,41 +820,68 @@ class PostgresChatStore:
 
 
 class ChatApplication:
-    """Gateway port. Execution persistence remains the source of technical state."""
-    def __init__(self, store: PostgresChatStore, executions) -> None: self.store, self._executions = store, executions
+    """Gateway port backed by an atomic conversation/Execution command."""
+    def __init__(self, store: PostgresChatStore, executions=None) -> None:
+        # ``executions`` is retained as an ignored compatibility argument for
+        # bootstrap/test callers.  The store now writes the canonical
+        # Execution in the same transaction as the turn.
+        self.store = store
     def allocate_conversation_id(self) -> str:
         return _id("chat")
     def create(self, context, *, message: str, provider: str, model_id: str, workspace_id: str | None, idempotency_key: str, project_id: str | None = None, attachments=(), new_conversation_id: str | None = None):
-        receipt = self.store.create(user_id=context.user_id, message=message, provider=provider, model_id=model_id, idempotency_key=idempotency_key, project_id=project_id, attachments=attachments, new_conversation_id=new_conversation_id)
-        self._project_execution(receipt, context.user_id, workspace_id, idempotency_key)
-        return receipt
+        return self.store.create(user_id=context.user_id, message=message, provider=provider, model_id=model_id, idempotency_key=idempotency_key, project_id=project_id, workspace_id=workspace_id, attachments=attachments, new_conversation_id=new_conversation_id)
     def send(self, user_id: str, conversation_id: str, message: str, idempotency_key: str, attachments=(), provider: str = "", model_id: str = ""):
+        waiting = self.store.waiting_execution_ids(conversation_id, user_id)
         receipt = self.store.create(user_id=user_id, message=message, provider=provider, model_id=model_id, idempotency_key=idempotency_key, conversation_id=conversation_id, attachments=attachments)
-        self._project_execution(receipt, user_id, None, idempotency_key)
+        # A normal follow-up is the durable answer to an ask_user effect. The
+        # old execution is resumed through its canonical input command before
+        # the new turn is allowed to become the only visible continuation.
+        queries = ExecutionQueryAdapter(self.store._engine)
+        controls = ExecutionApplicationAdapter(self.store._engine)
+        for execution_id in waiting:
+            view = queries.get({"resource_id": execution_id, "user_id": user_id, "purpose": "execution.read"})
+            if view["state"] == "WAITING_USER":
+                controls.provide_input({
+                    "context": {"execution_id": execution_id, "user_id": user_id},
+                    "expected_state_version": view["state_version"],
+                    "idempotency_key": f"chat-follow-up:{receipt.turn_id}:{execution_id}",
+                    "requested_at": datetime.now(UTC),
+                    "input_ref": f"conversation-turn:{receipt.turn_id}:input",
+                })
         return receipt
     def list(self, user_id: str): return self.store.list(user_id)
     def get(self, conversation_id: str, user_id: str): return self.store.get(conversation_id, user_id)
     def events(self, conversation_id: str, user_id: str, after: int): return self.store.events(conversation_id, user_id, after)
-    def cancel(self, conversation_id: str, user_id: str): return self.store.request_cancel(conversation_id, user_id)
-    def overview(self, conversation_id: str, user_id: str): return self.store.overview(conversation_id, user_id)
-    def _project_execution(self, receipt, user_id, workspace_id, key) -> None:
-        """Best-effort execution write; see README "Execution records".
+    def cancel(self, conversation_id: str, user_id: str):
+        """Request cancellation from the canonical Executions before the chat projection.
 
-        The turn itself is already durably committed by ``self.store.create``
-        -- conversation, messages, attachment rows, turn and the ``pending``
-        dispatch row, all in one transaction -- and that dispatch row can be
-        claimed by a worker within milliseconds. A failure writing the
-        technical execution projection must never propagate: raising here
-        would reach the gateway route, whose ``except Exception:`` handler
-        deletes the just-promoted attachment files, orphaning a turn that is
-        already live and already eligible to run.
+        A conversation can own more than one live turn.  Each cancellation is
+        optimistic and idempotent; if a worker wins the race and advances a
+        state first, the caller receives the normal conflict instead of a
+        conversation-only cancellation that the Execution cannot observe.
         """
-        try:
-            self._ensure_execution(receipt, user_id, workspace_id, key)
-        except Exception:
-            _LOGGER.warning("execution projection for turn %s was skipped", receipt.turn_id, exc_info=True)
-    def _ensure_execution(self, receipt, user_id, workspace_id, key):
-        digest = sha256(f"{user_id}|{receipt.turn_id}".encode()).hexdigest()
-        self._executions.create({"operation_id": f"op_{digest}", "context": {"user_id": user_id, "workspace_id": workspace_id, "agent_id": f"chat-agent-{digest[:16]}", "execution_id": PostgresChatStore.execution_id_for(receipt.turn_id), "correlation_id": "", "purpose": "conversation.turn"}, "task_ref": f"conversation-turn:{receipt.turn_id}", "limits": {"max_duration_seconds": 120}, "expected_agent_version": 1, "idempotency_key": f"chat:{key}", "requested_at": datetime.now(UTC)})
+        with self.store._engine.connect() as connection:
+            turns = connection.execute(select(conversation_turns.c.turn_id, conversation_turns.c.execution_id).where(
+                conversation_turns.c.conversation_id == conversation_id,
+                conversation_turns.c.user_id == user_id,
+                conversation_turns.c.state.in_(("queued", "starting", "running", "cancelling")),
+            )).mappings().all()
+        query = ExecutionQueryAdapter(self.store._engine)
+        control = ExecutionApplicationAdapter(self.store._engine)
+        for turn in turns:
+            execution_id = str(turn["execution_id"])
+            view = query.get({"resource_id": execution_id, "user_id": user_id, "purpose": "execution.read"})
+            if view["state"] in {"COMPLETED", "FAILED", "CANCELLED"}:
+                continue
+            control.control({
+                "context": {"user_id": user_id, "execution_id": execution_id},
+                "action": "CANCEL",
+                "expected_state_version": view["state_version"],
+                "reason": "conversation_cancelled",
+                "idempotency_key": f"conversation-cancel:{conversation_id}:{turn['turn_id']}",
+                "requested_at": datetime.now(UTC),
+            })
+        return self.store.request_cancel(conversation_id, user_id)
+    def overview(self, conversation_id: str, user_id: str): return self.store.overview(conversation_id, user_id)
 
 __all__ = ["ChatApplication", "ChatReceipt", "PostgresChatStore"]

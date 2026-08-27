@@ -81,6 +81,7 @@ class AgenticTurnRuntime:
         limits: AgenticLimits | None = None,
         clock: Callable[[], datetime] | None = None,
         cancelled: Callable[[Mapping[str, object]], bool] | None = None,
+        reconciliation_required: Callable[[Mapping[str, object]], bool] | None = None,
         toolset: object | None = None,
         system_prompt: str | None = None,
         tool_kinds: Mapping[str, str] | None = None,
@@ -98,6 +99,7 @@ class AgenticTurnRuntime:
         self.limits = limits or AgenticLimits()
         self.clock = clock or (lambda: datetime.now(UTC))
         self.cancelled = cancelled or (lambda _turn: False)
+        self.reconciliation_required = reconciliation_required or (lambda _turn: False)
         self.system_prompt = system_prompt
         self.tool_kinds = dict(tool_kinds or {})
         self.skill_prompt_tokens = max(0, int(skill_prompt_tokens))
@@ -159,10 +161,19 @@ class AgenticTurnRuntime:
             }
             if final_iteration:
                 request["tool_choice"] = "none"
+            provider_effect_id = self._effect_started(
+                turn,
+                kind="provider",
+                invocation_ref=f"provider:{iteration}:{provider_retries + 1}",
+                request_ref=f"conversation-turn:{turn_id}:provider:{iteration}",
+            )
             try:
                 events = self.provider.stream(request)
             except Exception:
-                if provider_retries < self.limits.max_provider_retries and self.clock() < deadline:
+                self._effect_finished(
+                    turn, provider_effect_id, state="NOT_APPLIED", error_code="PROVIDER_STREAM_NOT_STARTED"
+                )
+                if not provider_yielded and provider_retries < self.limits.max_provider_retries and self.clock() < deadline:
                     provider_retries += 1
                     self._life(turn, "retrying", attempt=provider_retries)
                     continue
@@ -176,11 +187,15 @@ class AgenticTurnRuntime:
             finish = None
             retryable_error = False
             rate_limited = False
+            provider_yielded = False
             try:
                 for raw_event in events:
+                    provider_yielded = True
                     if self.cancelled(turn):
+                        self._effect_finished(turn, provider_effect_id, state="UNKNOWN", error_code="PROVIDER_CANCELLED_DURING_EFFECT")
                         return self._cancel(turn, iteration, action_count)
                     if self.clock() >= deadline:
+                        self._effect_finished(turn, provider_effect_id, state="UNKNOWN", error_code="PROVIDER_DEADLINE_DURING_EFFECT")
                         return self._fail(turn, "TURN_DEADLINE_EXCEEDED", iteration, action_count)
                     event = self._coerce(raw_event)
                     if event.thinking:
@@ -210,6 +225,14 @@ class AgenticTurnRuntime:
                     elif event.kind is StreamKind.ERROR and event.error:
                         retryable_error = event.error.retryability.value == "SAFE"
             except Exception:
+                # Once a stream yielded anything the request may have reached
+                # the provider and charged or produced a result.  A restart
+                # must reconcile it rather than issuing a duplicate request.
+                self._effect_finished(
+                    turn, provider_effect_id,
+                    state="UNKNOWN" if provider_yielded else "NOT_APPLIED",
+                    error_code="PROVIDER_STREAM_INTERRUPTED",
+                )
                 if provider_retries < self.limits.max_provider_retries and self.clock() < deadline:
                     provider_retries += 1
                     self._life(turn, "retrying", attempt=provider_retries)
@@ -225,16 +248,25 @@ class AgenticTurnRuntime:
                 if callable(reporter) and any(value is not None for value in (input_tokens, output_tokens, provider_total_tokens)):
                     reporter(turn, input_tokens=input_tokens, output_tokens=output_tokens, total_tokens=provider_total_tokens)
             if self.limits.max_provider_tokens is not None and total_tokens > self.limits.max_provider_tokens:
+                self._effect_finished(turn, provider_effect_id, state="APPLIED", error_code="PROVIDER_TOKEN_LIMIT")
                 return self._fail(turn, "PROVIDER_TOKEN_LIMIT", iteration, action_count)
             if self.limits.max_cost is not None and total_cost > self.limits.max_cost:
+                self._effect_finished(turn, provider_effect_id, state="APPLIED", error_code="PROVIDER_COST_LIMIT")
                 return self._fail(turn, "PROVIDER_COST_LIMIT", iteration, action_count)
             if (retryable_error or rate_limited) and not text_parts and not calls and provider_retries < self.limits.max_provider_retries and self.clock() < deadline:
+                self._effect_finished(turn, provider_effect_id, state="NOT_APPLIED", error_code="PROVIDER_RETRY")
                 provider_retries += 1
                 self._life(turn, "retrying", attempt=provider_retries)
                 continue
             if (retryable_error or rate_limited) and not text_parts and not calls:
+                self._effect_finished(turn, provider_effect_id, state="NOT_APPLIED", error_code="PROVIDER_RETRY_EXHAUSTED")
                 return self._fail(turn, "PROVIDER_RETRY_EXHAUSTED", iteration, action_count)
             if (calls or (finish is not None and finish.value == "TOOL_CALLS")) and not final_iteration:
+                self._effect_finished(
+                    turn, provider_effect_id, state="APPLIED",
+                    result_ref=f"conversation-turn:{turn_id}:provider:{iteration}",
+                    private_result={"outcome": "tool_calls"},
+                )
                 self._life(turn, "waiting_tool", count=len(calls))
                 if self.toolset is not None:
                     if self.limits.max_actions is not None and action_count + len(calls) > self.limits.max_actions:
@@ -277,12 +309,20 @@ class AgenticTurnRuntime:
                     self._life(turn, "waiting_user")
                     self.store.finish(turn, code="WAITING_USER")
                     return AgenticRunResult("waiting_user", iteration, action_count)
+                if self.reconciliation_required(turn):
+                    return AgenticRunResult("reconciliation_required", iteration, action_count, "EFFECT_RECONCILIATION_REQUIRED")
                 self._life(turn, "running")
                 continue
             if (finish is not None or text_parts) and not (final_iteration and not text_parts):
+                self._effect_finished(
+                    turn, provider_effect_id, state="APPLIED",
+                    result_ref=f"conversation-message:{turn['assistant_message_id']}",
+                    private_result={"outcome": "final"},
+                )
                 self._life(turn, "completed")
                 self.store.finish(turn)
                 return AgenticRunResult("completed", iteration, action_count, budget_exhausted=final_iteration and (iteration > 1 or bool(calls)))
+            self._effect_finished(turn, provider_effect_id, state="APPLIED", private_result={"outcome": "empty"})
         # Reaching this point means the loop ended without any provider answer
         # that carried text; a turn that produced text has already returned
         # "completed" above. This also covers a final iteration where the
@@ -674,6 +714,35 @@ class AgenticTurnRuntime:
         # ever starting before an earlier call finishes, or from blocking a
         # later independent read.
         outcomes: dict[int, object] = {}
+
+        def invoke(index: int) -> object:
+            call_id, name, arguments, _ = prepared[index]
+            assert arguments is not None
+            effect_id = self._effect_started(
+                turn,
+                kind="tool",
+                invocation_ref=f"tool:{call_id}",
+                request_ref=f"conversation-turn:{turn['turn_id']}:tool:{call_id}",
+            )
+            try:
+                outcome = self.toolset.invoke(name, arguments)
+            except Exception:
+                self._effect_finished(turn, effect_id, state="UNKNOWN", error_code="TOOL_INTERRUPTED")
+                raise
+            state = "APPLIED" if outcome.status == "succeeded" else "NOT_APPLIED"
+            # A write-capable tool can fail after an external system accepted
+            # part of the work.  Its adapter did not provide a receipt, so it
+            # is intentionally held for reconciliation instead of retried.
+            if outcome.status != "succeeded" and not (callable(is_read_only) and is_read_only(name)):
+                state = "UNKNOWN"
+            self._effect_finished(
+                turn, effect_id, state=state,
+                result_ref=f"conversation-turn:{turn['turn_id']}:tool-result:{call_id}",
+                error_code=outcome.error_code,
+                private_result={"status": outcome.status, "content": outcome.content[:12_000]},
+            )
+            return outcome
+
         index = 0
         while index < len(prepared):
             if not eligible[index]:
@@ -681,7 +750,7 @@ class AgenticTurnRuntime:
                 if duplicate[index]:
                     outcomes[index] = duplicate_outcome(name, arguments)
                 elif error is None:
-                    outcomes[index] = self.toolset.invoke(name, arguments)
+                    outcomes[index] = invoke(index)
                 index += 1
                 continue
             run_end = index
@@ -690,7 +759,7 @@ class AgenticTurnRuntime:
             run_indexes = list(range(index, run_end))
             if len(run_indexes) > 1:
                 with ThreadPoolExecutor(max_workers=min(len(run_indexes), MAX_PARALLEL_TOOLS)) as pool:
-                    futures = {i: pool.submit(self.toolset.invoke, prepared[i][1], prepared[i][2]) for i in run_indexes}
+                    futures = {i: pool.submit(invoke, i) for i in run_indexes}
                     for i, future in futures.items():
                         try:
                             outcomes[i] = future.result()
@@ -698,7 +767,7 @@ class AgenticTurnRuntime:
                             message = f"{type(error).__name__}: {error}"
                             outcomes[i] = ToolOutcome("failed", f"{prepared[i][1]} falhou", message[:12_000], {}, "TOOL_FAILED")
             else:
-                outcomes[index] = self.toolset.invoke(prepared[index][1], prepared[index][2])
+                outcomes[index] = invoke(index)
             index = run_end
 
         results: list[dict[str, object]] = []
@@ -733,6 +802,29 @@ class AgenticTurnRuntime:
     def _life(self, turn: dict[str, object], state: str, **payload: object) -> None:
         if hasattr(self.store, "lifecycle"):
             self.store.lifecycle(turn, state, **payload)
+
+    def _effect_started(self, turn: dict[str, object], *, kind: str, invocation_ref: str, request_ref: str) -> str | None:
+        recorder = getattr(self.store, "effect_started", None)
+        if callable(recorder):
+            return recorder(turn, kind=kind, invocation_ref=invocation_ref, request_ref=request_ref)
+        return None
+
+    def _effect_finished(
+        self,
+        turn: dict[str, object],
+        effect_id: str | None,
+        *,
+        state: str,
+        result_ref: str | None = None,
+        error_code: str | None = None,
+        private_result: Mapping[str, object] | None = None,
+    ) -> None:
+        recorder = getattr(self.store, "effect_finished", None)
+        if callable(recorder) and effect_id is not None:
+            recorder(
+                turn, effect_id=effect_id, state=state, result_ref=result_ref,
+                error_code=error_code, private_result=private_result,
+            )
 
     def _hooks(self, turn: Mapping[str, object], event: str, **payload: object) -> None:
         """Notify plugin hooks and surface their result. Never raises, never influences the turn."""

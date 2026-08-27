@@ -632,6 +632,46 @@ conversation_dispatches = Table(
 )
 Index("ix_conversation_dispatch_state", conversation_dispatches.c.state, conversation_dispatches.c.queued_at)
 
+# The chat transcript is a projection of an execution, not its recovery
+# authority.  These records are deliberately narrow: they hold the durable
+# decision boundary around an external effect and references to the private
+# conversation material needed to rebuild context.  They never feed SSE or
+# public event payloads directly.
+execution_checkpoints = Table(
+    "execution_checkpoints", metadata,
+    Column("checkpoint_id", String(255), primary_key=True),
+    Column("execution_id", String(255), nullable=False),
+    Column("user_id", String(255), nullable=False), Column("workspace_id", String(255), nullable=True),
+    Column("agent_id", String(255), nullable=False), Column("correlation_id", String(255), nullable=False),
+    Column("sequence", Integer, nullable=False), Column("execution_state_version", Integer, nullable=False),
+    Column("context_manifest_ref", String(255), nullable=False), Column("next_decision", String(64), nullable=False),
+    Column("pending_effect_id", String(255), nullable=True), Column("is_safe", Boolean, nullable=False),
+    Column("snapshot", JSON, nullable=False), Column("created_at", DateTime(timezone=True), nullable=False),
+    UniqueConstraint("execution_id", "sequence", name="uq_execution_checkpoints_sequence"),
+    CheckConstraint("sequence > 0", name="ck_execution_checkpoints_sequence_positive"),
+)
+Index("ix_execution_checkpoints_latest", execution_checkpoints.c.execution_id, execution_checkpoints.c.sequence)
+
+execution_effects = Table(
+    "execution_effects", metadata,
+    Column("effect_id", String(255), primary_key=True),
+    Column("execution_id", String(255), nullable=False),
+    Column("user_id", String(255), nullable=False), Column("workspace_id", String(255), nullable=True),
+    Column("agent_id", String(255), nullable=False), Column("correlation_id", String(255), nullable=False),
+    Column("kind", String(32), nullable=False), Column("invocation_ref", String(255), nullable=False),
+    Column("request_ref", String(255), nullable=False), Column("result_ref", String(255), nullable=True),
+    Column("idempotency_key", String(255), nullable=False), Column("state", String(32), nullable=False),
+    Column("retryability", String(32), nullable=False), Column("attempt", Integer, nullable=False),
+    Column("result", JSON, nullable=True), Column("error_code", String(128), nullable=True),
+    Column("prepared_at", DateTime(timezone=True), nullable=False), Column("started_at", DateTime(timezone=True), nullable=True),
+    Column("resolved_at", DateTime(timezone=True), nullable=True), Column("reconciliation_ref", String(255), nullable=True),
+    Column("version", Integer, nullable=False),
+    UniqueConstraint("execution_id", "idempotency_key", name="uq_execution_effects_idempotency"),
+    CheckConstraint("attempt > 0", name="ck_execution_effects_attempt_positive"),
+    CheckConstraint("version > 0", name="ck_execution_effects_version_positive"),
+)
+Index("ix_execution_effects_recovery", execution_effects.c.execution_id, execution_effects.c.state, execution_effects.c.prepared_at)
+
 conversation_events = Table(
     "conversation_events", metadata,
     Column("id", Integer, primary_key=True), Column("conversation_id", String(255), nullable=False), Column("user_id", String(255), nullable=False),
@@ -886,6 +926,8 @@ __all__ = [
     "conversation_activity_events",
     "conversation_agents",
     "conversation_agent_usage",
+    "execution_checkpoints",
+    "execution_effects",
     "conversations",
     "projects",
     "workspace_roots",

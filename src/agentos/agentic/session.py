@@ -433,6 +433,7 @@ class TurnSession:
         provider_factory: Callable[[], object],
         workspace_root: Path | str | None = None,
         cancelled: Callable[[Mapping[str, object]], bool] | None = None,
+        reconciliation_required: Callable[[Mapping[str, object]], bool] | None = None,
         limits: AgenticLimits | None = None,
         enable_subagents: bool = True,
         skills=None,
@@ -459,6 +460,7 @@ class TurnSession:
         self.memory = memory_store
         self.provider_factory = provider_factory
         self.cancelled = cancelled or (lambda _turn: False)
+        self.reconciliation_required = reconciliation_required or (lambda _turn: False)
         self.limits = limits or AgenticLimits(deadline=timedelta(seconds=300), max_iterations=12, max_actions=24)
         self.enable_subagents = enable_subagents
         self.skills = skills
@@ -975,6 +977,7 @@ class TurnSession:
         return AgenticTurnRuntime(
             store=_MainAgentStore(self, self.store, toolset), provider=self.provider_factory(), toolset=toolset,
             system_prompt=prompt, limits=self.limits, cancelled=self.cancelled,
+            reconciliation_required=self.reconciliation_required,
             tool_kinds={item.name: item.kind for item in definitions},
             skill_prompt_tokens=_skill_prompt_tokens(skill_catalog),
             context_reporting=True,

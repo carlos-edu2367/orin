@@ -23,7 +23,7 @@ SWEEP_EVERY_SECONDS = 15.0
 def recover_once(store) -> tuple[str, ...]:
     """Requeue turns after a worker crash and fail turns no worker can claim."""
     recovered = ChatWorker(store).watchdog(maximum_age=UNCLAIMED_AFTER)
-    stale = store.recover_stale(maximum_age=STALE_AFTER)
+    stale = ChatWorker(store).recover_stale(maximum_age=STALE_AFTER)
     if recovered or stale:
         _LOGGER.info("recovery swept %d unclaimed and %d stale turns", len(recovered), len(stale))
     return tuple({*recovered, *stale})

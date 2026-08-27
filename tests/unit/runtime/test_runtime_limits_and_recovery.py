@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 from agentos.execution.models import ExecutionState
-from conftest import make_execution
+from tests.unit.runtime.conftest import make_execution
 from agentos.runtime.models import (
     CheckpointSnapshot,
     ContextReference,

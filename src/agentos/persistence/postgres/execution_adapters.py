@@ -158,6 +158,19 @@ class ExecutionApplicationAdapter:
         self._control = ExecutionControlService(persistence)
         self._scope = _ScopeResolver(engine)
 
+    def trusted_control_context(self, *, execution_id: str, user_id: str) -> tuple[ExecutionControlService, ExecutionCommandContext]:
+        """Return the typed Kernel seam for an already-authorized worker.
+
+        HTTP remains on dict receipts below. Workers deliberately use this
+        method instead of round-tripping through the application adapter so
+        the Kernel and the public API share the same control service.
+        """
+        scope = self._scope.resolve(execution_id, user_id)
+        return self._control, ExecutionCommandContext(
+            scope.user_id, scope.workspace_id, scope.agent_id, execution_id,
+            scope.correlation_id, _PURPOSE,
+        )
+
     def create(self, command: dict[str, object]) -> dict[str, object]:
         raw_context = command["context"]
         execution_id = str(raw_context["execution_id"])

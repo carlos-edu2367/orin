@@ -37,6 +37,8 @@ def test_persistence_schema_contains_only_the_durable_boundary_tables():
             "conversation_hook_context",
             "conversation_turns",
             "conversation_dispatches",
+            "execution_checkpoints",
+            "execution_effects",
             "conversation_events",
             "conversation_activity_events",
             "conversation_tool_records",

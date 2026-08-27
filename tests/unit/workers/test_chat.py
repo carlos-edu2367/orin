@@ -11,6 +11,8 @@ from agentos.agentic.runtime import AgenticRunResult
 from agentos.persistence.postgres.schema import metadata, provider_model_catalog, provider_model_favorites
 from agentos.workers import chat as chat_module
 from agentos.workers.chat import ChatWorker
+from agentos.conversations.chat import PostgresChatStore
+from agentos.persistence.postgres.execution_adapters import ExecutionQueryAdapter
 
 
 TURN = {
@@ -211,6 +213,38 @@ def test_run_releases_the_browser_registry_so_a_long_turn_is_not_evicted_as_idle
 
     assert len(registry.released) == 1
     assert registry.released[0]["turn_id"] == "turn-1"
+
+
+def test_default_worker_runs_the_chat_through_the_canonical_kernel() -> None:
+    """The production path has no runtime factory and must not use _project
+    to acquire/complete the execution around a second lifecycle loop."""
+    engine = create_engine("sqlite://", future=True)
+    metadata.create_all(engine)
+    store = PostgresChatStore(engine)
+    receipt = store.create(
+        user_id="user-1", message="hello", provider="openrouter", model_id="model-1", idempotency_key="kernel-turn",
+    )
+
+    class CompletedRuntime:
+        def run(self, turn_id):
+            return AgenticRunResult("completed")
+
+        def close(self):
+            return None
+
+    worker = ChatWorker(store)
+    # The module-level fixture replaces the production adapters for the small
+    # unit doubles above; this integration-shaped assertion restores them.
+    from agentos.persistence.postgres.execution_adapters import ExecutionApplicationAdapter
+
+    worker._executions = ExecutionApplicationAdapter(engine)
+    worker._queries = ExecutionQueryAdapter(engine)
+    worker._runtime_for = lambda turn: CompletedRuntime()
+    worker.run(receipt.turn_id)
+
+    execution = ExecutionQueryAdapter(engine).get({"resource_id": store.execution_id_for(receipt.turn_id), "user_id": "user-1"})
+    assert execution["state"] == "COMPLETED"
+    assert store.get(receipt.conversation_id, "user-1")["messages"][-1]["status"] == "completed"
 
 
 def test_unlimited_runtime_setting_removes_the_action_limit(monkeypatch: pytest.MonkeyPatch) -> None:
