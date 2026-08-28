@@ -693,6 +693,31 @@ turn_quality_metrics = Table(
 )
 Index("ix_turn_quality_metrics_model", turn_quality_metrics.c.user_id, turn_quality_metrics.c.provider, turn_quality_metrics.c.model_id, turn_quality_metrics.c.created_at)
 
+# The agentic trajectory of a turn: which tools were called, with what, and
+# what came back. ``conversation_messages`` deliberately cannot hold this --
+# its role check exists to protect what the interface renders, and its
+# content column is far too small for a tool result -- so the agent's memory
+# lives in its own table rather than being welded to the chat projection.
+#
+# Without this, every tool call and result was discarded at the end of the
+# turn, and a follow-up message ("now redo it with the new figures") began
+# with no idea what had already been read or written.
+conversation_turn_steps = Table(
+    "conversation_turn_steps", metadata,
+    Column("id", Integer, primary_key=True), Column("step_id", String(255), nullable=False, unique=True),
+    Column("conversation_id", String(255), nullable=False), Column("turn_id", String(255), nullable=False),
+    Column("user_id", String(255), nullable=False), Column("agent_id", String(255), nullable=False),
+    Column("sequence", Integer, nullable=False), Column("kind", String(24), nullable=False),
+    Column("tool_name", String(64), nullable=True), Column("tool_call_id", String(255), nullable=True),
+    Column("payload", Text(), nullable=False),
+    # The size before any truncation, so a rehydrated result can say honestly
+    # how much of it is missing instead of looking complete.
+    Column("content_bytes", Integer, nullable=False), Column("truncated", Boolean, nullable=False, server_default="false"),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    UniqueConstraint("turn_id", "agent_id", "sequence", name="uq_conversation_turn_step_sequence"),
+)
+Index("ix_conversation_turn_steps_turn", conversation_turn_steps.c.conversation_id, conversation_turn_steps.c.turn_id, conversation_turn_steps.c.sequence)
+
 conversation_events = Table(
     "conversation_events", metadata,
     Column("id", Integer, primary_key=True), Column("conversation_id", String(255), nullable=False), Column("user_id", String(255), nullable=False),
@@ -950,6 +975,7 @@ __all__ = [
     "execution_checkpoints",
     "execution_effects",
     "turn_quality_metrics",
+    "conversation_turn_steps",
     "conversations",
     "projects",
     "workspace_roots",

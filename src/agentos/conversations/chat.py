@@ -18,7 +18,8 @@ from agentos.api.events import CursorError
 from agentos.agentic.events import AgentActivityEvent, AgentActivityEventType
 from agentos.persistence.postgres.agentic_activity import ActivityCursorError
 from agentos.persistence.postgres.execution_adapters import ExecutionApplicationAdapter, ExecutionQueryAdapter
-from agentos.persistence.postgres.schema import (conversation_activity_events, conversation_agent_usage, conversation_agents, conversation_dispatches, conversation_events, conversation_hook_context, conversation_message_attachments, conversation_message_commands, conversation_messages, conversation_tool_records, conversation_turns, conversations, projects, runtime_heartbeats, turn_quality_metrics, workspace_roots)
+from agentos.agentic import transcript as turn_transcript
+from agentos.persistence.postgres.schema import (conversation_activity_events, conversation_agent_usage, conversation_agents, conversation_dispatches, conversation_events, conversation_hook_context, conversation_message_attachments, conversation_message_commands, conversation_messages, conversation_tool_records, conversation_turn_steps, conversation_turns, conversations, projects, runtime_heartbeats, turn_quality_metrics, workspace_roots)
 
 
 _LOGGER = logging.getLogger("agentos.conversations.chat")
@@ -270,6 +271,90 @@ class PostgresChatStore:
             {"tool_name": str(row["tool_name"]), "arguments": str(row["arguments"]), "status": str(row["status"]), "summary": str(row["summary"])}
             for row in reversed(rows)
         ]
+
+    def record_step(
+        self,
+        turn: Mapping[str, object],
+        *,
+        kind: str,
+        payload: Mapping[str, object],
+        agent_id: str = "main",
+        tool_name: str | None = None,
+        tool_call_id: str | None = None,
+    ) -> None:
+        """Append one step to this turn's agentic trajectory. Never raises.
+
+        The trajectory is what lets the *next* turn know what this one already
+        read and wrote. Losing a step costs the next turn some context; raising
+        here would cost this turn its whole run, which is strictly worse.
+        """
+        if kind not in turn_transcript.STEP_KINDS:
+            return
+        try:
+            encoded = json.dumps(payload, ensure_ascii=False, default=str)
+        except (TypeError, ValueError):
+            return
+        content_bytes = int(payload.get("content_bytes") or len(encoded))
+        truncated = bool(payload.get("truncated"))
+        now = datetime.now(UTC)
+        for _ in range(3):
+            try:
+                with self._engine.connect() as connection:
+                    current = connection.execute(
+                        select(func.max(conversation_turn_steps.c.sequence)).where(
+                            conversation_turn_steps.c.turn_id == turn["turn_id"],
+                            conversation_turn_steps.c.agent_id == agent_id,
+                        )
+                    ).scalar()
+                sequence = int(current or 0) + 1
+                with self._engine.begin() as connection:
+                    connection.execute(insert(conversation_turn_steps).values(
+                        step_id=f"step:{turn['turn_id']}:{agent_id}:{sequence}",
+                        conversation_id=str(turn["conversation_id"]), turn_id=str(turn["turn_id"]),
+                        user_id=str(turn["user_id"]), agent_id=str(agent_id)[:255], sequence=sequence,
+                        kind=str(kind)[:24], tool_name=str(tool_name)[:64] if tool_name else None,
+                        tool_call_id=str(tool_call_id)[:255] if tool_call_id else None,
+                        payload=encoded, content_bytes=content_bytes, truncated=truncated,
+                        created_at=now,
+                    ))
+                return
+            except IntegrityError:
+                continue
+            except Exception:  # noqa: BLE001 - the transcript never breaks a turn
+                _LOGGER.exception("could not record a turn step for %s", turn.get("turn_id"))
+                return
+
+    def turn_steps(self, conversation_id: str, *, turn_ids: Sequence[str]) -> dict[str, list[dict[str, object]]]:
+        """Recorded steps for the given turns, grouped by turn, in order."""
+        if not turn_ids:
+            return {}
+        try:
+            with self._engine.connect() as connection:
+                rows = connection.execute(
+                    select(
+                        conversation_turn_steps.c.turn_id, conversation_turn_steps.c.kind,
+                        conversation_turn_steps.c.payload, conversation_turn_steps.c.sequence,
+                    )
+                    .where(
+                        conversation_turn_steps.c.conversation_id == conversation_id,
+                        conversation_turn_steps.c.turn_id.in_(list(turn_ids)),
+                        # Only the main agent's trajectory belongs in the main
+                        # conversation history; a subagent's steps are its own.
+                        conversation_turn_steps.c.agent_id == "main",
+                    )
+                    .order_by(conversation_turn_steps.c.turn_id, conversation_turn_steps.c.sequence)
+                ).mappings().all()
+        except Exception:  # noqa: BLE001 - a missing transcript degrades to the old history
+            _LOGGER.exception("could not read the turn transcript for %s", conversation_id)
+            return {}
+        grouped: dict[str, list[dict[str, object]]] = {}
+        for row in rows:
+            try:
+                payload = json.loads(str(row["payload"]))
+            except (TypeError, ValueError):
+                continue
+            grouped.setdefault(str(row["turn_id"]), []).append({"kind": str(row["kind"]), "payload": payload})
+        return grouped
 
     def record_quality(
         self,
@@ -613,25 +698,90 @@ class PostgresChatStore:
         self._activity(turn, AgentActivityEventType.TURN_STARTED, "Turn started")
         return dict(turn)
 
-    def history_for_turn(self, turn: dict[str, object]) -> list[dict[str, str]]:
+    def history_for_turn(self, turn: dict[str, object], *, rehydration_budget_tokens: int = 0) -> list[dict[str, object]]:
+        """The conversation as the model should see it, including past tool work.
+
+        Until the transcript existed this returned only user/assistant text,
+        so a follow-up turn had no idea which files the previous turn had read
+        or written and rediscovered them from scratch. Each earlier turn's
+        recorded steps are now replayed between its own user message and its
+        answer, which is where they happened.
+
+        ``rehydration_budget_tokens`` bounds what the replayed trajectory may
+        cost; zero (the default, used by every caller that only wants the
+        readable transcript) reproduces the previous behaviour exactly.
+        """
         with self._engine.connect() as c:
             rows = c.execute(select(conversation_messages.c.message_id, conversation_messages.c.role, conversation_messages.c.content).where(conversation_messages.c.conversation_id == turn["conversation_id"], conversation_messages.c.sequence <= select(conversation_messages.c.sequence).where(conversation_messages.c.message_id == turn["user_message_id"]).scalar_subquery()).order_by(conversation_messages.c.sequence)).mappings().all()
             attachment_rows = c.execute(select(conversation_message_attachments).where(conversation_message_attachments.c.conversation_id == turn["conversation_id"]).order_by(conversation_message_attachments.c.id)).mappings().all()
             command_rows = c.execute(select(
                 conversation_message_commands.c.message_id, conversation_message_commands.c.expanded_body
             ).where(conversation_message_commands.c.conversation_id == turn["conversation_id"])).mappings().all()
+            turn_rows = c.execute(select(
+                conversation_turns.c.turn_id, conversation_turns.c.assistant_message_id
+            ).where(conversation_turns.c.conversation_id == turn["conversation_id"])).mappings().all() if rehydration_budget_tokens > 0 else []
         grouped: dict[str, list[dict[str, object]]] = {}
         for row in attachment_rows:
             grouped.setdefault(str(row["message_id"]), []).append(dict(row))
         expansions = {str(row["message_id"]): str(row["expanded_body"]) for row in command_rows}
-        history: list[dict[str, str]] = []
+        earlier_turns: dict[str, str] = {
+            str(row["assistant_message_id"]): str(row["turn_id"])
+            for row in turn_rows if str(row["turn_id"]) != str(turn.get("turn_id"))
+        }
+        # Conversation order comes from the message sequence, never from the
+        # identifiers, which are random.
+        ordered = [
+            (str(row["message_id"]), earlier_turns[str(row["message_id"])])
+            for row in rows if str(row["message_id"]) in earlier_turns
+        ]
+        replay = self._rehydrated_steps(turn, ordered, rehydration_budget_tokens) if ordered else {}
+        history: list[dict[str, object]] = []
         for row in rows:
-            content = expansions.get(str(row["message_id"]), str(row["content"]))
-            records = grouped.get(str(row["message_id"]), [])
+            message_id = str(row["message_id"])
+            for message in replay.get(message_id, ()):
+                history.append(message)
+            content = expansions.get(message_id, str(row["content"]))
+            records = grouped.get(message_id, [])
             if records:
                 content = f"{content}{_attachment_marker(records)}"
             history.append({"role": str(row["role"]), "content": content})
         return history
+
+    def _rehydrated_steps(
+        self,
+        turn: Mapping[str, object],
+        ordered_turns: Sequence[tuple[str, str]],
+        budget_tokens: int,
+    ) -> dict[str, list[dict[str, object]]]:
+        """Replayable messages per assistant message, within the token budget.
+
+        ``ordered_turns`` is (assistant_message_id, turn_id) in conversation
+        order. The budget is spent newest-first, so a long conversation keeps
+        the trajectory of the work in progress and drops the oldest turns --
+        the opposite of what cutting from the front would do. Projection uses
+        *this* turn's provider: the person may have switched models since the
+        steps were recorded.
+        """
+        stored = self.turn_steps(str(turn["conversation_id"]), turn_ids=[turn_id for _, turn_id in ordered_turns])
+        if not stored:
+            return {}
+        provider = str(turn.get("provider") or "")
+        remaining = max(0, int(budget_tokens))
+        replay: dict[str, list[dict[str, object]]] = {}
+        for message_id, turn_id in reversed(ordered_turns):
+            if remaining <= 0:
+                break
+            steps = stored.get(turn_id)
+            if not steps:
+                continue
+            kept = turn_transcript.within_budget(steps, remaining)
+            if not kept:
+                continue
+            remaining -= sum(turn_transcript.estimated_tokens(step.get("payload")) for step in kept)
+            messages = turn_transcript.project(kept, provider)
+            if messages:
+                replay[message_id] = messages
+        return replay
 
     def hook_context(self, conversation_id: str) -> str | None:
         with self._engine.connect() as c:

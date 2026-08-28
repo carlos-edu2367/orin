@@ -23,6 +23,7 @@ from agentos.provider_catalog.ollama import DEFAULT_OLLAMA_BASE_URL, normalize_o
 from agentos.provider_catalog.omniroute import DEFAULT_OMNIROUTE_BASE_URL, normalize_omniroute_base_url
 from agentos.agentic.runtime import AgenticLimits, AgenticRunResult, AgenticTurnRuntime
 from agentos.agentic.settings import AgentRuntimeSettingsStore
+from agentos.agentic.transcript import REHYDRATION_BUDGET_FRACTION
 from agentos.agentic.session import TurnSession, build_retrieval_for_turn, resolve_effective_workspace_id
 from agentos.agentic.browser_tools import ConversationBrowserRegistry, browser_capability_from_environment, conversation_browser_for
 from agentos.agentic.web_search import search_client_from_environment
@@ -137,7 +138,11 @@ class _RuntimeStore:
         return self._turn
 
     def history_for_turn(self, turn: dict[str, object]):
-        return self._store.history_for_turn(turn)
+        # The trajectory of earlier turns is replayed into the history, bounded
+        # by a fraction of this turn's context budget so a long conversation
+        # cannot spend the whole window on what already happened.
+        budget = int(self._worker._max_context_tokens_for(turn) * REHYDRATION_BUDGET_FRACTION)
+        return self._store.history_for_turn(turn, rehydration_budget_tokens=budget)
 
     def attachments_for_turn(self, turn: dict[str, object]):
         return self._store.attachments_for_turn(turn)
@@ -175,6 +180,9 @@ class _RuntimeStore:
 
     def record_quality(self, turn: dict[str, object], **values: object) -> None:
         self._store.record_quality(turn, **values)
+
+    def record_step(self, turn: dict[str, object], **values: object) -> None:
+        self._store.record_step(turn, **values)
 
     # -- session seams ---------------------------------------------------
 

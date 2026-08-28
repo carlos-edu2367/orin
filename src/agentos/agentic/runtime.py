@@ -12,6 +12,7 @@ from typing import Callable, Mapping
 from .action_loop import ActionLoop, MalformedToolCall
 from .provider_stream import NormalizedStreamItem, StreamKind
 from .quality import TurnQualityCounters
+from . import transcript
 
 MAX_PARALLEL_TOOLS = 4
 AGED_TOOL_RESULT_CHARS = 400
@@ -338,7 +339,22 @@ class AgenticTurnRuntime:
                             tool_arguments=dict(arguments),
                         )
                 messages.append(self._assistant_tool_message(turn, text_parts, calls, thinking_parts))
+                # Record the trajectory so the *next* turn of this conversation
+                # starts knowing what this one already read and wrote, instead
+                # of rediscovering it.
+                self._record_step(
+                    turn, kind=transcript.STEP_ASSISTANT_TOOL_CALL,
+                    payload=transcript.assistant_tool_call_payload("".join(text_parts), calls.values()),
+                )
                 for result in results:
+                    self._record_step(
+                        turn, kind=transcript.STEP_TOOL_RESULT,
+                        payload=transcript.tool_result_payload(
+                            call_id=str(result.get("id") or ""), name=str(result.get("name") or ""),
+                            status=str(result.get("status") or ""), content=str(result.get("content") or ""),
+                        ),
+                        tool_name=str(result.get("name") or ""), tool_call_id=str(result.get("id") or ""),
+                    )
                     messages.extend(self._tool_result_messages(turn, result))
                 self._age_tool_results(messages, keep_recent=len(results))
                 # ``ask_user`` deliberately ends this provider run.  A worker
@@ -951,6 +967,22 @@ class AgenticTurnRuntime:
                 turn, "plugin_hook", hook_id=getattr(outcome, "hook_id", ""), hook_event=event,
                 status=getattr(outcome, "status", ""), summary=summary[:2000],
             )
+
+    def _record_step(self, turn: dict[str, object], *, kind: str, payload: Mapping[str, object], **fields: object) -> None:
+        """Append one step to the durable transcript, if the store keeps one.
+
+        A store without the method (every in-memory test double, and the
+        subagent view, whose trajectory is not the conversation's) simply
+        records nothing, and a failure costs the next turn some context
+        rather than costing this turn its run.
+        """
+        recorder = getattr(self.store, "record_step", None)
+        if not callable(recorder):
+            return
+        try:
+            recorder(turn, kind=kind, payload=payload, **fields)
+        except Exception:  # noqa: BLE001 - the transcript never breaks a turn
+            pass
 
     def _settle_quality(self, turn: Mapping[str, object], outcome: str, error_code: str | None = None) -> None:
         """Persist this turn's efficiency row exactly once, at its terminal.
