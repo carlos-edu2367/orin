@@ -165,6 +165,11 @@ class AgenticTurnRuntime:
         # that has not opted in (and every contract test) relies on.
         self.phases = phase_controller
         self._first_request_text = ""
+        # Per-turn tool bookkeeping. ``run`` resets these; they are also
+        # initialised here so ``_run_toolset`` can be exercised on its own.
+        self._failed_signatures: dict[str, str] = {}
+        self._succeeded_reads: dict[str, tuple[str, int]] = {}
+        self._writes = 0
 
     def close(self) -> None:
         if self._closed:
@@ -179,6 +184,12 @@ class AgenticTurnRuntime:
 
     def run(self, turn_id: str, *, turn: dict[str, object] | None = None) -> AgenticRunResult:
         turn = turn or self._load(turn_id)
+        # A successful read, and how many writes had happened when it ran. A
+        # later identical read is only safe to serve from here if that count
+        # has not moved: re-reading a file after editing it is necessary, not
+        # redundant.
+        self._succeeded_reads: dict[str, tuple[str, int]] = {}
+        self._writes = 0
         self._started_at = self.clock()
         deadline = self._started_at + self.limits.deadline
         self._life(turn, "running")
@@ -909,8 +920,35 @@ class AgenticTurnRuntime:
             return ToolOutcome("failed", "Chamada repetida ignorada", content, {}, "DUPLICATE_TOOL_CALL")
 
         is_read_only = getattr(self.toolset, "is_read_only", None)
+
+        def cached_read(name: str, arguments: Mapping[str, object]) -> ToolOutcome | None:
+            """The earlier result of this exact read, if nothing can have changed it.
+
+            Two conditions, and the second is what makes this correct: the
+            tool must be read-only, and no write-capable tool may have run
+            since. A write to any path counts, because the runtime has no way
+            to know which file a tool touched. ``run_command`` is not
+            read-only, so a command that only reads is never served from here.
+            """
+            if not (callable(is_read_only) and is_read_only(name)):
+                return None
+            remembered = self._succeeded_reads.get(self._signature(name, arguments))
+            if remembered is None or remembered[1] != self._writes:
+                return None
+            content = (
+                f"{remembered[0]}\n\n[resultado da chamada anterior a {name} neste mesmo turno; "
+                "nada foi escrito desde então, então o conteúdo não mudou]"
+            )
+            return ToolOutcome("succeeded", f"{name} reaproveitado da chamada anterior", content, {})
+
+        repeated: list[ToolOutcome | None] = [
+            None if error is not None or duplicate[i] else cached_read(name, arguments)
+            for i, (_, name, arguments, error) in enumerate(prepared)
+        ]
+
         eligible = [
-            error is None and not duplicate[i] and callable(is_read_only) and is_read_only(name)
+            error is None and not duplicate[i] and repeated[i] is None
+            and callable(is_read_only) and is_read_only(name)
             for i, (_, name, _, error) in enumerate(prepared)
         ]
 
@@ -932,11 +970,19 @@ class AgenticTurnRuntime:
                 invocation_ref=f"tool:{call_id}",
                 request_ref=f"conversation-turn:{turn['turn_id']}:tool:{call_id}",
             )
+            read_only = bool(callable(is_read_only) and is_read_only(name))
+            if not read_only:
+                # Counted before the call, not after: a write that fails may
+                # still have changed something, so a later read must not be
+                # served from a result taken before it.
+                self._writes += 1
             try:
                 outcome = self.toolset.invoke(name, arguments)
             except Exception:
                 self._effect_finished(turn, effect_id, state="UNKNOWN", error_code="TOOL_INTERRUPTED")
                 raise
+            if read_only and outcome.status == "succeeded":
+                self._succeeded_reads[self._signature(name, arguments)] = (outcome.content, self._writes)
             state = "APPLIED" if outcome.status == "succeeded" else "NOT_APPLIED"
             # A write-capable tool can fail after an external system accepted
             # part of the work.  Its adapter did not provide a receipt, so it
@@ -957,6 +1003,8 @@ class AgenticTurnRuntime:
                 _, name, arguments, error = prepared[index]
                 if duplicate[index]:
                     outcomes[index] = duplicate_outcome(name, arguments)
+                elif repeated[index] is not None:
+                    outcomes[index] = repeated[index]
                 elif error is None:
                     outcomes[index] = invoke(index)
                 index += 1
