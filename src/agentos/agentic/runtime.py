@@ -124,6 +124,7 @@ class AgenticTurnRuntime:
         reconciliation_required: Callable[[Mapping[str, object]], bool] | None = None,
         toolset: object | None = None,
         system_prompt: str | None = None,
+        volatile_prompt: str = "",
         tool_kinds: Mapping[str, str] | None = None,
         skill_prompt_tokens: int = 0,
         context_reporting: bool = False,
@@ -142,6 +143,11 @@ class AgenticTurnRuntime:
         self.cancelled = cancelled or (lambda _turn: False)
         self.reconciliation_required = reconciliation_required or (lambda _turn: False)
         self.system_prompt = system_prompt
+        # The half of the prompt that changes as the conversation moves. It
+        # rides as its own system block so it stays out of the cached prefix;
+        # a caller that passes only ``system_prompt`` gets the previous
+        # behaviour, with the whole thing treated as stable.
+        self.volatile_prompt = volatile_prompt or ""
         self.tool_kinds = dict(tool_kinds or {})
         self.skill_prompt_tokens = max(0, int(skill_prompt_tokens))
         self.context_reporting = bool(context_reporting)
@@ -722,6 +728,8 @@ class AgenticTurnRuntime:
         preamble: list[dict[str, object]] = []
         if self.system_prompt:
             preamble.append({"role": "system", "content": self.system_prompt})
+        if self.volatile_prompt:
+            preamble.append({"role": "system", "content": self.volatile_prompt})
         if self.contract is not None:
             preamble.append({"role": "system", "content": self.contract.render()})
         return [*preamble, *window] if preamble else window
