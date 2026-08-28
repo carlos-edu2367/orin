@@ -184,3 +184,55 @@ def test_a_broken_step_never_raises() -> None:
         {"turn_id": "ghost", "conversation_id": "ghost", "user_id": "user-1"},
         kind=transcript.STEP_TOOL_RESULT, payload={"content": object()},
     )
+
+
+# -- contract continuity ----------------------------------------------------
+
+
+_CONTRACT_ARGUMENTS = (
+    '{"objective": "Reformular o orçamento com margem de 18%.", '
+    '"acceptance": [{"id": "total", "check": "o total reflete 18%", "how": "inspection"}], '
+    '"toolkits": ["files"]}'
+)
+
+
+def test_a_later_turn_finds_the_contract_the_conversation_is_working_under() -> None:
+    """A follow-up resumes the task instead of re-planning it."""
+    store = _store()
+    first = _first_turn(store)
+    store.record_step(
+        first, kind=transcript.STEP_ASSISTANT_TOOL_CALL,
+        payload=transcript.assistant_tool_call_payload(
+            "", [{"id": "c1", "name": "write_contract", "arguments": _CONTRACT_ARGUMENTS}],
+        ),
+    )
+
+    found = store.latest_contract(str(first["conversation_id"]))
+
+    assert found is not None
+    assert found["objective"].startswith("Reformular")
+
+
+def test_the_most_recent_contract_wins_when_the_agent_revised_it() -> None:
+    store = _store()
+    first = _first_turn(store)
+    store.record_step(
+        first, kind=transcript.STEP_ASSISTANT_TOOL_CALL,
+        payload=transcript.assistant_tool_call_payload("", [{"id": "c1", "name": "write_contract", "arguments": _CONTRACT_ARGUMENTS}]),
+    )
+    store.record_step(
+        first, kind=transcript.STEP_ASSISTANT_TOOL_CALL,
+        payload=transcript.assistant_tool_call_payload(
+            "", [{"id": "c2", "name": "write_contract", "arguments": _CONTRACT_ARGUMENTS.replace("18%", "22%")}],
+        ),
+    )
+
+    assert "22%" in str(store.latest_contract(str(first["conversation_id"])))
+
+
+def test_a_conversation_that_never_planned_has_no_contract() -> None:
+    store = _store()
+    first = _first_turn(store)
+    _record_a_read(store, first, path="a.txt", content="x")
+
+    assert store.latest_contract(str(first["conversation_id"])) is None

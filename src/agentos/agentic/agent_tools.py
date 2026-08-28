@@ -628,8 +628,19 @@ class AgentToolset:
             self._by_name = {item.name: item for item in self._definitions}
         return self._definitions
 
-    def schemas(self) -> list[dict[str, Any]]:
-        return [item.schema() for item in self.definitions()]
+    def schemas(self, allowed: Collection[str] | None = None, kinds: Collection[str] | None = None) -> list[dict[str, Any]]:
+        """Provider-facing schemas, optionally narrowed to one phase's tools.
+
+        ``allowed=None`` publishes everything, which is what the tool-runtime
+        contract tests and any caller without a phase expect. A phase passes
+        the names it publishes; ``kinds`` lets a family discovered at runtime
+        (MCP servers, plugin tools) through by kind, since their names are
+        not known when the phase sets are written.
+        """
+        if allowed is None:
+            return [item.schema() for item in self.definitions()]
+        names, families = set(allowed), set(kinds or ())
+        return [item.schema() for item in self.definitions() if item.name in names or item.kind in families]
 
     def resolve(self, name: str) -> ToolDefinition:
         self.definitions()

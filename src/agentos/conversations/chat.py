@@ -356,6 +356,44 @@ class PostgresChatStore:
             grouped.setdefault(str(row["turn_id"]), []).append({"kind": str(row["kind"]), "payload": payload})
         return grouped
 
+    def latest_contract(self, conversation_id: str) -> dict[str, object] | None:
+        """The most recent task contract written in this conversation, if any.
+
+        Read back from the transcript rather than stored separately: the
+        contract is already durable there, and a second copy would be one
+        more thing that can disagree with itself. A follow-up turn resumes
+        this contract instead of re-planning work that is already underway.
+        """
+        try:
+            with self._engine.connect() as connection:
+                rows = connection.execute(
+                    select(conversation_turn_steps.c.payload)
+                    .where(
+                        conversation_turn_steps.c.conversation_id == conversation_id,
+                        conversation_turn_steps.c.agent_id == "main",
+                        conversation_turn_steps.c.kind == turn_transcript.STEP_ASSISTANT_TOOL_CALL,
+                    )
+                    .order_by(conversation_turn_steps.c.id.desc())
+                    .limit(40)
+                ).scalars().all()
+        except Exception:  # noqa: BLE001 - a missing contract only costs a re-plan
+            return None
+        for raw in rows:
+            try:
+                payload = json.loads(str(raw))
+            except (TypeError, ValueError):
+                continue
+            for call in reversed(payload.get("calls") or ()):
+                if not isinstance(call, Mapping) or call.get("name") != "write_contract":
+                    continue
+                try:
+                    arguments = json.loads(str(call.get("arguments") or "{}"))
+                except (TypeError, ValueError):
+                    continue
+                if isinstance(arguments, dict) and arguments:
+                    return arguments
+        return None
+
     def record_quality(
         self,
         turn: Mapping[str, object],

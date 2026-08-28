@@ -184,6 +184,9 @@ class _RuntimeStore:
     def record_step(self, turn: dict[str, object], **values: object) -> None:
         self._store.record_step(turn, **values)
 
+    def latest_contract(self, conversation_id: str):
+        return self._store.latest_contract(conversation_id)
+
     # -- session seams ---------------------------------------------------
 
     def record(self, *args, **kwargs) -> None:

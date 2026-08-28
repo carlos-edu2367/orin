@@ -27,7 +27,9 @@ from agentos.retrieval.worker import IndexWorker
 
 from .agent_tools import AgentToolset, ToolOutcome
 from .browser_tools import AgentBrowserView
+from .contract import parse as parse_contract
 from .events import AgentActivityEventType
+from .phases import PhaseController
 from .runtime import AgenticLimits, AgenticTurnRuntime
 from .workspace import resolve_workspace
 
@@ -232,6 +234,11 @@ def build_system_prompt(
         "- Keep the final answer for the user short and useful; the interface already shows every tool step you took.",
         "- When you create a useful workspace file, link it in your final answer as [filename](workspace://relative/path). Prioritize final deliverables and include generator scripts when useful.",
         "- Use run_command only for commands that finish. To start a local server, call run_command with background=true; on Windows do not use nohup or Unix '&' syntax.",
+        # The reference material below describes every tool the workspace can
+        # offer, but a request publishes only the ones the current stage needs.
+        # Saying so prevents the model from planning around a tool it cannot
+        # currently see -- and tells it how to get that tool back.
+        "- Not every tool described below is published on every request: each stage of a task offers the tools that stage needs. The '## Agora' block tells you which stage you are in. To unlock the browser, MCP, plugins or subagents, declare them in `write_contract`.",
     ]
     if tool_names:
         lines += ["", "## Tools available now", "- " + ", ".join(tool_names)]
@@ -976,6 +983,13 @@ class TurnSession:
             workspace_tree=tree,
             hook_context=self._session_start_context(),
         )
+        # A conversation that already carries a contract resumes the work
+        # instead of re-orienting; the transcript already holds what was read.
+        resumed = self._resumed_contract()
+        phase_controller = PhaseController(
+            model_calls_tools=self.model_calls_tools,
+            resumed_contract=resumed is not None,
+        )
         definitions = toolset.definitions()
         # OmniRoute's public OpenAI-compatible response does not guarantee the
         # selected upstream/provider. Record the requested route only; never
@@ -986,7 +1000,7 @@ class TurnSession:
                 "Selecionando rota",
                 {"requested_route": str(self.turn.get("model_id") or ""), "provider": "omniroute"},
             )
-        return AgenticTurnRuntime(
+        runtime = AgenticTurnRuntime(
             store=_MainAgentStore(self, self.store, toolset), provider=self.provider_factory(), toolset=toolset,
             system_prompt=prompt, limits=self.limits, cancelled=self.cancelled,
             reconciliation_required=self.reconciliation_required,
@@ -994,7 +1008,22 @@ class TurnSession:
             skill_prompt_tokens=_skill_prompt_tokens(skill_catalog),
             context_reporting=True,
             hook_engine=self.hook_engine,
+            phase_controller=phase_controller,
         )
+        if resumed is not None:
+            runtime.contract = resumed
+        return runtime
+
+    def _resumed_contract(self):
+        """The contract this conversation is already working under, if any."""
+        reader = getattr(self.store, "latest_contract", None)
+        if not callable(reader):
+            return None
+        try:
+            payload = reader(str(self.turn["conversation_id"]))
+            return parse_contract(payload) if payload else None
+        except Exception:  # noqa: BLE001 - a lost contract costs a re-plan, never the turn
+            return None
 
 
 __all__ = ["MAX_PRE_READ_FILES", "MAX_SUBAGENTS_PER_TURN", "ProjectWorkspaceResolutionError", "SUBAGENT_MAX_ACTIONS", "SUBAGENT_MAX_OUTPUT_TOKENS", "TurnSession", "build_system_prompt", "environment_facts", "pre_read_attachments", "resolve_effective_workspace_id"]

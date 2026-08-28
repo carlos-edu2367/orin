@@ -11,9 +11,10 @@ from typing import Callable, Mapping
 
 from .action_loop import ActionLoop, MalformedToolCall
 from .provider_stream import NormalizedStreamItem, StreamKind
-from .contract import ContractError, TaskContract, parse as parse_contract
+from .contract import ContractError, TaskContract, parse as parse_contract, synthesize as synthesize_contract
 from .quality import TurnQualityCounters
-from . import transcript
+from . import phases, transcript
+from .phases import Phase, PhaseController
 
 MAX_PARALLEL_TOOLS = 4
 AGED_TOOL_RESULT_CHARS = 400
@@ -116,6 +117,7 @@ class AgenticTurnRuntime:
         skill_prompt_tokens: int = 0,
         context_reporting: bool = False,
         hook_engine=None,
+        phase_controller: PhaseController | None = None,
     ) -> None:
         self.store, self.provider = store, provider
         self.hook_engine = hook_engine
@@ -142,6 +144,10 @@ class AgenticTurnRuntime:
         # thing that must never vanish mid-task is the definition of the task.
         self.contract: TaskContract | None = None
         self._rejected_contracts = 0
+        # None keeps the previous single-stage behaviour, which every caller
+        # that has not opted in (and every contract test) relies on.
+        self.phases = phase_controller
+        self._first_request_text = ""
 
     def close(self) -> None:
         if self._closed:
@@ -170,6 +176,10 @@ class AgenticTurnRuntime:
         # onto a later tool-result message (Anthropic emits those with
         # ``role: "user"`` too) as the loop appends to ``messages`` below.
         self._pinned_index = self._last_user_index(messages)
+        # Kept for contract synthesis: if the model never manages to write a
+        # contract, the person's own request becomes the objective.
+        pinned_message = messages[self._pinned_index] if self._pinned_index is not None else None
+        self._first_request_text = str((pinned_message or {}).get("content") or "")[:2_000]
         provider_retries = 0
         total_tokens = 0
         total_cost = Decimal("0")
@@ -183,10 +193,17 @@ class AgenticTurnRuntime:
             remaining_tokens = None if self.limits.max_provider_tokens is None else self.limits.max_provider_tokens - total_tokens
             if remaining_tokens is not None and remaining_tokens <= 0:
                 return self._fail(turn, "PROVIDER_TOKEN_LIMIT", iteration, action_count)
-            final_iteration = self.limits.max_iterations is not None and iteration == self.limits.max_iterations
+            final_iteration = (
+                (self.limits.max_iterations is not None and iteration == self.limits.max_iterations)
+                or (self.phases is not None and self.phases.is_final)
+            )
             tool_schemas = self._tool_schemas(turn)
             self._maybe_compact(messages, turn, tool_schemas)
             window = self._request_messages(messages)
+            if self.phases is not None:
+                # Last, so the stage the agent is in is the nearest thing to
+                # the conversation rather than something it read paragraphs ago.
+                window = [*window, {"role": "system", "content": phases.PHASE_INSTRUCTIONS[self.phases.current]}]
             if final_iteration:
                 window = [*window, {"role": "system", "content": CLOSING_INSTRUCTION}]
             context = self._context_usage(messages, window, tool_schemas)
@@ -319,6 +336,7 @@ class AgenticTurnRuntime:
                         return self._fail(turn, "ACTION_LIMIT", iteration, action_count)
                     results = self._run_toolset(turn, list(calls.values()))
                     action_count += len(results)
+                    self._advance_phase(turn, results)
                 else:
                     try:
                         for _ in calls.values():
@@ -396,9 +414,20 @@ class AgenticTurnRuntime:
         return self._fail(turn, "ITERATION_LIMIT", self.limits.max_iterations or 0, action_count)
 
     def _tool_schemas(self, turn: Mapping[str, object]) -> list[dict[str, object]]:
-        if self.toolset is not None:
+        if self.toolset is None:
+            return self.actions.tool_schemas(turn)
+        if self.phases is None:
             return self.toolset.schemas()
-        return self.actions.tool_schemas(turn)
+        toolkits = self.contract.toolkits if self.contract is not None else None
+        allowed = phases.tools_for(self.phases.current, toolkits)
+        if not allowed:
+            return []
+        try:
+            return self.toolset.schemas(allowed, phases.kinds_for(toolkits))
+        except TypeError:
+            # A toolset that predates phase-aware publication still works; it
+            # simply publishes everything, as it did before.
+            return self.toolset.schemas()
 
     def _context_usage(
         self,
@@ -982,6 +1011,32 @@ class AgenticTurnRuntime:
                 turn, "plugin_hook", hook_id=getattr(outcome, "hook_id", ""), hook_event=event,
                 status=getattr(outcome, "status", ""), summary=summary[:2000],
             )
+
+    def _advance_phase(self, turn: dict[str, object], results: list[dict[str, object]]) -> None:
+        """Move the turn along, on evidence rather than on the model's say-so.
+
+        Two things advance a phase: the agent committed to a contract, or the
+        phase ran out of budget. Running out never fails the turn -- it hands
+        what exists to the next stage, which is the difference between an
+        agent that stops usefully and one that stops at ITERATION_LIMIT with
+        nothing to show.
+        """
+        if self.phases is None:
+            return
+        previous = self.phases.current
+        wrote_contract = any(
+            str(result.get("name")) == "write_contract" and str(result.get("status")) == "succeeded"
+            for result in results
+        )
+        self.phases.note_iteration(len(results))
+        self.phases.observe(wrote_contract=wrote_contract)
+        if self.phases.current is Phase.EXECUTE and self.contract is None:
+            # PLAN ended without a usable contract. A model too weak to fill
+            # the schema still has to be able to work, so the request itself
+            # becomes the contract rather than the turn stalling.
+            self.contract = synthesize_contract(self._first_request_text)
+        if self.phases.current is not previous:
+            self._life(turn, "phase_changed", phase=str(self.phases.current), previous_phase=str(previous))
 
     def _absorb_contract(self, outcome: object) -> None:
         """Adopt a contract the planning tool just produced, or count a refusal.
