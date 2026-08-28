@@ -148,3 +148,35 @@ A garantia de reconciliação de efeitos permanece invariável. O dedup nunca se
 4. Uma leitura idêntica repetida sem escrita no meio não chega à ferramenta.
 5. Um provider sem suporte a cache mantém exatamente o comportamento de hoje.
 6. `redundant_fraction` medido cai em relação à linha de base da Trilha A.
+
+---
+
+## 12. Desvios e resultados medidos
+
+### 12.1 B5 já estava feito
+
+O tiering de MCP, plugins, navegador e subagentes foi entregue na Trilha A, pelos conjuntos de ferramentas por fase. Verificado: em `orient`, `browse_page`, `ask_agents` e `fetch_url` estão fora; `browse_page` só aparece quando o contrato declara `browser`. Nenhum código novo foi necessário.
+
+### 12.2 O que foi medido
+
+**Prefixo reaproveitável entre iterações** (seis chamadas de ferramenta, resultados de 3.000 caracteres):
+
+| provider | antes | depois |
+|---|---:|---:|
+| anthropic | ~0% | **100%** |
+| ollama | 5% | 5% (inalterado, por desenho) |
+
+**Bloco de system cacheável entre turnos da mesma conversa** (turnos que diferem em árvore de workspace, ledger e memórias):
+
+| | tokens | cacheável entre turnos |
+|---|---:|---:|
+| antes | ~1.584 | 0% |
+| depois | ~1.517 estáveis + ~67–98 voláteis | **96%** |
+
+### 12.3 O que continua sem número
+
+`cached_fraction` real, cobrado por um provider. Como na Trilha A, produzir esse número exige credencial e é passo do operador: `scripts/agent_bench.py --record depois --compare baseline`. As medições acima são do prefixo e do prompt, não da fatura.
+
+### 12.4 `run_command` fica de fora do dedup
+
+Um comando que apenas lê (`cat`, `ls`, `git status`) é o caso mais comum de repetição desperdiçada, e não é deduplicado: `run_command` não é `read_only` e o runtime não tem como saber se um comando escreve. Classificar comandos por padrão seria adivinhação com consequência de correção. Fica como está.
