@@ -24,7 +24,7 @@ def test_omitted_messages_are_announced_not_silently_dropped() -> None:
 
     window = _runtime(max_context_tokens=2_000)._request_messages(messages)
 
-    assert any("earlier messages omitted" in str(item.get("content", "")) for item in window)
+    assert any("mensagens anteriores foram omitidas" in str(item.get("content", "")) for item in window)
 
 
 def test_a_short_conversation_is_returned_untouched() -> None:
@@ -70,7 +70,7 @@ def test_auto_compaction_keeps_the_current_request_and_reduces_old_units() -> No
 
     assert runtime._compaction_count == 1
     assert any(item.get("content") == "current request" for item in messages)
-    assert any("Resumo automático do contexto anterior" in str(item.get("content")) for item in messages)
+    assert any("## Contexto compactado" in str(item.get("content")) for item in messages)
     assert len(messages) < 9
 
 

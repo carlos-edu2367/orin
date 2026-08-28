@@ -27,6 +27,31 @@ BROWSER_TOOL_NAMES = frozenset({
 # instance attribute, which ``run`` sets once per turn.
 _PIN_UNSET = object()
 
+# A compacted summary has one job: let the model keep working without going
+# back to the tools. Free prose loses exactly the parts that make that
+# possible -- the paths, the numbers, the decisions already taken -- so the
+# summary is requested and rendered under fixed headings instead.
+COMPACTION_SECTIONS = ("Arquivos tocados", "Decisões", "Dados apurados", "Pendências")
+COMPACTION_HEADING = "## Contexto compactado"
+# The old header ended with "use os arquivos e ferramentas para confirmar
+# detalhes", which invited the model to re-run everything it had just been
+# told. The summary is authoritative for what it contains.
+COMPACTION_HEADER = (
+    f"{COMPACTION_HEADING}\n"
+    "[Este resumo é confiável para caminhos, decisões e valores registrados abaixo. "
+    "Releia um arquivo apenas se esperar que ele tenha mudado desde então.]"
+)
+COMPACTION_INSTRUCTION = (
+    "You are compacting a conversation so another agent can continue the work without "
+    "repeating it. Reply with exactly these four markdown sections, in this order, even "
+    "when a section is empty (write '- nenhum'):\n"
+    + "\n".join(f"### {section}" for section in COMPACTION_SECTIONS)
+    + "\nUnder 'Arquivos tocados' list each path with what was done to it. Under 'Decisões' "
+    "list each decision with its reason. Under 'Dados apurados' list every concrete value, "
+    "number or identifier established so far, verbatim. Under 'Pendências' list what is "
+    "still open. Preserve exact paths and figures. Do not invent anything."
+)
+
 CLOSING_INSTRUCTION = (
     "You have reached this turn's action budget. Do not request any more tools. "
     "Answer now with what you already accomplished, state plainly what is still missing, "
@@ -437,14 +462,11 @@ class AgenticTurnRuntime:
             self._life(turn, "context_compacting", removed_messages=len(compact_indices), compaction_count=self._compaction_count + 1)
         source = self._compact_source(messages, compact_indices)
         summary = self._request_compaction_summary(source, turn)
-        if not summary:
+        if not self._has_sections(summary):
             summary = self._fallback_compaction_summary(messages, compact_indices)
         insert_at = min(compact_indices)
         pinned_item = messages[pinned] if isinstance(pinned, int) and 0 <= pinned < len(messages) else None
-        replacement = {
-            "role": "system",
-            "content": "[Resumo automático do contexto anterior — use os arquivos e ferramentas para confirmar detalhes]\n" + summary[:8_000],
-        }
+        replacement = {"role": "system", "content": f"{COMPACTION_HEADER}\n{summary[:8_000]}"}
         retained = [item for index, item in enumerate(messages) if index not in compact_indices]
         original_to_retained = [(index, item) for index, item in enumerate(messages) if index not in compact_indices]
         position = next((offset for offset, (index, _item) in enumerate(original_to_retained) if index > insert_at), len(retained))
@@ -481,7 +503,7 @@ class AgenticTurnRuntime:
                 "turn_id": str(turn.get("turn_id") or "") + ":context-compaction",
                 "provider": str(turn.get("provider") or ""),
                 "model": str(turn.get("model_id") or ""),
-                "messages": [{"role": "system", "content": "Summarize the prior conversation for another agent. Preserve decisions, constraints, file paths, pending work and unresolved questions. Be concise and do not invent facts."}, {"role": "user", "content": source}],
+                "messages": [{"role": "system", "content": COMPACTION_INSTRUCTION}, {"role": "user", "content": source}],
                 "tools": [],
                 "max_output_tokens": min(1_600, max(256, self.limits.max_context_tokens // 4)),
             })
@@ -495,14 +517,49 @@ class AgenticTurnRuntime:
             return ""
 
     @staticmethod
-    def _fallback_compaction_summary(messages: list[dict[str, object]], indices: set[int]) -> str:
-        lines = ["A compactação semântica não ficou disponível; mensagens anteriores foram reduzidas."]
-        for index in sorted(indices)[-8:]:
+    def _has_sections(summary: str) -> bool:
+        """Whether a provider reply is usable as a structured summary.
+
+        A model that ignored the format and answered in prose is worse than
+        the local fallback, which at least keeps the paths and the tool names.
+        """
+        return bool(summary) and all(section in summary for section in COMPACTION_SECTIONS)
+
+    @classmethod
+    def _fallback_compaction_summary(cls, messages: list[dict[str, object]], indices: set[int]) -> str:
+        """Build the same four sections locally when the provider cannot.
+
+        This runs when the summarizer call fails or answers in the wrong
+        shape. It cannot infer decisions, but it can name every tool whose
+        result is being folded away and every path those calls mentioned --
+        which is what stops the model from rediscovering them.
+        """
+        touched: list[str] = []
+        pending: list[str] = []
+        for index in sorted(indices):
             item = messages[index]
-            role = str(item.get("role") or "message")
-            content = str(item.get("content") or "").replace("\n", " ")
-            lines.append(f"{role}: {content[:240]}")
-        return "\n".join(lines)
+            for call in item.get("tool_calls") or ():
+                if not isinstance(call, Mapping):
+                    continue
+                function = call.get("function") if isinstance(call.get("function"), Mapping) else {}
+                name = str(function.get("name") or "")
+                arguments = str(function.get("arguments") or "")[:160]
+                if name:
+                    touched.append(f"- {name}({arguments})")
+            content = item.get("content")
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, Mapping) and block.get("type") == "tool_use":
+                        touched.append(f"- {block.get('name')}({json.dumps(block.get('input') or {}, ensure_ascii=False)[:160]})")
+            elif isinstance(content, str) and content.strip() and str(item.get("role")) == "user":
+                pending.append(f"- {content.strip()[:200]}")
+        sections = {
+            COMPACTION_SECTIONS[0]: touched[-12:] or ["- nenhum"],
+            COMPACTION_SECTIONS[1]: ["- não registradas: a compactação semântica não ficou disponível"],
+            COMPACTION_SECTIONS[2]: ["- não registrados: a compactação semântica não ficou disponível"],
+            COMPACTION_SECTIONS[3]: pending[-6:] or ["- nenhuma"],
+        }
+        return "\n".join(f"### {name}\n" + "\n".join(lines) for name, lines in sections.items())
 
     @staticmethod
     def _estimated_tokens(message: Mapping[str, object]) -> int:
@@ -549,7 +606,20 @@ class AgenticTurnRuntime:
         omitted = len(messages) - len(ordered_kept)
         marker = None
         if omitted > 0:
-            marker = {"role": "system", "content": f"[{omitted} earlier messages omitted to stay within the context budget; re-read files or re-run searches if you need their content]"}
+            # Naming the tools whose results left the window turns re-reading
+            # into an informed choice. The previous wording ("re-read files or
+            # re-run searches if you need their content") made it a reflex,
+            # and re-running work already done is precisely what the loop is
+            # being changed to stop doing.
+            dropped = self._dropped_tool_names(messages, kept)
+            detail = f" Saíram resultados de: {', '.join(dropped)}." if dropped else ""
+            marker = {
+                "role": "system",
+                "content": (
+                    f"[{omitted} mensagens anteriores foram omitidas para caber no orçamento de contexto."
+                    f"{detail} O que já foi decidido e apurado está resumido acima.]"
+                ),
+            }
         window: list[dict[str, object]] = []
         previous = -1
         marker_inserted = False
@@ -564,6 +634,28 @@ class AgenticTurnRuntime:
         if not self.system_prompt:
             return window
         return [{"role": "system", "content": self.system_prompt}, *window]
+
+    @staticmethod
+    def _dropped_tool_names(messages: list[dict[str, object]], kept: set[int]) -> list[str]:
+        """Names of the tools whose calls fell outside the request window."""
+        names: list[str] = []
+        for index, message in enumerate(messages):
+            if index in kept or message.get("role") != "assistant":
+                continue
+            for call in message.get("tool_calls") or ():
+                if isinstance(call, Mapping):
+                    function = call.get("function") if isinstance(call.get("function"), Mapping) else {}
+                    name = str(function.get("name") or "")
+                    if name and name not in names:
+                        names.append(name)
+            content = message.get("content")
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, Mapping) and block.get("type") == "tool_use":
+                        name = str(block.get("name") or "")
+                        if name and name not in names:
+                            names.append(name)
+        return names[:8]
 
     @classmethod
     def _last_user_index(cls, messages: list[dict[str, object]]) -> int | None:
