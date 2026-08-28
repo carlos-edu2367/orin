@@ -18,6 +18,17 @@ from .phases import Phase, PhaseController
 
 MAX_PARALLEL_TOOLS = 4
 AGED_TOOL_RESULT_CHARS = 400
+
+# Providers whose prompt cache this runtime can actually address. For these the
+# message list is append-only, because prompt caching keys on an exact prefix:
+# editing a message already sent invalidates every entry written at or after
+# it. A cached token costs about a tenth of an ordinary input token, so keeping
+# an old tool result whole and cached is cheaper than shrinking it and paying
+# full price for the prefix the edit invalidated.
+#
+# For every other provider there is no cache to protect, shrinking is pure
+# gain, and the previous per-iteration behaviour is kept.
+PREFIX_CACHING_PROVIDERS = frozenset({"anthropic"})
 CONTEXT_COMPACTION_THRESHOLD = 0.82
 CONTEXT_COMPACTION_KEEP_UNITS = 6
 BROWSER_TOOL_NAMES = frozenset({
@@ -380,7 +391,13 @@ class AgenticTurnRuntime:
                         tool_name=str(result.get("name") or ""), tool_call_id=str(result.get("id") or ""),
                     )
                     messages.extend(self._tool_result_messages(turn, result))
-                self._age_tool_results(messages, keep_recent=len(results))
+                # Shrinking an already-sent result rewrites the prefix, which
+                # is exactly what a prompt cache cannot survive. Where the
+                # provider has a cache, this is deferred to compaction, whose
+                # rewrite is unavoidable anyway; where it has none, shrinking
+                # every iteration is still the cheapest thing to do.
+                if not self._prefix_caching(turn):
+                    self._age_tool_results(messages, keep_recent=len(results))
                 # ``ask_user`` deliberately ends this provider run.  A worker
                 # must never stay blocked while a person considers a form, and
                 # the next authenticated chat message starts the follow-up turn.
@@ -492,6 +509,17 @@ class AgenticTurnRuntime:
             "compaction_enabled": True,
         }
 
+    def _prefix_caching(self, turn: Mapping[str, object]) -> bool:
+        """Whether this turn's provider has a prompt cache worth protecting.
+
+        A provider that reported cached input tokens at any point this turn
+        counts as supporting it, which covers gateways that pass Anthropic's
+        caching through under their own name.
+        """
+        if self.counters.cached_input_tokens:
+            return True
+        return str(turn.get("provider", "")).lower() in PREFIX_CACHING_PROVIDERS
+
     def _maybe_compact(self, messages: list[dict[str, object]], turn: Mapping[str, object], tool_schemas: list[dict[str, object]]) -> None:
         """Summarize old exchanges before ordinary trimming becomes lossy."""
         if self._compaction_count >= 8 or len(messages) < CONTEXT_COMPACTION_KEEP_UNITS + 2:
@@ -523,6 +551,10 @@ class AgenticTurnRuntime:
         position = next((offset for offset, (index, _item) in enumerate(original_to_retained) if index > insert_at), len(retained))
         retained.insert(position, replacement)
         messages[:] = retained
+        # This rewrite already invalidates the cache, so it is the one place
+        # where shrinking surviving results is free. Doing it here instead of
+        # every iteration is what keeps the prefix append-only in between.
+        self._age_tool_results(messages, keep_recent=CONTEXT_COMPACTION_KEEP_UNITS)
         if pinned_item is not None:
             self._pinned_index = next((index for index, item in enumerate(messages) if item is pinned_item), None)
         self._compaction_count += 1
