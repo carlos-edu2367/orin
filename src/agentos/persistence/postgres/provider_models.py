@@ -10,18 +10,26 @@ from sqlalchemy.engine import Engine
 from agentos.provider_catalog.models import PricingSummary, ProviderCatalogContext, ProviderModelRecord
 
 from .schema import provider_configurations, provider_model_catalog, provider_model_favorites
+from .provider_api_keys import PostgresProviderApiKeyAdapter
 from agentos.persistence.provider_secrets import ProviderSecretCipher
 
 
 class PostgresProviderCatalogRepository:
-    def __init__(self, engine: Engine, *, cipher: ProviderSecretCipher | None = None) -> None:
+    def __init__(
+        self,
+        engine: Engine,
+        *,
+        cipher: ProviderSecretCipher | None = None,
+        keys: PostgresProviderApiKeyAdapter | None = None,
+    ) -> None:
         self._engine = engine
         self._cipher = cipher or ProviderSecretCipher.from_environment()
+        self._keys = keys or PostgresProviderApiKeyAdapter(engine, cipher=self._cipher)
 
     def credential(self, context: ProviderCatalogContext, provider: str) -> dict[str, object] | None:
         with self._engine.connect() as connection:
             row = connection.execute(
-                select(provider_configurations.c.enabled, provider_configurations.c.api_key, provider_configurations.c.api_key_ciphertext, provider_configurations.c.base_url).where(
+                select(provider_configurations.c.enabled, provider_configurations.c.base_url).where(
                     provider_configurations.c.user_id == context.user_id,
                     provider_configurations.c.provider == provider,
                 )
@@ -29,8 +37,14 @@ class PostgresProviderCatalogRepository:
         if row is None:
             return None
         value = dict(row)
-        encrypted = value.get("api_key_ciphertext") or value.get("api_key")
-        value["api_key"] = self._cipher.decrypt(str(encrypted))
+        # Credentials are stored exclusively in provider_api_keys.  The old
+        # configuration-table columns were removed when key rotation/fallback
+        # was introduced; reading them here made every catalog refresh fail
+        # before reaching its provider.  Resolve the next authorized key at
+        # this server-side boundary and expose only its short-lived plaintext
+        # to the upstream caller, never to a public response.
+        key = self._keys.next_available_key(context.user_id, provider)
+        value["api_key"] = key.plaintext if key is not None else ""
         return value
 
     def replace(self, context: ProviderCatalogContext, provider: str, records: list[ProviderModelRecord], refreshed_at: datetime) -> None:

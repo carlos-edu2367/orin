@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -350,6 +351,16 @@ def test_the_system_prompt_uses_orin_as_the_public_product_name() -> None:
 
     assert "You are the main agent of Orin" in prompt
     assert "You are the main agent of AgentOS" not in prompt
+
+
+def test_the_system_prompt_prefers_pdf_text_transcription_when_visual_reading_is_not_needed() -> None:
+    prompt = build_system_prompt(
+        tool_names=("transcribe_pdf", "view_file"), memories=[], agents=[], workspace_hint="hint", subagents_enabled=False,
+    )
+
+    assert "transcribe_pdf" in prompt
+    assert "native text layer" in prompt
+    assert "layout, images, tables, diagrams" in prompt
 
 
 def test_the_system_prompt_offers_skill_learning_only_after_user_confirmation() -> None:
@@ -712,6 +723,17 @@ def test_a_subagent_inherits_an_unlimited_iteration_setting(tmp_path: Path) -> N
 
     assert outcome.status == "succeeded"
     assert "review concluída" in outcome.content
+
+
+def test_a_subagent_inherits_the_parent_deadline_instead_of_a_shorter_one(tmp_path: Path) -> None:
+    session, _store, agents, provider = build(tmp_path, [text("review concluída")])
+    session.limits = AgenticLimits(deadline=timedelta(minutes=45), max_iterations=None, max_actions=None)
+    agents.create("Reviewer", "revisa", parent_agent_id="agent:chat_session:main")
+
+    outcome = session._ask_agent("Reviewer", "revise o projeto")
+
+    assert outcome.status == "succeeded"
+    assert provider.requests[0]["model"] == "test-model"
 
 
 def test_a_cancelled_turn_stops_and_reports_cancellation(tmp_path: Path) -> None:

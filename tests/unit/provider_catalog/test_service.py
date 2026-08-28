@@ -149,6 +149,37 @@ def test_refreshes_ollama_cloud_from_the_remote_catalog_without_rewriting_model_
     assert service.list(context("user-a"), "ollama")[0].model_id == "gemma4:31b"
 
 
+def test_refreshes_openai_and_anthropic_with_their_native_catalog_shapes() -> None:
+    repository = FakeRepository()
+    repository.configured[("user-a", "openai")] = {"enabled": True, "api_key": "openai-secret"}
+    repository.configured[("user-a", "anthropic")] = {"enabled": True, "api_key": "anthropic-secret"}
+
+    class OpenAI:
+        def fetch(self, api_key: str, *, base_url: str = "") -> list[dict[str, object]]:
+            assert api_key == "openai-secret" and base_url == ""
+            return [{"id": "gpt-test"}]
+
+    class Anthropic:
+        def fetch(self, api_key: str, *, base_url: str = "") -> list[dict[str, object]]:
+            assert api_key == "anthropic-secret" and base_url == ""
+            return [{
+                "id": "claude-test", "display_name": "Claude Test", "max_input_tokens": 200000,
+                "capabilities": {"image_input": {"supported": True}, "thinking": {"supported": True}},
+            }]
+
+    service = ProviderModelCatalogService(
+        repository, {"openai": OpenAI(), "anthropic": Anthropic()},
+        now=lambda: datetime(2026, 8, 28, tzinfo=UTC),
+    )
+
+    assert service.refresh(context("user-a"), "openai").count == 1
+    assert service.refresh(context("user-a"), "anthropic").count == 1
+    openai = service.list(context("user-a"), "openai")[0]
+    anthropic = service.list(context("user-a"), "anthropic")[0]
+    assert (openai.provider, openai.model_id, openai.input_modalities) == ("openai", "gpt-test", ("text",))
+    assert (anthropic.provider, anthropic.context_window, anthropic.input_modalities) == ("anthropic", 200000, ("text", "image"))
+
+
 def test_every_upstream_is_called_with_the_stored_base_url() -> None:
     """The Protocol declares base_url, so refresh needs no per-provider branch."""
     repository = FakeRepository()

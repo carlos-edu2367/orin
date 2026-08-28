@@ -37,6 +37,22 @@ def test_catalog_rows_are_hidden_when_the_saved_url_does_not_match_the_catalog_s
     assert repository.list(context, "ollama") == []
 
 
+def test_catalog_credential_reads_the_primary_key_from_the_key_store() -> None:
+    """Catalog refresh must use the durable multi-key store, never removed columns."""
+    engine = create_engine("sqlite://")
+    metadata.create_all(engine, tables=[provider_configurations, provider_api_keys, provider_model_catalog, provider_model_favorites])
+    cipher = ProviderSecretCipher(b"0" * 32)
+    PostgresProviderConfigurationAdapter(engine, cipher=cipher).configure({
+        "provider": "openai", "user_id": "user-1", "enabled": True, "api_key": "test-key",
+    })
+
+    credential = PostgresProviderCatalogRepository(engine, cipher=cipher).credential(
+        ProviderCatalogContext("user-1", "provider.catalog.refresh"), "openai",
+    )
+
+    assert credential == {"enabled": True, "base_url": None, "api_key": "test-key"}
+
+
 def test_catalog_rows_read_from_sqlite_restore_their_utc_timezone() -> None:
     """SQLite drops a datetime offset even when the schema requests one."""
     engine = create_engine("sqlite://")

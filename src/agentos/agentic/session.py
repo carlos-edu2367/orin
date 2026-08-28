@@ -32,7 +32,6 @@ from .runtime import AgenticLimits, AgenticTurnRuntime
 from .workspace import resolve_workspace
 
 
-SUBAGENT_DEADLINE = timedelta(seconds=180)
 MAX_SUBAGENTS_PER_TURN = 4
 PREVIEW_CHARS = 400
 # A subagent writes the deliverable the main agent will hand to the user, so it
@@ -236,6 +235,13 @@ def build_system_prompt(
     ]
     if tool_names:
         lines += ["", "## Tools available now", "- " + ", ".join(tool_names)]
+    if "transcribe_pdf" in tool_names:
+        lines += [
+            "",
+            "## PDFs",
+            "- For a PDF whose text is enough to answer the task, call `transcribe_pdf` first. It reads the native text layer without visual processing.",
+            "- Use `view_file` for a PDF only when layout, images, tables, diagrams, or pages reported without a text layer are material to the answer.",
+        ]
     if "ask_user" in tool_names:
         lines += [
             "",
@@ -716,7 +722,13 @@ class TurnSession:
             toolset=subagent_tools,
             system_prompt=self._subagent_prompt(record, task_text, subagent_tools),
             limits=AgenticLimits(
-                deadline=SUBAGENT_DEADLINE,
+                # A child belongs to the same durable turn as its parent.  A
+                # separate three-minute timer caused healthy long-running
+                # delegations to fail with TURN_DEADLINE_EXCEEDED while the
+                # parent worker was still allowed to run.  It now inherits
+                # the configured turn deadline and remains cancellable via
+                # the same durable cancellation signal.
+                deadline=self.limits.deadline,
                 max_iterations=self.limits.max_iterations,
                 max_actions=None if self.limits.max_actions is None else SUBAGENT_MAX_ACTIONS,
                 max_output_tokens=SUBAGENT_MAX_OUTPUT_TOKENS,

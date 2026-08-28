@@ -35,7 +35,7 @@ from agentos.persistence.postgres.provider_api_keys import PostgresProviderApiKe
 from agentos.persistence.provider_secrets import ProviderSecretCipher
 from agentos.persistence.postgres.provider_models import PostgresProviderCatalogRepository
 from agentos.persistence.postgres.security import PostgresSecurityService
-from agentos.provider_catalog.http import OpenRouterModelCatalogClient
+from agentos.provider_catalog.http import AnthropicModelCatalogClient, OpenAIModelCatalogClient, OpenRouterModelCatalogClient
 from agentos.provider_catalog.ollama import OllamaCatalogClient
 from agentos.provider_catalog.omniroute import OmniRouteCatalogClient
 from agentos.provider_catalog.service import ProviderModelCatalogService
@@ -283,7 +283,13 @@ def compose_production_services(engine: Engine, *, localhost_trust_enabled: bool
         plugins=PluginService(engine, plugin_root=orin_paths().data / "plugins", skill_library=skill_library, mcp_service=mcp_service, search_client=GithubRepositorySearchClient(), manifest_probe=GithubManifestProbe(), command_library=command_library, hook_engine=hook_engine),
         provider_configuration=PostgresProviderConfigurationAdapter(engine, cipher=provider_cipher),
         provider_api_keys=PostgresProviderApiKeyAdapter(engine, cipher=provider_cipher),
-        provider_catalog=ProviderModelCatalogService(provider_repository, {"openrouter": OpenRouterModelCatalogClient(), "omniroute": OmniRouteCatalogClient(), "ollama": OllamaCatalogClient()}),
+        provider_catalog=ProviderModelCatalogService(provider_repository, {
+            "anthropic": AnthropicModelCatalogClient(),
+            "ollama": OllamaCatalogClient(),
+            "omniroute": OmniRouteCatalogClient(),
+            "openai": OpenAIModelCatalogClient(),
+            "openrouter": OpenRouterModelCatalogClient(),
+        }),
         conversation_application=ChatApplication(PostgresChatStore(engine, PostgresAgenticActivityStore(engine, cursor_secret), command_library=command_library), ExecutionApplicationAdapter(engine)),
         projects=PostgresProjectStore(engine),
         omniroute_runtime=omniroute_runtime,

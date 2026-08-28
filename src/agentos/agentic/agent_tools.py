@@ -292,6 +292,14 @@ class AgentToolset:
                 self.view_file, "filesystem", read_only=True,
             ),
             ToolDefinition(
+                "transcribe_pdf",
+                "Extract the native text layer from a PDF without visual reading. Prefer this for PDFs when ordinary text is enough; use view_file only when layout, images, tables, diagrams, or pages without a text layer matter.",
+                _schema({
+                    "path": {**_TEXT, "description": "Workspace-relative PDF path, e.g. uploads/relatorio.pdf"},
+                }, ("path",)),
+                self.transcribe_pdf, "filesystem", read_only=True,
+            ),
+            ToolDefinition(
                 "write_file",
                 "Create or overwrite a UTF-8 text file in the conversation workspace. A file longer than one reply must be written in parts: the first call with the default mode, each following call with mode=\"append\".",
                 _schema({
@@ -773,6 +781,46 @@ class AgentToolset:
             "content": body or "[documento sem texto]",
             "payload": {"path": path, "media_type": media_type, "label": path,
                         "pages_without_text": list(extracted.pages_without_text)},
+        }
+
+    def transcribe_pdf(self, path: str) -> dict[str, Any]:
+        """Return a PDF's native text layer without rendering any page.
+
+        This intentionally does not fall back to vision: it lets the model
+        choose inexpensive, deterministic extraction whenever the user's task
+        only needs text, while clearly identifying pages that require the
+        existing ``view_file`` visual path.
+        """
+        target = self.workspace.resolve(path)
+        if not target.is_file():
+            raise AgentToolError(f"'{path}' is not a file in this workspace.")
+        media_type = media_type_for(target)
+        if media_type != "application/pdf":
+            raise AgentToolError(f"'{path}' is not a PDF.")
+        try:
+            extracted = extract_text(target, media_type)
+        except Exception as error:  # pypdf errors are not safe to expose verbatim
+            raise AgentToolError(f"Could not extract the text layer from '{path}'.") from error
+        body, bounded = _bounded(extracted.text)
+        if not body.strip():
+            body = "[o PDF não possui camada de texto extraível]"
+        if extracted.pages_without_text:
+            pages = ", ".join(str(number) for number in extracted.pages_without_text)
+            body += (
+                f"\n\n[páginas sem camada de texto: {pages}; use view_file apenas se "
+                "o conteúdo visual dessas páginas for necessário]"
+            )
+        if bounded or extracted.truncated:
+            body += "\n\n[transcrição truncada no limite de leitura]"
+        return {
+            "summary": f"Transcreveu {path}",
+            "content": body,
+            "payload": {
+                "path": path, "media_type": media_type, "label": path,
+                "pages_without_text": list(extracted.pages_without_text),
+                "truncated": bounded or extracted.truncated,
+                "text_extraction": True,
+            },
         }
 
     def _visual_read(self, path: str, images: list[tuple[str, str]], question: str) -> str | None:

@@ -2,6 +2,7 @@ import pytest
 
 from agentos.agentic.agent_tools import AgentToolError, AgentToolset
 from agentos.agentic.workspace import ConversationWorkspace
+from agentos.reading.extract import ExtractedText
 
 
 def _toolset(tmp_path):
@@ -11,6 +12,23 @@ def _toolset(tmp_path):
 def test_view_file_is_declared(tmp_path):
     names = {item.name for item in _toolset(tmp_path).definitions()}
     assert "view_file" in names
+
+
+def test_transcribe_pdf_is_declared_and_never_uses_visual_reading(tmp_path, monkeypatch):
+    toolset = _toolset(tmp_path)
+    (toolset.workspace.root / "uploads").mkdir()
+    (toolset.workspace.root / "uploads" / "vistoria.pdf").write_bytes(b"%PDF")
+    monkeypatch.setattr(
+        "agentos.agentic.agent_tools.extract_text",
+        lambda path, media_type: ExtractedText("[página 1]\\nItem pendente", pages_without_text=(2,)),
+    )
+
+    result = toolset.transcribe_pdf("uploads/vistoria.pdf")
+
+    assert "transcribe_pdf" in {item.name for item in toolset.definitions()}
+    assert "Item pendente" in result["content"]
+    assert "páginas sem camada de texto: 2" in result["content"]
+    assert result["payload"]["text_extraction"] is True
 
 
 def test_view_file_reads_a_text_document(tmp_path):

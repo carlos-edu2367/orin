@@ -40,7 +40,7 @@ class ProviderModelCatalogService:
         except Exception as error:
             raise ProviderCatalogUnavailable("provider catalog refresh failed") from error
         refreshed_at = self._now()
-        normalizer = _NORMALIZERS.get(normalized_provider, _normalize_openrouter)
+        normalizer = _NORMALIZERS.get(normalized_provider, _normalize_openai)
         records = [normalizer(model, refreshed_at) for model in raw_models]
         # The repository stores one row per (user, provider, model_id); an upstream
         # catalog that lists the same id twice (OmniRoute is known to do this — see
@@ -107,6 +107,48 @@ def _normalize_openrouter(raw: dict[str, object], refreshed_at: datetime) -> Pro
         input_modalities=_modalities(architecture.get("input_modalities")),
         output_modalities=_modalities(architecture.get("output_modalities")),
         pricing=_pricing(pricing),
+        refreshed_at=refreshed_at,
+    )
+
+
+def _normalize_openai(raw: dict[str, object], refreshed_at: datetime) -> ProviderModelRecord:
+    model_id = _text(raw.get("id"))
+    if model_id is None:
+        raise ProviderCatalogUnavailable("provider returned an invalid model")
+    return ProviderModelRecord(
+        provider="openai",
+        model_id=model_id,
+        display_name=_text(raw.get("name")) or model_id,
+        context_window=None,
+        capabilities=(),
+        input_modalities=("text",),
+        output_modalities=("text",),
+        pricing=None,
+        refreshed_at=refreshed_at,
+    )
+
+
+def _normalize_anthropic(raw: dict[str, object], refreshed_at: datetime) -> ProviderModelRecord:
+    model_id = _text(raw.get("id"))
+    if model_id is None:
+        raise ProviderCatalogUnavailable("provider returned an invalid model")
+    capabilities = raw.get("capabilities") if isinstance(raw.get("capabilities"), Mapping) else {}
+    capability_names = tuple(sorted(
+        str(name) for name, value in capabilities.items()
+        if isinstance(value, Mapping) and value.get("supported") is True
+    ))
+    max_input_tokens = raw.get("max_input_tokens")
+    context_window = max_input_tokens if isinstance(max_input_tokens, int) and not isinstance(max_input_tokens, bool) and max_input_tokens > 0 else None
+    input_modalities = ("text", "image") if "image_input" in capability_names else ("text",)
+    return ProviderModelRecord(
+        provider="anthropic",
+        model_id=model_id,
+        display_name=_text(raw.get("display_name")) or model_id,
+        context_window=context_window,
+        capabilities=capability_names,
+        input_modalities=input_modalities,
+        output_modalities=("text",),
+        pricing=None,
         refreshed_at=refreshed_at,
     )
 
@@ -199,7 +241,9 @@ def _per_million(value: object) -> str | None:
 
 
 _NORMALIZERS = {
+    "anthropic": _normalize_anthropic,
     "openrouter": _normalize_openrouter,
+    "openai": _normalize_openai,
     "omniroute": _normalize_omniroute,
     "ollama": _normalize_ollama,
 }
