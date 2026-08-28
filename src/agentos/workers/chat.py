@@ -89,8 +89,10 @@ PROVIDER_BASE_URLS = {
     "ollama": DEFAULT_OLLAMA_BASE_URL,
 }
 
-# Upper bound used whenever the turn's model has no known (or no smaller)
-# context window -- unchanged from the previous flat behavior.
+# Upper bound used only when the turn's model has no known context window.
+# It is a safety value for an unrefreshed catalog, not a ceiling on a model
+# whose real window we do know: capping a 200k model at 60k is what forced
+# compaction at ~49k and made the agent forget mid-task.
 DEFAULT_MAX_CONTEXT_TOKENS = 60_000
 # AgenticLimits rejects anything below 1_000; this keeps a real margin above
 # that floor so a tiny-context model still has room for the pinned request.
@@ -98,8 +100,13 @@ MIN_MAX_CONTEXT_TOKENS = 4_000
 # Headroom subtracted from a model's real context window before it becomes
 # the trim budget: the system prompt and tool schemas ride outside the
 # trimmed message window, and the reply itself (uncapped here, so it can use
-# the provider's own max) still has to fit in what's left.
+# the provider's own max) still has to fit in what's left. This is the floor;
+# a large window reserves a proportion instead, because 12k is not enough
+# room for thirty tool schemas plus a long reply.
 CONTEXT_WINDOW_RESERVE_TOKENS = 12_000
+CONTEXT_WINDOW_RESERVE_FRACTION = 0.10
+# A million-token window does not need to reserve a hundred thousand tokens.
+CONTEXT_WINDOW_RESERVE_CEILING = 64_000
 
 # num_ctx for an Ollama model the catalog has no window for. Deliberately not
 # DEFAULT_MAX_CONTEXT_TOKENS: asking an unknown local model for a 60k KV cache
@@ -657,32 +664,50 @@ class ChatWorker:
 
         return build
 
+    @staticmethod
+    def _context_reserve_for(context_window: int) -> int:
+        """Tokens held outside the trimmed message window.
+
+        The system prompt, the tool schemas and the model's own reply all
+        live there. A flat 12k is right for a small model and far too little
+        for a large one carrying thirty schemas, so a big window reserves a
+        proportion instead -- bounded, because ten percent of a million is
+        a hundred thousand tokens spent on nothing.
+        """
+        proportional = -(-context_window * 10 // 100)  # ceil without importing math
+        return min(CONTEXT_WINDOW_RESERVE_CEILING, max(CONTEXT_WINDOW_RESERVE_TOKENS, proportional))
+
     def _max_context_tokens_for(self, turn: dict[str, object]) -> int:
         """Derive the context-trim budget from the turn's actual model window.
 
-        The provider catalog already knows each model's real context window
-        (used today only to filter model *selection*); this is the first
-        place that spends it on the agentic loop's own request-sizing budget,
-        instead of the flat 60k every model used to get regardless of what it
-        can actually accept. A small or unrefreshed-catalog model falls back
-        to a safe smaller budget rather than risking an oversized request.
+        The provider catalog knows each model's real context window, and this
+        budget now follows it. It used to be capped at a flat 60k for every
+        model: a 200k model was trimmed to 60k and started compacting at
+        ~49k, which is what made the agent lose what it had already read and
+        re-run searches it had already run. A model with no catalogued window
+        still falls back to the safe flat default rather than risking an
+        oversized request.
         """
         context_window = self._context_window_for(turn)
         if context_window is None:
             return DEFAULT_MAX_CONTEXT_TOKENS
-        return max(MIN_MAX_CONTEXT_TOKENS, min(DEFAULT_MAX_CONTEXT_TOKENS, context_window - CONTEXT_WINDOW_RESERVE_TOKENS))
+        return max(MIN_MAX_CONTEXT_TOKENS, context_window - self._context_reserve_for(context_window))
 
     def _num_ctx_for(self, turn: dict[str, object]) -> int:
         """The KV cache Ollama should allocate for this turn.
 
-        Never more than the window this turn will actually fill, and never
-        more than the model can hold: both ceilings matter, because the cache
-        is real VRAM on the user's own machine.
+        Deliberately *not* derived from ``_max_context_tokens_for``. That
+        budget is a bound on tokens sent to a remote provider; this one is
+        real VRAM on the user's own machine, so it keeps the conservative
+        flat ceiling even for a model whose window is far larger. Asking a
+        262k local model for a 262k KV cache is what spills into system RAM
+        and drops inference by 20-50x.
         """
         context_window = self._context_window_for(turn)
         if context_window is None:
             return OLLAMA_FALLBACK_NUM_CTX
-        return min(context_window, self._max_context_tokens_for(turn) + CONTEXT_WINDOW_RESERVE_TOKENS)
+        capped = max(MIN_MAX_CONTEXT_TOKENS, min(DEFAULT_MAX_CONTEXT_TOKENS, context_window - CONTEXT_WINDOW_RESERVE_TOKENS))
+        return min(context_window, capped + CONTEXT_WINDOW_RESERVE_TOKENS)
 
     def _base_url_for(self, provider: str, credential) -> str:
         configured = str(credential.get("base_url") or "")
