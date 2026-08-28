@@ -672,6 +672,27 @@ execution_effects = Table(
 )
 Index("ix_execution_effects_recovery", execution_effects.c.execution_id, execution_effects.c.state, execution_effects.c.prepared_at)
 
+# One row per finished turn, recording how well the turn spent its tool calls.
+# It answers "did a change to the loop actually make the agent more efficient?"
+# with a measurement instead of an impression, so it is written before any
+# behavioural change lands and read as the baseline afterwards.
+turn_quality_metrics = Table(
+    "turn_quality_metrics", metadata,
+    Column("turn_id", String(255), primary_key=True),
+    Column("conversation_id", String(255), nullable=False), Column("user_id", String(255), nullable=False),
+    Column("provider", String(32), nullable=False), Column("model_id", String(512), nullable=False),
+    Column("tool_calls", Integer, nullable=False), Column("redundant_tool_calls", Integer, nullable=False),
+    Column("iterations", Integer, nullable=False),
+    Column("input_tokens", Integer, nullable=False), Column("output_tokens", Integer, nullable=False),
+    # NULL means the provider never reported cache usage for this turn. Zero
+    # would claim we measured and found none, which is a different fact.
+    Column("cached_input_tokens", Integer, nullable=True),
+    Column("outcome", String(32), nullable=False), Column("error_code", String(64), nullable=True),
+    Column("duration_ms", Integer, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+)
+Index("ix_turn_quality_metrics_model", turn_quality_metrics.c.user_id, turn_quality_metrics.c.provider, turn_quality_metrics.c.model_id, turn_quality_metrics.c.created_at)
+
 conversation_events = Table(
     "conversation_events", metadata,
     Column("id", Integer, primary_key=True), Column("conversation_id", String(255), nullable=False), Column("user_id", String(255), nullable=False),
@@ -928,6 +949,7 @@ __all__ = [
     "conversation_agent_usage",
     "execution_checkpoints",
     "execution_effects",
+    "turn_quality_metrics",
     "conversations",
     "projects",
     "workspace_roots",

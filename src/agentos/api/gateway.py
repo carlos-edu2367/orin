@@ -1405,6 +1405,18 @@ def create_app(services: ApiServices) -> FastAPI:
         _idempotency(request)
         return JSONResponse(_require_port(services.agentic_runtime).set_max_iterations(principal.user_id, payload.max_iterations))
 
+    @app.get("/v1/runtime/quality")
+    async def get_agent_runtime_quality(request: Request, days: int = 30) -> JSONResponse:
+        """How efficiently recent turns spent their tool calls, per model.
+
+        This is the measurement a change to the turn loop is judged against,
+        so it is a read of durable history and never derives anything live.
+        """
+        principal = principal_for(request)
+        services.security.authorize(principal, action="runtime.inspect", resource_id="agentic", purpose="runtime.inspect")
+        summary = require_port(services.conversation_application).quality_summary(principal.user_id, days=days)  # type: ignore[union-attr]
+        return JSONResponse(_jsonable(summary))
+
     @app.get("/v1/installation/status")
     async def get_installation_status(request: Request) -> JSONResponse:
         principal = principal_for(request)

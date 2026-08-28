@@ -18,7 +18,7 @@ from agentos.api.events import CursorError
 from agentos.agentic.events import AgentActivityEvent, AgentActivityEventType
 from agentos.persistence.postgres.agentic_activity import ActivityCursorError
 from agentos.persistence.postgres.execution_adapters import ExecutionApplicationAdapter, ExecutionQueryAdapter
-from agentos.persistence.postgres.schema import (conversation_activity_events, conversation_agent_usage, conversation_agents, conversation_dispatches, conversation_events, conversation_hook_context, conversation_message_attachments, conversation_message_commands, conversation_messages, conversation_tool_records, conversation_turns, conversations, projects, runtime_heartbeats, workspace_roots)
+from agentos.persistence.postgres.schema import (conversation_activity_events, conversation_agent_usage, conversation_agents, conversation_dispatches, conversation_events, conversation_hook_context, conversation_message_attachments, conversation_message_commands, conversation_messages, conversation_tool_records, conversation_turns, conversations, projects, runtime_heartbeats, turn_quality_metrics, workspace_roots)
 
 
 _LOGGER = logging.getLogger("agentos.conversations.chat")
@@ -270,6 +270,106 @@ class PostgresChatStore:
             {"tool_name": str(row["tool_name"]), "arguments": str(row["arguments"]), "status": str(row["status"]), "summary": str(row["summary"])}
             for row in reversed(rows)
         ]
+
+    def record_quality(
+        self,
+        turn: Mapping[str, object],
+        *,
+        counters: Mapping[str, object],
+        outcome: str,
+        error_code: str | None,
+        duration_ms: int,
+    ) -> None:
+        """Write this turn's efficiency row. Never raises.
+
+        A measurement that could end a turn would be worse than no
+        measurement at all, so every failure here is swallowed. The row is
+        also idempotent per turn: a recovered turn that reaches a terminal
+        state twice must not produce two rows.
+        """
+        try:
+            with self._engine.begin() as connection:
+                existing = connection.execute(
+                    select(turn_quality_metrics.c.turn_id).where(turn_quality_metrics.c.turn_id == turn["turn_id"])
+                ).first()
+                if existing:
+                    return
+                connection.execute(insert(turn_quality_metrics).values(
+                    turn_id=str(turn["turn_id"]), conversation_id=str(turn["conversation_id"]),
+                    user_id=str(turn["user_id"]), provider=str(turn.get("provider") or "")[:32],
+                    model_id=str(turn.get("model_id") or "")[:512],
+                    tool_calls=int(counters.get("tool_calls") or 0),
+                    redundant_tool_calls=int(counters.get("redundant_tool_calls") or 0),
+                    iterations=int(counters.get("iterations") or 0),
+                    input_tokens=int(counters.get("input_tokens") or 0),
+                    output_tokens=int(counters.get("output_tokens") or 0),
+                    cached_input_tokens=counters.get("cached_input_tokens"),
+                    outcome=str(outcome)[:32], error_code=str(error_code)[:64] if error_code else None,
+                    duration_ms=max(0, int(duration_ms)),
+                    created_at=datetime.now(UTC),
+                ))
+        except Exception:  # noqa: BLE001 - telemetry never breaks a turn
+            _LOGGER.exception("could not record turn quality for %s", turn.get("turn_id"))
+
+    def quality_summary(self, user_id: str, *, days: int = 30) -> list[dict[str, object]]:
+        """Efficiency aggregated per (provider, model), most turns first.
+
+        ``redundant_fraction`` and ``cached_fraction`` are the two numbers the
+        trilha is judged by; both are None when there is nothing to divide by,
+        rather than a misleading zero.
+        """
+        since = datetime.now(UTC) - timedelta(days=max(1, min(int(days), 365)))
+        with self._engine.connect() as connection:
+            rows = connection.execute(
+                select(
+                    turn_quality_metrics.c.provider, turn_quality_metrics.c.model_id,
+                    func.count().label("turns"),
+                    func.sum(turn_quality_metrics.c.tool_calls).label("tool_calls"),
+                    func.sum(turn_quality_metrics.c.redundant_tool_calls).label("redundant"),
+                    func.sum(turn_quality_metrics.c.input_tokens).label("input_tokens"),
+                    func.sum(turn_quality_metrics.c.cached_input_tokens).label("cached_input_tokens"),
+                    func.sum(turn_quality_metrics.c.iterations).label("iterations"),
+                    func.avg(turn_quality_metrics.c.duration_ms).label("avg_duration_ms"),
+                )
+                .where(turn_quality_metrics.c.user_id == user_id, turn_quality_metrics.c.created_at >= since)
+                .group_by(turn_quality_metrics.c.provider, turn_quality_metrics.c.model_id)
+                .order_by(func.count().desc())
+            ).mappings().all()
+            completed = {
+                (str(row["provider"]), str(row["model_id"])): int(row["completed"])
+                for row in connection.execute(
+                    select(
+                        turn_quality_metrics.c.provider, turn_quality_metrics.c.model_id,
+                        func.count().label("completed"),
+                    )
+                    .where(
+                        turn_quality_metrics.c.user_id == user_id,
+                        turn_quality_metrics.c.created_at >= since,
+                        turn_quality_metrics.c.outcome == "completed",
+                    )
+                    .group_by(turn_quality_metrics.c.provider, turn_quality_metrics.c.model_id)
+                ).mappings().all()
+            }
+        summary: list[dict[str, object]] = []
+        for row in rows:
+            key = (str(row["provider"]), str(row["model_id"]))
+            turns = int(row["turns"] or 0)
+            done = completed.get(key, 0)
+            tool_calls = int(row["tool_calls"] or 0)
+            input_tokens = int(row["input_tokens"] or 0)
+            cached = row["cached_input_tokens"]
+            summary.append({
+                "provider": key[0], "model_id": key[1], "turns": turns, "completed_turns": done,
+                "completion_rate": round(done / turns, 4) if turns else None,
+                "tool_calls": tool_calls,
+                "tool_calls_per_completed_turn": round(tool_calls / done, 2) if done else None,
+                "redundant_fraction": round(int(row["redundant"] or 0) / tool_calls, 4) if tool_calls else None,
+                "input_tokens_per_completed_turn": round(input_tokens / done, 1) if done else None,
+                "cached_fraction": round(int(cached) / input_tokens, 4) if cached is not None and input_tokens else None,
+                "iterations": int(row["iterations"] or 0),
+                "avg_duration_ms": round(float(row["avg_duration_ms"]), 1) if row["avg_duration_ms"] is not None else None,
+            })
+        return summary
 
     @staticmethod
     def main_agent_id(turn: Mapping[str, object]) -> str:
@@ -849,6 +949,7 @@ class ChatApplication:
                 })
         return receipt
     def list(self, user_id: str): return self.store.list(user_id)
+    def quality_summary(self, user_id: str, *, days: int = 30): return {"items": self.store.quality_summary(user_id, days=days), "window_days": days}
     def get(self, conversation_id: str, user_id: str): return self.store.get(conversation_id, user_id)
     def events(self, conversation_id: str, user_id: str, after: int): return self.store.events(conversation_id, user_id, after)
     def cancel(self, conversation_id: str, user_id: str):

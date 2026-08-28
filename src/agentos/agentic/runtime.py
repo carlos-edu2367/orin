@@ -11,6 +11,7 @@ from typing import Callable, Mapping
 
 from .action_loop import ActionLoop, MalformedToolCall
 from .provider_stream import NormalizedStreamItem, StreamKind
+from .quality import TurnQualityCounters
 
 MAX_PARALLEL_TOOLS = 4
 AGED_TOOL_RESULT_CHARS = 400
@@ -106,6 +107,9 @@ class AgenticTurnRuntime:
         self.context_reporting = bool(context_reporting)
         self._compaction_count = 0
         self._closed = False
+        self.counters = TurnQualityCounters()
+        self._started_at: datetime | None = None
+        self._quality_recorded = False
 
     def close(self) -> None:
         if self._closed:
@@ -120,7 +124,8 @@ class AgenticTurnRuntime:
 
     def run(self, turn_id: str, *, turn: dict[str, object] | None = None) -> AgenticRunResult:
         turn = turn or self._load(turn_id)
-        deadline = self.clock() + self.limits.deadline
+        self._started_at = self.clock()
+        deadline = self._started_at + self.limits.deadline
         self._life(turn, "running")
         messages = list(self.store.history_for_turn(turn))
         action_count = 0
@@ -138,6 +143,7 @@ class AgenticTurnRuntime:
         total_cost = Decimal("0")
         iterations = range(1, self.limits.max_iterations + 1) if self.limits.max_iterations is not None else count(1)
         for iteration in iterations:
+            self.counters.note_iteration()
             if self.cancelled(turn):
                 return self._cancel(turn, iteration, action_count)
             if self.clock() >= deadline:
@@ -218,6 +224,11 @@ class AgenticTurnRuntime:
                             input_tokens = event.usage.input_tokens if event.usage.input_tokens is not None else input_tokens
                             output_tokens = event.usage.output_tokens if event.usage.output_tokens is not None else output_tokens
                             reported_total_tokens = event.usage.total_tokens if event.usage.total_tokens is not None else reported_total_tokens
+                            self.counters.note_usage(
+                                input_tokens=event.usage.input_tokens,
+                                output_tokens=event.usage.output_tokens,
+                                cached_input_tokens=event.usage.cached_input_tokens,
+                            )
                     elif event.kind is StreamKind.FINISH:
                         finish = event.finish_reason
                     elif event.kind is StreamKind.RATE_LIMIT:
@@ -238,6 +249,9 @@ class AgenticTurnRuntime:
                     self._life(turn, "retrying", attempt=provider_retries)
                     continue
                 return self._fail(turn, "PROVIDER_STREAM_FAILED", iteration, action_count)
+            # One provider call is over; fold its usage into the turn total
+            # before the next call starts reporting its own.
+            self.counters.settle_provider_call()
             provider_total_tokens = reported_total_tokens
             if provider_total_tokens is None and input_tokens is not None and output_tokens is not None:
                 provider_total_tokens = input_tokens + output_tokens
@@ -308,8 +322,10 @@ class AgenticTurnRuntime:
                 if any(bool(result.get("wait_for_user")) for result in results):
                     self._life(turn, "waiting_user")
                     self.store.finish(turn, code="WAITING_USER")
+                    self._settle_quality(turn, "waiting_user")
                     return AgenticRunResult("waiting_user", iteration, action_count)
                 if self.reconciliation_required(turn):
+                    self._settle_quality(turn, "reconciliation_required", "EFFECT_RECONCILIATION_REQUIRED")
                     return AgenticRunResult("reconciliation_required", iteration, action_count, "EFFECT_RECONCILIATION_REQUIRED")
                 self._life(turn, "running")
                 continue
@@ -321,6 +337,7 @@ class AgenticTurnRuntime:
                 )
                 self._life(turn, "completed")
                 self.store.finish(turn)
+                self._settle_quality(turn, "completed")
                 return AgenticRunResult("completed", iteration, action_count, budget_exhausted=final_iteration and (iteration > 1 or bool(calls)))
             self._effect_finished(turn, provider_effect_id, state="APPLIED", private_result={"outcome": "empty"})
         # Reaching this point means the loop ended without any provider answer
@@ -773,10 +790,12 @@ class AgenticTurnRuntime:
         results: list[dict[str, object]] = []
         for index, (call_id, name, arguments, error) in enumerate(prepared):
             if error is not None:
+                self.counters.note_call(name, {}, "failed")
                 self._life(turn, "tool_finished", tool_name=name, invocation_id=call_id, status="failed", summary=error, error_code="INVALID_ARGUMENTS", tool_arguments={})
                 results.append({"id": call_id, "name": name, "status": "failed", "content": error})
                 continue
             outcome = outcomes[index]
+            self.counters.note_call(name, arguments, outcome.status)
             if outcome.status == "failed" and not duplicate[index]:
                 self._failed_signatures[self._signature(name, arguments)] = outcome.content
             self._life(
@@ -841,9 +860,36 @@ class AgenticTurnRuntime:
                 status=getattr(outcome, "status", ""), summary=summary[:2000],
             )
 
+    def _settle_quality(self, turn: Mapping[str, object], outcome: str, error_code: str | None = None) -> None:
+        """Persist this turn's efficiency row exactly once, at its terminal.
+
+        Recovery can drive a turn to a terminal state more than once, and the
+        row must describe the turn rather than the number of attempts, so the
+        first terminal wins. A store without the method (every in-memory test
+        double) simply records nothing.
+        """
+        if self._quality_recorded:
+            return
+        recorder = getattr(self.store, "record_quality", None)
+        if not callable(recorder):
+            return
+        self._quality_recorded = True
+        started = self._started_at or self.clock()
+        try:
+            recorder(
+                turn,
+                counters=self.counters.as_row(),
+                outcome=outcome,
+                error_code=error_code,
+                duration_ms=int((self.clock() - started).total_seconds() * 1000),
+            )
+        except Exception:  # noqa: BLE001 - telemetry never breaks a turn
+            pass
+
     def _fail(self, turn: dict[str, object], code: str, iteration: int, actions: int) -> AgenticRunResult:
         self._life(turn, "failed", code=code)
         self.store.finish(turn, failed=True, code=code)
+        self._settle_quality(turn, "failed", code)
         return AgenticRunResult("failed", iteration, actions, code)
 
     def _cancel(self, turn: dict[str, object], iteration: int, actions: int) -> AgenticRunResult:
@@ -855,6 +901,7 @@ class AgenticTurnRuntime:
                 pass
         self._life(turn, "cancelled", code="TURN_CANCELLED")
         self.store.finish(turn, failed=True, code="TURN_CANCELLED")
+        self._settle_quality(turn, "cancelled", "TURN_CANCELLED")
         return AgenticRunResult("cancelled", iteration, actions, "TURN_CANCELLED")
 
     @staticmethod

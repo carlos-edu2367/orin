@@ -166,6 +166,9 @@ class _RuntimeStore:
             error_code=error_code, private_result=private_result,
         )
 
+    def record_quality(self, turn: dict[str, object], **values: object) -> None:
+        self._store.record_quality(turn, **values)
+
     # -- session seams ---------------------------------------------------
 
     def record(self, *args, **kwargs) -> None:
