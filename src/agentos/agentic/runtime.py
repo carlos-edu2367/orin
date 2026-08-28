@@ -11,6 +11,7 @@ from typing import Callable, Mapping
 
 from .action_loop import ActionLoop, MalformedToolCall
 from .provider_stream import NormalizedStreamItem, StreamKind
+from .contract import ContractError, TaskContract, parse as parse_contract
 from .quality import TurnQualityCounters
 from . import transcript
 
@@ -136,6 +137,11 @@ class AgenticTurnRuntime:
         self.counters = TurnQualityCounters()
         self._started_at: datetime | None = None
         self._quality_recorded = False
+        # The task the agent committed to. Held here rather than in the
+        # message list so trimming and compaction cannot reach it: the one
+        # thing that must never vanish mid-task is the definition of the task.
+        self.contract: TaskContract | None = None
+        self._rejected_contracts = 0
 
     def close(self) -> None:
         if self._closed:
@@ -647,9 +653,17 @@ class AgenticTurnRuntime:
             previous = index
         if marker is not None and not marker_inserted:
             window.append(marker)
-        if not self.system_prompt:
-            return window
-        return [{"role": "system", "content": self.system_prompt}, *window]
+        # The contract is rebuilt into every request instead of living in
+        # ``messages``: a message can be trimmed away or folded into a
+        # compaction summary, and the definition of the task must outlive
+        # both. It stays out of the cached system prefix because it changes
+        # whenever the agent revises it.
+        preamble: list[dict[str, object]] = []
+        if self.system_prompt:
+            preamble.append({"role": "system", "content": self.system_prompt})
+        if self.contract is not None:
+            preamble.append({"role": "system", "content": self.contract.render()})
+        return [*preamble, *window] if preamble else window
 
     @staticmethod
     def _dropped_tool_names(messages: list[dict[str, object]], kept: set[int]) -> list[str]:
@@ -904,6 +918,7 @@ class AgenticTurnRuntime:
                 continue
             outcome = outcomes[index]
             self.counters.note_call(name, arguments, outcome.status)
+            self._absorb_contract(outcome)
             if outcome.status == "failed" and not duplicate[index]:
                 self._failed_signatures[self._signature(name, arguments)] = outcome.content
             self._life(
@@ -967,6 +982,30 @@ class AgenticTurnRuntime:
                 turn, "plugin_hook", hook_id=getattr(outcome, "hook_id", ""), hook_event=event,
                 status=getattr(outcome, "status", ""), summary=summary[:2000],
             )
+
+    def _absorb_contract(self, outcome: object) -> None:
+        """Adopt a contract the planning tool just produced, or count a refusal.
+
+        ``write_contract`` deliberately knows nothing about the runtime; it
+        returns the parsed contract on its payload and this is where it takes
+        effect. Repeated rejections are counted so a model that cannot fill
+        the schema still ends up with a workable contract instead of looping
+        on the same validation error.
+        """
+        if getattr(outcome, "error_code", None) == "INVALID_CONTRACT":
+            self._rejected_contracts += 1
+            return
+        payload = getattr(outcome, "payload", None)
+        if not isinstance(payload, Mapping):
+            return
+        raw = payload.get("contract")
+        if not isinstance(raw, Mapping):
+            return
+        try:
+            self.contract = parse_contract(raw)
+        except ContractError:
+            return
+        self._rejected_contracts = 0
 
     def _record_step(self, turn: dict[str, object], *, kind: str, payload: Mapping[str, object], **fields: object) -> None:
         """Append one step to the durable transcript, if the store keeps one.
