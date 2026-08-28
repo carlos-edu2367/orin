@@ -366,3 +366,57 @@ O bench de 4.4 não roda em CI (precisa de provider real). É o script `scripts/
 7. O bench de 4.4 mostra queda de pelo menos 50% em chamadas por tarefa concluída e `redundant_tool_calls / tool_calls` abaixo de 5%, no mesmo modelo da linha de base.
 
 O critério 7 é o que autoriza declarar a Trilha A concluída. Os demais são condição para chegar até ele.
+
+---
+
+## 15. Desvios da implementação
+
+Registrados na entrega, com o motivo. O desenho acima é a intenção; esta seção é o que foi construído onde os dois divergem.
+
+### 15.1 As fases não são um funil (§7.1, §7.3)
+
+**Previsto:** `orient` publicaria apenas ferramentas de leitura, e o trabalho começaria em `execute`.
+
+**Construído:** `orient` publica também o núcleo de escrita (`write_file`, `edit_file`, `run_command`).
+
+**Motivo:** com conjuntos disjuntos, "crie um arquivo" passaria de 2 para 4–5 chamadas de provider — uma regressão disfarçada de melhoria, e justamente no tipo de tarefa mais comum. A redução de ~50 para ~13 ferramentas continua valendo em `orient`; o que fica de fora é navegador, MCP, plugins e subagentes, que é de onde vinham as 50. O que dispara `plan` é o esgotamento do orçamento de `orient` sem conclusão — o momento em que o agente está demonstravelmente patinando.
+
+### 15.2 O teto de 12 ferramentas por requisição não é um truncamento (§7.3)
+
+**Previsto:** teto rígido de 12 schemas por requisição, com excedente entrando por ordem do contrato.
+
+**Construído:** cada fase declara seu conjunto explicitamente (≤16 com toolkits básicos); um toolkit declarado soma sua família inteira. Não há truncamento.
+
+**Motivo:** um contrato que declara `browser` precisa das 12 ferramentas de navegador. Cortar por prioridade removeria em silêncio a ferramenta de que a tarefa depende — trocaria um modo de falha ruidoso por um mudo e pior. O teto virou asserção de teste sobre os conjuntos base, não mecanismo de corte.
+
+### 15.3 A fase de verificação é alcançada por esgotamento, não por toda alegação de conclusão (§7.1, §10)
+
+**Previsto:** `execute` → `verify` quando os critérios de aceite fossem atendidos.
+
+**Construído:** `verify` é alcançada quando `execute` esgota o orçamento. Quando o modelo conclui por conta própria, o turno termina como hoje.
+
+**Motivo:** o texto final é transmitido por streaming à pessoa enquanto é gerado. Encaminhar para `verify` depois disso mostraria uma resposta "final", depois mais atividade, depois outra resposta. Tornar a verificação obrigatória exige mudar o protocolo de resposta — suprimir o stream até a verificação passar — que é exatamente o que **C1** precisa fazer. Fazer metade disso aqui produziria uma UX pior do que a atual.
+
+O ganho preservado é real: um `execute` esgotado hoje termina em `ITERATION_LIMIT` sem nada; agora passa por uma verificação somente-leitura e uma resposta de fechamento.
+
+### 15.4 O prompt em camadas está parcial (§7.5)
+
+**Construído:** a camada de fase existe e é injetada por requisição. A separação entre bloco estático e bloco volátil **não** foi feita.
+
+**Motivo:** essa separação existe para o cache (B1). Fazê-la aqui, sem os breakpoints de cache que a justificam, seria refatoração sem benefício mensurável. O prompt ganhou uma linha dizendo que nem toda ferramenta descrita está publicada em toda requisição, para o modelo não planejar em cima de uma ferramenta que não enxerga.
+
+### 15.5 O limite do transcript é rede de segurança, não limite operativo (§6.3)
+
+`MAX_TOOL_RESULT_CHARS = 12_000` já limita todo resultado de ferramenta antes de chegar ao transcript. Os 32.768 caracteres continuam valendo, mas na prática nenhum resultado os alcança.
+
+### 15.6 O bench mede, não dirige (§4.4)
+
+**Previsto:** um runner que executa as doze tarefas contra um provider real.
+
+**Construído:** as doze tarefas versionadas, mais um script que lê `turn_quality_metrics` pela API e compara duas execuções, declarando se o alvo foi atingido.
+
+**Motivo:** um driver HTTP escrito sem credencial não pode ser executado nem verificado, e um driver não verificado produz números em que ninguém deveria confiar. Enviar as tarefas pela interface, com o provider real, também é a única forma de os números descreverem o produto e não o arnês.
+
+### 15.7 Correções de gate fora do escopo da trilha
+
+O portão de release estava vermelho antes desta trilha: 9 erros de lint (`react-hooks/set-state-in-effect`) e 1 E2E falhando, ambos presentes em `v0.2.11`. Foram corrigidos aqui porque bloqueavam um release que pudesse ser honestamente chamado de verde — não porque pertençam à Trilha A. Isso endereça parcialmente o **P0-01** da auditoria: o gate agora passa; fazer a publicação *depender* dele continua pendente.
