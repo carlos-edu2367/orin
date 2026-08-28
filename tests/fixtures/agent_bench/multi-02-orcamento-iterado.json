@@ -1,0 +1,19 @@
+{
+  "id": "multi-02-orcamento-iterado",
+  "category": "multi-turno",
+  "messages": [
+    "Monte custos.csv com cinco itens de obra e seus valores.",
+    "Some 12% em todos os valores e grave custos-reajustado.csv.",
+    "Agora me diga qual item ficou mais caro depois do reajuste e grave a resposta em conclusao.md."
+  ],
+  "acceptance": [
+    {
+      "kind": "exists",
+      "path": "custos-reajustado.csv"
+    },
+    {
+      "kind": "exists",
+      "path": "conclusao.md"
+    }
+  ]
+}

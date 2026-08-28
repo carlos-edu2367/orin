@@ -113,7 +113,19 @@ def _usage(value: object) -> ProviderUsage:
     total_tokens = integer("total_tokens")
     if total_tokens is None and input_tokens is not None and output_tokens is not None:
         total_tokens = input_tokens + output_tokens
-    return ProviderUsage(input_tokens, output_tokens, total_tokens, measurement="CONFIRMED")
+    # How much of the prompt the provider served from its cache. Anthropic
+    # reports it at the top level of usage; the OpenAI-compatible shape nests
+    # it under prompt_tokens_details. A provider that reports neither leaves
+    # this None, which means "not measured" -- never zero, which would claim
+    # we measured and found no cache.
+    cached_input_tokens = integer("cache_read_input_tokens")
+    if cached_input_tokens is None:
+        details = value.get("prompt_tokens_details")
+        if isinstance(details, Mapping):
+            raw = details.get("cached_tokens")
+            if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0:
+                cached_input_tokens = raw
+    return ProviderUsage(input_tokens, output_tokens, total_tokens, cached_input_tokens, measurement="CONFIRMED")
 
 
 def _cost(value: object) -> Decimal | None:

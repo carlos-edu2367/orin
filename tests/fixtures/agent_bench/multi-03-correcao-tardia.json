@@ -1,0 +1,14 @@
+{
+  "id": "multi-03-correcao-tardia",
+  "category": "multi-turno",
+  "messages": [
+    "Crie plano.md com um cronograma de cinco etapas de uma reforma.",
+    "A etapa 3 esta errada: ela deve vir depois da etapa 4. Corrija a ordem sem reescrever o resto."
+  ],
+  "acceptance": [
+    {
+      "kind": "exists",
+      "path": "plano.md"
+    }
+  ]
+}

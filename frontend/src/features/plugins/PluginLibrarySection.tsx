@@ -18,8 +18,11 @@ export function PluginLibrarySection({ client, onInstalled }: { client: ApiClien
   const [addingMcpFor, setAddingMcpFor] = useState<string | null>(null)
   const [query, setQuery] = useState('')
   const [activeQuery, setActiveQuery] = useState('')
+  // Raising the busy flag is the caller's job. An event handler may do it
+  // directly; the mount pass needs nothing, because `loading` already starts
+  // true. Doing it inside `load` meant a synchronous setState in the mount
+  // effect, which costs a cascading render for no visible benefit.
   const load = useCallback((refresh: boolean, q: string) => {
-    (refresh ? setRefreshing : setLoading)(true)
     return fetchPluginLibrary(client, refresh, q)
       .then((result) => { setEntries(result.entries); setWebAvailable(result.web_search_available); setError(null) })
       .catch(() => setError('Não foi possível carregar a biblioteca de plugins.'))
@@ -30,17 +33,19 @@ export function PluginLibrarySection({ client, onInstalled }: { client: ApiClien
     event.preventDefault()
     const trimmed = query.trim()
     setActiveQuery(trimmed)
+    setRefreshing(true)
     void load(true, trimmed)
   }
   function clearSearch() {
     setQuery('')
     setActiveQuery('')
+    setLoading(true)
     void load(false, '')
   }
   return <div className="plugin-library">
     <div className="plugin-library__head">
       <p className="plugin-library__lede">Plugins compatíveis com MCP encontrados em marketplaces conhecidos e na web.</p>
-      <button type="button" className="button button--secondary" onClick={() => void load(true, activeQuery)} disabled={refreshing}>{refreshing ? 'Atualizando…' : 'Atualizar'}</button>
+      <button type="button" className="button button--secondary" onClick={() => { setRefreshing(true); void load(true, activeQuery) }} disabled={refreshing}>{refreshing ? 'Atualizando…' : 'Atualizar'}</button>
     </div>
     <form className="plugin-library__search" onSubmit={search}>
       <input type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar plugins por nome ou palavra-chave…" aria-label="Buscar na biblioteca de plugins" />

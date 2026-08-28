@@ -1,0 +1,13 @@
+{
+  "id": "explore-03-tres-perguntas",
+  "category": "exploracao",
+  "messages": [
+    "Responda em respostas.md: quais dependencias externas o projeto tem, onde ficam as migrations, e qual e o ponto de entrada."
+  ],
+  "acceptance": [
+    {
+      "kind": "exists",
+      "path": "respostas.md"
+    }
+  ]
+}

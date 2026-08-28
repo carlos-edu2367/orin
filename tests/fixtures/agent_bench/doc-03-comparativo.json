@@ -1,0 +1,18 @@
+{
+  "id": "doc-03-comparativo",
+  "category": "documento",
+  "messages": [
+    "Compare entrada/proposta-a.md e entrada/proposta-b.md e escreva comparativo.md com uma tabela das diferencas de escopo e preco."
+  ],
+  "acceptance": [
+    {
+      "kind": "exists",
+      "path": "comparativo.md"
+    },
+    {
+      "kind": "contains",
+      "path": "comparativo.md",
+      "value": "|"
+    }
+  ]
+}

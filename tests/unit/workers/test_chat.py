@@ -414,17 +414,21 @@ def _ollama_worker(*rows: dict[str, object]) -> ChatWorker:
 
 
 def test_num_ctx_never_exceeds_the_models_own_window() -> None:
-    """A 262k model must not be asked to allocate a 262k KV cache."""
+    """A 262k model must not be asked to allocate a 262k KV cache.
+
+    num_ctx deliberately no longer tracks ``_max_context_tokens_for``: that
+    budget follows the model's real window (someone else's tokens), while
+    this one is VRAM on the user's machine and keeps the conservative flat
+    ceiling.
+    """
     worker = _ollama_worker({
         "user_id": "user-1", "provider": "ollama", "model_id": "qwen3:8b",
         "display_name": "qwen3:8b", "context_window": 262_144,
     })
     turn = {**TURN, "provider": "ollama", "model_id": "qwen3:8b"}
 
-    budget = worker._max_context_tokens_for(turn) + chat_module.CONTEXT_WINDOW_RESERVE_TOKENS
-
-    assert worker._num_ctx_for(turn) == budget
-    assert budget < 262_144
+    assert worker._num_ctx_for(turn) == chat_module.DEFAULT_MAX_CONTEXT_TOKENS + chat_module.CONTEXT_WINDOW_RESERVE_TOKENS
+    assert worker._num_ctx_for(turn) < 262_144
 
 
 def test_num_ctx_is_capped_by_a_small_models_window() -> None:
@@ -452,3 +456,72 @@ def test_base_url_resolution_covers_local_and_cloud_ollama() -> None:
     assert worker._base_url_for("ollama", {"base_url": None}) == "http://localhost:11434"
     assert worker._base_url_for("ollama", {"base_url": "https://ollama.com/v1"}) == "https://ollama.com"
     assert worker._base_url_for("openai", {"base_url": None}) == chat_module.PROVIDER_BASE_URLS["openai"]
+
+
+def test_a_large_window_model_is_no_longer_capped_at_the_flat_default() -> None:
+    """A 200k model used to be trimmed to 60k, forcing compaction at ~49k.
+
+    That is what made the agent forget mid-task and re-run searches it had
+    already run. The budget now follows the model's real window.
+    """
+    engine = _catalog_engine({
+        "user_id": "user-1", "provider": "anthropic", "model_id": "claude-sonnet-4",
+        "display_name": "Claude Sonnet 4", "context_window": 200_000,
+    })
+
+    class LargeModelStore(Store):
+        _engine = engine
+
+    worker = ChatWorker(LargeModelStore())
+    turn = {**TURN, "provider": "anthropic", "model_id": "claude-sonnet-4"}
+
+    assert worker._max_context_tokens_for(turn) == 200_000 - 20_000
+    assert worker._max_context_tokens_for(turn) > chat_module.DEFAULT_MAX_CONTEXT_TOKENS
+
+
+def test_a_very_large_window_reserves_a_bounded_amount_of_headroom() -> None:
+    """Ten percent of a 1M window would reserve 100k for nothing."""
+    engine = _catalog_engine({
+        "user_id": "user-1", "provider": "openrouter", "model_id": "google/gemini-pro",
+        "display_name": "Gemini Pro", "context_window": 1_000_000,
+    })
+
+    class HugeModelStore(Store):
+        _engine = engine
+
+    worker = ChatWorker(HugeModelStore())
+    turn = {**TURN, "provider": "openrouter", "model_id": "google/gemini-pro"}
+
+    assert worker._max_context_tokens_for(turn) == 1_000_000 - chat_module.CONTEXT_WINDOW_RESERVE_CEILING
+
+
+def test_a_small_window_keeps_the_flat_minimum_reserve() -> None:
+    """Ten percent of 16k is 1.6k, far too little for the tool schemas."""
+    engine = _catalog_engine({
+        "user_id": "user-1", "provider": "openrouter", "model_id": "some/small-model",
+        "display_name": "Small Model", "context_window": 16_000,
+    })
+
+    class SmallModelStore(Store):
+        _engine = engine
+
+    worker = ChatWorker(SmallModelStore())
+    turn = {**TURN, "provider": "openrouter", "model_id": "some/small-model"}
+
+    assert worker._max_context_tokens_for(turn) == 16_000 - chat_module.CONTEXT_WINDOW_RESERVE_TOKENS
+
+
+def test_num_ctx_does_not_follow_the_liberated_context_budget() -> None:
+    """The trim budget is someone else's tokens; num_ctx is the user's VRAM.
+
+    Liberating the first must never enlarge the second, or a large-window
+    local model spills its KV cache into system RAM.
+    """
+    worker = _ollama_worker({
+        "user_id": "user-1", "provider": "ollama", "model_id": "qwen3:8b",
+        "display_name": "qwen3:8b", "context_window": 262_144,
+    })
+    turn = {**TURN, "provider": "ollama", "model_id": "qwen3:8b"}
+
+    assert worker._num_ctx_for(turn) < worker._max_context_tokens_for(turn)
+    assert worker._num_ctx_for(turn) <= chat_module.DEFAULT_MAX_CONTEXT_TOKENS + chat_module.CONTEXT_WINDOW_RESERVE_TOKENS

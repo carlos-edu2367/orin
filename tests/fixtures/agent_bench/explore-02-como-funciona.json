@@ -1,0 +1,13 @@
+{
+  "id": "explore-02-como-funciona",
+  "category": "exploracao",
+  "messages": [
+    "Explique em fluxo.md como uma requisicao entra no sistema ate gravar no banco, citando os arquivos envolvidos."
+  ],
+  "acceptance": [
+    {
+      "kind": "exists",
+      "path": "fluxo.md"
+    }
+  ]
+}

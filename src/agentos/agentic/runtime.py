@@ -11,6 +11,10 @@ from typing import Callable, Mapping
 
 from .action_loop import ActionLoop, MalformedToolCall
 from .provider_stream import NormalizedStreamItem, StreamKind
+from .contract import ContractError, TaskContract, parse as parse_contract, synthesize as synthesize_contract
+from .quality import TurnQualityCounters
+from . import phases, transcript
+from .phases import Phase, PhaseController
 
 MAX_PARALLEL_TOOLS = 4
 AGED_TOOL_RESULT_CHARS = 400
@@ -25,6 +29,31 @@ BROWSER_TOOL_NAMES = frozenset({
 # no user message to pin." Used only as the default for the ``_pinned_index``
 # instance attribute, which ``run`` sets once per turn.
 _PIN_UNSET = object()
+
+# A compacted summary has one job: let the model keep working without going
+# back to the tools. Free prose loses exactly the parts that make that
+# possible -- the paths, the numbers, the decisions already taken -- so the
+# summary is requested and rendered under fixed headings instead.
+COMPACTION_SECTIONS = ("Arquivos tocados", "Decisões", "Dados apurados", "Pendências")
+COMPACTION_HEADING = "## Contexto compactado"
+# The old header ended with "use os arquivos e ferramentas para confirmar
+# detalhes", which invited the model to re-run everything it had just been
+# told. The summary is authoritative for what it contains.
+COMPACTION_HEADER = (
+    f"{COMPACTION_HEADING}\n"
+    "[Este resumo é confiável para caminhos, decisões e valores registrados abaixo. "
+    "Releia um arquivo apenas se esperar que ele tenha mudado desde então.]"
+)
+COMPACTION_INSTRUCTION = (
+    "You are compacting a conversation so another agent can continue the work without "
+    "repeating it. Reply with exactly these four markdown sections, in this order, even "
+    "when a section is empty (write '- nenhum'):\n"
+    + "\n".join(f"### {section}" for section in COMPACTION_SECTIONS)
+    + "\nUnder 'Arquivos tocados' list each path with what was done to it. Under 'Decisões' "
+    "list each decision with its reason. Under 'Dados apurados' list every concrete value, "
+    "number or identifier established so far, verbatim. Under 'Pendências' list what is "
+    "still open. Preserve exact paths and figures. Do not invent anything."
+)
 
 CLOSING_INSTRUCTION = (
     "You have reached this turn's action budget. Do not request any more tools. "
@@ -88,6 +117,7 @@ class AgenticTurnRuntime:
         skill_prompt_tokens: int = 0,
         context_reporting: bool = False,
         hook_engine=None,
+        phase_controller: PhaseController | None = None,
     ) -> None:
         self.store, self.provider = store, provider
         self.hook_engine = hook_engine
@@ -106,6 +136,18 @@ class AgenticTurnRuntime:
         self.context_reporting = bool(context_reporting)
         self._compaction_count = 0
         self._closed = False
+        self.counters = TurnQualityCounters()
+        self._started_at: datetime | None = None
+        self._quality_recorded = False
+        # The task the agent committed to. Held here rather than in the
+        # message list so trimming and compaction cannot reach it: the one
+        # thing that must never vanish mid-task is the definition of the task.
+        self.contract: TaskContract | None = None
+        self._rejected_contracts = 0
+        # None keeps the previous single-stage behaviour, which every caller
+        # that has not opted in (and every contract test) relies on.
+        self.phases = phase_controller
+        self._first_request_text = ""
 
     def close(self) -> None:
         if self._closed:
@@ -120,7 +162,8 @@ class AgenticTurnRuntime:
 
     def run(self, turn_id: str, *, turn: dict[str, object] | None = None) -> AgenticRunResult:
         turn = turn or self._load(turn_id)
-        deadline = self.clock() + self.limits.deadline
+        self._started_at = self.clock()
+        deadline = self._started_at + self.limits.deadline
         self._life(turn, "running")
         messages = list(self.store.history_for_turn(turn))
         action_count = 0
@@ -133,11 +176,16 @@ class AgenticTurnRuntime:
         # onto a later tool-result message (Anthropic emits those with
         # ``role: "user"`` too) as the loop appends to ``messages`` below.
         self._pinned_index = self._last_user_index(messages)
+        # Kept for contract synthesis: if the model never manages to write a
+        # contract, the person's own request becomes the objective.
+        pinned_message = messages[self._pinned_index] if self._pinned_index is not None else None
+        self._first_request_text = str((pinned_message or {}).get("content") or "")[:2_000]
         provider_retries = 0
         total_tokens = 0
         total_cost = Decimal("0")
         iterations = range(1, self.limits.max_iterations + 1) if self.limits.max_iterations is not None else count(1)
         for iteration in iterations:
+            self.counters.note_iteration()
             if self.cancelled(turn):
                 return self._cancel(turn, iteration, action_count)
             if self.clock() >= deadline:
@@ -145,10 +193,17 @@ class AgenticTurnRuntime:
             remaining_tokens = None if self.limits.max_provider_tokens is None else self.limits.max_provider_tokens - total_tokens
             if remaining_tokens is not None and remaining_tokens <= 0:
                 return self._fail(turn, "PROVIDER_TOKEN_LIMIT", iteration, action_count)
-            final_iteration = self.limits.max_iterations is not None and iteration == self.limits.max_iterations
+            final_iteration = (
+                (self.limits.max_iterations is not None and iteration == self.limits.max_iterations)
+                or (self.phases is not None and self.phases.is_final)
+            )
             tool_schemas = self._tool_schemas(turn)
             self._maybe_compact(messages, turn, tool_schemas)
             window = self._request_messages(messages)
+            if self.phases is not None:
+                # Last, so the stage the agent is in is the nearest thing to
+                # the conversation rather than something it read paragraphs ago.
+                window = [*window, {"role": "system", "content": phases.PHASE_INSTRUCTIONS[self.phases.current]}]
             if final_iteration:
                 window = [*window, {"role": "system", "content": CLOSING_INSTRUCTION}]
             context = self._context_usage(messages, window, tool_schemas)
@@ -218,6 +273,11 @@ class AgenticTurnRuntime:
                             input_tokens = event.usage.input_tokens if event.usage.input_tokens is not None else input_tokens
                             output_tokens = event.usage.output_tokens if event.usage.output_tokens is not None else output_tokens
                             reported_total_tokens = event.usage.total_tokens if event.usage.total_tokens is not None else reported_total_tokens
+                            self.counters.note_usage(
+                                input_tokens=event.usage.input_tokens,
+                                output_tokens=event.usage.output_tokens,
+                                cached_input_tokens=event.usage.cached_input_tokens,
+                            )
                     elif event.kind is StreamKind.FINISH:
                         finish = event.finish_reason
                     elif event.kind is StreamKind.RATE_LIMIT:
@@ -238,6 +298,9 @@ class AgenticTurnRuntime:
                     self._life(turn, "retrying", attempt=provider_retries)
                     continue
                 return self._fail(turn, "PROVIDER_STREAM_FAILED", iteration, action_count)
+            # One provider call is over; fold its usage into the turn total
+            # before the next call starts reporting its own.
+            self.counters.settle_provider_call()
             provider_total_tokens = reported_total_tokens
             if provider_total_tokens is None and input_tokens is not None and output_tokens is not None:
                 provider_total_tokens = input_tokens + output_tokens
@@ -273,6 +336,7 @@ class AgenticTurnRuntime:
                         return self._fail(turn, "ACTION_LIMIT", iteration, action_count)
                     results = self._run_toolset(turn, list(calls.values()))
                     action_count += len(results)
+                    self._advance_phase(turn, results)
                 else:
                     try:
                         for _ in calls.values():
@@ -299,7 +363,22 @@ class AgenticTurnRuntime:
                             tool_arguments=dict(arguments),
                         )
                 messages.append(self._assistant_tool_message(turn, text_parts, calls, thinking_parts))
+                # Record the trajectory so the *next* turn of this conversation
+                # starts knowing what this one already read and wrote, instead
+                # of rediscovering it.
+                self._record_step(
+                    turn, kind=transcript.STEP_ASSISTANT_TOOL_CALL,
+                    payload=transcript.assistant_tool_call_payload("".join(text_parts), calls.values()),
+                )
                 for result in results:
+                    self._record_step(
+                        turn, kind=transcript.STEP_TOOL_RESULT,
+                        payload=transcript.tool_result_payload(
+                            call_id=str(result.get("id") or ""), name=str(result.get("name") or ""),
+                            status=str(result.get("status") or ""), content=str(result.get("content") or ""),
+                        ),
+                        tool_name=str(result.get("name") or ""), tool_call_id=str(result.get("id") or ""),
+                    )
                     messages.extend(self._tool_result_messages(turn, result))
                 self._age_tool_results(messages, keep_recent=len(results))
                 # ``ask_user`` deliberately ends this provider run.  A worker
@@ -308,8 +387,10 @@ class AgenticTurnRuntime:
                 if any(bool(result.get("wait_for_user")) for result in results):
                     self._life(turn, "waiting_user")
                     self.store.finish(turn, code="WAITING_USER")
+                    self._settle_quality(turn, "waiting_user")
                     return AgenticRunResult("waiting_user", iteration, action_count)
                 if self.reconciliation_required(turn):
+                    self._settle_quality(turn, "reconciliation_required", "EFFECT_RECONCILIATION_REQUIRED")
                     return AgenticRunResult("reconciliation_required", iteration, action_count, "EFFECT_RECONCILIATION_REQUIRED")
                 self._life(turn, "running")
                 continue
@@ -321,6 +402,7 @@ class AgenticTurnRuntime:
                 )
                 self._life(turn, "completed")
                 self.store.finish(turn)
+                self._settle_quality(turn, "completed")
                 return AgenticRunResult("completed", iteration, action_count, budget_exhausted=final_iteration and (iteration > 1 or bool(calls)))
             self._effect_finished(turn, provider_effect_id, state="APPLIED", private_result={"outcome": "empty"})
         # Reaching this point means the loop ended without any provider answer
@@ -332,9 +414,20 @@ class AgenticTurnRuntime:
         return self._fail(turn, "ITERATION_LIMIT", self.limits.max_iterations or 0, action_count)
 
     def _tool_schemas(self, turn: Mapping[str, object]) -> list[dict[str, object]]:
-        if self.toolset is not None:
+        if self.toolset is None:
+            return self.actions.tool_schemas(turn)
+        if self.phases is None:
             return self.toolset.schemas()
-        return self.actions.tool_schemas(turn)
+        toolkits = self.contract.toolkits if self.contract is not None else None
+        allowed = phases.tools_for(self.phases.current, toolkits)
+        if not allowed:
+            return []
+        try:
+            return self.toolset.schemas(allowed, phases.kinds_for(toolkits))
+        except TypeError:
+            # A toolset that predates phase-aware publication still works; it
+            # simply publishes everything, as it did before.
+            return self.toolset.schemas()
 
     def _context_usage(
         self,
@@ -420,14 +513,11 @@ class AgenticTurnRuntime:
             self._life(turn, "context_compacting", removed_messages=len(compact_indices), compaction_count=self._compaction_count + 1)
         source = self._compact_source(messages, compact_indices)
         summary = self._request_compaction_summary(source, turn)
-        if not summary:
+        if not self._has_sections(summary):
             summary = self._fallback_compaction_summary(messages, compact_indices)
         insert_at = min(compact_indices)
         pinned_item = messages[pinned] if isinstance(pinned, int) and 0 <= pinned < len(messages) else None
-        replacement = {
-            "role": "system",
-            "content": "[Resumo automático do contexto anterior — use os arquivos e ferramentas para confirmar detalhes]\n" + summary[:8_000],
-        }
+        replacement = {"role": "system", "content": f"{COMPACTION_HEADER}\n{summary[:8_000]}"}
         retained = [item for index, item in enumerate(messages) if index not in compact_indices]
         original_to_retained = [(index, item) for index, item in enumerate(messages) if index not in compact_indices]
         position = next((offset for offset, (index, _item) in enumerate(original_to_retained) if index > insert_at), len(retained))
@@ -464,7 +554,7 @@ class AgenticTurnRuntime:
                 "turn_id": str(turn.get("turn_id") or "") + ":context-compaction",
                 "provider": str(turn.get("provider") or ""),
                 "model": str(turn.get("model_id") or ""),
-                "messages": [{"role": "system", "content": "Summarize the prior conversation for another agent. Preserve decisions, constraints, file paths, pending work and unresolved questions. Be concise and do not invent facts."}, {"role": "user", "content": source}],
+                "messages": [{"role": "system", "content": COMPACTION_INSTRUCTION}, {"role": "user", "content": source}],
                 "tools": [],
                 "max_output_tokens": min(1_600, max(256, self.limits.max_context_tokens // 4)),
             })
@@ -478,14 +568,49 @@ class AgenticTurnRuntime:
             return ""
 
     @staticmethod
-    def _fallback_compaction_summary(messages: list[dict[str, object]], indices: set[int]) -> str:
-        lines = ["A compactação semântica não ficou disponível; mensagens anteriores foram reduzidas."]
-        for index in sorted(indices)[-8:]:
+    def _has_sections(summary: str) -> bool:
+        """Whether a provider reply is usable as a structured summary.
+
+        A model that ignored the format and answered in prose is worse than
+        the local fallback, which at least keeps the paths and the tool names.
+        """
+        return bool(summary) and all(section in summary for section in COMPACTION_SECTIONS)
+
+    @classmethod
+    def _fallback_compaction_summary(cls, messages: list[dict[str, object]], indices: set[int]) -> str:
+        """Build the same four sections locally when the provider cannot.
+
+        This runs when the summarizer call fails or answers in the wrong
+        shape. It cannot infer decisions, but it can name every tool whose
+        result is being folded away and every path those calls mentioned --
+        which is what stops the model from rediscovering them.
+        """
+        touched: list[str] = []
+        pending: list[str] = []
+        for index in sorted(indices):
             item = messages[index]
-            role = str(item.get("role") or "message")
-            content = str(item.get("content") or "").replace("\n", " ")
-            lines.append(f"{role}: {content[:240]}")
-        return "\n".join(lines)
+            for call in item.get("tool_calls") or ():
+                if not isinstance(call, Mapping):
+                    continue
+                function = call.get("function") if isinstance(call.get("function"), Mapping) else {}
+                name = str(function.get("name") or "")
+                arguments = str(function.get("arguments") or "")[:160]
+                if name:
+                    touched.append(f"- {name}({arguments})")
+            content = item.get("content")
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, Mapping) and block.get("type") == "tool_use":
+                        touched.append(f"- {block.get('name')}({json.dumps(block.get('input') or {}, ensure_ascii=False)[:160]})")
+            elif isinstance(content, str) and content.strip() and str(item.get("role")) == "user":
+                pending.append(f"- {content.strip()[:200]}")
+        sections = {
+            COMPACTION_SECTIONS[0]: touched[-12:] or ["- nenhum"],
+            COMPACTION_SECTIONS[1]: ["- não registradas: a compactação semântica não ficou disponível"],
+            COMPACTION_SECTIONS[2]: ["- não registrados: a compactação semântica não ficou disponível"],
+            COMPACTION_SECTIONS[3]: pending[-6:] or ["- nenhuma"],
+        }
+        return "\n".join(f"### {name}\n" + "\n".join(lines) for name, lines in sections.items())
 
     @staticmethod
     def _estimated_tokens(message: Mapping[str, object]) -> int:
@@ -532,7 +657,20 @@ class AgenticTurnRuntime:
         omitted = len(messages) - len(ordered_kept)
         marker = None
         if omitted > 0:
-            marker = {"role": "system", "content": f"[{omitted} earlier messages omitted to stay within the context budget; re-read files or re-run searches if you need their content]"}
+            # Naming the tools whose results left the window turns re-reading
+            # into an informed choice. The previous wording ("re-read files or
+            # re-run searches if you need their content") made it a reflex,
+            # and re-running work already done is precisely what the loop is
+            # being changed to stop doing.
+            dropped = self._dropped_tool_names(messages, kept)
+            detail = f" Saíram resultados de: {', '.join(dropped)}." if dropped else ""
+            marker = {
+                "role": "system",
+                "content": (
+                    f"[{omitted} mensagens anteriores foram omitidas para caber no orçamento de contexto."
+                    f"{detail} O que já foi decidido e apurado está resumido acima.]"
+                ),
+            }
         window: list[dict[str, object]] = []
         previous = -1
         marker_inserted = False
@@ -544,9 +682,39 @@ class AgenticTurnRuntime:
             previous = index
         if marker is not None and not marker_inserted:
             window.append(marker)
-        if not self.system_prompt:
-            return window
-        return [{"role": "system", "content": self.system_prompt}, *window]
+        # The contract is rebuilt into every request instead of living in
+        # ``messages``: a message can be trimmed away or folded into a
+        # compaction summary, and the definition of the task must outlive
+        # both. It stays out of the cached system prefix because it changes
+        # whenever the agent revises it.
+        preamble: list[dict[str, object]] = []
+        if self.system_prompt:
+            preamble.append({"role": "system", "content": self.system_prompt})
+        if self.contract is not None:
+            preamble.append({"role": "system", "content": self.contract.render()})
+        return [*preamble, *window] if preamble else window
+
+    @staticmethod
+    def _dropped_tool_names(messages: list[dict[str, object]], kept: set[int]) -> list[str]:
+        """Names of the tools whose calls fell outside the request window."""
+        names: list[str] = []
+        for index, message in enumerate(messages):
+            if index in kept or message.get("role") != "assistant":
+                continue
+            for call in message.get("tool_calls") or ():
+                if isinstance(call, Mapping):
+                    function = call.get("function") if isinstance(call.get("function"), Mapping) else {}
+                    name = str(function.get("name") or "")
+                    if name and name not in names:
+                        names.append(name)
+            content = message.get("content")
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, Mapping) and block.get("type") == "tool_use":
+                        name = str(block.get("name") or "")
+                        if name and name not in names:
+                            names.append(name)
+        return names[:8]
 
     @classmethod
     def _last_user_index(cls, messages: list[dict[str, object]]) -> int | None:
@@ -773,10 +941,13 @@ class AgenticTurnRuntime:
         results: list[dict[str, object]] = []
         for index, (call_id, name, arguments, error) in enumerate(prepared):
             if error is not None:
+                self.counters.note_call(name, {}, "failed")
                 self._life(turn, "tool_finished", tool_name=name, invocation_id=call_id, status="failed", summary=error, error_code="INVALID_ARGUMENTS", tool_arguments={})
                 results.append({"id": call_id, "name": name, "status": "failed", "content": error})
                 continue
             outcome = outcomes[index]
+            self.counters.note_call(name, arguments, outcome.status)
+            self._absorb_contract(outcome)
             if outcome.status == "failed" and not duplicate[index]:
                 self._failed_signatures[self._signature(name, arguments)] = outcome.content
             self._life(
@@ -841,9 +1012,102 @@ class AgenticTurnRuntime:
                 status=getattr(outcome, "status", ""), summary=summary[:2000],
             )
 
+    def _advance_phase(self, turn: dict[str, object], results: list[dict[str, object]]) -> None:
+        """Move the turn along, on evidence rather than on the model's say-so.
+
+        Two things advance a phase: the agent committed to a contract, or the
+        phase ran out of budget. Running out never fails the turn -- it hands
+        what exists to the next stage, which is the difference between an
+        agent that stops usefully and one that stops at ITERATION_LIMIT with
+        nothing to show.
+        """
+        if self.phases is None:
+            return
+        previous = self.phases.current
+        wrote_contract = any(
+            str(result.get("name")) == "write_contract" and str(result.get("status")) == "succeeded"
+            for result in results
+        )
+        self.phases.note_iteration(len(results))
+        self.phases.observe(wrote_contract=wrote_contract)
+        if self.phases.current is Phase.EXECUTE and self.contract is None:
+            # PLAN ended without a usable contract. A model too weak to fill
+            # the schema still has to be able to work, so the request itself
+            # becomes the contract rather than the turn stalling.
+            self.contract = synthesize_contract(self._first_request_text)
+        if self.phases.current is not previous:
+            self._life(turn, "phase_changed", phase=str(self.phases.current), previous_phase=str(previous))
+
+    def _absorb_contract(self, outcome: object) -> None:
+        """Adopt a contract the planning tool just produced, or count a refusal.
+
+        ``write_contract`` deliberately knows nothing about the runtime; it
+        returns the parsed contract on its payload and this is where it takes
+        effect. Repeated rejections are counted so a model that cannot fill
+        the schema still ends up with a workable contract instead of looping
+        on the same validation error.
+        """
+        if getattr(outcome, "error_code", None) == "INVALID_CONTRACT":
+            self._rejected_contracts += 1
+            return
+        payload = getattr(outcome, "payload", None)
+        if not isinstance(payload, Mapping):
+            return
+        raw = payload.get("contract")
+        if not isinstance(raw, Mapping):
+            return
+        try:
+            self.contract = parse_contract(raw)
+        except ContractError:
+            return
+        self._rejected_contracts = 0
+
+    def _record_step(self, turn: dict[str, object], *, kind: str, payload: Mapping[str, object], **fields: object) -> None:
+        """Append one step to the durable transcript, if the store keeps one.
+
+        A store without the method (every in-memory test double, and the
+        subagent view, whose trajectory is not the conversation's) simply
+        records nothing, and a failure costs the next turn some context
+        rather than costing this turn its run.
+        """
+        recorder = getattr(self.store, "record_step", None)
+        if not callable(recorder):
+            return
+        try:
+            recorder(turn, kind=kind, payload=payload, **fields)
+        except Exception:  # noqa: BLE001 - the transcript never breaks a turn
+            pass
+
+    def _settle_quality(self, turn: Mapping[str, object], outcome: str, error_code: str | None = None) -> None:
+        """Persist this turn's efficiency row exactly once, at its terminal.
+
+        Recovery can drive a turn to a terminal state more than once, and the
+        row must describe the turn rather than the number of attempts, so the
+        first terminal wins. A store without the method (every in-memory test
+        double) simply records nothing.
+        """
+        if self._quality_recorded:
+            return
+        recorder = getattr(self.store, "record_quality", None)
+        if not callable(recorder):
+            return
+        self._quality_recorded = True
+        started = self._started_at or self.clock()
+        try:
+            recorder(
+                turn,
+                counters=self.counters.as_row(),
+                outcome=outcome,
+                error_code=error_code,
+                duration_ms=int((self.clock() - started).total_seconds() * 1000),
+            )
+        except Exception:  # noqa: BLE001 - telemetry never breaks a turn
+            pass
+
     def _fail(self, turn: dict[str, object], code: str, iteration: int, actions: int) -> AgenticRunResult:
         self._life(turn, "failed", code=code)
         self.store.finish(turn, failed=True, code=code)
+        self._settle_quality(turn, "failed", code)
         return AgenticRunResult("failed", iteration, actions, code)
 
     def _cancel(self, turn: dict[str, object], iteration: int, actions: int) -> AgenticRunResult:
@@ -855,6 +1119,7 @@ class AgenticTurnRuntime:
                 pass
         self._life(turn, "cancelled", code="TURN_CANCELLED")
         self.store.finish(turn, failed=True, code="TURN_CANCELLED")
+        self._settle_quality(turn, "cancelled", "TURN_CANCELLED")
         return AgenticRunResult("cancelled", iteration, actions, "TURN_CANCELLED")
 
     @staticmethod

@@ -125,7 +125,7 @@ export function ChatPage() {
   const observedConversationRef = useRef(conversationId)
   const streamedDeltaIdsRef = useRef(new Set<string>())
   const streamedConversationRef = useRef(conversationId)
-  const selectionConversationRef = useRef('')
+
   const showOverview = location.pathname.endsWith('/overview')
   const conversationPath = projectId === undefined
     ? `/chats/${encodeURIComponent(conversationId)}`
@@ -253,27 +253,41 @@ export function ChatPage() {
   const effectiveChatProvider = chatProvider ?? asProviderName(provider ?? '')
   const effectiveChatModelId = chatProvider ? chatModelId : modelId ?? ''
 
-  useEffect(() => {
-    selectionConversationRef.current = ''
+  // Opening another conversation resets the picker, and the conversation's own
+  // selection is adopted as soon as it loads. Both are derivations of props,
+  // so they happen during render: an effect would paint one frame of the
+  // previous conversation's model before correcting itself, and that flicker
+  // sits in the most-used screen in the product.
+  const [selectionFor, setSelectionFor] = useState('')
+  const [renderedConversationId, setRenderedConversationId] = useState(conversationId)
+  if (conversationId !== renderedConversationId) {
+    setRenderedConversationId(conversationId)
+    setSelectionFor('')
     setChatProvider(null)
     setChatModelId('')
     setChatModels([])
-  }, [conversationId])
-
-  useEffect(() => {
-    if (!conversation || conversation.conversation_id !== conversationId || selectionConversationRef.current === conversationId) return
+  } else if (conversation && conversation.conversation_id === conversationId && selectionFor !== conversationId) {
     const initialProvider = asProviderName(conversation.provider)
-    if (!initialProvider) return
-    selectionConversationRef.current = conversationId
-    setChatProvider(initialProvider)
-    setChatModelId(conversation.model_id)
-  }, [conversation, conversationId])
+    if (initialProvider) {
+      setSelectionFor(conversationId)
+      setChatProvider(initialProvider)
+      setChatModelId(conversation.model_id)
+    }
+  }
+
+  // The catalog fetch is a subscription: the busy flags are raised during
+  // render alongside the provider change that causes them, and every later
+  // update happens in a promise callback.
+  const [modelsFor, setModelsFor] = useState<string | null>(null)
+  if (effectiveChatProvider && modelsFor !== effectiveChatProvider) {
+    setModelsFor(effectiveChatProvider)
+    setChatModelsLoading(true)
+    setChatModelsFailed(false)
+  }
 
   useEffect(() => {
     if (!effectiveChatProvider) return
     const controller = new AbortController()
-    setChatModelsLoading(true)
-    setChatModelsFailed(false)
     listProviderModels(client, effectiveChatProvider, controller.signal)
       .then((items) => {
         if (controller.signal.aborted) return

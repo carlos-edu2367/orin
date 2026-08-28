@@ -1,0 +1,13 @@
+{
+  "id": "explore-01-onde-esta",
+  "category": "exploracao",
+  "messages": [
+    "No projeto anexado, onde fica a funcao que valida o pagamento? Responda com caminho e linha e grave em resposta.md."
+  ],
+  "acceptance": [
+    {
+      "kind": "exists",
+      "path": "resposta.md"
+    }
+  ]
+}

@@ -32,6 +32,14 @@ test.describe('settings shell accessibility', () => {
   })
 
   test('keeps the Plugins empty state and installer accessible', async ({ page }) => {
+    // The empty state only renders when the listing succeeded and came back
+    // empty. This suite runs against the dev server with no backend, so the
+    // request failed and the page showed its error state instead -- the test
+    // was asserting a state it could never reach. Serving an empty listing
+    // puts the page in the state this test exists to audit.
+    await page.route('**/v1/plugins', (route) => route.fulfill({
+      status: 200, contentType: 'application/json', body: '[]',
+    }))
     await page.goto('/settings/plugins')
     await expect(page.getByRole('heading', { level: 1, name: 'Plugins' })).toBeVisible()
     await expect(page.getByRole('heading', { level: 2, name: 'Nenhum plugin instalado' })).toBeVisible()

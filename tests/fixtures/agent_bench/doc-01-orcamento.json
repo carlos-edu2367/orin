@@ -1,0 +1,18 @@
+{
+  "id": "doc-01-orcamento",
+  "category": "documento",
+  "messages": [
+    "Crie uma planilha orcamento.xlsx com as colunas Item, Quantidade, Valor unitario e Total, e tres linhas de exemplo de uma reforma de cozinha.",
+    "Agora aplique 18% de margem sobre cada Total e grave como orcamento-v2.xlsx, preservando os itens originais."
+  ],
+  "acceptance": [
+    {
+      "kind": "exists",
+      "path": "orcamento.xlsx"
+    },
+    {
+      "kind": "exists",
+      "path": "orcamento-v2.xlsx"
+    }
+  ]
+}

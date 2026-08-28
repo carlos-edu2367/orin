@@ -1,0 +1,17 @@
+{
+  "id": "script-01-transformar-csv",
+  "category": "script",
+  "messages": [
+    "Escreva transformar.py que le entrada/vendas.csv e grava resumo.csv com o total por vendedor. Rode o script e confirme a saida."
+  ],
+  "acceptance": [
+    {
+      "kind": "exists",
+      "path": "transformar.py"
+    },
+    {
+      "kind": "exists",
+      "path": "resumo.csv"
+    }
+  ]
+}

@@ -37,6 +37,7 @@ from .workspace import MAX_LIST_DEPTH, ConversationWorkspace, WorkspaceError
 from .models import MAX_USER_QUESTION_ITEMS
 from .browser_tools import _cache_key_url, _safe_display_url, sanitize_page_text
 from .file_preview import media_type_for
+from .contract import TOOLKITS, VERIFICATION_MODES, ContractError, parse as parse_contract
 from .provider_content import image_block
 
 
@@ -349,6 +350,45 @@ class AgentToolset:
                 self.search_files, "filesystem", read_only=True,
             ),
             ToolDefinition(
+                "write_contract",
+                "Declare what this task is and how it will be judged done, before doing it. "
+                "State the objective, the files you will produce, the constraints you must respect, "
+                "the acceptance criteria that must all hold before you may claim completion, and the "
+                "tool families you need. Call it again to revise the contract when the task turns out "
+                "to be different from what you assumed.",
+                _schema({
+                    "objective": {**_TEXT, "description": "One sentence: what the person actually wants."},
+                    "deliverables": {
+                        "type": "array", "maxItems": 12,
+                        "description": "Files this task must produce or change.",
+                        "items": _schema({"path": _TEXT, "description": _TEXT}, ("path", "description")),
+                    },
+                    "constraints": {
+                        "type": "array", "maxItems": 12, "items": _TEXT,
+                        "description": "What you must not do, or must preserve.",
+                    },
+                    "acceptance": {
+                        "type": "array", "minItems": 1, "maxItems": 12,
+                        "description": "Checks that must all pass before you report success.",
+                        "items": _schema({
+                            "id": {**_TEXT, "description": "Short identifier, e.g. total_correto."},
+                            "check": {**_TEXT, "description": "The condition, stated so it can be confirmed."},
+                            "how": {"type": "string", "enum": sorted(VERIFICATION_MODES), "description": "'tool' to run something, 'inspection' to look at something."},
+                        }, ("id", "check", "how")),
+                    },
+                    "toolkits": {
+                        "type": "array", "minItems": 1, "maxItems": 7,
+                        "items": {"type": "string", "enum": sorted(TOOLKITS)},
+                        "description": "Only the families you actually need; unlisted tools stay unavailable.",
+                    },
+                    "steps": {
+                        "type": "array", "maxItems": 12, "items": _TEXT,
+                        "description": "Your intended plan. Guidance, not a commitment.",
+                    },
+                }, ("objective", "acceptance", "toolkits")),
+                self.write_contract, "planning",
+            ),
+            ToolDefinition(
                 "fetch_url", "Fetch a public web page or API response and return its readable text.",
                 _schema({"url": _TEXT}, ("url",)),
                 self.fetch_url, "web", read_only=True, policy_tags=("network",),
@@ -588,8 +628,19 @@ class AgentToolset:
             self._by_name = {item.name: item for item in self._definitions}
         return self._definitions
 
-    def schemas(self) -> list[dict[str, Any]]:
-        return [item.schema() for item in self.definitions()]
+    def schemas(self, allowed: Collection[str] | None = None, kinds: Collection[str] | None = None) -> list[dict[str, Any]]:
+        """Provider-facing schemas, optionally narrowed to one phase's tools.
+
+        ``allowed=None`` publishes everything, which is what the tool-runtime
+        contract tests and any caller without a phase expect. A phase passes
+        the names it publishes; ``kinds`` lets a family discovered at runtime
+        (MCP servers, plugin tools) through by kind, since their names are
+        not known when the phase sets are written.
+        """
+        if allowed is None:
+            return [item.schema() for item in self.definitions()]
+        names, families = set(allowed), set(kinds or ())
+        return [item.schema() for item in self.definitions() if item.name in names or item.kind in families]
 
     def resolve(self, name: str) -> ToolDefinition:
         self.definitions()
@@ -675,6 +726,26 @@ class AgentToolset:
         )
 
     # -- handlers -------------------------------------------------------
+
+    def write_contract(self, **values: Any) -> ToolOutcome:
+        """Record the task contract, or explain precisely what is missing.
+
+        A rejection is a result the model reads and corrects, never an
+        exception: a weak model that cannot fill the schema on the first try
+        has to be able to try again with the field name in front of it. The
+        parsed contract rides back on the payload; the runtime is what pins
+        it into the request, so this tool stays free of runtime state.
+        """
+        try:
+            contract = parse_contract(values)
+        except ContractError as error:
+            return ToolOutcome("failed", "Contrato incompleto", str(error), {"tool_kind": "planning"}, "INVALID_CONTRACT")
+        rendered = contract.render()
+        return ToolOutcome(
+            "succeeded", f"Contrato definido: {contract.objective[:180]}",
+            f"Contrato registrado. Ele permanece visível durante toda a tarefa.\n\n{rendered}",
+            {"tool_kind": "planning", "contract": contract.as_payload()},
+        )
 
     def ask_user(self, questions: list[Mapping[str, Any]]) -> ToolOutcome:
         """Validate a bounded, display-safe batch before exposing it to the UI.
