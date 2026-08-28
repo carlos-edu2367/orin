@@ -18,6 +18,17 @@ from .phases import Phase, PhaseController
 
 MAX_PARALLEL_TOOLS = 4
 AGED_TOOL_RESULT_CHARS = 400
+
+# Providers whose prompt cache this runtime can actually address. For these the
+# message list is append-only, because prompt caching keys on an exact prefix:
+# editing a message already sent invalidates every entry written at or after
+# it. A cached token costs about a tenth of an ordinary input token, so keeping
+# an old tool result whole and cached is cheaper than shrinking it and paying
+# full price for the prefix the edit invalidated.
+#
+# For every other provider there is no cache to protect, shrinking is pure
+# gain, and the previous per-iteration behaviour is kept.
+PREFIX_CACHING_PROVIDERS = frozenset({"anthropic"})
 CONTEXT_COMPACTION_THRESHOLD = 0.82
 CONTEXT_COMPACTION_KEEP_UNITS = 6
 BROWSER_TOOL_NAMES = frozenset({
@@ -113,6 +124,7 @@ class AgenticTurnRuntime:
         reconciliation_required: Callable[[Mapping[str, object]], bool] | None = None,
         toolset: object | None = None,
         system_prompt: str | None = None,
+        volatile_prompt: str = "",
         tool_kinds: Mapping[str, str] | None = None,
         skill_prompt_tokens: int = 0,
         context_reporting: bool = False,
@@ -131,6 +143,11 @@ class AgenticTurnRuntime:
         self.cancelled = cancelled or (lambda _turn: False)
         self.reconciliation_required = reconciliation_required or (lambda _turn: False)
         self.system_prompt = system_prompt
+        # The half of the prompt that changes as the conversation moves. It
+        # rides as its own system block so it stays out of the cached prefix;
+        # a caller that passes only ``system_prompt`` gets the previous
+        # behaviour, with the whole thing treated as stable.
+        self.volatile_prompt = volatile_prompt or ""
         self.tool_kinds = dict(tool_kinds or {})
         self.skill_prompt_tokens = max(0, int(skill_prompt_tokens))
         self.context_reporting = bool(context_reporting)
@@ -148,6 +165,11 @@ class AgenticTurnRuntime:
         # that has not opted in (and every contract test) relies on.
         self.phases = phase_controller
         self._first_request_text = ""
+        # Per-turn tool bookkeeping. ``run`` resets these; they are also
+        # initialised here so ``_run_toolset`` can be exercised on its own.
+        self._failed_signatures: dict[str, str] = {}
+        self._succeeded_reads: dict[str, tuple[str, int]] = {}
+        self._writes = 0
 
     def close(self) -> None:
         if self._closed:
@@ -162,6 +184,12 @@ class AgenticTurnRuntime:
 
     def run(self, turn_id: str, *, turn: dict[str, object] | None = None) -> AgenticRunResult:
         turn = turn or self._load(turn_id)
+        # A successful read, and how many writes had happened when it ran. A
+        # later identical read is only safe to serve from here if that count
+        # has not moved: re-reading a file after editing it is necessary, not
+        # redundant.
+        self._succeeded_reads: dict[str, tuple[str, int]] = {}
+        self._writes = 0
         self._started_at = self.clock()
         deadline = self._started_at + self.limits.deadline
         self._life(turn, "running")
@@ -380,7 +408,13 @@ class AgenticTurnRuntime:
                         tool_name=str(result.get("name") or ""), tool_call_id=str(result.get("id") or ""),
                     )
                     messages.extend(self._tool_result_messages(turn, result))
-                self._age_tool_results(messages, keep_recent=len(results))
+                # Shrinking an already-sent result rewrites the prefix, which
+                # is exactly what a prompt cache cannot survive. Where the
+                # provider has a cache, this is deferred to compaction, whose
+                # rewrite is unavoidable anyway; where it has none, shrinking
+                # every iteration is still the cheapest thing to do.
+                if not self._prefix_caching(turn):
+                    self._age_tool_results(messages, keep_recent=len(results))
                 # ``ask_user`` deliberately ends this provider run.  A worker
                 # must never stay blocked while a person considers a form, and
                 # the next authenticated chat message starts the follow-up turn.
@@ -492,6 +526,17 @@ class AgenticTurnRuntime:
             "compaction_enabled": True,
         }
 
+    def _prefix_caching(self, turn: Mapping[str, object]) -> bool:
+        """Whether this turn's provider has a prompt cache worth protecting.
+
+        A provider that reported cached input tokens at any point this turn
+        counts as supporting it, which covers gateways that pass Anthropic's
+        caching through under their own name.
+        """
+        if self.counters.cached_input_tokens:
+            return True
+        return str(turn.get("provider", "")).lower() in PREFIX_CACHING_PROVIDERS
+
     def _maybe_compact(self, messages: list[dict[str, object]], turn: Mapping[str, object], tool_schemas: list[dict[str, object]]) -> None:
         """Summarize old exchanges before ordinary trimming becomes lossy."""
         if self._compaction_count >= 8 or len(messages) < CONTEXT_COMPACTION_KEEP_UNITS + 2:
@@ -523,6 +568,10 @@ class AgenticTurnRuntime:
         position = next((offset for offset, (index, _item) in enumerate(original_to_retained) if index > insert_at), len(retained))
         retained.insert(position, replacement)
         messages[:] = retained
+        # This rewrite already invalidates the cache, so it is the one place
+        # where shrinking surviving results is free. Doing it here instead of
+        # every iteration is what keeps the prefix append-only in between.
+        self._age_tool_results(messages, keep_recent=CONTEXT_COMPACTION_KEEP_UNITS)
         if pinned_item is not None:
             self._pinned_index = next((index for index, item in enumerate(messages) if item is pinned_item), None)
         self._compaction_count += 1
@@ -690,6 +739,8 @@ class AgenticTurnRuntime:
         preamble: list[dict[str, object]] = []
         if self.system_prompt:
             preamble.append({"role": "system", "content": self.system_prompt})
+        if self.volatile_prompt:
+            preamble.append({"role": "system", "content": self.volatile_prompt})
         if self.contract is not None:
             preamble.append({"role": "system", "content": self.contract.render()})
         return [*preamble, *window] if preamble else window
@@ -869,8 +920,35 @@ class AgenticTurnRuntime:
             return ToolOutcome("failed", "Chamada repetida ignorada", content, {}, "DUPLICATE_TOOL_CALL")
 
         is_read_only = getattr(self.toolset, "is_read_only", None)
+
+        def cached_read(name: str, arguments: Mapping[str, object]) -> ToolOutcome | None:
+            """The earlier result of this exact read, if nothing can have changed it.
+
+            Two conditions, and the second is what makes this correct: the
+            tool must be read-only, and no write-capable tool may have run
+            since. A write to any path counts, because the runtime has no way
+            to know which file a tool touched. ``run_command`` is not
+            read-only, so a command that only reads is never served from here.
+            """
+            if not (callable(is_read_only) and is_read_only(name)):
+                return None
+            remembered = self._succeeded_reads.get(self._signature(name, arguments))
+            if remembered is None or remembered[1] != self._writes:
+                return None
+            content = (
+                f"{remembered[0]}\n\n[resultado da chamada anterior a {name} neste mesmo turno; "
+                "nada foi escrito desde então, então o conteúdo não mudou]"
+            )
+            return ToolOutcome("succeeded", f"{name} reaproveitado da chamada anterior", content, {})
+
+        repeated: list[ToolOutcome | None] = [
+            None if error is not None or duplicate[i] else cached_read(name, arguments)
+            for i, (_, name, arguments, error) in enumerate(prepared)
+        ]
+
         eligible = [
-            error is None and not duplicate[i] and callable(is_read_only) and is_read_only(name)
+            error is None and not duplicate[i] and repeated[i] is None
+            and callable(is_read_only) and is_read_only(name)
             for i, (_, name, _, error) in enumerate(prepared)
         ]
 
@@ -892,11 +970,19 @@ class AgenticTurnRuntime:
                 invocation_ref=f"tool:{call_id}",
                 request_ref=f"conversation-turn:{turn['turn_id']}:tool:{call_id}",
             )
+            read_only = bool(callable(is_read_only) and is_read_only(name))
+            if not read_only:
+                # Counted before the call, not after: a write that fails may
+                # still have changed something, so a later read must not be
+                # served from a result taken before it.
+                self._writes += 1
             try:
                 outcome = self.toolset.invoke(name, arguments)
             except Exception:
                 self._effect_finished(turn, effect_id, state="UNKNOWN", error_code="TOOL_INTERRUPTED")
                 raise
+            if read_only and outcome.status == "succeeded":
+                self._succeeded_reads[self._signature(name, arguments)] = (outcome.content, self._writes)
             state = "APPLIED" if outcome.status == "succeeded" else "NOT_APPLIED"
             # A write-capable tool can fail after an external system accepted
             # part of the work.  Its adapter did not provide a receipt, so it
@@ -917,6 +1003,8 @@ class AgenticTurnRuntime:
                 _, name, arguments, error = prepared[index]
                 if duplicate[index]:
                     outcomes[index] = duplicate_outcome(name, arguments)
+                elif repeated[index] is not None:
+                    outcomes[index] = repeated[index]
                 elif error is None:
                     outcomes[index] = invoke(index)
                 index += 1

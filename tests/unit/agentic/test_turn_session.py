@@ -17,6 +17,13 @@ from agentos.skills.builtins import load_builtin_skills
 from agentos.skills.registry import SkillRegistry
 
 
+# ``build_system_prompt`` returns (stable, volatile). These assertions are
+# about what the model is told, which is both layers, so they join them.
+def _joined_prompt(**values):
+    stable, volatile = build_system_prompt(**values)
+    return stable + chr(10) + volatile
+
+
 TURN = {
     "turn_id": "turn-1",
     "conversation_id": "chat_session",
@@ -347,14 +354,14 @@ def test_the_system_prompt_names_the_tools_the_agent_actually_has(tmp_path: Path
 
 
 def test_the_system_prompt_uses_orin_as_the_public_product_name() -> None:
-    prompt = build_system_prompt(tool_names=(), memories=[], agents=[], workspace_hint="hint", subagents_enabled=False)
+    prompt = _joined_prompt(tool_names=(), memories=[], agents=[], workspace_hint="hint", subagents_enabled=False)
 
     assert "You are the main agent of Orin" in prompt
     assert "You are the main agent of AgentOS" not in prompt
 
 
 def test_the_system_prompt_prefers_pdf_text_transcription_when_visual_reading_is_not_needed() -> None:
-    prompt = build_system_prompt(
+    prompt = _joined_prompt(
         tool_names=("transcribe_pdf", "view_file"), memories=[], agents=[], workspace_hint="hint", subagents_enabled=False,
     )
 
@@ -364,7 +371,7 @@ def test_the_system_prompt_prefers_pdf_text_transcription_when_visual_reading_is
 
 
 def test_the_system_prompt_offers_skill_learning_only_after_user_confirmation() -> None:
-    prompt = build_system_prompt(
+    prompt = _joined_prompt(
         tool_names=("search_skills", "create_skill", "edit_skill"), memories=[], agents=[],
         workspace_hint="hint", subagents_enabled=False,
     )
@@ -390,7 +397,11 @@ def test_relevant_skill_metadata_is_injected_lazily_and_loaded_via_tool_result(t
     result = session.build_runtime().run("turn-1")
 
     assert result.state == "completed"
-    first_prompt = str(provider.requests[0]["messages"][0]["content"])
+    # The prompt travels as two system blocks now: the cacheable half and
+    # the volatile half a retrieved skill belongs to.
+    first_prompt = "".join(
+        str(item["content"]) for item in provider.requests[0]["messages"] if item.get("role") == "system"
+    )
     assert "Systematic Debugging" in first_prompt
     assert "## Workflow" not in first_prompt
     loaded = [message for message in provider.requests[-1]["messages"] if message.get("role") == "tool"]
@@ -761,7 +772,7 @@ def test_the_subagent_budget_is_bounded(tmp_path: Path) -> None:
 
 
 def test_the_prompt_explains_the_browser_ref_workflow_when_browse_page_is_available() -> None:
-    prompt = build_system_prompt(
+    prompt = _joined_prompt(
         tool_names=("browse_page", "browser_observe", "browser_click"), memories=[], agents=[],
         workspace_hint="hint", subagents_enabled=False,
     )
@@ -772,13 +783,13 @@ def test_the_prompt_explains_the_browser_ref_workflow_when_browse_page_is_availa
 
 
 def test_the_browser_section_is_absent_without_browse_page() -> None:
-    prompt = build_system_prompt(tool_names=("read_file",), memories=[], agents=[], workspace_hint="hint", subagents_enabled=False)
+    prompt = _joined_prompt(tool_names=("read_file",), memories=[], agents=[], workspace_hint="hint", subagents_enabled=False)
 
     assert "## Browser" not in prompt
 
 
 def test_the_prompt_explains_submission_confirmation_without_browser_submit_tool() -> None:
-    prompt = build_system_prompt(
+    prompt = _joined_prompt(
         tool_names=("browse_page", "browser_observe", "browser_click"), memories=[], agents=[],
         workspace_hint="hint", subagents_enabled=False,
     )
@@ -787,7 +798,7 @@ def test_the_prompt_explains_submission_confirmation_without_browser_submit_tool
 
 
 def test_the_prompt_explains_the_two_step_confirmation_when_browser_submit_is_available() -> None:
-    prompt = build_system_prompt(
+    prompt = _joined_prompt(
         tool_names=("browse_page", "browser_observe", "browser_click", "browser_submit"), memories=[], agents=[],
         workspace_hint="hint", subagents_enabled=False,
     )
@@ -798,7 +809,7 @@ def test_the_prompt_explains_the_two_step_confirmation_when_browser_submit_is_av
 
 
 def test_the_prompt_lists_remembered_facts() -> None:
-    prompt = build_system_prompt(
+    prompt = _joined_prompt(
         tool_names=("read_file",),
         memories=[{"fact": "O usuário se chama Carlos."}],
         agents=[],
@@ -811,7 +822,7 @@ def test_the_prompt_lists_remembered_facts() -> None:
 
 
 def test_the_system_prompt_lists_what_the_agent_already_did() -> None:
-    prompt = build_system_prompt(
+    prompt = _joined_prompt(
         tool_names=("read_file",), memories=[], agents=[], workspace_hint="hint",
         subagents_enabled=False,
         tool_ledger=({"tool_name": "write_file", "arguments": '{"path": "report.md"}', "status": "succeeded", "summary": "Escreveu report.md"},),
@@ -823,7 +834,7 @@ def test_the_system_prompt_lists_what_the_agent_already_did() -> None:
 
 
 def test_the_ledger_section_is_absent_when_nothing_was_done() -> None:
-    prompt = build_system_prompt(tool_names=("read_file",), memories=[], agents=[], workspace_hint="hint", subagents_enabled=False)
+    prompt = _joined_prompt(tool_names=("read_file",), memories=[], agents=[], workspace_hint="hint", subagents_enabled=False)
 
     assert "What you already did" not in prompt
 
@@ -849,7 +860,7 @@ def test_environment_facts_report_bin_sh_on_posix_regardless_of_preferred_shell(
 
 
 def test_the_prompt_states_the_environment_and_the_workspace_tree() -> None:
-    prompt = build_system_prompt(
+    prompt = _joined_prompt(
         tool_names=("run_command",), memories=[], agents=[], workspace_hint="hint", subagents_enabled=False,
         environment={"os": "Windows 11", "shell": "cmd.exe", "python": "3.12.4"},
         workspace_tree=("d src", "f src/app.py"),
@@ -860,7 +871,7 @@ def test_the_prompt_states_the_environment_and_the_workspace_tree() -> None:
 
 
 def test_an_empty_workspace_says_so_instead_of_printing_an_empty_tree() -> None:
-    prompt = build_system_prompt(
+    prompt = _joined_prompt(
         tool_names=("run_command",), memories=[], agents=[], workspace_hint="hint", subagents_enabled=False,
         environment={"os": "Windows 11", "shell": "cmd.exe", "python": "3.12.4"},
         workspace_tree=(),

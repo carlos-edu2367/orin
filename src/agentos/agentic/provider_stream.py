@@ -370,6 +370,44 @@ class HTTPProviderStreamTransport:
         return f"HTTPProviderStreamTransport(provider={self.provider!r}, base_url={self.base_url!r}, model={self.model!r})"
 
     @staticmethod
+    def _final_unit_start(messages: list[dict[str, object]]) -> int:
+        """Index where the last tool-call unit begins.
+
+        A tool-calling assistant message and the results answering it are one
+        unit; a breakpoint inside it would be invalidated by the very next
+        append. Everything before this index is settled.
+        """
+        def is_result(message: Mapping[str, object]) -> bool:
+            if message.get("role") == "tool":
+                return True
+            content = message.get("content")
+            return isinstance(content, list) and any(
+                isinstance(block, Mapping) and block.get("type") == "tool_result" for block in content
+            )
+
+        index = len(messages) - 1
+        while index > 0 and is_result(messages[index]):
+            index -= 1
+        return index
+
+    @classmethod
+    def _with_cache_breakpoints(cls, messages: list[dict[str, object]]) -> list[dict[str, object]]:
+        """Mark the tail, and the most recent settled boundary before it.
+
+        The tail alone is not enough: it stops matching as soon as the next
+        message is appended, so a turn would write an entry per iteration and
+        read none of them. The second mark sits on the last message of the
+        previous unit, which the next request still shares, so there is always
+        a live entry to hit.
+        """
+        marked = cls._with_cached_tail(messages)
+        boundary = cls._final_unit_start(messages) - 1
+        if boundary <= 0:
+            return marked
+        head = cls._with_cached_tail(marked[: boundary + 1])
+        return [*head, *marked[boundary + 1 :]]
+
+    @staticmethod
     def _with_cached_tail(messages: list[dict[str, object]]) -> list[dict[str, object]]:
         """Mark the last content block of the last message as a cache breakpoint.
 
@@ -401,7 +439,7 @@ class HTTPProviderStreamTransport:
         messages = project_messages(messages, "anthropic")
         system_items = [item for item in messages if item.get("role") == "system"]
         messages = [item for item in messages if item.get("role") != "system"]
-        messages = self._with_cached_tail(messages)
+        messages = self._with_cache_breakpoints(messages)
         # Anthropic requires max_tokens, so an uncapped turn still has to
         # name a number here; every other provider simply omits the field.
         payload: dict[str, object] = {"model": self.model, "max_tokens": int(requested) if requested else ANTHROPIC_REQUIRED_MAX_TOKENS, "messages": messages, "stream": True}

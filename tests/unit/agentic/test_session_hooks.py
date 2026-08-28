@@ -6,8 +6,15 @@ from tempfile import mkdtemp
 from agentos.agentic.session import TurnSession, build_system_prompt
 
 
+# ``build_system_prompt`` returns (stable, volatile). These assertions are
+# about what the model is told, which is both layers, so they join them.
+def _joined_prompt(**values):
+    stable, volatile = build_system_prompt(**values)
+    return stable + chr(10) + volatile
+
+
 def test_build_system_prompt_includes_hook_context_as_subordinate_info():
-    prompt = build_system_prompt(
+    prompt = _joined_prompt(
         tool_names=(), memories=[], agents=[], workspace_hint="hint", subagents_enabled=False,
         hook_context="VAULT CONTEXT",
     )
@@ -17,7 +24,7 @@ def test_build_system_prompt_includes_hook_context_as_subordinate_info():
 
 
 def test_build_system_prompt_omits_the_section_when_there_is_no_hook_context():
-    prompt = build_system_prompt(
+    prompt = _joined_prompt(
         tool_names=(), memories=[], agents=[], workspace_hint="hint", subagents_enabled=False,
     )
 
@@ -91,7 +98,8 @@ def test_session_start_output_is_injected_into_the_prompt():
 
     runtime = session.build_runtime()
 
-    assert "VAULT CONTEXT" in runtime.system_prompt
+    # Hook context is conversation state, so it rides in the volatile layer.
+    assert "VAULT CONTEXT" in runtime.volatile_prompt
     assert engine.calls == 1
 
 
@@ -104,7 +112,7 @@ def test_session_start_runs_once_per_conversation():
     second_runtime = _session(turn, store, hook_engine=engine).build_runtime()
 
     assert engine.calls == 1
-    assert "VAULT CONTEXT" in second_runtime.system_prompt
+    assert "VAULT CONTEXT" in second_runtime.volatile_prompt
 
 
 def test_a_failing_session_start_hook_does_not_break_the_prompt():
