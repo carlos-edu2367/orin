@@ -1,0 +1,13 @@
+{
+  "id": "script-02-corrigir",
+  "category": "script",
+  "messages": [
+    "O script entrada/quebrado.py falha ao rodar. Descubra o motivo, corrija e deixe corrigido.py funcionando."
+  ],
+  "acceptance": [
+    {
+      "kind": "exists",
+      "path": "corrigido.py"
+    }
+  ]
+}

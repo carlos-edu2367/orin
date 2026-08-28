@@ -1,0 +1,13 @@
+{
+  "id": "doc-02-pdf-para-planilha",
+  "category": "documento",
+  "messages": [
+    "Leia o arquivo entrada/relatorio.pdf e extraia os valores numericos para dados.csv, uma linha por valor com rotulo e numero."
+  ],
+  "acceptance": [
+    {
+      "kind": "exists",
+      "path": "dados.csv"
+    }
+  ]
+}

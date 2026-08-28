@@ -1,0 +1,20 @@
+{
+  "id": "multi-01-revisao-dupla",
+  "category": "multi-turno",
+  "messages": [
+    "Crie relatorio.md com um resumo de tres paragrafos sobre controle de custos em obras.",
+    "Agora reescreva o segundo paragrafo para focar em desvios de cronograma, mantendo o resto igual.",
+    "Adicione ao final uma secao 'Riscos' com tres itens coerentes com o que ja esta escrito."
+  ],
+  "acceptance": [
+    {
+      "kind": "exists",
+      "path": "relatorio.md"
+    },
+    {
+      "kind": "contains",
+      "path": "relatorio.md",
+      "value": "Riscos"
+    }
+  ]
+}

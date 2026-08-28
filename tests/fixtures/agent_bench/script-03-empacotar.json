@@ -1,0 +1,13 @@
+{
+  "id": "script-03-empacotar",
+  "category": "script",
+  "messages": [
+    "Transforme os passos que voce usou para gerar resumo.csv em um unico script reutilizavel rotina.py que aceita o caminho do CSV como argumento."
+  ],
+  "acceptance": [
+    {
+      "kind": "exists",
+      "path": "rotina.py"
+    }
+  ]
+}
