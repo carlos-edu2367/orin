@@ -26,9 +26,18 @@ export function McpFromRepoDialog({ client, sourceUrl, onClose, onAdded }: { cli
     return () => document.removeEventListener('keydown', onKeyDown)
   }, [onClose])
 
+  // `loading` already starts true, so the mount pass needs no synchronous
+  // setState inside the effect. Only a change of source has to reset it, and
+  // doing that during render avoids painting one frame of the previous
+  // repository's guess.
+  const [seenSource, setSeenSource] = useState(sourceUrl)
+  if (sourceUrl !== seenSource) {
+    setSeenSource(sourceUrl)
+    setLoading(true)
+  }
+
   useEffect(() => {
     let active = true
-    setLoading(true)
     inferMcpLaunch(client, sourceUrl)
       .then((result) => {
         if (!active) return

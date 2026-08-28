@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import type { ProviderApiKeyState } from '../../api/providers'
 
 function KeyRow({ apiKey, index, isLast, pending, onRename, onRemove, onMoveUp, onMoveDown }: {
@@ -15,7 +15,13 @@ function KeyRow({ apiKey, index, isLast, pending, onRename, onRemove, onMoveUp, 
   // fire a request (and self-disable via `pending`) on every keystroke; the
   // rename only goes out once the field loses focus, and only if it changed.
   const [draft, setDraft] = useState(apiKey.label ?? '')
-  useEffect(() => setDraft(apiKey.label ?? ''), [apiKey.label])
+  // Resetting the draft during render, rather than in an effect, means the
+  // field never paints one frame showing the previous key's label.
+  const [seenLabel, setSeenLabel] = useState(apiKey.label)
+  if (apiKey.label !== seenLabel) {
+    setSeenLabel(apiKey.label)
+    setDraft(apiKey.label ?? '')
+  }
 
   function commit() {
     const next = draft || null
@@ -43,7 +49,11 @@ export function ProviderKeyList({ keys, pending, cooldownSeconds, onAdd, onRenam
   const [newKey, setNewKey] = useState('')
   const [newLabel, setNewLabel] = useState('')
   const [cooldownInput, setCooldownInput] = useState(String(cooldownSeconds))
-  useEffect(() => setCooldownInput(String(cooldownSeconds)), [cooldownSeconds])
+  const [seenCooldown, setSeenCooldown] = useState(cooldownSeconds)
+  if (cooldownSeconds !== seenCooldown) {
+    setSeenCooldown(cooldownSeconds)
+    setCooldownInput(String(cooldownSeconds))
+  }
 
   async function submit() {
     if (!newKey) return

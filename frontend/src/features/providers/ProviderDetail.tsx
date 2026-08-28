@@ -1,4 +1,4 @@
-import { useEffect, useState, type CSSProperties, type FormEvent } from 'react'
+import { useState, type CSSProperties, type FormEvent } from 'react'
 import type { ApiClient } from '../../api/client'
 import { readBrowserSessionBootstrap, type BrowserSessionBootstrap } from '../../api/browserSession'
 import { isAuthenticationError, isCsrfAuthorizationError } from '../../api/errors'
@@ -17,10 +17,14 @@ export function ProviderDetail({ provider, client, bootstrap, onClose }: { provi
   const keysState = useProviderKeysState(client, provider, session)
   const [cooldownSeconds, setCooldownSeconds] = useState(60)
   const [cooldownError, setCooldownError] = useState(false)
-  useEffect(() => {
-    const loaded = state.load.status === 'loaded' ? state.load.state.extra.key_cooldown_seconds : undefined
-    if (typeof loaded === 'number') setCooldownSeconds(loaded)
-  }, [state.load])
+  // Adopt the saved cooldown during render rather than from an effect: an
+  // effect repaints the control once with the default before correcting it.
+  const loadedCooldown = state.load.status === 'loaded' ? state.load.state.extra.key_cooldown_seconds : undefined
+  const [seenCooldown, setSeenCooldown] = useState(loadedCooldown)
+  if (loadedCooldown !== seenCooldown) {
+    setSeenCooldown(loadedCooldown)
+    if (typeof loadedCooldown === 'number') setCooldownSeconds(loadedCooldown)
+  }
 
   async function saveCooldownSeconds(seconds: number) {
     if (session.status === 'missing_csrf') return
