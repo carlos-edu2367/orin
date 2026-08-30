@@ -776,8 +776,8 @@ def test_an_identical_failing_call_is_not_executed_twice() -> None:
     assert toolset.invocations == 1
 
 
-def test_a_rejected_planning_tool_does_not_pause_for_effect_reconciliation() -> None:
-    class ContractProvider:
+def test_a_handled_failure_from_a_mutating_tool_does_not_pause_for_effect_reconciliation() -> None:
+    class DelegationProvider:
         def __init__(self) -> None:
             self.calls = 0
 
@@ -786,17 +786,17 @@ def test_a_rejected_planning_tool_does_not_pause_for_effect_reconciliation() -> 
             if self.calls == 1:
                 return normalize_sse(
                     [
-                        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"contract-1","function":{"name":"write_contract","arguments":"{\\"objective\\":\\"build it\\"}"}}]},"finish_reason":"tool_calls"}]}',
+                        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"delegate-1","function":{"name":"ask_agents","arguments":"{\\"tasks\\":[]}"}}]},"finish_reason":"tool_calls"}]}',
                         "data: [DONE]",
                     ],
                     provider="openrouter",
                 )
             return normalize_sse(
-                ['data: {"choices":[{"delta":{"content":"I corrected the contract and continued."},"finish_reason":"stop"}]}', "data: [DONE]"],
+                ['data: {"choices":[{"delta":{"content":"I adjusted the delegation and continued."},"finish_reason":"stop"}]}', "data: [DONE]"],
                 provider="openrouter",
             )
 
-    class PlanningToolset:
+    class DelegationToolset:
         def schemas(self):
             return []
 
@@ -804,11 +804,11 @@ def test_a_rejected_planning_tool_does_not_pause_for_effect_reconciliation() -> 
             return False
 
         def is_mutating(self, name: str) -> bool:
-            return False
+            return True
 
         def invoke(self, name, arguments):
-            assert name == "write_contract"
-            return ToolOutcome("failed", "Contrato incompleto", "acceptance is required", {}, "INVALID_CONTRACT")
+            assert name == "ask_agents"
+            return ToolOutcome("failed", "Limite de subagentes atingido", "Finish the work yourself.", {}, "SUBAGENT_LIMIT")
 
     class EffectStore(Store):
         def __init__(self) -> None:
@@ -824,16 +824,16 @@ def test_a_rejected_planning_tool_does_not_pause_for_effect_reconciliation() -> 
     store = EffectStore()
     runtime = AgenticTurnRuntime(
         store=store,
-        provider=ContractProvider(),
-        toolset=PlanningToolset(),
+        provider=DelegationProvider(),
+        toolset=DelegationToolset(),
         reconciliation_required=lambda _turn: any(state == "UNKNOWN" for state, _ in store.effects),
     )
 
     result = runtime.run("turn-1")
 
     assert result.state == "completed"
-    assert ("NOT_APPLIED", "INVALID_CONTRACT") in store.effects
-    assert ("UNKNOWN", "INVALID_CONTRACT") not in store.effects
+    assert ("NOT_APPLIED", "SUBAGENT_LIMIT") in store.effects
+    assert ("UNKNOWN", "SUBAGENT_LIMIT") not in store.effects
 
 
 def test_a_final_iteration_with_only_tool_calls_and_no_text_still_fails_with_iteration_limit() -> None:

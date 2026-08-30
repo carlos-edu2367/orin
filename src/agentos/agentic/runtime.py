@@ -989,12 +989,14 @@ class AgenticTurnRuntime:
             if read_only and outcome.status == "succeeded":
                 self._succeeded_reads[self._signature(name, arguments)] = (outcome.content, self._writes)
             state = "APPLIED" if outcome.status == "succeeded" else "NOT_APPLIED"
-            # A mutating tool can fail after an external system accepted part
-            # of the work. Its adapter did not provide a receipt, so it is
-            # intentionally held for reconciliation instead of retried.
-            # Validation failures from planning and coordination tools do not
-            # cross that boundary and must be returned to the model to fix.
-            if outcome.status != "succeeded" and mutating:
+            # A normal failed ToolOutcome is a definite response from the
+            # adapter: the model can read it and choose a different action.
+            # Only an unexpected adapter failure is indeterminate for a
+            # mutating call, because it might have crossed the effect boundary
+            # without returning a receipt. Handlers may also opt in to that
+            # treatment explicitly for a known exceptional integration.
+            effect_unknown = outcome.error_code == "TOOL_FAILED" or outcome.payload.get("effect_state") == "unknown"
+            if outcome.status != "succeeded" and mutating and effect_unknown:
                 state = "UNKNOWN"
             self._effect_finished(
                 turn, effect_id, state=state,
