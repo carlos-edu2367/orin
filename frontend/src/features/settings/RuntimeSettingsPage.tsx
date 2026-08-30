@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { ApiClient, createBrowserApiClient } from '../../api/client'
 import { getInstallationStatus, removeInstalledVersion, type InstallationStatus } from '../../api/installation'
 import { getAgentRuntimeSettings, setAgentRuntimeSettings } from '../../api/runtime'
+import { getCodeModeSettings, setCodeModeSettings, type CodeAutonomy, type CodeModeSettings } from '../../api/codeMode'
 import { SettingsPage } from './SettingsPage'
 import { SettingsSection } from './SettingsSection'
 
@@ -16,6 +17,9 @@ export function RuntimeSettingsPage({ client, embedded = false }: { client?: Api
   const [installationLoading, setInstallationLoading] = useState(true)
   const [installationBusy, setInstallationBusy] = useState(false)
   const [installationNotice, setInstallationNotice] = useState<string | null>(null)
+  const [codeSettings, setCodeSettings] = useState<CodeModeSettings | null>(null)
+  const [savingCodeSettings, setSavingCodeSettings] = useState(false)
+  const [codeNotice, setCodeNotice] = useState<string | null>(null)
 
   useEffect(() => {
     const controller = new AbortController()
@@ -23,6 +27,14 @@ export function RuntimeSettingsPage({ client, embedded = false }: { client?: Api
       setMaxIterations(settings.max_iterations)
       if (settings.max_iterations !== null) setDraft(String(settings.max_iterations))
     }).catch(() => setNotice('Não foi possível carregar o limite atual.')).finally(() => setLoading(false))
+    return () => controller.abort()
+  }, [apiClient])
+
+  useEffect(() => {
+    const controller = new AbortController()
+    void getCodeModeSettings(apiClient, controller.signal).then((settings) => {
+      if (!controller.signal.aborted) setCodeSettings(settings)
+    }).catch(() => { if (!controller.signal.aborted) setCodeNotice('Não foi possível carregar as preferências do Modo Code.') })
     return () => controller.abort()
   }, [apiClient])
 
@@ -79,6 +91,20 @@ export function RuntimeSettingsPage({ client, embedded = false }: { client?: Api
     }
   }
 
+  async function saveCodeSettings() {
+    if (!codeSettings || savingCodeSettings) return
+    setSavingCodeSettings(true)
+    setCodeNotice(null)
+    try {
+      setCodeSettings(await setCodeModeSettings(apiClient, codeSettings))
+      setCodeNotice('Preferências do Modo Code salvas.')
+    } catch {
+      setCodeNotice('Não foi possível salvar as preferências do Modo Code.')
+    } finally {
+      setSavingCodeSettings(false)
+    }
+  }
+
   const content = <>
     {!embedded && <section className="installation-status" aria-busy={installationLoading} aria-labelledby="installation-status-title">
       <div className="installation-status__heading">
@@ -113,6 +139,21 @@ export function RuntimeSettingsPage({ client, embedded = false }: { client?: Api
       <p>Uma interação é uma nova rodada do agente após receber o resultado de uma ferramenta. O limite não interrompe uma resposta já em texto.</p>
       <button type="button" className="button button--primary" disabled={loading || saving} onClick={() => void save()}>Salvar limite</button>
       {notice && <p role="status" className="runtime-settings__notice">{notice}</p>}
+    </section>
+    <section className="runtime-settings code-mode-settings" aria-busy={codeSettings === null} aria-labelledby="code-mode-settings-title">
+      <div><p className="eyebrow">MODO CODE</p><h3 id="code-mode-settings-title">Autonomia e acompanhamento</h3></div>
+      <p>O Modo Code planeja, testa e valida alterações antes de concluir. Deploy em produção sempre pede confirmação.</p>
+      <label className="runtime-settings__field">Autonomia padrão
+        <select value={codeSettings?.autonomy ?? 'approval_required'} disabled={codeSettings === null || savingCodeSettings} onChange={(event) => setCodeSettings((current) => current ? { ...current, autonomy: event.target.value as CodeAutonomy } : current)}>
+          <option value="approval_required">Sempre pedir aprovação</option>
+          <option value="code_autonomy">Autonomia de código</option>
+          <option value="full_autonomy">Autonomia total</option>
+        </select>
+      </label>
+      <label className="provider-panel__toggle"><input type="checkbox" checked={codeSettings?.monitoring_enabled ?? true} disabled={codeSettings === null || savingCodeSettings} onChange={(event) => setCodeSettings((current) => current ? { ...current, monitoring_enabled: event.target.checked } : current)} />Acompanhar tarefas longas em segundo plano</label>
+      <label className="provider-panel__toggle"><input type="checkbox" checked={codeSettings?.system_notifications ?? false} disabled={codeSettings === null || savingCodeSettings} onChange={(event) => setCodeSettings((current) => current ? { ...current, system_notifications: event.target.checked } : current)} />Receber notificações do sistema ao concluir, bloquear ou precisar de decisão</label>
+      <button type="button" className="button button--primary" disabled={codeSettings === null || savingCodeSettings} onClick={() => void saveCodeSettings()}>{savingCodeSettings ? 'Salvando…' : 'Salvar preferências do Modo Code'}</button>
+      {codeNotice && <p role="status" className="runtime-settings__notice">{codeNotice}</p>}
     </section>
   </>
   return embedded ? <SettingsSection eyebrow="RUNTIME">{content}</SettingsSection> : <SettingsPage><p className="eyebrow">RUNTIME</p><h1>General</h1><p className="settings-content__lede">Estado do Orin nesta instalação e limites de execução do agente.</p>{content}</SettingsPage>

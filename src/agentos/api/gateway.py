@@ -44,6 +44,7 @@ from agentos.mcp.catalog import search_catalog
 from agentos.mcp.service import McpConnectionFailed, McpServerNotFound, McpServiceError
 from agentos.mcp.toolset import discover as _mcp_connect
 from agentos.plugins.service import PluginServiceError
+from agentos.code_mode.models import CodeAutonomy
 
 
 # Conversation SSE pacing. The active poll is fast enough to feel like token
@@ -141,6 +142,9 @@ class CreateConversationRequest(_RequestModel):
     workspace_path: str | None = Field(default=None, max_length=4096)
     workspace_acknowledged_risk: bool = False
     attachments: list[str] = Field(default_factory=list, max_length=MAX_FILES_PER_MESSAGE)
+    # ``auto`` keeps ordinary conversation requests backward-compatible while
+    # allowing the composer to explicitly enter or suppress the Code flow.
+    code_mode: str = Field(default="auto", pattern="^(auto|code|chat)$")
 
 
 class InspectNewWorkspaceFolderRequest(_RequestModel):
@@ -186,6 +190,9 @@ class SendConversationMessageRequest(_RequestModel):
     message: str = Field(default="", max_length=16000)
     attachments: list[str] = Field(default_factory=list, max_length=MAX_FILES_PER_MESSAGE)
     selection: ConversationSelectionRequest | None = None
+    # "auto" lets the trusted server classify a clearly technical request;
+    # "code" is the explicit composer choice; "chat" opts out for this turn.
+    code_mode: str = Field(default="auto", pattern="^(auto|code|chat)$")
 
 
 class SkillDependenciesRequest(_RequestModel):
@@ -265,6 +272,12 @@ class OmniRouteRuntimeActionRequest(_RequestModel):
 
 class AgentRuntimeSettingsRequest(_RequestModel):
     max_iterations: int | None = Field(default=None, ge=1)
+
+
+class CodeModeSettingsRequest(_RequestModel):
+    autonomy: str = Field(pattern="^(approval_required|code_autonomy|full_autonomy)$")
+    system_notifications: bool = False
+    monitoring_enabled: bool = True
 
 
 class VisionModelRequest(_RequestModel):
@@ -561,7 +574,7 @@ def create_app(services: ApiServices) -> FastAPI:
                 ProviderCatalogContext(principal.user_id, "conversation.create"),
                 message=payload.message, provider=provider, model_id=payload.selection.model_id,
                 workspace_id=payload.workspace_id, project_id=payload.project_id, idempotency_key=_idempotency(request),
-                attachments=attachments, new_conversation_id=conversation_id,
+                attachments=attachments, new_conversation_id=conversation_id, code_mode=payload.code_mode,
             )
         except Exception:
             discard_promoted(workspace_for(attachment_workspace_id, principal), attachments)
@@ -674,7 +687,7 @@ def create_app(services: ApiServices) -> FastAPI:
                 ProviderCatalogContext(principal.user_id, "project.conversation.create"),
                 message=payload.message, provider=provider, model_id=payload.selection.model_id,
                 workspace_id=project.workspace_id, idempotency_key=_idempotency(request), project_id=project_id,
-                attachments=attachments, new_conversation_id=conversation_id,
+                attachments=attachments, new_conversation_id=conversation_id, code_mode=payload.code_mode,
             )
         except Exception:
             discard_promoted(workspace_for(project.workspace_id, principal), attachments)
@@ -867,7 +880,7 @@ def create_app(services: ApiServices) -> FastAPI:
         try:
             result = require_port(services.conversation_application).send(
                 principal.user_id, conversation_id, payload.message, _idempotency(request),
-                attachments=attachments, provider=provider, model_id=model_id,
+                attachments=attachments, provider=provider, model_id=model_id, code_mode=payload.code_mode,
             )  # type: ignore[union-attr]
         except Exception:
             discard_promoted(workspace_for(workspace_id, principal), attachments)
@@ -1404,6 +1417,26 @@ def create_app(services: ApiServices) -> FastAPI:
         services.security.authorize(principal, action="runtime.configure", resource_id="agentic", purpose="runtime.configure")
         _idempotency(request)
         return JSONResponse(_require_port(services.agentic_runtime).set_max_iterations(principal.user_id, payload.max_iterations))
+
+    @app.get("/v1/code-mode/settings")
+    async def get_code_mode_settings(request: Request) -> JSONResponse:
+        principal = principal_for(request)
+        services.security.authorize(principal, action="runtime.inspect", resource_id="code-mode", purpose="code_mode.inspect")
+        settings = _require_port(services.agentic_runtime).get_code_mode(principal.user_id)
+        return JSONResponse(settings.as_dict())
+
+    @app.put("/v1/code-mode/settings")
+    async def update_code_mode_settings(payload: CodeModeSettingsRequest, request: Request) -> JSONResponse:
+        principal = principal_for(request, mutable=True)
+        services.security.authorize(principal, action="runtime.configure", resource_id="code-mode", purpose="code_mode.configure")
+        _idempotency(request)
+        settings = _require_port(services.agentic_runtime).set_code_mode(
+            principal.user_id,
+            autonomy=CodeAutonomy(payload.autonomy),
+            system_notifications=payload.system_notifications,
+            monitoring_enabled=payload.monitoring_enabled,
+        )
+        return JSONResponse(settings.as_dict())
 
     @app.get("/v1/runtime/quality")
     async def get_agent_runtime_quality(request: Request, days: int = 30) -> JSONResponse:

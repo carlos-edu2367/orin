@@ -12,7 +12,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 from typing import Callable
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from agentos.bootstrap.production import ProductionSettings, activity_cursor_fallback
 from agentos.agentic.provider_stream import HTTPProviderStreamTransport
@@ -23,6 +23,8 @@ from agentos.provider_catalog.ollama import DEFAULT_OLLAMA_BASE_URL, normalize_o
 from agentos.provider_catalog.omniroute import DEFAULT_OMNIROUTE_BASE_URL, normalize_omniroute_base_url
 from agentos.agentic.runtime import AgenticLimits, AgenticRunResult, AgenticTurnRuntime
 from agentos.agentic.settings import AgentRuntimeSettingsStore
+from agentos.agentic.events import AgentActivityEventType
+from agentos.code_mode.models import CodeStage
 from agentos.agentic.transcript import REHYDRATION_BUDGET_FRACTION
 from agentos.agentic.session import TurnSession, build_retrieval_for_turn, resolve_effective_workspace_id
 from agentos.agentic.browser_tools import ConversationBrowserRegistry, browser_capability_from_environment, conversation_browser_for
@@ -67,6 +69,7 @@ from agentos.runtime.models import (
 )
 from agentos.runtime.service import RuntimeService
 from agentos.persistence.postgres.schema import (
+    code_mode_runs,
     conversation_dispatches,
     provider_configurations,
     provider_model_catalog,
@@ -449,6 +452,38 @@ class ChatWorker:
             self._project(turn, "FAILED", result.error_code or "agentic_runtime_failed")
             if kernel_managed:
                 self.store.finish(turn, failed=True, code=result.error_code or "agentic_runtime_failed")
+        self._settle_code_mode(turn, result.state, error_code=result.error_code)
+
+    def _settle_code_mode(self, turn: dict[str, object], result_state: str, *, error_code: str | None) -> None:
+        if turn.get("code_mode") != "code":
+            return
+        target = {
+            "completed": CodeStage.COMPLETED,
+            "waiting_user": CodeStage.WAITING_DECISION,
+            "reconciliation_required": CodeStage.BLOCKED,
+            "cancelled": CodeStage.BLOCKED,
+        }.get(result_state, CodeStage.BLOCKED)
+        try:
+            with self.store._engine.begin() as connection:
+                connection.execute(update(code_mode_runs).where(
+                    code_mode_runs.c.execution_id == turn["execution_id"],
+                ).values(
+                    stage=target.value,
+                    completion_kind="verified" if target is CodeStage.COMPLETED else None,
+                    caveats=error_code if target is CodeStage.BLOCKED and error_code else None,
+                    updated_at=datetime.now(UTC),
+                ))
+            event = (
+                AgentActivityEventType.CODE_MODE_COMPLETED if target is CodeStage.COMPLETED else
+                AgentActivityEventType.CODE_MODE_DECISION_REQUIRED if target is CodeStage.WAITING_DECISION else
+                AgentActivityEventType.CODE_MODE_BLOCKED
+            )
+            summary = "Entrega de código concluída" if target is CodeStage.COMPLETED else (
+                "Modo Code aguarda uma decisão" if target is CodeStage.WAITING_DECISION else "Modo Code bloqueado"
+            )
+            self.store._activity(turn, event, summary, {"stage": target.value, "error_code": error_code} if error_code else {"stage": target.value})
+        except Exception:
+            _LOGGER.exception("could not settle Code mode for turn %s", turn.get("turn_id"))
 
     def _kernel_manages(self, turn: dict[str, object]) -> bool:
         return str(turn["turn_id"]) in self._kernel_turns
@@ -836,6 +871,7 @@ class ChatWorker:
         engine = self.store._engine
         skill_library = PostgresSkillLibraryService(engine)
         configured_limits = self._runtime_settings.get(str(turn["user_id"]))
+        turn = self._hydrate_code_mode(turn)
         browser = self._browser_registry.acquire(turn)
         local_root = turn.get("workspace_root_path")
         try:
@@ -910,6 +946,38 @@ class ChatWorker:
             if browser is not None:
                 self._browser_registry.discard(str(turn.get("conversation_id") or ""))
             raise
+
+    def _hydrate_code_mode(self, turn: dict[str, object]) -> dict[str, object]:
+        """Attach durable Code run policy to the otherwise generic chat turn."""
+        if turn.get("code_mode") != "code":
+            return turn
+        try:
+            with self.store._engine.begin() as connection:
+                run = connection.execute(select(code_mode_runs).where(
+                    code_mode_runs.c.execution_id == turn["execution_id"],
+                    code_mode_runs.c.user_id == turn["user_id"],
+                )).mappings().first()
+                if run is None:
+                    return turn
+                policy = self._runtime_settings.get_code_mode(str(turn["user_id"]))
+                connection.execute(update(code_mode_runs).where(code_mode_runs.c.run_id == run["run_id"]).values(
+                    autonomy=policy.autonomy.value, stage=CodeStage.PLANNING.value,
+                    plan_path=f".orin/plans/{turn['turn_id']}-plan.md", updated_at=datetime.now(UTC),
+                ))
+            enriched = dict(turn)
+            enriched.update({
+                "code_mode_work_kind": str(run["work_kind"]),
+                "code_mode_autonomy": policy.autonomy.value,
+                "code_mode_plan_path": f".orin/plans/{turn['turn_id']}-plan.md",
+            })
+            self.store._activity(enriched, AgentActivityEventType.CODE_MODE_STAGE_CHANGED, "Planejando entrega de código", {
+                "stage": CodeStage.PLANNING.value, "work_kind": str(run["work_kind"]),
+                "autonomy": policy.autonomy.value,
+            })
+            return enriched
+        except Exception:
+            _LOGGER.exception("could not hydrate Code mode for turn %s", turn.get("turn_id"))
+            return turn
 
 
 async def agentos_agent(ctx: dict, turn_id: str) -> None:

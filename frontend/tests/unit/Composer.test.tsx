@@ -39,4 +39,16 @@ describe('Composer command picker', () => {
     expect(onSubmit).not.toHaveBeenCalled()
     expect(onChange).toHaveBeenCalledWith('/daily ')
   })
+
+  it('lets the user explicitly toggle Code mode with an announced pressed state', async () => {
+    const onCodeModeChange = vi.fn()
+    const user = userEvent.setup()
+    render(<Composer value="implemente isto" onChange={() => {}} onSubmit={() => {}} codeMode="auto" onCodeModeChange={onCodeModeChange} />)
+
+    const toggle = screen.getByRole('button', { name: 'Ativar Modo Code' })
+    expect(toggle).toHaveAttribute('aria-pressed', 'false')
+    await user.click(toggle)
+
+    expect(onCodeModeChange).toHaveBeenCalledWith('code')
+  })
 })

@@ -14,6 +14,7 @@ from agentos.api import (
 )
 from agentos.api.security import LoopbackSecurityService
 from agentos.bootstrap.production import DependencyProbe, ProductionSettings, create_production_app
+from agentos.code_mode.models import CodeAutonomy, CodeModeSettings
 
 
 class FakeExecutionApplication:
@@ -99,6 +100,15 @@ class FakeAgentRuntimeSettings:
         self.value = value
         return {"max_iterations": value}
 
+    def get_code_mode(self, user_id: str) -> CodeModeSettings:
+        assert user_id == "user-1"
+        return getattr(self, "code_mode", CodeModeSettings())
+
+    def set_code_mode(self, user_id: str, *, autonomy: CodeAutonomy, system_notifications: bool, monitoring_enabled: bool) -> CodeModeSettings:
+        assert user_id == "user-1"
+        self.code_mode = CodeModeSettings(autonomy, system_notifications, monitoring_enabled)
+        return self.code_mode
+
 
 class FakeConversationApplication:
     def __init__(self) -> None:
@@ -108,14 +118,14 @@ class FakeConversationApplication:
     def allocate_conversation_id(self) -> str:
         return "conv-1"
 
-    def create(self, context, *, message, provider, model_id, workspace_id, idempotency_key, project_id=None, attachments=(), new_conversation_id=None):
+    def create(self, context, *, message, provider, model_id, workspace_id, idempotency_key, project_id=None, attachments=(), new_conversation_id=None, code_mode="auto"):
         self.create_calls += 1
         assert context.user_id == "user-1"
         assert (message, provider, model_id, workspace_id) == ("Organize este projeto", "openrouter", "anthropic/test-model", None)
         return {"conversation_id": "conv-1", "title": "Organize este projeto", "turn_id": "turn-1", "message_id": "msg-1", "state": "queued", "task_ref": "must-not-leak"}
 
-    def send(self, user_id, conversation_id, message, idempotency_key, attachments=(), provider="", model_id=""):
-        self.send_calls.append({"user_id": user_id, "conversation_id": conversation_id, "message": message, "provider": provider, "model_id": model_id})
+    def send(self, user_id, conversation_id, message, idempotency_key, attachments=(), provider="", model_id="", code_mode="auto"):
+        self.send_calls.append({"user_id": user_id, "conversation_id": conversation_id, "message": message, "provider": provider, "model_id": model_id, "code_mode": code_mode})
         return {"conversation_id": conversation_id, "title": "Conversa", "turn_id": "turn-2", "message_id": "msg-2", "state": "queued"}
 
 
@@ -437,6 +447,23 @@ def test_agent_runtime_settings_accept_unlimited_or_bounded_iterations() -> None
     assert initial.json() == {"max_iterations": None}
     assert bounded.json() == {"max_iterations": 48}
     assert unlimited.json() == {"max_iterations": None}
+
+
+def test_code_mode_settings_are_global_and_persisted_through_the_runtime_port() -> None:
+    security = InMemorySecurityService()
+    security.add_pat("pat-test", AuthenticatedPrincipal("user-1", "credential-1", frozenset({"api"})))
+    runtime = FakeAgentRuntimeSettings()
+    client = TestClient(create_app(ApiServices(security=security, execution_application=FakeExecutionApplication(), agentic_runtime=runtime)))
+
+    initial = client.get("/v1/code-mode/settings", headers={"Authorization": "Bearer pat-test"})
+    saved = client.put(
+        "/v1/code-mode/settings",
+        headers={"Authorization": "Bearer pat-test", "Idempotency-Key": "code-mode-settings"},
+        json={"autonomy": "code_autonomy", "system_notifications": True, "monitoring_enabled": False},
+    )
+
+    assert initial.json() == {"autonomy": "approval_required", "system_notifications": False, "monitoring_enabled": True}
+    assert saved.json() == {"autonomy": "code_autonomy", "system_notifications": True, "monitoring_enabled": False}
 
 
 def test_memory_management_scopes_query_and_does_not_mix_projects() -> None:

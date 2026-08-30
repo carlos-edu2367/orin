@@ -40,6 +40,15 @@ class AgentActivityEventType(StrEnum):
     TURN_WAITING_USER = "turn.waiting_user"
     TURN_COMPLETED = "turn.completed"
     TURN_FAILED = "turn.failed"
+    CODE_MODE_ACTIVATED = "code_mode.activated"
+    CODE_MODE_STAGE_CHANGED = "code_mode.stage_changed"
+    CODE_MODE_PLAN_READY = "code_mode.plan_ready"
+    CODE_MODE_VALIDATION_STARTED = "code_mode.validation_started"
+    CODE_MODE_VALIDATION_FINISHED = "code_mode.validation_finished"
+    CODE_MODE_COMPLETED = "code_mode.completed"
+    CODE_MODE_COMPLETED_WITH_CAVEATS = "code_mode.completed_with_caveats"
+    CODE_MODE_DECISION_REQUIRED = "code_mode.decision_required"
+    CODE_MODE_BLOCKED = "code_mode.blocked"
     PLUGIN_HOOK_EXECUTED = "plugin.hook_executed"
 
 

@@ -19,7 +19,8 @@ from agentos.agentic.events import AgentActivityEvent, AgentActivityEventType
 from agentos.persistence.postgres.agentic_activity import ActivityCursorError
 from agentos.persistence.postgres.execution_adapters import ExecutionApplicationAdapter, ExecutionQueryAdapter
 from agentos.agentic import transcript as turn_transcript
-from agentos.persistence.postgres.schema import (conversation_activity_events, conversation_agent_usage, conversation_agents, conversation_dispatches, conversation_events, conversation_hook_context, conversation_message_attachments, conversation_message_commands, conversation_messages, conversation_tool_records, conversation_turn_steps, conversation_turns, conversations, projects, runtime_heartbeats, turn_quality_metrics, workspace_roots)
+from agentos.persistence.postgres.schema import (code_mode_runs, conversation_activity_events, conversation_agent_usage, conversation_agents, conversation_dispatches, conversation_events, conversation_hook_context, conversation_message_attachments, conversation_message_commands, conversation_messages, conversation_tool_records, conversation_turn_steps, conversation_turns, conversations, projects, runtime_heartbeats, turn_quality_metrics, workspace_roots)
+from agentos.code_mode.models import CodeAutonomy, CodeStage, detect_code_request
 
 
 _LOGGER = logging.getLogger("agentos.conversations.chat")
@@ -499,13 +500,18 @@ class PostgresChatStore:
         # Stable across turns so the conversation-level graph keeps one root node.
         return f"agent:{turn['conversation_id']}:main"
 
-    def create(self, *, user_id: str, message: str, provider: str, model_id: str, idempotency_key: str, conversation_id: str | None = None, project_id: str | None = None, workspace_id: str | None = None, attachments: Sequence[Mapping[str, object]] = (), new_conversation_id: str | None = None, scheduled_by_schedule_id: str | None = None) -> ChatReceipt:
+    def create(self, *, user_id: str, message: str, provider: str, model_id: str, idempotency_key: str, conversation_id: str | None = None, project_id: str | None = None, workspace_id: str | None = None, attachments: Sequence[Mapping[str, object]] = (), new_conversation_id: str | None = None, scheduled_by_schedule_id: str | None = None, code_mode: str = "auto") -> ChatReceipt:
         message = message.strip()
         attachments = list(attachments)
         expansion = _expand_command(self._command_library, user_id, message)
         if len(message) > 16000: raise ValueError("message must be a bounded non-blank string")
         if not message and not attachments: raise ValueError("message must be a bounded non-blank string")
         title_source = message or str(attachments[0].get("original_name") or "Arquivo enviado")
+        requested_code_mode = str(code_mode or "auto")
+        if requested_code_mode not in {"auto", "code", "chat"}:
+            raise ValueError("code_mode is invalid")
+        work_kind = detect_code_request(message) if requested_code_mode != "chat" else None
+        code_active = requested_code_mode == "code" or (requested_code_mode == "auto" and work_kind is not None)
         now = datetime.now(UTC)
         with self._engine.begin() as c:
             previous = c.execute(select(conversation_turns).where(conversation_turns.c.user_id == user_id, conversation_turns.c.idempotency_key == idempotency_key)).mappings().first()
@@ -578,7 +584,16 @@ class PostgresChatStore:
                     "media_type": str(item["media_type"]), "kind": str(item["kind"]),
                     "bytes": int(item["bytes"]), "created_at": now,
                 } for item in attachments])
-            c.execute(insert(conversation_turns).values(turn_id=turn_id, conversation_id=conversation_id, user_id=user_id, execution_id=execution_id, user_message_id=user_message_id, assistant_message_id=assistant_message_id, provider=provider, model_id=model_id, state="queued", idempotency_key=idempotency_key, scheduled_by_schedule_id=scheduled_by_schedule_id, created_at=now, updated_at=now))
+            c.execute(insert(conversation_turns).values(turn_id=turn_id, conversation_id=conversation_id, user_id=user_id, execution_id=execution_id, user_message_id=user_message_id, assistant_message_id=assistant_message_id, provider=provider, model_id=model_id, state="queued", idempotency_key=idempotency_key, scheduled_by_schedule_id=scheduled_by_schedule_id, code_mode="code" if code_active else None, created_at=now, updated_at=now))
+            if code_active:
+                c.execute(insert(code_mode_runs).values(
+                    run_id=f"code_{turn_id}", execution_id=execution_id, turn_id=turn_id,
+                    conversation_id=conversation_id, user_id=user_id,
+                    work_kind=(work_kind.value if work_kind is not None else "implementation"),
+                    stage=CodeStage.PLANNING.value, autonomy=CodeAutonomy.APPROVAL_REQUIRED.value,
+                    plan_path=None, plan_versioned=None, completion_kind=None, caveats=None,
+                    created_at=now, updated_at=now,
+                ))
             c.execute(insert(conversation_dispatches).values(turn_id=turn_id, state="pending", attempts=0, queued_at=now, updated_at=now))
             c.execute(insert(conversation_events).values(conversation_id=conversation_id, user_id=user_id, event_type="turn.queued", message_id=assistant_message_id, payload={"state": "queued"}, created_at=now))
             c.execute(update(conversations).where(conversations.c.conversation_id == conversation_id).values(state="queued", updated_at=now))
@@ -607,6 +622,8 @@ class PostgresChatStore:
                 raise RuntimeError("canonical execution creation was not accepted")
         receipt = ChatReceipt(conversation_id, _title(title_source), turn_id, assistant_message_id, "queued")
         self._activity({"conversation_id": conversation_id, "turn_id": turn_id, "execution_id": execution_id, "user_id": user_id}, AgentActivityEventType.TURN_STARTED, "Execução agendada na fila" if scheduled_by_schedule_id else "Turn queued", {"scheduled_by_schedule_id": scheduled_by_schedule_id} if scheduled_by_schedule_id else None)
+        if code_active:
+            self._activity({"conversation_id": conversation_id, "turn_id": turn_id, "execution_id": execution_id, "user_id": user_id}, AgentActivityEventType.CODE_MODE_ACTIVATED, "Modo Code ativado — preparando plano", {"work_kind": work_kind.value if work_kind is not None else "implementation", "stage": CodeStage.PLANNING.value})
         return receipt
 
     def list(self, user_id: str) -> dict[str, object]:
@@ -658,7 +675,7 @@ class PostgresChatStore:
             (dict(item.get("payload") or {}) for item in reversed(activities) if item.get("event_type") in {AgentActivityEventType.CONTEXT_UPDATED.value, AgentActivityEventType.CONTEXT_COMPACTED.value} and isinstance(item.get("payload"), Mapping) and "used_tokens" in item["payload"]),
             None,
         )
-        return {"conversation_id": conv["conversation_id"], "title": conv["title"], "state": conv["state"], "provider": conv["provider"], "model_id": conv["model_id"], "project_id": conv["project_id"], "messages": [{"message_id": m["message_id"], "role": m["role"], "content": m["content"], "status": m["status"], "retryable": bool(m["retryable"]), "attachments": attachments_by_message.get(str(m["message_id"]), []), "command": command_by_message.get(str(m["message_id"]))} for m in messages], "turns": [{"turn_id": t["turn_id"], "state": t["state"], "created_at": t["created_at"].isoformat(), "started_at": t["started_at"].isoformat() if t["started_at"] else None, "finished_at": t["finished_at"].isoformat() if t["finished_at"] else None, "scheduled_by_schedule_id": t["scheduled_by_schedule_id"]} for t in turns], "activities": activities, "activity_cursor": activity_cursor, "context_usage": context_usage}
+        return {"conversation_id": conv["conversation_id"], "title": conv["title"], "state": conv["state"], "provider": conv["provider"], "model_id": conv["model_id"], "project_id": conv["project_id"], "messages": [{"message_id": m["message_id"], "role": m["role"], "content": m["content"], "status": m["status"], "retryable": bool(m["retryable"]), "attachments": attachments_by_message.get(str(m["message_id"]), []), "command": command_by_message.get(str(m["message_id"]))} for m in messages], "turns": [{"turn_id": t["turn_id"], "state": t["state"], "created_at": t["created_at"].isoformat(), "started_at": t["started_at"].isoformat() if t["started_at"] else None, "finished_at": t["finished_at"].isoformat() if t["finished_at"] else None, "scheduled_by_schedule_id": t["scheduled_by_schedule_id"], "code_mode": t.get("code_mode")} for t in turns], "activities": activities, "activity_cursor": activity_cursor, "context_usage": context_usage}
 
     @staticmethod
     def _public_activity(event: AgentActivityEvent, cursor: str | None = None) -> dict[str, object]:
@@ -1119,11 +1136,11 @@ class ChatApplication:
         self.store = store
     def allocate_conversation_id(self) -> str:
         return _id("chat")
-    def create(self, context, *, message: str, provider: str, model_id: str, workspace_id: str | None, idempotency_key: str, project_id: str | None = None, attachments=(), new_conversation_id: str | None = None):
-        return self.store.create(user_id=context.user_id, message=message, provider=provider, model_id=model_id, idempotency_key=idempotency_key, project_id=project_id, workspace_id=workspace_id, attachments=attachments, new_conversation_id=new_conversation_id)
-    def send(self, user_id: str, conversation_id: str, message: str, idempotency_key: str, attachments=(), provider: str = "", model_id: str = ""):
+    def create(self, context, *, message: str, provider: str, model_id: str, workspace_id: str | None, idempotency_key: str, project_id: str | None = None, attachments=(), new_conversation_id: str | None = None, code_mode: str = "auto"):
+        return self.store.create(user_id=context.user_id, message=message, provider=provider, model_id=model_id, idempotency_key=idempotency_key, project_id=project_id, workspace_id=workspace_id, attachments=attachments, new_conversation_id=new_conversation_id, code_mode=code_mode)
+    def send(self, user_id: str, conversation_id: str, message: str, idempotency_key: str, attachments=(), provider: str = "", model_id: str = "", code_mode: str = "auto"):
         waiting = self.store.waiting_execution_ids(conversation_id, user_id)
-        receipt = self.store.create(user_id=user_id, message=message, provider=provider, model_id=model_id, idempotency_key=idempotency_key, conversation_id=conversation_id, attachments=attachments)
+        receipt = self.store.create(user_id=user_id, message=message, provider=provider, model_id=model_id, idempotency_key=idempotency_key, conversation_id=conversation_id, attachments=attachments, code_mode=code_mode)
         # A normal follow-up is the durable answer to an ask_user effect. The
         # old execution is resumed through its canonical input command before
         # the new turn is allowed to become the only visible continuation.

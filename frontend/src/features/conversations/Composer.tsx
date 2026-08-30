@@ -1,6 +1,7 @@
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
 import { useEffect, useRef, useState, type ClipboardEvent, type DragEvent, type FormEvent, type KeyboardEvent, type ReactNode } from 'react'
 import type { PluginCommand } from '../../api/plugins'
+import type { CodeModeChoice } from '../../api/conversations'
 import { AttachmentChips, type ComposerAttachment } from './AttachmentChips'
 import { CommandPicker, commandToken } from './CommandPicker'
 
@@ -32,6 +33,8 @@ export type ComposerProps = {
   onRemoveAttachment?: (id: string) => void
   /** Active plugin commands offered by the `/` picker. Empty disables it. */
   commands?: PluginCommand[]
+  codeMode?: CodeModeChoice
+  onCodeModeChange?: (value: CodeModeChoice) => void
 }
 
 const MAX_ROWS_HEIGHT = 260
@@ -48,6 +51,7 @@ export function Composer({
   value, onChange, onSubmit, onStop, running = false, disabled = false,
   placeholder = 'Descreva o que você precisa…', settings, hint, error, autoFocus, notice, focusSignal = 0, canSend = true,
   attachments = [], onAttach = () => {}, onRemoveAttachment = () => {}, commands = [],
+  codeMode = 'auto', onCodeModeChange,
 }: ComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -172,6 +176,14 @@ export function Composer({
                 <path d="M10.7 4.3 5.4 9.6a2 2 0 1 0 2.8 2.8l5.1-5.1a3.4 3.4 0 1 0-4.8-4.8L3.3 7.7" />
               </svg>
             </button>
+            {onCodeModeChange && <button
+              type="button"
+              className={`composer__code${codeMode === 'code' ? ' is-active' : ''}`}
+              aria-pressed={codeMode === 'code'}
+              aria-label={codeMode === 'code' ? 'Desativar Modo Code' : 'Ativar Modo Code'}
+              title={codeMode === 'code' ? 'Modo Code ativo' : 'Ativar Modo Code'}
+              onClick={() => onCodeModeChange(codeMode === 'code' ? 'auto' : 'code')}
+            ><span aria-hidden="true">&lt;/&gt;</span><span>Code</span></button>}
             {settings}
           </div>
           <div className="composer__actions">

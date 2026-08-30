@@ -221,6 +221,7 @@ def build_system_prompt(
     environment: Mapping[str, str] = MappingProxyType({}),
     workspace_tree: tuple[str, ...] = (),
     hook_context: str = "",
+    code_mode_context: str = "",
 ) -> tuple[str, str]:
     lines = [
         "You are the main agent of Orin, a local-first agent workspace running on the user's own machine.",
@@ -242,6 +243,8 @@ def build_system_prompt(
     ]
     if tool_names:
         lines += ["", "## Tools available now", "- " + ", ".join(tool_names)]
+    if code_mode_context:
+        lines += ["", code_mode_context]
     if "transcribe_pdf" in tool_names:
         lines += [
             "",
@@ -568,6 +571,11 @@ class TurnSession:
             self._record(AgentActivityEventType.TOOL_STARTED, f"Executando {name}", {
                 **base, "tool_name": name, "invocation_id": str(payload.get("invocation_id") or ""),
             }, agent_id=actor)
+            if self.turn.get("code_mode") == "code":
+                if name in {"write_file", "edit_file"}:
+                    self._record(AgentActivityEventType.CODE_MODE_STAGE_CHANGED, "Implementando alteração", {"stage": "implementing"}, agent_id=actor)
+                elif name == "run_command":
+                    self._record(AgentActivityEventType.CODE_MODE_VALIDATION_STARTED, "Executando validação", {"stage": "validating"}, agent_id=actor)
             return
         if state == "tool_finished":
             name = str(payload.get("tool_name") or "tool")
@@ -609,12 +617,28 @@ class TurnSession:
                             {"path": path, "label": path, "size_bytes": size_bytes, "tool_kind": "artifact"},
                             agent_id=actor,
                         )
+            if self.turn.get("code_mode") == "code":
+                if extra.get("code_approval"):
+                    self._record(AgentActivityEventType.CODE_MODE_DECISION_REQUIRED, "Plano pronto para aprovação", {"stage": "waiting_approval"}, agent_id=actor)
+                elif name == "run_command":
+                    event = AgentActivityEventType.CODE_MODE_VALIDATION_FINISHED if status == "succeeded" else AgentActivityEventType.CODE_MODE_STAGE_CHANGED
+                    summary = "Validação concluída" if status == "succeeded" else "Corrigindo falha de validação"
+                    stage = "validating" if status == "succeeded" else "fixing"
+                    self._record(event, summary, {"stage": stage, "status": status, "error_code": payload.get("error_code")}, agent_id=actor)
             return
         if state == "waiting_tool":
             self._record(AgentActivityEventType.TOOL_REQUESTED, "Preparando ferramentas", {**base, "count": payload.get("count")}, agent_id=actor)
             return
         if state == "waiting_user":
             self._record(AgentActivityEventType.TURN_WAITING_USER, "Aguardando sua resposta", base, agent_id=actor)
+            return
+        if state == "code_validation_required":
+            self._record(
+                AgentActivityEventType.CODE_MODE_VALIDATION_STARTED,
+                "Validação obrigatória pendente",
+                {**base, "stage": "validating", "reason": payload.get("reason")},
+                agent_id=actor,
+            )
             return
         if state == "retrying":
             self._record(AgentActivityEventType.TURN_STARTED, "Tentando novamente", {**base, "attempt": payload.get("attempt")}, agent_id=actor)
@@ -871,7 +895,7 @@ class TurnSession:
 
     # -- runtime --------------------------------------------------------
 
-    def _toolset(self, *, subagents: bool, browser_agent_key: str | None = None) -> AgentToolset:
+    def _toolset(self, *, subagents: bool, browser_agent_key: str | None = None, code_mode_active: bool = False, code_mode_permits_push: bool = False, code_mode_requires_approval: bool = False) -> AgentToolset:
         # Scoping the browser to one agent_key gives that agent its own tab
         # on the host (see AgentBrowserView / _AgentPageState) so concurrent
         # subagents never fight over one shared page.
@@ -900,6 +924,9 @@ class TurnSession:
             mcp_provider=self.mcp_provider,
             plugin_service=self.plugin_service,
             plugin_user_id=str(self.turn.get("user_id") or "") or None,
+            code_mode_active=code_mode_active,
+            code_mode_permits_push=code_mode_permits_push,
+            code_mode_requires_approval=code_mode_requires_approval,
         )
 
     def _session_start_context(self) -> str:
@@ -950,7 +977,18 @@ class TurnSession:
             return ()
 
     def build_runtime(self) -> AgenticTurnRuntime:
-        toolset = self._toolset(subagents=self.enable_subagents)
+        resumed = self._resumed_contract()
+        code_requires_approval = (
+            self.turn.get("code_mode") == "code"
+            and str(self.turn.get("code_mode_autonomy") or "approval_required") == "approval_required"
+            and resumed is None
+        )
+        toolset = self._toolset(
+            subagents=self.enable_subagents,
+            code_mode_active=self.turn.get("code_mode") == "code",
+            code_mode_permits_push=str(self.turn.get("code_mode_autonomy") or "") == "full_autonomy",
+            code_mode_requires_approval=code_requires_approval,
+        )
         memories = self.memory.recent(limit=12) if self.memory is not None else []
         agents = self.agents_store.list() if self.agents_store is not None else []
         reader = getattr(self.store, "tool_ledger", None)
@@ -973,6 +1011,21 @@ class TurnSession:
             environment = {}
         history = self.store.history_for_turn(self.turn)
         task = next((str(item.get("content") or "") for item in reversed(history) if item.get("role") == "user"), "")
+        code_mode_context = ""
+        if self.turn.get("code_mode") == "code":
+            from agentos.code_mode.prompt import code_mode_instructions
+            plan_path = str(self.turn.get("code_mode_plan_path") or f".orin/plans/{self.turn['turn_id']}-plan.md")
+            self._ensure_code_mode_plan(plan_path, task)
+            self._record(
+                AgentActivityEventType.CODE_MODE_PLAN_READY,
+                "Plano do Modo Code criado",
+                {"stage": "planning", "plan_path": plan_path},
+            )
+            code_mode_context = code_mode_instructions(
+                work_kind=str(self.turn.get("code_mode_work_kind") or "implementation"),
+                autonomy=str(self.turn.get("code_mode_autonomy") or "approval_required"),
+                plan_path=plan_path,
+            )
         skill_catalog = self._skill_catalog(task, toolset)
         prompt, volatile_prompt = build_system_prompt(
             tool_names=tuple(item.name for item in toolset.definitions()),
@@ -991,10 +1044,10 @@ class TurnSession:
             environment=environment,
             workspace_tree=tree,
             hook_context=self._session_start_context(),
+            code_mode_context=code_mode_context,
         )
         # A conversation that already carries a contract resumes the work
         # instead of re-orienting; the transcript already holds what was read.
-        resumed = self._resumed_contract()
         phase_controller = PhaseController(
             model_calls_tools=self.model_calls_tools,
             resumed_contract=resumed is not None,
@@ -1022,6 +1075,33 @@ class TurnSession:
         if resumed is not None:
             runtime.contract = resumed
         return runtime
+
+    def _ensure_code_mode_plan(self, path: str, task: str) -> None:
+        """Persist the approved-plan destination before the model can change code.
+
+        This deliberately creates only a bounded scaffold.  The agent fills the
+        concrete acceptance criteria after it inspects the workspace, and the
+        file remains in the workspace as evidence even if it then pauses for
+        approval.
+        """
+        try:
+            target = self.workspace.resolve(path)
+            if target.exists():
+                return
+            objective = (task.strip() or "Atender ao pedido da pessoa.")[:500]
+            self.workspace.write_text(path, "\n".join((
+                "# Plano do Modo Code", "", "## Objetivo", objective, "",
+                "## Escopo e fora de escopo", "A detalhar após inspeção do workspace.", "",
+                "## Critérios de aceite", "- A detalhar e aprovar.", "",
+                "## Etapas de implementação", "- Planejar → implementar → testar → corrigir → validar.", "",
+                "## Estratégia de testes", "- Testes automatizados obrigatórios para alterações de código.", "",
+                "## Validação visual", "- Quando houver frontend: fluxo, responsividade, acessibilidade, screenshot e console.", "",
+                "## Resultado da execução", "Pendente.", "",
+            )))
+        except Exception:
+            # The plan remains represented by the durable Code run even if a
+            # workspace mount vanished between claim and runtime construction.
+            return
 
     def _resumed_contract(self):
         """The contract this conversation is already working under, if any."""

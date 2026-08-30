@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, Menu, nativeImage, shell } = require('electron')
+const { app, BrowserWindow, ipcMain, Menu, nativeImage, Notification, shell } = require('electron')
 const { spawn } = require('node:child_process')
 const fs = require('node:fs/promises')
 const path = require('node:path')
@@ -94,6 +94,25 @@ function registerIpc() {
     closeWindow()
     return true
   })
+  ipcMain.handle('desktop:notify-code-mode', (event, payload) => {
+    if (!fromApp(event) || !Notification.isSupported() || !safeCodeModeNotification(payload)) return false
+    const notification = new Notification({ title: payload.title, body: payload.body, icon: iconPath, silent: false })
+    notification.on('click', () => {
+      if (!mainWindow || mainWindow.isDestroyed()) return
+      if (mainWindow.isMinimized()) mainWindow.restore()
+      mainWindow.show()
+      mainWindow.focus()
+    })
+    notification.show()
+    return true
+  })
+}
+
+function safeCodeModeNotification(value) {
+  if (!value || typeof value !== 'object') return false
+  if (typeof value.title !== 'string' || typeof value.body !== 'string') return false
+  // Notification text must remain a short status, never a path, log, token or diff.
+  return value.title.length > 0 && value.title.length <= 80 && value.body.length > 0 && value.body.length <= 180
 }
 
 async function checkForUpdate() {

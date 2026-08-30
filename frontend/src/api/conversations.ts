@@ -14,7 +14,10 @@ export type CreateConversationInput = {
   workspace_path?: string | null
   workspace_acknowledged_risk?: boolean
   attachments?: string[]
+  code_mode?: CodeModeChoice
 }
+
+export type CodeModeChoice = 'auto' | 'code' | 'chat'
 
 export type ConversationReceipt = {
   conversation_id: string
@@ -28,7 +31,7 @@ export type MessageAttachment = { path: string; original_name: string; media_typ
 
 export type Conversation = { conversation_id: string; title: string; state: string; messages: ConversationMessage[]; turns: ConversationTurn[]; provider: string; model_id: string; activities: ConversationActivityEvent[]; activity_cursor: string; workspace: WorkspaceState; context_usage: ContextUsage | null }
 export type ConversationMessage = { message_id: string; role: 'user' | 'assistant'; content: string; status: string; retryable: boolean; attachments: MessageAttachment[]; command: MessageCommand | null }
-export type ConversationTurn = { turn_id: string; state: string; created_at: string; started_at: string | null; finished_at: string | null; scheduled_by_schedule_id: string | null }
+export type ConversationTurn = { turn_id: string; state: string; created_at: string; started_at: string | null; finished_at: string | null; scheduled_by_schedule_id: string | null; code_mode: 'code' | null }
 
 export function createConversation(client: ApiClient, input: CreateConversationInput, intent = client.createMutationIntent()): Promise<ConversationReceipt> {
   return client.request({
@@ -41,6 +44,9 @@ export function createConversation(client: ApiClient, input: CreateConversationI
       workspace_path: input.workspace_path ?? null,
       workspace_acknowledged_risk: input.workspace_acknowledged_risk ?? false,
       attachments: input.attachments ?? [],
+      // Omitting the default keeps older servers and integrations compatible;
+      // the API itself defaults to automatic classification.
+      ...(input.code_mode && input.code_mode !== 'auto' ? { code_mode: input.code_mode } : {}),
     },
     parse: parseConversationReceipt,
   })
@@ -63,10 +69,10 @@ export function listConversations(client: ApiClient): Promise<{ items: Array<Pic
   } })
 }
 
-export function sendConversationMessage(client: ApiClient, id: string, message: string, attachments: string[] = [], selection?: Pick<CreateConversationInput, 'provider' | 'model_id'>, intent = client.createMutationIntent()): Promise<ConversationReceipt> {
+export function sendConversationMessage(client: ApiClient, id: string, message: string, attachments: string[] = [], selection?: Pick<CreateConversationInput, 'provider' | 'model_id'>, codeMode: CodeModeChoice = 'auto', intent = client.createMutationIntent()): Promise<ConversationReceipt> {
   return client.request({
     path: `/v1/conversations/${encodeURIComponent(id)}/messages`, method: 'POST', expectedStatus: 201, intent,
-    body: { message, attachments, ...(selection ? { selection } : {}) }, parse: parseConversationReceipt,
+    body: { message, attachments, ...(codeMode !== 'auto' ? { code_mode: codeMode } : {}), ...(selection ? { selection } : {}) }, parse: parseConversationReceipt,
   })
 }
 
@@ -145,6 +151,7 @@ export function getConversationOverview(client: ApiClient, id: string): Promise<
           started_at: typeof item.started_at === 'string' ? item.started_at : null,
           finished_at: typeof item.finished_at === 'string' ? item.finished_at : null,
           scheduled_by_schedule_id: typeof item.scheduled_by_schedule_id === 'string' ? item.scheduled_by_schedule_id : null,
+          code_mode: item.code_mode === 'code' ? 'code' : null,
         })),
         activity_count: Number(data.activity_count) || 0,
         duration_seconds: typeof data.duration_seconds === 'number' ? data.duration_seconds : null,
@@ -271,6 +278,8 @@ export function parseConversationActivityEvent(value: unknown, cursor: string): 
   assign('label', optionalText(payload.label, 200))
   assign('path', optionalText(payload.path, 512))
   assign('screenshotPath', optionalWorkspacePath(payload.screenshot_path))
+  assign('codeStage', optionalText(payload.stage, 64))
+  if (payload.code_approval === true) event.codeApproval = true
   assign('occurredAt', optionalText(item.occurred_at, 64))
   const contextUsage = parseContextUsage(payload)
   if (contextUsage) event.contextUsage = contextUsage
@@ -291,7 +300,7 @@ export function parseConversation(value: unknown): Conversation {
   if (!Array.isArray(data.messages) || !Array.isArray(data.turns)) throw invalidResponseError()
   const activities = parseSnapshotActivities(data.activities)
   const activityCursor = data.activity_cursor === undefined ? (activities[activities.length - 1]?.cursor ?? '0') : publicId(data.activity_cursor)
-  return { conversation_id: string(data.conversation_id), title: string(data.title), state: string(data.state), provider: string(data.provider), model_id: string(data.model_id), activities, activity_cursor: activityCursor, workspace: parseWorkspaceState(data.workspace ?? {}), context_usage: parseContextUsage(data.context_usage), messages: data.messages.map((item) => { const m = item as Record<string, unknown>; const role = string(m.role); if (role !== 'user' && role !== 'assistant') throw invalidResponseError(); return { message_id: string(m.message_id), role, content: typeof m.content === 'string' ? m.content : '', status: string(m.status), retryable: m.retryable === true, attachments: parseMessageAttachments(m.attachments), command: parseMessageCommand(m.command) } }), turns: data.turns.map((item) => { const t = item as Record<string, unknown>; return { turn_id: string(t.turn_id), state: string(t.state), created_at: string(t.created_at), started_at: typeof t.started_at === 'string' ? t.started_at : null, finished_at: typeof t.finished_at === 'string' ? t.finished_at : null, scheduled_by_schedule_id: typeof t.scheduled_by_schedule_id === 'string' ? t.scheduled_by_schedule_id : null } }) }
+  return { conversation_id: string(data.conversation_id), title: string(data.title), state: string(data.state), provider: string(data.provider), model_id: string(data.model_id), activities, activity_cursor: activityCursor, workspace: parseWorkspaceState(data.workspace ?? {}), context_usage: parseContextUsage(data.context_usage), messages: data.messages.map((item) => { const m = item as Record<string, unknown>; const role = string(m.role); if (role !== 'user' && role !== 'assistant') throw invalidResponseError(); return { message_id: string(m.message_id), role, content: typeof m.content === 'string' ? m.content : '', status: string(m.status), retryable: m.retryable === true, attachments: parseMessageAttachments(m.attachments), command: parseMessageCommand(m.command) } }), turns: data.turns.map((item) => { const t = item as Record<string, unknown>; return { turn_id: string(t.turn_id), state: string(t.state), created_at: string(t.created_at), started_at: typeof t.started_at === 'string' ? t.started_at : null, finished_at: typeof t.finished_at === 'string' ? t.finished_at : null, scheduled_by_schedule_id: typeof t.scheduled_by_schedule_id === 'string' ? t.scheduled_by_schedule_id : null, code_mode: t.code_mode === 'code' ? 'code' : null } }) }
 }
 
 function parseContextUsage(value: unknown): ContextUsage | null {

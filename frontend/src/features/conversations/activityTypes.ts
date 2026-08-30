@@ -53,6 +53,8 @@ export type ConversationActivityEvent = {
   pluginApproval?: PluginApprovalRequest
   occurredAt?: string
   contextUsage?: ContextUsage
+  codeStage?: string
+  codeApproval?: boolean
 }
 
 export type ContextUsage = {
@@ -155,6 +157,8 @@ export function kindFor(type: string, toolKind?: string): ActivityKind {
 }
 
 export function stateFor(type: string, status?: string, errorCode?: string | null): ActivityState {
+  if (type === 'code_mode.completed_with_caveats') return 'completed'
+  if (type === 'code_mode.blocked') return 'failed'
   if (type === 'turn.completed') return 'completed'
   if (type === 'turn.failed' || type === 'delegation.failed') {
     return errorCode === 'TURN_CANCELLED' ? 'cancelled' : 'failed'

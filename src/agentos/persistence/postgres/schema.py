@@ -577,11 +577,35 @@ conversation_turns = Table(
     Column("provider", String(32), nullable=False), Column("model_id", String(512), nullable=False), Column("state", String(32), nullable=False),
     Column("idempotency_key", String(255), nullable=False), Column("created_at", DateTime(timezone=True), nullable=False),
     Column("scheduled_by_schedule_id", String(255), nullable=True),
+    Column("code_mode", String(16), nullable=True),
     Column("started_at", DateTime(timezone=True)), Column("finished_at", DateTime(timezone=True)), Column("updated_at", DateTime(timezone=True), nullable=False),
     UniqueConstraint("user_id", "idempotency_key", name="uq_conversation_turn_idempotency"),
 )
 Index("ix_conversation_turns_conversation", conversation_turns.c.conversation_id, conversation_turns.c.created_at)
 Index("ix_conversation_turns_schedule", conversation_turns.c.scheduled_by_schedule_id, conversation_turns.c.created_at)
+
+code_mode_runs = Table(
+    "code_mode_runs", metadata,
+    Column("run_id", String(255), primary_key=True), Column("execution_id", String(255), nullable=False, unique=True),
+    Column("turn_id", String(255), nullable=False, unique=True), Column("conversation_id", String(255), nullable=False),
+    Column("user_id", String(255), nullable=False), Column("work_kind", String(32), nullable=False),
+    Column("stage", String(32), nullable=False), Column("autonomy", String(32), nullable=False),
+    Column("plan_path", String(1024), nullable=True), Column("plan_versioned", Boolean(), nullable=True),
+    Column("completion_kind", String(32), nullable=True), Column("caveats", Text(), nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False), Column("updated_at", DateTime(timezone=True), nullable=False),
+)
+Index("ix_code_mode_runs_conversation", code_mode_runs.c.conversation_id, code_mode_runs.c.created_at)
+Index("ix_code_mode_runs_execution", code_mode_runs.c.execution_id)
+
+code_mode_checks = Table(
+    "code_mode_checks", metadata,
+    Column("check_id", String(255), primary_key=True), Column("run_id", String(255), nullable=False),
+    Column("category", String(32), nullable=False), Column("label", String(512), nullable=False),
+    Column("state", String(16), nullable=False), Column("evidence_ref", String(1024), nullable=True),
+    Column("details", Text(), nullable=True), Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+)
+Index("ix_code_mode_checks_run", code_mode_checks.c.run_id, code_mode_checks.c.created_at)
 
 scheduled_chat_tasks = Table(
     "scheduled_chat_tasks", metadata,

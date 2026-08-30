@@ -4,7 +4,7 @@ import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { createBrowserApiClient } from '../../api/client'
 import {
   cancelConversation, getConversation, listConversations, sendConversationMessage, streamConversationEvents,
-  type Conversation, type ConversationMessage,
+  type CodeModeChoice, type Conversation, type ConversationMessage,
 } from '../../api/conversations'
 import { ApiError } from '../../api/errors'
 import { approveMcpServer } from '../../api/mcp'
@@ -14,6 +14,7 @@ import {
   type ProviderModel, type ProviderName, type VisionModelSetting,
 } from '../../api/providers'
 import { deleteUpload, uploadFile } from '../../api/uploads'
+import { getCodeModeSettings } from '../../api/codeMode'
 import { attachWorkspaceFolder, detachWorkspaceFolder, inspectWorkspaceFolder, type WorkspaceState } from '../../api/workspace'
 import { CommandPalette } from '../../components/CommandPalette'
 import { Brand } from '../../components/Brand'
@@ -71,6 +72,14 @@ function asProviderName(value: string): ProviderName | null {
   return PROVIDER_NAMES.includes(value as ProviderName) ? value as ProviderName : null
 }
 
+function codeModeNotification(type: string): { title: string; body: string } | null {
+  if (type === 'code_mode.completed') return { title: 'Modo Code concluído', body: 'A entrega foi validada e está pronta para sua revisão.' }
+  if (type === 'code_mode.completed_with_caveats') return { title: 'Modo Code concluído com ressalvas', body: 'A entrega está pronta, mas há uma limitação documentada.' }
+  if (type === 'code_mode.blocked') return { title: 'Modo Code bloqueado', body: 'O Orin encontrou um bloqueio que precisa da sua decisão.' }
+  if (type === 'code_mode.decision_required') return { title: 'Decisão necessária no Modo Code', body: 'O Orin precisa da sua confirmação para continuar.' }
+  return null
+}
+
 /**
  * The conversation itself.
  *
@@ -89,6 +98,8 @@ export function ChatPage() {
   const [conversation, setConversation] = useState<Conversation | null>(null)
   const [chats, setChats] = useState<Array<{ conversation_id: string; title: string; state: string }>>([])
   const [message, setMessage] = useState('')
+  const [codeMode, setCodeMode] = useState<CodeModeChoice>('auto')
+  const [codeSystemNotifications, setCodeSystemNotifications] = useState(false)
   const { attachments, onAttach, onRemoveAttachment, canSend: attachmentsReady, readyUploadIds, reset: resetAttachments } = useComposerAttachments(client)
   const [pendingUserMessage, setPendingUserMessage] = useState<ConversationMessage | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -159,6 +170,10 @@ export function ChatPage() {
           onEvent: (event) => {
             cursorRef.current = event.cursor
             dispatch({ type: 'event', event })
+            if (codeSystemNotifications && document.visibilityState !== 'visible' && window.orinDesktop?.notifyCodeMode) {
+              const notification = codeModeNotification(event.type)
+              if (notification) void window.orinDesktop.notifyCodeMode(notification)
+            }
             const terminalState = terminalConversationState(event)
             if (terminalState) {
               setConversation((current) => current === null ? current : {
@@ -217,7 +232,15 @@ export function ChatPage() {
       controller.abort()
       if (timer !== undefined) window.clearTimeout(timer)
     }
-  }, [client, conversationId, loadAttempt, loadSnapshot])
+  }, [client, codeSystemNotifications, conversationId, loadAttempt, loadSnapshot])
+
+  useEffect(() => {
+    const controller = new AbortController()
+    void getCodeModeSettings(client, controller.signal).then((settings) => {
+      if (!controller.signal.aborted) setCodeSystemNotifications(settings.system_notifications)
+    }).catch(() => undefined)
+    return () => controller.abort()
+  }, [client])
 
   // Fetched once, best-effort: every vision-capable model this user has, and
   // the explicit override, so the composer's notice can name the model that
@@ -324,8 +347,8 @@ export function ChatPage() {
   )
 
   const sendChatMessage = useCallback(
-    (text: string, attachments: string[] = []) => sendConversationMessage(client, conversationId, text, attachments, chatSelection),
-    [chatSelection, client, conversationId],
+    (text: string, attachments: string[] = []) => sendConversationMessage(client, conversationId, text, attachments, chatSelection, codeMode),
+    [chatSelection, client, codeMode, conversationId],
   )
 
   useEffect(() => {
@@ -775,6 +798,8 @@ export function ChatPage() {
           canSend={attachmentsReady}
           notice={notice}
           commands={pluginCommands}
+          codeMode={codeMode}
+          onCodeModeChange={setCodeMode}
           settings={
             <>
               {effectiveChatProvider && <ModelPicker

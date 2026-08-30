@@ -27,6 +27,27 @@ def test_write_then_read_returns_the_content_to_the_model(toolset: AgentToolset)
     assert "step one" in outcome.content
 
 
+def test_code_mode_requires_a_successful_check_after_it_changes_code(tmp_path: Path) -> None:
+    tools = AgentToolset(ConversationWorkspace(tmp_path, "chat_code_gate"), code_mode_active=True)
+
+    tools.invoke("write_file", {"path": "src/app.py", "content": "print('ok')\n"})
+    assert tools.code_completion_gate()[0] is False
+
+    tools.invoke("run_command", {"command": "python -m pytest --version"})
+    assert tools.code_completion_gate()[0] is True
+
+
+def test_code_mode_keeps_push_and_production_publish_behind_the_right_boundaries(tmp_path: Path) -> None:
+    workspace = ConversationWorkspace(tmp_path, "chat_code_publish")
+    guarded = AgentToolset(workspace, code_mode_active=True)
+
+    assert guarded.invoke("run_command", {"command": "git push origin main"}).error_code == "CODE_PUSH_CONFIRMATION_REQUIRED"
+    assert guarded.invoke("run_command", {"command": "npm run deploy"}).error_code == "CODE_DEPLOY_CONFIRMATION_REQUIRED"
+
+    autonomous = AgentToolset(workspace, code_mode_active=True, code_mode_permits_push=True)
+    assert autonomous.invoke("run_command", {"command": "git push --dry-run"}).error_code != "CODE_PUSH_CONFIRMATION_REQUIRED"
+
+
 def test_web_search_is_absent_without_a_configured_client(toolset: AgentToolset) -> None:
     assert "web_search" not in [item.name for item in toolset.definitions()]
 

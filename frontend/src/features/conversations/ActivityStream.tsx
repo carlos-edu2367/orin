@@ -4,6 +4,7 @@ import { ActivityCard } from './ActivityCard'
 import { AgentBirth } from './AgentBirth'
 import { AgentExchange } from './AgentExchange'
 import { BrowserActivityCard } from './BrowserActivityCard'
+import { CodeModeCard } from './CodeModeCard'
 import { McpApprovalCard } from './McpApprovalCard'
 import { PluginApprovalCard } from './PluginApprovalCard'
 import { summarizeActivities } from './activitySummary'
@@ -63,7 +64,8 @@ export function renderActivityGroup(
   onPluginDecline?: (event: ConversationActivityEvent) => Promise<void>,
 ) {
   const first = group.events[0]
-  if (first.toolName === 'ask_user' && first.questions && first.turnId && onAnswer) {
+  if (first.type.startsWith('code_mode.')) return <CodeModeCard group={group} />
+  if ((first.toolName === 'ask_user' || first.codeApproval) && first.questions && first.turnId && onAnswer) {
     return <UserQuestionCard questions={first.questions} active={openQuestionTurnIds?.has(first.turnId) ?? false} onSubmit={(answers) => onAnswer(first, answers)} />
   }
   if (first.toolName === 'install_plugin' && first.pluginApproval && first.turnId && onPluginApprove && onPluginDecline) {

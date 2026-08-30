@@ -13,6 +13,13 @@ test.describe('settings shell visual states', () => {
     await expect(page).toHaveScreenshot('settings-general.png', { fullPage: true })
   })
 
+  test('Code mode controls remain legible as a focused workflow surface', async ({ page }) => {
+    await page.goto('/settings/general')
+    const section = page.getByRole('heading', { name: 'Autonomia e acompanhamento' }).locator('..').locator('..')
+    await expect(section).toBeVisible()
+    await expect(section).toHaveScreenshot('settings-code-mode.png')
+  })
+
   test('provider grid and drawer', async ({ page }) => {
     await page.goto('/settings/providers')
     await expect(page.getByRole('link', { name: /OpenAI/ })).toBeVisible()

@@ -429,6 +429,30 @@ class AgenticTurnRuntime:
                 self._life(turn, "running")
                 continue
             if (finish is not None or text_parts) and not (final_iteration and not text_parts):
+                completion_gate = getattr(self.toolset, "code_completion_gate", None)
+                gate_ok, gate_reason = (True, None)
+                if callable(completion_gate):
+                    try:
+                        gate_ok, gate_reason = completion_gate()
+                    except Exception:
+                        # A quality ledger may improve a run, but an adapter
+                        # fault must never make an otherwise valid turn hang.
+                        gate_ok, gate_reason = True, None
+                if not gate_ok:
+                    self._life(turn, "code_validation_required", reason=gate_reason)
+                    self._effect_finished(
+                        turn, provider_effect_id, state="APPLIED",
+                        result_ref=f"conversation-turn:{turn_id}:quality-gate:{iteration}",
+                        private_result={"outcome": "code_validation_required"},
+                    )
+                    if final_iteration:
+                        return self._fail(turn, "CODE_VALIDATION_REQUIRED", iteration, action_count)
+                    messages.append({
+                        "role": "user",
+                        "content": f"[Sistema do Modo Code] {gate_reason} Continue a tarefa usando ferramentas; não responda como concluída.",
+                    })
+                    self._life(turn, "running")
+                    continue
                 self._effect_finished(
                     turn, provider_effect_id, state="APPLIED",
                     result_ref=f"conversation-message:{turn['assistant_message_id']}",

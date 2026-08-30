@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { readBrowserSessionBootstrap, type BrowserSessionBootstrap } from '../api/browserSession'
 import { ApiClient, createBrowserApiClient } from '../api/client'
-import { createConversation } from '../api/conversations'
+import { createConversation, type CodeModeChoice } from '../api/conversations'
 import { listProjectSidebar } from '../api/projects'
 import { ApiError, isAuthenticationError, isCsrfAuthorizationError } from '../api/errors'
 import { PROVIDER_NAMES, listProviderModels, type ProviderModel, type ProviderName } from '../api/providers'
@@ -40,6 +40,7 @@ export function Home({ client, bootstrap }: HomeProps) {
   const session = bootstrap ?? (typeof document === 'undefined' ? { status: 'missing_csrf' as const } : readBrowserSessionBootstrap(document))
 
   const [message, setMessage] = useState('')
+  const [codeMode, setCodeMode] = useState<CodeModeChoice>('auto')
   const { attachments, onAttach, onRemoveAttachment, canSend: attachmentsReady, readyUploadIds, reset: resetAttachments } = useComposerAttachments(apiClient)
   const [provider, setProvider] = useState<ProviderName>(() => readStored(PROVIDER_STORAGE_KEY, 'openrouter') as ProviderName)
   const [models, setModels] = useState<ProviderModel[]>([])
@@ -108,6 +109,7 @@ export function Home({ client, bootstrap }: HomeProps) {
         workspace_path: workspacePath,
         workspace_acknowledged_risk: workspaceAcknowledgedRisk,
         attachments: readyUploads,
+        code_mode: codeMode,
       })
       writeStored(PROVIDER_STORAGE_KEY, provider)
       writeStored(MODEL_STORAGE_KEY, modelId)
@@ -191,6 +193,8 @@ export function Home({ client, bootstrap }: HomeProps) {
             attachments={attachments}
             onAttach={onAttach}
             onRemoveAttachment={onRemoveAttachment}
+            codeMode={codeMode}
+            onCodeModeChange={setCodeMode}
             settings={(
               <>
               <ModelPicker

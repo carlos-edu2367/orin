@@ -240,6 +240,9 @@ class AgentToolset:
         mcp_user_id: str | None = None,
         plugin_service: object | None = None,
         plugin_user_id: str | None = None,
+        code_mode_active: bool = False,
+        code_mode_permits_push: bool = False,
+        code_mode_requires_approval: bool = False,
     ) -> None:
         self.workspace = workspace
         self.memory = memory
@@ -272,6 +275,12 @@ class AgentToolset:
         self._mcp_user_id = mcp_user_id
         self._plugin_service = plugin_service
         self._plugin_user_id = plugin_user_id
+        self._code_mode_active = bool(code_mode_active)
+        self._code_mode_permits_push = bool(code_mode_permits_push)
+        self._code_mode_requires_approval = bool(code_mode_requires_approval)
+        self._code_mode_changed_paths: set[str] = set()
+        self._code_mode_checks: list[str] = []
+        self._code_mode_visual_check = False
         self._definitions: tuple[ToolDefinition, ...] | None = None
         self._by_name: dict[str, ToolDefinition] = {}
 
@@ -692,6 +701,28 @@ class AgentToolset:
             definition = self.resolve(name)
         except AgentToolError as error:
             return ToolOutcome("failed", f"Ferramenta desconhecida: {name}"[:240], str(error), {}, "UNKNOWN_TOOL")
+        if self._code_mode_requires_approval and name in {"write_file", "edit_file", "run_command"}:
+            path = str(arguments.get("path") or "")
+            if not (name == "write_file" and path.startswith(".orin/plans/")):
+                return ToolOutcome(
+                    "failed", "Aguardando aprovação do plano",
+                    "No Modo Code, registre o contrato e aguarde a aprovação do plano antes de alterar código ou executar comandos.",
+                    {"tool_kind": definition.kind, "code_mode": True}, "CODE_PLAN_APPROVAL_REQUIRED",
+                )
+        if self._code_mode_active and name == "run_command":
+            command = str(arguments.get("command") or "")
+            if re.search(r"\b(deploy|release|publish)\b", command, re.IGNORECASE):
+                return ToolOutcome(
+                    "failed", "Confirmação necessária para produção",
+                    "Deploy, publicação e release em produção sempre exigem confirmação explícita da pessoa.",
+                    {"tool_kind": definition.kind, "code_mode": True}, "CODE_DEPLOY_CONFIRMATION_REQUIRED",
+                )
+            if not self._code_mode_permits_push and re.search(r"\b(?:git\s+push|gh\s+(?:pr|repo)\b)", command, re.IGNORECASE):
+                return ToolOutcome(
+                    "failed", "Confirmação necessária para publicar",
+                    "Commits locais são permitidos; push e pull request precisam de confirmação ou da preferência Autonomia total.",
+                    {"tool_kind": definition.kind, "code_mode": True}, "CODE_PUSH_CONFIRMATION_REQUIRED",
+                )
         try:
             result = definition.handler(**dict(arguments))
         except (AgentToolError, WorkspaceError) as error:
@@ -703,7 +734,9 @@ class AgentToolset:
             message = f"{type(error).__name__}: {error}"
             return ToolOutcome("failed", f"{name} falhou", message[:MAX_TOOL_RESULT_CHARS], {"tool_kind": definition.kind}, "TOOL_FAILED")
         if isinstance(result, ToolOutcome):
-            return self._finalize_outcome(result, definition.kind)
+            outcome = self._finalize_outcome(result, definition.kind)
+            self._observe_code_mode_outcome(name, arguments, outcome)
+            return outcome
         content, truncated = _bounded(str(result.get("content", "")))
         payload = dict(result.get("payload") or {})
         payload.setdefault("tool_kind", definition.kind)
@@ -719,7 +752,48 @@ class AgentToolset:
             content, _ = _bounded(content, MAX_TOOL_RESULT_CHARS - len(notice))
             content += notice
         images = [dict(item) for item in (result.get("images") or ()) if isinstance(item, Mapping)]
-        return ToolOutcome("succeeded", str(result.get("summary", f"{name} concluído"))[:240], content, payload, images=images)
+        outcome = ToolOutcome("succeeded", str(result.get("summary", f"{name} concluído"))[:240], content, payload, images=images)
+        self._observe_code_mode_outcome(name, arguments, outcome)
+        return outcome
+
+    def _observe_code_mode_outcome(self, name: str, arguments: Mapping[str, Any], outcome: ToolOutcome) -> None:
+        """Keep validation evidence at the trusted tool boundary."""
+        if not self._code_mode_active or outcome.status != "succeeded":
+            return
+        payload = outcome.payload or {}
+        if name in {"write_file", "edit_file"}:
+            path = str(payload.get("path") or arguments.get("path") or "").replace("\\", "/")
+            if path and not path.startswith(".orin/plans/"):
+                self._code_mode_changed_paths.add(path)
+            return
+        if name in {"browse_page", "browser_observe", "browser_screenshot"}:
+            self._code_mode_visual_check = True
+            return
+        if name != "run_command" or bool(payload.get("failed")):
+            return
+        artifacts = payload.get("artifacts")
+        if isinstance(artifacts, list):
+            for artifact in artifacts:
+                if isinstance(artifact, Mapping) and isinstance(artifact.get("path"), str):
+                    path = str(artifact["path"]).replace("\\", "/")
+                    if not path.startswith(".orin/plans/"):
+                        self._code_mode_changed_paths.add(path)
+        command = str(payload.get("command") or arguments.get("command") or "").lower()
+        if re.search(r"\b(pytest|vitest|jest|playwright|cypress|eslint|ruff|mypy|pyright|tsc|typecheck|lint|test|build)\b", command):
+            self._code_mode_checks.append(command[:160])
+        if re.search(r"\b(playwright|cypress|test:e2e|test:visual)\b", command):
+            self._code_mode_visual_check = True
+
+    def code_completion_gate(self) -> tuple[bool, str | None]:
+        """Require actual checks after implementation changes before delivery."""
+        if not self._code_mode_active or not self._code_mode_changed_paths:
+            return True, None
+        if not self._code_mode_checks:
+            return False, "Você alterou código, mas ainda não executou uma verificação bem-sucedida. Rode os testes, lint, typecheck ou build apropriados antes de concluir."
+        frontend_suffixes = (".tsx", ".ts", ".jsx", ".js", ".css", ".scss", ".html", ".vue", ".svelte")
+        if any(path.lower().endswith(frontend_suffixes) for path in self._code_mode_changed_paths) and not self._code_mode_visual_check:
+            return False, "Você alterou o frontend. Faça uma verificação visual no navegador ou execute uma validação Playwright/Cypress bem-sucedida antes de concluir."
+        return True, None
 
     @staticmethod
     def _finalize_outcome(outcome: ToolOutcome, kind: str) -> ToolOutcome:
@@ -760,10 +834,25 @@ class AgentToolset:
         except ContractError as error:
             return ToolOutcome("failed", "Contrato incompleto", str(error), {"tool_kind": "planning"}, "INVALID_CONTRACT")
         rendered = contract.render()
+        payload: dict[str, Any] = {"tool_kind": "planning", "contract": contract.as_payload()}
+        if self._code_mode_requires_approval:
+            payload.update({
+                "wait_for_user": True,
+                "code_approval": True,
+                "questions": [{
+                    "id": "code_plan", "question": "Aprovar este plano do Modo Code para iniciar a implementação?",
+                    "mode": "single_choice",
+                    "options": [
+                        {"id": "approve", "label": "Aprovar plano"},
+                        {"id": "adjust", "label": "Pedir ajustes"},
+                        {"id": "cancel", "label": "Cancelar"},
+                    ],
+                }],
+            })
         return ToolOutcome(
             "succeeded", f"Contrato definido: {contract.objective[:180]}",
             f"Contrato registrado. Ele permanece visível durante toda a tarefa.\n\n{rendered}",
-            {"tool_kind": "planning", "contract": contract.as_payload()},
+            payload,
         )
 
     def ask_user(self, questions: list[Mapping[str, Any]]) -> ToolOutcome:
