@@ -9,7 +9,10 @@ export default defineConfig({
   // contend for the same Vite process; serialize this small suite instead of
   // inflating assertion timeouts.
   workers: 1,
-  retries: 0,
+  // Windows hosted runners can transiently exhaust Chromium's socket buffers
+  // while Vite emits harmless proxy failures for mocked API calls. A single CI
+  // retry distinguishes that runner condition from a reproducible product bug.
+  retries: processEnv.CI ? 1 : 0,
   use: {
     baseURL: 'http://127.0.0.1:4173',
     trace: 'retain-on-failure',
