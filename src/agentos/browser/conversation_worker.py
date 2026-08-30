@@ -273,14 +273,14 @@ def _launch_failure_message(error: Exception) -> str:
 def _policy_for(capability: str) -> NetworkPolicy:
     """The network policy for this session's capability level.
 
-    The conversation browser may also render loopback-only development
-    servers. This is deliberately narrower than private-network access: LAN,
-    link-local, metadata and reserved addresses remain blocked. ``full``
-    additionally widens public destinations to HTTP and non-standard ports.
+    ``full`` widens public destinations to HTTP and non-standard ports. It
+    does not turn the browser into a private-network proxy: loopback, LAN,
+    link-local, metadata and reserved addresses remain blocked at every
+    capability level.
     """
     if capability == "full":
-        return NetworkPolicy(allowed_schemes=("http", "https"), allowed_ports=(), allow_subresources=True, allow_loopback=True)
-    return NetworkPolicy(allow_subresources=True, allow_loopback=True)
+        return NetworkPolicy(allowed_schemes=("http", "https"), allowed_ports=(), allow_subresources=True)
+    return NetworkPolicy(allow_subresources=True)
 
 
 def _host(connection: Connection, capability: str = "interact") -> None:

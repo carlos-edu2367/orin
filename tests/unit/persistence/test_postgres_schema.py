@@ -36,6 +36,8 @@ def test_persistence_schema_contains_only_the_durable_boundary_tables():
             "conversation_message_commands",
             "conversation_hook_context",
             "conversation_turns",
+            "code_mode_runs",
+            "code_mode_checks",
             "conversation_dispatches",
             "execution_checkpoints",
             "execution_effects",
@@ -76,6 +78,16 @@ def test_schema_has_ownership_versions_and_integrity_constraints():
     assert idempotency.c.correlation_id.nullable is False
     assert idempotency.c.records.nullable is False
     assert any(constraint.name == "ck_persistence_idempotency_revision_nonnegative" for constraint in idempotency.constraints)
+
+
+def test_schema_keeps_code_mode_runs_and_validation_evidence_durable():
+    turns = metadata.tables["conversation_turns"]
+    runs = metadata.tables["code_mode_runs"]
+    checks = metadata.tables["code_mode_checks"]
+
+    assert "code_mode" in turns.c
+    assert {"run_id", "execution_id", "turn_id", "stage", "autonomy", "plan_path", "completion_kind", "caveats"} <= set(runs.c.keys())
+    assert {"check_id", "run_id", "category", "label", "state", "evidence_ref", "details"} <= set(checks.c.keys())
 
 
 def test_schema_binds_audit_and_outbox_to_the_full_record_scope():
