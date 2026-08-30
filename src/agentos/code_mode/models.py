@@ -74,13 +74,20 @@ class CodeModeSettings:
 _CODE_PATTERN = re.compile(
     r"\b(implemente|implement|corrija|conserte|refator|crie\s+(?:uma\s+)?(?:api|tela|feature|teste)|"
     r"bug|erro|falha|teste|testes|frontend|backend|c[oó]digo|code|typescript|python|react|api|endpoint|"
-    r"build|deploy|commit|pull request|pr)\b",
+    r"build|deploy|commit|pull request|pr|git\s+push)\b",
     re.IGNORECASE,
 )
 _REVIEW_PATTERN = re.compile(r"\b(revise|review|audite|audit)\b", re.IGNORECASE)
 _INVESTIGATION_PATTERN = re.compile(r"\b(investigue|diagnostique|descubra\s+por que|why .*fail)\b", re.IGNORECASE)
 _REFACTOR_PATTERN = re.compile(r"\b(refator\w*|refactor\w*)", re.IGNORECASE)
 _BUGFIX_PATTERN = re.compile(r"\b(corrija|conserte|bug|erro|falha|fix)\b", re.IGNORECASE)
+_PUSH_NEGATION_PATTERN = re.compile(r"\b(?:n[aã]o|sem|bloque(?:ie|ar))\b.{0,48}\bgit\s+push\b|\bgit\s+push\b.{0,48}\b(?:n[aã]o|sem|bloque(?:ie|ar))\b", re.IGNORECASE)
+_PUSH_AUTHORIZATION_PATTERN = re.compile(
+    r"\b(?:pode|autoriz(?:o|e|ado|ada|ar)|permit(?:o|a|ido|ida|ir)|liber(?:o|e|ado|ada|ar)|"
+    r"fa[çc]a|execute|rode|mande|realize|prossiga|continue|can|may|please)\b.{0,80}\bgit\s+push\b|"
+    r"\bgit\s+push\b.{0,80}\b(?:autoriz(?:ado|ada)|permit(?:ido|ida)|liber(?:ado|ada)|pode)\b",
+    re.IGNORECASE,
+)
 
 
 def detect_code_request(message: str) -> CodeWorkKind | None:
@@ -96,3 +103,17 @@ def detect_code_request(message: str) -> CodeWorkKind | None:
     if _BUGFIX_PATTERN.search(message):
         return CodeWorkKind.BUGFIX
     return CodeWorkKind.IMPLEMENTATION
+
+
+def explicitly_authorizes_git_push(message: str) -> bool:
+    """Return true only for a direct, affirmative authorization to push.
+
+    This is intentionally narrower than generic Code autonomy: a person can
+    authorize the concrete ``git push`` they named without also authorizing a
+    pull request, deploy, or release.
+    """
+    if not isinstance(message, str) or not re.search(r"\bgit\s+push\b", message, re.IGNORECASE):
+        return False
+    if _PUSH_NEGATION_PATTERN.search(message):
+        return False
+    return _PUSH_AUTHORIZATION_PATTERN.search(message) is not None

@@ -895,7 +895,7 @@ class TurnSession:
 
     # -- runtime --------------------------------------------------------
 
-    def _toolset(self, *, subagents: bool, browser_agent_key: str | None = None, code_mode_active: bool = False, code_mode_permits_push: bool = False, code_mode_requires_approval: bool = False) -> AgentToolset:
+    def _toolset(self, *, subagents: bool, browser_agent_key: str | None = None, code_mode_active: bool = False, code_mode_permits_push: bool = False, code_mode_permits_pr: bool = False, code_mode_requires_approval: bool = False) -> AgentToolset:
         # Scoping the browser to one agent_key gives that agent its own tab
         # on the host (see AgentBrowserView / _AgentPageState) so concurrent
         # subagents never fight over one shared page.
@@ -926,6 +926,7 @@ class TurnSession:
             plugin_user_id=str(self.turn.get("user_id") or "") or None,
             code_mode_active=code_mode_active,
             code_mode_permits_push=code_mode_permits_push,
+            code_mode_permits_pr=code_mode_permits_pr,
             code_mode_requires_approval=code_mode_requires_approval,
         )
 
@@ -986,7 +987,11 @@ class TurnSession:
         toolset = self._toolset(
             subagents=self.enable_subagents,
             code_mode_active=self.turn.get("code_mode") == "code",
-            code_mode_permits_push=str(self.turn.get("code_mode_autonomy") or "") == "full_autonomy",
+            code_mode_permits_push=(
+                str(self.turn.get("code_mode_autonomy") or "") == "full_autonomy"
+                or bool(self.turn.get("code_mode_push_authorized"))
+            ),
+            code_mode_permits_pr=str(self.turn.get("code_mode_autonomy") or "") == "full_autonomy",
             code_mode_requires_approval=code_requires_approval,
         )
         memories = self.memory.recent(limit=12) if self.memory is not None else []
@@ -1025,6 +1030,7 @@ class TurnSession:
                 work_kind=str(self.turn.get("code_mode_work_kind") or "implementation"),
                 autonomy=str(self.turn.get("code_mode_autonomy") or "approval_required"),
                 plan_path=plan_path,
+                permits_push=bool(self.turn.get("code_mode_push_authorized")),
             )
         skill_catalog = self._skill_catalog(task, toolset)
         prompt, volatile_prompt = build_system_prompt(

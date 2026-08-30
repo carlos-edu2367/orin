@@ -122,6 +122,20 @@ describe('activity grouping', () => {
     expect(groups).toEqual([])
   })
 
+  it('keeps one stable Code mode card while lifecycle events update its state', () => {
+    const groups = summarizeActivities([
+      event({ type: 'code_mode.activated', turnId: 'turn-code', codeStage: 'planning', summary: 'Modo Code ativado' }),
+      event({ type: 'tool.finished', turnId: 'turn-code', toolName: 'write_file', toolKind: 'filesystem', invocationId: 'plan', status: 'succeeded', summary: 'Plano salvo' }),
+      event({ type: 'code_mode.plan_ready', turnId: 'turn-code', codeStage: 'planning', summary: 'Plano pronto' }),
+      event({ type: 'code_mode.validation_started', turnId: 'turn-code', codeStage: 'validating', summary: 'Executando validação' }),
+    ])
+
+    const codeGroups = groups.filter((group) => group.id === 'code-mode:turn-code')
+    expect(codeGroups).toHaveLength(1)
+    expect(codeGroups[0]).toMatchObject({ count: 3, state: 'working', label: 'Executando validação' })
+    expect(codeGroups[0].events.map((item) => item.codeStage)).toEqual(['planning', 'planning', 'validating'])
+  })
+
   it('does not render a redundant waiting-for-you line next to the ask_user card', () => {
     const groups = summarizeActivities([
       event({ type: 'tool.started', toolName: 'ask_user', toolKind: 'user_input', invocationId: 'call-1', summary: 'Perguntou ao usuário', questions: [{ id: 'q1', question: 'Prints?', mode: 'text', options: [] }] }),

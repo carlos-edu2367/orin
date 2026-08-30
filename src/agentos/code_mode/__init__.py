@@ -7,10 +7,11 @@ from .models import (
     CodeStage,
     CodeWorkKind,
     detect_code_request,
+    explicitly_authorizes_git_push,
 )
 from .prompt import code_mode_instructions
 
 __all__ = [
     "CodeAutonomy", "CodeCompletionKind", "CodeModeSettings", "CodeStage",
-    "CodeWorkKind", "code_mode_instructions", "detect_code_request",
+    "CodeWorkKind", "code_mode_instructions", "detect_code_request", "explicitly_authorizes_git_push",
 ]

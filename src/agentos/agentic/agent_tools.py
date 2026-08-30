@@ -242,6 +242,7 @@ class AgentToolset:
         plugin_user_id: str | None = None,
         code_mode_active: bool = False,
         code_mode_permits_push: bool = False,
+        code_mode_permits_pr: bool = False,
         code_mode_requires_approval: bool = False,
     ) -> None:
         self.workspace = workspace
@@ -277,6 +278,7 @@ class AgentToolset:
         self._plugin_user_id = plugin_user_id
         self._code_mode_active = bool(code_mode_active)
         self._code_mode_permits_push = bool(code_mode_permits_push)
+        self._code_mode_permits_pr = bool(code_mode_permits_pr)
         self._code_mode_requires_approval = bool(code_mode_requires_approval)
         self._code_mode_changed_paths: set[str] = set()
         self._code_mode_checks: list[str] = []
@@ -717,10 +719,16 @@ class AgentToolset:
                     "Deploy, publicação e release em produção sempre exigem confirmação explícita da pessoa.",
                     {"tool_kind": definition.kind, "code_mode": True}, "CODE_DEPLOY_CONFIRMATION_REQUIRED",
                 )
-            if not self._code_mode_permits_push and re.search(r"\b(?:git\s+push|gh\s+(?:pr|repo)\b)", command, re.IGNORECASE):
+            if re.search(r"\bgit\s+push\b", command, re.IGNORECASE) and not self._code_mode_permits_push:
                 return ToolOutcome(
                     "failed", "Confirmação necessária para publicar",
-                    "Commits locais são permitidos; push e pull request precisam de confirmação ou da preferência Autonomia total.",
+                    "Commits locais são permitidos; git push precisa de confirmação explícita ou da preferência Autonomia total.",
+                    {"tool_kind": definition.kind, "code_mode": True}, "CODE_PUSH_CONFIRMATION_REQUIRED",
+                )
+            if re.search(r"\bgh\s+(?:pr|repo)\b", command, re.IGNORECASE) and not self._code_mode_permits_pr:
+                return ToolOutcome(
+                    "failed", "Confirmação necessária para publicar",
+                    "Commits locais são permitidos; pull request precisa de confirmação ou da preferência Autonomia total.",
                     {"tool_kind": definition.kind, "code_mode": True}, "CODE_PUSH_CONFIRMATION_REQUIRED",
                 )
         try:

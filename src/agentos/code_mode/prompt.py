@@ -4,18 +4,19 @@ from __future__ import annotations
 from .models import CodeAutonomy, CodeWorkKind
 
 
-def code_mode_instructions(*, work_kind: str, autonomy: str, plan_path: str | None = None) -> str:
+def code_mode_instructions(*, work_kind: str, autonomy: str, plan_path: str | None = None, permits_push: bool = False) -> str:
     kind = CodeWorkKind(work_kind)
     level = CodeAutonomy(autonomy)
     approval = "Você já tem autonomia de código para este turno." if level is not CodeAutonomy.APPROVAL_REQUIRED else (
         "Antes de qualquer escrita, crie um contrato claro e use `ask_user` para aprovar o plano. "
         "Não escreva arquivos, rode comandos mutáveis nem faça commit antes da resposta."
     )
-    external = (
-        "Push, PR e deploy não precisam de nova confirmação neste turno, exceto deploy em produção, que sempre exige `ask_user`."
-        if level is CodeAutonomy.FULL_AUTONOMY
-        else "Push, PR e qualquer deploy exigem `ask_user`; deploy em produção sempre exige `ask_user`."
-    )
+    if level is CodeAutonomy.FULL_AUTONOMY:
+        external = "Push e PR não precisam de nova confirmação neste turno; deploy em produção sempre exige `ask_user`."
+    elif permits_push:
+        external = "A pessoa autorizou explicitamente `git push` neste turno. Execute apenas esse push; pull request e qualquer deploy continuam exigindo `ask_user`."
+    else:
+        external = "Push, PR e qualquer deploy exigem `ask_user`; deploy em produção sempre exige `ask_user`."
     investigation = (
         "Esta é uma investigação: reproduza e mostre evidências; não altere código ou faça commit sem uma aprovação posterior para a correção."
         if kind is CodeWorkKind.INVESTIGATION else

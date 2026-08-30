@@ -11,12 +11,23 @@ import type { ActivityGroup, ActivityState, ConversationActivityEvent } from './
  */
 export function summarizeActivities(events: ConversationActivityEvent[]): ActivityGroup[] {
   const groups: ActivityGroup[] = []
+  const renderedCodeRuns = new Set<string>()
   const settled = new Set(
     events.filter((event) => event.type === 'tool.finished' && event.invocationId).map((event) => event.invocationId as string),
   )
 
   for (const event of events) {
     if (!isRenderable(event, settled)) continue
+    if (isCodeModeEvent(event)) {
+      const key = codeModeRunKey(event)
+      // A Code execution is one durable workflow. Its card keeps the first
+      // position in the transcript and receives later events as state updates
+      // instead of adding a second card for every lifecycle transition.
+      if (renderedCodeRuns.has(key)) continue
+      renderedCodeRuns.add(key)
+      groups.push(codeModeRunGroup(events, event))
+      continue
+    }
     const key = groupingKey(event)
     const previous = groups[groups.length - 1]
     if (previous && previous.id === key && previous.kind === event.kind) {
@@ -42,6 +53,32 @@ export function summarizeActivities(events: ConversationActivityEvent[]): Activi
     groups.push(group)
   }
   return groups
+}
+
+export function isCodeModeEvent(event: ConversationActivityEvent): boolean {
+  return event.type.startsWith('code_mode.')
+}
+
+export function codeModeRunKey(event: ConversationActivityEvent): string {
+  return `code-mode:${event.turnId ?? event.agentId}`
+}
+
+/** Aggregate all lifecycle events from one Code execution into its stable card. */
+export function codeModeRunGroup(events: ConversationActivityEvent[], anchor: ConversationActivityEvent): ActivityGroup {
+  const id = codeModeRunKey(anchor)
+  const runEvents = events.filter((event) => isCodeModeEvent(event) && codeModeRunKey(event) === id)
+  const latest = runEvents.at(-1) ?? anchor
+  return {
+    id,
+    kind: 'lifecycle',
+    state: latest.state,
+    label: latest.summary || 'Modo Code',
+    count: runEvents.length,
+    events: runEvents,
+    agentId: anchor.agentId,
+    agentName: anchor.agentName,
+    failed: runEvents.some((event) => event.state === 'failed'),
+  }
 }
 
 export function isRenderable(event: ConversationActivityEvent, settled: Set<string>): boolean {

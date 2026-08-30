@@ -24,7 +24,7 @@ from agentos.provider_catalog.omniroute import DEFAULT_OMNIROUTE_BASE_URL, norma
 from agentos.agentic.runtime import AgenticLimits, AgenticRunResult, AgenticTurnRuntime
 from agentos.agentic.settings import AgentRuntimeSettingsStore
 from agentos.agentic.events import AgentActivityEventType
-from agentos.code_mode.models import CodeStage
+from agentos.code_mode.models import CodeStage, explicitly_authorizes_git_push
 from agentos.agentic.transcript import REHYDRATION_BUDGET_FRACTION
 from agentos.agentic.session import TurnSession, build_retrieval_for_turn, resolve_effective_workspace_id
 from agentos.agentic.browser_tools import ConversationBrowserRegistry, browser_capability_from_environment, conversation_browser_for
@@ -960,6 +960,9 @@ class ChatWorker:
                 if run is None:
                     return turn
                 policy = self._runtime_settings.get_code_mode(str(turn["user_id"]))
+                history = self.store.history_for_turn(turn)
+                request_text = next((str(item.get("content") or "") for item in reversed(history) if item.get("role") == "user"), "")
+                push_authorized = explicitly_authorizes_git_push(request_text)
                 connection.execute(update(code_mode_runs).where(code_mode_runs.c.run_id == run["run_id"]).values(
                     autonomy=policy.autonomy.value, stage=CodeStage.PLANNING.value,
                     plan_path=f".orin/plans/{turn['turn_id']}-plan.md", updated_at=datetime.now(UTC),
@@ -968,11 +971,12 @@ class ChatWorker:
             enriched.update({
                 "code_mode_work_kind": str(run["work_kind"]),
                 "code_mode_autonomy": policy.autonomy.value,
+                "code_mode_push_authorized": push_authorized,
                 "code_mode_plan_path": f".orin/plans/{turn['turn_id']}-plan.md",
             })
             self.store._activity(enriched, AgentActivityEventType.CODE_MODE_STAGE_CHANGED, "Planejando entrega de código", {
                 "stage": CodeStage.PLANNING.value, "work_kind": str(run["work_kind"]),
-                "autonomy": policy.autonomy.value,
+                "autonomy": policy.autonomy.value, "push_authorized": push_authorized,
             })
             return enriched
         except Exception:

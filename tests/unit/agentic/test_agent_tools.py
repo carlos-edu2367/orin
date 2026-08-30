@@ -46,6 +46,10 @@ def test_code_mode_keeps_push_and_production_publish_behind_the_right_boundaries
 
     autonomous = AgentToolset(workspace, code_mode_active=True, code_mode_permits_push=True)
     assert autonomous.invoke("run_command", {"command": "git push --dry-run"}).error_code != "CODE_PUSH_CONFIRMATION_REQUIRED"
+    assert autonomous.invoke("run_command", {"command": "gh pr create --fill"}).error_code == "CODE_PUSH_CONFIRMATION_REQUIRED"
+
+    full_autonomy = AgentToolset(workspace, code_mode_active=True, code_mode_permits_push=True, code_mode_permits_pr=True)
+    assert full_autonomy.invoke("run_command", {"command": "gh pr create --fill"}).error_code != "CODE_PUSH_CONFIRMATION_REQUIRED"
 
 
 def test_web_search_is_absent_without_a_configured_client(toolset: AgentToolset) -> None:

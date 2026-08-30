@@ -51,6 +51,20 @@ describe('buildTurnTimeline', () => {
     if (timeline[2].kind === 'activity') expect(timeline[2].group.count).toBe(1)
   })
 
+  it('pins one Code mode card at its first event while later stages update it', () => {
+    const events = [
+      event({ type: 'code_mode.activated', codeStage: 'planning', summary: 'Modo Code ativado' }),
+      event({ type: 'tool.finished', toolName: 'write_file', toolKind: 'filesystem', invocationId: 'plan', status: 'succeeded', summary: 'Plano salvo' }),
+      event({ type: 'code_mode.plan_ready', codeStage: 'planning', summary: 'Plano pronto' }),
+      event({ type: 'code_mode.validation_started', codeStage: 'validating', summary: 'Executando validação' }),
+    ]
+
+    const timeline = buildTurnTimeline(events, 'turn-1', 'msg-1')
+    const codeItems = timeline.filter((item) => item.kind === 'activity' && item.group.id === 'code-mode:turn-1')
+    expect(codeItems).toHaveLength(1)
+    if (codeItems[0]?.kind === 'activity') expect(codeItems[0].group.events.at(-1)?.codeStage).toBe('validating')
+  })
+
   it('ignores events from other turns', () => {
     const events = [
       event({ type: 'assistant.delta', messageId: 'msg-1', content: 'Deste turno.' }),

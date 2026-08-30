@@ -1,5 +1,5 @@
 import type { ActivityGroup, ConversationActivityEvent } from './activityTypes'
-import { groupLabel, groupingKey, isRenderable } from './activitySummary'
+import { codeModeRunGroup, codeModeRunKey, groupLabel, groupingKey, isCodeModeEvent, isRenderable } from './activitySummary'
 
 export type TimelineTextItem = { id: string; kind: 'text'; content: string }
 export type TimelineActivityItem = { id: string; kind: 'activity'; group: ActivityGroup }
@@ -31,6 +31,7 @@ export function buildTurnTimeline(events: ConversationActivityEvent[], turnId: s
   let textBuffer = ''
   let textId = ''
   let group: ActivityGroup | null = null
+  const renderedCodeRuns = new Set<string>()
 
   const flushGroup = () => {
     if (!group) return
@@ -51,6 +52,15 @@ export function buildTurnTimeline(events: ConversationActivityEvent[], turnId: s
       if (!event.content) continue
       if (!textBuffer) textId = `text:${event.eventId}`
       textBuffer += event.content
+      continue
+    }
+    if (isCodeModeEvent(event)) {
+      const key = codeModeRunKey(event)
+      if (renderedCodeRuns.has(key)) continue
+      renderedCodeRuns.add(key)
+      flushText()
+      flushGroup()
+      items.push({ id: key, kind: 'activity', group: codeModeRunGroup(turnEvents, event) })
       continue
     }
     if (!isRenderable(event, settled)) continue
