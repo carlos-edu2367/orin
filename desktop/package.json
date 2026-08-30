@@ -1,7 +1,7 @@
 {
   "name": "orin-desktop",
   "private": true,
-  "version": "0.2.15",
+  "version": "0.2.16",
   "author": "Carlos Eduardo",
   "description": "Electron host for the Orin local application",
   "main": "electron/main.cjs",

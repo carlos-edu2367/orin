@@ -920,6 +920,7 @@ class AgenticTurnRuntime:
             return ToolOutcome("failed", "Chamada repetida ignorada", content, {}, "DUPLICATE_TOOL_CALL")
 
         is_read_only = getattr(self.toolset, "is_read_only", None)
+        is_mutating = getattr(self.toolset, "is_mutating", None)
 
         def cached_read(name: str, arguments: Mapping[str, object]) -> ToolOutcome | None:
             """The earlier result of this exact read, if nothing can have changed it.
@@ -971,7 +972,11 @@ class AgenticTurnRuntime:
                 request_ref=f"conversation-turn:{turn['turn_id']}:tool:{call_id}",
             )
             read_only = bool(callable(is_read_only) and is_read_only(name))
-            if not read_only:
+            # Older toolset adapters only expose is_read_only. Preserve their
+            # conservative behaviour, while native toolsets distinguish
+            # coordination/planning tools from calls that can mutate state.
+            mutating = bool(is_mutating(name)) if callable(is_mutating) else not read_only
+            if mutating:
                 # Counted before the call, not after: a write that fails may
                 # still have changed something, so a later read must not be
                 # served from a result taken before it.
@@ -984,10 +989,12 @@ class AgenticTurnRuntime:
             if read_only and outcome.status == "succeeded":
                 self._succeeded_reads[self._signature(name, arguments)] = (outcome.content, self._writes)
             state = "APPLIED" if outcome.status == "succeeded" else "NOT_APPLIED"
-            # A write-capable tool can fail after an external system accepted
-            # part of the work.  Its adapter did not provide a receipt, so it
-            # is intentionally held for reconciliation instead of retried.
-            if outcome.status != "succeeded" and not (callable(is_read_only) and is_read_only(name)):
+            # A mutating tool can fail after an external system accepted part
+            # of the work. Its adapter did not provide a receipt, so it is
+            # intentionally held for reconciliation instead of retried.
+            # Validation failures from planning and coordination tools do not
+            # cross that boundary and must be returned to the model to fix.
+            if outcome.status != "succeeded" and mutating:
                 state = "UNKNOWN"
             self._effect_finished(
                 turn, effect_id, state=state,

@@ -776,6 +776,66 @@ def test_an_identical_failing_call_is_not_executed_twice() -> None:
     assert toolset.invocations == 1
 
 
+def test_a_rejected_planning_tool_does_not_pause_for_effect_reconciliation() -> None:
+    class ContractProvider:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def stream(self, request):
+            self.calls += 1
+            if self.calls == 1:
+                return normalize_sse(
+                    [
+                        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"contract-1","function":{"name":"write_contract","arguments":"{\\"objective\\":\\"build it\\"}"}}]},"finish_reason":"tool_calls"}]}',
+                        "data: [DONE]",
+                    ],
+                    provider="openrouter",
+                )
+            return normalize_sse(
+                ['data: {"choices":[{"delta":{"content":"I corrected the contract and continued."},"finish_reason":"stop"}]}', "data: [DONE]"],
+                provider="openrouter",
+            )
+
+    class PlanningToolset:
+        def schemas(self):
+            return []
+
+        def is_read_only(self, name: str) -> bool:
+            return False
+
+        def is_mutating(self, name: str) -> bool:
+            return False
+
+        def invoke(self, name, arguments):
+            assert name == "write_contract"
+            return ToolOutcome("failed", "Contrato incompleto", "acceptance is required", {}, "INVALID_CONTRACT")
+
+    class EffectStore(Store):
+        def __init__(self) -> None:
+            super().__init__()
+            self.effects: list[tuple[str, str | None]] = []
+
+        def effect_started(self, turn, *, kind, invocation_ref, request_ref):
+            return invocation_ref
+
+        def effect_finished(self, turn, *, effect_id, state, result_ref=None, error_code=None, private_result=None):
+            self.effects.append((state, error_code))
+
+    store = EffectStore()
+    runtime = AgenticTurnRuntime(
+        store=store,
+        provider=ContractProvider(),
+        toolset=PlanningToolset(),
+        reconciliation_required=lambda _turn: any(state == "UNKNOWN" for state, _ in store.effects),
+    )
+
+    result = runtime.run("turn-1")
+
+    assert result.state == "completed"
+    assert ("NOT_APPLIED", "INVALID_CONTRACT") in store.effects
+    assert ("UNKNOWN", "INVALID_CONTRACT") not in store.effects
+
+
 def test_a_final_iteration_with_only_tool_calls_and_no_text_still_fails_with_iteration_limit() -> None:
     """The provider may ignore tool_choice="none" and request tools anyway.
 

@@ -661,6 +661,19 @@ class AgentToolset:
         except AgentToolError:
             return False
 
+    def is_mutating(self, name: str) -> bool:
+        """Whether a failed call could have changed an external effect.
+
+        A tool can be neither read-only nor mutating: planning and user-input
+        tools, for example, coordinate the turn without changing a workspace
+        or an external system. Their validation failures are safe for the
+        model to correct in the same turn.
+        """
+        try:
+            return "mutates" in self.resolve(name).policy_tags
+        except AgentToolError:
+            return False
+
     def argument_names(self, name: str) -> frozenset[str] | None:
         """The argument names a tool declares, or None when the tool is unknown."""
         try:
