@@ -134,6 +134,7 @@ def test_cancel_transitions_the_canonical_execution_before_the_chat_projection()
     result = application.cancel(receipt.conversation_id, "user-1")
 
     assert result["cancelling"] == [receipt.turn_id]
+    assert store.get(receipt.conversation_id, "user-1")["state"] == "cancelled"
     execution = ExecutionQueryAdapter(store._engine).get({
         "resource_id": PostgresChatStore.execution_id_for(receipt.turn_id),
         "user_id": "user-1", "purpose": "execution.read",

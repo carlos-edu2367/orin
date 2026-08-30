@@ -656,6 +656,19 @@ def test_fetch_url_refuses_private_addresses(toolset: AgentToolset) -> None:
         assert outcome.status == "failed", target
 
 
+def test_rendered_browser_allows_loopback_dev_servers(toolset: AgentToolset) -> None:
+    class Browser:
+        def navigate(self, url: str):
+            return {"url": url, "title": "Vite", "html": "<h1>Local app</h1>"}
+
+    toolset._browser = Browser()
+
+    outcome = toolset.invoke("browse_page", {"url": "http://localhost:5173/"})
+
+    assert outcome.status == "succeeded"
+    assert "Local app" in outcome.content
+
+
 def test_fetch_url_returns_readable_text(tmp_path: Path) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, html="<html><head><title>Doc</title></head><body><script>x=1</script><p>Hello world</p></body></html>")

@@ -13,6 +13,17 @@ def test_network_is_denied_by_default_and_rejects_unsafe_schemes_and_hosts() -> 
             validate_url(url, policy)
 
 
+def test_loopback_requires_an_explicit_policy_opt_in() -> None:
+    policy = NetworkPolicy(
+        allow_loopback=True,
+        resolver=lambda host: ("127.0.0.1",) if host == "localhost" else ("192.168.1.7",),
+    )
+
+    assert validate_url("http://localhost:5173/", policy) == "http://localhost:5173/"
+    with pytest.raises(NetworkPolicyError):
+        validate_url("http://lan.example/", policy)
+
+
 def test_allowlist_and_port_are_enforced() -> None:
     policy = NetworkPolicy(allowed_hosts=("example.com",), allowed_schemes=("https",), allowed_ports=(443,))
     validate_url("https://example.com/path", policy)

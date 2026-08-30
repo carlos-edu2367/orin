@@ -151,12 +151,16 @@ def _bounded(value: str, limit: int = MAX_TOOL_RESULT_CHARS) -> tuple[str, bool]
     return value[:limit], True
 
 
-def _public_url(url: str, *, resolve_dns: bool = False) -> str:
+def _public_url(url: str, *, resolve_dns: bool = False, allow_loopback: bool = False) -> str:
     parsed = urlparse(url.strip())
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         raise AgentToolError("Only absolute http(s) URLs can be fetched.")
     host = parsed.hostname
-    if host.lower() in {"localhost", "localhost.localdomain"} or host.endswith(".local"):
+    if host.lower() in {"localhost", "localhost.localdomain"}:
+        if allow_loopback:
+            return url.strip()
+        raise AgentToolError("Local network addresses cannot be fetched.")
+    if host.endswith(".local"):
         raise AgentToolError("Local network addresses cannot be fetched.")
     try:
         address = ip_address(host)
@@ -169,6 +173,8 @@ def _public_url(url: str, *, resolve_dns: bool = False) -> str:
             addresses = tuple(dict.fromkeys(str(record[4][0]) for record in records if record[4]))
             if not addresses or any(not ip_address(item).is_global for item in addresses):
                 raise AgentToolError("Private network addresses cannot be fetched.")
+        return url.strip()
+    if address.is_loopback and allow_loopback:
         return url.strip()
     if address.is_private or address.is_loopback or address.is_link_local or address.is_reserved:
         raise AgentToolError("Private network addresses cannot be fetched.")
@@ -1250,7 +1256,10 @@ class AgentToolset:
     def browse_page(self, url: str) -> dict[str, Any]:
         if self._browser is None:
             raise AgentToolError("The browser is not available.")
-        target = _public_url(url)
+        # The rendered browser is explicitly allowed to inspect a local dev
+        # server. ``fetch_url`` remains public-network-only, so a text fetch
+        # cannot be repurposed to read arbitrary local services.
+        target = _public_url(url, allow_loopback=True)
         navigation_key = _cache_key_url(target)
         if navigation_key == self._last_browser_navigation_url and self._last_browser_navigation_outcome is not None:
             return self._cached_navigation_outcome(self._last_browser_navigation_outcome)

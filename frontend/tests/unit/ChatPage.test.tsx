@@ -207,6 +207,8 @@ describe('ChatPage', () => {
     await user.click(await screen.findByRole('button', { name: 'Parar execução' }))
 
     await waitFor(() => expect(cancelled).toHaveBeenCalled())
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Parar execução' })).not.toBeInTheDocument())
+    expect(screen.queryByText('Pensando')).not.toBeInTheDocument()
   })
 
   it('keeps question answers enabled while the turn waits for the user', async () => {
@@ -274,7 +276,7 @@ describe('ChatPage', () => {
     await screen.findByRole('button', { name: 'Parar execução' })
     emitTerminal()
     await waitFor(() => expect(screen.queryByRole('button', { name: 'Parar execução' })).not.toBeInTheDocument())
-    expect(screen.queryByText('Pensando')).not.toBeInTheDocument()
+    await waitFor(() => expect(screen.queryByText('Pensando')).not.toBeInTheDocument())
     closeStream()
   })
 

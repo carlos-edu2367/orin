@@ -34,6 +34,10 @@ class NetworkPolicy:
     allowed_hosts: tuple[str, ...] = ()
     allowed_ports: tuple[int, ...] = (443,)
     allow_subresources: bool = False
+    # Local development servers are useful only to the isolated rendered
+    # browser. Private LAN, link-local and reserved ranges always remain
+    # blocked, even when this opt-in is enabled.
+    allow_loopback: bool = False
     resolver: Callable[[str], tuple[str, ...]] = _default_resolver
 
 
@@ -64,24 +68,34 @@ def validate_url(value: str, policy: NetworkPolicy, *, redirect_count: int = 0) 
     if redirect_count > 0:
         raise NetworkPolicyError("redirect limit must be checked by the caller")
     parsed = urlsplit(value)
-    if parsed.scheme.lower() not in tuple(s.lower() for s in policy.allowed_schemes):
-        raise NetworkPolicyError("scheme denied")
-    if parsed.scheme.lower() in {"file", "data", "javascript"} or not parsed.hostname:
+    scheme = parsed.scheme.lower()
+    if scheme in {"file", "data", "javascript"} or not parsed.hostname:
         raise NetworkPolicyError("scheme or host denied")
     try:
-        port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
+        port = parsed.port or (443 if scheme == "https" else 80)
     except ValueError as exc:
         raise NetworkPolicyError("port denied") from exc
-    if policy.allowed_ports and port not in policy.allowed_ports:
-        raise NetworkPolicyError("port denied")
+    scheme_allowed = scheme in tuple(item.lower() for item in policy.allowed_schemes)
+    port_allowed = not policy.allowed_ports or port in policy.allowed_ports
     host = parsed.hostname.lower().rstrip(".")
     if policy.allowed_hosts and host not in tuple(item.lower().rstrip(".") for item in policy.allowed_hosts):
         raise NetworkPolicyError("host denied")
     addresses = tuple(policy.resolver(host))
     if not addresses:
         raise NetworkPolicyError("destination could not be resolved")
-    for address in addresses:
-        resolved = ip_address(address)
+    resolved_addresses = tuple(ip_address(address) for address in addresses)
+    loopback_destination = bool(resolved_addresses) and all(address.is_loopback for address in resolved_addresses)
+    # Local development servers overwhelmingly use HTTP and an ephemeral port.
+    # This exception is limited to an explicitly enabled, *all-loopback* DNS
+    # result; public and private-network destinations keep the normal scheme
+    # and port policy.
+    if not scheme_allowed and not (policy.allow_loopback and loopback_destination):
+        raise NetworkPolicyError("scheme denied")
+    if not port_allowed and not (policy.allow_loopback and loopback_destination):
+        raise NetworkPolicyError("port denied")
+    for resolved in resolved_addresses:
+        if resolved.is_loopback and policy.allow_loopback:
+            continue
         if not resolved.is_global:
             raise NetworkPolicyError("destination denied")
     return navigable_url(value)

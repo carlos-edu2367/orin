@@ -96,6 +96,10 @@ export function ChatPage() {
   const [loading, setLoading] = useState(true)
   const [loadAttempt, setLoadAttempt] = useState(0)
   const [stopping, setStopping] = useState(false)
+  // A successful cancel receipt is authoritative even while a stale snapshot
+  // is in flight. Without this small local overlay, the server's short
+  // cancelling window could put the pulse back into “Pensando” indefinitely.
+  const [cancelledTurnIds, setCancelledTurnIds] = useState<Set<string>>(() => new Set())
   const [atBottom, setAtBottom] = useState(true)
   const [newActivityCount, setNewActivityCount] = useState(0)
   const [activity, dispatch] = useReducer(activityReducer, undefined, createActivityState)
@@ -415,7 +419,9 @@ export function ChatPage() {
   // A waiting turn is terminal from the worker's perspective and must keep
   // the question card and normal composer usable even if the conversation
   // snapshot briefly still reports the preceding running state.
-  const running = RUNNING_STATES.has(conversation?.state ?? '') && openQuestionTurnIds.size === 0
+  const running = RUNNING_STATES.has(conversation?.state ?? '')
+    && (conversation?.turns ?? []).some((turn) => RUNNING_STATES.has(turn.state) && !cancelledTurnIds.has(turn.turn_id))
+    && openQuestionTurnIds.size === 0
   const mode = useMemo(() => modeFromEvents(activity.events, conversation?.state ?? 'queued'), [activity.events, conversation?.state])
 
   // Track identities rather than render passes. Snapshot reconciliation can
@@ -611,7 +617,18 @@ export function ChatPage() {
     if (stopping) return
     setStopping(true)
     try {
-      await cancelConversation(client, conversationId)
+      const receipt = await cancelConversation(client, conversationId)
+      if (receipt.cancelling.length > 0) {
+        const cancelled = new Set(receipt.cancelling)
+        setCancelledTurnIds((current) => new Set([...current, ...cancelled]))
+        setConversation((current) => current === null ? current : {
+          ...current,
+          state: 'cancelled',
+          turns: current.turns.map((turn) => cancelled.has(turn.turn_id)
+            ? { ...turn, state: 'cancelled', finished_at: turn.finished_at ?? new Date().toISOString() }
+            : turn),
+        })
+      }
       await loadSnapshot(false)
     } catch {
       setError('Não foi possível parar a execução.')

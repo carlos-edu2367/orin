@@ -273,16 +273,14 @@ def _launch_failure_message(error: Exception) -> str:
 def _policy_for(capability: str) -> NetworkPolicy:
     """The network policy for this session's capability level.
 
-    ``full`` widens the reachable scheme/port beyond the default https:443,
-    for a site an automation flow legitimately needs to reach over plain
-    http or a non-standard port. The private-IP/loopback/link-local barrier
-    in ``validate_url`` is independent of these fields and stays in force at
-    every level — this only ever widens what a *public* destination can look
-    like, never what counts as public.
+    The conversation browser may also render loopback-only development
+    servers. This is deliberately narrower than private-network access: LAN,
+    link-local, metadata and reserved addresses remain blocked. ``full``
+    additionally widens public destinations to HTTP and non-standard ports.
     """
     if capability == "full":
-        return NetworkPolicy(allowed_schemes=("http", "https"), allowed_ports=(), allow_subresources=True)
-    return NetworkPolicy(allow_subresources=True)
+        return NetworkPolicy(allowed_schemes=("http", "https"), allowed_ports=(), allow_subresources=True, allow_loopback=True)
+    return NetworkPolicy(allow_subresources=True, allow_loopback=True)
 
 
 def _host(connection: Connection, capability: str = "interact") -> None:

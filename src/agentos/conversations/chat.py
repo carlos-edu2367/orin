@@ -998,8 +998,10 @@ class PostgresChatStore:
 
         The worker observes this flag between provider events and between tool
         calls, so a stop actually reaches the running turn instead of only
-        hiding the spinner. A turn that never got picked up is finished here
-        directly, because no worker will ever observe the flag for it.
+        hiding the spinner. The cancellation command has already transitioned
+        the canonical Execution, so the chat projection is also terminalized
+        here. Keeping an active turn in ``cancelling`` until a blocked provider
+        yielded used to leave the composer and activity pulse running forever.
         """
         now = datetime.now(UTC)
         cancelled: list[str] = []
@@ -1013,14 +1015,16 @@ class PostgresChatStore:
                 c.execute(update(conversation_turns).where(conversation_turns.c.turn_id == turn["turn_id"]).values(state="cancelling", updated_at=now))
                 cancelled.append(str(turn["turn_id"]))
         for turn in rows:
-            if turn["started_at"] is None:
-                self.finish(dict(turn), failed=True, code="TURN_CANCELLED")
+            self.finish(dict(turn), failed=True, code="TURN_CANCELLED")
         return {"conversation_id": conversation_id, "cancelling": cancelled}
 
     def cancel_requested(self, turn_id: str) -> bool:
         with self._engine.connect() as c:
             state = c.execute(select(conversation_turns.c.state).where(conversation_turns.c.turn_id == turn_id)).scalar()
-        return str(state) == "cancelling"
+        # ``request_cancel`` terminalizes the visible chat state immediately,
+        # while a provider call may still need one more callback to unwind.
+        # Keep that callback cancellable after the projection is terminal.
+        return str(state) in {"cancelling", "cancelled"}
 
     def waiting_execution_ids(self, conversation_id: str, user_id: str) -> tuple[str, ...]:
         with self._engine.connect() as c:
