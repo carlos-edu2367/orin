@@ -475,6 +475,21 @@ def test_edit_file_applies_a_batch_of_edits_in_one_call(toolset: AgentToolset) -
     assert "     3\tthree" in toolset.invoke("read_file", {"path": "app.py"}).content
 
 
+def test_edit_file_accepts_a_provider_duplicate_of_the_same_single_edit(toolset: AgentToolset) -> None:
+    toolset.invoke("write_file", {"path": "app.py", "content": "alpha\n"})
+
+    outcome = toolset.invoke("edit_file", {
+        "path": "app.py",
+        "old_text": "alpha",
+        "new_text": "one",
+        "edits": [{"old_text": "alpha", "new_text": "one"}],
+    })
+
+    assert outcome.status == "succeeded"
+    assert outcome.payload["edits_applied"] == 1
+    assert "     1\tone" in toolset.invoke("read_file", {"path": "app.py"}).content
+
+
 def test_edit_file_writes_nothing_when_one_edit_in_the_batch_fails(toolset: AgentToolset) -> None:
     toolset.invoke("write_file", {"path": "app.py", "content": "alpha\nbeta\n"})
 

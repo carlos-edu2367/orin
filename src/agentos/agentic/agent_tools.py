@@ -322,11 +322,11 @@ class AgentToolset:
             ),
             ToolDefinition(
                 "edit_file",
-                "Replace text fragments in a UTF-8 workspace file. Read the file first. Pass 'edits' to apply several replacements in one call; the whole batch is rejected if any fragment is missing or ambiguous.",
+                "Replace text fragments in a UTF-8 workspace file. Read the file first. Use either old_text/new_text for one replacement or edits for several; the whole batch is rejected if any fragment is missing or ambiguous.",
                 _schema({
                     "path": _TEXT,
-                    "old_text": _TEXT,
-                    "new_text": _TEXT,
+                    "old_text": {**_TEXT, "description": "Single-replacement form. Use together with new_text and omit edits."},
+                    "new_text": {**_TEXT, "description": "Replacement for old_text in the single-replacement form. Omit when using edits."},
                     "edits": {
                         "type": "array",
                         "description": "Batch form. Each item replaces one fragment; they are applied in order.",
@@ -985,7 +985,18 @@ class AgentToolset:
     def _normalized_edits(old_text: str | None, new_text: str | None, edits: list[Mapping[str, Any]] | None) -> list[tuple[str, str]]:
         single = old_text is not None or new_text is not None
         if single and edits:
-            raise AgentToolError("provide either old_text/new_text or edits, not both.")
+            # Some tool providers serialise the same single replacement in both
+            # supported shapes. Treat that exact duplication as one edit, while
+            # preserving the refusal for genuinely ambiguous requests.
+            duplicate_single = (
+                len(edits) == 1
+                and isinstance(edits[0], Mapping)
+                and edits[0].get("old_text") == old_text
+                and edits[0].get("new_text") == new_text
+            )
+            if not duplicate_single:
+                raise AgentToolError("provide either old_text/new_text or edits, not both.")
+            edits = None
         if single:
             if not isinstance(old_text, str) or not old_text:
                 raise AgentToolError("old_text must be a non-blank string")
