@@ -124,10 +124,11 @@ def test_enter_is_an_allowed_press_key_now_that_submit_has_a_confirmation_gate()
     assert "Enter" in conversation_worker._PRESS_KEYS
 
 
-def test_policy_for_interact_keeps_the_https_only_default() -> None:
+def test_policy_for_interact_keeps_the_https_only_default_but_allows_loopback_development() -> None:
     policy = conversation_worker._policy_for("interact")
     assert policy.allowed_schemes == ("https",)
     assert policy.allowed_ports == (443,)
+    assert policy.allow_loopback is True
 
 
 def test_policy_for_full_widens_scheme_and_port_but_stays_otherwise_default() -> None:
@@ -136,12 +137,13 @@ def test_policy_for_full_widens_scheme_and_port_but_stays_otherwise_default() ->
     assert policy.allowed_ports == ()  # empty means "no port restriction" per security.validate_url
 
 
-def test_full_capability_still_rejects_a_private_destination() -> None:
+def test_browser_capabilities_allow_loopback_but_still_reject_a_private_destination() -> None:
     from agentos.browser.security import NetworkPolicyError, validate_url
 
     policy = conversation_worker._policy_for("full")
+    assert validate_url("http://127.0.0.1:8080/", policy) == "http://127.0.0.1:8080/"
     with pytest.raises(NetworkPolicyError):
-        validate_url("http://127.0.0.1:8080/admin", policy)
+        validate_url("http://192.168.1.10:8080/admin", policy)
 
 
 def test_describe_form_reads_visible_field_values_and_masks_the_password() -> None:
