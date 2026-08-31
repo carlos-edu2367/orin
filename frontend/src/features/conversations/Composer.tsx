@@ -1,9 +1,10 @@
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
 import { useEffect, useRef, useState, type ClipboardEvent, type DragEvent, type FormEvent, type KeyboardEvent, type ReactNode } from 'react'
 import type { PluginCommand } from '../../api/plugins'
+import type { SkillSummary } from '../../api/skills'
 import type { CodeModeChoice } from '../../api/conversations'
 import { AttachmentChips, type ComposerAttachment } from './AttachmentChips'
-import { CommandPicker, commandToken } from './CommandPicker'
+import { CommandPicker, commandToken, skillToken } from './CommandPicker'
 
 export type ComposerProps = {
   value: string
@@ -31,8 +32,10 @@ export type ComposerProps = {
   attachments?: ComposerAttachment[]
   onAttach?: (files: File[]) => void
   onRemoveAttachment?: (id: string) => void
-  /** Active plugin commands offered by the `/` picker. Empty disables it. */
+  /** Active plugin commands offered by the `/` picker. */
   commands?: PluginCommand[]
+  /** Available skills offered alongside plugin commands by the `/` picker. */
+  skills?: SkillSummary[]
   codeMode?: CodeModeChoice
   onCodeModeChange?: (value: CodeModeChoice) => void
 }
@@ -50,7 +53,7 @@ const MAX_ROWS_HEIGHT = 260
 export function Composer({
   value, onChange, onSubmit, onStop, running = false, disabled = false,
   placeholder = 'Descreva o que você precisa…', settings, hint, error, autoFocus, notice, focusSignal = 0, canSend = true,
-  attachments = [], onAttach = () => {}, onRemoveAttachment = () => {}, commands = [],
+  attachments = [], onAttach = () => {}, onRemoveAttachment = () => {}, commands = [], skills = [],
   codeMode = 'auto', onCodeModeChange,
 }: ComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -72,7 +75,14 @@ export function Composer({
     setPreviousCommandQuery(commandQuery)
     if (commandQuery === null) setDismissed(false)
   }
-  const pickerOpen = commandQuery !== null && !dismissed && commands.length > 0
+  const pickerHasMatches = commandQuery !== null && [
+    ...commands.map((command) => ({ token: commandToken(command), description: command.description })),
+    ...skills.filter((skill) => skill.available).map((skill) => ({ token: skillToken(skill, commands), description: skill.description })),
+  ].some((item) => {
+    const needle = commandQuery.trim().toLowerCase()
+    return !needle || item.token.toLowerCase().includes(needle) || item.description.toLowerCase().includes(needle)
+  })
+  const pickerOpen = commandQuery !== null && !dismissed && pickerHasMatches
 
   useEffect(() => {
     const element = textareaRef.current
@@ -134,8 +144,9 @@ export function Composer({
         {pickerOpen && (
           <CommandPicker
             commands={commands}
+            skills={skills}
             query={commandQuery ?? ''}
-            onSelect={(command) => { onChange(`/${commandToken(command)} `); setDismissed(true) }}
+            onSelect={(token) => { onChange(`/${token} `); setDismissed(true) }}
             onDismiss={() => setDismissed(true)}
           />
         )}

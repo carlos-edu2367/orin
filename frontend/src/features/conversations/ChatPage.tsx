@@ -9,6 +9,7 @@ import {
 import { ApiError } from '../../api/errors'
 import { approveMcpServer } from '../../api/mcp'
 import { approvePlugin, listPluginCommands, type PluginCommand } from '../../api/plugins'
+import { listSkills, type SkillSummary } from '../../api/skills'
 import {
   PROVIDER_NAMES, getVisionModelSetting, listProviderModels,
   type ProviderModel, type ProviderName, type VisionModelSetting,
@@ -123,6 +124,7 @@ export function ChatPage() {
   const [turnModelCatalog, setTurnModelCatalog] = useState<ProviderModel | null>(null)
   const [visionCandidates, setVisionCandidates] = useState<ProviderModel[]>([])
   const [pluginCommands, setPluginCommands] = useState<PluginCommand[]>([])
+  const [skills, setSkills] = useState<SkillSummary[]>([])
   const [visionSetting, setVisionSetting] = useState<VisionModelSetting | null>(null)
   const [chatProvider, setChatProvider] = useState<ProviderName | null>(null)
   const [chatModelId, setChatModelId] = useState('')
@@ -260,14 +262,18 @@ export function ChatPage() {
     return () => controller.abort()
   }, [client])
 
-  // Fetched once, best-effort: the plugin commands the `/` picker offers. A
-  // failure here must never block the chat itself — it only means the picker
-  // stays empty until the next load.
+  // Fetched once, best-effort: slash invocations are a convenience only. A
+  // failure here must never block an ordinary conversation.
   useEffect(() => {
     const controller = new AbortController()
-    listPluginCommands(client, controller.signal)
-      .then((items) => { if (!controller.signal.aborted) setPluginCommands(items) })
-      .catch(() => { if (!controller.signal.aborted) setPluginCommands([]) })
+    Promise.allSettled([
+      listPluginCommands(client, controller.signal),
+      listSkills(client, { limit: 100 }, controller.signal),
+    ]).then(([commands, availableSkills]) => {
+      if (controller.signal.aborted) return
+      setPluginCommands(commands.status === 'fulfilled' ? commands.value : [])
+      setSkills(availableSkills.status === 'fulfilled' ? availableSkills.value.items : [])
+    })
     return () => controller.abort()
   }, [client])
 
@@ -798,6 +804,7 @@ export function ChatPage() {
           canSend={attachmentsReady}
           notice={notice}
           commands={pluginCommands}
+          skills={skills}
           codeMode={codeMode}
           onCodeModeChange={setCodeMode}
           settings={

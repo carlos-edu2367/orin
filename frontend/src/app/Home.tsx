@@ -6,7 +6,9 @@ import { ApiClient, createBrowserApiClient } from '../api/client'
 import { createConversation, type CodeModeChoice } from '../api/conversations'
 import { listProjectSidebar } from '../api/projects'
 import { ApiError, isAuthenticationError, isCsrfAuthorizationError } from '../api/errors'
+import { listPluginCommands, type PluginCommand } from '../api/plugins'
 import { PROVIDER_NAMES, listProviderModels, type ProviderModel, type ProviderName } from '../api/providers'
+import { listSkills, type SkillSummary } from '../api/skills'
 import { AmbientField } from '../components/three/AmbientField'
 import { Brand } from '../components/Brand'
 import { CommandPalette } from '../components/CommandPalette'
@@ -54,6 +56,8 @@ export function Home({ client, bootstrap }: HomeProps) {
   const [workspacePath, setWorkspacePath] = useState<string | null>(null)
   const [workspaceAcknowledgedRisk, setWorkspaceAcknowledgedRisk] = useState(false)
   const [chats, setChats] = useState<Array<{ conversation_id: string; title: string; state: string }>>([])
+  const [pluginCommands, setPluginCommands] = useState<PluginCommand[]>([])
+  const [skills, setSkills] = useState<SkillSummary[]>([])
   const activeProjectName = projectId ? projectName : null
 
   useEffect(() => {
@@ -80,6 +84,18 @@ export function Home({ client, bootstrap }: HomeProps) {
       .finally(() => { if (!controller.signal.aborted) setLoadingModels(false) })
     return () => controller.abort()
   }, [apiClient, provider])
+  useEffect(() => {
+    const controller = new AbortController()
+    Promise.allSettled([
+      listPluginCommands(apiClient, controller.signal),
+      listSkills(apiClient, { limit: 100 }, controller.signal),
+    ]).then(([commands, availableSkills]) => {
+      if (controller.signal.aborted) return
+      setPluginCommands(commands.status === 'fulfilled' ? commands.value : [])
+      setSkills(availableSkills.status === 'fulfilled' ? availableSkills.value.items : [])
+    })
+    return () => controller.abort()
+  }, [apiClient])
 
   function changeProvider(next: ProviderName) {
     if (next === provider) return
@@ -193,6 +209,8 @@ export function Home({ client, bootstrap }: HomeProps) {
             attachments={attachments}
             onAttach={onAttach}
             onRemoveAttachment={onRemoveAttachment}
+            commands={pluginCommands}
+            skills={skills}
             codeMode={codeMode}
             onCodeModeChange={setCodeMode}
             settings={(

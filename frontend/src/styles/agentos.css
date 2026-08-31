@@ -501,6 +501,22 @@ kbd {
 
 /* ---------------------------------------------------------------- chips & pickers */
 
+.command-picker {
+  position: absolute; right: 10px; bottom: calc(100% + 8px); left: 10px; z-index: 30;
+  max-height: min(360px, 48vh); margin: 0; padding: 5px; overflow-y: auto;
+  border: 1px solid var(--line-strong); border-radius: 12px; background: var(--surface);
+  box-shadow: 0 18px 46px rgb(0 0 0 / .38); list-style: none;
+}
+.command-picker__item {
+  display: grid; grid-template-columns: auto auto 1fr; align-items: baseline; gap: 7px;
+  padding: 9px 10px; border-radius: 8px; color: var(--muted); cursor: pointer;
+}
+.command-picker__item:hover, .command-picker__item.is-highlighted { background: var(--raised-strong); color: var(--text); }
+.command-picker__name { color: var(--signal); font: 11px var(--mono); }
+.command-picker__kind { color: var(--faint); font: 9px var(--mono); letter-spacing: .06em; text-transform: uppercase; }
+.command-picker__hint { color: var(--faint); font: 10px var(--mono); }
+.command-picker__description { grid-column: 1 / -1; overflow: hidden; color: var(--muted); font-size: 11px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
+
 .chip {
   display: inline-flex; align-items: center; gap: 7px; min-height: 30px;
   padding: 0 11px; border: 1px solid var(--line); border-radius: 99px;

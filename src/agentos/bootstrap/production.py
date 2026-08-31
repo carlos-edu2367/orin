@@ -290,7 +290,7 @@ def compose_production_services(engine: Engine, *, localhost_trust_enabled: bool
             "openai": OpenAIModelCatalogClient(),
             "openrouter": OpenRouterModelCatalogClient(),
         }),
-        conversation_application=ChatApplication(PostgresChatStore(engine, PostgresAgenticActivityStore(engine, cursor_secret), command_library=command_library), ExecutionApplicationAdapter(engine)),
+        conversation_application=ChatApplication(PostgresChatStore(engine, PostgresAgenticActivityStore(engine, cursor_secret), command_library=command_library, skill_library=skill_library), ExecutionApplicationAdapter(engine)),
         projects=PostgresProjectStore(engine),
         omniroute_runtime=omniroute_runtime,
         agentic_runtime=AgentRuntimeSettingsStore(),

@@ -9,6 +9,10 @@ const COMMANDS = [
   { command_id: 'alpha:daily', slug: 'daily', plugin_id: 'alpha', description: 'Outra', argument_hint: '', qualified: true },
 ]
 
+const SKILLS = [
+  { id: 'safe-review', name: 'Safe review', description: 'Revisa alterações antes de aprová-las.', version: '1.0.0', tags: [], source: 'system', available: true },
+]
+
 describe('CommandPicker', () => {
   it('filters by the typed prefix', () => {
     render(<CommandPicker commands={COMMANDS} query="dec" onSelect={() => {}} onDismiss={() => {}} />)
@@ -29,7 +33,7 @@ describe('CommandPicker', () => {
 
     await userEvent.keyboard('{Enter}')
 
-    expect(onSelect).toHaveBeenCalledWith(expect.objectContaining({ command_id: 'demo:decide' }))
+    expect(onSelect).toHaveBeenCalledWith('decide')
   })
 
   it('moves the highlight with the arrow keys', async () => {
@@ -39,7 +43,7 @@ describe('CommandPicker', () => {
     await userEvent.keyboard('{ArrowDown}{Enter}')
 
     expect(onSelect).toHaveBeenCalledTimes(1)
-    expect(onSelect.mock.calls[0][0].command_id).not.toBe(COMMANDS[0].command_id)
+    expect(onSelect.mock.calls[0][0]).not.toBe('daily')
   })
 
   it('dismisses on Escape', async () => {
@@ -55,5 +59,14 @@ describe('CommandPicker', () => {
     const { container } = render(<CommandPicker commands={COMMANDS} query="zzz" onSelect={() => {}} onDismiss={() => {}} />)
 
     expect(container).toBeEmptyDOMElement()
+  })
+
+  it('offers available skills and selects their slash token', async () => {
+    const onSelect = vi.fn()
+    render(<CommandPicker commands={COMMANDS} skills={SKILLS} query="review" onSelect={onSelect} onDismiss={() => {}} />)
+
+    expect(screen.getByRole('option', { name: /safe-review/i })).toHaveTextContent('Skill')
+    await userEvent.keyboard('{Enter}')
+    expect(onSelect).toHaveBeenCalledWith('safe-review')
   })
 })

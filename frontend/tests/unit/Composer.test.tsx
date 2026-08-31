@@ -7,11 +7,15 @@ const COMMANDS = [
   { command_id: 'demo:daily', slug: 'daily', plugin_id: 'demo', description: 'Nota diária', argument_hint: '[data]', qualified: false },
 ]
 
+const SKILLS = [
+  { id: 'safe-review', name: 'Safe review', description: 'Revisa alterações antes de aprová-las.', version: '1.0.0', tags: [], source: 'system', available: true },
+]
+
 describe('Composer command picker', () => {
   it('opens the picker when / starts an empty composer', async () => {
     render(<Composer value="/" onChange={() => {}} onSubmit={() => {}} commands={COMMANDS} />)
 
-    expect(await screen.findByRole('listbox', { name: /Comandos de plugin/ })).toBeInTheDocument()
+    expect(await screen.findByRole('listbox', { name: /Comandos e skills/ })).toBeInTheDocument()
   })
 
   it('does not open the picker for a slash inside existing text', () => {
@@ -38,6 +42,15 @@ describe('Composer command picker', () => {
 
     expect(onSubmit).not.toHaveBeenCalled()
     expect(onChange).toHaveBeenCalledWith('/daily ')
+  })
+
+  it('adds a selected skill as a slash invocation', async () => {
+    const onChange = vi.fn()
+    render(<Composer value="/safe" onChange={onChange} onSubmit={() => {}} skills={SKILLS} />)
+
+    await userEvent.keyboard('{Enter}')
+
+    expect(onChange).toHaveBeenCalledWith('/safe-review ')
   })
 
   it('lets the user explicitly toggle Code mode with an announced pressed state', async () => {

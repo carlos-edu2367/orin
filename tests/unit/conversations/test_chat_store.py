@@ -191,6 +191,16 @@ def _store_with_command(engine, tmp_path, body="Daily note for $ARGUMENTS."):
     return PostgresChatStore(engine, command_library=library)
 
 
+class _SkillLibrary:
+    def get(self, query):
+        if query["user_id"] != "user-1" or query["skill_id"] != "safe-review":
+            raise ValueError("skill not found")
+        return {
+            "id": "safe-review", "name": "Safe review", "version": "1.2.0",
+            "available": True, "instructions": "Review the change before approving it.",
+        }
+
+
 def test_hook_context_round_trips_and_accumulates_per_conversation() -> None:
     engine = create_engine("sqlite://", future=True)
     metadata.create_all(engine)
@@ -250,6 +260,24 @@ def test_a_command_message_stores_what_the_person_typed(tmp_path) -> None:
     })
     assert history[-1]["content"] == "Daily note for amanhã."
     assert _content(engine, receipt.turn_id) == "/daily amanhã"
+
+
+def test_a_skill_can_be_invoked_directly_with_a_slash() -> None:
+    engine = create_engine("sqlite://", future=True)
+    metadata.create_all(engine)
+    store = PostgresChatStore(engine, skill_library=_SkillLibrary())
+
+    receipt = store.create(
+        user_id="user-1", message="/safe-review confira este diff", provider="anthropic",
+        model_id="claude-opus-5", idempotency_key="request-skill-1",
+    )
+
+    payload = store.get(receipt.conversation_id, "user-1")
+    user_message = next(item for item in payload["messages"] if item["role"] == "user")
+    assert user_message["command"] == {"command_id": "skill:safe-review", "slug": "safe-review", "arguments": "confira este diff"}
+    history = store.history_for_turn({"conversation_id": receipt.conversation_id, "user_message_id": _user_message_id(engine, receipt.turn_id)})
+    assert "Safe review (safe-review@1.2.0)" in history[-1]["content"]
+    assert "Pedido da pessoa: confira este diff" in history[-1]["content"]
 
 
 def test_a_slash_message_that_is_not_a_command_passes_through_untouched(tmp_path) -> None:
