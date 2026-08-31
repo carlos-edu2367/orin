@@ -86,5 +86,5 @@ export function renderActivityGroup(
     return <>{group.events.map((event) => <AgentExchange key={event.eventId} event={event} />)}</>
   }
   if (first.toolKind === 'browser') return <BrowserActivityCard group={group} conversationId={conversationId} onPreview={onPreview} />
-  return <ActivityCard group={group} />
+  return <ActivityCard group={group} conversationId={conversationId} onPreview={onPreview} />
 }

@@ -171,6 +171,10 @@ export function stateFor(type: string, status?: string, errorCode?: string | nul
   }
   if (type === 'agent.message_sent' || type === 'delegation.waiting') return 'waiting_agent'
   if (type === 'agent.created' || type === 'agent.message_received' || type === 'delegation.completed') return 'completed'
+  // Only ever emitted after its tool call already succeeded (see the backend
+  // ARTIFACT_CREATED emission), so there is no "in progress" state for it to
+  // pass through.
+  if (type === 'artifact.created') return 'completed'
   if (type === 'turn.started') return 'working'
   return 'working'
 }

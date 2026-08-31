@@ -200,4 +200,52 @@ describe('activity grouping', () => {
     expect(groups).toHaveLength(1)
     expect(groups[0].events[0].type).toBe('turn.completed')
   })
+
+  it('folds a write and the artifact.created it emits into the same row, not a duplicate one', () => {
+    const groups = summarizeActivities([
+      event({ type: 'tool.finished', turnId: 'turn-1', toolName: 'write_file', toolKind: 'filesystem', invocationId: 'w1', status: 'succeeded', summary: 'Escreveu a.txt' }),
+      event({ type: 'artifact.created', turnId: 'turn-1', label: 'a.txt', path: 'a.txt', summary: 'Criou a.txt' }),
+    ])
+
+    expect(groups).toHaveLength(1)
+    expect(groups[0].kind).toBe('tool')
+    expect(groups[0].label).toBe('Escreveu a.txt')
+    expect(groups[0].state).toBe('completed')
+    expect(groups[0].events).toHaveLength(2)
+  })
+
+  it('keeps a whole run of writes as one expandable batch instead of one card per file', () => {
+    const groups = summarizeActivities([
+      event({ type: 'tool.finished', turnId: 'turn-1', toolName: 'write_file', toolKind: 'filesystem', invocationId: 'w1', status: 'succeeded', summary: 'Escreveu a.tsx' }),
+      event({ type: 'artifact.created', turnId: 'turn-1', label: 'a.tsx', path: 'a.tsx', summary: 'Criou a.tsx' }),
+      event({ type: 'tool.finished', turnId: 'turn-1', toolName: 'write_file', toolKind: 'filesystem', invocationId: 'w2', status: 'succeeded', summary: 'Escreveu b.ts' }),
+      event({ type: 'artifact.created', turnId: 'turn-1', label: 'b.ts', path: 'b.ts', summary: 'Criou b.ts' }),
+    ])
+
+    // The label follows the latest *tool* call, not the trailing artifact
+    // record, and never turns into a generic count for an ordinary sequence.
+    expect(groups).toHaveLength(1)
+    expect(groups[0].label).toBe('Escreveu b.ts')
+    expect(groups[0].events).toHaveLength(4)
+  })
+
+  it('gives a standalone artifact its own row when there is no open tool batch to attach to', () => {
+    const groups = summarizeActivities([
+      event({ type: 'artifact.created', turnId: 'turn-1', label: 'a.txt', path: 'a.txt', summary: 'Criou a.txt' }),
+    ])
+
+    expect(groups).toHaveLength(1)
+    expect(groups[0].kind).toBe('artifact')
+    expect(groups[0].state).toBe('completed')
+  })
+
+  it('does not attach an artifact to a tool batch left over from an earlier turn', () => {
+    const groups = summarizeActivities([
+      event({ type: 'tool.finished', turnId: 'turn-1', toolName: 'write_file', toolKind: 'filesystem', invocationId: 'w1', status: 'succeeded', summary: 'Escreveu a.txt' }),
+      event({ type: 'artifact.created', turnId: 'turn-2', label: 'b.txt', path: 'b.txt', summary: 'Criou b.txt' }),
+    ])
+
+    expect(groups).toHaveLength(2)
+    expect(groups[1].kind).toBe('artifact')
+  })
 })

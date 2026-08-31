@@ -3,12 +3,17 @@ import type { ActivityGroup, ActivityState, ConversationActivityEvent } from './
 /**
  * Collapse the raw event log into the short, human lines the chat shows.
  *
- * Two rules do the work: a `tool.started` is dropped once its `tool.finished`
- * arrives (the started event only exists so a running tool has a live state), and
- * a continuous sequence of ordinary tools becomes one row. The row keeps the
- * latest human-readable activity as its title, while the count and the expanded
- * view preserve the exact audit trail. Interactive approvals and browser
- * captures stay separate because they need their own controls and preview.
+ * Three rules do the work: a `tool.started` is dropped once its `tool.finished`
+ * arrives (the started event only exists so a running tool has a live state); a
+ * continuous sequence of ordinary tools becomes one row, like Claude Desktop's
+ * collapsed "used N tools"; and the `artifact.created` a write emits alongside
+ * its own `tool.finished` folds into that same row instead of adding a second,
+ * near-identical one -- the tool call already said "Escreveu X", so a
+ * standalone "Criou X" row contributes nothing to the collapsed line and only
+ * breaks the batch in two. The row keeps the latest human-readable activity as
+ * its title, while the count and the expanded view preserve the exact audit
+ * trail. Interactive approvals and browser captures stay separate because they
+ * need their own controls and preview.
  */
 export function summarizeActivities(events: ConversationActivityEvent[]): ActivityGroup[] {
   const groups: ActivityGroup[] = []
@@ -29,6 +34,24 @@ export function summarizeActivities(events: ConversationActivityEvent[]): Activi
       groups.push(codeModeRunGroup(events, event))
       continue
     }
+    if (event.kind === 'artifact') {
+      const previous = groups[groups.length - 1]
+      // Attaches to whatever tool batch is already open for this agent/turn --
+      // an artifact event carries no record of which tool produced it (the
+      // backend tags every one "tool_kind": "artifact"), so adjacency to the
+      // call that just ran is the only signal available, and it is reliable:
+      // the backend always emits ARTIFACT_CREATED immediately after the
+      // TOOL_FINISHED whose payload named it.
+      if (previous && previous.kind === 'tool' && previous.agentId === event.agentId && previous.events[0]?.turnId === event.turnId) {
+        previous.events.push(event)
+        previous.count += 1
+        continue
+      }
+      // No open batch to attach to (e.g. the very first event of a turn): give
+      // it its own row rather than dropping it.
+      groups.push(soloGroup(event))
+      continue
+    }
     const key = groupingKey(event)
     const previous = groups[groups.length - 1]
     if (previous && previous.id === key && previous.kind === event.kind) {
@@ -39,21 +62,25 @@ export function summarizeActivities(events: ConversationActivityEvent[]): Activi
       previous.label = groupLabel(previous)
       continue
     }
-    const group: ActivityGroup = {
-      id: key,
-      kind: event.kind,
-      state: event.state,
-      label: '',
-      count: 1,
-      events: [event],
-      agentId: event.agentId,
-      agentName: event.agentName,
-      failed: event.state === 'failed',
-    }
-    group.label = groupLabel(group)
-    groups.push(group)
+    groups.push(soloGroup(event))
   }
   return groups
+}
+
+function soloGroup(event: ConversationActivityEvent): ActivityGroup {
+  const group: ActivityGroup = {
+    id: groupingKey(event),
+    kind: event.kind,
+    state: event.state,
+    label: '',
+    count: 1,
+    events: [event],
+    agentId: event.agentId,
+    agentName: event.agentName,
+    failed: event.state === 'failed',
+  }
+  group.label = groupLabel(group)
+  return group
 }
 
 export function isCodeModeEvent(event: ConversationActivityEvent): boolean {
@@ -135,11 +162,15 @@ export function groupLabel(group: ActivityGroup): string {
 }
 
 function toolGroupLabel(group: ActivityGroup): string {
-  const latest = group.events.at(-1) ?? group.events[0]
-  // The summary comes from the tool boundary and names what the agent just did
-  // in user language. Keeping the most recent one on the stable card mirrors a
-  // person narrating their work without exposing implementation telemetry.
-  if (group.count > 1 && latest.summary.startsWith('$')) return 'Executando comandos'
+  // Counted and read from the tool calls alone: the `artifact.created` events
+  // folded into this same group (see summarizeActivities) are metadata about
+  // a call already counted here, not a call of their own, and their own
+  // ("Criou X") summary must never be what ends up on the collapsed line --
+  // the tool call's ("Escreveu X") already says what happened, and is what a
+  // person narrating their own work would say.
+  const toolEvents = group.events.filter((event) => event.kind === 'tool')
+  const latest = toolEvents.at(-1) ?? group.events.at(-1) ?? group.events[0]
+  if (toolEvents.length > 1 && latest.summary.startsWith('$')) return 'Executando comandos'
   return latest.summary || `Usou ${toolKindLabel(latest.toolKind)}`
 }
 
@@ -167,6 +198,10 @@ export function activityStateLabel(state: ActivityState): string {
     case 'completed': return 'Concluída'
     default: return 'Em andamento'
   }
+}
+
+export function formatActivityCount(count: number): string {
+  return `${count} ${count === 1 ? 'ação' : 'ações'}`
 }
 
 export function toolKindLabel(toolKind: string | undefined): string {
