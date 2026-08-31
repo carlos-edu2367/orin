@@ -27,14 +27,36 @@ def test_write_then_read_returns_the_content_to_the_model(toolset: AgentToolset)
     assert "step one" in outcome.content
 
 
-def test_code_mode_requires_a_successful_check_after_it_changes_code(tmp_path: Path) -> None:
+def test_code_mode_requires_structured_project_evidence_after_it_changes_code(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     tools = AgentToolset(ConversationWorkspace(tmp_path, "chat_code_gate"), code_mode_active=True)
 
     tools.invoke("write_file", {"path": "src/app.py", "content": "print('ok')\n"})
     assert tools.code_completion_gate()[0] is False
 
-    tools.invoke("run_command", {"command": "python -m pytest --version"})
+    # Regex used to accept this as a verification because its text contains
+    # "test". A command string is not evidence of a successful check.
+    tools.invoke("run_command", {"command": "echo test"})
+    assert tools.code_completion_gate()[0] is False
+
+    tools.invoke("write_file", {"path": "pyproject.toml", "content": "[project]\nname = 'demo'\n\n[tool.ruff]\n"})
+    monkeypatch.setattr(agent_tools.subprocess, "run", lambda *a, **k: type("R", (), {"returncode": 0, "stdout": "ok", "stderr": ""})())
+    tools.invoke("verify_project", {"steps": ["lint"]})
     assert tools.code_completion_gate()[0] is True
+
+
+def test_scaffold_is_a_mode_of_verify_project_and_uses_curated_commands(toolset: AgentToolset, monkeypatch: pytest.MonkeyPatch) -> None:
+    commands: list[str] = []
+
+    def fake_run(command: str, **_kwargs):
+        commands.append(command)
+        return {"summary": command, "content": "exit=0", "payload": {"failed": False, "artifacts": []}}
+
+    monkeypatch.setattr(toolset, "run_command", fake_run)
+    outcome = toolset.invoke("verify_project", {"scaffold": "vite-react-ts"})
+
+    assert outcome.status == "succeeded"
+    assert outcome.payload["scaffold"] == "vite-react-ts"
+    assert commands == ["npm create vite@latest . -- --template react-ts", "npm install"]
 
 
 def test_change_events_track_workspace_mutations_regardless_of_code_mode(toolset: AgentToolset) -> None:

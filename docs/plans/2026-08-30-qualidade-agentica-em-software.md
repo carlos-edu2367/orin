@@ -32,6 +32,18 @@ outros harnesses.
   bem-sucedida ou um resultado de verificação deixam de consumir o orçamento da fase — só flailing consome.
   O prompt não lista mais ferramentas de forma estática; cada requisição informa exatamente o que foi
   publicado naquela chamada.
+- **Fase 4 (conhecimento de stack):** implementada em 2026-08-30. Há skills built-in para React SPA,
+  Next.js App Router, FastAPI e acessibilidade de frontend; `verify_project(scaffold=...)` oferece as
+  receitas curadas sem acrescentar uma ferramenta à fase; contratos de software exigem evidência mecânica
+  e contratos de frontend também declaram browser; instruções raiz em `AGENTS.md`, `CLAUDE.md` e
+  `CONVENTIONS.md` entram no prompt volátil.
+- **Fase 5 (Modo Code confiável):** implementada em 2026-08-30. Workspaces gerenciados novos têm
+  autonomia de código na primeira execução (pastas locais continuam exigindo aprovação); o gate aceita
+  somente payload estruturado e aprovado de `verify_project` e `verify_frontend`, nunca regex sobre texto
+  de comando; no limite da iteração a entrega fecha com ressalvas explícitas, não como erro duro.
+- **Fase 6 (medição):** a matriz de 10 cenários e o método de pontuação mecânica estão em
+  `tests/eval/`; a execução da baseline pós-v0.2.25 continua pendente de credenciais/configuração para os
+  dois modelos alvo e deve ser registrada antes de comparar ganhos das Fases 4–5.
 
 ## Tese
 

@@ -68,6 +68,26 @@ DIAGNOSTIC_DEBOUNCE_SECONDS = 3.0
 MAX_FILE_DIAGNOSTIC_CHARS = 2_000
 VERIFY_STEP_TIMEOUT_SECONDS = 300
 MAX_VERIFY_STEP_CHARS = 3_000
+# Scaffold recipes deliberately live beside the single tool that executes
+# them. They are curated, non-interactive command sequences rather than a
+# generic shell escape hatch, and sharing ``verify_project`` keeps the phase
+# tool budget at 16.
+SCAFFOLD_RECIPES: Mapping[str, tuple[str, ...]] = {
+    "vite-react-ts": (
+        "npm create vite@latest . -- --template react-ts",
+        "npm install",
+    ),
+    "next-app": (
+        'npx --yes create-next-app@latest . --ts --eslint --app --src-dir --use-npm --no-tailwind --import-alias "@/*"',
+    ),
+    "fastapi-service": (
+        "python -m pip install \"fastapi[standard]\"",
+    ),
+    "express-api": (
+        "npm init -y",
+        "npm install express",
+    ),
+}
 
 # Commands that would damage the host rather than the workspace. This is a local
 # personal installation, so the goal is to stop an obviously catastrophic action
@@ -361,7 +381,9 @@ class AgentToolset:
         # not only Code mode.
         self._changed_paths: set[str] = set()
         self._change_events = 0
-        self._code_mode_checks: list[str] = []
+        # A Code-mode completion is evidence-led. A command string containing
+        # "test" is not evidence (``echo test`` used to satisfy this gate).
+        self._code_mode_verified = False
         self._code_mode_visual_check = False
         self._diagnosed_at: dict[str, float] = {}
         self._definitions: tuple[ToolDefinition, ...] | None = None
@@ -646,6 +668,10 @@ class AgentToolset:
                     "steps": {
                         "type": "array", "items": {"type": "string", "enum": list(STEP_ORDER)},
                         "description": "Subset of steps to run (always executed in the canonical order regardless of the order given here). Omit to run every step the project has.",
+                    },
+                    "scaffold": {
+                        "type": "string", "enum": sorted(SCAFFOLD_RECIPES),
+                        "description": "Create a new project from the official stack generator. Use only in a new workspace; this runs the curated generator and dependency install sequence.",
                     },
                 }),
                 self.verify_project, "terminal", policy_tags=("mutates",),
@@ -979,10 +1005,27 @@ class AgentToolset:
             if path and not path.startswith(".orin/"):
                 self._changed_paths.add(path)
                 self._change_events += 1
+                self._code_mode_verified = False
+                if path.lower().endswith((".tsx", ".ts", ".jsx", ".js", ".css", ".scss", ".html", ".vue", ".svelte")):
+                    self._code_mode_visual_check = False
             return
-        if name in {"browse_page", "browser_observe", "browser_screenshot"}:
-            if self._code_mode_active:
+        if name == "verify_frontend":
+            if self._code_mode_active and payload.get("all_ok") is True and payload.get("targets"):
                 self._code_mode_visual_check = True
+            return
+        if name == "verify_project":
+            if self._code_mode_active and not payload.get("scaffold"):
+                steps = payload.get("steps")
+                if payload.get("all_passed") is True and isinstance(steps, list) and any(item.get("ran") for item in steps if isinstance(item, Mapping)):
+                    self._code_mode_verified = True
+            # A scaffold can create files but is not a verification result.
+            artifacts = payload.get("artifacts")
+            if isinstance(artifacts, list) and any(
+                isinstance(item, Mapping) and isinstance(item.get("path"), str) and not str(item["path"]).startswith(".orin/")
+                for item in artifacts
+            ):
+                self._change_events += 1
+                self._code_mode_verified = False
             return
         if name != "run_command" or bool(payload.get("failed")):
             return
@@ -997,13 +1040,7 @@ class AgentToolset:
                         changed_any = True
         if changed_any:
             self._change_events += 1
-        if not self._code_mode_active:
-            return
-        command = str(payload.get("command") or arguments.get("command") or "").lower()
-        if re.search(r"\b(pytest|vitest|jest|playwright|cypress|eslint|ruff|mypy|pyright|tsc|typecheck|lint|test|build)\b", command):
-            self._code_mode_checks.append(command[:160])
-        if re.search(r"\b(playwright|cypress|test:e2e|test:visual)\b", command):
-            self._code_mode_visual_check = True
+            self._code_mode_verified = False
 
     def change_events(self) -> int:
         """How many times a workspace-changing tool call has succeeded this turn.
@@ -1018,11 +1055,11 @@ class AgentToolset:
         """Require actual checks after implementation changes before delivery."""
         if not self._code_mode_active or not self._changed_paths:
             return True, None
-        if not self._code_mode_checks:
-            return False, "Você alterou código, mas ainda não executou uma verificação bem-sucedida. Rode os testes, lint, typecheck ou build apropriados antes de concluir."
+        if not self._code_mode_verified:
+            return False, "Você alterou código, mas ainda não há evidência estruturada de `verify_project` com etapas executadas e aprovadas. Rode `verify_project` antes de concluir."
         frontend_suffixes = (".tsx", ".ts", ".jsx", ".js", ".css", ".scss", ".html", ".vue", ".svelte")
         if any(path.lower().endswith(frontend_suffixes) for path in self._changed_paths) and not self._code_mode_visual_check:
-            return False, "Você alterou o frontend. Faça uma verificação visual no navegador ou execute uma validação Playwright/Cypress bem-sucedida antes de concluir."
+            return False, "Você alterou o frontend. Rode `verify_frontend` e obtenha todas as rotas aprovadas antes de concluir."
         return True, None
 
     @staticmethod
@@ -1663,7 +1700,34 @@ class AgentToolset:
             "payload": {"pid": pid},
         }
 
-    def verify_project(self, steps: list[str] | None = None) -> dict[str, Any]:
+    def verify_project(self, steps: list[str] | None = None, scaffold: str | None = None) -> dict[str, Any]:
+        if scaffold is not None:
+            recipe_name = str(scaffold)
+            commands = SCAFFOLD_RECIPES.get(recipe_name)
+            if commands is None:
+                raise AgentToolError(f"unknown scaffold recipe '{recipe_name}'. valid recipes: {', '.join(sorted(SCAFFOLD_RECIPES))}.")
+            if steps:
+                raise AgentToolError("scaffold cannot be combined with verification steps; scaffold first, then call verify_project again.")
+            results: list[dict[str, Any]] = []
+            artifacts: list[dict[str, Any]] = []
+            for command in commands:
+                result = self.run_command(command, timeout_seconds=MAX_COMMAND_TIMEOUT_SECONDS)
+                payload = result.get("payload") if isinstance(result.get("payload"), Mapping) else {}
+                command_artifacts = payload.get("artifacts") if isinstance(payload.get("artifacts"), list) else []
+                artifacts.extend(item for item in command_artifacts if isinstance(item, Mapping))
+                passed = not bool(payload.get("failed"))
+                results.append({"step": "scaffold", "command": command, "ran": True, "passed": passed, "output": str(result.get("content") or "")})
+                if not passed:
+                    break
+            all_passed = bool(results) and all(item["passed"] for item in results)
+            lines = [f"Scaffold: {recipe_name}"]
+            for item in results:
+                lines.extend((f"\n== {item['command']} ==", f"resultado: {'ok' if item['passed'] else 'falhou'}", item["output"]))
+            return {
+                "summary": f"Scaffold {recipe_name}: {'ok' if all_passed else 'falhou'}",
+                "content": "\n".join(lines),
+                "payload": {"scaffold": recipe_name, "steps": results, "all_passed": all_passed, "artifacts": artifacts},
+            }
         recipe = detect_recipe(self.workspace.root)
         if recipe is None:
             return {

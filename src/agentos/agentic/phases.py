@@ -50,10 +50,14 @@ DEFAULT_PHASE_BUDGETS: Mapping[Phase, PhaseBudget] = {
 # Tools every working phase needs. Naming them explicitly is the point: the
 # alternative is publishing whatever happens to be registered.
 _READ_TOOLS = (
-    "read_file", "view_file", "transcribe_pdf", "list_files", "search_files", "search_code", "project_map",
+    "read_file", "view_file", "transcribe_pdf", "list_files", "search_files", "search_code",
     "read_process_output",
 )
-_WRITE_TOOLS = ("write_file", "edit_file", "run_command", "stop_process")
+# ``verify_project`` must be reachable while implementing: Code mode cannot
+# earn structured validation evidence otherwise. ``stop_process`` remains in
+# the terminal toolkit, which preserves the 16-tool ceiling for the common
+# files+terminal contract.
+_WRITE_TOOLS = ("write_file", "edit_file", "run_command", "verify_project")
 _ALWAYS = ("write_contract", "ask_user")
 
 PHASE_TOOLS: Mapping[Phase, tuple[str, ...]] = {
@@ -115,6 +119,8 @@ PHASE_INSTRUCTIONS: Mapping[Phase, str] = {
         "## Agora\n"
         "- Cumpra o contrato. Ele está acima e continua visível.\n"
         "- Trabalhe pelos critérios de aceite, não pela sua impressão de progresso.\n"
+        "- Para um projeto novo, comece pelo gerador oficial da stack através de `verify_project` com `scaffold`; "
+        "não escreva package.json ou a estrutura inicial à mão, salvo se o gerador falhar e você registrar a ressalva.\n"
         "- Se a tarefa se revelar diferente do contrato, reescreva o contrato em vez de improvisar."
     ),
     Phase.VERIFY: (

@@ -509,7 +509,16 @@ class AgenticTurnRuntime:
                         private_result={"outcome": "code_validation_required"},
                     )
                     if final_iteration:
-                        return self._fail(turn, "CODE_VALIDATION_REQUIRED", iteration, action_count)
+                        # The final provider response has already been streamed.
+                        # Do not turn an otherwise deliverable answer into an
+                        # opaque runtime error; attach the missing evidence as
+                        # an explicit caveat and preserve it durably instead.
+                        caveat = f"\n\nRessalva de verificação: {gate_reason}"
+                        self.store.delta(turn, caveat)
+                        self._life(turn, "completed_with_caveats", reason=gate_reason)
+                        self.store.finish(turn, code="CODE_VALIDATION_REQUIRED")
+                        self._settle_quality(turn, "completed_with_caveats", "CODE_VALIDATION_REQUIRED")
+                        return AgenticRunResult("completed_with_caveats", iteration, action_count, "CODE_VALIDATION_REQUIRED", budget_exhausted=True)
                     messages.append({
                         "role": "user",
                         "content": f"[Sistema do Modo Code] {gate_reason} Continue a tarefa usando ferramentas; não responda como concluída.",

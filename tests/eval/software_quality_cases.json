@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "models": ["gpt-5.6-luna", "deepseek-v4-flash"],
+  "scorer": "AgentToolset.verify_project + AgentToolset.verify_frontend",
+  "cases": [
+    {
+      "id": "study-trails-sqlalchemy",
+      "request": "Crie somente o frontend de uma plataforma de trilhas de estudo. A primeira trilha é SQL e SQLAlchemy, com página inicial, módulos, progresso e uma página de aula. Use React e TypeScript.",
+      "expect": {"stack": "vite-react-ts", "frontend": true, "routes": ["/", "/trilhas/sql-sqlalchemy", "/aulas/sqlalchemy-introducao"]}
+    },
+    {"id": "recipe-browser", "request": "Crie uma SPA React de receitas com busca, favoritos locais e páginas de detalhe.", "expect": {"stack": "vite-react-ts", "frontend": true, "routes": ["/", "/receitas/tacos"]}},
+    {"id": "habit-tracker", "request": "Implemente um frontend React para acompanhar hábitos semanais, com formulário acessível e resumo de progresso.", "expect": {"stack": "vite-react-ts", "frontend": true, "routes": ["/"]}},
+    {"id": "next-catalog", "request": "Crie um catálogo de cursos em Next.js com listagem, busca e rota dinâmica de detalhe.", "expect": {"stack": "next-app", "frontend": true, "routes": ["/", "/cursos/python"]}},
+    {"id": "next-dashboard", "request": "Implemente um dashboard Next.js de métricas de vendas com estados de carregamento e vazio.", "expect": {"stack": "next-app", "frontend": true, "routes": ["/"]}},
+    {"id": "fastapi-todos", "request": "Crie uma API FastAPI de tarefas com criar, listar e concluir, incluindo testes.", "expect": {"stack": "fastapi-service", "frontend": false}},
+    {"id": "fastapi-books", "request": "Implemente uma API FastAPI de biblioteca com validação de payload e resposta 404 para livro ausente.", "expect": {"stack": "fastapi-service", "frontend": false}},
+    {"id": "express-notes", "request": "Crie uma API Express para notas, com endpoints CRUD e testes básicos.", "expect": {"stack": "express-api", "frontend": false}},
+    {"id": "react-a11y-form", "request": "Crie uma tela React acessível para inscrição em newsletter, com validação, foco visível e mensagens de erro.", "expect": {"stack": "vite-react-ts", "frontend": true, "routes": ["/"]}},
+    {"id": "react-routing", "request": "Implemente uma SPA React de eventos com rotas de agenda, detalhe e página não encontrada.", "expect": {"stack": "vite-react-ts", "frontend": true, "routes": ["/", "/eventos", "/eventos/meetup"]}}
+  ]
+}

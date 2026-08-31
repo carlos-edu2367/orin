@@ -332,6 +332,25 @@ def test_verify_project_and_verify_frontend_are_published_during_verification() 
     assert "write_file" not in _published(verifying[0])
 
 
+def test_final_code_gate_failure_completes_with_an_explicit_caveat() -> None:
+    class _UnverifiedToolset(_Toolset):
+        def code_completion_gate(self):
+            return False, "faltou verify_project"
+
+    provider = _ScriptedProvider([_ANSWER])
+    store = _Store()
+    runtime = AgenticTurnRuntime(
+        store=store, provider=provider, toolset=_UnverifiedToolset(), system_prompt="prompt",
+        limits=AgenticLimits(max_iterations=1, max_actions=None), phase_controller=PhaseController(),
+    )
+
+    result = runtime.run("turn-1")
+
+    assert result.state == "completed_with_caveats"
+    assert result.error_code == "CODE_VALIDATION_REQUIRED"
+    assert any("Ressalva de verificação" in text for text in store.text)
+
+
 # -- elastic EXECUTE budget --------------------------------------------------
 
 

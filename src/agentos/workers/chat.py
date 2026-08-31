@@ -433,7 +433,7 @@ class ChatWorker:
                 self._browser_registry.release(turn)
             except Exception:
                 _LOGGER.exception("browser registry release for turn %s failed", turn_id)
-        if result.state == "completed":
+        if result.state in {"completed", "completed_with_caveats"}:
             self._project(turn, "COMPLETED", "provider_completed", result_ref=f"conversation-message:{turn['assistant_message_id']}")
             if kernel_managed:
                 self.store.finish(turn)
@@ -459,6 +459,7 @@ class ChatWorker:
             return
         target = {
             "completed": CodeStage.COMPLETED,
+            "completed_with_caveats": CodeStage.COMPLETED_WITH_CAVEATS,
             "waiting_user": CodeStage.WAITING_DECISION,
             "reconciliation_required": CodeStage.BLOCKED,
             "cancelled": CodeStage.BLOCKED,
@@ -469,16 +470,18 @@ class ChatWorker:
                     code_mode_runs.c.execution_id == turn["execution_id"],
                 ).values(
                     stage=target.value,
-                    completion_kind="verified" if target is CodeStage.COMPLETED else None,
-                    caveats=error_code if target is CodeStage.BLOCKED and error_code else None,
+                    completion_kind=("verified" if target is CodeStage.COMPLETED else "with_caveats" if target is CodeStage.COMPLETED_WITH_CAVEATS else None),
+                    caveats=error_code if target in {CodeStage.BLOCKED, CodeStage.COMPLETED_WITH_CAVEATS} and error_code else None,
                     updated_at=datetime.now(UTC),
                 ))
             event = (
                 AgentActivityEventType.CODE_MODE_COMPLETED if target is CodeStage.COMPLETED else
+                AgentActivityEventType.CODE_MODE_COMPLETED_WITH_CAVEATS if target is CodeStage.COMPLETED_WITH_CAVEATS else
                 AgentActivityEventType.CODE_MODE_DECISION_REQUIRED if target is CodeStage.WAITING_DECISION else
                 AgentActivityEventType.CODE_MODE_BLOCKED
             )
             summary = "Entrega de código concluída" if target is CodeStage.COMPLETED else (
+                "Entrega de código concluída com ressalvas" if target is CodeStage.COMPLETED_WITH_CAVEATS else
                 "Modo Code aguarda uma decisão" if target is CodeStage.WAITING_DECISION else "Modo Code bloqueado"
             )
             self.store._activity(turn, event, summary, {"stage": target.value, "error_code": error_code} if error_code else {"stage": target.value})

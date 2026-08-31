@@ -6,6 +6,7 @@ def test_builtin_packages_expose_metadata_without_loading_instruction_bodies() -
 
     assert {skill.id for skill in skills} == {
         "systematic-debugging", "testing", "code-review", "technical-research",
+        "react-spa", "next-js-app-router", "python-fastapi-service", "frontend-accessibility",
     }
     assert all(skill.instructions is None for skill in skills)
     assert all(skill.package_path and skill.package_path.name == "SKILL.md" for skill in skills)

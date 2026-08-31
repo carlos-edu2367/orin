@@ -31,6 +31,7 @@ def code_mode_instructions(*, work_kind: str, autonomy: str, plan_path: str | No
         "## Modo Code",
         "Você está executando uma tarefa de engenharia com entrega verificável." + plan,
         approval,
+        "Ao iniciar um projeto, use primeiro o gerador oficial da stack via `verify_project` com `scaffold`; criar package.json ou a estrutura-base manualmente é último recurso.",
         investigation,
         frontend,
         "Se um teste pré-existente e fora do escopo falhar, pare e peça uma decisão com evidência; nunca oculte a falha.",

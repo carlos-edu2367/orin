@@ -173,6 +173,13 @@ def test_verification_carries_its_own_mechanical_checks_and_a_way_to_conclude() 
     assert {"verify_project", "verify_frontend", "report_verification"} <= names
 
 
+def test_execute_publishes_project_verification_without_exceeding_the_tool_cap() -> None:
+    names = tools_for(Phase.EXECUTE, frozenset({"files", "terminal"}))
+
+    assert "verify_project" in names
+    assert len(names) <= 16
+
+
 def test_a_declared_toolkit_does_not_reopen_writing_during_verification() -> None:
     """Verification is read-only regardless of what the contract declared."""
     assert "write_file" not in tools_for(Phase.VERIFY, frozenset(TOOLKITS))

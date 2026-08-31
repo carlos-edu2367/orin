@@ -373,6 +373,28 @@ def test_the_workspace_tree_keeps_a_root_manifest_visible_past_the_line_cap(tmp_
     assert "f package.json" in runtime.volatile_prompt
 
 
+def test_root_workspace_conventions_are_injected_into_the_volatile_prompt(tmp_path: Path) -> None:
+    session, _store, _agents, _provider = build(tmp_path, [])
+    (session.workspace.root / "AGENTS.md").write_text("Use the project formatter before tests.", encoding="utf-8")
+    (session.workspace.root / "CONVENTIONS.md").write_text("Components use PascalCase.", encoding="utf-8")
+
+    runtime = session.build_runtime()
+
+    assert "## Convenções do workspace" in runtime.volatile_prompt
+    assert "Use the project formatter" in runtime.volatile_prompt
+    assert "Components use PascalCase" in runtime.volatile_prompt
+
+
+def test_new_managed_code_workspace_skips_plan_approval(tmp_path: Path) -> None:
+    session, _store, _agents, _provider = build(tmp_path, [])
+    session.turn.update({"code_mode": "code", "code_mode_autonomy": "approval_required"})
+
+    managed_runtime = session.build_runtime()
+
+    assert managed_runtime.toolset._code_mode_requires_approval is False
+    assert "autonomia de código" in managed_runtime.system_prompt
+
+
 def test_the_system_prompt_uses_orin_as_the_public_product_name() -> None:
     prompt = _joined_prompt(tool_names=(), memories=[], agents=[], workspace_hint="hint", subagents_enabled=False)
 
