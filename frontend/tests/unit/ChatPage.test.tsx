@@ -298,6 +298,23 @@ describe('ChatPage', () => {
     expect(String(sent.mock.calls[0][0])).toContain('e agora?')
   })
 
+  it('restores a failed request to the composer for an explicit retry', async () => {
+    globalThis.fetch = stubFetch(() => ({
+      state: 'failed',
+      messages: [
+        { message_id: 'msg-1', role: 'user', content: 'Corrija o erro', status: 'completed', retryable: false },
+        { message_id: 'msg-2', role: 'assistant', content: '', status: 'failed', retryable: true },
+      ],
+      activities: [],
+    }))
+
+    renderChat()
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: 'Usar solicitação novamente' }))
+
+    expect(screen.getByRole('textbox', { name: 'Mensagem' })).toHaveValue('Corrija o erro')
+  })
+
   it('sends a turn with an attachment and no text', async () => {
     const sent = vi.fn()
     globalThis.fetch = vi.fn<typeof fetch>().mockImplementation(async (input, init) => {

@@ -32,3 +32,15 @@ it('renders one persistent Code mode card as later lifecycle events arrive', () 
   expect(screen.getByLabelText('Progresso do Modo Code')).toBe(card)
   expect(card).toHaveTextContent('Executando validação')
 })
+
+it('distinguishes a recoverable provider failure from work that is still running', () => {
+  render(<ActivityStream events={[
+    event(1, 'code_mode.activated', 'planning', 'Modo Code ativado'),
+    { ...event(2, 'code_mode.blocked', 'blocked', 'Modo Code bloqueado'), errorCode: 'PROVIDER_STREAM_FAILED' },
+  ]} />)
+
+  const card = screen.getByLabelText('Progresso do Modo Code')
+  expect(card).toHaveTextContent('Falha temporária')
+  expect(card).toHaveTextContent('Não foi possível alcançar o provedor')
+  expect(card).not.toHaveTextContent('Em andamento')
+})

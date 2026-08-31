@@ -716,8 +716,11 @@ export function ChatPage() {
             {loading && <p className="chat__placeholder" role="status">Carregando conversa…</p>}
             {!loading && messages.length === 0 && <p className="chat__placeholder">Esta conversa ainda não tem mensagens.</p>}
 
-            {!loadFailure && messages.map((item) => {
+            {!loadFailure && messages.map((item, itemIndex) => {
               const timeline = item.role === 'assistant' ? timelinesByMessage.get(item.message_id) : undefined
+              const retrySource = item.role === 'assistant' && item.retryable
+                ? messages.slice(0, itemIndex).reverse().find((candidate) => candidate.role === 'user' && candidate.content.trim())
+                : undefined
               return (
                 <motion.article
                   key={item.message_id}
@@ -736,7 +739,10 @@ export function ChatPage() {
                   {item.role === 'user' && item.attachments.length > 0 && (
                     <MessageAttachments conversationId={conversationId} items={item.attachments} client={client} onPreview={setPreviewReference} />
                   )}
-                  {item.retryable && <span className="bubble__retry">Você pode reenviar esta mensagem.</span>}
+                  {item.retryable && <div className="bubble__retry">
+                    <span role="status">Você pode tentar novamente sem perder a solicitação.</span>
+                    {retrySource && <button type="button" className="ghost-button" disabled={running} onClick={() => { setMessage(retrySource.content); setError(null) }}>Usar solicitação novamente</button>}
+                  </div>}
                 </motion.article>
               )
             })}

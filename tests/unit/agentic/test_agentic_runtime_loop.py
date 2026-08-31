@@ -410,6 +410,46 @@ def test_runtime_retries_a_rate_limited_stream_within_the_turn_budget() -> None:
     assert any(state == "retrying" for state, _ in store.events)
 
 
+def test_runtime_retries_a_provider_stream_that_cannot_start() -> None:
+    class FlakyProvider:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def stream(self, request):
+            self.calls += 1
+            if self.calls == 1:
+                raise OSError("provider is temporarily unavailable")
+            return [NormalizedStreamItem(StreamKind.TEXT, 1, text="recovered"), NormalizedStreamItem(StreamKind.FINISH, 2, finish_reason="stop")]
+
+    provider = FlakyProvider()
+    store = Store()
+    result = AgenticTurnRuntime(store=store, provider=provider, limits=AgenticLimits(max_provider_retries=1)).run("turn-1")
+
+    assert result.state == "completed"
+    assert provider.calls == 2
+    assert any(state == "retrying" for state, _ in store.events)
+
+
+def test_runtime_pauses_for_reconciliation_when_a_stream_breaks_after_output() -> None:
+    class InterruptedProvider:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def stream(self, request):
+            self.calls += 1
+            yield NormalizedStreamItem(StreamKind.TEXT, 1, text="partial response")
+            raise OSError("connection reset")
+
+    provider = InterruptedProvider()
+    store = Store()
+    result = AgenticTurnRuntime(store=store, provider=provider, limits=AgenticLimits(max_provider_retries=1)).run("turn-1")
+
+    assert result.state == "reconciliation_required"
+    assert result.error_code == "PROVIDER_STREAM_INTERRUPTED"
+    assert provider.calls == 1
+    assert store.deltas == ["partial response"]
+
+
 def test_runtime_allows_an_unlimited_tool_iteration_budget() -> None:
     class ManyToolsProvider:
         def __init__(self) -> None:

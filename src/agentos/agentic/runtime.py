@@ -307,13 +307,18 @@ class AgenticTurnRuntime:
                 invocation_ref=f"provider:{iteration}:{provider_retries + 1}",
                 request_ref=f"conversation-turn:{turn_id}:provider:{iteration}",
             )
+            # A failure while opening a stream is safe to retry because no
+            # provider event has reached the runtime yet.  Keep this flag in
+            # scope before calling ``stream``: some transports can raise while
+            # constructing their iterator, before the loop below exists.
+            provider_yielded = False
             try:
                 events = self.provider.stream(request)
             except Exception:
                 self._effect_finished(
                     turn, provider_effect_id, state="NOT_APPLIED", error_code="PROVIDER_STREAM_NOT_STARTED"
                 )
-                if not provider_yielded and provider_retries < self.limits.max_provider_retries and self.clock() < deadline:
+                if provider_retries < self.limits.max_provider_retries and self.clock() < deadline:
                     provider_retries += 1
                     self._life(turn, "retrying", attempt=provider_retries)
                     continue
@@ -327,7 +332,6 @@ class AgenticTurnRuntime:
             finish = None
             retryable_error = False
             rate_limited = False
-            provider_yielded = False
             try:
                 for raw_event in events:
                     provider_yielded = True
@@ -378,6 +382,9 @@ class AgenticTurnRuntime:
                     state="UNKNOWN" if provider_yielded else "NOT_APPLIED",
                     error_code="PROVIDER_STREAM_INTERRUPTED",
                 )
+                if provider_yielded:
+                    self._settle_quality(turn, "reconciliation_required", "PROVIDER_STREAM_INTERRUPTED")
+                    return AgenticRunResult("reconciliation_required", iteration, action_count, "PROVIDER_STREAM_INTERRUPTED")
                 if provider_retries < self.limits.max_provider_retries and self.clock() < deadline:
                     provider_retries += 1
                     self._life(turn, "retrying", attempt=provider_retries)
