@@ -5,9 +5,10 @@ import type { ActivityGroup, ActivityState, ConversationActivityEvent } from './
  *
  * Two rules do the work: a `tool.started` is dropped once its `tool.finished`
  * arrives (the started event only exists so a running tool has a live state), and
- * consecutive finished tools of the same family collapse into one row — "Leu 8
- * arquivos" instead of eight lines. The individual events stay attached so the
- * card can expand into the detail.
+ * a continuous sequence of ordinary tools becomes one row. The row keeps the
+ * latest human-readable activity as its title, while the count and the expanded
+ * view preserve the exact audit trail. Interactive approvals and browser
+ * captures stay separate because they need their own controls and preview.
  */
 export function summarizeActivities(events: ConversationActivityEvent[]): ActivityGroup[] {
   const groups: ActivityGroup[] = []
@@ -113,7 +114,12 @@ export function groupingKey(event: ConversationActivityEvent): string {
     // disappears inside a collapsed group.
     if (event.pluginApproval) return `approval:plugin:${event.agentId}:${event.turnId ?? ''}:${event.invocationId ?? event.eventId}`
     if (event.mcpApproval || event.questions) return `approval:user:${event.agentId}:${event.turnId ?? ''}:${event.invocationId ?? event.eventId}`
-    return `tool:${event.agentId}:${event.turnId ?? ''}:${event.toolKind ?? event.toolName ?? 'tool'}`
+    // A tool sequence is one visible thought: moving from a file read to a
+    // command or a web lookup should update the same line, not make the chat
+    // look like a terminal log. The user can still open the card to see each
+    // exact call. Browser observations keep their visual-capture card.
+    if (event.toolKind === 'browser') return `browser:${event.agentId}:${event.turnId ?? ''}:${event.toolName ?? 'tool'}`
+    return `tool:${event.agentId}:${event.turnId ?? ''}`
   }
   if (event.kind === 'agent') return `agent:${event.agentId}:${event.turnId ?? ''}:${event.type}:${event.label ?? ''}`
   if (event.kind === 'artifact') return `artifact:${event.agentId}:${event.turnId ?? ''}:${event.label ?? ''}`
@@ -129,17 +135,12 @@ export function groupLabel(group: ActivityGroup): string {
 }
 
 function toolGroupLabel(group: ActivityGroup): string {
-  if (group.count === 1) return group.events[0].summary || `Usou ${toolKindLabel(group.events[0].toolKind)}`
-  const kind = group.events[0].toolKind
-  const plural = group.count
-  switch (kind) {
-    case 'filesystem': return `${plural} operações em arquivos`
-    case 'terminal': return `Terminal · ${plural} comandos`
-    case 'web': return `Consultou ${plural} páginas`
-    case 'browser': return `${plural} ações no navegador`
-    case 'memory': return `${plural} atualizações de memória`
-    default: return `${plural} ações de ${toolKindLabel(kind)}`
-  }
+  const latest = group.events.at(-1) ?? group.events[0]
+  // The summary comes from the tool boundary and names what the agent just did
+  // in user language. Keeping the most recent one on the stable card mirrors a
+  // person narrating their work without exposing implementation telemetry.
+  if (group.count > 1 && latest.summary.startsWith('$')) return 'Executando comandos'
+  return latest.summary || `Usou ${toolKindLabel(latest.toolKind)}`
 }
 
 function agentLabel(event: ConversationActivityEvent): string {

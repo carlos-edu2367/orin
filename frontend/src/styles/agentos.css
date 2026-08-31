@@ -699,29 +699,30 @@ kbd {
 
 /* ---------------------------------------------------------------- activity */
 
-.activity-stream { margin: 4px 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 3px; }
+.activity-stream { margin: 6px 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; }
 
 .activity-card { border-radius: var(--radius-sm); }
 .activity-card__trigger {
   display: flex; align-items: center; gap: 10px; width: 100%;
-  padding: 7px 10px; border: 1px solid transparent; border-radius: var(--radius-sm);
-  background: transparent; color: var(--muted); cursor: pointer;
+  min-height: 35px; padding: 8px 10px; border: 1px solid transparent; border-radius: var(--radius-sm);
+  background: rgb(var(--orin-text-rgb) / .018); color: var(--muted); cursor: pointer;
   font-size: 12.5px; text-align: left;
   transition: background 0.16s var(--ease), border-color 0.16s var(--ease), color 0.16s var(--ease);
 }
-.activity-card__trigger:hover { background: var(--raised); border-color: var(--line); color: var(--text); }
+.activity-card__trigger:hover, .activity-card__trigger:focus-visible { background: var(--raised); border-color: rgb(var(--orin-accent-rgb) / .35); color: var(--text); outline: none; }
 .activity-card__glyph {
   flex-shrink: 0; width: 18px; text-align: center; font-family: var(--mono);
   font-size: 11px; color: var(--signal-dim);
 }
 .activity-card__glyph.is-running { color: var(--signal); animation: glyph-breathe 1.6s ease-in-out infinite; }
-.activity-card__label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.activity-card__label { flex: 1; min-width: 0; overflow: hidden; color: rgb(var(--orin-text-rgb) / .84); font-weight: 520; letter-spacing: -.005em; text-overflow: ellipsis; white-space: nowrap; }
 .activity-card__count {
-  flex-shrink: 0; padding: 1px 7px; border-radius: 99px; background: var(--raised-strong);
-  font-family: var(--mono); font-size: 10px; color: var(--muted);
+  flex-shrink: 0; padding: 2px 7px; border: 1px solid rgb(var(--orin-text-rgb) / .1); border-radius: 99px; background: rgb(var(--orin-text-rgb) / .035);
+  font-family: var(--mono); font-size: 9.5px; color: var(--faint);
 }
+.activity-card__failure { flex-shrink: 0; color: var(--danger); font: 9.5px var(--mono); }
 .activity-card__agent { flex-shrink: 0; font-family: var(--mono); font-size: 10px; color: var(--info); }
-.activity-card__state { flex-shrink: 0; font-family: var(--mono); font-size: 10px; color: var(--faint); }
+.activity-card__state { flex-shrink: 0; font-family: var(--mono); font-size: 9.5px; color: var(--faint); }
 .activity-card[data-state="failed"] .activity-card__state { color: var(--danger); }
 .activity-card[data-state="failed"] .activity-card__glyph { color: var(--danger); }
 .activity-card[data-state="cancelled"] .activity-card__state { color: var(--warn); }
@@ -803,7 +804,7 @@ kbd {
 .activity-card__chevron.is-open { transform: rotate(90deg); }
 
 .activity-card__details { overflow: hidden; }
-.activity-card__events { margin: 2px 0 8px; padding: 0 0 0 28px; list-style: none; display: flex; flex-direction: column; gap: 8px; }
+.activity-card__events { margin: 3px 0 9px; padding: 0 10px 0 28px; list-style: none; display: flex; flex-direction: column; gap: 8px; }
 .activity-detail { border-left: 1px solid var(--line); padding: 2px 0 2px 12px; }
 .activity-detail[data-state="failed"] { border-left-color: rgba(255, 157, 145, 0.5); }
 .activity-detail__summary { display: block; font-size: 12px; color: rgb(var(--orin-text-rgb) / 0.82); overflow-wrap: anywhere; }

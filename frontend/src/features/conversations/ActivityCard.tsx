@@ -31,6 +31,7 @@ export function ActivityCard({ group }: ActivityCardProps) {
   const reduced = useReducedMotion()
   const glyph = GLYPHS[group.kind === 'tool' ? (group.events[0].toolKind ?? 'lifecycle') : group.kind] ?? '◦'
   const running = group.state === 'waiting_tool' || group.state === 'working' || group.state === 'waiting_agent'
+  const failedCalls = group.events.filter((event) => event.state === 'failed').length
 
   return (
     <motion.article
@@ -54,7 +55,8 @@ export function ActivityCard({ group }: ActivityCardProps) {
       >
         <span className={`activity-card__glyph${running ? ' is-running' : ''}`} aria-hidden="true">{glyph}</span>
         <span className="activity-card__label">{group.label}</span>
-        {group.count > 1 && <span className="activity-card__count">{group.count}</span>}
+        {group.count > 1 && <span className="activity-card__count">{formatActivityCount(group.count)}</span>}
+        {failedCalls > 0 && <span className="activity-card__failure">{formatFailureCount(failedCalls)}</span>}
         {group.agentName && <span className="activity-card__agent">{group.agentName}</span>}
         <span className="activity-card__state">{activityStateLabel(group.state)}</span>
         <span className={`activity-card__chevron${open ? ' is-open' : ''}`} aria-hidden="true">›</span>
@@ -79,6 +81,14 @@ export function ActivityCard({ group }: ActivityCardProps) {
       </AnimatePresence>
     </motion.article>
   )
+}
+
+function formatActivityCount(count: number): string {
+  return `${count} ${count === 1 ? 'ação' : 'ações'}`
+}
+
+function formatFailureCount(count: number): string {
+  return `${count} ${count === 1 ? 'falha' : 'falhas'}`
 }
 
 function ActivityDetailRow({ event }: { event: ConversationActivityEvent }) {

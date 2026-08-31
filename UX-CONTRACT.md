@@ -29,3 +29,11 @@
 - Desktop notifications are opt-in and only announce completion, a block, or a
   required decision. The activity timeline remains the source of detail.
 - Notification delivery failure must never change task state.
+
+## Activity in chat
+
+- A continuous sequence of ordinary tools in the same turn and agent is one
+  expandable activity line. Its title follows the latest human-readable action;
+  its count and expanded view retain every individual call and failure.
+- Approval requests and browser captures remain independent cards because they
+  have an action or visual evidence the person needs to reach directly.

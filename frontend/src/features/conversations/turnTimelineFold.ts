@@ -18,8 +18,8 @@ export function resolveTurnId(events: ConversationActivityEvent[], messageId: st
  * One assistant turn folded into the order it actually happened: narration
  * text broken wherever a tool or agent event landed, instead of prose
  * followed by a replayed report. Reuses the same grouping rules as
- * `summarizeActivities` so a run of same-family tool calls still collapses
- * into one card — just interrupted by whatever text fell between them.
+ * `summarizeActivities` so one continuous tool sequence still collapses into
+ * one card — just interrupted by whatever text fell between it.
  */
 export function buildTurnTimeline(events: ConversationActivityEvent[], turnId: string, messageId: string, completeContent = ''): TimelineItem[] {
   const turnEvents = events.filter((event) => event.turnId === turnId)

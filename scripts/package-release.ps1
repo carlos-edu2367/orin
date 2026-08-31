@@ -4,6 +4,26 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+function Get-Sha256Hash {
+    param([Parameter(Mandatory)][string]$Path)
+
+    $getFileHash = Get-Command Get-FileHash -ErrorAction SilentlyContinue
+    if ($null -ne $getFileHash) {
+        return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+    }
+
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    $stream = [System.IO.File]::OpenRead($Path)
+    try {
+        return ([System.BitConverter]::ToString($sha256.ComputeHash($stream))).Replace('-', '').ToLowerInvariant()
+    }
+    finally {
+        $stream.Dispose()
+        $sha256.Dispose()
+    }
+}
+
 $root = Split-Path -Parent $PSScriptRoot
 $desktopPackage = Get-Content (Join-Path $root 'desktop\package.json') -Raw | ConvertFrom-Json
 if ([string]::IsNullOrWhiteSpace($Version)) { $Version = [string]$desktopPackage.version }
@@ -24,7 +44,7 @@ $archive = Join-Path $output $archiveName
 New-Item -ItemType Directory -Force -Path $output | Out-Null
 Remove-Item -LiteralPath $archive -Force -ErrorAction SilentlyContinue
 Compress-Archive -Path (Join-Path $source '*') -DestinationPath $archive -CompressionLevel Optimal
-$hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+$hash = Get-Sha256Hash -Path $archive
 
 $manifest = @{
     version = $Version

@@ -26,18 +26,18 @@ function toolPair(name: string, toolKind: string, summary: string, invocationId:
 }
 
 describe('activity grouping', () => {
-  it('collapses a run of same-family tools into one readable row', () => {
+  it('keeps one readable row while a sequence moves between tool families', () => {
     const events = [
       ...toolPair('read_file', 'filesystem', 'Leu a.txt', 'call-1'),
-      ...toolPair('read_file', 'filesystem', 'Leu b.txt', 'call-2'),
-      ...toolPair('read_file', 'filesystem', 'Leu c.txt', 'call-3'),
+      ...toolPair('run_command', 'terminal', 'Executou os testes', 'call-2'),
+      ...toolPair('search_web', 'web', 'Confirmou a documentação', 'call-3'),
     ]
 
     const groups = summarizeActivities(events)
 
     expect(groups).toHaveLength(1)
     expect(groups[0].count).toBe(3)
-    expect(groups[0].label).toBe('3 operações em arquivos')
+    expect(groups[0].label).toBe('Confirmou a documentação')
     expect(groups[0].events).toHaveLength(3)
   })
 
@@ -63,14 +63,26 @@ describe('activity grouping', () => {
     expect(groups[0].state).toBe('waiting_tool')
   })
 
-  it('does not merge tools from different families', () => {
+  it('updates the same row instead of splitting different ordinary tools', () => {
     const groups = summarizeActivities([
       ...toolPair('read_file', 'filesystem', 'Leu a.txt', 'call-1'),
       ...toolPair('run_command', 'terminal', '$ ls', 'call-2'),
     ])
 
-    expect(groups.map((group) => group.kind)).toEqual(['tool', 'tool'])
-    expect(groups).toHaveLength(2)
+    expect(groups).toHaveLength(1)
+    expect(groups[0].count).toBe(2)
+    expect(groups[0].label).toBe('Executando comandos')
+  })
+
+  it('keeps browser captures separate from the ordinary tool sequence', () => {
+    const groups = summarizeActivities([
+      ...toolPair('read_file', 'filesystem', 'Leu a.txt', 'call-1'),
+      ...toolPair('inspect_page', 'browser', 'Inspecionou a página', 'call-2'),
+      ...toolPair('run_command', 'terminal', 'Executou os testes', 'call-3'),
+    ])
+
+    expect(groups).toHaveLength(3)
+    expect(groups.map((group) => group.label)).toEqual(['Leu a.txt', 'Inspecionou a página', 'Executou os testes'])
   })
 
   it('keeps a plugin approval card separate from plugin search activity', () => {

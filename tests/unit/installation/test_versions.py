@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
+import tomllib
 
 import pytest
 
 from agentos.installation.profile import RuntimeProfile
 from agentos.installation import versions
+from agentos.version import __version__
 
 
 def _profile(tmp_path: Path, version: str = "0.1.12") -> tuple[RuntimeProfile, Path]:
@@ -13,6 +16,18 @@ def _profile(tmp_path: Path, version: str = "0.1.12") -> tuple[RuntimeProfile, P
     runtime = version_root / "resources" / "runtime"
     runtime.mkdir(parents=True)
     return RuntimeProfile("installed", runtime, version, None), tmp_path
+
+
+def test_release_version_is_aligned_across_runtime_and_desktop_metadata() -> None:
+    root = Path(__file__).resolve().parents[3]
+    pyproject = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    desktop = json.loads((root / "desktop" / "package.json").read_text(encoding="utf-8"))
+    desktop_lock = json.loads((root / "desktop" / "package-lock.json").read_text(encoding="utf-8"))
+
+    assert pyproject["project"]["version"] == __version__
+    assert desktop["version"] == __version__
+    assert desktop_lock["version"] == __version__
+    assert desktop_lock["packages"][""]["version"] == __version__
 
 
 def test_status_lists_only_semver_version_directories_and_marks_current(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
