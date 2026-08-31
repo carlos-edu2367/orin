@@ -102,6 +102,38 @@ def test_entering_a_phase_resets_its_budget() -> None:
     assert controller.exhausted is False
 
 
+def test_a_productive_iteration_does_not_spend_the_phase_budget() -> None:
+    """The budget exists to catch flailing, not to cap real progress."""
+    controller = _controller()
+    controller._enter(Phase.EXECUTE)
+    for _ in range(DEFAULT_PHASE_BUDGETS[Phase.EXECUTE].iterations * 2):
+        controller.note_iteration(1, productive=True)
+        controller.observe(wrote_contract=False)
+    assert controller.current is Phase.EXECUTE
+    assert controller.exhausted is False
+
+
+def test_force_verify_enters_verification_regardless_of_budget() -> None:
+    controller = _controller()
+    controller._enter(Phase.EXECUTE)
+    controller.note_iteration(1)
+
+    controller.force_verify()
+
+    assert controller.current is Phase.VERIFY
+    assert controller.exhausted is False
+
+
+def test_force_respond_ends_verification_early() -> None:
+    controller = _controller()
+    controller._enter(Phase.VERIFY)
+
+    controller.force_respond()
+
+    assert controller.current is Phase.RESPOND
+    assert controller.is_final
+
+
 # -- published tools --------------------------------------------------------
 
 
@@ -134,6 +166,11 @@ def test_verification_can_look_but_never_change() -> None:
     assert "read_file" in names
     assert "write_file" not in names
     assert "edit_file" not in names
+
+
+def test_verification_carries_its_own_mechanical_checks_and_a_way_to_conclude() -> None:
+    names = tools_for(Phase.VERIFY)
+    assert {"verify_project", "verify_frontend", "report_verification"} <= names
 
 
 def test_a_declared_toolkit_does_not_reopen_writing_during_verification() -> None:

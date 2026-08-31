@@ -49,8 +49,11 @@ DEFAULT_PHASE_BUDGETS: Mapping[Phase, PhaseBudget] = {
 
 # Tools every working phase needs. Naming them explicitly is the point: the
 # alternative is publishing whatever happens to be registered.
-_READ_TOOLS = ("read_file", "view_file", "transcribe_pdf", "list_files", "search_files", "search_code", "project_map")
-_WRITE_TOOLS = ("write_file", "edit_file", "run_command")
+_READ_TOOLS = (
+    "read_file", "view_file", "transcribe_pdf", "list_files", "search_files", "search_code", "project_map",
+    "read_process_output",
+)
+_WRITE_TOOLS = ("write_file", "edit_file", "run_command", "stop_process")
 _ALWAYS = ("write_contract", "ask_user")
 
 PHASE_TOOLS: Mapping[Phase, tuple[str, ...]] = {
@@ -58,7 +61,16 @@ PHASE_TOOLS: Mapping[Phase, tuple[str, ...]] = {
     Phase.PLAN: (*_ALWAYS, "search_skills", "list_skills", "use_skill", "recall", "list_files", "read_file"),
     Phase.EXECUTE: (*_ALWAYS, *_READ_TOOLS, *_WRITE_TOOLS, "recall", "remember"),
     # Verification may look and may run a check; it may not change anything.
-    Phase.VERIFY: ("read_file", "view_file", "list_files", "search_files", "run_command", "browser_observe"),
+    # ``verify_project``/``verify_frontend`` mutate nothing themselves but can
+    # install dependencies or start a browser session as a side effect of
+    # actually checking something, which is why they sit with ``run_command``
+    # here rather than with the read-only inspection tools.
+    Phase.VERIFY: (
+        "read_file", "view_file", "list_files", "search_files",
+        "run_command", "read_process_output", "verify_project",
+        "browser_observe", "browser_screenshot", "verify_frontend",
+        "report_verification",
+    ),
     Phase.RESPOND: (),
 }
 
@@ -67,7 +79,7 @@ PHASE_TOOLS: Mapping[Phase, tuple[str, ...]] = {
 # server out of a request that has no use for them.
 TOOLKIT_TOOLS: Mapping[str, tuple[str, ...]] = {
     "files": (*_READ_TOOLS, *_WRITE_TOOLS),
-    "terminal": ("run_command",),
+    "terminal": ("run_command", "read_process_output", "stop_process"),
     "web": ("fetch_url", "web_search"),
     "browser": (
         "browse_page", "browser_observe", "browser_click", "browser_fill", "browser_press",
@@ -109,7 +121,10 @@ PHASE_INSTRUCTIONS: Mapping[Phase, str] = {
         "## Agora\n"
         "- Pare de produzir e confira o que existe, critério por critério do contrato.\n"
         "- Você só pode ler e rodar verificações; nada de alterar arquivos nesta etapa.\n"
-        "- Um critério que você não conseguir verificar deve ser declarado como não verificado."
+        "- Prefira `verify_project` a adivinhar comandos, e `verify_frontend` para confirmar que uma página renderiza de verdade.\n"
+        "- Um critério que você não conseguir verificar deve ser declarado como não verificado.\n"
+        "- Termine chamando `report_verification` com o resultado real. Se algo não se sustentar, descreva o erro "
+        "concreto — você voltará para corrigir. Uma resposta em texto livre não encerra esta etapa."
     ),
     Phase.RESPOND: (
         "## Agora\n"
@@ -166,7 +181,17 @@ class PhaseController:
     def is_final(self) -> bool:
         return self.current is Phase.RESPOND
 
-    def note_iteration(self, actions: int = 0) -> None:
+    def note_iteration(self, actions: int = 0, *, productive: bool = False) -> None:
+        """Count one iteration against the phase's budget, unless it earned a pass.
+
+        The budget exists to catch flailing -- an agent that repeats itself
+        without moving forward -- not to cap real work. An iteration that
+        wrote a successful change or produced a verification result is
+        exempted; the turn's outer limits (deadline, total actions) are the
+        backstop that still bounds it.
+        """
+        if productive:
+            return
         self._iterations += 1
         self._actions += max(0, int(actions))
 
@@ -183,8 +208,17 @@ class PhaseController:
             self._enter(self._next())
 
     def force_execute(self) -> None:
-        """Used when a contract had to be synthesized for a model that could not write one."""
+        """Used when a contract had to be synthesized for a model that could not write one,
+        or when a failed verification sends the agent back to fix what it found."""
         self._enter(Phase.EXECUTE)
+
+    def force_verify(self) -> None:
+        """Used when the runtime detects an unverified change the model tried to finish without checking."""
+        self._enter(Phase.VERIFY)
+
+    def force_respond(self) -> None:
+        """Used when verification passed, or its repair-round budget ran out."""
+        self._enter(Phase.RESPOND)
 
     def _next(self) -> Phase:
         index = _ORDER.index(self.current)

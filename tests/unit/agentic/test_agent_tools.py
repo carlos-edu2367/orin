@@ -37,6 +37,107 @@ def test_code_mode_requires_a_successful_check_after_it_changes_code(tmp_path: P
     assert tools.code_completion_gate()[0] is True
 
 
+def test_change_events_track_workspace_mutations_regardless_of_code_mode(toolset: AgentToolset) -> None:
+    """The general verify-before-responding gate applies to every turn, not only Code mode."""
+    assert toolset.change_events() == 0
+
+    toolset.invoke("write_file", {"path": "notes.txt", "content": "hello"})
+    assert toolset.change_events() == 1
+
+    toolset.invoke("read_file", {"path": "notes.txt"})
+    assert toolset.change_events() == 1
+
+    toolset.invoke("edit_file", {"path": "notes.txt", "old_text": "hello", "new_text": "hello world"})
+    assert toolset.change_events() == 2
+
+
+def test_change_events_ignore_the_orin_control_directory(toolset: AgentToolset) -> None:
+    toolset.invoke("write_file", {"path": ".orin/plans/plan.md", "content": "x"})
+    toolset.invoke("run_command", {"command": "echo hi", "background": True})
+
+    assert toolset.change_events() == 0
+
+
+def test_report_verification_returns_a_structured_pass_or_fail(toolset: AgentToolset) -> None:
+    passed = toolset.invoke("report_verification", {"passed": True, "findings": "build e testes ok"})
+    assert passed.status == "succeeded"
+    assert passed.payload["passed"] is True
+
+    failed = toolset.invoke("report_verification", {"passed": False, "findings": "build falha: TypeError em App.tsx:12"})
+    assert failed.status == "succeeded"
+    assert failed.payload["passed"] is False
+    assert "TypeError" in failed.content
+
+
+def test_verify_project_reports_no_recipe_for_an_unrecognized_workspace(toolset: AgentToolset) -> None:
+    outcome = toolset.invoke("verify_project", {})
+
+    assert outcome.status == "succeeded"
+    assert outcome.payload["recipe"] is None
+    assert outcome.payload["all_passed"] is None
+
+
+def test_verify_project_runs_detected_steps_and_reports_pass_and_fail(toolset: AgentToolset) -> None:
+    toolset.invoke("write_file", {"path": "pyproject.toml", "content": "[project]\nname = \"demo\"\n\n[tool.ruff]\n"})
+    toolset.invoke("write_file", {"path": "app.py", "content": "import os\n"})
+
+    outcome = toolset.invoke("verify_project", {"steps": ["lint"]})
+
+    assert outcome.status == "succeeded"
+    assert outcome.payload["recipe"] == "python"
+    assert [item["step"] for item in outcome.payload["steps"]] == ["lint"]
+    assert outcome.payload["steps"][0]["command"] == "python -m ruff check ."
+
+
+def test_verify_project_rejects_an_unknown_step(toolset: AgentToolset) -> None:
+    toolset.invoke("write_file", {"path": "pyproject.toml", "content": "[project]\nname = \"demo\"\n"})
+
+    outcome = toolset.invoke("verify_project", {"steps": ["deploy"]})
+
+    assert outcome.status == "failed"
+    assert outcome.error_code == "TOOL_REFUSED"
+
+
+def test_verify_project_stops_after_a_failing_install_step(toolset: AgentToolset, monkeypatch: pytest.MonkeyPatch) -> None:
+    toolset.invoke("write_file", {"path": "package.json", "content": '{"scripts": {"build": "vite build"}}'})
+
+    class FailedInstall:
+        returncode = 1
+        stdout = ""
+        stderr = "npm ERR! network timeout"
+
+    monkeypatch.setattr(agent_tools.subprocess, "run", lambda *a, **k: FailedInstall())
+
+    outcome = toolset.invoke("verify_project", {})
+
+    assert outcome.status == "succeeded"
+    assert outcome.payload["all_passed"] is False
+    assert [item["step"] for item in outcome.payload["steps"]] == ["install"]
+    assert "não foram executadas" in outcome.content
+
+
+def test_write_file_appends_an_automatic_lint_diagnostic_for_python_files(toolset: AgentToolset) -> None:
+    outcome = toolset.invoke("write_file", {"path": "app.py", "content": "import os\n"})
+
+    assert outcome.status == "succeeded"
+    assert "diagnóstico automático" in outcome.content
+
+
+def test_the_automatic_diagnostic_is_debounced_for_the_same_path(toolset: AgentToolset, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
+    monkeypatch.setattr(
+        agent_tools.subprocess, "run",
+        lambda *args, **kwargs: calls.append(args) or type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
+    )
+
+    first = toolset.invoke("write_file", {"path": "app.py", "content": "import os\n"})
+    second = toolset.invoke("edit_file", {"path": "app.py", "old_text": "import os", "new_text": "import sys"})
+
+    assert "diagnóstico automático" in first.content
+    assert "diagnóstico automático" not in second.content
+    assert len(calls) == 1
+
+
 def test_code_mode_keeps_push_and_production_publish_behind_the_right_boundaries(tmp_path: Path) -> None:
     workspace = ConversationWorkspace(tmp_path, "chat_code_publish")
     guarded = AgentToolset(workspace, code_mode_active=True)
@@ -155,6 +256,51 @@ def test_agent_edits_only_its_custom_skill_as_a_new_version(tmp_path: Path) -> N
 
 def test_browse_page_is_absent_without_a_browser(toolset: AgentToolset) -> None:
     assert "browse_page" not in [item.name for item in toolset.definitions()]
+
+
+def test_verify_frontend_is_absent_without_a_browser(toolset: AgentToolset) -> None:
+    assert "verify_frontend" not in [item.name for item in toolset.definitions()]
+
+
+def test_verify_frontend_checks_the_base_url_and_every_declared_route(tmp_path: Path) -> None:
+    class Browser:
+        def __init__(self) -> None:
+            self.navigated: list[str] = []
+
+        def navigate(self, url):
+            self.navigated.append(url)
+            return {"url": url, "title": "Trilha", "html": f"<html><body>conteúdo de {url}</body></html>", "screenshot": ""}
+
+    browser = Browser()
+    tools = AgentToolset(ConversationWorkspace(tmp_path, "chat_verify_frontend"), browser=browser)
+
+    outcome = tools.invoke("verify_frontend", {"url": "http://localhost:5173", "routes": ["/sobre", "/trilha/sql"]})
+
+    assert outcome.status == "succeeded"
+    assert outcome.payload["all_ok"] is True
+    assert browser.navigated == [
+        "http://localhost:5173", "http://localhost:5173/sobre", "http://localhost:5173/trilha/sql",
+    ]
+    assert "conteúdo de http://localhost:5173/trilha/sql" in outcome.content
+    assert "console" in outcome.content.lower()
+
+
+def test_verify_frontend_reports_a_route_that_fails_to_load_without_failing_the_others(tmp_path: Path) -> None:
+    class Browser:
+        def navigate(self, url):
+            if url.endswith("/quebrada"):
+                raise RuntimeError("net::ERR_CONNECTION_REFUSED")
+            return {"url": url, "title": "Trilha", "html": "<html><body>ok</body></html>", "screenshot": ""}
+
+    tools = AgentToolset(ConversationWorkspace(tmp_path, "chat_verify_frontend_fail"), browser=Browser())
+
+    outcome = tools.invoke("verify_frontend", {"url": "http://localhost:5173", "routes": ["/quebrada"]})
+
+    assert outcome.status == "succeeded"
+    assert outcome.payload["all_ok"] is False
+    targets = {item["url"]: item["ok"] for item in outcome.payload["targets"]}
+    assert targets["http://localhost:5173"] is True
+    assert targets["http://localhost:5173/quebrada"] is False
 
 
 def test_browse_page_returns_the_rendered_text(tmp_path) -> None:
@@ -644,7 +790,14 @@ def test_run_command_can_start_a_long_lived_server_without_waiting(toolset: Agen
     assert outcome.status == "succeeded"
     assert outcome.payload["background"] is True
     assert outcome.payload["pid"] == 2468
-    assert captured["stdout"] is subprocess.DEVNULL
+    # Output is redirected to a workspace log file (read later with
+    # read_process_output) instead of DEVNULL, and stdin is always closed so
+    # an interactive prompt fails fast instead of hanging the shell forever.
+    assert captured["stdin"] is subprocess.DEVNULL
+    assert captured["stderr"] == subprocess.STDOUT
+    log_path = outcome.payload["log_path"]
+    assert log_path.startswith(".orin/logs/") and log_path.endswith(".log")
+    assert captured["stdout"].name.replace("\\", "/").endswith(log_path)
 
 
 def test_run_command_reports_workspace_files_it_created(toolset: AgentToolset) -> None:
@@ -659,6 +812,108 @@ def test_run_command_refuses_a_host_destroying_command(toolset: AgentToolset) ->
 
     assert outcome.status == "failed"
     assert outcome.error_code == "TOOL_REFUSED"
+
+
+def test_run_command_runs_from_a_given_workspace_relative_directory(toolset: AgentToolset) -> None:
+    toolset.invoke("write_file", {"path": "sub/marker.txt", "content": "here"})
+
+    outcome = toolset.invoke("run_command", {
+        "command": "python -c \"import os; print(os.path.basename(os.getcwd()))\"",
+        "cwd": "sub",
+    })
+
+    assert outcome.status == "succeeded"
+    assert "sub" in outcome.content
+
+
+def test_run_command_refuses_a_cwd_that_is_not_a_directory(toolset: AgentToolset) -> None:
+    outcome = toolset.invoke("run_command", {"command": "echo hi", "cwd": "does/not/exist"})
+
+    assert outcome.status == "failed"
+    assert outcome.error_code == "TOOL_REFUSED"
+
+
+def test_run_command_refuses_an_out_of_range_timeout(toolset: AgentToolset) -> None:
+    too_short = toolset.invoke("run_command", {"command": "echo hi", "timeout_seconds": 0})
+    too_long = toolset.invoke("run_command", {"command": "echo hi", "timeout_seconds": 99_999})
+
+    assert too_short.status == "failed" and too_short.error_code == "TOOL_REFUSED"
+    assert too_long.status == "failed" and too_long.error_code == "TOOL_REFUSED"
+
+
+def test_run_command_preserves_the_tail_of_long_output(toolset: AgentToolset, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(agent_tools, "MAX_COMMAND_OUTPUT_CHARS", 300)
+    outcome = toolset.invoke("run_command", {
+        "command": "python -c \"print('A' * 5000); print('THE_REAL_ERROR_IS_HERE')\"",
+    })
+
+    assert outcome.status == "succeeded"
+    assert outcome.payload["output_truncated"] is True
+    assert "THE_REAL_ERROR_IS_HERE" in outcome.content
+    assert len(outcome.content) < 5000
+
+
+def test_background_process_output_can_be_read_listed_and_stopped(toolset: AgentToolset) -> None:
+    started = toolset.invoke("run_command", {
+        "command": "python -c \"print('hello-from-background')\"",
+        "background": True,
+    })
+    assert started.status == "succeeded"
+    pid = started.payload["pid"]
+    assert started.payload["log_path"].startswith(".orin/logs/")
+
+    deadline = time.time() + 10
+    read = toolset.invoke("read_process_output", {"pid": pid})
+    while read.payload.get("running") and time.time() < deadline:
+        time.sleep(0.05)
+        read = toolset.invoke("read_process_output", {"pid": pid})
+
+    assert read.status == "succeeded"
+    assert read.payload["running"] is False
+    assert "hello-from-background" in read.content
+
+    listing = toolset.invoke("read_process_output", {})
+    assert listing.status == "succeeded"
+    assert str(pid) in listing.content
+    assert listing.payload["count"] >= 1
+
+    stopped = toolset.invoke("stop_process", {"pid": pid})
+    assert stopped.status == "succeeded"
+
+
+def test_read_process_output_refuses_an_untracked_pid(toolset: AgentToolset) -> None:
+    outcome = toolset.invoke("read_process_output", {"pid": 999999})
+
+    assert outcome.status == "failed"
+    assert outcome.error_code == "TOOL_REFUSED"
+
+
+def test_stop_process_refuses_an_untracked_pid(toolset: AgentToolset) -> None:
+    outcome = toolset.invoke("stop_process", {"pid": 999999})
+
+    assert outcome.status == "failed"
+    assert outcome.error_code == "TOOL_REFUSED"
+
+
+def test_list_files_with_a_pattern_matches_a_glob_instead_of_listing_a_directory(toolset: AgentToolset) -> None:
+    toolset.invoke("write_file", {"path": "src/app.tsx", "content": "x"})
+    toolset.invoke("write_file", {"path": "src/app.py", "content": "x"})
+
+    outcome = toolset.invoke("list_files", {"pattern": "**/*.tsx"})
+
+    assert outcome.status == "succeeded"
+    assert outcome.content == "src/app.tsx"
+
+
+def test_list_files_and_search_files_hide_dependency_directories(toolset: AgentToolset) -> None:
+    toolset.invoke("write_file", {"path": "node_modules/react/index.js", "content": "module.exports = {}"})
+    toolset.invoke("write_file", {"path": "src/app.py", "content": "module"})
+
+    listed = toolset.invoke("list_files", {"depth": 3})
+    assert "node_modules" not in listed.content
+
+    searched = toolset.invoke("search_files", {"pattern": "module"})
+    assert searched.payload["count"] == 1
 
 
 def test_run_command_terminates_its_process_tree_when_it_times_out(toolset: AgentToolset, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -681,7 +936,7 @@ def test_run_command_terminates_its_process_tree_when_it_times_out(toolset: Agen
     monkeypatch.setattr(agent_tools.subprocess, "Popen", lambda *args, **kwargs: process)
     monkeypatch.setattr(agent_tools, "_terminate_process_tree", lambda item: terminated.append(item.pid))
 
-    outcome = toolset.invoke("run_command", {"command": "slow command"})
+    outcome = toolset.invoke("run_command", {"command": "slow command", "timeout_seconds": 45})
 
     assert outcome.status == "failed"
     assert outcome.error_code == "TOOL_REFUSED"

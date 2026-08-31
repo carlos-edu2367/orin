@@ -36,6 +36,15 @@ from .workspace import resolve_workspace
 
 MAX_SUBAGENTS_PER_TURN = 4
 PREVIEW_CHARS = 400
+# A manifest at the workspace root names the stack a project is built with —
+# npm vs. pip vs. cargo, which is exactly what a weak model otherwise has to
+# guess. Losing it to the tree preview's line cap on a project with many
+# files would throw away the one file that tells the agent which commands
+# and conventions actually apply here.
+PROJECT_MANIFEST_HINTS = frozenset({
+    "package.json", "pyproject.toml", "requirements.txt", "tsconfig.json",
+    "go.mod", "Cargo.toml", "composer.json", "Gemfile", "README.md",
+})
 # A subagent writes the deliverable the main agent will hand to the user, so it
 # needs the same output budget; inheriting the dataclass default silently cut
 # every long answer at 1024 tokens.
@@ -239,10 +248,8 @@ def build_system_prompt(
         # offer, but a request publishes only the ones the current stage needs.
         # Saying so prevents the model from planning around a tool it cannot
         # currently see -- and tells it how to get that tool back.
-        "- Not every tool described below is published on every request: each stage of a task offers the tools that stage needs. The '## Agora' block tells you which stage you are in. To unlock the browser, MCP, plugins or subagents, declare them in `write_contract`.",
+        "- Not every tool described below is published on every request: each stage of a task offers the tools that stage needs. The '## Agora' block tells you which stage you are in and lists exactly what is published right now. To unlock the browser, MCP, plugins or subagents, declare them in `write_contract`.",
     ]
-    if tool_names:
-        lines += ["", "## Tools available now", "- " + ", ".join(tool_names)]
     if code_mode_context:
         lines += ["", code_mode_context]
     if "transcribe_pdf" in tool_names:
@@ -1005,7 +1012,14 @@ class TurnSession:
         else:
             ledger = ()
         try:
-            tree = tuple(f"{item['kind'][:1]} {item['path']}" for item in self.workspace.list_entries(depth=3))[:60]
+            entries = self.workspace.list_entries(depth=3)
+            lines = tuple(f"{item['kind'][:1]} {item['path']}" for item in entries)
+            tree = lines[:60]
+            missing_manifests = tuple(
+                line for item, line in zip(entries, lines)
+                if item["kind"] == "file" and item["path"] in PROJECT_MANIFEST_HINTS and line not in tree
+            )
+            tree = missing_manifests + tree
         except Exception:
             # A prompt enrichment must never be the reason a turn cannot start.
             tree = ()

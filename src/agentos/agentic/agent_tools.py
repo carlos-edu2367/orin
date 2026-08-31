@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import base64
+from datetime import UTC, datetime
 from html.parser import HTMLParser
 from ipaddress import ip_address
 import json
@@ -24,6 +25,7 @@ import shlex
 import socket
 import signal
 import subprocess
+import time
 from typing import Any, Callable, Collection, Mapping
 from urllib.parse import urljoin, urlparse
 from uuid import uuid4
@@ -33,7 +35,8 @@ import httpx
 from agentos.reading.extract import extract_text
 from agentos.reading.render import ImageTooLarge, normalize_image, render_pdf_pages
 from agentos.reading.vision import VisionUnavailable
-from .workspace import MAX_LIST_DEPTH, ConversationWorkspace, WorkspaceError
+from .diagnostics import STEP_ORDER, detect_recipe, file_diagnostic_command
+from .workspace import MAX_LIST_DEPTH, MAX_SEARCH_RESULTS, ConversationWorkspace, WorkspaceError
 from .models import MAX_USER_QUESTION_ITEMS
 from .browser_tools import _cache_key_url, _safe_display_url, sanitize_page_text
 from .file_preview import media_type_for
@@ -44,9 +47,27 @@ from .provider_content import image_block
 logger = logging.getLogger(__name__)
 
 MAX_TOOL_RESULT_CHARS = 12_000
-COMMAND_TIMEOUT_SECONDS = 45
+DEFAULT_COMMAND_TIMEOUT_SECONDS = 120
+MAX_COMMAND_TIMEOUT_SECONDS = 600
+# Leaves headroom under MAX_TOOL_RESULT_CHARS for the "exit=" line and the
+# generic truncation notice, so our own head+tail bounding is what applies —
+# not the head-only ``_bounded`` every other tool result goes through, which
+# would throw away exactly the line a build or install failure ends with.
+MAX_COMMAND_OUTPUT_CHARS = 9_000
 FETCH_TIMEOUT_SECONDS = 25
 MAX_FETCH_REDIRECTS = 5
+_PROCESS_LOG_DIR = ".orin/logs"
+_PROCESS_MANIFEST_PATH = ".orin/logs/processes.json"
+MAX_PROCESS_LOG_TAIL_CHARS = 8_000
+MAX_TRACKED_PROCESSES = 50
+# A per-file lint/typecheck after a write only pays for itself if it is
+# cheap; this bounds how long any single one may run and how often the same
+# path is checked again when a long file is written across several calls.
+DIAGNOSTIC_TIMEOUT_SECONDS = 20
+DIAGNOSTIC_DEBOUNCE_SECONDS = 3.0
+MAX_FILE_DIAGNOSTIC_CHARS = 2_000
+VERIFY_STEP_TIMEOUT_SECONDS = 300
+MAX_VERIFY_STEP_CHARS = 3_000
 
 # Commands that would damage the host rather than the workspace. This is a local
 # personal installation, so the goal is to stop an obviously catastrophic action
@@ -151,6 +172,23 @@ def _bounded(value: str, limit: int = MAX_TOOL_RESULT_CHARS) -> tuple[str, bool]
     return value[:limit], True
 
 
+def _bounded_output(text: str, limit: int) -> tuple[str, bool]:
+    """Bound long process output while keeping both ends.
+
+    A build or install log's most useful line — the actual compiler error —
+    is almost always its last one. The generic ``_bounded`` above truncates
+    from the tail and would throw exactly that away; this keeps a head
+    (usually enough to see what command ran and how far it got) and a tail
+    (where the failure is) instead.
+    """
+    if len(text) <= limit:
+        return text, False
+    head_chars = limit // 3
+    tail_chars = limit - head_chars
+    omitted = len(text) - head_chars - tail_chars
+    return f"{text[:head_chars]}\n\n[...{omitted} characters omitted...]\n\n{text[-tail_chars:]}", True
+
+
 def _public_url(url: str, *, resolve_dns: bool = False, allow_loopback: bool = False) -> str:
     parsed = urlparse(url.strip())
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
@@ -181,28 +219,66 @@ def _public_url(url: str, *, resolve_dns: bool = False, allow_loopback: bool = F
     return url.strip()
 
 
-def _terminate_process_tree(process: subprocess.Popen[bytes]) -> None:
-    """Stop a timed-out shell together with any child retaining its output pipes."""
-    if process.poll() is not None:
-        return
+def _terminate_pid(pid: int) -> None:
+    """Best-effort kill of a process (and, on Windows, its tree) by pid alone.
+
+    Used both for a timed-out foreground command (which still has its
+    ``Popen`` object, see ``_terminate_process_tree``) and for stopping a
+    background process tracked across tool calls, where only the pid survives.
+    """
     if os.name == "nt":
         try:
             subprocess.run(
-                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
                 capture_output=True,
                 check=False,
                 timeout=5,
             )
             return
         except (OSError, subprocess.SubprocessError):
-            pass
-    else:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
             return
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except (ProcessLookupError, OSError):
+        try:
+            os.kill(pid, signal.SIGKILL)
         except (ProcessLookupError, OSError):
             pass
-    process.kill()
+
+
+def _terminate_process_tree(process: subprocess.Popen[bytes]) -> None:
+    """Stop a timed-out shell together with any child retaining its output pipes."""
+    if process.poll() is not None:
+        return
+    _terminate_pid(process.pid)
+    if process.poll() is None:
+        process.kill()
+
+
+def _process_is_running(pid: int) -> bool:
+    """Whether ``pid`` is alive, checked without needing the original ``Popen``.
+
+    A background process is tracked in a manifest file that outlives the
+    ``AgentToolset`` that started it (a new one is built every turn), so
+    liveness has to be answerable from the pid alone.
+    """
+    if os.name == "nt":
+        try:
+            completed = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}"], capture_output=True, text=True, timeout=5, check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return str(pid) in completed.stdout
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
 
 
 class AgentToolset:
@@ -280,9 +356,14 @@ class AgentToolset:
         self._code_mode_permits_push = bool(code_mode_permits_push)
         self._code_mode_permits_pr = bool(code_mode_permits_pr)
         self._code_mode_requires_approval = bool(code_mode_requires_approval)
-        self._code_mode_changed_paths: set[str] = set()
+        # Tracked unconditionally (see _observe_mutation_outcome): the general
+        # verify-before-responding gate in the runtime applies to every turn,
+        # not only Code mode.
+        self._changed_paths: set[str] = set()
+        self._change_events = 0
         self._code_mode_checks: list[str] = []
         self._code_mode_visual_check = False
+        self._diagnosed_at: dict[str, float] = {}
         self._definitions: tuple[ToolDefinition, ...] | None = None
         self._by_name: dict[str, ToolDefinition] = {}
 
@@ -348,10 +429,13 @@ class AgentToolset:
                 self.edit_file, "filesystem", policy_tags=("mutates",),
             ),
             ToolDefinition(
-                "list_files", "List files and directories in the conversation workspace. Use depth to see a whole subtree in one call.",
+                "list_files",
+                "List files and directories in the conversation workspace. Use depth to see a whole subtree in one call, or "
+                "pattern for a glob match (e.g. '**/*.tsx') when you need every file of one kind regardless of depth or directory shape — path and depth are ignored when pattern is set.",
                 _schema({
-                    "path": {**_TEXT, "description": "Workspace-relative directory; omit for the root."},
-                    "depth": {"type": "integer", "minimum": 1, "maximum": MAX_LIST_DEPTH, "description": "How many directory levels to descend. Defaults to 1."},
+                    "path": {**_TEXT, "description": "Workspace-relative directory; omit for the root. Ignored when pattern is set."},
+                    "depth": {"type": "integer", "minimum": 1, "maximum": MAX_LIST_DEPTH, "description": "How many directory levels to descend. Defaults to 1. Ignored when pattern is set."},
+                    "pattern": {**_TEXT, "description": "Glob pattern relative to the workspace, e.g. '**/*.py' or 'src/**/*.tsx'. When set, lists matching paths instead of one directory."},
                 }),
                 self.list_files, "filesystem", read_only=True,
             ),
@@ -404,6 +488,18 @@ class AgentToolset:
                     },
                 }, ("objective", "acceptance", "toolkits")),
                 self.write_contract, "planning",
+            ),
+            ToolDefinition(
+                "report_verification",
+                "Conclude verification: state whether every acceptance criterion actually holds, based on what you just "
+                "checked with tools — not a guess. If something does not hold, describe concretely what is broken (the "
+                "actual error, not a hypothesis); you will be sent back to fix it, up to a few rounds. Calling this tool, "
+                "not a plain text reply, is how you leave the verification stage.",
+                _schema({
+                    "passed": {"type": "boolean", "description": "True only if every acceptance criterion was checked with a tool and holds."},
+                    "findings": {**_TEXT, "description": "What you checked and, when passed=false, exactly what is broken and where."},
+                }, ("passed",)),
+                self.report_verification, "planning",
             ),
             ToolDefinition(
                 "fetch_url", "Fetch a public web page or API response and return its readable text.",
@@ -487,11 +583,72 @@ class AgentToolset:
                 _schema({"selector": _TEXT, "confirmed": {"type": "boolean", "description": "Only set true after the user has explicitly approved the previewed submission."}}, ("selector",)),
                 self.browser_submit, "browser", policy_tags=("network", "mutates"),
             ))
+            items.append(ToolDefinition(
+                "verify_frontend",
+                "Load a running frontend (e.g. a dev server you started with run_command) in the isolated browser and confirm it "
+                "actually renders: page structure, interactive elements and a screenshot for each URL. Pass routes for every "
+                "distinct page a deliverable requires (e.g. ['/', '/sobre']) so each one is checked, not just the home page. "
+                "This does not read the browser console — a rendering-safe JavaScript error can still slip through.",
+                _schema({
+                    "url": {**_TEXT, "description": "Base URL of the running frontend, e.g. http://localhost:5173."},
+                    "routes": {
+                        "type": "array", "maxItems": 8, "items": _TEXT,
+                        "description": "Additional relative paths to check against the same origin, e.g. ['/sobre', '/trilha/sql'].",
+                    },
+                }, ("url",)),
+                self.verify_frontend, "browser", policy_tags=("network",),
+            ))
         if self._enable_terminal:
             items.append(ToolDefinition(
-                "run_command", "Run one shell command inside the conversation workspace and return its output. Set background=true only for a long-lived server; it returns immediately.",
-                _schema({"command": {**_TEXT, "description": "A single command line, executed with the workspace as the working directory."}, "background": {"type": "boolean", "description": "Start without waiting; use only for persistent servers."}}, ("command",)),
+                "run_command",
+                "Run one shell command inside the conversation workspace and return its output. Set background=true only for a "
+                "long-lived process (e.g. a dev server); it returns immediately and you read its output later with read_process_output. "
+                "Raise timeout_seconds for a slow install or build instead of splitting it into smaller commands.",
+                _schema({
+                    "command": {**_TEXT, "description": "A single command line, executed non-interactively (stdin is closed)."},
+                    "background": {"type": "boolean", "description": "Start without waiting; use only for persistent servers."},
+                    "timeout_seconds": {
+                        "type": "integer", "minimum": 1, "maximum": MAX_COMMAND_TIMEOUT_SECONDS,
+                        "description": f"How long to wait for the command to finish. Defaults to {DEFAULT_COMMAND_TIMEOUT_SECONDS}s. Ignored when background=true.",
+                    },
+                    "cwd": {**_TEXT, "description": "Workspace-relative directory to run the command from. Defaults to the workspace root."},
+                }, ("command",)),
                 self.run_command, "terminal", policy_tags=("mutates",),
+            ))
+            items.append(ToolDefinition(
+                "read_process_output",
+                "List or read background processes started with run_command(background=true) in this workspace. Omit pid to list "
+                "every tracked process (pid, command, running or exited). Pass pid to read that process's captured output, up to "
+                "tail_chars, and whether it is still running.",
+                _schema({
+                    "pid": {"type": "integer", "description": "Process id from run_command(background=true). Omit to list every tracked process instead."},
+                    "tail_chars": {
+                        "type": "integer", "minimum": 1, "maximum": MAX_PROCESS_LOG_TAIL_CHARS,
+                        "description": "How many trailing characters of output to return when pid is set. Defaults to the maximum.",
+                    },
+                }),
+                self.read_process_output, "terminal", read_only=True,
+            ))
+            items.append(ToolDefinition(
+                "stop_process",
+                "Stop a background process started with run_command(background=true), e.g. a dev server you no longer need running.",
+                _schema({"pid": {"type": "integer", "description": "Process id to stop, from run_command or read_process_output."}}, ("pid",)),
+                self.stop_process, "terminal", policy_tags=("mutates",),
+            ))
+            items.append(ToolDefinition(
+                "verify_project",
+                "Detect the project's stack from its manifest (package.json, pyproject.toml, requirements.txt, go.mod, "
+                "Cargo.toml) and run its install, typecheck, lint, build and test steps in that order, reporting exactly "
+                "what passed and what failed with each step's real output. Use this instead of guessing which command to "
+                "run for a stack you did not write yourself. Omit steps to run everything detected; pass steps to skip a "
+                "slow one you already know is satisfied (e.g. skip 'install' once dependencies are installed).",
+                _schema({
+                    "steps": {
+                        "type": "array", "items": {"type": "string", "enum": list(STEP_ORDER)},
+                        "description": "Subset of steps to run (always executed in the canonical order regardless of the order given here). Omit to run every step the project has.",
+                    },
+                }),
+                self.verify_project, "terminal", policy_tags=("mutates",),
             ))
         if self.memory is not None:
             items.append(ToolDefinition(
@@ -703,7 +860,7 @@ class AgentToolset:
             definition = self.resolve(name)
         except AgentToolError as error:
             return ToolOutcome("failed", f"Ferramenta desconhecida: {name}"[:240], str(error), {}, "UNKNOWN_TOOL")
-        if self._code_mode_requires_approval and name in {"write_file", "edit_file", "run_command"}:
+        if self._code_mode_requires_approval and name in {"write_file", "edit_file", "run_command", "verify_project"}:
             path = str(arguments.get("path") or "")
             if not (name == "write_file" and path.startswith(".orin/plans/")):
                 return ToolOutcome(
@@ -743,63 +900,128 @@ class AgentToolset:
             return ToolOutcome("failed", f"{name} falhou", message[:MAX_TOOL_RESULT_CHARS], {"tool_kind": definition.kind}, "TOOL_FAILED")
         if isinstance(result, ToolOutcome):
             outcome = self._finalize_outcome(result, definition.kind)
-            self._observe_code_mode_outcome(name, arguments, outcome)
-            return outcome
-        content, truncated = _bounded(str(result.get("content", "")))
-        payload = dict(result.get("payload") or {})
-        payload.setdefault("tool_kind", definition.kind)
-        if truncated:
-            payload["truncated"] = True
-            notice = (
-                f"\n\n[output truncated at {MAX_TOOL_RESULT_CHARS} characters — "
-                "narrow the request instead of repeating it: use read_file with offset/limit, "
-                "search_files with a tighter pattern, or a command that prints less]"
-            )
-            # The notice itself counts against the budget, so make room for it
-            # rather than growing content past MAX_TOOL_RESULT_CHARS.
-            content, _ = _bounded(content, MAX_TOOL_RESULT_CHARS - len(notice))
-            content += notice
-        images = [dict(item) for item in (result.get("images") or ()) if isinstance(item, Mapping)]
-        outcome = ToolOutcome("succeeded", str(result.get("summary", f"{name} concluído"))[:240], content, payload, images=images)
-        self._observe_code_mode_outcome(name, arguments, outcome)
+        else:
+            content, truncated = _bounded(str(result.get("content", "")))
+            payload = dict(result.get("payload") or {})
+            payload.setdefault("tool_kind", definition.kind)
+            if truncated:
+                payload["truncated"] = True
+                notice = (
+                    f"\n\n[output truncated at {MAX_TOOL_RESULT_CHARS} characters — "
+                    "narrow the request instead of repeating it: use read_file with offset/limit, "
+                    "search_files with a tighter pattern, or a command that prints less]"
+                )
+                # The notice itself counts against the budget, so make room for it
+                # rather than growing content past MAX_TOOL_RESULT_CHARS.
+                content, _ = _bounded(content, MAX_TOOL_RESULT_CHARS - len(notice))
+                content += notice
+            images = [dict(item) for item in (result.get("images") or ()) if isinstance(item, Mapping)]
+            outcome = ToolOutcome("succeeded", str(result.get("summary", f"{name} concluído"))[:240], content, payload, images=images)
+        if name in {"write_file", "edit_file"} and outcome.status == "succeeded":
+            outcome = self._with_file_diagnostic(outcome, arguments)
+        self._observe_mutation_outcome(name, arguments, outcome)
         return outcome
 
-    def _observe_code_mode_outcome(self, name: str, arguments: Mapping[str, Any], outcome: ToolOutcome) -> None:
-        """Keep validation evidence at the trusted tool boundary."""
-        if not self._code_mode_active or outcome.status != "succeeded":
+    def _with_file_diagnostic(self, outcome: ToolOutcome, arguments: Mapping[str, Any]) -> ToolOutcome:
+        """Append a fast, single-file lint/typecheck result to a write's own output.
+
+        This is the mechanical feedback loop a weak model needs most: it never
+        has to think to ask for it, and the error is right there in the same
+        result it is already reading. Debounced per path so a file rewritten
+        across several ``write_file``/``append`` calls is not re-linted on
+        every one of them.
+        """
+        path = str(outcome.payload.get("path") or arguments.get("path") or "")
+        if not path:
+            return outcome
+        command = file_diagnostic_command(path, project_root=self.workspace.root)
+        if command is None:
+            return outcome
+        now = time.monotonic()
+        last = self._diagnosed_at.get(path)
+        if last is not None and now - last < DIAGNOSTIC_DEBOUNCE_SECONDS:
+            return outcome
+        self._diagnosed_at[path] = now
+        try:
+            completed = subprocess.run(
+                command, shell=True, cwd=str(self.workspace.root), capture_output=True, text=True,
+                timeout=DIAGNOSTIC_TIMEOUT_SECONDS, encoding="utf-8", errors="replace",
+            )
+        except (OSError, subprocess.SubprocessError):
+            return outcome
+        body = (completed.stdout or "") + (completed.stderr or "")
+        if not body.strip():
+            if completed.returncode == 0:
+                addition = f"\n\n[diagnóstico automático — {command}: nenhum problema encontrado]"
+            else:
+                return outcome
+        else:
+            trimmed, _ = _bounded_output(body.strip(), MAX_FILE_DIAGNOSTIC_CHARS)
+            status = "sem problemas" if completed.returncode == 0 else "encontrou problemas"
+            addition = f"\n\n[diagnóstico automático — {command} ({status})]\n{trimmed}"
+        return ToolOutcome(outcome.status, outcome.summary, outcome.content + addition, outcome.payload, outcome.error_code, outcome.images)
+
+    def _observe_mutation_outcome(self, name: str, arguments: Mapping[str, Any], outcome: ToolOutcome) -> None:
+        """Track workspace changes, and, in Code mode, the checks run against them.
+
+        Change tracking runs unconditionally: a plain chat turn that edits a
+        file is subject to the same verify-before-responding gate the runtime
+        enforces for every turn (see ``change_events``/``has_unverified_changes``
+        in the runtime), not only Code mode. Code mode's stricter "you must
+        have run a real check" gate (``code_completion_gate``) stays layered on
+        top, active only when Code mode is active.
+        """
+        if outcome.status != "succeeded":
             return
         payload = outcome.payload or {}
         if name in {"write_file", "edit_file"}:
             path = str(payload.get("path") or arguments.get("path") or "").replace("\\", "/")
-            if path and not path.startswith(".orin/plans/"):
-                self._code_mode_changed_paths.add(path)
+            if path and not path.startswith(".orin/"):
+                self._changed_paths.add(path)
+                self._change_events += 1
             return
         if name in {"browse_page", "browser_observe", "browser_screenshot"}:
-            self._code_mode_visual_check = True
+            if self._code_mode_active:
+                self._code_mode_visual_check = True
             return
         if name != "run_command" or bool(payload.get("failed")):
             return
         artifacts = payload.get("artifacts")
+        changed_any = False
         if isinstance(artifacts, list):
             for artifact in artifacts:
                 if isinstance(artifact, Mapping) and isinstance(artifact.get("path"), str):
                     path = str(artifact["path"]).replace("\\", "/")
-                    if not path.startswith(".orin/plans/"):
-                        self._code_mode_changed_paths.add(path)
+                    if not path.startswith(".orin/"):
+                        self._changed_paths.add(path)
+                        changed_any = True
+        if changed_any:
+            self._change_events += 1
+        if not self._code_mode_active:
+            return
         command = str(payload.get("command") or arguments.get("command") or "").lower()
         if re.search(r"\b(pytest|vitest|jest|playwright|cypress|eslint|ruff|mypy|pyright|tsc|typecheck|lint|test|build)\b", command):
             self._code_mode_checks.append(command[:160])
         if re.search(r"\b(playwright|cypress|test:e2e|test:visual)\b", command):
             self._code_mode_visual_check = True
 
+    def change_events(self) -> int:
+        """How many times a workspace-changing tool call has succeeded this turn.
+
+        The runtime compares this to the value recorded the last time
+        verification concluded to decide whether a new one is owed before the
+        turn may respond.
+        """
+        return self._change_events
+
     def code_completion_gate(self) -> tuple[bool, str | None]:
         """Require actual checks after implementation changes before delivery."""
-        if not self._code_mode_active or not self._code_mode_changed_paths:
+        if not self._code_mode_active or not self._changed_paths:
             return True, None
         if not self._code_mode_checks:
             return False, "Você alterou código, mas ainda não executou uma verificação bem-sucedida. Rode os testes, lint, typecheck ou build apropriados antes de concluir."
         frontend_suffixes = (".tsx", ".ts", ".jsx", ".js", ".css", ".scss", ".html", ".vue", ".svelte")
-        if any(path.lower().endswith(frontend_suffixes) for path in self._code_mode_changed_paths) and not self._code_mode_visual_check:
+        if any(path.lower().endswith(frontend_suffixes) for path in self._changed_paths) and not self._code_mode_visual_check:
             return False, "Você alterou o frontend. Faça uma verificação visual no navegador ou execute uma validação Playwright/Cypress bem-sucedida antes de concluir."
         return True, None
 
@@ -1152,7 +1374,15 @@ class AgentToolset:
             "payload": {"path": path, "bytes_written": written, "edits_applied": len(operations), "label": path, "artifacts": artifacts},
         }
 
-    def list_files(self, path: str = "", depth: int = 1) -> dict[str, Any]:
+    def list_files(self, path: str = "", depth: int = 1, pattern: str = "") -> dict[str, Any]:
+        if isinstance(pattern, str) and pattern.strip():
+            matches = self.workspace.glob(pattern, max_results=MAX_SEARCH_RESULTS)
+            body = "\n".join(matches) if matches else "[no match]"
+            return {
+                "summary": f"Buscou arquivos '{pattern[:60]}': {len(matches)} {'resultado' if len(matches) == 1 else 'resultados'}",
+                "content": body,
+                "payload": {"pattern": pattern[:200], "count": len(matches), "label": pattern[:80]},
+            }
         entries = self.workspace.list_entries(path, depth=int(depth))
         if not entries:
             listing = "[empty directory]"
@@ -1241,18 +1471,40 @@ class AgentToolset:
             # with zero trace anywhere — same risk IndexWorker._run logs for.
             logger.exception("could not queue a reindex for %s", paths)
 
-    def run_command(self, command: str, background: bool = False) -> dict[str, Any]:
+    def run_command(self, command: str, background: bool = False, timeout_seconds: int | None = None, cwd: str = "") -> dict[str, Any]:
         if not isinstance(command, str) or not command.strip():
             raise AgentToolError("command must be a non-blank string")
         if len(command) > 4096:
             raise AgentToolError("command is too long")
         if _BLOCKED_COMMAND.search(command):
             raise AgentToolError("This command is blocked because it would affect the host system.")
-        before = self.workspace.file_snapshot()
-        environment = {**os.environ, "PYTHONIOENCODING": "utf-8", "NO_COLOR": "1"}
+        timeout = DEFAULT_COMMAND_TIMEOUT_SECONDS if timeout_seconds is None else int(timeout_seconds)
+        if not 1 <= timeout <= MAX_COMMAND_TIMEOUT_SECONDS:
+            raise AgentToolError(f"timeout_seconds must be between 1 and {MAX_COMMAND_TIMEOUT_SECONDS}.")
+        working_directory = self.workspace.root
+        if isinstance(cwd, str) and cwd.strip():
+            working_directory = self.workspace.resolve(cwd)
+            if not working_directory.is_dir():
+                raise AgentToolError(f"'{cwd}' is not a directory in this workspace")
+        change_baseline = self.workspace.begin_change_tracking()
+        environment = {
+            **os.environ,
+            "PYTHONIOENCODING": "utf-8",
+            "NO_COLOR": "1",
+            # A model cannot answer an interactive prompt, so an installer or
+            # scaffolding tool that would ask one must instead fail fast (with
+            # stdin closed below) or take its non-interactive default.
+            "CI": "1",
+            "npm_config_yes": "true",
+            "npm_config_fund": "false",
+            "npm_config_audit": "false",
+            "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+            "DEBIAN_FRONTEND": "noninteractive",
+        }
         process_options: dict[str, Any] = {
             "shell": True,
-            "cwd": str(self.workspace.root),
+            "cwd": str(working_directory),
+            "stdin": subprocess.DEVNULL,
             "stdout": subprocess.DEVNULL if background else subprocess.PIPE,
             "stderr": subprocess.DEVNULL if background else subprocess.PIPE,
             "env": environment,
@@ -1261,26 +1513,52 @@ class AgentToolset:
             process_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
         else:
             process_options["start_new_session"] = True
-        process = subprocess.Popen(command, **process_options)  # noqa: S602 - a local agent shell is the feature
+        log_relative = ""
+        log_handle = None
         if background:
-            artifacts = self.workspace.changed_files(before)
+            # DEVNULL would otherwise swallow a dev server's output entirely;
+            # a later read_process_output needs it on disk to read.
+            log_relative = f"{_PROCESS_LOG_DIR}/{uuid4().hex[:12]}.log"
+            log_handle = self.workspace.prepare_write_target(log_relative).open("wb")
+            process_options["stdout"] = log_handle
+            process_options["stderr"] = subprocess.STDOUT
+        try:
+            process = subprocess.Popen(command, **process_options)  # noqa: S602 - a local agent shell is the feature
+        finally:
+            if log_handle is not None:
+                log_handle.close()
+        if background:
+            manifest = self._load_process_manifest()
+            manifest[str(process.pid)] = {
+                "command": command[:400], "log_path": log_relative, "started_at": datetime.now(UTC).isoformat(),
+            }
+            self._save_process_manifest(manifest)
+            artifacts = self.workspace.end_change_tracking(change_baseline)
             self._queue_reindex(artifacts)
             return {
                 "summary": f"Iniciou em segundo plano: {command[:80]}",
-                "content": f"Started background process {process.pid}. It is running from the workspace.",
-                "payload": {"command": command[:400], "label": command[:120], "background": True, "pid": process.pid, "artifacts": artifacts},
+                "content": (
+                    f"Started background process {process.pid}. Its output is being written to {log_relative}; "
+                    f"use read_process_output(pid={process.pid}) to read it, read_process_output() with no pid to "
+                    "see every tracked process, or stop_process(pid=...) to end it."
+                ),
+                "payload": {
+                    "command": command[:400], "label": command[:120], "background": True,
+                    "pid": process.pid, "log_path": log_relative, "artifacts": artifacts,
+                },
             }
         try:
-            stdout_bytes, stderr_bytes = process.communicate(timeout=COMMAND_TIMEOUT_SECONDS)
+            stdout_bytes, stderr_bytes = process.communicate(timeout=timeout)
         except subprocess.TimeoutExpired as error:
             _terminate_process_tree(process)
             process.communicate()
-            raise AgentToolError(f"Command timed out after {COMMAND_TIMEOUT_SECONDS}s.") from error
+            raise AgentToolError(f"Command timed out after {timeout}s.") from error
         stdout = stdout_bytes.decode("utf-8", "replace").strip()
         stderr = stderr_bytes.decode("utf-8", "replace").strip()
         body = "\n".join(part for part in (stdout, f"[stderr]\n{stderr}" if stderr else "") if part) or "[no output]"
+        body, output_truncated = _bounded_output(body, MAX_COMMAND_OUTPUT_CHARS)
         succeeded = process.returncode == 0
-        artifacts = self.workspace.changed_files(before)
+        artifacts = self.workspace.end_change_tracking(change_baseline)
         self._queue_reindex(artifacts)
         return {
             "summary": f"$ {command[:80]}",
@@ -1288,8 +1566,177 @@ class AgentToolset:
             "payload": {
                 "command": command[:400], "exit_code": process.returncode,
                 "label": command[:120], "failed": not succeeded,
-                "artifacts": artifacts,
+                "artifacts": artifacts, "output_truncated": output_truncated,
             },
+        }
+
+    def _load_process_manifest(self) -> dict[str, dict[str, Any]]:
+        try:
+            content, _ = self.workspace.read_text(_PROCESS_MANIFEST_PATH)
+        except WorkspaceError:
+            return {}
+        try:
+            data = json.loads(content)
+        except json.JSONDecodeError:
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _save_process_manifest(self, manifest: Mapping[str, Mapping[str, Any]]) -> None:
+        # Bounded so a long-running conversation cannot grow this file forever;
+        # the oldest tracked processes (by insertion order) fall off first.
+        trimmed = dict(list(manifest.items())[-MAX_TRACKED_PROCESSES:])
+        self.workspace.write_text(_PROCESS_MANIFEST_PATH, json.dumps(trimmed))
+
+    def read_process_output(self, pid: int | None = None, tail_chars: int = MAX_PROCESS_LOG_TAIL_CHARS) -> dict[str, Any]:
+        """List every tracked background process, or read one's output.
+
+        Folded into a single tool (rather than a separate ``list_processes``)
+        so the phase's published tool set stays small enough for a weak model
+        to navigate reliably.
+        """
+        manifest = self._load_process_manifest()
+        if pid is None:
+            rows: list[dict[str, Any]] = []
+            for pid_text, info in manifest.items():
+                try:
+                    row_pid = int(pid_text)
+                except ValueError:
+                    continue
+                if not isinstance(info, Mapping):
+                    continue
+                rows.append({
+                    "pid": row_pid,
+                    "command": str(info.get("command") or ""),
+                    "running": _process_is_running(row_pid),
+                    "log_path": str(info.get("log_path") or ""),
+                    "started_at": str(info.get("started_at") or ""),
+                })
+            rows.sort(key=lambda item: item["pid"])
+            if not rows:
+                body = "[no background process was started in this workspace]"
+            else:
+                body = "\n".join(
+                    f"{item['pid']} {'running' if item['running'] else 'exited'}  {item['command']}  (log: {item['log_path']})"
+                    for item in rows
+                )
+            return {
+                "summary": f"Listou {len(rows)} processo(s) em segundo plano",
+                "content": body,
+                "payload": {"count": len(rows), "processes": rows},
+            }
+        pid = int(pid)
+        info = manifest.get(str(pid))
+        if not isinstance(info, Mapping):
+            raise AgentToolError(f"No background process with pid {pid} was started in this workspace.")
+        log_path = str(info.get("log_path") or "")
+        # Checked before reading the file, not after: a process that finishes
+        # between the two would otherwise read as "exited" with whatever
+        # partial (possibly empty) output had been flushed at the moment of
+        # the read, which looks like a completed, silent failure. Checking
+        # first biases the race the other way — worst case, a process that
+        # finishes a moment later is reported "still running" with output
+        # that is already complete, which a follow-up call corrects.
+        running = _process_is_running(pid)
+        try:
+            content, _ = self.workspace.read_text(log_path)
+        except WorkspaceError:
+            content = ""
+        window = max(1, min(int(tail_chars), MAX_PROCESS_LOG_TAIL_CHARS))
+        tail = content[-window:]
+        body = tail if tail.strip() else "[no output yet]"
+        return {
+            "summary": f"Leu saída do processo {pid} ({'ainda rodando' if running else 'encerrado'})",
+            "content": f"pid={pid} status={'running' if running else 'exited'}\n{body}",
+            "payload": {"pid": pid, "running": running, "log_path": log_path},
+        }
+
+    def stop_process(self, pid: int) -> dict[str, Any]:
+        pid = int(pid)
+        info = self._load_process_manifest().get(str(pid))
+        if not isinstance(info, Mapping):
+            raise AgentToolError(f"No background process with pid {pid} was started in this workspace.")
+        if _process_is_running(pid):
+            _terminate_pid(pid)
+        return {
+            "summary": f"Encerrou o processo {pid}",
+            "content": f"pid={pid} stopped",
+            "payload": {"pid": pid},
+        }
+
+    def verify_project(self, steps: list[str] | None = None) -> dict[str, Any]:
+        recipe = detect_recipe(self.workspace.root)
+        if recipe is None:
+            return {
+                "summary": "Nenhum manifesto de projeto reconhecido",
+                "content": (
+                    "[no package.json, pyproject.toml, requirements.txt, go.mod or Cargo.toml was found at the "
+                    "workspace root; there is nothing this tool knows how to verify]"
+                ),
+                "payload": {"recipe": None, "steps": [], "all_passed": None},
+            }
+        if steps is None:
+            requested = list(recipe.available_steps())
+        else:
+            invalid = sorted(set(steps) - set(STEP_ORDER))
+            if invalid:
+                raise AgentToolError(f"unknown step(s): {', '.join(invalid)}. valid steps: {', '.join(STEP_ORDER)}.")
+            requested = [step for step in STEP_ORDER if step in steps]
+        step_results: list[dict[str, Any]] = []
+        stopped_early = False
+        for step in requested:
+            command = recipe.command_for(step)
+            if command is None:
+                step_results.append({"step": step, "command": None, "ran": False, "passed": None})
+                continue
+            try:
+                completed = subprocess.run(
+                    command, shell=True, cwd=str(self.workspace.root), capture_output=True, text=True,
+                    timeout=VERIFY_STEP_TIMEOUT_SECONDS, encoding="utf-8", errors="replace",
+                    env={**os.environ, "CI": "1", "PYTHONIOENCODING": "utf-8", "NO_COLOR": "1"},
+                )
+                passed = completed.returncode == 0
+                output, _ = _bounded_output(((completed.stdout or "") + (completed.stderr or "")).strip() or "[no output]", MAX_VERIFY_STEP_CHARS)
+            except subprocess.TimeoutExpired:
+                passed = False
+                output = f"[timed out after {VERIFY_STEP_TIMEOUT_SECONDS}s]"
+            step_results.append({"step": step, "command": command, "ran": True, "passed": passed, "output": output})
+            if step == "install" and not passed:
+                stopped_early = True
+                break
+        ran = [item for item in step_results if item["ran"]]
+        passed_steps = [item["step"] for item in ran if item["passed"]]
+        failed_steps = [item["step"] for item in ran if not item["passed"]]
+        all_passed = bool(ran) and not failed_steps
+        lines = [f"Projeto detectado: {recipe.kind} ({recipe.manifest})"]
+        for item in step_results:
+            if not item["ran"]:
+                lines.append(f"\n== {item['step']}: sem comando detectado ==")
+                continue
+            lines.append(f"\n== {item['step']}: {item['command']} ==")
+            lines.append(f"resultado: {'ok' if item['passed'] else 'falhou'}")
+            lines.append(item["output"])
+        if stopped_early:
+            lines.append("\n[a instalação falhou; as etapas seguintes não foram executadas]")
+        lines.append(f"\nResumo — passou: {', '.join(passed_steps) or 'nenhuma'}; falhou: {', '.join(failed_steps) or 'nenhuma'}.")
+        return {
+            "summary": (
+                f"Verificou o projeto ({recipe.kind}): {len(passed_steps)} ok, {len(failed_steps)} falhou"
+                if ran else f"Projeto {recipe.kind} não tem etapas executáveis detectadas"
+            ),
+            "content": "\n".join(lines),
+            "payload": {"recipe": recipe.kind, "steps": step_results, "all_passed": all_passed},
+        }
+
+    def report_verification(self, passed: bool, findings: str = "") -> dict[str, Any]:
+        passed = bool(passed)
+        findings = str(findings or "").strip()[:2000]
+        return {
+            "summary": "Verificação: critérios atendidos" if passed else "Verificação: critérios não atendidos",
+            "content": findings or (
+                "Todos os critérios de aceite foram conferidos com ferramentas e se sustentam."
+                if passed else "Um ou mais critérios de aceite não se sustentam."
+            ),
+            "payload": {"passed": passed, "findings": findings},
         }
 
     def fetch_url(self, url: str) -> dict[str, Any]:
@@ -1544,6 +1991,60 @@ class AgentToolset:
     def browser_submit(self, selector: str, confirmed: bool = False) -> ToolOutcome:
         confirmed = bool(confirmed)
         return self._browser_call("submit", str(selector), confirmed, action="Confirmou envio de" if confirmed else "Pré-visualizou envio de")
+
+    def verify_frontend(self, url: str, routes: list[str] | None = None) -> ToolOutcome:
+        if self._browser is None:
+            raise AgentToolError("The browser is not available; declare the 'browser' toolkit in write_contract first.")
+        navigate = getattr(self._browser, "navigate", None)
+        if not callable(navigate):
+            raise AgentToolError("This browser does not support navigation.")
+        base = _public_url(url, allow_loopback=True)
+        origin = f"{urlparse(base).scheme}://{urlparse(base).netloc}/"
+        targets = [base]
+        for route in (routes or [])[:8]:
+            route = str(route or "").strip()
+            if not route:
+                continue
+            joined = _public_url(urljoin(origin, route.lstrip("/")), allow_loopback=True)
+            if joined not in targets:
+                targets.append(joined)
+        sections: list[str] = []
+        visited: list[dict[str, Any]] = []
+        images: list[dict[str, str]] = []
+        all_ok = True
+        for target in targets:
+            try:
+                result = navigate(target)
+            except RuntimeError as error:
+                all_ok = False
+                sections.append(f"== {target} ==\n[failed to load: {error}]")
+                visited.append({"url": target, "ok": False, "error": str(error)})
+                continue
+            if not isinstance(result, Mapping):
+                all_ok = False
+                sections.append(f"== {target} ==\n[failed to load: no observation returned]")
+                visited.append({"url": target, "ok": False, "error": "no observation returned"})
+                continue
+            page = self._browser_outcome(result, action="Verificou")
+            sections.append(f"== {target} ==\n{page.content}")
+            images.extend(page.images or [])
+            visited.append({"url": target, "ok": True, "screenshot_path": page.payload.get("screenshot_path")})
+        # A composite check like this one leaves no single page "the current
+        # tab" in the cache's sense, so the next browse_page must observe
+        # fresh rather than reuse a stale navigation.
+        self._last_browser_navigation_url = None
+        self._last_browser_navigation_outcome = None
+        note = (
+            "\n\n[This checks that each page loads, its structure, and a screenshot. It does not read the browser "
+            "console in this version of Orin — a JavaScript error that does not break rendering can still slip through.]"
+        )
+        return ToolOutcome(
+            "succeeded",
+            f"Verificou {len(targets)} página(s) do frontend" + ("" if all_ok else "; uma ou mais não carregaram"),
+            "\n\n".join(sections) + note,
+            {"targets": visited, "all_ok": all_ok},
+            images=images,
+        )
 
     def close(self) -> None:
         closer = getattr(self._browser, "close", None)
@@ -2121,7 +2622,8 @@ class _ToolArgumentReader:
 __all__ = [
     "AgentToolError",
     "AgentToolset",
-    "COMMAND_TIMEOUT_SECONDS",
+    "DEFAULT_COMMAND_TIMEOUT_SECONDS",
+    "MAX_COMMAND_TIMEOUT_SECONDS",
     "MAX_TOOL_RESULT_CHARS",
     "ToolDefinition",
     "ToolOutcome",

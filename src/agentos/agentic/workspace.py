@@ -9,8 +9,12 @@ from __future__ import annotations
 
 from hashlib import sha256
 from pathlib import Path
+import os
 import re
+import shutil
+import subprocess
 
+from agentos.ignore import PathIgnorePolicy
 from agentos.pathsafety import resolve_contained
 
 
@@ -22,6 +26,8 @@ MAX_SEARCH_FILE_BYTES = 2_000_000
 MAX_SEARCH_LINE_CHARS = 400
 MAX_READ_LINES = 800
 MAX_LIST_DEPTH = 5
+MAX_LIST_ENTRIES = 500
+GIT_STATUS_TIMEOUT_SECONDS = 10
 
 _SAFE_SEGMENT = re.compile(r"^[A-Za-z0-9._-]+$")
 _PROJECT_WORKSPACE_ID = re.compile(r"^workspace:[A-Za-z0-9._-]+$")
@@ -155,18 +161,24 @@ class ConversationWorkspace:
             handle.write(payload)
         return len(payload), existing + len(payload)
 
+    def _ignore_policy(self) -> PathIgnorePolicy:
+        """Rebuilt on every call: a scaffold command can write a ``.gitignore``
+        mid-turn, and a cached policy from workspace construction would never
+        see it."""
+        return PathIgnorePolicy.for_root(self.root)
+
     def list_entries(self, path: str = "", *, depth: int = 1) -> list[dict[str, object]]:
         target = self.resolve(path) if path.strip() else self.root
         if not target.is_dir():
             raise WorkspaceError(f"'{path}' is not a directory in this workspace")
         levels = max(1, min(int(depth), MAX_LIST_DEPTH))
         entries: list[dict[str, object]] = []
-        self._collect(target, levels, entries)
+        self._collect(target, levels, entries, self._ignore_policy())
         return entries
 
-    def _collect(self, directory: Path, levels: int, entries: list[dict[str, object]]) -> None:
+    def _collect(self, directory: Path, levels: int, entries: list[dict[str, object]], ignore: PathIgnorePolicy) -> None:
         for item in sorted(directory.iterdir(), key=lambda value: (value.is_file(), value.name.lower())):
-            if len(entries) >= 500:
+            if len(entries) >= MAX_LIST_ENTRIES:
                 return
             # A directory-shaped symlink planted inside the workspace can point
             # outside ``root``; resolving and re-checking containment here (same
@@ -175,14 +187,23 @@ class ConversationWorkspace:
             resolved = resolve_contained(item, self.root)
             if resolved is None:
                 continue
+            relative = self.relative(item)
             is_file = resolved.is_file()
+            if ignore.ignores(relative, is_dir=not is_file):
+                continue
             entries.append({
-                "path": self.relative(item),
+                "path": relative,
                 "kind": "file" if is_file else "directory",
                 "size_bytes": resolved.stat().st_size if is_file else None,
             })
             if not is_file and levels > 1:
-                self._collect(item, levels - 1, entries)
+                self._collect(item, levels - 1, entries, ignore)
+
+    @staticmethod
+    def _validate_relative_glob(glob: str) -> str:
+        if not isinstance(glob, str) or not glob.strip() or ".." in glob or glob.startswith("/") or "\\" in glob:
+            raise WorkspaceError("glob must be a relative pattern without '..'")
+        return glob
 
     def search(self, pattern: str, *, glob: str = "**/*", max_results: int = 50, ignore_case: bool = True) -> list[dict[str, object]]:
         """Scan workspace text files for a regular expression.
@@ -193,13 +214,13 @@ class ConversationWorkspace:
         """
         if not isinstance(pattern, str) or not pattern.strip():
             raise WorkspaceError("pattern must be a non-blank string")
-        if not isinstance(glob, str) or not glob.strip() or ".." in glob or glob.startswith("/") or "\\" in glob:
-            raise WorkspaceError("glob must be a relative pattern without '..'")
+        glob = self._validate_relative_glob(glob)
         try:
             expression = re.compile(pattern, re.IGNORECASE if ignore_case else 0)
         except re.error as error:
             raise WorkspaceError(f"pattern is not a valid regular expression: {error}") from error
         limit = max(1, min(int(max_results), MAX_SEARCH_RESULTS))
+        ignore = self._ignore_policy()
         matches: list[dict[str, object]] = []
         for item in sorted(self.root.glob(glob)):
             if len(matches) >= limit:
@@ -209,7 +230,7 @@ class ConversationWorkspace:
                 continue
             try:
                 relative = resolved.relative_to(self.root).as_posix()
-                if not resolved.is_file() or resolved.stat().st_size > MAX_SEARCH_FILE_BYTES:
+                if ignore.ignores(relative) or not resolved.is_file() or resolved.stat().st_size > MAX_SEARCH_FILE_BYTES:
                     continue
                 text = resolved.read_bytes()[:MAX_SEARCH_FILE_BYTES].decode("utf-8", "replace")
             except (OSError, ValueError):
@@ -221,26 +242,125 @@ class ConversationWorkspace:
                     matches.append({"path": relative, "line": number, "text": line.strip()[:MAX_SEARCH_LINE_CHARS]})
         return matches
 
-    def file_snapshot(self) -> dict[str, dict[str, int]]:
-        """Return bounded metadata for regular files that remain in this workspace."""
-        snapshot: dict[str, dict[str, int]] = {}
-        for item in self.root.rglob("*"):
-            if len(snapshot) >= MAX_SNAPSHOT_FILES:
+    def glob(self, pattern: str, *, max_results: int = 100) -> list[str]:
+        """List workspace-relative paths matching a glob, without reading them.
+
+        Distinct from ``search``: this answers "what files exist" instead of
+        "which lines match", which is the question the model has no other way
+        to ask once a project has more than a handful of files.
+        """
+        pattern = self._validate_relative_glob(pattern)
+        limit = max(1, min(int(max_results), MAX_SEARCH_RESULTS))
+        ignore = self._ignore_policy()
+        matches: list[str] = []
+        for item in sorted(self.root.glob(pattern)):
+            if len(matches) >= limit:
                 break
             resolved = resolve_contained(item, self.root)
             if resolved is None:
                 continue
             try:
                 relative = resolved.relative_to(self.root).as_posix()
-                if not resolved.is_file():
-                    continue
-                stat = resolved.stat()
-            except (OSError, ValueError):
+            except ValueError:
                 continue
-            snapshot[relative] = {"size_bytes": stat.st_size, "mtime_ns": stat.st_mtime_ns}
+            if ignore.ignores(relative):
+                continue
+            matches.append(relative)
+        return matches
+
+    def file_snapshot(self) -> dict[str, dict[str, int]]:
+        """Return bounded metadata for regular files that remain in this workspace.
+
+        Walks with ``os.walk`` rather than ``rglob`` so a denied directory
+        (``node_modules``, ``.venv``, a project's own build output, ...) is
+        pruned *before* descending into it: on a scaffolded frontend project,
+        ``rglob`` would spend its entire bounded result count on dependency
+        files before ever reaching the project's own source.
+        """
+        ignore = self._ignore_policy()
+        snapshot: dict[str, dict[str, int]] = {}
+        for current_dir, dirnames, filenames in os.walk(self.root):
+            current = Path(current_dir)
+            dirnames[:] = [name for name in dirnames if not ignore.ignores(self.relative(current / name), is_dir=True)]
+            for name in filenames:
+                if len(snapshot) >= MAX_SNAPSHOT_FILES:
+                    return snapshot
+                item = current / name
+                relative = self.relative(item)
+                if ignore.ignores(relative):
+                    continue
+                resolved = resolve_contained(item, self.root)
+                if resolved is None:
+                    continue
+                try:
+                    if not resolved.is_file():
+                        continue
+                    stat = resolved.stat()
+                except OSError:
+                    continue
+                snapshot[relative] = {"size_bytes": stat.st_size, "mtime_ns": stat.st_mtime_ns}
         return snapshot
 
-    def changed_files(self, before: dict[str, dict[str, int]]) -> list[dict[str, object]]:
+    def _git_status_paths(self) -> list[str] | None:
+        """Relative paths ``git`` considers new or modified, or ``None`` when
+        git cannot answer.
+
+        Consulting the index is close to instant no matter how large
+        ``node_modules`` or a build's output directory has grown; walking the
+        tree twice per command (once before, once after) is not. Only used
+        when the workspace root is itself a git repository's top level.
+        """
+        if not (self.root / ".git").is_dir() or shutil.which("git") is None:
+            return None
+        try:
+            completed = subprocess.run(
+                ["git", "status", "--porcelain", "-uall"],
+                cwd=self.root, capture_output=True, text=True, timeout=GIT_STATUS_TIMEOUT_SECONDS, check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if completed.returncode != 0:
+            return None
+        paths: list[str] = []
+        for line in completed.stdout.splitlines():
+            if len(line) < 4:
+                continue
+            raw = line[3:].strip()
+            if " -> " in raw:  # a rename is reported as "old -> new"
+                raw = raw.split(" -> ", 1)[1]
+            paths.append(raw.strip('"'))
+        return paths
+
+    def begin_change_tracking(self) -> dict[str, dict[str, int]] | None:
+        """A cheap baseline for ``end_change_tracking``.
+
+        ``None`` means a git index will be able to answer the question
+        afterwards with no tree walk at all; a full snapshot is the fallback
+        when there is no git index to consult.
+        """
+        if self._git_status_paths() is not None:
+            return None
+        return self.file_snapshot()
+
+    def end_change_tracking(self, before: dict[str, dict[str, int]] | None) -> list[dict[str, object]]:
+        """Pair with ``begin_change_tracking`` around one mutating command."""
+        if before is None:
+            git_paths = self._git_status_paths()
+            if git_paths is not None:
+                results: list[dict[str, object]] = []
+                for relative in git_paths:
+                    target = self.root / relative
+                    try:
+                        if not target.is_file():
+                            continue
+                        size = target.stat().st_size
+                    except OSError:
+                        continue
+                    results.append({"path": relative, "size_bytes": size})
+                    if len(results) >= MAX_SNAPSHOT_FILES:
+                        break
+                return results
+            before = {}
         after = self.file_snapshot()
         return [
             {"path": path, "size_bytes": metadata["size_bytes"]}
@@ -254,6 +374,19 @@ class ConversationWorkspace:
             raise WorkspaceError(f"'{path}' is not a file in this workspace")
         return {"path": self.relative(target), "size_bytes": target.stat().st_size}
 
+    def prepare_write_target(self, path: str) -> Path:
+        """Resolve a path for a caller that will write to it directly.
+
+        Used where a real file handle is needed (e.g. redirecting a background
+        process's output) rather than going through ``write_text``/``write_bytes``.
+        Still enforces containment and creates the parent directory.
+        """
+        target = self.resolve(path)
+        if target == self.root:
+            raise WorkspaceError("path must name a file")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        return target
+
 
 def resolve_workspace(workspace_id: str, *, managed_root: Path | str, local_root: str | None) -> ConversationWorkspace:
     """The one place that decides where a workspace id lives on disk."""
@@ -265,6 +398,7 @@ def resolve_workspace(workspace_id: str, *, managed_root: Path | str, local_root
 __all__ = [
     "ConversationWorkspace",
     "MAX_LIST_DEPTH",
+    "MAX_LIST_ENTRIES",
     "MAX_READ_BYTES",
     "MAX_READ_LINES",
     "MAX_SEARCH_FILE_BYTES",

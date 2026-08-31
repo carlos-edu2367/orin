@@ -343,14 +343,34 @@ def test_the_subagent_runtime_is_built_with_that_budget(monkeypatch) -> None:
     assert captured[0].max_output_tokens == 4096
 
 
-def test_the_system_prompt_names_the_tools_the_agent_actually_has(tmp_path: Path) -> None:
+def test_the_agent_is_told_exactly_which_tools_are_published_this_phase(tmp_path: Path) -> None:
+    """The static system prompt no longer names every tool: a phase's published
+    set changes within one turn, and a stale cached list is worse than none.
+    ``## Agora`` carries the live list instead, rebuilt from the schemas each
+    request actually sends."""
+    session, _store, _agents, provider = build(tmp_path, [text("ok")])
+
+    session.build_runtime().run("turn-1")
+
+    phase_note = "".join(
+        str(item["content"]) for item in provider.requests[0]["messages"] if item.get("role") == "system"
+    )
+    assert "Ferramentas disponíveis agora" in phase_note
+    assert "read_file" in phase_note
+    assert "run_command" in phase_note
+    assert "create_agent" in phase_note
+
+
+def test_the_workspace_tree_keeps_a_root_manifest_visible_past_the_line_cap(tmp_path: Path) -> None:
     session, _store, _agents, _provider = build(tmp_path, [])
+    (session.workspace.root / "src").mkdir()
+    for index in range(70):
+        (session.workspace.root / "src" / f"file{index}.py").write_text("x", encoding="utf-8")
+    (session.workspace.root / "package.json").write_text("{}", encoding="utf-8")
+
     runtime = session.build_runtime()
 
-    assert runtime.system_prompt is not None
-    assert "read_file" in runtime.system_prompt
-    assert "run_command" in runtime.system_prompt
-    assert "create_agent" in runtime.system_prompt
+    assert "f package.json" in runtime.volatile_prompt
 
 
 def test_the_system_prompt_uses_orin_as_the_public_product_name() -> None:

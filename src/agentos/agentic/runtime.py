@@ -14,7 +14,7 @@ from .provider_stream import NormalizedStreamItem, StreamKind
 from .contract import ContractError, TaskContract, parse as parse_contract, synthesize as synthesize_contract
 from .quality import TurnQualityCounters
 from . import phases, transcript
-from .phases import Phase, PhaseController
+from .phases import DEFAULT_PHASE_BUDGETS, Phase, PhaseBudget, PhaseController
 
 MAX_PARALLEL_TOOLS = 4
 AGED_TOOL_RESULT_CHARS = 400
@@ -71,6 +71,46 @@ CLOSING_INSTRUCTION = (
     "Answer now with what you already accomplished, state plainly what is still missing, "
     "and say what the next step would be."
 )
+
+# How many times a failed ``report_verification`` sends the agent back to
+# EXECUTE before the turn gives up and answers with caveats instead. Without
+# a ceiling, a task whose acceptance criteria the model keeps failing to
+# satisfy would loop until the turn's outer deadline, which is a worse
+# failure mode than an honest "still broken" answer.
+MAX_VERIFY_REPAIR_ROUNDS = 3
+
+VERIFY_REQUIRED_MESSAGE = (
+    "[Sistema] Você alterou o workspace nesta tarefa e ainda não verificou o resultado. Antes de responder, "
+    "confira o que mudou com as ferramentas desta etapa e conclua com `report_verification`."
+)
+
+
+def _repair_message(findings: str) -> str:
+    detail = findings.strip() or "nenhum detalhe foi informado."
+    return (
+        f"[Sistema] A verificação não passou: {detail}\n"
+        "Corrija o problema descrito e, quando terminar, a verificação roda de novo."
+    )
+
+
+def _elastic_execute_budget(contract: TaskContract, base: PhaseBudget) -> PhaseBudget:
+    """Scale the EXECUTE budget with how much the contract actually asks for.
+
+    ``base`` must be the fixed default, not a previously-adjusted budget: the
+    result is recomputed from scratch whenever the contract changes (a
+    rewrite can raise or lower its deliverable count), so basing it on
+    anything but the true floor would compound on repeated calls.
+
+    The default budget assumes an ordinary task; a contract with several
+    declared deliverables is not one, and a fixed 20-iteration ceiling would
+    force it into VERIFY (or past it) before the work is even done. The
+    budget still exists to catch flailing, not to promise unlimited runway,
+    hence the caps.
+    """
+    deliverables = len(contract.deliverables) or 1
+    iterations = min(base.iterations + 3 * deliverables, 60)
+    actions = min(base.actions + 8 * deliverables, 160)
+    return PhaseBudget(iterations=iterations, actions=actions)
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,6 +230,15 @@ class AgenticTurnRuntime:
         # redundant.
         self._succeeded_reads: dict[str, tuple[str, int]] = {}
         self._writes = 0
+        # How many of the toolset's recorded change events have already been
+        # covered by a completed verification pass, and how many repair
+        # rounds a failed one has already spent. Both reset per turn: a new
+        # turn's own changes are what it must account for, not a previous
+        # turn's already-settled work.
+        self._verified_at_change_events = 0
+        self._verify_repair_rounds = 0
+        self._pending_verification: Mapping[str, object] | None = None
+        self._phase_transition_note: str | None = None
         self._started_at = self.clock()
         deadline = self._started_at + self.limits.deadline
         self._life(turn, "running")
@@ -231,7 +280,15 @@ class AgenticTurnRuntime:
             if self.phases is not None:
                 # Last, so the stage the agent is in is the nearest thing to
                 # the conversation rather than something it read paragraphs ago.
-                window = [*window, {"role": "system", "content": phases.PHASE_INSTRUCTIONS[self.phases.current]}]
+                # The tool list is named here, from the schemas actually being
+                # sent this call, rather than as a static line in the cached
+                # system prompt: a cached line cannot track a set that changes
+                # every time the phase does within the same turn, and a wrong
+                # one is worse than none -- it tells the model a tool is
+                # callable when the request does not offer it.
+                published = ", ".join(sorted(str(item.get("function", {}).get("name", "")) for item in tool_schemas)) or "nenhuma"
+                phase_note = f"{phases.PHASE_INSTRUCTIONS[self.phases.current]}\nFerramentas disponíveis agora: {published}."
+                window = [*window, {"role": "system", "content": phase_note}]
             if final_iteration:
                 window = [*window, {"role": "system", "content": CLOSING_INSTRUCTION}]
             context = self._context_usage(messages, window, tool_schemas)
@@ -408,6 +465,12 @@ class AgenticTurnRuntime:
                         tool_name=str(result.get("name") or ""), tool_call_id=str(result.get("id") or ""),
                     )
                     messages.extend(self._tool_result_messages(turn, result))
+                if self._phase_transition_note:
+                    # Appended after every tool result this iteration produced,
+                    # so it reads as a reaction to what the model just saw
+                    # rather than preceding (and appearing to predict) it.
+                    messages.append({"role": "user", "content": self._phase_transition_note})
+                    self._phase_transition_note = None
                 # Shrinking an already-sent result rewrites the prefix, which
                 # is exactly what a prompt cache cannot survive. Where the
                 # provider has a cache, this is deferred to compaction, whose
@@ -451,6 +514,24 @@ class AgenticTurnRuntime:
                         "role": "user",
                         "content": f"[Sistema do Modo Code] {gate_reason} Continue a tarefa usando ferramentas; não responda como concluída.",
                     })
+                    self._life(turn, "running")
+                    continue
+                if self._needs_verification() and not final_iteration:
+                    # Independent of Code mode's stricter gate above: any turn
+                    # that changed the workspace owes one look at what it did
+                    # before it may answer. Skipped only when there is no
+                    # budget left for another round -- the turn still
+                    # completes, it just does so without that look.
+                    self._effect_finished(
+                        turn, provider_effect_id, state="APPLIED",
+                        result_ref=f"conversation-turn:{turn_id}:verify-gate:{iteration}",
+                        private_result={"outcome": "verification_required"},
+                    )
+                    if self.phases is not None:
+                        previous_phase = self.phases.current
+                        self.phases.force_verify()
+                        self._life(turn, "phase_changed", phase=str(self.phases.current), previous_phase=str(previous_phase))
+                    messages.append({"role": "user", "content": VERIFY_REQUIRED_MESSAGE})
                     self._life(turn, "running")
                     continue
                 self._effect_finished(
@@ -1069,6 +1150,7 @@ class AgenticTurnRuntime:
             outcome = outcomes[index]
             self.counters.note_call(name, arguments, outcome.status)
             self._absorb_contract(outcome)
+            self._absorb_verification(name, outcome)
             if outcome.status == "failed" and not duplicate[index]:
                 self._failed_signatures[self._signature(name, arguments)] = outcome.content
             self._life(
@@ -1136,11 +1218,11 @@ class AgenticTurnRuntime:
     def _advance_phase(self, turn: dict[str, object], results: list[dict[str, object]]) -> None:
         """Move the turn along, on evidence rather than on the model's say-so.
 
-        Two things advance a phase: the agent committed to a contract, or the
-        phase ran out of budget. Running out never fails the turn -- it hands
-        what exists to the next stage, which is the difference between an
-        agent that stops usefully and one that stops at ITERATION_LIMIT with
-        nothing to show.
+        Three things advance a phase: the agent committed to a contract, it
+        reported a verification result, or the phase ran out of budget.
+        Running out of budget never fails the turn -- it hands what exists to
+        the next stage, which is the difference between an agent that stops
+        usefully and one that stops at ITERATION_LIMIT with nothing to show.
         """
         if self.phases is None:
             return
@@ -1149,15 +1231,84 @@ class AgenticTurnRuntime:
             str(result.get("name")) == "write_contract" and str(result.get("status")) == "succeeded"
             for result in results
         )
-        self.phases.note_iteration(len(results))
+        verification = self._pending_verification
+        self._pending_verification = None
+        if verification is not None and self.phases.current is Phase.VERIFY:
+            # An explicit verification result is never "flailing": it is
+            # exactly the work this phase exists to produce.
+            self.phases.note_iteration(len(results), productive=True)
+            if bool(verification.get("passed")):
+                self._verified_at_change_events = self._toolset_change_events()
+                self.phases.force_respond()
+            elif self._verify_repair_rounds < MAX_VERIFY_REPAIR_ROUNDS:
+                self._verify_repair_rounds += 1
+                self.phases.force_execute()
+                self._phase_transition_note = _repair_message(str(verification.get("findings") or ""))
+            else:
+                # Out of repair rounds: stop asking the model to fix it again
+                # and let it answer, with whatever it last reported broken.
+                self._verified_at_change_events = self._toolset_change_events()
+                self.phases.force_respond()
+                self._phase_transition_note = (
+                    "[Sistema] O limite de rodadas de correção foi atingido. Responda agora informando "
+                    "claramente o que permanece quebrado ou não verificado."
+                )
+            if self.phases.current is not previous:
+                self._life(turn, "phase_changed", phase=str(self.phases.current), previous_phase=str(previous))
+            return
+        is_mutating = getattr(self.toolset, "is_mutating", None)
+        productive = wrote_contract or any(
+            str(result.get("status")) == "succeeded" and callable(is_mutating) and is_mutating(str(result.get("name")))
+            for result in results
+        )
+        self.phases.note_iteration(len(results), productive=productive)
         self.phases.observe(wrote_contract=wrote_contract)
         if self.phases.current is Phase.EXECUTE and self.contract is None:
             # PLAN ended without a usable contract. A model too weak to fill
             # the schema still has to be able to work, so the request itself
             # becomes the contract rather than the turn stalling.
             self.contract = synthesize_contract(self._first_request_text)
+        if self.phases.current is Phase.EXECUTE and self.contract is not None:
+            self._apply_elastic_execute_budget()
         if self.phases.current is not previous:
             self._life(turn, "phase_changed", phase=str(self.phases.current), previous_phase=str(previous))
+
+    def _apply_elastic_execute_budget(self) -> None:
+        """Recomputed from the fixed default every time: see ``_elastic_execute_budget``."""
+        if self.phases is None or self.contract is None:
+            return
+        self.phases.budgets[Phase.EXECUTE] = _elastic_execute_budget(self.contract, DEFAULT_PHASE_BUDGETS[Phase.EXECUTE])
+
+    def _toolset_change_events(self) -> int:
+        getter = getattr(self.toolset, "change_events", None)
+        return getter() if callable(getter) else 0
+
+    def _needs_verification(self) -> bool:
+        """Whether the turn owes a VERIFY pass before it may answer.
+
+        Independent of Code mode: any turn that changed the workspace and has
+        not yet had those changes checked is subject to this, which is what
+        makes the contract's acceptance criteria mean something in the
+        ordinary case, not only when Code mode is explicitly on.
+        """
+        if self.toolset is None or self.phases is None:
+            return False
+        if self.phases.current in (Phase.VERIFY, Phase.RESPOND):
+            return False
+        return self._toolset_change_events() > self._verified_at_change_events
+
+    def _absorb_verification(self, name: str, outcome: object) -> None:
+        """Capture a verification result the moment the tool produces it.
+
+        Mirrors ``_absorb_contract``: ``report_verification`` knows nothing
+        about phases, it only returns whether things hold; this is where that
+        takes effect, consumed once by ``_advance_phase``.
+        """
+        if name != "report_verification" or getattr(outcome, "status", None) != "succeeded":
+            return
+        payload = getattr(outcome, "payload", None)
+        if isinstance(payload, Mapping):
+            self._pending_verification = payload
 
     def _absorb_contract(self, outcome: object) -> None:
         """Adopt a contract the planning tool just produced, or count a refusal.

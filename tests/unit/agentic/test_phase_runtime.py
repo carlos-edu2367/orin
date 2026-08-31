@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
+
 from agentos.agentic.agent_tools import ToolOutcome
 from agentos.agentic.phases import DEFAULT_PHASE_BUDGETS, Phase, PhaseBudget, PhaseController
 from agentos.agentic.provider_stream import normalize_sse
-from agentos.agentic.runtime import AgenticLimits, AgenticTurnRuntime
+from agentos.agentic.runtime import AgenticLimits, AgenticTurnRuntime, MAX_VERIFY_REPAIR_ROUNDS, _elastic_execute_budget
 
 
 def _turn() -> dict[str, object]:
@@ -25,6 +27,16 @@ class _Store:
     def lifecycle(self, turn, state, **payload) -> None: self.events.append((state, payload))
     def delta(self, turn, text) -> None: self.text.append(text)
     def finish(self, turn, *, failed: bool = False, code: str | None = None) -> None: ...
+
+
+def _json_args(payload: dict) -> str:
+    """Escape a real JSON payload for embedding as ``_tool_call``'s ``arguments`` slot.
+
+    ``_tool_call`` substitutes ``arguments`` raw into an already-quoted JSON
+    string; that only works unescaped for a trivial value like ``"{}"``. Any
+    payload with its own quotes (as every real tool argument does) needs this.
+    """
+    return json.dumps(json.dumps(payload))[1:-1]
 
 
 def _tool_call(call_id: str, name: str, arguments: str) -> str:
@@ -54,30 +66,42 @@ class _Toolset:
     """Publishes a realistic set and answers by name."""
 
     NAMES = (
-        "write_contract", "ask_user", "read_file", "view_file", "transcribe_pdf", "list_files",
-        "search_files", "search_code", "project_map", "write_file", "edit_file", "run_command",
-        "recall", "remember", "browse_page", "browser_click", "browser_observe",
+        "write_contract", "report_verification", "ask_user", "read_file", "view_file", "transcribe_pdf",
+        "list_files", "search_files", "search_code", "project_map", "write_file", "edit_file", "run_command",
+        "verify_project", "verify_frontend", "recall", "remember", "browse_page", "browser_click", "browser_observe",
         "create_agent", "ask_agent", "ask_agents", "fetch_url", "web_search",
     )
     KINDS = {"browse_page": "browser", "browser_click": "browser", "browser_observe": "browser"}
+
+    def __init__(self) -> None:
+        self._change_events = 0
 
     def schemas(self, allowed=None, kinds=None):
         names = self.NAMES if allowed is None else [n for n in self.NAMES if n in set(allowed)]
         return [{"type": "function", "function": {"name": name, "parameters": {}}} for name in names]
 
     def is_read_only(self, name): return name in {"read_file", "list_files", "search_files"}
+    def is_mutating(self, name): return name in {"write_file", "edit_file", "run_command", "verify_project", "stop_process"}
     def argument_names(self, name): return None
+    def change_events(self): return self._change_events
 
     def invoke(self, name, arguments):
         if name == "write_contract":
             from agentos.agentic.contract import parse
 
-            contract = parse({
+            payload = arguments if isinstance(arguments, dict) and arguments else {
                 "objective": "Reformular o orçamento.",
                 "acceptance": [{"id": "t", "check": "o total confere", "how": "inspection"}],
                 "toolkits": ["files", "browser"],
-            })
+            }
+            contract = parse(payload)
             return ToolOutcome("succeeded", "contrato", "ok", {"contract": contract.as_payload()})
+        if name == "report_verification":
+            passed = bool(arguments.get("passed")) if isinstance(arguments, dict) else False
+            findings = str(arguments.get("findings") or "") if isinstance(arguments, dict) else ""
+            return ToolOutcome("succeeded", "verificação", findings or "ok", {"passed": passed, "findings": findings})
+        if self.is_mutating(name):
+            self._change_events += 1
         return ToolOutcome("succeeded", name, "resultado", {})
 
 
@@ -213,3 +237,133 @@ def test_a_phase_change_is_reported_so_the_interface_can_show_it() -> None:
     changes = [payload for state, payload in store.events if state == "phase_changed"]
     assert changes
     assert changes[0]["phase"] == "execute"
+
+
+# -- verify-before-responding gate and the VERIFY<->EXECUTE repair loop -----
+
+
+def test_an_unverified_change_forces_a_verification_pass_before_completing() -> None:
+    """A turn that wrote something and then just tries to answer must look at
+    it first -- generalized from Code mode's own stricter gate, so an
+    ordinary chat turn that edits a file is covered too."""
+    provider = _ScriptedProvider([_tool_call("c1", "write_file", "{}"), _ANSWER, _ANSWER])
+    runtime = _runtime(provider, PhaseController())
+
+    result = runtime.run("turn-1")
+
+    assert result.state == "completed"
+    assert len(provider.requests) == 3
+    assert any("Você alterou o workspace" in str(r["messages"]) for r in provider.requests)
+    assert runtime.phases.current is Phase.VERIFY
+
+
+def test_a_turn_with_no_changes_never_visits_verification() -> None:
+    provider = _ScriptedProvider([_tool_call("c1", "read_file", "{}"), _ANSWER])
+    runtime = _runtime(provider, PhaseController())
+
+    result = runtime.run("turn-1")
+
+    assert result.state == "completed"
+    assert runtime.phases.current is not Phase.VERIFY
+
+
+def test_a_passed_verification_moves_straight_to_responding() -> None:
+    provider = _ScriptedProvider([
+        _tool_call("c1", "write_file", "{}"),
+        _ANSWER,
+        _tool_call("v1", "report_verification", _json_args({"passed": True, "findings": "tudo ok"})),
+        _ANSWER,
+    ])
+    runtime = _runtime(provider, PhaseController())
+
+    result = runtime.run("turn-1")
+
+    assert result.state == "completed"
+    assert runtime.phases.current is Phase.RESPOND
+
+
+def test_a_failed_verification_sends_the_agent_back_to_execute_with_the_findings() -> None:
+    provider = _ScriptedProvider([
+        _tool_call("c1", "write_file", "{}"),
+        _ANSWER,  # tries to finish -> forced into VERIFY
+        _tool_call("v1", "report_verification", _json_args({"passed": False, "findings": "build quebrado: TypeError em App.tsx"})),
+        _ANSWER,  # back in EXECUTE, tries to finish without fixing anything -> forced into VERIFY again
+        _tool_call("v2", "report_verification", _json_args({"passed": True, "findings": "corrigido"})),
+        _ANSWER,  # verification passed -> respond
+    ])
+    runtime = _runtime(provider, PhaseController())
+
+    result = runtime.run("turn-1")
+
+    assert result.state == "completed"
+    assert runtime.phases.current is Phase.RESPOND
+    assert runtime._verify_repair_rounds == 1
+    repaired = [r for r in provider.requests if "build quebrado" in str(r["messages"])]
+    assert repaired
+    assert "write_file" in _published(repaired[0])  # back in EXECUTE: writing tools are available again
+
+
+def test_repeated_failed_verifications_eventually_give_up_and_respond() -> None:
+    fail = _tool_call("v1", "report_verification", _json_args({"passed": False, "findings": "ainda quebrado"}))
+    script = [_tool_call("c1", "write_file", "{}")]
+    for _ in range(MAX_VERIFY_REPAIR_ROUNDS + 1):
+        script += [_ANSWER, fail]
+    script += [_ANSWER]
+    provider = _ScriptedProvider(script)
+    runtime = _runtime(provider, PhaseController())
+
+    result = runtime.run("turn-1")
+
+    assert result.state == "completed"
+    assert runtime.phases.current is Phase.RESPOND
+    assert runtime._verify_repair_rounds == MAX_VERIFY_REPAIR_ROUNDS
+    giving_up = [r for r in provider.requests if "limite de rodadas" in str(r["messages"])]
+    assert giving_up
+
+
+def test_verify_project_and_verify_frontend_are_published_during_verification() -> None:
+    provider = _ScriptedProvider([_tool_call("c1", "write_file", "{}"), _ANSWER, _ANSWER])
+    runtime = _runtime(provider, PhaseController())
+    runtime.run("turn-1")
+
+    verifying = [r for r in provider.requests if "critério por critério" in str(r["messages"])]
+    assert verifying
+    assert {"verify_project", "verify_frontend", "report_verification"} <= _published(verifying[0])
+    assert "write_file" not in _published(verifying[0])
+
+
+# -- elastic EXECUTE budget --------------------------------------------------
+
+
+def _contract_payload(deliverable_count: int) -> dict[str, object]:
+    return {
+        "objective": "Construir a trilha de estudo.",
+        "acceptance": [{"id": "existe", "check": "a página existe", "how": "inspection"}],
+        "toolkits": ["files"],
+        "deliverables": [{"path": f"src/page{i}.tsx", "description": "página"} for i in range(deliverable_count)],
+    }
+
+
+def test_elastic_execute_budget_grows_with_deliverables_and_caps() -> None:
+    base = DEFAULT_PHASE_BUDGETS[Phase.EXECUTE]
+    from agentos.agentic.contract import parse as parse_contract
+
+    small = parse_contract(_contract_payload(1))
+    big = parse_contract(_contract_payload(12))
+
+    small_budget = _elastic_execute_budget(small, base)
+    big_budget = _elastic_execute_budget(big, base)
+
+    assert small_budget.iterations >= base.iterations
+    assert big_budget.iterations > small_budget.iterations
+    assert big_budget.iterations <= 60
+    assert big_budget.actions <= 160
+
+
+def test_writing_a_contract_with_several_deliverables_grows_the_execute_budget() -> None:
+    provider = _ScriptedProvider([_tool_call("c1", "write_contract", _json_args(_contract_payload(6))), _ANSWER])
+    runtime = _runtime(provider, PhaseController())
+
+    runtime.run("turn-1")
+
+    assert runtime.phases.budgets[Phase.EXECUTE].iterations > DEFAULT_PHASE_BUDGETS[Phase.EXECUTE].iterations
