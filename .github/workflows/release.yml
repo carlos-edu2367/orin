@@ -1,4 +1,4 @@
-name: Publish Windows release
+name: Publish release
 
 on:
   push:
@@ -14,10 +14,36 @@ permissions:
   contents: write
 
 jobs:
-  release:
+  resolve-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: resolve
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            version="${{ inputs.version }}"
+          else
+            version="${GITHUB_REF_NAME#v}"
+          fi
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Release version must be semantic version format." >&2
+            exit 1
+          fi
+          package_version="$(python3 -c 'import json; print(json.load(open("desktop/package.json"))["version"])')"
+          if [ "$package_version" != "$version" ]; then
+            echo "Tag version $version does not match desktop/package.json version $package_version." >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  build-windows:
+    needs: resolve-version
     runs-on: windows-latest
     env:
-      GH_TOKEN: ${{ github.token }}
+      ORIN_RELEASE_VERSION: ${{ needs.resolve-version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -35,28 +61,119 @@ jobs:
           cache-dependency-path: |
             frontend/package-lock.json
             desktop/package-lock.json
-      - name: Resolve and verify release version
-        shell: pwsh
-        run: |
-          $version = if ('${{ github.event_name }}' -eq 'workflow_dispatch') { '${{ inputs.version }}' } else { '${{ github.ref_name }}'.TrimStart('v') }
-          if ($version -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$') { throw 'Release version must be semantic version format.' }
-          $package = Get-Content desktop/package.json -Raw | ConvertFrom-Json
-          if ($package.version -ne $version) { throw "Tag version $version does not match desktop/package.json version $($package.version)." }
-          "ORIN_RELEASE_VERSION=$version" | Add-Content -Path $env:GITHUB_ENV
       - name: Create isolated Python runtime
         run: uv sync --frozen --all-groups
       - name: Build packaged Windows release
         shell: pwsh
         run: .\scripts\build-windows.ps1 -SkipTests
-      - name: Verify generated manifest
-        shell: pwsh
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-release
+          path: |
+            dist/Orin-${{ env.ORIN_RELEASE_VERSION }}-windows-x64.zip
+            dist/release.json
+            dist/install.ps1
+
+  build-linux:
+    needs: resolve-version
+    runs-on: ubuntu-latest
+    env:
+      ORIN_RELEASE_VERSION: ${{ needs.resolve-version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            frontend/package-lock.json
+            desktop/package-lock.json
+      - name: Create isolated Python runtime
+        run: uv sync --frozen --all-groups
+      - name: Build packaged Linux release
         run: |
-          $manifest = Get-Content dist/release.json -Raw | ConvertFrom-Json
-          if ($manifest.version -ne $env:ORIN_RELEASE_VERSION) { throw 'Generated manifest version differs from release version.' }
-          $hash = (Get-FileHash -LiteralPath "dist/Orin-$env:ORIN_RELEASE_VERSION-windows-x64.zip" -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($hash -ne $manifest.archive_sha256) { throw 'Generated archive hash differs from release.json.' }
+          chmod +x scripts/build-linux.sh scripts/package-release.sh
+          SKIP_TESTS=1 scripts/build-linux.sh "$ORIN_RELEASE_VERSION"
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-release
+          path: |
+            dist/Orin-${{ env.ORIN_RELEASE_VERSION }}-linux-x64.tar.gz
+            dist/linux-release.json
+          if-no-files-found: error
+      - name: Upload install.sh
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-installer
+          path: install.sh
+
+  publish:
+    needs: [resolve-version, build-windows, build-linux]
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      ORIN_RELEASE_VERSION: ${{ needs.resolve-version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-release
+          path: dist/windows
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-release
+          path: dist/linux
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-installer
+          path: dist/linux
+      - name: Merge the release manifest
+        run: |
+          version="$ORIN_RELEASE_VERSION"
+          release_url="https://github.com/${{ github.repository }}/releases/tag/v$version"
+          # archive_name is the one source of truth for the tar.gz's filename
+          # (set by package-release.sh); reading it here instead of
+          # reconstructing the pattern keeps the naming convention defined
+          # in exactly one place.
+          python3 -c "
+          import json
+          fragment_in = json.load(open('dist/linux/linux-release.json'))
+          fragment = {
+              'archive_url': 'https://github.com/${{ github.repository }}/releases/download/v$version/' + fragment_in['archive_name'],
+              'archive_sha256': fragment_in['archive_sha256'],
+          }
+          json.dump(fragment, open('dist/linux-release-final.json', 'w'))
+          "
+          python3 scripts/merge_release_manifest.py dist/windows/release.json dist/linux-release-final.json "$release_url" > dist/release.json
+      - name: Verify the merged manifest
+        run: |
+          python3 -c "
+          import hashlib, json
+          manifest = json.load(open('dist/release.json'))
+          assert manifest['version'] == '$ORIN_RELEASE_VERSION'
+          windows_hash = hashlib.sha256(open('dist/windows/Orin-$ORIN_RELEASE_VERSION-windows-x64.zip', 'rb').read()).hexdigest()
+          assert windows_hash == manifest['archive_sha256'], 'windows hash mismatch'
+          linux_hash = hashlib.sha256(open('dist/linux/Orin-$ORIN_RELEASE_VERSION-linux-x64.tar.gz', 'rb').read()).hexdigest()
+          assert linux_hash == manifest['platforms']['linux-x64']['archive_sha256'], 'linux hash mismatch'
+          print('manifest OK')
+          "
       - name: Publish GitHub release assets
-        shell: pwsh
         run: |
-          $tag = "v$env:ORIN_RELEASE_VERSION"
-          gh release create $tag "dist/Orin-$env:ORIN_RELEASE_VERSION-windows-x64.zip" dist/release.json dist/install.ps1 --title "Orin $env:ORIN_RELEASE_VERSION" --generate-notes
+          tag="v$ORIN_RELEASE_VERSION"
+          gh release create "$tag" \
+            "dist/windows/Orin-$ORIN_RELEASE_VERSION-windows-x64.zip" \
+            "dist/linux/Orin-$ORIN_RELEASE_VERSION-linux-x64.tar.gz" \
+            dist/release.json \
+            dist/windows/install.ps1 \
+            dist/linux/install.sh \
+            --title "Orin $ORIN_RELEASE_VERSION" --generate-notes
