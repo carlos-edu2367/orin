@@ -46,3 +46,33 @@ def test_project_memory_management_lists_only_its_scope_and_can_delete() -> None
     assert [item["memory_id"] for item in managed] == [project_memory["memory_id"]]
     assert PostgresProjectStore(engine).delete_memory(project.project_id, "user", str(global_memory["memory_id"])) is False
     assert PostgresProjectStore(engine).delete_memory(project.project_id, "user", str(project_memory["memory_id"])) is True
+
+
+def test_updating_a_memory_rewrites_its_fact_and_returns_it():
+    from datetime import UTC, datetime
+    from sqlalchemy import insert
+    from agentos.persistence.postgres.schema import agent_memories
+
+    engine = create_engine("sqlite://")
+    metadata.create_all(engine)
+    now = datetime.now(UTC)
+    with engine.begin() as connection:
+        connection.execute(insert(agent_memories).values(
+            memory_id="mem_1", user_id="user:1", conversation_id=None, scope_type="user",
+            scope_id="user:1", project_id=None, source_message_id=None, source_execution_id=None,
+            fact="o build é npm", tags=[], kind="operational", confidence=0.7, source="mechanical",
+            hit_count=0, last_used_at=None, superseded_by=None, created_at=now, updated_at=now,
+        ))
+    store = PostgresProjectStore(engine)
+
+    updated = store.update_memory(None, "user:1", "mem_1", "o build é pnpm", scope="user")
+
+    assert updated["fact"] == "o build é pnpm"
+    assert updated["memory_id"] == "mem_1"
+
+
+def test_updating_a_memory_that_is_not_yours_returns_nothing():
+    engine = create_engine("sqlite://")
+    metadata.create_all(engine)
+
+    assert PostgresProjectStore(engine).update_memory(None, "user:1", "mem_nope", "x", scope="user") is None

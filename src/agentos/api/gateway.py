@@ -186,6 +186,10 @@ class UpdateProjectRequest(_RequestModel):
     description: str | None = Field(default=None, max_length=2000)
 
 
+class UpdateMemoryRequest(_RequestModel):
+    fact: str = Field(min_length=1, max_length=2000)
+
+
 class SendConversationMessageRequest(_RequestModel):
     message: str = Field(default="", max_length=16000)
     attachments: list[str] = Field(default_factory=list, max_length=MAX_FILES_PER_MESSAGE)
@@ -728,6 +732,16 @@ def create_app(services: ApiServices) -> FastAPI:
         if not _require_port(services.projects).delete_memory(project_id, principal.user_id, memory_id, scope=scope):
             raise ApplicationNotFoundError(memory_id)
         return JSONResponse(status_code=204, content=None)
+
+    @app.patch("/v1/memories/{memory_id}")
+    async def update_managed_memory(memory_id: str, payload: UpdateMemoryRequest, request: Request, scope: str = "user", project_id: str | None = None) -> JSONResponse:
+        if scope not in {"user", "project"} or (scope == "project" and not project_id):
+            raise ApplicationValidationError("invalid memory scope")
+        principal = principal_for(request, mutable=True)
+        updated = _require_port(services.projects).update_memory(project_id, principal.user_id, memory_id, payload.fact, scope=scope)
+        if updated is None:
+            raise ApplicationNotFoundError(memory_id)
+        return JSONResponse(_jsonable(updated))
 
     def effective_workspace_id(conversation: dict[str, object], principal: AuthenticatedPrincipal) -> tuple[str, str | None]:
         """The workspace id a chat actually resolves to, plus the project's name.

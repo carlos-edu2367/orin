@@ -171,5 +171,38 @@ class PostgresProjectStore:
             ))
         return bool(result.rowcount)
 
+    def update_memory(self, project_id: str | None, user_id: str, memory_id: str, fact: str, *, scope: str = "project") -> dict[str, object] | None:
+        """Let the person rewrite a fact the agent got slightly wrong.
+
+        Editing keeps the row's provenance: a memory the agent learned stays
+        marked as such even after a human fixed its wording. What changes is
+        the text and, because a person vouched for it now, its confidence.
+        """
+        if scope not in {"user", "project"}:
+            raise ValueError("unsupported memory scope")
+        if scope == "project" and (not project_id or self.get(project_id, user_id) is None):
+            return None
+        normalized = " ".join(str(fact).split())[:2000]
+        if not normalized:
+            raise ValueError("fact must be a non-blank string")
+        predicates = [
+            agent_memories.c.memory_id == memory_id,
+            agent_memories.c.user_id == user_id,
+            agent_memories.c.scope_type == scope,
+            agent_memories.c.project_id == project_id if scope == "project" else agent_memories.c.project_id.is_(None),
+        ]
+        with self._engine.begin() as connection:
+            result = connection.execute(update(agent_memories).where(*predicates).values(
+                fact=normalized, confidence=1.0, updated_at=datetime.now(UTC),
+            ))
+            if not result.rowcount:
+                return None
+            row = connection.execute(select(agent_memories).where(agent_memories.c.memory_id == memory_id)).mappings().one()
+        return {
+            "memory_id": row["memory_id"], "fact": row["fact"], "tags": list(row["tags"] or []),
+            "scope": scope, "project_id": row["project_id"], "conversation_id": row["conversation_id"],
+            "created_at": row["created_at"].isoformat(), "updated_at": row["updated_at"].isoformat(),
+        }
+
 
 __all__ = ["PostgresProjectStore", "ProjectRecord", "ProjectSidebarItem", "ProjectSidebarChat"]
