@@ -1,9 +1,15 @@
+import os
 import sys
 import time
 
 import pytest
 
-from agentos.mcp.transport_stdio import StdioTransport, StdioTransportError, StdioTransportRefused
+from agentos.mcp.transport_stdio import (
+    PLATFORM_ENVIRONMENT_PASSTHROUGH,
+    StdioTransport,
+    StdioTransportError,
+    StdioTransportRefused,
+)
 
 ECHO_SERVER = """
 import json, sys
@@ -109,7 +115,15 @@ def test_open_forwards_the_temp_and_profile_variables_real_launchers_need(tmp_pa
         transport.close()
     assert reply is not None
     present = reply["result"]
-    assert all(present.values()), f"expected every platform variable to be forwarded, got {present}"
+    # open() forwards a passthrough variable only when the parent actually has
+    # one, so the contract under test is "everything set here reaches the
+    # child" -- not "all of them are set". TMPDIR is optional under POSIX
+    # (unset on a stock GitHub ubuntu runner, where a blanket assertion fails
+    # even though forwarding works correctly).
+    expected = [name for name in PLATFORM_ENVIRONMENT_PASSTHROUGH if os.environ.get(name)]
+    assert expected, "no platform variable was set in the parent, so this proves nothing"
+    missing = [name for name in expected if not present.get(name)]
+    assert not missing, f"set in this process but never reached the child: {missing} (child saw {present})"
 
 
 def test_the_transport_round_trips_a_frame(tmp_path):
