@@ -237,6 +237,46 @@ def memories_for_task(memory_store: object | None, task: str) -> list[dict[str, 
         return []
 
 
+def learning_sink_for(memory_store, record, project_id: str | None):
+    """Turn what a turn learned into stored memory and one visible card.
+
+    The runtime produces ``LearnedMemory`` values and knows nothing about
+    storage; this closure owns both the store and the activity recorder. A
+    memory that was already known is stored again (which refreshes it) but is
+    not announced: the card exists to tell the person something new happened.
+
+    ``scope`` and ``project_id`` travel on the payload because the card's undo
+    button addresses the same memory through the public API, and that route
+    needs both to find the row.
+    """
+    if memory_store is None:
+        return None
+
+    def sink(learned) -> None:
+        for item in learned:
+            try:
+                receipt = memory_store.save(
+                    item.fact, item.tags, kind=item.kind, confidence=item.confidence, source=item.source,
+                )
+            except Exception:  # noqa: BLE001 - learning never breaks a turn
+                continue
+            if not receipt.get("created"):
+                continue
+            try:
+                record(
+                    AgentActivityEventType.MEMORY_LEARNED,
+                    f"Aprendi: {item.fact[:120]}",
+                    {
+                        "memory_id": receipt["memory_id"], "fact": item.fact, "kind": item.kind,
+                        "scope": item.scope, "project_id": project_id, "source": item.source,
+                    },
+                )
+            except Exception:  # noqa: BLE001 - the card never breaks a turn
+                pass
+
+    return sink
+
+
 def build_system_prompt(
     *,
     tool_names: tuple[str, ...],
@@ -339,7 +379,16 @@ def build_system_prompt(
         if child_model_ids:
             lines += ["- Favorite model IDs available for an explicit choice: " + ", ".join(json.dumps(model_id, ensure_ascii=True) for model_id in child_model_ids) + "."]
     if "remember" in tool_names:
-        lines += ["- Use `remember` when the user states a durable preference or fact worth keeping; do not store transient chatter."]
+        lines += [
+            "",
+            "## Memória",
+            "- Guarde com `remember` no momento em que aprende, não no fim: uma memória é o que continua verdadeiro depois que esta conversa acabar.",
+            "- Guarde quando a pessoa corrige você (\"não, é assim\", \"prefiro X\"), quando ela declara como quer trabalhar, e quando você descobre uma convenção do projeto que não estava escrita em lugar nenhum.",
+            "- Guarde também o que custou caro descobrir: um comando que só funciona de um jeito, uma armadilha que já te derrubou aqui.",
+            "- Escreva a memória como uma frase completa e autoexplicativa, que faça sentido daqui a um mês sem esta conversa junto.",
+            "- Não guarde o que já está no código ou nos arquivos do workspace, nem o que só vale para esta tarefa.",
+            "- Use `recall` quando desconfiar que já tratou disso antes e o que está acima não bastar.",
+        ]
 
     # Everything above is the same bytes for every turn of this workspace on
     # this model, which is what makes it worth a cache breakpoint. Everything
@@ -1153,6 +1202,10 @@ class TurnSession:
             context_reporting=True,
             hook_engine=self.hook_engine,
             phase_controller=phase_controller,
+            learning_sink=learning_sink_for(
+                self.memory, self._record,
+                str(self.turn["project_id"]) if self.turn.get("project_id") else None,
+            ),
         )
         if resumed is not None:
             runtime.contract = resumed

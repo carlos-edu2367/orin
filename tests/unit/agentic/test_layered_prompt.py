@@ -104,3 +104,14 @@ def test_the_volatile_layer_carries_only_what_actually_changes() -> None:
     assert "## Workspace contents" in volatile
     assert "Current date" in volatile
     assert "You are the main agent" not in volatile
+
+
+def test_the_memory_instruction_is_its_own_section_with_concrete_triggers() -> None:
+    """It used to be a lone bullet appended after the Subagents block, which
+    read as an instruction about subagents and never fired."""
+    stable, _ = _prompt(tool_names=("remember", "recall"))
+
+    assert "## Memória" in stable
+    section = stable.split("## Memória", 1)[1]
+    assert "corrige" in section
+    assert "convenção" in section

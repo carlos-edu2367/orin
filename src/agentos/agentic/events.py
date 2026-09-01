@@ -31,6 +31,7 @@ class AgentActivityEventType(StrEnum):
     BROWSER_NAVIGATED = "browser.navigated"
     BROWSER_ARTIFACT = "browser.artifact"
     AGENT_CREATED = "agent.created"
+    MEMORY_LEARNED = "memory.learned"
     AGENT_MESSAGE_SENT = "agent.message_sent"
     AGENT_MESSAGE_RECEIVED = "agent.message_received"
     DELEGATION_CREATED = "delegation.created"
