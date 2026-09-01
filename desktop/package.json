@@ -9,7 +9,8 @@
     "start": "electron .",
     "dev": "electron . --devtools",
     "build": "electron-builder --win",
-    "build:dir": "electron-builder --win --dir"
+    "build:dir": "electron-builder --win --dir",
+    "build:dir:linux": "electron-builder --linux dir"
   },
   "devDependencies": {
     "electron": "^37.2.6",
@@ -44,6 +45,12 @@
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true
+    },
+    "linux": {
+      "target": ["dir"],
+      "icon": "electron/assets/orin-logo.png",
+      "executableName": "Orin Desktop",
+      "category": "Development"
     }
   }
 }
