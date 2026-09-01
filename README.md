@@ -55,8 +55,7 @@ irm https://github.com/carlos-edu2367/orin/releases/latest/download/install.ps1 
 ### Linux (Debian/Ubuntu)
 
 ```bash
-curl -fsSL https://github.com/carlos-edu2367/orin/releases/latest/download/install.sh -o install.sh
-bash install.sh
+curl -fsSL https://github.com/carlos-edu2367/orin/releases/latest/download/install.sh | bash
 ```
 
 Em ambos os casos o instalador:
