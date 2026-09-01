@@ -272,10 +272,13 @@ class SqliteChunkStore:
 
     # -- reads ----------------------------------------------------------
 
-    def known_files(self) -> dict[str, tuple[str, int]]:
-        """Every indexed path mapped to its content hash and mtime."""
+    def known_files(self) -> dict[str, tuple[str, int, int]]:
+        """Every indexed path mapped to its content hash, mtime and size."""
         with self._lock:
-            return {row["path"]: (row["content_hash"], row["mtime_ns"]) for row in self._connection.execute("SELECT path, content_hash, mtime_ns FROM files")}
+            return {
+                row["path"]: (row["content_hash"], row["mtime_ns"], row["size_bytes"])
+                for row in self._connection.execute("SELECT path, content_hash, mtime_ns, size_bytes FROM files")
+            }
 
     def chunks_by_id(self, chunk_ids: list[str]) -> dict[str, Chunk]:
         if not chunk_ids:

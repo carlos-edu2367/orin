@@ -1,9 +1,9 @@
 """Walk the project and keep the index in step with the disk.
 
-Everything here is incremental. ``mtime_ns`` decides whether a file is even
-read; the content hash decides whether it is re-embedded. Embedding is the
-expensive step and is the last thing attempted, so an embedder outage costs
-vectors but never costs the lexical index.
+Everything here is incremental. ``mtime_ns`` and size together decide whether
+a file is even read; the content hash decides whether it is re-embedded.
+Embedding is the expensive step and is the last thing attempted, so an
+embedder outage costs vectors but never costs the lexical index.
 """
 from __future__ import annotations
 
@@ -88,7 +88,7 @@ class ProjectIndexer:
             return None
         return resolved
 
-    def _index_one(self, relative_path: str, known: dict[str, tuple[str, int]]) -> tuple[str | None, str] | None:
+    def _index_one(self, relative_path: str, known: dict[str, tuple[str, int, int]]) -> tuple[str | None, str] | None:
         """Index a file's content if it changed; return (language, text) for later import resolution."""
         resolved = self._resolve(relative_path)
         if resolved is None:
@@ -96,7 +96,12 @@ class ProjectIndexer:
         try:
             stat = resolved.stat()
             previous = known.get(relative_path)
-            if previous is not None and previous[1] == stat.st_mtime_ns:
+            # Size has to agree too, not just mtime: filesystem timestamp
+            # granularity is coarse (~16ms on NTFS, and whole seconds on some
+            # filesystems), so a file rewritten in the same tick it was
+            # indexed keeps its mtime and would otherwise stay stale in the
+            # index forever -- the content hash below is never even reached.
+            if previous is not None and previous[1] == stat.st_mtime_ns and previous[2] == stat.st_size:
                 return None
             payload = resolved.read_bytes()
         except OSError:

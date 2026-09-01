@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Sequence
 
@@ -63,6 +64,31 @@ def test_changed_content_is_re_embedded(tmp_path: Path) -> None:
     indexer.scan()
 
     target.write_text("def run():\n    return 2\n\ndef extra():\n    return 3\n", encoding="utf-8")
+    indexer.scan()
+
+    assert store.status().chunks >= 2
+    assert store.status().vectors == store.status().chunks
+
+
+def test_a_file_rewritten_within_the_same_mtime_tick_is_still_re_indexed(tmp_path: Path) -> None:
+    """Filesystem timestamps are coarse, so mtime alone cannot gate indexing.
+
+    NTFS moves mtime in ~16ms steps (whole seconds on some filesystems), so a
+    file edited in the same tick it was indexed keeps its timestamp. Gating on
+    mtime alone made that edit invisible to the index permanently -- the
+    content hash is never reached. Here the identical mtime is forced rather
+    than raced for, so the guarantee is pinned instead of timing-dependent.
+    """
+    embedder = CountingEmbedder()
+    indexer, store = _indexer(tmp_path, embedder)
+    target = indexer.root / "a.py"
+    target.write_text("def run():\n    return 1\n", encoding="utf-8")
+    indexer.scan()
+    frozen = target.stat()
+
+    target.write_text("def run():\n    return 2\n\ndef extra():\n    return 3\n", encoding="utf-8")
+    os.utime(target, ns=(frozen.st_atime_ns, frozen.st_mtime_ns))
+    assert target.stat().st_mtime_ns == frozen.st_mtime_ns, "the rewrite must keep the original mtime"
     indexer.scan()
 
     assert store.status().chunks >= 2

@@ -22,7 +22,7 @@ def test_replacing_a_file_swaps_its_chunks(tmp_path: Path) -> None:
     store.replace_file("src/a.py", content_hash="h2", size_bytes=11, mtime_ns=2, language="python", chunks=[_chunk("src/a.py", 5, "beta")])
 
     assert store.status().chunks == 1
-    assert store.known_files()["src/a.py"] == ("h2", 2)
+    assert store.known_files()["src/a.py"] == ("h2", 2, 11)
 
 
 def test_forgetting_a_file_removes_its_chunks(tmp_path: Path) -> None:
