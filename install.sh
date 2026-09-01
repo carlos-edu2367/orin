@@ -37,6 +37,23 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# Ask a question on the controlling terminal and echo the reply.
+#
+# `curl ... | bash` -- the documented install path -- leaves stdin pointing at
+# the consumed script, so a plain `read` hits EOF, and under `set -e` that
+# aborts an otherwise finished install at its last step. Reading /dev/tty asks
+# the person who actually typed the command instead. When there is no terminal
+# at all (automation, CI), the reply is empty and the caller's default stands.
+# Echoes the reply and succeeds when a terminal answered; fails when there was
+# no terminal to ask, so each caller applies its own default explicitly.
+ask() {
+  local reply=""
+  { exec 3< /dev/tty; } 2>/dev/null || return 1
+  read -r -p "$1" reply <&3 || reply=""
+  exec 3<&-
+  printf '%s' "$reply"
+}
+
 fetch_manifest() {
   local asset
   if [ "$VERSION" = "latest" ]; then
@@ -54,11 +71,17 @@ fetch_manifest() {
 
 if [ "$UNINSTALL" = "1" ]; then
   if [ "$FORCE" != "1" ]; then
-    read -r -p "Completely remove Orin, including all local data and configuration? [y/N] " answer
-    case "$answer" in
-      y|Y|yes|YES) ;;
-      *) exit 0 ;;
-    esac
+    # No terminal means nobody to confirm to, so the [y/N] default stands and
+    # nothing is removed -- both branches below end in the same refusal.
+    if answer="$(ask "Completely remove Orin, including all local data and configuration? [y/N] ")"; then
+      case "$answer" in
+        y|Y|yes|YES) ;;
+        *) exit 0 ;;
+      esac
+    else
+      echo "Refusing to remove Orin without a confirmation. Re-run from a terminal, or pass --force." >&2
+      exit 0
+    fi
   fi
   rm -f "$SHIM" "$DESKTOP_FILE"
   # Deferred removal: wait for the running instance's pid to exit (it may be
@@ -156,11 +179,16 @@ esac
 
 update_desktop_entry=0
 if [ ! -f "$DESKTOP_FILE" ] && [ "$NO_DESKTOP_SHORTCUT" != "1" ]; then
-  read -r -p "Do you want to add Orin Desktop to your application menu? [Y/n] " answer
-  case "$answer" in
-    n|N|no|NO) ;;
-    *) update_desktop_entry=1 ;;
-  esac
+  # A real terminal gets the question, where [Y/n] means a bare Enter says
+  # yes. An automated run does not get a menu entry it could never agree to.
+  if answer="$(ask "Do you want to add Orin Desktop to your application menu? [Y/n] ")"; then
+    case "$answer" in
+      n|N|no|NO) ;;
+      *) update_desktop_entry=1 ;;
+    esac
+  else
+    echo "No terminal to ask about the application menu entry, so it was skipped. Re-run install.sh from a terminal to add it."
+  fi
 elif [ -f "$DESKTOP_FILE" ]; then
   update_desktop_entry=1
 fi
