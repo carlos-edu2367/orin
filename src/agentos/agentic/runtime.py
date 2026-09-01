@@ -13,6 +13,7 @@ from .action_loop import ActionLoop, MalformedToolCall
 from .provider_stream import NormalizedStreamItem, StreamKind
 from .contract import ContractError, TaskContract, parse as parse_contract, synthesize as synthesize_contract
 from .quality import TurnQualityCounters
+from .learning import LearnedMemory, TurnLearningLedger
 from . import phases, transcript
 from .phases import DEFAULT_PHASE_BUDGETS, Phase, PhaseBudget, PhaseController
 
@@ -170,6 +171,7 @@ class AgenticTurnRuntime:
         context_reporting: bool = False,
         hook_engine=None,
         phase_controller: PhaseController | None = None,
+        learning_sink: Callable[[tuple[LearnedMemory, ...]], None] | None = None,
     ) -> None:
         self.store, self.provider = store, provider
         self.hook_engine = hook_engine
@@ -194,6 +196,9 @@ class AgenticTurnRuntime:
         self._compaction_count = 0
         self._closed = False
         self.counters = TurnQualityCounters()
+        self.ledger = TurnLearningLedger()
+        self._learning_sink = learning_sink
+        self._learning_committed = False
         self._started_at: datetime | None = None
         self._quality_recorded = False
         # The task the agent committed to. Held here rather than in the
@@ -1165,6 +1170,10 @@ class AgenticTurnRuntime:
                 continue
             outcome = outcomes[index]
             self.counters.note_call(name, arguments, outcome.status)
+            try:
+                self.ledger.note_tool_outcome(name, arguments, outcome.status)
+            except Exception:  # noqa: BLE001 - observation never breaks a turn
+                pass
             self._absorb_contract(outcome)
             self._absorb_verification(name, outcome)
             if outcome.status == "failed" and not duplicate[index]:
@@ -1367,19 +1376,23 @@ class AgenticTurnRuntime:
             pass
 
     def _settle_quality(self, turn: Mapping[str, object], outcome: str, error_code: str | None = None) -> None:
-        """Persist this turn's efficiency row exactly once, at its terminal.
+        """Settle this turn exactly once, at its terminal: efficiency row and learning.
 
         Recovery can drive a turn to a terminal state more than once, and the
         row must describe the turn rather than the number of attempts, so the
-        first terminal wins. A store without the method (every in-memory test
-        double) simply records nothing.
+        first terminal wins. Committing what the turn learned shares that same
+        exactly-once gate deliberately: both are terminal-settlement side
+        effects, and neither must depend on whether the store implements
+        ``record_quality`` -- a test double without one still learns.
         """
         if self._quality_recorded:
             return
+        self._quality_recorded = True
+        if outcome in {"completed", "completed_with_caveats"}:
+            self._commit_learning("project" if turn.get("project_id") else "user")
         recorder = getattr(self.store, "record_quality", None)
         if not callable(recorder):
             return
-        self._quality_recorded = True
         started = self._started_at or self.clock()
         try:
             recorder(
@@ -1390,6 +1403,24 @@ class AgenticTurnRuntime:
                 duration_ms=int((self.clock() - started).total_seconds() * 1000),
             )
         except Exception:  # noqa: BLE001 - telemetry never breaks a turn
+            pass
+
+    def _commit_learning(self, scope: str) -> None:
+        """Hand what this turn taught to whoever knows how to store it.
+
+        Runs once, after the answer has already been delivered, and only for
+        a turn that actually reached a terminal state. The runtime deliberately
+        does not know what a memory store is: the sink is supplied by the
+        session, which owns that dependency.
+        """
+        if self._learning_committed or self._learning_sink is None:
+            return
+        self._learning_committed = True
+        try:
+            learned = self.ledger.mechanical_memories(scope)
+            if learned:
+                self._learning_sink(learned)
+        except Exception:  # noqa: BLE001 - learning never breaks a turn
             pass
 
     def _fail(self, turn: dict[str, object], code: str, iteration: int, actions: int) -> AgenticRunResult:
