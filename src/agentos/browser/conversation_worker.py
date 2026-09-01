@@ -256,17 +256,31 @@ def _wait_for_page_ready(page, timeout_error) -> None:
 
 
 def _launch_failure_message(error: Exception) -> str:
-    """Distinguish "Chromium is not provisioned" from any other launch failure.
+    """Distinguish "Chromium is not provisioned" and "system libraries are
+    missing" from any other launch failure.
 
     ``playwright_available()`` only checks that the Python package is
     installed; the Chromium binary itself is a separate download
     (``scripts/install-browser.ps1``). Without this, a package-present,
     binary-absent install spawns a process per turn that immediately dies,
     and the caller only ever sees an opaque timeout.
+
+    On Linux, a *present* Chromium binary can still fail to start because a
+    shared library it links against (libnss3, libasound2, ...) is missing
+    from the host. Playwright's own exception text includes the loader's
+    exact "error while loading shared libraries" line, so this is detected
+    the same way as the missing-binary case rather than left as an opaque
+    ``TargetClosedError``.
     """
     text = str(error)
     if "Executable doesn't exist" in text or "playwright install" in text.lower():
         return "Chromium is not provisioned for the isolated browser. Run scripts/install-browser.ps1 (or `python -m playwright install chromium`) and try again."
+    if "error while loading shared libraries" in text:
+        return (
+            "O motor de navegador não conseguiu iniciar por faltar bibliotecas de sistema. "
+            "Em Debian/Ubuntu, rode: sudo apt install libnss3 libasound2t64 (ou libasound2 em "
+            "versões mais antigas) e tente de novo."
+        )
     return f"browser engine failed to start: {type(error).__name__}"
 
 

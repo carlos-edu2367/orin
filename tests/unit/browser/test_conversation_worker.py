@@ -889,6 +889,18 @@ def test_launch_failure_message_distinguishes_missing_chromium_from_other_errors
     assert "RuntimeError" in other
 
 
+def test_launch_failure_message_explains_a_missing_system_library() -> None:
+    error = Exception(
+        "playwright._impl._errors.TargetClosedError: BrowserType.launch: Target page, context or browser has been closed\n"
+        "[pid=2661][err] .../chrome-headless-shell: error while loading shared libraries: libnspr4.so: cannot open shared object file: No such file or directory"
+    )
+
+    message = conversation_worker._launch_failure_message(error)
+
+    assert "bibliotecas de sistema" in message
+    assert "apt install" in message
+
+
 @pytest.mark.skipif(not playwright_available(), reason="Playwright is optional")
 def test_isolated_browser_starts_and_captures_without_exposing_a_native_handle() -> None:
     browser = IsolatedConversationBrowser(timeout_seconds=15)
