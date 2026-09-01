@@ -10,7 +10,11 @@ permissions:
 
 jobs:
   backend:
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -22,7 +26,15 @@ jobs:
       - name: Install Python test runner
         run: uv sync --frozen --all-groups
       - name: Install Chromium for Python browser tests
-        run: uv run playwright install chromium
+        # --with-deps also installs the OS shared libraries Chromium links
+        # against (libnss3, libasound2, ...) via apt on Linux; Playwright
+        # ignores the flag on Windows, where it isn't needed. Without it,
+        # `playwright install chromium` alone downloads only the browser
+        # binary and the isolated-browser tests fail on a bare Ubuntu
+        # runner with "error while loading shared libraries" -- confirmed
+        # by running this suite against a bare Ubuntu 24.04 (no libnss3/
+        # libasound2 preinstalled) locally before this workflow existed.
+        run: uv run playwright install --with-deps chromium
       - name: Run Python suite
         run: uv run pytest -q --tb=short
 

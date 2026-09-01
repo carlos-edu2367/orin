@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.pool import StaticPool
@@ -50,7 +52,7 @@ def test_inspect_reports_a_typed_folder(tmp_path: Path) -> None:
     assert body["is_directory"] is True and body["entry_count"] == 1 and body["risk"] == "none"
 
 
-def test_attach_requires_acknowledgement_only_for_a_risky_folder(tmp_path: Path) -> None:
+def test_attach_requires_acknowledgement_only_for_a_risky_folder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A broad folder stays possible; it just cannot happen by accident."""
     client, store = _client(tmp_path)
     plain = tmp_path / "site"
@@ -60,14 +62,22 @@ def test_attach_requires_acknowledgement_only_for_a_risky_folder(tmp_path: Path)
     assert ok.status_code == 200
     assert store.root_for("chat_a", "owner") == str(plain.resolve())
 
-    root = Path(tmp_path.anchor)
-    refused = client.put("/v1/conversations/chat_a/workspace", headers={"Authorization": "Bearer owner", "Idempotency-Key": "i3"}, json={"path": str(root), "acknowledged_risk": False})
+    # A drive root is not writable by a non-root user on POSIX (this used to
+    # point at tmp_path.anchor, i.e. "/" on Linux -- true only on Windows).
+    # "home_root" is an equally broad risk classification that stays
+    # writable everywhere, so redirect Path.home() at a tmp_path folder
+    # instead of touching whoever actually runs this test's real home.
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+
+    refused = client.put("/v1/conversations/chat_a/workspace", headers={"Authorization": "Bearer owner", "Idempotency-Key": "i3"}, json={"path": str(fake_home), "acknowledged_risk": False})
     assert refused.status_code == 409
     assert store.root_for("chat_a", "owner") == str(plain.resolve())
 
-    accepted = client.put("/v1/conversations/chat_a/workspace", headers={"Authorization": "Bearer owner", "Idempotency-Key": "i4"}, json={"path": str(root), "acknowledged_risk": True})
+    accepted = client.put("/v1/conversations/chat_a/workspace", headers={"Authorization": "Bearer owner", "Idempotency-Key": "i4"}, json={"path": str(fake_home), "acknowledged_risk": True})
     assert accepted.status_code == 200
-    assert store.root_for("chat_a", "owner") == str(root)
+    assert store.root_for("chat_a", "owner") == str(fake_home.resolve())
 
 
 def test_attach_refuses_a_missing_folder(tmp_path: Path) -> None:
