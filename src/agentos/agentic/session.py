@@ -219,6 +219,24 @@ def build_retrieval_for_turn(*, workspace_id: str, local_root: str | None, data_
     return RetrievalBundle(service=service, worker=worker)
 
 
+def memories_for_task(memory_store: object | None, task: str) -> list[dict[str, object]]:
+    """The memories worth putting in this turn's prompt.
+
+    Relevance when the store can rank, recency when it cannot, and nothing at
+    all when it fails: a prompt enrichment must never be the reason a turn
+    cannot start.
+    """
+    if memory_store is None:
+        return []
+    try:
+        ranker = getattr(memory_store, "relevant", None)
+        if callable(ranker):
+            return list(ranker(task, limit=12))
+        return list(memory_store.recent(limit=12))
+    except Exception:  # noqa: BLE001 - a prompt enrichment never breaks a turn
+        return []
+
+
 def build_system_prompt(
     *,
     tool_names: tuple[str, ...],
@@ -1043,7 +1061,6 @@ class TurnSession:
             code_mode_permits_pr=effective_autonomy == "full_autonomy",
             code_mode_requires_approval=code_requires_approval,
         )
-        memories = self.memory.recent(limit=12) if self.memory is not None else []
         agents = self.agents_store.list() if self.agents_store is not None else []
         reader = getattr(self.store, "tool_ledger", None)
         if callable(reader):
@@ -1073,6 +1090,7 @@ class TurnSession:
         workspace_guidance = _workspace_guidance(self.workspace.root)
         history = self.store.history_for_turn(self.turn)
         task = next((str(item.get("content") or "") for item in reversed(history) if item.get("role") == "user"), "")
+        memories = memories_for_task(self.memory, task)
         code_mode_context = ""
         if self.turn.get("code_mode") == "code":
             from agentos.code_mode.prompt import code_mode_instructions
