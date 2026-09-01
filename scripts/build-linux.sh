@@ -47,9 +47,4 @@ npm ci
 npm run build:dir:linux
 cd "$ROOT"
 
-# package-release.sh is created by a later plan task (Task 8); call it only
-# if present so this script is independently runnable/verifiable now. Task
-# 8's dispatch restores this as an unconditional call once the script exists.
-if [ -x scripts/package-release.sh ]; then
-  scripts/package-release.sh
-fi
+scripts/package-release.sh
