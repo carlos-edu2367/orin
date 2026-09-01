@@ -8,6 +8,7 @@ from sqlalchemy import (
     CheckConstraint,
     Column,
     DateTime,
+    Float,
     Index,
     Integer,
     MetaData,
@@ -786,9 +787,22 @@ agent_memories = Table(
     Column("source_execution_id", String(255), nullable=True),
     Column("fact", String(2000), nullable=False),
     Column("tags", JSON, nullable=False, default=list),
+    # What the fact is, which decides how it enters the prompt and what it can
+    # contradict. A preference outranks an operational note for prompt space.
+    Column("kind", String(16), nullable=False, server_default="fact"),
+    Column("confidence", Float, nullable=False, server_default="1.0"),
+    # Who produced it. Without this, a wrong memory is untraceable.
+    Column("source", String(16), nullable=False, server_default="user_explicit"),
+    Column("hit_count", Integer, nullable=False, server_default="0"),
+    Column("last_used_at", DateTime(timezone=True), nullable=True),
+    # A contradiction chains instead of deleting, so the history stays auditable.
+    Column("superseded_by", String(255), nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),
-    UniqueConstraint("user_id", "fact", name="uq_agent_memories_user_fact"),
+    # Scope belongs in the key: 0028 added project scope but left the old
+    # (user_id, fact) constraint in place, so the same fact in two projects
+    # raised IntegrityError.
+    UniqueConstraint("user_id", "scope_type", "project_id", "fact", name="uq_agent_memories_scope_fact"),
 )
 Index("ix_agent_memories_user_updated", agent_memories.c.user_id, agent_memories.c.updated_at)
 
