@@ -1,6 +1,12 @@
 {
   "version": "0.1.0",
   "archive_url": "https://github.com/carlos-edu2367/orin/releases/download/v0.1.0/Orin-0.1.0-windows-x64.zip",
-  "archive_sha256": "replace-with-the-sha256-of-the-zip",
-  "release_url": "https://github.com/carlos-edu2367/orin/releases/tag/v0.1.0"
+  "archive_sha256": "replace-with-the-sha256-of-the-windows-zip",
+  "release_url": "https://github.com/carlos-edu2367/orin/releases/tag/v0.1.0",
+  "platforms": {
+    "linux-x64": {
+      "archive_url": "https://github.com/carlos-edu2367/orin/releases/download/v0.1.0/Orin-0.1.0-linux-x64.tar.gz",
+      "archive_sha256": "replace-with-the-sha256-of-the-linux-tarball"
+    }
+  }
 }
