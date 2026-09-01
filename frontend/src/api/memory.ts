@@ -23,3 +23,7 @@ export function listManagedMemories(client: ApiClient, options: { scope: 'user' 
 export function deleteManagedMemory(client: ApiClient, memoryId: string, scope: 'user' | 'project', projectId?: string, intent: MutationIntent = client.createMutationIntent()): Promise<void> {
   return client.request({ path: `/v1/memories/${encodeURIComponent(memoryId)}`, query: { scope, project_id: projectId }, method: 'DELETE', expectedStatus: 204, intent, parse: () => undefined })
 }
+
+export function updateManagedMemory(client: ApiClient, memoryId: string, fact: string, scope: 'user' | 'project', projectId?: string, intent: MutationIntent = client.createMutationIntent()): Promise<ManagedMemory> {
+  return client.request({ path: `/v1/memories/${encodeURIComponent(memoryId)}`, query: { scope, project_id: projectId }, method: 'PATCH', body: { fact }, intent, parse: row })
+}

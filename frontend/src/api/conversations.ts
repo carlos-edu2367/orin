@@ -280,6 +280,9 @@ export function parseConversationActivityEvent(value: unknown, cursor: string): 
   assign('screenshotPath', optionalWorkspacePath(payload.screenshot_path))
   assign('codeStage', optionalText(payload.stage, 64))
   if (payload.code_approval === true) event.codeApproval = true
+  assign('memoryId', optionalText(payload.memory_id, 255))
+  assign('memoryProjectId', optionalText(payload.project_id, 255))
+  if (payload.scope === 'user' || payload.scope === 'project') event.memoryScope = payload.scope
   assign('occurredAt', optionalText(item.occurred_at, 64))
   const contextUsage = parseContextUsage(payload)
   if (contextUsage) event.contextUsage = contextUsage

@@ -6,6 +6,7 @@ import { AgentExchange } from './AgentExchange'
 import { BrowserActivityCard } from './BrowserActivityCard'
 import { CodeModeCard } from './CodeModeCard'
 import { McpApprovalCard } from './McpApprovalCard'
+import { MemoryLearnedCard } from './MemoryLearnedCard'
 import { PluginApprovalCard } from './PluginApprovalCard'
 import { summarizeActivities } from './activitySummary'
 import type { ActivityGroup, ConversationActivityEvent } from './activityTypes'
@@ -80,6 +81,9 @@ export function renderActivityGroup(
         onDecline={() => onMcpDecline(first)}
       />
     )
+  }
+  if (first.type === 'memory.learned') {
+    return <>{group.events.map((event) => <MemoryLearnedCard key={event.eventId} event={event} />)}</>
   }
   if (group.kind === 'agent' && first.type === 'agent.created') return <AgentBirth event={first} />
   if (group.kind === 'agent' && (first.type === 'agent.message_sent' || first.type === 'agent.message_received')) {

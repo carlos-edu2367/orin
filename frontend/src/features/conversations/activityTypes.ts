@@ -55,6 +55,10 @@ export type ConversationActivityEvent = {
   contextUsage?: ContextUsage
   codeStage?: string
   codeApproval?: boolean
+  /** Set only on `memory.learned`: what the agent stored, and where. */
+  memoryId?: string
+  memoryScope?: 'user' | 'project'
+  memoryProjectId?: string
 }
 
 export type ContextUsage = {
@@ -175,6 +179,7 @@ export function stateFor(type: string, status?: string, errorCode?: string | nul
   // ARTIFACT_CREATED emission), so there is no "in progress" state for it to
   // pass through.
   if (type === 'artifact.created') return 'completed'
+  if (type === 'memory.learned') return 'completed'
   if (type === 'turn.started') return 'working'
   return 'working'
 }
