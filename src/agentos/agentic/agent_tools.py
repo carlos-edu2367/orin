@@ -281,6 +281,15 @@ def _process_is_running(pid: int) -> bool:
     A background process is tracked in a manifest file that outlives the
     ``AgentToolset`` that started it (a new one is built every turn), so
     liveness has to be answerable from the pid alone.
+
+    On POSIX, ``os.kill(pid, 0)`` alone is not enough: it reports a zombie
+    (a child that exited but was never ``wait()``-ed on) as alive, because a
+    zombie still occupies a process-table entry. ``run_command(background=True)``
+    never waits on the child it starts, so every background process on
+    Linux/macOS would otherwise be reported as running forever. Reaping it
+    with ``waitpid(pid, WNOHANG)`` first fixes that for the common case
+    (we are still the parent); the ``kill(pid, 0)`` fallback covers the case
+    where the process was tracked across a restart and we no longer are.
     """
     if os.name == "nt":
         try:
@@ -290,6 +299,18 @@ def _process_is_running(pid: int) -> bool:
         except (OSError, subprocess.SubprocessError):
             return False
         return str(pid) in completed.stdout
+    try:
+        reaped_pid, _ = os.waitpid(pid, 1)  # 1 == os.WNOHANG on Unix systems
+        if reaped_pid == pid:
+            return False
+        if reaped_pid == 0:
+            return True
+    except ChildProcessError:
+        # Not our child -- tracked across a new AgentToolset (a later turn)
+        # or a backend restart. waitpid() only works while the original
+        # launching process is still the one asking; fall back to a plain
+        # existence check.
+        pass
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
