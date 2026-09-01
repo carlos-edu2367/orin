@@ -250,10 +250,11 @@ def command_update(paths: OrinPaths, profile: RuntimeProfile, console: Console) 
             return code
     console.line("\n  Downloading the latest verified Orin release...")
     try:
-        result = subprocess.run(
-            ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(installer)],
-            check=False,
-        )
+        if os.name == "nt":
+            command = ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(installer)]
+        else:
+            command = ["bash", str(installer)]
+        result = subprocess.run(command, check=False)
     except OSError as error:
         console.error(f"Could not start the installer: {error}")
         return 1
@@ -275,13 +276,14 @@ def command_uninstall(paths: OrinPaths, profile: RuntimeProfile, console: Consol
             return code
     console.line("\n  Removing this Orin installation and its local data...")
     try:
-        result = subprocess.run(
-            [
+        if os.name == "nt":
+            command = [
                 "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(installer),
                 "-Uninstall", "-Force", "-WaitForPid", str(os.getpid()),
-            ],
-            check=False,
-        )
+            ]
+        else:
+            command = ["bash", str(installer), "--uninstall", "--force", "--wait-for-pid", str(os.getpid())]
+        result = subprocess.run(command, check=False)
     except OSError as error:
         console.error(f"Could not start the uninstaller: {error}")
         return 1

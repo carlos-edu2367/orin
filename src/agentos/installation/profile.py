@@ -9,6 +9,7 @@ packaging change rather than a launcher change.
 
 from __future__ import annotations
 
+import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -99,9 +100,10 @@ class RuntimeProfile:
     @property
     def installer(self) -> Path:
         """The verified release installer shipped beside a frozen runtime."""
-        candidates = [self.root / "install.ps1", self.root / "_internal" / "install.ps1"]
+        name = "install.ps1" if os.name == "nt" else "install.sh"
+        candidates = [self.root / name, self.root / "_internal" / name]
         if self.repository is not None:
-            candidates.append(self.repository / "install.ps1")
+            candidates.append(self.repository / name)
         return next((candidate for candidate in candidates if candidate.is_file()), candidates[0])
 
     @classmethod

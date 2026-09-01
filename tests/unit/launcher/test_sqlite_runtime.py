@@ -44,11 +44,13 @@ def test_frozen_layout_finds_assets_under_pyinstaller_internal_directory(tmp_pat
     (internal / "web").mkdir(parents=True)
     (internal / "web" / "index.html").write_text('<div id="root"></div>', encoding="utf-8")
     (internal / "playwright").mkdir()
-    (internal / "install.ps1").write_text("# installer", encoding="utf-8")
+    import os
+    installer_name = "install.ps1" if os.name == "nt" else "install.sh"
+    (internal / installer_name).write_text("# installer", encoding="utf-8")
     profile = RuntimeProfile("installed", root, "1", None)
 
     assert profile.web_dist == internal / "web"
-    assert profile.installer == internal / "install.ps1"
+    assert profile.installer == internal / installer_name
 
     paths = OrinPaths(tmp_path / "config", tmp_path / "data", tmp_path / "logs", tmp_path / "cache", tmp_path / "run").ensure()
     environment = load_environment(paths, profile)

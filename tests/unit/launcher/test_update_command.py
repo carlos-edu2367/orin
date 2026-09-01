@@ -16,7 +16,7 @@ def _paths(tmp_path: Path) -> OrinPaths:
     return OrinPaths(tmp_path / "config", tmp_path / "data", tmp_path / "logs", tmp_path / "cache", tmp_path / "run").ensure()
 
 
-def test_installed_uninstall_schedules_the_packaged_helper(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_update_invokes_the_platform_installer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     paths = _paths(tmp_path)
     runtime = tmp_path / "runtime"
     runtime.mkdir()
@@ -30,19 +30,18 @@ def test_installed_uninstall_schedules_the_packaged_helper(tmp_path: Path, monke
 
     monkeypatch.setattr(cli.subprocess, "run", lambda command, check: invoked.append(command) or Result())
 
-    assert cli.command_uninstall(paths, RuntimeProfile("installed", runtime, "1.0.0", None), Console(io.StringIO(), colour=False)) == 0
+    assert cli.command_update(paths, RuntimeProfile("installed", runtime, "1.0.0", None), Console(io.StringIO(), colour=False)) == 0
     if os.name == "nt":
-        assert invoked == [[
-            "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(installer),
-            "-Uninstall", "-Force", "-WaitForPid", str(os.getpid()),
-        ]]
+        assert invoked == [["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(installer)]]
     else:
-        assert invoked == [["bash", str(installer), "--uninstall", "--force", "--wait-for-pid", str(os.getpid())]]
+        assert invoked == [["bash", str(installer)]]
 
 
-def test_uninstall_refuses_to_delete_a_source_checkout(tmp_path: Path) -> None:
+def test_update_reports_a_missing_installer(tmp_path: Path) -> None:
     stream = io.StringIO()
-    profile = RuntimeProfile("development", tmp_path, "1.0.0", tmp_path)
+    paths = _paths(tmp_path)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
 
-    assert cli.command_uninstall(_paths(tmp_path), profile, Console(stream, colour=False)) == 2
-    assert "will not delete this source checkout" in stream.getvalue()
+    assert cli.command_update(paths, RuntimeProfile("installed", runtime, "1.0.0", None), Console(stream, colour=False)) == 1
+    assert "release installer is missing" in stream.getvalue()
