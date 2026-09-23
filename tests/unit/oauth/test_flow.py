@@ -115,3 +115,94 @@ def test_refresh_tokens_raises_on_an_error_response():
     client = httpx.Client(transport=httpx.MockTransport(handler))
     with pytest.raises(OAuthFlowError):
         refresh_tokens(_config(), "rt-expired", client=client)
+
+
+from urllib.parse import parse_qs, urlsplit
+
+from agentos.oauth.flow import OAuthGrantRejected, revoke_token
+
+
+def _mcp_config(**overrides):
+    defaults = dict(provider_id="mcp_1", authorize_url="https://auth.example.com/authorize",
+                    token_url="https://auth.example.com/token", scopes=("content:admin",), client_id="c-1",
+                    resource="https://mcp.example.com/mcp")
+    return OAuthProviderConfig(**{**defaults, **overrides})
+
+
+def test_the_authorization_url_carries_the_resource_indicator():
+    pending = begin_authorization(_mcp_config(), redirect_uri="http://127.0.0.1:49200/v1/mcp/oauth/callback")
+    query = parse_qs(urlsplit(pending.authorization_url).query)
+    assert query["resource"] == ["https://mcp.example.com/mcp"]
+    assert query["code_challenge_method"] == ["S256"]
+
+
+def test_no_scope_parameter_when_there_are_no_scopes():
+    pending = begin_authorization(_mcp_config(scopes=()), redirect_uri="http://127.0.0.1:49200/cb")
+    assert "scope" not in parse_qs(urlsplit(pending.authorization_url).query)
+
+
+def test_the_code_exchange_sends_resource_and_the_post_secret():
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update({key: values[0] for key, values in parse_qs(request.content.decode()).items()})
+        return httpx.Response(200, json={"access_token": "at", "refresh_token": "rt", "expires_in": 3600})
+
+    config = _mcp_config(client_secret="s-1", token_endpoint_auth_method="client_secret_post")
+    pending = begin_authorization(config, redirect_uri="http://127.0.0.1:49200/cb")
+    exchange_code_for_tokens(config, pending, code="code-1", client=httpx.Client(transport=httpx.MockTransport(handler)))
+
+    assert seen["resource"] == "https://mcp.example.com/mcp"
+    assert seen["client_secret"] == "s-1"
+    assert seen["code_verifier"] == pending.code_verifier
+
+
+def test_basic_client_authentication_keeps_the_secret_out_of_the_body():
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["authorization"] = request.headers.get("authorization", "")
+        seen["body"] = request.content.decode()
+        return httpx.Response(200, json={"access_token": "at"})
+
+    config = _mcp_config(client_secret="s-1", token_endpoint_auth_method="client_secret_basic")
+    refresh_tokens(config, "rt", client=httpx.Client(transport=httpx.MockTransport(handler)))
+    assert seen["authorization"].startswith("Basic ")
+    assert "s-1" not in seen["body"]
+
+
+def test_invalid_grant_is_a_typed_rejection():
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"error": "invalid_grant"})
+
+    with pytest.raises(OAuthGrantRejected):
+        refresh_tokens(_mcp_config(), "rt", client=httpx.Client(transport=httpx.MockTransport(handler)))
+
+
+def test_a_server_error_is_a_plain_flow_error():
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503)
+
+    with pytest.raises(OAuthFlowError) as raised:
+        refresh_tokens(_mcp_config(), "rt", client=httpx.Client(transport=httpx.MockTransport(handler)))
+    assert not isinstance(raised.value, OAuthGrantRejected)
+
+
+def test_a_private_token_endpoint_is_refused(monkeypatch):
+    from agentos.agentic.agent_tools import _public_url as real_public_url
+    monkeypatch.setattr("agentos.oauth.netpolicy._public_url", real_public_url)
+    config = _mcp_config(token_url="https://127.0.0.1/token")
+    with pytest.raises(OAuthFlowError):
+        refresh_tokens(config, "rt", client=httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200))))
+
+
+def test_revoke_posts_the_token_and_hint():
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update({key: values[0] for key, values in parse_qs(request.content.decode()).items()})
+        return httpx.Response(200)
+
+    revoke_token(_mcp_config(), revocation_url="https://auth.example.com/revoke", token="rt",
+                 token_type_hint="refresh_token", client=httpx.Client(transport=httpx.MockTransport(handler)))
+    assert seen == {"token": "rt", "token_type_hint": "refresh_token", "client_id": "c-1"}
