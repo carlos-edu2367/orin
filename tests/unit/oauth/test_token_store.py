@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import create_engine
@@ -70,3 +70,58 @@ def test_delete_removes_the_stored_tokens(store):
     store.save(user_id="u1", provider_id="google-drive", tokens=OAuthTokens("at-1", "rt-1", 3600, None))
     store.delete(user_id="u1", provider_id="google-drive")
     assert store.get(user_id="u1", provider_id="google-drive") is None
+
+
+def test_expires_at_comes_back_timezone_aware(store):
+    store.save(user_id="u1", provider_id="p", tokens=OAuthTokens("at", "rt", 60, None))
+    assert store.get(user_id="u1", provider_id="p").expires_at.tzinfo is not None
+
+
+def test_each_save_moves_the_version(store):
+    store.save(user_id="u1", provider_id="p", tokens=OAuthTokens("at-1", "rt-1", 60, None))
+    first = store.get(user_id="u1", provider_id="p").version
+    store.save(user_id="u1", provider_id="p", tokens=OAuthTokens("at-2", "rt-2", 60, None))
+    assert store.get(user_id="u1", provider_id="p").version == first + 1
+
+
+def test_only_one_caller_gets_the_lease(store):
+    store.save(user_id="u1", provider_id="p", tokens=OAuthTokens("at", "rt", 60, None))
+    version = store.get(user_id="u1", provider_id="p").version
+    assert store.try_acquire_refresh_lease(user_id="u1", provider_id="p", version=version, ttl=timedelta(seconds=30))
+    assert not store.try_acquire_refresh_lease(user_id="u1", provider_id="p", version=version, ttl=timedelta(seconds=30))
+
+
+def test_an_expired_lease_can_be_taken_again(store):
+    store.save(user_id="u1", provider_id="p", tokens=OAuthTokens("at", "rt", 60, None))
+    assert store.try_acquire_refresh_lease(user_id="u1", provider_id="p", version=0, ttl=timedelta(seconds=-1))
+    assert store.try_acquire_refresh_lease(user_id="u1", provider_id="p", version=0, ttl=timedelta(seconds=30))
+
+
+def test_a_stale_version_never_gets_the_lease(store):
+    store.save(user_id="u1", provider_id="p", tokens=OAuthTokens("at", "rt", 60, None))
+    store.save(user_id="u1", provider_id="p", tokens=OAuthTokens("at-2", "rt-2", 60, None))
+    assert not store.try_acquire_refresh_lease(user_id="u1", provider_id="p", version=0, ttl=timedelta(seconds=30))
+
+
+def test_saving_clears_the_lease_and_release_frees_it(store):
+    store.save(user_id="u1", provider_id="p", tokens=OAuthTokens("at", "rt", 60, None))
+    assert store.try_acquire_refresh_lease(user_id="u1", provider_id="p", version=0, ttl=timedelta(seconds=30))
+    store.release_refresh_lease(user_id="u1", provider_id="p")
+    assert store.try_acquire_refresh_lease(user_id="u1", provider_id="p", version=0, ttl=timedelta(seconds=30))
+    store.save(user_id="u1", provider_id="p", tokens=OAuthTokens("at-2", "rt-2", 60, None))
+    assert store.try_acquire_refresh_lease(user_id="u1", provider_id="p", version=1, ttl=timedelta(seconds=30))
+
+
+def test_two_processes_on_one_file_share_the_lease(monkeypatch, tmp_path):
+    # The API and the worker are separate processes over the same SQLite file.
+    monkeypatch.setenv("AGENTOS_PROVIDER_ENCRYPTION_KEY", "wYIYy1yzr2r_LRw2P0FE8zpO6zRQmYtP6cn0FdOtBOA=")
+    url = f"sqlite+pysqlite:///{tmp_path / 'orin.db'}"
+    api_engine, worker_engine = create_engine(url), create_engine(url)
+    metadata.create_all(api_engine)
+    api, worker = OAuthTokenStore(api_engine), OAuthTokenStore(worker_engine)
+    api.save(user_id="u1", provider_id="p", tokens=OAuthTokens("at", "rt", 60, None))
+
+    assert worker.try_acquire_refresh_lease(user_id="u1", provider_id="p", version=0, ttl=timedelta(seconds=30))
+    assert not api.try_acquire_refresh_lease(user_id="u1", provider_id="p", version=0, ttl=timedelta(seconds=30))
+    worker.save(user_id="u1", provider_id="p", tokens=OAuthTokens("at-2", "rt-2", 60, None))
+    assert api.get(user_id="u1", provider_id="p").access_token == "at-2"
