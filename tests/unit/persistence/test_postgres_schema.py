@@ -61,6 +61,8 @@ def test_persistence_schema_contains_only_the_durable_boundary_tables():
             "plugin_contributions",
             "plugin_marketplaces",
             "oauth_tokens",
+            "mcp_oauth_clients",
+            "oauth_pending_authorizations",
         }
 
 

@@ -1,7 +1,7 @@
 import pytest
 
 from agentos.mcp.models import (
-    McpServerConfig, McpServerState, McpToolDescriptor, McpTransport,
+    McpAuthKind, McpServerConfig, McpServerState, McpToolDescriptor, McpTransport,
     qualified_tool_name, slugify, tools_digest,
 )
 
@@ -43,3 +43,9 @@ def test_a_new_config_starts_in_pending_approval():
                              transport=McpTransport.HTTP, url="https://mcp.example.com/v1")
     assert config.state is McpServerState.PENDING_APPROVAL
     assert config.is_usable is False
+
+
+def test_a_config_defaults_to_no_authentication():
+    config = McpServerConfig(server_id="s", user_id="u", slug="x", display_name="X",
+                             transport=McpTransport.HTTP, url="https://mcp.example.com/mcp")
+    assert config.auth_kind is McpAuthKind.NONE

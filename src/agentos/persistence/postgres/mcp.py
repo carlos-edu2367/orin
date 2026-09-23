@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from agentos.mcp.models import McpServerConfig, McpServerState, McpToolDescriptor, McpTransport
+from agentos.mcp.models import McpAuthKind, McpServerConfig, McpServerState, McpToolDescriptor, McpTransport
 
 
 def row_to_config(row: Mapping[str, Any]) -> McpServerConfig:
@@ -27,6 +27,7 @@ def row_to_config(row: Mapping[str, Any]) -> McpServerConfig:
         state_reason=str(row["state_reason"] or ""),
         protocol_version=str(row["protocol_version"] or ""),
         tools_digest=str(row["tools_digest"] or ""),
+        auth_kind=McpAuthKind(str(row.get("auth_kind") or McpAuthKind.NONE.value)),
     )
 
 
@@ -43,6 +44,7 @@ def public_summary(row: Mapping[str, Any], *, tool_count: int) -> dict[str, Any]
         "url": row["url"], "secret_names": list(row["secret_names"] or ()), "catalog_id": row["catalog_id"],
         "state": str(row["state"]), "state_reason": str(row["state_reason"] or ""),
         "protocol_version": str(row["protocol_version"] or ""), "tool_count": tool_count,
+        "auth_kind": str(row.get("auth_kind") or McpAuthKind.NONE.value),
     }
 
 

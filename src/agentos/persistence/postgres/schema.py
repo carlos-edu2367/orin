@@ -924,6 +924,7 @@ mcp_servers = Table(
     Column("state_reason", String(512), nullable=False, server_default=""),
     Column("protocol_version", String(32), nullable=False, server_default=""),
     Column("tools_digest", String(64), nullable=False, server_default=""),
+    Column("auth_kind", String(16), nullable=False, server_default="none"),
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),
     UniqueConstraint("user_id", "slug", name="uq_mcp_servers_slug"),
@@ -972,8 +973,41 @@ oauth_tokens = Table(
     Column("user_id", String(255), primary_key=True), Column("provider_id", String(64), primary_key=True),
     Column("access_token_ciphertext", Text(), nullable=False), Column("refresh_token_ciphertext", Text(), nullable=True),
     Column("scope", String(1024), nullable=True), Column("expires_at", DateTime(timezone=True), nullable=True),
+    Column("version", Integer(), nullable=False, server_default="0"),
+    Column("refresh_lease_until", DateTime(timezone=True), nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=False), Column("updated_at", DateTime(timezone=True), nullable=False),
 )
+
+mcp_oauth_clients = Table(
+    "mcp_oauth_clients", metadata,
+    Column("server_id", String(255), primary_key=True),
+    Column("issuer", String(2048), nullable=False),
+    Column("authorization_endpoint", String(2048), nullable=False),
+    Column("token_endpoint", String(2048), nullable=False),
+    Column("revocation_endpoint", String(2048)),
+    Column("resource", String(2048), nullable=False),
+    Column("scope", String(1024)),
+    Column("client_id", String(512), nullable=False),
+    Column("client_secret_ciphertext", Text()),
+    Column("token_endpoint_auth_method", String(32), nullable=False),
+    Column("redirect_uri", String(512), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+    ForeignKeyConstraint(["server_id"], ["mcp_servers.server_id"], name="fk_mcp_oauth_clients_server", ondelete="CASCADE"),
+)
+
+oauth_pending_authorizations = Table(
+    "oauth_pending_authorizations", metadata,
+    Column("state", String(64), primary_key=True),
+    Column("user_id", String(255), nullable=False),
+    Column("server_id", String(255), nullable=False),
+    Column("code_verifier_ciphertext", Text(), nullable=False),
+    Column("redirect_uri", String(512), nullable=False),
+    Column("expires_at", DateTime(timezone=True), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    ForeignKeyConstraint(["server_id"], ["mcp_servers.server_id"], name="fk_oauth_pending_server", ondelete="CASCADE"),
+)
+Index("ix_oauth_pending_server", oauth_pending_authorizations.c.server_id)
 
 plugin_marketplaces = Table(
     "plugin_marketplaces", metadata,
@@ -1030,5 +1064,7 @@ __all__ = [
     "plugin_contributions",
     "plugin_marketplaces",
     "oauth_tokens",
+    "mcp_oauth_clients",
+    "oauth_pending_authorizations",
     "create_engine_for_tests",
 ]

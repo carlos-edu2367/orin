@@ -21,7 +21,7 @@ from agentos.persistence.postgres.mcp import public_summary, row_to_config, row_
 from agentos.persistence.postgres.schema import mcp_server_tools, mcp_servers
 from agentos.persistence.provider_secrets import ProviderSecretCipher
 
-from .models import McpServerConfig, McpServerState, McpToolDescriptor, McpTransport, slugify, tools_digest as _tools_digest
+from .models import McpAuthKind, McpServerConfig, McpServerState, McpToolDescriptor, McpTransport, slugify, tools_digest as _tools_digest
 
 MAX_STATE_REASON_CHARS = 512
 _ALLOWED_PROPOSAL_FIELDS = frozenset({
@@ -167,6 +167,7 @@ class McpServerService:
                 url=candidate.url, secret_names=list(candidate.secret_names), secrets_ciphertext=None,
                 tool_allowlist=list(candidate.tool_allowlist) if candidate.tool_allowlist is not None else None,
                 state=McpServerState.PENDING_APPROVAL.value, state_reason="", protocol_version="", tools_digest="",
+                auth_kind=(McpAuthKind.STATIC if candidate.secret_names else McpAuthKind.NONE).value,
                 created_at=now, updated_at=now,
             ))
         return self.get(user_id, candidate.server_id)

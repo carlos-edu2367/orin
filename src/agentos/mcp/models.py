@@ -28,6 +28,12 @@ class McpServerState(StrEnum):
     ERROR = "error"
 
 
+class McpAuthKind(StrEnum):
+    NONE = "none"
+    STATIC = "static"
+    OAUTH = "oauth"
+
+
 def slugify(value: str) -> str:
     slug = re.sub(r"-+", "-", re.sub(r"[^a-z0-9]+", "-", value.lower())).strip("-")
     if not slug:
@@ -72,6 +78,7 @@ class McpServerConfig:
     state_reason: str = ""
     protocol_version: str = ""
     tools_digest: str = ""
+    auth_kind: McpAuthKind = McpAuthKind.NONE
 
     def __post_init__(self) -> None:
         if self.transport is McpTransport.STDIO and not self.command:
@@ -87,6 +94,6 @@ class McpServerConfig:
 
 
 __all__ = [
-    "MAX_SLUG_LENGTH", "McpServerConfig", "McpServerState", "McpToolDescriptor",
+    "MAX_SLUG_LENGTH", "McpAuthKind", "McpServerConfig", "McpServerState", "McpToolDescriptor",
     "McpTransport", "qualified_tool_name", "slugify", "tools_digest",
 ]

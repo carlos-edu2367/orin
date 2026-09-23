@@ -98,3 +98,11 @@ def test_disabling_removes_the_server_from_the_active_set(service):
                     connect=lambda config, secrets: ("2025-06-18", ()))
     service.set_enabled("u1", record["server_id"], enabled=False)
     assert service.active_servers("u1") == []
+
+
+def test_a_proposal_records_its_auth_kind(service):
+    with_secret = service.propose(_proposal())
+    without = service.propose(_proposal(display_name="Auryly", transport="http", command=None, args=[],
+                                        url="https://mcp.example.com/mcp", secret_names=[]))
+    assert with_secret["auth_kind"] == "static"
+    assert without["auth_kind"] == "none"

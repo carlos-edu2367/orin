@@ -87,3 +87,23 @@ def test_migration_0038_preserves_a_credential_saved_before_encryption_existed(m
     assert row["position"] == 0
     cipher = ProviderSecretCipher.from_environment(required=True)
     assert cipher.decrypt(row["api_key_ciphertext"]) == "plain-legacy-secret"
+
+
+def test_migration_0045_marks_servers_with_credentials_as_static():
+    engine = create_engine("sqlite:///:memory:")
+    upgrade(engine, "0044_memory_learning")
+    now = datetime.now(UTC)
+    with engine.begin() as connection:
+        for server_id, names in (("with", '["TOKEN"]'), ("without", "[]")):
+            connection.execute(text(
+                "INSERT INTO mcp_servers (server_id, user_id, slug, display_name, transport, args, secret_names, "
+                "state, state_reason, protocol_version, tools_digest, created_at, updated_at) VALUES "
+                "(:id, 'u1', :id, :id, 'http', '[]', :names, 'active', '', '', '', :now, :now)"
+            ), {"id": server_id, "names": names, "now": now})
+
+    upgrade(engine)
+
+    with engine.connect() as connection:
+        kinds = dict(connection.execute(text("SELECT server_id, auth_kind FROM mcp_servers")).all())
+    assert kinds == {"with": "static", "without": "none"}
+    assert {"mcp_oauth_clients", "oauth_pending_authorizations"} <= set(inspect(engine).get_table_names())
