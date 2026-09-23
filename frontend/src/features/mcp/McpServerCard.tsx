@@ -5,6 +5,8 @@ import {
   type McpServerSummary, type McpToolSummary,
 } from '../../api/mcp'
 import { McpApprovalCard } from '../conversations/McpApprovalCard'
+import { McpSignInPanel } from './McpSignInPanel'
+import { useMcpOAuth } from './useMcpOAuth'
 
 const STATE_LABEL: Record<string, string> = {
   pending_approval: 'Aguardando aprovação', active: 'Ativo', disabled: 'Desativado', error: 'Erro',
@@ -27,6 +29,7 @@ export function McpServerCard({ server, client, onChanged }: McpServerCardProps)
   const [error, setError] = useState<string | null>(null)
   const [confirmingRemove, setConfirmingRemove] = useState(false)
   const [testResult, setTestResult] = useState<string | null>(null)
+  const oauth = useMcpOAuth(client, server.server_id, onChanged)
 
   async function toggleToolsOpen() {
     if (toolsOpen) {
@@ -110,13 +113,18 @@ export function McpServerCard({ server, client, onChanged }: McpServerCardProps)
 
       {server.state === 'pending_approval' ? (
         <McpApprovalCard
-          server={{ server_id: server.server_id, display_name: server.display_name, transport: server.transport, secret_names: server.secret_names, catalog_id: server.catalog_id }}
+          server={{ server_id: server.server_id, display_name: server.display_name, transport: server.transport, secret_names: server.secret_names, catalog_id: server.catalog_id, auth_kind: server.auth_kind }}
           active
+          oauth={oauth}
           onApprove={async (secrets) => { await approveMcpServer(client, server.server_id, secrets); onChanged() }}
           onDecline={async () => { await deleteMcpServer(client, server.server_id); onChanged() }}
         />
       ) : (
         <div className="mcp-server-card__body">
+          {server.state === 'error' && server.state_reason && <p className="mcp-server-card__reason">{server.state_reason}</p>}
+          {server.state === 'error' && server.auth_kind === 'oauth' && (
+            <McpSignInPanel displayName={server.display_name} actionLabel="Reconectar" oauth={oauth} />
+          )}
           <div className="mcp-server-card__actions">
             <button type="button" onClick={() => void toggleServer()} disabled={busy}>{server.state === 'active' ? 'Desativar' : 'Ativar'}</button>
             <button type="button" onClick={() => void runTest()} disabled={busy}>Testar conexão</button>

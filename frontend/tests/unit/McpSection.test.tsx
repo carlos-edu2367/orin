@@ -174,4 +174,15 @@ describe('McpSection', () => {
 
     await waitFor(() => expect(calls.some(([, init]) => init?.method === 'DELETE')).toBe(true))
   })
+  it('offers Reconectar for an OAuth server in error', async () => {
+    renderSection([
+      { method: 'GET', pattern: /\/v1\/mcp\/servers$/, respond: () => json([summary({
+        transport: 'http', url: 'https://auryly.com/mcp', secret_names: [], auth_kind: 'oauth',
+        state: 'error', state_reason: 'Reconexão necessária: o servidor recusou a renovação do acesso',
+      })]) },
+    ])
+
+    expect(await screen.findByText(/o servidor recusou a renovação/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Reconectar' })).toBeInTheDocument()
+  })
 })

@@ -3,6 +3,7 @@ import type { ApiClient } from '../../api/client'
 import { inferMcpLaunch, type McpLaunchGuess } from '../../api/plugins'
 import { approveMcpServer, createMcpServer, deleteMcpServer, type McpServerDetail, type McpTransport } from '../../api/mcp'
 import { McpApprovalCard } from '../conversations/McpApprovalCard'
+import { useMcpOAuth } from '../mcp/useMcpOAuth'
 
 export function McpFromRepoDialog({ client, sourceUrl, onClose, onAdded }: { client: ApiClient; sourceUrl: string; onClose: () => void; onAdded: () => void }) {
   const dialogRef = useRef<HTMLDivElement>(null)
@@ -18,6 +19,7 @@ export function McpFromRepoDialog({ client, sourceUrl, onClose, onAdded }: { cli
   const [submitting, setSubmitting] = useState(false)
   const [submitError, setSubmitError] = useState<string | null>(null)
   const [created, setCreated] = useState<McpServerDetail | null>(null)
+  const oauth = useMcpOAuth(client, created?.server_id ?? '', onAdded)
 
   useEffect(() => {
     dialogRef.current?.focus()
@@ -86,8 +88,9 @@ export function McpFromRepoDialog({ client, sourceUrl, onClose, onAdded }: { cli
 
         {created ? (
           <McpApprovalCard
-            server={{ server_id: created.server_id, display_name: created.display_name, transport: created.transport, secret_names: created.secret_names, catalog_id: created.catalog_id }}
+            server={{ server_id: created.server_id, display_name: created.display_name, transport: created.transport, secret_names: created.secret_names, catalog_id: created.catalog_id, auth_kind: created.auth_kind }}
             active
+            oauth={oauth}
             onApprove={async (secrets) => { await approveMcpServer(client, created.server_id, secrets); onAdded() }}
             onDecline={async () => { await deleteMcpServer(client, created.server_id); onAdded() }}
           />

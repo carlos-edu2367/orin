@@ -1,4 +1,7 @@
 import { useState, type FormEvent } from 'react'
+import { isMcpAuthorizationRequired } from '../../api/mcp'
+import { McpSignInPanel } from '../mcp/McpSignInPanel'
+import type { McpOAuthControl } from '../mcp/useMcpOAuth'
 
 export type McpApprovalServer = {
   server_id: string
@@ -6,6 +9,7 @@ export type McpApprovalServer = {
   transport: string
   secret_names: string[]
   catalog_id: string | null
+  auth_kind?: string
 }
 
 type McpApprovalCardProps = {
@@ -13,6 +17,8 @@ type McpApprovalCardProps = {
   active: boolean
   onApprove: (secrets: Record<string, string>) => Promise<void>
   onDecline: () => Promise<void>
+  /** Present where the card can drive a browser sign-in (Settings, repository dialog). */
+  oauth?: McpOAuthControl
 }
 
 const TRANSPORT_LABEL: Record<string, string> = { stdio: 'processo local (stdio)', http: 'servidor remoto (https)' }
@@ -22,10 +28,11 @@ const TRANSPORT_LABEL: Record<string, string> = { stdio: 'processo local (stdio)
  * credential is typed here, never passed back through the agent's own message
  * — the value goes straight to approveMcpServer and nowhere else.
  */
-export function McpApprovalCard({ server, active, onApprove, onDecline }: McpApprovalCardProps) {
+export function McpApprovalCard({ server, active, onApprove, onDecline, oauth }: McpApprovalCardProps) {
   const [values, setValues] = useState<Record<string, string>>({})
   const [submitting, setSubmitting] = useState<'approve' | 'decline' | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [needsSignIn, setNeedsSignIn] = useState(server.auth_kind === 'oauth')
 
   const missing = server.secret_names.some((name) => !values[name]?.trim())
 
@@ -36,7 +43,11 @@ export function McpApprovalCard({ server, active, onApprove, onDecline }: McpApp
     setSubmitting('approve')
     try {
       await onApprove({ ...values })
-    } catch {
+    } catch (failure) {
+      if (isMcpAuthorizationRequired(failure)) {
+        setNeedsSignIn(true)
+        return
+      }
       setError(`Não foi possível conectar ${server.display_name}. Confira os valores e tente novamente.`)
     } finally {
       setSubmitting(null)
@@ -70,7 +81,20 @@ export function McpApprovalCard({ server, active, onApprove, onDecline }: McpApp
         </div>
       </header>
 
-      {active ? (
+      {active && needsSignIn ? (
+        <div className="approval-card__form">
+          <p className="approval-card__hint">Este servidor pede login. Você vai autorizar o acesso no navegador.</p>
+          {oauth
+            ? <McpSignInPanel displayName={server.display_name} actionLabel={`Entrar com ${server.display_name}`} oauth={oauth} />
+            : <p className="approval-card__hint">Conecte este servidor em Configurações → MCP.</p>}
+          <footer className="approval-card__actions">
+            <button type="button" className="approval-card__decline" onClick={() => void decline()} disabled={submitting !== null}>
+              {submitting === 'decline' ? 'Recusando…' : 'Recusar'}
+            </button>
+          </footer>
+          {error && <p className="approval-card__error" role="alert">{error}</p>}
+        </div>
+      ) : active ? (
         <form className="approval-card__form" onSubmit={(event) => void approve(event)}>
           <fieldset disabled={submitting !== null}>
             {server.secret_names.length === 0 ? (

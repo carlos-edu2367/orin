@@ -1,6 +1,8 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
+import { ApiError } from '../../src/api/errors'
 import { McpApprovalCard } from '../../src/features/conversations/McpApprovalCard'
+import type { McpOAuthControl } from '../../src/features/mcp/useMcpOAuth'
 
 function server(overrides: Partial<Parameters<typeof McpApprovalCard>[0]['server']> = {}) {
   return {
@@ -82,5 +84,43 @@ describe('McpApprovalCard', () => {
 
     expect(screen.queryByRole('button', { name: 'Conectar' })).not.toBeInTheDocument()
     expect(screen.getByText('Resolvido · GitHub')).toBeInTheDocument()
+  })
+})
+
+function oauthControl(overrides: Partial<McpOAuthControl> = {}): McpOAuthControl {
+  return { phase: 'idle', reason: null, pendingUrl: null, start: vi.fn().mockResolvedValue(undefined), cancel: vi.fn().mockResolvedValue(undefined), ...overrides }
+}
+
+describe('McpApprovalCard sign-in', () => {
+  it('switches to sign-in when approval answers authorization required', async () => {
+    const onApprove = vi.fn().mockRejectedValue(new ApiError({ status: 409, code: 'mcp_authorization_required' }))
+    const oauth = oauthControl()
+    render(<McpApprovalCard active server={server({ secret_names: [], transport: 'http' })} onApprove={onApprove} onDecline={vi.fn()} oauth={oauth} />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Conectar' }))
+
+    expect(await screen.findByText(/pede login/i)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Entrar com GitHub' }))
+    expect(oauth.start).toHaveBeenCalled()
+  })
+
+  it('starts in sign-in mode for a server already known to use OAuth', () => {
+    render(<McpApprovalCard active server={server({ secret_names: [], transport: 'http', auth_kind: 'oauth' })} onApprove={vi.fn()} onDecline={vi.fn()} oauth={oauthControl()} />)
+    expect(screen.getByRole('button', { name: 'Entrar com GitHub' })).toBeInTheDocument()
+  })
+
+  it('shows the waiting state, the fallback link and cancel', () => {
+    const oauth = oauthControl({ phase: 'waiting', pendingUrl: 'https://auth.example.com/authorize' })
+    render(<McpApprovalCard active server={server({ secret_names: [], auth_kind: 'oauth' })} onApprove={vi.fn()} onDecline={vi.fn()} oauth={oauth} />)
+
+    expect(screen.getByText(/Aguardando autorização no navegador/)).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Abrir página de login' })).toHaveAttribute('href', 'https://auth.example.com/authorize')
+    fireEvent.click(screen.getByRole('button', { name: 'Cancelar' }))
+    expect(oauth.cancel).toHaveBeenCalled()
+  })
+
+  it('without an oauth control, points to the settings page', () => {
+    render(<McpApprovalCard active server={server({ secret_names: [], auth_kind: 'oauth' })} onApprove={vi.fn()} onDecline={vi.fn()} />)
+    expect(screen.getByText(/Configurações → MCP/)).toBeInTheDocument()
   })
 })
