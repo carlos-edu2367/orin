@@ -1,8 +1,9 @@
 import type { ApiClient, MutationIntent } from './client'
-import { invalidResponseError } from './errors'
+import { ApiError, invalidResponseError } from './errors'
 
 export type McpTransport = 'stdio' | 'http'
 export type McpServerState = 'pending_approval' | 'active' | 'disabled' | 'error'
+export type McpAuthKind = 'none' | 'static' | 'oauth'
 
 export type McpSecretRequirement = { name: string; label: string; how_to_obtain: string }
 
@@ -30,6 +31,7 @@ export type McpServerSummary = {
   state_reason: string
   protocol_version: string
   tool_count: number
+  auth_kind: McpAuthKind
 }
 
 export type McpToolSummary = { name: string; description: string; enabled: boolean }
@@ -93,6 +95,21 @@ export function deleteMcpServer(client: ApiClient, serverId: string, intent = cl
   return client.request({ path: serverPath(serverId), method: 'DELETE', expectedStatus: 204, intent, parse: () => undefined })
 }
 
+export type McpOAuthStart = { authorization_url: string; expires_at: string }
+
+export function startMcpOAuth(client: ApiClient, serverId: string, intent = client.createMutationIntent()): Promise<McpOAuthStart> {
+  return client.request({ path: `${serverPath(serverId)}/oauth/start`, method: 'POST', intent, parse: parseOAuthStart })
+}
+
+export function cancelMcpOAuth(client: ApiClient, serverId: string, intent = client.createMutationIntent()): Promise<void> {
+  return client.request({ path: `${serverPath(serverId)}/oauth/cancel`, method: 'POST', intent, expectedStatus: 204, parse: () => undefined })
+}
+
+/** The server answered 401 at approval: it signs users in with OAuth instead of a pasted credential. */
+export function isMcpAuthorizationRequired(error: unknown): boolean {
+  return error instanceof ApiError && error.code === 'mcp_authorization_required'
+}
+
 function serverPath(serverId: string): string {
   if (!serverId.trim()) throw new TypeError('An MCP server id is required')
   return `/v1/mcp/servers/${encodeURIComponent(serverId)}`
@@ -131,7 +148,7 @@ function parseServer(value: unknown): McpServerSummary {
     transport: mcpTransport(data.transport), command: nullableText(data.command), args: textArray(data.args),
     url: nullableText(data.url), secret_names: textArray(data.secret_names), catalog_id: nullableText(data.catalog_id),
     state: mcpServerState(data.state), state_reason: text(data.state_reason ?? ''), protocol_version: text(data.protocol_version ?? ''),
-    tool_count: number(data.tool_count),
+    tool_count: number(data.tool_count), auth_kind: mcpAuthKind(data.auth_kind ?? 'none'),
   }
 }
 
@@ -185,6 +202,19 @@ function mcpTransport(value: unknown): McpTransport {
 
 function mcpServerState(value: unknown): McpServerState {
   if (value === 'pending_approval' || value === 'active' || value === 'disabled' || value === 'error') return value
+  throw invalidResponseError()
+}
+
+function parseOAuthStart(value: unknown): McpOAuthStart {
+  const data = record(value)
+  const url = text(data.authorization_url)
+  // The URL is opened in the system browser: only https is ever acceptable.
+  if (!url.startsWith('https://')) throw invalidResponseError()
+  return { authorization_url: url, expires_at: text(data.expires_at) }
+}
+
+function mcpAuthKind(value: unknown): McpAuthKind {
+  if (value === 'none' || value === 'static' || value === 'oauth') return value
   throw invalidResponseError()
 }
 

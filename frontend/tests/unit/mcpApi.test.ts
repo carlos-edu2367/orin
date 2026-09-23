@@ -3,12 +3,15 @@ import { ApiClient } from '../../src/api/client'
 import { ApiError } from '../../src/api/errors'
 import {
   approveMcpServer,
+  cancelMcpOAuth,
   createMcpServer,
   deleteMcpServer,
   getMcpServer,
+  isMcpAuthorizationRequired,
   listMcpCatalog,
   listMcpServers,
   setMcpServerEnabled,
+  startMcpOAuth,
 } from '../../src/api/mcp'
 
 function json(value: unknown, status = 200) {
@@ -19,7 +22,7 @@ function server(overrides: Record<string, unknown> = {}) {
   return {
     server_id: 's1', slug: 'github', display_name: 'GitHub', transport: 'stdio', command: 'npx',
     args: ['-y', 'server-github'], url: null, secret_names: ['GITHUB_PERSONAL_ACCESS_TOKEN'], catalog_id: 'github',
-    state: 'pending_approval', state_reason: '', protocol_version: '', tool_count: 0, ...overrides,
+    state: 'pending_approval', state_reason: '', protocol_version: '', tool_count: 0, auth_kind: 'none', ...overrides,
   }
 }
 
@@ -128,5 +131,57 @@ describe('MCP API client', () => {
     const [url, init] = fetchImpl.mock.calls[0]
     expect(String(url)).toBe('/v1/mcp/servers/s1')
     expect(init?.method).toBe('DELETE')
+  })
+})
+
+describe('MCP OAuth API client', () => {
+  it('reads auth_kind and defaults it to none', async () => {
+    const fetchImpl = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(json([server({ auth_kind: 'oauth' })]))
+      .mockResolvedValueOnce(json([{ ...server(), auth_kind: undefined }]))
+    const client = new ApiClient({ fetchImpl, maxAttempts: 1 })
+
+    expect((await listMcpServers(client))[0].auth_kind).toBe('oauth')
+    expect((await listMcpServers(client))[0].auth_kind).toBe('none')
+  })
+
+  it('starts a sign-in and returns the authorization URL', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(json({
+      authorization_url: 'https://auth.example.com/authorize?state=x', expires_at: '2026-09-23T12:00:00+00:00',
+    }))
+    const client = new ApiClient({ fetchImpl, maxAttempts: 1 })
+
+    const started = await startMcpOAuth(client, 's1')
+
+    expect(started.authorization_url).toBe('https://auth.example.com/authorize?state=x')
+    expect(String(fetchImpl.mock.calls[0][0])).toContain('/v1/mcp/servers/s1/oauth/start')
+  })
+
+  it('refuses a non-https authorization URL', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(json({ authorization_url: 'javascript:alert(1)', expires_at: 'x' }))
+    const client = new ApiClient({ fetchImpl, maxAttempts: 1 })
+
+    await expect(startMcpOAuth(client, 's1')).rejects.toBeInstanceOf(ApiError)
+  })
+
+  it('cancels a pending sign-in', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 204 }))
+    const client = new ApiClient({ fetchImpl, maxAttempts: 1 })
+
+    await cancelMcpOAuth(client, 's1')
+
+    expect(String(fetchImpl.mock.calls[0][0])).toContain('/v1/mcp/servers/s1/oauth/cancel')
+  })
+
+  it('recognizes the authorization-required error', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(json({
+      error: { code: 'mcp_authorization_required', category: 'MCP', message_key: 'mcp_authorization_required', correlation_id: 'c', retryable: false, retry_after: null },
+    }, 409))
+    const client = new ApiClient({ fetchImpl, maxAttempts: 1 })
+
+    const failure = await approveMcpServer(client, 's1', {}).catch((error: unknown) => error)
+
+    expect(isMcpAuthorizationRequired(failure)).toBe(true)
+    expect(isMcpAuthorizationRequired(new Error('x'))).toBe(false)
   })
 })
