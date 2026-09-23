@@ -15,11 +15,14 @@ few milliseconds later, which needs a pinned-IP connection to close fully.
 from __future__ import annotations
 
 import json
-from typing import Any, Mapping
+from typing import TYPE_CHECKING, Any, Mapping
 
 import httpx
 
 from agentos.agentic.agent_tools import _public_url
+
+if TYPE_CHECKING:
+    from .token_source import TokenSource
 
 DEFAULT_TIMEOUT_SECONDS = 45.0
 MAX_RESPONSE_BYTES = 4_000_000
@@ -33,13 +36,22 @@ class HttpTransportError(RuntimeError):
     """The server was reachable but the exchange failed."""
 
 
+class HttpUnauthorized(HttpTransportError):
+    """The endpoint answered 401 and there is no sign-in to present."""
+
+    def __init__(self, www_authenticate: str | None) -> None:
+        super().__init__("the MCP endpoint requires sign-in (401)")
+        self.www_authenticate = www_authenticate
+
+
 class HttpTransport:
     kind = "http"
 
-    def __init__(self, *, url: str, headers: Mapping[str, str],
+    def __init__(self, *, url: str, headers: Mapping[str, str] | None = None, token_source: "TokenSource | None" = None,
                  client: httpx.Client | None = None, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> None:
         self._url = self._checked(url)
-        self._headers = dict(headers)
+        self._headers = dict(headers or {})
+        self._token_source = token_source
         self._timeout = timeout
         self._client = client
         self._owns_client = client is None
@@ -64,18 +76,17 @@ class HttpTransport:
         # docstring for why a one-time check at construction is not enough.
         self._checked(self._url)
         self.open()
-        assert self._client is not None
-        headers = {
-            "content-type": "application/json",
-            "accept": "application/json, text/event-stream",
-            **self._headers,
-        }
-        if self.session_id:
-            headers["mcp-session-id"] = self.session_id
-        try:
-            response = self._client.post(self._url, json=dict(frame), headers=headers, timeout=self._timeout)
-        except httpx.HTTPError as error:
-            raise HttpTransportError(f"the MCP endpoint did not answer: {error}") from error
+        token = self._token_source.current() if self._token_source is not None else None
+        response = self._post(frame, token)
+        if response.status_code == 401:
+            if self._token_source is None or token is None:
+                raise HttpUnauthorized(response.headers.get("www-authenticate"))
+            # One renewal and one retry: a token the server rejects right after
+            # renewing means the grant itself is gone.
+            token = self._token_source.force_refresh(token)
+            response = self._post(frame, token)
+            if response.status_code == 401:
+                self._token_source.invalidate("Reconexão necessária: o servidor recusou o acesso renovado")
         self.session_id = response.headers.get("mcp-session-id") or self.session_id
         if response.status_code >= 400:
             raise HttpTransportError(f"the MCP endpoint answered {response.status_code}")
@@ -88,6 +99,22 @@ class HttpTransport:
             return json.loads(body)
         except json.JSONDecodeError as error:
             raise HttpTransportError("the MCP endpoint answered with invalid JSON") from error
+
+    def _post(self, frame: Mapping[str, Any], token: str | None) -> httpx.Response:
+        assert self._client is not None
+        headers = {
+            "content-type": "application/json",
+            "accept": "application/json, text/event-stream",
+            **self._headers,
+        }
+        if token:
+            headers["authorization"] = f"Bearer {token}"
+        if self.session_id:
+            headers["mcp-session-id"] = self.session_id
+        try:
+            return self._client.post(self._url, json=dict(frame), headers=headers, timeout=self._timeout)
+        except httpx.HTTPError as error:
+            raise HttpTransportError(f"the MCP endpoint did not answer: {error}") from error
 
     def close(self) -> None:
         if self._owns_client and self._client is not None:
@@ -102,4 +129,4 @@ def _first_sse_payload(body: str) -> str:
     raise HttpTransportError("the event stream carried no data frame")
 
 
-__all__ = ["HttpTransport", "HttpTransportError", "HttpTransportRefused"]
+__all__ = ["HttpTransport", "HttpTransportError", "HttpTransportRefused", "HttpUnauthorized"]

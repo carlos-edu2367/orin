@@ -1,7 +1,8 @@
 import httpx
 import pytest
 
-from agentos.mcp.transport_http import HttpTransport, HttpTransportRefused
+from agentos.mcp.token_source import McpReauthRequired
+from agentos.mcp.transport_http import HttpTransport, HttpTransportRefused, HttpUnauthorized
 
 
 def test_a_loopback_url_is_refused():
@@ -61,3 +62,72 @@ def test_an_sse_response_body_is_decoded_to_the_first_data_frame(monkeypatch):
     transport = HttpTransport(url="https://mcp.example.com/v1", headers={},
                               client=httpx.Client(transport=httpx.MockTransport(handler)))
     assert transport.send({"jsonrpc": "2.0", "id": 1, "method": "ping"})["result"] == {"ok": True}
+
+
+class FakeTokenSource:
+    def __init__(self, tokens: list[str]) -> None:
+        self.tokens = tokens
+        self.forced: list[str] = []
+        self.invalidated: list[str] = []
+
+    def current(self) -> str:
+        return self.tokens[0]
+
+    def force_refresh(self, rejected: str) -> str:
+        self.forced.append(rejected)
+        self.tokens.pop(0)
+        return self.tokens[0]
+
+    def invalidate(self, reason: str):
+        self.invalidated.append(reason)
+        raise McpReauthRequired("expired")
+
+
+def _ok(request_id: int = 1) -> httpx.Response:
+    return httpx.Response(200, json={"jsonrpc": "2.0", "id": request_id, "result": {}})
+
+
+def _transport(handler, **kwargs) -> HttpTransport:
+    return HttpTransport(url="https://mcp.example.com/mcp", client=httpx.Client(transport=httpx.MockTransport(handler)), **kwargs)
+
+
+def test_a_401_without_token_source_exposes_the_challenge(monkeypatch):
+    monkeypatch.setattr("agentos.mcp.transport_http._public_url", lambda url, resolve_dns=False: url)
+    transport = _transport(lambda r: httpx.Response(401, headers={"WWW-Authenticate": 'Bearer resource_metadata="x"'}))
+    with pytest.raises(HttpUnauthorized) as raised:
+        transport.send({"jsonrpc": "2.0", "id": 1, "method": "initialize"})
+    assert raised.value.www_authenticate == 'Bearer resource_metadata="x"'
+
+
+def test_the_token_source_sets_the_bearer(monkeypatch):
+    monkeypatch.setattr("agentos.mcp.transport_http._public_url", lambda url, resolve_dns=False: url)
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers["authorization"])
+        return _ok()
+
+    _transport(handler, token_source=FakeTokenSource(["at-1"])).send({"jsonrpc": "2.0", "id": 1, "method": "ping"})
+    assert seen == ["Bearer at-1"]
+
+
+def test_a_401_refreshes_once_and_retries(monkeypatch):
+    monkeypatch.setattr("agentos.mcp.transport_http._public_url", lambda url, resolve_dns=False: url)
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers["authorization"])
+        return httpx.Response(401) if len(seen) == 1 else _ok()
+
+    source = FakeTokenSource(["at-1", "at-2"])
+    _transport(handler, token_source=source).send({"jsonrpc": "2.0", "id": 1, "method": "ping"})
+    assert seen == ["Bearer at-1", "Bearer at-2"]
+    assert source.forced == ["at-1"]
+
+
+def test_a_second_401_invalidates_the_sign_in(monkeypatch):
+    monkeypatch.setattr("agentos.mcp.transport_http._public_url", lambda url, resolve_dns=False: url)
+    source = FakeTokenSource(["at-1", "at-2"])
+    with pytest.raises(McpReauthRequired):
+        _transport(lambda r: httpx.Response(401), token_source=source).send({"jsonrpc": "2.0", "id": 1, "method": "ping"})
+    assert len(source.invalidated) == 1

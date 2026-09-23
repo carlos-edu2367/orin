@@ -6,18 +6,26 @@ with the turn, so a configured-but-unused server costs nothing.
 """
 from __future__ import annotations
 
-from typing import Any, Callable, Iterable, Mapping, Sequence
+import threading
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping, Sequence
 
 from agentos.agentic.agent_tools import ToolOutcome, _bounded
-from .models import McpServerConfig, McpToolDescriptor, McpTransport, qualified_tool_name
+from .models import McpAuthKind, McpServerConfig, McpToolDescriptor, McpTransport, qualified_tool_name
+
+if TYPE_CHECKING:
+    from .auth import McpOAuth
+    from .client import McpClient
+    from .token_source import TokenSource
 
 MAX_MCP_RESULT_CHARS = 12_000
 MAX_IMAGES_PER_CALL = 4
 
 ServerBundle = tuple[McpServerConfig, tuple[McpToolDescriptor, ...], Mapping[str, str]]
+Connector = Callable[[McpServerConfig, Mapping[str, str]], tuple[str, tuple[McpToolDescriptor, ...]]]
 
 
-def build_client(config: McpServerConfig, secrets: Mapping[str, str]) -> "McpClient":
+def build_client(config: McpServerConfig, secrets: Mapping[str, str], *,
+                 token_source: "TokenSource | None" = None) -> "McpClient":
     # Imported here so building a tool set never imports a transport it will not
     # use, and so the client module stays free of a cycle back into this one.
     from .client import McpClient
@@ -27,12 +35,13 @@ def build_client(config: McpServerConfig, secrets: Mapping[str, str]) -> "McpCli
     if config.transport is McpTransport.STDIO:
         transport = StdioTransport(command=str(config.command), args=config.args, env=dict(secrets))
     else:
-        headers = {"authorization": f"Bearer {secrets['token']}"} if "token" in secrets else {}
-        transport = HttpTransport(url=str(config.url), headers=headers)
+        headers = {"authorization": f"Bearer {secrets['token']}"} if "token" in secrets and token_source is None else {}
+        transport = HttpTransport(url=str(config.url), headers=headers, token_source=token_source)
     return McpClient(transport)
 
 
-def discover(config: McpServerConfig, secrets: Mapping[str, str]) -> tuple[str, tuple[McpToolDescriptor, ...]]:
+def discover(config: McpServerConfig, secrets: Mapping[str, str], *,
+             token_source: "TokenSource | None" = None) -> tuple[str, tuple[McpToolDescriptor, ...]]:
     """Open a short-lived session, list its tools, and close.
 
     This is the one place a proposed or already-approved server gets turned
@@ -40,7 +49,7 @@ def discover(config: McpServerConfig, secrets: Mapping[str, str]) -> tuple[str, 
     both take this as their `connect` callable, so there is exactly one
     implementation of "what a live connection attempt means" in the codebase.
     """
-    client = build_client(config, secrets)
+    client = build_client(config, secrets, token_source=token_source) if token_source is not None else build_client(config, secrets)
     try:
         negotiation = client.initialize()
         tools = client.list_tools()
@@ -49,21 +58,41 @@ def discover(config: McpServerConfig, secrets: Mapping[str, str]) -> tuple[str, 
     return negotiation.protocol_version, tools
 
 
+def connector_for(oauth: "McpOAuth | None") -> Connector:
+    """The approve/test/activate connector: an OAuth-signed server connects with its token source."""
+    def connect(config: McpServerConfig, secrets: Mapping[str, str]) -> tuple[str, tuple[McpToolDescriptor, ...]]:
+        source = oauth.token_source(config) if oauth is not None and config.auth_kind is McpAuthKind.OAUTH else None
+        return discover(config, secrets, token_source=source)
+    return connect
+
+
 class McpToolProvider:
-    def __init__(self, bundles: Iterable[ServerBundle],
-                 client_factory: Callable[[McpServerConfig, Mapping[str, str]], Any] = build_client) -> None:
+    def __init__(self, bundles: Iterable[ServerBundle], client_factory: Callable[..., Any] = build_client,
+                 oauth: "McpOAuth | None" = None) -> None:
         self._bundles = list(bundles)
         self._client_factory = client_factory
+        self._oauth = oauth
         self._sessions: dict[str, Any] = {}
+        # Subagents run in threads and share this provider; one MCP session is
+        # not safe to drive from two threads, and a refresh must not race itself.
+        self._locks: dict[str, threading.Lock] = {}
+        self._locks_guard = threading.Lock()
 
     @property
     def open_session_count(self) -> int:
         return len(self._sessions)
 
+    def _lock(self, server_id: str) -> threading.Lock:
+        with self._locks_guard:
+            return self._locks.setdefault(server_id, threading.Lock())
+
     def _session(self, config: McpServerConfig, secrets: Mapping[str, str]) -> Any:
         client = self._sessions.get(config.server_id)
         if client is None:
-            client = self._client_factory(config, secrets)
+            if self._oauth is not None and config.auth_kind is McpAuthKind.OAUTH:
+                client = self._client_factory(config, secrets, token_source=self._oauth.token_source(config))
+            else:
+                client = self._client_factory(config, secrets)
             client.initialize()
             self._sessions[config.server_id] = client
         return client
@@ -71,16 +100,19 @@ class McpToolProvider:
     def _handler(self, config: McpServerConfig, secrets: Mapping[str, str], tool: McpToolDescriptor):
         def call(**arguments: Any) -> ToolOutcome:
             from .protocol import McpProtocolError
+            from .token_source import McpReauthRequired
 
+            payload = {"tool_kind": "mcp", "mcp_server": config.slug, "mcp_tool": tool.name}
             try:
-                result = self._session(config, secrets).call_tool(tool.name, arguments)
+                with self._lock(config.server_id):
+                    result = self._session(config, secrets).call_tool(tool.name, arguments)
+            except McpReauthRequired as error:
+                message = str(error)
+                return ToolOutcome("failed", message[:240], message[:MAX_MCP_RESULT_CHARS], payload, "MCP_REAUTH_REQUIRED")
             except (McpProtocolError, RuntimeError) as error:
                 message = f"{config.display_name}: {error}"
-                return ToolOutcome("failed", message[:240], message[:MAX_MCP_RESULT_CHARS],
-                                   {"tool_kind": "mcp", "mcp_server": config.slug, "mcp_tool": tool.name},
-                                   "MCP_UNAVAILABLE")
+                return ToolOutcome("failed", message[:240], message[:MAX_MCP_RESULT_CHARS], payload, "MCP_UNAVAILABLE")
             text, images = _render(result.content)
-            payload = {"tool_kind": "mcp", "mcp_server": config.slug, "mcp_tool": tool.name}
             if result.is_error:
                 return ToolOutcome("failed", f"{config.display_name} recusou {tool.name}"[:240],
                                    text or "the server reported a tool error", payload, "MCP_TOOL_ERROR")
@@ -131,4 +163,4 @@ def _render(content: Sequence[Mapping[str, Any]]) -> tuple[str, list[dict[str, s
     return text, images
 
 
-__all__ = ["McpToolProvider", "ServerBundle", "build_client", "discover"]
+__all__ = ["Connector", "McpToolProvider", "ServerBundle", "build_client", "connector_for", "discover"]

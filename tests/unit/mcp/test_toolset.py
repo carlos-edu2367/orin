@@ -1,7 +1,10 @@
+import threading
+
 import pytest
 
 from agentos.mcp.client import McpCallResult, McpNegotiation
-from agentos.mcp.models import McpServerConfig, McpServerState, McpToolDescriptor, McpTransport
+from agentos.mcp.models import McpAuthKind, McpServerConfig, McpServerState, McpToolDescriptor, McpTransport
+from agentos.mcp.token_source import McpReauthRequired
 from agentos.mcp.toolset import McpToolProvider, discover
 
 
@@ -119,3 +122,82 @@ def test_discover_closes_the_client_even_when_listing_tools_fails(monkeypatch):
         discover(_config(), {})
 
     assert client.closed is True
+
+
+def _oauth_config() -> McpServerConfig:
+    return McpServerConfig(server_id="s1", user_id="u1", slug="auryly", display_name="Auryly",
+                           transport=McpTransport.HTTP, url="https://mcp.example.com/mcp", auth_kind=McpAuthKind.OAUTH)
+
+
+class _FakeOAuth:
+    def __init__(self) -> None:
+        self.requested: list[str] = []
+
+    def token_source(self, config):
+        self.requested.append(config.server_id)
+        return "token-source"
+
+
+def test_an_oauth_server_gets_its_token_source():
+    built: list[object] = []
+
+    class Client:
+        def initialize(self): pass
+        def call_tool(self, name, arguments):
+            from agentos.mcp.client import McpCallResult
+            return McpCallResult(content=({"type": "text", "text": "ok"},), is_error=False)
+        def close(self): pass
+
+    def factory(config, secrets, *, token_source=None):
+        built.append(token_source)
+        return Client()
+
+    tool = McpToolDescriptor(name="list", description="d", input_schema={"type": "object"})
+    oauth = _FakeOAuth()
+    provider = McpToolProvider([(_oauth_config(), (tool,), {})], client_factory=factory, oauth=oauth)
+    outcome = provider.definitions()[0].handler()
+    assert outcome.status == "succeeded"
+    assert built == ["token-source"] and oauth.requested == ["s1"]
+
+
+def test_a_lost_sign_in_becomes_a_reauth_outcome():
+    class Client:
+        def initialize(self): raise McpReauthRequired("O acesso a Auryly expirou. Reconecte em Configurações → MCP.")
+        def close(self): pass
+
+    tool = McpToolDescriptor(name="list", description="d", input_schema={"type": "object"})
+    provider = McpToolProvider([(_oauth_config(), (tool,), {})],
+                               client_factory=lambda config, secrets, token_source=None: Client(), oauth=_FakeOAuth())
+    outcome = provider.definitions()[0].handler()
+    assert outcome.status == "failed"
+    assert outcome.error_code == "MCP_REAUTH_REQUIRED"
+    assert "Reconecte" in outcome.content
+
+
+def test_calls_to_one_server_never_overlap():
+    active = {"now": 0, "max": 0}
+    guard = threading.Lock()
+
+    class Client:
+        def initialize(self): pass
+        def call_tool(self, name, arguments):
+            from agentos.mcp.client import McpCallResult
+            with guard:
+                active["now"] += 1
+                active["max"] = max(active["max"], active["now"])
+            threading.Event().wait(0.02)
+            with guard:
+                active["now"] -= 1
+            return McpCallResult(content=(), is_error=False)
+        def close(self): pass
+
+    tool = McpToolDescriptor(name="list", description="d", input_schema={"type": "object"})
+    provider = McpToolProvider([(_oauth_config(), (tool,), {})],
+                               client_factory=lambda config, secrets, token_source=None: Client(), oauth=_FakeOAuth())
+    handler = provider.definitions()[0].handler
+    threads = [threading.Thread(target=handler) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert active["max"] == 1
