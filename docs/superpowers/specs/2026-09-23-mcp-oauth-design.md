@@ -1,7 +1,7 @@
 # OAuth para servidores MCP remotos — design
 
 **Data:** 2026-09-23
-**Estado:** design aprovado, aguardando plano de implementação
+**Estado:** implementado na branch feat/mcp-oauth; falta validar com https://auryly.com/mcp
 **Motivação:** conectar o Orin a servidores MCP que exigem login OAuth (o primeiro alvo é o MCP de conteúdo do Auryly, `https://auryly.com/mcp`) sem colar token à mão.
 **Relações:** [RFC 903 — MCP](../../architecture/900-extensibility/903-mcp-future.md), `docs/MCP.md`, [plano de conectores](../plans/2026-08-14-mcp-connectors.md) ("o fluxo OAuth completo é seu próprio plano"), [correções de usabilidade](../plans/2026-08-15-connector-usability-fixes.md) ("Causa 4").
 

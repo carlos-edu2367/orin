@@ -46,7 +46,13 @@ e o que permanece adiado.
 - cancelamento e fail-closed: uma falha de conexão nunca ativa parcialmente
   um servidor, e uma falha de servidor configurado nunca bloqueia o turno;
 - eventos auditáveis: aprovação, teste e remoção passam pelas mesmas rotas
-  versionadas e autenticadas do restante do gateway.
+  versionadas e autenticadas do restante do gateway;
+- login OAuth pelo MCP Authorization spec para servidores `http`: descoberta
+  RFC 9728/8414 a partir do `401`, registro dinâmico (RFC 7591), PKCE S256,
+  `resource` (RFC 8707), tokens cifrados e renovação sob lease entre API e
+  worker; acesso perdido vira `MCP_REAUTH_REQUIRED` e o servidor vai para
+  `error` até o usuário reconectar (ver
+  [spec](../../superpowers/specs/2026-09-23-mcp-oauth-design.md)).
 
 **Adiado deliberadamente** (não implementado nesta versão):
 
