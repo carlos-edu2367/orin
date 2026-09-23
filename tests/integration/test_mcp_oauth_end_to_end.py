@@ -142,3 +142,16 @@ def test_the_whole_sign_in_life_cycle(world):
     remote.revoked = False
     _sign_in(api, server_id)
     assert service.get("user-1", server_id)["state"] == "active"
+
+
+def test_approving_again_before_signing_in_still_asks_for_sign_in(world):
+    # The chat card does not know auth_kind; after a reload it offers
+    # Conectar again for a server that already answered 401 once.
+    _engine, service, _oauth, _remote, api = world
+    server_id = api.post("/v1/mcp/servers", json={"display_name": "Auryly", "transport": "http", "url": MCP_URL},
+                         headers={"Authorization": "Bearer pat", "Idempotency-Key": uuid4().hex}).json()["server_id"]
+    for _ in range(2):
+        approve = api.post(f"/v1/mcp/servers/{server_id}/approve", json={"secrets": {}},
+                           headers={"Authorization": "Bearer pat", "Idempotency-Key": uuid4().hex})
+        assert approve.status_code == 409, approve.text
+    assert service.get("user-1", server_id)["state"] == "pending_approval"

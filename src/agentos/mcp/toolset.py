@@ -59,9 +59,14 @@ def discover(config: McpServerConfig, secrets: Mapping[str, str], *,
 
 
 def connector_for(oauth: "McpOAuth | None") -> Connector:
-    """The approve/test/activate connector: an OAuth-signed server connects with its token source."""
+    """The approve/test/activate connector: an OAuth-signed server connects with its token source.
+
+    A server that asked for sign-in but has none yet connects bare, so its
+    401 reads as "sign in" again instead of as a lost sign-in.
+    """
     def connect(config: McpServerConfig, secrets: Mapping[str, str]) -> tuple[str, tuple[McpToolDescriptor, ...]]:
-        source = oauth.token_source(config) if oauth is not None and config.auth_kind is McpAuthKind.OAUTH else None
+        signed_in = oauth is not None and config.auth_kind is McpAuthKind.OAUTH and oauth.has_sign_in(config)
+        source = oauth.token_source(config) if signed_in else None
         return discover(config, secrets, token_source=source)
     return connect
 

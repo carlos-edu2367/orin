@@ -133,6 +133,9 @@ class McpOAuth:
     def cancel(self, *, user_id: str, server_id: str) -> None:
         self._records.cancel_pending(user_id=user_id, server_id=server_id)
 
+    def has_sign_in(self, config: McpServerConfig) -> bool:
+        return self._tokens.get(user_id=config.user_id, provider_id=config.server_id) is not None
+
     def token_source(self, config: McpServerConfig) -> LeasedTokenSource:
         return LeasedTokenSource(store=self._tokens, records=self._records, user_id=config.user_id,
                                  server_id=config.server_id, display_name=config.display_name,
