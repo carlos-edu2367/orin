@@ -29,6 +29,31 @@ class SlowMcp:
         return {"connected": True, "protocol_version": "", "tools": [], "error": None}
 
 
+class SlowOAuth:
+    """A fake McpOAuth whose start()/complete() block the way discovery,
+    registration and the token exchange do."""
+
+    def start(self, *, user_id, server_id, redirect_uri):
+        from datetime import UTC, datetime
+
+        from agentos.mcp.auth import SignInStart
+
+        time.sleep(SLOW_SECONDS)
+        return SignInStart("https://auth.example.com/authorize?state=x", datetime.now(UTC))
+
+    def complete(self, *, user_id, state, code, error):
+        time.sleep(SLOW_SECONDS)
+        return "s1"
+
+    def token_source(self, config):
+        return None
+
+
+class ActivatingMcp(SlowMcp):
+    def activate_after_authorization(self, user_id, server_id, connect):
+        return {**self.get(user_id, server_id), "state": "active"}
+
+
 class SlowPlugins:
     """A fake plugin service whose inspect() blocks synchronously, the way a
     real `git clone` does."""
@@ -59,7 +84,7 @@ def _app(**services):
     return create_app(ApiServices(security=security, **services))
 
 
-async def _fast_request_completes_while_slow_one_is_in_flight(app, slow_call, fast_call):
+async def _fast_request_completes_while_slow_one_is_in_flight(app, slow_call, fast_call, base_url="http://test"):
     # A real blocking call (time.sleep on the event-loop thread) freezes the whole
     # process, so a delay placed *before* issuing the fast request would itself be
     # delayed by the same amount — it can't be used to "wait for the slow request to
@@ -68,7 +93,7 @@ async def _fast_request_completes_while_slow_one_is_in_flight(app, slow_call, fa
     # (at least) SLOW_SECONDS, no matter when the fast call was fired.
     transport = ASGITransport(app=app)
     scenario_started = time.monotonic()
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
+    async with AsyncClient(transport=transport, base_url=base_url) as client:
         slow = asyncio.ensure_future(slow_call(client))
         await asyncio.sleep(SLOW_SECONDS / 4)  # give the slow request a head start
         await fast_call(client)
@@ -104,6 +129,38 @@ def test_mcp_test_route_does_not_block_a_concurrent_simple_request():
     fast_completed_at = asyncio.run(_fast_request_completes_while_slow_one_is_in_flight(app, slow_call, fast_call))
     assert fast_completed_at < SLOW_SECONDS / 2, (
         "a concurrent GET should not wait for a slow /test to finish — the event loop is blocked"
+    )
+
+
+def test_mcp_oauth_start_does_not_block_a_concurrent_simple_request():
+    app = _app(mcp=ActivatingMcp(), mcp_oauth=SlowOAuth())
+
+    async def slow_call(client):
+        return await client.post("/v1/mcp/servers/s1/oauth/start", headers=_headers())
+
+    async def fast_call(client):
+        return await client.get("/v1/mcp/servers", headers=_headers())
+
+    fast_completed_at = asyncio.run(_fast_request_completes_while_slow_one_is_in_flight(
+        app, slow_call, fast_call, base_url="http://127.0.0.1:49200"))
+    assert fast_completed_at < SLOW_SECONDS / 2, (
+        "a concurrent GET should not wait for a slow /oauth/start to finish — the event loop is blocked"
+    )
+
+
+def test_mcp_oauth_callback_does_not_block_a_concurrent_simple_request():
+    app = _app(mcp=ActivatingMcp(), mcp_oauth=SlowOAuth())
+
+    async def slow_call(client):
+        return await client.get("/v1/mcp/oauth/callback?state=s&code=c", headers={"Authorization": "Bearer pat"})
+
+    async def fast_call(client):
+        return await client.get("/v1/mcp/servers", headers=_headers())
+
+    fast_completed_at = asyncio.run(_fast_request_completes_while_slow_one_is_in_flight(
+        app, slow_call, fast_call, base_url="http://127.0.0.1:49200"))
+    assert fast_completed_at < SLOW_SECONDS / 2, (
+        "a concurrent GET should not wait for a slow OAuth callback to finish — the event loop is blocked"
     )
 
 

@@ -50,6 +50,7 @@ from agentos.browser.service import BrowserService
 from agentos.tool_runtime.adapters import BrowserNavigateAtomicTool, FilesystemAtomicTool, TerminalCommandAtomicTool
 from agentos.tool_runtime.production import ProductionToolRuntime
 from agentos.persistence.postgres.skills import PostgresSkillLibraryService
+from agentos.mcp.auth import McpOAuth
 from agentos.mcp.service import McpServerService
 from agentos.plugins.command_library import CommandLibrary
 from agentos.plugins.hook_engine import HookEngine
@@ -263,6 +264,7 @@ def compose_production_services(engine: Engine, *, localhost_trust_enabled: bool
     provider_repository = PostgresProviderCatalogRepository(engine, cipher=provider_cipher)
     skill_library = PostgresSkillLibraryService(engine)
     mcp_service = McpServerService(engine)
+    mcp_oauth = McpOAuth(engine)
     command_library = CommandLibrary()
     hook_engine = HookEngine()
     omniroute_runtime = OmniRouteProcessManager(OmniRouteRuntimeSettingsStore())
@@ -280,6 +282,7 @@ def compose_production_services(engine: Engine, *, localhost_trust_enabled: bool
         resource_services={**{name: unavailable for name in ("agents", "capabilities", "tools", "workspaces", "artifacts", "memories")}, "multi_agent": multi_agent_coordinator or unavailable},
         skills=skill_library,
         mcp=mcp_service,
+        mcp_oauth=mcp_oauth,
         plugins=PluginService(engine, plugin_root=orin_paths().data / "plugins", skill_library=skill_library, mcp_service=mcp_service, search_client=GithubRepositorySearchClient(), manifest_probe=GithubManifestProbe(), command_library=command_library, hook_engine=hook_engine),
         provider_configuration=PostgresProviderConfigurationAdapter(engine, cipher=provider_cipher),
         provider_api_keys=PostgresProviderApiKeyAdapter(engine, cipher=provider_cipher),

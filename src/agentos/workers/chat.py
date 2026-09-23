@@ -32,6 +32,7 @@ from agentos.agentic.web_search import search_client_from_environment
 from agentos.retrieval.registry import RetrievalRegistry
 from agentos.conversations.chat import PostgresChatStore
 from agentos.installation import orin_paths
+from agentos.mcp.auth import McpOAuth
 from agentos.mcp.service import McpServerService
 from agentos.mcp.toolset import McpToolProvider
 from agentos.plugins.hook_engine import HookEngine
@@ -902,7 +903,7 @@ class ChatWorker:
         except Exception:
             _LOGGER.exception("could not load the MCP servers for %s", turn["user_id"])
             mcp_bundles = []
-        mcp_provider = McpToolProvider(mcp_bundles) if mcp_bundles else None
+        mcp_provider = McpToolProvider(mcp_bundles, oauth=McpOAuth(engine)) if mcp_bundles else None
         try:
             session = TurnSession(
                 turn=turn,

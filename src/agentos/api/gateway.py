@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 from dataclasses import asdict, is_dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
@@ -13,7 +14,7 @@ from uuid import uuid4
 from fastapi import FastAPI, File, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
 from .contracts import (
@@ -41,8 +42,9 @@ from agentos.local_workspace import FolderRejected, choose_folder, inspect_folde
 from agentos.uploads.media import MAX_FILES_PER_MESSAGE, MAX_UPLOAD_BYTES, UploadRejected
 from agentos.uploads.promotion import discard_promoted, promote_uploads
 from agentos.mcp.catalog import search_catalog
-from agentos.mcp.service import McpConnectionFailed, McpServerNotFound, McpServiceError
-from agentos.mcp.toolset import discover as _mcp_connect
+from agentos.mcp.auth import McpOAuthCallbackError, McpOAuthUnreachable, McpOAuthUnsupported
+from agentos.mcp.service import McpAuthorizationRequired, McpConnectionFailed, McpServerNotFound, McpServiceError
+from agentos.mcp.toolset import connector_for
 from agentos.plugins.service import PluginServiceError
 from agentos.code_mode.models import CodeAutonomy
 
@@ -306,6 +308,7 @@ class ApiServices:
         projects: object | None = None,
         skills: object | None = None,
         mcp: object | None = None,
+        mcp_oauth: object | None = None,
         plugins: object | None = None,
         omniroute_runtime: object | None = None,
         agentic_runtime: object | None = None,
@@ -327,6 +330,7 @@ class ApiServices:
         self.projects = projects
         self.skills = skills
         self.mcp = mcp
+        self.mcp_oauth = mcp_oauth
         self.plugins = plugins
         self.local_workspaces = local_workspaces
         self.omniroute_runtime = omniroute_runtime
@@ -407,6 +411,18 @@ def create_app(services: ApiServices) -> FastAPI:
     @app.exception_handler(McpConnectionFailed)
     async def mcp_connection_failed(_: Request, __: McpConnectionFailed) -> JSONResponse:
         return _error(502, "MCP", "mcp_connection_failed", retryable=True)
+
+    @app.exception_handler(McpAuthorizationRequired)
+    async def mcp_authorization_required(_: Request, __: McpAuthorizationRequired) -> JSONResponse:
+        return _error(409, "MCP", "mcp_authorization_required", retryable=False)
+
+    @app.exception_handler(McpOAuthUnsupported)
+    async def mcp_oauth_unsupported(_: Request, __: McpOAuthUnsupported) -> JSONResponse:
+        return _error(422, "MCP", "mcp_oauth_unsupported", retryable=False)
+
+    @app.exception_handler(McpOAuthUnreachable)
+    async def mcp_oauth_unreachable(_: Request, __: McpOAuthUnreachable) -> JSONResponse:
+        return _error(502, "MCP", "mcp_oauth_unreachable", retryable=True)
 
     @app.exception_handler(McpServiceError)
     async def mcp_service_error(_: Request, __: McpServiceError) -> JSONResponse:
@@ -1197,7 +1213,7 @@ def create_app(services: ApiServices) -> FastAPI:
         # handshake), which is blocking I/O that can take seconds; run it off the
         # event loop so it doesn't stall every other request and open SSE stream.
         result = await run_in_threadpool(
-            _require_port(services.mcp).approve, user_id=principal.user_id, server_id=server_id, secrets=secrets, connect=_mcp_connect,
+            _require_port(services.mcp).approve, user_id=principal.user_id, server_id=server_id, secrets=secrets, connect=connector_for(services.mcp_oauth),
         )
         return JSONResponse(_jsonable(result))
 
@@ -1207,8 +1223,52 @@ def create_app(services: ApiServices) -> FastAPI:
         services.security.check_rate_limit(principal, action="mcp.servers.test", origin=request.headers.get("origin"))
         services.security.authorize(principal, action="mcp.servers.test", resource_id=server_id, purpose="mcp.configure")
         server = _require_port(services.mcp).get(principal.user_id, server_id)
-        result = await run_in_threadpool(_require_port(services.mcp).test, principal.user_id, str(server["slug"]), _mcp_connect)
+        result = await run_in_threadpool(_require_port(services.mcp).test, principal.user_id, str(server["slug"]), connector_for(services.mcp_oauth))
         return JSONResponse(_jsonable(result))
+
+    @app.post("/v1/mcp/servers/{server_id}/oauth/start")
+    async def start_mcp_oauth(server_id: str, request: Request) -> JSONResponse:
+        principal = principal_for(request, mutable=True)
+        services.security.check_rate_limit(principal, action="mcp.servers.oauth.start", origin=request.headers.get("origin"))
+        services.security.authorize(principal, action="mcp.servers.oauth.start", resource_id=server_id, purpose="mcp.configure")
+        redirect_uri = _oauth_redirect_uri(request)
+        started = await run_in_threadpool(
+            _require_port(services.mcp_oauth).start, user_id=principal.user_id, server_id=server_id, redirect_uri=redirect_uri,
+        )
+        return JSONResponse({"authorization_url": started.authorization_url, "expires_at": started.expires_at.isoformat()})
+
+    @app.post("/v1/mcp/servers/{server_id}/oauth/cancel", status_code=204)
+    async def cancel_mcp_oauth(server_id: str, request: Request) -> JSONResponse:
+        principal = principal_for(request, mutable=True)
+        services.security.check_rate_limit(principal, action="mcp.servers.oauth.cancel", origin=request.headers.get("origin"))
+        services.security.authorize(principal, action="mcp.servers.oauth.cancel", resource_id=server_id, purpose="mcp.configure")
+        await run_in_threadpool(_require_port(services.mcp_oauth).cancel, user_id=principal.user_id, server_id=server_id)
+        return JSONResponse(status_code=204, content=None)
+
+    @app.get("/v1/mcp/oauth/callback")
+    async def complete_mcp_oauth(request: Request, state: str = "", code: str = "", error: str = "") -> HTMLResponse:
+        # A plain GET from the system browser: no CSRF header can exist here, and
+        # the single-use `state` bound to this user is what protects it.
+        principal = principal_for(request)
+        services.security.check_rate_limit(principal, action="mcp.oauth.callback", origin=request.headers.get("origin"))
+        services.security.authorize(principal, action="mcp.oauth.callback", resource_id=None, purpose="mcp.configure")
+        oauth = _require_port(services.mcp_oauth)
+        try:
+            server_id = await run_in_threadpool(
+                oauth.complete, user_id=principal.user_id, state=state[:128], code=code[:2048], error=error[:64],
+            )
+            await run_in_threadpool(
+                _require_port(services.mcp).activate_after_authorization, principal.user_id, server_id, connector_for(oauth),
+            )
+        except McpOAuthCallbackError as failure:
+            return _oauth_page("Não foi possível conectar", str(failure), status_code=400)
+        except McpConnectionFailed:
+            return _oauth_page(
+                "Login concluído, conexão falhou",
+                "O Orin recebeu a autorização, mas não conseguiu conversar com o servidor. Veja o motivo em Configurações → MCP.",
+                status_code=502,
+            )
+        return _oauth_page("Conectado", "Pode fechar esta aba e voltar ao Orin.")
 
     @app.put("/v1/mcp/servers/{server_id}/enabled")
     async def set_mcp_server_enabled(server_id: str, payload: McpEnabledRequest, request: Request) -> JSONResponse:
@@ -1231,6 +1291,9 @@ def create_app(services: ApiServices) -> FastAPI:
         principal = principal_for(request, mutable=True)
         services.security.check_rate_limit(principal, action="mcp.servers.remove", origin=request.headers.get("origin"))
         services.security.authorize(principal, action="mcp.servers.remove", resource_id=server_id, purpose="mcp.configure")
+        server = _require_port(services.mcp).get(principal.user_id, server_id)
+        if server.get("auth_kind") == "oauth" and services.mcp_oauth is not None:
+            await run_in_threadpool(services.mcp_oauth.revoke, user_id=principal.user_id, server_id=server_id)
         _require_port(services.mcp).remove(principal.user_id, server_id)
         return JSONResponse(status_code=204, content=None)
 
@@ -1649,6 +1712,32 @@ def _idempotency(request: Request) -> str:
     if not value or len(value) > 255:
         raise AuthorizationError("idempotency key is required")
     return value
+
+
+_OAUTH_PAGE_HEADERS = {
+    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'",
+    "Cache-Control": "no-store",
+    "Referrer-Policy": "no-referrer",
+    "X-Content-Type-Options": "nosniff",
+}
+
+
+def _oauth_redirect_uri(request: Request) -> str:
+    """The callback on the address the API is serving right now; always loopback, never taken from the client."""
+    base = request.base_url
+    if base.scheme != "http" or (base.hostname or "").lower() not in {"127.0.0.1", "localhost"} or base.port is None:
+        raise McpServiceError("OAuth sign-in needs the Orin API on a loopback address")
+    return f"http://{base.hostname}:{base.port}/v1/mcp/oauth/callback"
+
+
+def _oauth_page(title: str, message: str, *, status_code: int = 200) -> HTMLResponse:
+    body = (
+        '<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>{title} · Orin</title>'
+        "<style>body{{font-family:system-ui,sans-serif;max-width:32rem;margin:15vh auto;padding:0 1rem;"
+        "color:#1f2328;background:#fff}}@media (prefers-color-scheme:dark){{body{{background:#0d1117;color:#e6edf3}}}}"
+        "</style></head><body><h1>{title}</h1><p>{message}</p></body></html>"
+    ).format(title=html.escape(title), message=html.escape(message))
+    return HTMLResponse(body, status_code=status_code, headers=_OAUTH_PAGE_HEADERS)
 
 
 def _is_loopback_client(host: str | None) -> bool:
