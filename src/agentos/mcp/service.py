@@ -18,10 +18,13 @@ from sqlalchemy import delete, insert, select, update
 from sqlalchemy.engine import Engine
 
 from agentos.persistence.postgres.mcp import public_summary, row_to_config, row_to_tool
-from agentos.persistence.postgres.schema import mcp_server_tools, mcp_servers
+from agentos.persistence.postgres.schema import (
+    mcp_oauth_clients, mcp_server_tools, mcp_servers, oauth_pending_authorizations, oauth_tokens,
+)
 from agentos.persistence.provider_secrets import ProviderSecretCipher
 
 from .models import McpAuthKind, McpServerConfig, McpServerState, McpToolDescriptor, McpTransport, slugify, tools_digest as _tools_digest
+from .transport_http import HttpUnauthorized
 
 MAX_STATE_REASON_CHARS = 512
 _ALLOWED_PROPOSAL_FIELDS = frozenset({
@@ -48,6 +51,10 @@ class McpConnectionFailed(McpServiceError):
     client-input error — the request was well-formed, the remote server was not
     reachable or rejected the credential.
     """
+
+
+class McpAuthorizationRequired(McpServiceError):
+    """The server answered 401 with no credential offered: it signs users in with OAuth."""
 
 
 def _now() -> datetime:
@@ -121,6 +128,16 @@ class McpServerService:
         raw = json.loads(_cipher().decrypt(str(ciphertext)))
         return {str(key): str(value) for key, value in raw.items()}
 
+    @staticmethod
+    def _replace_tools(connection: Any, server_id: str, tools: tuple[McpToolDescriptor, ...], now: datetime) -> None:
+        connection.execute(delete(mcp_server_tools).where(mcp_server_tools.c.server_id == server_id))
+        if tools:
+            connection.execute(insert(mcp_server_tools), [
+                {"server_id": server_id, "name": item.name, "description": item.description,
+                 "input_schema": dict(item.input_schema), "enabled": True, "discovered_at": now}
+                for item in tools
+            ])
+
     # -- writes -------------------------------------------------------------
 
     def propose(self, command: Mapping[str, Any]) -> dict[str, Any]:
@@ -177,6 +194,21 @@ class McpServerService:
         config = row_to_config(row)
         try:
             protocol_version, tools = connect(config, secrets)
+        except HttpUnauthorized as error:
+            if secrets:
+                reason = "o servidor recusou a credencial informada"
+                with self.engine.begin() as connection:
+                    connection.execute(
+                        update(mcp_servers).where(mcp_servers.c.server_id == server_id, mcp_servers.c.user_id == user_id)
+                        .values(state_reason=reason, updated_at=_now())
+                    )
+                raise McpConnectionFailed(f"could not connect to '{config.display_name}': {reason}") from error
+            with self.engine.begin() as connection:
+                connection.execute(
+                    update(mcp_servers).where(mcp_servers.c.server_id == server_id, mcp_servers.c.user_id == user_id)
+                    .values(auth_kind=McpAuthKind.OAUTH.value, state_reason="", updated_at=_now())
+                )
+            raise McpAuthorizationRequired(f"'{config.display_name}' asks you to sign in") from error
         except Exception as error:
             reason = str(error)[:MAX_STATE_REASON_CHARS]
             with self.engine.begin() as connection:
@@ -189,13 +221,7 @@ class McpServerService:
         ciphertext = _cipher().encrypt(json.dumps(dict(secrets)))
         now = _now()
         with self.engine.begin() as connection:
-            connection.execute(delete(mcp_server_tools).where(mcp_server_tools.c.server_id == server_id))
-            if tools:
-                connection.execute(insert(mcp_server_tools), [
-                    {"server_id": server_id, "name": item.name, "description": item.description,
-                     "input_schema": dict(item.input_schema), "enabled": True, "discovered_at": now}
-                    for item in tools
-                ])
+            self._replace_tools(connection, server_id, tools, now)
             connection.execute(
                 update(mcp_servers).where(mcp_servers.c.server_id == server_id, mcp_servers.c.user_id == user_id)
                 .values(secrets_ciphertext=ciphertext, protocol_version=protocol_version,
@@ -223,10 +249,38 @@ class McpServerService:
             )
         return self.get(user_id, server_id)
 
+    def activate_after_authorization(self, user_id: str, server_id: str, connect: Connector) -> dict[str, Any]:
+        """Discover tools with the fresh sign-in and activate; used by the OAuth callback and Reconectar."""
+        row = self._row(user_id, server_id)
+        config = row_to_config(row)
+        try:
+            protocol_version, tools = connect(config, {})
+        except Exception as error:
+            reason = f"Login concluído, mas a conexão falhou: {error}"[:MAX_STATE_REASON_CHARS]
+            with self.engine.begin() as connection:
+                connection.execute(
+                    update(mcp_servers).where(mcp_servers.c.server_id == server_id, mcp_servers.c.user_id == user_id)
+                    .values(state_reason=reason, updated_at=_now())
+                )
+            raise McpConnectionFailed(f"could not connect to '{config.display_name}': {error}") from error
+        now = _now()
+        with self.engine.begin() as connection:
+            self._replace_tools(connection, server_id, tools, now)
+            connection.execute(
+                update(mcp_servers).where(mcp_servers.c.server_id == server_id, mcp_servers.c.user_id == user_id)
+                .values(secrets_ciphertext=None, protocol_version=protocol_version, tools_digest=_tools_digest(tools),
+                        state=McpServerState.ACTIVE.value, state_reason="", auth_kind=McpAuthKind.OAUTH.value,
+                        updated_at=now)
+            )
+        return self.get(user_id, server_id)
+
     def remove(self, user_id: str, server_id: str) -> None:
         self._row(user_id, server_id)
         with self.engine.begin() as connection:
             connection.execute(delete(mcp_server_tools).where(mcp_server_tools.c.server_id == server_id))
+            connection.execute(delete(oauth_pending_authorizations).where(oauth_pending_authorizations.c.server_id == server_id))
+            connection.execute(delete(mcp_oauth_clients).where(mcp_oauth_clients.c.server_id == server_id))
+            connection.execute(delete(oauth_tokens).where(oauth_tokens.c.user_id == user_id, oauth_tokens.c.provider_id == server_id))
             connection.execute(delete(mcp_servers).where(mcp_servers.c.server_id == server_id, mcp_servers.c.user_id == user_id))
 
     def test(self, user_id: str, slug: str, connect: Connector) -> dict[str, Any]:
@@ -246,13 +300,7 @@ class McpServerService:
 
         now = _now()
         with self.engine.begin() as connection:
-            connection.execute(delete(mcp_server_tools).where(mcp_server_tools.c.server_id == server_id))
-            if tools:
-                connection.execute(insert(mcp_server_tools), [
-                    {"server_id": server_id, "name": item.name, "description": item.description,
-                     "input_schema": dict(item.input_schema), "enabled": True, "discovered_at": now}
-                    for item in tools
-                ])
+            self._replace_tools(connection, server_id, tools, now)
             connection.execute(
                 update(mcp_servers).where(mcp_servers.c.server_id == server_id, mcp_servers.c.user_id == user_id)
                 .values(protocol_version=protocol_version, tools_digest=_tools_digest(tools), updated_at=now)
@@ -260,4 +308,4 @@ class McpServerService:
         return {"connected": True, "protocol_version": protocol_version, "tools": [item.name for item in tools], "error": None}
 
 
-__all__ = ["McpConnectionFailed", "McpServerNotFound", "McpServerService", "McpServiceError"]
+__all__ = ["McpAuthorizationRequired", "McpConnectionFailed", "McpServerNotFound", "McpServerService", "McpServiceError"]

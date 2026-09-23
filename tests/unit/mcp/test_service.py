@@ -1,9 +1,12 @@
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 
 from agentos.mcp.models import McpServerState, McpToolDescriptor, McpTransport
-from agentos.mcp.service import McpServerService, McpServiceError
-from agentos.persistence.postgres.schema import metadata
+from agentos.mcp.service import McpAuthorizationRequired, McpConnectionFailed, McpServerService, McpServiceError
+from agentos.mcp.transport_http import HttpUnauthorized
+from agentos.oauth.flow import OAuthTokens
+from agentos.oauth.token_store import OAuthTokenStore
+from agentos.persistence.postgres.schema import mcp_oauth_clients, metadata, oauth_pending_authorizations, oauth_tokens
 
 
 @pytest.fixture()
@@ -106,3 +109,73 @@ def test_a_proposal_records_its_auth_kind(service):
                                         url="https://mcp.example.com/mcp", secret_names=[]))
     assert with_secret["auth_kind"] == "static"
     assert without["auth_kind"] == "none"
+
+
+def _remote(service):
+    return service.propose(_proposal(display_name="Auryly", transport="http", command=None, args=[],
+                                     url="https://mcp.example.com/mcp", secret_names=[]))
+
+
+def _unauthorized(config, secrets):
+    raise HttpUnauthorized('Bearer resource_metadata="x"')
+
+
+def test_a_401_without_credentials_asks_for_sign_in(service):
+    record = _remote(service)
+    with pytest.raises(McpAuthorizationRequired):
+        service.approve(user_id="u1", server_id=record["server_id"], secrets={}, connect=_unauthorized)
+    after = service.get("u1", record["server_id"])
+    assert after["auth_kind"] == "oauth"
+    assert after["state"] == McpServerState.PENDING_APPROVAL.value
+
+
+def test_a_401_with_a_pasted_credential_is_a_plain_failure(service):
+    record = service.propose(_proposal(transport="http", command=None, args=[], url="https://mcp.example.com/mcp",
+                                       secret_names=["token"]))
+    with pytest.raises(McpConnectionFailed):
+        service.approve(user_id="u1", server_id=record["server_id"], secrets={"token": "bad"}, connect=_unauthorized)
+    assert service.get("u1", record["server_id"])["auth_kind"] == "static"
+
+
+def test_activation_after_sign_in_stores_tools_and_activates(service):
+    record = _remote(service)
+    tools = (McpToolDescriptor(name="list_tracks", description="d", input_schema={"type": "object"}),)
+    activated = service.activate_after_authorization("u1", record["server_id"], lambda config, secrets: ("2025-06-18", tools))
+    assert activated["state"] == McpServerState.ACTIVE.value
+    assert activated["auth_kind"] == "oauth"
+    assert activated["tool_count"] == 1
+
+
+def test_a_failed_activation_keeps_the_state_and_records_why(service):
+    record = _remote(service)
+
+    def broken(config, secrets):
+        raise RuntimeError("tools/list failed")
+
+    with pytest.raises(McpConnectionFailed):
+        service.activate_after_authorization("u1", record["server_id"], broken)
+    after = service.get("u1", record["server_id"])
+    assert after["state"] == McpServerState.PENDING_APPROVAL.value
+    assert "tools/list failed" in after["state_reason"]
+
+
+def test_removing_a_server_removes_its_oauth_rows(service):
+    record = _remote(service)
+    server_id = record["server_id"]
+    OAuthTokenStore(service.engine).save(user_id="u1", provider_id=server_id, tokens=OAuthTokens("at", "rt", 60, None))
+    from agentos.mcp.oauth_records import McpOAuthClient, McpOAuthRecords
+    from datetime import timedelta
+    records = McpOAuthRecords(service.engine)
+    records.save_client(McpOAuthClient(server_id=server_id, issuer="https://a/", authorization_endpoint="https://a/authorize",
+                                       token_endpoint="https://a/token", revocation_endpoint=None, resource="https://mcp.example.com/mcp",
+                                       scope=None, client_id="c", client_secret=None, token_endpoint_auth_method="none",
+                                       redirect_uri="http://127.0.0.1:1/cb"))
+    records.add_pending(state="s", user_id="u1", server_id=server_id, code_verifier="v", redirect_uri="http://127.0.0.1:1/cb",
+                        ttl=timedelta(minutes=10))
+
+    service.remove("u1", server_id)
+
+    with service.engine.connect() as connection:
+        for table in (mcp_oauth_clients, oauth_pending_authorizations):
+            assert connection.execute(select(table)).first() is None
+        assert connection.execute(select(oauth_tokens)).first() is None
