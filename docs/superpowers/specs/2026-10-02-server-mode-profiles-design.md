@@ -132,28 +132,28 @@ Um objeto imutável `InstanceCapabilities`, construído na composição a partir
 | `user_admin` | não | sim |
 
 - O gateway consulta o objeto antes de executar a rota correspondente: `404 capability_unavailable`.
-- O runtime agentic não registra as ferramentas indisponíveis no conjunto oferecido ao modelo, para que ele não tente usá-las.
+- O runtime agentic não registra as ferramentas indisponíveis no conjunto oferecido ao modelo, para que ele não tente usá-las (`AgentToolset(enable_terminal=False)`). O diagnóstico automático depois de `write_file`/`edit_file` (que roda linters do projeto via shell, `agentic/agent_tools.py:972-1010`) também fica desligado sem `shell`.
 - O worker do MCP recusa iniciar servidores stdio e o motor de hooks não executa hooks quando a capacidade está desligada.
 - `/v1/auth/me` expõe o objeto para a UI.
 - A etapa 2 troca `shell`, `mcp_stdio`, `plugin_hooks` e `omniroute` para "disponível via sandbox", sem mexer nos pontos de consulta.
 
 ### 4.5 Dados em disco por perfil
 
-Novo layout, usado **nos dois modos**:
+Novo layout, usado **nos dois modos**, para o que o sandbox da etapa 2 vai montar:
 
 ```
 <data>/users/<user_id>/
   workspaces/<workspace_id>/   # workspaces gerenciados (antes <data>/workspaces)
   files/                        # área de arquivos do perfil (só modo server usa)
-  uploads/                      # staging de uploads (antes <data>/uploads/staging/<owner>)
-  retrieval/<workspace_id>.db   # índices (antes <data>/retrieval)
-  plugins/                      # pacotes de plugin (antes <data>/plugins)
-  agent-runtime.json            # antes um JSON único com chave por usuário
 ```
 
-- `OrinPaths` ganha `user_root(user_id)`, que valida o id (`^[A-Za-z0-9_-]{1,64}$`) e é o único ponto que monta esses caminhos. Quem hoje chama `orin_paths().data / "workspaces"`, `/ "retrieval"`, `/ "plugins"` e `/ "agent-runtime.json"` passa a receber o `user_id`.
-- `AgentRuntimeSettingsStore` vira um arquivo por perfil.
-- **Migração de layout** no boot (antes de servir requests), idempotente e com marcador `<data>/.layout-v2`. O que existe no layout antigo é movido para `users/local-user/`. `agent-runtime.json` é dividido por chave de usuário. `workspace_roots` com caminho dentro de `<data>/workspaces` são reescritos para o caminho novo na mesma transação. Se a migração falhar no meio, o boot para com erro e o próximo boot retoma (cada movimento é verificável: destino existe e origem não).
+- `OrinPaths` ganha `user_root(user_id)`, `user_workspaces(user_id)` e `user_files(user_id)`. `user_root` valida o id (`^[A-Za-z0-9_-]{1,64}$`) e é o único ponto que monta esses caminhos. Quem hoje usa `orin_paths().workspaces` (gateway, `TurnSession`, `ChatWorker`) passa a usar `user_workspaces(user_id)`.
+- **Migração de layout** no boot (antes de servir requests), idempotente e com marcador `<data>/.layout-v2`. O conteúdo de `<data>/workspaces/` é movido para `users/local-user/workspaces/`. Se a migração falhar no meio, o boot para com erro e o próximo boot retoma (cada movimento é verificável: destino existe e origem não).
+- **Continuam onde estão**, por já serem isolados e por não serem montados no sandbox:
+  - staging de uploads: já é separado por dono em `<data>/uploads/staging/<user_id>`;
+  - índices de busca `<data>/retrieval/<workspace_id>.db`: só são abertos a partir de um workspace cujo dono já foi verificado, e o id do workspace é aleatório;
+  - `<data>/agent-runtime.json`: já é indexado por `user_id` e só é lido no servidor;
+  - cache de pacotes de plugin `<data>/plugins/<plugin_id>/<versão>`: é endereçado por conteúdo (digest conferido) e, no modo server, só recebe pacotes públicos via https (§4.7). O que cada perfil instalou e habilitou já fica na tabela `plugins`, por `user_id`.
 - `runtime_heartbeats`, a chave de criptografia, o lock de instalação e o log são da instância e continuam globais.
 
 ### 4.6 Área de arquivos do perfil (modo server)
@@ -167,7 +167,8 @@ Substitui o vínculo de pasta do host:
   - ignora symlinks;
   - limites de tamanho total extraído (padrão 2 GiB), número de entradas (padrão 50 000) e razão de compressão (para conter zip bomb);
   - extração para uma pasta temporária e `rename` atômico ao terminar.
-- **Download:** `GET /v1/conversations/{id}/files/{path}/download` e `GET /v1/files/download?path=…` devolvem o arquivo com `Content-Disposition: attachment`. Uma pasta inteira sai como .zip gerado em streaming. Isso substitui "abrir no app do desktop" no modo `server`.
+- **Download:** a rota de arquivo de conversa já aceita `?disposition=attachment` (`GET /v1/conversations/{id}/files/{path}`); a UI passa a usá-la no lugar de "abrir no app do desktop" no modo `server`. Para a área de arquivos, `GET /v1/files/download?path=…` devolve o arquivo com `Content-Disposition: attachment`. Baixar uma pasta inteira como .zip fica fora desta etapa.
+- **Turno com pasta fora da área:** o worker revalida `workspace_root_path` no modo `server`. Se a pasta vinculada estiver fora de `users/<user_id>/files/`, o turno termina com o código `workspace_unavailable` em vez de rodar em outro lugar.
 
 ### 4.7 Plugins no modo server
 
