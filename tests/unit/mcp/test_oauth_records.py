@@ -90,3 +90,12 @@ def test_reauth_marks_the_server_as_error(engine, server_id):
     records.mark_reauth_required(server_id, "Reconexão necessária")
     row = records.server("u1", server_id)
     assert (row["state"], row["state_reason"]) == ("error", "Reconexão necessária")
+
+
+def test_cancelling_another_profiles_sign_in_is_not_found(engine, server_id):
+    from agentos.mcp.service import McpServerNotFound
+
+    records = McpOAuthRecords(engine)
+    with pytest.raises(McpServerNotFound):
+        records.cancel_pending(user_id="u2", server_id=server_id)
+    records.cancel_pending(user_id="u1", server_id=server_id)

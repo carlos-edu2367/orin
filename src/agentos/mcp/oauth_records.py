@@ -19,6 +19,7 @@ from agentos.persistence.postgres.schema import mcp_oauth_clients, mcp_servers, 
 from agentos.persistence.provider_secrets import ProviderSecretCipher
 
 from .models import McpServerState
+from .service import McpServerNotFound
 
 MAX_STATE_REASON_CHARS = 512
 
@@ -138,6 +139,11 @@ class McpOAuthRecords:
 
     def cancel_pending(self, *, user_id: str, server_id: str) -> None:
         with self._engine.begin() as connection:
+            owned = connection.execute(select(mcp_servers.c.server_id).where(
+                mcp_servers.c.server_id == server_id, mcp_servers.c.user_id == user_id,
+            )).first()
+            if owned is None:
+                raise McpServerNotFound(f"no MCP server '{server_id}' for this user")
             connection.execute(delete(oauth_pending_authorizations).where(
                 oauth_pending_authorizations.c.user_id == user_id, oauth_pending_authorizations.c.server_id == server_id,
             ))
