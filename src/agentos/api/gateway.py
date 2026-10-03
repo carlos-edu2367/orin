@@ -1020,6 +1020,9 @@ def create_app(services: ApiServices) -> FastAPI:
         if not after or len(after) > 512: raise ValueError("invalid cursor")
         services.security.authorize(principal, action="conversation.read", resource_id=conversation_id, purpose="conversation.observe")
         app_service = require_port(services.conversation_application)
+        # Resolve ownership before the stream opens: another profile's id must
+        # be a 404, not an empty stream that stays open for minutes.
+        conversation_record(conversation_id, principal)
 
         async def body() -> Any:
             # A long-lived stream: the client attaches once per conversation and

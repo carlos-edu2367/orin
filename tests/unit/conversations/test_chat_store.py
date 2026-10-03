@@ -387,3 +387,17 @@ def test_a_follow_up_message_in_a_project_queues_a_new_turn() -> None:
             select(conversation_turns.c.execution_id).where(conversation_turns.c.turn_id == follow_up.turn_id)
         ).scalar_one()
     assert execution_id
+
+
+def test_cancelling_another_profiles_conversation_is_not_found() -> None:
+    import pytest
+
+    from agentos.api.contracts import ApplicationNotFoundError
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    metadata.create_all(engine)
+    store = PostgresChatStore(engine, PostgresAgenticActivityStore(engine, "cursor-secret"))
+    receipt = store.create(user_id="u1", message="oi", provider="openrouter", model_id="m", idempotency_key="k1")
+    with pytest.raises(ApplicationNotFoundError):
+        store.request_cancel(receipt.conversation_id, "u2")
+    assert store.request_cancel(receipt.conversation_id, "u1")["conversation_id"] == receipt.conversation_id

@@ -1065,6 +1065,11 @@ class PostgresChatStore:
         now = datetime.now(UTC)
         cancelled: list[str] = []
         with self._engine.begin() as c:
+            owned = c.execute(select(conversations.c.conversation_id).where(
+                conversations.c.conversation_id == conversation_id, conversations.c.user_id == user_id,
+            )).first()
+            if owned is None:
+                raise ApplicationNotFoundError(conversation_id)
             rows = c.execute(select(conversation_turns).where(
                 conversation_turns.c.conversation_id == conversation_id,
                 conversation_turns.c.user_id == user_id,
