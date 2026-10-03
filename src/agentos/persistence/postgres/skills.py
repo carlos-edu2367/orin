@@ -161,14 +161,14 @@ class PostgresSkillLibraryService:
             )
             record = connection.execute(select(skills.c.id).where(identity).with_for_update()).scalar_one_or_none()
             if record is None:
-                raise ValueError("skill version was not found in this user scope")
+                raise SkillNotFound("skill version was not found in this user scope")
             rows = connection.execute(
                 select(skill_versions.c.id, skill_versions.c.version)
                 .where(skill_versions.c.skill_record_id == record)
             ).mappings().all()
             target = next((row for row in rows if str(row["version"]) == version), None)
             if target is None:
-                raise ValueError("skill version was not found in this user scope")
+                raise SkillNotFound("skill version was not found in this user scope")
             current = max(rows, key=lambda row: semver_key(str(row["version"])))
             if str(target["version"]) == str(current["version"]):
                 raise ValueError("the current skill version cannot be uninstalled")
@@ -235,6 +235,7 @@ class PostgresSkillLibraryService:
 
     def agents_for_skill(self, query: Mapping[str, object]) -> dict[str, object]:
         user_id, skill_id = str(query["user_id"]), str(query["skill_id"])
+        self.registry_for(user_id).resolve(skill_id)  # raises SkillNotFound outside this user's scope
         statement = select(agent_skills.c.agent_id, agent_skills.c.mode).join(skill_versions, agent_skills.c.skill_version_id == skill_versions.c.id).join(skills, skill_versions.c.skill_record_id == skills.c.id).where((agent_skills.c.user_id == user_id) & (skills.c.skill_id == skill_id))
         with self.engine.connect() as connection:
             items = [{"agent_id": str(row["agent_id"]), "mode": str(row["mode"])} for row in connection.execute(statement).mappings()]

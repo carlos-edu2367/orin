@@ -54,6 +54,7 @@ from agentos.uploads.promotion import discard_promoted, promote_uploads
 from agentos.mcp.catalog import search_catalog
 from agentos.mcp.auth import McpOAuthCallbackError, McpOAuthUnreachable, McpOAuthUnsupported
 from agentos.mcp.service import McpAuthorizationRequired, McpConnectionFailed, McpServerNotFound, McpServiceError
+from agentos.skills.registry import SkillNotFound
 from agentos.mcp.toolset import connector_for
 from agentos.plugins.service import PluginServiceError
 from agentos.code_mode.models import CodeAutonomy
@@ -443,6 +444,12 @@ def create_app(services: ApiServices) -> FastAPI:
         # (frontend/src/api/errors.ts): the client already knows to drop its
         # cursor and open a fresh stream binding on this response.
         return _error(409, "CONFLICT", "cursor_invalid", retryable=True)
+
+    @app.exception_handler(SkillNotFound)
+    async def skill_not_found(_: Request, __: SkillNotFound) -> JSONResponse:
+        # Skills resolve inside the caller's own scope, so another profile's
+        # skill and one that never existed are the same answer.
+        return _error(404, "NOT_FOUND", "resource_not_found", retryable=False)
 
     @app.exception_handler(McpServerNotFound)
     async def mcp_server_not_found(_: Request, __: McpServerNotFound) -> JSONResponse:

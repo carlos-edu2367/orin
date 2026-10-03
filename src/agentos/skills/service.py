@@ -145,7 +145,7 @@ class SkillLibraryService:
         versions = self._all_versions(user_id, skill_id)
         target = next((skill for skill in versions if skill.version == version), None)
         if target is None:
-            raise ValueError("skill version was not found in this user scope")
+            raise SkillNotFound("skill version was not found in this user scope")
         current = max(versions, key=lambda skill: semver_key(skill.version))
         if target.version == current.version:
             raise ValueError("the current skill version cannot be uninstalled")

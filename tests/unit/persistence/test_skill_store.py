@@ -117,3 +117,24 @@ def test_agent_can_switch_between_auto_discovery_and_pinned_skill_versions() -> 
     assert pinned["items"][0]["id"] == "testing"
     assert service.agents_for_skill({"user_id": "u1", "skill_id": "testing"})["items"] == [{"agent_id": "a1", "mode": "pinned"}]
     assert service.set_agent_skills({"user_id": "u1", "agent_id": "a1", "mode": "auto", "skill_ids": []}) == {"mode": "auto", "items": []}
+
+
+def test_another_profiles_skill_is_not_found_by_any_skill_call() -> None:
+    import pytest
+
+    from agentos.skills.registry import SkillNotFound
+
+    engine = create_engine("sqlite://")
+    metadata.create_all(engine)
+    service = PostgresSkillLibraryService(engine)
+    created = service.create({"user_id": "u1", "name": "Private Cleanup", "description": "Clean.", "version": "1.0.0", "tags": [], "instructions": "# v1"})
+    service.update({"user_id": "u1", "skill_id": created["id"], "description": "Clean.", "instructions": "# v2"})
+    with pytest.raises(SkillNotFound):
+        service.get({"user_id": "u2", "skill_id": created["id"]})
+    with pytest.raises(SkillNotFound):
+        service.update({"user_id": "u2", "skill_id": created["id"], "instructions": "# hijack"})
+    with pytest.raises(SkillNotFound):
+        service.remove_version({"user_id": "u2", "skill_id": created["id"], "version": "1.0.0"})
+    with pytest.raises(SkillNotFound):
+        service.agents_for_skill({"user_id": "u2", "skill_id": created["id"]})
+    assert service.get({"user_id": "u1", "skill_id": created["id"]})["versions"] == ["1.0.1", "1.0.0"]
