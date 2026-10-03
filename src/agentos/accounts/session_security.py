@@ -36,6 +36,14 @@ def derive_csrf_secret(encryption_key: str) -> bytes:
     return sha256(b"orin-session-csrf:" + encryption_key.encode("utf-8")).digest()
 
 
+def revoke_user_sessions(engine: Engine, user_id: str, *, keep_session_id: str | None = None) -> None:
+    condition = security_sessions.c.user_id == user_id
+    if keep_session_id is not None:
+        condition = condition & (security_sessions.c.session_id != keep_session_id)
+    with engine.begin() as connection:
+        connection.execute(update(security_sessions).where(condition).values(revoked=True))
+
+
 class SessionSecurityService(PostgresSecurityService):
     requires_loopback_client = False
 
@@ -66,11 +74,7 @@ class SessionSecurityService(PostgresSecurityService):
             connection.execute(update(security_sessions).where(security_sessions.c.session_id == session_id).values(revoked=True))
 
     def revoke_user(self, user_id: str, *, keep_session_id: str | None = None) -> None:
-        condition = security_sessions.c.user_id == user_id
-        if keep_session_id is not None:
-            condition = condition & (security_sessions.c.session_id != keep_session_id)
-        with self._engine.begin() as connection:
-            connection.execute(update(security_sessions).where(condition).values(revoked=True))
+        revoke_user_sessions(self._engine, user_id, keep_session_id=keep_session_id)
 
     def authenticate(self, *, bearer_token: str | None, session_id: str | None) -> AuthenticatedPrincipal:
         if bearer_token:
@@ -111,4 +115,4 @@ class SessionSecurityService(PostgresSecurityService):
         super().authorize(principal, action=action, resource_id=resource_id, purpose=purpose)
 
 
-__all__ = ["SESSION_COOKIE", "SESSION_TTL", "SessionSecurityService", "TOUCH_INTERVAL", "derive_csrf_secret"]
+__all__ = ["SESSION_COOKIE", "SESSION_TTL", "SessionSecurityService", "TOUCH_INTERVAL", "derive_csrf_secret", "revoke_user_sessions"]

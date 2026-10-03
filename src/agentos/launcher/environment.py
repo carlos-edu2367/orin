@@ -156,6 +156,46 @@ def load_environment(paths: OrinPaths, profile: RuntimeProfile) -> RuntimeEnviro
     return RuntimeEnvironment(values, files, created)
 
 
+def load_server_environment(paths: OrinPaths, profile: RuntimeProfile) -> RuntimeEnvironment:
+    """The environment for ``orin serve``: the same files, never loopback trust."""
+    files = profile.environment_files(paths.config)
+    created: Path | None = None
+    default_database_url = sqlite_url(paths.data / "orin.db")
+    if not files:
+        created = write_default_configuration(paths.config / "orin.env", database_url=default_database_url)
+        files = (created,)
+    values: dict[str, str] = {}
+    for path in files:
+        values.update(parse_env_file(path))
+    # Exported variables win over files: a container is configured through its
+    # environment, the file only carries the generated encryption key.
+    values.update(os.environ)
+    values.setdefault("DATABASE_URL", default_database_url)
+    values["ORIN_MODE"] = "server"
+    values["LOCALHOST_TRUST_ENABLED"] = "false"
+    # The generated orin.env says AGENTOS_ENV=local for the personal install;
+    # a server only keeps "local" when the operator exported it on purpose.
+    if values.get("AGENTOS_ENV", "").strip().lower() in {"", "local"} and not os.environ.get("AGENTOS_ENV", "").strip():
+        values["AGENTOS_ENV"] = "production"
+    values.setdefault("ORIN_BACKEND_HOST", "127.0.0.1")
+    values.setdefault("ORIN_BACKEND_PORT", "49200")
+    web = profile.web_dist
+    if web is None or not (web / "index.html").is_file():
+        raise ConfigurationError(f"The Orin web interface is missing from this installation (expected {web}).")
+    values["WEB_DIST_DIR"] = str(web.resolve())
+    values.update(paths.as_environment())
+    if not values.get("ORIN_PUBLIC_URL", "").strip():
+        raise ConfigurationError(
+            "ORIN_PUBLIC_URL is not set. It is the address people open in the browser, e.g.\n"
+            "  ORIN_PUBLIC_URL=https://orin.example.com"
+        )
+    if not values.get("AGENTOS_PROVIDER_ENCRYPTION_KEY", "").strip():
+        raise ConfigurationError("AGENTOS_PROVIDER_ENCRYPTION_KEY is not set and no configuration file provides one.")
+    if not values["DATABASE_URL"].startswith("sqlite"):
+        raise ConfigurationError("Orin server mode only supports the bundled SQLite database.")
+    return RuntimeEnvironment(values, tuple(files), created)
+
+
 def _validate(values: dict[str, str], profile: RuntimeProfile) -> None:
     trust = values.get("LOCALHOST_TRUST_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"}
     environment = values.get("AGENTOS_ENV", "").strip().lower()
@@ -179,6 +219,7 @@ __all__ = [
     "ConfigurationError",
     "RuntimeEnvironment",
     "load_environment",
+    "load_server_environment",
     "parse_env_file",
     "redact",
     "write_default_configuration",

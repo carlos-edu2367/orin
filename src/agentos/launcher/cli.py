@@ -68,6 +68,8 @@ def build_parser() -> argparse.ArgumentParser:
             "  orin status             show whether Orin is running\n"
             "  orin logs --follow      watch the launcher log\n"
             "  orin stop               stop a running Orin\n"
+            "  orin serve              run as a server (behind a reverse proxy)\n"
+            "  orin user create ana    create a server profile\n"
         ),
     )
     parser.add_argument("--version", action="store_true", help="print the Orin version and exit")
@@ -81,6 +83,15 @@ def build_parser() -> argparse.ArgumentParser:
     commands.add_parser("restart", parents=[shared], help="stop a running Orin and start it again")
     commands.add_parser("update", help="install the latest verified Orin release")
     commands.add_parser("status", help="show whether Orin is running, and where")
+    commands.add_parser("serve", help="run Orin as a multi-profile server in the foreground (needs ORIN_PUBLIC_URL)")
+    user = commands.add_parser("user", help="manage server profiles from the terminal")
+    user_commands = user.add_subparsers(dest="user_command", metavar="action", required=True)
+    create = user_commands.add_parser("create", help="create a profile (asks for the password)")
+    create.add_argument("username")
+    create.add_argument("--admin", action="store_true", help="give the profile admin rights")
+    create.add_argument("--display-name", default=None)
+    reset = user_commands.add_parser("reset-password", help="issue a temporary password and end the profile's sessions")
+    reset.add_argument("username")
 
     logs = commands.add_parser("logs", help="show Orin's logs")
     logs.add_argument("--service", choices=("launcher", *SERVICES), default="launcher", help="which log to show")
@@ -310,6 +321,12 @@ def main(argv: list[str] | None = None) -> int:
     command = "uninstall" if arguments.uninstall else "update" if arguments.update else getattr(arguments, "command", None)
 
     try:
+        if command == "serve":
+            from .serve import command_serve
+            return command_serve(paths, profile, console)
+        if command == "user":
+            from .users import command_user
+            return command_user(arguments, paths, console)
         if command in (None, "start"):
             return command_start(arguments, paths, profile, console)
         if command == "stop":
