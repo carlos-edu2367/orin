@@ -31,6 +31,14 @@ class AuthorizationError(PermissionError):
     ...
 
 
+class AdminRequiredError(AuthorizationError):
+    """An instance-wide action asked by a profile that is not an admin."""
+
+
+class PasswordChangeRequiredError(AuthorizationError):
+    """A profile signed in with a temporary password and must replace it first."""
+
+
 class RateLimitError(RuntimeError):
     ...
 
