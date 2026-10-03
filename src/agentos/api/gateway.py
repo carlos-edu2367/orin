@@ -17,6 +17,10 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
+from agentos.accounts.errors import AccountError
+from agentos.configuration.capabilities import CapabilityUnavailable, InstanceCapabilities
+from agentos.configuration.mode import RuntimeMode
+
 from .contracts import (
     ApplicationConflictError,
     ApplicationIndeterminateError,
@@ -34,7 +38,10 @@ from .contracts import (
 from agentos.provider_catalog.models import PROVIDERS_WITH_OPTIONAL_KEY, ProviderCatalogContext
 from agentos.provider_catalog.service import ProviderCatalogUnavailable
 from .events import CursorError, InMemoryClientEventStream
-from .security import AuthenticationError, AuthorizationError, AuthenticatedPrincipal, InMemorySecurityService, RateLimitError
+from .security import (
+    AdminRequiredError, AuthenticationError, AuthorizationError, AuthenticatedPrincipal, InMemorySecurityService,
+    PasswordChangeRequiredError, RateLimitError,
+)
 from agentos.agentic.file_preview import media_type_for, open_in_default_application
 from agentos.installation import orin_paths, read_installation_status, remove_installed_version, runtime_profile, start_update
 from agentos.agentic.workspace import ConversationWorkspace, WorkspaceError, resolve_workspace
@@ -318,8 +325,14 @@ class ApiServices:
         uploads: object | None = None,
         vision_model_settings: object | None = None,
         scheduled_chats: object | None = None,
+        accounts: object | None = None,
+        capabilities: InstanceCapabilities | None = None,
+        public_origin: str | None = None,
     ) -> None:
         self.security = security or InMemorySecurityService()
+        self.accounts = accounts
+        self.capabilities = capabilities or InstanceCapabilities.for_mode(RuntimeMode.LOCAL)
+        self.public_origin = public_origin
         self.execution_application = execution_application
         self.execution_query = execution_query
         self.resource_services = resource_services or {}
@@ -364,6 +377,22 @@ def create_app(services: ApiServices) -> FastAPI:
     @app.exception_handler(RateLimitError)
     async def rate_limit_error(_: Request, __: RateLimitError) -> JSONResponse:
         return _error(429, "RATE_LIMITED", "rate_limited", retryable=True, retry_after=60)
+
+    @app.exception_handler(AccountError)
+    async def account_error(_: Request, exc: AccountError) -> JSONResponse:
+        return _error(exc.status, exc.category, exc.code, retryable=exc.retryable, retry_after=exc.retry_after)
+
+    @app.exception_handler(AdminRequiredError)
+    async def admin_required(_: Request, __: AdminRequiredError) -> JSONResponse:
+        return _error(403, "AUTHORIZATION", "admin_required", retryable=False)
+
+    @app.exception_handler(PasswordChangeRequiredError)
+    async def password_change_required(_: Request, __: PasswordChangeRequiredError) -> JSONResponse:
+        return _error(403, "AUTHORIZATION", "password_change_required", retryable=False)
+
+    @app.exception_handler(CapabilityUnavailable)
+    async def capability_unavailable(_: Request, __: CapabilityUnavailable) -> JSONResponse:
+        return _error(404, "NOT_FOUND", "capability_unavailable", retryable=False)
 
     @app.exception_handler(ApplicationConflictError)
     async def conflict_error(_: Request, __: ApplicationConflictError) -> JSONResponse:
@@ -436,7 +465,7 @@ def create_app(services: ApiServices) -> FastAPI:
     async def internal_error(_: Request, __: Exception) -> JSONResponse:
         return _error(500, "INTERNAL", "internal_error", retryable=False)
 
-    def principal_for(request: Request, *, mutable: bool = False) -> AuthenticatedPrincipal:
+    def principal_for(request: Request, *, mutable: bool = False, allow_pending_password: bool = False) -> AuthenticatedPrincipal:
         if getattr(services.security, "requires_loopback_client", False):
             client_host = request.client.host if request.client is not None else None
             if not _is_loopback_client(client_host):
@@ -444,6 +473,12 @@ def create_app(services: ApiServices) -> FastAPI:
         authorization = request.headers.get("authorization", "")
         bearer = authorization[7:] if authorization.lower().startswith("bearer ") else None
         principal = services.security.authenticate(bearer_token=bearer, session_id=request.cookies.get("agentos_session"))
+        scopes = getattr(principal, "scopes", frozenset())
+        # Checked here rather than only in authorize(): a route that forgets to
+        # call authorize() must still not serve a profile holding a temporary
+        # password.
+        if "password_change" in scopes and "api" not in scopes and not allow_pending_password:
+            raise PasswordChangeRequiredError("password change required")
         if mutable:
             services.security.validate_csrf(principal, request.headers.get("x-csrf-token"), request.headers.get("origin"))
         return principal
@@ -1669,6 +1704,9 @@ def create_app(services: ApiServices) -> FastAPI:
             yield f"event: heartbeat\ndata: {json_dumps({'cursor': next_cursor})}\n\n"
 
         return StreamingResponse(body(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+    from .auth_routes import register_auth_routes
+    register_auth_routes(app, services, principal_for)
 
     return app
 
