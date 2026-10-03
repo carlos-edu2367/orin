@@ -25,3 +25,15 @@ def test_a_worker_defaults_to_the_process_mode(tmp_path, monkeypatch):
     assert ChatWorker(_store(tmp_path))._capabilities.shell is False
     monkeypatch.setenv("ORIN_MODE", "local")
     assert ChatWorker(_store(tmp_path))._capabilities.shell is True
+
+
+def test_the_worker_plugin_service_refuses_host_paths_on_a_server(tmp_path, monkeypatch):
+    monkeypatch.setenv("ORIN_HOME", str(tmp_path / "home"))
+    from agentos.installation import reset_cached_paths
+    reset_cached_paths()
+    store = _store(tmp_path)
+    server = ChatWorker(store, capabilities=InstanceCapabilities.for_mode(RuntimeMode.SERVER))
+    local = ChatWorker(store, capabilities=InstanceCapabilities.for_mode(RuntimeMode.LOCAL))
+    assert server._plugin_service(store._engine, skill_library=None, mcp_service=None).fetcher.remote_only is True
+    assert local._plugin_service(store._engine, skill_library=None, mcp_service=None).fetcher.remote_only is False
+    reset_cached_paths()

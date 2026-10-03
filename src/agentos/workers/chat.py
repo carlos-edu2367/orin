@@ -40,6 +40,7 @@ from agentos.mcp.service import McpServerService
 from agentos.mcp.toolset import McpToolProvider
 from agentos.plugins.hook_engine import HookEngine
 from agentos.plugins.rehydrate import rehydrate_hooks
+from agentos.plugins.fetcher import PluginFetcher
 from agentos.plugins.service import PluginService
 from agentos.profile_files.binding import relative_display
 from agentos.persistence.postgres.agent_memory import PostgresAgentMemoryStore
@@ -502,6 +503,15 @@ class ChatWorker:
     def _kernel_manages(self, turn: dict[str, object]) -> bool:
         return str(turn["turn_id"]) in self._kernel_turns
 
+    def _plugin_service(self, engine, *, skill_library, mcp_service) -> PluginService:
+        # The agent can install plugins from a turn, so the worker's service
+        # must refuse host paths on a server exactly like the API's does.
+        plugin_root = orin_paths().data / "plugins"
+        return PluginService(
+            engine, plugin_root=plugin_root, skill_library=skill_library, mcp_service=mcp_service,
+            fetcher=PluginFetcher(plugin_root, remote_only=not self._capabilities.host_folders), hook_engine=self._hook_engine,
+        )
+
     def _preflight_refusal(self, turn: dict[str, object]) -> str | None:
         """Why this turn must not run at all on this instance, if anything."""
         user_id = str(turn.get("user_id") or "")
@@ -926,7 +936,7 @@ class ChatWorker:
             _LOGGER.exception("could not acquire the retrieval index for %s", turn.get("conversation_id"))
             retrieval_bundle = None
         mcp_service = McpServerService(engine, allow_stdio=self._capabilities.mcp_stdio)
-        plugin_service = PluginService(engine, plugin_root=orin_paths().data / "plugins", skill_library=skill_library, mcp_service=mcp_service, hook_engine=self._hook_engine)
+        plugin_service = self._plugin_service(engine, skill_library=skill_library, mcp_service=mcp_service)
         # A worker process's hook index starts empty; refresh this user's
         # active, consented hooks before every turn so a plugin approved (or a
         # consent flipped) from the API process is picked up without a restart.

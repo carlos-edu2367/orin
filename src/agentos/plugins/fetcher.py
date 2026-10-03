@@ -4,10 +4,13 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+
+from agentos.oauth.netpolicy import OAuthUrlRefused, public_https
 
 from .manifest import ManifestRejected, PluginManifest, parse_plugin_manifest
 from .sources import PluginSource
@@ -25,9 +28,10 @@ class FetchedPlugin:
 
 
 class PluginFetcher:
-    def __init__(self, root: Path, *, max_bytes: int = 25_000_000, max_files: int = 4000, timeout: int = 120) -> None:
+    def __init__(self, root: Path, *, max_bytes: int = 25_000_000, max_files: int = 4000, timeout: int = 120, remote_only: bool = False) -> None:
         self.root = Path(root)
         self.max_bytes, self.max_files, self.timeout = max_bytes, max_files, timeout
+        self.remote_only = remote_only
 
     def fetch(self, source: PluginSource) -> FetchedPlugin:
         with tempfile.TemporaryDirectory(prefix="orin-plugin-") as temporary:
@@ -80,16 +84,26 @@ class PluginFetcher:
 
     def _clone_into(self, source: PluginSource, temporary: str) -> Path:
         staging = Path(temporary) / "package"
+        if self.remote_only and source.kind == "path":
+            raise FetchRejected("a server instance installs plugins only from public https repositories")
         if source.kind == "path":
             self._validate(Path(source.path or ""))
             shutil.copytree(Path(source.path or ""), staging, symlinks=False)
         elif source.kind == "git":
             command = ["git", "clone", "--depth", "1", "--no-tags", "--recurse-submodules=no", "--config", "core.symlinks=false"]
+            environment = None
+            if self.remote_only:
+                try:
+                    public_https(source.url or "")
+                except OAuthUrlRefused as error:
+                    raise FetchRejected("plugin repository must be a public https URL") from error
+                command = ["git", "-c", "protocol.file.allow=never", *command[1:]]
+                environment = {**os.environ, "GIT_ALLOW_PROTOCOL": "https", "GIT_TERMINAL_PROMPT": "0"}
             if source.ref:
                 command += ["--branch", source.ref]
             command += [source.url or "", str(staging)]
             try:
-                subprocess.run(command, check=True, shell=False, timeout=self.timeout, capture_output=True, text=True)
+                subprocess.run(command, check=True, shell=False, timeout=self.timeout, capture_output=True, text=True, env=environment)
             except (OSError, subprocess.SubprocessError) as error:
                 raise FetchRejected("plugin repository could not be fetched") from error
             if source.subdirectory:

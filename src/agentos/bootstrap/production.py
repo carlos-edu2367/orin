@@ -63,6 +63,7 @@ from agentos.persistence.postgres.skills import PostgresSkillLibraryService
 from agentos.mcp.auth import McpOAuth
 from agentos.mcp.service import McpServerService
 from agentos.plugins.command_library import CommandLibrary
+from agentos.plugins.fetcher import PluginFetcher
 from agentos.plugins.hook_engine import HookEngine
 from agentos.plugins.github_search import GithubRepositorySearchClient
 from agentos.plugins.manifest_probe import GithubManifestProbe
@@ -333,7 +334,7 @@ def compose_production_services(engine: Engine, *, localhost_trust_enabled: bool
         skills=skill_library,
         mcp=mcp_service,
         mcp_oauth=mcp_oauth,
-        plugins=PluginService(engine, plugin_root=orin_paths().data / "plugins", skill_library=skill_library, mcp_service=mcp_service, search_client=GithubRepositorySearchClient(), manifest_probe=GithubManifestProbe(), command_library=command_library, hook_engine=hook_engine),
+        plugins=PluginService(engine, plugin_root=orin_paths().data / "plugins", fetcher=PluginFetcher(orin_paths().data / "plugins", remote_only=not capabilities.host_folders), skill_library=skill_library, mcp_service=mcp_service, search_client=GithubRepositorySearchClient(), manifest_probe=GithubManifestProbe(), command_library=command_library, hook_engine=hook_engine),
         provider_configuration=PostgresProviderConfigurationAdapter(engine, cipher=provider_cipher),
         provider_api_keys=PostgresProviderApiKeyAdapter(engine, cipher=provider_cipher),
         provider_catalog=ProviderModelCatalogService(provider_repository, {

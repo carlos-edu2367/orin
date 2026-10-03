@@ -17,6 +17,8 @@ from threading import Lock
 import time
 from typing import Any, Mapping
 
+from agentos.configuration.mode import RuntimeMode, current_mode
+
 from .security import NetworkPolicy, NetworkPolicyError, validate_url
 
 
@@ -284,17 +286,18 @@ def _launch_failure_message(error: Exception) -> str:
     return f"browser engine failed to start: {type(error).__name__}"
 
 
-def _policy_for(capability: str) -> NetworkPolicy:
+def _policy_for(capability: str, *, allow_loopback: bool | None = None) -> NetworkPolicy:
     """The network policy for this session's capability level.
 
-    Local development servers on loopback are available at every capability
-    level so Code mode can exercise the application it is changing. LAN,
-    link-local, metadata and reserved addresses remain blocked: this is not a
-    private-network proxy.
+    On a personal install, local development servers on loopback are reachable
+    so Code mode can exercise the application it is changing. On a server,
+    loopback is the Orin API and the host's own services, so it is closed.
+    LAN, link-local, metadata and reserved addresses are always blocked.
     """
+    loopback = current_mode() is not RuntimeMode.SERVER if allow_loopback is None else allow_loopback
     if capability == "full":
-        return NetworkPolicy(allowed_schemes=("http", "https"), allowed_ports=(), allow_subresources=True, allow_loopback=True)
-    return NetworkPolicy(allow_subresources=True, allow_loopback=True)
+        return NetworkPolicy(allowed_schemes=("http", "https"), allowed_ports=(), allow_subresources=True, allow_loopback=loopback)
+    return NetworkPolicy(allow_subresources=True, allow_loopback=loopback)
 
 
 def _host(connection: Connection, capability: str = "interact") -> None:
