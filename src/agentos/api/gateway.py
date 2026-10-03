@@ -20,6 +20,9 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 from agentos.accounts.errors import AccountError
 from agentos.configuration.capabilities import CapabilityUnavailable, InstanceCapabilities
 from agentos.configuration.mode import RuntimeMode
+from agentos.local_workspace.paths import FolderInspection
+from agentos.profile_files.archive import ArchiveRejected
+from agentos.profile_files.binding import files_root, inspect_profile_folder, relative_display, resolve_inside
 
 from .contracts import (
     ApplicationConflictError,
@@ -398,6 +401,10 @@ def create_app(services: ApiServices) -> FastAPI:
     async def capability_unavailable(_: Request, __: CapabilityUnavailable) -> JSONResponse:
         return _error(404, "NOT_FOUND", "capability_unavailable", retryable=False)
 
+    @app.exception_handler(ArchiveRejected)
+    async def archive_rejected(_: Request, __: ArchiveRejected) -> JSONResponse:
+        return _error(422, "VALIDATION", "archive_rejected", retryable=False)
+
     @app.exception_handler(ApplicationConflictError)
     async def conflict_error(_: Request, __: ApplicationConflictError) -> JSONResponse:
         return _error(409, "CONFLICT", "execution_conflict", retryable=True)
@@ -599,7 +606,7 @@ def create_app(services: ApiServices) -> FastAPI:
                 return JSONResponse({"cancelled": True}, status_code=200)
             chosen = result.path
         try:
-            inspection = inspect_folder(chosen, home=Path.home(), orin_data=orin_paths().data)
+            inspection = inspect_for(principal, chosen)
         except FolderRejected as error:
             raise ApplicationValidationError("invalid workspace folder") from error
         return JSONResponse(asdict(inspection))
@@ -620,10 +627,10 @@ def create_app(services: ApiServices) -> FastAPI:
                 raise ApplicationNotFoundError(payload.project_id)
         workspace_root_id = project.workspace_id if project is not None else conversation_id
         attachment_workspace_id = workspace_root_id
-        previous_root = local_root_for(workspace_root_id, principal) if payload.workspace_path else None
+        previous_root = stored_root_for(workspace_root_id, principal) if payload.workspace_path else None
         if payload.workspace_path:
             try:
-                inspection = inspect_folder(payload.workspace_path, home=Path.home(), orin_data=orin_paths().data)
+                inspection = inspect_for(principal, payload.workspace_path)
             except FolderRejected as error:
                 raise ApplicationValidationError("invalid workspace folder") from error
             if not inspection.is_directory:
@@ -632,7 +639,7 @@ def create_app(services: ApiServices) -> FastAPI:
                 raise ApplicationValidationError("workspace folder is not writable")
             if inspection.risk != "none" and not payload.workspace_acknowledged_risk:
                 return _error(409, "CONFLICT", "workspace_risk_acknowledgement_required", retryable=False)
-            _require_port(services.local_workspaces).set_root(workspace_root_id, principal.user_id, inspection.path)
+            _require_port(services.local_workspaces).set_root(workspace_root_id, principal.user_id, bind_path_for(principal, inspection))
         attachments: list[dict[str, object]] = []
         try:
             attachments = promote(attachment_workspace_id, principal, payload.attachments)
@@ -823,21 +830,45 @@ def create_app(services: ApiServices) -> FastAPI:
         name = data.get("name")
         return workspace_id, name if isinstance(name, str) else None
 
-    def local_root_for(workspace_id: str, principal: AuthenticatedPrincipal) -> str | None:
+    def inspect_for(principal: AuthenticatedPrincipal, raw: str) -> FolderInspection:
+        if services.capabilities.profile_files:
+            return inspect_profile_folder(files_root(principal.user_id), raw)
+        return inspect_folder(raw, home=Path.home(), orin_data=orin_paths().data)
+
+    def bind_path_for(principal: AuthenticatedPrincipal, inspection: FolderInspection) -> str:
+        if services.capabilities.profile_files:
+            return str(resolve_inside(files_root(principal.user_id), inspection.path))
+        return inspection.path
+
+    def stored_root_for(workspace_id: str, principal: AuthenticatedPrincipal) -> str | None:
         store = services.local_workspaces
-        if store is None:
+        return store.root_for(workspace_id, principal.user_id) if store is not None else None
+
+    def local_root_for(workspace_id: str, principal: AuthenticatedPrincipal) -> str | None:
+        root = stored_root_for(workspace_id, principal)
+        if root and services.capabilities.profile_files and relative_display(files_root(principal.user_id), root) is None:
+            # A host folder bound before this instance became a server is never
+            # served; the conversation falls back to its managed workspace.
             return None
-        return store.root_for(workspace_id, principal.user_id)
+        return root
+
+    def _workspace_scope(project_name: str | None) -> dict[str, object]:
+        return {"scope": "project" if project_name is not None else "chat", "project_name": project_name}
 
     def workspace_state(conversation: dict[str, object], principal: AuthenticatedPrincipal) -> dict[str, object]:
         workspace_id, project_name = effective_workspace_id(conversation, principal)
+        stored = stored_root_for(workspace_id, principal)
+        if stored and services.capabilities.profile_files:
+            shown = relative_display(files_root(principal.user_id), stored)
+            if shown is None:
+                return {"kind": "unavailable", "path": None, "folder_name": Path(stored).name, **_workspace_scope(project_name)}
+            return {"kind": "local", "path": shown, "folder_name": Path(stored).name, **_workspace_scope(project_name)}
         root = local_root_for(workspace_id, principal)
         return {
             "kind": "local" if root else "managed",
             "path": root,
             "folder_name": Path(root).name if root else None,
-            "scope": "project" if project_name is not None else "chat",
-            "project_name": project_name,
+            **_workspace_scope(project_name),
         }
 
     def conversation_record(conversation_id: str, principal: AuthenticatedPrincipal) -> dict[str, object]:
@@ -870,7 +901,7 @@ def create_app(services: ApiServices) -> FastAPI:
                 return JSONResponse({"cancelled": True}, status_code=200)
             chosen = result.path
         try:
-            inspection = inspect_folder(chosen, home=Path.home(), orin_data=orin_paths().data)
+            inspection = inspect_for(principal, chosen)
         except FolderRejected as error:
             raise ApplicationValidationError("invalid workspace folder") from error
         return JSONResponse(asdict(inspection))
@@ -881,7 +912,7 @@ def create_app(services: ApiServices) -> FastAPI:
         services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.workspace.attach")
         conversation = conversation_record(conversation_id, principal)
         try:
-            inspection = inspect_folder(payload.path, home=Path.home(), orin_data=orin_paths().data)
+            inspection = inspect_for(principal, payload.path)
         except FolderRejected as error:
             raise ApplicationValidationError("invalid workspace folder") from error
         if not inspection.is_directory:
@@ -891,7 +922,7 @@ def create_app(services: ApiServices) -> FastAPI:
         if inspection.risk != "none" and not payload.acknowledged_risk:
             return _error(409, "CONFLICT", "workspace_risk_acknowledgement_required", retryable=False)
         workspace_id, _ = effective_workspace_id(conversation, principal)
-        _require_port(services.local_workspaces).set_root(workspace_id, principal.user_id, inspection.path)
+        _require_port(services.local_workspaces).set_root(workspace_id, principal.user_id, bind_path_for(principal, inspection))
         return JSONResponse(workspace_state(conversation, principal))
 
     @app.delete("/v1/conversations/{conversation_id}/workspace")
@@ -1718,6 +1749,8 @@ def create_app(services: ApiServices) -> FastAPI:
 
     from .auth_routes import register_auth_routes
     register_auth_routes(app, services, principal_for)
+    from .files_routes import register_files_routes
+    register_files_routes(app, services, principal_for)
 
     return app
 
