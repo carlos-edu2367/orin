@@ -7,6 +7,7 @@ from pathlib import Path
 import secrets
 import os
 from typing import Callable
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from fastapi import FastAPI
@@ -24,6 +25,7 @@ from agentos.local_workspace.store import PostgresLocalWorkspaceStore
 from agentos.scheduler.scheduled_chats import ScheduledChatService
 from agentos.projects import PostgresProjectStore
 from agentos.configuration import AgentOSSettings
+from agentos.configuration.mode import RuntimeMode
 from agentos.installation import orin_paths
 from agentos.persistence.postgres.event_stream import PostgresClientEventStream
 from agentos.persistence.postgres.agentic_activity import PostgresAgenticActivityStore
@@ -77,6 +79,9 @@ class ProductionSettings(AgentOSSettings):
     LOCALHOST_TRUST_ENABLED: bool = False
     WEB_DIST_DIR: str | None = None
     AGENTOS_ACTIVITY_CURSOR_SECRET: SecretStr | None = None
+    ORIN_MODE: RuntimeMode = RuntimeMode.LOCAL
+    ORIN_PUBLIC_URL: str | None = None
+    ORIN_TRUSTED_PROXIES: str = ""
     OPENROUTER_ENABLED: bool = False
     OPENROUTER_API_KEY: SecretStr | None = None
     OPENROUTER_MODEL: str | None = None
@@ -87,16 +92,38 @@ class ProductionSettings(AgentOSSettings):
     OPENAI_API_KEY: SecretStr | None = None
     OPENAI_MODEL: str | None = None
 
+    @property
+    def public_origin(self) -> str | None:
+        if not self.ORIN_PUBLIC_URL:
+            return None
+        parsed = urlsplit(self.ORIN_PUBLIC_URL.strip())
+        return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
+
     @model_validator(mode="after")
     def _validate_enabled_providers(self) -> "ProductionSettings":
         if self.LOCALHOST_TRUST_ENABLED and self.AGENTOS_ENV.strip().lower() not in {"development", "local"}:
             raise ValueError("LOCALHOST_TRUST_ENABLED is allowed only when AGENTOS_ENV is development or local")
         if self.LOCALHOST_TRUST_ENABLED and not self.WEB_DIST_DIR:
             raise ValueError("LOCALHOST_TRUST_ENABLED requires WEB_DIST_DIR with the built frontend")
+        if self.ORIN_MODE is RuntimeMode.SERVER:
+            self._validate_server()
         for name in ("OPENROUTER", "ANTHROPIC", "OPENAI"):
             if getattr(self, f"{name}_ENABLED") and getattr(self, f"{name}_API_KEY") is None:
                 raise ValueError(f"enabled {name} provider requires API key")
         return self
+
+    def _validate_server(self) -> None:
+        if self.LOCALHOST_TRUST_ENABLED:
+            raise ValueError("ORIN_MODE=server never trusts loopback; unset LOCALHOST_TRUST_ENABLED")
+        if not self.WEB_DIST_DIR:
+            raise ValueError("ORIN_MODE=server requires WEB_DIST_DIR with the built frontend")
+        if not (os.getenv("AGENTOS_PROVIDER_ENCRYPTION_KEY", "").strip() or os.getenv("APP_MASTER_KEY", "").strip()):
+            raise ValueError("ORIN_MODE=server requires AGENTOS_PROVIDER_ENCRYPTION_KEY")
+        parsed = urlsplit((self.ORIN_PUBLIC_URL or "").strip())
+        if parsed.scheme not in {"https", "http"} or not parsed.hostname:
+            raise ValueError("ORIN_MODE=server requires ORIN_PUBLIC_URL as an absolute https:// URL")
+        if parsed.scheme == "http" and parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
+            raise ValueError("ORIN_PUBLIC_URL must use https:// unless it points at loopback for development")
 
 
 @dataclass(frozen=True, slots=True)
