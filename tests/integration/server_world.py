@@ -37,7 +37,9 @@ class ServerWorld:
     home: Path
 
     def client(self) -> TestClient:
-        return TestClient(self.app, base_url=ORIGIN)
+        # Probes judge routes by their HTTP answer; an unavailable adapter is
+        # a 500 in production, not an exception raised into the test.
+        return TestClient(self.app, base_url=ORIGIN, raise_server_exceptions=False)
 
     def admin(self, username: str = "carla") -> Session:
         api = self.client()
