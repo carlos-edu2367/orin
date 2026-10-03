@@ -23,16 +23,21 @@ def run_backend() -> int:
     """HTTP, SSE, and the built web interface. Never calls a provider."""
     import uvicorn
 
+    from agentos.configuration.mode import RuntimeMode, current_mode
+
     host = os.getenv("ORIN_BACKEND_HOST", "127.0.0.1")
     port = int(os.getenv("ORIN_BACKEND_PORT", str(DEFAULT_PORT)))
+    trusted = os.getenv("ORIN_TRUSTED_PROXIES", "").strip()
+    # The local profile authenticates the loopback peer itself, so it never
+    # trusts forwarded headers. A server behind a reverse proxy trusts them
+    # only from the proxy addresses the operator listed.
+    behind_proxy = current_mode() is RuntimeMode.SERVER and bool(trusted)
     uvicorn.run(
         "agentos.api.asgi:app",
         host=host,
         port=port,
-        # The local profile authenticates the loopback peer itself. Trusting
-        # forwarded headers here would let a proxy claim any address it liked.
-        proxy_headers=False,
-        forwarded_allow_ips=None,
+        proxy_headers=behind_proxy,
+        forwarded_allow_ips=trusted if behind_proxy else None,
         log_level=os.getenv("ORIN_LOG_LEVEL", "info"),
         access_log=os.getenv("ORIN_ACCESS_LOG", "").strip().lower() in {"1", "true", "yes"},
     )

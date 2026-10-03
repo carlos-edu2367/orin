@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from pathlib import Path
 import secrets
 import os
+import sys
 from typing import Callable
 from urllib.parse import urlsplit
 from uuid import uuid4
@@ -18,6 +20,11 @@ from pydantic_settings import SettingsConfigDict
 
 from sqlalchemy.engine import Engine
 
+from agentos.accounts.login_guard import LoginGuard
+from agentos.accounts.services import AccountServices
+from agentos.accounts.session_security import SessionSecurityService, derive_csrf_secret
+from agentos.accounts.setup import SetupTokens
+from agentos.accounts.store import UserStore
 from agentos.api.gateway import ApiServices, create_app
 from agentos.api.security import AuthenticationError, LoopbackSecurityService
 from agentos.conversations.chat import ChatApplication, PostgresChatStore
@@ -25,6 +32,7 @@ from agentos.local_workspace.store import PostgresLocalWorkspaceStore
 from agentos.scheduler.scheduled_chats import ScheduledChatService
 from agentos.projects import PostgresProjectStore
 from agentos.configuration import AgentOSSettings
+from agentos.configuration.capabilities import InstanceCapabilities
 from agentos.configuration.mode import RuntimeMode
 from agentos.installation import orin_paths
 from agentos.persistence.postgres.event_stream import PostgresClientEventStream
@@ -268,7 +276,7 @@ def unavailable_production_services() -> ApiServices:
     )
 
 
-def compose_production_services(engine: Engine, *, localhost_trust_enabled: bool = False, activity_cursor_secret: str | None = None, multi_agent_coordinator=None) -> ApiServices:
+def compose_production_services(engine: Engine, *, localhost_trust_enabled: bool = False, activity_cursor_secret: str | None = None, multi_agent_coordinator=None, mode: RuntimeMode = RuntimeMode.LOCAL, public_origin: str | None = None) -> ApiServices:
     """Durable composition for the frontend-facing surface (Fase 0/D).
 
     Executions and their public event stream are backed by the real
@@ -302,8 +310,23 @@ def compose_production_services(engine: Engine, *, localhost_trust_enabled: bool
         # Staging cleanup is best-effort: a failure here must never block the
         # API from starting, it just leaves stale uploads for the next purge.
         pass
+    capabilities = InstanceCapabilities.for_mode(mode)
+    accounts: AccountServices | None = None
+    if mode is RuntimeMode.SERVER:
+        if not public_origin:
+            raise ValueError("server mode requires the public origin")
+        users = UserStore(engine)
+        encryption_key = os.getenv("AGENTOS_PROVIDER_ENCRYPTION_KEY", "").strip() or os.getenv("APP_MASTER_KEY", "").strip()
+        sessions = SessionSecurityService(engine, users=users, public_origin=public_origin, csrf_secret=derive_csrf_secret(encryption_key))
+        accounts = AccountServices(users=users, setup=SetupTokens(engine), guard=LoginGuard(engine), sessions=sessions)
+        security = sessions
+    else:
+        security = LoopbackSecurityService() if localhost_trust_enabled else PostgresSecurityService(engine)
     return ApiServices(
-        security=LoopbackSecurityService() if localhost_trust_enabled else PostgresSecurityService(engine),
+        security=security,
+        accounts=accounts,
+        capabilities=capabilities,
+        public_origin=public_origin,
         execution_application=ExecutionApplicationAdapter(engine),
         execution_query=ExecutionQueryAdapter(engine),
         resource_services={**{name: unavailable for name in ("agents", "capabilities", "tools", "workspaces", "artifacts", "memories")}, "multi_agent": multi_agent_coordinator or unavailable},
@@ -358,8 +381,27 @@ def create_production_app(settings: ProductionSettings, *, services: ApiServices
             return JSONResponse({"status": "ready"})
         return JSONResponse({"status": "unavailable"}, status_code=503)
 
-    if settings.LOCALHOST_TRUST_ENABLED:
-        _mount_local_frontend(app, settings.WEB_DIST_DIR)
+    if settings.ORIN_MODE is RuntimeMode.SERVER:
+        _mount_frontend(app, settings.WEB_DIST_DIR, auth_mode="session")
+    elif settings.LOCALHOST_TRUST_ENABLED:
+        _mount_frontend(app, settings.WEB_DIST_DIR, auth_mode="loopback")
+
+    @app.on_event("startup")
+    async def _announce_setup_token() -> None:
+        accounts = getattr(services, "accounts", None) if services is not None else None
+        if accounts is None:
+            return
+        token = accounts.setup.issue_if_needed(accounts.users)
+        if token is None:
+            return
+        # The only place the raw token exists. The operator reads it from the
+        # container log and pastes it into /setup to create the first admin.
+        logger = logging.getLogger("orin.setup")
+        lines = ("ORIN SETUP TOKEN", f"token: {token}", "Abra /setup na URL pública e cole este token para criar o primeiro admin.")
+        for line in lines:
+            logger.warning(line)
+        sys.stderr.write("\n" + "\n".join(lines) + "\n\n")
+        sys.stderr.flush()
 
     def _omniroute_manager() -> object | None:
         manager = getattr(services, "omniroute_runtime", None) if services is not None else None
@@ -369,6 +411,8 @@ def create_production_app(settings: ProductionSettings, *, services: ApiServices
 
     @app.on_event("startup")
     async def _start_configured_omniroute() -> None:
+        if services is not None and not services.capabilities.omniroute:
+            return
         manager = _omniroute_manager()
         if manager is None:
             return
@@ -403,8 +447,8 @@ def create_production_app(settings: ProductionSettings, *, services: ApiServices
     return app
 
 
-def _mount_local_frontend(app: FastAPI, directory: str | None) -> None:
-    """Serve the built SPA only for the explicitly local loopback profile."""
+def _mount_frontend(app: FastAPI, directory: str | None, *, auth_mode: str) -> None:
+    """Serve the built SPA, stamped with how this instance authenticates the browser."""
     root = Path(directory or "").resolve()
     index = root / "index.html"
     assets = root / "assets"
@@ -421,7 +465,7 @@ def _mount_local_frontend(app: FastAPI, directory: str | None) -> None:
             # otherwise-valid static build from locking its own composer behind
             # a CSRF token it can never obtain.
             'name="agentos-auth-mode" content=""',
-            'name="agentos-auth-mode" content="loopback"',
+            f'name="agentos-auth-mode" content="{auth_mode}"',
             1,
         )
 
