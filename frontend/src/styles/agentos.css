@@ -1405,3 +1405,15 @@ body.has-workspace-file-preview { overflow: hidden; }
 .mcp-server-form__manual input, .mcp-server-form__manual select { padding: 9px 11px; border: 1px solid var(--line); border-radius: 8px; background: var(--ink); color: var(--text); font-family: inherit; font-size: 12px; }
 
 .mcp-sign-in { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
+
+/* Sign-in, setup and password screens (server mode). One column that works on a phone. */
+.auth-page { min-height: 100dvh; display: grid; place-items: center; padding: 24px 16px; background: var(--orin-ink); }
+.auth-card { width: min(100%, 380px); display: grid; gap: 12px; }
+.auth-card h1 { margin: 0; font-size: 22px; }
+.auth-card__lede { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.5; }
+.auth-form { display: grid; gap: 14px; margin-top: 8px; }
+.auth-form label { display: grid; gap: 6px; font-size: 12px; color: var(--muted); }
+.auth-form input { min-height: 44px; padding: 10px 12px; border: 1px solid var(--line-strong); border-radius: 8px; background: transparent; color: var(--text); font-size: 16px; }
+.auth-form input:focus-visible { outline: 2px solid var(--signal-dim); outline-offset: 1px; }
+.auth-form button { min-height: 44px; }
+.auth-form__error { margin: 0; color: var(--danger); font-size: 13px; }
