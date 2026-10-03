@@ -20,6 +20,7 @@ from pathlib import Path
 from time import monotonic, sleep
 
 from agentos.installation import OrinPaths, RuntimeProfile
+from agentos.installation.layout import migrate_data_layout
 from agentos.omniroute import OmniRouteRuntimeSettingsStore
 from agentos.provider_catalog.omniroute import DEFAULT_OMNIROUTE_BASE_URL
 
@@ -186,6 +187,8 @@ class Supervisor:
             self._desktop_current_service = "migrations"
             self._desktop_service("migrations", "starting", "Aplicando atualizações do banco")
             apply_migrations(self.environment, self.profile, log=self.log)
+            if migrate_data_layout(self.paths):
+                self.log.info("moved managed workspaces into %s", self.paths.user_workspaces("local-user"))
         except StartupCancelled:
             raise
         except Exception as error:

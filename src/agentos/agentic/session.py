@@ -627,7 +627,7 @@ class TurnSession:
         self.workspace_is_local = isinstance(local_root, str) and bool(local_root.strip())
         self.workspace = resolve_workspace(
             resolve_effective_workspace_id(turn),
-            managed_root=workspace_root or orin_paths().workspaces,
+            managed_root=workspace_root or orin_paths().user_workspaces(str(turn.get("user_id") or "")),
             local_root=local_root if isinstance(local_root, str) else None,
         )
         # Pre-acquired by the caller (typically from a RetrievalRegistry kept

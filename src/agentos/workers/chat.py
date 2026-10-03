@@ -334,7 +334,7 @@ class ChatWorker:
         self._reconciliation_turns: set[str] = set()
         self._kernel_turns: set[str] = set()
         self._runtime_factory = runtime_factory
-        self._workspace_root = workspace_root if workspace_root is not None else str(orin_paths().workspaces)
+        self._workspace_root = workspace_root
         self._enable_subagents = enable_subagents
         self._runtime_settings = runtime_settings or AgentRuntimeSettingsStore()
         # A conversation's browser survives across turns (a login or a

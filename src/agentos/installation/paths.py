@@ -18,9 +18,12 @@ installation directory, so replacing the installation never touches user data.
 from __future__ import annotations
 
 import os
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+
+_USER_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
 def _environment_path(name: str) -> Path | None:
@@ -74,8 +77,20 @@ class OrinPaths:
 
     @property
     def workspaces(self) -> Path:
-        """Agent workspaces. One directory per conversation lives under here."""
+        """Legacy shared workspace root, only read by the layout migration."""
         return self.data / "workspaces"
+
+    def user_root(self, user_id: str) -> Path:
+        """Everything a sandbox may later mount for one profile lives under here."""
+        if not isinstance(user_id, str) or not _USER_ID.fullmatch(user_id):
+            raise ValueError("user id is not safe to use as a directory name")
+        return self.data / "users" / user_id
+
+    def user_workspaces(self, user_id: str) -> Path:
+        return self.user_root(user_id) / "workspaces"
+
+    def user_files(self, user_id: str) -> Path:
+        return self.user_root(user_id) / "files"
 
     @property
     def instance_state(self) -> Path:

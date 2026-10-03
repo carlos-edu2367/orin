@@ -349,10 +349,14 @@ class ApiServices:
         self.omniroute_runtime = omniroute_runtime
         self.agentic_runtime = agentic_runtime
         self.events = events or InMemoryClientEventStream()
-        self.workspace_root = Path(workspace_root) if workspace_root is not None else orin_paths().workspaces
+        self.workspace_root = Path(workspace_root) if workspace_root is not None else None
         self.uploads = uploads
         self.vision_model_settings = vision_model_settings
         self.scheduled_chats = scheduled_chats
+
+    def managed_root_for(self, user_id: str) -> Path:
+        """Where a profile's managed workspaces live; an explicit root (tests) wins."""
+        return self.workspace_root if self.workspace_root is not None else orin_paths().user_workspaces(user_id)
 
 
 def create_app(services: ApiServices) -> FastAPI:
@@ -555,7 +559,7 @@ def create_app(services: ApiServices) -> FastAPI:
         return JSONResponse(status_code=204, content=None)
 
     def workspace_for(workspace_id: str, principal: AuthenticatedPrincipal) -> ConversationWorkspace:
-        return resolve_workspace(workspace_id, managed_root=services.workspace_root, local_root=local_root_for(workspace_id, principal))
+        return resolve_workspace(workspace_id, managed_root=services.managed_root_for(principal.user_id), local_root=local_root_for(workspace_id, principal))
 
     def promote(workspace_id: str, principal: AuthenticatedPrincipal, upload_ids: list[str]) -> list[dict[str, object]]:
         if not upload_ids:
@@ -902,7 +906,7 @@ def create_app(services: ApiServices) -> FastAPI:
     def conversation_workspace(conversation_id: str, principal: AuthenticatedPrincipal) -> ConversationWorkspace:
         conversation = conversation_record(conversation_id, principal)
         workspace_id, _ = effective_workspace_id(conversation, principal)
-        return resolve_workspace(workspace_id, managed_root=services.workspace_root, local_root=local_root_for(workspace_id, principal))
+        return resolve_workspace(workspace_id, managed_root=services.managed_root_for(principal.user_id), local_root=local_root_for(workspace_id, principal))
 
     @app.get("/v1/conversations/{conversation_id}/files/{path:path}")
     async def get_conversation_file(conversation_id: str, path: str, request: Request, disposition: str = "inline") -> FileResponse:
