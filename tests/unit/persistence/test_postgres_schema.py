@@ -63,6 +63,9 @@ def test_persistence_schema_contains_only_the_durable_boundary_tables():
             "oauth_tokens",
             "mcp_oauth_clients",
             "oauth_pending_authorizations",
+            "users",
+            "instance_setup",
+            "auth_login_attempts",
         }
 
 

@@ -278,6 +278,8 @@ security_sessions = Table(
     Column("scopes", JSON, nullable=False),
     Column("revoked", Boolean, nullable=False, server_default="false"),
     Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("expires_at", DateTime(timezone=True)),
+    Column("last_seen_at", DateTime(timezone=True)),
     UniqueConstraint("session_id", name="uq_security_sessions_session_id"),
 )
 Index("ix_security_sessions_credential_ref", security_sessions.c.credential_ref)
@@ -299,6 +301,39 @@ security_rate_limit_hits = Table(
     Column("occurred_at", DateTime(timezone=True), nullable=False),
 )
 Index("ix_security_rate_limit_window", security_rate_limit_hits.c.credential_ref, security_rate_limit_hits.c.action, security_rate_limit_hits.c.occurred_at)
+
+users = Table(
+    "users", metadata,
+    Column("user_id", String(255), primary_key=True),
+    Column("username", String(64), nullable=False),
+    Column("display_name", String(128), nullable=False),
+    Column("password_hash", String(255), nullable=False),
+    Column("role", String(16), nullable=False),
+    Column("active", Boolean, nullable=False, server_default="true"),
+    Column("must_change_password", Boolean, nullable=False, server_default="false"),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+    Column("password_changed_at", DateTime(timezone=True), nullable=False),
+    UniqueConstraint("username", name="uq_users_username"),
+    CheckConstraint("role IN ('admin', 'member')", name="ck_users_role"),
+)
+
+# At most one row: the digest of the one-time token that creates the first admin.
+instance_setup = Table(
+    "instance_setup", metadata,
+    Column("id", Integer, primary_key=True),
+    Column("token_digest", String(64), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+)
+
+auth_login_attempts = Table(
+    "auth_login_attempts", metadata,
+    Column("id", Integer, primary_key=True),
+    Column("key", String(320), nullable=False),
+    Column("succeeded", Boolean, nullable=False),
+    Column("occurred_at", DateTime(timezone=True), nullable=False),
+)
+Index("ix_auth_login_attempts_key_time", auth_login_attempts.c.key, auth_login_attempts.c.occurred_at)
 
 
 event_stream_bindings = Table(

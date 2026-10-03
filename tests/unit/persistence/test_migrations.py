@@ -107,3 +107,12 @@ def test_migration_0045_marks_servers_with_credentials_as_static():
         kinds = dict(connection.execute(text("SELECT server_id, auth_kind FROM mcp_servers")).all())
     assert kinds == {"with": "static", "without": "none"}
     assert {"mcp_oauth_clients", "oauth_pending_authorizations"} <= set(inspect(engine).get_table_names())
+
+
+def test_migration_0046_creates_accounts_and_session_expiry():
+    engine = create_engine("sqlite:///:memory:")
+    upgrade(engine)
+    tables = set(inspect(engine).get_table_names())
+    assert {"users", "instance_setup", "auth_login_attempts"} <= tables
+    columns = {column["name"] for column in inspect(engine).get_columns("security_sessions")}
+    assert {"expires_at", "last_seen_at"} <= columns
