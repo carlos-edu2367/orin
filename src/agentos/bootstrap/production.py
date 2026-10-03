@@ -401,8 +401,12 @@ def create_production_app(settings: ProductionSettings, *, services: ApiServices
         lines = ("ORIN SETUP TOKEN", f"token: {token}", "Abra /setup na URL pública e cole este token para criar o primeiro admin.")
         for line in lines:
             logger.warning(line)
-        sys.stderr.write("\n" + "\n".join(lines) + "\n\n")
-        sys.stderr.flush()
+        # With no logging configured, Python's last-resort handler already put
+        # these lines on stderr. Echo them only when a handler may be sending
+        # the log somewhere the operator is not looking (a file, a collector).
+        if logger.hasHandlers():
+            sys.stderr.write("\n" + "\n".join(lines) + "\n\n")
+            sys.stderr.flush()
 
     def _omniroute_manager() -> object | None:
         manager = getattr(services, "omniroute_runtime", None) if services is not None else None
