@@ -1,6 +1,7 @@
 export type BrowserSessionBootstrap =
   | { status: 'ready'; csrfToken: string }
   | { status: 'loopback' }
+  | { status: 'session' }
   | { status: 'missing_csrf' }
 
 export function readBrowserSessionBootstrap(documentRef?: Document): BrowserSessionBootstrap {
@@ -9,6 +10,8 @@ export function readBrowserSessionBootstrap(documentRef?: Document): BrowserSess
     ?.content
     .trim()
   if (authMode === 'loopback') return { status: 'loopback' }
+  // Server mode: the CSRF token arrives from /v1/auth/me after sign-in.
+  if (authMode === 'session') return { status: 'session' }
 
   const csrfToken = documentRef
     ?.querySelector<HTMLMetaElement>('meta[name="csrf-token"]')

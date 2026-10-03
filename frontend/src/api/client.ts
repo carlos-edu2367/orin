@@ -1,12 +1,14 @@
 import { ApiError, invalidResponseError, parseApiErrorResponse } from './errors'
 import { readBrowserSessionBootstrap } from './browserSession'
+import { getSessionCsrf, notifyUnauthenticated } from './session'
 
 export type MutationIntent = Readonly<{ idempotencyKey: string }>
 
 type ApiClientOptions = {
   baseUrl?: string
   bearerToken?: string
-  csrfToken?: string
+  csrfToken?: string | (() => string | undefined)
+  onUnauthenticated?: () => void
   fetchImpl?: typeof fetch
   maxAttempts?: number
   retryDelayMs?: number
@@ -34,7 +36,8 @@ export type StreamRequestOptions = {
 export class ApiClient {
   private readonly baseUrl: string
   private readonly bearerToken?: string
-  private readonly csrfToken?: string
+  private readonly csrfSource?: string | (() => string | undefined)
+  private readonly onUnauthenticated?: () => void
   private readonly fetchImpl: typeof fetch
   private readonly maxAttempts: number
   private readonly retryDelayMs: number
@@ -43,11 +46,16 @@ export class ApiClient {
   constructor(options: ApiClientOptions = {}) {
     this.baseUrl = options.baseUrl?.replace(/\/$/, '') ?? ''
     this.bearerToken = options.bearerToken
-    this.csrfToken = options.csrfToken
+    this.csrfSource = options.csrfToken
+    this.onUnauthenticated = options.onUnauthenticated
     this.fetchImpl = options.fetchImpl ?? fetch
     this.maxAttempts = Math.max(1, Math.min(options.maxAttempts ?? 2, 3))
     this.retryDelayMs = Math.max(0, options.retryDelayMs ?? 250)
     this.createKey = options.createIdempotencyKey ?? defaultIdempotencyKey
+  }
+
+  private csrf(): string | undefined {
+    return typeof this.csrfSource === 'function' ? this.csrfSource() : this.csrfSource
   }
 
   createMutationIntent(): MutationIntent {
@@ -60,7 +68,8 @@ export class ApiClient {
     const headers = new Headers({ Accept: 'application/json' })
     if (options.body !== undefined) headers.set('Content-Type', 'application/json')
     if (this.bearerToken) headers.set('Authorization', `Bearer ${this.bearerToken}`)
-    if (this.csrfToken && method !== 'GET') headers.set('X-CSRF-Token', this.csrfToken)
+    const csrfToken = this.csrf()
+    if (csrfToken && method !== 'GET') headers.set('X-CSRF-Token', csrfToken)
     if (options.intent) headers.set('Idempotency-Key', options.intent.idempotencyKey)
 
     for (let attempt = 1; attempt <= this.maxAttempts; attempt += 1) {
@@ -74,6 +83,7 @@ export class ApiClient {
           signal: options.signal,
         })
         if (!response.ok || (options.expectedStatus !== undefined && response.status !== options.expectedStatus)) {
+          if (response.status === 401) this.onUnauthenticated?.()
           const error = await parseApiErrorResponse(response)
           if (error.retryable && attempt < this.maxAttempts) {
             await delay(this.retryDelayMs, options.signal)
@@ -116,7 +126,8 @@ export class ApiClient {
     const url = this.safeUrl(options.path)
     const headers = new Headers({ Accept: 'application/json' })
     if (this.bearerToken) headers.set('Authorization', `Bearer ${this.bearerToken}`)
-    if (this.csrfToken) headers.set('X-CSRF-Token', this.csrfToken)
+    const csrfToken = this.csrf()
+    if (csrfToken) headers.set('X-CSRF-Token', csrfToken)
     const response = await this.fetchImpl.call(globalThis, url, {
       method: 'POST',
       headers,
@@ -124,6 +135,7 @@ export class ApiClient {
       body: options.body,
     })
     if (!response.ok || (options.expectedStatus !== undefined && response.status !== options.expectedStatus)) {
+      if (response.status === 401) this.onUnauthenticated?.()
       throw await parseApiErrorResponse(response)
     }
     try {
@@ -171,6 +183,9 @@ export function createBrowserApiClient(options: BrowserApiClientOptions = {}): A
   const bootstrap = typeof document === 'undefined'
     ? { status: 'missing_csrf' as const }
     : readBrowserSessionBootstrap(document)
+  if (bootstrap.status === 'session') {
+    return new ApiClient({ ...options, csrfToken: getSessionCsrf, onUnauthenticated: notifyUnauthenticated, maxAttempts: 1 })
+  }
   const csrfToken = bootstrap.status === 'ready' ? bootstrap.csrfToken : undefined
   return new ApiClient({ ...options, csrfToken, maxAttempts: 1 })
 }
