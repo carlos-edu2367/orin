@@ -63,3 +63,29 @@ def test_list_serializes_once_schedule_as_explicit_utc_for_local_display():
     listed = service.list("user-1")
 
     assert listed["items"][0]["next_fire_at"] == "2026-08-16T02:50:00Z"
+
+
+def test_a_deactivated_owner_does_not_fire_until_reactivated():
+    from agentos.accounts.store import UserStore
+
+    now = datetime(2026, 8, 13, 12, tzinfo=UTC)
+    engine = create_local_engine("sqlite+pysqlite://")
+    metadata.create_all(engine)
+    users = UserStore(engine)
+    users.create(username="admin", password="a long password", role="admin")
+    owner = users.create(username="bruno", password="a long password")
+    with engine.begin() as connection:
+        connection.execute(insert(provider_model_catalog).values(
+            user_id=owner.user_id, provider="openrouter", model_id="model-1", display_name="Model",
+            capabilities=[], input_modalities=[], output_modalities=[], refreshed_at=now, created_at=now, updated_at=now,
+        ))
+        connection.execute(insert(provider_configurations).values(
+            user_id=owner.user_id, provider="openrouter", enabled=True, model=None,
+            base_url=None, secret_ref="test", key_cooldown_seconds=60, catalog_refreshed_at=now, created_at=now, updated_at=now,
+        ))
+    service = ScheduledChatService(engine, clock=lambda: now)
+    service.create(owner.user_id, ScheduledChatInput("x", "openrouter", "model-1", "UTC", "hourly"), idempotency_key="s1")
+    users.update(owner.user_id, active=False)
+    assert service.run_due(worker_id="w", due_before=now + timedelta(hours=1)) == ()
+    users.update(owner.user_id, active=True)
+    assert service.run_due(worker_id="w", due_before=now + timedelta(hours=1))

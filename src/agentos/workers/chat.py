@@ -30,6 +30,7 @@ from agentos.agentic.session import TurnSession, build_retrieval_for_turn, resol
 from agentos.agentic.browser_tools import ConversationBrowserRegistry, browser_capability_from_environment, conversation_browser_for
 from agentos.agentic.web_search import search_client_from_environment
 from agentos.retrieval.registry import RetrievalRegistry
+from agentos.accounts.store import UserStore
 from agentos.configuration.capabilities import InstanceCapabilities
 from agentos.configuration.mode import current_mode
 from agentos.conversations.chat import PostgresChatStore
@@ -40,6 +41,7 @@ from agentos.mcp.toolset import McpToolProvider
 from agentos.plugins.hook_engine import HookEngine
 from agentos.plugins.rehydrate import rehydrate_hooks
 from agentos.plugins.service import PluginService
+from agentos.profile_files.binding import relative_display
 from agentos.persistence.postgres.agent_memory import PostgresAgentMemoryStore
 from agentos.persistence.postgres.agentic_activity import PostgresAgenticActivityStore
 from agentos.persistence.postgres.conversation_agents import ConversationAgentStore
@@ -361,6 +363,10 @@ class ChatWorker:
         turn = self.store.claim(turn_id)
         if turn is None:
             return
+        refusal = self._preflight_refusal(turn)
+        if refusal is not None:
+            self._refuse(turn, refusal)
+            return
         kernel_managed = self._runtime_factory is None
         if not kernel_managed:
             try:
@@ -495,6 +501,33 @@ class ChatWorker:
 
     def _kernel_manages(self, turn: dict[str, object]) -> bool:
         return str(turn["turn_id"]) in self._kernel_turns
+
+    def _preflight_refusal(self, turn: dict[str, object]) -> str | None:
+        """Why this turn must not run at all on this instance, if anything."""
+        user_id = str(turn.get("user_id") or "")
+        if self._capabilities.user_admin and not UserStore(self.store._engine).is_active(user_id):
+            return "owner_inactive"
+        local_root = turn.get("workspace_root_path")
+        if self._capabilities.profile_files and isinstance(local_root, str) and local_root.strip():
+            try:
+                outside = relative_display(orin_paths().user_files(user_id), local_root) is None
+            except ValueError:
+                outside = True
+            if outside:
+                return "workspace_unavailable"
+        return None
+
+    def _refuse(self, turn: dict[str, object], code: str) -> None:
+        # Close the canonical execution too, so a refused turn never stays
+        # QUEUED for a sweeper to pick up again. QUEUED only reaches FAILED
+        # through STARTING. Best-effort: the chat read model is what the user
+        # sees, and it is finished regardless.
+        try:
+            self._project(turn, "STARTING", "worker_acquired")
+            self._project(turn, "FAILED", code)
+        except Exception:
+            _LOGGER.exception("execution for refused chat turn %s could not be closed", turn.get("turn_id"))
+        self.store.finish(turn, failed=True, code=code)
 
     def _project(self, turn: dict[str, object], target: str, reason: str, result_ref: str | None = None) -> None:
         """Commit the canonical execution lifecycle before the provider runs.

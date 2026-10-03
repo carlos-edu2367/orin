@@ -16,7 +16,7 @@ from sqlalchemy.engine import Engine
 from agentos.conversations.chat import PostgresChatStore
 from agentos.persistence.postgres.schema import (
     provider_configurations, provider_model_catalog,
-    projects, schedule_occurrences, scheduled_chat_tasks, schedules,
+    projects, schedule_occurrences, scheduled_chat_tasks, schedules, users,
 )
 
 
@@ -241,7 +241,13 @@ class ScheduledChatService:
                 schedule_occurrences.c.claim_expires_at <= due,
             )).all()
             claimed.extend((str(row.schedule_id), str(row.occurrence_id)) for row in expired)
-            rows = connection.execute(select(schedules).where(schedules.c.state == "ACTIVE", schedules.c.next_fire_at <= due).with_for_update()).mappings().all()
+            # A deactivated profile's schedules pause; an owner without an
+            # account row (the local install) keeps firing as before.
+            inactive_owners = select(users.c.user_id).where(users.c.active.is_(False))
+            rows = connection.execute(select(schedules).where(
+                schedules.c.state == "ACTIVE", schedules.c.next_fire_at <= due,
+                schedules.c.user_id.not_in(inactive_owners),
+            ).with_for_update()).mappings().all()
             for schedule in rows:
                 active = connection.execute(select(schedule_occurrences.c.occurrence_id).where(
                     schedule_occurrences.c.schedule_id == schedule["schedule_id"],
