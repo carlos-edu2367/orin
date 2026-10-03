@@ -827,6 +827,7 @@ export function ChatPage() {
                 disabled={running || stopping}
               />}
               <WorkspaceFolderButton
+                client={client}
                 state={conversation?.workspace ?? MANAGED_WORKSPACE}
                 onInspect={(path) => inspectWorkspaceFolder(client, conversationId, path)}
                 onAttach={(path, acknowledged) => attachWorkspaceFolder(client, conversationId, path, acknowledged)}

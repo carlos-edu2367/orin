@@ -1,5 +1,8 @@
 import { useRef, useState } from 'react'
+import type { ApiClient } from '../../api/client'
 import type { FolderInspection, InspectionOutcome, WorkspaceRisk, WorkspaceState } from '../../api/workspace'
+import { useSession } from '../../app/useSession'
+import { ProfileFolderBrowser } from '../files/ProfileFolderBrowser'
 
 export type WorkspaceFolderButtonProps = {
   state: WorkspaceState
@@ -7,6 +10,7 @@ export type WorkspaceFolderButtonProps = {
   onAttach: (path: string, acknowledgedRisk: boolean) => Promise<WorkspaceState>
   onDetach: () => Promise<WorkspaceState>
   onChange: (state: WorkspaceState) => void
+  client?: ApiClient
 }
 
 const RISK_SENTENCE: Record<Exclude<WorkspaceRisk, 'none'>, string> = {
@@ -22,7 +26,9 @@ const RISK_SENTENCE: Record<Exclude<WorkspaceRisk, 'none'>, string> = {
  * choice only costs a second, named click, which is what keeps it deliberate
  * instead of accidental.
  */
-export function WorkspaceFolderButton({ state, onInspect, onAttach, onDetach, onChange }: WorkspaceFolderButtonProps) {
+export function WorkspaceFolderButton({ state, onInspect, onAttach, onDetach, onChange, client }: WorkspaceFolderButtonProps) {
+  const { capabilities } = useSession()
+  const profileArea = capabilities.profile_files && client !== undefined
   const [open, setOpen] = useState(false)
   const [candidate, setCandidate] = useState<FolderInspection | null>(null)
   const [typed, setTyped] = useState('')
@@ -33,7 +39,7 @@ export function WorkspaceFolderButton({ state, onInspect, onAttach, onDetach, on
   const [error, setError] = useState<string | null>(null)
   const inspectionRequest = useRef(0)
 
-  const label = state.kind === 'local' ? (state.folderName || state.path || 'Pasta') : 'Pasta'
+  const label = state.kind === 'local' ? (state.folderName || state.path || 'Pasta') : state.kind === 'unavailable' ? 'Pasta indisponível' : 'Pasta'
 
   async function inspect(path: string | null) {
     const requestId = ++inspectionRequest.current
@@ -102,10 +108,10 @@ export function WorkspaceFolderButton({ state, onInspect, onAttach, onDetach, on
         className={`workspace-folder__button${state.kind === 'local' ? ' is-attached' : ''}`}
         onClick={toggleOpen}
         title={state.path ?? undefined}
-        aria-label={state.kind === 'local' ? `Diretório do workspace: ${label}` : 'Adicionar pasta ao workspace'}
+        aria-label={state.kind === 'local' ? `Diretório do workspace: ${label}` : state.kind === 'unavailable' ? 'Pasta indisponível no servidor' : 'Adicionar pasta ao workspace'}
         aria-expanded={open}
       >
-        <span aria-hidden="true">▰</span> {state.kind === 'local' ? label : 'Adicionar diretório'}
+        <span aria-hidden="true">▰</span> {state.kind === 'managed' ? 'Adicionar diretório' : label}
       </button>
 
       {open && (
@@ -135,21 +141,29 @@ export function WorkspaceFolderButton({ state, onInspect, onAttach, onDetach, on
           ) : (
             <>
               <div>
-                <h3>Workspace local</h3>
+                <h3>{capabilities.profile_files ? 'Pasta do projeto' : 'Workspace local'}</h3>
                 <p className="workspace-folder__meta">Escolha um diretório para o agente trabalhar neste {state.scope === 'project' ? 'projeto' : 'chat'}.</p>
               </div>
               {state.kind === 'local' ? (
                 <p className="workspace-folder__path">{state.path}</p>
+              ) : state.kind === 'unavailable' ? (
+                <p className="workspace-folder__risk">A pasta {state.folderName} era do computador onde o Orin rodava antes. Neste servidor, escolha uma pasta da sua área de arquivos.</p>
               ) : (
                 <p className="workspace-folder__meta">Sem pasta local. O agente trabalha na pasta gerenciada pelo Orin.</p>
               )}
-              <button type="button" disabled={actionBusy || dialogBusy} onClick={() => void inspect(null)}>Selecionar diretório…</button>
-              <label className="workspace-folder__field">
-                Caminho da pasta
-                <input value={typed} disabled={actionBusy || manualInspecting} onChange={(event) => setTyped(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); if (typed.trim()) void inspect(typed.trim()) } }} placeholder="C:\projetos\meu-app" />
-              </label>
-              <button type="button" disabled={actionBusy || manualInspecting || !typed.trim()} onClick={() => void inspect(typed.trim())}>Adicionar diretório</button>
-              {state.kind === 'local' && <button type="button" disabled={actionBusy} onClick={() => void detach()}>Remover</button>}
+              {profileArea ? (
+                <ProfileFolderBrowser client={client} onChoose={(path) => void inspect(path)} />
+              ) : (
+                <>
+                  <button type="button" disabled={actionBusy || dialogBusy} onClick={() => void inspect(null)}>Selecionar diretório…</button>
+                  <label className="workspace-folder__field">
+                    Caminho da pasta
+                    <input value={typed} disabled={actionBusy || manualInspecting} onChange={(event) => setTyped(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); if (typed.trim()) void inspect(typed.trim()) } }} placeholder="C:\projetos\meu-app" />
+                  </label>
+                  <button type="button" disabled={actionBusy || manualInspecting || !typed.trim()} onClick={() => void inspect(typed.trim())}>Adicionar diretório</button>
+                </>
+              )}
+              {state.kind !== 'managed' && <button type="button" disabled={actionBusy} onClick={() => void detach()}>Remover</button>}
             </>
           )}
           {dialogBusy && <p className="workspace-folder__notice" role="status">O seletor do Windows está aberto. Se ele não aparecer, cole o caminho abaixo.</p>}

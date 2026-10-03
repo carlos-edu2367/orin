@@ -1435,3 +1435,15 @@ body.has-workspace-file-preview { overflow: hidden; }
 .users-error { color: var(--danger); }
 .installation-status__managed { color: var(--muted); font-size: 13px; }
 @media (max-width: 720px) { .users-table thead { display: none; } .users-table tr { display: grid; padding: 8px 0; } .users-table td { border: 0; padding: 2px 0; } }
+
+/* The profile file area picker (server mode). */
+.profile-files { display: grid; gap: 10px; }
+.profile-files__bar { display: flex; align-items: center; gap: 8px; }
+.profile-files__path { font: 12px var(--mono); color: var(--muted); overflow-wrap: anywhere; }
+.profile-files__list { display: grid; gap: 2px; max-height: 220px; margin: 0; padding: 0; overflow: auto; list-style: none; }
+.profile-files__list button { width: 100%; padding: 8px; border: 0; border-radius: 6px; background: transparent; color: var(--text); text-align: left; cursor: pointer; }
+.profile-files__list button:hover, .profile-files__list button:focus-visible { background: rgba(255, 255, 255, .05); }
+.profile-files__empty { color: var(--muted); font-size: 12px; padding: 8px; }
+.profile-files__create { display: flex; flex-wrap: wrap; align-items: end; gap: 8px; }
+.profile-files__import { font-size: 12px; color: var(--muted); }
+.profile-files__error { color: var(--danger); font-size: 12px; }

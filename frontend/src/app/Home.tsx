@@ -227,6 +227,7 @@ export function Home({ client, bootstrap }: HomeProps) {
                 disabled={submitting}
               />
               <WorkspaceFolderButton
+                client={apiClient}
                 state={workspaceState(workspacePath, projectId, activeProjectName)}
                 onInspect={(path) => inspectNewWorkspaceFolder(apiClient, path, projectId)}
                 onAttach={async (path, acknowledgedRisk) => {

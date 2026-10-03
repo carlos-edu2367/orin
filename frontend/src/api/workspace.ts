@@ -4,7 +4,7 @@ import { invalidResponseError } from './errors'
 export type WorkspaceRisk = 'none' | 'drive_root' | 'system' | 'home_root' | 'orin_data'
 
 export type WorkspaceState = {
-  kind: 'managed' | 'local'
+  kind: 'managed' | 'local' | 'unavailable'
   path: string | null
   folderName: string | null
   scope: 'chat' | 'project'
@@ -58,7 +58,7 @@ export function detachWorkspaceFolder(client: ApiClient, conversationId: string,
 
 export function parseWorkspaceState(value: unknown): WorkspaceState {
   const data = record(value)
-  const kind = data.kind === 'local' ? 'local' : 'managed'
+  const kind = data.kind === 'local' ? 'local' : data.kind === 'unavailable' ? 'unavailable' : 'managed'
   return {
     kind,
     path: typeof data.path === 'string' ? data.path : null,
