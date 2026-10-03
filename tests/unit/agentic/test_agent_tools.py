@@ -1533,3 +1533,17 @@ def test_a_broken_reindex_queue_does_not_fail_the_tool_but_is_logged(tmp_path, c
 
     assert outcome.status == "succeeded"
     assert any("reindex" in record.message for record in caplog.records)
+
+
+def test_without_terminal_there_are_no_shell_tools_and_no_write_diagnostics(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    tools = AgentToolset(ConversationWorkspace(tmp_path, "chat_server"), enable_terminal=False)
+    names = {item.name for item in tools.definitions()}
+    assert not names & {"run_command", "read_process_output", "stop_process", "verify_project"}
+
+    def forbid(*args, **kwargs):
+        raise AssertionError("no process may start without the terminal capability")
+    monkeypatch.setattr(agent_tools, "file_diagnostic_command", lambda path, project_root: "ruff check x.py")
+    monkeypatch.setattr(agent_tools.subprocess, "run", forbid)
+    outcome = tools.invoke("write_file", {"path": "x.py", "content": "print('ok')\n"})
+    assert outcome.status == "succeeded"
+    assert "diagnóstico automático" not in outcome.content

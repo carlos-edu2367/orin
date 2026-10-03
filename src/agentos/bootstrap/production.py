@@ -289,6 +289,7 @@ def compose_production_services(engine: Engine, *, localhost_trust_enabled: bool
     IMPLEMENTATION_PLAN.md, Fase D "Decisões locais").
     """
     unavailable = _UnavailableApplicationPort()
+    capabilities = InstanceCapabilities.for_mode(mode)
     # Optional Postgres integration tests use a process-scoped ephemeral key;
     # deployed profiles must provide a stable key through the environment.
     provider_cipher = ProviderSecretCipher.from_environment(required=not bool(os.getenv("AGENTOS_TEST_POSTGRES_DSN")))
@@ -298,10 +299,10 @@ def compose_production_services(engine: Engine, *, localhost_trust_enabled: bool
     cursor_secret = activity_cursor_secret or activity_cursor_fallback(engine)
     provider_repository = PostgresProviderCatalogRepository(engine, cipher=provider_cipher)
     skill_library = PostgresSkillLibraryService(engine)
-    mcp_service = McpServerService(engine)
+    mcp_service = McpServerService(engine, allow_stdio=capabilities.mcp_stdio)
     mcp_oauth = McpOAuth(engine)
     command_library = CommandLibrary()
-    hook_engine = HookEngine()
+    hook_engine = HookEngine(enabled=capabilities.plugin_hooks)
     omniroute_runtime = OmniRouteProcessManager(OmniRouteRuntimeSettingsStore())
     staging = UploadStaging(orin_paths().data / "uploads" / "staging")
     try:
@@ -310,7 +311,6 @@ def compose_production_services(engine: Engine, *, localhost_trust_enabled: bool
         # Staging cleanup is best-effort: a failure here must never block the
         # API from starting, it just leaves stale uploads for the next purge.
         pass
-    capabilities = InstanceCapabilities.for_mode(mode)
     accounts: AccountServices | None = None
     if mode is RuntimeMode.SERVER:
         if not public_origin:

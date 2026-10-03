@@ -23,8 +23,9 @@ class RegisteredHook:
 
 
 class HookEngine:
-    def __init__(self, *, executor=None) -> None:
+    def __init__(self, *, executor=None, enabled: bool = True) -> None:
         self.executor = executor or HookExecutor()
+        self.enabled = enabled
         self._hooks: dict[str, list[RegisteredHook]] = {}
         self._lock = RLock()
 
@@ -32,7 +33,7 @@ class HookEngine:
         with self._lock:
             registry = self._hooks.setdefault(user_id, [])
             registry[:] = [item for item in registry if item.plugin_id != plugin_id]
-            if not enabled:
+            if not enabled or not self.enabled:
                 return
             registry.extend(RegisteredHook(plugin_id, Path(install_path), item) for item in hooks)
 
@@ -42,6 +43,8 @@ class HookEngine:
             registry[:] = [item for item in registry if item.plugin_id != plugin_id]
 
     def dispatch(self, *, user_id: str, event: str, payload: dict) -> tuple[HookOutcome, ...]:
+        if not self.enabled:
+            return ()
         with self._lock:
             candidates = [item for item in self._hooks.get(user_id, []) if item.contribution.event == event]
         tool_name = str(payload.get("tool_name") or "")

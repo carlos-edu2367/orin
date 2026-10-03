@@ -17,6 +17,7 @@ from uuid import uuid4
 from sqlalchemy import delete, insert, select, update
 from sqlalchemy.engine import Engine
 
+from agentos.configuration.capabilities import CapabilityUnavailable
 from agentos.persistence.postgres.mcp import public_summary, row_to_config, row_to_tool
 from agentos.persistence.postgres.schema import (
     mcp_oauth_clients, mcp_server_tools, mcp_servers, oauth_pending_authorizations, oauth_tokens,
@@ -66,8 +67,13 @@ def _cipher() -> ProviderSecretCipher:
 
 
 class McpServerService:
-    def __init__(self, engine: Engine) -> None:
+    def __init__(self, engine: Engine, *, allow_stdio: bool = True) -> None:
         self.engine = engine
+        self.allow_stdio = allow_stdio
+
+    def _require_transport(self, transport: McpTransport | str) -> None:
+        if not self.allow_stdio and McpTransport(transport) is McpTransport.STDIO:
+            raise CapabilityUnavailable("mcp_stdio")
 
     # -- reads ------------------------------------------------------------
 
@@ -110,6 +116,9 @@ class McpServerService:
             rows = connection.execute(
                 select(mcp_servers).where(mcp_servers.c.user_id == user_id, mcp_servers.c.state == McpServerState.ACTIVE.value)
             ).mappings().all()
+            # Rows written before the instance became a server stay in the
+            # database but never spawn: a stdio server is a host process.
+            rows = [row for row in rows if self.allow_stdio or row["transport"] != McpTransport.STDIO.value]
             bundles: list[tuple[McpServerConfig, tuple[McpToolDescriptor, ...], dict[str, str]]] = []
             for row in rows:
                 tool_rows = connection.execute(
@@ -157,6 +166,7 @@ class McpServerService:
             transport = McpTransport(str(command.get("transport") or ""))
         except ValueError as error:
             raise McpServiceError("transport must be 'stdio' or 'http'") from error
+        self._require_transport(transport)
         try:
             slug = slugify(str(command.get("slug") or display_name))
         except ValueError as error:
@@ -192,6 +202,7 @@ class McpServerService:
     def approve(self, *, user_id: str, server_id: str, secrets: Mapping[str, str], connect: Connector) -> dict[str, Any]:
         row = self._row(user_id, server_id)
         config = row_to_config(row)
+        self._require_transport(config.transport)
         try:
             protocol_version, tools = connect(config, secrets)
         except HttpUnauthorized as error:
@@ -253,6 +264,7 @@ class McpServerService:
         """Discover tools with the fresh sign-in and activate; used by the OAuth callback and Reconectar."""
         row = self._row(user_id, server_id)
         config = row_to_config(row)
+        self._require_transport(config.transport)
         try:
             protocol_version, tools = connect(config, {})
         except Exception as error:
@@ -292,6 +304,7 @@ class McpServerService:
             raise McpServerNotFound(f"no MCP server named '{slug}' for this user")
         server_id = str(row["server_id"])
         config = row_to_config(row)
+        self._require_transport(config.transport)
         secrets = self._decrypt_secrets(row["secrets_ciphertext"])
         try:
             protocol_version, tools = connect(config, secrets)

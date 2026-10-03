@@ -584,8 +584,10 @@ class TurnSession:
         mcp_provider=None,
         plugin_service=None,
         hook_engine=None,
+        enable_terminal: bool = True,
     ) -> None:
         self.turn = turn
+        self.enable_terminal = bool(enable_terminal)
         self.store = store
         self.agents_store = agents_store
         self.memory = memory_store
@@ -1034,6 +1036,7 @@ class TurnSession:
             code_mode_permits_push=code_mode_permits_push,
             code_mode_permits_pr=code_mode_permits_pr,
             code_mode_requires_approval=code_mode_requires_approval,
+            enable_terminal=self.enable_terminal,
         )
 
     def _session_start_context(self) -> str:

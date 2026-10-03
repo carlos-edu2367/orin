@@ -978,6 +978,10 @@ class AgentToolset:
         across several ``write_file``/``append`` calls is not re-linted on
         every one of them.
         """
+        if not self._enable_terminal:
+            # Linters configured by the project (eslint, ruff plugins) are code
+            # execution. Without a terminal capability nothing runs at all.
+            return outcome
         path = str(outcome.payload.get("path") or arguments.get("path") or "")
         if not path:
             return outcome

@@ -932,3 +932,12 @@ def test_omniroute_records_only_the_requested_route_for_observability(tmp_path: 
     event = next(item for item in store.activity if item[0].value == "model.routing_started")
     assert event[1] == "Selecionando rota"
     assert event[2] == {"requested_route": "auto/coding", "provider": "omniroute"}
+
+
+def test_a_session_without_terminal_offers_no_shell_tools(tmp_path: Path) -> None:
+    session = TurnSession(
+        turn=dict(TURN), store=RecordingStore(), agents_store=MemoryAgentsStore(), memory_store=None,
+        provider_factory=lambda: object(), workspace_root=tmp_path, enable_terminal=False,
+    )
+    names = {item.name for item in session._toolset(subagents=False).definitions()}
+    assert "run_command" not in names and "verify_project" not in names

@@ -30,6 +30,8 @@ from agentos.agentic.session import TurnSession, build_retrieval_for_turn, resol
 from agentos.agentic.browser_tools import ConversationBrowserRegistry, browser_capability_from_environment, conversation_browser_for
 from agentos.agentic.web_search import search_client_from_environment
 from agentos.retrieval.registry import RetrievalRegistry
+from agentos.configuration.capabilities import InstanceCapabilities
+from agentos.configuration.mode import current_mode
 from agentos.conversations.chat import PostgresChatStore
 from agentos.installation import orin_paths
 from agentos.mcp.auth import McpOAuth
@@ -325,6 +327,7 @@ class ChatWorker:
         runtime_settings: AgentRuntimeSettingsStore | None = None,
         browser_registry: ConversationBrowserRegistry | None = None,
         retrieval_registry: RetrievalRegistry | None = None,
+        capabilities: InstanceCapabilities | None = None,
     ) -> None:
         self.store, self._executions, self._queries = store, ExecutionApplicationAdapter(store._engine), ExecutionQueryAdapter(store._engine)
         self._journal = PostgresExecutionJournal(store._engine)
@@ -350,7 +353,8 @@ class ChatWorker:
         # Kept for the whole worker process (unlike skill_library/plugin_service,
         # which are cheap DB-backed rebuilds per turn): registrations here are an
         # in-process index, and are refreshed per-user before each turn below.
-        self._hook_engine = HookEngine()
+        self._capabilities = capabilities or InstanceCapabilities.for_mode(current_mode())
+        self._hook_engine = HookEngine(enabled=self._capabilities.plugin_hooks)
 
     def run(self, turn_id: str) -> None:
         self.store.heartbeat("chat-worker")
@@ -888,7 +892,7 @@ class ChatWorker:
             # any more loudly than it already costs everything else below.
             _LOGGER.exception("could not acquire the retrieval index for %s", turn.get("conversation_id"))
             retrieval_bundle = None
-        mcp_service = McpServerService(engine)
+        mcp_service = McpServerService(engine, allow_stdio=self._capabilities.mcp_stdio)
         plugin_service = PluginService(engine, plugin_root=orin_paths().data / "plugins", skill_library=skill_library, mcp_service=mcp_service, hook_engine=self._hook_engine)
         # A worker process's hook index starts empty; refresh this user's
         # active, consented hooks before every turn so a plugin approved (or a
@@ -916,6 +920,7 @@ class ChatWorker:
                 ),
                 provider_factory=lambda: self._provider_transport(turn),
                 workspace_root=self._workspace_root,
+                enable_terminal=self._capabilities.shell,
                 cancelled=lambda current: self.store.cancel_requested(str(current["turn_id"])),
                 reconciliation_required=self._reconciliation_required,
                 limits=AgenticLimits(deadline=TURN_DEADLINE, max_iterations=configured_limits["max_iterations"], max_actions=None if configured_limits["max_iterations"] is None else 24, max_context_tokens=self._max_context_tokens_for(turn), context_window_tokens=self._context_window_for(turn)),
