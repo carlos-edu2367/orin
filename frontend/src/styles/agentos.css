@@ -1417,3 +1417,21 @@ body.has-workspace-file-preview { overflow: hidden; }
 .auth-form input:focus-visible { outline: 2px solid var(--signal-dim); outline-offset: 1px; }
 .auth-form button { min-height: 44px; }
 .auth-form__error { margin: 0; color: var(--danger); font-size: 13px; }
+
+/* Profile menu, profile administration (server mode). */
+.profile-menu { position: relative; margin-top: auto; padding: 12px 8px; border-top: 1px solid var(--line-strong); }
+.profile-menu__button { display: flex; align-items: center; gap: 10px; width: 100%; padding: 6px 8px; border: 0; border-radius: 8px; background: transparent; color: var(--text); cursor: pointer; }
+.profile-menu__button:hover, .profile-menu__button:focus-visible { background: rgba(255, 255, 255, .04); }
+.profile-menu__avatar { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; border: 1px solid var(--signal-dim); font: 12px var(--mono); }
+.profile-menu__name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.profile-menu__list { position: absolute; left: 8px; right: 8px; bottom: calc(100% - 4px); display: grid; padding: 4px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--orin-surface); }
+.profile-menu__list button { padding: 8px 10px; border: 0; border-radius: 6px; background: transparent; color: var(--text); text-align: left; cursor: pointer; }
+.profile-menu__list button:hover, .profile-menu__list button:focus-visible { background: rgba(255, 255, 255, .06); }
+.users-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.users-table th, .users-table td { padding: 10px 8px; border-bottom: 1px solid var(--line-strong); text-align: left; }
+.users-table__actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.users-create { display: grid; gap: 10px; max-width: 420px; margin-top: 28px; }
+.users-reveal { display: grid; gap: 8px; margin-bottom: 20px; padding: 14px; border: 1px solid var(--signal-dim); border-radius: 8px; }
+.users-error { color: var(--danger); }
+.installation-status__managed { color: var(--muted); font-size: 13px; }
+@media (max-width: 720px) { .users-table thead { display: none; } .users-table tr { display: grid; padding: 8px 0; } .users-table td { border: 0; padding: 2px 0; } }

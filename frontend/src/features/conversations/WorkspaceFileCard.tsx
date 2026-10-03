@@ -3,6 +3,7 @@ import remarkGfm from 'remark-gfm'
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { ApiClient } from '../../api/client'
+import { useSession } from '../../app/useSession'
 
 export type WorkspaceFileReference = { conversationId: string; path: string; name?: string }
 export type WorkspaceFilePreviewHandler = (reference: WorkspaceFileReference) => void
@@ -56,6 +57,7 @@ export function WorkspaceFileCard({
 }) {
   const name = reference.name ?? reference.path.split('/').at(-1) ?? reference.path
   const downloadUrl = workspaceFileUrl(reference, 'attachment')
+  const { capabilities } = useSession()
   const open = async () => {
     if (!client) return
     await client.request({
@@ -83,7 +85,7 @@ export function WorkspaceFileCard({
       <span className="workspace-file-card__actions">
         <button type="button" onClick={() => onPreview?.(reference)} aria-label={`Visualizar ${name}`}>Prévia</button>
         <a href={downloadUrl} aria-label={`Baixar ${name}`}>Baixar</a>
-        <button type="button" onClick={() => void open()} disabled={!client} aria-label={`Abrir ${name} no sistema`}>Abrir</button>
+        {capabilities.open_in_desktop_app && <button type="button" onClick={() => void open()} disabled={!client} aria-label={`Abrir ${name} no sistema`}>Abrir</button>}
       </span>
     </span>
   )
@@ -101,6 +103,7 @@ export function WorkspaceFilePreview({
   const closeButtonRef = useRef<HTMLButtonElement>(null)
   const name = reference.name ?? reference.path.split('/').at(-1) ?? reference.path
   const downloadUrl = workspaceFileUrl(reference, 'attachment')
+  const { capabilities } = useSession()
   const kind = previewKindFor(reference.path)
 
   useEffect(() => {
@@ -149,7 +152,7 @@ export function WorkspaceFilePreview({
           </div>
           <div className="workspace-file-preview__actions">
             <a href={downloadUrl} aria-label={`Baixar ${name}`}>Baixar</a>
-            <button type="button" onClick={() => void open()} disabled={!client} aria-label={`Abrir ${name} no sistema`}>Abrir</button>
+            {capabilities.open_in_desktop_app && <button type="button" onClick={() => void open()} disabled={!client} aria-label={`Abrir ${name} no sistema`}>Abrir</button>}
             <button ref={closeButtonRef} type="button" className="workspace-file-preview__close" onClick={onClose}>Fechar</button>
           </div>
         </header>

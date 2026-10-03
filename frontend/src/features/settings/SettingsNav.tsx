@@ -1,14 +1,16 @@
 import { NavLink, useLocation } from 'react-router-dom'
-import { SETTINGS_GROUPS, findSettingsItem, type SettingsBadge } from './sections'
+import { useSession } from '../../app/useSession'
+import { findSettingsItem, visibleSettingsGroups, type SettingsBadge } from './sections'
 
 export type BadgeState = { value: string; pending?: boolean }
 export type BadgeMap = Partial<Record<SettingsBadge, BadgeState>>
 
 export function SettingsNav({ badges }: { badges: BadgeMap }) {
   const current = findSettingsItem(useLocation().pathname)
+  const session = useSession()
   return (
     <nav className="settings-nav" aria-label="Settings">
-      {SETTINGS_GROUPS.map((group) => (
+      {visibleSettingsGroups(session).map((group) => (
         <div className="settings-nav__group" key={group.title}>
           <p className="settings-nav__group-title">{group.title}</p>
           {group.items.map((item) => {

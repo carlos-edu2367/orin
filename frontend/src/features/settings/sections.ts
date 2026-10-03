@@ -1,4 +1,6 @@
 /** The single source of truth for settings navigation. */
+import type { Capabilities } from '../../api/session'
+
 export type SettingsBadge = 'memory' | 'providers' | 'skills' | 'mcp' | 'plugins' | 'schedules' | 'version'
 
 export type SettingsItem = {
@@ -7,6 +9,7 @@ export type SettingsItem = {
   path: string
   lede: string
   badge?: SettingsBadge
+  requires?: 'admin'
 }
 
 export type SettingsGroup = { title: string; items: SettingsItem[] }
@@ -39,6 +42,7 @@ export const SETTINGS_GROUPS: SettingsGroup[] = [
     items: [
       { id: 'workspace', label: 'Workspace', path: '/settings/workspace', lede: 'Onde os arquivos de cada conversa são gravados.' },
       { id: 'schedules', label: 'Agendamentos', path: '/settings/schedules', lede: 'Conversas que começam sozinhas em um horário.', badge: 'schedules' },
+      { id: 'users', label: 'Perfis', path: '/settings/users', lede: 'Quem acessa esta instância e com qual papel.', requires: 'admin' },
       { id: 'about', label: 'Sobre', path: '/settings/about', lede: 'Versão instalada, atualização e remoção.', badge: 'version' },
     ],
   },
@@ -46,6 +50,18 @@ export const SETTINGS_GROUPS: SettingsGroup[] = [
 
 export function settingsItems(): SettingsItem[] {
   return SETTINGS_GROUPS.flatMap((group) => group.items)
+}
+
+export type SettingsAudience = { isAdmin: boolean; capabilities: Capabilities }
+
+export function visibleSettingsGroups(audience: SettingsAudience): SettingsGroup[] {
+  return SETTINGS_GROUPS
+    .map((group) => ({ ...group, items: group.items.filter((item) => item.requires !== 'admin' || (audience.isAdmin && audience.capabilities.user_admin)) }))
+    .filter((group) => group.items.length > 0)
+}
+
+export function visibleSettingsItems(audience: SettingsAudience): SettingsItem[] {
+  return visibleSettingsGroups(audience).flatMap((group) => group.items)
 }
 
 export function findSettingsItem(pathname: string): SettingsItem | undefined {

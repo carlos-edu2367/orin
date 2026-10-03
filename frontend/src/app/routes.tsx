@@ -23,6 +23,8 @@ import { MemoryPage } from '../features/memory/MemoryPage'
 import { SchedulesPage } from '../features/schedules/SchedulesPage'
 import { McpSection } from '../features/mcp/McpSection'
 import { PluginsSection } from '../features/plugins/PluginsSection'
+import { UsersSection } from '../features/users/UsersSection'
+import { useSession } from './useSession'
 
 export type RouteDefinition = {
   path: string
@@ -53,6 +55,7 @@ export const routes: RouteDefinition[] = [
   { path: '/settings/workspace', element: <SettingsRoute><WorkspaceSection /></SettingsRoute> },
   { path: '/settings/schedules', element: <SettingsRoute><SchedulesPage embedded /></SettingsRoute> },
   { path: '/settings/about', element: <SettingsRoute><AboutSection /></SettingsRoute> },
+  { path: '/settings/users', element: <AdminSettingsRoute><UsersSection /></AdminSettingsRoute> },
   { path: '/providers', element: <Navigate to="/settings/providers" replace /> },
   { path: '/skills', element: <Navigate to="/settings/skills" replace /> },
   { path: '/skills/:skillId', element: <Navigate to="/settings/skills" replace /> },
@@ -85,13 +88,21 @@ function SettingsRoute({ children }: { children: ReactNode }) {
   return <SettingsShell badges={badges}>{children}</SettingsShell>
 }
 
+function AdminSettingsRoute({ children }: { children: ReactNode }) {
+  const session = useSession()
+  if (!session.isAdmin || !session.capabilities.user_admin) return <Navigate to="/settings/general" replace />
+  return <SettingsRoute>{children}</SettingsRoute>
+}
+
 function ProviderSettingsRoute() {
   const { provider: rawProvider } = useParams()
   const navigate = useNavigate()
   const client = useMemo(() => createBrowserApiClient(), [])
   const provider = PROVIDER_NAMES.includes(rawProvider as ProviderName) ? rawProvider as ProviderName : null
   const badges = useSettingsBadges()
+  const { capabilities } = useSession()
   if (rawProvider && !provider) return <Navigate to="/settings/providers" replace />
+  if (provider === 'omniroute' && !capabilities.omniroute) return <Navigate to="/settings/providers" replace />
   return <SettingsShell badges={badges} drawer={provider ? <ProviderDetail provider={provider} client={client} onClose={() => navigate('/settings/providers')} /> : undefined}><ProvidersSection client={client} /></SettingsShell>
 }
 

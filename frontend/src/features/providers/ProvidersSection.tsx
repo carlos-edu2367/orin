@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { createBrowserApiClient, type ApiClient } from '../../api/client'
 import { inspectProvider, listProviderModels, PROVIDER_NAMES, type ProviderName } from '../../api/providers'
+import { useSession } from '../../app/useSession'
 import { SettingsSection } from '../settings/SettingsSection'
 import { VisionModelSetting } from './VisionModelSetting'
 import { ProviderGrid, type ProviderCardStates } from './ProviderGrid'
@@ -8,9 +9,11 @@ import { ProviderGrid, type ProviderCardStates } from './ProviderGrid'
 export function ProvidersSection({ client: providedClient }: { client?: ApiClient }) {
   const client = useMemo(() => providedClient ?? createBrowserApiClient(), [providedClient])
   const [states, setStates] = useState<ProviderCardStates>(() => Object.fromEntries(PROVIDER_NAMES.map((provider) => [provider, { status: 'unconfigured', detail: 'Carregando estado…' }])) as ProviderCardStates)
+  const { capabilities } = useSession()
+  const omniroute = capabilities.omniroute
   useEffect(() => {
     const controller = new AbortController()
-    Promise.all(PROVIDER_NAMES.map(async (provider) => {
+    Promise.all(PROVIDER_NAMES.filter((provider) => provider !== 'omniroute' || omniroute).map(async (provider) => {
       try {
         const state = await inspectProvider(client, provider, controller.signal)
         if (state.enabled !== true) return [provider, { status: 'unconfigured' as const, detail: state.enabled === false ? 'Desabilitado' : 'Não configurado' }] as const
@@ -24,7 +27,7 @@ export function ProvidersSection({ client: providedClient }: { client?: ApiClien
       }
     })).then((entries) => { if (!controller.signal.aborted) setStates(Object.fromEntries(entries) as ProviderCardStates) }).catch(() => undefined)
     return () => controller.abort()
-  }, [client])
+  }, [client, omniroute])
   return <SettingsSection eyebrow="PROVIDERS / CONEXÕES"><ProviderGrid states={states} /><VisionModelSetting client={client} /></SettingsSection>
 }
 

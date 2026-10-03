@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import type { ApiClient } from '../../api/client'
+import { useSession } from '../../app/useSession'
 import { createMcpServer, listMcpCatalog, type McpCatalogEntry, type McpTransport } from '../../api/mcp'
 
 type Mode = 'catalog' | 'manual'
@@ -15,6 +16,8 @@ type McpServerFormProps = {
  * value — the value is typed later, at approval, on the server's own card.
  */
 export function McpServerForm({ client, onCreated, onClose }: McpServerFormProps) {
+  const { capabilities } = useSession()
+  const allowStdio = capabilities.mcp_stdio
   const [mode, setMode] = useState<Mode>('catalog')
   const [query, setQuery] = useState('')
   const [entries, setEntries] = useState<McpCatalogEntry[]>([])
@@ -24,7 +27,7 @@ export function McpServerForm({ client, onCreated, onClose }: McpServerFormProps
   const [error, setError] = useState<string | null>(null)
 
   const [displayName, setDisplayName] = useState('')
-  const [transport, setTransport] = useState<McpTransport>('stdio')
+  const [transport, setTransport] = useState<McpTransport>(allowStdio ? 'stdio' : 'http')
   const [command, setCommand] = useState('')
   const [args, setArgs] = useState('')
   const [url, setUrl] = useState('')
@@ -34,11 +37,12 @@ export function McpServerForm({ client, onCreated, onClose }: McpServerFormProps
     if (mode !== 'catalog') return
     const controller = new AbortController()
     listMcpCatalog(client, query, controller.signal)
-      .then((value) => { setEntries(value); setError(null) })
+      // A server instance cannot spawn stdio servers, so it never offers them.
+      .then((value) => { setEntries(allowStdio ? value : value.filter((entry) => entry.transport !== 'stdio')); setError(null) })
       .catch(() => setError('Não foi possível carregar o catálogo.'))
       .finally(() => setLoadingCatalog(false))
     return () => controller.abort()
-  }, [client, mode, query])
+  }, [client, mode, query, allowStdio])
 
   async function proposeFromCatalog(entry: McpCatalogEntry) {
     setSubmitting(true)
@@ -119,7 +123,7 @@ export function McpServerForm({ client, onCreated, onClose }: McpServerFormProps
           <label>
             Transporte
             <select value={transport} onChange={(event) => setTransport(event.target.value as McpTransport)}>
-              <option value="stdio">stdio</option>
+              {allowStdio && <option value="stdio">stdio</option>}
               <option value="http">http</option>
             </select>
           </label>

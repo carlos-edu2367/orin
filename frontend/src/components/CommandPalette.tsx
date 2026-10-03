@@ -2,7 +2,8 @@ import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useNavigate } from 'react-router-dom'
-import { settingsItems } from '../features/settings/sections'
+import { useSession } from '../app/useSession'
+import { visibleSettingsItems } from '../features/settings/sections'
 
 export type PaletteCommand = {
   id: string
@@ -31,13 +32,14 @@ export function CommandPalette({ commands = [], conversations = [] }: CommandPal
   const navigate = useNavigate()
   const inputRef = useRef<HTMLInputElement>(null)
   const reduced = useReducedMotion()
+  const session = useSession()
 
   const close = useCallback(() => { setOpen(false); setQuery(''); setActive(0) }, [])
 
   const items = useMemo<PaletteCommand[]>(() => [
     { id: 'new', label: 'Nova conversa', hint: 'Começar do zero', group: 'Ir para', run: () => navigate('/') },
     { id: 'settings', label: 'Settings', hint: 'Configurações e gerenciamento', group: 'Ir para', run: () => navigate('/settings') },
-    ...settingsItems().map((item) => ({ id: `settings:${item.id}`, label: item.label, hint: item.lede, group: 'Settings', run: () => navigate(item.path) })),
+    ...visibleSettingsItems(session).map((item) => ({ id: `settings:${item.id}`, label: item.label, hint: item.lede, group: 'Settings', run: () => navigate(item.path) })),
     ...commands,
     ...conversations.map((item) => ({
       id: `chat:${item.conversation_id}`,
@@ -46,7 +48,7 @@ export function CommandPalette({ commands = [], conversations = [] }: CommandPal
       group: 'Conversas',
       run: () => navigate(`/chats/${encodeURIComponent(item.conversation_id)}`),
     })),
-  ], [commands, conversations, navigate])
+  ], [commands, conversations, navigate, session])
 
   const filtered = useMemo(() => {
     const needle = query.trim().toLowerCase()
