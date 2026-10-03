@@ -11,7 +11,7 @@ from time import monotonic
 from typing import Any, Mapping
 from uuid import uuid4
 
-from fastapi import FastAPI, File, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
@@ -483,6 +483,13 @@ def create_app(services: ApiServices) -> FastAPI:
             services.security.validate_csrf(principal, request.headers.get("x-csrf-token"), request.headers.get("origin"))
         return principal
 
+    def capability(name: str):
+        """Route dependency: FastAPI calls dependencies before validating the
+        body, so a closed capability answers 404 even for a malformed request."""
+        def check() -> None:
+            services.capabilities.require(name)
+        return Depends(check)
+
     def context(principal: AuthenticatedPrincipal, *, agent_id: str, execution_id: str, workspace_id: str | None, purpose: str) -> dict[str, str | None]:
         # correlation_id is derived deterministically from execution_id (not a fresh
         # value per request): the real persistence adapter scopes every read/write to
@@ -579,7 +586,7 @@ def create_app(services: ApiServices) -> FastAPI:
         chosen = payload.path
         if chosen is None:
             client_host = request.client.host if request.client is not None else None
-            if not _is_loopback_client(client_host):
+            if not services.capabilities.host_folders or not _is_loopback_client(client_host):
                 return JSONResponse({"dialog_unavailable": True}, status_code=200)
             result = await run_in_threadpool(choose_folder)
             if not result.available:
@@ -850,7 +857,7 @@ def create_app(services: ApiServices) -> FastAPI:
         chosen = payload.path
         if chosen is None:
             client_host = request.client.host if request.client is not None else None
-            if not _is_loopback_client(client_host):
+            if not services.capabilities.host_folders or not _is_loopback_client(client_host):
                 return JSONResponse({"dialog_unavailable": True}, status_code=200)
             result = await run_in_threadpool(choose_folder)
             if not result.available:
@@ -909,7 +916,7 @@ def create_app(services: ApiServices) -> FastAPI:
         if not target.is_file(): raise ApplicationNotFoundError(conversation_id)
         return FileResponse(target, media_type=media_type_for(target), filename=target.name, content_disposition_type=disposition, headers={"X-Content-Type-Options": "nosniff"})
 
-    @app.post("/v1/conversations/{conversation_id}/files/{path:path}/open")
+    @app.post("/v1/conversations/{conversation_id}/files/{path:path}/open", dependencies=[capability("open_in_desktop_app")])
     async def open_conversation_file(conversation_id: str, path: str, request: Request) -> JSONResponse:
         principal = principal_for(request, mutable=True)
         services.security.authorize(principal, action="conversation.open_file", resource_id=conversation_id, purpose="conversation.file.open")
@@ -1438,7 +1445,7 @@ def create_app(services: ApiServices) -> FastAPI:
         })
         return JSONResponse(_provider_public(result))
 
-    @app.post("/v1/providers/omniroute/test")
+    @app.post("/v1/providers/omniroute/test", dependencies=[capability("omniroute")])
     async def test_omniroute_connection(payload: ProviderSetupRequest, request: Request) -> JSONResponse:
         principal = principal_for(request, mutable=True)
         services.security.check_rate_limit(principal, action="provider.test", origin=request.headers.get("origin"))
@@ -1467,7 +1474,7 @@ def create_app(services: ApiServices) -> FastAPI:
         )
         return JSONResponse(_connection_test_public(result))
 
-    @app.post("/v1/providers/omniroute/install")
+    @app.post("/v1/providers/omniroute/install", dependencies=[capability("omniroute")])
     async def install_omniroute(request: Request) -> JSONResponse:
         principal = principal_for(request, mutable=True)
         services.security.check_rate_limit(principal, action="provider.install", origin=request.headers.get("origin"))
@@ -1482,7 +1489,7 @@ def create_app(services: ApiServices) -> FastAPI:
             raise ValueError("OmniRoute installation response is invalid")
         return JSONResponse({"installed": True, "next_step": "omniroute"})
 
-    @app.get("/v1/providers/omniroute/install")
+    @app.get("/v1/providers/omniroute/install", dependencies=[capability("omniroute")])
     async def omniroute_installation_status(request: Request) -> JSONResponse:
         principal = principal_for(request)
         services.security.check_rate_limit(principal, action="provider.install.status", origin=request.headers.get("origin"))
@@ -1495,21 +1502,21 @@ def create_app(services: ApiServices) -> FastAPI:
             raise ValueError("OmniRoute installation status response is invalid")
         return JSONResponse({"installed": data["installed"]})
 
-    @app.get("/v1/providers/omniroute/runtime")
+    @app.get("/v1/providers/omniroute/runtime", dependencies=[capability("omniroute")])
     async def omniroute_runtime_status(request: Request) -> JSONResponse:
         principal = principal_for(request)
         services.security.authorize(principal, action="provider.inspect", resource_id="omniroute", purpose="provider.inspect")
         manager = _require_port(services.omniroute_runtime)
         return JSONResponse({**manager.status(), "auto_start": manager.auto_start(principal.user_id)})
 
-    @app.put("/v1/providers/omniroute/runtime")
+    @app.put("/v1/providers/omniroute/runtime", dependencies=[capability("omniroute")])
     async def update_omniroute_runtime(payload: OmniRouteRuntimeRequest, request: Request) -> JSONResponse:
         principal = principal_for(request, mutable=True)
         services.security.authorize(principal, action="provider.configure", resource_id="omniroute", purpose="provider.configure")
         manager = _require_port(services.omniroute_runtime)
         return JSONResponse({**manager.status(), **manager.set_auto_start(principal.user_id, payload.auto_start)})
 
-    @app.post("/v1/providers/omniroute/runtime/actions")
+    @app.post("/v1/providers/omniroute/runtime/actions", dependencies=[capability("omniroute")])
     async def control_omniroute_runtime(payload: OmniRouteRuntimeActionRequest, request: Request) -> JSONResponse:
         principal = principal_for(request, mutable=True)
         services.security.authorize(principal, action="provider.configure", resource_id="omniroute", purpose="provider.configure")
@@ -1569,7 +1576,7 @@ def create_app(services: ApiServices) -> FastAPI:
         status = await run_in_threadpool(read_installation_status, runtime_profile())
         return JSONResponse(status)
 
-    @app.delete("/v1/installation/versions/{version}")
+    @app.delete("/v1/installation/versions/{version}", dependencies=[capability("ui_updater")])
     async def delete_installation_version(version: str, request: Request) -> JSONResponse:
         principal = principal_for(request, mutable=True)
         services.security.authorize(principal, action="installation.configure", resource_id=version, purpose="installation.version.remove")
@@ -1577,7 +1584,7 @@ def create_app(services: ApiServices) -> FastAPI:
         result = await run_in_threadpool(remove_installed_version, version, runtime_profile())
         return JSONResponse(result)
 
-    @app.post("/v1/installation/update")
+    @app.post("/v1/installation/update", dependencies=[capability("ui_updater")])
     async def install_latest_release(request: Request) -> JSONResponse:
         principal = principal_for(request, mutable=True)
         services.security.authorize(principal, action="installation.configure", resource_id=None, purpose="installation.update")
