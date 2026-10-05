@@ -66,6 +66,12 @@ jobs:
       - name: Build packaged Windows release
         shell: pwsh
         run: .\scripts\build-windows.ps1 -SkipTests
+      - name: Build the graphical installer
+        shell: pwsh
+        env:
+          ORIN_CODESIGN_PFX: ${{ secrets.ORIN_CODESIGN_PFX_PATH }}
+          ORIN_CODESIGN_PASSWORD: ${{ secrets.ORIN_CODESIGN_PASSWORD }}
+        run: .\scripts\build-setup.ps1
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
         with:
@@ -74,6 +80,8 @@ jobs:
             dist/Orin-${{ env.ORIN_RELEASE_VERSION }}-windows-x64.zip
             dist/release.json
             dist/install.ps1
+            dist/OrinSetup.exe
+          if-no-files-found: error
 
   build-linux:
     needs: resolve-version
@@ -175,5 +183,6 @@ jobs:
             "dist/linux/Orin-$ORIN_RELEASE_VERSION-linux-x64.tar.gz" \
             dist/release.json \
             dist/windows/install.ps1 \
+            dist/windows/OrinSetup.exe \
             dist/linux/install.sh \
             --title "Orin $ORIN_RELEASE_VERSION" --generate-notes

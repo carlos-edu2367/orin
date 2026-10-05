@@ -48,6 +48,14 @@ Cada release publica pacotes independentes para **Windows** e **Linux (x64)**. O
 
 ### Windows
 
+Baixe e abra o **[OrinSetup.exe](https://github.com/carlos-edu2367/orin/releases/latest/download/OrinSetup.exe)**. Uma janela mostra a versão, o local de instalação e o progresso (download, verificação, testes), e termina com **Abrir o Orin**. Não pede senha de administrador: instala só para o seu usuário, cria os atalhos, adiciona o comando `orin` ao terminal e registra o Orin em *Aplicativos instalados*. Rodar de novo atualiza ou repara a instalação.
+
+> Enquanto o instalador não for assinado digitalmente, o Windows SmartScreen pode avisar na primeira execução: clique em **Mais informações → Executar assim mesmo**. O instalador confere o SHA-256 de tudo o que baixa.
+
+Para automação, sem janela: `OrinSetup.exe --silent [--dir C:\Orin] [--to 0.5.0] [--no-shortcut] [--no-path]`.
+
+Prefere o terminal?
+
 ```powershell
 irm https://github.com/carlos-edu2367/orin/releases/latest/download/install.ps1 | iex
 ```
