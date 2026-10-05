@@ -63,3 +63,18 @@ def test_missing_engine_is_detected_only_when_the_package_exists(tmp_path, monke
     assert engine.engine_missing_for_agent()
     monkeypatch.setattr(engine, "playwright_package_present", lambda: False)
     assert not engine.engine_missing_for_agent()
+
+
+def test_unset_variable_falls_back_to_playwrights_own_cache(tmp_path, monkeypatch):
+    # A checkout (or CI) never exports PLAYWRIGHT_BROWSERS_PATH; the browser then
+    # lives where Playwright put it, and must still count as installed.
+    monkeypatch.delenv("PLAYWRIGHT_BROWSERS_PATH", raising=False)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setattr(engine.sys, "platform", "linux")
+    monkeypatch.setattr(engine.os, "name", "posix")
+    default = tmp_path / "ms-playwright"
+    assert engine.browsers_path() == default and not chromium_installed()
+    (default / "chromium_headless_shell-1181").mkdir(parents=True)
+    (default / "chromium_headless_shell-1181" / "INSTALLATION_COMPLETE").write_text("")
+    assert chromium_installed()

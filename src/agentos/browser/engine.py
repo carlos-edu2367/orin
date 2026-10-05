@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 from threading import Lock, Thread
 from typing import Callable, Sequence
 
@@ -32,9 +33,21 @@ _LOG_LINES = 12
 CommandFactory = Callable[[], Sequence[str]]
 
 
-def browsers_path() -> Path | None:
+def default_browsers_path() -> Path:
+    """Where Playwright itself puts browsers when ``PLAYWRIGHT_BROWSERS_PATH`` is unset."""
+    if os.name == "nt":
+        return Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / "ms-playwright"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Caches" / "ms-playwright"
+    return Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "ms-playwright"
+
+
+def browsers_path() -> Path:
+    # An installed Orin always exports the variable (pointing at its own cache);
+    # a development checkout and CI usually do not, and then Playwright's own
+    # default is where the browser lives.
     value = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "").strip()
-    return Path(value) if value else None
+    return Path(value) if value and value != "0" else default_browsers_path()
 
 
 def playwright_package_present() -> bool:
@@ -46,7 +59,7 @@ def playwright_package_present() -> bool:
 
 def chromium_installed(root: Path | None = None) -> bool:
     root = root if root is not None else browsers_path()
-    if root is None or not root.is_dir():
+    if not root.is_dir():
         return False
     return any((directory / _MARKER).is_file() for pattern in _BROWSER_DIRS for directory in root.glob(pattern))
 

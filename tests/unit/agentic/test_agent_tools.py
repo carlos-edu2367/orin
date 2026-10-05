@@ -276,11 +276,16 @@ def test_agent_edits_only_its_custom_skill_as_a_new_version(tmp_path: Path) -> N
     assert library.get({"user_id": "owner-1", "skill_id": "safe-review"})["description"] == "Review release changes safely."
 
 
-def test_browse_page_is_absent_without_a_browser(toolset: AgentToolset) -> None:
+def test_browse_page_is_absent_without_a_browser(toolset: AgentToolset, monkeypatch: pytest.MonkeyPatch) -> None:
+    # "No browser" here means the optional Playwright package is not installed at
+    # all; with the package but no Chromium the agent gets a guidance tool instead
+    # (see test_browser_tools.py).
+    monkeypatch.setattr("agentos.browser.engine.playwright_package_present", lambda: False)
     assert "browse_page" not in [item.name for item in toolset.definitions()]
 
 
-def test_verify_frontend_is_absent_without_a_browser(toolset: AgentToolset) -> None:
+def test_verify_frontend_is_absent_without_a_browser(toolset: AgentToolset, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("agentos.browser.engine.playwright_package_present", lambda: False)
     assert "verify_frontend" not in [item.name for item in toolset.definitions()]
 
 
