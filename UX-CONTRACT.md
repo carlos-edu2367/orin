@@ -33,7 +33,10 @@
 ## Activity in chat
 
 - A continuous sequence of ordinary tools in the same turn and agent is one
-  expandable activity line. Its title follows the latest human-readable action;
-  its count and expanded view retain every individual call and failure.
+  expandable activity line, drawn as quiet text with a chevron rather than a
+  box. While it runs, the title is the latest human-readable action beside a
+  live clock; once settled, it is one sentence summarising the batch ("Explorou
+  3 arquivos, executou 4 comandos"). Expanding it lists every individual call
+  as a verb and target, with failures marked, so no call or failure is lost.
 - Approval requests and browser captures remain independent cards because they
   have an action or visual evidence the person needs to reach directly.

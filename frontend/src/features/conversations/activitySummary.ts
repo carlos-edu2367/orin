@@ -216,3 +216,83 @@ export function toolKindLabel(toolKind: string | undefined): string {
     default: return 'ferramentas'
   }
 }
+
+type ActionClass = 'read' | 'edit' | 'command' | 'web' | 'memory' | 'skill' | 'tool'
+
+const READ_TOOLS = new Set(['read_file', 'view_file', 'transcribe_pdf', 'list_files', 'search_files', 'search_code', 'project_map', 'read_process_output'])
+const EDIT_TOOLS = new Set(['write_file', 'edit_file', 'write_contract'])
+const COMMAND_TOOLS = new Set(['run_command', 'stop_process', 'verify_project', 'verify_frontend'])
+
+function actionClass(event: ConversationActivityEvent): ActionClass {
+  const name = event.toolName ?? ''
+  if (READ_TOOLS.has(name)) return 'read'
+  if (EDIT_TOOLS.has(name)) return 'edit'
+  if (COMMAND_TOOLS.has(name)) return 'command'
+  if (name.includes('skill')) return 'skill'
+  if (event.toolKind === 'filesystem') return 'read'
+  if (event.toolKind === 'terminal') return 'command'
+  if (event.toolKind === 'web' || event.toolKind === 'browser') return 'web'
+  if (event.toolKind === 'memory') return 'memory'
+  return 'tool'
+}
+
+const ACTION_PHRASES: Record<ActionClass, [singular: string, plural: string]> = {
+  read: ['leu um arquivo', 'explorou {n} arquivos'],
+  edit: ['editou um arquivo', 'editou {n} arquivos'],
+  command: ['executou um comando', 'executou {n} comandos'],
+  web: ['consultou a web', 'consultou a web {n} vezes'],
+  memory: ['usou a memória', 'usou a memória {n} vezes'],
+  skill: ['usou uma skill', 'usou {n} skills'],
+  tool: ['usou uma ferramenta', 'usou {n} ferramentas'],
+}
+
+const ACTION_ORDER: ActionClass[] = ['read', 'edit', 'command', 'web', 'memory', 'skill', 'tool']
+
+/** The calls a tool group really made; folded `artifact.created` records are not calls. */
+export function toolCalls(group: ActivityGroup): ConversationActivityEvent[] {
+  return group.events.filter((event) => event.kind === 'tool')
+}
+
+/**
+ * The settled one-line account of a tool batch, in the order a person would
+ * narrate it: "Explorou 3 arquivos, executou 4 comandos, usou uma ferramenta".
+ * A batch of one call keeps that call's own label, which already says it best.
+ */
+export function toolBatchOverview(group: ActivityGroup): string {
+  const calls = toolCalls(group)
+  if (calls.length <= 1) return group.label
+  const counts = new Map<ActionClass, number>()
+  for (const call of calls) {
+    const key = actionClass(call)
+    counts.set(key, (counts.get(key) ?? 0) + 1)
+  }
+  const parts = ACTION_ORDER.filter((key) => counts.has(key)).map((key) => {
+    const n = counts.get(key) as number
+    const [singular, plural] = ACTION_PHRASES[key]
+    return n === 1 ? singular : plural.replace('{n}', String(n))
+  })
+  const sentence = parts.join(', ')
+  return sentence.charAt(0).toUpperCase() + sentence.slice(1)
+}
+
+/** `5 min 28 s`, `42 s` — the elapsed clock shown beside a running batch. */
+export function formatElapsed(totalSeconds: number): string {
+  const seconds = Math.max(0, Math.floor(totalSeconds))
+  if (seconds < 60) return `${seconds} s`
+  const minutes = Math.floor(seconds / 60)
+  return `${minutes} min ${String(seconds % 60).padStart(2, '0')} s`
+}
+
+/**
+ * Splits a call's one-line summary into the verb ("Leu") and its target
+ * ("Home.jsx") so the row can set the target in heavier type. Commands (`$ ...`)
+ * and summaries without a leading verb stay whole.
+ */
+export function splitActionSummary(summary: string): { verb: string; target: string } {
+  const text = summary.trim()
+  if (text.startsWith('$')) return { verb: 'Executou', target: text.replace(/^\$\s*/, '') }
+  if (!text) return { verb: '', target: text }
+  const space = text.indexOf(' ')
+  if (space <= 0) return { verb: '', target: text }
+  return { verb: text.slice(0, space), target: text.slice(space + 1) }
+}
