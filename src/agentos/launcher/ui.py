@@ -62,6 +62,27 @@ class Console:
             return text
         return "".join(_ANSI[style] for style in styles) + text + _ANSI["reset"]
 
+    @property
+    def interactive(self) -> bool:
+        """True when output goes to a live terminal that understands ``\\r`` redraws."""
+        return bool(self.colour) and not self.quiet and hasattr(self.stream, "isatty") and self.stream.isatty()
+
+    def paint(self, text: str, *styles: str) -> str:
+        return self._paint(text, *styles)
+
+    def redraw(self, text: str) -> None:
+        """Overwrite the current terminal line without ending it (live terminals only)."""
+        if not self.interactive:
+            return
+        self._write_text("\r\033[2K" + text)
+        self.stream.flush()
+
+    def settle(self, text: str) -> None:
+        """Finish a redrawn line with its final text and a newline."""
+        if self.interactive:
+            self._write_text("\r\033[2K")
+        self._write(text)
+
     def _write(self, text: str = "") -> None:
         if self.quiet:
             return

@@ -8,7 +8,6 @@ import os
 from pathlib import Path
 import re
 import shutil
-import subprocess
 import sys
 from typing import Any
 from urllib.error import URLError
@@ -44,7 +43,8 @@ def _active_version_dir(profile: RuntimeProfile) -> Path | None:
     return version_dir
 
 
-def _installation_root(profile: RuntimeProfile) -> Path | None:
+def installation_root(profile: RuntimeProfile) -> Path | None:
+    """The directory holding ``<version>`` folders and ``current``; None outside a packaged install."""
     active = _active_version_dir(profile)
     return active.parent if active is not None else None
 
@@ -71,7 +71,7 @@ def _latest_release() -> dict[str, str] | None:
 
 
 def _installed_versions(profile: RuntimeProfile) -> list[dict[str, Any]]:
-    root = _installation_root(profile)
+    root = installation_root(profile)
     active = _active_version_dir(profile)
     if root is None or active is None or not root.is_dir():
         return []
@@ -115,50 +115,32 @@ def read_installation_status(profile: RuntimeProfile | None = None) -> dict[str,
 def start_update(profile: RuntimeProfile | None = None) -> dict[str, Any]:
     """Install the latest verified release side by side with the running one.
 
-    Downloads and verifies the release exactly the way ``orin update`` does
-    (``install.ps1``'s SHA-256 check against its signed manifest), but --
-    unlike ``orin update`` -- never stops the process handling this request.
-    A packaged install is versioned side by side (see this package's module
-    docstring): the new version lands in its own directory and only the
-    ``current`` pointer changes, which a process already running from the
-    old resolved path does not need to still exist for. The user still has
-    to close and reopen Orin afterward to actually run the new version --
-    the CLI's own ``orin update`` leaves that same follow-up step to the
-    user, it just also stops the old process first.
+    Runs the same engine as ``orin update`` (download, SHA-256 check, staged
+    extraction, a smoke test of the new runtime, then the pointer flip with an
+    automatic rollback), but -- unlike ``orin update`` -- never stops the process
+    handling this request. The new version lands in its own directory and only
+    ``current`` changes, which a process already running from the old resolved
+    path does not need to still exist for. The person still has to close and
+    reopen Orin to actually run it.
     """
+    from .updater import UpdateError, Updater
+
     profile = profile or RuntimeProfile.detect()
-    if profile.kind != "installed":
+    root = installation_root(profile)
+    if profile.kind != "installed" or root is None:
         raise ValueError("installing a release is only available for a packaged installation")
-    installer = profile.installer
-    if not installer.is_file():
-        raise ValueError(f"the release installer is missing: {installer}")
-    # -NoDesktopShortcut/--no-desktop-shortcut: this call has no attached
-    # terminal (it runs from an API request's threadpool worker), so the
-    # installer's "create a desktop shortcut? [Y/n]" prompt -- which only
-    # fires when this flag is absent and no shortcut exists yet -- would
-    # otherwise block reading from whatever this process's stdin happens to
-    # be, indefinitely or with unpredictable answers.
     try:
-        if os.name == "nt":
-            command = ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(installer), "-NoDesktopShortcut"]
-        else:
-            command = ["bash", str(installer), "--no-desktop-shortcut"]
-        result = subprocess.run(
-            command,
-            check=False, capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=300,
-        )
-    except subprocess.TimeoutExpired as error:
-        raise RuntimeError("the installer did not finish within 5 minutes") from error
-    if result.returncode != 0:
-        raise RuntimeError((result.stderr or result.stdout or "the installer failed").strip()[:2000])
-    return {"started": True}
+        result = Updater(versions_root=root, current_version=profile.version).run()
+    except UpdateError as error:
+        raise RuntimeError(error.message) from None
+    return {"started": True, "status": result.status, "version": result.version}
 
 
 def remove_installed_version(version: str, profile: RuntimeProfile | None = None) -> dict[str, Any]:
     profile = profile or RuntimeProfile.detect()
     if _VERSION.fullmatch(version) is None:
         raise ValueError("invalid release version")
-    root = _installation_root(profile)
+    root = installation_root(profile)
     active = _active_version_dir(profile)
     if root is None or active is None:
         raise ValueError("version cleanup is available only in a packaged installation")

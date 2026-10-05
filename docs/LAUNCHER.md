@@ -269,10 +269,24 @@ The release workflow is implemented as follows:
    writes the same `orin.cmd` shim to the same bin directory that
    `scripts\install-orin.ps1` writes today. The published one-liner
    (`irm https://orin.dev/install.ps1 | iex`) is that script.
-3. **`orin update`** — downloads the next version *beside* the current one, runs
-   migrations against the untouched data directory, then flips the junction.
-   Rollback is flipping it back: user data was never inside either version, so
-   neither direction can lose it.
+3. **`orin update`** — implemented by one Python engine
+   (`agentos.installation.updater`) that the terminal, the app's update button
+   and the future graphical installer all share. It downloads the next version
+   *beside* the current one, verifies its SHA-256, extracts into a staging
+   directory, runs the staged runtime's `--version`, and only then flips the
+   `current` pointer. After the flip it runs the new runtime once more through
+   `current`; if that fails it flips back and deletes the new version, so a bad
+   release never leaves the installation unusable. The replaced version is
+   remembered in `update-state.json`, and `orin update --rollback` returns to it.
+   User data was never inside either version, so neither direction can lose it.
+
+   ```text
+   orin update                  update to the latest release
+   orin update --check          only report whether one exists
+   orin update --to 0.5.0       install an exact version
+   orin update --rollback       go back to the version this one replaced
+   orin update --json           one JSON object per line (for the app and scripts)
+   ```
 
 The installed runtime has no Docker, PostgreSQL, Redis, Python or Node
 dependency. OmniRoute remains a separately installed optional npm integration;

@@ -81,7 +81,12 @@ def build_parser() -> argparse.ArgumentParser:
     commands.add_parser("start", parents=[shared], help="start the Orin runtime (the default)")
     commands.add_parser("stop", help="stop a running Orin")
     commands.add_parser("restart", parents=[shared], help="stop a running Orin and start it again")
-    commands.add_parser("update", help="install the latest verified Orin release")
+    update = commands.add_parser("update", help="install the latest verified Orin release")
+    update.add_argument("--check", action="store_true", help="only check whether a newer release exists")
+    update.add_argument("--to", dest="target", metavar="VERSION", default=None, help="install this exact version instead of the latest")
+    update.add_argument("--force", action="store_true", help="reinstall even if this version is already installed")
+    update.add_argument("--rollback", action="store_true", help="go back to the version this one replaced")
+    update.add_argument("--json", action="store_true", help="print machine-readable progress, one JSON object per line")
     commands.add_parser("status", help="show whether Orin is running, and where")
     browser = commands.add_parser("browser", help="manage the optional browser engine the agent uses")
     browser_commands = browser.add_subparsers(dest="browser_command", metavar="action", required=True)
@@ -254,26 +259,68 @@ def command_restart(arguments: argparse.Namespace, paths: OrinPaths, profile: Ru
     return command_start(arguments, paths, profile, console)
 
 
-def command_update(paths: OrinPaths, profile: RuntimeProfile, console: Console) -> int:
-    installer = profile.installer
-    if not installer.is_file():
-        console.error(f"The release installer is missing: {installer}. Reinstall Orin to restore it.")
-        return 1
-    if running_instance(paths) is not None:
-        code = command_stop(paths, console)
-        if code != 0:
-            return code
-    console.line("\n  Downloading the latest verified Orin release...")
-    try:
-        if os.name == "nt":
-            command = ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(installer)]
+def command_update(
+    paths: OrinPaths,
+    profile: RuntimeProfile,
+    console: Console,
+    arguments: argparse.Namespace | None = None,
+    *,
+    opener=None,
+) -> int:
+    """``orin update``: the engine in ``agentos.installation.updater``, rendered for a terminal."""
+    from agentos.installation.updater import UpdateError, Updater
+    from agentos.installation.versions import installation_root
+
+    from .update_ui import JsonRenderer, UpdateRenderer
+
+    options = arguments or argparse.Namespace()
+    as_json = bool(getattr(options, "json", False))
+    check_only = bool(getattr(options, "check", False))
+    rollback = bool(getattr(options, "rollback", False))
+    json_out = JsonRenderer() if as_json else None
+    renderer = None if as_json else UpdateRenderer(console, current_version=profile.version)
+
+    def refuse(message: str) -> int:
+        if json_out is not None:
+            json_out.failed(UpdateError(message))
         else:
-            command = ["bash", str(installer)]
-        result = subprocess.run(command, check=False)
-    except OSError as error:
-        console.error(f"Could not start the installer: {error}")
+            console.error(message)
+        return 2
+
+    if profile.is_development:
+        return refuse("Esta é uma cópia de desenvolvimento (código-fonte); atualize com `git pull`. O `orin update` só se aplica à versão instalada.")
+    root = installation_root(profile)
+    if root is None:
+        return refuse("Este Orin não foi instalado pelo instalador oficial, então não sei atualizá-lo daqui. Reinstale pelo instalador.")
+
+    def stop_before_switching() -> None:
+        if running_instance(paths) is None:
+            return
+        if command_stop(paths, Console(console.stream, quiet=True)) != 0:
+            raise UpdateError("Não consegui encerrar o Orin que está rodando.", step="activate", hint="Feche o Orin e tente de novo.")
+
+    updater = Updater(
+        versions_root=root, current_version=profile.version,
+        emit=json_out if json_out is not None else renderer, before_activate=stop_before_switching,
+        **({"opener": opener} if opener is not None else {}),
+    )
+    if renderer is not None:
+        renderer.header()
+    try:
+        result = updater.rollback() if rollback else updater.run(
+            getattr(options, "target", None) or "latest", force=bool(getattr(options, "force", False)), check_only=check_only,
+        )
+    except UpdateError as error:
+        if json_out is not None:
+            json_out.failed(error)
+        elif renderer is not None:
+            renderer.failed(error)
         return 1
-    return int(result.returncode)
+    if json_out is not None:
+        json_out.result(result)
+    elif renderer is not None:
+        {"available": renderer.available, "up_to_date": renderer.up_to_date, "updated": renderer.updated, "rolled_back": renderer.rolled_back}[result.status](result)
+    return 0
 
 
 def command_uninstall(paths: OrinPaths, profile: RuntimeProfile, console: Console) -> int:
@@ -341,7 +388,7 @@ def main(argv: list[str] | None = None) -> int:
         if command == "restart":
             return command_restart(arguments, paths, profile, console)
         if command == "update":
-            return command_update(paths, profile, console)
+            return command_update(paths, profile, console, arguments)
         if command == "uninstall":
             return command_uninstall(paths, profile, console)
         if command == "status":

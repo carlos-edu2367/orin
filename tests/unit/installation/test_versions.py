@@ -91,30 +91,21 @@ def test_status_does_not_flag_an_update_when_the_release_lookup_failed(tmp_path:
     assert versions.read_installation_status(profile)["update_available"] is False
 
 
-def test_start_update_runs_the_installer_and_reports_started(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    profile, _root = _profile(tmp_path)
-    installer_name = "install.ps1" if os.name == "nt" else "install.sh"
-    installer = profile.root / installer_name
-    installer.write_text("# fake installer", encoding="utf-8")
-    captured: dict[str, object] = {}
+def test_start_update_runs_the_engine_without_stopping_this_process(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from agentos.installation import updater
 
-    def fake_run(command, *, check, capture_output, text, stdin, timeout):
-        captured["command"] = command
-        captured["stdin"] = stdin
-        return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+    profile, root = _profile(tmp_path)
+    monkeypatch.setattr(versions.sys, "frozen", True, raising=False)
+    seen: dict[str, object] = {}
 
-    monkeypatch.setattr(versions.subprocess, "run", fake_run)
+    def fake_run(self, *args, **kwargs):
+        seen["root"], seen["before_activate"] = self.root, self._before_activate
+        return updater.UpdateResult("updated", "0.1.12", "0.1.13")
 
-    assert versions.start_update(profile) == {"started": True}
-    assert str(installer) in captured["command"]
-    # -NoDesktopShortcut/--no-desktop-shortcut: this call has no terminal
-    # attached to answer the installer's "create a shortcut?" prompt; must
-    # skip it, not hang on it.
-    if os.name == "nt":
-        assert "-NoDesktopShortcut" in captured["command"]
-    else:
-        assert "--no-desktop-shortcut" in captured["command"]
-    assert captured["stdin"] is versions.subprocess.DEVNULL
+    monkeypatch.setattr(updater.Updater, "run", fake_run)
+
+    assert versions.start_update(profile) == {"started": True, "status": "updated", "version": "0.1.13"}
+    assert seen == {"root": root, "before_activate": None}
 
 
 def test_start_update_is_unavailable_outside_a_packaged_install() -> None:
@@ -124,28 +115,16 @@ def test_start_update_is_unavailable_outside_a_packaged_install() -> None:
         versions.start_update(profile)
 
 
-def test_start_update_surfaces_the_installer_stderr_on_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_start_update_surfaces_the_engine_message_on_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from agentos.installation import updater
+
     profile, _root = _profile(tmp_path)
-    installer_name = "install.ps1" if os.name == "nt" else "install.sh"
-    (profile.root / installer_name).write_text("# fake installer", encoding="utf-8")
-    monkeypatch.setattr(
-        versions.subprocess, "run",
-        lambda command, *, check, capture_output, text, stdin, timeout: type("Result", (), {"returncode": 1, "stdout": "", "stderr": "hash mismatch"})(),
-    )
+    monkeypatch.setattr(versions.sys, "frozen", True, raising=False)
 
-    with pytest.raises(RuntimeError, match="hash mismatch"):
-        versions.start_update(profile)
+    def fake_run(self, *args, **kwargs):
+        raise updater.UpdateError("O arquivo baixado não confere", step="verify")
 
+    monkeypatch.setattr(updater.Updater, "run", fake_run)
 
-def test_start_update_turns_an_installer_timeout_into_a_clear_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    profile, _root = _profile(tmp_path)
-    installer_name = "install.ps1" if os.name == "nt" else "install.sh"
-    (profile.root / installer_name).write_text("# fake installer", encoding="utf-8")
-
-    def fake_run(command, *, check, capture_output, text, stdin, timeout):
-        raise versions.subprocess.TimeoutExpired(cmd=command, timeout=timeout)
-
-    monkeypatch.setattr(versions.subprocess, "run", fake_run)
-
-    with pytest.raises(RuntimeError, match="5 minutes"):
+    with pytest.raises(RuntimeError, match="não confere"):
         versions.start_update(profile)
