@@ -328,7 +328,13 @@ def build_system_prompt(
             "- A checkbox or single-choice question always lets the person add a note instead. Do not mark a question as required or infer a missing selection.",
             "- After calling `ask_user`, stop the current task and wait for the person's next message. Their answer starts a follow-up turn with the normal conversation history.",
         ]
-    if "browse_page" in tool_names:
+    if "browse_page" in tool_names and "browser_observe" not in tool_names:
+        lines += [
+            "",
+            "## Browser",
+            "- The browser engine (Chromium) is optional and is not installed here. If a page needs JavaScript or the person asked you to use the browser, call `browse_page` once: it returns the installation steps. Explain them simply — open Configurações > Navegador and click Instalar (about 150 MB, a few minutes), or run `orin browser install` in a terminal — then offer to continue once it is installed. Use `fetch_url` and `web_search` for pages that do not need JavaScript.",
+        ]
+    if "browser_observe" in tool_names:
         lines += [
             "",
             "## Browser",

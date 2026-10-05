@@ -38,6 +38,7 @@ from agentos.reading.vision import VisionUnavailable
 from .diagnostics import STEP_ORDER, detect_recipe, file_diagnostic_command
 from .workspace import MAX_LIST_DEPTH, MAX_SEARCH_RESULTS, ConversationWorkspace, WorkspaceError
 from .models import MAX_USER_QUESTION_ITEMS
+from agentos.browser.engine import agent_install_guidance, engine_missing_for_agent
 from .browser_tools import _cache_key_url, _safe_display_url, sanitize_page_text
 from .file_preview import media_type_for
 from .contract import TOOLKITS, VERIFICATION_MODES, ContractError, parse as parse_contract
@@ -597,6 +598,16 @@ class AgentToolset:
                 "List the files the project depends on most, with their top-level symbols. Use this once to orient yourself in an unfamiliar codebase.",
                 _schema({"limit": {"type": "integer", "minimum": 1, "maximum": 50}}),
                 self.project_map, "filesystem", read_only=True,
+            ))
+        if self._browser is None and engine_missing_for_agent():
+            # Chromium is an optional download. Publishing the tool anyway lets
+            # the agent discover that, and teach the person how to install it,
+            # instead of silently having no browser at all.
+            items.append(ToolDefinition(
+                "browse_page",
+                "Open a page in the isolated browser. The browser engine is NOT installed on this computer yet, so calling this returns the installation steps; relay them to the person in plain words (Settings > Navegador > Instalar, or `orin browser install`) and continue the task with other tools meanwhile.",
+                _schema({"url": _TEXT}, ("url",)),
+                self.browse_page, "browser", policy_tags=("network",),
             ))
         if self._browser is not None:
             items.append(ToolDefinition(
@@ -1912,6 +1923,8 @@ class AgentToolset:
 
     def browse_page(self, url: str) -> dict[str, Any]:
         if self._browser is None:
+            if engine_missing_for_agent():
+                raise AgentToolError(agent_install_guidance())
             raise AgentToolError("The browser is not available.")
         # The rendered browser is explicitly allowed to inspect a local dev
         # server. ``fetch_url`` remains public-network-only, so a text fetch

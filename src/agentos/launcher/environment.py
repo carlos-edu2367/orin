@@ -105,6 +105,20 @@ class RuntimeEnvironment:
         return "\n".join(f"{name}={redact(name, value)}" for name, value in sorted(self.values.items()) if name.startswith(("DATABASE", "AGENTOS", "ORIN", "WEB", "LOCALHOST")))
 
 
+def browser_directory(paths: OrinPaths, profile: RuntimeProfile) -> Path:
+    """Where the agent's Chromium lives.
+
+    Chromium is no longer shipped inside the release. An older bundle that still
+    carries one keeps working; otherwise the browser is downloaded on demand into
+    the per-user cache, which stays writable (the installation directory is
+    read-only at runtime).
+    """
+    return next(
+        (candidate for candidate in (profile.root / "playwright", profile.root / "_internal" / "playwright") if candidate.is_dir()),
+        paths.cache / "playwright",
+    )
+
+
 def load_environment(paths: OrinPaths, profile: RuntimeProfile) -> RuntimeEnvironment:
     """Assemble the runtime environment.
 
@@ -144,12 +158,7 @@ def load_environment(paths: OrinPaths, profile: RuntimeProfile) -> RuntimeEnviro
         )
     # Absolute, always: the backend must not resolve its own UI through a cwd.
     values["WEB_DIST_DIR"] = str(web.resolve())
-    bundled_browser = next(
-        (candidate for candidate in (profile.root / "playwright", profile.root / "_internal" / "playwright") if candidate.is_dir()),
-        paths.cache / "playwright",
-    )
-    browser_path = bundled_browser
-    values.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(browser_path.resolve()))
+    values.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(browser_directory(paths, profile).resolve()))
     values.update(paths.as_environment())
 
     _validate(values, profile)
@@ -218,6 +227,7 @@ def _validate(values: dict[str, str], profile: RuntimeProfile) -> None:
 __all__ = [
     "ConfigurationError",
     "RuntimeEnvironment",
+    "browser_directory",
     "load_environment",
     "load_server_environment",
     "parse_env_file",

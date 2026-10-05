@@ -2,10 +2,15 @@
 """PyInstaller specification for the self-contained Orin launcher.
 
 Build with ``python -m PyInstaller packaging/orin.spec --noconfirm`` after
-building ``frontend/dist`` and provisioning Chromium into the supplied browser
-directory. The resulting one-directory runtime contains no Python/Node/Docker
-requirement on the target machine.
+building ``frontend/dist``. The resulting one-directory runtime contains no
+Python/Node/Docker requirement on the target machine.
+
+Chromium is deliberately *not* bundled: it is the largest part of a release and
+most people never use the agent's browser. The Playwright driver is bundled
+instead, and downloads Chromium on demand into the per-user cache (see
+``agentos.browser.engine`` and ``orin browser install``).
 """
+import importlib.util
 import os
 from pathlib import Path
 
@@ -13,12 +18,12 @@ from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, co
 
 ROOT = Path(SPECPATH).parent
 WEB = ROOT / "frontend" / "dist"
-BROWSERS = Path(os.environ["ORIN_PLAYWRIGHT_BROWSERS_PATH"])
+PLAYWRIGHT_DRIVER = Path(importlib.util.find_spec("playwright").origin).parent / "driver"
 
 if not (WEB / "index.html").is_file():
     raise SystemExit("frontend/dist is missing; run npm --prefix frontend run build first")
-if not BROWSERS.is_dir():
-    raise SystemExit("ORIN_PLAYWRIGHT_BROWSERS_PATH is missing; provision Chromium before packaging")
+if not (PLAYWRIGHT_DRIVER / "package").is_dir():
+    raise SystemExit("The Playwright driver is missing; run uv sync before packaging")
 
 INSTALLER_SCRIPT = ROOT / ("install.ps1" if os.name == "nt" else "install.sh")
 
@@ -26,7 +31,7 @@ datas = collect_data_files("agentos")
 datas += copy_metadata("agentos")
 datas += [
     (str(WEB), "web"),
-    (str(BROWSERS), "playwright"),
+    (str(PLAYWRIGHT_DRIVER), "playwright/driver"),
     (str(INSTALLER_SCRIPT), "."),
     (str(ROOT / "src" / "agentos" / "persistence" / "postgres" / "migrations"), "agentos/persistence/postgres/migrations"),
 ]

@@ -208,8 +208,12 @@ class ConversationBrowser:
 def conversation_browser_for(turn: Mapping[str, object]) -> object | None:
     """Build an isolated browser host only when the optional engine exists."""
     from agentos.browser.conversation_worker import IsolatedConversationBrowser, playwright_available
+    from agentos.browser.engine import chromium_installed
 
-    if not playwright_available():
+    # Chromium is an optional download: with the package but no binary, the
+    # toolset publishes a guidance stub instead (see AgentToolset), so the
+    # agent can tell the person how to install it.
+    if not playwright_available() or not chromium_installed():
         return None
     return IsolatedConversationBrowser(capability=browser_capability_from_environment())
 

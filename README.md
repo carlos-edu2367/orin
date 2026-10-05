@@ -21,7 +21,7 @@ Ele combina chat durável, ferramentas para arquivos e comandos, busca semântic
 - **Um workspace para o trabalho real:** projetos podem apontar para uma pasta local, compartilhar contexto com conversas e servir de base para busca, comandos e tarefas agendadas.
 - **Liberdade de modelo:** o catálogo e as portas de provedor uniformizam streaming, tool calls, visão, cancelamento, uso e erros sem prender o fluxo a uma única API.
 - **Aprende com o uso:** correções suas e falhas de comando viram memória durável, tipada e rastreável — e o que foi aprendido aparece no turno, onde você pode corrigir ou desfazer.
-- **Instalação simples:** as releases para Windows e Linux já incluem runtime, SQLite e Chromium. O uso instalado não exige Python, Node.js, Docker, PostgreSQL ou Redis.
+- **Instalação simples:** as releases para Windows e Linux já incluem runtime e SQLite; o Chromium do browser do agente é um download opcional, feito com um clique. O uso instalado não exige Python, Node.js, Docker, PostgreSQL ou Redis.
 - **Extensível:** ferramentas nativas, Skills versionadas, MCP, plugins e browser isolado permitem adaptar o agente ao seu processo.
 
 ## Veja o Orin em ação
@@ -44,7 +44,7 @@ O command palette concentra navegação, conversas, projetos e ações frequente
 
 ## Download e instalação
 
-Cada release publica pacotes independentes para **Windows** e **Linux (x64)**. Os dois incluem runtime, SQLite e Chromium, e não exigem Python, Node.js nem Docker instalados.
+Cada release publica pacotes independentes para **Windows** e **Linux (x64)**. Os dois incluem runtime e SQLite (o Chromium é opcional, veja abaixo), e não exigem Python, Node.js nem Docker instalados.
 
 ### Windows
 
@@ -62,7 +62,7 @@ Em ambos os casos o instalador:
 
 1. baixa a release estável mais recente;
 2. valida o hash SHA-256 dos artefatos;
-3. instala o runtime local e o Chromium usado pelo browser do agente;
+3. instala o runtime local (o Chromium do browser do agente fica de fora e é baixado só se você quiser);
 4. oferece o atalho (Área de Trabalho no Windows; entrada no menu de aplicativos no Linux);
 5. disponibiliza o comando `orin`.
 
@@ -92,7 +92,9 @@ orin --uninstall  # remove a instalação
 
 As versões e os artefatos verificados por hash ficam na página de [releases do Orin](https://github.com/carlos-edu2367/orin/releases).
 
-> **Linux — bibliotecas de sistema para o browser do agente.** O pacote traz o Chromium, mas ele depende de bibliotecas que o instalador deliberadamente não instala (nada de `sudo`). Em Debian/Ubuntu: `sudo apt install libnss3 libasound2t64` (ou `libasound2` em versões mais antigas). Sem elas, apenas o browser isolado falha — com uma mensagem explicando exatamente isso — e o restante do Orin funciona normalmente.
+> **Browser do agente (opcional).** O Chromium não vem no pacote, para manter o download pequeno. Para habilitá-lo, abra **Configurações > Navegador > Instalar navegador** (cerca de 150 MB) ou rode `orin browser install`. Se você pedir algo que precise do browser sem tê-lo instalado, o próprio agente explica esse caminho.
+>
+> **Linux — bibliotecas de sistema para o browser do agente.** Depois de instalado, o Chromium depende de bibliotecas que o instalador deliberadamente não instala (nada de `sudo`). Em Debian/Ubuntu: `sudo apt install libnss3 libasound2t64` (ou `libasound2` em versões mais antigas). Sem elas, apenas o browser isolado falha — com uma mensagem explicando exatamente isso — e o restante do Orin funciona normalmente.
 
 ## Primeiro fluxo
 

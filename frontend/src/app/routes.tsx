@@ -18,6 +18,7 @@ import { SettingsShell } from '../features/settings/SettingsShell'
 import { SettingsSection } from '../features/settings/SettingsSection'
 import { useSettingsBadges } from '../features/settings/useSettingsBadges'
 import { AboutSection } from '../features/settings/AboutSection'
+import { BrowserSection } from '../features/settings/BrowserSection'
 import { WorkspaceSection } from '../features/settings/WorkspaceSection'
 import { MemoryPage } from '../features/memory/MemoryPage'
 import { SchedulesPage } from '../features/schedules/SchedulesPage'
@@ -53,6 +54,7 @@ export const routes: RouteDefinition[] = [
   { path: '/settings/plugins', element: <SettingsRoute><PluginsSection /></SettingsRoute> },
   { path: '/settings/agents', element: <Navigate to="/settings/general" replace /> },
   { path: '/settings/workspace', element: <SettingsRoute><WorkspaceSection /></SettingsRoute> },
+  { path: '/settings/browser', element: <SettingsRoute><BrowserSection /></SettingsRoute> },
   { path: '/settings/schedules', element: <SettingsRoute><SchedulesPage embedded /></SettingsRoute> },
   { path: '/settings/about', element: <SettingsRoute><AboutSection /></SettingsRoute> },
   { path: '/settings/users', element: <AdminSettingsRoute><UsersSection /></AdminSettingsRoute> },

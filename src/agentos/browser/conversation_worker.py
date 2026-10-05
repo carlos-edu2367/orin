@@ -263,7 +263,7 @@ def _launch_failure_message(error: Exception) -> str:
 
     ``playwright_available()`` only checks that the Python package is
     installed; the Chromium binary itself is a separate download
-    (``scripts/install-browser.ps1``). Without this, a package-present,
+    (``orin browser install``). Without this, a package-present,
     binary-absent install spawns a process per turn that immediately dies,
     and the caller only ever sees an opaque timeout.
 
@@ -276,7 +276,7 @@ def _launch_failure_message(error: Exception) -> str:
     """
     text = str(error)
     if "Executable doesn't exist" in text or "playwright install" in text.lower():
-        return "Chromium is not provisioned for the isolated browser. Run scripts/install-browser.ps1 (or `python -m playwright install chromium`) and try again."
+        return "Chromium is not installed for the isolated browser. Open Configurações > Navegador and click Instalar (or run `orin browser install`), then try again."
     if "error while loading shared libraries" in text:
         return (
             "O motor de navegador não conseguiu iniciar por faltar bibliotecas de sistema. "
@@ -567,7 +567,7 @@ class IsolatedConversationBrowser:
                     raise RuntimeError(
                         "the browser process exited unexpectedly; the tab was reset — "
                         "if this keeps happening, Chromium may not be provisioned "
-                        "(run scripts/install-browser.ps1)"
+                        "(run `orin browser install`)"
                     )
                 raise RuntimeError("the browser page took too long to respond; the tab was reset and the next call starts a fresh page")
             try:

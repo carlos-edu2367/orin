@@ -41,6 +41,7 @@ export const SETTINGS_GROUPS: SettingsGroup[] = [
     title: 'Sistema',
     items: [
       { id: 'workspace', label: 'Workspace', path: '/settings/workspace', lede: 'Onde os arquivos de cada conversa são gravados.' },
+      { id: 'browser', label: 'Navegador', path: '/settings/browser', lede: 'O Chromium que o agente usa para abrir páginas. É um download opcional.' },
       { id: 'schedules', label: 'Agendamentos', path: '/settings/schedules', lede: 'Conversas que começam sozinhas em um horário.', badge: 'schedules' },
       { id: 'users', label: 'Perfis', path: '/settings/users', lede: 'Quem acessa esta instância e com qual papel.', requires: 'admin' },
       { id: 'about', label: 'Sobre', path: '/settings/about', lede: 'Versão instalada, atualização e remoção.', badge: 'version' },

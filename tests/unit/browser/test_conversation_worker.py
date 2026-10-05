@@ -571,7 +571,7 @@ def test_host_reports_missing_chromium_instead_of_an_opaque_bootstrap_failure(mo
         # sends this failure unprompted; recv() blocks until that happens.
         response = parent.recv()
         assert response["ok"] is False
-        assert "scripts/install-browser.ps1" in response["error"]
+        assert "orin browser install" in response["error"]
     finally:
         thread.join(timeout=2)
         parent.close()
@@ -882,10 +882,10 @@ def test_a_dead_child_is_detected_quickly_instead_of_waiting_the_full_timeout(mo
 
 def test_launch_failure_message_distinguishes_missing_chromium_from_other_errors() -> None:
     missing = conversation_worker._launch_failure_message(Exception("Executable doesn't exist at /path/to/chromium\nRun playwright install"))
-    assert "scripts/install-browser.ps1" in missing
+    assert "orin browser install" in missing
 
     other = conversation_worker._launch_failure_message(RuntimeError("some other engine failure"))
-    assert "scripts/install-browser.ps1" not in other
+    assert "orin browser install" not in other
     assert "RuntimeError" in other
 
 

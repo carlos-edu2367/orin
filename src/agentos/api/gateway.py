@@ -46,6 +46,7 @@ from .security import (
     PasswordChangeRequiredError, RateLimitError,
 )
 from agentos.agentic.file_preview import media_type_for, open_in_default_application
+from agentos.browser.engine import engine_installer
 from agentos.installation import orin_paths, read_installation_status, remove_installed_version, runtime_profile, start_update
 from agentos.agentic.workspace import ConversationWorkspace, WorkspaceError, resolve_workspace
 from agentos.local_workspace import FolderRejected, choose_folder, inspect_folder
@@ -1639,6 +1640,20 @@ def create_app(services: ApiServices) -> FastAPI:
         # Ollama connection test above is.
         result = await run_in_threadpool(start_update, runtime_profile())
         return JSONResponse(result)
+
+    @app.get("/v1/runtime/browser")
+    async def get_browser_engine_status(request: Request) -> JSONResponse:
+        principal = principal_for(request)
+        services.security.authorize(principal, action="installation.inspect", resource_id=None, purpose="browser.engine.inspect")
+        return JSONResponse(await run_in_threadpool(lambda: engine_installer().status().as_dict()))
+
+    @app.post("/v1/runtime/browser/install", dependencies=[capability("ui_updater")])
+    async def install_browser_engine(request: Request) -> JSONResponse:
+        """Starts the Chromium download in the background; poll the GET above."""
+        principal = principal_for(request, mutable=True)
+        services.security.authorize(principal, action="installation.configure", resource_id=None, purpose="browser.engine.install")
+        _idempotency(request)
+        return JSONResponse(await run_in_threadpool(lambda: engine_installer().start().as_dict()), status_code=202)
 
     @app.get("/v1/settings/vision-model")
     async def get_vision_model_setting(request: Request) -> JSONResponse:

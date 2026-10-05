@@ -221,3 +221,29 @@ def test_browser_capability_reads_a_recognized_value_case_insensitively(monkeypa
 def test_browser_capability_falls_back_on_an_unrecognized_value(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(BROWSER_CAPABILITY_VARIABLE, "godmode")
     assert browser_capability_from_environment() == "interact"
+
+
+def test_missing_engine_publishes_a_guidance_tool_instead_of_no_browser(tmp_path, monkeypatch):
+    from agentos.agentic.agent_tools import AgentToolError, AgentToolset
+    from agentos.agentic.workspace import ConversationWorkspace
+    from agentos.browser import engine
+
+    monkeypatch.setattr(engine, "playwright_package_present", lambda: True)
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path / "none"))
+    toolset = AgentToolset(ConversationWorkspace(root=tmp_path, conversation_id="c1"), browser=None)
+
+    names = {definition.name for definition in toolset.definitions()}
+    assert "browse_page" in names
+    assert "browser_click" not in names
+    with pytest.raises(AgentToolError, match="orin browser install"):
+        toolset.browse_page("https://example.com")
+
+
+def test_no_playwright_package_means_no_browser_tool_at_all(tmp_path, monkeypatch):
+    from agentos.agentic.agent_tools import AgentToolset
+    from agentos.agentic.workspace import ConversationWorkspace
+    from agentos.browser import engine
+
+    monkeypatch.setattr(engine, "playwright_package_present", lambda: False)
+    toolset = AgentToolset(ConversationWorkspace(root=tmp_path, conversation_id="c1"), browser=None)
+    assert "browse_page" not in {definition.name for definition in toolset.definitions()}

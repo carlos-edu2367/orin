@@ -7,7 +7,6 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON="$ROOT/.venv/bin/python"
-BROWSER_ROOT="$ROOT/build/playwright"
 
 if [ ! -x "$PYTHON" ]; then
   echo "Create the development virtual environment (uv sync) before building a release." >&2
@@ -19,27 +18,22 @@ cd "$ROOT"
 npm ci --prefix frontend
 npm run build --prefix frontend
 
-export PLAYWRIGHT_BROWSERS_PATH="$BROWSER_ROOT"
-"$PYTHON" -m playwright install chromium
-export ORIN_PLAYWRIGHT_BROWSERS_PATH="$BROWSER_ROOT"
-
 "$PYTHON" -m PyInstaller packaging/orin.spec --noconfirm --clean
 
 frozen_runtime="$ROOT/dist/runtime"
-chromium=$(find "$frozen_runtime" -type f -name chrome -path '*chrome-linux*' | head -n1)
-if [ -z "$chromium" ]; then
-  echo "Frozen runtime was built without a Chromium executable." >&2
+# Chromium is an on-demand download now; the release must carry the driver that
+# fetches it, and must not carry the browser itself.
+if ! find "$frozen_runtime" -type d -path '*playwright/driver' | grep -q .; then
+  echo "Frozen runtime was built without the Playwright driver." >&2
   exit 1
 fi
-echo "Bundled Chromium: $chromium"
+if find "$frozen_runtime" -type f -name chrome -path '*chrome-linux*' | grep -q .; then
+  echo "Frozen runtime unexpectedly bundles Chromium; it must stay an optional download." >&2
+  exit 1
+fi
 
 if [ "${SKIP_TESTS:-0}" != "1" ]; then
-  packaging_browser_path="${ORIN_PLAYWRIGHT_BROWSERS_PATH:-}"
-  playwright_browser_path="${PLAYWRIGHT_BROWSERS_PATH:-}"
-  unset ORIN_PLAYWRIGHT_BROWSERS_PATH PLAYWRIGHT_BROWSERS_PATH
   "$PYTHON" -m pytest -q tests/unit
-  [ -n "$packaging_browser_path" ] && export ORIN_PLAYWRIGHT_BROWSERS_PATH="$packaging_browser_path"
-  [ -n "$playwright_browser_path" ] && export PLAYWRIGHT_BROWSERS_PATH="$playwright_browser_path"
 fi
 
 cd desktop
