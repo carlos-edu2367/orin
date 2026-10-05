@@ -232,3 +232,77 @@ def test_before_activate_runs_after_validation_and_a_failure_there_changes_nothi
 
 def test_version_ordering_ranks_prereleases_below_releases() -> None:
     assert engine.version_key("0.5.0") > engine.version_key("0.5.0-rc1") > engine.version_key("0.4.9")
+
+
+def test_prepare_leaves_a_verified_ready_version_and_touches_nothing_live(tmp_path: Path) -> None:
+    root = _installed(tmp_path)
+    updater = _updater(root, Server("0.5.0", _archive("0.5.0"), notes="n"), [])
+
+    result = updater.prepare()
+
+    assert result.status == "ready" and result.downloaded_bytes > 0
+    assert (root / "current").resolve() == (root / "0.4.0").resolve()
+    assert (root / "0.5.0.ready").is_dir() and not (root / "0.5.0").exists()
+    prepared = updater.prepared_release()
+    assert prepared is not None and (prepared.version, prepared.notes) == ("0.5.0", "n")
+
+
+def test_a_prepared_release_is_reused_without_downloading_again(tmp_path: Path) -> None:
+    root = _installed(tmp_path)
+    server = Server("0.5.0", _archive("0.5.0"))
+    _updater(root, server, []).prepare()
+    server.calls.clear()
+
+    assert _updater(root, server, []).prepare().status == "ready"
+    assert all("tar.gz" not in call for call in server.calls)
+
+
+def test_apply_prepared_activates_it_and_records_the_attempt(tmp_path: Path) -> None:
+    root = _installed(tmp_path)
+    updater = _updater(root, Server("0.5.0", _archive("0.5.0")), [])
+    updater.prepare()
+
+    result = updater.apply_prepared()
+
+    assert (result.status, result.version) == ("updated", "0.5.0")
+    assert (root / "current").resolve() == (root / "0.5.0").resolve()
+    assert not (root / "0.5.0.ready").exists() and not (root / "prepared.json").exists()
+    assert updater.last_attempt()["status"] == "updated"
+    assert updater.previous_version() == "0.4.0"
+
+
+def test_apply_without_a_prepared_update_explains_itself(tmp_path: Path) -> None:
+    with pytest.raises(UpdateError, match="preparada"):
+        _updater(_installed(tmp_path), Server("0.5.0", _archive("0.5.0")), []).apply_prepared()
+
+
+def test_a_prepared_version_that_fails_after_activation_rolls_back_and_is_recorded(tmp_path: Path) -> None:
+    root = _installed(tmp_path)
+    updater = _updater(root, Server("0.5.0", _archive("0.5.0", runtime=_runtime_script("0.5.0", fail_when_current=True))), [])
+    updater.prepare()
+
+    with pytest.raises(UpdateError) as caught:
+        updater.apply_prepared()
+
+    assert caught.value.rolled_back
+    assert (root / "current").resolve() == (root / "0.4.0").resolve()
+    attempt = updater.last_attempt()
+    assert attempt["status"] == "rolled_back" and attempt["version"] == "0.5.0" and attempt["restored"] == "0.4.0"
+    assert updater.prepared_release() is None
+
+
+def test_failing_to_stop_orin_keeps_the_prepared_update_for_a_retry(tmp_path: Path) -> None:
+    root = _installed(tmp_path)
+    calls = {"n": 0}
+    def stop() -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise UpdateError("não consegui encerrar", step="activate")
+    updater = _updater(root, Server("0.5.0", _archive("0.5.0")), [], before_activate=stop)
+    updater.prepare()
+
+    with pytest.raises(UpdateError):
+        updater.apply_prepared()
+    assert updater.prepared_release() is not None
+
+    assert updater.apply_prepared().status == "updated"

@@ -1,0 +1,9 @@
+# Atualização dentro do app (fase 2)
+
+- Motor dividido: `Updater.prepare()` (check → download → verify → extract → validate, deixa `<versão>.ready` + `prepared.json`, reaproveitável se já baixada) e `Updater.apply_prepared()` (ativa com rollback automático). `run()` = os dois, para `orin update` no terminal.
+- `installation/update_job.py`: `UpdateJob` roda `prepare()` em thread; estados `idle|checking|downloading|verifying|extracting|validating|ready|up_to_date|failed|unsupported`; `ready` é derivado do disco, então sobrevive a reiniciar o app. API: `GET /v1/installation/update/status`, `POST /v1/installation/update/prepare` (capability `ui_updater`).
+- Ativação não roda na API (pararia o próprio processo). O Electron chama `orin update --apply --restart` destacado (`desktop:apply-update`, preload `applyUpdate`); o CLI para o Orin só depois que a versão preparada passou no teste, ativa, e reabre `current/.../orin --desktop` após 3 s de carência (o Electron antigo fecha em <1 s e só aceita uma instância). Se a ativação falhar, reabre a versão anterior em vez de deixar o usuário sem janela.
+- `update-state.json` guarda `last_attempt` (`updated` | `rolled_back` + mensagem); o banner mostra uma vez ("A versão X não funcionou e o Orin voltou para a Y" / "Agora você está na versão X"), com "Entendi" lembrado em localStorage.
+- Frontend: `api/updateJob.ts`, `features/updates/useUpdateJob.ts` (polling de 1 s só enquanto ativo), `UpdateBanner` (só no desktop) e o painel de atualização em Configurações > Sobre usam o mesmo fluxo. `installLatestRelease` (POST síncrono) saiu do frontend; o endpoint antigo `POST /v1/installation/update` continua para scripts.
+- Fora do desktop (navegador), "pronta" instrui a rodar `orin update` (reaproveita o download).
+- Não validado em build real: reinício do Electron no Windows (criação de processo destacado) e a junction.

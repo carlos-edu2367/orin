@@ -102,3 +102,53 @@ def test_update_refuses_a_source_checkout_and_an_unofficial_install(tmp_path: Pa
 def test_update_subcommand_accepts_its_options_without_clobbering_the_version_flag() -> None:
     arguments = cli.build_parser().parse_args(["update", "--to", "0.5.0", "--check", "--json"])
     assert (arguments.target, arguments.check, arguments.json, arguments.version) == ("0.5.0", True, True, False)
+
+
+def test_apply_activates_the_prepared_update_and_reopens_the_desktop(tmp_path: Path) -> None:
+    root = _installed(tmp_path)
+    server = Server("0.5.0", _archive("0.5.0"))
+    from agentos.installation.updater import Updater
+    Updater(versions_root=root, current_version="0.4.0", base_url=BASE, platform="linux-x64", opener=server).prepare()
+    launched: list[list[str]] = []
+    waited: list[float] = []
+    stream = io.StringIO()
+
+    code = cli.command_update(
+        _paths(tmp_path), _profile(root), Console(stream, colour=False), argparse.Namespace(apply=True, restart=True),
+        sleep=waited.append, popen=lambda command, **kw: launched.append(command),
+    )
+
+    assert code == 0 and (root / "current").resolve() == (root / "0.5.0").resolve()
+    assert launched == [[str(root / "current" / "resources" / "runtime" / "orin"), "--desktop"]]
+    assert waited == [cli.RESTART_GRACE_SECONDS]
+
+
+def test_apply_that_gets_undone_still_reopens_the_desktop_on_the_old_version(tmp_path: Path) -> None:
+    root = _installed(tmp_path)
+    from agentos.installation.updater import Updater
+    from tests.unit.installation.test_updater import _runtime_script
+    broken = _archive("0.5.0", runtime=_runtime_script("0.5.0", fail_when_current=True))
+    Updater(versions_root=root, current_version="0.4.0", base_url=BASE, platform="linux-x64", opener=Server("0.5.0", broken)).prepare()
+    launched: list[list[str]] = []
+    stream = io.StringIO()
+
+    code = cli.command_update(
+        _paths(tmp_path), _profile(root), Console(stream, colour=False), argparse.Namespace(apply=True, restart=True),
+        sleep=lambda _: None, popen=lambda command, **kw: launched.append(command),
+    )
+
+    assert code == 1 and "restaurada" in stream.getvalue()
+    assert (root / "current").resolve() == (root / "0.4.0").resolve()
+    assert len(launched) == 1
+
+
+def test_apply_without_anything_prepared_fails_without_relaunching(tmp_path: Path) -> None:
+    root = _installed(tmp_path)
+    launched: list[list[str]] = []
+
+    code = cli.command_update(
+        _paths(tmp_path), _profile(root), Console(io.StringIO(), colour=False), argparse.Namespace(apply=True, restart=False),
+        popen=lambda command, **kw: launched.append(command),
+    )
+
+    assert code == 1 and launched == []

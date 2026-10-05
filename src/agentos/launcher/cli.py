@@ -86,6 +86,8 @@ def build_parser() -> argparse.ArgumentParser:
     update.add_argument("--to", dest="target", metavar="VERSION", default=None, help="install this exact version instead of the latest")
     update.add_argument("--force", action="store_true", help="reinstall even if this version is already installed")
     update.add_argument("--rollback", action="store_true", help="go back to the version this one replaced")
+    update.add_argument("--apply", action="store_true", help="activate the update the app already downloaded (stops Orin first)")
+    update.add_argument("--restart", action="store_true", help="with --apply: reopen Orin Desktop afterwards, on the new version (or the old one if the update was undone)")
     update.add_argument("--json", action="store_true", help="print machine-readable progress, one JSON object per line")
     commands.add_parser("status", help="show whether Orin is running, and where")
     browser = commands.add_parser("browser", help="manage the optional browser engine the agent uses")
@@ -266,6 +268,8 @@ def command_update(
     arguments: argparse.Namespace | None = None,
     *,
     opener=None,
+    sleep=None,
+    popen=None,
 ) -> int:
     """``orin update``: the engine in ``agentos.installation.updater``, rendered for a terminal."""
     from agentos.installation.updater import UpdateError, Updater
@@ -277,6 +281,8 @@ def command_update(
     as_json = bool(getattr(options, "json", False))
     check_only = bool(getattr(options, "check", False))
     rollback = bool(getattr(options, "rollback", False))
+    apply = bool(getattr(options, "apply", False))
+    restart = bool(getattr(options, "restart", False))
     json_out = JsonRenderer() if as_json else None
     renderer = None if as_json else UpdateRenderer(console, current_version=profile.version)
 
@@ -307,7 +313,7 @@ def command_update(
     if renderer is not None:
         renderer.header()
     try:
-        result = updater.rollback() if rollback else updater.run(
+        result = updater.rollback() if rollback else updater.apply_prepared() if apply else updater.run(
             getattr(options, "target", None) or "latest", force=bool(getattr(options, "force", False)), check_only=check_only,
         )
     except UpdateError as error:
@@ -315,12 +321,44 @@ def command_update(
             json_out.failed(error)
         elif renderer is not None:
             renderer.failed(error)
+        # The person pressed "restart to update": whatever happened, Orin was
+        # closed for it, so reopen the version that is active now (the old one
+        # after a rollback) instead of leaving them with no window at all.
+        if restart and running_instance(paths) is None:
+            _relaunch_desktop(root, **({"sleep": sleep} if sleep else {}), **({"popen": popen} if popen else {}))
         return 1
+    if restart:
+        _relaunch_desktop(root, **({"sleep": sleep} if sleep else {}), **({"popen": popen} if popen else {}))
     if json_out is not None:
         json_out.result(result)
     elif renderer is not None:
         {"available": renderer.available, "up_to_date": renderer.up_to_date, "updated": renderer.updated, "rolled_back": renderer.rolled_back}[result.status](result)
     return 0
+
+
+RESTART_GRACE_SECONDS = 3.0
+
+
+def _relaunch_desktop(root: Path, *, sleep=sleep, popen=subprocess.Popen) -> bool:
+    """Open Orin Desktop from ``current``, detached from this (soon to exit) process.
+
+    The old window quits within a second of the supervisor stopping, and Electron
+    allows only one instance; starting the new one before then would make it
+    hand focus to the dying one and exit. Hence the short grace.
+    """
+    from agentos.installation.updater import runtime_relative_path
+
+    runtime = root / "current" / runtime_relative_path()
+    if not runtime.is_file():
+        return False
+    sleep(RESTART_GRACE_SECONDS)
+    flags = (getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)) if os.name == "nt" else 0
+    try:
+        popen([str(runtime), "--desktop"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+              close_fds=True, start_new_session=os.name != "nt", creationflags=flags)
+    except OSError:
+        return False
+    return True
 
 
 def command_uninstall(paths: OrinPaths, profile: RuntimeProfile, console: Console) -> int:

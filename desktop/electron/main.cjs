@@ -88,7 +88,7 @@ function registerIpc() {
     return shell.openPath(status.logs_dir)
   })
   ipcMain.handle('desktop:retry', (event) => fromSplash(event) ? retryStartup() : false)
-  ipcMain.handle('desktop:run-update', (event) => fromApp(event) ? runUpdate() : false)
+  ipcMain.handle('desktop:apply-update', (event) => fromApp(event) ? applyUpdate() : false)
   ipcMain.handle('desktop:close', (event) => {
     if (!fromSplash(event)) return false
     closeWindow()
@@ -146,7 +146,7 @@ function updateRelease(value) {
 function showUpdateFlag(release) {
   if (!mainWindow || mainWindow.isDestroyed()) return
   const currentVersion = app.getVersion()
-  const label = `Orin ${release.version} is available. Run orin update to install it.`
+  const label = `Orin ${release.version} is available. Open Orin to download and install it.`
   mainWindow.setTitle(`Orin - Update ${release.version} available`)
   if (process.platform === 'win32') mainWindow.setOverlayIcon(updateOverlayIcon(), label)
   mainWindow.webContents.send('desktop:update-available', {
@@ -155,7 +155,12 @@ function showUpdateFlag(release) {
   })
 }
 
-async function runUpdate() {
+// The app downloads and verifies the release in the background (the API's
+// update job); this only performs the last step. `orin update --apply --restart`
+// stops this Orin, activates the prepared version (undoing it automatically if
+// the new one does not start) and reopens the window. It must outlive us, hence
+// detached: this window closes itself when the launcher reports "stopped".
+async function applyUpdate() {
   if (updating) return false
   const command = await updateCommand()
   if (!command) return false
@@ -183,7 +188,7 @@ async function updateCommand() {
   } catch {
     return null
   }
-  return [executable, ...arguments, 'update']
+  return [executable, ...arguments, 'update', '--apply', '--restart']
 }
 
 function updateOverlayIcon() {

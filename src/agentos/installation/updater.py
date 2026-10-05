@@ -32,6 +32,8 @@ import zipfile
 
 SEMVER = re.compile(r"^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+([0-9A-Za-z.-]+))?$")
 STATE_FILE = "update-state.json"
+PREPARED_FILE = "prepared.json"
+READY_SUFFIX = ".ready"
 CHUNK = 256 * 1024
 MANIFEST_ATTEMPTS = 3
 DOWNLOAD_ATTEMPTS = 2
@@ -173,36 +175,97 @@ class Updater:
         return release
 
     def run(self, requested: str = "latest", *, force: bool = False, check_only: bool = False) -> UpdateResult:
-        self._started = self._clock()
-        release = self.check(requested)
+        """Prepare and immediately activate (``orin update`` in a terminal)."""
         if check_only:
+            self._started = self._clock()
+            release = self.check(requested)
             newer = version_key(release.version) > version_key(self.current_version)
             return self._result("available" if newer else "up_to_date", release)
+        prepared = self.prepare(requested, force=force)
+        if prepared.status != "ready":
+            return prepared
+        applied = self.apply_prepared()
+        return UpdateResult(
+            applied.status, applied.previous_version, applied.version, applied.release_url, applied.notes,
+            prepared.downloaded_bytes, self._clock() - self._started,
+        )
+
+    def prepare(self, requested: str = "latest", *, force: bool = False) -> UpdateResult:
+        """Download, verify, extract and test a release, then leave it ready to activate.
+
+        Nothing the running installation uses is touched, so this can run in the
+        background of a live Orin. The result is ``<version>.ready`` plus
+        ``prepared.json``; ``apply_prepared`` turns it into the active version.
+        """
+        self._started = self._clock()
+        release = self.check(requested)
         if release.version == self.current_version and not force:
             return self._result("up_to_date", release)
-        if release.version == self.active_version() and not force:
-            return self._result("up_to_date", release)
         if release.version == self.active_version():
+            if not force:
+                return self._result("up_to_date", release)
             raise UpdateError(
                 f"A versão {release.version} é a que está ativa agora e não pode ser reinstalada por cima de si mesma.",
                 step="check", hint="Instale outra versão ou aguarde a próxima release.",
             )
 
         self.root.mkdir(parents=True, exist_ok=True)
-        target = self.root / release.version
+        ready = self.root / f"{release.version}{READY_SUFFIX}"
+        if self._ready_matches(release):
+            # Downloaded and verified earlier (e.g. by the app, minutes ago).
+            for name, _ in STEPS[1:5]:
+                self._step(name, "done", detail="já preparada")
+            return self._result("ready", release)
         staging = self.root / f"{release.version}.staging"
         archive = self.root / f".download-{release.version}-{os.getpid()}"
         shutil.rmtree(staging, ignore_errors=True)
+        shutil.rmtree(ready, ignore_errors=True)
+        self._clear_prepared()
         try:
             size = self._download(release, archive)
             self._extract(archive, staging)
             self._validate(release, staging)
-            archive.unlink(missing_ok=True)
-            self._activate(release, staging, target)
+            os.replace(staging, ready)
+            self._write_prepared(release)
         finally:
             archive.unlink(missing_ok=True)
             shutil.rmtree(staging, ignore_errors=True)
-        return self._result("updated", release, downloaded_bytes=size)
+        return self._result("ready", release, downloaded_bytes=size)
+
+    def prepared_release(self) -> Release | None:
+        """The release waiting to be activated, if one is on disk and still intact."""
+        try:
+            data = json.loads((self.root / PREPARED_FILE).read_text(encoding="utf-8"))
+            release = Release(str(data["version"]), "", str(data["sha256"]), data.get("release_url"), data.get("notes"))
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+        if SEMVER.fullmatch(release.version) is None or not (self.root / f"{release.version}{READY_SUFFIX}").is_dir():
+            return None
+        if version_key(release.version) <= version_key(self.active_version() or self.current_version):
+            return None
+        return release
+
+    def apply_prepared(self) -> UpdateResult:
+        """Activate the prepared release (stops the running Orin first, via ``before_activate``)."""
+        self._started = self._clock()
+        release = self.prepared_release()
+        if release is None:
+            raise UpdateError("Não há uma atualização preparada para instalar.", step="activate", hint="Rode `orin update` para baixar a versão mais recente.")
+        ready = self.root / f"{release.version}{READY_SUFFIX}"
+        try:
+            self._run_version_check(ready / runtime_relative_path(self._platform), release.version, step="validate")
+            self._activate(release, ready, self.root / release.version)
+        finally:
+            # ``_activate`` consumes the ready directory (a rename). If it is still
+            # there, activation never started (e.g. the running Orin could not be
+            # stopped) and the downloaded update stays available for a retry.
+            if not ready.exists():
+                self._clear_prepared()
+        return self._result("updated", release)
+
+    def last_attempt(self) -> dict[str, Any] | None:
+        attempt = self._read_state().get("last_attempt")
+        return attempt if isinstance(attempt, dict) else None
 
     def active_version(self) -> str | None:
         link = self.root / "current"
@@ -379,6 +442,7 @@ class Updater:
             restored = self._restore(previous_target)
             shutil.rmtree(target, ignore_errors=True)
             reason = error.message if isinstance(error, UpdateError) else "a nova versão não iniciou depois de ativada"
+            self._write_state(attempt={"status": "rolled_back", "version": release.version, "restored": previous, "message": reason})
             if restored or previous_target is None:
                 self._emit(UpdateEvent("rolled_back", "activate", 5, len(STEPS), "Voltando à versão anterior", detail=reason))
             if isinstance(error, (KeyboardInterrupt, SystemExit)):
@@ -388,7 +452,7 @@ class Updater:
                 step="activate", rolled_back=restored,
                 hint=(f"A versão {previous} foi restaurada e continua funcionando. Nada foi perdido." if restored else None),
             ) from None
-        self._write_state(previous=previous, current=release.version)
+        self._write_state(previous=previous, current=release.version, attempt={"status": "updated", "version": release.version})
         self._step("activate", "done", label=f"Versão {release.version} ativa")
 
     # -- helpers --------------------------------------------------------
@@ -451,6 +515,19 @@ class Updater:
         index = names.index(step)
         self._emit(UpdateEvent(phase, step, index, len(STEPS), label or STEPS[index][1], detail=detail))
 
+    def _ready_matches(self, release: Release) -> bool:
+        found = self.prepared_release()
+        return found is not None and found.version == release.version and found.archive_sha256 == release.archive_sha256
+
+    def _write_prepared(self, release: Release) -> None:
+        payload = {"version": release.version, "sha256": release.archive_sha256, "release_url": release.release_url, "notes": release.notes}
+        temporary = self.root / f".{PREPARED_FILE}.{os.getpid()}"
+        temporary.write_text(json.dumps(payload), encoding="utf-8")
+        os.replace(temporary, self.root / PREPARED_FILE)
+
+    def _clear_prepared(self) -> None:
+        (self.root / PREPARED_FILE).unlink(missing_ok=True)
+
     def _read_state(self) -> dict[str, Any]:
         try:
             data = json.loads((self.root / STATE_FILE).read_text(encoding="utf-8"))
@@ -458,8 +535,13 @@ class Updater:
             return {}
         return data if isinstance(data, dict) else {}
 
-    def _write_state(self, *, previous: str | None, current: str) -> None:
-        payload = {"previous": previous, "current": current, "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
+    def _write_state(self, *, previous: str | None = None, current: str | None = None, attempt: dict[str, Any] | None = None) -> None:
+        payload = self._read_state()
+        if current is not None:
+            payload.update({"previous": previous, "current": current})
+        if attempt is not None:
+            payload["last_attempt"] = {**attempt, "at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
+        payload["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
         temporary = self.root / f".{STATE_FILE}.{os.getpid()}"
         try:
             temporary.write_text(json.dumps(payload), encoding="utf-8")

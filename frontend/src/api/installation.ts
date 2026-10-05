@@ -51,10 +51,3 @@ export function removeInstalledVersion(client: ApiClient, version: string, inten
     return { removed_version: (value as Record<string, unknown>).removed_version as string }
   } })
 }
-
-export function installLatestRelease(client: ApiClient, intent = client.createMutationIntent()): Promise<{ started: boolean }> {
-  return client.request({ path: '/v1/installation/update', method: 'POST', intent, parse: (value) => {
-    if (!value || typeof value !== 'object' || Array.isArray(value) || (value as Record<string, unknown>).started !== true) throw invalidResponseError()
-    return { started: true }
-  } })
-}

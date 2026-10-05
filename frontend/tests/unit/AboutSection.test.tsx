@@ -26,7 +26,7 @@ describe('AboutSection', () => {
 
     render(<MemoryRouter><AboutSection client={client} /></MemoryRouter>)
 
-    expect(await screen.findByRole('button', { name: 'Instalar v0.2.5' })).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: 'Baixar v0.2.5' })).toBeInTheDocument()
   })
 
   it('hides the install button when already on the latest version', async () => {
@@ -49,34 +49,38 @@ describe('AboutSection', () => {
     expect(screen.queryByRole('button', { name: /Instalar/ })).not.toBeInTheDocument()
   })
 
-  it('starts the install and reports success', async () => {
+  it('downloads in the background and offers the terminal command once ready', async () => {
+    let prepared = false
     const fetchImpl = vi.fn<typeof fetch>((input, init) => {
-      if (init?.method === 'POST') return Promise.resolve(json({ started: true }))
+      const url = String(input)
+      if (init?.method === 'POST' && url.endsWith('/v1/installation/update/prepare')) { prepared = true; return Promise.resolve(json({ state: 'ready', current_version: '0.2.4', version: '0.2.5' }, 202)) }
+      if (url.endsWith('/v1/installation/update/status')) return Promise.resolve(json({ state: prepared ? 'ready' : 'idle', current_version: '0.2.4', version: prepared ? '0.2.5' : null }))
       return Promise.resolve(json(status()))
     })
     const client = new ApiClient({ fetchImpl, maxAttempts: 1, createIdempotencyKey: () => 'intent-test' })
     const user = userEvent.setup()
 
     render(<MemoryRouter><AboutSection client={client} /></MemoryRouter>)
-    const button = await screen.findByRole('button', { name: 'Instalar v0.2.5' })
-    await user.click(button)
+    await user.click(await screen.findByRole('button', { name: 'Baixar v0.2.5' }))
 
-    expect(await screen.findByText(/Nova versão instalada/)).toBeInTheDocument()
-    expect(fetchImpl.mock.calls.some(([requestInput]) => String(requestInput).endsWith('/v1/installation/update'))).toBe(true)
+    expect(await screen.findByText(/baixada e verificada/)).toBeInTheDocument()
+    expect(screen.getByText('orin update')).toBeInTheDocument()
   })
 
-  it('reports a failed install without crashing', async () => {
+  it('shows the reason and a retry when the download fails', async () => {
     const fetchImpl = vi.fn<typeof fetch>((input, init) => {
-      if (init?.method === 'POST') return Promise.resolve(json({ error: 'boom' }, 500))
+      const url = String(input)
+      if (init?.method === 'POST') return Promise.resolve(json({ state: 'failed', current_version: '0.2.4', error: { message: 'Sem conexão com o servidor de releases.', hint: 'Verifique sua internet.' } }, 202))
+      if (url.endsWith('/v1/installation/update/status')) return Promise.resolve(json({ state: 'idle', current_version: '0.2.4' }))
       return Promise.resolve(json(status()))
     })
     const client = new ApiClient({ fetchImpl, maxAttempts: 1, createIdempotencyKey: () => 'intent-test' })
     const user = userEvent.setup()
 
     render(<MemoryRouter><AboutSection client={client} /></MemoryRouter>)
-    const button = await screen.findByRole('button', { name: 'Instalar v0.2.5' })
-    await user.click(button)
+    await user.click(await screen.findByRole('button', { name: 'Baixar v0.2.5' }))
 
-    expect(await screen.findByText('Não foi possível instalar a nova versão.')).toBeInTheDocument()
+    expect(await screen.findByText(/Sem conexão com o servidor de releases/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Tentar novamente' })).toBeInTheDocument()
   })
 })

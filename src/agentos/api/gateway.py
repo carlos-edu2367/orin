@@ -47,6 +47,7 @@ from .security import (
 )
 from agentos.agentic.file_preview import media_type_for, open_in_default_application
 from agentos.browser.engine import engine_installer
+from agentos.installation.update_job import update_job
 from agentos.installation import orin_paths, read_installation_status, remove_installed_version, runtime_profile, start_update
 from agentos.agentic.workspace import ConversationWorkspace, WorkspaceError, resolve_workspace
 from agentos.local_workspace import FolderRejected, choose_folder, inspect_folder
@@ -1640,6 +1641,20 @@ def create_app(services: ApiServices) -> FastAPI:
         # Ollama connection test above is.
         result = await run_in_threadpool(start_update, runtime_profile())
         return JSONResponse(result)
+
+    @app.get("/v1/installation/update/status")
+    async def get_update_status(request: Request) -> JSONResponse:
+        principal = principal_for(request)
+        services.security.authorize(principal, action="installation.inspect", resource_id=None, purpose="installation.update.inspect")
+        return JSONResponse(await run_in_threadpool(lambda: update_job(runtime_profile()).status()))
+
+    @app.post("/v1/installation/update/prepare", dependencies=[capability("ui_updater")])
+    async def prepare_update(request: Request) -> JSONResponse:
+        """Starts downloading and verifying the latest release in the background; poll the GET above."""
+        principal = principal_for(request, mutable=True)
+        services.security.authorize(principal, action="installation.configure", resource_id=None, purpose="installation.update.prepare")
+        _idempotency(request)
+        return JSONResponse(await run_in_threadpool(lambda: update_job(runtime_profile()).start()), status_code=202)
 
     @app.get("/v1/runtime/browser")
     async def get_browser_engine_status(request: Request) -> JSONResponse:

@@ -286,7 +286,21 @@ The release workflow is implemented as follows:
    orin update --to 0.5.0       install an exact version
    orin update --rollback       go back to the version this one replaced
    orin update --json           one JSON object per line (for the app and scripts)
+   orin update --apply          activate an update the app already downloaded
+   orin update --apply --restart  ...and reopen Orin Desktop afterwards
    ```
+
+   **In the app** the same engine is split in two. The backend downloads,
+   verifies, extracts and tests the release in a background thread
+   (`agentos.installation.update_job`, polled through
+   `GET /v1/installation/update/status`, started by
+   `POST /v1/installation/update/prepare`) while Orin keeps working, leaving
+   `<version>.ready` and `prepared.json` on disk. The banner then offers
+   *Reiniciar para atualizar*, and Electron runs
+   `orin update --apply --restart` detached: it stops this Orin, activates the
+   prepared version (rolling back automatically if it does not start), and
+   reopens the window on whichever version ended up active. What happened is
+   kept in `update-state.json` (`last_attempt`) so the next launch can say so.
 
 The installed runtime has no Docker, PostgreSQL, Redis, Python or Node
 dependency. OmniRoute remains a separately installed optional npm integration;

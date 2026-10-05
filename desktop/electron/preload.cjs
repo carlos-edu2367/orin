@@ -12,6 +12,6 @@ contextBridge.exposeInMainWorld('orinDesktop', Object.freeze({
     ipcRenderer.on('desktop:update-available', listener)
     return () => ipcRenderer.removeListener('desktop:update-available', listener)
   },
-  runUpdate: () => ipcRenderer.invoke('desktop:run-update'),
+  applyUpdate: () => ipcRenderer.invoke('desktop:apply-update'),
   notifyCodeMode: (notification) => ipcRenderer.invoke('desktop:notify-code-mode', notification),
 }))
