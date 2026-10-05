@@ -66,13 +66,14 @@ irm https://github.com/carlos-edu2367/orin/releases/latest/download/install.ps1 
 curl -fsSL https://github.com/carlos-edu2367/orin/releases/latest/download/install.sh | bash
 ```
 
-Em ambos os casos o instalador:
+Os comandos de uma linha só baixam o programa de instalação da release (`OrinSetup.exe` / `OrinSetup-linux-x64`) e o executam em modo texto. Ele:
 
 1. baixa a release estável mais recente;
 2. valida o hash SHA-256 dos artefatos;
-3. instala o runtime local (o Chromium do browser do agente fica de fora e é baixado só se você quiser);
-4. oferece o atalho (Área de Trabalho no Windows; entrada no menu de aplicativos no Linux);
-5. disponibiliza o comando `orin`.
+3. testa o programa novo antes de ativá-lo (e volta atrás se algo falhar);
+4. instala o runtime local (o Chromium do browser do agente fica de fora e é baixado só se você quiser);
+5. cria os atalhos (Área de Trabalho e menu Iniciar no Windows; entrada no menu de aplicativos no Linux);
+6. disponibiliza o comando `orin`.
 
 O instalador nunca executa comandos privilegiados: no Linux ele não chama `apt` nem pede `sudo`, e instala tudo no seu usuário — runtime em `~/.local/share/Orin/versions`, comando em `~/.local/bin/orin`. Se `~/.local/bin` não estiver no seu `PATH`, ele imprime a linha exata para adicionar, em vez de editar seus dotfiles sozinho.
 
@@ -96,7 +97,7 @@ orin --update     # instala a release verificada mais recente
 orin --uninstall  # remove a instalação
 ```
 
-`orin --update` e `orin --uninstall` chamam o instalador da própria plataforma (`install.ps1` no Windows, `install.sh` no Linux), então o ciclo de atualização é o mesmo nos dois sistemas.
+`orin update` baixa a versão nova ao lado da atual, confere o SHA-256, testa o programa novo e só então troca; se a versão nova não iniciar, volta sozinho para a anterior (`orin update --rollback` desfaz uma atualização manualmente). No app, a atualização baixa em segundo plano e pede só um clique em **Reiniciar para atualizar**. `orin --uninstall` lista o que será apagado e pede confirmação (`--yes` para automação). O motor é o mesmo no Windows e no Linux, e o mesmo do `OrinSetup`.
 
 As versões e os artefatos verificados por hash ficam na página de [releases do Orin](https://github.com/carlos-edu2367/orin/releases).
 
@@ -259,24 +260,21 @@ docs/                        arquitetura, ADRs e runbooks
 
 ## Desenvolvimento a partir do código-fonte
 
-Para desenvolvimento, use Python 3.13+, Node.js 22+ e Docker Desktop quando precisar dos serviços de integração documentados. Para o perfil local completo no Windows:
+Para desenvolvimento, use Python 3.13+, [uv](https://docs.astral.sh/uv/) e Node.js 22+ (o Docker só é necessário para os serviços de integração documentados). O mesmo caminho serve para Windows, Linux e macOS:
 
-```powershell
-Copy-Item .env.local.example .env.local
-Copy-Item frontend/.env.local.example frontend/.env.local
-.\scripts\install-orin.ps1
-orin
+```bash
+uv sync --frozen --all-groups                 # ambiente Python + dependências de desenvolvimento
+npm --prefix frontend ci && npm --prefix frontend run build   # o frontend que o backend serve
+uv run orin                                   # sobe o runtime a partir do código-fonte
 ```
 
-O script cria o ambiente Python, instala o projeto, prepara o frontend e configura o runtime local.
+Para ter o comando `orin` no PATH apontando para este checkout (um `git pull` vale na hora), instale-o como ferramenta editável: `uv tool install --editable .`. Se quiser o navegador do agente nos testes, rode `uv run orin browser install` (a CI usa `uv run playwright install --with-deps chromium`).
 
-Em **Linux** (ou em qualquer plataforma, se preferir o mesmo caminho que a CI usa), o ambiente é criado com [uv](https://docs.astral.sh/uv/):
+Os arquivos de configuração são opcionais: o launcher gera a chave de criptografia e a configuração padrão sozinho. Para personalizar, copie os exemplos:
 
 ```bash
 cp .env.local.example .env.local
 cp frontend/.env.local.example frontend/.env.local
-uv sync --frozen --all-groups
-uv run playwright install --with-deps chromium
 ```
 
 A chave de criptografia pode ser gerada com:

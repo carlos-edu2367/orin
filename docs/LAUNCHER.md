@@ -27,17 +27,16 @@ interface really answers, and opens it in your browser.
 
 ## Installing the command
 
-```powershell
-.\scripts\install-orin.ps1
+From a checkout, install `orin` as an editable tool:
+
+```bash
+uv tool install --editable .
 ```
 
-That registers `orin` as a shim in `%LOCALAPPDATA%\Orin\bin` and puts that
-directory on your user PATH. Open a new terminal afterwards — Windows only gives
-a PATH change to terminals started after it.
-
-The shim points at the runtime in this checkout, so a `git pull` is reflected in
-`orin` immediately. `.\scripts\install-orin.ps1 -Uninstall` removes the command
-and leaves your data, configuration and logs alone.
+That puts `orin` on your PATH pointing at this checkout, so a `git pull` is
+reflected in `orin` immediately. `uv tool uninstall orin` removes it and leaves
+your data, configuration and logs alone. (Released builds install through
+`OrinSetup`; see *Distribution* below.)
 
 ## What starts, in what order
 
@@ -264,14 +263,17 @@ The release workflow is implemented as follows:
 1. **Build** — CI produces `frontend/dist` and freezes the launcher and backend
    into one `orin.exe` (PyInstaller onedir), shipped as a versioned archive with
    the web bundle as a static asset directory inside the installation.
-2. **`install.ps1`** — downloads the archive, unpacks it to
+2. **`OrinSetup` / `install.ps1` / `install.sh`** — `OrinSetup` (a small frozen
+   program with a window, or `--silent` in a terminal) is the installer; the two
+   scripts are one-line bootstraps that download and run it. It downloads the archive, unpacks it to
    `%LOCALAPPDATA%\Programs\Orin\<version>`, repoints a `current` junction, and
-   writes the same `orin.cmd` shim to the same bin directory that
-   `scripts\install-orin.ps1` writes today. The published one-liner
-   (`irm https://orin.dev/install.ps1 | iex`) is that script.
+   writes the `orin.cmd` shim into the bin directory, adds it to PATH and
+   creates the shortcuts. All of it is one Python engine
+   (`agentos.installation`), shared with `orin update` and `orin --uninstall`;
+   there is no second implementation in PowerShell or Bash.
 3. **`orin update`** — implemented by one Python engine
    (`agentos.installation.updater`) that the terminal, the app's update button
-   and the future graphical installer all share. It downloads the next version
+   and the `OrinSetup` window all share. It downloads the next version
    *beside* the current one, verifies its SHA-256, extracts into a staging
    directory, runs the staged runtime's `--version`, and only then flips the
    `current` pointer. After the flip it runs the new runtime once more through

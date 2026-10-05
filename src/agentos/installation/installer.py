@@ -78,6 +78,9 @@ class Integration(Protocol):
     def integrate(self, options: InstallOptions, version: str) -> str | None:
         """Create the command/shortcuts. Returns a hint to show the person, if any."""
 
+    def remove(self, options: InstallOptions) -> None:
+        """Undo ``integrate``: the command, shortcuts, PATH entry and registry entry."""
+
 
 # -- pure helpers (tested on every platform) ------------------------------
 
@@ -161,6 +164,19 @@ class WindowsIntegration:
                 winreg.SetValueEx(key, name, 0, winreg.REG_DWORD if isinstance(value, int) else winreg.REG_SZ, value)
         return None
 
+    def remove(self, options: InstallOptions) -> None:
+        import winreg  # type: ignore[import-not-found]
+
+        for name in ("orin.cmd", "orin-desktop.ps1", "orin-desktop.vbs"):
+            (options.bin_root / name).unlink(missing_ok=True)
+        (Path(self._known_folder("Desktop")) / "Orin Desktop.lnk").unlink(missing_ok=True)
+        (Path(os.environ.get("APPDATA", "")) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Orin.lnk").unlink(missing_ok=True)
+        self._add_to_user_path(str(options.bin_root), remove=True)
+        try:
+            winreg.DeleteKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Uninstall\Orin")
+        except FileNotFoundError:
+            pass
+
     @staticmethod
     def _known_folder(name: str) -> str:
         result = subprocess.run(
@@ -177,7 +193,7 @@ class WindowsIntegration:
         )
 
     @staticmethod
-    def _add_to_user_path(directory: str) -> None:
+    def _add_to_user_path(directory: str, *, remove: bool = False) -> None:
         import ctypes
         import winreg  # type: ignore[import-not-found]
 
@@ -186,7 +202,7 @@ class WindowsIntegration:
                 existing, kind = winreg.QueryValueEx(key, "Path")
             except FileNotFoundError:
                 existing, kind = "", winreg.REG_EXPAND_SZ
-            updated = merge_path(existing, directory)
+            updated = merge_path(existing, directory, remove=remove)
             if updated != existing:
                 winreg.SetValueEx(key, "Path", 0, kind, updated)
         # Tell running programs (Explorer, new terminals) the environment changed.
@@ -206,6 +222,11 @@ class PosixIntegration:
         if str(options.bin_root) not in os.environ.get("PATH", "").split(os.pathsep):
             return f'Para usar o comando orin, adicione ao seu shell: export PATH="{options.bin_root}:$PATH"'
         return None
+
+
+    def remove(self, options: InstallOptions) -> None:
+        (options.bin_root / "orin").unlink(missing_ok=True)
+        (Path.home() / ".local" / "share" / "applications" / "orin-desktop.desktop").unlink(missing_ok=True)
 
 
 def integration_for(system: str | None = None) -> Integration:

@@ -183,3 +183,19 @@ def test_setup_help_exits_cleanly_and_describes_the_silent_flags(capsys: pytest.
     assert caught.value.code == 0
     out = capsys.readouterr().out
     assert "--silent" in out and "--no-shortcut" in out and "--to" in out
+
+
+@posix_only
+def test_posix_integration_remove_deletes_the_command_and_menu_entry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
+    monkeypatch.setenv("PATH", "/usr/bin")
+    options = InstallOptions(root=tmp_path / "Orin", bin_root=tmp_path / "bin")
+    integration = inst.PosixIntegration()
+    integration.integrate(options, "0.5.0")
+    assert (tmp_path / "bin" / "orin").exists()
+
+    integration.remove(options)
+
+    assert not (tmp_path / "bin" / "orin").exists()
+    assert not (tmp_path / "home" / ".local" / "share" / "applications" / "orin-desktop.desktop").exists()
+    integration.remove(options)  # removing twice is harmless

@@ -25,14 +25,11 @@ if not (WEB / "index.html").is_file():
 if not (PLAYWRIGHT_DRIVER / "package").is_dir():
     raise SystemExit("The Playwright driver is missing; run uv sync before packaging")
 
-INSTALLER_SCRIPT = ROOT / ("install.ps1" if os.name == "nt" else "install.sh")
-
 datas = collect_data_files("agentos")
 datas += copy_metadata("agentos")
 datas += [
     (str(WEB), "web"),
     (str(PLAYWRIGHT_DRIVER), "playwright/driver"),
-    (str(INSTALLER_SCRIPT), "."),
     (str(ROOT / "src" / "agentos" / "persistence" / "postgres" / "migrations"), "agentos/persistence/postgres/migrations"),
 ]
 binaries = collect_dynamic_libs("pypdfium2")

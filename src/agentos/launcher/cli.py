@@ -74,8 +74,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--version", action="store_true", help="print the Orin version and exit")
     parser.add_argument("--update", action="store_true", help="install the latest verified Orin release")
-    parser.add_argument("--uninstall", action="store_true", help="completely remove this installed Orin runtime and its local data")
-    parser.set_defaults(port=None, no_browser=False, verbose=False, desktop=False, desktop_devtools=False, desktop_reuse=False, update=False, uninstall=False, command=None)
+    parser.add_argument("--uninstall", action="store_true", help="completely remove this installed Orin runtime and its local data (asks first)")
+    parser.add_argument("--yes", action="store_true", help="with --uninstall: do not ask for confirmation")
+    parser.set_defaults(port=None, no_browser=False, verbose=False, desktop=False, desktop_devtools=False, desktop_reuse=False, update=False, uninstall=False, yes=False, command=None)
 
     commands = parser.add_subparsers(dest="command", metavar="command")
     commands.add_parser("start", parents=[shared], help="start the Orin runtime (the default)")
@@ -361,33 +362,64 @@ def _relaunch_desktop(root: Path, *, sleep=sleep, popen=subprocess.Popen) -> boo
     return True
 
 
-def command_uninstall(paths: OrinPaths, profile: RuntimeProfile, console: Console) -> int:
+def command_uninstall(
+    paths: OrinPaths,
+    profile: RuntimeProfile,
+    console: Console,
+    arguments: argparse.Namespace | None = None,
+    *,
+    ask=input,
+    popen=subprocess.Popen,
+) -> int:
     """Remove a packaged installation without ever targeting a source checkout."""
+    from agentos.installation.uninstaller import plan_uninstall, uninstall
+    from agentos.installation.updater import UpdateError
+    from agentos.installation.versions import installation_root
+
     if profile.is_development:
         console.error("--uninstall only applies to an installed Orin runtime. It will not delete this source checkout.")
         return 2
-    installer = profile.installer
-    if not installer.is_file():
-        console.error(f"The release installer is missing: {installer}. Reinstall Orin to restore it.")
-        return 1
+    root = installation_root(profile)
+    if root is None:
+        console.error("Este Orin não foi instalado pelo instalador oficial, então não sei removê-lo daqui. Apague a pasta de instalação manualmente.")
+        return 2
+    try:
+        plan = plan_uninstall(root, paths)
+    except UpdateError as error:
+        console.error(f"{error.message}\n{error.hint or ''}".rstrip())
+        return 2
+
+    console.line("")
+    console.line("  " + console.paint("Remover o Orin", "bold", "red"))
+    console.line("")
+    console.line("  Serão apagados, junto com o comando e os atalhos:")
+    for target in plan.targets:
+        console.line(f"    {target}")
+    console.line("  " + console.paint("Isso inclui suas conversas, memórias, chaves e configurações locais.", "yellow"))
+    for kept in plan.kept:
+        console.line("  " + console.paint(f"Mantido (fora dos locais padrão): {kept}", "dim"))
+    console.line("")
+    if not getattr(arguments, "yes", False):
+        interactive = sys.stdin is not None and sys.stdin.isatty()
+        if not interactive:
+            console.error("Sem um terminal para confirmar, não removo nada. Rode de um terminal ou passe --yes.")
+            return 2
+        if ask("  Remover tudo isso? [s/N] ").strip().lower() not in {"s", "sim", "y", "yes"}:
+            console.line("  Nada foi removido.\n")
+            return 0
     if running_instance(paths) is not None:
         code = command_stop(paths, console)
         if code != 0:
             return code
-    console.line("\n  Removing this Orin installation and its local data...")
     try:
-        if os.name == "nt":
-            command = [
-                "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(installer),
-                "-Uninstall", "-Force", "-WaitForPid", str(os.getpid()),
-            ]
-        else:
-            command = ["bash", str(installer), "--uninstall", "--force", "--wait-for-pid", str(os.getpid())]
-        result = subprocess.run(command, check=False)
-    except OSError as error:
-        console.error(f"Could not start the uninstaller: {error}")
+        uninstall(plan, wait_for_pid=os.getpid(), popen=popen)
+    except UpdateError as error:
+        console.error(f"{error.message}\n{error.hint or ''}".rstrip())
         return 1
-    return int(result.returncode)
+    console.line("  " + console.paint("✓", "green") + " Comando e atalhos removidos.")
+    console.line("  " + console.paint("As pastas serão apagadas assim que este programa terminar.", "dim"))
+    console.line("")
+    return 0
 
 
 # -- entry point --------------------------------------------------------
@@ -428,7 +460,7 @@ def main(argv: list[str] | None = None) -> int:
         if command == "update":
             return command_update(paths, profile, console, arguments)
         if command == "uninstall":
-            return command_uninstall(paths, profile, console)
+            return command_uninstall(paths, profile, console, arguments)
         if command == "status":
             return command_status(paths, profile, console)
         if command == "logs":
