@@ -8,18 +8,28 @@
   </head>
   <body>
     <main class="splash-shell">
-      <section class="splash-card" aria-labelledby="title">
-        <header class="brand"><span class="brand-mark">O</span><span>ORIN</span></header>
-        <p class="eyebrow">AMBIENTE LOCAL</p>
+      <section class="splash-card" aria-labelledby="title" data-phase="starting">
+        <div class="orb" aria-hidden="true">
+          <svg viewBox="0 0 120 120" class="orb-ring">
+            <circle class="orb-track" cx="60" cy="60" r="52" />
+            <circle id="orb-progress" class="orb-progress" cx="60" cy="60" r="52" />
+          </svg>
+          <span class="orb-mark">O</span>
+        </div>
+        <p class="eyebrow">ORIN · AMBIENTE LOCAL</p>
         <h1 id="title">Preparando seu ambiente</h1>
-        <p id="message" class="message" role="status">Conectando ao launcher…</p>
-        <ol id="steps" class="steps" aria-label="Progresso de inicialização"></ol>
-        <div class="progress" aria-hidden="true"><span id="progress-bar"></span></div>
+        <p id="message" class="message" role="status">Conectando…</p>
+        <div class="progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-label="Progresso de inicialização">
+          <span id="progress-bar"></span>
+        </div>
+        <p class="percent"><span id="percent">0</span>%</p>
+        <ol id="steps" class="steps" aria-label="Etapas da inicialização"></ol>
         <section id="failure-actions" class="failure-actions" hidden>
           <button id="retry" class="button button-primary" type="button">Tentar novamente</button>
           <button id="open-logs" class="button" type="button">Abrir logs</button>
           <button id="close" class="button button-quiet" type="button">Fechar</button>
         </section>
+        <p class="tip" id="tip">Dica: ao fechar a janela, você pode manter o Orin em segundo plano para que as tarefas agendadas continuem rodando.</p>
       </section>
     </main>
     <script src="./splash.js"></script>

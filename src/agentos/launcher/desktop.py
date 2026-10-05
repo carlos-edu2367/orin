@@ -29,6 +29,7 @@ def launch_desktop(
     *,
     devtools: bool = False,
     focus_only: bool = False,
+    background: bool = False,
 ) -> DesktopProcess:
     """Start Electron with a status file it can read, never through a shell."""
     command = list(_electron_command(profile))
@@ -37,6 +38,8 @@ def launch_desktop(
         command.append("--devtools")
     if focus_only:
         command.append("--focus-only")
+    if background:
+        command.append("--background")
 
     log_path = paths.logs / "desktop.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)

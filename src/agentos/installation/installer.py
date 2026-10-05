@@ -19,6 +19,7 @@ from pathlib import Path
 import subprocess
 from typing import Callable, Protocol
 
+from .autostart import Autostart
 from .updater import STEPS, UpdateError, UpdateEvent, UpdateResult, Updater, current_platform, runtime_relative_path
 
 #: The final step the installer adds after the engine's own.
@@ -51,6 +52,8 @@ class InstallOptions:
     desktop_shortcut: bool = True
     menu_entry: bool = True
     add_to_path: bool = True
+    background: bool = False
+    """Start Orin hidden, in the tray, whenever the user signs in."""
 
     @classmethod
     def defaults(cls, system: str | None = None, **overrides: object) -> "InstallOptions":
@@ -285,6 +288,11 @@ class Installer:
                 f"O Orin foi instalado, mas não consegui criar o comando e os atalhos ({type(error).__name__}).",
                 step="integrate", hint="Você ainda pode abrir o Orin pela pasta de instalação. Rode o instalador de novo para tentar outra vez.",
             ) from None
+        if self.options.background:
+            try:
+                Autostart(self.options.root, system=self._platform).set(True)
+            except Exception:  # noqa: BLE001 - optional; the settings screen offers it again
+                hint = hint or "Não consegui ativar o início com o computador. Você pode ligar isso depois, nas configurações do Orin."
         self._emit(UpdateEvent("done", "integrate", index, len(SETUP_STEPS), label))
         runtime = self.options.root / "current" / runtime_relative_path(self._platform)
         status = "installed" if existing is None and result.status == "updated" else ("updated" if result.status == "updated" else "up_to_date")

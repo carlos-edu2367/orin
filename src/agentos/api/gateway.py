@@ -47,6 +47,7 @@ from .security import (
 )
 from agentos.agentic.file_preview import media_type_for, open_in_default_application
 from agentos.browser.engine import engine_installer
+from agentos.installation.autostart import autostart_for
 from agentos.installation.update_job import update_job
 from agentos.installation import orin_paths, read_installation_status, remove_installed_version, runtime_profile, start_update
 from agentos.agentic.workspace import ConversationWorkspace, WorkspaceError, resolve_workspace
@@ -283,6 +284,10 @@ class PluginEnabledRequest(_RequestModel):
 
 class OmniRouteRuntimeRequest(_RequestModel):
     auto_start: bool
+
+
+class AutostartRequest(_RequestModel):
+    enabled: bool
 
 
 class OmniRouteRuntimeActionRequest(_RequestModel):
@@ -1655,6 +1660,25 @@ def create_app(services: ApiServices) -> FastAPI:
         services.security.authorize(principal, action="installation.configure", resource_id=None, purpose="installation.update.prepare")
         _idempotency(request)
         return JSONResponse(await run_in_threadpool(lambda: update_job(runtime_profile()).start()), status_code=202)
+
+    @app.get("/v1/installation/autostart")
+    async def get_autostart(request: Request) -> JSONResponse:
+        principal = principal_for(request)
+        services.security.authorize(principal, action="installation.inspect", resource_id=None, purpose="installation.autostart.inspect")
+        return JSONResponse(await run_in_threadpool(lambda: autostart_for(runtime_profile()).status().as_dict()))
+
+    @app.put("/v1/installation/autostart", dependencies=[capability("ui_updater")])
+    async def set_autostart(payload: AutostartRequest, request: Request) -> JSONResponse:
+        principal = principal_for(request, mutable=True)
+        services.security.authorize(principal, action="installation.configure", resource_id=None, purpose="installation.autostart")
+        _idempotency(request)
+        try:
+            status = await run_in_threadpool(lambda: autostart_for(runtime_profile()).set(payload.enabled))
+        except RuntimeError:
+            return _error(409, "CONFLICT", "autostart_unavailable", retryable=False)
+        except OSError:
+            return _error(500, "INTERNAL", "autostart_failed", retryable=True)
+        return JSONResponse(status.as_dict())
 
     @app.get("/v1/runtime/browser")
     async def get_browser_engine_status(request: Request) -> JSONResponse:

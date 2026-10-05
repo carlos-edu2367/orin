@@ -48,6 +48,7 @@ def _start_options() -> argparse.ArgumentParser:
     shared.add_argument("--port", type=int, default=argparse.SUPPRESS, help=f"port for the Orin interface (default {DEFAULT_PORT})")
     shared.add_argument("--no-browser", action="store_true", default=argparse.SUPPRESS, help="do not open a browser window")
     shared.add_argument("--desktop", action="store_true", default=argparse.SUPPRESS, help="open Orin in the Electron desktop window")
+    shared.add_argument("--background", action="store_true", default=argparse.SUPPRESS, help="with --desktop: start without a window, in the system tray")
     shared.add_argument("--desktop-devtools", action="store_true", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
     shared.add_argument("--desktop-reuse", action="store_true", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
     shared.add_argument("-v", "--verbose", action="store_true", default=argparse.SUPPRESS, help="show startup detail on the console")
@@ -76,7 +77,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--update", action="store_true", help="install the latest verified Orin release")
     parser.add_argument("--uninstall", action="store_true", help="completely remove this installed Orin runtime and its local data (asks first)")
     parser.add_argument("--yes", action="store_true", help="with --uninstall: do not ask for confirmation")
-    parser.set_defaults(port=None, no_browser=False, verbose=False, desktop=False, desktop_devtools=False, desktop_reuse=False, update=False, uninstall=False, yes=False, command=None)
+    parser.set_defaults(port=None, no_browser=False, verbose=False, desktop=False, background=False, desktop_devtools=False, desktop_reuse=False, update=False, uninstall=False, yes=False, command=None)
 
     commands = parser.add_subparsers(dest="command", metavar="command")
     commands.add_parser("start", parents=[shared], help="start the Orin runtime (the default)")
@@ -91,6 +92,8 @@ def build_parser() -> argparse.ArgumentParser:
     update.add_argument("--restart", action="store_true", help="with --apply: reopen Orin Desktop afterwards, on the new version (or the old one if the update was undone)")
     update.add_argument("--json", action="store_true", help="print machine-readable progress, one JSON object per line")
     commands.add_parser("status", help="show whether Orin is running, and where")
+    autostart = commands.add_parser("autostart", help="start Orin in the background when you sign in to the computer")
+    autostart.add_argument("action", choices=("on", "off", "status"), nargs="?", default="status")
     browser = commands.add_parser("browser", help="manage the optional browser engine the agent uses")
     browser_commands = browser.add_subparsers(dest="browser_command", metavar="action", required=True)
     browser_commands.add_parser("install", help="download Chromium (about 150 MB) so the agent can open web pages")
@@ -145,6 +148,9 @@ def command_start(arguments: argparse.Namespace, paths: OrinPaths, profile: Runt
     lock = InstanceLock(paths.instance_lock)
     if existing is not None or not lock.acquire():
         state = existing or read_state(paths)
+        if arguments.background:
+            # Signing in while Orin is already up must not pop its window open.
+            return 0
         if arguments.desktop and focus_desktop(paths, profile):
             if state is not None:
                 return attach_to_running(console, state, open_browser=False)
@@ -166,6 +172,7 @@ def command_start(arguments: argparse.Namespace, paths: OrinPaths, profile: Runt
             open_browser=not arguments.no_browser and not arguments.desktop,
             verbose=arguments.verbose,
             desktop=arguments.desktop,
+            background=arguments.desktop and arguments.background,
             desktop_devtools=arguments.desktop_devtools,
             desktop_reuse=arguments.desktop_reuse,
         ),
@@ -253,6 +260,22 @@ def _follow(path: Path, console: Console) -> None:
                 console.line(line.rstrip("\n"))
                 continue
             sleep(0.3)
+
+
+def command_autostart(arguments: argparse.Namespace, profile: RuntimeProfile, console: Console) -> int:
+    from agentos.installation.autostart import autostart_for
+
+    autostart = autostart_for(profile)
+    try:
+        status = autostart.status() if arguments.action == "status" else autostart.set(arguments.action == "on")
+    except Exception as error:  # noqa: BLE001 - shown as a sentence, never a traceback
+        console.error(str(error) or "Não foi possível alterar o início com o computador.")
+        return 1
+    if not status.supported:
+        console.line("\n  Iniciar com o computador só existe no Orin instalado.\n")
+        return 1
+    console.line("\n  Orin " + ("inicia em segundo plano ao ligar o computador." if status.enabled else "não inicia sozinho ao ligar o computador.") + "\n")
+    return 0
 
 
 def command_restart(arguments: argparse.Namespace, paths: OrinPaths, profile: RuntimeProfile, console: Console) -> int:
@@ -448,6 +471,8 @@ def main(argv: list[str] | None = None) -> int:
         if command == "browser":
             from .browser import command_browser
             return command_browser(arguments, paths, profile, console)
+        if command == "autostart":
+            return command_autostart(arguments, profile, console)
         if command == "user":
             from .users import command_user
             return command_user(arguments, paths, console)

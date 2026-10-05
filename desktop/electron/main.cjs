@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, Menu, nativeImage, Notification, shell } = require('electron')
+const { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Notification, shell, Tray } = require('electron')
 const { spawn } = require('node:child_process')
 const fs = require('node:fs/promises')
 const path = require('node:path')
@@ -6,6 +6,8 @@ const { pathToFileURL } = require('node:url')
 
 const statusFile = argumentValue('--status-file')
 const devtools = process.argv.includes('--devtools')
+// Started at sign-in: no window, only the tray icon. The launcher keeps running either way.
+const startHidden = process.argv.includes('--background')
 const iconPath = path.join(__dirname, 'assets', 'orin-logo.png')
 let mainWindow = null
 let appUrl = null
@@ -13,17 +15,18 @@ let closing = false
 let retrying = false
 let updating = false
 let lifecycleTimer = null
+let tray = null
+let asking = false
+let announcedBackground = false
+
+const CLOSE_BEHAVIORS = ['ask', 'background', 'quit']
+let preferences = { closeBehavior: 'ask' }
 
 if (!app.requestSingleInstanceLock()) {
   app.quit()
 }
 
-app.on('second-instance', () => {
-  if (!mainWindow) return
-  if (mainWindow.isMinimized()) mainWindow.restore()
-  mainWindow.show()
-  mainWindow.focus()
-})
+app.on('second-instance', () => showWindow())
 
 app.whenReady().then(async () => {
   if (process.argv.includes('--focus-only')) {
@@ -33,6 +36,7 @@ app.whenReady().then(async () => {
   // Orin owns its navigation through the application UI. The stock Electron
   // File/Edit/View bar is both redundant and visually disconnected from it.
   Menu.setApplicationMenu(null)
+  preferences = await loadPreferences()
   registerIpc()
   mainWindow = new BrowserWindow({
     width: 1120,
@@ -61,17 +65,31 @@ app.whenReady().then(async () => {
   mainWindow.on('close', (event) => {
     if (closing) return
     event.preventDefault()
-    closeWindow()
+    handleCloseRequest()
   })
   await mainWindow.loadFile(path.join(__dirname, 'splash.html'))
-  mainWindow.show()
+  if (startHidden) createTray()
+  else mainWindow.show()
   if (devtools) mainWindow.webContents.openDevTools({ mode: 'detach' })
 })
 
 app.on('window-all-closed', () => app.quit())
 
 function registerIpc() {
-  ipcMain.handle('desktop:startup-status', (event) => fromSplash(event) ? readStatus() : null)
+  ipcMain.handle('desktop:startup-status', async (event) => {
+    if (!fromSplash(event)) return null
+    const status = await readStatus()
+    // A hidden start must not hide a failure: nobody would ever learn why Orin is not running.
+    if (status && status.mode === 'error' && startHidden) showWindow()
+    return status
+  })
+  ipcMain.handle('desktop:get-preferences', (event) => fromApp(event) ? { ...preferences } : null)
+  ipcMain.handle('desktop:set-preferences', async (event, value) => {
+    if (!fromApp(event)) return null
+    const behavior = value && value.closeBehavior
+    if (CLOSE_BEHAVIORS.includes(behavior)) await savePreferences({ ...preferences, closeBehavior: behavior })
+    return { ...preferences }
+  })
   ipcMain.handle('desktop:load-app', async (event, url) => {
     if (!fromSplash(event)) return false
     if (!isLocalOrinUrl(url)) return false
@@ -97,12 +115,7 @@ function registerIpc() {
   ipcMain.handle('desktop:notify-code-mode', (event, payload) => {
     if (!fromApp(event) || !Notification.isSupported() || !safeCodeModeNotification(payload)) return false
     const notification = new Notification({ title: payload.title, body: payload.body, icon: iconPath, silent: false })
-    notification.on('click', () => {
-      if (!mainWindow || mainWindow.isDestroyed()) return
-      if (mainWindow.isMinimized()) mainWindow.restore()
-      mainWindow.show()
-      mainWindow.focus()
-    })
+    notification.on('click', () => showWindow())
     notification.show()
     return true
   })
@@ -267,9 +280,110 @@ function isLocalOrinUrl(value) {
 async function closeWindow() {
   if (closing) return
   closing = true
+  destroyTray()
   await requestShutdown()
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.destroy()
   app.quit()
+}
+
+// Closing the window of a running Orin is a real choice: quitting also stops the
+// scheduler and the worker, so scheduled work stops with it.
+async function handleCloseRequest() {
+  // Still starting (or failed): there is nothing to keep alive.
+  if (!appUrl || updating) return closeWindow()
+  if (preferences.closeBehavior === 'quit') return closeWindow()
+  if (preferences.closeBehavior === 'background') return hideToBackground()
+  if (asking) return
+  asking = true
+  try {
+    const { response, checkboxChecked } = await dialog.showMessageBox(mainWindow, {
+      type: 'question',
+      title: 'Fechar o Orin?',
+      message: 'Fechar o Orin ou mantê-lo em segundo plano?',
+      detail: 'Em segundo plano o Orin continua rodando, sem janela, e suas tarefas agendadas seguem funcionando. Para abri-lo de novo, use o ícone na bandeja do sistema.\n\nVocê pode mudar isso depois em Configurações.',
+      buttons: ['Manter em segundo plano', 'Fechar o Orin', 'Cancelar'],
+      defaultId: 0,
+      cancelId: 2,
+      noLink: true,
+      checkboxLabel: 'Lembrar minha escolha',
+      checkboxChecked: false,
+      icon: nativeImage.createFromPath(iconPath),
+    })
+    if (response === 2) return
+    if (checkboxChecked) await savePreferences({ ...preferences, closeBehavior: response === 0 ? 'background' : 'quit' })
+    if (response === 0) hideToBackground()
+    else closeWindow()
+  } finally {
+    asking = false
+  }
+}
+
+function hideToBackground() {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  if (!createTray()) {
+    // No tray on this desktop: minimizing keeps a visible way back.
+    mainWindow.minimize()
+    return
+  }
+  mainWindow.hide()
+  if (!announcedBackground && Notification.isSupported()) {
+    announcedBackground = true
+    new Notification({ title: 'O Orin continua em segundo plano', body: 'Suas tarefas agendadas seguem rodando. Use o ícone da bandeja para abrir ou sair.', icon: iconPath, silent: true }).show()
+  }
+}
+
+function showWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  destroyTray()
+  if (mainWindow.isMinimized()) mainWindow.restore()
+  mainWindow.show()
+  mainWindow.focus()
+}
+
+function createTray() {
+  if (tray) return true
+  try {
+    const image = nativeImage.createFromPath(iconPath).resize({ width: 18, height: 18 })
+    tray = new Tray(image)
+    tray.setToolTip('Orin — em segundo plano')
+    tray.setContextMenu(Menu.buildFromTemplate([
+      { label: 'Abrir o Orin', click: () => showWindow() },
+      { type: 'separator' },
+      { label: 'Sair do Orin', click: () => closeWindow() },
+    ]))
+    tray.on('click', () => showWindow())
+    return true
+  } catch {
+    tray = null
+    return false
+  }
+}
+
+function destroyTray() {
+  if (!tray) return
+  tray.destroy()
+  tray = null
+}
+
+function preferencesFile() {
+  return path.join(app.getPath('userData'), 'orin-preferences.json')
+}
+
+async function loadPreferences() {
+  try {
+    const stored = JSON.parse(await fs.readFile(preferencesFile(), 'utf8'))
+    if (CLOSE_BEHAVIORS.includes(stored.closeBehavior)) return { closeBehavior: stored.closeBehavior }
+  } catch {}
+  return { closeBehavior: 'ask' }
+}
+
+async function savePreferences(next) {
+  preferences = next
+  try {
+    await fs.writeFile(preferencesFile(), JSON.stringify(next), 'utf8')
+  } catch {
+    // Not persisting only means asking again next time.
+  }
 }
 
 function watchLauncherLifecycle() {
@@ -278,6 +392,7 @@ function watchLauncherLifecycle() {
     const status = await readStatus()
     if (!status || status.mode !== 'stopped' || closing) return
     closing = true
+    destroyTray()
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.destroy()
     app.quit()
   }, 700)

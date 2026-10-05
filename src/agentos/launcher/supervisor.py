@@ -68,6 +68,7 @@ class LaunchOptions:
     open_browser: bool = True
     verbose: bool = False
     desktop: bool = False
+    background: bool = False
     desktop_devtools: bool = False
     desktop_reuse: bool = False
 
@@ -171,6 +172,7 @@ class Supervisor:
                         self.profile,
                         self.desktop_status,
                         devtools=self.options.desktop_devtools,
+                        background=self.options.background,
                     )
                 except DesktopUnavailable as error:
                     self._desktop_failed(str(error))

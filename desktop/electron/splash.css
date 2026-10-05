@@ -8,35 +8,58 @@
   --muted: #a69fb8;
   --faint: #706a7c;
   --accent: #a66cff;
+  --ok: #8ee6b4;
   --danger: #ff6b7d;
-  --radius: 18px;
+  --radius: 22px;
 }
 * { box-sizing: border-box; }
-body { margin: 0; min-width: 320px; min-height: 100vh; color: var(--text); background: var(--ink); font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-.splash-shell { display: grid; min-height: 100vh; place-items: center; overflow: hidden; padding: 28px; background: radial-gradient(ellipse 68% 52% at 50% 12%, rgb(166 108 255 / .16), transparent 66%), radial-gradient(ellipse 48% 42% at 8% 95%, rgb(166 108 255 / .09), transparent 70%), var(--surface); }
-.splash-card { width: min(100%, 580px); padding: 42px; border: 1px solid var(--line); border-radius: var(--radius); background: rgb(11 10 20 / .76); box-shadow: 0 28px 90px rgb(0 0 0 / .42), 0 0 80px rgb(166 108 255 / .07); backdrop-filter: blur(16px); animation: appear .45s ease-out both; }
-.brand { display: flex; align-items: center; gap: 10px; font-size: 13px; font-weight: 760; letter-spacing: .18em; }
-.brand-mark { display: grid; width: 27px; height: 27px; place-items: center; border: 1px solid var(--accent); border-radius: 8px; color: var(--accent); font-size: 13px; letter-spacing: 0; box-shadow: 0 0 20px rgb(166 108 255 / .28); }
-.eyebrow { margin: 39px 0 10px; color: var(--accent); font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 10px; font-weight: 650; letter-spacing: .17em; }
-h1 { margin: 0; font-size: clamp(28px, 5vw, 38px); letter-spacing: -.045em; }
-.message { min-height: 42px; margin: 12px 0 28px; color: var(--muted); font-size: 14px; line-height: 1.5; }
-.steps { display: grid; gap: 5px; margin: 0; padding: 0; list-style: none; }
-.step { display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 10px; align-items: center; padding: 10px 11px; border: 1px solid transparent; border-radius: 10px; transition: color .2s ease, background .2s ease, border-color .2s ease; }
-.step-icon { display: grid; width: 17px; height: 17px; place-items: center; color: var(--faint); font-family: ui-monospace, Consolas, monospace; font-size: 13px; }
-.step-label { display: grid; gap: 2px; min-width: 0; font-size: 13px; font-weight: 550; }
-.step-detail { overflow: hidden; color: var(--faint); font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
-.step--starting { border-color: rgb(166 108 255 / .17); background: rgb(166 108 255 / .055); }
-.step--starting .step-icon { color: var(--accent); animation: pulse 1.2s ease-in-out infinite; }
-.step--ready .step-icon { color: #b8f5d0; }
-.step--error { border-color: rgb(255 107 125 / .22); background: rgb(255 107 125 / .055); }
-.step--error .step-icon { color: var(--danger); }
-.progress { height: 3px; margin-top: 28px; overflow: hidden; border-radius: 999px; background: rgb(245 241 255 / .10); }
-.progress span { display: block; width: 8%; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #7c3aed, var(--accent)); box-shadow: 0 0 12px rgb(166 108 255 / .7); transition: width .35s ease; }
-.failure-actions { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 24px; }
-.button { border: 1px solid var(--line); border-radius: 9px; padding: 9px 12px; background: var(--raised); color: var(--text); cursor: pointer; font: 600 12px inherit; transition: border-color .16s ease, transform .16s ease; }
+body { margin: 0; min-width: 320px; min-height: 100vh; color: var(--text); background: var(--ink); font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; -webkit-font-smoothing: antialiased; }
+.splash-shell { display: grid; min-height: 100vh; place-items: center; overflow: hidden; padding: 56px 28px 28px; background: radial-gradient(ellipse 70% 55% at 50% 0%, rgb(166 108 255 / .20), transparent 68%), radial-gradient(ellipse 50% 40% at 90% 100%, rgb(124 58 237 / .12), transparent 70%), var(--surface); }
+.splash-card { display: flex; flex-direction: column; align-items: center; width: min(100%, 520px); padding: 34px 38px 30px; border: 1px solid var(--line); border-radius: var(--radius); background: rgb(11 10 20 / .72); box-shadow: 0 28px 90px rgb(0 0 0 / .45), 0 0 90px rgb(166 108 255 / .08); backdrop-filter: blur(18px); text-align: center; animation: appear .5s ease-out both; }
+
+.orb { position: relative; display: grid; width: 104px; height: 104px; place-items: center; }
+.orb::before { content: ""; position: absolute; inset: 14px; border-radius: 50%; background: radial-gradient(circle, rgb(166 108 255 / .35), transparent 70%); filter: blur(10px); animation: breathe 3.2s ease-in-out infinite; }
+.orb-ring { position: absolute; inset: 0; width: 100%; height: 100%; transform: rotate(-90deg); }
+.orb-track { fill: none; stroke: rgb(245 241 255 / .09); stroke-width: 3; }
+.orb-progress { fill: none; stroke: var(--accent); stroke-width: 3; stroke-linecap: round; filter: drop-shadow(0 0 6px rgb(166 108 255 / .8)); transition: stroke-dashoffset .5s ease, stroke .3s ease; }
+.orb-mark { position: relative; display: grid; width: 56px; height: 56px; place-items: center; border: 1px solid rgb(166 108 255 / .7); border-radius: 17px; background: rgb(166 108 255 / .08); color: var(--text); font-size: 26px; font-weight: 750; box-shadow: 0 0 28px rgb(166 108 255 / .35), inset 0 0 18px rgb(166 108 255 / .12); }
+
+.eyebrow { margin: 22px 0 8px; color: var(--accent); font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 10px; font-weight: 650; letter-spacing: .2em; }
+h1 { margin: 0; font-size: clamp(22px, 5vw, 29px); white-space: nowrap; letter-spacing: -.045em; }
+.message { min-height: 22px; margin: 10px 0 22px; color: var(--muted); font-size: 14px; line-height: 1.5; }
+
+.progress { width: 100%; height: 4px; overflow: hidden; border-radius: 999px; background: rgb(245 241 255 / .10); }
+.progress span { display: block; width: 0; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #7c3aed, var(--accent), #d2b3ff); background-size: 200% 100%; box-shadow: 0 0 12px rgb(166 108 255 / .7); transition: width .5s ease; animation: sheen 2.4s linear infinite; }
+.percent { margin: 9px 0 20px; color: var(--faint); font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 11px; font-variant-numeric: tabular-nums; }
+
+.steps { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 8px; width: 100%; margin: 0; padding: 0; list-style: none; text-align: left; }
+.step { display: flex; align-items: center; gap: 10px; min-width: 0; padding: 8px 11px; border: 1px solid transparent; border-radius: 10px; color: var(--faint); font-size: 12.5px; font-weight: 550; transition: color .25s ease, background .25s ease, border-color .25s ease; }
+.step-icon { display: grid; flex: none; width: 16px; height: 16px; place-items: center; border: 1.5px solid rgb(245 241 255 / .18); border-radius: 50%; font-size: 10px; font-weight: 800; line-height: 1; transition: all .25s ease; }
+.step-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.step--starting { border-color: rgb(166 108 255 / .22); background: rgb(166 108 255 / .07); color: var(--text); }
+.step--starting .step-icon { border-color: var(--accent) transparent var(--accent) var(--accent); animation: spin .9s linear infinite; }
+.step--ready { color: var(--muted); }
+.step--ready .step-icon { border-color: transparent; background: rgb(142 230 180 / .16); color: var(--ok); }
+.step--error { border-color: rgb(255 107 125 / .26); background: rgb(255 107 125 / .06); color: var(--text); }
+.step--error .step-icon { border-color: transparent; background: rgb(255 107 125 / .18); color: var(--danger); }
+
+.failure-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 9px; width: 100%; margin-top: 22px; }
+.button { border: 1px solid var(--line); border-radius: 10px; padding: 9px 14px; background: var(--raised); color: var(--text); cursor: pointer; font: 600 12px inherit; transition: border-color .16s ease, transform .16s ease; }
 .button:hover { border-color: rgb(166 108 255 / .55); transform: translateY(-1px); }
 .button-primary { border-color: var(--accent); background: var(--accent); color: var(--ink); }
-.button-quiet { margin-left: auto; color: var(--muted); }
-@keyframes appear { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
-@keyframes pulse { 50% { opacity: .35; transform: scale(.8); } }
-@media (max-width: 520px) { .splash-shell { padding: 16px; } .splash-card { padding: 28px 22px; } .eyebrow { margin-top: 28px; } }
+.button-quiet { color: var(--muted); }
+.tip { max-width: 400px; margin: 20px 0 0; color: var(--faint); font-size: 11.5px; line-height: 1.55; }
+
+[data-phase="ready"] .orb-progress { stroke: var(--ok); filter: drop-shadow(0 0 6px rgb(142 230 180 / .7)); }
+[data-phase="error"] .orb-progress { stroke: var(--danger); filter: drop-shadow(0 0 6px rgb(255 107 125 / .7)); }
+[data-phase="error"] .orb::before { background: radial-gradient(circle, rgb(255 107 125 / .28), transparent 70%); animation: none; }
+[data-phase="error"] .message { color: #ffb4bd; }
+[hidden] { display: none !important; }
+
+@keyframes appear { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes breathe { 50% { opacity: .55; transform: scale(.9); } }
+@keyframes sheen { to { background-position: -200% 0; } }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { *, *::before { animation: none !important; transition: none !important; } }
+@media (max-height: 700px) { .splash-shell { padding-top: 44px; padding-bottom: 14px; } .splash-card { padding: 22px 34px 20px; } .orb { width: 84px; height: 84px; } .orb-mark { width: 46px; height: 46px; font-size: 22px; } .eyebrow { margin-top: 14px; } .message { margin-bottom: 16px; } .percent { margin-bottom: 12px; } .step { padding: 6px 11px; } .tip { margin-top: 12px; } }
+@media (max-width: 520px) { .splash-shell { padding: 52px 14px 14px; } .splash-card { padding: 26px 20px; } h1 { white-space: normal; } .steps { grid-template-columns: 1fr; } }

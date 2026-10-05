@@ -19,6 +19,7 @@ from pathlib import Path
 import subprocess
 from typing import Callable
 
+from .autostart import Autostart
 from .installer import InstallOptions, default_bin_root, integration_for
 from .paths import OrinPaths, _user_config_root, _user_state_root
 from .updater import UpdateError, current_platform
@@ -104,6 +105,10 @@ def uninstall(
             f"Não consegui remover o comando e os atalhos ({type(error).__name__}).",
             step="uninstall", hint="Feche o Orin e tente de novo.",
         ) from None
+    try:
+        Autostart(plan.versions_root, system=system).set(False)
+    except Exception:  # noqa: BLE001 - a leftover login entry only points at a folder that is going away
+        pass
     command, extra_env = deferred_removal_command(plan.targets, wait_for_pid if wait_for_pid is not None else os.getpid(), system)
     flags = (getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)) if os.name == "nt" else 0
     try:

@@ -114,6 +114,7 @@ def options_from(arguments: argparse.Namespace) -> InstallOptions:
         desktop_shortcut=not arguments.no_shortcut,
         menu_entry=not arguments.no_shortcut,
         add_to_path=not arguments.no_path,
+        background=arguments.background,
     )
 
 
@@ -122,6 +123,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--silent", action="store_true", help="no window: print progress in the terminal")
     parser.add_argument("--dir", default=None, help="install folder (default: your user programs folder)")
     parser.add_argument("--to", default=None, metavar="VERSION", help="install an exact version instead of the latest")
+    parser.add_argument("--background", action="store_true", help="start Orin in the background when you sign in to the computer")
     parser.add_argument("--no-shortcut", action="store_true", help="do not create desktop/menu shortcuts")
     parser.add_argument("--no-path", action="store_true", help="do not add the orin command to PATH")
     return parser
@@ -180,9 +182,10 @@ class SetupWindow:  # pragma: no cover - exercised by hand and by the Xvfb scree
         root = self.root = tk.Tk()
         self.shortcut = tk.BooleanVar(master=root, value=options.desktop_shortcut)
         self.path = tk.BooleanVar(master=root, value=options.add_to_path)
+        self.background = tk.BooleanVar(master=root, value=options.background)
         root.title("Instalador do Orin")
         root.configure(bg=BG)
-        root.geometry("560x470")
+        root.geometry("560x500")
         root.resizable(False, False)
         self._center()
         self.body = tk.Frame(root, bg=BG)
@@ -196,7 +199,7 @@ class SetupWindow:  # pragma: no cover - exercised by hand and by the Xvfb scree
     def _center(self) -> None:
         self.root.update_idletasks()
         x = (self.root.winfo_screenwidth() - 560) // 2
-        y = (self.root.winfo_screenheight() - 470) // 3
+        y = (self.root.winfo_screenheight() - 500) // 3
         self.root.geometry(f"+{max(x, 0)}+{max(y, 0)}")
 
     def _clear(self) -> None:
@@ -241,7 +244,8 @@ class SetupWindow:  # pragma: no cover - exercised by hand and by the Xvfb scree
         self.place_label.pack(side="left", fill="x", expand=True)
         change = tk.Button(place, text="Alterar…", command=self._choose_folder, relief="flat", bd=0, bg=SURFACE, fg=ACCENT, activebackground=SURFACE, activeforeground=TEXT, cursor="hand2", font=("Segoe UI", 9), highlightthickness=0)
         change.pack(side="right", padx=8)
-        for variable, text in ((self.shortcut, "Criar atalhos na Área de Trabalho e no menu Iniciar"), (self.path, "Adicionar o comando orin ao terminal")):
+        for variable, text in ((self.shortcut, "Criar atalhos na Área de Trabalho e no menu Iniciar"), (self.path, "Adicionar o comando orin ao terminal"),
+                                   (self.background, "Iniciar o Orin em segundo plano ao ligar o computador")):
             tk.Checkbutton(
                 self.body, text=text, variable=variable, bg=BG, fg=TEXT, selectcolor=SURFACE, activebackground=BG, activeforeground=TEXT,
                 font=("Segoe UI", 10), anchor="w", highlightthickness=0,
@@ -313,6 +317,7 @@ class SetupWindow:  # pragma: no cover - exercised by hand and by the Xvfb scree
             self.options = InstallOptions(
                 root=folder if folder.name.lower() == "orin" else folder / "Orin", bin_root=self.options.bin_root, version=self.options.version,
                 desktop_shortcut=self.options.desktop_shortcut, menu_entry=self.options.menu_entry, add_to_path=self.options.add_to_path,
+                background=self.options.background,
             )
             self.place_label.configure(text=str(self.options.root))
 
@@ -335,6 +340,7 @@ class SetupWindow:  # pragma: no cover - exercised by hand and by the Xvfb scree
         self.options = InstallOptions(
             root=self.options.root, bin_root=self.options.bin_root, version=self.options.version,
             desktop_shortcut=bool(self.shortcut.get()), menu_entry=bool(self.shortcut.get()), add_to_path=bool(self.path.get()),
+            background=bool(self.background.get()),
         )
         self.model = SetupModel()
         self.show_progress()

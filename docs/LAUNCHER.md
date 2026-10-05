@@ -114,6 +114,8 @@ orin                    # start, wait for ready, open the browser
 orin --port 9000        # start on a specific port
 orin --no-browser       # start without opening a browser
 orin --desktop          # start and host the API-served app in Electron
+orin --desktop --background   # the same, with no window: only the tray icon
+orin autostart on|off|status  # start Orin in the background at sign-in
 orin -v                 # show startup detail on the console
 orin start              # the same as `orin`
 orin stop
@@ -163,6 +165,25 @@ Then use `orin --desktop --desktop-devtools` while changing shell files. Electro
 logs are written beside the other launcher logs as `desktop.log`. Build the
 initial Windows shell with `npm run build` from `desktop`; it is only the
 Electron host until the frozen launcher is packaged next to it.
+
+### Background mode
+
+Scheduled conversations only run while Orin does, so closing the window must not
+have to mean stopping Orin. When the window of a running Orin is closed, Electron
+asks whether to **close** (stop everything) or **keep running in the background**
+(hide the window, leave a tray icon with *Abrir o Orin* / *Sair do Orin*). The
+answer can be remembered; *Configurações → Segundo plano* changes it later.
+The choice lives in Electron's `orin-preferences.json` (`closeBehavior`:
+`ask`, `background` or `quit`). Closing while Orin is still starting (or has
+failed) never asks: there is nothing to keep alive.
+
+`orin autostart on` (also an option in `OrinSetup` and in *Configurações*) adds a
+per-user sign-in entry that runs `orin --desktop --background`: an HKCU `Run`
+value on Windows, `~/.config/autostart/orin.desktop` on Linux. It points at
+`<install root>/current`, so updates never leave it stale, and `orin --uninstall`
+removes it. If Orin is already running, a background start does nothing; if the
+hidden start fails, the window opens so the error is visible. A normal
+`orin --desktop` while Orin sits in the tray restores the window.
 
 ## Logs
 

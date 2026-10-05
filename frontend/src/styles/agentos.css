@@ -1487,6 +1487,17 @@ body.has-workspace-file-preview { overflow: hidden; }
 .activity-detail__badge.is-running { color: var(--signal); }
 .activity-card--tool .activity-detail .activity-detail { padding: 4px 0 0 12px; border-top: 0; }
 
+/* ---------------------------------------------------------------- background */
+.background-settings__lede { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.55; }
+.background-settings__group { display: grid; gap: 4px; margin: 6px 0 0; padding: 0; border: 0; }
+.background-settings__group legend { margin-bottom: 6px; padding: 0; color: var(--text); font-size: 13px; font-weight: 650; }
+.background-settings__row { display: flex; align-items: flex-start; gap: 12px; padding: 11px 12px; border: 1px solid var(--line); border-radius: 10px; cursor: pointer; }
+.background-settings__row:hover { border-color: var(--line-strong, var(--line)); }
+.background-settings__row input { margin: 3px 0 0; accent-color: var(--signal); }
+.background-settings__row span { display: grid; gap: 2px; }
+.background-settings__row strong { font-size: 13px; font-weight: 600; }
+.background-settings__row small { color: var(--muted); font-size: 12px; line-height: 1.5; }
+
 /* ---------------------------------------------------------------- browser engine */
 .browser-engine__lede, .browser-engine__hint { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.55; }
 .browser-engine__hint { font-size: 12px; color: var(--faint); }
