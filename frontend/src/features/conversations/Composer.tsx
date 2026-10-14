@@ -128,28 +128,30 @@ export function Composer({
     }
   }
 
-  const [fetchedFiles, setFetchedFiles] = useState<string[]>([])
-  const [mentionLoading, setMentionLoading] = useState(false)
+  const [fetchedMentionResult, setFetchedMentionResult] = useState<{ query: string; items: string[] } | null>(null)
 
   useEffect(() => {
     if (mentionQuery === null || mentionDismissed || !onSearchWorkspaceFiles) return
     let cancelled = false
-    setMentionLoading(true)
     onSearchWorkspaceFiles(mentionQuery)
       .then((items) => {
-        if (!cancelled) setFetchedFiles(items)
+        if (!cancelled) setFetchedMentionResult({ query: mentionQuery, items })
       })
       .catch(() => {
-        if (!cancelled) setFetchedFiles([])
-      })
-      .finally(() => {
-        if (!cancelled) setMentionLoading(false)
+        if (!cancelled) setFetchedMentionResult({ query: mentionQuery, items: [] })
       })
     return () => {
       cancelled = true
     }
   }, [mentionQuery, mentionDismissed, onSearchWorkspaceFiles])
 
+  const mentionLoading = Boolean(
+    onSearchWorkspaceFiles &&
+    mentionQuery !== null &&
+    !mentionDismissed &&
+    fetchedMentionResult?.query !== mentionQuery,
+  )
+  const fetchedFiles = fetchedMentionResult?.query === mentionQuery ? fetchedMentionResult.items : []
   const availableMentionFiles = onSearchWorkspaceFiles && fetchedFiles.length > 0 ? fetchedFiles : workspaceFiles
   const mentionHasMatches = mentionQuery !== null && (
     mentionLoading || availableMentionFiles.some((file) => {
