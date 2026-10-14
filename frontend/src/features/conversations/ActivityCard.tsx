@@ -2,7 +2,7 @@ import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
 import { useId, useState } from 'react'
 import type { ActivityGroup, ConversationActivityEvent } from './activityTypes'
 import { activityStateLabel, formatActivityCount } from './activitySummary'
-import type { WorkspaceFilePreviewHandler } from './WorkspaceFileCard'
+import { StructuredDiffView, type WorkspaceFilePreviewHandler } from './WorkspaceFileCard'
 
 type ActivityCardProps = {
   group: ActivityGroup
@@ -36,6 +36,9 @@ export function ActivityCard({ group, conversationId, onPreview }: ActivityCardP
   const glyph = GLYPHS[group.kind === 'tool' ? (firstTool.toolKind ?? 'lifecycle') : group.kind] ?? '◦'
   const running = group.state === 'waiting_tool' || group.state === 'working' || group.state === 'waiting_agent'
   const failedCalls = group.events.filter((event) => event.state === 'failed').length
+  const liveStreamEvent = running
+    ? [...group.events].reverse().find((event) => Boolean(event.outputTail))
+    : undefined
 
   return (
     <motion.article
@@ -69,6 +72,9 @@ export function ActivityCard({ group, conversationId, onPreview }: ActivityCardP
         <span className="activity-card__state">{activityStateLabel(group.state)}</span>
         <span className={`activity-card__chevron${open ? ' is-open' : ''}`} aria-hidden="true">›</span>
       </button>
+      {!open && liveStreamEvent?.outputTail && (
+        <pre className="activity-detail__terminal-stream" aria-live="polite">{liveStreamEvent.outputTail}</pre>
+      )}
       <AnimatePresence initial={false}>
         {open && (
           <motion.div
@@ -101,6 +107,8 @@ function ActivityDetailRow({ event, conversationId, onPreview }: { event: Conver
   // A file this batch produced is still a file: previewing it from the
   // collapsed detail list is more useful than a plain, inert line of text.
   const previewable = event.kind === 'artifact' && event.path && conversationId && onPreview
+  const hasStats = event.addedLines !== undefined || event.removedLines !== undefined
+  const hasPatch = Boolean(event.structuredPatch && event.structuredPatch.length > 0)
   return (
     <li className="activity-detail" data-state={event.state}>
       {previewable ? (
@@ -117,10 +125,25 @@ function ActivityDetailRow({ event, conversationId, onPreview }: { event: Conver
       <span className="activity-detail__meta">
         {event.toolName && <code>{event.toolName}</code>}
         {event.label && event.label !== event.summary && <span className="activity-detail__label">{event.label}</span>}
+        {hasStats && (
+          <span className="activity-detail__diff-stats" aria-label={`Diff +${event.addedLines ?? 0} -${event.removedLines ?? 0}`}>
+            <span className="workspace-diff__stat-add">+{event.addedLines ?? 0}</span>
+            {' '}
+            <span className="workspace-diff__stat-del">-{event.removedLines ?? 0}</span>
+          </span>
+        )}
         {event.errorCode && <span className="activity-detail__error">{event.errorCode}</span>}
         {event.occurredAt && <time dateTime={event.occurredAt}>{formatTime(event.occurredAt)}</time>}
       </span>
       {event.content && <p className="activity-detail__content">{event.content}</p>}
+      {event.outputTail && (
+        <pre className="activity-detail__terminal-stream" aria-live="polite">{event.outputTail}</pre>
+      )}
+      {hasPatch && event.structuredPatch && (
+        <div className="activity-detail__diff">
+          <StructuredDiffView hunks={event.structuredPatch} mode="unified" />
+        </div>
+      )}
     </li>
   )
 }

@@ -46,6 +46,13 @@ from agentos.mcp.auth import McpOAuthCallbackError, McpOAuthUnreachable, McpOAut
 from agentos.mcp.service import McpAuthorizationRequired, McpConnectionFailed, McpServerNotFound, McpServiceError
 from agentos.mcp.toolset import connector_for
 from agentos.plugins.service import PluginServiceError
+from agentos.code_mode import (
+    FileCheckpointStore,
+    ToolPermissionBroker,
+    WorktreeError,
+    WorktreeManager,
+    list_workspace_files,
+)
 from agentos.code_mode.models import CodeAutonomy
 
 
@@ -281,9 +288,27 @@ class AgentRuntimeSettingsRequest(_RequestModel):
 
 
 class CodeModeSettingsRequest(_RequestModel):
-    autonomy: str = Field(pattern="^(approval_required|code_autonomy|full_autonomy)$")
+    autonomy: str = Field(
+        pattern="^(approval_required|code_autonomy|full_autonomy|ask_permissions|accept_edits|plan_mode)$"
+    )
     system_notifications: bool = False
     monitoring_enabled: bool = True
+
+
+class ToolPermissionDecisionRequest(_RequestModel):
+    request_id: str = Field(min_length=1, max_length=128)
+    decision: str = Field(pattern="^(allow_once|allow_always|deny)$")
+    reason: str | None = Field(default=None, max_length=512)
+
+
+class ConversationWorktreeRequest(_RequestModel):
+    action: str = Field(default="enter", pattern="^(enter|exit|create|remove|status|list)$")
+    name: str | None = Field(default=None, max_length=64)
+    base_branch: str | None = Field(default=None, max_length=128)
+    cleanup: str = Field(default="keep", pattern="^(keep|remove)$")
+    force: bool = False
+    enabled: bool | None = None
+
 
 
 class VisionModelRequest(_RequestModel):
@@ -886,6 +911,127 @@ def create_app(services: ApiServices) -> FastAPI:
             raise ApplicationNotFoundError(conversation_id) from error
         return JSONResponse({"opened": True})
 
+    @app.get("/v1/conversations/{conversation_id}/workspace-files")
+    async def get_conversation_workspace_files(
+        conversation_id: str,
+        request: Request,
+        query: str = "",
+        q: str = "",
+        limit: int = 20,
+    ) -> JSONResponse:
+        principal = principal_for(request)
+        services.security.authorize(
+            principal,
+            action="conversation.read",
+            resource_id=conversation_id,
+            purpose="conversation.workspace.files",
+        )
+        workspace = conversation_workspace(conversation_id, principal)
+        effective_query = query if query.strip() else q
+        bounded_limit = min(max(int(limit), 1), 100)
+        items = await run_in_threadpool(list_workspace_files, workspace, effective_query, limit=bounded_limit)
+        return JSONResponse({"items": items, "files": items, "query": effective_query})
+
+    @app.get("/v1/conversations/{conversation_id}/worktree")
+    async def get_conversation_worktree(conversation_id: str, request: Request) -> JSONResponse:
+        principal = principal_for(request)
+        services.security.authorize(
+            principal,
+            action="conversation.read",
+            resource_id=conversation_id,
+            purpose="conversation.worktree.read",
+        )
+        workspace = conversation_workspace(conversation_id, principal)
+        manager = WorktreeManager(workspace.root)
+        is_git = await run_in_threadpool(manager.is_git_repo)
+        if not is_git:
+            return JSONResponse({"is_git_repo": False, "active": False, "worktree": None, "worktrees": []})
+        worktrees = await run_in_threadpool(manager.list_worktrees)
+        active = await run_in_threadpool(manager.active_worktree)
+        return JSONResponse({
+            "is_git_repo": True,
+            "active": active is not None,
+            "worktree": active.as_dict() if active is not None else None,
+            "worktrees": [wt.as_dict() for wt in worktrees],
+        })
+
+    @app.post("/v1/conversations/{conversation_id}/worktree")
+    async def manage_conversation_worktree(
+        conversation_id: str,
+        payload: ConversationWorktreeRequest,
+        request: Request,
+    ) -> JSONResponse:
+        principal = principal_for(request, mutable=True)
+        services.security.authorize(
+            principal,
+            action="conversation.send",
+            resource_id=conversation_id,
+            purpose="conversation.worktree.manage",
+        )
+        workspace = conversation_workspace(conversation_id, principal)
+        manager = WorktreeManager(workspace.root)
+        action = payload.action
+        if payload.enabled is True:
+            action = "enter"
+        elif payload.enabled is False:
+            action = "exit"
+
+        is_git = await run_in_threadpool(manager.is_git_repo)
+        if action in {"status", "list"}:
+            if not is_git:
+                return JSONResponse({"is_git_repo": False, "active": False, "worktree": None, "worktrees": []})
+            worktrees = await run_in_threadpool(manager.list_worktrees)
+            active = await run_in_threadpool(manager.active_worktree)
+            return JSONResponse({
+                "is_git_repo": True,
+                "active": active is not None,
+                "worktree": active.as_dict() if active is not None else None,
+                "worktrees": [wt.as_dict() for wt in worktrees],
+            })
+
+        if not is_git:
+            raise ApplicationValidationError("workspace is not a Git repository")
+
+        try:
+            if action in {"enter", "create"}:
+                slug = payload.name or f"chat-{conversation_id[:8]}"
+                info = await run_in_threadpool(manager.create_worktree, slug, payload.base_branch)
+                return JSONResponse({
+                    "active": True,
+                    "is_git_repo": True,
+                    "worktree": info.as_dict(),
+                    **info.as_dict(),
+                })
+
+            main_root = await run_in_threadpool(manager.main_worktree_root)
+            active = await run_in_threadpool(manager.active_worktree)
+            target_ref: Path | str | None = payload.name or (active.path if active is not None else None)
+            if action == "remove" or payload.cleanup == "remove":
+                if target_ref is None:
+                    raise WorktreeError("no active worktree to remove")
+                removed = await run_in_threadpool(manager.remove_worktree, target_ref, force=payload.force)
+                return JSONResponse({
+                    "active": False,
+                    "is_git_repo": True,
+                    "worktree": None,
+                    "action": "remove",
+                    **removed,
+                })
+
+            meta_path = main_root / ".orin" / "active_worktree.json"
+            if meta_path.is_file():
+                meta_path.unlink(missing_ok=True)
+            return JSONResponse({
+                "active": False,
+                "is_git_repo": True,
+                "worktree": None,
+                "action": "keep",
+                "kept_path": str(active.path) if active is not None else None,
+            })
+        except WorktreeError as error:
+            raise ApplicationValidationError(str(error)) from error
+
+
     @app.post("/v1/conversations/{conversation_id}/messages", status_code=201)
     async def send_conversation_message(conversation_id: str, payload: SendConversationMessageRequest, request: Request) -> JSONResponse:
         principal = principal_for(request, mutable=True)
@@ -923,6 +1069,48 @@ def create_app(services: ApiServices) -> FastAPI:
         services.security.authorize(principal, action="conversation.cancel", resource_id=conversation_id, purpose="conversation.cancel")
         result = require_port(services.conversation_application).cancel(conversation_id, principal.user_id)  # type: ignore[union-attr]
         return JSONResponse(_jsonable(result), status_code=202)
+
+    @app.post("/v1/conversations/{conversation_id}/turns/{turn_id}/tool-permission")
+    async def submit_turn_tool_permission(
+        conversation_id: str,
+        turn_id: str,
+        payload: ToolPermissionDecisionRequest,
+        request: Request,
+    ) -> JSONResponse:
+        principal = principal_for(request, mutable=True)
+        services.security.authorize(
+            principal,
+            action="conversation.send",
+            resource_id=conversation_id,
+            purpose="conversation.tool_permission",
+        )
+        workspace = conversation_workspace(conversation_id, principal)
+        broker = ToolPermissionBroker(workspace)
+        result = await run_in_threadpool(
+            broker.submit_decision,
+            payload.request_id,
+            decision=payload.decision,
+            reason=payload.reason,
+        )
+        return JSONResponse(_jsonable({**result, "turn_id": turn_id}))
+
+    @app.post("/v1/conversations/{conversation_id}/turns/{turn_id}/rewind")
+    async def rewind_conversation_turn(
+        conversation_id: str,
+        turn_id: str,
+        request: Request,
+    ) -> JSONResponse:
+        principal = principal_for(request, mutable=True)
+        services.security.authorize(
+            principal,
+            action="conversation.send",
+            resource_id=conversation_id,
+            purpose="conversation.rewind",
+        )
+        workspace = conversation_workspace(conversation_id, principal)
+        store = FileCheckpointStore(workspace)
+        result = await run_in_threadpool(store.rewind_turn, turn_id)
+        return JSONResponse(_jsonable(result))
 
     @app.get("/v1/conversations/{conversation_id}/overview")
     async def conversation_overview(conversation_id: str, request: Request) -> JSONResponse:

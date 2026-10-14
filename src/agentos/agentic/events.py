@@ -50,6 +50,7 @@ class AgentActivityEventType(StrEnum):
     CODE_MODE_COMPLETED_WITH_CAVEATS = "code_mode.completed_with_caveats"
     CODE_MODE_DECISION_REQUIRED = "code_mode.decision_required"
     CODE_MODE_BLOCKED = "code_mode.blocked"
+    TOOL_PERMISSION_REQUIRED = "tool.permission_required"
     PLUGIN_HOOK_EXECUTED = "plugin.hook_executed"
 
 

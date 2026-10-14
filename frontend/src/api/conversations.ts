@@ -2,7 +2,7 @@ import type { ApiClient } from './client'
 import { invalidResponseError, parseApiErrorResponse } from './errors'
 import type { ProviderName } from './providers'
 import { parseWorkspaceState, type WorkspaceState } from './workspace'
-import { kindFor, stateFor, type ContextUsage, type ConversationActivityEvent } from '../features/conversations/activityTypes'
+import { kindFor, stateFor, type ContextUsage, type ConversationActivityEvent, type StructuredPatchHunk, type TodoItem, type ToolPermissionDecision, type ToolPermissionRequest } from '../features/conversations/activityTypes'
 import type { MessageCommand } from '../features/conversations/MessageCommandChip'
 
 export type CreateConversationInput = {
@@ -86,6 +86,84 @@ export function cancelConversation(client: ApiClient, id: string, intent = clien
     },
   })
 }
+
+export type ToolPermissionDecisionResponse = {
+  request_id: string
+  decision: ToolPermissionDecision
+  allowed: boolean
+  persisted_rule?: string | null
+}
+
+export function submitToolPermission(
+  client: ApiClient,
+  conversationId: string,
+  turnId: string,
+  requestId: string,
+  decision: ToolPermissionDecision,
+  reason?: string,
+  intent = client.createMutationIntent(),
+): Promise<ToolPermissionDecisionResponse> {
+  return client.request({
+    path: `/v1/conversations/${encodeURIComponent(conversationId)}/turns/${encodeURIComponent(turnId)}/tool-permission`,
+    method: 'POST',
+    intent,
+    body: { request_id: requestId, decision, ...(reason ? { reason } : {}) },
+    parse: (value) => {
+      const data = record(value)
+      const parsedDecision = data.decision === 'allow_once' || data.decision === 'allow_always' || data.decision === 'deny'
+        ? data.decision
+        : decision
+      return {
+        request_id: typeof data.request_id === 'string' ? data.request_id : requestId,
+        decision: parsedDecision,
+        allowed: data.allowed === true,
+        persisted_rule: typeof data.persisted_rule === 'string' ? data.persisted_rule : null,
+      }
+    },
+  })
+}
+
+export type RewindTurnResponse = {
+  turn_id: string
+  rewound: boolean
+  restored_files: string[]
+  deleted_files: string[]
+  undo_backup_id: string | null
+}
+
+export function rewindTurn(
+  client: ApiClient,
+  conversationId: string,
+  turnId: string,
+  intent = client.createMutationIntent(),
+): Promise<RewindTurnResponse> {
+  return client.request({
+    path: `/v1/conversations/${encodeURIComponent(conversationId)}/turns/${encodeURIComponent(turnId)}/rewind`,
+    method: 'POST',
+    intent,
+    body: {},
+    parse: (value) => {
+      const data = record(value)
+      return {
+        turn_id: typeof data.turn_id === 'string' ? data.turn_id : turnId,
+        rewound: data.rewound === true,
+        restored_files: Array.isArray(data.restored_files) ? data.restored_files.map((item) => String(item)) : [],
+        deleted_files: Array.isArray(data.deleted_files) ? data.deleted_files.map((item) => String(item)) : [],
+        undo_backup_id: typeof data.undo_backup_id === 'string' ? data.undo_backup_id : null,
+      }
+    },
+  })
+}
+
+export {
+  getConversationWorktree,
+  listWorkspaceFiles,
+  manageConversationWorktree,
+  type ConversationWorktreeResponse,
+  type ManageWorktreeInput,
+  type WorktreeInfo,
+} from './codeMode'
+
 
 export type ConversationOverview = {
   conversation_id: string
@@ -292,9 +370,100 @@ export function parseConversationActivityEvent(value: unknown, cursor: string): 
   if (mcpApproval) event.mcpApproval = mcpApproval
   const pluginApproval = parsePluginApprovalRequest(payload)
   if (pluginApproval) event.pluginApproval = pluginApproval
+  const toolPermission = parseToolPermissionRequest(payload, event.turnId)
+  if (toolPermission) {
+    event.toolPermission = toolPermission
+    event.kind = 'tool'
+    event.state = 'waiting_user'
+  }
+  const structuredPatch = parseStructuredPatch(payload.structured_patch)
+  if (structuredPatch) event.structuredPatch = structuredPatch
+  if (typeof payload.added_lines === 'number' && Number.isFinite(payload.added_lines) && payload.added_lines >= 0) {
+    event.addedLines = payload.added_lines
+  }
+  if (typeof payload.removed_lines === 'number' && Number.isFinite(payload.removed_lines) && payload.removed_lines >= 0) {
+    event.removedLines = payload.removed_lines
+  }
+  if (typeof payload.output_tail === 'string' && payload.output_tail.length > 0 && payload.output_tail.length <= 4_000) {
+    event.outputTail = payload.output_tail
+  }
+  if (typeof payload.elapsed_ms === 'number' && Number.isFinite(payload.elapsed_ms) && payload.elapsed_ms >= 0) {
+    event.elapsedMs = payload.elapsed_ms
+  }
+  const todos = parseTodoItems(payload.todos)
+  if (todos) event.todos = todos
   if (errorCode) event.errorCode = errorCode
   if (typeof payload.content === 'string' && payload.content.length <= 16_000) event.content = payload.content
   return event
+}
+
+function parseTodoItems(value: unknown): TodoItem[] | undefined {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 50) return undefined
+  const items: TodoItem[] = []
+  for (const entry of value) {
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) continue
+    const raw = entry as Record<string, unknown>
+    const id = optionalText(raw.id, 64)
+    const content = optionalText(raw.content, 500)
+    const status = raw.status === 'pending' || raw.status === 'in_progress' || raw.status === 'completed'
+      ? raw.status
+      : 'pending'
+    if (!id || !content) continue
+    const activeForm = optionalText(raw.active_form ?? raw.activeForm, 500) ?? content
+    items.push({ id, content, status, activeForm })
+  }
+  return items.length > 0 ? items : undefined
+}
+
+function parseToolPermissionRequest(payload: Record<string, unknown>, fallbackTurnId?: string): ToolPermissionRequest | undefined {
+  const source = typeof payload.permission_request === 'object' && payload.permission_request !== null && !Array.isArray(payload.permission_request)
+    ? (payload.permission_request as Record<string, unknown>)
+    : payload.tool_permission === true
+      ? payload
+      : null
+  if (!source) return undefined
+  const requestId = optionalText(source.request_id, 128)
+  const toolName = optionalText(source.tool_name, 64) ?? optionalText(payload.tool_name, 64)
+  if (!requestId || !toolName) return undefined
+  const structuredPatch = parseStructuredPatch(source.structured_patch ?? payload.structured_patch)
+  const addedLines = typeof source.added_lines === 'number' && Number.isFinite(source.added_lines)
+    ? source.added_lines
+    : typeof payload.added_lines === 'number' && Number.isFinite(payload.added_lines)
+      ? payload.added_lines
+      : undefined
+  const removedLines = typeof source.removed_lines === 'number' && Number.isFinite(source.removed_lines)
+    ? source.removed_lines
+    : typeof payload.removed_lines === 'number' && Number.isFinite(payload.removed_lines)
+      ? payload.removed_lines
+      : undefined
+  return {
+    requestId,
+    turnId: optionalText(source.turn_id, 255) ?? fallbackTurnId,
+    toolName,
+    ruleSuggestion: optionalText(source.rule_suggestion, 255) ?? optionalText(payload.rule_suggestion, 255),
+    command: optionalText(source.command, 2000) ?? optionalText(payload.command, 2000),
+    path: optionalText(source.path, 512) ?? optionalText(payload.path, 512),
+    structuredPatch,
+    addedLines,
+    removedLines,
+  }
+}
+
+function parseStructuredPatch(value: unknown): StructuredPatchHunk[] | undefined {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 50) return undefined
+  const hunks: StructuredPatchHunk[] = []
+  for (const entry of value) {
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) continue
+    const raw = entry as Record<string, unknown>
+    const oldStart = typeof raw.oldStart === 'number' && Number.isFinite(raw.oldStart) ? raw.oldStart : null
+    const oldLines = typeof raw.oldLines === 'number' && Number.isFinite(raw.oldLines) ? raw.oldLines : null
+    const newStart = typeof raw.newStart === 'number' && Number.isFinite(raw.newStart) ? raw.newStart : null
+    const newLines = typeof raw.newLines === 'number' && Number.isFinite(raw.newLines) ? raw.newLines : null
+    if (oldStart === null || oldLines === null || newStart === null || newLines === null || !Array.isArray(raw.lines)) continue
+    const lines = raw.lines.filter((line): line is string => typeof line === 'string').slice(0, 500)
+    hunks.push({ oldStart, oldLines, newStart, newLines, lines })
+  }
+  return hunks.length > 0 ? hunks : undefined
 }
 
 export function parseConversation(value: unknown): Conversation {

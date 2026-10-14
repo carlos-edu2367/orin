@@ -15,16 +15,20 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import base64
 from datetime import UTC, datetime
+import difflib
+import hashlib
 from html.parser import HTMLParser
 from ipaddress import ip_address
 import json
 import logging
 import os
+from pathlib import Path
 import re
 import shlex
 import socket
 import signal
 import subprocess
+import threading
 import time
 from typing import Any, Callable, Collection, Mapping
 from urllib.parse import urljoin, urlparse
@@ -40,6 +44,19 @@ from .workspace import MAX_LIST_DEPTH, MAX_SEARCH_RESULTS, ConversationWorkspace
 from .models import MAX_USER_QUESTION_ITEMS
 from .browser_tools import _cache_key_url, _safe_display_url, sanitize_page_text
 from .file_preview import media_type_for
+
+
+@dataclass(slots=True)
+class ReadFileRecord:
+    """Tracks the last observed file state for anti-staleness and read-before-edit checks."""
+
+    mtime_ns: int
+    sha256: str
+    offset: int = 1
+    limit: int = 400
+    total_lines: int = 0
+
+
 from .contract import TOOLKITS, VERIFICATION_MODES, ContractError, parse as parse_contract
 from .provider_content import image_block
 
@@ -107,6 +124,111 @@ _BLOCKED_COMMAND = re.compile(
 class AgentToolError(RuntimeError):
     """A tool refused or failed in a way the model should read and react to."""
 
+    def __init__(self, message: str, *, error_code: str = "TOOL_REFUSED") -> None:
+        super().__init__(message)
+        self.error_code = error_code
+
+
+_HUNK_HEADER_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+_MAX_PATCH_HUNKS = 20
+_MAX_PATCH_LINES = 250
+_MAX_PATCH_LINE_CHARS = 500
+
+
+def compute_structured_patch(old_content: str, new_content: str) -> tuple[list[dict[str, Any]], int, int]:
+    """Return ``(hunks, added_lines, removed_lines)`` in Claude Code structuredPatch format."""
+    old_lines = old_content.splitlines(keepends=False)
+    new_lines = new_content.splitlines(keepends=False)
+    diff = list(difflib.unified_diff(old_lines, new_lines, n=3, lineterm=""))
+    hunks: list[dict[str, Any]] = []
+    added = 0
+    removed = 0
+    recorded_lines = 0
+    current_hunk: dict[str, Any] | None = None
+    for line in diff:
+        if line.startswith("---") or line.startswith("+++"):
+            continue
+        match = _HUNK_HEADER_RE.match(line)
+        if match:
+            if current_hunk is not None:
+                hunks.append(current_hunk)
+            if len(hunks) < _MAX_PATCH_HUNKS and recorded_lines < _MAX_PATCH_LINES:
+                current_hunk = {
+                    "oldStart": int(match.group(1)),
+                    "oldLines": int(match.group(2) or "1"),
+                    "newStart": int(match.group(3)),
+                    "newLines": int(match.group(4) or "1"),
+                    "lines": [],
+                }
+            else:
+                current_hunk = None
+            continue
+        if line.startswith("+"):
+            added += 1
+        elif line.startswith("-"):
+            removed += 1
+        if current_hunk is not None and recorded_lines < _MAX_PATCH_LINES:
+            current_hunk["lines"].append(line[:_MAX_PATCH_LINE_CHARS])
+            recorded_lines += 1
+    if current_hunk is not None and len(hunks) < _MAX_PATCH_HUNKS:
+        hunks.append(current_hunk)
+    return hunks, added, removed
+
+
+_PARAM_ALIASES: Mapping[str, Mapping[str, str]] = {
+    "read_file": {"file_path": "path", "filepath": "path", "file": "path"},
+    "write_file": {
+        "file_path": "path",
+        "filepath": "path",
+        "file": "path",
+        "file_text": "content",
+        "file_content": "content",
+        "new_text": "content",
+        "body": "content",
+    },
+    "edit_file": {
+        "file_path": "path",
+        "filepath": "path",
+        "file": "path",
+        "old_string": "old_text",
+        "new_string": "new_text",
+    },
+    "view_file": {"file_path": "path", "filepath": "path", "file": "path"},
+    "run_subagent": {"prompt": "task", "type": "subagent_type", "agent": "subagent_type"},
+    "ask_agent": {"prompt": "task", "agent": "name"},
+}
+
+
+def coerce_tool_arguments(tool_name: str, arguments: Mapping[str, Any]) -> tuple[dict[str, Any], str | None]:
+    """Map common model parameter aliases to canonical schema names."""
+    aliases = _PARAM_ALIASES.get(tool_name)
+    if not aliases:
+        return dict(arguments), None
+    coerced = dict(arguments)
+    notes: list[str] = []
+    for wrong_key, right_key in aliases.items():
+        if wrong_key in coerced and right_key not in coerced:
+            coerced[right_key] = coerced.pop(wrong_key)
+            notes.append(f"parameter '{wrong_key}' was read as '{right_key}'")
+    if tool_name == "edit_file" and isinstance(coerced.get("edits"), list):
+        new_edits: list[Any] = []
+        for item in coerced["edits"]:
+            if isinstance(item, Mapping):
+                edit_item = dict(item)
+                if "old_string" in edit_item and "old_text" not in edit_item:
+                    edit_item["old_text"] = edit_item.pop("old_string")
+                    notes.append("parameter 'edits[].old_string' was read as 'old_text'")
+                if "new_string" in edit_item and "new_text" not in edit_item:
+                    edit_item["new_text"] = edit_item.pop("new_string")
+                    notes.append("parameter 'edits[].new_string' was read as 'new_text'")
+                new_edits.append(edit_item)
+            else:
+                new_edits.append(item)
+        coerced["edits"] = new_edits
+    if not notes:
+        return coerced, None
+    return coerced, "\n\n[Note: " + "; ".join(notes) + "]"
+
 
 @dataclass(frozen=True, slots=True)
 class ToolDefinition:
@@ -122,6 +244,8 @@ class ToolDefinition:
     read_only: bool = False
     # Coarse labels a policy can authorize or refuse as a family.
     policy_tags: tuple[str, ...] = ()
+    # Per-tool result budget before truncation and disk persistence.
+    max_result_size_chars: int = MAX_TOOL_RESULT_CHARS
 
     def schema(self) -> dict[str, Any]:
         return {"type": "function", "function": {"name": self.name, "description": self.description, "parameters": dict(self.parameters)}}
@@ -337,6 +461,8 @@ class AgentToolset:
         delegate: Callable[[str, str], ToolOutcome] | None = None,
         delegate_batch: Callable[[list[Mapping[str, Any]]], ToolOutcome] | None = None,
         create_agent: Callable[[str, str, str | None], ToolOutcome] | None = None,
+        run_subagent: Callable[..., ToolOutcome] | None = None,
+        on_tool_progress: Callable[[str, str, Mapping[str, Any]], None] | None = None,
         http_client: httpx.Client | None = None,
         search_client: object | None = None,
         retrieval: object | None = None,
@@ -361,14 +487,33 @@ class AgentToolset:
         code_mode_permits_push: bool = False,
         code_mode_permits_pr: bool = False,
         code_mode_requires_approval: bool = False,
+        code_mode_autonomy: str | None = None,
+        permission_mode: str | None = None,
+        permission_broker: object | None = None,
+        interactive_permissions: bool = False,
+        on_permission_request: Callable[[dict[str, Any]], None] | None = None,
+        checkpoint_store: object | None = None,
+        turn_id: str | None = None,
+        conversation_id: str | None = None,
+        read_file_state: dict[str, ReadFileRecord] | None = None,
+        todos_state: list[dict[str, str]] | None = None,
+        read_only_mode: bool = False,
     ) -> None:
+        from agentos.code_mode.checkpoints import FileCheckpointStore
+        from agentos.code_mode.models import CodePermissionMode, normalize_permission_mode
+        from agentos.code_mode.permissions import ToolPermissionBroker
+
         self.workspace = workspace
+        self.turn_id = str(turn_id) if turn_id else None
+        self.conversation_id = str(conversation_id) if conversation_id else None
         self.memory = memory
         self.model_sees_images = bool(model_sees_images)
         self._visual_reader = visual_reader
         self._delegate = delegate
         self._delegate_batch = delegate_batch
         self._create_agent = create_agent
+        self._run_subagent = run_subagent
+        self._on_tool_progress = on_tool_progress
         self._http_client = http_client
         self._search_client = search_client
         self._retrieval = retrieval
@@ -377,7 +522,8 @@ class AgentToolset:
         self.browser_capability = browser_capability
         self._last_browser_navigation_url: str | None = None
         self._last_browser_navigation_outcome: ToolOutcome | None = None
-        self._enable_terminal = enable_terminal
+        self._enable_terminal = enable_terminal and not bool(read_only_mode)
+        self._read_only_mode: bool = bool(read_only_mode)
         self.skills = skills
         # The registry is intentionally read-only.  Publishing must go through
         # the application service, with the user identity bound by the trusted
@@ -397,6 +543,34 @@ class AgentToolset:
         self._code_mode_permits_push = bool(code_mode_permits_push)
         self._code_mode_permits_pr = bool(code_mode_permits_pr)
         self._code_mode_requires_approval = bool(code_mode_requires_approval)
+        raw_mode = permission_mode or code_mode_autonomy
+        if raw_mode:
+            resolved_mode = normalize_permission_mode(raw_mode)
+        elif self._code_mode_requires_approval:
+            resolved_mode = CodePermissionMode.ASK_PERMISSIONS
+        elif self._code_mode_permits_push and self._code_mode_permits_pr:
+            resolved_mode = CodePermissionMode.FULL_AUTONOMY
+        else:
+            resolved_mode = CodePermissionMode.ACCEPT_EDITS
+        self._permission_mode: CodePermissionMode = resolved_mode
+        self._previous_permission_mode: CodePermissionMode = (
+            CodePermissionMode.ACCEPT_EDITS if resolved_mode is CodePermissionMode.PLAN_MODE else resolved_mode
+        )
+        self._plan_mode_active: bool = resolved_mode is CodePermissionMode.PLAN_MODE
+        self._permission_broker: ToolPermissionBroker = (
+            permission_broker if isinstance(permission_broker, ToolPermissionBroker) else ToolPermissionBroker(self.workspace)
+        )
+        self._on_permission_request: Callable[[dict[str, Any]], None] | None = on_permission_request
+        self._interactive_permissions: bool = bool(interactive_permissions or permission_broker is not None or on_permission_request is not None)
+        self._checkpoint_store: FileCheckpointStore = (
+            checkpoint_store if isinstance(checkpoint_store, FileCheckpointStore) else FileCheckpointStore(self.workspace)
+        )
+        self._read_file_state: dict[str, ReadFileRecord] = read_file_state if read_file_state is not None else {}
+        self._todos: list[dict[str, str]] = todos_state if todos_state is not None else []
+        self._current_cwd: Path = self.workspace.root
+        self._original_workspace_root: Path = self.workspace.root
+        self._active_worktree_name: str | None = None
+        self._notified_exited_pids: set[int] = set()
         # Tracked unconditionally (see _observe_mutation_outcome): the general
         # verify-before-responding gate in the runtime applies to every turn,
         # not only Code mode.
@@ -543,6 +717,41 @@ class AgentToolset:
                     "findings": {**_TEXT, "description": "What you checked and, when passed=false, exactly what is broken and where."},
                 }, ("passed",)),
                 self.report_verification, "planning",
+            ),
+            ToolDefinition(
+                "enter_plan_mode",
+                "Enter read-only Plan Mode for the current turn. In Plan Mode, mutating tools are blocked except writing or editing plan files inside .orin/plans/. Use this to explore the codebase and draft a plan before implementation.",
+                _schema({
+                    "reason": {**_TEXT, "description": "Why planning is needed before modifying project files."},
+                }),
+                self.enter_plan_mode, "planning", read_only=True,
+            ),
+            ToolDefinition(
+                "exit_plan_mode",
+                "Exit Plan Mode after writing the plan in .orin/plans/ and present it for review or transition back to implementation.",
+                _schema({
+                    "plan_path": {**_TEXT, "description": "Workspace-relative path to the plan file inside .orin/plans/."},
+                    "summary": {**_TEXT, "description": "Concise summary of the proposed plan."},
+                }),
+                self.exit_plan_mode, "planning", read_only=True,
+            ),
+            ToolDefinition(
+                "todo_write",
+                "Create or update the structured task checklist for the current session. Use this to track progress on multi-step implementations (pending, in_progress, completed). Keep at most one task in_progress at a time.",
+                _schema({
+                    "todos": {
+                        "type": "array",
+                        "minItems": 0,
+                        "maxItems": 40,
+                        "items": _schema({
+                            "id": {**_TEXT, "description": "Stable short identifier, e.g. '1' or 'auth-middleware'."},
+                            "content": {**_TEXT, "description": "Task description in imperative form."},
+                            "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]},
+                            "active_form": {**_TEXT, "description": "Optional present-continuous label shown while in_progress."},
+                        }, ("id", "content", "status")),
+                    },
+                }, ("todos",)),
+                self.todo_write, "planning", read_only=True,
             ),
             ToolDefinition(
                 "fetch_url", "Fetch a public web page or API response and return its readable text.",
@@ -697,6 +906,54 @@ class AgentToolset:
                 }),
                 self.verify_project, "terminal", policy_tags=("mutates",),
             ))
+            items.append(ToolDefinition(
+                "enter_worktree",
+                "Create or switch to an isolated Git worktree inside .orin/worktrees/<name> on branch worktree-<name>, and copy .worktreeinclude files.",
+                _schema({
+                    "name": {**_TEXT, "description": "Optional slug for the worktree name. Generated automatically when omitted."},
+                    "base_branch": {**_TEXT, "description": "Optional base Git ref/branch to branch from. Defaults to HEAD."},
+                }),
+                self.enter_worktree, "terminal", policy_tags=("mutates",),
+            ))
+            items.append(ToolDefinition(
+                "exit_worktree",
+                "Exit the current Git worktree and return the workspace root to the main repository checkout.",
+                _schema({
+                    "action": {
+                        "type": "string",
+                        "enum": ["keep", "remove"],
+                        "description": "Whether to keep the worktree on disk or remove it ('keep' or 'remove'). Defaults to 'keep'.",
+                    },
+                    "force": {"type": "boolean", "description": "Force removal even when uncommitted changes exist."},
+                }),
+                self.exit_worktree, "terminal", policy_tags=("mutates",),
+            ))
+            items.append(ToolDefinition(
+                "preview_start",
+                "Start a local development/preview server from .orin/launch.json (or auto-detected from package.json / pyproject.toml), wait for its port, and navigate the browser if available.",
+                _schema({
+                    "name": {**_TEXT, "description": "Optional configuration name from launch.json. Uses the first configuration when omitted."},
+                    "wait_timeout": {"type": "number", "minimum": 0.1, "maximum": 60.0, "description": "Seconds to wait for the server port to open. Defaults to 10."},
+                }),
+                self.preview_start, "terminal", policy_tags=("mutates",),
+            ))
+            items.append(ToolDefinition(
+                "preview_stop",
+                "Stop a running local preview server started with preview_start.",
+                _schema({
+                    "name": {**_TEXT, "description": "Optional server configuration name to stop. Stops all tracked preview servers when omitted."},
+                }),
+                self.preview_stop, "terminal", policy_tags=("mutates",),
+            ))
+            items.append(ToolDefinition(
+                "preview_logs",
+                "Read recent stdout/stderr logs from a local preview server started with preview_start.",
+                _schema({
+                    "name": {**_TEXT, "description": "Optional server configuration name."},
+                    "tail_lines": {"type": "integer", "minimum": 1, "maximum": 500, "description": "Number of trailing log lines to return. Defaults to 100."},
+                }),
+                self.preview_logs, "terminal", read_only=True,
+            ))
         if self.memory is not None:
             items.append(ToolDefinition(
                 "remember", "Save a durable fact about the user or the project for future conversations.",
@@ -722,8 +979,8 @@ class AgentToolset:
         if self._delegate is not None:
             items.append(ToolDefinition(
                 "ask_agent",
-                "Send a task to a subagent you created and wait for its answer.",
-                _schema({"name": _TEXT, "task": {**_TEXT, "description": "The complete instruction; the subagent cannot see this conversation."}}, ("name", "task")),
+                "Send a task to a subagent you created (or a builtin specialist: 'explore', 'plan', 'general', 'fork') and wait for its answer.",
+                _schema({"name": _TEXT, "task": {**_TEXT, "description": "The complete instruction; the subagent cannot see this conversation unless name is 'fork'."}}, ("name", "task")),
                 self.ask_agent, "agent", policy_tags=("mutates",),
             ))
         if self._delegate_batch is not None:
@@ -737,6 +994,22 @@ class AgentToolset:
                     },
                 }, ("tasks",)),
                 self.ask_agents, "agent", policy_tags=("mutates",),
+            ))
+        if self._run_subagent is not None or self._delegate is not None:
+            items.append(ToolDefinition(
+                "run_subagent",
+                "Launch a specialized zero-config builtin subagent ('explore' for read-only codebase search, 'plan' for read-only architecture planning, 'general' for multi-step implementation/research, or 'fork' to inherit the full conversation context) and return its final report.",
+                _schema({
+                    "subagent_type": {
+                        "type": "string",
+                        "enum": ["explore", "plan", "general", "fork"],
+                        "description": "Builtin specialist type: 'explore' (read-only search), 'plan' (read-only architect), 'general' (full toolset), or 'fork' (inherits parent conversation context).",
+                    },
+                    "task": {**_TEXT, "description": "Complete task instructions for the subagent."},
+                    "description": {**_TEXT, "description": "Short 3-5 word summary of what the subagent will do."},
+                    "model_id": {**_TEXT, "description": "Optional favorite model ID from the current provider."},
+                }, ("subagent_type", "task")),
+                self.run_subagent, "agent", policy_tags=("mutates",),
             ))
         if self.skills is not None:
             items.extend((
@@ -843,6 +1116,14 @@ class AgentToolset:
         """The tool set is fixed for the lifetime of a turn, so build it once."""
         if self._definitions is None:
             built = self._build_definitions()
+            if self._read_only_mode:
+                built = tuple(
+                    item for item in built
+                    if item.read_only and item.name not in {
+                        "write_file", "edit_file", "run_command", "stop_process",
+                        "verify_project", "create_agent", "ask_agent", "ask_agents", "run_subagent",
+                    }
+                )
             if self._policy is not None:
                 built = tuple(item for item in built if self._policy.allows(item.name, item.policy_tags))
             self._definitions = built
@@ -900,21 +1181,92 @@ class AgentToolset:
 
     # -- execution ------------------------------------------------------
 
-    def invoke(self, name: str, arguments: Mapping[str, Any]) -> ToolOutcome:
+    def invoke(
+        self,
+        name: str,
+        arguments: Mapping[str, Any],
+        *,
+        call_id: str | None = None,
+        invocation_id: str | None = None,
+    ) -> ToolOutcome:
+        self._active_invocation_id = call_id or invocation_id or getattr(self, "_active_invocation_id", None)
         # A model can hallucinate a tool name, so an unknown tool is a result the
         # model reads and corrects, never an exception that kills the turn.
+        if self._read_only_mode and name in {"write_file", "edit_file", "run_command", "stop_process", "verify_project"}:
+            return ToolOutcome(
+                "failed",
+                "Bloqueado em subagente somente-leitura",
+                f"Tool '{name}' is not allowed in read-only subagent mode.",
+                {"tool_kind": "filesystem"},
+                "READ_ONLY_SUBAGENT",
+            )
         try:
             definition = self.resolve(name)
         except AgentToolError as error:
             return ToolOutcome("failed", f"Ferramenta desconhecida: {name}"[:240], str(error), {}, "UNKNOWN_TOOL")
-        if self._code_mode_requires_approval and name in {"write_file", "edit_file", "run_command", "verify_project"}:
-            path = str(arguments.get("path") or "")
-            if not (name == "write_file" and path.startswith(".orin/plans/")):
+        arguments, coercion_note = coerce_tool_arguments(name, arguments)
+        if self._plan_mode_active or self._permission_mode.value == "plan_mode":
+            plan_decision = self._permission_broker.evaluate(
+                name,
+                arguments,
+                self._permission_mode,
+                plan_mode_active=True,
+            )
+            if plan_decision == "deny":
                 return ToolOutcome(
-                    "failed", "Aguardando aprovação do plano",
-                    "No Modo Code, registre o contrato e aguarde a aprovação do plano antes de alterar código ou executar comandos.",
-                    {"tool_kind": definition.kind, "code_mode": True}, "CODE_PLAN_APPROVAL_REQUIRED",
+                    "failed",
+                    "Bloqueado no Modo Plano",
+                    "No Modo Plano (plan_mode), apenas ferramentas de leitura e escrita de planos em `.orin/plans/` são permitidas. Use `exit_plan_mode` quando o plano estiver concluído.",
+                    {"tool_kind": definition.kind, "code_mode": True, "plan_mode": True},
+                    "CODE_PLAN_MODE_READONLY",
                 )
+        if self._code_mode_active or self._interactive_permissions or self._permission_broker.settings_path.exists():
+            perm_decision = self._permission_broker.evaluate(
+                name,
+                arguments,
+                self._permission_mode,
+                plan_mode_active=self._plan_mode_active,
+            )
+            if perm_decision == "deny":
+                return ToolOutcome(
+                    "failed",
+                    "Permissão negada por regra do projeto",
+                    f"A execução de `{name}` foi bloqueada pelas regras de permissão do projeto (.orin/settings.json).",
+                    {"tool_kind": definition.kind, "code_mode": True},
+                    "CODE_PERMISSION_DENIED",
+                )
+            if perm_decision == "ask":
+                if self._interactive_permissions:
+                    perm_result = self._permission_broker.request_and_wait(
+                        tool_name=name,
+                        arguments=arguments,
+                        turn_id=self.turn_id,
+                        conversation_id=self.conversation_id,
+                        permission_mode=self._permission_mode,
+                        emit_request=self._on_permission_request,
+                    )
+                    if perm_result.get("decision") not in {"allow_once", "allow_always"}:
+                        return ToolOutcome(
+                            "failed",
+                            "Permissão negada pelo usuário",
+                            f"O usuário negou a permissão para executar `{name}`.",
+                            {
+                                "tool_kind": definition.kind,
+                                "code_mode": True,
+                                "permission_request_id": perm_result.get("request_id"),
+                            },
+                            "CODE_PERMISSION_DENIED",
+                        )
+                elif self._code_mode_requires_approval and name in {"write_file", "edit_file", "run_command", "verify_project"}:
+                    path = str(arguments.get("path") or "")
+                    if not (name in {"write_file", "edit_file"} and path.replace("\\", "/").lstrip("./").startswith(".orin/plans/")):
+                        return ToolOutcome(
+                            "failed",
+                            "Aguardando aprovação do plano",
+                            "No Modo Code, registre o contrato e aguarde a aprovação do plano antes de alterar código ou executar comandos.",
+                            {"tool_kind": definition.kind, "code_mode": True},
+                            "CODE_PLAN_APPROVAL_REQUIRED",
+                        )
         if self._code_mode_active and name == "run_command":
             command = str(arguments.get("command") or "")
             if re.search(r"\b(deploy|release|publish)\b", command, re.IGNORECASE):
@@ -935,39 +1287,67 @@ class AgentToolset:
                     "Commits locais são permitidos; pull request precisa de confirmação ou da preferência Autonomia total.",
                     {"tool_kind": definition.kind, "code_mode": True}, "CODE_PUSH_CONFIRMATION_REQUIRED",
                 )
+        limit = definition.max_result_size_chars
         try:
             result = definition.handler(**dict(arguments))
         except (AgentToolError, WorkspaceError) as error:
-            return ToolOutcome("failed", str(error)[:240], str(error), {"tool_kind": definition.kind}, "TOOL_REFUSED")
+            error_code = getattr(error, "error_code", "TOOL_REFUSED") or "TOOL_REFUSED"
+            return ToolOutcome("failed", str(error)[:240], str(error), {"tool_kind": definition.kind}, error_code)
         except TypeError as error:
             message = f"Invalid arguments for {name}: {error}"
             return ToolOutcome("failed", message[:240], message, {"tool_kind": definition.kind}, "INVALID_ARGUMENTS")
         except Exception as error:  # noqa: BLE001 - the model must see why a tool failed
             message = f"{type(error).__name__}: {error}"
-            return ToolOutcome("failed", f"{name} falhou", message[:MAX_TOOL_RESULT_CHARS], {"tool_kind": definition.kind}, "TOOL_FAILED")
+            return ToolOutcome("failed", f"{name} falhou", message[:limit], {"tool_kind": definition.kind}, "TOOL_FAILED")
         if isinstance(result, ToolOutcome):
-            outcome = self._finalize_outcome(result, definition.kind)
+            outcome = self._finalize_outcome(result, definition.kind, limit=limit, tool_name=name)
         else:
-            content, truncated = _bounded(str(result.get("content", "")))
+            raw_content = str(result.get("content", ""))
+            content, truncated = _bounded(raw_content, limit)
             payload = dict(result.get("payload") or {})
             payload.setdefault("tool_kind", definition.kind)
             if truncated:
                 payload["truncated"] = True
+                saved_path = self._persist_truncated_output(name, raw_content)
+                if saved_path:
+                    payload["full_output_path"] = saved_path
+                saved_hint = f" Full output saved to {saved_path}." if saved_path else ""
                 notice = (
-                    f"\n\n[output truncated at {MAX_TOOL_RESULT_CHARS} characters — "
+                    f"\n\n[output truncated at {limit} characters —{saved_hint} "
                     "narrow the request instead of repeating it: use read_file with offset/limit, "
                     "search_files with a tighter pattern, or a command that prints less]"
                 )
                 # The notice itself counts against the budget, so make room for it
-                # rather than growing content past MAX_TOOL_RESULT_CHARS.
-                content, _ = _bounded(content, MAX_TOOL_RESULT_CHARS - len(notice))
+                # rather than growing content past the tool result limit.
+                content, _ = _bounded(raw_content, max(0, limit - len(notice)))
                 content += notice
             images = [dict(item) for item in (result.get("images") or ()) if isinstance(item, Mapping)]
             outcome = ToolOutcome("succeeded", str(result.get("summary", f"{name} concluído"))[:240], content, payload, images=images)
+        if coercion_note and outcome.status == "succeeded":
+            if len(outcome.content) + len(coercion_note) <= limit:
+                outcome.content += coercion_note
         if name in {"write_file", "edit_file"} and outcome.status == "succeeded":
             outcome = self._with_file_diagnostic(outcome, arguments)
+        if not (name == "run_command" and bool(arguments.get("background"))) and name not in {"read_process_output", "stop_process", "list_files"}:
+            bg_notice = self._check_exited_background_processes()
+            if bg_notice and len(outcome.content) + len(bg_notice) <= limit:
+                outcome.content += bg_notice
         self._observe_mutation_outcome(name, arguments, outcome)
         return outcome
+
+    def _persist_truncated_output(self, tool_name: str, full_content: str) -> str | None:
+        """Persist full untruncated tool output inside .orin/tool-outputs/ for paged inspection."""
+        try:
+            rel_dir = ".orin/tool-outputs"
+            out_dir = self.workspace.resolve(rel_dir)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            safe_name = re.sub(r"[^A-Za-z0-9_-]", "_", tool_name)[:32] or "tool"
+            rel_path = f"{rel_dir}/{safe_name}-{uuid4().hex[:12]}.txt"
+            target = self.workspace.resolve(rel_path)
+            target.write_text(full_content, encoding="utf-8", errors="replace")
+            return rel_path
+        except Exception:
+            return None
 
     def _with_file_diagnostic(self, outcome: ToolOutcome, arguments: Mapping[str, Any]) -> ToolOutcome:
         """Append a fast, single-file lint/typecheck result to a write's own output.
@@ -1083,18 +1463,22 @@ class AgentToolset:
             return False, "Você alterou o frontend. Rode `verify_frontend` e obtenha todas as rotas aprovadas antes de concluir."
         return True, None
 
-    @staticmethod
-    def _finalize_outcome(outcome: ToolOutcome, kind: str) -> ToolOutcome:
+    def _finalize_outcome(self, outcome: ToolOutcome, kind: str, *, limit: int = MAX_TOOL_RESULT_CHARS, tool_name: str = "tool") -> ToolOutcome:
         payload = dict(outcome.payload or {})
         payload.setdefault("tool_kind", kind)
-        content, truncated = _bounded(str(outcome.content or ""))
+        raw_content = str(outcome.content or "")
+        content, truncated = _bounded(raw_content, limit)
         if truncated:
+            saved_path = self._persist_truncated_output(tool_name, raw_content)
+            if saved_path:
+                payload["full_output_path"] = saved_path
+            saved_hint = f" Full output saved to {saved_path}." if saved_path else ""
             notice = (
-                f"\n\n[output truncated at {MAX_TOOL_RESULT_CHARS} characters — "
+                f"\n\n[output truncated at {limit} characters —{saved_hint} "
                 "narrow the request instead of repeating it: use read_file with offset/limit, "
                 "search_files with a tighter pattern, or a command that prints less]"
             )
-            content, _ = _bounded(content, MAX_TOOL_RESULT_CHARS - len(notice))
+            content, _ = _bounded(raw_content, max(0, limit - len(notice)))
             content += notice
             payload["truncated"] = True
         return ToolOutcome(
@@ -1142,6 +1526,104 @@ class AgentToolset:
             f"Contrato registrado. Ele permanece visível durante toda a tarefa.\n\n{rendered}",
             payload,
         )
+
+    def enter_plan_mode(self, reason: str = "") -> ToolOutcome:
+        """Switch the current turn into read-only Plan Mode."""
+        from agentos.code_mode.models import CodePermissionMode
+
+        if self._permission_mode is not CodePermissionMode.PLAN_MODE:
+            self._previous_permission_mode = self._permission_mode
+        self._plan_mode_active = True
+        self._permission_mode = CodePermissionMode.PLAN_MODE
+        clean_reason = str(reason or "").strip()
+        summary = f"Modo Plano ativado{f': {clean_reason[:120]}' if clean_reason else ''}"
+        return ToolOutcome(
+            "succeeded",
+            summary,
+            (
+                "Plan Mode is now active. Mutating tools are blocked except writing or editing "
+                "plan files inside `.orin/plans/`. Inspect the codebase, write your plan to "
+                "`.orin/plans/<name>.md`, and call `exit_plan_mode(plan_path=..., summary=...)` when ready."
+            ),
+            {
+                "tool_kind": "planning",
+                "plan_mode": True,
+                "permission_mode": "plan_mode",
+                "reason": clean_reason,
+            },
+        )
+
+    def exit_plan_mode(self, plan_path: str = "", summary: str = "") -> ToolOutcome:
+        """Exit Plan Mode and present the plan for review or implementation."""
+        from agentos.code_mode.models import CodePermissionMode
+
+        clean_path = str(plan_path or "").strip().replace("\\", "/")
+        clean_summary = str(summary or "").strip()
+        plan_content = ""
+        if clean_path:
+            try:
+                target = self.workspace.resolve(clean_path)
+                if target.exists() and target.is_file():
+                    plan_content = target.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                plan_content = ""
+        elif (self.workspace.root / ".orin" / "plans").is_dir():
+            plans = sorted((self.workspace.root / ".orin" / "plans").glob("*.md"), key=lambda item: item.stat().st_mtime)
+            if plans:
+                latest = plans[-1]
+                clean_path = latest.relative_to(self.workspace.root).as_posix()
+                try:
+                    plan_content = latest.read_text(encoding="utf-8", errors="replace")
+                except Exception:
+                    plan_content = ""
+
+        restored_mode = getattr(self, "_previous_permission_mode", CodePermissionMode.ACCEPT_EDITS)
+        if restored_mode is CodePermissionMode.PLAN_MODE:
+            restored_mode = CodePermissionMode.ACCEPT_EDITS
+        self._plan_mode_active = False
+        self._permission_mode = restored_mode
+
+        payload: dict[str, Any] = {
+            "tool_kind": "planning",
+            "plan_mode": False,
+            "plan_ready": True,
+            "permission_mode": restored_mode.value,
+            "plan_path": clean_path,
+            "plan_summary": clean_summary,
+        }
+        if self._code_mode_requires_approval:
+            payload.update({
+                "wait_for_user": True,
+                "code_approval": True,
+                "questions": [{
+                    "id": "code_plan",
+                    "question": "Aprovar este plano do Modo Code para iniciar a implementação?",
+                    "mode": "single_choice",
+                    "options": [
+                        {"id": "approve", "label": "Aprovar plano"},
+                        {"id": "adjust", "label": "Pedir ajustes"},
+                        {"id": "cancel", "label": "Cancelar"},
+                    ],
+                }],
+            })
+        body_parts = ["Exited Plan Mode."]
+        if clean_path:
+            body_parts.append(f"Plan file: {clean_path}")
+        if clean_summary:
+            body_parts.append(f"Summary: {clean_summary}")
+        if plan_content:
+            body_parts.append(f"\n{plan_content[:4000]}")
+        return ToolOutcome(
+            "succeeded",
+            f"Plano pronto{f': {clean_summary[:140]}' if clean_summary else ''}",
+            "\n".join(body_parts),
+            payload,
+        )
+
+    def rewind_turn(self, turn_id: str | None = None) -> dict[str, Any]:
+        """Restore workspace files modified during ``turn_id`` back to their pre-turn state."""
+        return self._checkpoint_store.rewind_turn(str(turn_id or self.turn_id or "turn-default"))
+
 
     def ask_user(self, questions: list[Mapping[str, Any]]) -> ToolOutcome:
         """Validate a bounded, display-safe batch before exposing it to the UI.
@@ -1208,8 +1690,55 @@ class AgentToolset:
             {"questions": normalized, "wait_for_user": True, "tool_kind": "user_input", "label": names[:200]},
         )
 
+    def _record_file_read(self, path: str, *, offset: int = 1, limit: int = 400, total_lines: int = 0) -> str:
+        try:
+            target = self.workspace.resolve(path)
+            if not target.is_file():
+                return ""
+            norm = target.relative_to(self.workspace.root).as_posix()
+            raw_bytes = target.read_bytes()
+            stat = target.stat()
+            sha = hashlib.sha256(raw_bytes).hexdigest()
+            self._read_file_state[norm] = ReadFileRecord(
+                mtime_ns=stat.st_mtime_ns,
+                sha256=sha,
+                offset=offset,
+                limit=limit,
+                total_lines=total_lines,
+            )
+            return sha
+        except Exception:
+            return ""
+
+    def _check_read_file_guard(self, path: str) -> tuple[str | None, str]:
+        """Verify read-before-edit/overwrite and anti-staleness in Code mode.
+
+        Returns ``(old_content_or_none, original_sha256)``.
+        """
+        target = self.workspace.resolve(path)
+        if not target.exists() or not target.is_file():
+            return None, ""
+        norm = target.relative_to(self.workspace.root).as_posix()
+        raw_bytes = target.read_bytes()
+        current_sha = hashlib.sha256(raw_bytes).hexdigest()
+        old_content = raw_bytes.decode("utf-8", errors="replace")
+        if self._code_mode_active and not norm.startswith(".orin/"):
+            record = self._read_file_state.get(norm)
+            if record is None:
+                raise AgentToolError(
+                    "File has not been read yet. Read it first with read_file before writing or editing it.",
+                    error_code="FILE_NOT_READ",
+                )
+            if current_sha != record.sha256:
+                raise AgentToolError(
+                    "File has been modified since read, either by the user or by a linter. Read it again with read_file before attempting to write it.",
+                    error_code="STALE_FILE_READ",
+                )
+        return old_content, current_sha
+
     def read_file(self, path: str, offset: int = 1, limit: int = 400) -> dict[str, Any]:
         lines, first, total, truncated = self.workspace.read_lines(path, offset=int(offset), limit=int(limit))
+        self._record_file_read(path, offset=first, limit=int(limit), total_lines=total)
         if not lines:
             body = "[empty file]" if total == 0 else f"[no lines at offset {first}; the file has {total} lines]"
         else:
@@ -1229,6 +1758,7 @@ class AgentToolset:
         target = self.workspace.resolve(path)
         if not target.is_file():
             raise AgentToolError(f"'{path}' is not a file in this workspace.")
+        self._record_file_read(path)
         media_type = media_type_for(target)
         if media_type.startswith("image/"):
             return self._view_image(path, target, media_type, question)
@@ -1358,17 +1888,52 @@ class AgentToolset:
         if mode not in {"overwrite", "append"}:
             raise AgentToolError("mode must be 'overwrite' or 'append'.")
         if mode == "append":
+            target = self.workspace.resolve(path)
+            if target.exists() and target.is_file():
+                raw_bytes = target.read_bytes()
+                original_sha = hashlib.sha256(raw_bytes).hexdigest()
+                old_content = raw_bytes.decode("utf-8", errors="replace")
+            else:
+                original_sha = ""
+                old_content = None
+            self._checkpoint_store.snapshot_before_write(self.turn_id or "turn-default", path)
             written, total = self.workspace.append_text(path, content)
+            new_content = (old_content or "") + content
             body = f"Appended {written} bytes to {path}; it now holds {total} bytes."
         else:
+            old_content, original_sha = self._check_read_file_guard(path)
+            self._checkpoint_store.snapshot_before_write(self.turn_id or "turn-default", path)
             written = total = self.workspace.write_text(path, content)
+            new_content = content
             body = f"Wrote {written} bytes to {path}."
-        artifacts = [self.workspace.file_metadata(path)]
+        updated_sha = self._record_file_read(
+            path, offset=1, limit=400, total_lines=len(new_content.splitlines()),
+        )
+        hunks, added_lines, removed_lines = compute_structured_patch(old_content or "", new_content)
+        artifact = dict(self.workspace.file_metadata(path))
+        artifact["structured_patch"] = hunks
+        artifact["added_lines"] = added_lines
+        artifact["removed_lines"] = removed_lines
+        artifact["original_sha256"] = original_sha
+        artifact["updated_sha256"] = updated_sha
+        artifacts = [artifact]
         self._queue_reindex(artifacts)
         return {
             "summary": f"{'Acrescentou a' if mode == 'append' else 'Escreveu'} {path}",
             "content": body,
-            "payload": {"path": path, "bytes_written": written, "bytes_total": total, "mode": mode, "label": path, "artifacts": artifacts},
+            "payload": {
+                "path": path,
+                "bytes_written": written,
+                "bytes_total": total,
+                "mode": mode,
+                "label": path,
+                "artifacts": artifacts,
+                "structured_patch": hunks,
+                "added_lines": added_lines,
+                "removed_lines": removed_lines,
+                "original_sha256": original_sha,
+                "updated_sha256": updated_sha,
+            },
         }
 
     @staticmethod
@@ -1409,6 +1974,7 @@ class AgentToolset:
 
     def edit_file(self, path: str, old_text: str | None = None, new_text: str | None = None, edits: list[Mapping[str, Any]] | None = None, replace_all: bool = False) -> dict[str, Any]:
         operations = self._normalized_edits(old_text, new_text, edits)
+        _, original_sha = self._check_read_file_guard(path)
         content, truncated = self.workspace.read_text(path)
         if truncated:
             raise AgentToolError("file is too large to edit safely; split the edit into a smaller file or rewrite it deliberately.")
@@ -1423,13 +1989,35 @@ class AgentToolset:
             if matches > 1 and not replace_all:
                 raise AgentToolError(f"edit {index + 1}: old_text occurs {matches} times; add surrounding text or set replace_all=true.")
             draft = draft.replace(current, replacement) if replace_all else draft.replace(current, replacement, 1)
+        self._checkpoint_store.snapshot_before_write(self.turn_id or "turn-default", path)
         written = self.workspace.write_text(path, draft)
-        artifacts = [self.workspace.file_metadata(path)]
+        updated_sha = self._record_file_read(
+            path, offset=1, limit=400, total_lines=len(draft.splitlines()),
+        )
+        hunks, added_lines, removed_lines = compute_structured_patch(content, draft)
+        artifact = dict(self.workspace.file_metadata(path))
+        artifact["structured_patch"] = hunks
+        artifact["added_lines"] = added_lines
+        artifact["removed_lines"] = removed_lines
+        artifact["original_sha256"] = original_sha
+        artifact["updated_sha256"] = updated_sha
+        artifacts = [artifact]
         self._queue_reindex(artifacts)
         return {
             "summary": f"Editou {path}",
             "content": f"Applied {len(operations)} edit(s) to {path} ({written} bytes).",
-            "payload": {"path": path, "bytes_written": written, "edits_applied": len(operations), "label": path, "artifacts": artifacts},
+            "payload": {
+                "path": path,
+                "bytes_written": written,
+                "edits_applied": len(operations),
+                "label": path,
+                "artifacts": artifacts,
+                "structured_patch": hunks,
+                "added_lines": added_lines,
+                "removed_lines": removed_lines,
+                "original_sha256": original_sha,
+                "updated_sha256": updated_sha,
+            },
         }
 
     def list_files(self, path: str = "", depth: int = 1, pattern: str = "") -> dict[str, Any]:
@@ -1529,6 +2117,29 @@ class AgentToolset:
             # with zero trace anywhere — same risk IndexWorker._run logs for.
             logger.exception("could not queue a reindex for %s", paths)
 
+    def _resolve_cwd_after_command(self, command: str, starting_cwd: Path, *, precheck: bool) -> Path:
+        root_resolved = self.workspace.root.resolve()
+        current = starting_cwd.resolve()
+        for segment in re.split(r"\s*(?:&&|;)\s*", command.strip()):
+            match = re.match(r"(?i)^cd(?:\s+/d)?\s+(.+)$", segment.strip())
+            if not match:
+                continue
+            raw_target = match.group(1).strip()
+            if len(raw_target) >= 2 and raw_target[0] == raw_target[-1] and raw_target[0] in {"'", '"'}:
+                raw_target = raw_target[1:-1].strip()
+            if not raw_target:
+                continue
+            candidate = (current / raw_target).resolve()
+            try:
+                candidate.relative_to(root_resolved)
+            except ValueError as error:
+                raise AgentToolError("Directory outside workspace is not allowed.") from error
+            if precheck and re.match(r"(?i)^cd(?:\s+/d)?\s+(.+)$", command.strip()):
+                if not candidate.is_dir():
+                    raise AgentToolError(f"'{raw_target}' is not a directory in this workspace")
+            current = candidate
+        return current
+
     def run_command(self, command: str, background: bool = False, timeout_seconds: int | None = None, cwd: str = "") -> dict[str, Any]:
         if not isinstance(command, str) or not command.strip():
             raise AgentToolError("command must be a non-blank string")
@@ -1539,11 +2150,13 @@ class AgentToolset:
         timeout = DEFAULT_COMMAND_TIMEOUT_SECONDS if timeout_seconds is None else int(timeout_seconds)
         if not 1 <= timeout <= MAX_COMMAND_TIMEOUT_SECONDS:
             raise AgentToolError(f"timeout_seconds must be between 1 and {MAX_COMMAND_TIMEOUT_SECONDS}.")
-        working_directory = self.workspace.root
+        working_directory = self._current_cwd if self._current_cwd.is_dir() else self.workspace.root
         if isinstance(cwd, str) and cwd.strip():
             working_directory = self.workspace.resolve(cwd)
             if not working_directory.is_dir():
                 raise AgentToolError(f"'{cwd}' is not a directory in this workspace")
+            self._current_cwd = working_directory
+        self._resolve_cwd_after_command(command, working_directory, precheck=True)
         change_baseline = self.workspace.begin_change_tracking()
         environment = {
             **os.environ,
@@ -1588,7 +2201,10 @@ class AgentToolset:
         if background:
             manifest = self._load_process_manifest()
             manifest[str(process.pid)] = {
-                "command": command[:400], "log_path": log_relative, "started_at": datetime.now(UTC).isoformat(),
+                "command": command[:400],
+                "log_path": log_relative,
+                "started_at": datetime.now(UTC).isoformat(),
+                "notified_exit": False,
             }
             self._save_process_manifest(manifest)
             artifacts = self.workspace.end_change_tracking(change_baseline)
@@ -1605,17 +2221,120 @@ class AgentToolset:
                     "pid": process.pid, "log_path": log_relative, "artifacts": artifacts,
                 },
             }
-        try:
-            stdout_bytes, stderr_bytes = process.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired as error:
-            _terminate_process_tree(process)
-            process.communicate()
-            raise AgentToolError(f"Command timed out after {timeout}s.") from error
+        if getattr(process, "stdout", None) is not None and getattr(process, "stderr", None) is not None and hasattr(process, "poll"):
+            stdout_chunks: list[bytes] = []
+            stderr_chunks: list[bytes] = []
+            live_parts: list[str] = []
+            stream_lock = threading.Lock()
+
+            def _reader(stream: Any, bucket: list[bytes]) -> None:
+                try:
+                    for chunk in iter(stream.readline, b""):
+                        if not chunk:
+                            break
+                        bucket.append(chunk)
+                        decoded = chunk.decode("utf-8", "replace")
+                        with stream_lock:
+                            live_parts.append(decoded)
+                except Exception:
+                    pass
+                finally:
+                    try:
+                        stream.close()
+                    except Exception:
+                        pass
+
+            t_out = threading.Thread(target=_reader, args=(process.stdout, stdout_chunks), daemon=True)
+            t_err = threading.Thread(target=_reader, args=(process.stderr, stderr_chunks), daemon=True)
+            t_out.start()
+            t_err.start()
+            started_at = time.monotonic()
+            last_emit_at = 0.0
+            last_emitted_count = 0
+
+            while process.poll() is None or t_out.is_alive() or t_err.is_alive():
+                now = time.monotonic()
+                elapsed = now - started_at
+                if elapsed >= timeout:
+                    _terminate_process_tree(process)
+                    t_out.join(timeout=0.5)
+                    t_err.join(timeout=0.5)
+                    if hasattr(process, "communicate"):
+                        try:
+                            process.communicate(timeout=0.5)
+                        except Exception:
+                            pass
+                    raise AgentToolError(f"Command timed out after {timeout}s.")
+                if callable(self._on_tool_progress):
+                    with stream_lock:
+                        current_count = len(live_parts)
+                        tail_snapshot = "".join(live_parts)[-2000:].strip() if current_count > last_emitted_count else ""
+                    if current_count > last_emitted_count and tail_snapshot and (last_emitted_count == 0 or now - last_emit_at >= 0.25):
+                        last_emitted_count = current_count
+                        last_emit_at = now
+                        progress_payload = {
+                            "tool_name": "run_command",
+                            "tool_kind": "terminal",
+                            "invocation_id": getattr(self, "_active_invocation_id", None) or "",
+                            "command": command[:240],
+                            "output_tail": tail_snapshot,
+                            "elapsed_ms": int(elapsed * 1000),
+                        }
+                        try:
+                            try:
+                                self._on_tool_progress("run_command", f"Executando: {command[:60]}", progress_payload)
+                            except TypeError:
+                                self._on_tool_progress("run_command", progress_payload)  # type: ignore[call-arg]
+                        except Exception:
+                            pass
+                time.sleep(0.02)
+
+            t_out.join(timeout=0.5)
+            t_err.join(timeout=0.5)
+            if hasattr(process, "wait"):
+                try:
+                    process.wait(timeout=0.5)
+                except Exception:
+                    pass
+            if callable(self._on_tool_progress):
+                with stream_lock:
+                    current_count = len(live_parts)
+                    tail_snapshot = "".join(live_parts)[-2000:].strip()
+                if current_count > last_emitted_count and tail_snapshot:
+                    elapsed = time.monotonic() - started_at
+                    progress_payload = {
+                        "tool_name": "run_command",
+                        "tool_kind": "terminal",
+                        "invocation_id": getattr(self, "_active_invocation_id", None) or "",
+                        "command": command[:240],
+                        "output_tail": tail_snapshot,
+                        "elapsed_ms": int(elapsed * 1000),
+                    }
+                    try:
+                        try:
+                            self._on_tool_progress("run_command", f"Executando: {command[:60]}", progress_payload)
+                        except TypeError:
+                            self._on_tool_progress("run_command", progress_payload)  # type: ignore[call-arg]
+                    except Exception:
+                        pass
+            stdout_bytes = b"".join(stdout_chunks)
+            stderr_bytes = b"".join(stderr_chunks)
+        else:
+            try:
+                stdout_bytes, stderr_bytes = process.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired as error:
+                _terminate_process_tree(process)
+                process.communicate()
+                raise AgentToolError(f"Command timed out after {timeout}s.") from error
         stdout = stdout_bytes.decode("utf-8", "replace").strip()
         stderr = stderr_bytes.decode("utf-8", "replace").strip()
         body = "\n".join(part for part in (stdout, f"[stderr]\n{stderr}" if stderr else "") if part) or "[no output]"
         body, output_truncated = _bounded_output(body, MAX_COMMAND_OUTPUT_CHARS)
         succeeded = process.returncode == 0
+        if succeeded:
+            next_cwd = self._resolve_cwd_after_command(command, working_directory, precheck=False)
+            if next_cwd.is_dir():
+                self._current_cwd = next_cwd
         artifacts = self.workspace.end_change_tracking(change_baseline)
         self._queue_reindex(artifacts)
         return {
@@ -1625,8 +2344,47 @@ class AgentToolset:
                 "command": command[:400], "exit_code": process.returncode,
                 "label": command[:120], "failed": not succeeded,
                 "artifacts": artifacts, "output_truncated": output_truncated,
+                "cwd": self._current_cwd.resolve().relative_to(self.workspace.root.resolve()).as_posix() or ".",
             },
         }
+
+    def _check_exited_background_processes(self) -> str:
+        manifest = self._load_process_manifest()
+        if not manifest:
+            return ""
+        notices: list[str] = []
+        dirty = False
+        for pid_text, info in list(manifest.items()):
+            if not isinstance(info, Mapping):
+                continue
+            if info.get("notified_exit"):
+                continue
+            try:
+                row_pid = int(pid_text)
+            except ValueError:
+                continue
+            if row_pid in self._notified_exited_pids:
+                continue
+            if not _process_is_running(row_pid):
+                self._notified_exited_pids.add(row_pid)
+                updated = dict(info)
+                updated["notified_exit"] = True
+                manifest[pid_text] = updated
+                dirty = True
+                cmd = str(info.get("command") or "").strip()
+                log_path = str(info.get("log_path") or "").strip()
+                notices.append(
+                    f"Background process {row_pid} ({cmd}) has exited. "
+                    f"Use read_process_output(pid={row_pid}) to inspect {log_path or 'its output'}."
+                )
+        if dirty:
+            try:
+                self._save_process_manifest(manifest)
+            except Exception:
+                pass
+        if not notices:
+            return ""
+        return "\n\n<system-reminder>\n" + "\n".join(notices) + "\n</system-reminder>"
 
     def _load_process_manifest(self) -> dict[str, dict[str, Any]]:
         try:
@@ -1637,7 +2395,15 @@ class AgentToolset:
             data = json.loads(content)
         except json.JSONDecodeError:
             return {}
-        return data if isinstance(data, dict) else {}
+        if isinstance(data, dict):
+            return data
+        if isinstance(data, list):
+            normalized: dict[str, dict[str, Any]] = {}
+            for item in data:
+                if isinstance(item, Mapping) and item.get("pid") is not None:
+                    normalized[str(item["pid"])] = dict(item)
+            return normalized
+        return {}
 
     def _save_process_manifest(self, manifest: Mapping[str, Mapping[str, Any]]) -> None:
         # Bounded so a long-running conversation cannot grow this file forever;
@@ -1710,11 +2476,20 @@ class AgentToolset:
 
     def stop_process(self, pid: int) -> dict[str, Any]:
         pid = int(pid)
-        info = self._load_process_manifest().get(str(pid))
+        manifest = self._load_process_manifest()
+        info = manifest.get(str(pid))
         if not isinstance(info, Mapping):
             raise AgentToolError(f"No background process with pid {pid} was started in this workspace.")
         if _process_is_running(pid):
             _terminate_pid(pid)
+        self._notified_exited_pids.add(pid)
+        updated = dict(info)
+        updated["notified_exit"] = True
+        manifest[str(pid)] = updated
+        try:
+            self._save_process_manifest(manifest)
+        except Exception:
+            pass
         return {
             "summary": f"Encerrou o processo {pid}",
             "content": f"pid={pid} stopped",
@@ -2409,6 +3184,109 @@ class AgentToolset:
             raise AgentToolError(str(error)) from error
         return ToolOutcome("succeeded", f"Removeu o plugin {plugin_id}", json.dumps(result), {**result, "tool_kind": "plugin"})
 
+    def todo_write(self, todos: list[Mapping[str, Any]]) -> dict[str, Any]:
+        if not isinstance(todos, list):
+            raise AgentToolError("todos must be a list of task objects.")
+        if len(todos) > 40:
+            raise AgentToolError("todos cannot exceed 40 items.")
+        normalized: list[dict[str, str]] = []
+        completed_count = 0
+        in_progress_count = 0
+        pending_count = 0
+        lines: list[str] = []
+        for index, raw_item in enumerate(todos):
+            if not isinstance(raw_item, Mapping):
+                raise AgentToolError(f"todos[{index}] must be an object.")
+            item_id = str(raw_item.get("id") or f"{index + 1}").strip()[:64]
+            content = str(raw_item.get("content") or "").strip()[:300]
+            status = str(raw_item.get("status") or "").strip().lower()
+            active_form = str(raw_item.get("active_form") or "").strip()[:200]
+            if not item_id or not content:
+                raise AgentToolError(f"todos[{index}] requires non-blank 'id' and 'content'.")
+            if status not in {"pending", "in_progress", "completed"}:
+                raise AgentToolError(
+                    f"todos[{index}] status must be 'pending', 'in_progress', or 'completed' (got '{status}')."
+                )
+            entry: dict[str, str] = {"id": item_id, "content": content, "status": status}
+            if active_form:
+                entry["active_form"] = active_form
+            normalized.append(entry)
+            if status == "completed":
+                completed_count += 1
+                marker = "[x]"
+            elif status == "in_progress":
+                in_progress_count += 1
+                marker = "[~]"
+            else:
+                pending_count += 1
+                marker = "[ ]"
+            suffix = f" ({active_form})" if status == "in_progress" and active_form else ""
+            lines.append(f"- {marker} {item_id}: {content}{suffix}")
+        self._todos.clear()
+        self._todos.extend(normalized)
+        summary = f"Lista de tarefas ({completed_count}/{len(normalized)} concluídas)"
+        body = "Updated todo list:\n" + ("\n".join(lines) if lines else "[empty todo list]")
+        return {
+            "summary": summary,
+            "content": body,
+            "payload": {
+                "todos": list(self._todos),
+                "total": len(normalized),
+                "completed": completed_count,
+                "in_progress": in_progress_count,
+                "pending": pending_count,
+                "tool_kind": "planning",
+            },
+        }
+
+    def post_compact_enrichment(self) -> str:
+        """Build a re-hydration markdown block after context compaction (top-5 recent files, todos, and active plan)."""
+        sections: list[str] = []
+        if self._read_file_state:
+            recent = sorted(
+                self._read_file_state.items(),
+                key=lambda item: item[1].mtime_ns,
+                reverse=True,
+            )[:5]
+            file_blocks: list[str] = []
+            for rel_path, _record in recent:
+                try:
+                    content, _ = self.workspace.read_text(rel_path)
+                except Exception:
+                    continue
+                snippet = content[:2000]
+                if len(content) > 2000:
+                    snippet += "\n... [truncated for post-compact re-hydration]"
+                file_blocks.append(f"#### `{rel_path}`\n```\n{snippet}\n```")
+            if file_blocks:
+                sections.append("### Recently Accessed Files (Re-hydrated)\n" + "\n\n".join(file_blocks))
+        if self._todos:
+            todo_lines: list[str] = []
+            for item in self._todos:
+                status = item.get("status", "pending")
+                marker = "[x]" if status == "completed" else "[~]" if status == "in_progress" else "[ ]"
+                active = f" ({item['active_form']})" if status == "in_progress" and item.get("active_form") else ""
+                todo_lines.append(f"- {marker} {item.get('id', '')}: {item.get('content', '')}{active}")
+            sections.append("### Current Todo List\n" + "\n".join(todo_lines))
+        try:
+            plans_dir = self.workspace.root / ".orin" / "plans"
+            plan_files = (
+                sorted(f".orin/plans/{p.name}" for p in plans_dir.glob("*.md") if p.is_file())
+                if plans_dir.is_dir()
+                else []
+            )
+        except Exception:
+            plan_files = []
+        if plan_files:
+            plan_path = plan_files[-1]
+            try:
+                plan_text, _ = self.workspace.read_text(plan_path)
+                if plan_text.strip():
+                    sections.append(f"### Active Plan (`{plan_path}`)\n{plan_text[:2000]}")
+            except Exception:
+                pass
+        return "\n\n".join(sections)
+
     def create_agent(self, name: str, role: str, model_id: str | None = None) -> ToolOutcome:
         if self._create_agent is None:
             raise AgentToolError("Subagents are not available.")
@@ -2423,6 +3301,173 @@ class AgentToolset:
         if self._delegate_batch is None:
             raise AgentToolError("Subagents are not available.")
         return self._delegate_batch(list(tasks))
+
+    def run_subagent(
+        self,
+        subagent_type: str,
+        task: str,
+        description: str = "",
+        model_id: str | None = None,
+    ) -> ToolOutcome:
+        clean_type = str(subagent_type or "").strip().lower()
+        if clean_type == "general-purpose":
+            clean_type = "general"
+        if clean_type not in {"explore", "plan", "general", "fork"}:
+            raise AgentToolError("subagent_type must be one of 'explore', 'plan', 'general', or 'fork'.")
+        if not isinstance(task, str) or not task.strip():
+            raise AgentToolError("task must be a non-blank string.")
+        if self._run_subagent is not None:
+            return self._run_subagent(
+                clean_type,
+                task.strip(),
+                description=str(description or "").strip(),
+                model_id=str(model_id).strip() if model_id is not None else None,
+            )
+        if self._delegate is not None:
+            return self._delegate(clean_type, task.strip())
+        raise AgentToolError("Subagents are not available.")
+
+    def enter_worktree(
+        self,
+        name: str | None = None,
+        base_branch: str | None = None,
+    ) -> ToolOutcome:
+        from agentos.code_mode.worktree import WorktreeError, WorktreeManager
+
+        manager = WorktreeManager(self._original_workspace_root)
+        try:
+            info = manager.create_worktree(name=name, base_branch=base_branch)
+        except WorktreeError as error:
+            raise AgentToolError(str(error)) from error
+        self.workspace.root = info.path
+        self._current_cwd = info.path
+        self._active_worktree_name = info.name
+        summary = f"Worktree isolado ativado: {info.name} ({info.branch})"
+        content = json.dumps(
+            {
+                "status": "entered",
+                "worktree": info.to_dict(),
+                "workspace_root": str(info.path),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        return ToolOutcome(
+            "succeeded",
+            summary[:240],
+            content,
+            {"tool_kind": "terminal", "worktree": info.to_dict()},
+        )
+
+    def exit_worktree(
+        self,
+        action: str = "keep",
+        force: bool = False,
+    ) -> ToolOutcome:
+        from agentos.code_mode.worktree import WorktreeError, WorktreeManager
+
+        clean_action = str(action or "keep").strip().lower()
+        if clean_action not in {"keep", "remove"}:
+            raise AgentToolError("action must be 'keep' or 'remove'.")
+        manager = WorktreeManager(self._original_workspace_root)
+        wt_name = self._active_worktree_name
+        if not wt_name:
+            active = manager.active_worktree()
+            if active is not None:
+                wt_name = active.name
+        removed_info: dict[str, Any] | None = None
+        if clean_action == "remove" and wt_name:
+            # Switch root out of worktree before removing directory on Windows
+            previous_root = self.workspace.root
+            self.workspace.root = self._original_workspace_root
+            self._current_cwd = self._original_workspace_root
+            try:
+                removed_info = manager.remove_worktree(wt_name, force=bool(force))
+            except WorktreeError as error:
+                self.workspace.root = previous_root
+                self._current_cwd = previous_root
+                raise AgentToolError(str(error)) from error
+        else:
+            self.workspace.root = self._original_workspace_root
+            self._current_cwd = self._original_workspace_root
+        self._active_worktree_name = None
+        summary = f"Saiu do worktree ({clean_action})"
+        content = json.dumps(
+            {
+                "status": "exited",
+                "action": clean_action,
+                "worktree_name": wt_name,
+                "removed": removed_info,
+                "workspace_root": str(self.workspace.root),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        return ToolOutcome(
+            "succeeded",
+            summary[:240],
+            content,
+            {"tool_kind": "terminal", "action": clean_action, "worktree_name": wt_name},
+        )
+
+    def preview_start(
+        self,
+        name: str | None = None,
+        wait_timeout: float = 10.0,
+    ) -> ToolOutcome:
+        from agentos.code_mode.preview_server import PreviewServerError, PreviewServerManager
+
+        manager = PreviewServerManager(self.workspace.root, browser=self._browser)
+        try:
+            result = manager.start_server(name=name, wait_timeout=float(wait_timeout))
+        except PreviewServerError as error:
+            raise AgentToolError(str(error)) from error
+        summary = f"Preview server iniciado: {result.get('name')} ({result.get('url')})"
+        return ToolOutcome(
+            "succeeded",
+            summary[:240],
+            json.dumps(result, ensure_ascii=False, indent=2),
+            {"tool_kind": "terminal", "preview": result},
+        )
+
+    def preview_stop(
+        self,
+        name: str | None = None,
+    ) -> ToolOutcome:
+        from agentos.code_mode.preview_server import PreviewServerError, PreviewServerManager
+
+        manager = PreviewServerManager(self.workspace.root, browser=self._browser)
+        try:
+            result = manager.stop_server(name=name)
+        except PreviewServerError as error:
+            raise AgentToolError(str(error)) from error
+        summary = f"Preview server encerrado: {result.get('name') or 'default'}"
+        return ToolOutcome(
+            "succeeded",
+            summary[:240],
+            json.dumps(result, ensure_ascii=False, indent=2),
+            {"tool_kind": "terminal", "preview": result},
+        )
+
+    def preview_logs(
+        self,
+        name: str | None = None,
+        tail_lines: int = 100,
+    ) -> ToolOutcome:
+        from agentos.code_mode.preview_server import PreviewServerError, PreviewServerManager
+
+        manager = PreviewServerManager(self.workspace.root, browser=self._browser)
+        try:
+            result = manager.read_logs(name=name, tail_lines=int(tail_lines))
+        except PreviewServerError as error:
+            raise AgentToolError(str(error)) from error
+        summary = f"Logs do preview server: {result.get('name') or 'default'}"
+        return ToolOutcome(
+            "succeeded",
+            summary[:240],
+            json.dumps(result, ensure_ascii=False, indent=2),
+            {"tool_kind": "terminal", "preview": {k: v for k, v in result.items() if k != "logs"}},
+        )
 
 
 TRUNCATED_ARGUMENTS_MESSAGE = (
@@ -2710,8 +3755,11 @@ __all__ = [
     "DEFAULT_COMMAND_TIMEOUT_SECONDS",
     "MAX_COMMAND_TIMEOUT_SECONDS",
     "MAX_TOOL_RESULT_CHARS",
+    "ReadFileRecord",
     "ToolDefinition",
     "ToolOutcome",
+    "coerce_tool_arguments",
+    "compute_structured_patch",
     "parse_arguments",
     "shlex",
 ]

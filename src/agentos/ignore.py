@@ -17,7 +17,7 @@ from fnmatch import fnmatch
 from pathlib import Path
 
 DENIED_SEGMENTS = frozenset({
-    ".git", ".hg", ".svn", "node_modules", ".venv", "venv", "__pycache__",
+    ".git", ".hg", ".svn", ".orin", "node_modules", ".venv", "venv", "__pycache__",
     "dist", "build", ".next", ".turbo", ".pytest_cache", ".mypy_cache",
     ".ruff_cache", "target", "vendor", ".tox", "site-packages",
     ".aws", ".ssh",

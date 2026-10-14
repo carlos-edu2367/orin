@@ -62,7 +62,7 @@ _ALWAYS = ("write_contract", "ask_user")
 
 PHASE_TOOLS: Mapping[Phase, tuple[str, ...]] = {
     Phase.ORIENT: (*_ALWAYS, *_READ_TOOLS, *_WRITE_TOOLS, "recall", "remember"),
-    Phase.PLAN: (*_ALWAYS, "search_skills", "list_skills", "use_skill", "recall", "list_files", "read_file"),
+    Phase.PLAN: (*_ALWAYS, "search_skills", "list_skills", "use_skill", "recall", "list_files", "read_file", "todo_write"),
     Phase.EXECUTE: (*_ALWAYS, *_READ_TOOLS, *_WRITE_TOOLS, "recall", "remember"),
     # Verification may look and may run a check; it may not change anything.
     # ``verify_project``/``verify_frontend`` mutate nothing themselves but can
@@ -73,7 +73,7 @@ PHASE_TOOLS: Mapping[Phase, tuple[str, ...]] = {
         "read_file", "view_file", "list_files", "search_files",
         "run_command", "read_process_output", "verify_project",
         "browser_observe", "browser_screenshot", "verify_frontend",
-        "report_verification",
+        "report_verification", "todo_write",
     ),
     Phase.RESPOND: (),
 }
@@ -90,7 +90,7 @@ TOOLKIT_TOOLS: Mapping[str, tuple[str, ...]] = {
         "browser_select", "browser_check", "browser_screenshot", "browser_back",
         "browser_scroll", "browser_wait_for", "browser_submit",
     ),
-    "delegation": ("create_agent", "ask_agent", "ask_agents"),
+    "delegation": ("create_agent", "ask_agent", "ask_agents", "run_subagent", "todo_write"),
 }
 # ``mcp`` and ``plugins`` are declared the same way but resolve by tool kind
 # rather than by name, since their tools are discovered at runtime.

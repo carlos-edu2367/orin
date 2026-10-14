@@ -1,10 +1,12 @@
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
 import { useEffect, useRef, useState, type ClipboardEvent, type DragEvent, type FormEvent, type KeyboardEvent, type ReactNode } from 'react'
+import { CODE_PERMISSION_MODES, nextCodePermissionMode, type CodePermissionMode } from '../../api/codeMode'
 import type { PluginCommand } from '../../api/plugins'
 import type { SkillSummary } from '../../api/skills'
 import type { CodeModeChoice } from '../../api/conversations'
 import { AttachmentChips, type ComposerAttachment } from './AttachmentChips'
 import { CommandPicker, commandToken, skillToken } from './CommandPicker'
+import { applyFileMention, detectFileMention, FileMentionPicker } from './FileMentionPicker'
 
 export type ComposerProps = {
   value: string
@@ -38,6 +40,16 @@ export type ComposerProps = {
   skills?: SkillSummary[]
   codeMode?: CodeModeChoice
   onCodeModeChange?: (value: CodeModeChoice) => void
+  codePermissionMode?: CodePermissionMode
+  onCodePermissionModeChange?: (value: CodePermissionMode) => void
+  /** Workspace file paths offered by the `@` mention picker. */
+  workspaceFiles?: string[]
+  /** Optional async lookup for workspace files matching the typed `@query`. */
+  onSearchWorkspaceFiles?: (query: string) => Promise<string[]>
+  /** Whether Git Worktree isolation is active for this Code session. */
+  worktreeIsolated?: boolean
+  onWorktreeIsolatedChange?: (isolated: boolean) => void
+  worktreeBranch?: string | null
 }
 
 const MAX_ROWS_HEIGHT = 260
@@ -54,12 +66,29 @@ export function Composer({
   value, onChange, onSubmit, onStop, running = false, disabled = false,
   placeholder = 'Descreva o que você precisa…', settings, hint, error, autoFocus, notice, focusSignal = 0, canSend = true,
   attachments = [], onAttach = () => {}, onRemoveAttachment = () => {}, commands = [], skills = [],
-  codeMode = 'auto', onCodeModeChange,
+  codeMode = 'auto', onCodeModeChange, codePermissionMode, onCodePermissionModeChange,
+  workspaceFiles = [], onSearchWorkspaceFiles,
+  worktreeIsolated, onWorktreeIsolatedChange, worktreeBranch = null,
 }: ComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [focused, setFocused] = useState(false)
+  const [caretPosition, setCaretPosition] = useState<number | undefined>(undefined)
+  const [internalPermissionMode, setInternalPermissionMode] = useState<CodePermissionMode>('ask_permissions')
+  const [internalWorktreeIsolated, setInternalWorktreeIsolated] = useState(false)
+  const activePermissionMode = codePermissionMode ?? internalPermissionMode
+  const activeWorktreeIsolated = worktreeIsolated ?? internalWorktreeIsolated
   const reduced = useReducedMotion()
+
+  function changePermissionMode(next: CodePermissionMode) {
+    setInternalPermissionMode(next)
+    onCodePermissionModeChange?.(next)
+  }
+
+  function changeWorktreeIsolated(next: boolean) {
+    setInternalWorktreeIsolated(next)
+    onWorktreeIsolatedChange?.(next)
+  }
 
   // The picker only claims the keyboard while the message is exactly a
   // command being typed from the very start. Anything else — a path, a
@@ -83,6 +112,52 @@ export function Composer({
     return !needle || item.token.toLowerCase().includes(needle) || item.description.toLowerCase().includes(needle)
   })
   const pickerOpen = commandQuery !== null && !dismissed && pickerHasMatches
+
+  // `@file` mention autocomplete anywhere in the composer text.
+  const activeMention = detectFileMention(value, caretPosition)
+  const mentionQuery = activeMention?.query ?? null
+  const [mentionDismissed, setMentionDismissed] = useState(false)
+  const [previousMentionKey, setPreviousMentionKey] = useState<string | null>(null)
+  const currentMentionKey = activeMention ? `${activeMention.startIndex}:${activeMention.query}` : null
+  if (currentMentionKey !== previousMentionKey) {
+    setPreviousMentionKey(currentMentionKey)
+    if (currentMentionKey === null || !previousMentionKey || !currentMentionKey.startsWith(`${activeMention?.startIndex}:`)) {
+      setMentionDismissed(false)
+    } else {
+      setMentionDismissed(false)
+    }
+  }
+
+  const [fetchedFiles, setFetchedFiles] = useState<string[]>([])
+  const [mentionLoading, setMentionLoading] = useState(false)
+
+  useEffect(() => {
+    if (mentionQuery === null || mentionDismissed || !onSearchWorkspaceFiles) return
+    let cancelled = false
+    setMentionLoading(true)
+    onSearchWorkspaceFiles(mentionQuery)
+      .then((items) => {
+        if (!cancelled) setFetchedFiles(items)
+      })
+      .catch(() => {
+        if (!cancelled) setFetchedFiles([])
+      })
+      .finally(() => {
+        if (!cancelled) setMentionLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [mentionQuery, mentionDismissed, onSearchWorkspaceFiles])
+
+  const availableMentionFiles = onSearchWorkspaceFiles && fetchedFiles.length > 0 ? fetchedFiles : workspaceFiles
+  const mentionHasMatches = mentionQuery !== null && (
+    mentionLoading || availableMentionFiles.some((file) => {
+      const needle = mentionQuery.trim().toLowerCase()
+      return !needle || file.toLowerCase().includes(needle)
+    })
+  )
+  const mentionPickerOpen = activeMention !== null && !pickerOpen && !mentionDismissed && mentionHasMatches
 
   useEffect(() => {
     const element = textareaRef.current
@@ -108,7 +183,13 @@ export function Composer({
   }
 
   function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (event.key === 'Tab' && event.shiftKey && codeMode === 'code') {
+      event.preventDefault()
+      changePermissionMode(nextCodePermissionMode(activePermissionMode))
+      return
+    }
     if (pickerOpen && ['Enter', 'ArrowUp', 'ArrowDown', 'Escape'].includes(event.key)) return
+    if (mentionPickerOpen && ['Enter', 'Tab', 'ArrowUp', 'ArrowDown', 'Escape'].includes(event.key)) return
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault()
       if (running || !canSend) return
@@ -150,6 +231,19 @@ export function Composer({
             onDismiss={() => setDismissed(true)}
           />
         )}
+        {mentionPickerOpen && activeMention && (
+          <FileMentionPicker
+            files={availableMentionFiles}
+            query={activeMention.query}
+            loading={mentionLoading}
+            onSelect={(filePath) => {
+              const nextValue = applyFileMention(value, activeMention, filePath)
+              onChange(nextValue)
+              setMentionDismissed(true)
+            }}
+            onDismiss={() => setMentionDismissed(true)}
+          />
+        )}
         <textarea
           id="composer-message"
           ref={textareaRef}
@@ -158,7 +252,14 @@ export function Composer({
           rows={1}
           placeholder={placeholder}
           disabled={disabled}
-          onChange={(event) => onChange(event.target.value)}
+          onChange={(event) => {
+            setCaretPosition(event.target.selectionStart ?? event.target.value.length)
+            onChange(event.target.value)
+          }}
+          onSelect={(event) => {
+            const target = event.currentTarget
+            setCaretPosition(target.selectionStart ?? target.value.length)
+          }}
           onKeyDown={onKeyDown}
           onPaste={onPaste}
           onFocus={() => setFocused(true)}
@@ -195,6 +296,40 @@ export function Composer({
               title={codeMode === 'code' ? 'Modo Code ativo' : 'Ativar Modo Code'}
               onClick={() => onCodeModeChange(codeMode === 'code' ? 'auto' : 'code')}
             ><span aria-hidden="true">&lt;/&gt;</span><span>Code</span></button>}
+            {codeMode === 'code' && (
+              <>
+                <select
+                  className="composer__permission-mode"
+                  data-testid="code-permission-mode-select"
+                  aria-label="Modo de permissão do Code"
+                  title="Alternar modo de permissão (Shift+Tab)"
+                  value={activePermissionMode}
+                  onChange={(event) => changePermissionMode(event.target.value as CodePermissionMode)}
+                >
+                  {CODE_PERMISSION_MODES.map((entry) => (
+                    <option key={entry.mode} value={entry.mode}>
+                      {entry.label}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  className={`composer__worktree${activeWorktreeIsolated ? ' is-active' : ''}`}
+                  data-testid="code-worktree-toggle"
+                  aria-pressed={activeWorktreeIsolated}
+                  aria-label={activeWorktreeIsolated ? 'Desativar Worktree isolado' : 'Ativar Worktree isolado'}
+                  title={
+                    activeWorktreeIsolated
+                      ? `Worktree isolado ativo${worktreeBranch ? ` (${worktreeBranch})` : ''}`
+                      : 'Isolar sessão em um Git Worktree (.orin/worktrees/)'
+                  }
+                  onClick={() => changeWorktreeIsolated(!activeWorktreeIsolated)}
+                >
+                  <span aria-hidden="true">⑂</span>
+                  <span>{activeWorktreeIsolated && worktreeBranch ? worktreeBranch : 'Worktree'}</span>
+                </button>
+              </>
+            )}
             {settings}
           </div>
           <div className="composer__actions">

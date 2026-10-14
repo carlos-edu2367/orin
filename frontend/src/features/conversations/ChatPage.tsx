@@ -3,7 +3,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, u
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { createBrowserApiClient } from '../../api/client'
 import {
-  cancelConversation, getConversation, listConversations, sendConversationMessage, streamConversationEvents,
+  cancelConversation, getConversation, listConversations, rewindTurn, sendConversationMessage, streamConversationEvents, submitToolPermission,
   type CodeModeChoice, type Conversation, type ConversationMessage,
 } from '../../api/conversations'
 import { ApiError } from '../../api/errors'
@@ -15,7 +15,10 @@ import {
   type ProviderModel, type ProviderName, type VisionModelSetting,
 } from '../../api/providers'
 import { deleteUpload, uploadFile } from '../../api/uploads'
-import { getCodeModeSettings } from '../../api/codeMode'
+import {
+  getCodeModeSettings, listWorkspaceFiles, manageConversationWorktree, normalizeCodePermissionMode, permissionModeToAutonomy, setCodeModeSettings,
+  type CodePermissionMode,
+} from '../../api/codeMode'
 import { attachWorkspaceFolder, detachWorkspaceFolder, inspectWorkspaceFolder, type WorkspaceState } from '../../api/workspace'
 import { CommandPalette } from '../../components/CommandPalette'
 import { Brand } from '../../components/Brand'
@@ -34,7 +37,7 @@ import { TurnTimeline } from './TurnTimeline'
 import { WorkspaceFilePreview, type WorkspaceFileReference } from './WorkspaceFileCard'
 import { WorkspaceFolderButton } from './WorkspaceFolderButton'
 import { activityReducer, createActivityState } from './activityReducer'
-import type { ConversationActivityEvent } from './activityTypes'
+import type { ConversationActivityEvent, ToolPermissionDecision } from './activityTypes'
 import type { UserQuestionAnswer } from './UserQuestionCard'
 import { buildMessageTimelines } from './turnTimelineFold'
 import { useComposerAttachments } from './useComposerAttachments'
@@ -100,7 +103,9 @@ export function ChatPage() {
   const [chats, setChats] = useState<Array<{ conversation_id: string; title: string; state: string }>>([])
   const [message, setMessage] = useState('')
   const [codeMode, setCodeMode] = useState<CodeModeChoice>('auto')
+  const [codePermissionMode, setCodePermissionMode] = useState<CodePermissionMode>('ask_permissions')
   const [codeSystemNotifications, setCodeSystemNotifications] = useState(false)
+  const [codeMonitoringEnabled, setCodeMonitoringEnabled] = useState(true)
   const { attachments, onAttach, onRemoveAttachment, canSend: attachmentsReady, readyUploadIds, reset: resetAttachments } = useComposerAttachments(client)
   const [pendingUserMessage, setPendingUserMessage] = useState<ConversationMessage | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -239,10 +244,45 @@ export function ChatPage() {
   useEffect(() => {
     const controller = new AbortController()
     void getCodeModeSettings(client, controller.signal).then((settings) => {
-      if (!controller.signal.aborted) setCodeSystemNotifications(settings.system_notifications)
+      if (!controller.signal.aborted) {
+        setCodePermissionMode(normalizeCodePermissionMode(settings.autonomy))
+        setCodeSystemNotifications(settings.system_notifications)
+        setCodeMonitoringEnabled(settings.monitoring_enabled)
+      }
     }).catch(() => undefined)
     return () => controller.abort()
   }, [client])
+
+  const changeCodePermissionMode = useCallback((next: CodePermissionMode) => {
+    setCodePermissionMode(next)
+    void setCodeModeSettings(client, {
+      autonomy: permissionModeToAutonomy(next),
+      system_notifications: codeSystemNotifications,
+      monitoring_enabled: codeMonitoringEnabled,
+    }).catch(() => undefined)
+  }, [client, codeMonitoringEnabled, codeSystemNotifications])
+
+  const [worktreeIsolated, setWorktreeIsolated] = useState(false)
+  const [worktreeBranch, setWorktreeBranch] = useState<string | null>(null)
+
+  const searchWorkspaceFiles = useCallback(
+    (query: string) => listWorkspaceFiles(client, conversationId, query, 20),
+    [client, conversationId],
+  )
+
+  const toggleWorktreeIsolation = useCallback((nextIsolated: boolean) => {
+    setWorktreeIsolated(nextIsolated)
+    void manageConversationWorktree(client, conversationId, {
+      action: nextIsolated ? 'enter' : 'exit',
+      enabled: nextIsolated,
+    }).then((response) => {
+      setWorktreeIsolated(response.active)
+      setWorktreeBranch(response.worktree?.branch ?? null)
+    }).catch(() => {
+      setWorktreeIsolated(!nextIsolated)
+    })
+  }, [client, conversationId])
+
 
   // Fetched once, best-effort: every vision-capable model this user has, and
   // the explicit override, so the composer's notice can name the model that
@@ -587,6 +627,19 @@ export function ChatPage() {
     await loadSnapshot(false)
   }, [loadSnapshot, openQuestionTurnIds, running, sendChatMessage])
 
+  const submitToolPermissionDecision = useCallback(async (event: ConversationActivityEvent, decision: ToolPermissionDecision) => {
+    const request = event.toolPermission
+    const turnId = request?.turnId ?? event.turnId
+    if (!request || !turnId) return
+    setError(null)
+    await submitToolPermission(client, conversationId, turnId, request.requestId, decision)
+  }, [client, conversationId])
+
+  const handleRewindTurn = useCallback(async (turnId: string) => {
+    setError(null)
+    await rewindTurn(client, conversationId, turnId)
+  }, [client, conversationId])
+
   async function submit() {
     const text = message.trim()
     const readyUploads = readyUploadIds()
@@ -730,7 +783,7 @@ export function ChatPage() {
                   transition={{ duration: 0.24, ease: [0.22, 0.61, 0.36, 1] }}
                 >
                   {timeline
-                    ? <TurnTimeline items={timeline} conversationId={conversationId} client={client} onPreview={setPreviewReference} openQuestionTurnIds={openQuestionTurnIds} onAnswer={submitQuestionAnswers} onMcpApprove={submitMcpApproval} onMcpDecline={declineMcpApproval} onPluginApprove={submitPluginApproval} onPluginDecline={declinePluginApproval} />
+                    ? <TurnTimeline items={timeline} conversationId={conversationId} client={client} onPreview={setPreviewReference} openQuestionTurnIds={openQuestionTurnIds} onAnswer={submitQuestionAnswers} onMcpApprove={submitMcpApproval} onMcpDecline={declineMcpApproval} onPluginApprove={submitPluginApproval} onPluginDecline={declinePluginApproval} onToolPermission={submitToolPermissionDecision} onRewindTurn={handleRewindTurn} />
                     : item.role === 'assistant' && item.content
                       ? <MarkdownMessage content={item.content} conversationId={conversationId} client={client} onPreview={setPreviewReference} />
                       : item.command
@@ -747,7 +800,7 @@ export function ChatPage() {
               )
             })}
 
-            {!loadFailure && <ActivityStream events={unclaimedEvents} conversationId={conversationId} onPreview={setPreviewReference} openQuestionTurnIds={openQuestionTurnIds} onAnswer={submitQuestionAnswers} onMcpApprove={submitMcpApproval} onMcpDecline={declineMcpApproval} onPluginApprove={submitPluginApproval} onPluginDecline={declinePluginApproval} />}
+            {!loadFailure && <ActivityStream events={unclaimedEvents} conversationId={conversationId} onPreview={setPreviewReference} openQuestionTurnIds={openQuestionTurnIds} onAnswer={submitQuestionAnswers} onMcpApprove={submitMcpApproval} onMcpDecline={declineMcpApproval} onPluginApprove={submitPluginApproval} onPluginDecline={declinePluginApproval} onToolPermission={submitToolPermissionDecision} />}
 
             <AnimatePresence>
               {!loadFailure && running && (
@@ -783,13 +836,21 @@ export function ChatPage() {
         </AnimatePresence>
       </div>
 
-      {previewReference && (
-        <WorkspaceFilePreview
-          reference={previewReference}
-          client={client}
-          onClose={closePreview}
-        />
-      )}
+      {previewReference && (() => {
+        const latestPatchEvent = [...activity.events]
+          .reverse()
+          .find((event) => event.path === previewReference.path && event.structuredPatch && event.structuredPatch.length > 0)
+        return (
+          <WorkspaceFilePreview
+            reference={previewReference}
+            client={client}
+            onClose={closePreview}
+            structuredPatch={latestPatchEvent?.structuredPatch}
+            addedLines={latestPatchEvent?.addedLines}
+            removedLines={latestPatchEvent?.removedLines}
+          />
+        )
+      })()}
 
       {!loadFailure && !showOverview && <footer className="chat__foot" data-testid="chat-composer" data-at-bottom={atBottom}>
         {activity.connection === 'degraded' && (
@@ -813,6 +874,12 @@ export function ChatPage() {
           skills={skills}
           codeMode={codeMode}
           onCodeModeChange={setCodeMode}
+          codePermissionMode={codePermissionMode}
+          onCodePermissionModeChange={changeCodePermissionMode}
+          onSearchWorkspaceFiles={searchWorkspaceFiles}
+          worktreeIsolated={worktreeIsolated}
+          onWorktreeIsolatedChange={toggleWorktreeIsolation}
+          worktreeBranch={worktreeBranch}
           settings={
             <>
               {effectiveChatProvider && <ModelPicker

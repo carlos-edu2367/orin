@@ -27,7 +27,7 @@ MAX_USER_QUESTION_TEXT = MAX_ACTION_TEXT
 MAX_APPROVAL_DEPTH = MAX_ACTION_DEPTH + 2
 MAX_APPROVAL_ITEMS = 1600
 MAX_APPROVAL_TEXT = 2000
-_LARGE_BUDGET_KEYS = frozenset({"questions", "plugin", "server"})
+_LARGE_BUDGET_KEYS = frozenset({"questions", "plugin", "server", "structured_patch", "artifacts", "permission_request", "todos"})
 REDACTED = "[REDACTED]"
 
 _SENSITIVE_KEY_PARTS = (
@@ -148,6 +148,16 @@ def _bounded(
                     depth_limit=MAX_USER_QUESTION_DEPTH if is_questions else MAX_APPROVAL_DEPTH,
                     item_limit=MAX_USER_QUESTION_ITEMS if is_questions else MAX_APPROVAL_ITEMS,
                     text_limit=MAX_USER_QUESTION_TEXT if is_questions else MAX_APPROVAL_TEXT,
+                )
+            elif depth == 0 and key == "output_tail" and isinstance(item, str):
+                result[key] = _bounded(
+                    item,
+                    depth=depth + 1,
+                    count=count,
+                    redact=redact,
+                    depth_limit=depth_limit,
+                    item_limit=item_limit,
+                    text_limit=MAX_APPROVAL_TEXT,
                 )
             else:
                 result[key] = _bounded(

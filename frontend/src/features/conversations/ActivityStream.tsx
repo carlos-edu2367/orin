@@ -8,8 +8,9 @@ import { CodeModeCard } from './CodeModeCard'
 import { McpApprovalCard } from './McpApprovalCard'
 import { MemoryLearnedCard } from './MemoryLearnedCard'
 import { PluginApprovalCard } from './PluginApprovalCard'
+import { ToolPermissionCard } from './ToolPermissionCard'
 import { summarizeActivities } from './activitySummary'
-import type { ActivityGroup, ConversationActivityEvent } from './activityTypes'
+import type { ActivityGroup, ConversationActivityEvent, ToolPermissionDecision } from './activityTypes'
 import { UserQuestionCard, type UserQuestionAnswer } from './UserQuestionCard'
 import type { WorkspaceFilePreviewHandler } from './WorkspaceFileCard'
 
@@ -23,6 +24,7 @@ type ActivityStreamProps = {
   onMcpDecline?: (event: ConversationActivityEvent) => Promise<void>
   onPluginApprove?: (event: ConversationActivityEvent) => Promise<void>
   onPluginDecline?: (event: ConversationActivityEvent) => Promise<void>
+  onToolPermission?: (event: ConversationActivityEvent, decision: ToolPermissionDecision) => Promise<void>
   conversationId?: string
   onPreview?: WorkspaceFilePreviewHandler
 }
@@ -36,7 +38,7 @@ const DEFAULT_LIMIT = 120
  * treatment because they carry the product's identity: a subagent being born, and
  * a message crossing between agents.
  */
-export function ActivityStream({ events, limit = DEFAULT_LIMIT, openQuestionTurnIds, onAnswer, onMcpApprove, onMcpDecline, onPluginApprove, onPluginDecline, conversationId, onPreview }: ActivityStreamProps) {
+export function ActivityStream({ events, limit = DEFAULT_LIMIT, openQuestionTurnIds, onAnswer, onMcpApprove, onMcpDecline, onPluginApprove, onPluginDecline, onToolPermission, conversationId, onPreview }: ActivityStreamProps) {
   const groups = useMemo(() => {
     const summarized = summarizeActivities(events)
     return summarized.length > limit ? summarized.slice(summarized.length - limit) : summarized
@@ -47,7 +49,7 @@ export function ActivityStream({ events, limit = DEFAULT_LIMIT, openQuestionTurn
   return (
     <ol className="activity-stream" aria-label="Atividade do agente">
       <AnimatePresence initial={false}>
-        {groups.map((group) => <li key={group.id + group.events[0].eventId}>{renderActivityGroup(group, openQuestionTurnIds, onAnswer, conversationId, onPreview, onMcpApprove, onMcpDecline, onPluginApprove, onPluginDecline)}</li>)}
+        {groups.map((group) => <li key={group.id + group.events[0].eventId}>{renderActivityGroup(group, openQuestionTurnIds, onAnswer, conversationId, onPreview, onMcpApprove, onMcpDecline, onPluginApprove, onPluginDecline, onToolPermission)}</li>)}
       </AnimatePresence>
     </ol>
   )
@@ -63,8 +65,18 @@ export function renderActivityGroup(
   onMcpDecline?: (event: ConversationActivityEvent) => Promise<void>,
   onPluginApprove?: (event: ConversationActivityEvent) => Promise<void>,
   onPluginDecline?: (event: ConversationActivityEvent) => Promise<void>,
+  onToolPermission?: (event: ConversationActivityEvent, decision: ToolPermissionDecision) => Promise<void>,
 ) {
   const first = group.events[0]
+  if (first.toolPermission) {
+    return (
+      <ToolPermissionCard
+        request={first.toolPermission}
+        active={true}
+        onDecision={onToolPermission ? (decision) => onToolPermission(first, decision) : undefined}
+      />
+    )
+  }
   if (first.type.startsWith('code_mode.')) return <CodeModeCard group={group} />
   if ((first.toolName === 'ask_user' || first.codeApproval) && first.questions && first.turnId && onAnswer) {
     return <UserQuestionCard questions={first.questions} active={openQuestionTurnIds?.has(first.turnId) ?? false} onSubmit={(answers) => onAnswer(first, answers)} />

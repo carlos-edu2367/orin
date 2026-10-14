@@ -11,10 +11,64 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 
+class CodePermissionMode(StrEnum):
+    ASK_PERMISSIONS = "ask_permissions"
+    ACCEPT_EDITS = "accept_edits"
+    PLAN_MODE = "plan_mode"
+    FULL_AUTONOMY = "full_autonomy"
+
+    @classmethod
+    def _missing_(cls, value: object) -> CodePermissionMode | None:
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized == "approval_required":
+                return cls.ASK_PERMISSIONS
+            if normalized == "code_autonomy":
+                return cls.ACCEPT_EDITS
+        return None
+
+
 class CodeAutonomy(StrEnum):
     APPROVAL_REQUIRED = "approval_required"
     CODE_AUTONOMY = "code_autonomy"
+    PLAN_MODE = "plan_mode"
     FULL_AUTONOMY = "full_autonomy"
+
+    @classmethod
+    def _missing_(cls, value: object) -> CodeAutonomy | None:
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized == "ask_permissions":
+                return cls.APPROVAL_REQUIRED
+            if normalized == "accept_edits":
+                return cls.CODE_AUTONOMY
+        return None
+
+
+def normalize_permission_mode(value: str | CodePermissionMode | CodeAutonomy | None) -> CodePermissionMode:
+    if isinstance(value, CodePermissionMode):
+        return value
+    if isinstance(value, CodeAutonomy):
+        return CodePermissionMode(value.value)
+    if isinstance(value, str) and value.strip():
+        try:
+            return CodePermissionMode(value.strip())
+        except ValueError:
+            pass
+    return CodePermissionMode.ASK_PERMISSIONS
+
+
+def normalize_code_autonomy(value: str | CodePermissionMode | CodeAutonomy | None) -> CodeAutonomy:
+    if isinstance(value, CodeAutonomy):
+        return value
+    if isinstance(value, CodePermissionMode):
+        return CodeAutonomy(value.value)
+    if isinstance(value, str) and value.strip():
+        try:
+            return CodeAutonomy(value.strip())
+        except ValueError:
+            pass
+    return CodeAutonomy.APPROVAL_REQUIRED
 
 
 class CodeWorkKind(StrEnum):
@@ -56,6 +110,10 @@ class CodeModeSettings:
             raise ValueError("code mode boolean settings are invalid")
 
     @property
+    def permission_mode(self) -> CodePermissionMode:
+        return CodePermissionMode(self.autonomy.value)
+
+    @property
     def requires_plan_approval(self) -> bool:
         return self.autonomy is CodeAutonomy.APPROVAL_REQUIRED
 
@@ -69,6 +127,7 @@ class CodeModeSettings:
             "system_notifications": self.system_notifications,
             "monitoring_enabled": self.monitoring_enabled,
         }
+
 
 
 _CODE_PATTERN = re.compile(

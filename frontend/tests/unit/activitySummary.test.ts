@@ -248,4 +248,29 @@ describe('activity grouping', () => {
     expect(groups).toHaveLength(2)
     expect(groups[1].kind).toBe('artifact')
   })
+
+  it('merges tool.progressed outputTail into the running tool without inflating count, and drops it once finished', () => {
+    const runningGroups = summarizeActivities([
+      event({ type: 'tool.started', toolName: 'run_command', toolKind: 'terminal', invocationId: 'call-stream', summary: 'Executando run_command' }),
+      event({ type: 'tool.progressed', toolName: 'run_command', toolKind: 'terminal', invocationId: 'call-stream', summary: 'Executando pytest', outputTail: '10 passed', elapsedMs: 650 }),
+    ])
+
+    expect(runningGroups).toHaveLength(1)
+    expect(runningGroups[0].count).toBe(1)
+    expect(runningGroups[0].state).toBe('waiting_tool')
+    expect(runningGroups[0].events).toHaveLength(1)
+    expect(runningGroups[0].events[0].outputTail).toBe('10 passed')
+
+    const settledGroups = summarizeActivities([
+      event({ type: 'tool.started', toolName: 'run_command', toolKind: 'terminal', invocationId: 'call-stream', summary: 'Executando run_command' }),
+      event({ type: 'tool.progressed', toolName: 'run_command', toolKind: 'terminal', invocationId: 'call-stream', summary: 'Executando pytest', outputTail: '10 passed', elapsedMs: 650 }),
+      event({ type: 'tool.finished', toolName: 'run_command', toolKind: 'terminal', invocationId: 'call-stream', status: 'succeeded', summary: '$ pytest' }),
+    ])
+
+    expect(settledGroups).toHaveLength(1)
+    expect(settledGroups[0].count).toBe(1)
+    expect(settledGroups[0].state).toBe('completed')
+    expect(settledGroups[0].events).toHaveLength(1)
+    expect(settledGroups[0].events[0].type).toBe('tool.finished')
+  })
 })
