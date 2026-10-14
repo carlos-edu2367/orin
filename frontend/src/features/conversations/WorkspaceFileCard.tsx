@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { ApiClient } from '../../api/client'
 import { useSession } from '../../app/useSession'
+import type { StructuredPatchHunk } from './activityTypes'
 
 export type WorkspaceFileReference = { conversationId: string; path: string; name?: string }
 export type WorkspaceFilePreviewHandler = (reference: WorkspaceFileReference) => void
@@ -50,14 +51,19 @@ export function WorkspaceFileCard({
   reference,
   client,
   onPreview,
+  addedLines,
+  removedLines,
 }: {
   reference: WorkspaceFileReference
   client?: ApiClient
   onPreview?: WorkspaceFilePreviewHandler
+  addedLines?: number
+  removedLines?: number
 }) {
   const name = reference.name ?? reference.path.split('/').at(-1) ?? reference.path
   const downloadUrl = workspaceFileUrl(reference, 'attachment')
   const { capabilities } = useSession()
+  const hasStats = addedLines !== undefined || removedLines !== undefined
   const open = async () => {
     if (!client) return
     await client.request({
@@ -79,7 +85,17 @@ export function WorkspaceFileCard({
         <span className="workspace-file-card__glyph" aria-hidden="true">▣</span>
         <span className="workspace-file-card__details">
           <span className="workspace-file-card__name">{name}</span>
-          <span className="workspace-file-card__meta">{fileKind(reference.path)} · workspace</span>
+          <span className="workspace-file-card__meta">
+            {fileKind(reference.path)} · workspace
+            {hasStats && (
+              <span className="workspace-file-card__diff-stats" aria-label={`Alterações +${addedLines ?? 0} -${removedLines ?? 0}`}>
+                {' · '}
+                <span className="workspace-diff__stat-add">+{addedLines ?? 0}</span>
+                {' '}
+                <span className="workspace-diff__stat-del">-{removedLines ?? 0}</span>
+              </span>
+            )}
+          </span>
         </span>
       </button>
       <span className="workspace-file-card__actions">
@@ -95,16 +111,27 @@ export function WorkspaceFilePreview({
   reference,
   client,
   onClose,
+  structuredPatch,
+  addedLines,
+  removedLines,
+  initialTab = 'file',
 }: {
   reference: WorkspaceFileReference
   client?: ApiClient
   onClose: () => void
+  structuredPatch?: StructuredPatchHunk[]
+  addedLines?: number
+  removedLines?: number
+  initialTab?: 'file' | 'diff'
 }) {
   const closeButtonRef = useRef<HTMLButtonElement>(null)
   const name = reference.name ?? reference.path.split('/').at(-1) ?? reference.path
   const downloadUrl = workspaceFileUrl(reference, 'attachment')
   const { capabilities } = useSession()
   const kind = previewKindFor(reference.path)
+  const hasPatch = Boolean(structuredPatch && structuredPatch.length > 0)
+  const [activeTab, setActiveTab] = useState<'file' | 'diff'>(hasPatch && initialTab === 'diff' ? 'diff' : 'file')
+  const [diffMode, setDiffMode] = useState<'unified' | 'split'>('unified')
 
   useEffect(() => {
     const previous = document.activeElement
@@ -147,23 +174,147 @@ export function WorkspaceFilePreview({
             <span className="workspace-file-preview__glyph" aria-hidden="true">▣</span>
             <div>
               <h2 id="workspace-file-preview-title">{name}</h2>
-              <p>{reference.path}</p>
+              <p>
+                {reference.path}
+                {(addedLines !== undefined || removedLines !== undefined) && (
+                  <span className="workspace-file-preview__diff-stats">
+                    {' · '}
+                    <span className="workspace-diff__stat-add">+{addedLines ?? 0}</span>
+                    {' '}
+                    <span className="workspace-diff__stat-del">-{removedLines ?? 0}</span>
+                  </span>
+                )}
+              </p>
             </div>
           </div>
           <div className="workspace-file-preview__actions">
+            {hasPatch && (
+              <div className="workspace-file-preview__tabs" role="tablist" aria-label="Modo de visualização">
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={activeTab === 'file'}
+                  className={activeTab === 'file' ? 'is-active' : ''}
+                  onClick={() => setActiveTab('file')}
+                >
+                  Arquivo Completo
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={activeTab === 'diff'}
+                  className={activeTab === 'diff' ? 'is-active' : ''}
+                  onClick={() => setActiveTab('diff')}
+                >
+                  Alterações (Diff)
+                </button>
+                {activeTab === 'diff' && (
+                  <button
+                    type="button"
+                    className="workspace-file-preview__diff-mode"
+                    onClick={() => setDiffMode((current) => (current === 'unified' ? 'split' : 'unified'))}
+                  >
+                    {diffMode === 'unified' ? 'Lado a Lado' : 'Unificado'}
+                  </button>
+                )}
+              </div>
+            )}
             <a href={downloadUrl} aria-label={`Baixar ${name}`}>Baixar</a>
             {capabilities.open_in_desktop_app && <button type="button" onClick={() => void open()} disabled={!client} aria-label={`Abrir ${name} no sistema`}>Abrir</button>}
             <button ref={closeButtonRef} type="button" className="workspace-file-preview__close" onClick={onClose}>Fechar</button>
           </div>
         </header>
-        <div className="workspace-file-preview__body" data-kind={kind}>
-          <FilePreview reference={reference} name={name} kind={kind} />
+        <div className="workspace-file-preview__body" data-kind={activeTab === 'diff' ? 'diff' : kind}>
+          {activeTab === 'diff' && structuredPatch ? (
+            <StructuredDiffView hunks={structuredPatch} mode={diffMode} />
+          ) : (
+            <FilePreview reference={reference} name={name} kind={kind} />
+          )}
         </div>
       </div>
     </div>
   )
 
   return typeof document === 'undefined' ? modal : createPortal(modal, document.body)
+}
+
+export function StructuredDiffView({
+  hunks,
+  mode = 'unified',
+}: {
+  hunks: StructuredPatchHunk[]
+  mode?: 'unified' | 'split'
+}) {
+  if (mode === 'split') {
+    return (
+      <section className="workspace-diff workspace-diff--split" aria-label="Visualização de diff lado a lado">
+        {hunks.map((hunk, hunkIdx) => {
+          let oldLine = hunk.oldStart
+          let newLine = hunk.newStart
+          const rows: Array<{ oldNo: string; oldText: string; oldKind: string; newNo: string; newText: string; newKind: string }> = []
+          for (const line of hunk.lines) {
+            if (line.startsWith('-')) {
+              rows.push({ oldNo: String(oldLine++), oldText: line.slice(1), oldKind: 'del', newNo: '', newText: '', newKind: 'empty' })
+            } else if (line.startsWith('+')) {
+              rows.push({ oldNo: '', oldText: '', oldKind: 'empty', newNo: String(newLine++), newText: line.slice(1), newKind: 'add' })
+            } else {
+              const text = line.startsWith(' ') ? line.slice(1) : line
+              rows.push({ oldNo: String(oldLine++), oldText: text, oldKind: 'ctx', newNo: String(newLine++), newText: text, newKind: 'ctx' })
+            }
+          }
+          return (
+            <div key={hunkIdx} className="workspace-diff__hunk">
+              <div className="workspace-diff__header">
+                {`@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@`}
+              </div>
+              {rows.map((row, rowIdx) => (
+                <div key={rowIdx} className="workspace-diff__split-row">
+                  <div className={`workspace-diff__cell is-${row.oldKind}`} data-diff-line={row.oldKind}>
+                    <span className="workspace-diff__lineno">{row.oldNo}</span>
+                    <span className="workspace-diff__code">{row.oldText}</span>
+                  </div>
+                  <div className={`workspace-diff__cell is-${row.newKind}`} data-diff-line={row.newKind}>
+                    <span className="workspace-diff__lineno">{row.newNo}</span>
+                    <span className="workspace-diff__code">{row.newText}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )
+        })}
+      </section>
+    )
+  }
+
+  return (
+    <section className="workspace-diff workspace-diff--unified" aria-label="Visualização de diff unificado">
+      {hunks.map((hunk, hunkIdx) => {
+        let oldLine = hunk.oldStart
+        let newLine = hunk.newStart
+        return (
+          <div key={hunkIdx} className="workspace-diff__hunk">
+            <div className="workspace-diff__header">
+              {`@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@`}
+            </div>
+            {hunk.lines.map((line, lineIdx) => {
+              const isAdd = line.startsWith('+')
+              const isDel = line.startsWith('-')
+              const kind = isAdd ? 'add' : isDel ? 'del' : 'ctx'
+              const oldNo = isAdd ? '' : String(oldLine++)
+              const newNo = isDel ? '' : String(newLine++)
+              return (
+                <div key={lineIdx} className={`workspace-diff__line is-${kind}`} data-diff-line={kind}>
+                  <span className="workspace-diff__lineno">{oldNo}</span>
+                  <span className="workspace-diff__lineno">{newNo}</span>
+                  <span className="workspace-diff__code">{line}</span>
+                </div>
+              )
+            })}
+          </div>
+        )
+      })}
+    </section>
+  )
 }
 
 function FilePreview({ reference, name, kind }: { reference: WorkspaceFileReference; name: string; kind: PreviewKind }) {

@@ -102,4 +102,73 @@ describe('ActivityCard', () => {
     expect(screen.getByText('python build.py')).toBeInTheDocument()
     expect(screen.getByText('Falhou')).toBeInTheDocument()
   })
+
+  it('renders +N / -M counters and unified diff hunks when structuredPatch is present', () => {
+    render(
+      <ActivityCard
+        group={group({
+          events: [
+            {
+              eventId: 'e1',
+              cursor: 'a.1',
+              type: 'tool.finished',
+              kind: 'tool',
+              state: 'completed',
+              agentId: 'agent:main',
+              toolName: 'edit_file',
+              toolKind: 'filesystem',
+              summary: 'Editou b.ts',
+              addedLines: 2,
+              removedLines: 1,
+              structuredPatch: [
+                {
+                  oldStart: 1,
+                  oldLines: 2,
+                  newStart: 1,
+                  newLines: 3,
+                  lines: [' const a = 1', '-const b = 2', '+const b = 20', '+const c = 30'],
+                },
+              ],
+            },
+          ],
+        })}
+      />,
+    )
+
+    fireEvent.click(screen.getByText('Escreveu b.ts'))
+
+    expect(screen.getByText('+2')).toBeInTheDocument()
+    expect(screen.getByText('-1')).toBeInTheDocument()
+    expect(screen.getByText('+const b = 20')).toBeInTheDocument()
+    expect(screen.getByText('-const b = 2')).toBeInTheDocument()
+  })
+
+  it('renders live terminal outputTail when a running command emits progress', () => {
+    render(
+      <ActivityCard
+        group={group({
+          state: 'waiting_tool',
+          label: 'Executando pytest',
+          count: 1,
+          events: [
+            {
+              eventId: 'e1',
+              cursor: 'a.1',
+              type: 'tool.started',
+              kind: 'tool',
+              state: 'waiting_tool',
+              agentId: 'agent:main',
+              toolName: 'run_command',
+              toolKind: 'terminal',
+              summary: 'Executando pytest',
+              outputTail: 'collecting ... 6 items\n6 passed in 1.15s',
+            },
+          ],
+        })}
+      />,
+    )
+
+    fireEvent.click(screen.getByText('Executando pytest'))
+    expect(screen.getByText(/6 passed in 1.15s/)).toBeInTheDocument()
+  })
 })

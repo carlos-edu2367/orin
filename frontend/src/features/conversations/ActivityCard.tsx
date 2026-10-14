@@ -2,7 +2,7 @@ import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
 import { useEffect, useId, useState } from 'react'
 import type { ActivityGroup, ConversationActivityEvent } from './activityTypes'
 import { activityStateLabel, formatActivityCount, formatElapsed, splitActionSummary, toolBatchOverview, toolCalls } from './activitySummary'
-import type { WorkspaceFilePreviewHandler } from './WorkspaceFileCard'
+import { StructuredDiffView, type WorkspaceFilePreviewHandler } from './WorkspaceFileCard'
 
 type ActivityCardProps = {
   group: ActivityGroup
@@ -36,6 +36,9 @@ export function ActivityCard({ group, conversationId, onPreview }: ActivityCardP
   const glyph = GLYPHS[group.kind === 'tool' ? (firstTool.toolKind ?? 'lifecycle') : group.kind] ?? '◦'
   const running = group.state === 'waiting_tool' || group.state === 'working' || group.state === 'waiting_agent'
   const failedCalls = group.events.filter((event) => event.state === 'failed').length
+  const liveStreamEvent = running
+    ? [...group.events].reverse().find((event) => Boolean(event.outputTail))
+    : undefined
 
   const isTool = group.kind === 'tool'
   const elapsed = useElapsedSeconds(isTool && running, group.events[0]?.occurredAt)
@@ -73,6 +76,9 @@ export function ActivityCard({ group, conversationId, onPreview }: ActivityCardP
         {!isTool && <span className="activity-card__state">{activityStateLabel(group.state)}</span>}
         <span className={`activity-card__chevron${open ? ' is-open' : ''}`} aria-hidden="true">{isTool ? '⌄' : '›'}</span>
       </button>
+      {!open && liveStreamEvent?.outputTail && (
+        <pre className="activity-detail__terminal-stream" aria-live="polite">{liveStreamEvent.outputTail}</pre>
+      )}
       <AnimatePresence initial={false}>
         {open && (
           <motion.div
@@ -144,34 +150,53 @@ function ActivityDetailRow({ event, conversationId, onPreview, folded = [] }: { 
       <span className="activity-detail__target">{target}</span>
     </>
   )
+  const hasStats = event.addedLines !== undefined || event.removedLines !== undefined
+  const hasPatch = Boolean(event.structuredPatch && event.structuredPatch.length > 0)
   return (
-    <li className="activity-detail" data-state={event.state}>
-      <div className="activity-detail__line">
-        {previewable ? (
-          <button
-            type="button"
-            className="activity-detail__summary activity-detail__link"
-            onClick={() => onPreview({ conversationId, path: event.path as string })}
-          >
-            {event.summary || event.type}
-          </button>
-        ) : (
-          <span className="activity-detail__summary">{summary}</span>
+    <>
+      <li className="activity-detail" data-state={event.state}>
+        <div className="activity-detail__line">
+          {previewable ? (
+            <button
+              type="button"
+              className="activity-detail__summary activity-detail__link"
+              onClick={() => onPreview({ conversationId, path: event.path as string })}
+            >
+              {event.summary || event.type}
+            </button>
+          ) : (
+            <span className="activity-detail__summary">{summary}</span>
+          )}
+          {failed && <span className="activity-detail__badge">Falhou</span>}
+          {event.state === 'waiting_tool' && <span className="activity-detail__badge is-running">Em execução</span>}
+        </div>
+        <span className="activity-detail__meta">
+          {event.toolName && <code>{event.toolName}</code>}
+          {event.label && event.label !== event.summary && <span className="activity-detail__label">{event.label}</span>}
+          {hasStats && (
+            <span className="activity-detail__diff-stats" aria-label={`Diff +${event.addedLines ?? 0} -${event.removedLines ?? 0}`}>
+              <span className="workspace-diff__stat-add">+{event.addedLines ?? 0}</span>
+              {' '}
+              <span className="workspace-diff__stat-del">-{event.removedLines ?? 0}</span>
+            </span>
+          )}
+          {event.errorCode && <span className="activity-detail__error">{event.errorCode}</span>}
+          {event.occurredAt && <time dateTime={event.occurredAt}>{formatTime(event.occurredAt)}</time>}
+        </span>
+        {event.content && <p className="activity-detail__content">{event.content}</p>}
+        {event.outputTail && (
+          <pre className="activity-detail__terminal-stream" aria-live="polite">{event.outputTail}</pre>
         )}
-        {failed && <span className="activity-detail__badge">Falhou</span>}
-        {event.state === 'waiting_tool' && <span className="activity-detail__badge is-running">Em execução</span>}
-      </div>
-      <span className="activity-detail__meta">
-        {event.toolName && <code>{event.toolName}</code>}
-        {event.label && event.label !== event.summary && <span className="activity-detail__label">{event.label}</span>}
-        {event.errorCode && <span className="activity-detail__error">{event.errorCode}</span>}
-        {event.occurredAt && <time dateTime={event.occurredAt}>{formatTime(event.occurredAt)}</time>}
-      </span>
-      {event.content && <p className="activity-detail__content">{event.content}</p>}
+        {hasPatch && event.structuredPatch && (
+          <div className="activity-detail__diff">
+            <StructuredDiffView hunks={event.structuredPatch} mode="unified" />
+          </div>
+        )}
+      </li>
       {folded.map((file) => (
         <ActivityDetailRow key={file.eventId} event={file} conversationId={conversationId} onPreview={onPreview} />
       ))}
-    </li>
+    </>
   )
 }
 

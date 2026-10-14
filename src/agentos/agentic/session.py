@@ -16,7 +16,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Lock
 from types import MappingProxyType
-from typing import Callable, Mapping
+from typing import Any, Callable, Mapping
 
 from agentos.installation import orin_paths
 
@@ -484,12 +484,22 @@ class _SubagentStore:
     accumulates its own text and reports its activity under its own agent id.
     """
 
-    def __init__(self, session: "TurnSession", turn: dict[str, object], agent_id: str, name: str, task: str) -> None:
+    def __init__(
+        self,
+        session: "TurnSession",
+        turn: dict[str, object],
+        agent_id: str,
+        name: str,
+        task: str,
+        *,
+        initial_history: list[dict[str, Any]] | None = None,
+    ) -> None:
         self._session = session
         self._turn = turn
         self.agent_id = agent_id
         self.name = name
         self._task = task
+        self._initial_history = [dict(item) for item in initial_history] if initial_history else None
         self.text: list[str] = []
         self.failed = False
         self.error_code: str | None = None
@@ -497,7 +507,9 @@ class _SubagentStore:
     def load(self, turn_id: str) -> dict[str, object]:
         return self._turn
 
-    def history_for_turn(self, turn: dict[str, object]) -> list[dict[str, str]]:
+    def history_for_turn(self, turn: dict[str, object]) -> list[dict[str, Any]]:
+        if self._initial_history:
+            return [*self._initial_history, {"role": "user", "content": self._task}]
         return [{"role": "user", "content": self._task}]
 
     def delta(self, turn: dict[str, object], text: str) -> None:
@@ -537,9 +549,19 @@ class _MainAgentStore:
         return getattr(self._inner, name)
 
     def history_for_turn(self, turn: dict[str, object]) -> list[dict[str, str]]:
+        from agentos.code_mode.mentions import inject_file_mentions_into_history
+
         history = self._inner.history_for_turn(turn)
         if not self._session.model_calls_tools:
             history = pre_read_attachments(history, self._session.turn_attachments, self._toolset)
+        try:
+            history = inject_file_mentions_into_history(
+                history,
+                self._session.workspace,
+                self._session._read_file_state,
+            )
+        except Exception:
+            pass
         return history
 
     def lifecycle(self, turn: dict[str, object], state: str, **payload: object) -> None:
@@ -555,6 +577,34 @@ class _MainAgentStore:
             output_tokens=output_tokens,
             total_tokens=total_tokens,
         )
+
+
+_BUILTIN_SUBAGENT_SPECS: Mapping[str, Mapping[str, object]] = {
+    "explore": {
+        "display_name": "explore",
+        "role": "Fast read-only codebase explorer and search specialist",
+        "read_only": True,
+        "inherit_context": False,
+    },
+    "plan": {
+        "display_name": "plan",
+        "role": "Read-only software architect and implementation planner",
+        "read_only": True,
+        "inherit_context": False,
+    },
+    "general": {
+        "display_name": "general",
+        "role": "General-purpose research and multi-step implementation specialist",
+        "read_only": False,
+        "inherit_context": False,
+    },
+    "fork": {
+        "display_name": "fork",
+        "role": "Context-inheriting parallel worker with full parent conversation history",
+        "read_only": False,
+        "inherit_context": True,
+    },
+}
 
 
 class TurnSession:
@@ -645,6 +695,8 @@ class TurnSession:
         self.retrieval = retrieval_bundle.service if retrieval_bundle is not None else None
         self._subagent_runs = 0
         self._subagent_lock = Lock()
+        self._read_file_state: dict[str, object] = {}
+        self._todos_state: list[dict[str, str]] = []
         self.main_agent_id = store.main_agent_id(turn) if hasattr(store, "main_agent_id") else str(turn.get("agent_id", "agent:main"))
 
     # -- activity -------------------------------------------------------
@@ -691,6 +743,23 @@ class TurnSession:
                 elif name == "run_command":
                     self._record(AgentActivityEventType.CODE_MODE_VALIDATION_STARTED, "Executando validação", {"stage": "validating"}, agent_id=actor)
             return
+        if state == "tool_progressed":
+            name = str(payload.get("tool_name") or "run_command")
+            summary = str(payload.get("summary") or f"Executando: {name}")
+            self._record(
+                AgentActivityEventType.TOOL_PROGRESSED,
+                summary,
+                {
+                    **base,
+                    "tool_name": name,
+                    "tool_kind": str(payload.get("tool_kind") or "terminal"),
+                    "command": str(payload.get("command") or "")[:240],
+                    "output_tail": str(payload.get("output_tail") or "")[-2000:],
+                    "elapsed_ms": int(payload.get("elapsed_ms") or 0),
+                },
+                agent_id=actor,
+            )
+            return
         if state == "tool_finished":
             name = str(payload.get("tool_name") or "tool")
             status = str(payload.get("status") or "succeeded")
@@ -725,15 +794,31 @@ class TurnSession:
                         size_bytes = artifact.get("size_bytes")
                         if not isinstance(path, str) or not path or not isinstance(size_bytes, int) or size_bytes < 0:
                             continue
+                        artifact_payload: dict[str, object] = {
+                            "path": path,
+                            "label": path,
+                            "size_bytes": size_bytes,
+                            "tool_kind": "artifact",
+                        }
+                        for extra_key in ("structured_patch", "added_lines", "removed_lines", "original_sha256", "updated_sha256"):
+                            if extra_key in artifact:
+                                artifact_payload[extra_key] = artifact[extra_key]
                         self._record(
                             AgentActivityEventType.ARTIFACT_CREATED,
                             f"Criou {path}",
-                            {"path": path, "label": path, "size_bytes": size_bytes, "tool_kind": "artifact"},
+                            artifact_payload,
                             agent_id=actor,
                         )
             if self.turn.get("code_mode") == "code":
                 if extra.get("code_approval"):
                     self._record(AgentActivityEventType.CODE_MODE_DECISION_REQUIRED, "Plano pronto para aprovação", {"stage": "waiting_approval"}, agent_id=actor)
+                elif name == "todo_write" and status == "succeeded":
+                    self._record(
+                        AgentActivityEventType.CODE_MODE_STAGE_CHANGED,
+                        summary,
+                        {"stage": "implementing", "todos": extra.get("todos") or list(self._todos_state)},
+                        agent_id=actor,
+                    )
                 elif name == "run_command":
                     event = AgentActivityEventType.CODE_MODE_VALIDATION_FINISHED if status == "succeeded" else AgentActivityEventType.CODE_MODE_STAGE_CHANGED
                     summary = "Validação concluída" if status == "succeeded" else "Corrigindo falha de validação"
@@ -813,17 +898,89 @@ class TurnSession:
             {"agent_name": clean, "label": clean, "tool_kind": "agent"},
         )
 
-    def _ask_agent(self, name: str, task: str) -> ToolOutcome:
+    def _ensure_builtin_subagent_record(self, subagent_type: str, model_id: str | None = None) -> dict[str, object] | None:
+        key = subagent_type.strip().lower()
+        if key == "general-purpose":
+            key = "general"
+        spec = _BUILTIN_SUBAGENT_SPECS.get(key)
+        if spec is None:
+            return None
+        selected_model_id = str(model_id).strip() if model_id is not None and str(model_id).strip() else str(self.turn.get("model_id") or "")
+        existing = self.agents_store.find(key) if self.agents_store is not None and hasattr(self.agents_store, "find") else None
+        if existing is not None:
+            merged = dict(existing)
+            merged.setdefault("builtin_type", key)
+            return merged
+        if self.agents_store is not None and hasattr(self.agents_store, "create"):
+            try:
+                created = self.agents_store.create(
+                    key,
+                    str(spec["role"]),
+                    parent_agent_id=self.main_agent_id,
+                    provider=str(self.turn.get("provider") or ""),
+                    model_id=selected_model_id,
+                )
+                merged = dict(created)
+                merged["builtin_type"] = key
+                return merged
+            except Exception:
+                pass
+        return {
+            "agent_id": f"agent:{key}",
+            "name": key,
+            "role": str(spec["role"]),
+            "provider": str(self.turn.get("provider") or ""),
+            "model_id": selected_model_id,
+            "builtin_type": key,
+        }
+
+    def _run_subagent(
+        self,
+        subagent_type: str,
+        task: str,
+        *,
+        description: str = "",
+        model_id: str | None = None,
+    ) -> ToolOutcome:
+        clean_type = str(subagent_type or "").strip().lower()
+        if clean_type == "general-purpose":
+            clean_type = "general"
+        if clean_type not in _BUILTIN_SUBAGENT_SPECS:
+            return ToolOutcome(
+                "failed",
+                f"Tipo de subagente inválido: {clean_type}",
+                "subagent_type must be one of 'explore', 'plan', 'general', or 'fork'.",
+                {"tool_kind": "agent"},
+                "INVALID_ARGUMENTS",
+            )
+        return self._ask_agent(clean_type, task, requested_model_id=model_id, description=description)
+
+    def _ask_agent(
+        self,
+        name: str,
+        task: str,
+        *,
+        requested_model_id: str | None = None,
+        description: str = "",
+    ) -> ToolOutcome:
         clean = " ".join(str(name).split())[:60]
-        record = self.agents_store.find(clean)
+        builtin_key = clean.lower()
+        if builtin_key == "general-purpose":
+            builtin_key = "general"
+            clean = "general"
+        builtin_spec = _BUILTIN_SUBAGENT_SPECS.get(builtin_key)
+        record = self.agents_store.find(clean) if self.agents_store is not None else None
+        if record is None and builtin_spec is not None:
+            record = self._ensure_builtin_subagent_record(builtin_key, model_id=requested_model_id)
         if record is None:
             return ToolOutcome("failed", f"Agente {clean} não existe", f"No subagent named '{clean}'. Create it first with create_agent.", {"tool_kind": "agent"}, "AGENT_NOT_FOUND")
         # Legacy conversation-agent rows predate provider/model snapshots.
         # Treat their absent values exactly as an omitted model_id: use the
         # current turn model, never an arbitrary catalog model.
         child_provider = str(record.get("provider") or self.turn.get("provider") or "")
-        child_model_id = str(record.get("model_id") or self.turn.get("model_id") or "")
-        if child_provider != str(self.turn.get("provider") or "") or not self._child_model_allowed(child_model_id, allow_current=True):
+        explicit_model = str(requested_model_id).strip() if requested_model_id else ""
+        child_model_id = explicit_model or str(record.get("model_id") or self.turn.get("model_id") or "")
+        if child_provider != str(self.turn.get("provider") or "") or not self._child_model_allowed(child_model_id, allow_current=not explicit_model):
             return ToolOutcome(
                 "failed", f"Modelo de {clean} nao permitido",
                 "This subagent is not configured with the current model or a current favorite model for this provider.",
@@ -863,18 +1020,39 @@ class TurnSession:
         self._record(
             AgentActivityEventType.AGENT_MESSAGE_SENT,
             f"Enviou uma tarefa para {clean}",
-            {"agent_name": clean, "recipient_name": clean, "sender_name": "Main", "label": clean,
+            {"agent_name": clean, "recipient_name": clean, "sender_name": "Main", "label": description[:120] or clean,
              "content": task_text[:PREVIEW_CHARS], "to_agent_id": agent_id, "tool_kind": "agent"},
             agent_id=self.main_agent_id,
         )
-        self.agents_store.set_state(agent_id, "working")
-        sub_store = _SubagentStore(self, subagent_turn, agent_id, clean, self._subagent_task(record, task_text))
-        subagent_tools = self._toolset(subagents=False, browser_agent_key=agent_id)
+        if self.agents_store is not None and hasattr(self.agents_store, "set_state"):
+            self.agents_store.set_state(agent_id, "working")
+        read_only_subagent = bool(builtin_spec and builtin_spec.get("read_only"))
+        inherit_context = bool(builtin_spec and builtin_spec.get("inherit_context"))
+        initial_history: list[dict[str, Any]] | None = None
+        if inherit_context and hasattr(self.store, "history_for_turn"):
+            try:
+                initial_history = [dict(item) for item in self.store.history_for_turn(self.turn)]
+            except Exception:
+                initial_history = None
+        enriched_record = {**record, "builtin_type": builtin_key if builtin_spec is not None else None}
+        sub_store = _SubagentStore(
+            self,
+            subagent_turn,
+            agent_id,
+            clean,
+            self._subagent_task(enriched_record, task_text),
+            initial_history=initial_history,
+        )
+        subagent_tools = self._toolset(
+            subagents=False,
+            browser_agent_key=agent_id,
+            read_only_mode=read_only_subagent,
+        )
         runtime = AgenticTurnRuntime(
             store=sub_store,
             provider=child_provider_instance,
             toolset=subagent_tools,
-            system_prompt=self._subagent_prompt(record, task_text, subagent_tools),
+            system_prompt=self._subagent_prompt(enriched_record, task_text, subagent_tools),
             limits=AgenticLimits(
                 # A child belongs to the same durable turn as its parent.  A
                 # separate three-minute timer caused healthy long-running
@@ -894,14 +1072,16 @@ class TurnSession:
         answer = "".join(sub_store.text).strip()
         if result.state != "completed" or not answer:
             reason = result.error_code or ("SUBAGENT_EMPTY_RESPONSE" if not answer else "SUBAGENT_FAILED")
-            self.agents_store.set_state(agent_id, "failed")
+            if self.agents_store is not None and hasattr(self.agents_store, "set_state"):
+                self.agents_store.set_state(agent_id, "failed")
             self._record(
                 AgentActivityEventType.DELEGATION_FAILED, f"{clean} não concluiu a tarefa",
                 {"agent_name": clean, "sender_name": clean, "recipient_name": "Main", "label": clean, "error_code": reason},
                 agent_id=agent_id, parent_agent_id=self.main_agent_id,
             )
             return ToolOutcome("failed", f"{clean} não concluiu", f"Subagent '{clean}' did not finish ({reason}).", {"agent_name": clean, "tool_kind": "agent"}, reason)
-        self.agents_store.set_state(agent_id, "completed")
+        if self.agents_store is not None and hasattr(self.agents_store, "set_state"):
+            self.agents_store.set_state(agent_id, "completed")
         self._record(
             AgentActivityEventType.AGENT_MESSAGE_RECEIVED,
             f"Recebeu a resposta de {clean}",
@@ -909,7 +1089,14 @@ class TurnSession:
              "content": answer[:PREVIEW_CHARS], "from_agent_id": agent_id, "tool_kind": "agent"},
             agent_id=agent_id, parent_agent_id=self.main_agent_id,
         )
-        payload: dict[str, object] = {"agent_name": clean, "label": clean, "tool_kind": "agent"}
+        payload: dict[str, object] = {
+            "agent_name": clean,
+            "subagent_type": builtin_key if builtin_spec is not None else clean,
+            "read_only": read_only_subagent,
+            "inherited_context": inherit_context,
+            "label": clean,
+            "tool_kind": "agent",
+        }
         if result.budget_exhausted:
             payload["budget_exhausted"] = True
             content = (
@@ -965,13 +1152,52 @@ class TurnSession:
         )
 
     def _subagent_task(self, record: Mapping[str, object], task: str) -> str:
+        builtin_type = str(record.get("builtin_type") or "")
+        if builtin_type == "fork":
+            return (
+                "<fork-directive>\n"
+                f"{task}\n"
+                "</fork-directive>\n\n"
+                "You are a forked worker inheriting the parent conversation context above. "
+                "Execute this directive directly and reply with the complete result."
+            )
         return f"{task}\n\nWhen you are done, reply with the complete result. The main agent only sees your final message."
 
     def _subagent_prompt(self, record: Mapping[str, object], task: str, toolset: AgentToolset) -> str:
-        prompt = (
+        builtin_type = str(record.get("builtin_type") or "")
+        header_lines: list[str] = []
+        if builtin_type == "explore":
+            header_lines.extend((
+                "=== CRITICAL: READ-ONLY MODE - NO FILE MODIFICATIONS ===",
+                "You are the 'explore' specialist subagent inside Orin.",
+                "You have strictly read-only tools (list_files, search_files, search_code, read_file, view_file).",
+                "Never attempt to create, edit, or delete files or execute shell commands.",
+                "Locate the exact files, symbols, and line numbers relevant to the task and report them concisely as `path:line`.",
+                "",
+            ))
+        elif builtin_type == "plan":
+            header_lines.extend((
+                "=== CRITICAL: READ-ONLY MODE - NO FILE MODIFICATIONS ===",
+                "You are the 'plan' software architect subagent inside Orin.",
+                "You have strictly read-only tools to inspect the codebase and design an implementation plan.",
+                "Return a structured architectural response with: (1) Critical Files & Symbols (`path:line`), "
+                "(2) Step-by-Step Implementation Plan, (3) Risks & Trade-offs, and (4) Verification Strategy.",
+                "",
+            ))
+        elif builtin_type == "fork":
+            header_lines.extend((
+                "You are a 'fork' subagent inside Orin inheriting the full parent conversation context.",
+                "Do not re-ask the user questions; execute the delegated fork directive and return a concise report.",
+                "",
+            ))
+        prompt = "\n".join(header_lines) + (
             f"You are '{record['name']}', a specialist subagent inside Orin. Your role: {record['role']}.\n"
-            "You were given one task by the main agent and you cannot see the user's conversation.\n"
-            "Use your tools to actually do the work, then reply with the finished result and nothing else.\n"
+            + (
+                "You inherited the parent conversation history above.\n"
+                if builtin_type == "fork"
+                else "You were given one task by the main agent and you cannot see the user's conversation.\n"
+            )
+            + "Use your tools to actually do the work, then reply with the finished result and nothing else.\n"
             "Answer in the same language as the task. Be concise and factual.\n"
             "Request every independent tool call in the same response instead of one at a time."
         )
@@ -1009,19 +1235,43 @@ class TurnSession:
 
     # -- runtime --------------------------------------------------------
 
-    def _toolset(self, *, subagents: bool, browser_agent_key: str | None = None, code_mode_active: bool = False, code_mode_permits_push: bool = False, code_mode_permits_pr: bool = False, code_mode_requires_approval: bool = False) -> AgentToolset:
+    def _toolset(
+        self,
+        *,
+        subagents: bool,
+        browser_agent_key: str | None = None,
+        code_mode_active: bool = False,
+        code_mode_permits_push: bool = False,
+        code_mode_permits_pr: bool = False,
+        code_mode_requires_approval: bool = False,
+        code_mode_autonomy: str | None = None,
+        permission_broker: object | None = None,
+        interactive_permissions: bool = False,
+        read_only_mode: bool = False,
+    ) -> AgentToolset:
         # Scoping the browser to one agent_key gives that agent its own tab
         # on the host (see AgentBrowserView / _AgentPageState) so concurrent
         # subagents never fight over one shared page.
         browser = self.browser
-        if browser is not None:
+        if browser is not None and not read_only_mode:
             browser = AgentBrowserView(browser, browser_agent_key or self.main_agent_id)
+        elif read_only_mode:
+            browser = None
+        actor_id = browser_agent_key or self.main_agent_id
         return AgentToolset(
             self.workspace,
             memory=self.memory,
             create_agent=self._create_agent if subagents else None,
             delegate=self._ask_agent if subagents else None,
             delegate_batch=self._ask_agents if subagents else None,
+            run_subagent=self._run_subagent if subagents else None,
+            on_tool_progress=lambda tool_name, summary, progress_payload: self.emit_lifecycle(
+                self.turn,
+                "tool_progressed",
+                agent_id=actor_id,
+                summary=summary,
+                **progress_payload,
+            ),
             skills=self.skills,
             skill_library=self.skill_library,
             skill_user_id=str(self.turn.get("user_id") or "") or None,
@@ -1043,6 +1293,14 @@ class TurnSession:
             code_mode_permits_pr=code_mode_permits_pr,
             code_mode_requires_approval=code_mode_requires_approval,
             enable_terminal=self.enable_terminal,
+            code_mode_autonomy=code_mode_autonomy,
+            permission_broker=permission_broker,
+            interactive_permissions=interactive_permissions,
+            turn_id=str(self.turn.get("turn_id") or "") or None,
+            conversation_id=str(self.turn.get("conversation_id") or "") or None,
+            read_file_state=self._read_file_state,
+            todos_state=self._todos_state,
+            read_only_mode=read_only_mode,
         )
 
     def _session_start_context(self) -> str:
@@ -1093,8 +1351,16 @@ class TurnSession:
             return ()
 
     def build_runtime(self) -> AgenticTurnRuntime:
+        from agentos.code_mode.models import normalize_code_autonomy
+        from agentos.code_mode.permissions import ToolPermissionBroker
+
         resumed = self._resumed_contract()
-        configured_autonomy = str(self.turn.get("code_mode_autonomy") or "approval_required")
+        raw_autonomy = str(
+            self.turn.get("code_mode_permission_mode")
+            or self.turn.get("code_mode_autonomy")
+            or "approval_required"
+        )
+        configured_autonomy = normalize_code_autonomy(raw_autonomy).value
         # A managed conversation workspace starts empty and is explicitly
         # owned by this task. Requiring plan approval before its first write
         # defeats Code mode's only advantage there. Attached local folders
@@ -1109,6 +1375,15 @@ class TurnSession:
             and effective_autonomy == "approval_required"
             and resumed is None
         )
+        permission_broker = ToolPermissionBroker(
+            self.workspace,
+            event_emitter=lambda _event_name, summary, payload: self._record(
+                AgentActivityEventType.CODE_MODE_DECISION_REQUIRED,
+                summary,
+                payload,
+            ),
+            cancelled=lambda: bool(self.cancelled(self.turn)),
+        )
         toolset = self._toolset(
             subagents=self.enable_subagents,
             code_mode_active=self.turn.get("code_mode") == "code",
@@ -1118,6 +1393,9 @@ class TurnSession:
             ),
             code_mode_permits_pr=effective_autonomy == "full_autonomy",
             code_mode_requires_approval=code_requires_approval,
+            code_mode_autonomy=effective_autonomy,
+            permission_broker=permission_broker if bool(self.turn.get("interactive_permissions")) else None,
+            interactive_permissions=bool(self.turn.get("interactive_permissions")),
         )
         agents = self.agents_store.list() if self.agents_store is not None else []
         reader = getattr(self.store, "tool_ledger", None)
@@ -1148,6 +1426,13 @@ class TurnSession:
         workspace_guidance = _workspace_guidance(self.workspace.root)
         history = self.store.history_for_turn(self.turn)
         task = next((str(item.get("content") or "") for item in reversed(history) if item.get("role") == "user"), "")
+        if task:
+            try:
+                from agentos.code_mode.mentions import expand_file_mentions
+
+                expand_file_mentions(task, self.workspace, self._read_file_state)
+            except Exception:
+                pass
         memories = memories_for_task(self.memory, task)
         code_mode_context = ""
         if self.turn.get("code_mode") == "code":
@@ -1186,11 +1471,15 @@ class TurnSession:
             code_mode_context=code_mode_context,
             workspace_guidance=workspace_guidance,
         )
-        # A conversation that already carries a contract resumes the work
-        # instead of re-orienting; the transcript already holds what was read.
-        phase_controller = PhaseController(
-            model_calls_tools=self.model_calls_tools,
-            resumed_contract=resumed is not None,
+        # In Code Mode, use a single fluid agentic loop without rigid phase boundaries;
+        # standard chat keeps PhaseController.
+        phase_controller = (
+            None
+            if self.turn.get("code_mode") == "code"
+            else PhaseController(
+                model_calls_tools=self.model_calls_tools,
+                resumed_contract=resumed is not None,
+            )
         )
         definitions = toolset.definitions()
         # OmniRoute's public OpenAI-compatible response does not guarantee the

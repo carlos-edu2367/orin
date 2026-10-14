@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from itertools import count
 import json
+import re
 from typing import Callable, Mapping
 
 from .action_loop import ActionLoop, MalformedToolCall
@@ -19,6 +20,8 @@ from .phases import DEFAULT_PHASE_BUDGETS, Phase, PhaseBudget, PhaseController
 
 MAX_PARALLEL_TOOLS = 4
 AGED_TOOL_RESULT_CHARS = 400
+MICROCOMPACT_TOOL_RESULT_CHARS = 3_000
+MICROCOMPACT_THRESHOLD = 0.65
 
 # Providers whose prompt cache this runtime can actually address. For these the
 # message list is append-only, because prompt caching keys on an exact prefix:
@@ -47,6 +50,17 @@ _PIN_UNSET = object()
 # possible -- the paths, the numbers, the decisions already taken -- so the
 # summary is requested and rendered under fixed headings instead.
 COMPACTION_SECTIONS = ("Arquivos tocados", "Decisões", "Dados apurados", "Pendências")
+CODE_COMPACTION_SECTIONS = (
+    "Primary Request and Intent",
+    "Key Technical Concepts",
+    "Files and Code Sections",
+    "Errors and fixes",
+    "Problem Solving",
+    "All user messages",
+    "Pending Tasks",
+    "Current Work",
+    "Optional Next Step",
+)
 COMPACTION_HEADING = "## Contexto compactado"
 # The old header ended with "use os arquivos e ferramentas para confirmar
 # detalhes", which invited the model to re-run everything it had just been
@@ -66,6 +80,26 @@ COMPACTION_INSTRUCTION = (
     "number or identifier established so far, verbatim. Under 'Pendências' list what is "
     "still open. Preserve exact paths and figures. Do not invent anything."
 )
+CODE_COMPACTION_INSTRUCTION = (
+    "You are compacting a software engineering session so the agent can continue seamlessly without "
+    "re-reading files or repeating searches.\n"
+    "First, write a brief internal scratchpad inside <analysis>...</analysis> tags to review the trajectory chronologically.\n"
+    "Then, outside the <analysis> block, reply with exactly these nine markdown sections, in this order, even when a section is empty (write '- none'):\n"
+    + "\n".join(f"### {section}" for section in CODE_COMPACTION_SECTIONS)
+    + "\nUnder 'Files and Code Sections' list every file read or modified with exact paths and key symbols/changes. "
+    "Under 'Errors and fixes' list errors encountered and how they were resolved. "
+    "Under 'All user messages' list every non-tool user request in order. "
+    "Under 'Pending Tasks' and 'Current Work' record exact remaining items and what was being worked on immediately before compaction. "
+    "Preserve exact file paths, identifiers, and figures. Do not invent anything."
+)
+
+
+def strip_analysis_block(text: str) -> str:
+    """Strip internal <analysis>...</analysis> scratchpad blocks from a compaction summary."""
+    if not text:
+        return ""
+    cleaned = re.sub(r"<analysis>[\s\S]*?</analysis>", "", text, flags=re.IGNORECASE)
+    return cleaned.strip()
 
 CLOSING_INSTRUCTION = (
     "You have reached this turn's action budget. Do not request any more tools. "
@@ -209,6 +243,7 @@ class AgenticTurnRuntime:
         # None keeps the previous single-stage behaviour, which every caller
         # that has not opted in (and every contract test) relies on.
         self.phases = phase_controller
+        self.phase_controller = phase_controller
         self._first_request_text = ""
         # Per-turn tool bookkeeping. ``run`` resets these; they are also
         # initialised here so ``_run_toolset`` can be exercised on its own.
@@ -263,6 +298,7 @@ class AgenticTurnRuntime:
         pinned_message = messages[self._pinned_index] if self._pinned_index is not None else None
         self._first_request_text = str((pinned_message or {}).get("content") or "")[:2_000]
         provider_retries = 0
+        reactive_compacted = False
         total_tokens = 0
         total_cost = Decimal("0")
         iterations = range(1, self.limits.max_iterations + 1) if self.limits.max_iterations is not None else count(1)
@@ -319,10 +355,14 @@ class AgenticTurnRuntime:
             provider_yielded = False
             try:
                 events = self.provider.stream(request)
-            except Exception:
+            except Exception as exc:
                 self._effect_finished(
                     turn, provider_effect_id, state="NOT_APPLIED", error_code="PROVIDER_STREAM_NOT_STARTED"
                 )
+                if not reactive_compacted and self._is_context_length_error(exc) and self.clock() < deadline:
+                    reactive_compacted = True
+                    if self._force_compact(messages, turn, tool_schemas):
+                        continue
                 if provider_retries < self.limits.max_provider_retries and self.clock() < deadline:
                     provider_retries += 1
                     self._life(turn, "retrying", attempt=provider_retries)
@@ -337,6 +377,7 @@ class AgenticTurnRuntime:
             finish = None
             retryable_error = False
             rate_limited = False
+            context_overflow_error = False
             try:
                 for raw_event in events:
                     provider_yielded = True
@@ -377,8 +418,20 @@ class AgenticTurnRuntime:
                     elif event.kind is StreamKind.RATE_LIMIT:
                         rate_limited = True
                     elif event.kind is StreamKind.ERROR and event.error:
+                        err_desc = f"{getattr(event.error, 'code', '')} {getattr(event.error, 'message', '')}"
+                        if self._is_context_length_error(err_desc):
+                            context_overflow_error = True
                         retryable_error = event.error.retryability.value == "SAFE"
-            except Exception:
+            except Exception as exc:
+                if not reactive_compacted and not text_parts and not calls and self._is_context_length_error(exc) and self.clock() < deadline:
+                    self._effect_finished(
+                        turn, provider_effect_id,
+                        state="NOT_APPLIED",
+                        error_code="CONTEXT_LENGTH_EXCEEDED_COMPACTING",
+                    )
+                    reactive_compacted = True
+                    if self._force_compact(messages, turn, tool_schemas):
+                        continue
                 # Once a stream yielded anything the request may have reached
                 # the provider and charged or produced a result.  A restart
                 # must reconcile it rather than issuing a duplicate request.
@@ -413,6 +466,11 @@ class AgenticTurnRuntime:
             if self.limits.max_cost is not None and total_cost > self.limits.max_cost:
                 self._effect_finished(turn, provider_effect_id, state="APPLIED", error_code="PROVIDER_COST_LIMIT")
                 return self._fail(turn, "PROVIDER_COST_LIMIT", iteration, action_count)
+            if context_overflow_error and not text_parts and not calls and not reactive_compacted and self.clock() < deadline:
+                self._effect_finished(turn, provider_effect_id, state="NOT_APPLIED", error_code="CONTEXT_LENGTH_EXCEEDED_COMPACTING")
+                reactive_compacted = True
+                if self._force_compact(messages, turn, tool_schemas):
+                    continue
             if (retryable_error or rate_limited) and not text_parts and not calls and provider_retries < self.limits.max_provider_retries and self.clock() < deadline:
                 self._effect_finished(turn, provider_effect_id, state="NOT_APPLIED", error_code="PROVIDER_RETRY")
                 provider_retries += 1
@@ -663,32 +721,146 @@ class AgenticTurnRuntime:
             return True
         return str(turn.get("provider", "")).lower() in PREFIX_CACHING_PROVIDERS
 
+    @staticmethod
+    def _is_context_length_error(error: object) -> bool:
+        text = str(error or "").lower()
+        return any(
+            needle in text
+            for needle in (
+                "context_length_exceeded",
+                "prompt is too long",
+                "maximum context length",
+                "too many tokens",
+                "context window",
+                "request too large",
+                "input is too long",
+            )
+        )
+
+    def _is_code_compaction(self, turn: Mapping[str, object]) -> bool:
+        if str(turn.get("code_mode") or "").strip().lower() == "code":
+            return True
+        return callable(getattr(self.toolset, "post_compact_enrichment", None))
+
+    def _microcompact(
+        self,
+        messages: list[dict[str, object]],
+        *,
+        keep_recent_units: int = 4,
+        max_chars: int = MICROCOMPACT_TOOL_RESULT_CHARS,
+    ) -> int:
+        """Level 1 compaction: shrink old large tool results before invoking LLM summarization."""
+        units = self._group_tool_units(messages)
+        pinned = getattr(self, "_pinned_index", _PIN_UNSET)
+        eligible = [unit for unit in units if pinned is _PIN_UNSET or pinned not in unit]
+        if len(eligible) <= keep_recent_units:
+            return 0
+        old_indices = {index for unit in eligible[:-keep_recent_units] for index in unit}
+        shrunk = 0
+        preview_chars = min(800, max(200, max_chars // 4))
+
+        def shrink_text(text: str) -> tuple[str, bool]:
+            if len(text) <= max_chars or "[microcompacted: " in text or "\n[compressed: " in text:
+                return text, False
+            return (
+                f"{text[:preview_chars]}\n[microcompacted: {len(text)} characters total; key output preserved above]",
+                True,
+            )
+
+        for index in sorted(old_indices):
+            message = messages[index]
+            if not self._is_tool_result(message):
+                continue
+            content = message.get("content")
+            if isinstance(content, str):
+                new_text, changed = shrink_text(content)
+                if changed:
+                    message["content"] = new_text
+                    shrunk += 1
+            elif isinstance(content, list):
+                new_blocks: list[object] = []
+                changed_any = False
+                for block in content:
+                    if isinstance(block, Mapping) and block.get("type") == "tool_result":
+                        new_text, changed = shrink_text(str(block.get("content", "")))
+                        if changed:
+                            new_blocks.append({**block, "content": new_text})
+                            changed_any = True
+                        else:
+                            new_blocks.append(block)
+                    else:
+                        new_blocks.append(block)
+                if changed_any:
+                    message["content"] = new_blocks
+                    shrunk += 1
+        return shrunk
+
+    def _force_compact(
+        self,
+        messages: list[dict[str, object]],
+        turn: Mapping[str, object],
+        tool_schemas: list[dict[str, object]],
+    ) -> bool:
+        """Level 3 reactive compaction: force immediate microcompaction + summary compaction on context overflow."""
+        shrunk = self._microcompact(messages, keep_recent_units=1, max_chars=AGED_TOOL_RESULT_CHARS)
+        before_len = len(messages)
+        self._run_compaction(messages, turn, keep_units=min(2, CONTEXT_COMPACTION_KEEP_UNITS))
+        self._age_tool_results(messages, keep_recent=1)
+        return shrunk > 0 or len(messages) < before_len
+
     def _maybe_compact(self, messages: list[dict[str, object]], turn: Mapping[str, object], tool_schemas: list[dict[str, object]]) -> None:
         """Summarize old exchanges before ordinary trimming becomes lossy."""
         if self._compaction_count >= 8 or len(messages) < CONTEXT_COMPACTION_KEEP_UNITS + 2:
             return
         estimate = self._estimated_tokens({"messages": messages, "tools": tool_schemas})
         limit = self.limits.max_context_tokens
+        if estimate >= int(limit * MICROCOMPACT_THRESHOLD):
+            if self._microcompact(messages):
+                estimate = self._estimated_tokens({"messages": messages, "tools": tool_schemas})
         if estimate < int(limit * CONTEXT_COMPACTION_THRESHOLD):
             return
+        self._run_compaction(messages, turn, keep_units=CONTEXT_COMPACTION_KEEP_UNITS)
+
+    def _run_compaction(
+        self,
+        messages: list[dict[str, object]],
+        turn: Mapping[str, object],
+        *,
+        keep_units: int = CONTEXT_COMPACTION_KEEP_UNITS,
+    ) -> None:
         units = self._group_tool_units(messages)
         pinned = getattr(self, "_pinned_index", _PIN_UNSET)
         eligible = [unit for unit in units if pinned is _PIN_UNSET or pinned not in unit]
-        if len(eligible) <= CONTEXT_COMPACTION_KEEP_UNITS:
+        if len(eligible) <= keep_units:
             return
-        compact_units = eligible[:-CONTEXT_COMPACTION_KEEP_UNITS]
+        compact_units = eligible[:-keep_units]
         compact_indices = {index for unit in compact_units for index in unit}
         if not compact_indices:
             return
         if self.context_reporting:
             self._life(turn, "context_compacting", removed_messages=len(compact_indices), compaction_count=self._compaction_count + 1)
         source = self._compact_source(messages, compact_indices)
-        summary = self._request_compaction_summary(source, turn)
-        if not self._has_sections(summary):
-            summary = self._fallback_compaction_summary(messages, compact_indices)
+        code_mode = self._is_code_compaction(turn)
+        summary = strip_analysis_block(self._request_compaction_summary(source, turn, code_mode=code_mode))
+        if code_mode:
+            if not (self._has_code_sections(summary) or self._has_sections(summary)):
+                summary = self._fallback_code_compaction_summary(messages, compact_indices)
+        else:
+            if not self._has_sections(summary):
+                summary = self._fallback_compaction_summary(messages, compact_indices)
+        enrichment = ""
+        enricher = getattr(self.toolset, "post_compact_enrichment", None)
+        if callable(enricher):
+            try:
+                enrichment = str(enricher() or "").strip()
+            except Exception:
+                enrichment = ""
+        body = summary[:8_000]
+        if enrichment:
+            body = f"{body}\n\n{enrichment[:8_000]}"
         insert_at = min(compact_indices)
         pinned_item = messages[pinned] if isinstance(pinned, int) and 0 <= pinned < len(messages) else None
-        replacement = {"role": "system", "content": f"{COMPACTION_HEADER}\n{summary[:8_000]}"}
+        replacement = {"role": "system", "content": f"{COMPACTION_HEADER}\n{body}"}
         retained = [item for index, item in enumerate(messages) if index not in compact_indices]
         original_to_retained = [(index, item) for index, item in enumerate(messages) if index not in compact_indices]
         position = next((offset for offset, (index, _item) in enumerate(original_to_retained) if index > insert_at), len(retained))
@@ -697,7 +869,7 @@ class AgenticTurnRuntime:
         # This rewrite already invalidates the cache, so it is the one place
         # where shrinking surviving results is free. Doing it here instead of
         # every iteration is what keeps the prefix append-only in between.
-        self._age_tool_results(messages, keep_recent=CONTEXT_COMPACTION_KEEP_UNITS)
+        self._age_tool_results(messages, keep_recent=keep_units)
         if pinned_item is not None:
             self._pinned_index = next((index for index, item in enumerate(messages) if item is pinned_item), None)
         self._compaction_count += 1
@@ -723,13 +895,14 @@ class AgenticTurnRuntime:
             remaining -= len(parts[-1])
         return "\n".join(parts)
 
-    def _request_compaction_summary(self, source: str, turn: Mapping[str, object]) -> str:
+    def _request_compaction_summary(self, source: str, turn: Mapping[str, object], *, code_mode: bool = False) -> str:
+        instruction = CODE_COMPACTION_INSTRUCTION if code_mode else COMPACTION_INSTRUCTION
         try:
             events = self.provider.stream({
                 "turn_id": str(turn.get("turn_id") or "") + ":context-compaction",
                 "provider": str(turn.get("provider") or ""),
                 "model": str(turn.get("model_id") or ""),
-                "messages": [{"role": "system", "content": COMPACTION_INSTRUCTION}, {"role": "user", "content": source}],
+                "messages": [{"role": "system", "content": instruction}, {"role": "user", "content": source}],
                 "tools": [],
                 "max_output_tokens": min(1_600, max(256, self.limits.max_context_tokens // 4)),
             })
@@ -750,6 +923,10 @@ class AgenticTurnRuntime:
         the local fallback, which at least keeps the paths and the tool names.
         """
         return bool(summary) and all(section in summary for section in COMPACTION_SECTIONS)
+
+    @staticmethod
+    def _has_code_sections(summary: str) -> bool:
+        return bool(summary) and all(section in summary for section in CODE_COMPACTION_SECTIONS)
 
     @classmethod
     def _fallback_compaction_summary(cls, messages: list[dict[str, object]], indices: set[int]) -> str:
@@ -784,6 +961,46 @@ class AgenticTurnRuntime:
             COMPACTION_SECTIONS[1]: ["- não registradas: a compactação semântica não ficou disponível"],
             COMPACTION_SECTIONS[2]: ["- não registrados: a compactação semântica não ficou disponível"],
             COMPACTION_SECTIONS[3]: pending[-6:] or ["- nenhuma"],
+        }
+        return "\n".join(f"### {name}\n" + "\n".join(lines) for name, lines in sections.items())
+
+    @classmethod
+    def _fallback_code_compaction_summary(cls, messages: list[dict[str, object]], indices: set[int]) -> str:
+        """Build the nine Claude Code compaction sections locally when the provider cannot."""
+        touched: list[str] = []
+        user_messages: list[str] = []
+        errors: list[str] = []
+        for index in sorted(indices):
+            item = messages[index]
+            for call in item.get("tool_calls") or ():
+                if not isinstance(call, Mapping):
+                    continue
+                function = call.get("function") if isinstance(call.get("function"), Mapping) else {}
+                name = str(function.get("name") or "")
+                arguments = str(function.get("arguments") or "")[:160]
+                if name:
+                    touched.append(f"- {name}({arguments})")
+            content = item.get("content")
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, Mapping) and block.get("type") == "tool_use":
+                        touched.append(f"- {block.get('name')}({json.dumps(block.get('input') or {}, ensure_ascii=False)[:160]})")
+            elif isinstance(content, str) and content.strip():
+                role = str(item.get("role") or "")
+                if role == "user":
+                    user_messages.append(f"- {content.strip()[:200]}")
+                elif role == "tool" and ("error" in content.lower() or "failed" in content.lower()):
+                    errors.append(f"- {content.strip()[:200]}")
+        sections = {
+            CODE_COMPACTION_SECTIONS[0]: user_messages[:2] or ["- none"],
+            CODE_COMPACTION_SECTIONS[1]: ["- preserved from workspace trajectory"],
+            CODE_COMPACTION_SECTIONS[2]: touched[-12:] or ["- none"],
+            CODE_COMPACTION_SECTIONS[3]: errors[-6:] or ["- none"],
+            CODE_COMPACTION_SECTIONS[4]: touched[-6:] or ["- none"],
+            CODE_COMPACTION_SECTIONS[5]: user_messages[-8:] or ["- none"],
+            CODE_COMPACTION_SECTIONS[6]: user_messages[-2:] or ["- none"],
+            CODE_COMPACTION_SECTIONS[7]: touched[-3:] or ["- none"],
+            CODE_COMPACTION_SECTIONS[8]: ["- continue with the active request"],
         }
         return "\n".join(f"### {name}\n" + "\n".join(lines) for name, lines in sections.items())
 
@@ -1108,6 +1325,10 @@ class AgenticTurnRuntime:
                 # served from a result taken before it.
                 self._writes += 1
             try:
+                try:
+                    setattr(self.toolset, "_active_invocation_id", call_id)
+                except Exception:
+                    pass
                 outcome = self.toolset.invoke(name, arguments)
             except Exception:
                 self._effect_finished(turn, effect_id, state="UNKNOWN", error_code="TOOL_INTERRUPTED")

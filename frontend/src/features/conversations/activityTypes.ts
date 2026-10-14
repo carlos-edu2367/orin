@@ -25,6 +25,21 @@ export type ActivityState = (typeof activityStates)[number]
 /** Drives the icon, grouping rule and copy for an activity card. */
 export type ActivityKind = 'lifecycle' | 'message' | 'tool' | 'agent' | 'artifact'
 
+export type StructuredPatchHunk = {
+  oldStart: number
+  oldLines: number
+  newStart: number
+  newLines: number
+  lines: string[]
+}
+
+export type TodoItem = {
+  id: string
+  content: string
+  status: 'pending' | 'in_progress' | 'completed'
+  activeForm: string
+}
+
 export type ConversationActivityEvent = {
   eventId: string
   cursor: string
@@ -59,6 +74,31 @@ export type ConversationActivityEvent = {
   memoryId?: string
   memoryScope?: 'user' | 'project'
   memoryProjectId?: string
+  /** Structured unified diff hunks emitted by write_file / edit_file. */
+  structuredPatch?: StructuredPatchHunk[]
+  addedLines?: number
+  removedLines?: number
+  /** Interactive tool permission request emitted in Code Mode. */
+  toolPermission?: ToolPermissionRequest
+  /** Live terminal stdout/stderr tail emitted by `tool.progressed`. */
+  outputTail?: string
+  elapsedMs?: number
+  /** Live task list emitted by `todo_write`. */
+  todos?: TodoItem[]
+}
+
+export type ToolPermissionDecision = 'allow_once' | 'allow_always' | 'deny'
+
+export type ToolPermissionRequest = {
+  requestId: string
+  turnId?: string
+  toolName: string
+  ruleSuggestion?: string
+  command?: string
+  path?: string
+  structuredPatch?: StructuredPatchHunk[]
+  addedLines?: number
+  removedLines?: number
 }
 
 export type ContextUsage = {
@@ -155,6 +195,7 @@ export function kindFor(type: string, toolKind?: string): ActivityKind {
   if (type === 'assistant.delta' || type === 'assistant.completed') return 'message'
   if (AGENT_TYPES.has(type)) return 'agent'
   if (type === 'artifact.created') return 'artifact'
+  if (type === 'tool.permission_required') return 'tool'
   if (type.startsWith('tool.')) return toolKind === 'agent' ? 'agent' : 'tool'
   if (type.startsWith('browser.') || type.startsWith('terminal.') || type.startsWith('filesystem.')) return 'tool'
   return 'lifecycle'
@@ -167,8 +208,8 @@ export function stateFor(type: string, status?: string, errorCode?: string | nul
   if (type === 'turn.failed' || type === 'delegation.failed') {
     return errorCode === 'TURN_CANCELLED' ? 'cancelled' : 'failed'
   }
-  if (type === 'turn.waiting_user') return 'waiting_user'
-  if (type === 'tool.requested' || type === 'tool.started') return 'waiting_tool'
+  if (type === 'turn.waiting_user' || type === 'tool.permission_required') return 'waiting_user'
+  if (type === 'tool.requested' || type === 'tool.started' || type === 'tool.progressed') return 'waiting_tool'
   if (type === 'tool.finished') {
     if (status === 'cancelled') return 'cancelled'
     return status && status !== 'succeeded' ? 'failed' : 'completed'
