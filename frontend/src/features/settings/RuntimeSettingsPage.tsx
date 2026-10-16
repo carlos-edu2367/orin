@@ -12,6 +12,7 @@ export function RuntimeSettingsPage({ client, embedded = false }: { client?: Api
   const [draft, setDraft] = useState('24')
   const [subagentMaxIterations, setSubagentMaxIterations] = useState<number | null>(null)
   const [subagentDraft, setSubagentDraft] = useState('48')
+  const [subagentConfigured, setSubagentConfigured] = useState(false)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
@@ -28,7 +29,9 @@ export function RuntimeSettingsPage({ client, embedded = false }: { client?: Api
     void getAgentRuntimeSettings(apiClient, controller.signal).then((settings) => {
       setMaxIterations(settings.max_iterations)
       if (settings.max_iterations !== null) setDraft(String(settings.max_iterations))
-      const resolvedSub = settings.subagent_max_iterations !== undefined ? settings.subagent_max_iterations : settings.max_iterations
+      const hasSub = settings.subagent_max_iterations !== undefined
+      setSubagentConfigured(hasSub)
+      const resolvedSub = hasSub ? (settings.subagent_max_iterations ?? null) : settings.max_iterations
       setSubagentMaxIterations(resolvedSub)
       if (resolvedSub !== null) setSubagentDraft(String(resolvedSub))
     }).catch(() => setNotice('Não foi possível carregar o limite atual.')).finally(() => setLoading(false))
@@ -83,14 +86,14 @@ export function RuntimeSettingsPage({ client, embedded = false }: { client?: Api
       return
     }
     const nextSub = subagentMaxIterations === null ? null : Number(subagentDraft)
-    if (nextSub !== null && (!Number.isInteger(nextSub) || nextSub < 1)) {
+    if (subagentConfigured && nextSub !== null && (!Number.isInteger(nextSub) || nextSub < 1)) {
       setNotice('Informe um número inteiro maior que zero para subagentes.')
       return
     }
     setSaving(true)
     setNotice(null)
     try {
-      const settings = await setAgentRuntimeSettings(apiClient, next, nextSub)
+      const settings = await setAgentRuntimeSettings(apiClient, next, subagentConfigured ? nextSub : undefined)
       setMaxIterations(settings.max_iterations)
       if (settings.max_iterations !== null) setDraft(String(settings.max_iterations))
       const resolvedSub = settings.subagent_max_iterations !== undefined ? settings.subagent_max_iterations : settings.max_iterations
@@ -147,10 +150,10 @@ export function RuntimeSettingsPage({ client, embedded = false }: { client?: Api
     <h2 className="runtime-settings__title">Interações do agente</h2>
     <p className="settings-content__lede">Defina quantas rodadas de ferramentas e raciocínio o agente principal e os subagentes podem executar por turno. Sem limite remove os tetos de rodadas e ações; a proteção contra processos travados continua ativa.</p>
     <section className="runtime-settings" aria-busy={loading}>
-      <label className="provider-panel__toggle"><input type="checkbox" checked={maxIterations === null} disabled={loading || saving} onChange={(event) => setMaxIterations(event.target.checked ? null : Number(draft) || 24)} />Sem limite de interações (agente principal)</label>
+      <label className="provider-panel__toggle"><input type="checkbox" checked={maxIterations === null} disabled={loading || saving} onChange={(event) => setMaxIterations(event.target.checked ? null : Number(draft) || 24)} />Sem limite de interações</label>
       <label className="runtime-settings__field">Máximo de interações por turno<input aria-label="Máximo de interações por turno" type="number" min="1" step="1" value={draft} disabled={loading || saving || maxIterations === null} onChange={(event) => setDraft(event.target.value)} /></label>
-      <label className="provider-panel__toggle"><input type="checkbox" data-testid="subagent-unlimited-toggle" checked={subagentMaxIterations === null} disabled={loading || saving} onChange={(event) => setSubagentMaxIterations(event.target.checked ? null : Number(subagentDraft) || 48)} />Sem limite de interações em subagentes</label>
-      <label className="runtime-settings__field">Máximo de interações por subagente<input aria-label="Máximo de interações por subagente" data-testid="subagent-max-iterations-input" type="number" min="1" step="1" value={subagentDraft} disabled={loading || saving || subagentMaxIterations === null} onChange={(event) => setSubagentDraft(event.target.value)} /></label>
+      <label className="provider-panel__toggle"><input type="checkbox" data-testid="subagent-unlimited-toggle" checked={subagentMaxIterations === null} disabled={loading || saving} onChange={(event) => { setSubagentConfigured(true); setSubagentMaxIterations(event.target.checked ? null : Number(subagentDraft) || 48) }} />Sem limite de interações em subagentes</label>
+      <label className="runtime-settings__field">Máximo de interações por subagente<input aria-label="Máximo de interações por subagente" data-testid="subagent-max-iterations-input" type="number" min="1" step="1" value={subagentDraft} disabled={loading || saving || subagentMaxIterations === null} onChange={(event) => { setSubagentConfigured(true); setSubagentDraft(event.target.value) }} /></label>
       <p>Uma interação é uma nova rodada do agente após receber o resultado de uma ferramenta. O limite não interrompe uma resposta já em texto.</p>
       <button type="button" className="button button--primary" disabled={loading || saving} onClick={() => void save()}>Salvar limite</button>
       {notice && <p role="status" className="runtime-settings__notice">{notice}</p>}

@@ -28,6 +28,7 @@ SECRET = "SEGREDO-A"
 OWNED = {
     ("DELETE", "/v1/uploads/{upload_id}"),
     ("GET", "/v1/projects/{project_id}"), ("PATCH", "/v1/projects/{project_id}"),
+    ("PUT", "/v1/projects/{project_id}/workspace"), ("DELETE", "/v1/projects/{project_id}/workspace"),
     ("POST", "/v1/projects/{project_id}/archive"), ("POST", "/v1/projects/{project_id}/conversations"),
     ("GET", "/v1/projects/{project_id}/memories"), ("DELETE", "/v1/projects/{project_id}/memories/{memory_id}"),
     ("DELETE", "/v1/schedules/{schedule_id}"),
@@ -35,6 +36,7 @@ OWNED = {
     ("GET", "/v1/conversations/{conversation_id}"),
     ("GET", "/v1/conversations/{conversation_id}/activities"),
     ("PATCH", "/v1/conversations/{conversation_id}/permission-mode"),
+    ("PATCH", "/v1/conversations/{conversation_id}/project"),
     ("POST", "/v1/conversations/{conversation_id}/workspace/inspect"),
     ("PUT", "/v1/conversations/{conversation_id}/workspace"),
     ("DELETE", "/v1/conversations/{conversation_id}/workspace"),

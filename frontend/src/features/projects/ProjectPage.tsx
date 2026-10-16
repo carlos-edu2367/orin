@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { createBrowserApiClient } from '../../api/client'
 import {
@@ -37,7 +37,7 @@ export function ProjectPage() {
     })
   }, [load])
 
-  const handleSaveWorkspace = async (e: React.FormEvent) => {
+  const handleSaveWorkspace = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault()
     if (!wsPath.trim() || wsBusy) return
     setWsBusy(true)

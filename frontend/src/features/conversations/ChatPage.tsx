@@ -1,5 +1,5 @@
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
-import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type FormEvent } from 'react'
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { createBrowserApiClient } from '../../api/client'
 import {
@@ -1276,29 +1276,26 @@ export function ChatPage() {
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [oversizedInput, pendingToolPermissions.length, previewReference, running, stop, stopping])
 
-  const [projectMenuOpen, setProjectMenuOpen] = useState(false)
+  const [projectMenuConversationId, setProjectMenuConversationId] = useState<string | null>(null)
+  const projectMenuOpen = projectMenuConversationId === conversationId
   const [availableProjects, setAvailableProjects] = useState<Project[]>([])
   const [newProjectName, setNewProjectName] = useState('')
   const [newProjectDescription, setNewProjectDescription] = useState('')
   const [projectBusy, setProjectBusy] = useState(false)
 
-  useEffect(() => {
-    setProjectMenuOpen(false)
-  }, [conversationId])
-
   const toggleProjectMenu = useCallback(() => {
-    setProjectMenuOpen((open) => {
-      const next = !open
-      if (next) {
+    setProjectMenuConversationId((openConvId) => {
+      const nextOpen = openConvId !== conversationId
+      if (nextOpen) {
         setNewProjectName(conversation?.title || 'Novo projeto')
         setNewProjectDescription('')
         void listProjects(client)
           .then((res) => setAvailableProjects(res.items))
           .catch(() => undefined)
       }
-      return next
+      return nextOpen ? conversationId : null
     })
-  }, [client, conversation?.title])
+  }, [client, conversation, conversationId])
 
   const handleMoveToProject = useCallback(async (targetProjectId: string | null) => {
     if (projectBusy) return
@@ -1316,7 +1313,7 @@ export function ChatPage() {
             }
           : prev,
       )
-      setProjectMenuOpen(false)
+      setProjectMenuConversationId(null)
       window.dispatchEvent(new CustomEvent('orin:projects-updated'))
       const nextUrl = targetProjectId
         ? `/projects/${encodeURIComponent(targetProjectId)}/chats/${encodeURIComponent(conversationId)}`
@@ -1329,7 +1326,7 @@ export function ChatPage() {
     }
   }, [client, conversationId, navigate, projectBusy])
 
-  const handleCreateProjectFromSession = useCallback(async (event: React.FormEvent) => {
+  const handleCreateProjectFromSession = useCallback(async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     if (!newProjectName.trim() || projectBusy) return
     setProjectBusy(true)
@@ -1351,7 +1348,7 @@ export function ChatPage() {
             }
           : prev,
       )
-      setProjectMenuOpen(false)
+      setProjectMenuConversationId(null)
       window.dispatchEvent(new CustomEvent('orin:projects-updated'))
       await loadSnapshot(false).catch(() => undefined)
       navigate(`/projects/${encodeURIComponent(created.project_id)}/chats/${encodeURIComponent(conversationId)}`)
@@ -1360,7 +1357,7 @@ export function ChatPage() {
     } finally {
       setProjectBusy(false)
     }
-  }, [client, conversation?.workspace, conversationId, loadSnapshot, navigate, newProjectDescription, newProjectName, projectBusy])
+  }, [client, conversation, conversationId, loadSnapshot, navigate, newProjectDescription, newProjectName, projectBusy])
 
   const activeConvProjectId = conversation?.project_id ?? projectId ?? null
   const activeConvProjectName =
