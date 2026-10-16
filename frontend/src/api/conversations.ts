@@ -1,5 +1,5 @@
 import { createBrowserApiClient, type ApiClient, type MutationIntent } from './client'
-import { invalidResponseError, parseApiErrorResponse } from './errors'
+import { ApiError, invalidResponseError, parseApiErrorResponse } from './errors'
 import type { ProviderName } from './providers'
 import { parseWorkspaceState, type WorkspaceState } from './workspace'
 import {
@@ -494,6 +494,14 @@ export async function streamConversationEvents(
         handlers.onCursor(heartbeat)
         return
       }
+      if (current.event === 'resync') {
+        throw new ApiError({
+          status: 409,
+          code: 'cursor_invalid',
+          category: 'CONFLICT',
+          messageKey: 'Stream cursor requires resync',
+        })
+      }
       const event = parseConversationActivityEvent(data, current.id)
       handlers.onEvent(event)
       handlers.onCursor(event.cursor)
@@ -536,10 +544,11 @@ export function parseConversationActivityEvent(value: unknown, cursor: string): 
   const status = optionalText(payload.status, 32)
   const errorCode = optionalText(payload.error_code, 64) ?? null
   const kind = kindFor(type, toolKind)
+  const resolvedCursor = optionalText(item.cursor, 512) ?? cursor
 
   const event: ConversationActivityEvent = {
-    eventId: publicId(item.event_id ?? item.id ?? cursor),
-    cursor: publicId(cursor),
+    eventId: publicId(item.event_id ?? item.id ?? resolvedCursor),
+    cursor: publicId(resolvedCursor),
     type,
     kind,
     state: stateFor(type, status, errorCode),
@@ -1075,7 +1084,7 @@ function parseHeartbeat(value: unknown): string {
 
 function publicId(value: unknown): string {
   if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) return String(value)
-  if (typeof value === 'string' && /^[A-Za-z0-9._:-]{1,255}$/.test(value)) return value
+  if (typeof value === 'string' && /^[A-Za-z0-9._:-]{1,512}$/.test(value)) return value
   throw invalidResponseError()
 }
 

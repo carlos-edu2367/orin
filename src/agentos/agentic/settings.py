@@ -9,6 +9,9 @@ from agentos.installation import orin_paths
 from agentos.code_mode.models import CodeAutonomy, CodeModeSettings
 
 
+_UNSET = object()
+
+
 class AgentRuntimeSettingsStore:
     """Persist per-user turn-loop limits without coupling workers to the API process."""
 
@@ -20,21 +23,48 @@ class AgentRuntimeSettingsStore:
         self._validate_user(user_id)
         with self._lock:
             raw = self._read().get(user_id, {})
-            value = raw.get("max_iterations") if isinstance(raw, dict) else None
-            return {"max_iterations": value if isinstance(value, int) and value > 0 else None}
+            record = raw if isinstance(raw, dict) else {}
+            value = record.get("max_iterations")
+            result: dict[str, int | None] = {
+                "max_iterations": value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None,
+            }
+            if "subagent_max_iterations" in record:
+                sub_val = record.get("subagent_max_iterations")
+                result["subagent_max_iterations"] = (
+                    sub_val if isinstance(sub_val, int) and not isinstance(sub_val, bool) and sub_val > 0 else None
+                )
+            return result
 
-    def set_max_iterations(self, user_id: str, max_iterations: int | None) -> dict[str, int | None]:
+    def set_max_iterations(
+        self,
+        user_id: str,
+        max_iterations: int | None,
+        *,
+        subagent_max_iterations: int | None | object = _UNSET,
+    ) -> dict[str, int | None]:
         self._validate_user(user_id)
         if max_iterations is not None and (not isinstance(max_iterations, int) or isinstance(max_iterations, bool) or max_iterations < 1):
             raise ValueError("max_iterations must be a positive integer or null")
+        if subagent_max_iterations is not _UNSET and subagent_max_iterations is not None and (
+            not isinstance(subagent_max_iterations, int) or isinstance(subagent_max_iterations, bool) or subagent_max_iterations < 1
+        ):
+            raise ValueError("subagent_max_iterations must be a positive integer or null")
         with self._lock:
             values = self._read()
             current = values.get(user_id)
             record = dict(current) if isinstance(current, dict) else {}
             record["max_iterations"] = max_iterations
+            if subagent_max_iterations is not _UNSET:
+                record["subagent_max_iterations"] = subagent_max_iterations
             values[user_id] = record
             self._write(values)
-            return {"max_iterations": max_iterations}
+            result: dict[str, int | None] = {"max_iterations": max_iterations}
+            if "subagent_max_iterations" in record:
+                sub_val = record.get("subagent_max_iterations")
+                result["subagent_max_iterations"] = (
+                    sub_val if isinstance(sub_val, int) and not isinstance(sub_val, bool) and sub_val > 0 else None
+                )
+            return result
 
     def get_code_mode(self, user_id: str) -> CodeModeSettings:
         """Return global, non-secret Code mode preferences with safe defaults."""

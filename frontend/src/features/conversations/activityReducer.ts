@@ -24,7 +24,7 @@ export type ActivityAction =
   | { type: 'connection'; connection: ActivityConnectionState }
   | { type: 'resync' }
 
-export const EVENT_LIMIT = 500
+export const EVENT_LIMIT = 1500
 
 const TERMINAL_COMPLETED_TYPES = new Set([
   'turn.completed',
@@ -303,9 +303,11 @@ function mergeAdjacentDelta(
   const olderIsAssistant = older.type === 'assistant.delta' || older.type === 'ASSISTANT_DELTA'
   const newerIsAssistant = newer.type === 'assistant.delta' || newer.type === 'ASSISTANT_DELTA'
   if (olderIsAssistant && newerIsAssistant && older.messageId === newer.messageId) {
+    const mergedContent = `${older.content ?? ''}${newer.content ?? ''}`
     return {
       ...newer,
-      content: `${older.content ?? ''}${newer.content ?? ''}`,
+      content: mergedContent,
+      ...(older.summary && newer.summary ? { summary: `${older.summary}${newer.summary}` } : {}),
     }
   }
   return null
@@ -314,33 +316,41 @@ function mergeAdjacentDelta(
 /**
  * Retains structural tool/artifact/lifecycle/prepend_older events unconditionally
  * while compacting and trimming old `assistant.delta` / `agent.thought_delta` /
- * stale `context.updated` events so delta floods never evict structural history.
+ * stale `context.updated` events so delta floods never evict structural history
+ * or delete consolidated paragraphs before tool calls.
  */
-function trimActivityEvents(events: ConversationActivityEvent[], limit: number): ConversationActivityEvent[] {
+export function trimActivityEvents(
+  events: ConversationActivityEvent[],
+  limit: number = EVENT_LIMIT,
+): ConversationActivityEvent[] {
   if (events.length <= limit) return events
 
+  const working = [...events]
   const latestContextIdByTurn = new Map<string, string>()
-  for (const event of events) {
+  for (const event of working) {
     if (event.type === 'context.updated' || event.type === 'CONTEXT_UPDATED') {
       latestContextIdByTurn.set(event.turnId ?? '__default__', event.eventId)
     }
   }
 
-  const dropNeeded = events.length - limit
+  const dropNeeded = working.length - limit
   let dropped = 0
   const filtered: ConversationActivityEvent[] = []
-  for (let i = 0; i < events.length; i += 1) {
-    const event = events[i]
+  for (let i = 0; i < working.length; i += 1) {
+    const event = working[i]
     if (dropped < dropNeeded && isEphemeralDeltaOrContext(event, latestContextIdByTurn)) {
-      const next = events[i + 1]
-      if (next && isStreamingDeltaEvent(event) && isStreamingDeltaEvent(next)) {
-        const merged = mergeAdjacentDelta(event, next)
+      if (isStreamingDeltaEvent(event)) {
+        const next = working[i + 1]
+        const merged = next && isStreamingDeltaEvent(next) ? mergeAdjacentDelta(event, next) : null
         if (merged) {
-          events[i + 1] = merged
+          working[i + 1] = merged
+          dropped += 1
+          continue
         }
+      } else {
+        dropped += 1
+        continue
       }
-      dropped += 1
-      continue
     }
     filtered.push(event)
   }

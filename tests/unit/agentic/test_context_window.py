@@ -175,7 +175,7 @@ def test_old_tool_results_are_compressed_but_recent_ones_are_kept() -> None:
     AgenticTurnRuntime._age_tool_results(messages, keep_recent=1)
 
     assert "compressed" in messages[1]["content"]
-    assert len(messages[1]["content"]) < 800
+    assert len(messages[1]["content"]) < 1800
     assert messages[2]["content"] == "new " * 500
 
 

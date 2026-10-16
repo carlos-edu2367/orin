@@ -426,7 +426,7 @@ function reconcileCompleteText(items: TurnTimelineItem[], completeContent: strin
   const missingPrefix = completeContent.slice(0, completeContent.length - visibleContent.length)
   if (!missingPrefix) return items
   const firstTextIndex = items.findIndex((item) => item.kind === 'text')
-  if (firstTextIndex < 0) return [...items, { id: `text:complete:${messageId}`, kind: 'text', content: completeContent }]
+  if (firstTextIndex < 0) return [{ id: `text:complete:${messageId}`, kind: 'text', content: completeContent }, ...items]
   const first = items[firstTextIndex]
   if (first.kind !== 'text') return items
   const next = [...items]

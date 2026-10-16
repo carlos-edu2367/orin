@@ -4,6 +4,7 @@ import type { ActivityDiffHunk, ConversationActivityEvent, StructuredPatchHunk }
 export type CodeToolCallBlockProps = {
   event: ConversationActivityEvent
   onOpenFile?: (path: string) => void
+  defaultDiffOpen?: boolean
 }
 
 export type ToolVisualStatus = 'completed' | 'running' | 'failed' | 'muted'
@@ -68,7 +69,11 @@ function extractFilePathFromSummary(summary: string | undefined): string {
   return match ? match[1].trim() : ''
 }
 
-export function CodeToolCallBlock({ event, onOpenFile }: CodeToolCallBlockProps) {
+export function CodeToolCallBlock({
+  event,
+  onOpenFile,
+  defaultDiffOpen = true,
+}: CodeToolCallBlockProps) {
   const toolName = event.toolName ?? 'tool'
   const rawFilePath = event.filePath ?? event.path ?? event.diff?.path ?? ''
   const filePath = rawFilePath || (toolName === 'read_file' ? extractFilePathFromSummary(event.summary) : '')
@@ -84,7 +89,7 @@ export function CodeToolCallBlock({ event, onOpenFile }: CodeToolCallBlockProps)
   const totalDiffLines = hunks.reduce((sum, hunk) => sum + hunk.lines.length, 0)
   const hasLongDiff = totalDiffLines > DIFF_PREVIEW_LINE_LIMIT
 
-  const [diffOpen, setDiffOpen] = useState(true)
+  const [diffOpen, setDiffOpen] = useState(defaultDiffOpen)
   const [diffExpanded, setDiffExpanded] = useState(false)
   const [terminalExpanded, setTerminalExpanded] = useState(false)
 

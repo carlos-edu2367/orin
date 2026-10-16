@@ -44,6 +44,7 @@ class StreamKind(StrEnum):
     FINISH = "finish"
     RATE_LIMIT = "rate-limit"
     ERROR = "error"
+    KEEPALIVE = "keepalive"
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,6 +87,18 @@ class NormalizedStreamItem:
             object.__setattr__(self, "call_id", self.tool_call_id)
         if self.finish_reason is not None and not isinstance(self.finish_reason, FinishReason):
             object.__setattr__(self, "finish_reason", _finish(self.finish_reason))
+
+    def get(self, key: str, default: Any = None) -> Any:
+        if key in ("type", "kind"):
+            return str(self.kind)
+        return getattr(self, key, default)
+
+    def __getitem__(self, key: str) -> Any:
+        if key in ("type", "kind"):
+            return str(self.kind)
+        if hasattr(self, key):
+            return getattr(self, key)
+        raise KeyError(key)
 
 
 NormalizedStreamEvent = NormalizedStreamItem
@@ -216,6 +229,10 @@ def normalize_sse(lines: Iterable[str | bytes], *, provider: str) -> Iterator[No
 
     for raw in lines:
         line = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
+        if line.lstrip().startswith(":"):
+            sequence += 1
+            yield NormalizedStreamItem(StreamKind.KEEPALIVE, sequence)
+            continue
         if not line.startswith("data:"):
             continue
         body = line[5:].strip()

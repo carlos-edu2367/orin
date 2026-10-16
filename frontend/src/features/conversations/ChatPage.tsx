@@ -603,9 +603,12 @@ export function ChatPage() {
 
   const messages = useMemo(() => {
     const base = (conversation?.messages ?? []).map((item) => {
-      if (item.role !== 'assistant' || item.content) return item
+      if (item.role !== 'assistant') return item
       const streamed = streamedByMessage.get(item.message_id)
-      return streamed ? { ...item, content: streamed } : item
+      if (streamed && streamed.length > (item.content?.length ?? 0)) {
+        return { ...item, content: streamed }
+      }
+      return item
     })
     // The optimistic echo is dropped as soon as the durable snapshot contains
     // the same text, so a re-render can never show the message twice.

@@ -119,7 +119,7 @@ PROJECT_MANIFEST_HINTS = frozenset({
 # needs the same output budget; inheriting the dataclass default silently cut
 # every long answer at 1024 tokens.
 SUBAGENT_MAX_OUTPUT_TOKENS = 16384
-SUBAGENT_MAX_ACTIONS = 12
+SUBAGENT_MAX_ACTIONS = 20
 # A model that cannot call tools gets its visual attachments read before the
 # turn starts (see ``pre_read_attachments``); this bounds how many of those
 # reads happen so a person who attaches a dozen files cannot turn one turn
@@ -587,6 +587,7 @@ class _SubagentStore:
         self._task = task
         self._initial_history = [dict(item) for item in initial_history] if initial_history else None
         self.text: list[str] = []
+        self.prior_text: list[str] = []
         self.failed = False
         self.error_code: str | None = None
 
@@ -617,10 +618,22 @@ class _SubagentStore:
         self._session.emit_lifecycle(turn, state, agent_id=self.agent_id, agent_name=self.name, **payload)
 
     def record_step(self, turn: dict[str, object], **values: object) -> None:
+        payload = values.get("payload")
+        has_tool_calls = bool(
+            values.get("tool_calls")
+            or values.get("kind") == "assistant_tool_call"
+            or (isinstance(payload, Mapping) and (payload.get("calls") or payload.get("tool_calls")))
+        )
+        if has_tool_calls and self.text:
+            self.prior_text.extend(self.text)
+            self.text = []
         recorder = getattr(self._session.store, "record_step", None)
         if callable(recorder):
             values.setdefault("agent_id", self.agent_id)
             recorder(turn, **values)
+
+    def final_answer(self) -> str:
+        return "".join(self.text).strip() or "".join(self.prior_text).strip()
 
 
 class _MainAgentStore:
@@ -1289,7 +1302,8 @@ class TurnSession:
                  "reason": type(error).__name__},
                 agent_id=agent_id, parent_agent_id=self.main_agent_id,
             )
-        subagent_turn = {**self.turn, "model_id": active_model_id}
+        is_code_mode = str(self.turn.get("code_mode") or "").strip().lower() == "code"
+        subagent_turn = {**self.turn, "model_id": active_model_id, "is_subagent": True}
         self._record(
             AgentActivityEventType.AGENT_MESSAGE_SENT,
             f"Enviou uma tarefa para {clean}",
@@ -1316,12 +1330,28 @@ class TurnSession:
             self._subagent_task(enriched_record, task_text),
             initial_history=initial_history,
         )
+        sub_permission_mode = "plan_mode" if read_only_subagent else self.permission_mode
         subagent_tools = self._toolset(
             subagents=False,
             browser_agent_key=agent_id,
+            code_mode_active=is_code_mode,
+            permission_broker=getattr(self, "_active_permission_broker", None),
+            permission_mode=sub_permission_mode,
+            interactive_permissions=bool(self.turn.get("interactive_permissions")),
             read_only_mode=read_only_subagent,
             inherit_context=inherit_context,
         )
+        sub_max_iterations = (
+            self.limits.subagent_max_iterations
+            if self.limits.subagent_max_iterations is not None
+            else self.limits.max_iterations
+        )
+        sub_max_actions = (
+            self.limits.subagent_max_actions
+            if self.limits.subagent_max_actions is not None
+            else (None if self.limits.max_actions is None else min(self.limits.max_actions, SUBAGENT_MAX_ACTIONS))
+        )
+        sub_definitions = subagent_tools.definitions()
         runtime = AgenticTurnRuntime(
             store=sub_store,
             provider=child_provider_instance,
@@ -1329,11 +1359,14 @@ class TurnSession:
             system_prompt=self._subagent_prompt(enriched_record, task_text, subagent_tools),
             limits=AgenticLimits(
                 deadline=self.limits.deadline,
-                max_iterations=self.limits.max_iterations,
-                max_actions=None if self.limits.max_actions is None else SUBAGENT_MAX_ACTIONS,
+                max_iterations=sub_max_iterations,
+                max_actions=sub_max_actions,
                 max_output_tokens=SUBAGENT_MAX_OUTPUT_TOKENS,
                 max_context_tokens=self.limits.max_context_tokens,
             ),
+            tool_kinds={item.name: item.kind for item in sub_definitions},
+            hook_engine=self.hook_engine,
+            phase_controller=None,
             cancelled=self.cancelled,
         )
         result = runtime.run(str(self.turn["turn_id"]), turn=subagent_turn)
@@ -1365,7 +1398,7 @@ class TurnSession:
                 agent_id=agent_id,
                 parent_agent_id=self.main_agent_id,
             )
-            subagent_turn = {**self.turn, "model_id": active_model_id}
+            subagent_turn = {**self.turn, "model_id": active_model_id, "is_subagent": True}
             sub_store = _SubagentStore(
                 self,
                 subagent_turn,
@@ -1381,16 +1414,24 @@ class TurnSession:
                 system_prompt=self._subagent_prompt(enriched_record, task_text, subagent_tools),
                 limits=AgenticLimits(
                     deadline=self.limits.deadline,
-                    max_iterations=self.limits.max_iterations,
-                    max_actions=None if self.limits.max_actions is None else SUBAGENT_MAX_ACTIONS,
+                    max_iterations=sub_max_iterations,
+                    max_actions=sub_max_actions,
                     max_output_tokens=SUBAGENT_MAX_OUTPUT_TOKENS,
                     max_context_tokens=self.limits.max_context_tokens,
                 ),
+                tool_kinds={item.name: item.kind for item in sub_definitions},
+                hook_engine=self.hook_engine,
+                phase_controller=None,
                 cancelled=self.cancelled,
             )
             result = runtime.run(str(self.turn["turn_id"]), turn=subagent_turn)
-        answer = "".join(sub_store.text).strip()
-        if result.state != "completed" or not answer:
+        answer = sub_store.final_answer()
+        limit_stopped = (
+            result.error_code in {"ACTION_LIMIT", "ITERATION_LIMIT", "TURN_DEADLINE_EXCEEDED"}
+            or result.budget_exhausted
+        )
+        acceptable_state = result.state in {"completed", "completed_with_caveats"} or (limit_stopped and bool(answer))
+        if not acceptable_state or not answer:
             reason = result.error_code or ("SUBAGENT_EMPTY_RESPONSE" if not answer else "SUBAGENT_FAILED")
             if self.agents_store is not None and hasattr(self.agents_store, "set_state"):
                 agent_final_state = "cancelled" if (result.state == "cancelled" or reason == "TURN_CANCELLED") else "failed"
@@ -1411,18 +1452,25 @@ class TurnSession:
             agent_id=agent_id, parent_agent_id=self.main_agent_id,
         )
         payload: dict[str, object] = {
+            "agent_id": agent_id,
             "agent_name": clean,
             "subagent_type": builtin_key if builtin_spec is not None else clean,
             "read_only": read_only_subagent,
             "inherited_context": inherit_context,
             "label": clean,
             "tool_kind": "agent",
+            "partial": bool(limit_stopped),
+            "usage": {
+                "iterations": result.iterations,
+                "tool_uses": result.actions,
+            },
         }
-        if result.budget_exhausted:
+        if limit_stopped:
             payload["budget_exhausted"] = True
             content = (
-                f"{clean} ran out of its action budget before finishing and reports the following "
-                f"partial, possibly incomplete, answer:\n\n{answer}"
+                f"NOTE: {clean} stopped at its limit ({result.error_code or 'budget_exhausted'}: "
+                f"{result.iterations} turns, {result.actions} tool uses) before finishing. "
+                f"The text below is PARTIAL output; treat it as incomplete.\n\n{answer}"
             )
         else:
             content = f"{clean} reported:\n\n{answer}"
@@ -1491,7 +1539,7 @@ class TurnSession:
             header_lines.extend((
                 "=== CRITICAL: READ-ONLY MODE - NO FILE MODIFICATIONS ===",
                 "You are the 'explore' specialist subagent inside Orin.",
-                "You have strictly read-only tools (list_files, search_files, search_code, read_file, view_file).",
+                "You have strictly read-only tools (list_files, glob_files, search_files, search_code, read_file, view_file).",
                 "Never attempt to create, edit, or delete files or execute shell commands.",
                 "Locate the exact files, symbols, and line numbers relevant to the task and report them concisely as `path:line`.",
                 "",
@@ -1520,7 +1568,8 @@ class TurnSession:
             )
             + "Use your tools to actually do the work, then reply with the finished result and nothing else.\n"
             "Answer in the same language as the task. Be concise and factual.\n"
-            "Request every independent tool call in the same response instead of one at a time."
+            "Request every independent tool call in the same response instead of one at a time.\n"
+            "In your final response, share relevant file paths (`path:line`) and do NOT create summary/report .md files unless explicitly requested."
         )
         try:
             environment = environment_facts()
@@ -1550,6 +1599,9 @@ class TurnSession:
             prompt += "\n- It currently contains:\n" + "\n".join(f"  {line}" for line in tree)
         else:
             prompt += "\n- It is currently empty."
+        workspace_guidance = _workspace_guidance(self.workspace.root)
+        if workspace_guidance:
+            prompt += f"\n\n## Workspace instructions\n{workspace_guidance}"
         catalog = self._skill_catalog(task, toolset)
         if catalog:
             prompt += "\n\nRelevant procedural Skills are available as metadata only. Load one with use_skill only if it helps:"
@@ -1762,6 +1814,7 @@ class TurnSession:
             **broker_kwargs,
         )
         setattr(permission_broker, "mode", self.permission_mode)
+        self._active_permission_broker = permission_broker
         toolset = self._toolset(
             subagents=self.enable_subagents,
             code_mode_active=self.turn.get("code_mode") == "code",

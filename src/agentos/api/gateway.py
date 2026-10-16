@@ -312,6 +312,7 @@ class OmniRouteRuntimeActionRequest(_RequestModel):
 
 class AgentRuntimeSettingsRequest(_RequestModel):
     max_iterations: int | None = Field(default=None, ge=1)
+    subagent_max_iterations: int | None = Field(default=None, ge=1)
 
 
 class CodeModeSettingsRequest(_RequestModel):
@@ -1981,7 +1982,19 @@ def create_app(services: ApiServices) -> FastAPI:
         principal = principal_for(request, mutable=True)
         services.security.authorize(principal, action="runtime.configure", resource_id="agentic", purpose="runtime.configure")
         _idempotency(request)
-        return JSONResponse(_require_port(services.agentic_runtime).set_max_iterations(principal.user_id, payload.max_iterations))
+        port = _require_port(services.agentic_runtime)
+        if "subagent_max_iterations" in payload.model_fields_set:
+            try:
+                return JSONResponse(
+                    port.set_max_iterations(
+                        principal.user_id,
+                        payload.max_iterations,
+                        subagent_max_iterations=payload.subagent_max_iterations,
+                    )
+                )
+            except TypeError:
+                pass
+        return JSONResponse(port.set_max_iterations(principal.user_id, payload.max_iterations))
 
     @app.get("/v1/code-mode/settings")
     async def get_code_mode_settings(request: Request) -> JSONResponse:

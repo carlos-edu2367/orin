@@ -29,19 +29,29 @@ def recover_once(store) -> tuple[str, ...]:
     return tuple({*recovered, *stale})
 
 
+def poll_once(worker: ChatWorker, next_sweep: float) -> tuple[bool, float]:
+    """Run one polling tick: claim pending turns before running watchdog sweeps."""
+    worker.store.heartbeat("chat-worker")
+    pending = worker.store.pending()
+    if pending:
+        worker.run(str(pending[0]))
+        return True, next_sweep
+    now_mono = time.monotonic()
+    if now_mono >= next_sweep:
+        worker.store.heartbeat("chat-worker")
+        next_sweep = now_mono + SWEEP_EVERY_SECONDS
+        recover_once(worker.store)
+    return False, next_sweep
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     worker = create_chat_worker()
     next_sweep = 0.0
     while True:
         try:
-            worker.store.heartbeat("chat-worker")
-            if time.monotonic() >= next_sweep:
-                next_sweep = time.monotonic() + SWEEP_EVERY_SECONDS
-                recover_once(worker.store)
-            pending = worker.store.pending()
-            if pending:
-                worker.run(str(pending[0]))
+            ran_turn, next_sweep = poll_once(worker, next_sweep)
+            if ran_turn:
                 continue
         except Exception:
             _LOGGER.exception("worker tick failed")

@@ -212,6 +212,36 @@ test('E2E: Orin Chat CodeSessionProposalCard -> Orin Code McpApprovalCard & Plug
             payload: { stage: 'implementing' },
           },
           {
+            event_id: 'ev-read-1',
+            cursor: '1a',
+            turn_id: 'turn-code-1',
+            agent_id: 'agent:main',
+            event_type: 'tool.finished',
+            summary: 'Leu README.md',
+            occurred_at: '2026-10-16T14:01:01.200Z',
+            payload: {
+              tool_name: 'read_file',
+              tool_kind: 'filesystem',
+              status: 'succeeded',
+              path: 'README.md',
+            },
+          },
+          {
+            event_id: 'ev-read-2',
+            cursor: '1b',
+            turn_id: 'turn-code-1',
+            agent_id: 'agent:main',
+            event_type: 'tool.finished',
+            summary: 'Leu src/auth/jwt.py',
+            occurred_at: '2026-10-16T14:01:01.500Z',
+            payload: {
+              tool_name: 'read_file',
+              tool_kind: 'filesystem',
+              status: 'succeeded',
+              path: 'src/auth/jwt.py',
+            },
+          },
+          {
             event_id: 'ev-mcp-prop',
             cursor: '2',
             turn_id: 'turn-code-1',
@@ -425,6 +455,16 @@ test('E2E: Orin Chat CodeSessionProposalCard -> Orin Code McpApprovalCard & Plug
   expect(createdConversations[0].message).toBe('Implemente rotação de refresh token com Ed25519 e rode pytest.')
 
   await expect(page.getByTestId('orin-code-badge')).toBeVisible()
+  // Verify smart collapsible CodeToolBatch renders collapsed by default ("Leu 2 arquivos") and expands on click
+  const toolBatch = page.getByTestId('code-tool-batch')
+  await expect(toolBatch).toBeVisible()
+  const batchToggle = page.getByTestId('code-tool-batch-toggle')
+  await expect(batchToggle).toContainText('Leu 2 arquivos')
+  await expect(toolBatch).not.toContainText('src/auth/jwt.py')
+  await batchToggle.click()
+  await expect(toolBatch).toContainText('README.md')
+  await expect(toolBatch).toContainText('src/auth/jwt.py')
+
   // Both McpApprovalCard and PluginApprovalCard must render inside the Code Mode timeline!
   await expect(page.getByRole('region', { name: /Conectar GitHub MCP/i })).toBeVisible()
   await expect(page.getByRole('region', { name: /Instalar Security Audit Pack/i })).toBeVisible()

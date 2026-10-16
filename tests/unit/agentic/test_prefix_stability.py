@@ -152,7 +152,7 @@ def test_compaction_is_the_only_thing_that_rewrites_the_prefix() -> None:
 
 def test_a_provider_without_caching_still_shrinks_old_results() -> None:
     """Without a cache to protect, shrinking is pure gain and must be kept."""
-    provider = _RecordingProvider(tool_calls=6)
+    provider = _RecordingProvider(tool_calls=10)
     _run(provider, turn_provider="ollama")
 
     last = provider.requests[-1]

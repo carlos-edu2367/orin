@@ -12,6 +12,8 @@ import threading
 import time
 from typing import Callable, Mapping
 
+from agentos.providers.models import ProviderError, ProviderErrorCategory, Retryability
+
 from .action_loop import ActionLoop, MalformedToolCall
 from .provider_stream import NormalizedStreamItem, StreamKind
 from .contract import ContractError, TaskContract, parse as parse_contract, synthesize as synthesize_contract
@@ -21,7 +23,9 @@ from . import phases, transcript
 from .phases import DEFAULT_PHASE_BUDGETS, Phase, PhaseBudget, PhaseController
 
 MAX_PARALLEL_TOOLS = 4
-AGED_TOOL_RESULT_CHARS = 400
+AGED_TOOL_RESULT_CHARS = 1600
+RECENT_UNAGED_TOOL_RESULTS = 8
+MAX_STREAM_KEEPALIVE_STALL_SECONDS = 180.0
 MICROCOMPACT_TOOL_RESULT_CHARS = 3_000
 MICROCOMPACT_THRESHOLD = 0.65
 
@@ -184,9 +188,13 @@ class AgenticLimits:
     # above deliberately leaves room for system/tool overhead; this value is
     # what the UI should present as the model's full context window.
     context_window_tokens: int | None = None
+    subagent_max_iterations: int | None = None
+    subagent_max_actions: int | None = None
 
     def __post_init__(self) -> None:
         if (self.max_actions is not None and self.max_actions < 0) or (self.max_iterations is not None and self.max_iterations < 1) or self.max_provider_retries < 0 or self.deadline <= timedelta(0):
+            raise ValueError("agentic limits are invalid")
+        if (self.subagent_max_actions is not None and self.subagent_max_actions < 0) or (self.subagent_max_iterations is not None and self.subagent_max_iterations < 1):
             raise ValueError("agentic limits are invalid")
         if (self.max_output_tokens is not None and self.max_output_tokens < 1) or self.max_context_tokens < 1_000 or (self.context_window_tokens is not None and self.context_window_tokens < 1_000):
             raise ValueError("agentic limits are invalid")
@@ -320,6 +328,7 @@ class AgenticTurnRuntime:
         provider_retries = 0
         reactive_compacted = False
         code_gate_rejections = 0
+        empty_response_retries = 0
         total_tokens = 0
         total_cost = Decimal("0")
         emitted_text_in_turn = False
@@ -417,16 +426,31 @@ class AgenticTurnRuntime:
                 last_thinking_flush = time.monotonic()
                 self._life(turn, "thinking_delta", delta=delta_text, iteration=iteration)
 
+            last_progress_at = self.clock()
             try:
                 for raw_event in events:
-                    provider_yielded = True
                     if self.cancelled(turn):
                         self._effect_finished(turn, provider_effect_id, state="UNKNOWN", error_code="PROVIDER_CANCELLED_DURING_EFFECT")
                         return self._cancel(turn, iteration, action_count)
-                    if self.clock() >= deadline:
+                    now_clock = self.clock()
+                    if now_clock >= deadline:
                         self._effect_finished(turn, provider_effect_id, state="UNKNOWN", error_code="PROVIDER_DEADLINE_DURING_EFFECT")
                         return self._fail(turn, "TURN_DEADLINE_EXCEEDED", iteration, action_count)
                     event = self._coerce(raw_event)
+                    if event.kind is StreamKind.KEEPALIVE:
+                        diff = now_clock - last_progress_at
+                        elapsed_s = float(diff.total_seconds()) if hasattr(diff, "total_seconds") else float(diff)
+                        if elapsed_s >= MAX_STREAM_KEEPALIVE_STALL_SECONDS:
+                            raise ProviderError(
+                                ProviderErrorCategory.TIMEOUT,
+                                "PROVIDER_TIMEOUT",
+                                "Provider stream stalled without tokens for over 180s",
+                                Retryability.SAFE,
+                            )
+                        continue
+                    provider_yielded = True
+                    if event.kind in {StreamKind.TEXT, StreamKind.THINKING, StreamKind.TOOL_CALL, StreamKind.FINISH}:
+                        last_progress_at = now_clock
                     if event.kind is StreamKind.THINKING:
                         saw_thinking_kind = True
                         if event.thinking:
@@ -516,15 +540,17 @@ class AgenticTurnRuntime:
                     reactive_compacted = True
                     if self._force_compact(messages, turn, tool_schemas):
                         continue
+                is_keepalive_stall = isinstance(exc, ProviderError) and exc.category is ProviderErrorCategory.TIMEOUT and not text_parts and not calls
+                effective_yielded = provider_yielded and not is_keepalive_stall
                 # Once a stream yielded anything the request may have reached
                 # the provider and charged or produced a result.  A restart
                 # must reconcile it rather than issuing a duplicate request.
                 self._effect_finished(
                     turn, provider_effect_id,
-                    state="UNKNOWN" if provider_yielded else "NOT_APPLIED",
+                    state="UNKNOWN" if effective_yielded else "NOT_APPLIED",
                     error_code="PROVIDER_STREAM_INTERRUPTED",
                 )
-                if provider_yielded:
+                if effective_yielded:
                     self._settle_quality(turn, "reconciliation_required", "PROVIDER_STREAM_INTERRUPTED")
                     return AgenticRunResult("reconciliation_required", iteration, action_count, "PROVIDER_STREAM_INTERRUPTED")
                 if provider_retries < self.limits.max_provider_retries and self.clock() < deadline:
@@ -642,7 +668,7 @@ class AgenticTurnRuntime:
                 # rewrite is unavoidable anyway; where it has none, shrinking
                 # every iteration is still the cheapest thing to do.
                 if not self._prefix_caching(turn):
-                    self._age_tool_results(messages, keep_recent=len(results))
+                    self._age_tool_results(messages, keep_recent=max(RECENT_UNAGED_TOOL_RESULTS, len(results)))
                 # ``ask_user`` deliberately ends this provider run.  A worker
                 # must never stay blocked while a person considers a form, and
                 # the next authenticated chat message starts the follow-up turn.
@@ -658,7 +684,8 @@ class AgenticTurnRuntime:
                 continue
             has_text = bool("".join(text_parts).strip())
             is_subagent = hasattr(self.store, "text") and hasattr(self.store, "agent_id")
-            if not has_text and (not is_subagent or bool(thinking_parts)):
+            if not has_text and (not is_subagent or bool(thinking_parts) or (action_count > 0 and empty_response_retries < 2)):
+                empty_response_retries += 1
                 self._effect_finished(turn, provider_effect_id, state="APPLIED", private_result={"outcome": "empty"})
                 if not final_iteration:
                     if thinking_parts and str(turn.get("provider", "")).lower() == "ollama":
@@ -676,7 +703,7 @@ class AgenticTurnRuntime:
             if (finish is not None or has_text) and not (final_iteration and not has_text):
                 completion_gate = getattr(self.toolset, "code_completion_gate", None)
                 gate_ok, gate_reason = (True, None)
-                if callable(completion_gate) and (final_iteration or code_gate_rejections < 1):
+                if callable(completion_gate) and not turn.get("is_subagent") and (final_iteration or code_gate_rejections < 1):
                     try:
                         gate_ok, gate_reason = completion_gate()
                     except Exception:
@@ -1353,7 +1380,7 @@ class AgenticTurnRuntime:
         return f"{text[:AGED_TOOL_RESULT_CHARS]}\n[compressed: {len(text)} characters total; re-run the tool if you need the rest]"
 
     @classmethod
-    def _age_tool_results(cls, messages: list[dict[str, object]], keep_recent: int) -> list[dict[str, object]]:
+    def _age_tool_results(cls, messages: list[dict[str, object]], keep_recent: int = RECENT_UNAGED_TOOL_RESULTS) -> list[dict[str, object]]:
         """Shrink tool output the model has already had a chance to read.
 
         The full result is what the model needed on the iteration right after
@@ -2025,6 +2052,10 @@ class AgenticTurnRuntime:
     def _coerce(event: object) -> NormalizedStreamItem:
         if isinstance(event, NormalizedStreamItem):
             return event
+        if isinstance(event, Mapping):
+            kind_val = str(event.get("kind") or event.get("type") or "").lower()
+            if kind_val == "keepalive":
+                return NormalizedStreamItem(StreamKind.KEEPALIVE, int(event.get("sequence") or 1))
         event_type = type(event).__name__
         if event_type == "ContentDelta":
             return NormalizedStreamItem(StreamKind.TEXT, int(getattr(event, "sequence", 1)), text=str(getattr(event, "delta", "")))

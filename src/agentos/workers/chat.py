@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 from typing import Callable
@@ -140,6 +142,7 @@ OLLAMA_FALLBACK_NUM_CTX = 16_384
 # A turn is allowed to continue until the worker's job timeout.  The old
 # five-minute deadline cut off ordinary multi-step file work mid-task.
 TURN_DEADLINE = timedelta(seconds=3600)
+HEARTBEAT_REFRESH_SECONDS = 10.0
 
 
 class _RuntimeStore:
@@ -171,6 +174,7 @@ class _RuntimeStore:
         return self._store.attachments_for_turn(turn)
 
     def delta(self, turn: dict[str, object], text: str) -> None:
+        self._worker._refresh_heartbeat_if_due()
         self._store.delta(turn, text)
 
     def reset_assistant_message(self, turn: dict[str, object]) -> None:
@@ -183,6 +187,7 @@ class _RuntimeStore:
             self._store.finish(turn, failed=failed, code=code)
 
     def lifecycle(self, turn: dict[str, object], state: str, **payload: object) -> None:
+        self._worker._refresh_heartbeat_if_due()
         # Public activity is published by the session before this is called;
         # this is the authoritative lifecycle commit for the current turn.
         if self._worker._kernel_manages(turn):
@@ -383,9 +388,24 @@ class ChatWorker:
         # in-process index, and are refreshed per-user before each turn below.
         self._capabilities = capabilities or InstanceCapabilities.for_mode(current_mode())
         self._hook_engine = HookEngine(enabled=self._capabilities.plugin_hooks)
+        self._last_heartbeat_mono: float = 0.0
+
+    def _refresh_heartbeat_if_due(self) -> None:
+        now_mono = time.monotonic()
+        if now_mono - self._last_heartbeat_mono >= HEARTBEAT_REFRESH_SECONDS:
+            try:
+                self.store.heartbeat("chat-worker")
+                self._last_heartbeat_mono = now_mono
+            except Exception:
+                pass
+
+    def _is_turn_cancelled(self, current: Mapping[str, object]) -> bool:
+        self._refresh_heartbeat_if_due()
+        return bool(self.store.cancel_requested(str(current["turn_id"])))
 
     def run(self, turn_id: str) -> None:
         self.store.heartbeat("chat-worker")
+        self._last_heartbeat_mono = time.monotonic()
         turn = self.store.claim(turn_id)
         if turn is None:
             return
@@ -1118,9 +1138,21 @@ class ChatWorker:
                 provider_factory=lambda: self._provider_transport(turn),
                 workspace_root=self._workspace_root,
                 enable_terminal=self._capabilities.shell,
-                cancelled=lambda current: self.store.cancel_requested(str(current["turn_id"])),
+                cancelled=self._is_turn_cancelled,
                 reconciliation_required=self._reconciliation_required,
-                limits=AgenticLimits(deadline=TURN_DEADLINE, max_iterations=configured_limits["max_iterations"], max_actions=None if configured_limits["max_iterations"] is None else 24, max_context_tokens=self._max_context_tokens_for(turn), context_window_tokens=self._context_window_for(turn)),
+                limits=AgenticLimits(
+                    deadline=TURN_DEADLINE,
+                    max_iterations=configured_limits["max_iterations"],
+                    max_actions=None if configured_limits["max_iterations"] is None else max(24, configured_limits["max_iterations"] * 2),
+                    max_context_tokens=self._max_context_tokens_for(turn),
+                    context_window_tokens=self._context_window_for(turn),
+                    subagent_max_iterations=configured_limits.get("subagent_max_iterations", configured_limits["max_iterations"]),
+                    subagent_max_actions=(
+                        None
+                        if configured_limits.get("subagent_max_iterations", configured_limits["max_iterations"]) is None
+                        else max(24, int(configured_limits.get("subagent_max_iterations", configured_limits["max_iterations"]) or 12) * 2)
+                    ),
+                ),
                 skills=skill_library.registry_for(str(turn["user_id"]), agent_id=str(self.store.main_agent_id(turn))),
                 skill_library=skill_library,
                 skill_load_recorder=lambda loaded: skill_library.record_load(

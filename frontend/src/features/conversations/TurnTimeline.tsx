@@ -328,18 +328,154 @@ function RepeatedToolFailureGroup({
   )
 }
 
+export function summarizeCodeToolBatch(events: ConversationActivityEvent[]): string {
+  const n = events.length
+  if (n === 0) return 'Executou 0 ações'
+  const toolNames = events.map((ev) => resolveEventToolName(ev))
+
+  if (toolNames.every((t) => t === 'read_file')) {
+    const uniqueFiles = new Set(
+      events.map((ev) => ev.filePath || ev.path || ev.diff?.path || '').filter(Boolean),
+    )
+    if (uniqueFiles.size === 1 && n > 1) {
+      const onlyFile = [...uniqueFiles][0]
+      return `Leu ${onlyFile} (${n} trechos)`
+    }
+    return `Leu ${n} ${n === 1 ? 'arquivo' : 'arquivos'}`
+  }
+
+  if (toolNames.every((t) => t === 'write_file')) {
+    return `Criou ${n} ${n === 1 ? 'arquivo' : 'arquivos'}`
+  }
+
+  if (toolNames.every((t) => t === 'edit_file' || t === 'notebook_edit')) {
+    const uniqueFilesSet = new Set(
+      events.map((ev) => ev.filePath || ev.path || ev.diff?.path || '').filter(Boolean),
+    )
+    const uniqueFiles = uniqueFilesSet.size > 0 ? uniqueFilesSet.size : n
+    return `Editou ${uniqueFiles} ${uniqueFiles === 1 ? 'arquivo' : 'arquivos'}`
+  }
+
+  if (
+    toolNames.every(
+      (t) =>
+        t === 'search_files' ||
+        t === 'glob_files' ||
+        t === 'list_files' ||
+        t === 'list_directory',
+    )
+  ) {
+    return `Buscou em ${n} ${n === 1 ? 'padrão' : 'padrões'}`
+  }
+
+  if (toolNames.every((t) => t === 'run_command' || t === 'bash')) {
+    return `Executou ${n} ${n === 1 ? 'comando' : 'comandos'}`
+  }
+
+  return `Executou ${n} ${n === 1 ? 'ação' : 'ações'}`
+}
+
+function CodeToolBatch({
+  events,
+  onOpenFile,
+  defaultExpanded = false,
+}: {
+  events: ConversationActivityEvent[]
+  onOpenFile?: (path: string) => void
+  defaultExpanded?: boolean
+}) {
+  const [expanded, setExpanded] = useState(defaultExpanded)
+  const summaryLabel = summarizeCodeToolBatch(events)
+
+  let totalAdded = 0
+  let totalRemoved = 0
+  let hasDiffStats = false
+  for (const ev of events) {
+    const added = ev.addedLines ?? ev.diff?.added_lines
+    const removed = ev.removedLines ?? ev.diff?.removed_lines
+    if (added !== undefined || removed !== undefined) {
+      hasDiffStats = true
+      totalAdded += added ?? 0
+      totalRemoved += removed ?? 0
+    }
+  }
+
+  const runningEvent = [...events].reverse().find((ev) => resolveVisualStatus(ev) === 'running')
+  const hasFailed = events.some((ev) => resolveVisualStatus(ev) === 'failed')
+  const runningSig = runningEvent ? formatToolSignature(runningEvent) : null
+
+  const dotClass = runningEvent
+    ? 'text-amber-400 animate-pulse'
+    : hasFailed
+      ? 'text-rose-400'
+      : 'text-emerald-400'
+
+  return (
+    <div
+      className="code-tool-batch my-1.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-raised)]/60 px-3 py-1.5 text-[12px] text-[var(--text-primary)]"
+      data-testid="code-tool-batch"
+    >
+      <button
+        type="button"
+        onClick={() => setExpanded((prev) => !prev)}
+        aria-expanded={expanded}
+        data-testid="code-tool-batch-toggle"
+        className="flex w-full items-center justify-between gap-2 text-left font-mono text-[12px]"
+      >
+        <div className="flex min-w-0 flex-1 items-center gap-2">
+          <span className={`text-[11px] leading-none ${dotClass}`} aria-hidden="true">
+            ●
+          </span>
+          <span className="font-semibold text-[var(--text-primary)]">{summaryLabel}</span>
+          {hasDiffStats && (
+            <span
+              className="inline-flex items-center gap-1.5 rounded bg-white/[0.05] px-1.5 py-0.5 text-[11px] font-medium"
+              aria-label={`Alterações +${totalAdded} -${totalRemoved}`}
+            >
+              <span className="text-emerald-400">+{totalAdded}</span>
+              <span className="text-rose-400">-{totalRemoved}</span>
+            </span>
+          )}
+          {runningSig && (
+            <span className="truncate text-[11px] text-[var(--text-muted)]">
+              · {runningSig.verb}({runningSig.arg})
+            </span>
+          )}
+        </div>
+        <span className="shrink-0 rounded px-1.5 py-0.5 font-mono text-[11px] text-[var(--text-muted)] hover:bg-white/5">
+          {expanded ? 'Recolher ▴' : 'Expandir ▾'}
+        </span>
+      </button>
+      {expanded && (
+        <div className="mt-2 space-y-1 border-t border-[var(--border-subtle)] pt-1.5">
+          {events.map((event) => (
+            <CodeToolCallBlock
+              key={event.eventId}
+              event={event}
+              onOpenFile={onOpenFile}
+              defaultDiffOpen={defaultExpanded}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function SubagentTaskContainer({
   agentName,
   count,
   failed = false,
+  running = false,
   children,
 }: {
   agentName: string
   count: number
   failed?: boolean
+  running?: boolean
   children: ReactNode
 }) {
-  const [expanded, setExpanded] = useState(true)
+  const [expanded, setExpanded] = useState(running)
 
   return (
     <div
@@ -413,6 +549,11 @@ export function TurnTimeline({
   const [rewinding, setRewinding] = useState(false)
   const [rewound, setRewound] = useState(false)
   const [rewindError, setRewindError] = useState<string | null>(null)
+
+  const hasLegacyCodeModeStarted = useMemo(
+    () => Boolean(events?.some((ev) => ev.type === 'code_mode.started')),
+    [events],
+  )
 
   const resolvedItems: TimelineRenderItem[] = useMemo(() => {
     if (items) return items
@@ -537,7 +678,43 @@ export function TurnTimeline({
   function renderCodeToolSequence(toolEvents: ConversationActivityEvent[]): ReactNode[] {
     const nodes: ReactNode[] = []
     const openFileHandler = onOpenFile || onPreview ? handleOpenFile : undefined
+    let normalBatch: ConversationActivityEvent[] = []
     let index = 0
+
+    const flushNormalBatch = () => {
+      if (normalBatch.length === 0) return
+      if (normalBatch.length === 1) {
+        const single = normalBatch[0]
+        nodes.push(
+          <CodeToolCallBlock
+            key={single.eventId}
+            event={single}
+            onOpenFile={openFileHandler}
+            defaultDiffOpen={hasLegacyCodeModeStarted}
+          />,
+        )
+      } else if (hasLegacyCodeModeStarted) {
+        for (const item of normalBatch) {
+          nodes.push(
+            <CodeToolCallBlock
+              key={item.eventId}
+              event={item}
+              onOpenFile={openFileHandler}
+              defaultDiffOpen={true}
+            />,
+          )
+        }
+      } else {
+        nodes.push(
+          <CodeToolBatch
+            key={`tool-batch:${normalBatch[0].eventId}`}
+            events={normalBatch}
+            onOpenFile={openFileHandler}
+          />,
+        )
+      }
+      normalBatch = []
+    }
 
     while (index < toolEvents.length) {
       const current = normalizeCodeToolEvent(toolEvents[index])
@@ -560,6 +737,7 @@ export function TurnTimeline({
         }
 
         if (failedRun.length > 2) {
+          flushNormalBatch()
           nodes.push(
             <RepeatedToolFailureGroup
               key={`fail-group:${failedRun[0].eventId}`}
@@ -573,16 +751,11 @@ export function TurnTimeline({
         }
       }
 
-      nodes.push(
-        <CodeToolCallBlock
-          key={current.eventId}
-          event={current}
-          onOpenFile={openFileHandler}
-        />,
-      )
+      normalBatch.push(current)
       index += 1
     }
 
+    flushNormalBatch()
     return nodes
   }
 
@@ -604,12 +777,16 @@ export function TurnTimeline({
       group.events.find((ev) => ev.agentName)?.agentName ||
       group.agentId
     const toolCount = group.events.filter((ev) => ev.kind === 'tool').length || group.events.length
+    const isSubagentRunning =
+      !turnCompleted &&
+      group.events.some((ev) => resolveVisualStatus(ev) === 'running')
 
     return (
       <SubagentTaskContainer
         agentName={subagentLabel}
         count={toolCount}
         failed={group.failed}
+        running={isSubagentRunning}
       >
         {content}
       </SubagentTaskContainer>
