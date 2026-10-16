@@ -370,3 +370,210 @@ def test_gateway_tool_permission_rewind_and_four_mode_settings_endpoints(tmp_pat
     assert data["rewound"] is True
     assert "app.py" in data["restored_files"]
     assert target_file.read_text(encoding="utf-8") == "original = True\n"
+
+
+def test_run_command_stashes_dot_orin_for_empty_workspace_scaffold_and_detects_interactive_cancel(tmp_path: Path) -> None:
+    workspace = ConversationWorkspace(tmp_path, "conv-scaffold")
+    marker = workspace.root / ".orin" / "permissions.json"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text('{"allow": [], "deny": []}', encoding="utf-8")
+
+    toolset = AgentToolset(
+        workspace,
+        code_mode_active=True,
+        permission_mode="full_autonomy",
+        turn_id="turn-scaf-1",
+    )
+
+    # 1. Command sees empty directory because .orin is stashed temporarily, and .orin is restored after
+    res = toolset.invoke(
+        "run_command",
+        {"command": 'python -c "import os, pathlib; assert os.listdir(\'.\') == []; pathlib.Path(\'package.json\').write_text(\'{}\')"'},
+    )
+    assert res.status == "succeeded"
+    assert (workspace.root / "package.json").exists()
+    assert marker.exists()
+
+    # 2. Interactive command that outputs "Operation cancelled" without creating files is marked failed
+    (workspace.root / "package.json").unlink()
+    cancelled_res = toolset.invoke(
+        "run_command",
+        {"command": 'python -c "print(\'Operation cancelled\')"'},
+    )
+    assert cancelled_res.status == "failed"
+    assert cancelled_res.error_code == "COMMAND_CANCELLED_INTERACTIVE"
+    assert "command" in cancelled_res.payload
+
+
+def test_stdout_and_stderr_are_not_redacted_while_secrets_remain_redacted() -> None:
+    from agentos.agentic.models import sanitize_public_mapping
+
+    payload = {
+        "command": "npm run build",
+        "stdout": "vite v5.4.0 building for production...",
+        "stderr": "warning: chunk size",
+        "api_key": "sk-secret",
+        "private_key": "-----BEGIN PRIVATE KEY-----",
+    }
+    sanitized = sanitize_public_mapping(payload)
+    assert sanitized["stdout"] == "vite v5.4.0 building for production..."
+    assert sanitized["stderr"] == "warning: chunk size"
+    assert sanitized["api_key"] == "[REDACTED]"
+    assert sanitized["private_key"] == "[REDACTED]"
+
+
+def test_subagent_isolates_read_file_state_when_inherit_context_false_and_warns_windows_shell(tmp_path: Path) -> None:
+    workspace_dir = tmp_path / "workspaces"
+    conv_ws = ConversationWorkspace(workspace_dir, "conv-sub-iso")
+    conv_ws.write_text("shared.py", "x = 42\n")
+
+    class DummyStore:
+        def main_agent_id(self, turn):
+            return "agent:conv-sub-iso:main"
+
+        def history_for_turn(self, turn):
+            return []
+
+        def record(self, *args, **kwargs):
+            return None
+
+    class DummyAgents:
+        def list(self):
+            return []
+
+    session = TurnSession(
+        turn={
+            "turn_id": "turn-iso",
+            "conversation_id": "conv-sub-iso",
+            "user_id": "local-user",
+            "execution_id": "exe-iso",
+            "code_mode": "code",
+            "provider": "ollama",
+            "model_id": "glm-5.1:cloud",
+        },
+        store=DummyStore(),
+        agents_store=DummyAgents(),
+        memory_store=None,
+        provider_factory=lambda: None,
+        workspace_root=workspace_dir,
+        cancelled=lambda _turn: False,
+    )
+    main_tools = session._toolset(subagents=True)
+    first_read = main_tools.invoke("read_file", {"path": "shared.py"})
+    assert first_read.status == "succeeded"
+    assert "x = 42" in first_read.content
+
+    # Subagent toolset without inherit_context must not inherit _read_file_state
+    sub_tools = session._toolset(subagents=False, inherit_context=False)
+    sub_read = sub_tools.invoke("read_file", {"path": "shared.py"})
+    assert sub_read.status == "succeeded"
+    assert sub_read.payload.get("unchanged") is False
+    assert "x = 42" in sub_read.content
+
+    sub_prompt = session._subagent_prompt({"name": "Worker", "role": "build"}, "build task", sub_tools)
+    assert "always provide the `'path'` argument first before `'content'`" in sub_prompt
+    assert "never run Unix commands like cat, ls, grep, head, or tail" in sub_prompt
+
+
+def test_write_file_missing_path_hint_stream_length_and_circuit_breaker(tmp_path: Path) -> None:
+    from typing import Any, Mapping
+    from agentos.agentic.provider_stream import NormalizedStreamItem, StreamKind, normalize_ndjson
+    from agentos.agentic.runtime import AgenticTurnRuntime
+    from agentos.providers.models import FinishReason
+
+    workspace = ConversationWorkspace(tmp_path, "conv-trunc-cb")
+    toolset = AgentToolset(workspace, code_mode_active=True, permission_mode="full_autonomy")
+
+    write_defn = next(d for d in toolset.definitions() if d.name == "write_file")
+    assert "Always provide 'path' first before 'content'." in write_defn.description
+    assert list(write_defn.parameters["properties"].keys())[0] == "path"
+
+    missing_path = toolset.invoke("write_file", {"content": "large content without path"})
+    assert missing_path.status == "failed"
+    assert missing_path.error_code == "INVALID_ARGUMENTS"
+    assert "Hint: Ensure 'path' is provided first" in missing_path.content
+    assert "truncated at max_tokens" in missing_path.content
+
+    # Provider stream preserves FinishReason.LENGTH even when a tool call was seen
+    ndjson_lines = [
+        '{"message":{"role":"assistant","tool_calls":[{"function":{"name":"write_file","arguments":{}}}]},"done":false}',
+        '{"done":true,"done_reason":"length","prompt_eval_count":100,"eval_count":4096}',
+    ]
+    items = list(normalize_ndjson(ndjson_lines))
+    finish_items = [item for item in items if item.kind is StreamKind.FINISH]
+    assert len(finish_items) == 1
+    assert finish_items[0].finish_reason is FinishReason.LENGTH
+
+    # Runtime circuit breaker trips after 3 consecutive identical tool failures
+    class _LoopingInvalidToolProvider:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def stream(self, request: Mapping[str, Any]):
+            self.calls += 1
+            return iter([
+                NormalizedStreamItem(
+                    StreamKind.TOOL_CALL,
+                    1,
+                    tool_call_id=f"call_{self.calls}",
+                    tool_name="write_file",
+                    arguments_delta="{}",
+                ),
+                NormalizedStreamItem(StreamKind.FINISH, 2, finish_reason=FinishReason.LENGTH),
+            ])
+
+    class _DummyRuntimeStore:
+        def history_for_turn(self, turn):
+            return [{"role": "user", "content": "write file"}]
+
+        def lifecycle(self, turn, state, **payload):
+            pass
+
+        def finish(self, turn, *, failed: bool = False, code: str | None = None):
+            pass
+
+    runtime = AgenticTurnRuntime(
+        store=_DummyRuntimeStore(),
+        provider=_LoopingInvalidToolProvider(),
+        toolset=toolset,
+        phase_controller=None,
+    )
+    run_res = runtime.run("turn-cb", turn={"turn_id": "turn-cb", "code_mode": "code", "assistant_message_id": "m-cb"})
+    assert run_res.state == "failed"
+    assert run_res.error_code == "REPEATED_TOOL_FAILURE"
+    assert run_res.iterations == 3
+
+
+def test_run_command_cwd_prefix_artifacts_read_registration_and_todo_failure_guard(tmp_path: Path) -> None:
+    workspace = ConversationWorkspace(tmp_path, "conv-cwd-todos")
+    (workspace.root / "frontend").mkdir(parents=True, exist_ok=True)
+    toolset = AgentToolset(workspace, code_mode_active=True, permission_mode="full_autonomy")
+
+    # 1. CWD prefix is included when _current_cwd != workspace.root, and created files are registered in _read_file_state
+    cmd_res = toolset.invoke(
+        "run_command",
+        {"command": 'cd frontend && python -c "import pathlib; pathlib.Path(\'gen.txt\').write_text(\'v1\')"'},
+    )
+    assert cmd_res.status == "succeeded"
+    assert cmd_res.content.startswith("[cwd: frontend]\nexit=0")
+
+    # Overwriting gen.txt created by run_command succeeds without prior read_file
+    overwrite_res = toolset.invoke("write_file", {"path": "frontend/gen.txt", "content": "v2\n"})
+    assert overwrite_res.status == "succeeded"
+
+    # 2. complete_remaining_todos does NOT mark tasks completed when failed=True
+    toolset.invoke(
+        "todo_write",
+        {
+            "todos": [
+                {"id": "1", "content": "Step 1", "status": "completed"},
+                {"id": "2", "content": "Step 2", "status": "in_progress"},
+                {"id": "3", "content": "Step 3", "status": "pending"},
+            ]
+        },
+    )
+    assert toolset.complete_remaining_todos(failed=True) is None
+    assert toolset.complete_remaining_todos(state="cancelled") is None
+    assert [t["status"] for t in toolset._todos] == ["completed", "in_progress", "pending"]
+
+

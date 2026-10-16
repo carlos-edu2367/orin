@@ -165,9 +165,12 @@ class CreateConversationRequest(_RequestModel):
     workspace_path: str | None = Field(default=None, max_length=4096)
     workspace_acknowledged_risk: bool = False
     attachments: list[str] = Field(default_factory=list, max_length=MAX_FILES_PER_MESSAGE)
-    # ``auto`` keeps ordinary conversation requests backward-compatible while
-    # allowing the composer to explicitly enter or suppress the Code flow.
-    code_mode: str = Field(default="auto", pattern="^(auto|code|chat)$")
+    code_mode: str = Field(default="chat", pattern="^(auto|code|chat)$")
+    permission_mode: str | None = Field(default=None, pattern="^(accept_edits|plan_mode|ask_permissions|full_autonomy)$")
+
+
+class UpdateConversationPermissionModeRequest(_RequestModel):
+    permission_mode: str = Field(pattern="^(accept_edits|plan_mode|ask_permissions|full_autonomy)$")
 
 
 class InspectNewWorkspaceFolderRequest(_RequestModel):
@@ -217,9 +220,8 @@ class SendConversationMessageRequest(_RequestModel):
     message: str = Field(default="", max_length=16000)
     attachments: list[str] = Field(default_factory=list, max_length=MAX_FILES_PER_MESSAGE)
     selection: ConversationSelectionRequest | None = None
-    # "auto" lets the trusted server classify a clearly technical request;
-    # "code" is the explicit composer choice; "chat" opts out for this turn.
-    code_mode: str = Field(default="auto", pattern="^(auto|code|chat)$")
+    code_mode: str = Field(default="chat", pattern="^(auto|code|chat)$")
+    permission_mode: str | None = Field(default=None, pattern="^(accept_edits|plan_mode|ask_permissions|full_autonomy)$")
 
 
 class SkillDependenciesRequest(_RequestModel):
@@ -682,11 +684,22 @@ def create_app(services: ApiServices) -> FastAPI:
         attachments: list[dict[str, object]] = []
         try:
             attachments = promote(attachment_workspace_id, principal, payload.attachments)
+            create_kwargs: dict[str, object] = {
+                "message": payload.message,
+                "provider": provider,
+                "model_id": payload.selection.model_id,
+                "workspace_id": payload.workspace_id,
+                "project_id": payload.project_id,
+                "idempotency_key": _idempotency(request),
+                "attachments": attachments,
+                "new_conversation_id": conversation_id,
+                "code_mode": payload.code_mode,
+            }
+            if payload.permission_mode is not None:
+                create_kwargs["permission_mode"] = payload.permission_mode
             result = application.create(  # type: ignore[union-attr]
                 ProviderCatalogContext(principal.user_id, "conversation.create"),
-                message=payload.message, provider=provider, model_id=payload.selection.model_id,
-                workspace_id=payload.workspace_id, project_id=payload.project_id, idempotency_key=_idempotency(request),
-                attachments=attachments, new_conversation_id=conversation_id, code_mode=payload.code_mode,
+                **create_kwargs,
             )
         except Exception:
             discard_promoted(workspace_for(attachment_workspace_id, principal), attachments)
@@ -699,13 +712,38 @@ def create_app(services: ApiServices) -> FastAPI:
         data = _jsonable(result)
         if not isinstance(data, dict):
             raise ValueError("conversation response is invalid")
-        return JSONResponse({key: data.get(key) for key in ("conversation_id", "title", "turn_id", "message_id", "state")}, status_code=201)
+        response_payload = {key: data.get(key) for key in ("conversation_id", "title", "turn_id", "message_id", "state")}
+        if "mode" in data:
+            response_payload["mode"] = data["mode"]
+        if "permission_mode" in data:
+            response_payload["permission_mode"] = data["permission_mode"]
+        return JSONResponse(response_payload, status_code=201)
 
     @app.get("/v1/conversations")
     async def list_conversations(request: Request) -> JSONResponse:
         principal = principal_for(request)
         services.security.authorize(principal, action="conversation.list", resource_id=None, purpose="conversation.read")
         return JSONResponse(_jsonable(require_port(services.conversation_application).list(principal.user_id)))  # type: ignore[union-attr]
+
+    @app.patch("/v1/conversations/{conversation_id}/permission-mode")
+    async def update_conversation_permission_mode(
+        conversation_id: str,
+        payload: UpdateConversationPermissionModeRequest,
+        request: Request,
+    ) -> JSONResponse:
+        principal = principal_for(request, mutable=True)
+        services.security.authorize(
+            principal,
+            action="conversation.send",
+            resource_id=conversation_id,
+            purpose="conversation.permission_mode",
+        )
+        app_service = require_port(services.conversation_application)
+        setter = getattr(app_service, "set_permission_mode", None)
+        if not callable(setter):
+            raise ApplicationValidationError("permission_mode update not supported")
+        result = setter(conversation_id, principal.user_id, payload.permission_mode)
+        return JSONResponse(_jsonable(result))
 
     @app.post("/v1/schedules", status_code=201)
     async def create_scheduled_chat(payload: CreateScheduledChatRequest, request: Request) -> JSONResponse:
@@ -795,11 +833,15 @@ def create_app(services: ApiServices) -> FastAPI:
         conversation_id = application.allocate_conversation_id()  # type: ignore[union-attr]
         attachments = promote(project.workspace_id, principal, payload.attachments)
         try:
+            create_kwargs: dict[str, object] = {}
+            if payload.permission_mode is not None:
+                create_kwargs["permission_mode"] = payload.permission_mode
             result = application.create(  # type: ignore[union-attr]
                 ProviderCatalogContext(principal.user_id, "project.conversation.create"),
                 message=payload.message, provider=provider, model_id=payload.selection.model_id,
                 workspace_id=project.workspace_id, idempotency_key=_idempotency(request), project_id=project_id,
                 attachments=attachments, new_conversation_id=conversation_id, code_mode=payload.code_mode,
+                **create_kwargs,
             )
         except Exception:
             discard_promoted(workspace_for(project.workspace_id, principal), attachments)
@@ -922,6 +964,26 @@ def create_app(services: ApiServices) -> FastAPI:
         services.security.authorize(principal, action="conversation.read", resource_id=conversation_id, purpose="conversation.read")
         conversation = conversation_record(conversation_id, principal)
         return JSONResponse({**conversation, "workspace": workspace_state(conversation, principal)})
+
+    @app.get("/v1/conversations/{conversation_id}/activities")
+    async def get_conversation_older_activities(
+        conversation_id: str,
+        request: Request,
+        before_id: int = 0,
+        limit: int = 100,
+    ) -> JSONResponse:
+        principal = principal_for(request)
+        services.security.authorize(principal, action="conversation.read", resource_id=conversation_id, purpose="conversation.read")
+        app_port = require_port(services.conversation_application)
+        if not hasattr(app_port, "list_older_activities"):
+            return JSONResponse({"activities": [], "has_older_activities": False, "oldest_activity_id": None})
+        result = app_port.list_older_activities(  # type: ignore[union-attr]
+            conversation_id,
+            principal.user_id,
+            before_id=before_id,
+            limit=min(max(limit, 1), 300),
+        )
+        return JSONResponse(_jsonable(result))
 
     @app.post("/v1/conversations/{conversation_id}/workspace/inspect")
     async def inspect_conversation_workspace(conversation_id: str, payload: InspectWorkspaceFolderRequest, request: Request) -> JSONResponse:
@@ -1145,9 +1207,13 @@ def create_app(services: ApiServices) -> FastAPI:
             workspace_id, _ = effective_workspace_id(conversation_record(conversation_id, principal), principal)
             attachments = promote(workspace_id, principal, payload.attachments)
         try:
+            send_kwargs: dict[str, object] = {}
+            if payload.permission_mode is not None:
+                send_kwargs["permission_mode"] = payload.permission_mode
             result = require_port(services.conversation_application).send(
                 principal.user_id, conversation_id, payload.message, _idempotency(request),
                 attachments=attachments, provider=provider, model_id=model_id, code_mode=payload.code_mode,
+                **send_kwargs,
             )  # type: ignore[union-attr]
         except Exception:
             discard_promoted(workspace_for(workspace_id, principal), attachments)
@@ -2189,7 +2255,7 @@ def _project_sidebar_public(item: object) -> dict[str, object]:
     if not isinstance(data, dict):
         raise ValueError("project sidebar response is invalid")
     return {"project_id": data.get("project_id"), "name": data.get("name"), "description": data.get("description"), "chats": [
-        {"conversation_id": chat.get("conversation_id"), "title": chat.get("title"), "state": chat.get("state"), "updated_at": chat["updated_at"].isoformat() if isinstance(chat.get("updated_at"), datetime) else None}
+        {"conversation_id": chat.get("conversation_id"), "title": chat.get("title"), "state": chat.get("state"), "mode": chat.get("mode") if chat.get("mode") in {"chat", "code"} else "chat", "updated_at": chat["updated_at"].isoformat() if isinstance(chat.get("updated_at"), datetime) else None}
         for chat in data.get("chats", []) if isinstance(chat, dict)
     ]}
 

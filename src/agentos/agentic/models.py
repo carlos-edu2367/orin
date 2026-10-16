@@ -39,6 +39,7 @@ _SENSITIVE_KEY_PARTS = (
     "credential",
     "cookie",
     "authorization",
+    "private_key",
     "raw_prompt",
     "prompt",
     "prompt_text",
@@ -47,8 +48,6 @@ _SENSITIVE_KEY_PARTS = (
     "raw_input",
     "raw_output",
     "provider_payload",
-    "stdout",
-    "stderr",
 )
 
 # These fields are bounded numeric telemetry, not prompt contents or provider
@@ -149,7 +148,7 @@ def _bounded(
                     item_limit=MAX_USER_QUESTION_ITEMS if is_questions else MAX_APPROVAL_ITEMS,
                     text_limit=MAX_USER_QUESTION_TEXT if is_questions else MAX_APPROVAL_TEXT,
                 )
-            elif depth == 0 and key == "output_tail" and isinstance(item, str):
+            elif depth == 0 and key in {"output_tail", "plan_content"} and isinstance(item, str):
                 result[key] = _bounded(
                     item,
                     depth=depth + 1,

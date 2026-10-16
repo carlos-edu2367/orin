@@ -113,11 +113,117 @@ describe('conversation activity reducer', () => {
     const snapshot = parseConversation({
       conversation_id: 'conversation-1', title: 'Teste', state: 'running', provider: 'openrouter', model_id: 'model',
       messages: [], turns: [], activity_cursor: 'a.cursor',
+      has_older_activities: true,
+      oldest_activity_id: 42,
       activities: [{ event_id: 'activity:turn-1:1', event_type: 'turn.started', summary: 'Turn started', agent_id: 'agent:c:main', payload: {}, cursor: 'a.cursor' }],
     })
 
     expect(snapshot.activity_cursor).toBe('a.cursor')
+    expect(snapshot.has_older_activities).toBe(true)
+    expect(snapshot.oldest_activity_id).toBe(42)
     expect(snapshot.activities).toHaveLength(1)
     expect(snapshot.activities[0]).toMatchObject({ eventId: 'activity:turn-1:1', state: 'working' })
+  })
+
+  it('prepends older lazy-loaded activities in chronological order without duplicates', () => {
+    const initial = activityReducer(createActivityState(), {
+      type: 'snapshot',
+      cursor: '10',
+      events: [event('event-3', '3'), event('event-4', '4', 'turn.completed')],
+    })
+    const prepended = activityReducer(initial, {
+      type: 'prepend_older',
+      events: [event('event-1', '1'), event('event-2', '2'), event('event-3', '3')],
+    })
+
+    expect(prepended.events.map((item) => item.eventId)).toEqual(['event-1', 'event-2', 'event-3', 'event-4'])
+    expect(prepended.events[0].state).toBe('completed')
+  })
+
+  it('ignores literal [REDACTED] stdout/stderr and falls back to output_tail while suppressing exitCode 0 on failed tools', () => {
+    const redactedEvent = parseConversationActivityEvent(
+      {
+        event_id: 'evt-redacted-1',
+        event_type: 'tool.finished',
+        summary: '$ npm test',
+        agent_id: 'agent:c:main',
+        payload: {
+          tool_name: 'run_command',
+          status: 'succeeded',
+          command: 'npm test',
+          stdout: '[REDACTED]',
+          stderr: '[REDACTED]',
+          output_tail: 'PASS tests/unit/app.test.ts',
+          exit_code: 0,
+        },
+      },
+      'a.11',
+    )
+    expect(redactedEvent.outputTail).toBe('PASS tests/unit/app.test.ts')
+    expect(redactedEvent.bashOutput?.stdout).toBe('PASS tests/unit/app.test.ts')
+    expect(redactedEvent.bashOutput?.stderr).toBeUndefined()
+
+    const cancelledCmd = parseConversationActivityEvent(
+      {
+        event_id: 'evt-cancel-cmd',
+        event_type: 'tool.finished',
+        summary: 'run_command falhou',
+        agent_id: 'agent:c:main',
+        payload: {
+          tool_name: 'run_command',
+          status: 'failed',
+          error_code: 'COMMAND_CANCELLED_INTERACTIVE',
+          command: 'npx create-vite@latest',
+          exit_code: 0,
+        },
+      },
+      'a.12',
+    )
+    expect(cancelledCmd.state).toBe('failed')
+    expect(cancelledCmd.exitCode).toBeUndefined()
+    expect(cancelledCmd.bashOutput?.exit_code).toBeUndefined()
+  })
+
+  it('keeps pending and in_progress todos as pending when a turn fails or is blocked even if turn.completed follows', () => {
+    let state = applyActivityEvent(createActivityState(), {
+      eventId: 'evt-todo-init',
+      cursor: '1',
+      turnId: 'turn-fail-1',
+      type: 'todo.updated',
+      kind: 'tool',
+      state: 'working',
+      agentId: 'agent:c:main',
+      summary: 'Updated todos',
+      todos: [
+        { id: '1', content: 'Done step', status: 'completed' },
+        { id: '2', content: 'Running step', status: 'in_progress' },
+        { id: '3', content: 'Pending step', status: 'pending' },
+      ],
+    })
+
+    state = applyActivityEvent(state, {
+      eventId: 'evt-blocked',
+      cursor: '2',
+      turnId: 'turn-fail-1',
+      type: 'code_mode.blocked',
+      kind: 'lifecycle',
+      state: 'failed',
+      agentId: 'agent:c:main',
+      summary: 'Blocked by tool failure',
+    })
+    expect(state.todos.map((t) => t.status)).toEqual(['completed', 'pending', 'pending'])
+
+    state = applyActivityEvent(state, {
+      eventId: 'evt-turn-complete-after-blocked',
+      cursor: '3',
+      turnId: 'turn-fail-1',
+      type: 'turn.completed',
+      kind: 'lifecycle',
+      state: 'completed',
+      agentId: 'agent:c:main',
+      summary: 'Turn ended',
+    })
+    expect(state.status).toBe('failed')
+    expect(state.todos.map((t) => t.status)).toEqual(['completed', 'pending', 'pending'])
   })
 })

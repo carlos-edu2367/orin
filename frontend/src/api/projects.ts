@@ -1,7 +1,8 @@
 import type { ApiClient } from './client'
 import { invalidResponseError } from './errors'
 
-export type ProjectChat = { conversation_id: string; title: string; state: string; updated_at: string | null }
+export type ProjectChat = { conversation_id: string; title: string; state: string; updated_at: string | null; mode?: 'chat' | 'code' }
+export type ProjectSidebarChat = ProjectChat
 export type Project = { project_id: string; name: string; description: string | null; workspace_id: string; created_at: string | null; updated_at: string | null; archived_at: string | null }
 export type ProjectSidebarItem = Pick<Project, 'project_id' | 'name' | 'description'> & { chats: ProjectChat[] }
 
@@ -23,7 +24,22 @@ export function listProjectSidebar(client: ApiClient): Promise<{ items: ProjectS
     return { items: data.items.map((value) => {
       const item = record(value)
       if (!Array.isArray(item.chats)) throw invalidResponseError()
-      return { project_id: text(item.project_id), name: text(item.name), description: optionalText(item.description), chats: item.chats.map((chat) => { const row = record(chat); return { conversation_id: text(row.conversation_id), title: text(row.title), state: text(row.state), updated_at: optionalText(row.updated_at) } }) }
+      return {
+        project_id: text(item.project_id),
+        name: text(item.name),
+        description: optionalText(item.description),
+        chats: item.chats.map((chat) => {
+          const row = record(chat)
+          const mode: 'chat' | 'code' = row.mode === 'code' ? 'code' : 'chat'
+          return {
+            conversation_id: text(row.conversation_id),
+            title: text(row.title),
+            state: text(row.state),
+            updated_at: optionalText(row.updated_at),
+            mode,
+          }
+        }),
+      }
     }) }
   } })
 }

@@ -30,14 +30,58 @@ export type StructuredPatchHunk = {
   oldLines: number
   newStart: number
   newLines: number
+  old_start?: number
+  old_lines?: number
+  new_start?: number
+  new_lines?: number
   lines: string[]
 }
 
+export type ActivityDiffHunk = {
+  old_start: number
+  old_lines: number
+  new_start: number
+  new_lines: number
+  oldStart: number
+  oldLines: number
+  newStart: number
+  newLines: number
+  lines: string[]
+}
+
+export type ActivityDiff = {
+  path: string
+  added_lines: number
+  removed_lines: number
+  structured_patch: ActivityDiffHunk[]
+  summary?: string
+}
+
+export type ActivityBashOutput = {
+  command?: string
+  description?: string
+  stdout?: string
+  stderr?: string
+  exit_code?: number | null
+  duration_ms?: number
+  background?: boolean
+  auto_backgrounded?: boolean
+  shell_id?: string
+  detected_url?: string
+}
+
+export type ActivityPlanApproval = {
+  plan_path?: string
+  plan_content?: string
+  allowed_prompts?: Array<{ tool?: string; prompt?: string }>
+}
+
 export type TodoItem = {
-  id: string
+  id?: string
   content: string
   status: 'pending' | 'in_progress' | 'completed'
-  activeForm: string
+  activeForm?: string
+  active_form?: string
 }
 
 export type ConversationActivityEvent = {
@@ -51,12 +95,20 @@ export type ConversationActivityEvent = {
   parentAgentId?: string | null
   turnId?: string
   messageId?: string
+  tool?: string
   toolName?: string
   toolKind?: string
+  command?: string
   invocationId?: string
   status?: string
   label?: string
   path?: string
+  /** Normalized file path for file/plan tools. */
+  filePath?: string
+  /** Optional human-readable description (e.g., bash description). */
+  description?: string
+  /** True when edit_file / write_file produced no diff changes. */
+  unchanged?: boolean
   /** Private workspace image created from a browser observation. */
   screenshotPath?: string
   summary: string
@@ -78,6 +130,18 @@ export type ConversationActivityEvent = {
   structuredPatch?: StructuredPatchHunk[]
   addedLines?: number
   removedLines?: number
+  /** Structured diff output for write_file / edit_file. */
+  diff?: ActivityDiff
+  /** Structured terminal output for bash / run_command. */
+  bashOutput?: ActivityBashOutput
+  /** Structured plan approval metadata emitted on exit_plan_mode / plan_approval. */
+  planApproval?: ActivityPlanApproval
+  planPath?: string
+  planContent?: string
+  autoBackgrounded?: boolean
+  detectedUrl?: string
+  shellId?: string
+  exitCode?: number | null
   /** Interactive tool permission request emitted in Code Mode. */
   toolPermission?: ToolPermissionRequest
   /** Live terminal stdout/stderr tail emitted by `tool.progressed`. */
@@ -86,6 +150,8 @@ export type ConversationActivityEvent = {
   /** Live task list emitted by `todo_write`. */
   todos?: TodoItem[]
 }
+
+export type ActivityToolCall = ConversationActivityEvent
 
 export type ToolPermissionDecision = 'allow_once' | 'allow_always' | 'deny'
 
@@ -99,6 +165,7 @@ export type ToolPermissionRequest = {
   structuredPatch?: StructuredPatchHunk[]
   addedLines?: number
   removedLines?: number
+  planApproval?: ActivityPlanApproval
 }
 
 export type ContextUsage = {
@@ -204,9 +271,17 @@ export function kindFor(type: string, toolKind?: string): ActivityKind {
 export function stateFor(type: string, status?: string, errorCode?: string | null): ActivityState {
   if (type === 'code_mode.completed_with_caveats') return 'completed'
   if (type === 'code_mode.blocked') return 'failed'
-  if (type === 'turn.completed') return 'completed'
-  if (type === 'turn.failed' || type === 'delegation.failed') {
-    return errorCode === 'TURN_CANCELLED' ? 'cancelled' : 'failed'
+  if (type === 'turn.completed' || type === 'TURN_COMPLETED') return 'completed'
+  if (
+    type === 'turn.cancelled' ||
+    type === 'execution.canceled' ||
+    type === 'TURN_CANCELLED' ||
+    type === 'EXECUTION_CANCELED'
+  ) {
+    return 'cancelled'
+  }
+  if (type === 'turn.failed' || type === 'TURN_FAILED' || type === 'delegation.failed') {
+    return errorCode === 'TURN_CANCELLED' || status === 'cancelled' ? 'cancelled' : 'failed'
   }
   if (type === 'turn.waiting_user' || type === 'tool.permission_required') return 'waiting_user'
   if (type === 'tool.requested' || type === 'tool.started' || type === 'tool.progressed') return 'waiting_tool'
@@ -220,7 +295,18 @@ export function stateFor(type: string, status?: string, errorCode?: string | nul
   // ARTIFACT_CREATED emission), so there is no "in progress" state for it to
   // pass through.
   if (type === 'artifact.created') return 'completed'
-  if (type === 'memory.learned') return 'completed'
-  if (type === 'turn.started') return 'working'
+  if (type === 'memory.learned' || type === 'todo.updated' || type === 'TODO_UPDATED') return 'completed'
+  if (type === 'turn.started' || type === 'TURN_STARTED') return 'working'
   return 'working'
 }
+
+export type TurnActivityState = {
+  events: ConversationActivityEvent[]
+  cursor: string
+  connection: 'snapshot' | 'connecting' | 'live' | 'degraded' | 'resyncing'
+  resyncRequired: boolean
+  todos: TodoItem[]
+  activePhase: string | null
+  status: 'idle' | 'running' | 'completed' | 'failed' | 'cancelled'
+}
+

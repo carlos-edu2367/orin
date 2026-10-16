@@ -93,10 +93,15 @@ def test_file_diagnostic_picks_ruff_for_python_files(tmp_path: Path) -> None:
     assert file_diagnostic_command("src/app.py", project_root=tmp_path) == 'python -m ruff check "src/app.py"'
 
 
-def test_file_diagnostic_only_lints_typescript_when_a_node_project_is_present(tmp_path: Path) -> None:
+def test_file_diagnostic_only_lints_typescript_when_a_node_project_and_local_eslint_are_present(tmp_path: Path) -> None:
     assert file_diagnostic_command("src/App.tsx", project_root=tmp_path) is None
 
     (tmp_path / "package.json").write_text("{}", encoding="utf-8")
+    assert file_diagnostic_command("src/App.tsx", project_root=tmp_path) is None
+
+    eslint_bin = tmp_path / "node_modules" / ".bin"
+    eslint_bin.mkdir(parents=True)
+    (eslint_bin / "eslint").write_text("", encoding="utf-8")
 
     assert file_diagnostic_command("src/App.tsx", project_root=tmp_path) == 'npx --no-install eslint "src/App.tsx"'
 

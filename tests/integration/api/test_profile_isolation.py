@@ -33,6 +33,8 @@ OWNED = {
     ("DELETE", "/v1/schedules/{schedule_id}"),
     ("DELETE", "/v1/memories/{memory_id}"), ("PATCH", "/v1/memories/{memory_id}"),
     ("GET", "/v1/conversations/{conversation_id}"),
+    ("GET", "/v1/conversations/{conversation_id}/activities"),
+    ("PATCH", "/v1/conversations/{conversation_id}/permission-mode"),
     ("POST", "/v1/conversations/{conversation_id}/workspace/inspect"),
     ("PUT", "/v1/conversations/{conversation_id}/workspace"),
     ("DELETE", "/v1/conversations/{conversation_id}/workspace"),

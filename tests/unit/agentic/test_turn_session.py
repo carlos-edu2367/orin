@@ -314,7 +314,7 @@ def test_a_mixed_batch_reports_success_and_failure_as_failed() -> None:
 def test_a_subagent_gets_the_same_output_budget_as_the_main_agent() -> None:
     from agentos.agentic.session import SUBAGENT_MAX_OUTPUT_TOKENS
 
-    assert SUBAGENT_MAX_OUTPUT_TOKENS == 4096
+    assert SUBAGENT_MAX_OUTPUT_TOKENS == 16384
 
 
 def test_the_subagent_runtime_is_built_with_that_budget(monkeypatch) -> None:
@@ -340,7 +340,7 @@ def test_the_subagent_runtime_is_built_with_that_budget(monkeypatch) -> None:
     outcome = _session_with_one_subagent()._ask_agent("Pesquisador", "faça x")
 
     assert outcome.status == "succeeded"
-    assert captured[0].max_output_tokens == 4096
+    assert captured[0].max_output_tokens == 16384
 
 
 def test_the_agent_is_told_exactly_which_tools_are_published_this_phase(tmp_path: Path) -> None:

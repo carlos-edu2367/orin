@@ -69,10 +69,22 @@ export function renderActivityGroup(
 ) {
   const first = group.events[0]
   if (first.toolPermission) {
+    const latest = group.events[group.events.length - 1] ?? first
+    const isResolved =
+      group.state === 'completed' ||
+      group.state === 'failed' ||
+      group.state === 'cancelled' ||
+      latest.state === 'completed' ||
+      latest.state === 'failed' ||
+      latest.state === 'cancelled' ||
+      latest.status === 'completed' ||
+      latest.status === 'succeeded' ||
+      latest.status === 'failed' ||
+      latest.status === 'cancelled'
     return (
       <ToolPermissionCard
         request={first.toolPermission}
-        active={true}
+        active={!isResolved}
         onDecision={onToolPermission ? (decision) => onToolPermission(first, decision) : undefined}
       />
     )

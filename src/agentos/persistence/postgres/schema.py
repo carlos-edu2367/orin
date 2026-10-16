@@ -554,6 +554,8 @@ conversations = Table(
     Column("provider", String(32), nullable=False), Column("model_id", String(512), nullable=False),
     Column("state", String(32), nullable=False), Column("created_at", DateTime(timezone=True), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False), Column("project_id", String(255), nullable=True),
+    Column("mode", String(16), nullable=False, server_default="chat"),
+    Column("permission_mode", String(32), nullable=False, server_default="ask_permissions"),
 )
 Index("ix_conversations_user_updated", conversations.c.user_id, conversations.c.updated_at)
 Index("ix_conversations_project_updated", conversations.c.project_id, conversations.c.updated_at)

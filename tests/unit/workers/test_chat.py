@@ -525,3 +525,80 @@ def test_num_ctx_does_not_follow_the_liberated_context_budget() -> None:
 
     assert worker._num_ctx_for(turn) < worker._max_context_tokens_for(turn)
     assert worker._num_ctx_for(turn) <= chat_module.DEFAULT_MAX_CONTEXT_TOKENS + chat_module.CONTEXT_WINDOW_RESERVE_TOKENS
+
+
+def test_chat_worker_handles_application_conflict_error_when_cancelled_concurrently() -> None:
+    from agentos.api.contracts import ApplicationConflictError
+
+    class CancelRaceStore(Store):
+        def cancel_requested(self, turn_id):
+            return True
+
+    settled: list[tuple[str, str | None]] = []
+    runtime = ClosableRuntime(AgenticRunResult("failed", error_code="PROVIDER_FAILED"))
+    worker = ChatWorker(CancelRaceStore(), runtime_factory=lambda turn: runtime)
+
+    def conflict_project(turn, target, reason, **kwargs):
+        if target in ("CANCELLED", "FAILED"):
+            raise ApplicationConflictError("Illegal execution state transition from CANCELLED to FAILED.", current_state_version=2)
+
+    worker._project = conflict_project
+    worker._settle_code_mode = lambda turn, state, *, error_code=None: settled.append((state, error_code))
+
+    # Must not raise ApplicationConflictError and must settle code mode as cancelled
+    worker.run("turn-1")
+
+    assert runtime.closed == 1
+    assert settled == [("cancelled", "TURN_CANCELLED")]
+
+
+def test_watchdog_handles_naive_queued_at_datetime_without_raising() -> None:
+    from sqlalchemy import update
+    from agentos.persistence.postgres.schema import conversation_dispatches
+
+    engine = create_engine("sqlite://", future=True)
+    metadata.create_all(engine)
+    store = PostgresChatStore(engine)
+    receipt = store.create(
+        user_id="user-1", message="hello", provider="openrouter", model_id="model-1", idempotency_key="watchdog-naive",
+    )
+    naive_past = datetime(2020, 1, 1, 0, 0, 0)
+    with engine.begin() as conn:
+        conn.execute(
+            update(conversation_dispatches)
+            .where(conversation_dispatches.c.turn_id == receipt.turn_id)
+            .values(queued_at=naive_past)
+        )
+
+    worker = ChatWorker(store)
+    expired = worker.watchdog()
+
+    assert receipt.turn_id in expired
+
+
+def test_runtime_store_forwards_reset_assistant_message_to_store() -> None:
+    reset_calls: list[dict[str, object]] = []
+
+    class ResettableStore(Store):
+        def reset_assistant_message(self, turn: dict[str, object]) -> None:
+            reset_calls.append(turn)
+
+    worker = ChatWorker(ResettableStore())
+    runtime_store = chat_module._RuntimeStore(worker, TURN)
+    runtime_store.reset_assistant_message(TURN)
+
+    assert reset_calls == [TURN]
+
+
+def test_conversation_provider_port_preserves_completed_with_caveats() -> None:
+    runtime = ClosableRuntime(AgenticRunResult("completed_with_caveats", error_code="CODE_COMPLETION_GATE_FAILED"))
+    port = chat_module._ConversationProviderPort(runtime, TURN)
+    outcome = port.generate(None)
+
+    assert isinstance(outcome, chat_module.ProviderFinal)
+    assert port.completed_with_caveats is True
+    assert port.error_code == "CODE_COMPLETION_GATE_FAILED"
+
+
+
+

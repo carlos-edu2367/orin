@@ -197,6 +197,31 @@ def _total_token_usage(usages) -> dict[str, object]:
     }
 
 
+_VALID_PERMISSION_MODES = frozenset({"accept_edits", "plan_mode", "ask_permissions", "full_autonomy"})
+
+
+def _ensure_conversation_mode_columns(engine: Engine) -> None:
+    """Ensure existing local SQLite/Postgres databases have mode and permission_mode on conversations."""
+    from sqlalchemy import inspect as sa_inspect, text
+    try:
+        inspector = sa_inspect(engine)
+        if not inspector.has_table("conversations"):
+            return
+        cols = {col["name"] for col in inspector.get_columns("conversations")}
+        with engine.begin() as conn:
+            if "mode" not in cols:
+                conn.execute(text("ALTER TABLE conversations ADD COLUMN mode VARCHAR(16) NOT NULL DEFAULT 'chat'"))
+            if "permission_mode" not in cols:
+                conn.execute(text("ALTER TABLE conversations ADD COLUMN permission_mode VARCHAR(32) NOT NULL DEFAULT 'ask_permissions'"))
+            if "mode" not in cols and inspector.has_table("conversation_turns"):
+                conn.execute(text(
+                    "UPDATE conversations SET mode = 'code', permission_mode = 'accept_edits' "
+                    "WHERE conversation_id IN (SELECT DISTINCT conversation_id FROM conversation_turns WHERE code_mode = 'code')"
+                ))
+    except Exception:
+        pass
+
+
 @dataclass(frozen=True, slots=True)
 class ChatReceipt:
     conversation_id: str
@@ -204,6 +229,8 @@ class ChatReceipt:
     turn_id: str
     message_id: str
     state: str
+    mode: str = "chat"
+    permission_mode: str = "ask_permissions"
 
 
 class PostgresChatStore:
@@ -212,6 +239,7 @@ class PostgresChatStore:
         self.activity_store = activity_store
         self._command_library = command_library
         self._skill_library = skill_library
+        _ensure_conversation_mode_columns(engine)
 
     def _activity(
         self,
@@ -225,6 +253,21 @@ class PostgresChatStore:
     ) -> None:
         if self.activity_store is None or turn is None:
             return
+        effective_agent_id = agent_id or self.main_agent_id(turn)
+        if event_type is AgentActivityEventType.TURN_FAILED:
+            try:
+                with self._engine.connect() as connection:
+                    already_failed = connection.execute(
+                        select(conversation_activity_events.c.id).where(
+                            conversation_activity_events.c.turn_id == str(turn["turn_id"]),
+                            conversation_activity_events.c.agent_id == effective_agent_id,
+                            conversation_activity_events.c.event_type == AgentActivityEventType.TURN_FAILED.value,
+                        )
+                    ).first()
+                if already_failed is not None:
+                    return
+            except Exception:
+                pass
         # ``sequence`` is unique per turn, so it is derived from the activity log
         # itself rather than from another table's identity. Concurrent writers
         # (the runtime emits several events back to back) lose the race on the
@@ -236,7 +279,7 @@ class PostgresChatStore:
                     event_id=f"activity:{turn['turn_id']}:{sequence}",
                     conversation_id=str(turn["conversation_id"]), turn_id=str(turn["turn_id"]),
                     execution_id=str(turn["execution_id"]), user_id=str(turn["user_id"]),
-                    agent_id=agent_id or self.main_agent_id(turn), parent_agent_id=parent_agent_id,
+                    agent_id=effective_agent_id, parent_agent_id=parent_agent_id,
                     event_type=event_type, sequence=sequence,
                     summary=summary[:512] or "Atividade", payload=payload or {}, created_at=datetime.now(UTC),
                 )
@@ -543,35 +586,62 @@ class PostgresChatStore:
         # Stable across turns so the conversation-level graph keeps one root node.
         return f"agent:{turn['conversation_id']}:main"
 
-    def create(self, *, user_id: str, message: str, provider: str, model_id: str, idempotency_key: str, conversation_id: str | None = None, project_id: str | None = None, workspace_id: str | None = None, attachments: Sequence[Mapping[str, object]] = (), new_conversation_id: str | None = None, scheduled_by_schedule_id: str | None = None, code_mode: str = "auto") -> ChatReceipt:
+    def create(self, *, user_id: str, message: str, provider: str, model_id: str, idempotency_key: str, conversation_id: str | None = None, project_id: str | None = None, workspace_id: str | None = None, attachments: Sequence[Mapping[str, object]] = (), new_conversation_id: str | None = None, scheduled_by_schedule_id: str | None = None, code_mode: str = "chat", permission_mode: str | None = None) -> ChatReceipt:
         message = message.strip()
         attachments = list(attachments)
         expansion = _expand_command(self._command_library, self._skill_library, user_id, message)
         if len(message) > 16000: raise ValueError("message must be a bounded non-blank string")
         if not message and not attachments: raise ValueError("message must be a bounded non-blank string")
         title_source = message or str(attachments[0].get("original_name") or "Arquivo enviado")
-        requested_code_mode = str(code_mode or "auto")
+        requested_code_mode = str(code_mode or "chat")
         if requested_code_mode not in {"auto", "code", "chat"}:
             raise ValueError("code_mode is invalid")
-        work_kind = detect_code_request(message) if requested_code_mode != "chat" else None
-        code_active = requested_code_mode == "code" or (requested_code_mode == "auto" and work_kind is not None)
         now = datetime.now(UTC)
         with self._engine.begin() as c:
             previous = c.execute(select(conversation_turns).where(conversation_turns.c.user_id == user_id, conversation_turns.c.idempotency_key == idempotency_key)).mappings().first()
             if previous:
                 row = c.execute(select(conversations).where(conversations.c.conversation_id == previous["conversation_id"])).mappings().one()
-                return ChatReceipt(previous["conversation_id"], row["title"], previous["turn_id"], previous["assistant_message_id"], previous["state"])
+                return ChatReceipt(
+                    previous["conversation_id"],
+                    row["title"],
+                    previous["turn_id"],
+                    previous["assistant_message_id"],
+                    previous["state"],
+                    mode=str(row.get("mode") or "chat"),
+                    permission_mode=str(row.get("permission_mode") or "ask_permissions"),
+                )
             if conversation_id is None:
                 conversation_id = new_conversation_id or _id("chat")
+                conv_mode = "code" if requested_code_mode == "code" else "chat"
+                default_perm = "accept_edits" if conv_mode == "code" else "ask_permissions"
+                conv_perm = str(permission_mode or default_perm)
+                if conv_perm not in _VALID_PERMISSION_MODES:
+                    raise ValueError("permission_mode is invalid")
+                code_active = conv_mode == "code"
                 if project_id is not None:
                     project = c.execute(select(projects.c.project_id, projects.c.workspace_id).where(projects.c.project_id == project_id, projects.c.user_id == user_id, projects.c.archived_at.is_(None))).mappings().first()
                     if project is None: raise ApplicationNotFoundError(project_id)
                     workspace_id = str(project["workspace_id"]) if project["workspace_id"] is not None else workspace_id
-                c.execute(insert(conversations).values(conversation_id=conversation_id, user_id=user_id, title=_title(title_source), provider=provider, model_id=model_id, project_id=project_id, state="queued", created_at=now, updated_at=now))
+                c.execute(insert(conversations).values(
+                    conversation_id=conversation_id, user_id=user_id, title=_title(title_source),
+                    provider=provider, model_id=model_id, project_id=project_id,
+                    mode=conv_mode, permission_mode=conv_perm,
+                    state="queued", created_at=now, updated_at=now,
+                ))
                 sequence = 1
             else:
                 row = c.execute(select(conversations).where(conversations.c.conversation_id == conversation_id, conversations.c.user_id == user_id)).mappings().first()
                 if row is None: raise ApplicationNotFoundError(conversation_id)
+                conv_mode = "code" if str(row.get("mode") or "chat") == "code" else "chat"
+                conv_perm = str(row.get("permission_mode") or ("accept_edits" if conv_mode == "code" else "ask_permissions"))
+                if permission_mode and permission_mode in _VALID_PERMISSION_MODES and permission_mode != conv_perm:
+                    conv_perm = permission_mode
+                    c.execute(update(conversations).where(
+                        conversations.c.conversation_id == conversation_id,
+                        conversations.c.user_id == user_id,
+                    ).values(permission_mode=conv_perm, updated_at=now))
+                # Strict invariant: a conversation is either chat or code forever.
+                code_active = conv_mode == "code"
                 requested_provider, requested_model_id = provider.strip(), model_id.strip()
                 if bool(requested_provider) != bool(requested_model_id):
                     raise ValueError("provider and model_id must be provided together")
@@ -628,21 +698,25 @@ class PostgresChatStore:
                 } for item in attachments])
             c.execute(insert(conversation_turns).values(turn_id=turn_id, conversation_id=conversation_id, user_id=user_id, execution_id=execution_id, user_message_id=user_message_id, assistant_message_id=assistant_message_id, provider=provider, model_id=model_id, state="queued", idempotency_key=idempotency_key, scheduled_by_schedule_id=scheduled_by_schedule_id, code_mode="code" if code_active else None, created_at=now, updated_at=now))
             if code_active:
+                work_kind = detect_code_request(message)
+                autonomy_map = {
+                    "accept_edits": CodeAutonomy.CODE_AUTONOMY.value,
+                    "plan_mode": CodeAutonomy.PLAN_MODE.value,
+                    "ask_permissions": CodeAutonomy.APPROVAL_REQUIRED.value,
+                    "full_autonomy": CodeAutonomy.FULL_AUTONOMY.value,
+                }
                 c.execute(insert(code_mode_runs).values(
                     run_id=f"code_{turn_id}", execution_id=execution_id, turn_id=turn_id,
                     conversation_id=conversation_id, user_id=user_id,
                     work_kind=(work_kind.value if work_kind is not None else "implementation"),
-                    stage=CodeStage.PLANNING.value, autonomy=CodeAutonomy.APPROVAL_REQUIRED.value,
+                    stage=CodeStage.IMPLEMENTING.value if conv_perm != "plan_mode" else CodeStage.PLANNING.value,
+                    autonomy=autonomy_map.get(conv_perm, CodeAutonomy.CODE_AUTONOMY.value),
                     plan_path=None, plan_versioned=None, completion_kind=None, caveats=None,
                     created_at=now, updated_at=now,
                 ))
             c.execute(insert(conversation_dispatches).values(turn_id=turn_id, state="pending", attempts=0, queued_at=now, updated_at=now))
             c.execute(insert(conversation_events).values(conversation_id=conversation_id, user_id=user_id, event_type="turn.queued", message_id=assistant_message_id, payload={"state": "queued"}, created_at=now))
             c.execute(update(conversations).where(conversations.c.conversation_id == conversation_id).values(state="queued", updated_at=now))
-            # The Execution is not a best-effort mirror of the turn.  Bind the
-            # canonical persistence adapter to this very transaction so a
-            # committed chat turn always has its Execution, command receipt and
-            # outbox record, while a failure rolls all of them back together.
             digest = sha256(f"{user_id}|{turn_id}".encode()).hexdigest()
             execution_result = ExecutionApplicationAdapter(c).create({
                 "operation_id": f"op_{digest}",
@@ -662,15 +736,38 @@ class PostgresChatStore:
             })
             if execution_result.get("outcome") not in {"accepted", "already_applied"}:
                 raise RuntimeError("canonical execution creation was not accepted")
-        receipt = ChatReceipt(conversation_id, _title(title_source), turn_id, assistant_message_id, "queued")
+        receipt = ChatReceipt(
+            conversation_id, _title(title_source), turn_id, assistant_message_id, "queued",
+            mode=conv_mode, permission_mode=conv_perm,
+        )
         self._activity({"conversation_id": conversation_id, "turn_id": turn_id, "execution_id": execution_id, "user_id": user_id}, AgentActivityEventType.TURN_STARTED, "Execução agendada na fila" if scheduled_by_schedule_id else "Turn queued", {"scheduled_by_schedule_id": scheduled_by_schedule_id} if scheduled_by_schedule_id else None)
-        if code_active:
-            self._activity({"conversation_id": conversation_id, "turn_id": turn_id, "execution_id": execution_id, "user_id": user_id}, AgentActivityEventType.CODE_MODE_ACTIVATED, "Modo Code ativado — preparando plano", {"work_kind": work_kind.value if work_kind is not None else "implementation", "stage": CodeStage.PLANNING.value})
         return receipt
+
+    def set_permission_mode(self, conversation_id: str, user_id: str, permission_mode: str) -> dict[str, object]:
+        normalized = str(permission_mode or "").strip()
+        if normalized not in _VALID_PERMISSION_MODES:
+            raise ValueError("permission_mode is invalid")
+        now = datetime.now(UTC)
+        with self._engine.begin() as c:
+            row = c.execute(select(conversations).where(
+                conversations.c.conversation_id == conversation_id,
+                conversations.c.user_id == user_id,
+            )).mappings().first()
+            if row is None:
+                raise ApplicationNotFoundError(conversation_id)
+            c.execute(update(conversations).where(
+                conversations.c.conversation_id == conversation_id,
+                conversations.c.user_id == user_id,
+            ).values(permission_mode=normalized, updated_at=now))
+        return {
+            "conversation_id": conversation_id,
+            "mode": str(row.get("mode") or "chat"),
+            "permission_mode": normalized,
+        }
 
     def list(self, user_id: str) -> dict[str, object]:
         with self._engine.connect() as c: rows = c.execute(select(conversations).where(conversations.c.user_id == user_id, conversations.c.project_id.is_(None)).order_by(conversations.c.updated_at.desc())).mappings().all()
-        return {"items": [{"conversation_id": r["conversation_id"], "title": r["title"], "state": r["state"], "updated_at": r["updated_at"].isoformat()} for r in rows]}
+        return {"items": [{"conversation_id": r["conversation_id"], "title": r["title"], "state": r["state"], "mode": str(r.get("mode") or "chat"), "permission_mode": str(r.get("permission_mode") or "ask_permissions"), "updated_at": r["updated_at"].isoformat()} for r in rows]}
 
     def get(self, conversation_id: str, user_id: str) -> dict[str, object]:
         with self._engine.connect() as c:
@@ -695,35 +792,278 @@ class PostgresChatStore:
         }
         activities: list[dict[str, object]] = []
         activity_cursor = "0"
+        has_older_activities = False
+        oldest_activity_id: int | None = None
+        context_usage: dict[str, object] | None = None
         if self.activity_store is not None:
-            # A snapshot replays the whole conversation, including assistant
-            # deltas. Their position between tool and agent events is required
-            # to reconstruct the same interleaved timeline as the live stream.
-            cursor: str = "0"
-            while True:
-                page = self.activity_store.replay(user_id, conversation_id, cursor=cursor, limit=500)
-                if not page.events:
-                    break
-                cursors = page.cursors or tuple(str(item.sequence) for item in page.events)
-                activities.extend(
-                    self._public_activity(item, item_cursor)
-                    for item, item_cursor in zip(page.events, cursors)
+            if hasattr(self.activity_store, "_encode_cursor"):
+                with self._engine.connect() as c:
+                    max_id = c.execute(
+                        select(func.max(conversation_activity_events.c.id)).where(
+                            conversation_activity_events.c.user_id == user_id,
+                            conversation_activity_events.c.conversation_id == conversation_id,
+                        )
+                    ).scalar()
+                    if max_id is not None:
+                        activity_cursor = self.activity_store._encode_cursor(
+                            user_id, conversation_id, int(max_id)
+                        )
+                        activities, has_older_activities, oldest_activity_id = self._query_activity_window(
+                            c,
+                            user_id=user_id,
+                            conversation_id=conversation_id,
+                            turns=turns,
+                            limit=150,
+                            before_id=None,
+                        )
+                        ctx_rows = c.execute(
+                            select(conversation_activity_events.c.payload)
+                            .where(
+                                conversation_activity_events.c.user_id == user_id,
+                                conversation_activity_events.c.conversation_id == conversation_id,
+                                conversation_activity_events.c.event_type.in_((
+                                    AgentActivityEventType.CONTEXT_UPDATED.value,
+                                    AgentActivityEventType.CONTEXT_COMPACTED.value,
+                                )),
+                            )
+                            .order_by(conversation_activity_events.c.id.desc())
+                            .limit(5)
+                        ).scalars().all()
+                        for raw_ctx in ctx_rows:
+                            plain_ctx = _plain(raw_ctx)
+                            if isinstance(plain_ctx, dict) and "used_tokens" in plain_ctx:
+                                context_usage = _repair_context_usage(plain_ctx)
+                                break
+            else:
+                cursor: str = "0"
+                while True:
+                    page = self.activity_store.replay(user_id, conversation_id, cursor=cursor, limit=500)
+                    if not page.events:
+                        break
+                    cursors = page.cursors or tuple(str(item.sequence) for item in page.events)
+                    activities.extend(
+                        self._public_activity(item, item_cursor)
+                        for item, item_cursor in zip(page.events, cursors)
+                    )
+                    cursor = page.next_cursor or cursor
+                    activity_cursor = cursor
+                    if len(page.events) < 500:
+                        break
+        if context_usage is None:
+            context_usage = next(
+                (dict(item.get("payload") or {}) for item in reversed(activities) if item.get("event_type") in {AgentActivityEventType.CONTEXT_UPDATED.value, AgentActivityEventType.CONTEXT_COMPACTED.value} and isinstance(item.get("payload"), Mapping) and "used_tokens" in item["payload"]),
+                None,
+            )
+        conv_mode = "code" if str(conv.get("mode") or "chat") == "code" else "chat"
+        conv_perm = str(conv.get("permission_mode") or ("accept_edits" if conv_mode == "code" else "ask_permissions"))
+        turn_by_message: dict[str, str] = {}
+        for t in turns:
+            t_id_str = str(t["turn_id"])
+            if t.get("user_message_id"):
+                turn_by_message[str(t["user_message_id"])] = t_id_str
+            if t.get("assistant_message_id"):
+                turn_by_message[str(t["assistant_message_id"])] = t_id_str
+        return {"conversation_id": conv["conversation_id"], "title": conv["title"], "state": conv["state"], "mode": conv_mode, "permission_mode": conv_perm, "provider": conv["provider"], "model_id": conv["model_id"], "project_id": conv["project_id"], "messages": [{"message_id": m["message_id"], "role": m["role"], "content": m["content"], "status": m["status"], "retryable": bool(m["retryable"]), "attachments": attachments_by_message.get(str(m["message_id"]), []), "command": command_by_message.get(str(m["message_id"])), "turn_id": turn_by_message.get(str(m["message_id"]))} for m in messages], "turns": [{"turn_id": t["turn_id"], "state": t["state"], "created_at": t["created_at"].isoformat(), "started_at": t["started_at"].isoformat() if t["started_at"] else None, "finished_at": t["finished_at"].isoformat() if t["finished_at"] else None, "scheduled_by_schedule_id": t["scheduled_by_schedule_id"], "code_mode": t.get("code_mode")} for t in turns], "activities": activities, "activity_cursor": activity_cursor, "has_older_activities": has_older_activities, "oldest_activity_id": oldest_activity_id, "context_usage": context_usage}
+
+    def list_older_activities(
+        self,
+        conversation_id: str,
+        user_id: str,
+        *,
+        before_id: int,
+        limit: int = 150,
+    ) -> dict[str, object]:
+        bounded_limit = min(max(int(limit), 1), 300)
+        with self._engine.connect() as c:
+            conv = c.execute(
+                select(conversations.c.conversation_id).where(
+                    conversations.c.conversation_id == conversation_id,
+                    conversations.c.user_id == user_id,
                 )
-                cursor = page.next_cursor or cursor
-                activity_cursor = cursor
-                if len(page.events) < 500:
-                    break
-        context_usage = next(
-            (dict(item.get("payload") or {}) for item in reversed(activities) if item.get("event_type") in {AgentActivityEventType.CONTEXT_UPDATED.value, AgentActivityEventType.CONTEXT_COMPACTED.value} and isinstance(item.get("payload"), Mapping) and "used_tokens" in item["payload"]),
-            None,
+            ).first()
+            if conv is None:
+                raise ApplicationNotFoundError(conversation_id)
+            turns = c.execute(
+                select(conversation_turns)
+                .where(conversation_turns.c.conversation_id == conversation_id)
+                .order_by(conversation_turns.c.created_at)
+            ).mappings().all()
+            activities, has_older, oldest_id = self._query_activity_window(
+                c,
+                user_id=user_id,
+                conversation_id=conversation_id,
+                turns=turns,
+                limit=bounded_limit,
+                before_id=int(before_id),
+            )
+        return {
+            "activities": activities,
+            "has_older_activities": has_older,
+            "oldest_activity_id": oldest_id,
+        }
+
+    @classmethod
+    def _query_activity_window(
+        cls,
+        c,
+        *,
+        user_id: str,
+        conversation_id: str,
+        turns: Sequence[Mapping[str, object]],
+        limit: int = 150,
+        before_id: int | None = None,
+    ) -> tuple[list[dict[str, object]], bool, int | None]:
+        settled_turns = [
+            str(t["turn_id"])
+            for t in turns
+            if str(t.get("state") or "") in {"completed", "failed", "cancelled"}
+        ]
+        stmt = select(conversation_activity_events).where(
+            conversation_activity_events.c.user_id == user_id,
+            conversation_activity_events.c.conversation_id == conversation_id,
         )
-        return {"conversation_id": conv["conversation_id"], "title": conv["title"], "state": conv["state"], "provider": conv["provider"], "model_id": conv["model_id"], "project_id": conv["project_id"], "messages": [{"message_id": m["message_id"], "role": m["role"], "content": m["content"], "status": m["status"], "retryable": bool(m["retryable"]), "attachments": attachments_by_message.get(str(m["message_id"]), []), "command": command_by_message.get(str(m["message_id"]))} for m in messages], "turns": [{"turn_id": t["turn_id"], "state": t["state"], "created_at": t["created_at"].isoformat(), "started_at": t["started_at"].isoformat() if t["started_at"] else None, "finished_at": t["finished_at"].isoformat() if t["finished_at"] else None, "scheduled_by_schedule_id": t["scheduled_by_schedule_id"], "code_mode": t.get("code_mode")} for t in turns], "activities": activities, "activity_cursor": activity_cursor, "context_usage": context_usage}
+        if settled_turns:
+            stmt = stmt.where(
+                ~(
+                    conversation_activity_events.c.turn_id.in_(settled_turns)
+                    & conversation_activity_events.c.event_type.in_((
+                        AgentActivityEventType.ASSISTANT_DELTA.value,
+                        "tool.progressed",
+                        "tool.requested",
+                        "tool.started",
+                        "code_mode.validation_started",
+                        "code_mode.validation_finished",
+                        "code_mode.stage_changed",
+                    ))
+                )
+            )
+        fetch_limit = max(limit * 3, 250)
+        collected_rows: list[Mapping[str, object]] = []
+        cursor_before = before_id
+        reached_start = False
+        compacted: list[dict[str, object]] = []
+        while True:
+            batch_stmt = stmt
+            if cursor_before is not None:
+                batch_stmt = batch_stmt.where(conversation_activity_events.c.id < cursor_before)
+            desc_batch = c.execute(
+                batch_stmt.order_by(conversation_activity_events.c.id.desc()).limit(fetch_limit)
+            ).mappings().all()
+            if not desc_batch:
+                reached_start = True
+                break
+            collected_rows = list(reversed(desc_batch)) + collected_rows
+            cursor_before = int(desc_batch[-1]["id"])
+            if len(desc_batch) < fetch_limit:
+                reached_start = True
+            compacted = cls._compact_snapshot_activities(collected_rows, turns, keep_db_id=True)
+            if len(compacted) > limit or reached_start:
+                break
+        if not compacted:
+            return [], False, None
+        has_older = len(compacted) > limit
+        window = compacted[-limit:]
+        oldest_id = int(window[0]["_db_id"]) if has_older else None
+        for item in window:
+            item.pop("_db_id", None)
+        return window, has_older, oldest_id
+
+    @classmethod
+    def _compact_snapshot_activities(
+        cls,
+        rows: Sequence[Mapping[str, object]],
+        turns: Sequence[Mapping[str, object]],
+        *,
+        keep_db_id: bool = False,
+    ) -> list[dict[str, object]]:
+        settled_turns = {
+            str(t["turn_id"])
+            for t in turns
+            if str(t.get("state") or "") in {"completed", "failed", "cancelled"}
+        }
+        last_context_id_by_turn: dict[str, int] = {}
+        context_count_by_turn: dict[str, int] = {}
+        last_validation_id_by_turn: dict[str, int] = {}
+        for row in rows:
+            ev_type = str(row["event_type"])
+            t_id = str(row["turn_id"])
+            r_id = int(row["id"])
+            if ev_type == AgentActivityEventType.CONTEXT_UPDATED.value:
+                last_context_id_by_turn[t_id] = r_id
+                context_count_by_turn[t_id] = context_count_by_turn.get(t_id, 0) + 1
+            elif ev_type == AgentActivityEventType.CODE_MODE_VALIDATION_STARTED.value:
+                last_validation_id_by_turn[t_id] = r_id
+
+        compacted: list[dict[str, object]] = []
+        for row in rows:
+            ev_type = str(row["event_type"])
+            t_id = str(row["turn_id"])
+            r_id = int(row["id"])
+            if t_id in settled_turns and ev_type in {"tool.progressed", "tool.requested", AgentActivityEventType.ASSISTANT_DELTA.value}:
+                continue
+            if (
+                ev_type == AgentActivityEventType.CONTEXT_UPDATED.value
+                and context_count_by_turn.get(t_id, 0) > 3
+                and r_id != last_context_id_by_turn.get(t_id)
+            ):
+                continue
+            if (
+                ev_type in {"code_mode.validation_started", "code_mode.validation_finished"}
+                and r_id < last_validation_id_by_turn.get(t_id, 0)
+            ):
+                continue
+            raw_payload = row["payload"]
+            payload = _plain(raw_payload) if isinstance(raw_payload, Mapping) else {}
+            if ev_type in {
+                AgentActivityEventType.CONTEXT_UPDATED.value,
+                AgentActivityEventType.CONTEXT_COMPACTED.value,
+            } and isinstance(payload, dict):
+                payload = _repair_context_usage(payload)
+
+            created_at = row["created_at"]
+            occurred_at = (
+                (created_at.replace(tzinfo=UTC) if created_at.tzinfo is None else created_at).isoformat()
+                if isinstance(created_at, datetime)
+                else str(created_at)
+            )
+            agent_id = str(row["agent_id"])
+            if (
+                ev_type == AgentActivityEventType.ASSISTANT_DELTA.value
+                and compacted
+                and compacted[-1]["event_type"] == AgentActivityEventType.ASSISTANT_DELTA.value
+                and compacted[-1]["turn_id"] == t_id
+                and compacted[-1]["agent_id"] == agent_id
+            ):
+                prev_payload = compacted[-1].get("payload")
+                if isinstance(prev_payload, dict) and isinstance(payload, dict):
+                    prev_content = str(prev_payload.get("content") or "")
+                    chunk_content = str(payload.get("content") or "")
+                    prev_payload["content"] = prev_content + chunk_content
+                    compacted[-1]["sequence"] = int(row["sequence"])
+                    compacted[-1]["cursor"] = str(row["sequence"])
+                    compacted[-1]["occurred_at"] = occurred_at
+                    continue
+
+            entry: dict[str, object] = {
+                "event_id": str(row["event_id"]),
+                "event_type": ev_type,
+                "sequence": int(row["sequence"]),
+                "summary": str(row["summary"]),
+                "payload": payload,
+                "occurred_at": occurred_at,
+                "turn_id": t_id,
+                "execution_id": str(row["execution_id"]),
+                "agent_id": agent_id,
+                "parent_agent_id": row["parent_agent_id"],
+                "cursor": str(row["sequence"]),
+            }
+            if keep_db_id:
+                entry["_db_id"] = r_id
+            compacted.append(entry)
+        return compacted
 
     @staticmethod
     def _public_activity(event: AgentActivityEvent, cursor: str | None = None) -> dict[str, object]:
-        # The whole payload is already bounded and secret-redacted by
-        # AgentActivityEvent, so it can be published as-is rather than through a
-        # hand-maintained key allowlist that silently drops new event fields.
         payload = _plain(event.payload)
         if event.event_type in {AgentActivityEventType.CONTEXT_UPDATED, AgentActivityEventType.CONTEXT_COMPACTED} and isinstance(payload, Mapping):
             payload = _repair_context_usage(payload)
@@ -746,8 +1086,6 @@ class PostgresChatStore:
             try:
                 page = self.activity_store.replay(user_id, conversation_id, cursor=str(after), limit=200)
             except ActivityCursorError as error:
-                # Translate the storage-level cursor failure into the public
-                # resync signal the HTTP boundary and the client already share.
                 raise CursorError("cursor_invalid") from error
             cursors = page.cursors or tuple(str(item.sequence) for item in page.events)
             events = [self._public_activity(item, item_cursor) for item, item_cursor in zip(page.events, cursors)]
@@ -780,20 +1118,39 @@ class PostgresChatStore:
             if result.rowcount != 1: return None
             effective_workspace_id = func.coalesce(projects.c.workspace_id, conversation_turns.c.conversation_id)
             turn = c.execute(
-                select(conversation_turns, conversations.c.project_id, projects.c.workspace_id.label("project_workspace_id"), workspace_roots.c.root_path.label("workspace_root_path"))
+                select(
+                    conversation_turns,
+                    conversations.c.project_id,
+                    conversations.c.mode.label("conversation_mode"),
+                    conversations.c.permission_mode.label("permission_mode"),
+                    projects.c.workspace_id.label("project_workspace_id"),
+                    workspace_roots.c.root_path.label("workspace_root_path"),
+                )
                 .join(conversations, conversations.c.conversation_id == conversation_turns.c.conversation_id)
                 .outerjoin(projects, projects.c.project_id == conversations.c.project_id)
                 .outerjoin(workspace_roots, workspace_roots.c.workspace_id == effective_workspace_id)
                 .where(conversation_turns.c.turn_id == turn_id)
             ).mappings().one()
-            c.execute(update(conversation_turns).where(conversation_turns.c.turn_id == turn_id).values(state="starting", started_at=now, updated_at=now))
+            c.execute(update(conversation_turns).where(conversation_turns.c.turn_id == turn_id).values(state="running", started_at=now, updated_at=now))
             c.execute(update(conversation_messages).where(conversation_messages.c.message_id == turn["assistant_message_id"]).values(status="streaming", updated_at=now))
-            # The conversation carries the state the UI labels. Leaving it at
-            # "queued" for the whole run made a working agent read as waiting.
             c.execute(update(conversations).where(conversations.c.conversation_id == turn["conversation_id"]).values(state="running", updated_at=now))
-            c.execute(insert(conversation_events).values(conversation_id=turn["conversation_id"], user_id=turn["user_id"], event_type="turn.starting", message_id=turn["assistant_message_id"], payload={"state": "starting"}, created_at=now))
-        self._activity(turn, AgentActivityEventType.TURN_STARTED, "Turn started")
-        return dict(turn)
+            c.execute(insert(conversation_events).values(conversation_id=turn["conversation_id"], user_id=turn["user_id"], event_type="turn.running", message_id=turn["assistant_message_id"], payload={"state": "running"}, created_at=now))
+        claimed = {**dict(turn), "state": "running", "started_at": now}
+        self._activity(claimed, AgentActivityEventType.TURN_STARTED, "Turn started")
+        return claimed
+
+    def lifecycle(self, turn: Mapping[str, object], state: str, **_payload: object) -> None:
+        if state == "running" and turn.get("turn_id"):
+            now = datetime.now(UTC)
+            with self._engine.begin() as c:
+                c.execute(
+                    update(conversation_turns)
+                    .where(
+                        conversation_turns.c.turn_id == turn["turn_id"],
+                        conversation_turns.c.state.in_(("queued", "starting")),
+                    )
+                    .values(state="running", updated_at=now)
+                )
 
     def history_for_turn(self, turn: dict[str, object], *, rehydration_budget_tokens: int = 0) -> list[dict[str, object]]:
         """The conversation as the model should see it, including past tool work.
@@ -924,6 +1281,25 @@ class PostgresChatStore:
         for chunk in _chunks(text, 480):
             self._activity(turn, AgentActivityEventType.ASSISTANT_DELTA, "Resposta em andamento", {"content": chunk, "message_id": str(turn["assistant_message_id"])})
 
+    def reset_assistant_message(self, turn: dict[str, object]) -> None:
+        now = datetime.now(UTC)
+        with self._engine.begin() as c:
+            c.execute(
+                update(conversation_messages)
+                .where(conversation_messages.c.message_id == turn["assistant_message_id"])
+                .values(content="", status="streaming", updated_at=now)
+            )
+            c.execute(
+                insert(conversation_events).values(
+                    conversation_id=turn["conversation_id"],
+                    user_id=turn["user_id"],
+                    event_type="message.reset",
+                    message_id=turn["assistant_message_id"],
+                    payload={"content": ""},
+                    created_at=now,
+                )
+            )
+
     def record(self, turn: dict[str, object], event_type: AgentActivityEventType, summary: str, payload: dict[str, object] | None = None, *, agent_id: str | None = None, parent_agent_id: str | None = None) -> None:
         """Public activity seam used by the agentic runtime and its tools."""
         self._activity(turn, event_type, summary, payload, agent_id=agent_id, parent_agent_id=parent_agent_id)
@@ -944,6 +1320,17 @@ class PostgresChatStore:
             c.execute(update(conversation_turns).where(conversation_turns.c.turn_id == turn["turn_id"]).values(state=state, finished_at=now, updated_at=now))
             c.execute(update(conversation_messages).where(conversation_messages.c.message_id == turn["assistant_message_id"]).values(status=state, retryable=retryable, updated_at=now))
             c.execute(update(conversations).where(conversations.c.conversation_id == turn["conversation_id"]).values(state=state, updated_at=now))
+            if state in ("cancelled", "failed"):
+                c.execute(
+                    update(code_mode_runs)
+                    .where(code_mode_runs.c.turn_id == turn["turn_id"])
+                    .values(
+                        stage=CodeStage.BLOCKED.value,
+                        completion_kind=None,
+                        caveats=code or ("TURN_CANCELLED" if state == "cancelled" else "TURN_FAILED"),
+                        updated_at=now,
+                    )
+                )
             c.execute(insert(conversation_events).values(conversation_id=turn["conversation_id"], user_id=turn["user_id"], event_type=f"turn.{state}", message_id=turn["assistant_message_id"], payload={"state": state, "retryable": retryable}, created_at=now))
         summaries = {"cancelled": "Execução cancelada", "failed": "Não foi possível concluir", "completed": "Resposta concluída"}
         summaries["waiting_user"] = "Aguardando sua resposta"
@@ -1183,11 +1570,11 @@ class ChatApplication:
         self.store = store
     def allocate_conversation_id(self) -> str:
         return _id("chat")
-    def create(self, context, *, message: str, provider: str, model_id: str, workspace_id: str | None, idempotency_key: str, project_id: str | None = None, attachments=(), new_conversation_id: str | None = None, code_mode: str = "auto"):
-        return self.store.create(user_id=context.user_id, message=message, provider=provider, model_id=model_id, idempotency_key=idempotency_key, project_id=project_id, workspace_id=workspace_id, attachments=attachments, new_conversation_id=new_conversation_id, code_mode=code_mode)
-    def send(self, user_id: str, conversation_id: str, message: str, idempotency_key: str, attachments=(), provider: str = "", model_id: str = "", code_mode: str = "auto"):
+    def create(self, context, *, message: str, provider: str, model_id: str, workspace_id: str | None, idempotency_key: str, project_id: str | None = None, attachments=(), new_conversation_id: str | None = None, code_mode: str = "chat", permission_mode: str | None = None):
+        return self.store.create(user_id=context.user_id, message=message, provider=provider, model_id=model_id, idempotency_key=idempotency_key, project_id=project_id, workspace_id=workspace_id, attachments=attachments, new_conversation_id=new_conversation_id, code_mode=code_mode, permission_mode=permission_mode)
+    def send(self, user_id: str, conversation_id: str, message: str, idempotency_key: str, attachments=(), provider: str = "", model_id: str = "", code_mode: str = "chat", permission_mode: str | None = None):
         waiting = self.store.waiting_execution_ids(conversation_id, user_id)
-        receipt = self.store.create(user_id=user_id, message=message, provider=provider, model_id=model_id, idempotency_key=idempotency_key, conversation_id=conversation_id, attachments=attachments, code_mode=code_mode)
+        receipt = self.store.create(user_id=user_id, message=message, provider=provider, model_id=model_id, idempotency_key=idempotency_key, conversation_id=conversation_id, attachments=attachments, code_mode=code_mode, permission_mode=permission_mode)
         # A normal follow-up is the durable answer to an ask_user effect. The
         # old execution is resumed through its canonical input command before
         # the new turn is allowed to become the only visible continuation.
@@ -1204,9 +1591,13 @@ class ChatApplication:
                     "input_ref": f"conversation-turn:{receipt.turn_id}:input",
                 })
         return receipt
+    def set_permission_mode(self, conversation_id: str, user_id: str, permission_mode: str):
+        return self.store.set_permission_mode(conversation_id, user_id, permission_mode)
     def list(self, user_id: str): return self.store.list(user_id)
     def quality_summary(self, user_id: str, *, days: int = 30): return {"items": self.store.quality_summary(user_id, days=days), "window_days": days}
     def get(self, conversation_id: str, user_id: str): return self.store.get(conversation_id, user_id)
+    def list_older_activities(self, conversation_id: str, user_id: str, *, before_id: int, limit: int = 100):
+        return self.store.list_older_activities(conversation_id, user_id, before_id=before_id, limit=limit)
     def events(self, conversation_id: str, user_id: str, after: int): return self.store.events(conversation_id, user_id, after)
     def cancel(self, conversation_id: str, user_id: str):
         """Request cancellation from the canonical Executions before the chat projection.

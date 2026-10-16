@@ -1,7 +1,13 @@
 """Modular prompt policy for Orin Code mode, inspired by Claude Code's engineering discipline."""
 from __future__ import annotations
 
-from .models import CodeAutonomy, CodeWorkKind
+from .models import (
+    CodeAutonomy,
+    CodePermissionMode,
+    CodeWorkKind,
+    normalize_code_autonomy,
+    normalize_permission_mode,
+)
 
 
 def reversibility_and_blast_radius_section(*, level: CodeAutonomy, permits_push: bool) -> str:
@@ -23,11 +29,12 @@ def reversibility_and_blast_radius_section(*, level: CodeAutonomy, permits_push:
 def dedicated_tools_over_shell_section() -> str:
     return (
         "### Ferramentas Dedicadas em vez de Shell\n"
-        "- Prefira sempre as ferramentas nativas estruturadas em vez de comandos shell equivalentes em `run_command`:\n"
-        "  - Para ler arquivos: use `read_file` (ou `view_file` para PDFs/imagens) — nunca use `cat`, `head` ou `tail` via `run_command`.\n"
-        "  - Para editar arquivos existentes: leia primeiro com `read_file` e aplique mudanças cirúrgicas com `edit_file` — nunca use `sed`, `awk` ou redirecionamento shell.\n"
-        "  - Para criar arquivos novos: use `write_file` — nunca use `echo >` ou heredoc (`cat <<EOF`).\n"
-        "  - Para encontrar arquivos ou buscar texto/símbolos: use `list_files`, `search_files` e `search_code` — nunca use `find` ou `grep` via shell.\n"
+        "- Prefira sempre as ferramentas nativas estruturadas em vez de comandos shell equivalentes em `run_command` (`Bash`):\n"
+        "  - Para ler arquivos (`Read`): use `read_file` (ou `view_file` para PDFs/imagens) — nunca use `cat`, `head` ou `tail` via `run_command`.\n"
+        "  - Para editar arquivos existentes (`Edit`): leia primeiro com `read_file` (invariante read-before-edit) e aplique mudanças cirúrgicas com `edit_file` — nunca use `sed`, `awk` ou redirecionamento shell.\n"
+        "  - Para criar ou sobrescrever arquivos (`Write`): use `write_file` (lendo antes com `read_file` se o arquivo já existir) — nunca use `echo >` ou heredoc (`cat <<EOF`).\n"
+        "  - Para encontrar arquivos (`Glob`) ou buscar conteúdo (`Grep`): use `glob_files`, `list_files`, `search_files` e `search_code` — nunca use `find` ou `grep` via shell.\n"
+        "- Ao chamar `run_command` (`Bash`), forneça sempre uma `description` curta e clara (5-10 palavras) descrevendo o comando.\n"
         "- Reserve `run_command` para compilação, execução de testes, gerenciadores de pacotes, git e servidores de desenvolvimento."
     )
 
@@ -43,28 +50,69 @@ def parallel_execution_section() -> str:
 def act_dont_rederive_section() -> str:
     return (
         "### Entrega Completa e Citações de Código\n"
+        "- Seja direto, conciso e técnico; evite preâmbulos desnecessários.\n"
         "- Nunca reduza silenciosamente o escopo solicitado, não substitua implementação real por comentários `TODO`/`FIXME` ou stubs vazios, e não re-derive um plano já aprovado.\n"
-        "- Ao referenciar funções, classes ou trechos de código na sua resposta final, cite sempre no formato `caminho/arquivo.ext:linha`."
+        "- Ao referenciar arquivos no texto, use links inline concisos `[nome](workspace://caminho/arquivo.ext)` sem quebrar listas ou parágrafos; ao citar trechos ou símbolos específicos, use `caminho/arquivo.ext:linha`."
     )
 
 
-def code_mode_instructions(*, work_kind: str, autonomy: str, plan_path: str | None = None, permits_push: bool = False) -> str:
-    kind = CodeWorkKind(work_kind)
-    level = CodeAutonomy(autonomy)
-    if level is CodeAutonomy.PLAN_MODE:
-        approval = (
+def permission_mode_section(
+    *,
+    permission_mode: CodePermissionMode,
+    level: CodeAutonomy,
+    plan_path: str | None = None,
+) -> str:
+    modes_overview = (
+        f"### Modo de Permissão Ativo: `{permission_mode.value}`\n"
+        "- Modos de permissão suportados na sessão Orin Code (`Shift+Tab`):\n"
+        "  - `accept_edits`: auto-aprova edições de arquivos no workspace (`write_file`, `edit_file`) e comandos locais seguros; execução direta sem burocracia.\n"
+        "  - `plan_mode`: modo somente leitura e arquitetura; explora o repositório, escreve o plano em `.orin/plans/` e chama `exit_plan_mode` para aprovação.\n"
+        "  - `ask_permissions`: solicita confirmação antes de edições de arquivos e comandos shell.\n"
+        "  - `full_autonomy`: autonomia completa dentro do workspace (mantendo confirmação para deploy em produção)."
+    )
+    if permission_mode is CodePermissionMode.PLAN_MODE or level is CodeAutonomy.PLAN_MODE:
+        target_plan = plan_path or ".orin/plans/<slug>.md"
+        behavior = (
             "Você está em `plan_mode` (somente leitura e planejamento). "
-            "Inspecione o projeto com ferramentas de leitura (`read_file`, `glob_files`, `grep_files`, `git_status`, `git_diff`), "
-            "escreva o plano apenas em `.orin/plans/` e use `exit_plan_mode` quando o plano estiver pronto para revisão do usuário. "
-            "Não edite arquivos de código nem execute `run_command` em `plan_mode`."
+            "Explore o repositório apenas com ferramentas de leitura (`read_file`, `glob_files`, `search_files`, `list_files`, `search_code`), "
+            f"escreva o plano estruturado em `.orin/plans/` (`{target_plan}`) e chame `exit_plan_mode` para aprovação do usuário. "
+            "Não edite arquivos de código de produção nem execute `run_command` mutável enquanto estiver em `plan_mode`."
         )
-    elif level is not CodeAutonomy.APPROVAL_REQUIRED:
-        approval = "Você já tem autonomia de código para este turno. Para mudanças complexas, você pode usar `enter_plan_mode` e `exit_plan_mode` quando quiser alinhar um plano."
+    elif permission_mode in {CodePermissionMode.ACCEPT_EDITS, CodePermissionMode.FULL_AUTONOMY} or level is not CodeAutonomy.APPROVAL_REQUIRED:
+        behavior = (
+            "Você já tem autonomia de código (`accept_edits`) para este turno. Aja diretamente como no Claude Code "
+            "(`Read` / `read_file`, `Grep` / `search_files`, `Glob` / `glob_files`, `Edit` / `edit_file`, `Write` / `write_file`, `Bash` / `run_command`, `TodoWrite` / `todo_write`) "
+            "sem cerimônia desnecessária e sem criar arquivos de plano não solicitados. "
+            "Para tarefas de múltiplos passos, use `todo_write`, `task_create` e `task_update` (mantendo no máximo uma tarefa `in_progress` por vez). "
+            "Use `enter_plan_mode` e `exit_plan_mode` apenas quando estiver em `plan_mode` ou quando precisar planejar mudanças arquiteturais complexas."
+        )
     else:
-        approval = (
-            "Antes de qualquer escrita, crie um contrato claro e use `ask_user` (ou `enter_plan_mode` / `exit_plan_mode`) para aprovar o plano. "
-            "Não escreva arquivos, rode comandos mutáveis nem faça commit antes da resposta."
+        behavior = (
+            "Você está em `ask_permissions`. Antes de qualquer escrita em código, detalhe o plano e use `ask_user` "
+            "(ou `enter_plan_mode` / `exit_plan_mode`) para aprovar o plano ou aguarde confirmação de permissão. "
+            "Para tarefas de múltiplos passos, use `todo_write`, `task_create` e `task_update`."
         )
+    return f"{modes_overview}\n- {behavior}"
+
+
+def build_code_mode_system_prompt(
+    permission_mode: str | CodePermissionMode | CodeAutonomy | None = None,
+    *,
+    work_kind: str | CodeWorkKind = "implementation",
+    autonomy: str | CodeAutonomy | CodePermissionMode | None = None,
+    plan_path: str | None = None,
+    permits_push: bool = False,
+    workspace_root: str | None = None,
+    **_extra: object,
+) -> str:
+    raw_mode = permission_mode if permission_mode is not None else (autonomy if autonomy is not None else "accept_edits")
+    resolved_perm = normalize_permission_mode(raw_mode)
+    level = normalize_code_autonomy(autonomy if autonomy is not None else resolved_perm)
+    try:
+        kind = CodeWorkKind(str(work_kind))
+    except ValueError:
+        kind = CodeWorkKind.IMPLEMENTATION
+
     investigation = (
         "Esta é uma investigação: reproduza e mostre evidências; não altere código ou faça commit sem uma aprovação posterior para a correção."
         if kind is CodeWorkKind.INVESTIGATION else
@@ -74,12 +122,17 @@ def code_mode_instructions(*, work_kind: str, autonomy: str, plan_path: str | No
         "Se a mudança afetar frontend, valide em browser real: fluxo afetado, viewport estreito e largo, acessibilidade, screenshot e console. "
         "Corrija divergências do escopo e valide de novo."
     )
-    plan = f" O plano desta execução deve ser salvo em `{plan_path}`." if plan_path else ""
+    plan_notice = (
+        f" O plano desta execução deve ser salvo em `{plan_path}`."
+        if plan_path and (resolved_perm is CodePermissionMode.PLAN_MODE or level is CodeAutonomy.PLAN_MODE)
+        else ""
+    )
+    workspace_notice = f"\n- Workspace vinculado: `{workspace_root}`." if workspace_root else ""
     return "\n".join((
         "## Modo Code",
-        "Você está executando uma tarefa de engenharia com entrega verificável." + plan,
-        approval,
-        "Ao iniciar um projeto, use primeiro o gerador oficial da stack via `verify_project` com `scaffold`; criar package.json ou a estrutura-base manualmente é último recurso.",
+        "Você está executando uma tarefa de engenharia com entrega verificável." + plan_notice + workspace_notice,
+        permission_mode_section(permission_mode=resolved_perm, level=level, plan_path=plan_path),
+        "Ao iniciar um projeto do zero, use primeiro o gerador oficial da stack via `verify_project` com `scaffold`; criar package.json ou a estrutura-base manualmente é último recurso.",
         investigation,
         frontend,
         "Se um teste pré-existente e fora do escopo falhar, pare e peça uma decisão com evidência; nunca oculte a falha.",
@@ -89,4 +142,32 @@ def code_mode_instructions(*, work_kind: str, autonomy: str, plan_path: str | No
         act_dont_rederive_section(),
         "No fim, relate mudanças, testes executados, validação visual, ressalvas e próximos passos com base em evidências reais.",
     ))
+
+
+def code_mode_instructions(
+    *,
+    work_kind: str = "implementation",
+    autonomy: str = "accept_edits",
+    plan_path: str | None = None,
+    permits_push: bool = False,
+    permission_mode: str | None = None,
+) -> str:
+    return build_code_mode_system_prompt(
+        permission_mode=permission_mode or autonomy,
+        work_kind=work_kind,
+        autonomy=autonomy,
+        plan_path=plan_path,
+        permits_push=permits_push,
+    )
+
+
+__all__ = [
+    "act_dont_rederive_section",
+    "build_code_mode_system_prompt",
+    "code_mode_instructions",
+    "dedicated_tools_over_shell_section",
+    "parallel_execution_section",
+    "permission_mode_section",
+    "reversibility_and_blast_radius_section",
+]
 

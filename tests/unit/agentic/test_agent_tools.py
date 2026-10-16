@@ -1552,3 +1552,133 @@ def test_without_terminal_there_are_no_shell_tools_and_no_write_diagnostics(tmp_
     outcome = tools.invoke("write_file", {"path": "x.py", "content": "print('ok')\n"})
     assert outcome.status == "succeeded"
     assert "diagnóstico automático" not in outcome.content
+
+
+def test_code_completion_gate_accepts_direct_test_run_command_and_no_recipe_verify_project(tmp_path: Path) -> None:
+    import sys
+
+    tools = AgentToolset(ConversationWorkspace(tmp_path, "chat_gate_cmd"), code_mode_active=True)
+    tools.invoke("write_file", {"path": "script.py", "content": "x = 1\n"})
+    assert tools.code_completion_gate()[0] is False
+
+    outcome = tools.invoke("run_command", {"command": f'"{sys.executable}" -m py_compile script.py'})
+    assert outcome.status == "succeeded"
+    assert tools.code_completion_gate()[0] is True
+
+    # Mutate again in a directory without a project recipe; verify_project(recipe=None) satisfies the gate.
+    tools.invoke("write_file", {"path": "script.py", "content": "x = 2\n"})
+    assert tools.code_completion_gate()[0] is False
+    tools.invoke("verify_project", {})
+    assert tools.code_completion_gate()[0] is True
+
+
+def test_verify_frontend_infra_failure_marks_fallback_and_does_not_block_completion_gate(tmp_path: Path) -> None:
+    class BrokenBrowser:
+        def navigate(self, url: str):
+            raise BrokenPipeError(232, "The pipe is being closed")
+
+    tools = AgentToolset(
+        ConversationWorkspace(tmp_path, "chat_gate_fe"),
+        browser=BrokenBrowser(),
+        code_mode_active=True,
+    )
+    tools.invoke("write_file", {"path": "src/App.tsx", "content": "export const App = () => null;\n"})
+    outcome = tools.invoke("verify_frontend", {"url": "http://127.0.0.1:5173"})
+    assert outcome.status == "succeeded"
+    assert outcome.payload["all_ok"] is False
+    assert tools._frontend_verify_infra_failed is True
+    assert tools._frontend_verify_attempts == 1
+
+
+def test_complete_remaining_todos_marks_pending_and_in_progress_items_completed(toolset: AgentToolset) -> None:
+    toolset.invoke(
+        "todo_write",
+        {
+            "todos": [
+                {"id": "1", "content": "Criar arquivo", "status": "completed"},
+                {"id": "2", "content": "Rodar testes", "status": "in_progress"},
+                {"id": "3", "content": "Validar build", "status": "pending"},
+            ]
+        },
+    )
+    settled = toolset.complete_remaining_todos()
+    assert settled is not None
+    assert [item["status"] for item in settled] == ["completed", "completed", "completed"]
+    assert toolset.complete_remaining_todos() is None
+
+
+def test_read_process_output_and_stop_process_integrate_with_preview_servers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import json
+
+    workspace = ConversationWorkspace(tmp_path, "chat_preview_proc")
+    tools = AgentToolset(workspace)
+    log_rel = ".orin/logs/preview-web.log"
+    log_file = workspace.root / log_rel
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    log_file.write_text("VITE v5.0.0 ready in 200 ms\n", encoding="utf-8")
+
+    manifest_file = workspace.root / ".orin" / "preview_servers.json"
+    manifest_file.write_text(
+        json.dumps(
+            {
+                "web": {
+                    "name": "web",
+                    "command": "npm run dev",
+                    "pid": 999999,
+                    "port": 5173,
+                    "url": "http://127.0.0.1:5173",
+                    "status": "running",
+                    "started_at": "2026-10-15T00:00:00Z",
+                    "log_path": log_rel,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(agent_tools, "_process_is_running", lambda pid: True)
+    monkeypatch.setattr(agent_tools, "_terminate_pid", lambda pid: True)
+
+    read_out = tools.invoke("read_process_output", {"pid": 999999})
+    assert read_out.status == "succeeded"
+    assert "VITE v5.0.0 ready" in read_out.content
+
+    stop_out = tools.invoke("stop_process", {"pid": 999999})
+    assert stop_out.status == "succeeded"
+    assert stop_out.payload["preview_server"] == "web"
+
+
+def test_reset_assistant_message_clears_draft_content_and_emits_reset_event() -> None:
+    from sqlalchemy import create_engine
+    from agentos.conversations.chat import PostgresChatStore
+    from agentos.persistence.postgres.schema import metadata
+
+    engine = create_engine("sqlite://", future=True)
+    metadata.create_all(engine)
+    store = PostgresChatStore(engine)
+    receipt = store.create(
+        user_id="user-1",
+        message="crie um app",
+        provider="openrouter",
+        model_id="model-1",
+        idempotency_key="reset-msg-test",
+    )
+    turn = store.claim(receipt.turn_id)
+    assert turn is not None
+
+    store.delta(turn, "Draft text before gate")
+    conv_before = store.get(receipt.conversation_id, "user-1")
+    assert conv_before["messages"][-1]["content"] == "Draft text before gate"
+
+    store.reset_assistant_message(turn)
+    conv_after = store.get(receipt.conversation_id, "user-1")
+    assert conv_after["messages"][-1]["content"] == ""
+
+    store.delta(turn, "Final verified text")
+    conv_final = store.get(receipt.conversation_id, "user-1")
+    assert conv_final["messages"][-1]["content"] == "Final verified text"
+    assert conv_final["messages"][-1]["content"].count("Draft text") == 0
+
+
+
+
+

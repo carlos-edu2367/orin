@@ -107,7 +107,7 @@ def windows_desktop_launcher(root: Path) -> str:
 
 
 def posix_shim(root: Path) -> str:
-    return f'#!/usr/bin/env bash\nexec "{root / "current" / runtime_relative_path("linux-x64")}" "$@"\n'
+    return f'#!/usr/bin/env bash\nexec "{(root / "current" / runtime_relative_path("linux-x64")).as_posix()}" "$@"\n'
 
 
 def desktop_entry(root: Path) -> str:

@@ -49,6 +49,7 @@ class ProjectSidebarChat:
     title: str
     state: str
     updated_at: datetime
+    mode: str = "chat"
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,7 +115,7 @@ class PostgresProjectStore:
         return bool(result.rowcount)
 
     def sidebar(self, user_id: str) -> tuple[ProjectSidebarItem, ...]:
-        statement = select(projects, conversations.c.conversation_id, conversations.c.title, conversations.c.state.label("conversation_state"), conversations.c.updated_at.label("conversation_updated_at")).outerjoin(
+        statement = select(projects, conversations.c.conversation_id, conversations.c.title, conversations.c.state.label("conversation_state"), conversations.c.mode.label("conversation_mode"), conversations.c.updated_at.label("conversation_updated_at")).outerjoin(
             conversations, conversations.c.project_id == projects.c.project_id
         ).where(projects.c.user_id == user_id, projects.c.archived_at.is_(None)).order_by(projects.c.updated_at.desc(), conversations.c.updated_at.desc())
         grouped: dict[str, list[ProjectSidebarChat]] = {}
@@ -125,7 +126,15 @@ class PostgresProjectStore:
             record = ProjectRecord(**{key: row[key] for key in ProjectRecord.__dataclass_fields__})
             records[record.project_id] = record
             if row["conversation_id"]:
-                grouped.setdefault(record.project_id, []).append(ProjectSidebarChat(str(row["conversation_id"]), str(row["title"]), str(row["conversation_state"]), row["conversation_updated_at"]))
+                grouped.setdefault(record.project_id, []).append(
+                    ProjectSidebarChat(
+                        str(row["conversation_id"]),
+                        str(row["title"]),
+                        str(row["conversation_state"]),
+                        row["conversation_updated_at"],
+                        str(row.get("conversation_mode") or "chat"),
+                    )
+                )
         return tuple(ProjectSidebarItem(record.project_id, record.name, record.description, tuple(grouped.get(record.project_id, ()))) for record in records.values())
 
     def workspace_for_conversation(self, conversation_id: str, user_id: str) -> str | None:

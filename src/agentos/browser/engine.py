@@ -33,13 +33,16 @@ _LOG_LINES = 12
 CommandFactory = Callable[[], Sequence[str]]
 
 
+_Path = type(Path())
+
+
 def default_browsers_path() -> Path:
     """Where Playwright itself puts browsers when ``PLAYWRIGHT_BROWSERS_PATH`` is unset."""
     if os.name == "nt":
-        return Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / "ms-playwright"
+        return _Path(os.environ.get("LOCALAPPDATA") or _Path.home() / "AppData" / "Local") / "ms-playwright"
     if sys.platform == "darwin":
-        return Path.home() / "Library" / "Caches" / "ms-playwright"
-    return Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "ms-playwright"
+        return _Path.home() / "Library" / "Caches" / "ms-playwright"
+    return _Path(os.environ.get("XDG_CACHE_HOME") or _Path.home() / ".cache") / "ms-playwright"
 
 
 def browsers_path() -> Path:
@@ -47,7 +50,7 @@ def browsers_path() -> Path:
     # a development checkout and CI usually do not, and then Playwright's own
     # default is where the browser lives.
     value = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "").strip()
-    return Path(value) if value and value != "0" else default_browsers_path()
+    return _Path(value) if value and value != "0" else default_browsers_path()
 
 
 def playwright_package_present() -> bool:
@@ -57,11 +60,71 @@ def playwright_package_present() -> bool:
         return False
 
 
+_HEADLESS_BINARIES = (
+    "chrome-headless-shell.exe",
+    "headless_shell.exe",
+    "chrome-headless-shell",
+    "headless_shell",
+)
+_FULL_BINARIES = (
+    "chrome.exe",
+    "chrome",
+    "Chromium",
+)
+
+
+def _revision_key(directory: Path) -> int:
+    _, _, suffix = directory.name.rpartition("-")
+    return int(suffix) if suffix.isdigit() else -1
+
+
+def _find_binary_in_dir(directory: Path, binary_names: tuple[str, ...]) -> Path | None:
+    for name in binary_names:
+        direct = directory / name
+        if direct.is_file():
+            return direct
+        for candidate in sorted(directory.glob(f"*/{name}")):
+            if candidate.is_file():
+                return candidate
+        for candidate in sorted(directory.glob(f"*/*.app/Contents/MacOS/{name}")):
+            if candidate.is_file():
+                return candidate
+    return None
+
+
+def resolve_chromium_executable(headless: bool = True, root: Path | None = None) -> Path | None:
+    """Locate an installed Chromium or headless-shell binary even when its revision differs from Playwright's default."""
+    target = root if root is not None else browsers_path()
+    if not target.is_dir():
+        return None
+    search_plan = (
+        (("chromium_headless_shell-*", _HEADLESS_BINARIES), ("chromium-*", _FULL_BINARIES))
+        if headless
+        else (("chromium-*", _FULL_BINARIES), ("chromium_headless_shell-*", _HEADLESS_BINARIES))
+    )
+    for require_marker in (True, False):
+        for pattern, binaries in search_plan:
+            directories = sorted(
+                (d for d in target.glob(pattern) if d.is_dir()),
+                key=_revision_key,
+                reverse=True,
+            )
+            for directory in directories:
+                if require_marker and not (directory / _MARKER).is_file():
+                    continue
+                found = _find_binary_in_dir(directory, binaries)
+                if found is not None:
+                    return found
+    return None
+
+
 def chromium_installed(root: Path | None = None) -> bool:
-    root = root if root is not None else browsers_path()
-    if not root.is_dir():
+    target = root if root is not None else browsers_path()
+    if not target.is_dir():
         return False
-    return any((directory / _MARKER).is_file() for pattern in _BROWSER_DIRS for directory in root.glob(pattern))
+    if any((directory / _MARKER).is_file() for pattern in _BROWSER_DIRS for directory in target.glob(pattern)):
+        return True
+    return resolve_chromium_executable(headless=True, root=target) is not None
 
 
 def _driver_command() -> list[str]:
@@ -138,9 +201,19 @@ class BrowserEngineInstaller:
         return self.status()
 
     def _run(self) -> None:
+        env = {
+            **{
+                k: v
+                for k, v in os.environ.items()
+                if k.upper() in {"SYSTEMROOT", "WINDIR", "COMSPEC", "PATH", "TEMP", "TMP", "USERPROFILE", "LOCALAPPDATA", "APPDATA", "HOME"}
+            },
+            "PYTHONUTF8": "1",
+            "PYTHONIOENCODING": "utf-8",
+            **self._environment(),
+        }
         try:
             process = subprocess.Popen(
-                list(self._command()), env=self._environment(), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                list(self._command()), env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
         except OSError as error:
@@ -207,4 +280,5 @@ def agent_install_guidance() -> str:
 __all__ = [
     "BrowserEngineInstaller", "BrowserEngineStatus", "INSTALL_COMMAND", "agent_install_guidance", "browsers_path",
     "chromium_installed", "engine_installer", "engine_missing_for_agent", "playwright_package_present",
+    "resolve_chromium_executable",
 ]

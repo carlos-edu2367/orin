@@ -19,6 +19,7 @@ from typing import Any, Mapping
 
 from agentos.configuration.mode import RuntimeMode, current_mode
 
+from .engine import resolve_chromium_executable
 from .security import NetworkPolicy, NetworkPolicyError, validate_url
 
 
@@ -314,9 +315,17 @@ def _host(connection: Connection, capability: str = "interact") -> None:
         with sync_playwright() as engine:
             try:
                 browser = engine.chromium.launch(headless=True)
-            except Exception as error:
-                connection.send({"ok": False, "error": _launch_failure_message(error)})
-                return
+            except Exception as first_error:
+                fallback_exec = resolve_chromium_executable(headless=True)
+                if fallback_exec is not None:
+                    try:
+                        browser = engine.chromium.launch(headless=True, executable_path=str(fallback_exec))
+                    except Exception as second_error:
+                        connection.send({"ok": False, "error": _launch_failure_message(second_error)})
+                        return
+                else:
+                    connection.send({"ok": False, "error": _launch_failure_message(first_error)})
+                    return
             context = browser.new_context(viewport={"width": 1280, "height": 800}, locale="pt-BR")
 
             def guard(route, request) -> None:
@@ -559,10 +568,50 @@ class IsolatedConversationBrowser:
         with self._lock:
             if self._closed:
                 raise RuntimeError("browser session is closed")
-            self._parent.send({"action": action, **arguments})
+            if not self._process.is_alive() and self._parent.poll(0):
+                try:
+                    early = self._parent.recv()
+                except (BrokenPipeError, EOFError, OSError):
+                    early = None
+                self._recycle()
+                if isinstance(early, Mapping) and early.get("error"):
+                    raise RuntimeError(str(early["error"]))
+                raise RuntimeError(
+                    "the browser process exited unexpectedly; the tab was reset — "
+                    "if this keeps happening, Chromium may not be provisioned "
+                    "(run `orin browser install`)"
+                )
+            try:
+                self._parent.send({"action": action, **arguments})
+            except (BrokenPipeError, EOFError, OSError) as exc:
+                early_error: str | None = None
+                try:
+                    if self._parent.poll(0):
+                        early = self._parent.recv()
+                        if isinstance(early, Mapping) and early.get("error"):
+                            early_error = str(early["error"])
+                except (BrokenPipeError, EOFError, OSError, Exception):
+                    pass
+                self._recycle()
+                if early_error:
+                    raise RuntimeError(early_error) from exc
+                raise RuntimeError(
+                    "the browser process stopped unexpectedly; the tab was reset and the next call starts a fresh page"
+                ) from exc
             if not self._poll_until_ready():
                 died = not self._process.is_alive()
+                early_error = None
+                if died:
+                    try:
+                        if self._parent.poll(0):
+                            early = self._parent.recv()
+                            if isinstance(early, Mapping) and early.get("error"):
+                                early_error = str(early["error"])
+                    except (BrokenPipeError, EOFError, OSError, Exception):
+                        pass
                 self._recycle()
+                if early_error:
+                    raise RuntimeError(early_error)
                 if died:
                     raise RuntimeError(
                         "the browser process exited unexpectedly; the tab was reset — "
@@ -572,10 +621,12 @@ class IsolatedConversationBrowser:
                 raise RuntimeError("the browser page took too long to respond; the tab was reset and the next call starts a fresh page")
             try:
                 response = self._parent.recv()
-            except (EOFError, OSError):
+            except (BrokenPipeError, EOFError, OSError) as exc:
                 self._recycle()
-                raise RuntimeError("the browser process stopped unexpectedly; the tab was reset and the next call starts a fresh page")
+                raise RuntimeError("the browser process stopped unexpectedly; the tab was reset and the next call starts a fresh page") from exc
             if not isinstance(response, Mapping) or not response.get("ok"):
+                if not self._process.is_alive():
+                    self._recycle()
                 raise RuntimeError(str(response.get("error") if isinstance(response, Mapping) else "browser host returned an invalid response"))
             result = response.get("result", {})
             return dict(result) if isinstance(result, Mapping) else {}

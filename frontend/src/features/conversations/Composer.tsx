@@ -1,12 +1,14 @@
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
 import { useEffect, useRef, useState, type ClipboardEvent, type DragEvent, type FormEvent, type KeyboardEvent, type ReactNode } from 'react'
-import { CODE_PERMISSION_MODES, nextCodePermissionMode, type CodePermissionMode } from '../../api/codeMode'
+import type { CodePermissionMode } from '../../api/codeMode'
 import type { PluginCommand } from '../../api/plugins'
 import type { SkillSummary } from '../../api/skills'
-import type { CodeModeChoice } from '../../api/conversations'
+import type { CodeModeChoice, ConversationMode } from '../../api/conversations'
+import type { TodoItem } from './activityTypes'
 import { AttachmentChips, type ComposerAttachment } from './AttachmentChips'
 import { CommandPicker, commandToken, skillToken } from './CommandPicker'
 import { applyFileMention, detectFileMention, FileMentionPicker } from './FileMentionPicker'
+import { TodoBar } from './TodoBar'
 
 export type ComposerProps = {
   value: string
@@ -40,8 +42,14 @@ export type ComposerProps = {
   skills?: SkillSummary[]
   codeMode?: CodeModeChoice
   onCodeModeChange?: (value: CodeModeChoice) => void
+  /** When true, hides the Chat/Code mode toggle button (e.g. inside an active conversation). */
+  hideCodeModeToggle?: boolean
+  /** Immutable mode of an existing conversation ('chat' | 'code'). */
+  conversationMode?: ConversationMode
   codePermissionMode?: CodePermissionMode
   onCodePermissionModeChange?: (value: CodePermissionMode) => void
+  /** Live TodoWrite / Task checklist pinned directly above the composer input. */
+  todos?: TodoItem[]
   /** Workspace file paths offered by the `@` mention picker. */
   workspaceFiles?: string[]
   /** Optional async lookup for workspace files matching the typed `@query`. */
@@ -53,6 +61,38 @@ export type ComposerProps = {
 }
 
 const MAX_ROWS_HEIGHT = 260
+
+const SAFE_PERMISSION_CYCLE: readonly CodePermissionMode[] = [
+  'accept_edits',
+  'plan_mode',
+  'ask_permissions',
+]
+
+export function formatPermissionModePill(mode: CodePermissionMode): string {
+  switch (mode) {
+    case 'accept_edits':
+      return '⏵⏵ Aceitar edições'
+    case 'plan_mode':
+      return '⏸ Modo Plano'
+    case 'ask_permissions':
+      return '🔒 Pedir permissão'
+    case 'full_autonomy':
+      return '⚡ Sem restrições'
+  }
+}
+
+export function formatPermissionModeTitle(mode: CodePermissionMode): string {
+  switch (mode) {
+    case 'accept_edits':
+      return 'Modo de permissão: Aceitar edições (Shift+Tab para alternar)'
+    case 'plan_mode':
+      return 'Modo de permissão: Modo Plano (Shift+Tab para alternar)'
+    case 'ask_permissions':
+      return 'Modo de permissão: Pedir permissão (Shift+Tab para alternar)'
+    case 'full_autonomy':
+      return 'Modo de permissão: Sem restrições (Shift+Tab para alternar)'
+  }
+}
 
 /**
  * The single place a person types.
@@ -66,15 +106,20 @@ export function Composer({
   value, onChange, onSubmit, onStop, running = false, disabled = false,
   placeholder = 'Descreva o que você precisa…', settings, hint, error, autoFocus, notice, focusSignal = 0, canSend = true,
   attachments = [], onAttach = () => {}, onRemoveAttachment = () => {}, commands = [], skills = [],
-  codeMode = 'auto', onCodeModeChange, codePermissionMode, onCodePermissionModeChange,
+  codeMode = 'auto', onCodeModeChange, hideCodeModeToggle = false, conversationMode,
+  codePermissionMode, onCodePermissionModeChange, todos,
   workspaceFiles = [], onSearchWorkspaceFiles,
   worktreeIsolated, onWorktreeIsolatedChange, worktreeBranch = null,
 }: ComposerProps) {
+  const effectiveCodeMode: CodeModeChoice = conversationMode ?? codeMode
+  const showCodeModeToggle = Boolean(onCodeModeChange && !hideCodeModeToggle && conversationMode === undefined)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [focused, setFocused] = useState(false)
   const [caretPosition, setCaretPosition] = useState<number | undefined>(undefined)
-  const [internalPermissionMode, setInternalPermissionMode] = useState<CodePermissionMode>('ask_permissions')
+  const [internalPermissionMode, setInternalPermissionMode] = useState<CodePermissionMode>(
+    codePermissionMode ?? (conversationMode === 'code' ? 'accept_edits' : 'ask_permissions'),
+  )
   const [internalWorktreeIsolated, setInternalWorktreeIsolated] = useState(false)
   const activePermissionMode = codePermissionMode ?? internalPermissionMode
   const activeWorktreeIsolated = worktreeIsolated ?? internalWorktreeIsolated
@@ -83,6 +128,16 @@ export function Composer({
   function changePermissionMode(next: CodePermissionMode) {
     setInternalPermissionMode(next)
     onCodePermissionModeChange?.(next)
+  }
+
+  function stepPermissionMode() {
+    if (activePermissionMode === 'full_autonomy') {
+      changePermissionMode('ask_permissions')
+      return
+    }
+    const idx = SAFE_PERMISSION_CYCLE.indexOf(activePermissionMode)
+    const next = SAFE_PERMISSION_CYCLE[(idx === -1 ? 0 : idx + 1) % SAFE_PERMISSION_CYCLE.length]
+    changePermissionMode(next)
   }
 
   function changeWorktreeIsolated(next: boolean) {
@@ -185,13 +240,20 @@ export function Composer({
   }
 
   function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
-    if (event.key === 'Tab' && event.shiftKey && codeMode === 'code') {
+    if (event.key === 'Tab' && event.shiftKey && effectiveCodeMode === 'code') {
       event.preventDefault()
-      changePermissionMode(nextCodePermissionMode(activePermissionMode))
+      event.stopPropagation()
+      stepPermissionMode()
       return
     }
     if (pickerOpen && ['Enter', 'ArrowUp', 'ArrowDown', 'Escape'].includes(event.key)) return
     if (mentionPickerOpen && ['Enter', 'Tab', 'ArrowUp', 'ArrowDown', 'Escape'].includes(event.key)) return
+    if (event.key === 'Escape' && running && onStop) {
+      event.preventDefault()
+      event.stopPropagation()
+      onStop()
+      return
+    }
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault()
       if (running || !canSend) return
@@ -219,8 +281,11 @@ export function Composer({
     if (event.dataTransfer?.types?.includes('Files')) event.preventDefault()
   }
 
+  const sendDisabled = Boolean(disabled || !canSend || (!value.trim() && attachments.length === 0))
+
   return (
     <form className={`composer${focused ? ' is-focused' : ''}${running ? ' is-running' : ''}`} onSubmit={submit} onDrop={onDrop} onDragOver={onDragOver}>
+      {todos && todos.length > 0 && <TodoBar todos={todos} isTurnRunning={Boolean(running)} className="mb-2" />}
       <div className="composer__surface">
         <label className="visually-hidden" htmlFor="composer-message">Mensagem</label>
         <AttachmentChips items={attachments} onRemove={onRemoveAttachment} />
@@ -290,29 +355,39 @@ export function Composer({
                 <path d="M10.7 4.3 5.4 9.6a2 2 0 1 0 2.8 2.8l5.1-5.1a3.4 3.4 0 1 0-4.8-4.8L3.3 7.7" />
               </svg>
             </button>
-            {onCodeModeChange && <button
+            {showCodeModeToggle && <button
               type="button"
-              className={`composer__code${codeMode === 'code' ? ' is-active' : ''}`}
-              aria-pressed={codeMode === 'code'}
-              aria-label={codeMode === 'code' ? 'Desativar Modo Code' : 'Ativar Modo Code'}
-              title={codeMode === 'code' ? 'Modo Code ativo' : 'Ativar Modo Code'}
-              onClick={() => onCodeModeChange(codeMode === 'code' ? 'auto' : 'code')}
+              className={`composer__code${effectiveCodeMode === 'code' ? ' is-active' : ''}`}
+              aria-pressed={effectiveCodeMode === 'code'}
+              aria-label={effectiveCodeMode === 'code' ? 'Desativar Modo Code' : 'Ativar Modo Code'}
+              title={effectiveCodeMode === 'code' ? 'Modo Code ativo' : 'Ativar Modo Code'}
+              onClick={() => onCodeModeChange?.(effectiveCodeMode === 'code' ? 'auto' : 'code')}
             ><span aria-hidden="true">&lt;/&gt;</span><span>Code</span></button>}
-            {codeMode === 'code' && (
+            {effectiveCodeMode === 'code' && (
               <>
-                <select
-                  className="composer__permission-mode"
-                  data-testid="code-permission-mode-select"
+                <button
+                  type="button"
+                  className="composer__permission-pill composer__permission-mode inline-flex items-center gap-1.5 rounded-md border border-[var(--border-subtle)] bg-[var(--surface-raised)]/80 px-2.5 py-1 font-mono text-[11px] font-medium text-[var(--text-secondary)] hover:border-[var(--accent-primary)] hover:text-[var(--text-primary)] transition-colors"
+                  data-testid="code-permission-mode-pill"
+                  data-permission-mode={activePermissionMode}
                   aria-label="Modo de permissão do Code"
-                  title="Alternar modo de permissão (Shift+Tab)"
+                  title={formatPermissionModeTitle(activePermissionMode)}
+                  onClick={() => stepPermissionMode()}
+                >
+                  {formatPermissionModePill(activePermissionMode)}
+                </button>
+                <select
+                  className="visually-hidden"
+                  data-testid="code-permission-mode-select"
+                  aria-label="Selecionar modo de permissão do Code"
+                  tabIndex={-1}
                   value={activePermissionMode}
                   onChange={(event) => changePermissionMode(event.target.value as CodePermissionMode)}
                 >
-                  {CODE_PERMISSION_MODES.map((entry) => (
-                    <option key={entry.mode} value={entry.mode}>
-                      {entry.label}
-                    </option>
-                  ))}
+                  <option value="ask_permissions">Pedir permissão</option>
+                  <option value="accept_edits">Aceitar edições</option>
+                  <option value="plan_mode">Modo Plano</option>
+                  <option value="full_autonomy">Sem restrições</option>
                 </select>
                 <button
                   type="button"
@@ -357,9 +432,10 @@ export function Composer({
                   type="submit"
                   className="composer__action composer__action--send"
                   aria-label="Enviar mensagem"
-                  disabled={disabled || !canSend || (!value.trim() && attachments.length === 0)}
+                  disabled={sendDisabled}
+                  style={{ opacity: sendDisabled ? 0.32 : 1 }}
                   initial={reduced ? false : { scale: 0.7, opacity: 0, rotate: 25 }}
-                  animate={{ scale: 1, opacity: 1, rotate: 0 }}
+                  animate={{ scale: 1, opacity: sendDisabled ? 0.32 : 1, rotate: 0 }}
                   exit={reduced ? { opacity: 0 } : { scale: 0.7, opacity: 0, rotate: -25 }}
                   transition={{ duration: 0.18, ease: 'easeOut' }}
                 >

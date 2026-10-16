@@ -3,8 +3,8 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, u
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { createBrowserApiClient } from '../../api/client'
 import {
-  cancelConversation, getConversation, listConversations, rewindTurn, sendConversationMessage, streamConversationEvents, submitToolPermission,
-  type CodeModeChoice, type Conversation, type ConversationMessage,
+  cancelConversation, getConversation, listConversations, listOlderConversationActivities, rewindTurn, sendConversationMessage, streamConversationEvents, submitToolPermission, updateConversationPermissionMode,
+  type Conversation, type ConversationMessage, type ConversationMode,
 } from '../../api/conversations'
 import { ApiError } from '../../api/errors'
 import { approveMcpServer } from '../../api/mcp'
@@ -16,7 +16,7 @@ import {
 } from '../../api/providers'
 import { deleteUpload, uploadFile } from '../../api/uploads'
 import {
-  getCodeModeSettings, listWorkspaceFiles, manageConversationWorktree, normalizeCodePermissionMode, permissionModeToAutonomy, setCodeModeSettings,
+  getCodeModeSettings, listWorkspaceFiles, manageConversationWorktree, normalizeCodePermissionMode,
   type CodePermissionMode,
 } from '../../api/codeMode'
 import { attachWorkspaceFolder, detachWorkspaceFolder, inspectWorkspaceFolder, type WorkspaceState } from '../../api/workspace'
@@ -44,6 +44,7 @@ import { useComposerAttachments } from './useComposerAttachments'
 
 const TOOL_CAPABILITY_NAMES = new Set(['tools', 'tool_use', 'function_calling'])
 const MAX_MESSAGE_CHARACTERS = 16000
+const EMPTY_TURN_IDS: ReadonlySet<string> = new Set()
 
 /** Mirrors the worker's own `_model_calls_tools`: an unrefreshed catalog must not silently disable tools. */
 function modelCallsTools(capabilities: string[]): boolean {
@@ -102,10 +103,13 @@ export function ChatPage() {
   const [conversation, setConversation] = useState<Conversation | null>(null)
   const [chats, setChats] = useState<Array<{ conversation_id: string; title: string; state: string }>>([])
   const [message, setMessage] = useState('')
-  const [codeMode, setCodeMode] = useState<CodeModeChoice>('auto')
   const [codePermissionMode, setCodePermissionMode] = useState<CodePermissionMode>('ask_permissions')
   const [codeSystemNotifications, setCodeSystemNotifications] = useState(false)
-  const [codeMonitoringEnabled, setCodeMonitoringEnabled] = useState(true)
+  const [workspaceDrawerOpen, setWorkspaceDrawerOpen] = useState(false)
+  const [drawerFiles, setDrawerFiles] = useState<string[]>([])
+  const [drawerSearchQuery, setDrawerSearchQuery] = useState('')
+  const [decidedPlanKeys, setDecidedPlanKeys] = useState<Set<string>>(() => new Set())
+  const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null)
   const { attachments, onAttach, onRemoveAttachment, canSend: attachmentsReady, readyUploadIds, reset: resetAttachments } = useComposerAttachments(client)
   const [pendingUserMessage, setPendingUserMessage] = useState<ConversationMessage | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -139,14 +143,28 @@ export function ChatPage() {
   const [streamedByMessage, setStreamedByMessage] = useState<Map<string, string>>(() => new Map())
   const [oversizedInput, setOversizedInput] = useState<{ text: string; attachments: string[] } | null>(null)
   const [sendingOversizedInput, setSendingOversizedInput] = useState(false)
+  const [hasOlderActivities, setHasOlderActivities] = useState(false)
+  const [oldestActivityId, setOldestActivityId] = useState<number | null>(null)
+  const [loadingOlderActivities, setLoadingOlderActivities] = useState(false)
 
   const cursorRef = useRef('0')
   const scrollRef = useRef<HTMLDivElement>(null)
   const pinnedRef = useRef(true)
+  const loadingOlderRef = useRef(false)
   const observedContentRef = useRef(new Set<string>())
   const observedConversationRef = useRef(conversationId)
   const streamedDeltaIdsRef = useRef(new Set<string>())
   const streamedConversationRef = useRef(conversationId)
+  const userChangedPermissionRef = useRef(false)
+  useEffect(() => {
+    userChangedPermissionRef.current = false
+  }, [conversationId])
+
+  const conversationMode: ConversationMode = useMemo(() => {
+    if (conversation?.mode === 'code') return 'code'
+    if (conversation?.mode === 'chat') return 'chat'
+    return conversation?.turns.some((turn) => turn.code_mode === 'code') ? 'code' : 'chat'
+  }, [conversation?.mode, conversation?.turns])
 
   const showOverview = location.pathname.endsWith('/overview')
   const conversationPath = projectId === undefined
@@ -156,12 +174,73 @@ export function ChatPage() {
   const loadSnapshot = useCallback(async (resetActivity: boolean) => {
     const next = await getConversation(client, conversationId)
     setConversation(next)
+    if (!userChangedPermissionRef.current) {
+      const resolvedPerm = next.permission_mode ?? (next.mode === 'code' ? 'accept_edits' : 'ask_permissions')
+      setCodePermissionMode(normalizeCodePermissionMode(resolvedPerm))
+    }
     if (resetActivity) {
       cursorRef.current = next.activity_cursor
+      setHasOlderActivities(Boolean(next.has_older_activities))
+      setOldestActivityId(next.oldest_activity_id ?? null)
+      setLoadingOlderActivities(false)
+      loadingOlderRef.current = false
       dispatch({ type: 'snapshot', events: next.activities, cursor: next.activity_cursor })
     }
     return next
   }, [client, conversationId])
+
+  const loadOlderActivities = useCallback(async () => {
+    if (!hasOlderActivities || oldestActivityId === null || loadingOlderRef.current) return
+    loadingOlderRef.current = true
+    setLoadingOlderActivities(true)
+    const scrollEl = scrollRef.current
+    const prevScrollHeight = scrollEl?.scrollHeight ?? 0
+    const prevScrollTop = scrollEl?.scrollTop ?? 0
+    try {
+      const page = await listOlderConversationActivities(client, conversationId, oldestActivityId, 150)
+      if (page.activities.length === 0 || !page.has_older_activities || page.oldest_activity_id === oldestActivityId) {
+        if (page.activities.length > 0) {
+          for (const item of page.activities) {
+            observedContentRef.current.add(`activity:${item.eventId}`)
+          }
+          pinnedRef.current = false
+          dispatch({ type: 'prepend_older', events: page.activities })
+        }
+        setHasOlderActivities(false)
+        setOldestActivityId(null)
+      } else {
+        for (const item of page.activities) {
+          observedContentRef.current.add(`activity:${item.eventId}`)
+        }
+        pinnedRef.current = false
+        dispatch({ type: 'prepend_older', events: page.activities })
+        setHasOlderActivities(true)
+        setOldestActivityId(page.oldest_activity_id)
+      }
+      requestAnimationFrame(() => {
+        const el = scrollRef.current
+        if (el && prevScrollHeight > 0) {
+          const delta = el.scrollHeight - prevScrollHeight
+          if (delta > 0) {
+            el.scrollTop = prevScrollTop + delta
+          }
+        }
+      })
+    } catch {
+      // Ignore transient pagination errors so the user can retry by scrolling/clicking
+    } finally {
+      loadingOlderRef.current = false
+      setLoadingOlderActivities(false)
+    }
+  }, [client, conversationId, hasOlderActivities, oldestActivityId])
+
+  useEffect(() => {
+    if (loading || !hasOlderActivities || loadingOlderActivities || loadingOlderRef.current) return
+    const el = scrollRef.current
+    if (el && el.scrollTop < 250 && !pinnedRef.current) {
+      void loadOlderActivities()
+    }
+  }, [hasOlderActivities, loadOlderActivities, loading, loadingOlderActivities, oldestActivityId])
 
   useEffect(() => {
     let cancelled = false
@@ -181,7 +260,7 @@ export function ChatPage() {
               const notification = codeModeNotification(event.type)
               if (notification) void window.orinDesktop.notifyCodeMode(notification)
             }
-            const terminalState = terminalConversationState(event)
+            const terminalState = !event.parentAgentId ? terminalConversationState(event) : null
             if (terminalState) {
               setConversation((current) => current === null ? current : {
                 ...current,
@@ -245,29 +324,75 @@ export function ChatPage() {
     const controller = new AbortController()
     void getCodeModeSettings(client, controller.signal).then((settings) => {
       if (!controller.signal.aborted) {
-        setCodePermissionMode(normalizeCodePermissionMode(settings.autonomy))
         setCodeSystemNotifications(settings.system_notifications)
-        setCodeMonitoringEnabled(settings.monitoring_enabled)
       }
     }).catch(() => undefined)
     return () => controller.abort()
   }, [client])
 
   const changeCodePermissionMode = useCallback((next: CodePermissionMode) => {
+    const previous = codePermissionMode
+    userChangedPermissionRef.current = true
     setCodePermissionMode(next)
-    void setCodeModeSettings(client, {
-      autonomy: permissionModeToAutonomy(next),
-      system_notifications: codeSystemNotifications,
-      monitoring_enabled: codeMonitoringEnabled,
-    }).catch(() => undefined)
-  }, [client, codeMonitoringEnabled, codeSystemNotifications])
+    setConversation((current) => (current ? { ...current, permission_mode: next } : current))
+    const targetId = conversation?.conversation_id ?? conversationId
+    if (targetId) {
+      void updateConversationPermissionMode(client, targetId, next).catch(() => {
+        setCodePermissionMode(previous)
+        setConversation((current) => (current ? { ...current, permission_mode: previous } : current))
+        setError('Não foi possível alterar o modo de permissão desta conversa.')
+      })
+    }
+  }, [client, codePermissionMode, conversation?.conversation_id, conversationId])
+
+  const fetchWorkspaceFiles = useCallback(async (query = '', limit = 100): Promise<string[]> => {
+    if (!conversationId) return []
+    try {
+      return await listWorkspaceFiles(client, conversationId, query, limit)
+    } catch (caught) {
+      if (!(caught instanceof TypeError)) throw caught
+      return await client.request({
+        path: `/v1/conversations/${encodeURIComponent(conversationId)}/workspace-files`,
+        query: { ...(query ? { query } : {}), limit },
+        parse: (value) => {
+          if (!value || typeof value !== 'object' || Array.isArray(value)) return []
+          const data = value as Record<string, unknown>
+          const raw = Array.isArray(data.items) ? data.items : Array.isArray(data.files) ? data.files : []
+          return raw.filter((item): item is string => typeof item === 'string')
+        },
+      })
+    }
+  }, [client, conversationId])
+
+  const toggleWorkspaceDrawer = useCallback(() => {
+    setWorkspaceDrawerOpen((prev) => {
+      const next = !prev
+      if (next && conversationId) {
+        void fetchWorkspaceFiles(drawerSearchQuery, 100)
+          .then((files) => setDrawerFiles(files))
+          .catch(() => setDrawerFiles([]))
+      }
+      return next
+    })
+  }, [conversationId, drawerSearchQuery, fetchWorkspaceFiles])
+
+  const handleDrawerSearchChange = useCallback(async (query: string) => {
+    setDrawerSearchQuery(query)
+    if (!conversationId) return
+    try {
+      const files = await fetchWorkspaceFiles(query, 100)
+      setDrawerFiles(files)
+    } catch {
+      setDrawerFiles([])
+    }
+  }, [conversationId, fetchWorkspaceFiles])
 
   const [worktreeIsolated, setWorktreeIsolated] = useState(false)
   const [worktreeBranch, setWorktreeBranch] = useState<string | null>(null)
 
   const searchWorkspaceFiles = useCallback(
-    (query: string) => listWorkspaceFiles(client, conversationId, query, 20),
-    [client, conversationId],
+    (query: string) => fetchWorkspaceFiles(query, 20),
+    [fetchWorkspaceFiles],
   )
 
   const toggleWorktreeIsolation = useCallback((nextIsolated: boolean) => {
@@ -393,8 +518,9 @@ export function ChatPage() {
   )
 
   const sendChatMessage = useCallback(
-    (text: string, attachments: string[] = []) => sendConversationMessage(client, conversationId, text, attachments, chatSelection, codeMode),
-    [chatSelection, client, codeMode, conversationId],
+    (text: string, attachments: string[] = []) =>
+      sendConversationMessage(client, conversationId, text, attachments, chatSelection, conversationMode === 'code' ? 'code' : 'auto'),
+    [chatSelection, client, conversationId, conversationMode],
   )
 
   useEffect(() => {
@@ -433,17 +559,34 @@ export function ChatPage() {
       setStreamedByMessage(new Map())
       return
     }
-    const unseen = activity.events.filter((event) => (
-      event.type === 'assistant.delta'
-      && Boolean(event.messageId)
-      && Boolean(event.content)
-      && !streamedDeltaIdsRef.current.has(event.eventId)
-    ))
+    const turnToMessageId = new Map<string, string>()
+    for (const event of activity.events) {
+      if (event.turnId && event.messageId) {
+        turnToMessageId.set(event.turnId, event.messageId)
+      }
+    }
+    const unseen = activity.events.filter((event) => {
+      if (streamedDeltaIdsRef.current.has(event.eventId)) return false
+      if (event.type === 'assistant.delta' && Boolean(event.messageId) && Boolean(event.content)) {
+        return true
+      }
+      if (event.type === 'message.reset' || event.type === 'code_mode.validation_started') {
+        return Boolean(event.messageId || (event.turnId && turnToMessageId.has(event.turnId)))
+      }
+      return false
+    })
     if (unseen.length === 0) return
     for (const event of unseen) streamedDeltaIdsRef.current.add(event.eventId)
     setStreamedByMessage((current) => {
       const next = new Map(current)
       for (const event of unseen) {
+        if (event.type === 'message.reset' || event.type === 'code_mode.validation_started') {
+          const messageId = event.messageId ?? (event.turnId ? turnToMessageId.get(event.turnId) : undefined)
+          if (messageId) {
+            next.delete(messageId)
+          }
+          continue
+        }
         const messageId = event.messageId as string
         next.set(messageId, (next.get(messageId) ?? '') + event.content)
       }
@@ -464,33 +607,153 @@ export function ChatPage() {
     return pendingUserMessage && !alreadyDurable ? [...base, pendingUserMessage] : base
   }, [conversation?.messages, streamedByMessage, pendingUserMessage])
 
+  const consolidatedEvents = useMemo(() => {
+    const lastTerminalLifecycleByTurn = new Map<string, string>()
+    const cancelledTurns = new Set<string>(cancelledTurnIds)
+    for (const event of activity.events) {
+      if (event.parentAgentId) continue
+      const term = terminalConversationState(event)
+      if (term === 'cancelled' && event.turnId) {
+        cancelledTurns.add(event.turnId)
+      }
+      if (event.kind === 'lifecycle' && event.turnId && (term === 'completed' || term === 'failed' || term === 'cancelled')) {
+        lastTerminalLifecycleByTurn.set(event.turnId, event.eventId)
+      }
+    }
+    return activity.events.filter((event) => {
+      if (event.kind === 'lifecycle' && Boolean(event.parentAgentId)) return false
+      if ((event.type === 'delegation.failed' || event.type === 'DELEGATION_FAILED') && event.turnId && cancelledTurns.has(event.turnId)) {
+        return false
+      }
+      const term = terminalConversationState(event)
+      if (event.kind === 'lifecycle' && event.turnId && (term === 'completed' || term === 'failed' || term === 'cancelled')) {
+        const lastId = lastTerminalLifecycleByTurn.get(event.turnId)
+        if (lastId && lastId !== event.eventId) return false
+      }
+      return true
+    })
+  }, [activity.events, cancelledTurnIds])
+
   // Each assistant message gets its own text/action timeline, folded from the
   // turn it belongs to; a turn no message could claim (still running before
   // its first delta, or older than the 500-event window) stays visible
   // through the flat stream below instead of disappearing.
   const { timelines: timelinesByMessage, claimedTurnIds } = useMemo(
-    () => buildMessageTimelines(messages, activity.events),
-    [messages, activity.events],
+    () => buildMessageTimelines(messages, consolidatedEvents),
+    [messages, consolidatedEvents],
+  )
+  const hasTerminalPlaceholderMessage = useMemo(
+    () => messages.some((m) => m.role === 'assistant' && !m.content.trim() && (m.status === 'cancelled' || m.status === 'failed' || m.status === 'completed')),
+    [messages],
   )
   const unclaimedEvents = useMemo(
-    () => activity.events.filter((event) => !claimedTurnIds.has(event.turnId ?? '') && !event.type.startsWith('context.')),
-    [activity.events, claimedTurnIds],
+    () => consolidatedEvents.filter((event) => {
+      if (claimedTurnIds.has(event.turnId ?? '') || event.type.startsWith('context.')) return false
+      const term = terminalConversationState(event)
+      if (hasTerminalPlaceholderMessage && event.kind === 'lifecycle' && (term === 'cancelled' || term === 'failed' || term === 'completed')) {
+        return false
+      }
+      return true
+    }),
+    [consolidatedEvents, claimedTurnIds, hasTerminalPlaceholderMessage],
   )
   const contextUsage = useMemo(
     () => [...activity.events].reverse().find((event) => event.contextUsage)?.contextUsage ?? conversation?.context_usage ?? null,
     [activity.events, conversation?.context_usage],
   )
-  const openQuestionTurnIds = useMemo(
-    () => new Set((conversation?.turns ?? []).filter((turn) => turn.state === 'waiting_user').map((turn) => turn.turn_id)),
-    [conversation?.turns],
+  const openQuestionTurnIds = useMemo(() => {
+    const terminalTurnIds = new Set(
+      (conversation?.turns ?? [])
+        .filter((turn) => turn.state === 'completed' || turn.state === 'failed' || turn.state === 'cancelled' || cancelledTurnIds.has(turn.turn_id))
+        .map((turn) => turn.turn_id),
+    )
+    const ids = new Set(
+      (conversation?.turns ?? [])
+        .filter((turn) => turn.state === 'waiting_user' && !terminalTurnIds.has(turn.turn_id))
+        .map((turn) => turn.turn_id),
+    )
+    for (const event of activity.events) {
+      if (!event.turnId || terminalTurnIds.has(event.turnId) || decidedPlanKeys.has(event.turnId) || decidedPlanKeys.has(event.eventId)) continue
+      if (
+        event.type === 'turn.waiting_user'
+        || event.type === 'code_mode.blocked'
+        || event.type === 'code_mode.plan_ready'
+        || event.type === 'tool.permission_required'
+        || Boolean(event.planApproval)
+        || event.tool === 'exit_plan_mode'
+        || event.toolName === 'exit_plan_mode'
+      ) {
+        ids.add(event.turnId)
+      }
+      if (
+        event.type === 'turn.completed'
+        || event.type === 'TURN_COMPLETED'
+        || event.type === 'code_mode.completed'
+        || event.type === 'code_mode.completed_with_caveats'
+        || event.type === 'turn.failed'
+        || event.type === 'TURN_FAILED'
+        || event.type === 'turn.cancelled'
+        || event.type === 'TURN_CANCELLED'
+        || event.type === 'execution.canceled'
+        || event.type === 'EXECUTION_CANCELED'
+      ) {
+        ids.delete(event.turnId)
+      }
+    }
+    for (const key of decidedPlanKeys) {
+      ids.delete(key)
+    }
+    return ids
+  }, [activity.events, cancelledTurnIds, conversation?.turns, decidedPlanKeys])
+
+  const activeTurn = useMemo(
+    () =>
+      [...(conversation?.turns ?? [])]
+        .reverse()
+        .find((turn) => !cancelledTurnIds.has(turn.turn_id)) ?? null,
+    [cancelledTurnIds, conversation?.turns],
   )
 
-  // A waiting turn is terminal from the worker's perspective and must keep
-  // the question card and normal composer usable even if the conversation
+  const hasTerminalEventForActiveTurn = useMemo(() => {
+    if (!activeTurn) return false
+    return activity.events.some(
+      (event) =>
+        !event.parentAgentId
+        && (!event.turnId || event.turnId === activeTurn.turn_id)
+        && terminalConversationState(event) !== null,
+    )
+  }, [activeTurn, activity.events])
+
+  const lastRootEvent = useMemo(
+    () => [...activity.events].reverse().find((event) => !event.parentAgentId) ?? null,
+    [activity.events],
+  )
+  const lastActivityTurnId = lastRootEvent?.turnId
+  const isActivityTerminal =
+    (activity.status === 'completed'
+      || activity.status === 'failed'
+      || activity.status === 'cancelled')
+    && (lastRootEvent ? terminalConversationState(lastRootEvent) !== null : !activeTurn)
+    && (!lastActivityTurnId || !activeTurn || lastActivityTurnId === activeTurn.turn_id)
+
+  // A waiting or terminal turn must keep the question/plan card and normal
+  // composer usable and immediately hide AgentPulse even if the conversation
   // snapshot briefly still reports the preceding running state.
-  const running = RUNNING_STATES.has(conversation?.state ?? '')
-    && (conversation?.turns ?? []).some((turn) => RUNNING_STATES.has(turn.state) && !cancelledTurnIds.has(turn.turn_id))
+  const running =
+    !stopping
+    && RUNNING_STATES.has(conversation?.state ?? '')
+    && activeTurn !== null
+    && RUNNING_STATES.has(activeTurn.state)
     && openQuestionTurnIds.size === 0
+    && !hasTerminalEventForActiveTurn
+    && !isActivityTerminal
+
+  const showAgentPulse =
+    running
+    && activeTurn !== null
+    && RUNNING_STATES.has(activeTurn.state)
+    && !isActivityTerminal
+
   const mode = useMemo(() => modeFromEvents(activity.events, conversation?.state ?? 'queued'), [activity.events, conversation?.state])
 
   // Track identities rather than render passes. Snapshot reconciliation can
@@ -630,20 +893,109 @@ export function ChatPage() {
   const submitToolPermissionDecision = useCallback(async (event: ConversationActivityEvent, decision: ToolPermissionDecision) => {
     const request = event.toolPermission
     const turnId = request?.turnId ?? event.turnId
-    if (!request || !turnId) return
+    if (!request || !turnId || !openQuestionTurnIds.has(turnId)) return
     setError(null)
     await submitToolPermission(client, conversationId, turnId, request.requestId, decision)
-  }, [client, conversationId])
+  }, [client, conversationId, openQuestionTurnIds])
+
+  const handleApprovePlanAcceptEdits = useCallback(async (event: ConversationActivityEvent) => {
+    const request = event.toolPermission
+    const turnId = request?.turnId ?? event.turnId
+    if (turnId && (!openQuestionTurnIds.has(turnId) || decidedPlanKeys.has(turnId))) return
+    if (decidedPlanKeys.has(event.eventId)) return
+    setError(null)
+    setDecidedPlanKeys((current) => {
+      const next = new Set(current)
+      next.add(event.eventId)
+      if (turnId) next.add(turnId)
+      return next
+    })
+    changeCodePermissionMode('accept_edits')
+    if (request && turnId) {
+      await submitToolPermission(client, conversationId, turnId, request.requestId, 'allow_always')
+      await loadSnapshot(false)
+      return
+    }
+    const response = 'Plano aprovado. Pode prosseguir com accept edits.'
+    setPendingUserMessage({ message_id: `pending-${Date.now()}`, role: 'user', content: response, status: 'completed', retryable: false, attachments: [], command: null })
+    await sendChatMessage(response)
+    await loadSnapshot(false)
+  }, [changeCodePermissionMode, client, conversationId, decidedPlanKeys, loadSnapshot, openQuestionTurnIds, sendChatMessage])
+
+  const handleApprovePlanAskPermissions = useCallback(async (event: ConversationActivityEvent) => {
+    const request = event.toolPermission
+    const turnId = request?.turnId ?? event.turnId
+    if (turnId && (!openQuestionTurnIds.has(turnId) || decidedPlanKeys.has(turnId))) return
+    if (decidedPlanKeys.has(event.eventId)) return
+    setError(null)
+    setDecidedPlanKeys((current) => {
+      const next = new Set(current)
+      next.add(event.eventId)
+      if (turnId) next.add(turnId)
+      return next
+    })
+    changeCodePermissionMode('ask_permissions')
+    if (request && turnId) {
+      await submitToolPermission(client, conversationId, turnId, request.requestId, 'allow_once')
+      await loadSnapshot(false)
+      return
+    }
+    const response = 'Plano aprovado. Pode prosseguir pedindo permissão para edições.'
+    setPendingUserMessage({ message_id: `pending-${Date.now()}`, role: 'user', content: response, status: 'completed', retryable: false, attachments: [], command: null })
+    await sendChatMessage(response)
+    await loadSnapshot(false)
+  }, [changeCodePermissionMode, client, conversationId, decidedPlanKeys, loadSnapshot, openQuestionTurnIds, sendChatMessage])
+
+  const handleRequestPlanChanges = useCallback(async (feedback: string, event: ConversationActivityEvent) => {
+    const request = event.toolPermission
+    const turnId = request?.turnId ?? event.turnId
+    if (turnId && (!openQuestionTurnIds.has(turnId) || decidedPlanKeys.has(turnId))) return
+    if (decidedPlanKeys.has(event.eventId)) return
+    setError(null)
+    setDecidedPlanKeys((current) => {
+      const next = new Set(current)
+      next.add(event.eventId)
+      if (turnId) next.add(turnId)
+      return next
+    })
+    if (request && turnId) {
+      await submitToolPermission(client, conversationId, turnId, request.requestId, 'deny')
+    }
+    setPendingUserMessage({ message_id: `pending-${Date.now()}`, role: 'user', content: feedback, status: 'completed', retryable: false, attachments: [], command: null })
+    await sendChatMessage(feedback)
+    await loadSnapshot(false)
+  }, [client, conversationId, decidedPlanKeys, loadSnapshot, openQuestionTurnIds, sendChatMessage])
 
   const handleRewindTurn = useCallback(async (turnId: string) => {
     setError(null)
-    await rewindTurn(client, conversationId, turnId)
-  }, [client, conversationId])
+    try {
+      await rewindTurn(client, conversationId, turnId)
+      await loadSnapshot(true)
+    } catch (caught) {
+      setError('Não foi possível reverter as alterações deste turno.')
+      throw caught
+    }
+  }, [client, conversationId, loadSnapshot])
+
+  const copyAssistantMessage = useCallback(async (messageId: string, content: string) => {
+    if (!content.trim()) return
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(content)
+      }
+      setCopiedMessageId(messageId)
+      window.setTimeout(() => {
+        setCopiedMessageId((current) => (current === messageId ? null : current))
+      }, 1800)
+    } catch {
+      // Ignore clipboard failures in restricted environments.
+    }
+  }, [])
 
   async function submit() {
     const text = message.trim()
     const readyUploads = readyUploadIds()
-    if ((!text && readyUploads.length === 0) || running) return
+    if ((!text && readyUploads.length === 0) || running || stopping) return
     if (text.length > MAX_MESSAGE_CHARACTERS) {
       setOversizedInput({ text, attachments: readyUploads })
       return
@@ -695,9 +1047,22 @@ export function ChatPage() {
     }
   }
 
-  async function stop() {
+  const stop = useCallback(async () => {
     if (stopping) return
     setStopping(true)
+    const runningIds = (conversation?.turns ?? [])
+      .filter((turn) => RUNNING_STATES.has(turn.state))
+      .map((turn) => turn.turn_id)
+    if (runningIds.length > 0) {
+      setCancelledTurnIds((current) => new Set([...current, ...runningIds]))
+      setConversation((current) => current === null ? current : {
+        ...current,
+        state: 'cancelled',
+        turns: current.turns.map((turn) => runningIds.includes(turn.turn_id)
+          ? { ...turn, state: 'cancelled', finished_at: turn.finished_at ?? new Date().toISOString() }
+          : turn),
+      })
+    }
     try {
       const receipt = await cancelConversation(client, conversationId)
       if (receipt.cancelling.length > 0) {
@@ -717,19 +1082,57 @@ export function ChatPage() {
     } finally {
       setStopping(false)
     }
-  }
+  }, [client, conversation?.turns, conversationId, loadSnapshot, stopping])
+
+  useEffect(() => {
+    if (!running || stopping) return
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || event.defaultPrevented) return
+      if (oversizedInput || previewReference) return
+      if (document.querySelector('[role="dialog"], [role="listbox"]')) return
+      event.preventDefault()
+      void stop()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [oversizedInput, previewReference, running, stop, stopping])
 
   return (
     <main className="chat">
       <header className="chat__bar">
         <Brand to="/" />
         <div className="chat__title">
+          {conversationMode === 'code' && (
+            <span className="chat__code-badge" data-testid="orin-code-badge">
+              &gt;_ Orin Code
+            </span>
+          )}
           <h1>{conversation?.title ?? 'Conversa'}</h1>
+          {conversationMode === 'code' && (conversation?.workspace?.folderName || conversation?.workspace?.path) && (
+            <span
+              className="chat__workspace-chip"
+              data-testid="orin-code-workspace-chip"
+              title={conversation?.workspace?.path ?? undefined}
+            >
+              {conversation?.workspace?.folderName ?? conversation?.workspace?.path}
+            </span>
+          )}
           {conversation?.turns.some((turn) => turn.scheduled_by_schedule_id) && <span className="chat__model">execuções agendadas</span>}
           {conversation && <span className="chat__model">{conversation.provider} · {conversation.model_id}</span>}
           <ContextIndicator usage={contextUsage} />
         </div>
         <div className="chat__bar-actions">
+          {conversationMode === 'code' && (
+            <button
+              type="button"
+              className={workspaceDrawerOpen ? 'ghost-button is-active' : 'ghost-button'}
+              aria-pressed={workspaceDrawerOpen}
+              data-testid="workspace-files-drawer-toggle"
+              onClick={toggleWorkspaceDrawer}
+            >
+              Arquivos
+            </button>
+          )}
           <button
             type="button"
             className={showOverview ? 'ghost-button is-active' : 'ghost-button'}
@@ -747,15 +1150,18 @@ export function ChatPage() {
         <WorkspaceNavigation client={client} onChatsChange={setChats} />
       </aside>
 
-      <div className="chat__body">
+      <div className="chat__body" style={conversationMode === 'code' && workspaceDrawerOpen ? { position: 'relative' } : undefined}>
         <div className="chat__scroll" ref={scrollRef} onScroll={(event) => {
           const element = event.currentTarget
           const nextAtBottom = element.scrollHeight - element.scrollTop - element.clientHeight < 120
           pinnedRef.current = nextAtBottom
           setAtBottom((current) => current === nextAtBottom ? current : nextAtBottom)
           if (nextAtBottom) setNewActivityCount(0)
+          if (element.scrollTop < 250 && hasOlderActivities && !loadingOlderRef.current) {
+            void loadOlderActivities()
+          }
         }}>
-          <div className="chat__thread">
+          <div className="chat__thread" role="log" aria-live="polite" aria-relevant="additions text">
             {!loading && loadFailure && (
               <section className="chat__load-error" role="alert">
                 <h2>Não foi possível abrir esta conversa</h2>
@@ -771,6 +1177,37 @@ export function ChatPage() {
 
             {!loadFailure && messages.map((item, itemIndex) => {
               const timeline = item.role === 'assistant' ? timelinesByMessage.get(item.message_id) : undefined
+              const oldestEventId = consolidatedEvents[0]?.eventId
+              const isEarliestPartialTurn = Boolean(
+                hasOlderActivities
+                && item.role === 'assistant'
+                && timeline
+                && oldestEventId
+                && timeline.some((seg) => seg.kind === 'activity' && seg.group.events.some((ev) => ev.eventId === oldestEventId)),
+              )
+              const hasSubsequentUserMessage = messages.slice(itemIndex + 1).some((candidate) => candidate.role === 'user')
+              const timelineTurnIds = timeline
+                ? Array.from(
+                    new Set(
+                      timeline.flatMap((seg) =>
+                        seg.kind === 'activity'
+                          ? seg.group.events.map((ev) => ev.turnId).filter((id): id is string => Boolean(id))
+                          : [],
+                      ),
+                    ),
+                  )
+                : []
+              const isTurnFinished =
+                hasSubsequentUserMessage
+                || item.status === 'completed'
+                || item.status === 'failed'
+                || item.status === 'cancelled'
+                || timelineTurnIds.some((tid) => {
+                  if (cancelledTurnIds.has(tid) || decidedPlanKeys.has(tid)) return true
+                  const turnRecord = conversation?.turns.find((t) => t.turn_id === tid)
+                  return turnRecord ? (turnRecord.state === 'completed' || turnRecord.state === 'failed' || turnRecord.state === 'cancelled') : false
+                })
+              const effectiveOpenQuestionTurnIds = isTurnFinished ? EMPTY_TURN_IDS : openQuestionTurnIds
               const retrySource = item.role === 'assistant' && item.retryable
                 ? messages.slice(0, itemIndex).reverse().find((candidate) => candidate.role === 'user' && candidate.content.trim())
                 : undefined
@@ -782,13 +1219,60 @@ export function ChatPage() {
                   animate={{ opacity: 1, y: 0 }}
                   transition={{ duration: 0.24, ease: [0.22, 0.61, 0.36, 1] }}
                 >
+                  {isEarliestPartialTurn && (
+                    <div className="flex justify-start pb-2">
+                      <button
+                        type="button"
+                        data-testid="load-older-activities"
+                        disabled={loadingOlderActivities}
+                        onClick={() => { void loadOlderActivities() }}
+                        className="inline-flex items-center gap-1.5 rounded-full border border-[var(--border-subtle)] bg-[var(--surface-raised)] px-3 py-1 text-[12px] text-[var(--text-secondary)] hover:border-[var(--accent-primary)] hover:text-[var(--text-primary)] disabled:opacity-60 transition-colors"
+                      >
+                        {loadingOlderActivities ? 'Carregando atividades anteriores…' : '↑ Carregar atividades anteriores deste turno'}
+                      </button>
+                    </div>
+                  )}
                   {timeline
-                    ? <TurnTimeline items={timeline} conversationId={conversationId} client={client} onPreview={setPreviewReference} openQuestionTurnIds={openQuestionTurnIds} onAnswer={submitQuestionAnswers} onMcpApprove={submitMcpApproval} onMcpDecline={declineMcpApproval} onPluginApprove={submitPluginApproval} onPluginDecline={declinePluginApproval} onToolPermission={submitToolPermissionDecision} onRewindTurn={handleRewindTurn} />
+                    ? (
+                      <TurnTimeline
+                        items={timeline}
+                        conversationId={conversationId}
+                        client={client}
+                        mode={conversationMode}
+                        permissionMode={codePermissionMode}
+                        onPreview={setPreviewReference}
+                        openQuestionTurnIds={effectiveOpenQuestionTurnIds}
+                        onAnswer={submitQuestionAnswers}
+                        onMcpApprove={submitMcpApproval}
+                        onMcpDecline={declineMcpApproval}
+                        onPluginApprove={submitPluginApproval}
+                        onPluginDecline={declinePluginApproval}
+                        onToolPermission={submitToolPermissionDecision}
+                        onRewindTurn={handleRewindTurn}
+                        onApprovePlanAcceptEdits={isTurnFinished ? undefined : handleApprovePlanAcceptEdits}
+                        onApprovePlanAskPermissions={isTurnFinished ? undefined : handleApprovePlanAskPermissions}
+                        onRequestPlanChanges={isTurnFinished ? undefined : handleRequestPlanChanges}
+                      />
+                    )
                     : item.role === 'assistant' && item.content
                       ? <MarkdownMessage content={item.content} conversationId={conversationId} client={client} onPreview={setPreviewReference} />
                       : item.command
                         ? <MessageCommandChip command={item.command} />
                         : <p>{item.content || placeholderFor(item)}</p>}
+                  {item.role === 'assistant' && item.content.trim().length > 0 && item.status === 'completed' && (
+                    <div className="bubble__actions" style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '6px' }}>
+                      <button
+                        type="button"
+                        className="ghost-button"
+                        aria-label="Copiar resposta"
+                        data-testid={`copy-message-${item.message_id}`}
+                        onClick={() => { void copyAssistantMessage(item.message_id, item.content) }}
+                        style={{ fontSize: '11px', padding: '2px 8px', opacity: 0.78 }}
+                      >
+                        {copiedMessageId === item.message_id ? 'Copiado' : 'Copiar resposta'}
+                      </button>
+                    </div>
+                  )}
                   {item.role === 'user' && item.attachments.length > 0 && (
                     <MessageAttachments conversationId={conversationId} items={item.attachments} client={client} onPreview={setPreviewReference} />
                   )}
@@ -800,10 +1284,48 @@ export function ChatPage() {
               )
             })}
 
-            {!loadFailure && <ActivityStream events={unclaimedEvents} conversationId={conversationId} onPreview={setPreviewReference} openQuestionTurnIds={openQuestionTurnIds} onAnswer={submitQuestionAnswers} onMcpApprove={submitMcpApproval} onMcpDecline={declineMcpApproval} onPluginApprove={submitPluginApproval} onPluginDecline={declinePluginApproval} onToolPermission={submitToolPermissionDecision} />}
+            {!loadFailure && unclaimedEvents.length > 0 && (() => {
+              const isUnclaimedTurnActive = openQuestionTurnIds.size > 0 && unclaimedEvents.some((ev) => ev.turnId && openQuestionTurnIds.has(ev.turnId))
+              return conversationMode === 'code'
+                ? (
+                  <TurnTimeline
+                    events={unclaimedEvents}
+                    conversationId={conversationId}
+                    client={client}
+                    mode="code"
+                    permissionMode={codePermissionMode}
+                    onPreview={setPreviewReference}
+                    openQuestionTurnIds={openQuestionTurnIds}
+                    onAnswer={submitQuestionAnswers}
+                    onMcpApprove={submitMcpApproval}
+                    onMcpDecline={declineMcpApproval}
+                    onPluginApprove={submitPluginApproval}
+                    onPluginDecline={declinePluginApproval}
+                    onToolPermission={submitToolPermissionDecision}
+                    onRewindTurn={handleRewindTurn}
+                    onApprovePlanAcceptEdits={isUnclaimedTurnActive ? handleApprovePlanAcceptEdits : undefined}
+                    onApprovePlanAskPermissions={isUnclaimedTurnActive ? handleApprovePlanAskPermissions : undefined}
+                    onRequestPlanChanges={isUnclaimedTurnActive ? handleRequestPlanChanges : undefined}
+                  />
+                )
+                : (
+                  <ActivityStream
+                    events={unclaimedEvents}
+                    conversationId={conversationId}
+                    onPreview={setPreviewReference}
+                    openQuestionTurnIds={openQuestionTurnIds}
+                    onAnswer={submitQuestionAnswers}
+                    onMcpApprove={submitMcpApproval}
+                    onMcpDecline={declineMcpApproval}
+                    onPluginApprove={submitPluginApproval}
+                    onPluginDecline={declinePluginApproval}
+                    onToolPermission={submitToolPermissionDecision}
+                  />
+                )
+            })()}
 
             <AnimatePresence>
-              {!loadFailure && running && (
+              {!loadFailure && showAgentPulse && (
                 <motion.div
                   key="pulse"
                   initial={reduced ? false : { opacity: 0, y: 6 }}
@@ -822,6 +1344,97 @@ export function ChatPage() {
           <button type="button" className="chat__new-activity" onClick={scrollToLatest}>
             Ir para o fim · {newActivityCount} novas atividades
           </button>
+        )}
+
+        {conversationMode === 'code' && workspaceDrawerOpen && (
+          <aside
+            className="chat__files-drawer chat__workspace-drawer"
+            data-testid="workspace-files-drawer"
+            aria-label="Arquivos do workspace"
+            style={{
+              position: 'absolute',
+              top: 0,
+              right: 0,
+              bottom: 0,
+              width: '340px',
+              maxWidth: '100%',
+              background: 'var(--orin-surface-2, var(--surface-raised))',
+              borderLeft: '1px solid var(--orin-border-subtle, var(--border-subtle))',
+              display: 'flex',
+              flexDirection: 'column',
+              zIndex: 24,
+              boxShadow: '-8px 0 24px rgba(0, 0, 0, 0.24)',
+            }}
+          >
+            <div
+              className="chat__workspace-drawer-header"
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                padding: '12px 16px',
+                borderBottom: '1px solid var(--orin-border-subtle, var(--border-subtle))',
+              }}
+            >
+              <h2 style={{ margin: 0, fontSize: '13px', fontWeight: 600 }}>Arquivos do workspace</h2>
+              <button
+                type="button"
+                className="ghost-button"
+                aria-label="Fechar arquivos do workspace"
+                onClick={() => setWorkspaceDrawerOpen(false)}
+              >
+                ×
+              </button>
+            </div>
+            <div style={{ padding: '10px 16px', borderBottom: '1px solid var(--orin-border-subtle, var(--border-subtle))' }}>
+              <input
+                type="search"
+                value={drawerSearchQuery}
+                onChange={(event) => { void handleDrawerSearchChange(event.target.value) }}
+                placeholder="Filtrar arquivos…"
+                aria-label="Filtrar arquivos do workspace"
+                data-testid="workspace-files-search"
+                style={{
+                  width: '100%',
+                  padding: '6px 10px',
+                  borderRadius: '8px',
+                  border: '1px solid var(--orin-border-subtle, var(--border-subtle))',
+                  background: 'var(--surface-base, transparent)',
+                  color: 'inherit',
+                  fontSize: '12px',
+                }}
+              />
+            </div>
+            <ul
+              className="chat__workspace-drawer-list"
+              style={{
+                listStyle: 'none',
+                margin: 0,
+                padding: '8px 12px',
+                overflowY: 'auto',
+                flex: 1,
+              }}
+            >
+              {drawerFiles.length === 0 ? (
+                <li className="chat__workspace-drawer-empty" style={{ padding: '8px 4px', fontSize: '12px', opacity: 0.72 }}>
+                  Nenhum arquivo listado.
+                </li>
+              ) : (
+                drawerFiles.map((filePath) => (
+                  <li key={filePath} style={{ marginBottom: '2px' }}>
+                    <button
+                      type="button"
+                      className="ghost-button"
+                      style={{ width: '100%', justifyContent: 'flex-start', textAlign: 'left', fontSize: '12px' }}
+                      onClick={() => setPreviewReference({ conversationId, path: filePath, name: filePath.split('/').at(-1) })}
+                    >
+                      {filePath}
+                    </button>
+                  </li>
+                ))
+              )}
+            </ul>
+          </aside>
         )}
 
         <AnimatePresence>
@@ -852,7 +1465,7 @@ export function ChatPage() {
         )
       })()}
 
-      {!loadFailure && !showOverview && <footer className="chat__foot" data-testid="chat-composer" data-at-bottom={atBottom}>
+      {!loadFailure && <footer className="chat__foot" data-testid="chat-composer" data-at-bottom={atBottom || running || stopping}>
         {activity.connection === 'degraded' && (
           <p className="chat__connection" role="status">Atualizações em tempo real indisponíveis; tentando reconectar.</p>
         )}
@@ -862,20 +1475,23 @@ export function ChatPage() {
           onSubmit={() => void submit()}
           onStop={() => void stop()}
           running={running}
+          disabled={stopping}
           error={error}
           hint={stopping ? 'parando…' : undefined}
           placeholder="Continue a conversa…"
           attachments={attachments}
           onAttach={onAttach}
           onRemoveAttachment={onRemoveAttachment}
-          canSend={attachmentsReady}
+          canSend={attachmentsReady && !stopping}
           notice={notice}
           commands={pluginCommands}
           skills={skills}
-          codeMode={codeMode}
-          onCodeModeChange={setCodeMode}
+          codeMode={conversationMode}
+          conversationMode={conversationMode}
+          hideCodeModeToggle={true}
           codePermissionMode={codePermissionMode}
           onCodePermissionModeChange={changeCodePermissionMode}
+          todos={activity.todos}
           onSearchWorkspaceFiles={searchWorkspaceFiles}
           worktreeIsolated={worktreeIsolated}
           onWorktreeIsolatedChange={toggleWorktreeIsolation}
@@ -940,13 +1556,42 @@ function conversationLoadHeadline(error: unknown): string {
 }
 
 function terminalConversationState(event: ConversationActivityEvent): 'completed' | 'failed' | 'cancelled' | 'waiting_user' | null {
-  if (event.type === 'turn.completed') return 'completed'
-  if (event.type === 'turn.failed') return event.state === 'cancelled' ? 'cancelled' : 'failed'
-  if (event.type === 'turn.waiting_user') return 'waiting_user'
+  if (
+    event.type === 'turn.completed'
+    || event.type === 'TURN_COMPLETED'
+    || event.type === 'code_mode.completed'
+    || event.type === 'code_mode.completed_with_caveats'
+  ) {
+    return 'completed'
+  }
+  if (
+    event.type === 'turn.cancelled'
+    || event.type === 'TURN_CANCELLED'
+    || event.type === 'execution.canceled'
+    || event.type === 'EXECUTION_CANCELED'
+  ) {
+    return 'cancelled'
+  }
+  if (event.type === 'turn.failed' || event.type === 'TURN_FAILED') {
+    return event.state === 'cancelled' || event.status === 'cancelled' || event.errorCode === 'TURN_CANCELLED'
+      ? 'cancelled'
+      : 'failed'
+  }
+  if (
+    event.type === 'turn.waiting_user'
+    || event.type === 'code_mode.blocked'
+    || event.type === 'code_mode.plan_ready'
+    || event.type === 'tool.permission_required'
+    || Boolean(event.planApproval)
+    || event.tool === 'exit_plan_mode'
+    || event.toolName === 'exit_plan_mode'
+  ) {
+    return 'waiting_user'
+  }
   return null
 }
 
-function isResyncError(value: unknown): value is ApiError {
+function isResyncError(value: unknown): boolean {
   if (!(value instanceof ApiError)) return false
   const code = value.code.toLowerCase().replaceAll('-', '_')
   return value.status === 409 || code === 'cursor_invalid' || code === 'invalid_cursor' || code === 'cursor_expired' || code === 'retention_expired' || code === 'sequence_gap'

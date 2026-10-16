@@ -273,4 +273,45 @@ describe('activity grouping', () => {
     expect(settledGroups[0].events).toHaveLength(1)
     expect(settledGroups[0].events[0].type).toBe('tool.finished')
   })
+
+  it('never overwrites a completed tool.finished row when tool.progressed lacks invocationId or reuses synthetic tool-call:1 across iterations', () => {
+    const groups = summarizeActivities([
+      event({ type: 'tool.started', turnId: 'turn-1', toolName: 'run_command', toolKind: 'terminal', invocationId: 'tool-call:1', summary: 'Executando run_command' }),
+      event({ type: 'tool.progressed', turnId: 'turn-1', toolName: 'run_command', toolKind: 'terminal', summary: 'Executando npm create vite', outputTail: 'Operation cancelled' }),
+      event({ type: 'tool.finished', turnId: 'turn-1', toolName: 'run_command', toolKind: 'terminal', invocationId: 'tool-call:1', status: 'succeeded', summary: '$ npm create vite' }),
+      event({ type: 'tool.started', turnId: 'turn-1', toolName: 'run_command', toolKind: 'terminal', invocationId: 'tool-call:1', summary: 'Executando run_command' }),
+      event({ type: 'tool.progressed', turnId: 'turn-1', toolName: 'run_command', toolKind: 'terminal', summary: 'Executando npm install', outputTail: 'added 50 packages' }),
+      event({ type: 'tool.finished', turnId: 'turn-1', toolName: 'run_command', toolKind: 'terminal', invocationId: 'tool-call:1', status: 'succeeded', summary: '$ npm install' }),
+    ])
+
+    expect(groups).toHaveLength(1)
+    expect(groups[0].count).toBe(2)
+    expect(groups[0].state).toBe('completed')
+    expect(groups[0].events).toHaveLength(2)
+    expect(groups[0].events.every((item) => item.type === 'tool.finished' && item.state === 'completed')).toBe(true)
+  })
+
+  it('anchors the Code mode card at the top of the turn without splitting a tool batch when code_mode.activated rolled out of the window', () => {
+    const groups = summarizeActivities([
+      event({ type: 'tool.finished', turnId: 'turn-code', toolName: 'run_command', toolKind: 'terminal', invocationId: 'c1', status: 'succeeded', summary: '$ npm create vite' }),
+      event({ type: 'code_mode.validation_started', turnId: 'turn-code', codeStage: 'validating', summary: 'Executando validação' }),
+      event({ type: 'tool.finished', turnId: 'turn-code', toolName: 'run_command', toolKind: 'terminal', invocationId: 'c2', status: 'succeeded', summary: '$ npm run build' }),
+    ])
+
+    expect(groups).toHaveLength(2)
+    expect(groups[0].id).toBe('code-mode:turn-code')
+    expect(groups[1].kind).toBe('tool')
+    expect(groups[1].count).toBe(2)
+  })
+
+  it('keeps count at 1 when duplicate turn.failed lifecycle events arrive on cancel', () => {
+    const groups = summarizeActivities([
+      event({ type: 'turn.failed', turnId: 'turn-cancel', state: 'cancelled', summary: 'Execução cancelada' }),
+      event({ type: 'turn.failed', turnId: 'turn-cancel', state: 'cancelled', summary: 'Cancelado' }),
+    ])
+
+    expect(groups).toHaveLength(1)
+    expect(groups[0].count).toBe(1)
+    expect(groups[0].state).toBe('cancelled')
+  })
 })

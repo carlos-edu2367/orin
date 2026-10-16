@@ -18,8 +18,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Mapping, Sequence
 
-from agentos.code_mode.models import detect_code_request
-
 
 # Coarse families of capability a task can need. Naming them in the contract
 # is what lets a phase publish ten relevant tools instead of fifty, which is
@@ -41,6 +39,8 @@ def _is_frontend_work(objective: str, deliverables: Sequence["Deliverable"] = ()
 
 
 def _is_software_work(objective: str, toolkits: set[str]) -> bool:
+    from agentos.code_mode.models import detect_code_request
+
     return "terminal" in toolkits or detect_code_request(objective) is not None
 
 
@@ -192,6 +192,8 @@ def synthesize(request: str) -> TaskContract:
     contract loses some of the benefit, while no contract would stall the
     turn entirely.
     """
+    from agentos.code_mode.models import detect_code_request
+
     objective = (request or "Atender ao pedido da pessoa.").strip()[:MAX_OBJECTIVE_CHARS]
     software = detect_code_request(objective) is not None
     frontend = _is_frontend_work(objective)

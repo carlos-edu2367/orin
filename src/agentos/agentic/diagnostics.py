@@ -143,7 +143,14 @@ def file_diagnostic_command(path: str, *, project_root: Path) -> str | None:
     lowered = path.lower()
     if lowered.endswith(".py"):
         return f'python -m ruff check "{path}"'
-    if lowered.endswith((".ts", ".tsx", ".js", ".jsx")) and (project_root / "package.json").is_file():
+    if (
+        lowered.endswith((".ts", ".tsx", ".js", ".jsx"))
+        and (project_root / "package.json").is_file()
+        and (
+            (project_root / "node_modules" / ".bin" / "eslint").exists()
+            or (project_root / "node_modules" / ".bin" / "eslint.cmd").exists()
+        )
+    ):
         return f'npx --no-install eslint "{path}"'
     return None
 

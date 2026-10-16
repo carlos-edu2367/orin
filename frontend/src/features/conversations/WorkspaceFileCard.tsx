@@ -20,11 +20,68 @@ export function workspaceFileUrl(reference: WorkspaceFileReference, disposition:
   return `/v1/conversations/${encodeURIComponent(reference.conversationId)}/files/${reference.path.split('/').map(encodeURIComponent).join('/')}?disposition=${disposition}`
 }
 
-export function parseWorkspaceReference(href: string, conversationId: string): WorkspaceFileReference | null {
+export function parseWorkspaceReference(href: string, conversationId = ''): WorkspaceFileReference | null {
   if (!href.startsWith('workspace://')) return null
   const path = decodeURIComponent(href.slice('workspace://'.length)).replaceAll('\\', '/')
   if (!path || path.startsWith('/') || path.split('/').some((part) => !part || part === '.' || part === '..')) return null
   return { conversationId, path, name: path.split('/').at(-1) }
+}
+
+export type InlineWorkspaceFilePillProps = {
+  path: string
+  label?: string
+  conversationId?: string
+  reference?: WorkspaceFileReference
+  onPreview?: ((path: string, label?: string) => void) | WorkspaceFilePreviewHandler
+  onPreviewWorkspaceFile?: (path: string, label?: string) => void
+}
+
+export function InlineWorkspaceFilePill({
+  path,
+  label,
+  conversationId,
+  reference,
+  onPreview,
+  onPreviewWorkspaceFile,
+}: InlineWorkspaceFilePillProps) {
+  const resolvedPath = path || reference?.path || ''
+  const fileName = resolvedPath.split('/').at(-1) || resolvedPath
+  const displayLabel = label?.trim() || reference?.name || fileName
+
+  const handleClick = () => {
+    if (onPreviewWorkspaceFile) {
+      onPreviewWorkspaceFile(resolvedPath, displayLabel)
+      return
+    }
+    if (onPreview) {
+      if (reference && !path) {
+        ;(onPreview as WorkspaceFilePreviewHandler)(reference)
+      } else {
+        ;(onPreview as (p: string, l?: string) => void)(resolvedPath, displayLabel)
+      }
+      return
+    }
+    const targetConversationId = conversationId ?? reference?.conversationId
+    if (targetConversationId && typeof window !== 'undefined') {
+      const url = workspaceFileUrl({ conversationId: targetConversationId, path: resolvedPath, name: fileName }, 'inline')
+      window.open(url, '_blank', 'noopener,noreferrer')
+    }
+  }
+
+  return (
+    <button
+      type="button"
+      data-testid="inline-workspace-file-pill"
+      data-workspace-path={resolvedPath}
+      title={resolvedPath}
+      aria-label={`Visualizar ${fileName}`}
+      onClick={handleClick}
+      className="inline-flex items-center gap-1.5 rounded-md border border-[var(--border-subtle)] bg-[var(--surface-raised)] px-1.5 py-0.5 font-mono text-[12px] text-[var(--text-primary)] hover:border-[var(--accent-primary)] hover:bg-[var(--surface-hover)] align-baseline transition-colors"
+    >
+      <span aria-hidden="true" className="text-[11px] leading-none opacity-75">▣</span>
+      <span>{displayLabel}</span>
+    </button>
+  )
 }
 
 export function previewKindFor(path: string): PreviewKind {

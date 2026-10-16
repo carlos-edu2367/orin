@@ -13,17 +13,20 @@ export function CodeModeCard({ group }: { group: ActivityGroup }) {
   const todos = [...group.events].reverse().find((event) => Boolean(event.todos && event.todos.length > 0))?.todos
   const activeTodo = todos?.find((todo) => todo.status === 'in_progress')
   const terminal = stage === 'completed' || stage === 'completed_with_caveats'
+  const cancelled = group.state === 'cancelled' || latest.errorCode === 'TURN_CANCELLED'
   const index = terminal ? STAGES.length - 1 : Math.max(0, STAGES.findIndex(([id]) => id === stage))
   const providerFailure = stage === 'blocked' && PROVIDER_FAILURES.has(latest.errorCode ?? '')
-  const stateLabel = terminal ? 'Concluído' : stage === 'waiting_decision' || stage === 'waiting_approval'
-    ? 'Aguardando você'
-    : providerFailure ? 'Falha temporária'
-      : stage === 'blocked' ? 'Bloqueado'
-        : activeTodo?.activeForm || 'Em andamento'
-  return <article className="code-mode-card" data-stage={stage} data-recoverable={providerFailure || undefined} aria-label="Progresso do Modo Code">
-    <div className="code-mode-card__heading" aria-live="polite" aria-atomic="true"><span aria-hidden="true">&lt;/&gt;</span><div><strong>Modo Code</strong><p>{latest.summary || 'Preparando entrega verificável'}</p></div><span className="code-mode-card__state">{stateLabel}</span></div>
+  const stateLabel = terminal ? 'Concluído'
+    : cancelled ? 'Cancelada'
+    : stage === 'waiting_decision' || stage === 'waiting_approval'
+      ? 'Aguardando você'
+      : providerFailure ? 'Falha temporária'
+        : stage === 'blocked' ? 'Bloqueado'
+          : activeTodo?.activeForm || 'Em andamento'
+  return <article className="code-mode-card" data-stage={cancelled ? 'cancelled' : stage} data-recoverable={providerFailure || undefined} aria-label="Progresso do Modo Code">
+    <div className="code-mode-card__heading" aria-live="polite" aria-atomic="true"><span aria-hidden="true">&lt;/&gt;</span><div><strong>Modo Code</strong><p>{cancelled ? 'Execução interrompida pelo usuário' : (latest.summary || 'Preparando entrega verificável')}</p></div><span className="code-mode-card__state">{stateLabel}</span></div>
     <ol className="code-mode-card__steps" aria-label="Etapas da entrega">
-      {STAGES.map(([id, label], itemIndex) => <li key={id} data-state={stage === 'blocked' ? 'next' : itemIndex < index ? 'done' : itemIndex === index ? 'current' : 'next'}><span aria-hidden="true">{itemIndex < index && stage !== 'blocked' ? '✓' : itemIndex + 1}</span>{label}</li>)}
+      {STAGES.map(([id, label], itemIndex) => <li key={id} data-state={stage === 'blocked' || cancelled ? 'next' : itemIndex < index ? 'done' : itemIndex === index ? 'current' : 'next'}><span aria-hidden="true">{itemIndex < index && stage !== 'blocked' && !cancelled ? '✓' : itemIndex + 1}</span>{label}</li>)}
     </ol>
     {todos && todos.length > 0 && (
       <ul className="code-mode-card__todos" aria-label="Lista de tarefas">

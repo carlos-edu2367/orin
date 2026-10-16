@@ -49,10 +49,7 @@ DEFAULT_PHASE_BUDGETS: Mapping[Phase, PhaseBudget] = {
 
 # Tools every working phase needs. Naming them explicitly is the point: the
 # alternative is publishing whatever happens to be registered.
-_READ_TOOLS = (
-    "read_file", "view_file", "transcribe_pdf", "list_files", "search_files", "search_code",
-    "read_process_output",
-)
+_READ_TOOLS = ("read_file", "view_file", "transcribe_pdf", "list_files", "search_files", "search_code", "read_process_output")
 # ``verify_project`` must be reachable while implementing: Code mode cannot
 # earn structured validation evidence otherwise. ``stop_process`` remains in
 # the terminal toolkit, which preserves the 16-tool ceiling for the common
@@ -90,7 +87,10 @@ TOOLKIT_TOOLS: Mapping[str, tuple[str, ...]] = {
         "browser_select", "browser_check", "browser_screenshot", "browser_back",
         "browser_scroll", "browser_wait_for", "browser_submit",
     ),
-    "delegation": ("create_agent", "ask_agent", "ask_agents", "run_subagent", "todo_write"),
+    "delegation": (
+        "create_agent", "ask_agent", "ask_agents", "run_subagent",
+        "todo_write", "task_create", "task_update", "task_get", "task_list",
+    ),
 }
 # ``mcp`` and ``plugins`` are declared the same way but resolve by tool kind
 # rather than by name, since their tools are discovered at runtime.

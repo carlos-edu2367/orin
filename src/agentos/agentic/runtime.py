@@ -39,6 +39,16 @@ BROWSER_TOOL_NAMES = frozenset({
     "browse_page", "browser_observe", "browser_click", "browser_fill",
     "browser_press", "browser_select", "browser_check", "browser_screenshot",
 })
+CODE_MODE_CORE_TOOLS = frozenset({
+    "read_file", "view_file", "transcribe_pdf", "write_file", "edit_file", "notebook_edit",
+    "glob_files", "list_files", "search_files", "search_code", "project_map",
+    "run_command", "read_process_output", "stop_process", "verify_project",
+    "enter_worktree", "exit_worktree", "preview_start", "preview_stop", "preview_logs",
+    "enter_plan_mode", "exit_plan_mode",
+    "todo_write", "task_create", "task_update", "task_get", "task_list",
+    "ask_user", "run_subagent", "fetch_url", "web_search", "verify_frontend", "browse_page",
+    "remember", "recall", "use_skill",
+})
 
 # Sentinel distinguishing "no pin resolved yet" from "resolved, and there is
 # no user message to pin." Used only as the default for the ``_pinned_index``
@@ -248,6 +258,7 @@ class AgenticTurnRuntime:
         # Per-turn tool bookkeeping. ``run`` resets these; they are also
         # initialised here so ``_run_toolset`` can be exercised on its own.
         self._failed_signatures: dict[str, str] = {}
+        self._consecutive_tool_failures: dict[str, int] = {}
         self._succeeded_reads: dict[str, tuple[str, int]] = {}
         self._writes = 0
 
@@ -285,6 +296,7 @@ class AgenticTurnRuntime:
         messages = list(self.store.history_for_turn(turn))
         action_count = 0
         self._failed_signatures: dict[str, str] = {}
+        self._consecutive_tool_failures: dict[str, int] = {}
         # ``history_for_turn`` returns the whole conversation up to and
         # including this turn's request, so the current request is always the
         # last user message in this pre-loop snapshot. Resolving it once here
@@ -299,6 +311,7 @@ class AgenticTurnRuntime:
         self._first_request_text = str((pinned_message or {}).get("content") or "")[:2_000]
         provider_retries = 0
         reactive_compacted = False
+        code_gate_rejections = 0
         total_tokens = 0
         total_cost = Decimal("0")
         iterations = range(1, self.limits.max_iterations + 1) if self.limits.max_iterations is not None else count(1)
@@ -317,6 +330,8 @@ class AgenticTurnRuntime:
             )
             tool_schemas = self._tool_schemas(turn)
             self._maybe_compact(messages, turn, tool_schemas)
+            if self.cancelled(turn):
+                return self._cancel(turn, iteration, action_count)
             window = self._request_messages(messages)
             if self.phases is not None:
                 # Last, so the stage the agent is in is the nearest thing to
@@ -394,7 +409,12 @@ class AgenticTurnRuntime:
                         text_parts.append(event.text)
                         self.store.delta(turn, event.text)
                     elif event.kind is StreamKind.TOOL_CALL and event.tool_call_id:
-                        current = calls.setdefault(event.tool_call_id, {"id": event.tool_call_id, "name": event.tool_name or "", "arguments": ""})
+                        call_id = (
+                            f"iter{iteration}-{event.tool_call_id}"
+                            if event.tool_call_id.startswith("tool-call:") and iteration > 1
+                            else event.tool_call_id
+                        )
+                        current = calls.setdefault(call_id, {"id": call_id, "name": event.tool_name or "", "arguments": ""})
                         if event.tool_name:
                             current["name"] = event.tool_name
                         current["arguments"] += event.arguments_delta or ""
@@ -490,6 +510,15 @@ class AgenticTurnRuntime:
                     if self.limits.max_actions is not None and action_count + len(calls) > self.limits.max_actions:
                         return self._fail(turn, "ACTION_LIMIT", iteration, action_count)
                     results = self._run_toolset(turn, list(calls.values()))
+                    if finish is not None and str(getattr(finish, "value", finish)).lower() == "length":
+                        for result in results:
+                            if str(result.get("status")) == "failed" and "truncated at max_tokens" not in str(result.get("content") or ""):
+                                result["content"] = (
+                                    f"{result.get('content') or ''} "
+                                    "Hint: Ensure 'path' is provided first; if you are writing a large file, "
+                                    "your output may have been truncated at max_tokens — write smaller modular "
+                                    "files or use edit_file in chunks."
+                                ).strip()
                     action_count += len(results)
                     self._advance_phase(turn, results)
                 else:
@@ -535,6 +564,8 @@ class AgenticTurnRuntime:
                         tool_name=str(result.get("name") or ""), tool_call_id=str(result.get("id") or ""),
                     )
                     messages.extend(self._tool_result_messages(turn, result))
+                if max(self._consecutive_tool_failures.values(), default=0) >= 3:
+                    return self._fail(turn, "REPEATED_TOOL_FAILURE", iteration, action_count)
                 if self._phase_transition_note:
                     # Appended after every tool result this iteration produced,
                     # so it reads as a reaction to what the model just saw
@@ -561,10 +592,27 @@ class AgenticTurnRuntime:
                     return AgenticRunResult("reconciliation_required", iteration, action_count, "EFFECT_RECONCILIATION_REQUIRED")
                 self._life(turn, "running")
                 continue
-            if (finish is not None or text_parts) and not (final_iteration and not text_parts):
+            has_text = bool("".join(text_parts).strip())
+            is_subagent = hasattr(self.store, "text") and hasattr(self.store, "agent_id")
+            if not has_text and (not is_subagent or bool(thinking_parts)):
+                self._effect_finished(turn, provider_effect_id, state="APPLIED", private_result={"outcome": "empty"})
+                if not final_iteration:
+                    if thinking_parts and str(turn.get("provider", "")).lower() == "ollama":
+                        messages.append({"role": "assistant", "content": "", "thinking": "".join(thinking_parts)})
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "[Sistema] Sua resposta anterior veio sem texto e sem chamadas de ferramentas. "
+                            "Use as ferramentas disponíveis (como list_files, read_file, write_file, edit_file, run_command, verify_project) "
+                            "para executar a tarefa ou responda diretamente ao usuário."
+                        ),
+                    })
+                    self._life(turn, "running")
+                continue
+            if (finish is not None or has_text) and not (final_iteration and not has_text):
                 completion_gate = getattr(self.toolset, "code_completion_gate", None)
                 gate_ok, gate_reason = (True, None)
-                if callable(completion_gate):
+                if callable(completion_gate) and (final_iteration or code_gate_rejections < 1):
                     try:
                         gate_ok, gate_reason = completion_gate()
                     except Exception:
@@ -585,10 +633,17 @@ class AgenticTurnRuntime:
                         # an explicit caveat and preserve it durably instead.
                         caveat = f"\n\nRessalva de verificação: {gate_reason}"
                         self.store.delta(turn, caveat)
+                        self._settle_remaining_todos(turn, str(turn_id))
                         self._life(turn, "completed_with_caveats", reason=gate_reason)
                         self.store.finish(turn, code="CODE_VALIDATION_REQUIRED")
                         self._settle_quality(turn, "completed_with_caveats", "CODE_VALIDATION_REQUIRED")
                         return AgenticRunResult("completed_with_caveats", iteration, action_count, "CODE_VALIDATION_REQUIRED", budget_exhausted=True)
+                    code_gate_rejections += 1
+                    if has_text:
+                        messages.append({"role": "assistant", "content": "".join(text_parts)})
+                        reset_fn = getattr(self.store, "reset_assistant_message", None)
+                        if callable(reset_fn):
+                            reset_fn(turn)
                     messages.append({
                         "role": "user",
                         "content": f"[Sistema do Modo Code] {gate_reason} Continue a tarefa usando ferramentas; não responda como concluída.",
@@ -610,6 +665,11 @@ class AgenticTurnRuntime:
                         previous_phase = self.phases.current
                         self.phases.force_verify()
                         self._life(turn, "phase_changed", phase=str(self.phases.current), previous_phase=str(previous_phase))
+                    if has_text:
+                        messages.append({"role": "assistant", "content": "".join(text_parts)})
+                        reset_fn = getattr(self.store, "reset_assistant_message", None)
+                        if callable(reset_fn):
+                            reset_fn(turn)
                     messages.append({"role": "user", "content": VERIFY_REQUIRED_MESSAGE})
                     self._life(turn, "running")
                     continue
@@ -618,6 +678,7 @@ class AgenticTurnRuntime:
                     result_ref=f"conversation-message:{turn['assistant_message_id']}",
                     private_result={"outcome": "final"},
                 )
+                self._settle_remaining_todos(turn, str(turn_id))
                 self._life(turn, "completed")
                 self.store.finish(turn)
                 self._settle_quality(turn, "completed")
@@ -635,6 +696,25 @@ class AgenticTurnRuntime:
         if self.toolset is None:
             return self.actions.tool_schemas(turn)
         if self.phases is None:
+            if getattr(self.toolset, "_code_mode_active", False) or turn.get("code_mode") == "code":
+                allowed = set(CODE_MODE_CORE_TOOLS)
+                if getattr(self.toolset, "_last_browser_navigation_url", None):
+                    allowed.update({
+                        "browser_observe", "browser_click", "browser_fill",
+                        "browser_press", "browser_select", "browser_check",
+                        "browser_screenshot", "browser_back", "browser_wait_for",
+                        "browser_scroll", "browser_submit",
+                    })
+                mcp_provider = getattr(self.toolset, "_mcp_provider", None)
+                if mcp_provider is not None and hasattr(mcp_provider, "definitions"):
+                    try:
+                        allowed.update(item.name for item in mcp_provider.definitions())
+                    except Exception:
+                        pass
+                try:
+                    return self.toolset.schemas(allowed)
+                except TypeError:
+                    return self.toolset.schemas()
             return self.toolset.schemas()
         toolkits = self.contract.toolkits if self.contract is not None else None
         allowed = phases.tools_for(self.phases.current, toolkits)
@@ -1242,12 +1322,42 @@ class AgenticTurnRuntime:
         for call in calls:
             name = str(call.get("name") or "")
             call_id = str(call.get("id") or "")
-            self._life(turn, "tool_started", tool_name=name, invocation_id=call_id)
             argument_names = getattr(self.toolset, "argument_names", None)
+            parsed_args: dict[str, object] | None = None
+            parse_err: str | None = None
             try:
-                prepared.append((call_id, name, parse_arguments(call.get("arguments") or "{}", argument_names(name) if callable(argument_names) else None), None))
+                parsed_args = parse_arguments(
+                    call.get("arguments") or "{}",
+                    argument_names(name) if callable(argument_names) else None,
+                )
             except AgentToolError as error:
-                prepared.append((call_id, name, None, str(error)))
+                parse_err = str(error)
+                if name in {"write_file", "edit_file"} and "truncated at max_tokens" not in parse_err:
+                    parse_err = (
+                        f"{parse_err} Hint: Ensure 'path' is provided first; if you are writing a large file, "
+                        "your output may have been truncated at max_tokens — write smaller modular "
+                        "files or use edit_file in chunks."
+                    )
+            started_meta: dict[str, object] = {}
+            if isinstance(parsed_args, Mapping):
+                desc = parsed_args.get("description") or parsed_args.get("subject")
+                if isinstance(desc, str) and desc.strip():
+                    started_meta["description"] = desc.strip()[:200]
+                t_path = (
+                    parsed_args.get("path")
+                    or parsed_args.get("file_path")
+                    or parsed_args.get("notebook_path")
+                    or parsed_args.get("plan_path")
+                    or parsed_args.get("pattern")
+                )
+                if isinstance(t_path, str) and t_path.strip():
+                    started_meta["target_path"] = t_path.strip()[:240]
+                    started_meta["path"] = t_path.strip()[:240]
+                cmd_val = parsed_args.get("command")
+                if isinstance(cmd_val, str) and cmd_val.strip():
+                    started_meta["command"] = cmd_val.strip()[:240]
+            self._life(turn, "tool_started", tool_name=name, invocation_id=call_id, **started_meta)
+            prepared.append((call_id, name, parsed_args, parse_err))
 
         # A call whose exact (name, arguments) signature already failed
         # earlier in this turn is never invoked again — neither in the pool
@@ -1386,8 +1496,10 @@ class AgenticTurnRuntime:
         for index, (call_id, name, arguments, error) in enumerate(prepared):
             if error is not None:
                 self.counters.note_call(name, {}, "failed")
+                sig = f"{name}:<invalid_json>"
+                self._consecutive_tool_failures[sig] = self._consecutive_tool_failures.get(sig, 0) + 1
                 self._life(turn, "tool_finished", tool_name=name, invocation_id=call_id, status="failed", summary=error, error_code="INVALID_ARGUMENTS", tool_arguments={})
-                results.append({"id": call_id, "name": name, "status": "failed", "content": error})
+                results.append({"id": call_id, "name": name, "status": "failed", "content": error, "error_code": "INVALID_ARGUMENTS"})
                 continue
             outcome = outcomes[index]
             self.counters.note_call(name, arguments, outcome.status)
@@ -1397,8 +1509,29 @@ class AgenticTurnRuntime:
                 pass
             self._absorb_contract(outcome)
             self._absorb_verification(name, outcome)
-            if outcome.status == "failed" and not duplicate[index]:
-                self._failed_signatures[self._signature(name, arguments)] = outcome.content
+            sig = self._signature(name, arguments)
+            if outcome.status == "succeeded":
+                self._consecutive_tool_failures.clear()
+            else:
+                self._consecutive_tool_failures[sig] = self._consecutive_tool_failures.get(sig, 0) + 1
+            is_mutating_fn = getattr(self.toolset, "is_mutating", None)
+            if outcome.status == "succeeded" and (
+                name in {
+                    "write_file",
+                    "edit_file",
+                    "notebook_edit",
+                    "delete_file",
+                    "run_command",
+                    "preview_start",
+                    "preview_stop",
+                    "stop_process",
+                    "verify_project",
+                }
+                or (callable(is_mutating_fn) and is_mutating_fn(name))
+            ):
+                self._failed_signatures.clear()
+            elif outcome.status == "failed" and not duplicate[index]:
+                self._failed_signatures[sig] = outcome.content
             self._life(
                 turn, "tool_finished", tool_name=name, invocation_id=call_id, status=outcome.status,
                 summary=outcome.summary, error_code=outcome.error_code, tool_payload=dict(outcome.payload),
@@ -1409,8 +1542,37 @@ class AgenticTurnRuntime:
                 "id": call_id, "name": name, "status": outcome.status,
                 "content": outcome.content, "images": list(outcome.images or []),
                 "wait_for_user": bool(outcome.payload.get("wait_for_user")),
+                "error_code": outcome.error_code,
             })
         return results
+
+    def _settle_remaining_todos(self, turn: dict[str, object], turn_id: str, *, failed: bool = False) -> None:
+        if failed or str(turn.get("state") or "").lower() in {"failed", "cancelled", "blocked", "error"}:
+            return
+        complete_todos_fn = getattr(self.toolset, "complete_remaining_todos", None)
+        if not callable(complete_todos_fn):
+            return
+        try:
+            settled_todos = complete_todos_fn()
+            if settled_todos:
+                self._life(
+                    turn,
+                    "tool_finished",
+                    tool_name="todo_write",
+                    invocation_id=f"auto_todo_settle_{turn_id}",
+                    status="succeeded",
+                    summary=f"Lista de tarefas ({len(settled_todos)}/{len(settled_todos)} concluídas)",
+                    tool_payload={
+                        "todos": settled_todos,
+                        "total": len(settled_todos),
+                        "completed": len(settled_todos),
+                        "in_progress": 0,
+                        "pending": 0,
+                        "tool_kind": "planning",
+                    },
+                )
+        except Exception:
+            pass
 
     def _load(self, turn_id: str) -> dict[str, object]:
         if hasattr(self.store, "load"):

@@ -1,9 +1,30 @@
-import type { ApiClient } from './client'
+import { createBrowserApiClient, type ApiClient, type MutationIntent } from './client'
 import { invalidResponseError, parseApiErrorResponse } from './errors'
 import type { ProviderName } from './providers'
 import { parseWorkspaceState, type WorkspaceState } from './workspace'
-import { kindFor, stateFor, type ContextUsage, type ConversationActivityEvent, type StructuredPatchHunk, type TodoItem, type ToolPermissionDecision, type ToolPermissionRequest } from '../features/conversations/activityTypes'
+import {
+  kindFor,
+  stateFor,
+  type ActivityBashOutput,
+  type ActivityDiffHunk,
+  type ActivityPlanApproval,
+  type ContextUsage,
+  type ConversationActivityEvent,
+  type StructuredPatchHunk,
+  type TodoItem,
+  type ToolPermissionDecision,
+  type ToolPermissionRequest,
+} from '../features/conversations/activityTypes'
 import type { MessageCommand } from '../features/conversations/MessageCommandChip'
+import {
+  normalizeCodePermissionMode,
+  nextCodePermissionMode,
+  type CodePermissionMode,
+} from './codeMode'
+
+export type ConversationMode = 'chat' | 'code'
+export type PermissionMode = CodePermissionMode
+export { normalizeCodePermissionMode, nextCodePermissionMode, type CodePermissionMode }
 
 export type CreateConversationInput = {
   message: string
@@ -15,6 +36,8 @@ export type CreateConversationInput = {
   workspace_acknowledged_risk?: boolean
   attachments?: string[]
   code_mode?: CodeModeChoice
+  mode?: ConversationMode
+  permission_mode?: PermissionMode
 }
 
 export type CodeModeChoice = 'auto' | 'code' | 'chat'
@@ -25,15 +48,65 @@ export type ConversationReceipt = {
   turn_id: string
   message_id: string
   state: string
+  mode: ConversationMode
+  permission_mode: PermissionMode
 }
 
 export type MessageAttachment = { path: string; original_name: string; media_type: string; kind: string; bytes: number }
 
-export type Conversation = { conversation_id: string; title: string; state: string; messages: ConversationMessage[]; turns: ConversationTurn[]; provider: string; model_id: string; activities: ConversationActivityEvent[]; activity_cursor: string; workspace: WorkspaceState; context_usage: ContextUsage | null }
-export type ConversationMessage = { message_id: string; role: 'user' | 'assistant'; content: string; status: string; retryable: boolean; attachments: MessageAttachment[]; command: MessageCommand | null }
+export type Conversation = {
+  conversation_id: string
+  title: string
+  state: string
+  mode: ConversationMode
+  permission_mode: PermissionMode
+  messages: ConversationMessage[]
+  turns: ConversationTurn[]
+  provider: string
+  model_id: string
+  activities: ConversationActivityEvent[]
+  activity_cursor: string
+  has_older_activities?: boolean
+  oldest_activity_id?: number | null
+  workspace: WorkspaceState
+  context_usage: ContextUsage | null
+}
+export type ConversationDetail = Conversation
+export type ConversationSummary = Pick<Conversation, 'conversation_id' | 'title' | 'state'> & {
+  mode?: ConversationMode
+  permission_mode?: PermissionMode
+  updated_at?: string | null
+}
+export type ConversationMessage = { message_id: string; role: 'user' | 'assistant'; content: string; status: string; retryable: boolean; attachments: MessageAttachment[]; command: MessageCommand | null; turn_id?: string | null }
 export type ConversationTurn = { turn_id: string; state: string; created_at: string; started_at: string | null; finished_at: string | null; scheduled_by_schedule_id: string | null; code_mode: 'code' | null }
 
+export type SendMessageInput = {
+  message: string
+  attachments?: string[]
+  selection?: Pick<CreateConversationInput, 'provider' | 'model_id'>
+  code_mode?: CodeModeChoice
+  mode?: ConversationMode
+  permission_mode?: PermissionMode
+}
+
+function parseModeAndPermission(data: Record<string, unknown>, fallbackMode: ConversationMode = 'chat'): {
+  mode: ConversationMode
+  permission_mode: PermissionMode
+} {
+  const mode: ConversationMode = data.mode === 'code' ? 'code' : data.mode === 'chat' ? 'chat' : fallbackMode
+  const defaultPermission: PermissionMode = mode === 'code' ? 'accept_edits' : 'ask_permissions'
+  const permission_mode: PermissionMode = typeof data.permission_mode === 'string'
+    ? normalizeCodePermissionMode(data.permission_mode)
+    : defaultPermission
+  return { mode, permission_mode }
+}
+
 export function createConversation(client: ApiClient, input: CreateConversationInput, intent = client.createMutationIntent()): Promise<ConversationReceipt> {
+  const effectiveCodeMode: CodeModeChoice | undefined = input.mode
+    ? input.mode
+    : input.code_mode && input.code_mode !== 'auto'
+      ? input.code_mode
+      : undefined
   return client.request({
     path: '/v1/conversations', method: 'POST', expectedStatus: 201, intent,
     body: {
@@ -44,35 +117,163 @@ export function createConversation(client: ApiClient, input: CreateConversationI
       workspace_path: input.workspace_path ?? null,
       workspace_acknowledged_risk: input.workspace_acknowledged_risk ?? false,
       attachments: input.attachments ?? [],
-      // Omitting the default keeps older servers and integrations compatible;
-      // the API itself defaults to automatic classification.
-      ...(input.code_mode && input.code_mode !== 'auto' ? { code_mode: input.code_mode } : {}),
+      ...(effectiveCodeMode ? { code_mode: effectiveCodeMode } : {}),
+      ...(input.permission_mode ? { permission_mode: input.permission_mode } : {}),
     },
     parse: parseConversationReceipt,
   })
 }
 
-function parseConversationReceipt(value: unknown): ConversationReceipt {
+export function parseConversationReceipt(value: unknown): ConversationReceipt {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw invalidResponseError()
   const data = value as Record<string, unknown>
-  return { conversation_id: string(data.conversation_id), title: string(data.title), turn_id: string(data.turn_id), message_id: string(data.message_id), state: string(data.state) }
+  const { mode, permission_mode } = parseModeAndPermission(data)
+  return {
+    conversation_id: string(data.conversation_id),
+    title: string(data.title),
+    turn_id: string(data.turn_id),
+    message_id: string(data.message_id),
+    state: string(data.state),
+    mode,
+    permission_mode,
+  }
 }
+
+export const parseReceipt = parseConversationReceipt
 
 export function getConversation(client: ApiClient, id: string): Promise<Conversation> {
   return client.request({ path: `/v1/conversations/${encodeURIComponent(id)}`, parse: parseConversation })
 }
 
-export function listConversations(client: ApiClient): Promise<{ items: Array<Pick<Conversation, 'conversation_id' | 'title' | 'state'>> }> {
+export type OlderActivitiesPage = {
+  activities: ConversationActivityEvent[]
+  has_older_activities: boolean
+  oldest_activity_id: number | null
+}
+
+export function listOlderConversationActivities(
+  client: ApiClient,
+  conversationId: string,
+  beforeId: number,
+  limit = 150,
+  signal?: AbortSignal,
+): Promise<OlderActivitiesPage> {
+  return client.request({
+    path: `/v1/conversations/${encodeURIComponent(conversationId)}/activities`,
+    query: { before_id: beforeId, limit },
+    signal,
+    parse: (value) => {
+      const data = record(value)
+      return {
+        activities: parseSnapshotActivities(data.activities),
+        has_older_activities: data.has_older_activities === true,
+        oldest_activity_id: typeof data.oldest_activity_id === 'number' && Number.isFinite(data.oldest_activity_id) ? data.oldest_activity_id : null,
+      }
+    },
+  })
+}
+
+export function parseConversationSummary(value: unknown): Required<Pick<ConversationSummary, 'conversation_id' | 'title' | 'state' | 'mode' | 'permission_mode'>> & { updated_at: string | null } {
+  const data = record(value)
+  const { mode, permission_mode } = parseModeAndPermission(data)
+  return {
+    conversation_id: string(data.conversation_id),
+    title: string(data.title),
+    state: string(data.state),
+    mode,
+    permission_mode,
+    updated_at: typeof data.updated_at === 'string' ? data.updated_at : null,
+  }
+}
+
+export function listConversations(client: ApiClient): Promise<{ items: Array<Required<Pick<ConversationSummary, 'conversation_id' | 'title' | 'state' | 'mode' | 'permission_mode'>> & { updated_at: string | null }> }> {
   return client.request({ path: '/v1/conversations', parse: (value) => {
     if (typeof value !== 'object' || value === null || !Array.isArray((value as { items?: unknown }).items)) throw invalidResponseError()
-    return { items: (value as { items: unknown[] }).items.map((item) => { const data = item as Record<string, unknown>; return { conversation_id: string(data.conversation_id), title: string(data.title), state: string(data.state) } }) }
+    return { items: (value as { items: unknown[] }).items.map(parseConversationSummary) }
   } })
 }
 
-export function sendConversationMessage(client: ApiClient, id: string, message: string, attachments: string[] = [], selection?: Pick<CreateConversationInput, 'provider' | 'model_id'>, codeMode: CodeModeChoice = 'auto', intent = client.createMutationIntent()): Promise<ConversationReceipt> {
+export function sendConversationMessage(
+  client: ApiClient,
+  id: string,
+  messageOrInput: string | SendMessageInput,
+  attachments: string[] = [],
+  selection?: Pick<CreateConversationInput, 'provider' | 'model_id'>,
+  codeMode: CodeModeChoice = 'auto',
+  permissionModeOrIntent?: PermissionMode | MutationIntent,
+  intentArg?: MutationIntent,
+): Promise<ConversationReceipt> {
+  if (typeof messageOrInput === 'object' && messageOrInput !== null) {
+    const effectiveMode = messageOrInput.mode ?? (messageOrInput.code_mode && messageOrInput.code_mode !== 'auto' ? messageOrInput.code_mode : undefined)
+    const intent = (typeof permissionModeOrIntent === 'object' && permissionModeOrIntent !== null ? permissionModeOrIntent : intentArg) ?? client.createMutationIntent()
+    return client.request({
+      path: `/v1/conversations/${encodeURIComponent(id)}/messages`,
+      method: 'POST',
+      expectedStatus: 201,
+      intent,
+      body: {
+        message: messageOrInput.message,
+        attachments: messageOrInput.attachments ?? [],
+        ...(effectiveMode ? { code_mode: effectiveMode } : {}),
+        ...(messageOrInput.permission_mode ? { permission_mode: messageOrInput.permission_mode } : {}),
+        ...(messageOrInput.selection ? { selection: messageOrInput.selection } : {}),
+      },
+      parse: parseConversationReceipt,
+    })
+  }
+  const permissionMode = typeof permissionModeOrIntent === 'string' ? permissionModeOrIntent : undefined
+  const intent = (typeof permissionModeOrIntent === 'object' && permissionModeOrIntent !== null ? permissionModeOrIntent : intentArg) ?? client.createMutationIntent()
   return client.request({
     path: `/v1/conversations/${encodeURIComponent(id)}/messages`, method: 'POST', expectedStatus: 201, intent,
-    body: { message, attachments, ...(codeMode !== 'auto' ? { code_mode: codeMode } : {}), ...(selection ? { selection } : {}) }, parse: parseConversationReceipt,
+    body: {
+      message: messageOrInput,
+      attachments,
+      ...(codeMode !== 'auto' ? { code_mode: codeMode } : {}),
+      ...(permissionMode ? { permission_mode: permissionMode } : {}),
+      ...(selection ? { selection } : {}),
+    },
+    parse: parseConversationReceipt,
+  })
+}
+
+export const sendMessage = sendConversationMessage
+
+export type UpdatePermissionModeResponse = {
+  conversation_id: string
+  mode: ConversationMode
+  permission_mode: PermissionMode
+}
+
+export function updateConversationPermissionMode(
+  clientOrConversationId: ApiClient | string,
+  conversationIdOrPermissionMode: string,
+  maybePermissionMode?: PermissionMode,
+  maybeIntent?: MutationIntent,
+): Promise<UpdatePermissionModeResponse> {
+  const client = typeof clientOrConversationId === 'string'
+    ? createBrowserApiClient()
+    : clientOrConversationId
+  const conversationId = typeof clientOrConversationId === 'string'
+    ? clientOrConversationId
+    : conversationIdOrPermissionMode
+  const permissionMode = (typeof clientOrConversationId === 'string'
+    ? conversationIdOrPermissionMode
+    : maybePermissionMode) as PermissionMode
+  const intent = maybeIntent ?? client.createMutationIntent()
+  return client.request({
+    path: `/v1/conversations/${encodeURIComponent(conversationId)}/permission-mode`,
+    method: 'PATCH',
+    intent,
+    body: { permission_mode: permissionMode },
+    parse: (value) => {
+      const data = record(value)
+      const { mode, permission_mode } = parseModeAndPermission(data)
+      return {
+        conversation_id: typeof data.conversation_id === 'string' ? data.conversation_id : conversationId,
+        mode,
+        permission_mode: typeof data.permission_mode === 'string' ? permission_mode : normalizeCodePermissionMode(permissionMode),
+      }
+    },
   })
 }
 
@@ -354,7 +555,10 @@ export function parseConversationActivityEvent(value: unknown, cursor: string): 
   assign('invocationId', optionalText(payload.invocation_id, 255))
   assign('status', status)
   assign('label', optionalText(payload.label, 200))
-  assign('path', optionalText(payload.path, 512))
+  const resolvedPath = optionalText(payload.path ?? payload.file_path, 512)
+  assign('path', resolvedPath)
+  assign('filePath', resolvedPath)
+  if (payload.unchanged === true) event.unchanged = true
   assign('screenshotPath', optionalWorkspacePath(payload.screenshot_path))
   assign('codeStage', optionalText(payload.stage, 64))
   if (payload.code_approval === true) event.codeApproval = true
@@ -370,7 +574,13 @@ export function parseConversationActivityEvent(value: unknown, cursor: string): 
   if (mcpApproval) event.mcpApproval = mcpApproval
   const pluginApproval = parsePluginApprovalRequest(payload)
   if (pluginApproval) event.pluginApproval = pluginApproval
-  const toolPermission = parseToolPermissionRequest(payload, event.turnId)
+  const planApproval = parsePlanApproval(payload)
+  if (planApproval) {
+    event.planApproval = planApproval
+    if (planApproval.plan_path) event.planPath = planApproval.plan_path
+    if (planApproval.plan_content) event.planContent = planApproval.plan_content
+  }
+  const toolPermission = parseToolPermissionRequest(payload, event.turnId, planApproval)
   if (toolPermission) {
     event.toolPermission = toolPermission
     event.kind = 'tool'
@@ -384,17 +594,186 @@ export function parseConversationActivityEvent(value: unknown, cursor: string): 
   if (typeof payload.removed_lines === 'number' && Number.isFinite(payload.removed_lines) && payload.removed_lines >= 0) {
     event.removedLines = payload.removed_lines
   }
-  if (typeof payload.output_tail === 'string' && payload.output_tail.length > 0 && payload.output_tail.length <= 4_000) {
-    event.outputTail = payload.output_tail
+  if (structuredPatch || event.addedLines !== undefined || event.removedLines !== undefined || payload.unchanged === true) {
+    event.diff = {
+      path: resolvedPath ?? event.label ?? '',
+      added_lines: event.addedLines ?? 0,
+      removed_lines: event.removedLines ?? 0,
+      structured_patch: (structuredPatch ?? []) as ActivityDiffHunk[],
+      ...(event.summary ? { summary: event.summary } : {}),
+    }
+  }
+  assign('command', optionalText(payload.command, 4000))
+  const rawOutputTail =
+    typeof payload.output_tail === 'string'
+      ? payload.output_tail
+      : typeof payload.outputTail === 'string'
+        ? payload.outputTail
+        : undefined
+  if (rawOutputTail && rawOutputTail.length > 0 && rawOutputTail.length <= 4_000 && !isRedactedValue(rawOutputTail)) {
+    event.outputTail = rawOutputTail
   }
   if (typeof payload.elapsed_ms === 'number' && Number.isFinite(payload.elapsed_ms) && payload.elapsed_ms >= 0) {
     event.elapsedMs = payload.elapsed_ms
   }
-  const todos = parseTodoItems(payload.todos)
+  const bashOutput = parseBashOutput(payload, toolKind, event.toolName, event.state, status, errorCode)
+  if (bashOutput) {
+    event.bashOutput = bashOutput
+    if (bashOutput.command && !event.command) event.command = bashOutput.command
+    if (bashOutput.description) event.description = bashOutput.description
+    if (bashOutput.auto_backgrounded !== undefined) event.autoBackgrounded = bashOutput.auto_backgrounded
+    if (bashOutput.detected_url) event.detectedUrl = bashOutput.detected_url
+    if (bashOutput.shell_id) event.shellId = bashOutput.shell_id
+    if (bashOutput.exit_code !== undefined) event.exitCode = bashOutput.exit_code
+  } else {
+    assign('description', optionalText(payload.description, 500))
+  }
+  const todosSource =
+    payload.todos ??
+    (typeof payload.result === 'object' && payload.result !== null ? (payload.result as Record<string, unknown>).todos : undefined) ??
+    (typeof payload.output === 'object' && payload.output !== null ? (payload.output as Record<string, unknown>).todos : undefined)
+  const todos = parseTodoItems(todosSource)
   if (todos) event.todos = todos
   if (errorCode) event.errorCode = errorCode
-  if (typeof payload.content === 'string' && payload.content.length <= 16_000) event.content = payload.content
+  if (typeof payload.content === 'string' && payload.content.length <= 16_000 && !isRedactedValue(payload.content)) {
+    event.content = payload.content
+  } else if (event.state === 'failed') {
+    const errorText = optionalText(payload.error ?? payload.detail, 16_000)
+    if (errorText && !isRedactedValue(errorText)) {
+      event.content = errorText
+    }
+  }
   return event
+}
+
+function isRedactedValue(value: unknown): boolean {
+  if (typeof value !== 'string') return false
+  const trimmed = value.trim()
+  if (!trimmed) return false
+  return trimmed === '[REDACTED]' || trimmed.replace(/\[REDACTED\]/g, '').trim() === ''
+}
+
+function parseBashOutput(
+  payload: Record<string, unknown>,
+  toolKind?: string,
+  toolName?: string,
+  state?: string,
+  status?: string,
+  errorCode?: string | null,
+): ActivityBashOutput | undefined {
+  const bashSource = typeof payload.bash_output === 'object' && payload.bash_output !== null && !Array.isArray(payload.bash_output)
+    ? (payload.bash_output as Record<string, unknown>)
+    : payload
+  const isTerminalTool = toolKind === 'terminal' || toolName === 'run_command' || toolName === 'bash' || toolName === 'bash_output'
+  const command = optionalText(bashSource.command ?? payload.command, 4000)
+  const description = optionalText(bashSource.description ?? payload.description, 500)
+  const fallbackTail = typeof bashSource.output_tail === 'string' && !isRedactedValue(bashSource.output_tail)
+    ? bashSource.output_tail
+    : typeof payload.output_tail === 'string' && !isRedactedValue(payload.output_tail)
+      ? payload.output_tail
+      : typeof payload.outputTail === 'string' && !isRedactedValue(payload.outputTail)
+        ? payload.outputTail
+        : undefined
+  const rawStdout = typeof bashSource.stdout === 'string' && !isRedactedValue(bashSource.stdout)
+    ? bashSource.stdout.slice(0, 16_000)
+    : typeof payload.stdout === 'string' && !isRedactedValue(payload.stdout)
+      ? payload.stdout.slice(0, 16_000)
+      : undefined
+  const stdout = rawStdout !== undefined && rawStdout.length > 0
+    ? rawStdout
+    : isTerminalTool && fallbackTail !== undefined
+      ? fallbackTail.slice(0, 16_000)
+      : rawStdout
+  const stderr = typeof bashSource.stderr === 'string' && !isRedactedValue(bashSource.stderr)
+    ? bashSource.stderr.slice(0, 16_000)
+    : typeof payload.stderr === 'string' && !isRedactedValue(payload.stderr)
+      ? payload.stderr.slice(0, 16_000)
+      : undefined
+  const isFailedEvent =
+    state === 'failed' ||
+    status === 'failed' ||
+    Boolean(errorCode)
+  const rawExitCode = typeof bashSource.exit_code === 'number' && Number.isFinite(bashSource.exit_code)
+    ? bashSource.exit_code
+    : bashSource.exit_code === null
+      ? null
+      : typeof payload.exit_code === 'number' && Number.isFinite(payload.exit_code)
+        ? payload.exit_code
+        : undefined
+  const exitCode = isFailedEvent && rawExitCode === 0 ? undefined : rawExitCode
+  const background = typeof bashSource.background === 'boolean'
+    ? bashSource.background
+    : typeof payload.background === 'boolean'
+      ? payload.background
+      : undefined
+  const autoBackgrounded = typeof bashSource.auto_backgrounded === 'boolean'
+    ? bashSource.auto_backgrounded
+    : typeof payload.auto_backgrounded === 'boolean'
+      ? payload.auto_backgrounded
+      : undefined
+  const shellId = optionalText(bashSource.shell_id ?? payload.shell_id, 128)
+  const detectedUrl = optionalText(bashSource.detected_url ?? payload.detected_url, 1024)
+  if (
+    command === undefined &&
+    stdout === undefined &&
+    stderr === undefined &&
+    exitCode === undefined &&
+    background === undefined &&
+    autoBackgrounded === undefined &&
+    shellId === undefined &&
+    detectedUrl === undefined &&
+    !(isTerminalTool && description !== undefined)
+  ) {
+    return undefined
+  }
+  return {
+    ...(command !== undefined ? { command } : {}),
+    ...(description !== undefined ? { description } : {}),
+    ...(stdout !== undefined ? { stdout } : {}),
+    ...(stderr !== undefined ? { stderr } : {}),
+    ...(exitCode !== undefined ? { exit_code: exitCode } : {}),
+    ...(background !== undefined ? { background } : {}),
+    ...(autoBackgrounded !== undefined ? { auto_backgrounded: autoBackgrounded } : {}),
+    ...(shellId !== undefined ? { shell_id: shellId } : {}),
+    ...(detectedUrl !== undefined ? { detected_url: detectedUrl } : {}),
+  }
+}
+
+function parsePlanApproval(payload: Record<string, unknown>): ActivityPlanApproval | undefined {
+  const nested = typeof payload.plan_approval === 'object' && payload.plan_approval !== null && !Array.isArray(payload.plan_approval)
+    ? (payload.plan_approval as Record<string, unknown>)
+    : typeof payload.permission_request === 'object' && payload.permission_request !== null && !Array.isArray(payload.permission_request)
+      ? (payload.permission_request as Record<string, unknown>)
+      : null
+  const planPath = optionalText(nested?.plan_path ?? payload.plan_path, 512)
+  const rawContent = nested?.plan_content ?? payload.plan_content
+  const planContent = typeof rawContent === 'string' && rawContent.length <= 32_000 ? rawContent : undefined
+  const rawPrompts = Array.isArray(nested?.allowed_prompts)
+    ? nested.allowed_prompts
+    : Array.isArray(payload.allowed_prompts)
+      ? payload.allowed_prompts
+      : undefined
+  const allowedPrompts = rawPrompts
+    ? rawPrompts
+        .filter((item): item is Record<string, unknown> => typeof item === 'object' && item !== null && !Array.isArray(item))
+        .map((item) => ({
+          ...(typeof item.tool === 'string' ? { tool: item.tool } : {}),
+          ...(typeof item.prompt === 'string' ? { prompt: item.prompt } : {}),
+        }))
+    : undefined
+  const isPlanEvent =
+    payload.plan_approval === true ||
+    nested?.plan_approval === true ||
+    payload.tool_name === 'exit_plan_mode' ||
+    nested?.tool_name === 'exit_plan_mode' ||
+    planPath !== undefined ||
+    planContent !== undefined
+  if (!isPlanEvent) return undefined
+  return {
+    ...(planPath !== undefined ? { plan_path: planPath } : {}),
+    ...(planContent !== undefined ? { plan_content: planContent } : {}),
+    ...(allowedPrompts !== undefined ? { allowed_prompts: allowedPrompts } : {}),
+  }
 }
 
 function parseTodoItems(value: unknown): TodoItem[] | undefined {
@@ -410,12 +789,16 @@ function parseTodoItems(value: unknown): TodoItem[] | undefined {
       : 'pending'
     if (!id || !content) continue
     const activeForm = optionalText(raw.active_form ?? raw.activeForm, 500) ?? content
-    items.push({ id, content, status, activeForm })
+    items.push({ id, content, status, activeForm, active_form: activeForm })
   }
   return items.length > 0 ? items : undefined
 }
 
-function parseToolPermissionRequest(payload: Record<string, unknown>, fallbackTurnId?: string): ToolPermissionRequest | undefined {
+function parseToolPermissionRequest(
+  payload: Record<string, unknown>,
+  fallbackTurnId?: string,
+  planApproval?: ActivityPlanApproval,
+): ToolPermissionRequest | undefined {
   const source = typeof payload.permission_request === 'object' && payload.permission_request !== null && !Array.isArray(payload.permission_request)
     ? (payload.permission_request as Record<string, unknown>)
     : payload.tool_permission === true
@@ -442,10 +825,11 @@ function parseToolPermissionRequest(payload: Record<string, unknown>, fallbackTu
     toolName,
     ruleSuggestion: optionalText(source.rule_suggestion, 255) ?? optionalText(payload.rule_suggestion, 255),
     command: optionalText(source.command, 2000) ?? optionalText(payload.command, 2000),
-    path: optionalText(source.path, 512) ?? optionalText(payload.path, 512),
+    path: optionalText(source.path ?? source.file_path ?? source.plan_path, 512) ?? optionalText(payload.path ?? payload.file_path ?? payload.plan_path, 512),
     structuredPatch,
     addedLines,
     removedLines,
+    ...(planApproval ? { planApproval } : {}),
   }
 }
 
@@ -455,13 +839,27 @@ function parseStructuredPatch(value: unknown): StructuredPatchHunk[] | undefined
   for (const entry of value) {
     if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) continue
     const raw = entry as Record<string, unknown>
-    const oldStart = typeof raw.oldStart === 'number' && Number.isFinite(raw.oldStart) ? raw.oldStart : null
-    const oldLines = typeof raw.oldLines === 'number' && Number.isFinite(raw.oldLines) ? raw.oldLines : null
-    const newStart = typeof raw.newStart === 'number' && Number.isFinite(raw.newStart) ? raw.newStart : null
-    const newLines = typeof raw.newLines === 'number' && Number.isFinite(raw.newLines) ? raw.newLines : null
+    const rawOldStart = raw.oldStart ?? raw.old_start
+    const rawOldLines = raw.oldLines ?? raw.old_lines
+    const rawNewStart = raw.newStart ?? raw.new_start
+    const rawNewLines = raw.newLines ?? raw.new_lines
+    const oldStart = typeof rawOldStart === 'number' && Number.isFinite(rawOldStart) ? rawOldStart : null
+    const oldLines = typeof rawOldLines === 'number' && Number.isFinite(rawOldLines) ? rawOldLines : null
+    const newStart = typeof rawNewStart === 'number' && Number.isFinite(rawNewStart) ? rawNewStart : null
+    const newLines = typeof rawNewLines === 'number' && Number.isFinite(rawNewLines) ? rawNewLines : null
     if (oldStart === null || oldLines === null || newStart === null || newLines === null || !Array.isArray(raw.lines)) continue
     const lines = raw.lines.filter((line): line is string => typeof line === 'string').slice(0, 500)
-    hunks.push({ oldStart, oldLines, newStart, newLines, lines })
+    hunks.push({
+      oldStart,
+      oldLines,
+      newStart,
+      newLines,
+      old_start: oldStart,
+      old_lines: oldLines,
+      new_start: newStart,
+      new_lines: newLines,
+      lines,
+    })
   }
   return hunks.length > 0 ? hunks : undefined
 }
@@ -472,8 +870,54 @@ export function parseConversation(value: unknown): Conversation {
   if (!Array.isArray(data.messages) || !Array.isArray(data.turns)) throw invalidResponseError()
   const activities = parseSnapshotActivities(data.activities)
   const activityCursor = data.activity_cursor === undefined ? (activities[activities.length - 1]?.cursor ?? '0') : publicId(data.activity_cursor)
-  return { conversation_id: string(data.conversation_id), title: string(data.title), state: string(data.state), provider: string(data.provider), model_id: string(data.model_id), activities, activity_cursor: activityCursor, workspace: parseWorkspaceState(data.workspace ?? {}), context_usage: parseContextUsage(data.context_usage), messages: data.messages.map((item) => { const m = item as Record<string, unknown>; const role = string(m.role); if (role !== 'user' && role !== 'assistant') throw invalidResponseError(); return { message_id: string(m.message_id), role, content: typeof m.content === 'string' ? m.content : '', status: string(m.status), retryable: m.retryable === true, attachments: parseMessageAttachments(m.attachments), command: parseMessageCommand(m.command) } }), turns: data.turns.map((item) => { const t = item as Record<string, unknown>; return { turn_id: string(t.turn_id), state: string(t.state), created_at: string(t.created_at), started_at: typeof t.started_at === 'string' ? t.started_at : null, finished_at: typeof t.finished_at === 'string' ? t.finished_at : null, scheduled_by_schedule_id: typeof t.scheduled_by_schedule_id === 'string' ? t.scheduled_by_schedule_id : null, code_mode: t.code_mode === 'code' ? 'code' : null } }) }
+  const turns = data.turns.map((item) => {
+    const t = item as Record<string, unknown>
+    return {
+      turn_id: string(t.turn_id),
+      state: string(t.state),
+      created_at: string(t.created_at),
+      started_at: typeof t.started_at === 'string' ? t.started_at : null,
+      finished_at: typeof t.finished_at === 'string' ? t.finished_at : null,
+      scheduled_by_schedule_id: typeof t.scheduled_by_schedule_id === 'string' ? t.scheduled_by_schedule_id : null,
+      code_mode: t.code_mode === 'code' ? ('code' as const) : null,
+    }
+  })
+  const fallbackMode: ConversationMode = turns.some((t) => t.code_mode === 'code') ? 'code' : 'chat'
+  const { mode, permission_mode } = parseModeAndPermission(data, fallbackMode)
+  return {
+    conversation_id: string(data.conversation_id),
+    title: string(data.title),
+    state: string(data.state),
+    mode,
+    permission_mode,
+    provider: string(data.provider),
+    model_id: string(data.model_id),
+    activities,
+    activity_cursor: activityCursor,
+    has_older_activities: data.has_older_activities === true,
+    oldest_activity_id: typeof data.oldest_activity_id === 'number' && Number.isFinite(data.oldest_activity_id) ? data.oldest_activity_id : null,
+    workspace: parseWorkspaceState(data.workspace ?? {}),
+    context_usage: parseContextUsage(data.context_usage),
+    messages: data.messages.map((item) => {
+      const m = item as Record<string, unknown>
+      const role = string(m.role)
+      if (role !== 'user' && role !== 'assistant') throw invalidResponseError()
+      return {
+        message_id: string(m.message_id),
+        role,
+        content: typeof m.content === 'string' ? m.content : '',
+        status: string(m.status),
+        retryable: m.retryable === true,
+        attachments: parseMessageAttachments(m.attachments),
+        command: parseMessageCommand(m.command),
+        turn_id: typeof m.turn_id === 'string' && m.turn_id ? m.turn_id : null,
+      }
+    }),
+    turns,
+  }
 }
+
+export const parseConversationDetail = parseConversation
 
 function parseContextUsage(value: unknown): ContextUsage | null {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return null

@@ -14,6 +14,7 @@ from typing import Callable
 
 from sqlalchemy import select, update
 
+from agentos.api.contracts import ApplicationConflictError
 from agentos.bootstrap.production import ProductionSettings, activity_cursor_fallback
 from agentos.agentic.provider_stream import HTTPProviderStreamTransport
 from agentos.agentic.provider_key_fallback import MultiKeyProviderStreamTransport
@@ -24,7 +25,13 @@ from agentos.provider_catalog.omniroute import DEFAULT_OMNIROUTE_BASE_URL, norma
 from agentos.agentic.runtime import AgenticLimits, AgenticRunResult, AgenticTurnRuntime
 from agentos.agentic.settings import AgentRuntimeSettingsStore
 from agentos.agentic.events import AgentActivityEventType
-from agentos.code_mode.models import CodeStage, explicitly_authorizes_git_push
+from agentos.code_mode.models import (
+    CodePermissionMode,
+    CodeStage,
+    explicitly_authorizes_git_push,
+    normalize_code_autonomy,
+    normalize_permission_mode,
+)
 from agentos.agentic.transcript import REHYDRATION_BUDGET_FRACTION
 from agentos.agentic.session import TurnSession, build_retrieval_for_turn, resolve_effective_workspace_id
 from agentos.agentic.browser_tools import ConversationBrowserRegistry, browser_capability_from_environment, conversation_browser_for
@@ -158,6 +165,11 @@ class _RuntimeStore:
 
     def delta(self, turn: dict[str, object], text: str) -> None:
         self._store.delta(turn, text)
+
+    def reset_assistant_message(self, turn: dict[str, object]) -> None:
+        resetter = getattr(self._store, "reset_assistant_message", None)
+        if callable(resetter):
+            resetter(turn)
 
     def finish(self, turn: dict[str, object], *, failed: bool = False, code: str | None = None) -> None:
         if not self._worker._kernel_manages(turn):
@@ -297,10 +309,16 @@ class _ConversationProviderPort:
     def __init__(self, runtime: AgenticTurnRuntime, turn: dict[str, object]) -> None:
         self._runtime, self._turn = runtime, turn
         self.reconciliation_required = False
+        self.completed_with_caveats = False
+        self.error_code: str | None = None
 
     def generate(self, request):
         result = self._runtime.run(str(self._turn["turn_id"]))
+        self.error_code = result.error_code
         if result.state == "completed":
+            return ProviderFinal(f"conversation-message:{self._turn['assistant_message_id']}")
+        if result.state == "completed_with_caveats":
+            self.completed_with_caveats = True
             return ProviderFinal(f"conversation-message:{self._turn['assistant_message_id']}")
         if result.state == "waiting_user":
             return ProviderUserInputRequest(f"conversation-turn:{self._turn['turn_id']}:input")
@@ -405,7 +423,10 @@ class ChatWorker:
                     model_requirements_ref=f"conversation-model:{turn['provider']}:{turn['model_id']}",
                 ))
                 if isinstance(outcome, CompletedOutcome):
-                    result = AgenticRunResult("completed")
+                    result = AgenticRunResult(
+                        "completed_with_caveats" if provider_port.completed_with_caveats else "completed",
+                        error_code=provider_port.error_code,
+                    )
                 elif isinstance(outcome, WaitingOutcome):
                     result = AgenticRunResult(
                         "reconciliation_required" if provider_port.reconciliation_required or outcome.state is ExecutionState.PAUSED else "waiting_user",
@@ -445,26 +466,46 @@ class ChatWorker:
                 self._browser_registry.release(turn)
             except Exception:
                 _LOGGER.exception("browser registry release for turn %s failed", turn_id)
-        if result.state in {"completed", "completed_with_caveats"}:
-            self._project(turn, "COMPLETED", "provider_completed", result_ref=f"conversation-message:{turn['assistant_message_id']}")
+        result_state = result.state
+        error_code = result.error_code
+        if result_state not in {"completed", "completed_with_caveats", "waiting_user", "cancelled", "reconciliation_required"}:
+            cancel_req = getattr(self.store, "cancel_requested", None)
+            if callable(cancel_req) and cancel_req(turn["turn_id"]):
+                result_state = "cancelled"
+                error_code = "TURN_CANCELLED"
+        try:
+            if result_state in {"completed", "completed_with_caveats"}:
+                self._project(turn, "COMPLETED", "provider_completed", result_ref=f"conversation-message:{turn['assistant_message_id']}")
+                if kernel_managed:
+                    self.store.finish(turn)
+            elif result_state == "waiting_user":
+                self._project(turn, "WAITING_USER", "agent_requested_user_input")
+                if kernel_managed:
+                    self.store.finish(turn, code="WAITING_USER")
+            elif result_state == "cancelled":
+                self._project(turn, "CANCELLED", "user_cancelled")
+                if kernel_managed:
+                    self.store.finish(turn, failed=True, code="TURN_CANCELLED")
+            elif result_state == "reconciliation_required":
+                self._project(turn, "PAUSED", "effect_reconciliation_required")
+                self.store.pause_for_reconciliation(turn, code=error_code or "EFFECT_RECONCILIATION_REQUIRED")
+            else:
+                self._project(turn, "FAILED", error_code or "agentic_runtime_failed")
+                if kernel_managed:
+                    self.store.finish(turn, failed=True, code=error_code or "agentic_runtime_failed")
+        except ApplicationConflictError:
+            _LOGGER.info("execution %s already transitioned concurrently for turn %s", turn.get("execution_id"), turn_id)
             if kernel_managed:
-                self.store.finish(turn)
-        elif result.state == "waiting_user":
-            self._project(turn, "WAITING_USER", "agent_requested_user_input")
-            if kernel_managed:
-                self.store.finish(turn, code="WAITING_USER")
-        elif result.state == "cancelled":
-            self._project(turn, "CANCELLED", "user_cancelled")
-            if kernel_managed:
-                self.store.finish(turn, failed=True, code="TURN_CANCELLED")
-        elif result.state == "reconciliation_required":
-            self._project(turn, "PAUSED", "effect_reconciliation_required")
-            self.store.pause_for_reconciliation(turn, code=result.error_code or "EFFECT_RECONCILIATION_REQUIRED")
-        else:
-            self._project(turn, "FAILED", result.error_code or "agentic_runtime_failed")
-            if kernel_managed:
-                self.store.finish(turn, failed=True, code=result.error_code or "agentic_runtime_failed")
-        self._settle_code_mode(turn, result.state, error_code=result.error_code)
+                if result_state == "cancelled":
+                    self.store.finish(turn, failed=True, code="TURN_CANCELLED")
+                elif result_state in {"completed", "completed_with_caveats"}:
+                    self.store.finish(turn)
+                elif result_state == "waiting_user":
+                    self.store.finish(turn, code="WAITING_USER")
+                elif result_state != "reconciliation_required":
+                    self.store.finish(turn, failed=True, code=error_code or "agentic_runtime_failed")
+        finally:
+            self._settle_code_mode(turn, result_state, error_code=error_code)
 
     def _settle_code_mode(self, turn: dict[str, object], result_state: str, *, error_code: str | None) -> None:
         if turn.get("code_mode") != "code":
@@ -477,15 +518,26 @@ class ChatWorker:
             "cancelled": CodeStage.BLOCKED,
         }.get(result_state, CodeStage.BLOCKED)
         try:
-            with self.store._engine.begin() as connection:
-                connection.execute(update(code_mode_runs).where(
-                    code_mode_runs.c.execution_id == turn["execution_id"],
-                ).values(
-                    stage=target.value,
-                    completion_kind=("verified" if target is CodeStage.COMPLETED else "with_caveats" if target is CodeStage.COMPLETED_WITH_CAVEATS else None),
-                    caveats=error_code if target in {CodeStage.BLOCKED, CodeStage.COMPLETED_WITH_CAVEATS} and error_code else None,
-                    updated_at=datetime.now(UTC),
-                ))
+            plan = turn.get("code_mode_plan_path") or turn.get("plan_path") or turn.get("plan")
+            begin = getattr(getattr(self.store, "_engine", None), "begin", None)
+            if callable(begin):
+                with begin() as connection:
+                    run = connection.execute(select(code_mode_runs).where(
+                        code_mode_runs.c.execution_id == turn["execution_id"],
+                    )).mappings().first()
+                    if run is not None and not plan:
+                        plan = run.get("plan_path")
+                    if run is not None:
+                        connection.execute(update(code_mode_runs).where(
+                            code_mode_runs.c.execution_id == turn["execution_id"],
+                        ).values(
+                            stage=target.value,
+                            completion_kind=("verified" if target is CodeStage.COMPLETED else "with_caveats" if target is CodeStage.COMPLETED_WITH_CAVEATS else None),
+                            caveats=error_code if target in {CodeStage.BLOCKED, CodeStage.COMPLETED_WITH_CAVEATS} and error_code else None,
+                            updated_at=datetime.now(UTC),
+                        ))
+            if not plan:
+                return
             event = (
                 AgentActivityEventType.CODE_MODE_COMPLETED if target is CodeStage.COMPLETED else
                 AgentActivityEventType.CODE_MODE_COMPLETED_WITH_CAVEATS if target is CodeStage.COMPLETED_WITH_CAVEATS else
@@ -496,7 +548,14 @@ class ChatWorker:
                 "Entrega de código concluída com ressalvas" if target is CodeStage.COMPLETED_WITH_CAVEATS else
                 "Modo Code aguarda uma decisão" if target is CodeStage.WAITING_DECISION else "Modo Code bloqueado"
             )
-            self.store._activity(turn, event, summary, {"stage": target.value, "error_code": error_code} if error_code else {"stage": target.value})
+            self.store._activity(
+                turn,
+                event,
+                summary,
+                {"stage": target.value, "plan_path": plan, "error_code": error_code}
+                if error_code
+                else {"stage": target.value, "plan_path": plan},
+            )
         except Exception:
             _LOGGER.exception("could not settle Code mode for turn %s", turn.get("turn_id"))
 
@@ -617,7 +676,10 @@ class ChatWorker:
         with self.store._engine.connect() as c:
             rows = c.execute(select(conversation_dispatches.c.turn_id, conversation_dispatches.c.queued_at).where(conversation_dispatches.c.state.in_(("pending", "enqueued")))).mappings().all()
         for row in rows:
-            if now - row["queued_at"] >= maximum_age:
+            queued_at = row["queued_at"]
+            if isinstance(queued_at, datetime) and queued_at.tzinfo is None:
+                queued_at = queued_at.replace(tzinfo=UTC)
+            if now - queued_at >= maximum_age:
                 turn = self.store.claim(row["turn_id"])
                 if turn is not None:
                     self.store.finish(turn, failed=True, code="worker_unavailable")
@@ -1011,25 +1073,60 @@ class ChatWorker:
                 )).mappings().first()
                 if run is None:
                     return turn
-                policy = self._runtime_settings.get_code_mode(str(turn["user_id"]))
+                raw_perm = (
+                    turn.get("permission_mode")
+                    or turn.get("code_mode_permission_mode")
+                    or run.get("autonomy")
+                    or "accept_edits"
+                )
+                resolved_perm = normalize_permission_mode(str(raw_perm))
+                resolved_autonomy = normalize_code_autonomy(resolved_perm)
                 history = self.store.history_for_turn(turn)
                 request_text = next((str(item.get("content") or "") for item in reversed(history) if item.get("role") == "user"), "")
                 push_authorized = explicitly_authorizes_git_push(request_text)
+                existing_plan = str(turn.get("code_mode_plan_path") or run.get("plan_path") or "").strip() or None
+                if existing_plan is None and turn.get("conversation_id"):
+                    prev_plan = connection.execute(
+                        select(code_mode_runs.c.plan_path)
+                        .where(
+                            code_mode_runs.c.conversation_id == turn["conversation_id"],
+                            code_mode_runs.c.user_id == turn["user_id"],
+                            code_mode_runs.c.plan_path.is_not(None),
+                        )
+                        .order_by(code_mode_runs.c.created_at.desc())
+                    ).scalar_one_or_none()
+                    if isinstance(prev_plan, str) and prev_plan.strip():
+                        existing_plan = prev_plan.strip()
+                plan_path: str | None = (
+                    existing_plan or f".orin/plans/{turn['turn_id']}-plan.md"
+                    if resolved_perm is CodePermissionMode.PLAN_MODE
+                    else existing_plan
+                )
+                stage = (
+                    CodeStage.PLANNING
+                    if resolved_perm is CodePermissionMode.PLAN_MODE or plan_path is not None
+                    else CodeStage.IMPLEMENTING
+                )
                 connection.execute(update(code_mode_runs).where(code_mode_runs.c.run_id == run["run_id"]).values(
-                    autonomy=policy.autonomy.value, stage=CodeStage.PLANNING.value,
-                    plan_path=f".orin/plans/{turn['turn_id']}-plan.md", updated_at=datetime.now(UTC),
+                    autonomy=resolved_autonomy.value,
+                    stage=stage.value,
+                    plan_path=plan_path,
+                    updated_at=datetime.now(UTC),
                 ))
             enriched = dict(turn)
             enriched.update({
+                "permission_mode": resolved_perm.value,
+                "code_mode_permission_mode": resolved_perm.value,
                 "code_mode_work_kind": str(run["work_kind"]),
-                "code_mode_autonomy": policy.autonomy.value,
+                "code_mode_autonomy": resolved_autonomy.value,
                 "code_mode_push_authorized": push_authorized,
-                "code_mode_plan_path": f".orin/plans/{turn['turn_id']}-plan.md",
+                "code_mode_plan_path": plan_path,
             })
-            self.store._activity(enriched, AgentActivityEventType.CODE_MODE_STAGE_CHANGED, "Planejando entrega de código", {
-                "stage": CodeStage.PLANNING.value, "work_kind": str(run["work_kind"]),
-                "autonomy": policy.autonomy.value, "push_authorized": push_authorized,
-            })
+            if stage is CodeStage.PLANNING:
+                self.store._activity(enriched, AgentActivityEventType.CODE_MODE_STAGE_CHANGED, "Planejando entrega de código", {
+                    "stage": CodeStage.PLANNING.value, "work_kind": str(run["work_kind"]),
+                    "autonomy": resolved_autonomy.value, "push_authorized": push_authorized,
+                })
             return enriched
         except Exception:
             _LOGGER.exception("could not hydrate Code mode for turn %s", turn.get("turn_id"))

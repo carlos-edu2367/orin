@@ -18,12 +18,24 @@ import type { ActivityGroup, ActivityState, ConversationActivityEvent } from './
 export function summarizeActivities(events: ConversationActivityEvent[]): ActivityGroup[] {
   const groups: ActivityGroup[] = []
   const renderedCodeRuns = new Set<string>()
-  const settled = new Set(
-    events.filter((event) => event.type === 'tool.finished' && event.invocationId).map((event) => event.invocationId as string),
-  )
+  const settled = computeSettledEventIds(events)
+  const firstCodeEventByTurn = new Map<string, ConversationActivityEvent>()
+  for (const event of events) {
+    if (isCodeModeEvent(event) && event.turnId && !firstCodeEventByTurn.has(event.turnId)) {
+      firstCodeEventByTurn.set(event.turnId, event)
+    }
+  }
 
   for (const event of events) {
     if (!isRenderable(event, settled)) continue
+    if (event.turnId && firstCodeEventByTurn.has(event.turnId)) {
+      const anchor = firstCodeEventByTurn.get(event.turnId)!
+      const codeKey = codeModeRunKey(anchor)
+      if (!renderedCodeRuns.has(codeKey)) {
+        renderedCodeRuns.add(codeKey)
+        groups.push(codeModeRunGroup(events, anchor))
+      }
+    }
     if (isCodeModeEvent(event)) {
       const key = codeModeRunKey(event)
       // A Code execution is one durable workflow. Its card keeps the first
@@ -55,34 +67,111 @@ export function summarizeActivities(events: ConversationActivityEvent[]): Activi
     const key = groupingKey(event)
     const previous = groups[groups.length - 1]
     if (previous && previous.id === key && previous.kind === event.kind) {
-      if (event.type === 'tool.progressed') {
-        const matchIndex = event.invocationId
-          ? previous.events.findIndex((item) => item.invocationId === event.invocationId && item.type !== 'tool.finished')
-          : previous.events.length - 1
-        if (matchIndex >= 0) {
-          const existing = previous.events[matchIndex]
-          previous.events[matchIndex] = {
-            ...existing,
-            summary: event.summary || existing.summary,
-            outputTail: event.outputTail ?? existing.outputTail,
-            elapsedMs: event.elapsedMs ?? existing.elapsedMs,
-            state: 'waiting_tool',
-          }
-          previous.state = 'waiting_tool'
-          previous.label = groupLabel(previous)
-          continue
-        }
-      }
-      previous.count += 1
-      previous.events.push(event)
-      previous.state = event.state
-      previous.failed = previous.failed || event.state === 'failed'
-      previous.label = groupLabel(previous)
+      applyEventToGroup(previous, event)
       continue
     }
     groups.push(soloGroup(event))
   }
   return groups
+}
+
+export function applyEventToGroup(group: ActivityGroup, event: ConversationActivityEvent): void {
+  if (event.type === 'tool.progressed') {
+    const matchIndex = event.invocationId
+      ? group.events.findIndex((item) => item.invocationId === event.invocationId && item.type !== 'tool.finished')
+      : findLastOpenToolIndex(group.events)
+    if (matchIndex >= 0) {
+      const existing = group.events[matchIndex]
+      group.events[matchIndex] = {
+        ...existing,
+        summary: event.summary || existing.summary,
+        outputTail: event.outputTail ?? existing.outputTail,
+        elapsedMs: event.elapsedMs ?? existing.elapsedMs,
+        state: 'waiting_tool',
+      }
+      group.state = 'waiting_tool'
+      group.label = groupLabel(group)
+      return
+    }
+  }
+  if (event.kind === 'lifecycle') {
+    group.events[group.events.length - 1] = event
+    group.state = event.state
+    group.failed = group.failed || event.state === 'failed'
+    group.label = groupLabel(group)
+    return
+  }
+  group.count += 1
+  group.events.push(event)
+  group.state = event.state
+  group.failed = group.failed || event.state === 'failed'
+  group.label = groupLabel(group)
+}
+
+function findLastOpenToolIndex(events: ConversationActivityEvent[]): number {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const item = events[index]
+    if (item.kind === 'tool' && item.type !== 'tool.finished') return index
+  }
+  return -1
+}
+
+const TERMINAL_TURN_TYPES = new Set([
+  'turn.completed',
+  'turn.failed',
+  'code_mode.completed',
+  'code_mode.completed_with_caveats',
+  'code_mode.blocked',
+])
+
+/**
+ * Walks the event stream in chronological order and records the `eventId` of
+ * every `tool.started` / `tool.progressed` event that was later settled by its
+ * corresponding `tool.finished` or by a terminal turn event. Tracking by
+ * `eventId` (instead of a global `Set<invocationId>`) ensures that a new
+ * running tool call stays visible even if an earlier iteration reused a
+ * synthetic `invocationId` like `tool-call:1`, while also settling any
+ * `tool.progressed` events that lacked an `invocationId`.
+ */
+export function computeSettledEventIds(events: ConversationActivityEvent[]): Set<string> {
+  const settled = new Set<string>()
+  const openByTurn = new Map<string, ConversationActivityEvent[]>()
+
+  for (const event of events) {
+    const turnScope = `${event.agentId}:${event.turnId ?? ''}`
+    if (event.type === 'tool.started' || event.type === 'tool.progressed') {
+      const list = openByTurn.get(turnScope) ?? []
+      list.push(event)
+      openByTurn.set(turnScope, list)
+      continue
+    }
+    if (event.type === 'tool.finished') {
+      const list = openByTurn.get(turnScope)
+      if (!list || list.length === 0) continue
+      const remaining: ConversationActivityEvent[] = []
+      for (const openEvent of list) {
+        const matchesInvocation = event.invocationId
+          ? openEvent.invocationId === event.invocationId || !openEvent.invocationId
+          : true
+        if (matchesInvocation) {
+          settled.add(openEvent.eventId)
+        } else {
+          remaining.push(openEvent)
+        }
+      }
+      openByTurn.set(turnScope, remaining)
+      continue
+    }
+    if (TERMINAL_TURN_TYPES.has(event.type)) {
+      for (const [scope, list] of openByTurn.entries()) {
+        if (scope === turnScope || (event.turnId && scope.endsWith(`:${event.turnId}`))) {
+          for (const openEvent of list) settled.add(openEvent.eventId)
+          openByTurn.set(scope, [])
+        }
+      }
+    }
+  }
+  return settled
 }
 
 function soloGroup(event: ConversationActivityEvent): ActivityGroup {
@@ -114,16 +203,25 @@ export function codeModeRunGroup(events: ConversationActivityEvent[], anchor: Co
   const id = codeModeRunKey(anchor)
   const runEvents = events.filter((event) => isCodeModeEvent(event) && codeModeRunKey(event) === id)
   const latest = runEvents.at(-1) ?? anchor
+  const turnFailure = anchor.turnId
+    ? [...events].reverse().find((event) => event.turnId === anchor.turnId && event.type === 'turn.failed')
+    : undefined
+  const state: ActivityState =
+    turnFailure?.state === 'cancelled'
+      ? 'cancelled'
+      : latest.state === 'working' && turnFailure?.state === 'failed'
+        ? 'failed'
+        : latest.state
   return {
     id,
     kind: 'lifecycle',
-    state: latest.state,
+    state,
     label: latest.summary || 'Modo Code',
     count: runEvents.length,
     events: runEvents,
     agentId: anchor.agentId,
     agentName: anchor.agentName,
-    failed: runEvents.some((event) => event.state === 'failed'),
+    failed: state === 'failed' || runEvents.some((event) => event.state === 'failed'),
   }
 }
 
@@ -140,7 +238,12 @@ export function isRenderable(event: ConversationActivityEvent, settled: Set<stri
   // sitting right after a card that has already moved on.
   if (event.type === 'turn.waiting_user') return false
   if (event.type === 'tool.requested') return false
-  if ((event.type === 'tool.started' || event.type === 'tool.progressed') && event.invocationId && settled.has(event.invocationId)) return false
+  if (
+    (event.type === 'tool.started' || event.type === 'tool.progressed') &&
+    (settled.has(event.eventId) || Boolean(event.invocationId && settled.has(event.invocationId)))
+  ) {
+    return false
+  }
   // The agent tools already emit their own agent.* events, which read better.
   if (event.kind === 'agent' && event.type.startsWith('tool.') ) return false
   return true

@@ -1,9 +1,109 @@
 import type { ActivityGroup, ConversationActivityEvent } from './activityTypes'
-import { codeModeRunGroup, codeModeRunKey, groupLabel, groupingKey, isCodeModeEvent, isRenderable } from './activitySummary'
+import { applyEventToGroup, codeModeRunGroup, codeModeRunKey, computeSettledEventIds, groupLabel, groupingKey, isCodeModeEvent, isRenderable } from './activitySummary'
 
 export type TimelineTextItem = { id: string; kind: 'text'; content: string }
 export type TimelineActivityItem = { id: string; kind: 'activity'; group: ActivityGroup }
 export type TimelineItem = TimelineTextItem | TimelineActivityItem
+
+/**
+ * Backfills missing target metadata (`path`, `filePath`, `command`, `description`,
+ * `toolName`, `agentName`, `parentAgentId`) on `tool.finished` / `tool.completed` /
+ * `tool.failed` events from their corresponding `tool.started` event before the
+ * started event is collapsed away.
+ */
+function extractUnchangedPathFromSummary(summary: string | undefined): string {
+  if (!summary) return ''
+  const match = summary.match(/^Arquivo inalterado:\s*(.+)$/i)
+  return match ? match[1].trim() : ''
+}
+
+export function enrichEventsWithStartedMetadata(
+  events: ConversationActivityEvent[],
+): ConversationActivityEvent[] {
+  const openByScope = new Map<string, ConversationActivityEvent[]>()
+  const lastReadPathByScope = new Map<string, string>()
+  let mutated = false
+
+  const next = events.map((event) => {
+    const scope = `${event.agentId}:${event.turnId ?? ''}`
+    const explicitReadPath =
+      event.toolName === 'read_file'
+        ? event.path || event.filePath || extractUnchangedPathFromSummary(event.summary)
+        : ''
+    if (explicitReadPath) {
+      lastReadPathByScope.set(scope, explicitReadPath)
+    }
+
+    if (event.type === 'tool.started' || event.type === 'tool.progressed') {
+      const list = openByScope.get(scope) ?? []
+      list.push(event)
+      openByScope.set(scope, list)
+      return event
+    }
+    if (
+      event.type === 'tool.finished' ||
+      event.type === 'tool.completed' ||
+      event.type === 'tool.failed'
+    ) {
+      const list = openByScope.get(scope)
+      const match =
+        list && list.length > 0
+          ? (event.invocationId
+              ? list.find((item) => item.invocationId === event.invocationId)
+              : undefined) ??
+            (event.toolName
+              ? [...list].reverse().find((item) => item.toolName === event.toolName)
+              : undefined) ??
+            list[list.length - 1]
+          : undefined
+
+      const fallbackReadPath =
+        event.toolName === 'read_file'
+          ? explicitReadPath || lastReadPathByScope.get(scope) || ''
+          : ''
+
+      const nextPath = event.path || event.filePath || match?.path || match?.filePath || fallbackReadPath
+      const nextFilePath = event.filePath || event.path || match?.filePath || match?.path || fallbackReadPath
+      const nextCommand = event.command || match?.command
+      const nextDescription = event.description || match?.description
+      const nextToolName = event.toolName || match?.toolName
+      const nextToolKind = event.toolKind || match?.toolKind
+      const nextAgentName = event.agentName || match?.agentName
+      const nextParentAgentId = event.parentAgentId || match?.parentAgentId
+
+      if (nextToolName === 'read_file' && (nextPath || nextFilePath)) {
+        lastReadPathByScope.set(scope, (nextPath || nextFilePath) as string)
+      }
+
+      const needsPatch =
+        Boolean(nextPath && nextPath !== event.path) ||
+        Boolean(nextFilePath && nextFilePath !== event.filePath) ||
+        Boolean(nextCommand && nextCommand !== event.command) ||
+        Boolean(nextDescription && nextDescription !== event.description) ||
+        Boolean(nextToolName && nextToolName !== event.toolName) ||
+        Boolean(nextToolKind && nextToolKind !== event.toolKind) ||
+        Boolean(nextAgentName && nextAgentName !== event.agentName) ||
+        Boolean(nextParentAgentId && nextParentAgentId !== event.parentAgentId)
+
+      if (!needsPatch) return event
+      mutated = true
+      return {
+        ...event,
+        ...(nextPath ? { path: nextPath } : {}),
+        ...(nextFilePath ? { filePath: nextFilePath } : {}),
+        ...(nextCommand ? { command: nextCommand } : {}),
+        ...(nextDescription ? { description: nextDescription } : {}),
+        ...(nextToolName ? { toolName: nextToolName } : {}),
+        ...(nextToolKind ? { toolKind: nextToolKind } : {}),
+        ...(nextAgentName ? { agentName: nextAgentName } : {}),
+        ...(nextParentAgentId ? { parentAgentId: nextParentAgentId } : {}),
+      }
+    }
+    return event
+  })
+
+  return mutated ? next : events
+}
 
 /**
  * The turn a message belongs to, found through the message's own delta or
@@ -22,10 +122,9 @@ export function resolveTurnId(events: ConversationActivityEvent[], messageId: st
  * one card — just interrupted by whatever text fell between it.
  */
 export function buildTurnTimeline(events: ConversationActivityEvent[], turnId: string, messageId: string, completeContent = ''): TimelineItem[] {
-  const turnEvents = events.filter((event) => event.turnId === turnId)
-  const settled = new Set(
-    turnEvents.filter((event) => event.type === 'tool.finished' && event.invocationId).map((event) => event.invocationId as string),
-  )
+  const turnEvents = enrichEventsWithStartedMetadata(events.filter((event) => event.turnId === turnId))
+  const settled = computeSettledEventIds(turnEvents)
+  const firstCodeEvent = turnEvents.find((event) => isCodeModeEvent(event))
 
   const items: TimelineItem[] = []
   let textBuffer = ''
@@ -54,6 +153,15 @@ export function buildTurnTimeline(events: ConversationActivityEvent[], turnId: s
       textBuffer += event.content
       continue
     }
+    if (firstCodeEvent) {
+      const codeKey = codeModeRunKey(firstCodeEvent)
+      if (!renderedCodeRuns.has(codeKey)) {
+        renderedCodeRuns.add(codeKey)
+        flushText()
+        flushGroup()
+        items.push({ id: codeKey, kind: 'activity', group: codeModeRunGroup(turnEvents, firstCodeEvent) })
+      }
+    }
     if (isCodeModeEvent(event)) {
       const key = codeModeRunKey(event)
       if (renderedCodeRuns.has(key)) continue
@@ -65,13 +173,14 @@ export function buildTurnTimeline(events: ConversationActivityEvent[], turnId: s
     }
     if (!isRenderable(event, settled)) continue
     flushText()
+    if (event.kind === 'artifact' && group && group.kind === 'tool' && group.agentId === event.agentId) {
+      group.events.push(event)
+      group.count += 1
+      continue
+    }
     const key = groupingKey(event)
     if (group && group.id === key && group.kind === event.kind) {
-      group.count += 1
-      group.events.push(event)
-      group.state = event.state
-      group.failed = group.failed || event.state === 'failed'
-      group.label = groupLabel(group)
+      applyEventToGroup(group, event)
       continue
     }
     flushGroup()
@@ -98,7 +207,7 @@ function reconcileCompleteText(items: TimelineItem[], completeContent: string, m
   const missingPrefix = completeContent.slice(0, completeContent.length - visibleContent.length)
   if (!missingPrefix) return items
   const firstTextIndex = items.findIndex((item) => item.kind === 'text')
-  if (firstTextIndex < 0) return [{ id: `text:complete:${messageId}`, kind: 'text', content: completeContent }, ...items]
+  if (firstTextIndex < 0) return [...items, { id: `text:complete:${messageId}`, kind: 'text', content: completeContent }]
   const first = items[firstTextIndex]
   if (first.kind !== 'text') return items
   const next = [...items]
@@ -114,14 +223,14 @@ function reconcileCompleteText(items: TimelineItem[], completeContent: string, m
  * existing flat activity stream instead of dropping it.
  */
 export function buildMessageTimelines(
-  messages: { message_id: string; role: string; content?: string }[],
+  messages: { message_id: string; role: string; content?: string; turn_id?: string | null }[],
   events: ConversationActivityEvent[],
 ): { timelines: Map<string, TimelineItem[]>; claimedTurnIds: Set<string> } {
   const timelines = new Map<string, TimelineItem[]>()
   const claimedTurnIds = new Set<string>()
   for (const message of messages) {
     if (message.role !== 'assistant') continue
-    const turnId = resolveTurnId(events, message.message_id)
+    const turnId = (typeof message.turn_id === 'string' && message.turn_id ? message.turn_id : null) ?? resolveTurnId(events, message.message_id)
     if (!turnId) continue
     const timeline = buildTurnTimeline(events, turnId, message.message_id, message.content ?? '')
     if (timeline.length === 0) continue

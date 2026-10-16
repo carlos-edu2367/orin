@@ -202,3 +202,139 @@ def test_modular_code_mode_prompt_includes_claude_code_sections() -> None:
     assert "Entrega Completa e Citações de Código" in prompt
     assert "caminho/arquivo.ext:linha" in prompt
     assert "produção" in prompt and "sempre exige" in prompt
+
+
+def test_code_completion_gate_rejects_zero_tool_implementation_turn(tmp_path: Path) -> None:
+    workspace = ConversationWorkspace(tmp_path, "chat_zero_tool_gate")
+    tools = AgentToolset(
+        workspace,
+        code_mode_active=True,
+        code_mode_requires_approval=False,
+        code_mode_work_kind="implementation",
+    )
+
+    ok, msg = tools.code_completion_gate()
+    assert ok is False
+    assert msg is not None and "ainda não executou nenhuma ferramenta" in msg
+
+    # After an exploratory read-only tool call, if no files were modified (e.g. answering after inspection), gate allows
+    res = tools.invoke("list_files", {})
+    assert res.status == "succeeded"
+    ok_after_read, msg_after_read = tools.code_completion_gate()
+    assert ok_after_read is True
+    assert msg_after_read is None
+
+
+def test_runtime_recovers_from_thinking_only_turn_and_filters_code_mode_schemas(tmp_path: Path) -> None:
+    from typing import Any, Mapping
+    from agentos.agentic.provider_stream import NormalizedStreamItem, StreamKind
+    from agentos.agentic.runtime import AgenticTurnRuntime
+    from agentos.providers.models import FinishReason
+
+    class _ThinkingThenToolThenTextProvider:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def stream(self, request: Mapping[str, Any]):
+            self.calls += 1
+            if self.calls == 1:
+                # 1st iteration: model emits only thinking tokens and stops with empty content and zero tool calls
+                return iter(
+                    [
+                        NormalizedStreamItem(StreamKind.TEXT, 1, text="", thinking="Analisando o pedido..."),
+                        NormalizedStreamItem(StreamKind.FINISH, 2, finish_reason=FinishReason.STOP),
+                    ]
+                )
+            if self.calls == 2:
+                # 2nd iteration: after runtime nudge, model creates the file
+                return iter(
+                    [
+                        NormalizedStreamItem(
+                            StreamKind.TOOL_CALL,
+                            1,
+                            tool_call_id="call_write_1",
+                            tool_name="write_file",
+                            arguments_delta='{"path":"hello.py","content":"def greet():\\n    return \'ok\'\\n"}',
+                        ),
+                        NormalizedStreamItem(StreamKind.FINISH, 2, finish_reason=FinishReason.TOOL_CALLS),
+                    ]
+                )
+            if self.calls == 3:
+                # 3rd iteration: model runs verification
+                return iter(
+                    [
+                        NormalizedStreamItem(
+                            StreamKind.TOOL_CALL,
+                            1,
+                            tool_call_id="call_verify_1",
+                            tool_name="verify_project",
+                            arguments_delta='{"steps":["test"]}',
+                        ),
+                        NormalizedStreamItem(StreamKind.FINISH, 2, finish_reason=FinishReason.TOOL_CALLS),
+                    ]
+                )
+            # 4th iteration: model delivers final text response
+            return iter(
+                [
+                    NormalizedStreamItem(StreamKind.TEXT, 1, text="Módulo criado em `hello.py:1`."),
+                    NormalizedStreamItem(StreamKind.FINISH, 2, finish_reason=FinishReason.STOP),
+                ]
+            )
+
+    class _MinimalStore:
+        def __init__(self) -> None:
+            self.deltas: list[str] = []
+
+        def history_for_turn(self, turn: Mapping[str, Any]) -> list[dict[str, Any]]:
+            return [{"role": "user", "content": "cria hello.py"}]
+
+        def lifecycle(self, turn: Mapping[str, Any], state: str, **payload: Any) -> None:
+            pass
+
+        def effect_started(self, turn: Mapping[str, Any], **kwargs: Any) -> str:
+            return "eff-1"
+
+        def effect_finished(self, turn: Mapping[str, Any], effect_id: str, **kwargs: Any) -> None:
+            pass
+
+        def delta(self, turn: Mapping[str, Any], text: str) -> None:
+            self.deltas.append(text)
+
+        def finish(self, turn: Mapping[str, Any], *, code: str | None = None) -> None:
+            pass
+
+    workspace = ConversationWorkspace(tmp_path / "workspaces", "chat_thinking_only")
+    workspace.write_text("package.json", '{"name":"demo","scripts":{"test":"python -c \\"import hello\\""}}\n')
+    tools = AgentToolset(
+        workspace,
+        code_mode_active=True,
+        code_mode_requires_approval=False,
+        code_mode_work_kind="implementation",
+    )
+    store = _MinimalStore()
+    provider = _ThinkingThenToolThenTextProvider()
+    runtime = AgenticTurnRuntime(
+        store=store,
+        provider=provider,
+        toolset=tools,
+        phase_controller=None,
+    )
+
+    turn = {
+        "turn_id": "turn-thinking-recovery",
+        "code_mode": "code",
+        "assistant_message_id": "msg-thinking-1",
+    }
+    schema_names = {s["function"]["name"] for s in runtime._tool_schemas(turn)}
+    assert "write_contract" not in schema_names
+    assert "report_verification" not in schema_names
+    assert {"list_files", "read_file", "write_file", "edit_file", "run_command", "verify_project"}.issubset(
+        schema_names
+    )
+
+    result = runtime.run("turn-thinking-recovery", turn=turn)
+    assert result.state == "completed"
+    assert "".join(store.deltas) == "Módulo criado em `hello.py:1`."
+    assert "def greet():" in workspace.resolve("hello.py").read_text(encoding="utf-8")
+
+

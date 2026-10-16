@@ -48,7 +48,7 @@ PROJECT_MANIFEST_HINTS = frozenset({
 # A subagent writes the deliverable the main agent will hand to the user, so it
 # needs the same output budget; inheriting the dataclass default silently cut
 # every long answer at 1024 tokens.
-SUBAGENT_MAX_OUTPUT_TOKENS = 4096
+SUBAGENT_MAX_OUTPUT_TOKENS = 16384
 SUBAGENT_MAX_ACTIONS = 12
 # A model that cannot call tools gets its visual attachments read before the
 # turn starts (see ``pre_read_attachments``); this bounds how many of those
@@ -305,12 +305,15 @@ def build_system_prompt(
         "- Keep the final answer for the user short and useful; the interface already shows every tool step you took.",
         "- When you create a useful workspace file, link it in your final answer as [filename](workspace://relative/path). Prioritize final deliverables and include generator scripts when useful.",
         "- Use run_command only for commands that finish. To start a local server, call run_command with background=true; on Windows do not use nohup or Unix '&' syntax.",
+    ]
+    if not code_mode_context:
         # The reference material below describes every tool the workspace can
         # offer, but a request publishes only the ones the current stage needs.
         # Saying so prevents the model from planning around a tool it cannot
         # currently see -- and tells it how to get that tool back.
-        "- Not every tool described below is published on every request: each stage of a task offers the tools that stage needs. The '## Agora' block tells you which stage you are in and lists exactly what is published right now. To unlock the browser, MCP, plugins or subagents, declare them in `write_contract`.",
-    ]
+        lines.append(
+            "- Not every tool described below is published on every request: each stage of a task offers the tools that stage needs. The '## Agora' block tells you which stage you are in and lists exactly what is published right now. To unlock the browser, MCP, plugins or subagents, declare them in `write_contract`."
+        )
     if code_mode_context:
         lines += ["", code_mode_context]
     if "transcribe_pdf" in tool_names:
@@ -530,6 +533,12 @@ class _SubagentStore:
     def lifecycle(self, turn: dict[str, object], state: str, **payload: object) -> None:
         self._session.emit_lifecycle(turn, state, agent_id=self.agent_id, agent_name=self.name, **payload)
 
+    def record_step(self, turn: dict[str, object], **values: object) -> None:
+        recorder = getattr(self._session.store, "record_step", None)
+        if callable(recorder):
+            values.setdefault("agent_id", self.agent_id)
+            recorder(turn, **values)
+
 
 class _MainAgentStore:
     """Turn-store view for the main agent.
@@ -697,6 +706,14 @@ class TurnSession:
         self._subagent_lock = Lock()
         self._read_file_state: dict[str, object] = {}
         self._todos_state: list[dict[str, str]] = []
+        raw_perm = str(turn.get("permission_mode") or "").strip().lower()
+        self.permission_mode: str = (
+            raw_perm
+            if raw_perm in {"accept_edits", "plan_mode", "ask_permissions", "full_autonomy"}
+            else ("accept_edits" if turn.get("code_mode") == "code" else "ask_permissions")
+        )
+        self._in_plan_mode: bool = self.permission_mode == "plan_mode"
+        self._code_mode_stage: str = "planning" if self._in_plan_mode else "implementing"
         self.main_agent_id = store.main_agent_id(turn) if hasattr(store, "main_agent_id") else str(turn.get("agent_id", "agent:main"))
 
     # -- activity -------------------------------------------------------
@@ -734,14 +751,23 @@ class TurnSession:
             return
         if state == "tool_started":
             name = str(payload.get("tool_name") or "tool")
-            self._record(AgentActivityEventType.TOOL_STARTED, f"Executando {name}", {
+            started_payload: dict[str, object] = {
                 **base, "tool_name": name, "invocation_id": str(payload.get("invocation_id") or ""),
-            }, agent_id=actor)
+            }
+            for k in ("description", "target_path", "path", "command"):
+                val = payload.get(k)
+                if isinstance(val, str) and val.strip():
+                    started_payload[k] = val.strip()[:240]
+            self._record(AgentActivityEventType.TOOL_STARTED, f"Executando {name}", started_payload, agent_id=actor)
             if self.turn.get("code_mode") == "code":
-                if name in {"write_file", "edit_file"}:
-                    self._record(AgentActivityEventType.CODE_MODE_STAGE_CHANGED, "Implementando alteração", {"stage": "implementing"}, agent_id=actor)
-                elif name == "run_command":
-                    self._record(AgentActivityEventType.CODE_MODE_VALIDATION_STARTED, "Executando validação", {"stage": "validating"}, agent_id=actor)
+                if name in {"write_file", "edit_file", "notebook_edit"}:
+                    if self._code_mode_stage != "implementing":
+                        self._code_mode_stage = "implementing"
+                        self._record(AgentActivityEventType.CODE_MODE_STAGE_CHANGED, "Implementando alteração", {"stage": "implementing"}, agent_id=actor)
+                elif name in {"run_command", "verify_project", "verify_frontend"}:
+                    if self._code_mode_stage != "validating":
+                        self._code_mode_stage = "validating"
+                        self._record(AgentActivityEventType.CODE_MODE_VALIDATION_STARTED, "Executando validação", {"stage": "validating"}, agent_id=actor)
             return
         if state == "tool_progressed":
             name = str(payload.get("tool_name") or "run_command")
@@ -753,6 +779,7 @@ class TurnSession:
                     **base,
                     "tool_name": name,
                     "tool_kind": str(payload.get("tool_kind") or "terminal"),
+                    "invocation_id": str(payload.get("invocation_id") or ""),
                     "command": str(payload.get("command") or "")[:240],
                     "output_tail": str(payload.get("output_tail") or "")[-2000:],
                     "elapsed_ms": int(payload.get("elapsed_ms") or 0),
@@ -810,20 +837,49 @@ class TurnSession:
                             agent_id=actor,
                         )
             if self.turn.get("code_mode") == "code":
-                if extra.get("code_approval"):
-                    self._record(AgentActivityEventType.CODE_MODE_DECISION_REQUIRED, "Plano pronto para aprovação", {"stage": "waiting_approval"}, agent_id=actor)
-                elif name == "todo_write" and status == "succeeded":
+                if (extra.get("code_approval") or extra.get("plan_approval")) and extra.get("wait_for_user"):
+                    self._code_mode_stage = "waiting_approval"
+                    decision_payload: dict[str, object] = {"stage": "waiting_approval"}
+                    for k in ("plan_approval", "plan_path", "plan_content", "plan_summary", "steps"):
+                        if k in extra and extra[k] is not None:
+                            decision_payload[k] = extra[k]
+                    self._record(
+                        AgentActivityEventType.CODE_MODE_DECISION_REQUIRED,
+                        "Plano pronto para aprovação",
+                        decision_payload,
+                        agent_id=actor,
+                    )
+                elif name in {"todo_write", "task_create", "task_update"} and status == "succeeded":
+                    self._code_mode_stage = "implementing"
                     self._record(
                         AgentActivityEventType.CODE_MODE_STAGE_CHANGED,
                         summary,
                         {"stage": "implementing", "todos": extra.get("todos") or list(self._todos_state)},
                         agent_id=actor,
                     )
-                elif name == "run_command":
-                    event = AgentActivityEventType.CODE_MODE_VALIDATION_FINISHED if status == "succeeded" else AgentActivityEventType.CODE_MODE_STAGE_CHANGED
-                    summary = "Validação concluída" if status == "succeeded" else "Corrigindo falha de validação"
-                    stage = "validating" if status == "succeeded" else "fixing"
-                    self._record(event, summary, {"stage": stage, "status": status, "error_code": payload.get("error_code")}, agent_id=actor)
+                elif name == "verify_project" and extra.get("scaffold"):
+                    cmd_failed = status != "succeeded" or extra.get("all_passed") is False
+                    stage = "fixing" if cmd_failed else "implementing"
+                    self._code_mode_stage = stage
+                    self._record(
+                        AgentActivityEventType.CODE_MODE_STAGE_CHANGED,
+                        "Corrigindo falha no scaffold" if cmd_failed else "Implementando alteração",
+                        {"stage": stage, "status": "failed" if cmd_failed else status, "error_code": payload.get("error_code")},
+                        agent_id=actor,
+                    )
+                elif name in {"run_command", "verify_project", "verify_frontend"}:
+                    cmd_failed = (
+                        status != "succeeded"
+                        or bool(extra.get("failed"))
+                        or (name == "verify_project" and extra.get("all_passed") is False)
+                        or (name == "verify_frontend" and extra.get("all_ok") is False)
+                    )
+                    event = AgentActivityEventType.CODE_MODE_STAGE_CHANGED if cmd_failed else AgentActivityEventType.CODE_MODE_VALIDATION_FINISHED
+                    val_summary = "Corrigindo falha de validação" if cmd_failed else "Validação concluída"
+                    stage = "fixing" if cmd_failed else "validating"
+                    if cmd_failed or self._code_mode_stage != "validating_done":
+                        self._code_mode_stage = "fixing" if cmd_failed else "validating_done"
+                        self._record(event, val_summary, {"stage": stage, "status": "failed" if cmd_failed else status, "error_code": payload.get("error_code")}, agent_id=actor)
             return
         if state == "waiting_tool":
             self._record(AgentActivityEventType.TOOL_REQUESTED, "Preparando ferramentas", {**base, "count": payload.get("count")}, agent_id=actor)
@@ -1047,6 +1103,7 @@ class TurnSession:
             subagents=False,
             browser_agent_key=agent_id,
             read_only_mode=read_only_subagent,
+            inherit_context=inherit_context,
         )
         runtime = AgenticTurnRuntime(
             store=sub_store,
@@ -1073,7 +1130,8 @@ class TurnSession:
         if result.state != "completed" or not answer:
             reason = result.error_code or ("SUBAGENT_EMPTY_RESPONSE" if not answer else "SUBAGENT_FAILED")
             if self.agents_store is not None and hasattr(self.agents_store, "set_state"):
-                self.agents_store.set_state(agent_id, "failed")
+                agent_final_state = "cancelled" if (result.state == "cancelled" or reason == "TURN_CANCELLED") else "failed"
+                self.agents_store.set_state(agent_id, agent_final_state)
             self._record(
                 AgentActivityEventType.DELEGATION_FAILED, f"{clean} não concluiu a tarefa",
                 {"agent_name": clean, "sender_name": clean, "recipient_name": "Main", "label": clean, "error_code": reason},
@@ -1215,7 +1273,9 @@ class TurnSession:
             "\n\n## Workspace and environment\n"
             "- You share one working directory with the main agent. All paths are relative to it; do not use absolute paths.\n"
             f"- Operating system: {environment['os']}.\n"
-            f"- run_command executes through: {environment['shell']} — use that shell's syntax.\n"
+            f"- run_command executes through: {environment['shell']} — use that shell's syntax (on Windows cmd.exe, never run Unix commands like cat, ls, grep, head, or tail).\n"
+            "- Always prefer dedicated tools (`read_file`, `list_files`, `search_files`, `write_file`, `edit_file`) over shell commands (`run_command`).\n"
+            "- When calling `write_file` or `edit_file`, always provide the `'path'` argument first before `'content'`.\n"
             f"- Python: {environment['python']}. Also on PATH: {environment['available']}."
         )
         try:
@@ -1245,9 +1305,12 @@ class TurnSession:
         code_mode_permits_pr: bool = False,
         code_mode_requires_approval: bool = False,
         code_mode_autonomy: str | None = None,
+        code_mode_work_kind: str | None = None,
         permission_broker: object | None = None,
+        permission_mode: str | None = None,
         interactive_permissions: bool = False,
         read_only_mode: bool = False,
+        inherit_context: bool = True,
     ) -> AgentToolset:
         # Scoping the browser to one agent_key gives that agent its own tab
         # on the host (see AgentBrowserView / _AgentPageState) so concurrent
@@ -1258,7 +1321,8 @@ class TurnSession:
         elif read_only_mode:
             browser = None
         actor_id = browser_agent_key or self.main_agent_id
-        return AgentToolset(
+        effective_perm_mode = str(permission_mode or self.permission_mode)
+        toolset = AgentToolset(
             self.workspace,
             memory=self.memory,
             create_agent=self._create_agent if subagents else None,
@@ -1294,14 +1358,25 @@ class TurnSession:
             code_mode_requires_approval=code_mode_requires_approval,
             enable_terminal=self.enable_terminal,
             code_mode_autonomy=code_mode_autonomy,
-            permission_broker=permission_broker,
+            code_mode_work_kind=code_mode_work_kind,
+            permission_broker=permission_broker if interactive_permissions else None,
+            permission_mode=effective_perm_mode,
             interactive_permissions=interactive_permissions,
             turn_id=str(self.turn.get("turn_id") or "") or None,
             conversation_id=str(self.turn.get("conversation_id") or "") or None,
-            read_file_state=self._read_file_state,
+            read_file_state=self._read_file_state if (subagents or inherit_context) else {},
             todos_state=self._todos_state,
             read_only_mode=read_only_mode,
         )
+        if permission_broker is not None:
+            toolset._permission_broker = permission_broker
+            toolset._interactive_permissions = bool(interactive_permissions)
+            setattr(permission_broker, "mode", effective_perm_mode)
+        elif getattr(toolset, "_permission_broker", None) is not None:
+            setattr(toolset._permission_broker, "mode", effective_perm_mode)
+        if effective_perm_mode == "plan_mode" or self._in_plan_mode:
+            toolset._plan_mode_active = True
+        return toolset
 
     def _session_start_context(self) -> str:
         """The SessionStart hook output for this conversation.
@@ -1351,14 +1426,18 @@ class TurnSession:
             return ()
 
     def build_runtime(self) -> AgenticTurnRuntime:
+        import inspect
+        from agentos.agentic.runtime import CODE_MODE_CORE_TOOLS
         from agentos.code_mode.models import normalize_code_autonomy
         from agentos.code_mode.permissions import ToolPermissionBroker
 
         resumed = self._resumed_contract()
+        explicit_perm = str(self.turn.get("permission_mode") or "").strip().lower()
         raw_autonomy = str(
-            self.turn.get("code_mode_permission_mode")
+            explicit_perm
+            or self.turn.get("code_mode_permission_mode")
             or self.turn.get("code_mode_autonomy")
-            or "approval_required"
+            or ("accept_edits" if self.turn.get("code_mode") == "code" else "ask_permissions")
         )
         configured_autonomy = normalize_code_autonomy(raw_autonomy).value
         # A managed conversation workspace starts empty and is explicitly
@@ -1367,34 +1446,66 @@ class TurnSession:
         # retain the user's safer default unchanged.
         effective_autonomy = (
             "code_autonomy"
-            if self.turn.get("code_mode") == "code" and configured_autonomy == "approval_required" and self._managed_workspace_is_new()
+            if self.turn.get("code_mode") == "code" and configured_autonomy == "approval_required" and self._managed_workspace_is_new() and explicit_perm != "plan_mode"
             else configured_autonomy
         )
+        if explicit_perm in {"accept_edits", "plan_mode", "ask_permissions", "full_autonomy"}:
+            self.permission_mode = explicit_perm
+        elif self.turn.get("code_mode") == "code":
+            if effective_autonomy == "full_autonomy":
+                self.permission_mode = "full_autonomy"
+            elif effective_autonomy == "approval_required":
+                self.permission_mode = "ask_permissions"
+            else:
+                self.permission_mode = "accept_edits"
+        else:
+            self.permission_mode = "ask_permissions"
+        self._in_plan_mode = self.permission_mode == "plan_mode"
+        if self._in_plan_mode:
+            self._code_mode_stage = "planning"
         code_requires_approval = (
             self.turn.get("code_mode") == "code"
-            and effective_autonomy == "approval_required"
+            and (self._in_plan_mode or effective_autonomy == "approval_required")
             and resumed is None
         )
-        permission_broker = ToolPermissionBroker(
-            self.workspace,
-            event_emitter=lambda _event_name, summary, payload: self._record(
+        broker_kwargs: dict[str, Any] = {
+            "event_emitter": lambda _event_name, summary, payload: self._record(
                 AgentActivityEventType.CODE_MODE_DECISION_REQUIRED,
                 summary,
                 payload,
             ),
-            cancelled=lambda: bool(self.cancelled(self.turn)),
+            "cancelled": lambda: bool(self.cancelled(self.turn)),
+        }
+        try:
+            sig = inspect.signature(ToolPermissionBroker)
+            if "mode" in sig.parameters or any(
+                p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+            ):
+                broker_kwargs["mode"] = self.permission_mode
+        except Exception:
+            pass
+        permission_broker = ToolPermissionBroker(
+            self.workspace,
+            **broker_kwargs,
         )
+        setattr(permission_broker, "mode", self.permission_mode)
         toolset = self._toolset(
             subagents=self.enable_subagents,
             code_mode_active=self.turn.get("code_mode") == "code",
             code_mode_permits_push=(
                 effective_autonomy == "full_autonomy"
+                or self.permission_mode == "full_autonomy"
                 or bool(self.turn.get("code_mode_push_authorized"))
             ),
-            code_mode_permits_pr=effective_autonomy == "full_autonomy",
+            code_mode_permits_pr=(
+                effective_autonomy == "full_autonomy"
+                or self.permission_mode == "full_autonomy"
+            ),
             code_mode_requires_approval=code_requires_approval,
             code_mode_autonomy=effective_autonomy,
-            permission_broker=permission_broker if bool(self.turn.get("interactive_permissions")) else None,
+            code_mode_work_kind=str(self.turn.get("code_mode_work_kind") or "implementation"),
+            permission_broker=permission_broker,
+            permission_mode=self.permission_mode,
             interactive_permissions=bool(self.turn.get("interactive_permissions")),
         )
         agents = self.agents_store.list() if self.agents_store is not None else []
@@ -1436,23 +1547,30 @@ class TurnSession:
         memories = memories_for_task(self.memory, task)
         code_mode_context = ""
         if self.turn.get("code_mode") == "code":
-            from agentos.code_mode.prompt import code_mode_instructions
+            from agentos.code_mode.prompt import build_code_mode_system_prompt
             plan_path = str(self.turn.get("code_mode_plan_path") or f".orin/plans/{self.turn['turn_id']}-plan.md")
-            self._ensure_code_mode_plan(plan_path, task)
-            self._record(
-                AgentActivityEventType.CODE_MODE_PLAN_READY,
-                "Plano do Modo Code criado",
-                {"stage": "planning", "plan_path": plan_path},
-            )
-            code_mode_context = code_mode_instructions(
+            if self._in_plan_mode:
+                self._ensure_code_mode_plan(plan_path, task)
+                self._record(
+                    AgentActivityEventType.CODE_MODE_PLAN_READY,
+                    "Plano do Modo Code criado",
+                    {"stage": "planning", "plan_path": plan_path},
+                )
+            code_mode_context = build_code_mode_system_prompt(
                 work_kind=str(self.turn.get("code_mode_work_kind") or "implementation"),
                 autonomy=effective_autonomy,
-                plan_path=plan_path,
+                permission_mode=self.permission_mode,
+                plan_path=plan_path if self._in_plan_mode else None,
                 permits_push=bool(self.turn.get("code_mode_push_authorized")),
             )
         skill_catalog = self._skill_catalog(task, toolset)
+        prompt_tool_names = (
+            tuple(item.name for item in toolset.definitions() if item.name in CODE_MODE_CORE_TOOLS)
+            if self.turn.get("code_mode") == "code"
+            else tuple(item.name for item in toolset.definitions())
+        )
         prompt, volatile_prompt = build_system_prompt(
-            tool_names=tuple(item.name for item in toolset.definitions()),
+            tool_names=prompt_tool_names,
             memories=memories,
             agents=agents,
             workspace_hint=(

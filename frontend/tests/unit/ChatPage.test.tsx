@@ -567,7 +567,7 @@ describe('ChatPage', () => {
     closeStream()
   })
 
-  it('keeps the project chat route when toggling the overview', async () => {
+  it('keeps the project chat route and keeps composer mounted when toggling the overview', async () => {
     globalThis.fetch = stubFetch(() => ({ state: 'completed', messages: [], activities: [] }))
 
     renderChat(`/projects/project-e2e/chats/${CONVERSATION_ID}`)
@@ -575,7 +575,7 @@ describe('ChatPage', () => {
 
     await userEvent.setup().click(screen.getByRole('button', { name: 'Visão geral' }))
     expect(screen.getByTestId('current-path')).toHaveTextContent(`/projects/project-e2e/chats/${CONVERSATION_ID}/overview`)
-    expect(screen.queryByTestId('chat-composer')).not.toBeInTheDocument()
+    expect(screen.getByTestId('chat-composer')).toBeInTheDocument()
     await userEvent.setup().click(screen.getByRole('button', { name: 'Visão geral' }))
     expect(screen.getByTestId('current-path')).toHaveTextContent(`/projects/project-e2e/chats/${CONVERSATION_ID}`)
     expect(screen.getByTestId('chat-composer')).toBeInTheDocument()
@@ -629,5 +629,274 @@ describe('ChatPage', () => {
     renderChat()
 
     expect(await screen.findByRole('button', { name: /site/ })).toBeInTheDocument()
+  })
+
+  it('renders Orin Code badge, workspace chip, right-side files drawer with search, TodoBar, and scopes Shift+Tab permission mode changes to textarea and conversation', async () => {
+    const permissionUpdates: Array<Record<string, unknown>> = []
+    let currentPermissionMode = 'accept_edits'
+    let globalSettingsCalled = false
+    const local = { kind: 'local', path: 'D:/orin', folder_name: 'orin', scope: 'chat', project_name: null }
+    const snapshot: Snapshot = {
+      state: 'completed',
+      messages: [
+        { message_id: 'msg-1', role: 'user', content: 'Refatore o módulo', status: 'completed', retryable: false },
+        { message_id: 'msg-2', role: 'assistant', content: 'Refatoração concluída.', status: 'completed', retryable: false },
+      ],
+      activities: [
+        activity(1, 'tool.finished', 'Atualizou tarefas', {
+          tool_name: 'todo_write',
+          tool_kind: 'filesystem',
+          status: 'succeeded',
+          todos: [
+            { id: 'todo-1', content: 'Inspecionar ChatPage', status: 'completed', activeForm: 'Inspecionando ChatPage' },
+            { id: 'todo-2', content: 'Testar integração', status: 'in_progress', activeForm: 'Testando integração' },
+          ],
+        }),
+      ],
+    }
+
+    globalThis.fetch = vi.fn<typeof fetch>().mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : String(input)
+      const method = (init?.method ?? 'GET').toUpperCase()
+      if (url.includes('/events?')) {
+        return new Response('event: heartbeat\ndata: {"cursor":"a.9"}\n\n', { headers: { 'Content-Type': 'text/event-stream' } })
+      }
+      if (url.includes('/v1/settings/code-mode') && method === 'PUT') {
+        globalSettingsCalled = true
+      }
+      if (url.includes(`/v1/conversations/${CONVERSATION_ID}/permission-mode`) && method === 'PATCH') {
+        const parsed = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>
+        if (typeof parsed.permission_mode === 'string') {
+          currentPermissionMode = parsed.permission_mode
+        }
+        permissionUpdates.push(parsed)
+        return new Response(
+          JSON.stringify({ conversation_id: CONVERSATION_ID, permission_mode: parsed.permission_mode }),
+          { headers: { 'Content-Type': 'application/json' } },
+        )
+      }
+      if (url.includes(`/v1/conversations/${CONVERSATION_ID}/workspace-files`) || url.includes(`/v1/conversations/${CONVERSATION_ID}/workspace/files`)) {
+        const parsedUrl = new URL(url, 'http://localhost')
+        const q = parsedUrl.searchParams.get('query') ?? ''
+        const allFiles = ['src/App.tsx', 'README.md']
+        const filtered = q ? allFiles.filter((item) => item.toLowerCase().includes(q.toLowerCase())) : allFiles
+        return new Response(JSON.stringify({ files: filtered, items: filtered }), { headers: { 'Content-Type': 'application/json' } })
+      }
+      if (url.endsWith('/v1/projects/sidebar') || url.endsWith('/v1/conversations')) {
+        return new Response(JSON.stringify({ items: [] }), { headers: { 'Content-Type': 'application/json' } })
+      }
+      if (url.includes(`/v1/conversations/${CONVERSATION_ID}`)) {
+        return new Response(
+          JSON.stringify({
+            ...snapshotBody(snapshot, local),
+            mode: 'code',
+            permission_mode: currentPermissionMode,
+          }),
+          { headers: { 'Content-Type': 'application/json' } },
+        )
+      }
+      return new Response('{}', { headers: { 'Content-Type': 'application/json' } })
+    })
+
+    renderChat()
+    const user = userEvent.setup()
+
+    expect(await screen.findByTestId('orin-code-badge')).toHaveTextContent('>_ Orin Code')
+    expect(screen.getByTestId('orin-code-workspace-chip')).toHaveTextContent('orin')
+    expect(screen.queryByRole('button', { name: /Ativar Modo Code|Desativar Modo Code/i })).not.toBeInTheDocument()
+    expect(screen.queryByTestId('workspace-files-drawer')).not.toBeInTheDocument()
+    await user.click(screen.getByTestId('workspace-files-drawer-toggle'))
+    const drawer = await screen.findByTestId('workspace-files-drawer')
+    expect(drawer).toBeInTheDocument()
+    expect(await screen.findByText('src/App.tsx')).toBeInTheDocument()
+    expect(screen.getByText('README.md')).toBeInTheDocument()
+
+    const searchInput = screen.getByTestId('workspace-files-search')
+    await user.type(searchInput, 'App')
+    await waitFor(() => {
+      expect(screen.getByText('src/App.tsx')).toBeInTheDocument()
+      expect(screen.queryByText('README.md')).not.toBeInTheDocument()
+    })
+
+    expect(screen.getByTestId('todo-bar')).toBeInTheDocument()
+
+    const pill = screen.getByTestId('code-permission-mode-pill')
+    expect(pill).toHaveTextContent('⏵⏵ Aceitar edições')
+
+    // Global Shift+Tab outside composer textarea must not change permission mode
+    fireEvent.keyDown(window, { key: 'Tab', shiftKey: true })
+    expect(pill).toHaveTextContent('⏵⏵ Aceitar edições')
+
+    const textarea = screen.getByRole('textbox', { name: 'Mensagem' })
+    textarea.focus()
+    fireEvent.keyDown(textarea, { key: 'Tab', shiftKey: true })
+    expect(pill).toHaveTextContent('⏸ Modo Plano')
+    await waitFor(() => {
+      expect(permissionUpdates).toContainEqual({ permission_mode: 'plan_mode' })
+    })
+    expect(globalSettingsCalled).toBe(false)
+  })
+
+  it('immediately hides AgentPulse when activity status is terminal even if snapshot turn state is still running', async () => {
+    globalThis.fetch = stubFetch(() => ({
+      state: 'running',
+      messages: [{ message_id: 'msg-1', role: 'user', content: 'Execute', status: 'completed', retryable: false }],
+      activities: [
+        activity(1, 'code_mode.completed', 'Execução concluída', { stage: 'completed' }),
+      ],
+    }))
+
+    renderChat()
+
+    expect(await screen.findByText('Execute')).toBeInTheDocument()
+    expect(screen.queryByText('Pensando')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Parar execução' })).not.toBeInTheDocument()
+  })
+
+  it('keeps Parar execução visible when activeTurn.state is starting or streaming and stops on Escape', async () => {
+    const cancelled = vi.fn()
+    globalThis.fetch = stubFetch(() => ({
+      state: 'streaming',
+      messages: [{ message_id: 'msg-1', role: 'user', content: 'Analise os arquivos', status: 'completed', retryable: false }],
+      activities: [activity(1, 'tool.started', 'Lendo src/index.ts', { tool_name: 'read_file', tool_kind: 'filesystem', invocation_id: 'call-1' })],
+    }), cancelled)
+
+    renderChat()
+
+    const stopButton = await screen.findByRole('button', { name: 'Parar execução' })
+    expect(stopButton).toBeInTheDocument()
+
+    fireEvent.keyDown(window, { key: 'Escape' })
+    await waitFor(() => expect(cancelled).toHaveBeenCalledTimes(1))
+  })
+
+  it('does not hide Parar execução when a subagent emits turn.completed while the root turn is still running', async () => {
+    globalThis.fetch = stubFetch(() => ({
+      state: 'running',
+      messages: [{ message_id: 'msg-1', role: 'user', content: 'Delegue a pesquisa', status: 'completed', retryable: false }],
+      activities: [
+        {
+          ...activity(1, 'turn.completed', 'Subagente concluiu', { state: 'completed' }),
+          agent_id: 'agent:chat_e2e:sub-1',
+          parent_agent_id: 'agent:chat_e2e:main',
+        },
+      ],
+    }))
+
+    renderChat()
+
+    expect(await screen.findByRole('button', { name: 'Parar execução' })).toBeInTheDocument()
+  })
+
+  it('disables PlanApprovalCard actions on completed or historical turns so old plans cannot be re-submitted', async () => {
+    const sent = vi.fn()
+    globalThis.fetch = stubFetch(() => ({
+      state: 'completed',
+      messages: [
+        { message_id: 'msg-1', role: 'user', content: 'Planeje a mudança', status: 'completed', retryable: false, turn_id: 'turn-1' },
+        { message_id: 'msg-2', role: 'assistant', content: 'Plano finalizado.', status: 'completed', retryable: false, turn_id: 'turn-1' },
+      ],
+      activities: [
+        activity(1, 'tool.finished', 'Plano proposto', {
+          tool_name: 'exit_plan_mode',
+          tool_kind: 'plan',
+          status: 'succeeded',
+          invocation_id: 'call-plan-1',
+          plan: '# Plano\n1. Passo um',
+        }),
+        activity(2, 'turn.completed', 'Resposta concluída', { state: 'completed' }),
+      ],
+    }), undefined, sent)
+
+    renderChat()
+
+    expect(await screen.findByTestId('plan-approval-card')).toBeInTheDocument()
+    expect(screen.getByTestId('plan-approve-accept-edits')).toBeDisabled()
+    expect(screen.getByTestId('plan-approve-ask-permissions')).toBeDisabled()
+    expect(screen.queryByTestId('plan-request-changes-toggle')).not.toBeInTheDocument()
+    await userEvent.setup().click(screen.getByTestId('plan-approve-accept-edits'))
+    expect(sent).not.toHaveBeenCalled()
+  })
+
+  it('reloads the conversation snapshot after handleRewindTurn succeeds', async () => {
+    let rewound = false
+    let snapshotLoads = 0
+    globalThis.fetch = vi.fn<typeof fetch>().mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : String(input)
+      const method = (init?.method ?? 'GET').toUpperCase()
+      if (url.includes('/events?')) {
+        return new Response('event: heartbeat\ndata: {"cursor":"a.9"}\n\n', { headers: { 'Content-Type': 'text/event-stream' } })
+      }
+      if (url.includes('/turns/turn-1/rewind') && method === 'POST') {
+        rewound = true
+        return new Response(JSON.stringify({ status: 'ok', restored: ['hello.txt'] }), { headers: { 'Content-Type': 'application/json' } })
+      }
+      if (url.endsWith('/v1/projects/sidebar') || url.endsWith('/v1/conversations')) {
+        return new Response(JSON.stringify({ items: [] }), { headers: { 'Content-Type': 'application/json' } })
+      }
+      if (url.includes(`/v1/conversations/${CONVERSATION_ID}`)) {
+        snapshotLoads += 1
+        return new Response(
+          JSON.stringify({
+            ...snapshotBody({
+              state: 'completed',
+              messages: [
+                { message_id: 'msg-1', role: 'user', content: 'Edite hello.txt', status: 'completed', retryable: false },
+                { message_id: 'msg-2', role: 'assistant', content: rewound ? 'Alterações revertidas.' : 'Editei hello.txt.', status: 'completed', retryable: false },
+              ],
+              activities: [
+                activity(1, 'tool.finished', 'Editou hello.txt', {
+                  tool_name: 'write_file',
+                  tool_kind: 'filesystem',
+                  status: 'succeeded',
+                  invocation_id: 'call-1',
+                  path: 'hello.txt',
+                }),
+                activity(2, 'turn.completed', 'Concluído', { state: 'completed' }),
+              ],
+            }),
+            mode: 'code',
+          }),
+          { headers: { 'Content-Type': 'application/json' } },
+        )
+      }
+      return new Response('{}', { headers: { 'Content-Type': 'application/json' } })
+    })
+
+    renderChat()
+    const user = userEvent.setup()
+    expect(await screen.findByText('Editei hello.txt.')).toBeInTheDocument()
+    const loadsBeforeRewind = snapshotLoads
+
+    await user.click(screen.getByTestId('rewind-turn-button'))
+    const confirmBtn = screen.queryByTestId('rewind-confirm-button')
+    if (confirmBtn) {
+      await user.click(confirmBtn)
+    }
+
+    await waitFor(() => expect(rewound).toBe(true))
+    await waitFor(() => expect(snapshotLoads).toBeGreaterThan(loadsBeforeRewind))
+    expect(await screen.findByText('Alterações revertidas.')).toBeInTheDocument()
+  })
+
+  it('exposes role="log" on chat thread, offers Copiar resposta on completed assistant messages, and deduplicates cancelled lifecycle events', async () => {
+    globalThis.fetch = stubFetch(() => ({
+      state: 'cancelled',
+      messages: [
+        { message_id: 'msg-1', role: 'user', content: 'Faça algo', status: 'completed', retryable: false },
+        { message_id: 'msg-2', role: 'assistant', content: 'Resposta parcial útil.', status: 'completed', retryable: false },
+      ],
+      activities: [
+        activity(1, 'assistant.delta', 'Resposta parcial útil.', { message_id: 'msg-2', content: 'Resposta parcial útil.' }),
+        activity(2, 'execution.canceled', 'Execução cancelada', { state: 'cancelled' }),
+        activity(3, 'turn.cancelled', 'Execução cancelada', { state: 'cancelled' }),
+      ],
+    }))
+
+    renderChat()
+
+    expect(await screen.findByRole('log')).toHaveAttribute('aria-live', 'polite')
+    expect(await screen.findByRole('button', { name: 'Copiar resposta' })).toBeInTheDocument()
+    expect(screen.getAllByText('Execução cancelada')).toHaveLength(1)
   })
 })

@@ -36,6 +36,7 @@ def layout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     from agentos.installation import uninstaller
     monkeypatch.setattr(uninstaller, "_user_state_root", lambda: home / ".local" / "share" / "orin")
     monkeypatch.setattr(uninstaller, "_user_config_root", lambda: home / ".config" / "orin")
+    monkeypatch.setattr(uninstaller, "current_platform", lambda: "linux-x64")
     root = home / ".local" / "share" / "Orin" / "versions"
     runtime = root / "1.0.0" / "resources" / "runtime"
     runtime.mkdir(parents=True)
@@ -68,8 +69,8 @@ def test_uninstall_lists_what_goes_asks_and_schedules_the_removal(layout, monkey
     assert "conversas, memórias" in out and "Comando e atalhos removidos" in out
     assert len(fake.removed) == 1
     command, kwargs = spawned[0]
-    assert command[0] == "sh" and any(str(layout[2].parent) == part for part in command)  # …/Orin, not …/Orin/versions
-    assert str(layout[1].data.parent) in command  # …/share/orin
+    assert command[0] == "sh" and any(Path(part) == layout[2].parent for part in command)  # …/Orin, not …/Orin/versions
+    assert any(Path(part) == layout[1].data.parent for part in command)  # …/share/orin
 
 
 def test_declining_removes_nothing(layout, monkeypatch: pytest.MonkeyPatch) -> None:

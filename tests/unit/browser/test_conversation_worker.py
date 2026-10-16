@@ -911,3 +911,72 @@ def test_isolated_browser_starts_and_captures_without_exposing_a_native_handle()
 
     assert isinstance(observation["screenshot"], str)
     assert observation["html"]
+
+
+def test_resolve_chromium_executable_finds_fallback_revision_binary(tmp_path) -> None:
+    from agentos.browser.engine import resolve_chromium_executable
+
+    shell_dir = tmp_path / "chromium_headless_shell-1208" / "chrome-headless-shell-win64"
+    shell_dir.mkdir(parents=True)
+    binary = shell_dir / "chrome-headless-shell.exe"
+    binary.write_text("fake-binary", encoding="utf-8")
+    (tmp_path / "chromium_headless_shell-1208" / "INSTALLATION_COMPLETE").write_text("", encoding="utf-8")
+
+    resolved = resolve_chromium_executable(headless=True, root=tmp_path)
+    assert resolved == binary
+
+
+def test_request_converts_broken_pipe_into_runtime_error_and_recycles(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(conversation_worker, "playwright_available", lambda: True)
+
+    class BrokenPipeConn:
+        def send(self, payload):
+            raise BrokenPipeError(232, "The pipe is being closed")
+
+        def poll(self, timeout=0):
+            return False
+
+        def recv(self):
+            raise EOFError()
+
+        def close(self):
+            pass
+
+    class DummyProc:
+        exitcode = 1
+
+        def start(self):
+            pass
+
+        def is_alive(self):
+            return False
+
+        def terminate(self):
+            pass
+
+        def kill(self):
+            pass
+
+        def join(self, timeout=None):
+            pass
+
+    class BrokenPipeCtx:
+        def __init__(self):
+            self.spawns = 0
+
+        def Pipe(self, duplex=True):
+            return BrokenPipeConn(), BrokenPipeConn()
+
+        def Process(self, **kwargs):
+            self.spawns += 1
+            return DummyProc()
+
+    ctx = BrokenPipeCtx()
+    browser = IsolatedConversationBrowser(timeout_seconds=1.0, process_context=ctx)
+    try:
+        with pytest.raises(RuntimeError, match="stopped unexpectedly"):
+            browser.navigate("https://example.test")
+        assert ctx.spawns == 2
+    finally:
+        browser.close()
+

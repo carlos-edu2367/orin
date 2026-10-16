@@ -20,6 +20,7 @@ orin.env
 # Local runtime output: process logs, agent workspaces, visual captures.
 .logs/
 data/workspaces/
+data/users/
 frontend/tests/visual/output/
 *.run-*.log
 
@@ -27,6 +28,7 @@ frontend/tests/visual/output/
 .superpowers/
 
 # Local runtime state
+data/.layout-v2
 data/*.json
 data/*.db
 data/*.db-shm

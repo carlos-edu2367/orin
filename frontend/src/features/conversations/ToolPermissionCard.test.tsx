@@ -43,7 +43,7 @@ describe('Fase B: ToolPermissionCard, 4 Permission Modes & Rewind UI', () => {
     })
   })
 
-  it('cycles through the 4 Code Mode permission modes on Shift+Tab in Composer', () => {
+  it('cycles through the 3 safe Code Mode permission modes on Shift+Tab in Composer without escalating to full_autonomy', () => {
     const onPermissionChange = vi.fn()
     render(
       <Composer
@@ -69,15 +69,11 @@ describe('Fase B: ToolPermissionCard, 4 Permission Modes & Rewind UI', () => {
     expect(onPermissionChange).toHaveBeenLastCalledWith('plan_mode')
 
     fireEvent.keyDown(textarea, { key: 'Tab', shiftKey: true })
-    expect(select.value).toBe('full_autonomy')
-    expect(onPermissionChange).toHaveBeenLastCalledWith('full_autonomy')
-
-    fireEvent.keyDown(textarea, { key: 'Tab', shiftKey: true })
     expect(select.value).toBe('ask_permissions')
     expect(onPermissionChange).toHaveBeenLastCalledWith('ask_permissions')
   })
 
-  it('parses permission_request from activity event and renders Reverter alterações on modified turn', async () => {
+  it('parses permission_request from activity event and renders 2-step Reverter alterações confirmation on modified turn', async () => {
     const permEvent = parseConversationActivityEvent(
       {
         event_id: 'evt-perm-1',
@@ -142,6 +138,9 @@ describe('Fase B: ToolPermissionCard, 4 Permission Modes & Rewind UI', () => {
     const rewindBtn = screen.getByTestId('rewind-turn-button')
     expect(rewindBtn).toHaveTextContent('Reverter alterações')
     fireEvent.click(rewindBtn)
+    expect(onRewind).not.toHaveBeenCalled()
+    const confirmBtn = screen.getByTestId('rewind-confirm-button')
+    fireEvent.click(confirmBtn)
     await waitFor(() => {
       expect(onRewind).toHaveBeenCalledWith('turn-42')
     })

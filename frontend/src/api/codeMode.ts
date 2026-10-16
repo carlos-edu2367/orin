@@ -1,7 +1,8 @@
 import type { ApiClient } from './client'
 import { invalidResponseError } from './errors'
 
-export type CodePermissionMode = 'ask_permissions' | 'accept_edits' | 'plan_mode' | 'full_autonomy'
+export type CodePermissionMode = 'accept_edits' | 'plan_mode' | 'ask_permissions' | 'full_autonomy'
+export type PermissionMode = CodePermissionMode
 export type CodeAutonomy =
   | 'approval_required'
   | 'code_autonomy'
@@ -22,9 +23,9 @@ export const CODE_PERMISSION_MODES: ReadonlyArray<{
   label: string
   shortLabel: string
 }> = [
-  { mode: 'ask_permissions', autonomy: 'approval_required', label: 'Perguntar permissões', shortLabel: 'Perguntar' },
   { mode: 'accept_edits', autonomy: 'code_autonomy', label: 'Aceitar edições automaticamente', shortLabel: 'Aceitar edições' },
   { mode: 'plan_mode', autonomy: 'plan_mode', label: 'Modo Plano', shortLabel: 'Plano' },
+  { mode: 'ask_permissions', autonomy: 'approval_required', label: 'Perguntar permissões', shortLabel: 'Perguntar' },
   { mode: 'full_autonomy', autonomy: 'full_autonomy', label: 'Autonomia total', shortLabel: 'Autonomia total' },
 ]
 
@@ -68,9 +69,10 @@ export function permissionModeToAutonomy(mode: CodePermissionMode): CodeAutonomy
 }
 
 export function nextCodePermissionMode(current: CodePermissionMode): CodePermissionMode {
-  const order: CodePermissionMode[] = ['ask_permissions', 'accept_edits', 'plan_mode', 'full_autonomy']
+  if (current === 'full_autonomy') return 'ask_permissions'
+  const order: CodePermissionMode[] = ['accept_edits', 'plan_mode', 'ask_permissions']
   const idx = order.indexOf(current)
-  return order[(idx + 1) % order.length]
+  return order[(idx === -1 ? 0 : idx + 1) % order.length]
 }
 
 function parse(value: unknown): CodeModeSettings {
@@ -156,11 +158,12 @@ export function listWorkspaceFiles(
   limit = 20,
   signal?: AbortSignal,
 ): Promise<string[]> {
-  const params = new URLSearchParams()
-  if (query) params.set('query', query)
-  params.set('limit', String(limit))
   return client.request({
-    path: `/v1/conversations/${encodeURIComponent(conversationId)}/workspace-files?${params.toString()}`,
+    path: `/v1/conversations/${encodeURIComponent(conversationId)}/workspace-files`,
+    query: {
+      ...(query ? { query } : {}),
+      limit,
+    },
     signal,
     parse: (value) => {
       if (!value || typeof value !== 'object' || Array.isArray(value)) throw invalidResponseError()

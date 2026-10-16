@@ -401,3 +401,94 @@ def test_cancelling_another_profiles_conversation_is_not_found() -> None:
     with pytest.raises(ApplicationNotFoundError):
         store.request_cancel(receipt.conversation_id, "u2")
     assert store.request_cancel(receipt.conversation_id, "u1")["conversation_id"] == receipt.conversation_id
+
+
+def test_snapshot_paginates_recent_activities_and_loads_older_pages() -> None:
+    engine = create_engine("sqlite://", future=True)
+    metadata.create_all(engine)
+    store = PostgresChatStore(engine, PostgresAgenticActivityStore(engine, "test-cursor-secret"))
+    receipt = store.create(
+        user_id="user-1",
+        message="Execute muitas ferramentas.",
+        provider="openrouter",
+        model_id="model-a",
+        idempotency_key="request-paginate",
+    )
+    turn = store.claim(receipt.turn_id)
+    assert turn is not None
+
+    # Emit 180 distinct tool events plus noisy deltas, then finish the turn
+    for idx in range(180):
+        store.delta(turn, f"token-{idx} ")
+        store.record(
+            turn,
+            AgentActivityEventType.FILESYSTEM_READ,
+            f"Leu arquivo {idx}.txt",
+            {"path": f"{idx}.txt", "tool_name": "read_file", "tool_kind": "filesystem"},
+        )
+    store.finish(turn)
+
+    snapshot = store.get(receipt.conversation_id, "user-1")
+    assert len(snapshot["activities"]) == 150
+    assert snapshot["has_older_activities"] is True
+    assert isinstance(snapshot["oldest_activity_id"], int)
+    # Settled turns should not include per-token assistant.delta events
+    assert all(item["event_type"] != "assistant.delta" for item in snapshot["activities"])
+
+    older_page = store.list_older_activities(
+        receipt.conversation_id,
+        "user-1",
+        before_id=snapshot["oldest_activity_id"],
+        limit=150,
+    )
+    assert len(older_page["activities"]) > 0
+    assert older_page["has_older_activities"] is False
+    assert older_page["oldest_activity_id"] is None
+    assert older_page["activities"][0]["summary"] == "Execução iniciada" or "Leu arquivo 0.txt" in [
+        item["summary"] for item in older_page["activities"]
+    ]
+
+
+def test_claim_sets_turn_running_and_cancelled_finish_blocks_code_mode_run_and_deduplicates_turn_failed() -> None:
+    from agentos.persistence.postgres.schema import code_mode_runs
+
+    engine = create_engine("sqlite://", future=True)
+    metadata.create_all(engine)
+    store = PostgresChatStore(engine, PostgresAgenticActivityStore(engine, "test-cursor-secret"))
+    receipt = store.create(
+        user_id="user-1",
+        message="Build the app.",
+        provider="ollama",
+        model_id="glm-5.1:cloud",
+        idempotency_key="request-cancel-code",
+        code_mode="code",
+    )
+    turn = store.claim(receipt.turn_id)
+    assert turn is not None
+    assert turn["state"] == "running"
+
+    with engine.connect() as conn:
+        db_state = conn.execute(
+            select(conversation_turns.c.state).where(conversation_turns.c.turn_id == receipt.turn_id)
+        ).scalar_one()
+    assert db_state == "running"
+
+    # Attempt to record duplicate turn.failed events for the same turn and agent
+    store.record(turn, AgentActivityEventType.TURN_FAILED, "Execução interrompida", {"reason": "TURN_CANCELLED"})
+    store.finish(turn, failed=True, code="TURN_CANCELLED")
+
+    snapshot = store.get(receipt.conversation_id, "user-1")
+    turn_row = next(t for t in snapshot["turns"] if t["turn_id"] == receipt.turn_id)
+    assert turn_row["state"] == "cancelled"
+
+    failed_events = [a for a in snapshot["activities"] if a["event_type"] == "turn.failed"]
+    assert len(failed_events) == 1
+
+    with engine.connect() as conn:
+        code_row = conn.execute(
+            select(code_mode_runs.c.stage, code_mode_runs.c.caveats).where(code_mode_runs.c.turn_id == receipt.turn_id)
+        ).mappings().one()
+    assert code_row["stage"] == "blocked"
+    assert code_row["caveats"] == "TURN_CANCELLED"
+
+

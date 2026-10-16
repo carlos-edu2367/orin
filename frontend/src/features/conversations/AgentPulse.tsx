@@ -17,9 +17,40 @@ export type AgentActivityMode =
 
 type AgentPulseProps = {
   mode: AgentActivityMode
-  state: ActivityState
+  state?: ActivityState | string
+  status?: string
+  active?: boolean
   detail?: string
 }
+
+const INACTIVE_PULSE_STATES = new Set([
+  'completed',
+  'failed',
+  'cancelled',
+  'canceled',
+  'waiting_user',
+  'idle',
+])
+
+const TERMINAL_COMPLETED_EVENT_TYPES = new Set([
+  'turn.completed',
+  'TURN_COMPLETED',
+  'code_mode.completed',
+  'code_mode.completed_with_caveats',
+])
+
+const TERMINAL_FAILED_EVENT_TYPES = new Set([
+  'turn.failed',
+  'TURN_FAILED',
+  'code_mode.blocked',
+])
+
+const TERMINAL_CANCELLED_EVENT_TYPES = new Set([
+  'turn.cancelled',
+  'TURN_CANCELLED',
+  'execution.canceled',
+  'EXECUTION_CANCELED',
+])
 
 /**
  * The agent's current state, as motion rather than a spinner.
@@ -29,9 +60,19 @@ type AgentPulseProps = {
  * shape of the work is readable from across the room. Every variant collapses to
  * a static mark under reduced motion.
  */
-export function AgentPulse({ mode, state, detail }: AgentPulseProps) {
+export function AgentPulse({ mode, state = 'working', status, active, detail }: AgentPulseProps) {
   const reduced = useReducedMotion()
-  const label = detail ?? modeLabel(mode, state)
+
+  if (
+    active === false ||
+    INACTIVE_PULSE_STATES.has(mode) ||
+    (state && INACTIVE_PULSE_STATES.has(state)) ||
+    (status && INACTIVE_PULSE_STATES.has(status))
+  ) {
+    return null
+  }
+
+  const label = detail ?? modeLabel(mode, state as ActivityState)
 
   return (
     <div className="agent-pulse" data-mode={mode} role="status" aria-live="polite">
@@ -130,20 +171,36 @@ function modeLabel(mode: AgentActivityMode, state: ActivityState): string {
 }
 
 /** Derive the visual mode from the most recent meaningful event. */
-export function modeFromEvents(events: { type: string; toolKind?: string; toolName?: string; state: string }[], conversationState: string): AgentActivityMode {
+export function modeFromEvents(
+  events: { type: string; toolKind?: string; toolName?: string; state: string }[],
+  conversationState: string,
+): AgentActivityMode {
   if (conversationState === 'completed') return 'completed'
   if (conversationState === 'failed') return 'failed'
-  if (conversationState === 'cancelled') return 'cancelled'
+  if (conversationState === 'cancelled' || conversationState === 'canceled') return 'cancelled'
+  if (conversationState === 'idle' || conversationState === 'waiting_user') return 'idle'
+
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index]
+    if (TERMINAL_COMPLETED_EVENT_TYPES.has(event.type)) return 'completed'
+    if (TERMINAL_CANCELLED_EVENT_TYPES.has(event.type) || event.state === 'cancelled') return 'cancelled'
+    if (TERMINAL_FAILED_EVENT_TYPES.has(event.type)) return 'failed'
+    if (event.type === 'turn.waiting_user' || event.type === 'tool.permission_required' || event.state === 'waiting_user') {
+      return 'idle'
+    }
     if (event.type === 'agent.message_sent') return 'waiting_agent'
-    if (event.type === 'tool.started') {
+    if (event.type === 'tool.started' || event.type === 'tool.progressed') {
+      if (INACTIVE_PULSE_STATES.has(event.state)) return 'thinking'
       switch (event.toolKind ?? toolKindOf(event.toolName)) {
         case 'terminal': return 'terminal'
-        case 'web': return 'browsing'
+        case 'web':
+        case 'browser': return 'browsing'
         case 'memory': return 'remembering'
         case 'agent': return 'waiting_agent'
-        case 'filesystem': return event.toolName === 'write_file' ? 'writing' : 'reading'
+        case 'filesystem':
+          return event.toolName === 'write_file' || event.toolName === 'edit_file' || event.toolName === 'notebook_edit'
+            ? 'writing'
+            : 'reading'
         default: return 'thinking'
       }
     }
@@ -154,11 +211,27 @@ export function modeFromEvents(events: { type: string; toolKind?: string; toolNa
 
 function toolKindOf(toolName: string | undefined): string | undefined {
   switch (toolName) {
-    case 'read_file': case 'write_file': case 'list_files': return 'filesystem'
-    case 'run_command': return 'terminal'
-    case 'fetch_url': return 'web'
-    case 'remember': case 'recall': return 'memory'
-    case 'create_agent': case 'ask_agent': return 'agent'
-    default: return undefined
+    case 'read_file':
+    case 'write_file':
+    case 'edit_file':
+    case 'notebook_edit':
+    case 'list_files':
+    case 'glob_files':
+    case 'search_files':
+      return 'filesystem'
+    case 'run_command':
+      return 'terminal'
+    case 'fetch_url':
+      return 'web'
+    case 'remember':
+    case 'recall':
+      return 'memory'
+    case 'create_agent':
+    case 'ask_agent':
+    case 'spawn_subagent':
+      return 'agent'
+    default:
+      return undefined
   }
 }
+

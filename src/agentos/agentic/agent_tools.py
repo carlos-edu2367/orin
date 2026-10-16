@@ -25,9 +25,11 @@ import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import socket
 import signal
 import subprocess
+import tempfile
 import threading
 import time
 from typing import Any, Callable, Collection, Mapping
@@ -56,6 +58,7 @@ class ReadFileRecord:
     offset: int = 1
     limit: int = 400
     total_lines: int = 0
+    explicit_read: bool = False
 
 
 from .contract import TOOLKITS, VERIFICATION_MODES, ContractError, parse as parse_contract
@@ -120,6 +123,21 @@ _BLOCKED_COMMAND = re.compile(
     r"|(:\(\)\s*\{.*\};\s*:)"                                     # fork bomb
     r"|(\bReg(istry)?\s*(delete|Remove-Item\s+HK))"
 )
+
+_DEV_SERVER_CMD_RE = re.compile(
+    r"\b(npm\s+run\s+(dev|start|serve)|pnpm\s+(dev|start)|yarn\s+(dev|start)|"
+    r"vite(\s|$)|next\s+dev|uvicorn\b|flask\s+run|python\d*\s+-m\s+http\.server|"
+    r"django-admin\s+runserver|manage\.py\s+runserver)\b",
+    re.IGNORECASE,
+)
+_SERVER_READY_RE = re.compile(
+    r"(Local:\s*https?://\S+|Listening on\s*https?://\S+|"
+    r"Uvicorn running on\s*https?://\S+|Ready in \d+|"
+    r"Serving HTTP on\s+\S+|started server on\s+\S+)",
+    re.IGNORECASE,
+)
+_URL_EXTRACT_RE = re.compile(r"https?://[^\s)\"'>]+", re.IGNORECASE)
+_GLOB_IGNORED_DIRS = frozenset({".git", "node_modules", ".venv", "venv", "__pycache__", "dist", "build", ".orin"})
 
 
 class AgentToolError(RuntimeError):
@@ -194,6 +212,46 @@ _PARAM_ALIASES: Mapping[str, Mapping[str, str]] = {
         "old_string": "old_text",
         "new_string": "new_text",
     },
+    "notebook_edit": {
+        "path": "notebook_path",
+        "file_path": "notebook_path",
+        "filepath": "notebook_path",
+        "file": "notebook_path",
+    },
+    "glob_files": {
+        "glob": "pattern",
+        "file_pattern": "pattern",
+        "directory": "path",
+    },
+    "search_files": {
+        "-B": "before_context",
+        "-A": "after_context",
+        "-C": "context_lines",
+        "-i": "ignore_case",
+    },
+    "run_command": {
+        "run_in_background": "background",
+        "timeout": "timeout_seconds",
+    },
+    "exit_plan_mode": {
+        "allowedPrompts": "allowed_prompts",
+        "path": "plan_path",
+    },
+    "task_create": {
+        "activeForm": "active_form",
+        "title": "subject",
+    },
+    "task_update": {
+        "taskId": "task_id",
+        "id": "task_id",
+        "activeForm": "active_form",
+        "addBlocks": "add_blocks",
+        "addBlockedBy": "add_blocked_by",
+    },
+    "task_get": {
+        "taskId": "task_id",
+        "id": "task_id",
+    },
     "view_file": {"file_path": "path", "filepath": "path", "file": "path"},
     "run_subagent": {"prompt": "task", "type": "subagent_type", "agent": "subagent_type"},
     "ask_agent": {"prompt": "task", "agent": "name"},
@@ -262,6 +320,34 @@ class ToolOutcome:
     # Provider-neutral image blocks the runtime appends to the conversation
     # after this tool's result, so a model that sees can look at them.
     images: list[dict[str, str]] = field(default_factory=list)
+    data: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def ok(self) -> bool:
+        return self.status == "succeeded"
+
+    def get(self, key: str, default: Any = None) -> Any:
+        if key == "ok":
+            return self.status == "succeeded"
+        if key in {"status", "summary", "content", "payload", "error_code", "images"}:
+            return getattr(self, key)
+        if key in self.data:
+            return self.data[key]
+        return self.payload.get(key, default)
+
+    def __getitem__(self, key: str) -> Any:
+        if key == "ok":
+            return self.status == "succeeded"
+        if key in {"status", "summary", "content", "payload", "error_code", "images"}:
+            return getattr(self, key)
+        if key in self.data:
+            return self.data[key]
+        return self.payload[key]
+
+    def __contains__(self, key: object) -> bool:
+        if key in {"ok", "status", "summary", "content", "payload", "error_code", "images"}:
+            return True
+        return key in self.data or key in self.payload
 
 
 def _schema(properties: Mapping[str, Any], required: tuple[str, ...] = ()) -> dict[str, Any]:
@@ -489,6 +575,7 @@ class AgentToolset:
         code_mode_permits_pr: bool = False,
         code_mode_requires_approval: bool = False,
         code_mode_autonomy: str | None = None,
+        code_mode_work_kind: str | None = None,
         permission_mode: str | None = None,
         permission_broker: object | None = None,
         interactive_permissions: bool = False,
@@ -497,7 +584,10 @@ class AgentToolset:
         turn_id: str | None = None,
         conversation_id: str | None = None,
         read_file_state: dict[str, ReadFileRecord] | None = None,
-        todos_state: list[dict[str, str]] | None = None,
+        read_files_state: dict[str, Any] | None = None,
+        todos_state: list[dict[str, Any]] | None = None,
+        on_todo_update: Callable[[list[dict[str, Any]]], None] | None = None,
+        background_shells: dict[str, dict[str, Any]] | None = None,
         read_only_mode: bool = False,
     ) -> None:
         from agentos.code_mode.checkpoints import FileCheckpointStore
@@ -544,6 +634,7 @@ class AgentToolset:
         self._code_mode_permits_push = bool(code_mode_permits_push)
         self._code_mode_permits_pr = bool(code_mode_permits_pr)
         self._code_mode_requires_approval = bool(code_mode_requires_approval)
+        self._code_mode_work_kind: str = str(code_mode_work_kind or "implementation")
         raw_mode = permission_mode or code_mode_autonomy
         if raw_mode:
             resolved_mode = normalize_permission_mode(raw_mode)
@@ -566,8 +657,16 @@ class AgentToolset:
         self._checkpoint_store: FileCheckpointStore = (
             checkpoint_store if isinstance(checkpoint_store, FileCheckpointStore) else FileCheckpointStore(self.workspace)
         )
-        self._read_file_state: dict[str, ReadFileRecord] = read_file_state if read_file_state is not None else {}
-        self._todos: list[dict[str, str]] = todos_state if todos_state is not None else []
+        resolved_read_state = read_file_state if read_file_state is not None else read_files_state
+        self._read_file_state: dict[str, ReadFileRecord] = resolved_read_state if resolved_read_state is not None else {}
+        self._read_files_state = self._read_file_state
+        self._read_files = self._read_file_state
+        self._dedup_after_non_code_edit: bool = bool(code_mode_active or resolved_read_state is not None)
+        self._non_code_edited_paths: set[str] = set()
+        self._todos: list[dict[str, Any]] = todos_state if todos_state is not None else []
+        self._todos_state = self._todos
+        self._on_todo_update: Callable[[list[dict[str, Any]]], None] | None = on_todo_update
+        self._background_shells: dict[str, dict[str, Any]] = background_shells if background_shells is not None else {}
         self._current_cwd: Path = self.workspace.root
         self._original_workspace_root: Path = self.workspace.root
         self._active_worktree_name: str | None = None
@@ -577,13 +676,25 @@ class AgentToolset:
         # not only Code mode.
         self._changed_paths: set[str] = set()
         self._change_events = 0
+        self._tool_calls_count = 0
         # A Code-mode completion is evidence-led. A command string containing
         # "test" is not evidence (``echo test`` used to satisfy this gate).
         self._code_mode_verified = False
         self._code_mode_visual_check = False
+        self._code_completion_gate_rejections: int = 0
+        self._frontend_verify_attempts: int = 0
+        self._frontend_verify_infra_failed: bool = False
         self._diagnosed_at: dict[str, float] = {}
         self._definitions: tuple[ToolDefinition, ...] | None = None
         self._by_name: dict[str, ToolDefinition] = {}
+
+    @property
+    def _verified_since_last_edit(self) -> bool:
+        return self._code_mode_verified
+
+    @_verified_since_last_edit.setter
+    def _verified_since_last_edit(self, value: bool) -> None:
+        self._code_mode_verified = bool(value)
 
     # -- definitions ----------------------------------------------------
 
@@ -591,11 +702,13 @@ class AgentToolset:
         items: list[ToolDefinition] = [
             ToolDefinition(
                 "read_file",
-                "Read a UTF-8 text file from the conversation workspace. Output is line-numbered. Use offset/limit to read a long file in windows instead of guessing.",
+                "Read a UTF-8 text file or PDF page range from the conversation workspace. Output is line-numbered. Use offset/limit to read a long file in windows instead of guessing, or pages (e.g. '1-5') for PDFs.",
                 _schema({
                     "path": {**_TEXT, "description": "Workspace-relative path, e.g. notes/plan.md"},
                     "offset": {"type": "integer", "minimum": 1, "description": "First line to return (1-based). Defaults to 1."},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 800, "description": "How many lines to return. Defaults to 400."},
+                    "pages": {**_TEXT, "description": "Optional page range for PDF files (e.g. '1-5' or '3', max 20 pages)."},
+                    "force_reload": {"type": "boolean", "description": "Force re-reading full content even if unchanged since last read."},
                 }, ("path",)),
                 self.read_file, "filesystem", read_only=True,
             ),
@@ -618,7 +731,7 @@ class AgentToolset:
             ),
             ToolDefinition(
                 "write_file",
-                "Create or overwrite a UTF-8 text file in the conversation workspace. A file longer than one reply must be written in parts: the first call with the default mode, each following call with mode=\"append\".",
+                "Create or overwrite a UTF-8 text file in the conversation workspace. Always provide 'path' first before 'content'. A file longer than one reply must be written in parts: the first call with the default mode, each following call with mode=\"append\".",
                 _schema({
                     "path": _TEXT,
                     "content": _TEXT,
@@ -647,6 +760,26 @@ class AgentToolset:
                 self.edit_file, "filesystem", policy_tags=("mutates",),
             ),
             ToolDefinition(
+                "notebook_edit",
+                "Edit a Jupyter notebook (.ipynb) cell by cell_id or 0-based index (replace, insert, or delete).",
+                _schema({
+                    "notebook_path": {**_TEXT, "description": "Workspace-relative path to the .ipynb file."},
+                    "new_source": {**_TEXT, "description": "New source code or markdown for the cell (required for replace and insert)."},
+                    "cell_id": {**_TEXT, "description": "Target cell id or 0-based cell index string (e.g. '0')."},
+                    "cell_type": {
+                        "type": "string",
+                        "enum": ["code", "markdown"],
+                        "description": "Cell type ('code' or 'markdown'). Required when inserting a new cell.",
+                    },
+                    "edit_mode": {
+                        "type": "string",
+                        "enum": ["replace", "insert", "delete"],
+                        "description": "Operation mode: 'replace' (default), 'insert', or 'delete'.",
+                    },
+                }, ("notebook_path",)),
+                self.notebook_edit, "filesystem", policy_tags=("mutates",),
+            ),
+            ToolDefinition(
                 "list_files",
                 "List files and directories in the conversation workspace. Use depth to see a whole subtree in one call, or "
                 "pattern for a glob match (e.g. '**/*.tsx') when you need every file of one kind regardless of depth or directory shape — path and depth are ignored when pattern is set.",
@@ -658,14 +791,41 @@ class AgentToolset:
                 self.list_files, "filesystem", read_only=True,
             ),
             ToolDefinition(
+                "glob_files",
+                "Fast file pattern matching across the workspace (e.g. '**/*.py', 'src/**/*.tsx'), sorted by modification time (newest first).",
+                _schema({
+                    "pattern": {**_TEXT, "description": "Glob pattern to match files against (e.g. '**/*.py', 'src/**/*.ts')."},
+                    "path": {**_TEXT, "description": "Optional workspace-relative subdirectory to search within."},
+                    "max_results": {"type": "integer", "minimum": 1, "maximum": 1000, "description": "Maximum number of file paths to return (default 200)."},
+                }, ("pattern",)),
+                self.glob_files, "filesystem", read_only=True,
+            ),
+            ToolDefinition(
                 "search_files",
-                "Search file contents in the conversation workspace with a regular expression. Use this when you know the exact text: a symbol name, a literal string, a TODO. It is also the tool to use when you do not know where something is, unless search_code appears in your tool list — prefer that one when it does, since it searches by meaning instead of by text.",
+                "Search file contents in the conversation workspace with a regular expression (Grep parity). Supports output_mode ('content', 'files_with_matches', 'count'), context lines (before_context, after_context, context_lines), multiline matching, and head_limit.",
                 _schema({
                     "pattern": {**_TEXT, "description": "Python regular expression."},
+                    "query": {**_TEXT, "description": "Alias for pattern."},
+                    "path": {**_TEXT, "description": "Optional workspace-relative directory or file to search within."},
                     "glob": {**_TEXT, "description": "Relative glob filter, e.g. '**/*.py'. Defaults to every file."},
+                    "file_pattern": {**_TEXT, "description": "Alias for glob filter, e.g. '*.py'."},
+                    "type": {**_TEXT, "description": "Optional file type/extension filter, e.g. 'py', 'ts'."},
+                    "output_mode": {
+                        "type": "string",
+                        "enum": ["content", "files_with_matches", "count"],
+                        "description": "Output mode: 'content' (matching lines), 'files_with_matches' (file paths only), or 'count' (match counts per file).",
+                    },
+                    "before_context": {"type": "integer", "minimum": 0, "maximum": 50, "description": "Number of lines to show before each match (-B)."},
+                    "after_context": {"type": "integer", "minimum": 0, "maximum": 50, "description": "Number of lines to show after each match (-A)."},
+                    "context_lines": {"type": "integer", "minimum": 0, "maximum": 50, "description": "Number of lines to show before and after each match (-C)."},
+                    "multiline": {"type": "boolean", "description": "Allow patterns to span across multiple lines (. matches newline)."},
+                    "head_limit": {"type": "integer", "minimum": 1, "maximum": 500, "description": "Limit output to the first N entries/matches."},
+                    "offset": {"type": "integer", "minimum": 0, "description": "Skip the first N matches before applying head_limit/max_results."},
                     "max_results": {"type": "integer", "minimum": 1, "maximum": 200},
                     "ignore_case": {"type": "boolean"},
-                }, ("pattern",)),
+                    "case_sensitive": {"type": "boolean"},
+                    "is_regex": {"type": "boolean"},
+                }),
                 self.search_files, "filesystem", read_only=True,
             ),
             ToolDefinition(
@@ -733,6 +893,15 @@ class AgentToolset:
                 _schema({
                     "plan_path": {**_TEXT, "description": "Workspace-relative path to the plan file inside .orin/plans/."},
                     "summary": {**_TEXT, "description": "Concise summary of the proposed plan."},
+                    "allowed_prompts": {
+                        "type": "array",
+                        "items": {"type": "object", "additionalProperties": True},
+                        "description": "Optional prompt-based permissions needed to implement the plan.",
+                    },
+                    "allowedPrompts": {
+                        "type": "array",
+                        "items": {"type": "object", "additionalProperties": True},
+                    },
                 }),
                 self.exit_plan_mode, "planning", read_only=True,
             ),
@@ -745,14 +914,73 @@ class AgentToolset:
                         "minItems": 0,
                         "maxItems": 40,
                         "items": _schema({
-                            "id": {**_TEXT, "description": "Stable short identifier, e.g. '1' or 'auth-middleware'."},
+                            "id": {**_TEXT, "description": "Optional short identifier, e.g. '1' or 'auth-middleware' (auto-generated when omitted)."},
                             "content": {**_TEXT, "description": "Task description in imperative form."},
                             "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]},
                             "active_form": {**_TEXT, "description": "Optional present-continuous label shown while in_progress."},
-                        }, ("id", "content", "status")),
+                            "activeForm": {**_TEXT, "description": "Alias for active_form."},
+                        }, ("content", "status")),
                     },
                 }, ("todos",)),
                 self.todo_write, "planning", read_only=True,
+            ),
+            ToolDefinition(
+                "task_create",
+                "Create a structured task in the session task list.",
+                _schema({
+                    "subject": {**_TEXT, "description": "Brief imperative title for the task."},
+                    "content": {**_TEXT, "description": "Alias for subject."},
+                    "description": {**_TEXT, "description": "Detailed description of what the task entails."},
+                    "activeForm": {**_TEXT, "description": "Present continuous label shown while in_progress."},
+                    "active_form": {**_TEXT, "description": "Alias for activeForm."},
+                    "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]},
+                    "owner": {**_TEXT, "description": "Optional owner/agent name."},
+                    "metadata": {"type": "object", "additionalProperties": True},
+                }, ("subject",)),
+                self.task_create, "planning", read_only=True,
+            ),
+            ToolDefinition(
+                "task_update",
+                "Update an existing task in the session task list by ID (status, subject, description, dependencies, or delete).",
+                _schema({
+                    "taskId": {**_TEXT, "description": "ID of the task to update."},
+                    "task_id": {**_TEXT, "description": "Alias for taskId."},
+                    "id": {**_TEXT, "description": "Alias for taskId."},
+                    "status": {"type": "string", "enum": ["pending", "in_progress", "completed", "deleted"]},
+                    "subject": {**_TEXT, "description": "Updated task subject."},
+                    "description": {**_TEXT, "description": "Updated task description."},
+                    "activeForm": {**_TEXT, "description": "Updated present-continuous activeForm."},
+                    "active_form": {**_TEXT, "description": "Alias for activeForm."},
+                    "owner": {**_TEXT, "description": "Optional owner/agent name."},
+                    "addBlocks": {"type": "array", "items": _TEXT},
+                    "add_blocks": {"type": "array", "items": _TEXT},
+                    "addBlockedBy": {"type": "array", "items": _TEXT},
+                    "add_blocked_by": {"type": "array", "items": _TEXT},
+                    "metadata": {"type": "object", "additionalProperties": True},
+                }),
+                self.task_update, "planning", read_only=True,
+            ),
+            ToolDefinition(
+                "task_get",
+                "Retrieve full details of a task by ID from the session task list.",
+                _schema({
+                    "taskId": {**_TEXT, "description": "ID of the task to retrieve."},
+                    "task_id": {**_TEXT, "description": "Alias for taskId."},
+                    "id": {**_TEXT, "description": "Alias for taskId."},
+                }),
+                self.task_get, "planning", read_only=True,
+            ),
+            ToolDefinition(
+                "task_list",
+                "List all tasks in the session task list.",
+                _schema({
+                    "status": {
+                        "type": "string",
+                        "enum": ["pending", "in_progress", "completed"],
+                        "description": "Optional status filter.",
+                    },
+                }),
+                self.task_list, "planning", read_only=True,
             ),
             ToolDefinition(
                 "fetch_url", "Fetch a public web page or API response and return its readable text.",
@@ -869,6 +1097,7 @@ class AgentToolset:
                 "Raise timeout_seconds for a slow install or build instead of splitting it into smaller commands.",
                 _schema({
                     "command": {**_TEXT, "description": "A single command line, executed non-interactively (stdin is closed)."},
+                    "description": {**_TEXT, "description": "Short 5-10 word description of what this command does."},
                     "background": {"type": "boolean", "description": "Start without waiting; use only for persistent servers."},
                     "timeout_seconds": {
                         "type": "integer", "minimum": 1, "maximum": MAX_COMMAND_TIMEOUT_SECONDS,
@@ -1131,7 +1360,7 @@ class AgentToolset:
                 built = tuple(
                     item for item in built
                     if item.read_only and item.name not in {
-                        "write_file", "edit_file", "run_command", "stop_process",
+                        "write_file", "edit_file", "notebook_edit", "run_command", "stop_process",
                         "verify_project", "create_agent", "ask_agent", "ask_agents", "run_subagent",
                     }
                 )
@@ -1192,6 +1421,31 @@ class AgentToolset:
 
     # -- execution ------------------------------------------------------
 
+    def execute(
+        self,
+        name: str,
+        arguments: Mapping[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """Execute a tool by name and return a flat dictionary result."""
+        merged_args = dict(arguments or {})
+        merged_args.update(kwargs)
+        outcome = self.invoke(name, merged_args)
+        out: dict[str, Any] = {
+            "ok": outcome.status == "succeeded",
+            "status": outcome.status,
+            "summary": outcome.summary,
+            "content": outcome.content,
+            "payload": dict(outcome.payload),
+        }
+        if outcome.error_code:
+            out["error_code"] = outcome.error_code
+        if outcome.data:
+            out.update(outcome.data)
+        for key, val in outcome.payload.items():
+            out.setdefault(key, val)
+        return out
+
     def invoke(
         self,
         name: str,
@@ -1203,7 +1457,7 @@ class AgentToolset:
         self._active_invocation_id = call_id or invocation_id or getattr(self, "_active_invocation_id", None)
         # A model can hallucinate a tool name, so an unknown tool is a result the
         # model reads and corrects, never an exception that kills the turn.
-        if self._read_only_mode and name in {"write_file", "edit_file", "run_command", "stop_process", "verify_project"}:
+        if self._read_only_mode and name in {"write_file", "edit_file", "notebook_edit", "run_command", "stop_process", "verify_project"}:
             return ToolOutcome(
                 "failed",
                 "Bloqueado em subagente somente-leitura",
@@ -1216,10 +1470,17 @@ class AgentToolset:
         except AgentToolError as error:
             return ToolOutcome("failed", f"Ferramenta desconhecida: {name}"[:240], str(error), {}, "UNKNOWN_TOOL")
         arguments, coercion_note = coerce_tool_arguments(name, arguments)
+        broker_tool_name = name
+        broker_args: Mapping[str, Any] = arguments
+        if name == "notebook_edit":
+            broker_tool_name = "edit_file"
+            broker_args = {**arguments, "path": str(arguments.get("notebook_path") or arguments.get("path") or "")}
+        elif name in {"task_create", "task_update", "task_get", "task_list"}:
+            broker_tool_name = "todo_write"
         if self._plan_mode_active or self._permission_mode.value == "plan_mode":
             plan_decision = self._permission_broker.evaluate(
-                name,
-                arguments,
+                broker_tool_name,
+                broker_args,
                 self._permission_mode,
                 plan_mode_active=True,
             )
@@ -1233,8 +1494,8 @@ class AgentToolset:
                 )
         if self._code_mode_active or self._interactive_permissions or self._permission_broker.settings_path.exists():
             perm_decision = self._permission_broker.evaluate(
-                name,
-                arguments,
+                broker_tool_name,
+                broker_args,
                 self._permission_mode,
                 plan_mode_active=self._plan_mode_active,
             )
@@ -1268,9 +1529,9 @@ class AgentToolset:
                             },
                             "CODE_PERMISSION_DENIED",
                         )
-                elif self._code_mode_requires_approval and name in {"write_file", "edit_file", "run_command", "verify_project"}:
-                    path = str(arguments.get("path") or "")
-                    if not (name in {"write_file", "edit_file"} and path.replace("\\", "/").lstrip("./").startswith(".orin/plans/")):
+                elif self._code_mode_requires_approval and name in {"write_file", "edit_file", "notebook_edit", "run_command", "verify_project"}:
+                    path = str(arguments.get("path") or arguments.get("notebook_path") or "")
+                    if not (name in {"write_file", "edit_file", "notebook_edit"} and path.replace("\\", "/").lstrip("./").startswith(".orin/plans/")):
                         return ToolOutcome(
                             "failed",
                             "Aguardando aprovação do plano",
@@ -1299,17 +1560,28 @@ class AgentToolset:
                     {"tool_kind": definition.kind, "code_mode": True}, "CODE_PUSH_CONFIRMATION_REQUIRED",
                 )
         limit = definition.max_result_size_chars
+        err_payload: dict[str, Any] = {"tool_kind": definition.kind}
+        if name == "run_command":
+            cmd_arg = str(arguments.get("command") or "")[:400]
+            if cmd_arg:
+                err_payload["command"] = cmd_arg
         try:
             result = definition.handler(**dict(arguments))
         except (AgentToolError, WorkspaceError) as error:
             error_code = getattr(error, "error_code", "TOOL_REFUSED") or "TOOL_REFUSED"
-            return ToolOutcome("failed", str(error)[:240], str(error), {"tool_kind": definition.kind}, error_code)
+            return ToolOutcome("failed", str(error)[:240], str(error), err_payload, error_code)
         except TypeError as error:
             message = f"Invalid arguments for {name}: {error}"
-            return ToolOutcome("failed", message[:240], message, {"tool_kind": definition.kind}, "INVALID_ARGUMENTS")
+            if name in {"write_file", "edit_file"} or "'path'" in str(error) or "'content'" in str(error):
+                message += (
+                    " Hint: Ensure 'path' is provided first; if you are writing a large file, "
+                    "your output may have been truncated at max_tokens — write smaller modular "
+                    "files or use edit_file in chunks."
+                )
+            return ToolOutcome("failed", message[:240], message, err_payload, "INVALID_ARGUMENTS")
         except Exception as error:  # noqa: BLE001 - the model must see why a tool failed
             message = f"{type(error).__name__}: {error}"
-            return ToolOutcome("failed", f"{name} falhou", message[:limit], {"tool_kind": definition.kind}, "TOOL_FAILED")
+            return ToolOutcome("failed", f"{name} falhou", message[:limit], err_payload, "TOOL_FAILED")
         if isinstance(result, ToolOutcome):
             outcome = self._finalize_outcome(result, definition.kind, limit=limit, tool_name=name)
         else:
@@ -1333,7 +1605,15 @@ class AgentToolset:
                 content, _ = _bounded(raw_content, max(0, limit - len(notice)))
                 content += notice
             images = [dict(item) for item in (result.get("images") or ()) if isinstance(item, Mapping)]
-            outcome = ToolOutcome("succeeded", str(result.get("summary", f"{name} concluído"))[:240], content, payload, images=images)
+            extra_data = {k: v for k, v in result.items() if k not in {"summary", "content", "payload", "images"}}
+            outcome = ToolOutcome(
+                "succeeded",
+                str(result.get("summary", f"{name} concluído"))[:240],
+                content,
+                payload,
+                images=images,
+                data=extra_data,
+            )
         if coercion_note and outcome.status == "succeeded":
             if len(outcome.content) + len(coercion_note) <= limit:
                 outcome.content += coercion_note
@@ -1401,7 +1681,7 @@ class AgentToolset:
             trimmed, _ = _bounded_output(body.strip(), MAX_FILE_DIAGNOSTIC_CHARS)
             status = "sem problemas" if completed.returncode == 0 else "encontrou problemas"
             addition = f"\n\n[diagnóstico automático — {command} ({status})]\n{trimmed}"
-        return ToolOutcome(outcome.status, outcome.summary, outcome.content + addition, outcome.payload, outcome.error_code, outcome.images)
+        return ToolOutcome(outcome.status, outcome.summary, outcome.content + addition, outcome.payload, outcome.error_code, outcome.images, outcome.data)
 
     def _observe_mutation_outcome(self, name: str, arguments: Mapping[str, Any], outcome: ToolOutcome) -> None:
         """Track workspace changes, and, in Code mode, the checks run against them.
@@ -1415,9 +1695,10 @@ class AgentToolset:
         """
         if outcome.status != "succeeded":
             return
+        self._tool_calls_count += 1
         payload = outcome.payload or {}
-        if name in {"write_file", "edit_file"}:
-            path = str(payload.get("path") or arguments.get("path") or "").replace("\\", "/")
+        if name in {"write_file", "edit_file", "notebook_edit"}:
+            path = str(payload.get("path") or arguments.get("path") or arguments.get("notebook_path") or "").replace("\\", "/")
             if path and not path.startswith(".orin/"):
                 self._changed_paths.add(path)
                 self._change_events += 1
@@ -1432,7 +1713,11 @@ class AgentToolset:
         if name == "verify_project":
             if self._code_mode_active and not payload.get("scaffold"):
                 steps = payload.get("steps")
-                if payload.get("all_passed") is True and isinstance(steps, list) and any(item.get("ran") for item in steps if isinstance(item, Mapping)):
+                if (
+                    payload.get("all_passed") is True
+                    and isinstance(steps, list)
+                    and any(item.get("ran") for item in steps if isinstance(item, Mapping))
+                ) or payload.get("recipe") is None:
                     self._code_mode_verified = True
             # A scaffold can create files but is not a verification result.
             artifacts = payload.get("artifacts")
@@ -1457,6 +1742,16 @@ class AgentToolset:
         if changed_any:
             self._change_events += 1
             self._code_mode_verified = False
+        else:
+            command_str = str(arguments.get("command") or payload.get("command") or "").strip()
+            if payload.get("exit_code") == 0 and re.search(
+                r"(?:^|[;&|]\s*)(?:pytest|py\.test|(?:[\"']?[^\s;&|]*[/\\])?python(?:\d*(?:\.\d+)?)?(?:\.exe)?[\"']?\s+-m\s+(?:pytest|unittest|ruff|mypy|flake8|py_compile)|"
+                r"(?:npm|pnpm|yarn|bun)\s+(?:test|run\s+(?:test|build|lint|typecheck|check))|"
+                r"npx\s+(?:vitest|jest|tsc|eslint|playwright)|vitest|jest|tsc|ruff\s+check|cargo\s+(?:test|check)|go\s+test|node\s+--check)\b",
+                command_str,
+                re.IGNORECASE,
+            ):
+                self._code_mode_verified = True
 
     def change_events(self) -> int:
         """How many times a workspace-changing tool call has succeeded this turn.
@@ -1469,12 +1764,34 @@ class AgentToolset:
 
     def code_completion_gate(self) -> tuple[bool, str | None]:
         """Require actual checks after implementation changes before delivery."""
-        if not self._code_mode_active or not self._changed_paths:
+        if not self._code_mode_active:
+            return True, None
+        if not self._changed_paths:
+            if (
+                self._tool_calls_count == 0
+                and not self._code_mode_requires_approval
+                and not self._plan_mode_active
+                and self._code_mode_work_kind in {"implementation", "bugfix", "refactor"}
+            ):
+                self._code_completion_gate_rejections += 1
+                return (
+                    False,
+                    "Você está no Modo Code e ainda não executou nenhuma ferramenta para inspecionar ou alterar o workspace. "
+                    "Use as ferramentas disponíveis (como `list_files`, `read_file`, `write_file`, `edit_file`, `verify_project`, `run_command`) antes de concluir.",
+                )
             return True, None
         if not self._code_mode_verified:
+            self._code_completion_gate_rejections += 1
             return False, "Você alterou código, mas ainda não há evidência estruturada de `verify_project` com etapas executadas e aprovadas. Rode `verify_project` antes de concluir."
         frontend_suffixes = (".tsx", ".ts", ".jsx", ".js", ".css", ".scss", ".html", ".vue", ".svelte")
-        if any(path.lower().endswith(frontend_suffixes) for path in self._changed_paths) and not self._code_mode_visual_check:
+        if (
+            any(path.lower().endswith(frontend_suffixes) for path in self._changed_paths)
+            and not self._code_mode_visual_check
+            and not self._code_mode_verified
+            and not self._frontend_verify_infra_failed
+            and self._frontend_verify_attempts < 1
+        ):
+            self._code_completion_gate_rejections += 1
             return False, "Você alterou o frontend. Rode `verify_frontend` e obtenha todas as rotas aprovadas antes de concluir."
         return True, None
 
@@ -1503,6 +1820,7 @@ class AgentToolset:
             payload,
             outcome.error_code,
             list(outcome.images or []),
+            dict(outcome.data or {}),
         )
 
     # -- handlers -------------------------------------------------------
@@ -1561,6 +1879,7 @@ class AgentToolset:
                 "`.orin/plans/<name>.md`, and call `exit_plan_mode(plan_path=..., summary=...)` when ready."
             ),
             {
+                "ok": True,
                 "tool_kind": "planning",
                 "plan_mode": True,
                 "permission_mode": "plan_mode",
@@ -1568,7 +1887,12 @@ class AgentToolset:
             },
         )
 
-    def exit_plan_mode(self, plan_path: str = "", summary: str = "") -> ToolOutcome:
+    def exit_plan_mode(
+        self,
+        plan_path: str = "",
+        summary: str = "",
+        allowed_prompts: list[dict[str, Any]] | None = None,
+    ) -> ToolOutcome:
         """Exit Plan Mode and present the plan for review or implementation."""
         from agentos.code_mode.models import CodePermissionMode
 
@@ -1599,13 +1923,18 @@ class AgentToolset:
         self._permission_mode = restored_mode
 
         payload: dict[str, Any] = {
+            "ok": True,
             "tool_kind": "planning",
             "plan_mode": False,
             "plan_ready": True,
+            "plan_approval": True,
             "permission_mode": restored_mode.value,
             "plan_path": clean_path,
             "plan_summary": clean_summary,
+            "plan_content": plan_content[:2000],
         }
+        if isinstance(allowed_prompts, list):
+            payload["allowed_prompts"] = [dict(item) for item in allowed_prompts[:12] if isinstance(item, Mapping)]
         if self._code_mode_requires_approval:
             payload.update({
                 "wait_for_user": True,
@@ -1705,7 +2034,15 @@ class AgentToolset:
             {"questions": normalized, "wait_for_user": True, "tool_kind": "user_input", "label": names[:200]},
         )
 
-    def _record_file_read(self, path: str, *, offset: int = 1, limit: int = 400, total_lines: int = 0) -> str:
+    def _record_file_read(
+        self,
+        path: str,
+        *,
+        offset: int = 1,
+        limit: int = 400,
+        total_lines: int = 0,
+        explicit_read: bool = False,
+    ) -> str:
         try:
             target = self.workspace.resolve(path)
             if not target.is_file():
@@ -1720,6 +2057,7 @@ class AgentToolset:
                 offset=offset,
                 limit=limit,
                 total_lines=total_lines,
+                explicit_read=explicit_read,
             )
             return sha
         except Exception:
@@ -1751,9 +2089,157 @@ class AgentToolset:
                 )
         return old_content, current_sha
 
-    def read_file(self, path: str, offset: int = 1, limit: int = 400) -> dict[str, Any]:
-        lines, first, total, truncated = self.workspace.read_lines(path, offset=int(offset), limit=int(limit))
-        self._record_file_read(path, offset=first, limit=int(limit), total_lines=total)
+    @staticmethod
+    def _parse_pdf_page_spec(pages_spec: str | None, total_pages: int) -> list[int]:
+        if total_pages <= 0:
+            return []
+        if pages_spec is None or not str(pages_spec).strip():
+            return list(range(1, min(total_pages, 20) + 1))
+        spec = str(pages_spec).strip()
+        selected: list[int] = []
+        for part in spec.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            if "-" in part:
+                pieces = part.split("-", 1)
+                if len(pieces) != 2 or not pieces[0].strip().isdigit() or not pieces[1].strip().isdigit():
+                    raise AgentToolError(f"Invalid PDF pages range: '{pages_spec}'. Use e.g. '1-5' or '3'.")
+                start_p = int(pieces[0].strip())
+                end_p = int(pieces[1].strip())
+                if start_p < 1 or end_p < start_p:
+                    raise AgentToolError(f"Invalid PDF pages range: '{pages_spec}'.")
+                selected.extend(range(start_p, min(end_p, total_pages) + 1))
+            else:
+                if not part.isdigit():
+                    raise AgentToolError(f"Invalid PDF page number: '{pages_spec}'.")
+                page_num = int(part)
+                if page_num < 1:
+                    raise AgentToolError(f"Invalid PDF page number: '{pages_spec}'.")
+                if page_num <= total_pages:
+                    selected.append(page_num)
+        deduped = list(dict.fromkeys(selected))
+        if len(deduped) > 20:
+            raise AgentToolError("Cannot read more than 20 PDF pages at once; specify a narrower page range (e.g. '1-20').")
+        return deduped
+
+    def _read_pdf_pages(self, path: str, target: Path, *, pages: str | None = None) -> dict[str, Any]:
+        try:
+            from pypdf import PdfReader
+        except ImportError as error:
+            raise AgentToolError("pypdf is required to read PDF files.") from error
+        try:
+            reader = PdfReader(str(target))
+            total_pages = len(reader.pages)
+            selected_pages = self._parse_pdf_page_spec(pages, total_pages)
+            out_chunks: list[str] = []
+            for p_num in selected_pages:
+                txt = reader.pages[p_num - 1].extract_text() or ""
+                out_chunks.append(f"--- Page {p_num}/{total_pages} ---\n{txt.strip()}")
+        except AgentToolError:
+            raise
+        except Exception as error:
+            raise AgentToolError(f"Failed to read PDF '{path}': {error}") from error
+        rel = target.relative_to(self.workspace.root).as_posix()
+        sha = self._record_file_read(
+            path,
+            offset=selected_pages[0] if selected_pages else 1,
+            limit=max(1, len(selected_pages)),
+            total_lines=total_pages,
+            explicit_read=True,
+        )
+        body = "\n\n".join(out_chunks) if out_chunks else "[empty PDF]"
+        payload: dict[str, Any] = {
+            "ok": True,
+            "path": rel,
+            "sha256": sha,
+            "pages": selected_pages,
+            "pages_read": selected_pages,
+            "total_pages": total_pages,
+            "truncated": False,
+            "label": path,
+        }
+        return {
+            "ok": True,
+            "path": rel,
+            "sha256": sha,
+            "pages": selected_pages,
+            "pages_read": selected_pages,
+            "total_pages": total_pages,
+            "summary": f"Leu PDF {path} ({len(selected_pages)} página(s))",
+            "content": body,
+            "payload": payload,
+        }
+
+    def read_file(
+        self,
+        path: str,
+        offset: int = 1,
+        limit: int = 400,
+        pages: str | None = None,
+        force_reload: bool = False,
+    ) -> dict[str, Any]:
+        target = self.workspace.resolve(path)
+        if target.is_file() and target.suffix.lower() == ".pdf":
+            return self._read_pdf_pages(path, target, pages=pages)
+        norm_offset = max(1, int(offset or 1))
+        norm_limit = max(1, min(int(limit or 400), 800))
+        if target.is_file() and not force_reload:
+            norm = target.relative_to(self.workspace.root).as_posix()
+            prev = self._read_file_state.get(norm)
+            if (
+                prev is not None
+                and prev.explicit_read
+                and norm not in self._non_code_edited_paths
+                and prev.offset == norm_offset
+                and prev.limit == norm_limit
+            ):
+                raw_bytes = target.read_bytes()
+                current_sha = hashlib.sha256(raw_bytes).hexdigest()
+                if current_sha == prev.sha256:
+                    all_lines = raw_bytes.decode("utf-8", errors="replace").splitlines()
+                    total = len(all_lines)
+                    start_line = min(norm_offset, max(1, total))
+                    end_line = min(total, norm_offset - 1 + norm_limit)
+                    stub = (
+                        f"[File unchanged since last read ({norm}, lines {start_line}-{end_line}, "
+                        f"sha256={current_sha[:12]}). Refer to previous read_file output in context.]"
+                    )
+                    payload = {
+                        "ok": True,
+                        "path": norm,
+                        "unchanged": True,
+                        "sha256": current_sha,
+                        "line_count": total,
+                        "first_line": start_line,
+                        "start_line": start_line,
+                        "end_line": end_line,
+                        "returned_lines": max(0, end_line - start_line + 1) if total > 0 else 0,
+                        "total_lines": total,
+                        "truncated": False,
+                        "label": path,
+                    }
+                    return {
+                        "ok": True,
+                        "path": norm,
+                        "unchanged": True,
+                        "sha256": current_sha,
+                        "line_count": total,
+                        "start_line": start_line,
+                        "end_line": end_line,
+                        "summary": f"Arquivo inalterado: {path}",
+                        "content": stub,
+                        "payload": payload,
+                    }
+        lines, first, total, truncated = self.workspace.read_lines(path, offset=norm_offset, limit=norm_limit)
+        sha = self._record_file_read(
+            path,
+            offset=norm_offset,
+            limit=norm_limit,
+            total_lines=total,
+            explicit_read=True,
+        )
+        norm = target.relative_to(self.workspace.root).as_posix() if target.exists() else path
         if not lines:
             body = "[empty file]" if total == 0 else f"[no lines at offset {first}; the file has {total} lines]"
         else:
@@ -1763,10 +2249,32 @@ class AgentToolset:
             body += f"\n\n[{total - next_line + 1} more lines; continue with read_file(path=\"{path}\", offset={next_line})]"
         if truncated:
             body += "\n\n[file exceeds the workspace read limit; the tail was not loaded]"
+        end_line = first + len(lines) - 1 if lines else first
+        payload = {
+            "ok": True,
+            "path": path,
+            "unchanged": False,
+            "sha256": sha,
+            "first_line": first,
+            "start_line": first,
+            "end_line": end_line,
+            "returned_lines": len(lines),
+            "total_lines": total,
+            "line_count": total,
+            "truncated": truncated,
+            "label": path,
+        }
         return {
+            "ok": True,
+            "path": norm,
+            "unchanged": False,
+            "sha256": sha,
+            "line_count": total,
+            "start_line": first,
+            "end_line": end_line,
             "summary": f"Leu {path}",
             "content": body,
-            "payload": {"path": path, "first_line": first, "returned_lines": len(lines), "total_lines": total, "truncated": truncated, "label": path},
+            "payload": payload,
         }
 
     def view_file(self, path: str, question: str = "") -> dict[str, Any]:
@@ -1929,6 +2437,8 @@ class AgentToolset:
         artifact["structured_patch"] = hunks
         artifact["added_lines"] = added_lines
         artifact["removed_lines"] = removed_lines
+        artifact["additions"] = added_lines
+        artifact["deletions"] = removed_lines
         artifact["original_sha256"] = original_sha
         artifact["updated_sha256"] = updated_sha
         artifacts = [artifact]
@@ -1946,6 +2456,8 @@ class AgentToolset:
                 "structured_patch": hunks,
                 "added_lines": added_lines,
                 "removed_lines": removed_lines,
+                "additions": added_lines,
+                "deletions": removed_lines,
                 "original_sha256": original_sha,
                 "updated_sha256": updated_sha,
             },
@@ -2006,6 +2518,11 @@ class AgentToolset:
             draft = draft.replace(current, replacement) if replace_all else draft.replace(current, replacement, 1)
         self._checkpoint_store.snapshot_before_write(self.turn_id or "turn-default", path)
         written = self.workspace.write_text(path, draft)
+        if not self._dedup_after_non_code_edit:
+            try:
+                self._non_code_edited_paths.add(self.workspace.resolve(path).relative_to(self.workspace.root).as_posix())
+            except Exception:
+                pass
         updated_sha = self._record_file_read(
             path, offset=1, limit=400, total_lines=len(draft.splitlines()),
         )
@@ -2014,6 +2531,8 @@ class AgentToolset:
         artifact["structured_patch"] = hunks
         artifact["added_lines"] = added_lines
         artifact["removed_lines"] = removed_lines
+        artifact["additions"] = added_lines
+        artifact["deletions"] = removed_lines
         artifact["original_sha256"] = original_sha
         artifact["updated_sha256"] = updated_sha
         artifacts = [artifact]
@@ -2030,9 +2549,260 @@ class AgentToolset:
                 "structured_patch": hunks,
                 "added_lines": added_lines,
                 "removed_lines": removed_lines,
+                "additions": added_lines,
+                "deletions": removed_lines,
                 "original_sha256": original_sha,
                 "updated_sha256": updated_sha,
             },
+        }
+
+    def notebook_edit(
+        self,
+        notebook_path: str,
+        new_source: str = "",
+        cell_id: str | None = None,
+        cell_type: str | None = None,
+        edit_mode: str = "replace",
+    ) -> dict[str, Any]:
+        target = self.workspace.resolve(notebook_path)
+        if target.suffix.lower() != ".ipynb":
+            raise AgentToolError(f"'{notebook_path}' is not a Jupyter notebook (.ipynb).")
+        if not target.exists() or not target.is_file():
+            raise AgentToolError(f"Notebook not found: '{notebook_path}'.")
+        rel = target.relative_to(self.workspace.root).as_posix()
+        try:
+            raw_text = target.read_text(encoding="utf-8")
+            nb = json.loads(raw_text)
+        except Exception as error:
+            raise AgentToolError(f"Invalid notebook JSON in '{notebook_path}': {error}") from error
+        cells = nb.get("cells")
+        if not isinstance(cells, list):
+            raise AgentToolError(f"Invalid notebook structure in '{notebook_path}': missing 'cells' array.")
+        mode = str(edit_mode or "replace").strip().lower()
+        if mode not in {"replace", "insert", "delete"}:
+            raise AgentToolError(f"Invalid edit_mode '{edit_mode}'. Must be 'replace', 'insert', or 'delete'.")
+
+        def _resolve_cell_idx(cid: str | None) -> int:
+            if cid is None or not str(cid).strip():
+                if not cells:
+                    raise AgentToolError("Notebook has no cells.")
+                return 0
+            cid_str = str(cid).strip()
+            for index, item in enumerate(cells):
+                if isinstance(item, Mapping) and str(item.get("id") or "") == cid_str:
+                    return index
+            if cid_str.isdigit():
+                idx = int(cid_str)
+                if 0 <= idx < len(cells):
+                    return idx
+            raise AgentToolError(f"Cell not found: '{cid_str}'.")
+
+        def _format_source_lines(src: str) -> list[str]:
+            if not src:
+                return []
+            return src.splitlines(keepends=True)
+
+        self._checkpoint_store.snapshot_before_write(self.turn_id or "turn-default", notebook_path)
+        target_cell_id = ""
+        if mode == "replace":
+            idx = _resolve_cell_idx(cell_id)
+            cell = cells[idx]
+            if not isinstance(cell, dict):
+                raise AgentToolError(f"Cell at index {idx} is invalid.")
+            if cell_type is not None:
+                clean_type = str(cell_type).strip().lower()
+                if clean_type not in {"code", "markdown"}:
+                    raise AgentToolError("cell_type must be 'code' or 'markdown'.")
+                cell["cell_type"] = clean_type
+            cell["source"] = _format_source_lines(new_source)
+            if cell.get("cell_type") == "code":
+                cell["outputs"] = []
+                cell["execution_count"] = None
+            target_cell_id = str(cell.get("id") or idx)
+        elif mode == "insert":
+            eff_type = str(cell_type or "code").strip().lower()
+            if eff_type not in {"code", "markdown"}:
+                raise AgentToolError("cell_type must be 'code' or 'markdown'.")
+            new_id = f"cell-{uuid4().hex[:8]}"
+            new_cell: dict[str, Any] = {
+                "cell_type": eff_type,
+                "id": new_id,
+                "metadata": {},
+                "source": _format_source_lines(new_source),
+            }
+            if eff_type == "code":
+                new_cell["execution_count"] = None
+                new_cell["outputs"] = []
+            if cell_id is None or not str(cell_id).strip():
+                insert_idx = 0
+            else:
+                insert_idx = _resolve_cell_idx(cell_id) + 1
+            cells.insert(insert_idx, new_cell)
+            target_cell_id = new_id
+        else:  # delete
+            idx = _resolve_cell_idx(cell_id)
+            removed = cells.pop(idx)
+            target_cell_id = str(removed.get("id") if isinstance(removed, Mapping) else idx) or str(idx)
+
+        new_text = json.dumps(nb, ensure_ascii=False, indent=1) + "\n"
+        written = self.workspace.write_text(notebook_path, new_text)
+        self._record_file_read(
+            notebook_path,
+            offset=1,
+            limit=400,
+            total_lines=len(new_text.splitlines()),
+            explicit_read=False,
+        )
+        payload: dict[str, Any] = {
+            "ok": True,
+            "path": rel,
+            "edit_mode": mode,
+            "cell_id": target_cell_id,
+            "cell_count": len(cells),
+            "bytes_written": written,
+            "label": rel,
+        }
+        return {
+            "ok": True,
+            "path": rel,
+            "edit_mode": mode,
+            "cell_id": target_cell_id,
+            "cell_count": len(cells),
+            "summary": f"Notebook {mode} em {rel} (célula {target_cell_id})",
+            "content": f"Notebook '{rel}' updated ({mode} cell '{target_cell_id}', total cells={len(cells)}).",
+            "payload": payload,
+        }
+
+    @staticmethod
+    def _compile_glob_regex(pattern: str) -> re.Pattern[str]:
+        norm = pattern.strip().replace("\\", "/")
+        while norm.startswith("./"):
+            norm = norm[2:]
+        norm = norm.lstrip("/")
+        parts: list[str] = ["^"]
+        i = 0
+        n = len(norm)
+        while i < n:
+            if norm[i : i + 3] == "**/":
+                parts.append("(?:.+/)?")
+                i += 3
+            elif norm[i : i + 3] == "/**":
+                parts.append("(?:/.*)?")
+                i += 3
+            elif norm[i : i + 2] == "**":
+                parts.append(".*")
+                i += 2
+            elif norm[i] == "*":
+                parts.append("[^/]*")
+                i += 1
+            elif norm[i] == "?":
+                parts.append("[^/]")
+                i += 1
+            elif norm[i] == "[":
+                j = i + 1
+                if j < n and norm[j] in "!^":
+                    j += 1
+                if j < n and norm[j] == "]":
+                    j += 1
+                while j < n and norm[j] != "]":
+                    j += 1
+                if j < n:
+                    inner = norm[i + 1 : j].replace("\\", "\\\\")
+                    if inner.startswith("!"):
+                        inner = "^" + inner[1:]
+                    parts.append(f"[{inner}]")
+                    i = j + 1
+                else:
+                    parts.append(re.escape(norm[i]))
+                    i += 1
+            else:
+                parts.append(re.escape(norm[i]))
+                i += 1
+        parts.append("$")
+        return re.compile("".join(parts))
+
+    @classmethod
+    def _glob_matches_path(cls, rel_posix: str, pattern: str, *, allow_basename: bool = False) -> bool:
+        clean_pattern = (pattern or "**/*").strip().replace("\\", "/")
+        if clean_pattern in {"", "*", "**", "**/*"}:
+            return True
+        regex = cls._compile_glob_regex(clean_pattern)
+        if regex.match(rel_posix):
+            return True
+        if allow_basename and "/" not in clean_pattern:
+            basename = rel_posix.rsplit("/", 1)[-1]
+            if regex.match(basename):
+                return True
+        return False
+
+    def glob_files(
+        self,
+        pattern: str,
+        path: str | None = None,
+        max_results: int = 200,
+    ) -> dict[str, Any]:
+        if not isinstance(pattern, str) or not pattern.strip():
+            raise AgentToolError("pattern must be a non-blank glob string.")
+        clean_pattern = pattern.strip()
+        cap = max(1, min(int(max_results or 200), 1000))
+        base_root = self.workspace.resolve(path) if (isinstance(path, str) and path.strip()) else self.workspace.root
+        if not base_root.exists() or not base_root.is_dir():
+            raise AgentToolError(f"Directory not found: '{path}'.")
+        ignore_policy = getattr(self.workspace, "_ignore_policy", lambda: None)()
+        matched: list[tuple[int, str]] = []
+        for cur_root, dirs, files in os.walk(base_root):
+            cur_path = Path(cur_root)
+            kept_dirs: list[str] = []
+            for d in dirs:
+                if d in _GLOB_IGNORED_DIRS or d.startswith(".git"):
+                    continue
+                d_full = cur_path / d
+                try:
+                    d_rel_ws = d_full.relative_to(self.workspace.root).as_posix()
+                except ValueError:
+                    continue
+                if ignore_policy is not None and ignore_policy.ignores(d_rel_ws, is_dir=True):
+                    continue
+                kept_dirs.append(d)
+            dirs[:] = kept_dirs
+            for fname in files:
+                full_file = cur_path / fname
+                try:
+                    rel_ws = full_file.relative_to(self.workspace.root).as_posix()
+                    rel_base = full_file.relative_to(base_root).as_posix()
+                except ValueError:
+                    continue
+                if any(part in _GLOB_IGNORED_DIRS for part in Path(rel_ws).parts):
+                    continue
+                if ignore_policy is not None and ignore_policy.ignores(rel_ws, is_dir=False):
+                    continue
+                if self._glob_matches_path(rel_base, clean_pattern, allow_basename=False):
+                    try:
+                        mtime_ns = full_file.stat().st_mtime_ns
+                    except OSError:
+                        mtime_ns = 0
+                    matched.append((mtime_ns, rel_ws))
+        matched.sort(key=lambda item: (-item[0], item[1]))
+        truncated = len(matched) > cap
+        matches = [rel for _, rel in matched[:cap]]
+        body = "\n".join(matches) if matches else "[no match]"
+        payload: dict[str, Any] = {
+            "ok": True,
+            "pattern": clean_pattern[:200],
+            "matches": matches[:25],
+            "count": len(matches),
+            "truncated": truncated,
+            "label": clean_pattern[:80],
+        }
+        return {
+            "ok": True,
+            "pattern": clean_pattern,
+            "matches": matches,
+            "count": len(matches),
+            "truncated": truncated,
+            "summary": f"Buscou arquivos '{clean_pattern[:60]}': {len(matches)} {'resultado' if len(matches) == 1 else 'resultados'}",
+            "content": body,
+            "payload": payload,
         }
 
     def list_files(self, path: str = "", depth: int = 1, pattern: str = "") -> dict[str, Any]:
@@ -2055,16 +2825,260 @@ class AgentToolset:
             "payload": {"path": path or "/", "count": len(entries), "depth": int(depth), "label": path or "/"},
         }
 
-    def search_files(self, pattern: str, glob: str = "**/*", max_results: int = 50, ignore_case: bool = True) -> dict[str, Any]:
-        matches = self.workspace.search(pattern, glob=glob, max_results=int(max_results), ignore_case=bool(ignore_case))
-        if not matches:
-            body = "[no match]"
+    def search_files(
+        self,
+        pattern: str | None = None,
+        glob: str = "**/*",
+        max_results: int = 50,
+        ignore_case: bool = True,
+        *,
+        query: str | None = None,
+        path: str | None = None,
+        file_pattern: str | None = None,
+        is_regex: bool = True,
+        case_sensitive: bool | None = None,
+        output_mode: str = "content",
+        before_context: int = 0,
+        after_context: int = 0,
+        context_lines: int = 0,
+        multiline: bool = False,
+        head_limit: int | None = None,
+        type: str | None = None,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        raw_pattern = pattern if (isinstance(pattern, str) and pattern.strip()) else (query if isinstance(query, str) else "")
+        if not isinstance(raw_pattern, str) or not raw_pattern.strip() or len(raw_pattern) > 500:
+            raise AgentToolError("pattern must be a non-blank string of at most 500 characters")
+        mode = str(output_mode or "content").strip().lower()
+        if mode not in {"content", "files_with_matches", "count"}:
+            raise AgentToolError("output_mode must be 'content', 'files_with_matches', or 'count'.")
+        eff_ignore_case = (not bool(case_sensitive)) if case_sensitive is not None else bool(ignore_case)
+        flags = re.MULTILINE
+        if eff_ignore_case:
+            flags |= re.IGNORECASE
+        if multiline:
+            flags |= re.DOTALL
+        expr = raw_pattern if is_regex else re.escape(raw_pattern)
+        try:
+            regex = re.compile(expr, flags)
+        except re.error as error:
+            raise AgentToolError(f"invalid regular expression: {error}") from error
+
+        eff_limit = int(head_limit) if (head_limit is not None and int(head_limit) > 0) else int(max_results or 50)
+        eff_limit = max(1, min(eff_limit, MAX_SEARCH_RESULTS))
+        eff_offset = max(0, int(offset or 0))
+        pre_ctx = max(0, int(context_lines if int(context_lines or 0) > 0 else (before_context or 0)))
+        post_ctx = max(0, int(context_lines if int(context_lines or 0) > 0 else (after_context or 0)))
+        eff_glob = file_pattern.strip() if (isinstance(file_pattern, str) and file_pattern.strip()) else (glob or "**/*")
+        clean_type = str(type or "").strip().lstrip(".").lower()
+
+        search_target = self.workspace.resolve(path) if (isinstance(path, str) and path.strip()) else self.workspace.root
+        if not search_target.exists():
+            raise AgentToolError(f"Path not found: '{path}'.")
+
+        candidate_files: list[Path] = []
+        if search_target.is_file():
+            candidate_files = [search_target]
         else:
-            body = "\n".join(f"{item['path']}:{item['line']}: {item['text']}" for item in matches)
+            ignore_policy = getattr(self.workspace, "_ignore_policy", lambda: None)()
+            for cur_root, dirs, files in os.walk(search_target):
+                cur_path = Path(cur_root)
+                kept_dirs: list[str] = []
+                for d in dirs:
+                    if d in _GLOB_IGNORED_DIRS or d.startswith(".git"):
+                        continue
+                    d_full = cur_path / d
+                    try:
+                        d_rel_ws = d_full.relative_to(self.workspace.root).as_posix()
+                    except ValueError:
+                        continue
+                    if ignore_policy is not None and ignore_policy.ignores(d_rel_ws, is_dir=True):
+                        continue
+                    kept_dirs.append(d)
+                dirs[:] = sorted(kept_dirs)
+                for fname in sorted(files):
+                    full_file = cur_path / fname
+                    try:
+                        rel_ws = full_file.relative_to(self.workspace.root).as_posix()
+                        rel_target = full_file.relative_to(search_target).as_posix()
+                    except ValueError:
+                        continue
+                    if any(part in _GLOB_IGNORED_DIRS for part in Path(rel_ws).parts):
+                        continue
+                    if ignore_policy is not None and ignore_policy.ignores(rel_ws, is_dir=False):
+                        continue
+                    if clean_type and full_file.suffix.lstrip(".").lower() != clean_type:
+                        continue
+                    if not (
+                        self._glob_matches_path(rel_ws, eff_glob, allow_basename=True)
+                        or self._glob_matches_path(rel_target, eff_glob, allow_basename=True)
+                    ):
+                        continue
+                    candidate_files.append(full_file)
+
+        files_with_matches: list[str] = []
+        counts_list: list[dict[str, Any]] = []
+        content_matches: list[dict[str, Any]] = []
+
+        for file_path in candidate_files:
+            try:
+                if file_path.stat().st_size > 2_000_000:
+                    continue
+                raw_bytes = file_path.read_bytes()
+            except OSError:
+                continue
+            if b"\x00" in raw_bytes[:4096]:
+                continue
+            text = raw_bytes.decode("utf-8", errors="replace")
+            rel_posix = file_path.relative_to(self.workspace.root).as_posix()
+
+            if multiline:
+                found = list(regex.finditer(text))
+                if not found:
+                    continue
+                files_with_matches.append(rel_posix)
+                counts_list.append({"path": rel_posix, "file": rel_posix, "count": len(found)})
+                if mode == "content":
+                    file_lines = text.splitlines()
+                    for m in found:
+                        start_line = text.count("\n", 0, m.start()) + 1
+                        end_line = text.count("\n", 0, m.end()) + 1
+                        b_ctx = [l[:300] for l in file_lines[max(0, start_line - 1 - pre_ctx) : start_line - 1]] if pre_ctx > 0 else []
+                        a_ctx = [l[:300] for l in file_lines[end_line : min(len(file_lines), end_line + post_ctx)]] if post_ctx > 0 else []
+                        content_matches.append({
+                            "path": rel_posix,
+                            "file": rel_posix,
+                            "line": start_line,
+                            "end_line": end_line,
+                            "text": m.group(0)[:300],
+                            "before_context": b_ctx,
+                            "after_context": a_ctx,
+                        })
+            else:
+                file_lines = text.splitlines()
+                file_hits = 0
+                for idx, line_text in enumerate(file_lines):
+                    if regex.search(line_text):
+                        file_hits += 1
+                        if mode == "content":
+                            b_ctx = [l[:300] for l in file_lines[max(0, idx - pre_ctx) : idx]] if pre_ctx > 0 else []
+                            a_ctx = [l[:300] for l in file_lines[idx + 1 : min(len(file_lines), idx + 1 + post_ctx)]] if post_ctx > 0 else []
+                            content_matches.append({
+                                "path": rel_posix,
+                                "file": rel_posix,
+                                "line": idx + 1,
+                                "text": line_text[:300],
+                                "before_context": b_ctx,
+                                "after_context": a_ctx,
+                            })
+                if file_hits > 0:
+                    files_with_matches.append(rel_posix)
+                    counts_list.append({"path": rel_posix, "file": rel_posix, "count": file_hits})
+
+        if mode == "files_with_matches":
+            sliced_files = files_with_matches[eff_offset : eff_offset + eff_limit]
+            truncated = len(files_with_matches) > eff_offset + eff_limit
+            body = "\n".join(sliced_files) if sliced_files else "[no match]"
+            payload = {
+                "ok": True,
+                "output_mode": mode,
+                "pattern": raw_pattern[:200],
+                "query": raw_pattern[:200],
+                "files": sliced_files[:20],
+                "matches": sliced_files[:20],
+                "count": len(sliced_files),
+                "truncated": truncated,
+                "label": raw_pattern[:80],
+            }
+            return {
+                "ok": True,
+                "output_mode": mode,
+                "pattern": raw_pattern,
+                "query": raw_pattern,
+                "files": sliced_files,
+                "matches": sliced_files,
+                "count": len(sliced_files),
+                "truncated": truncated,
+                "summary": f"Buscou '{raw_pattern[:40]}': {len(sliced_files)} {'arquivo' if len(sliced_files) == 1 else 'arquivos'}",
+                "content": body,
+                "payload": payload,
+            }
+
+        if mode == "count":
+            sliced_counts = counts_list[eff_offset : eff_offset + eff_limit]
+            truncated = len(counts_list) > eff_offset + eff_limit
+            total_occurrences = sum(int(item["count"]) for item in sliced_counts)
+            counts_map = {str(item["path"]): int(item["count"]) for item in sliced_counts}
+            body = "\n".join(f"{item['path']}:{item['count']}" for item in sliced_counts) if sliced_counts else "[no match]"
+            payload = {
+                "ok": True,
+                "output_mode": mode,
+                "pattern": raw_pattern[:200],
+                "query": raw_pattern[:200],
+                "counts": dict(list(counts_map.items())[:20]),
+                "matches": sliced_counts[:8],
+                "count": len(sliced_counts),
+                "total_matches": total_occurrences,
+                "truncated": truncated,
+                "label": raw_pattern[:80],
+            }
+            return {
+                "ok": True,
+                "output_mode": mode,
+                "pattern": raw_pattern,
+                "query": raw_pattern,
+                "counts": counts_map,
+                "matches": sliced_counts,
+                "count": len(sliced_counts),
+                "total_matches": total_occurrences,
+                "truncated": truncated,
+                "summary": f"Buscou '{raw_pattern[:40]}': {total_occurrences} {'ocorrência' if total_occurrences == 1 else 'ocorrências'} em {len(sliced_counts)} {'arquivo' if len(sliced_counts) == 1 else 'arquivos'}",
+                "content": body,
+                "payload": payload,
+            }
+
+        sliced_matches = content_matches[eff_offset : eff_offset + eff_limit]
+        truncated = len(content_matches) > eff_offset + eff_limit
+        if not sliced_matches:
+            body = "[no match]"
+        elif pre_ctx > 0 or post_ctx > 0:
+            blocks: list[str] = []
+            for item in sliced_matches:
+                block_lines: list[str] = []
+                b_lines = item.get("before_context") or []
+                a_lines = item.get("after_context") or []
+                for idx_b, b_text in enumerate(b_lines):
+                    b_line_no = item["line"] - len(b_lines) + idx_b
+                    block_lines.append(f"{item['path']}-{b_line_no}: {b_text}")
+                block_lines.append(f"{item['path']}:{item['line']}: {item['text']}")
+                for idx_a, a_text in enumerate(a_lines):
+                    a_line_no = item.get("end_line", item["line"]) + 1 + idx_a
+                    block_lines.append(f"{item['path']}+{a_line_no}: {a_text}")
+                blocks.append("\n".join(block_lines))
+            body = "\n--\n".join(blocks)
+        else:
+            body = "\n".join(f"{item['path']}:{item['line']}: {item['text']}" for item in sliced_matches)
+        payload = {
+            "ok": True,
+            "output_mode": mode,
+            "pattern": raw_pattern[:200],
+            "query": raw_pattern[:200],
+            "matches": sliced_matches[:4],
+            "count": len(sliced_matches),
+            "truncated": truncated,
+            "label": raw_pattern[:80],
+        }
         return {
-            "summary": f"Buscou '{pattern[:40]}': {len(matches)} {'ocorrência' if len(matches) == 1 else 'ocorrências'}",
+            "ok": True,
+            "output_mode": mode,
+            "pattern": raw_pattern,
+            "query": raw_pattern,
+            "matches": sliced_matches,
+            "count": len(sliced_matches),
+            "truncated": truncated,
+            "summary": f"Buscou '{raw_pattern[:40]}': {len(sliced_matches)} {'ocorrência' if len(sliced_matches) == 1 else 'ocorrências'}",
             "content": body,
-            "payload": {"pattern": pattern[:200], "count": len(matches), "label": pattern[:80]},
+            "payload": payload,
         }
 
     def search_code(self, query: str, limit: int = 8) -> dict[str, Any]:
@@ -2155,13 +3169,21 @@ class AgentToolset:
             current = candidate
         return current
 
-    def run_command(self, command: str, background: bool = False, timeout_seconds: int | None = None, cwd: str = "") -> dict[str, Any]:
+    def run_command(
+        self,
+        command: str,
+        background: bool = False,
+        timeout_seconds: int | None = None,
+        cwd: str = "",
+        description: str = "",
+    ) -> dict[str, Any]:
         if not isinstance(command, str) or not command.strip():
             raise AgentToolError("command must be a non-blank string")
         if len(command) > 4096:
             raise AgentToolError("command is too long")
         if _BLOCKED_COMMAND.search(command):
             raise AgentToolError("This command is blocked because it would affect the host system.")
+        clean_description = str(description or "").strip()[:240]
         timeout = DEFAULT_COMMAND_TIMEOUT_SECONDS if timeout_seconds is None else int(timeout_seconds)
         if not 1 <= timeout <= MAX_COMMAND_TIMEOUT_SECONDS:
             raise AgentToolError(f"timeout_seconds must be between 1 and {MAX_COMMAND_TIMEOUT_SECONDS}.")
@@ -2208,158 +3230,374 @@ class AgentToolset:
             log_handle = self.workspace.prepare_write_target(log_relative).open("wb")
             process_options["stdout"] = log_handle
             process_options["stderr"] = subprocess.STDOUT
-        try:
-            process = subprocess.Popen(command, **process_options)  # noqa: S602 - a local agent shell is the feature
-        finally:
-            if log_handle is not None:
-                log_handle.close()
-        if background:
-            manifest = self._load_process_manifest()
-            manifest[str(process.pid)] = {
-                "command": command[:400],
-                "log_path": log_relative,
-                "started_at": datetime.now(UTC).isoformat(),
-                "notified_exit": False,
-            }
-            self._save_process_manifest(manifest)
-            artifacts = self.workspace.end_change_tracking(change_baseline)
-            self._queue_reindex(artifacts)
-            return {
-                "summary": f"Iniciou em segundo plano: {command[:80]}",
-                "content": (
-                    f"Started background process {process.pid}. Its output is being written to {log_relative}; "
-                    f"use read_process_output(pid={process.pid}) to read it, read_process_output() with no pid to "
-                    "see every tracked process, or stop_process(pid=...) to end it."
-                ),
-                "payload": {
-                    "command": command[:400], "label": command[:120], "background": True,
-                    "pid": process.pid, "log_path": log_relative, "artifacts": artifacts,
-                },
-            }
-        if getattr(process, "stdout", None) is not None and getattr(process, "stderr", None) is not None and hasattr(process, "poll"):
-            stdout_chunks: list[bytes] = []
-            stderr_chunks: list[bytes] = []
-            live_parts: list[str] = []
-            stream_lock = threading.Lock()
+        stashed_orin_dir: Path | None = None
+        orin_dir = self.workspace.root / ".orin"
+        if not background and orin_dir.is_dir():
+            try:
+                root_entries = [entry.name for entry in self.workspace.root.iterdir()]
+                if all(name in {".orin", ".git"} for name in root_entries):
+                    stash_parent = Path(tempfile.mkdtemp(prefix="orin-stash-"))
+                    stashed_orin_dir = stash_parent / ".orin"
+                    shutil.move(str(orin_dir), str(stashed_orin_dir))
+            except Exception:
+                stashed_orin_dir = None
 
-            def _reader(stream: Any, bucket: list[bytes]) -> None:
-                try:
-                    for chunk in iter(stream.readline, b""):
-                        if not chunk:
-                            break
-                        bucket.append(chunk)
-                        decoded = chunk.decode("utf-8", "replace")
-                        with stream_lock:
-                            live_parts.append(decoded)
-                except Exception:
-                    pass
-                finally:
+        def _restore_stashed_orin() -> None:
+            if stashed_orin_dir is None or not stashed_orin_dir.exists():
+                return
+            try:
+                if not orin_dir.exists():
+                    shutil.move(str(stashed_orin_dir), str(orin_dir))
+                else:
+                    for child in stashed_orin_dir.iterdir():
+                        dest = orin_dir / child.name
+                        if not dest.exists():
+                            shutil.move(str(child), str(dest))
+                shutil.rmtree(str(stashed_orin_dir.parent), ignore_errors=True)
+            except Exception:
+                pass
+
+        try:
+            try:
+                process = subprocess.Popen(command, **process_options)  # noqa: S602 - a local agent shell is the feature
+            finally:
+                if log_handle is not None:
+                    log_handle.close()
+            if background:
+                shell_id = f"bash_{process.pid}"
+                manifest = self._load_process_manifest()
+                manifest[str(process.pid)] = {
+                    "command": command[:400],
+                    "description": clean_description,
+                    "log_path": log_relative,
+                    "started_at": datetime.now(UTC).isoformat(),
+                    "notified_exit": False,
+                }
+                self._save_process_manifest(manifest)
+                self._background_shells[shell_id] = {
+                    "shell_id": shell_id,
+                    "pid": process.pid,
+                    "command": command[:400],
+                    "description": clean_description,
+                    "process": process,
+                    "log_path": log_relative,
+                    "status": "running",
+                }
+                artifacts = self.workspace.end_change_tracking(change_baseline)
+                self._queue_reindex(artifacts)
+                return {
+                    "ok": True,
+                    "description": clean_description,
+                    "background": True,
+                    "auto_backgrounded": False,
+                    "shell_id": shell_id,
+                    "pid": process.pid,
+                    "log_path": log_relative,
+                    "summary": f"Iniciou em segundo plano: {(clean_description or command)[:80]}",
+                    "content": (
+                        f"Started background process {process.pid}. Its output is being written to {log_relative}; "
+                        f"use read_process_output(pid={process.pid}) to read it, read_process_output() with no pid to "
+                        "see every tracked process, or stop_process(pid=...) to end it."
+                    ),
+                    "payload": {
+                        "ok": True,
+                        "command": command[:400],
+                        "description": clean_description,
+                        "label": (clean_description or command)[:120],
+                        "background": True,
+                        "auto_backgrounded": False,
+                        "shell_id": shell_id,
+                        "pid": process.pid,
+                        "log_path": log_relative,
+                        "artifacts": artifacts,
+                    },
+                }
+            if getattr(process, "stdout", None) is not None and getattr(process, "stderr", None) is not None and hasattr(process, "poll"):
+                stdout_chunks: list[bytes] = []
+                stderr_chunks: list[bytes] = []
+                live_parts: list[str] = []
+                stream_lock = threading.Lock()
+                bg_log_file_ref: list[Any] = [None]
+
+                def _reader(stream: Any, bucket: list[bytes]) -> None:
                     try:
-                        stream.close()
+                        for chunk in iter(stream.readline, b""):
+                            if not chunk:
+                                break
+                            decoded = chunk.decode("utf-8", "replace")
+                            with stream_lock:
+                                bucket.append(chunk)
+                                live_parts.append(decoded)
+                                log_f = bg_log_file_ref[0]
+                                if log_f is not None:
+                                    try:
+                                        log_f.write(chunk)
+                                        log_f.flush()
+                                    except Exception:
+                                        pass
                     except Exception:
                         pass
-
-            t_out = threading.Thread(target=_reader, args=(process.stdout, stdout_chunks), daemon=True)
-            t_err = threading.Thread(target=_reader, args=(process.stderr, stderr_chunks), daemon=True)
-            t_out.start()
-            t_err.start()
-            started_at = time.monotonic()
-            last_emit_at = 0.0
-            last_emitted_count = 0
-
-            while process.poll() is None or t_out.is_alive() or t_err.is_alive():
-                now = time.monotonic()
-                elapsed = now - started_at
-                if elapsed >= timeout:
-                    _terminate_process_tree(process)
-                    t_out.join(timeout=0.5)
-                    t_err.join(timeout=0.5)
-                    if hasattr(process, "communicate"):
+                    finally:
                         try:
-                            process.communicate(timeout=0.5)
+                            stream.close()
                         except Exception:
                             pass
-                    raise AgentToolError(f"Command timed out after {timeout}s.")
+
+                t_out = threading.Thread(target=_reader, args=(process.stdout, stdout_chunks), daemon=True)
+                t_err = threading.Thread(target=_reader, args=(process.stderr, stderr_chunks), daemon=True)
+                t_out.start()
+                t_err.start()
+                started_at = time.monotonic()
+                last_emit_at = 0.0
+                last_emitted_count = 0
+                is_dev_server_cmd = bool(_DEV_SERVER_CMD_RE.search(command))
+                ready_match_at: float | None = None
+                detected_url: str | None = None
+
+                while process.poll() is None or t_out.is_alive() or t_err.is_alive():
+                    now = time.monotonic()
+                    elapsed = now - started_at
+                    if elapsed >= timeout:
+                        _terminate_process_tree(process)
+                        t_out.join(timeout=0.5)
+                        t_err.join(timeout=0.5)
+                        if hasattr(process, "communicate"):
+                            try:
+                                process.communicate(timeout=0.5)
+                            except Exception:
+                                pass
+                        raise AgentToolError(f"Command timed out after {timeout}s.")
+                    with stream_lock:
+                        current_count = len(live_parts)
+                        combined_live = "".join(live_parts) if current_count > 0 else ""
+                        tail_snapshot = combined_live[-2000:].strip() if current_count > last_emitted_count else ""
+                    if ready_match_at is None and combined_live and _SERVER_READY_RE.search(combined_live):
+                        ready_match_at = now
+                        url_m = _URL_EXTRACT_RE.search(combined_live)
+                        detected_url = url_m.group(0) if url_m else None
+
+                    should_auto_bg = process.poll() is None and (
+                        (ready_match_at is not None and (now - ready_match_at) >= 0.35)
+                        or (is_dev_server_cmd and elapsed >= 2.0)
+                    )
+                    if should_auto_bg:
+                        _restore_stashed_orin()
+                        auto_log_rel = f"{_PROCESS_LOG_DIR}/{uuid4().hex[:12]}.log"
+                        try:
+                            auto_log_target = self.workspace.prepare_write_target(auto_log_rel)
+                            auto_log_f = auto_log_target.open("ab")
+                        except Exception:
+                            auto_log_f = None
+                        with stream_lock:
+                            stdout_now = b"".join(stdout_chunks).decode("utf-8", "replace").strip()
+                            stderr_now = b"".join(stderr_chunks).decode("utf-8", "replace").strip()
+                            if auto_log_f is not None:
+                                try:
+                                    for c in stdout_chunks:
+                                        auto_log_f.write(c)
+                                    for c in stderr_chunks:
+                                        auto_log_f.write(c)
+                                    auto_log_f.flush()
+                                except Exception:
+                                    pass
+                                bg_log_file_ref[0] = auto_log_f
+                        if detected_url is None and combined_live:
+                            url_m = _URL_EXTRACT_RE.search(combined_live)
+                            detected_url = url_m.group(0) if url_m else None
+                        shell_id = f"bash_{process.pid}"
+                        manifest = self._load_process_manifest()
+                        manifest[str(process.pid)] = {
+                            "command": command[:400],
+                            "description": clean_description,
+                            "log_path": auto_log_rel,
+                            "started_at": datetime.now(UTC).isoformat(),
+                            "notified_exit": False,
+                            "auto_backgrounded": True,
+                            "detected_url": detected_url,
+                        }
+                        self._save_process_manifest(manifest)
+                        self._background_shells[shell_id] = {
+                            "shell_id": shell_id,
+                            "pid": process.pid,
+                            "command": command[:400],
+                            "description": clean_description,
+                            "process": process,
+                            "log_path": auto_log_rel,
+                            "status": "running",
+                            "auto_backgrounded": True,
+                            "detected_url": detected_url,
+                        }
+                        artifacts = self.workspace.end_change_tracking(change_baseline)
+                        self._queue_reindex(artifacts)
+                        msg = "Dev server detected and automatically moved to background."
+                        content_parts = [f"{msg} (pid={process.pid}, shell_id={shell_id}, log={auto_log_rel})"]
+                        if detected_url:
+                            content_parts.append(f"Detected URL: {detected_url}")
+                        if stdout_now:
+                            content_parts.append(stdout_now)
+                        if stderr_now:
+                            content_parts.append(f"[stderr]\n{stderr_now}")
+                        auto_tail = "\n".join(p for p in (stdout_now, stderr_now) if p)[-2000:]
+                        payload = {
+                            "ok": True,
+                            "command": command[:400],
+                            "description": clean_description,
+                            "label": (clean_description or command)[:120],
+                            "background": True,
+                            "auto_backgrounded": True,
+                            "backgrounded_by_readiness": bool(ready_match_at is not None),
+                            "shell_id": shell_id,
+                            "pid": process.pid,
+                            "process_id": process.pid,
+                            "status": "running",
+                            "detected_url": detected_url,
+                            "log_path": auto_log_rel,
+                            "exit_code": None,
+                            "failed": False,
+                            "stdout": stdout_now[:400],
+                            "stderr": stderr_now[:400],
+                            "output_tail": auto_tail,
+                            "message": msg,
+                            "artifacts": artifacts,
+                        }
+                        return {
+                            "ok": True,
+                            "command": command,
+                            "description": clean_description,
+                            "background": True,
+                            "auto_backgrounded": True,
+                            "backgrounded_by_readiness": bool(ready_match_at is not None),
+                            "shell_id": shell_id,
+                            "pid": process.pid,
+                            "process_id": process.pid,
+                            "status": "running",
+                            "detected_url": detected_url,
+                            "log_path": auto_log_rel,
+                            "exit_code": None,
+                            "stdout": stdout_now,
+                            "stderr": stderr_now,
+                            "output_tail": auto_tail,
+                            "message": msg,
+                            "summary": f"Auto-backgrounded dev server: {(clean_description or command)[:60]}"[:240],
+                            "content": "\n".join(content_parts),
+                            "payload": payload,
+                        }
+
+                    if callable(self._on_tool_progress):
+                        if current_count > last_emitted_count and tail_snapshot and (last_emitted_count == 0 or now - last_emit_at >= 0.25):
+                            last_emitted_count = current_count
+                            last_emit_at = now
+                            progress_payload = {
+                                "tool_name": "run_command",
+                                "tool_kind": "terminal",
+                                "invocation_id": getattr(self, "_active_invocation_id", None) or "",
+                                "command": command[:240],
+                                "description": clean_description,
+                                "output_tail": tail_snapshot,
+                                "elapsed_ms": int(elapsed * 1000),
+                            }
+                            try:
+                                try:
+                                    self._on_tool_progress("run_command", f"Executando: {(clean_description or command)[:60]}", progress_payload)
+                                except TypeError:
+                                    self._on_tool_progress("run_command", progress_payload)  # type: ignore[call-arg]
+                            except Exception:
+                                pass
+                    time.sleep(0.02)
+
+                t_out.join(timeout=0.5)
+                t_err.join(timeout=0.5)
+                if hasattr(process, "wait"):
+                    try:
+                        process.wait(timeout=0.5)
+                    except Exception:
+                        pass
                 if callable(self._on_tool_progress):
                     with stream_lock:
                         current_count = len(live_parts)
-                        tail_snapshot = "".join(live_parts)[-2000:].strip() if current_count > last_emitted_count else ""
-                    if current_count > last_emitted_count and tail_snapshot and (last_emitted_count == 0 or now - last_emit_at >= 0.25):
-                        last_emitted_count = current_count
-                        last_emit_at = now
+                        tail_snapshot = "".join(live_parts)[-2000:].strip()
+                    if current_count > last_emitted_count and tail_snapshot:
+                        elapsed = time.monotonic() - started_at
                         progress_payload = {
                             "tool_name": "run_command",
                             "tool_kind": "terminal",
                             "invocation_id": getattr(self, "_active_invocation_id", None) or "",
                             "command": command[:240],
+                            "description": clean_description,
                             "output_tail": tail_snapshot,
                             "elapsed_ms": int(elapsed * 1000),
                         }
                         try:
                             try:
-                                self._on_tool_progress("run_command", f"Executando: {command[:60]}", progress_payload)
+                                self._on_tool_progress("run_command", f"Executando: {(clean_description or command)[:60]}", progress_payload)
                             except TypeError:
                                 self._on_tool_progress("run_command", progress_payload)  # type: ignore[call-arg]
                         except Exception:
                             pass
-                time.sleep(0.02)
-
-            t_out.join(timeout=0.5)
-            t_err.join(timeout=0.5)
-            if hasattr(process, "wait"):
+                stdout_bytes = b"".join(stdout_chunks)
+                stderr_bytes = b"".join(stderr_chunks)
+            else:
                 try:
-                    process.wait(timeout=0.5)
-                except Exception:
-                    pass
-            if callable(self._on_tool_progress):
-                with stream_lock:
-                    current_count = len(live_parts)
-                    tail_snapshot = "".join(live_parts)[-2000:].strip()
-                if current_count > last_emitted_count and tail_snapshot:
-                    elapsed = time.monotonic() - started_at
-                    progress_payload = {
-                        "tool_name": "run_command",
-                        "tool_kind": "terminal",
-                        "invocation_id": getattr(self, "_active_invocation_id", None) or "",
-                        "command": command[:240],
-                        "output_tail": tail_snapshot,
-                        "elapsed_ms": int(elapsed * 1000),
-                    }
-                    try:
-                        try:
-                            self._on_tool_progress("run_command", f"Executando: {command[:60]}", progress_payload)
-                        except TypeError:
-                            self._on_tool_progress("run_command", progress_payload)  # type: ignore[call-arg]
-                    except Exception:
-                        pass
-            stdout_bytes = b"".join(stdout_chunks)
-            stderr_bytes = b"".join(stderr_chunks)
-        else:
-            try:
-                stdout_bytes, stderr_bytes = process.communicate(timeout=timeout)
-            except subprocess.TimeoutExpired as error:
-                _terminate_process_tree(process)
-                process.communicate()
-                raise AgentToolError(f"Command timed out after {timeout}s.") from error
+                    stdout_bytes, stderr_bytes = process.communicate(timeout=timeout)
+                except subprocess.TimeoutExpired as error:
+                    _terminate_process_tree(process)
+                    process.communicate()
+                    raise AgentToolError(f"Command timed out after {timeout}s.") from error
+        finally:
+            _restore_stashed_orin()
         stdout = stdout_bytes.decode("utf-8", "replace").strip()
         stderr = stderr_bytes.decode("utf-8", "replace").strip()
         body = "\n".join(part for part in (stdout, f"[stderr]\n{stderr}" if stderr else "") if part) or "[no output]"
         body, output_truncated = _bounded_output(body, MAX_COMMAND_OUTPUT_CHARS)
+        fg_tail = "\n".join(p for p in (stdout, stderr) if p)[-2000:]
         succeeded = process.returncode == 0
         if succeeded:
             next_cwd = self._resolve_cwd_after_command(command, working_directory, precheck=False)
             if next_cwd.is_dir():
                 self._current_cwd = next_cwd
         artifacts = self.workspace.end_change_tracking(change_baseline)
+        for artifact in artifacts:
+            artifact_path = str(artifact.get("path") or "") if isinstance(artifact, Mapping) else ""
+            if artifact_path and (change_baseline is None or artifact_path not in change_baseline or artifact_path not in self._read_file_state):
+                self._record_file_read(artifact_path, explicit_read=False)
         self._queue_reindex(artifacts)
+        rel_cwd = self._current_cwd.resolve().relative_to(self.workspace.root.resolve()).as_posix() or "."
+        cwd_prefix = f"[cwd: {rel_cwd}]\n" if rel_cwd != "." else ""
+        if re.search(r"\boperation\s+cancel+ed\b", body, re.IGNORECASE) and not artifacts:
+            raise AgentToolError(
+                f"{cwd_prefix}exit={process.returncode}\n{body}\n\n"
+                "[Command cancelled interactively ('Operation cancelled') because stdin is closed or the target "
+                "directory is not empty. Do not repeat the same command; pass non-interactive overwrite flags or "
+                "create the files directly with write_file.]",
+                error_code="COMMAND_CANCELLED_INTERACTIVE",
+            )
         return {
-            "summary": f"$ {command[:80]}",
-            "content": f"exit={process.returncode}\n{body}",
+            "ok": succeeded,
+            "command": command,
+            "description": clean_description,
+            "background": False,
+            "auto_backgrounded": False,
+            "exit_code": process.returncode,
+            "stdout": stdout,
+            "stderr": stderr,
+            "output_tail": fg_tail,
+            "summary": f"$ {(clean_description or command)[:80]}",
+            "content": f"{cwd_prefix}exit={process.returncode}\n{body}",
             "payload": {
-                "command": command[:400], "exit_code": process.returncode,
-                "label": command[:120], "failed": not succeeded,
-                "artifacts": artifacts, "output_truncated": output_truncated,
-                "cwd": self._current_cwd.resolve().relative_to(self.workspace.root.resolve()).as_posix() or ".",
+                "ok": succeeded,
+                "command": command[:400],
+                "description": clean_description,
+                "background": False,
+                "auto_backgrounded": False,
+                "exit_code": process.returncode,
+                "stdout": stdout[:400],
+                "stderr": stderr[:400],
+                "output_tail": fg_tail,
+                "label": (clean_description or command)[:120],
+                "failed": not succeeded,
+                "artifacts": artifacts,
+                "output_truncated": output_truncated,
+                "cwd": rel_cwd,
             },
         }
 
@@ -2434,8 +3672,17 @@ class AgentToolset:
         to navigate reliably.
         """
         manifest = self._load_process_manifest()
+        preview_manifest: dict[str, Any] = {}
+        try:
+            from agentos.code_mode.preview_server import PreviewServerManager
+
+            preview_manifest = PreviewServerManager(self.workspace.root, browser=self._browser)._load_manifest()
+        except Exception:
+            preview_manifest = {}
+
         if pid is None:
             rows: list[dict[str, Any]] = []
+            seen_pids: set[int] = set()
             for pid_text, info in manifest.items():
                 try:
                     row_pid = int(pid_text)
@@ -2443,12 +3690,30 @@ class AgentToolset:
                     continue
                 if not isinstance(info, Mapping):
                     continue
+                seen_pids.add(row_pid)
                 rows.append({
                     "pid": row_pid,
                     "command": str(info.get("command") or ""),
                     "running": _process_is_running(row_pid),
                     "log_path": str(info.get("log_path") or ""),
                     "started_at": str(info.get("started_at") or ""),
+                })
+            for srv_name, srv_info in preview_manifest.items():
+                if not isinstance(srv_info, Mapping):
+                    continue
+                try:
+                    srv_pid = int(srv_info.get("pid") or -1)
+                except (TypeError, ValueError):
+                    continue
+                if srv_pid <= 0 or srv_pid in seen_pids:
+                    continue
+                seen_pids.add(srv_pid)
+                rows.append({
+                    "pid": srv_pid,
+                    "command": str(srv_info.get("command") or f"preview:{srv_name}"),
+                    "running": _process_is_running(srv_pid),
+                    "log_path": str(srv_info.get("log_path") or f".orin/logs/preview-{srv_name}.log"),
+                    "started_at": str(srv_info.get("started_at") or ""),
                 })
             rows.sort(key=lambda item: item["pid"])
             if not rows:
@@ -2466,8 +3731,34 @@ class AgentToolset:
         pid = int(pid)
         info = manifest.get(str(pid))
         if not isinstance(info, Mapping):
+            for shell_entry in self._background_shells.values():
+                if isinstance(shell_entry, Mapping) and shell_entry.get("pid") == pid:
+                    info = shell_entry
+                    break
+        if not isinstance(info, Mapping):
+            for srv_name, srv_info in preview_manifest.items():
+                if isinstance(srv_info, Mapping):
+                    try:
+                        srv_pid = int(srv_info.get("pid") or -1)
+                    except (TypeError, ValueError):
+                        continue
+                    if srv_pid == pid:
+                        info = {
+                            "command": str(srv_info.get("command") or f"preview:{srv_name}"),
+                            "log_path": str(srv_info.get("log_path") or f".orin/logs/preview-{srv_name}.log"),
+                            "started_at": str(srv_info.get("started_at") or ""),
+                        }
+                        break
+        if not isinstance(info, Mapping):
             raise AgentToolError(f"No background process with pid {pid} was started in this workspace.")
         log_path = str(info.get("log_path") or "")
+        if log_path:
+            try:
+                p = Path(log_path)
+                if p.is_absolute():
+                    log_path = p.resolve().relative_to(self.workspace.root.resolve()).as_posix()
+            except Exception:
+                pass
         # Checked before reading the file, not after: a process that finishes
         # between the two would otherwise read as "exited" with whatever
         # partial (possibly empty) output had been flushed at the moment of
@@ -2493,22 +3784,53 @@ class AgentToolset:
         pid = int(pid)
         manifest = self._load_process_manifest()
         info = manifest.get(str(pid))
-        if not isinstance(info, Mapping):
+        found_in_shells = False
+        for shell_entry in self._background_shells.values():
+            if isinstance(shell_entry, dict) and shell_entry.get("pid") == pid:
+                found_in_shells = True
+                shell_entry["status"] = "stopped"
+        preview_stopped_name: str | None = None
+        try:
+            from agentos.code_mode.preview_server import PreviewServerManager
+
+            preview_mgr = PreviewServerManager(self.workspace.root, browser=self._browser)
+            preview_manifest = preview_mgr._load_manifest()
+            for srv_name, srv_info in list(preview_manifest.items()):
+                if isinstance(srv_info, Mapping):
+                    try:
+                        srv_pid = int(srv_info.get("pid") or -1)
+                    except (TypeError, ValueError):
+                        continue
+                    if srv_pid == pid:
+                        preview_mgr.stop_server(name=str(srv_name))
+                        preview_stopped_name = str(srv_name)
+                        break
+        except Exception:
+            pass
+        if not isinstance(info, Mapping) and not found_in_shells and preview_stopped_name is None:
             raise AgentToolError(f"No background process with pid {pid} was started in this workspace.")
         if _process_is_running(pid):
             _terminate_pid(pid)
         self._notified_exited_pids.add(pid)
-        updated = dict(info)
-        updated["notified_exit"] = True
-        manifest[str(pid)] = updated
-        try:
-            self._save_process_manifest(manifest)
-        except Exception:
-            pass
+        if isinstance(info, Mapping):
+            updated = dict(info)
+            updated["notified_exit"] = True
+            manifest[str(pid)] = updated
+            try:
+                self._save_process_manifest(manifest)
+            except Exception:
+                pass
+        payload: dict[str, Any] = {"pid": pid, "ok": True, "status": "stopped"}
+        if preview_stopped_name:
+            payload["preview_server"] = preview_stopped_name
         return {
+            "ok": True,
+            "pid": pid,
+            "status": "stopped",
+            **({"preview_server": preview_stopped_name} if preview_stopped_name else {}),
             "summary": f"Encerrou o processo {pid}",
             "content": f"pid={pid} stopped",
-            "payload": {"pid": pid},
+            "payload": payload,
         }
 
     def verify_project(self, steps: list[str] | None = None, scaffold: str | None = None) -> dict[str, Any]:
@@ -2716,7 +4038,7 @@ class AgentToolset:
                 self._last_browser_navigation_outcome = outcome
                 return outcome
             html = self._browser.render(target)
-        except RuntimeError as error:
+        except (RuntimeError, OSError) as error:
             raise AgentToolError(f"The page could not be rendered: {error}") from error
         parser = _TextExtractor()
         parser.feed(html)
@@ -2808,7 +4130,7 @@ class AgentToolset:
             self._last_browser_navigation_outcome = None
         try:
             result = callback(*arguments)
-        except RuntimeError as error:
+        except (RuntimeError, OSError) as error:
             raise AgentToolError(f"The browser could not complete the action: {error}") from error
         if not isinstance(result, Mapping):
             raise AgentToolError("The browser returned an invalid observation.")
@@ -2870,10 +4192,13 @@ class AgentToolset:
         return self._browser_call("submit", str(selector), confirmed, action="Confirmou envio de" if confirmed else "Pré-visualizou envio de")
 
     def verify_frontend(self, url: str, routes: list[str] | None = None) -> ToolOutcome:
+        self._frontend_verify_attempts += 1
         if self._browser is None:
+            self._frontend_verify_infra_failed = True
             raise AgentToolError("The browser is not available; declare the 'browser' toolkit in write_contract first.")
         navigate = getattr(self._browser, "navigate", None)
         if not callable(navigate):
+            self._frontend_verify_infra_failed = True
             raise AgentToolError("This browser does not support navigation.")
         base = _public_url(url, allow_loopback=True)
         origin = f"{urlparse(base).scheme}://{urlparse(base).netloc}/"
@@ -2892,8 +4217,23 @@ class AgentToolset:
         for target in targets:
             try:
                 result = navigate(target)
-            except RuntimeError as error:
+            except (RuntimeError, OSError) as error:
                 all_ok = False
+                err_lower = str(error).lower()
+                if isinstance(error, OSError) or any(
+                    token in err_lower
+                    for token in (
+                        "exited unexpectedly",
+                        "stopped unexpectedly",
+                        "took too long",
+                        "not installed",
+                        "failed to start",
+                        "pipe",
+                        "bibliotecas de sistema",
+                        "unavailable",
+                    )
+                ):
+                    self._frontend_verify_infra_failed = True
                 sections.append(f"== {target} ==\n[failed to load: {error}]")
                 visited.append({"url": target, "ok": False, "error": str(error)})
                 continue
@@ -3206,7 +4546,7 @@ class AgentToolset:
             raise AgentToolError("todos must be a list of task objects.")
         if len(todos) > 40:
             raise AgentToolError("todos cannot exceed 40 items.")
-        normalized: list[dict[str, str]] = []
+        normalized: list[dict[str, Any]] = []
         completed_count = 0
         in_progress_count = 0
         pending_count = 0
@@ -3214,17 +4554,18 @@ class AgentToolset:
         for index, raw_item in enumerate(todos):
             if not isinstance(raw_item, Mapping):
                 raise AgentToolError(f"todos[{index}] must be an object.")
-            item_id = str(raw_item.get("id") or f"{index + 1}").strip()[:64]
-            content = str(raw_item.get("content") or "").strip()[:300]
-            status = str(raw_item.get("status") or "").strip().lower()
-            active_form = str(raw_item.get("active_form") or "").strip()[:200]
+            raw_id = raw_item.get("id")
+            item_id = (str(raw_id).strip() if raw_id is not None and str(raw_id).strip() else f"todo_{index + 1}")[:64]
+            content = str(raw_item.get("content") or raw_item.get("subject") or "").strip()[:300]
+            status = str(raw_item.get("status") or "pending").strip().lower()
+            active_form = str(raw_item.get("active_form") or raw_item.get("activeForm") or "").strip()[:200]
             if not item_id or not content:
-                raise AgentToolError(f"todos[{index}] requires non-blank 'id' and 'content'.")
+                raise AgentToolError(f"todos[{index}] requires non-blank 'content'.")
             if status not in {"pending", "in_progress", "completed"}:
                 raise AgentToolError(
                     f"todos[{index}] status must be 'pending', 'in_progress', or 'completed' (got '{status}')."
                 )
-            entry: dict[str, str] = {"id": item_id, "content": content, "status": status}
+            entry: dict[str, Any] = {"id": item_id, "content": content, "status": status}
             if active_form:
                 entry["active_form"] = active_form
             normalized.append(entry)
@@ -3241,17 +4582,227 @@ class AgentToolset:
             lines.append(f"- {marker} {item_id}: {content}{suffix}")
         self._todos.clear()
         self._todos.extend(normalized)
+        if callable(self._on_todo_update):
+            self._on_todo_update(list(self._todos))
         summary = f"Lista de tarefas ({completed_count}/{len(normalized)} concluídas)"
         body = "Updated todo list:\n" + ("\n".join(lines) if lines else "[empty todo list]")
         return {
             "summary": summary,
             "content": body,
+            "todos": list(self._todos),
+            "total": len(normalized),
+            "completed": completed_count,
+            "in_progress": in_progress_count,
+            "pending": pending_count,
             "payload": {
                 "todos": list(self._todos),
                 "total": len(normalized),
                 "completed": completed_count,
                 "in_progress": in_progress_count,
                 "pending": pending_count,
+                "tool_kind": "planning",
+            },
+        }
+
+    def complete_remaining_todos(self, *, failed: bool = False, state: str | None = None) -> list[dict[str, Any]] | None:
+        """Mark any remaining pending or in_progress tasks as completed when a turn finishes successfully."""
+        if failed or (state is not None and str(state).lower() in {"failed", "cancelled", "blocked", "error"}):
+            return None
+        if not self._todos:
+            return None
+        if not any(str(item.get("status") or "") != "completed" for item in self._todos):
+            return None
+        for item in self._todos:
+            if str(item.get("status") or "") != "completed":
+                item["status"] = "completed"
+        if callable(self._on_todo_update):
+            self._on_todo_update(list(self._todos))
+        return [dict(item) for item in self._todos]
+
+    def _next_task_id(self) -> str:
+        existing_ids = {str(item.get("id", "")) for item in self._todos}
+        counter = len(self._todos) + 1
+        while f"todo_{counter}" in existing_ids or str(counter) in existing_ids:
+            counter += 1
+        return f"todo_{counter}"
+
+    def task_create(
+        self,
+        subject: str = "",
+        description: str = "",
+        content: str = "",
+        active_form: str = "",
+        status: str = "pending",
+        owner: str | None = None,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        task_subject = str(subject or content or "").strip()[:300]
+        if not task_subject:
+            raise AgentToolError("subject (or content) is required to create a task.")
+        clean_status = str(status or "pending").strip().lower()
+        if clean_status not in {"pending", "in_progress", "completed"}:
+            raise AgentToolError("status must be 'pending', 'in_progress', or 'completed'.")
+        task_id = self._next_task_id()
+        entry: dict[str, Any] = {
+            "id": task_id,
+            "subject": task_subject,
+            "content": task_subject,
+            "description": str(description or "").strip()[:1000],
+            "status": clean_status,
+        }
+        clean_active = str(active_form or "").strip()[:200]
+        if clean_active:
+            entry["active_form"] = clean_active
+        if owner is not None and str(owner).strip():
+            entry["owner"] = str(owner).strip()[:120]
+        if isinstance(metadata, Mapping) and metadata:
+            entry["metadata"] = {
+                str(k)[:80]: v for k, v in list(metadata.items())[:16] if v is not None
+            }
+        self._todos.append(entry)
+        if callable(self._on_todo_update):
+            self._on_todo_update(list(self._todos))
+        return {
+            "summary": f"Tarefa criada: {task_id} ({task_subject[:60]})",
+            "content": json.dumps(entry, ensure_ascii=False, indent=2),
+            "task": dict(entry),
+            "todos": list(self._todos),
+            "payload": {
+                "task": dict(entry),
+                "todos": list(self._todos),
+                "tool_kind": "planning",
+            },
+        }
+
+    def task_update(
+        self,
+        task_id: str,
+        status: str | None = None,
+        subject: str | None = None,
+        description: str | None = None,
+        active_form: str | None = None,
+        owner: str | None = None,
+        metadata: Mapping[str, Any] | None = None,
+        add_blocked_by: list[str] | None = None,
+        add_blocks: list[str] | None = None,
+    ) -> dict[str, Any]:
+        target_id = str(task_id or "").strip()
+        if not target_id:
+            raise AgentToolError("task_id is required.")
+        found: dict[str, Any] | None = None
+        for item in self._todos:
+            if str(item.get("id", "")) == target_id or (
+                target_id.isdigit() and str(item.get("id", "")) == f"todo_{target_id}"
+            ):
+                found = item
+                break
+        if found is None:
+            raise AgentToolError(f"Task '{target_id}' not found.")
+        if status is not None:
+            clean_status = str(status).strip().lower()
+            if clean_status == "deleted":
+                self._todos.remove(found)
+                if callable(self._on_todo_update):
+                    self._on_todo_update(list(self._todos))
+                deleted_entry = {**found, "status": "deleted"}
+                return {
+                    "summary": f"Tarefa removida: {found.get('id')}",
+                    "content": json.dumps(deleted_entry, ensure_ascii=False, indent=2),
+                    "task": deleted_entry,
+                    "todos": list(self._todos),
+                    "payload": {
+                        "task": deleted_entry,
+                        "todos": list(self._todos),
+                        "tool_kind": "planning",
+                    },
+                }
+            if clean_status not in {"pending", "in_progress", "completed"}:
+                raise AgentToolError("status must be 'pending', 'in_progress', 'completed', or 'deleted'.")
+            found["status"] = clean_status
+        if subject is not None and str(subject).strip():
+            clean_subject = str(subject).strip()[:300]
+            found["subject"] = clean_subject
+            found["content"] = clean_subject
+        if description is not None:
+            found["description"] = str(description).strip()[:1000]
+        if active_form is not None:
+            found["active_form"] = str(active_form).strip()[:200]
+        if owner is not None:
+            found["owner"] = str(owner).strip()[:120]
+        if isinstance(metadata, Mapping):
+            merged_meta = dict(found.get("metadata") or {})
+            for k, v in list(metadata.items())[:16]:
+                key_str = str(k)[:80]
+                if v is None:
+                    merged_meta.pop(key_str, None)
+                else:
+                    merged_meta[key_str] = v
+            found["metadata"] = merged_meta
+        if add_blocked_by:
+            existing_blocked = list(found.get("blocked_by") or [])
+            for dep in add_blocked_by:
+                dep_id = str(dep).strip()
+                if dep_id and dep_id not in existing_blocked:
+                    existing_blocked.append(dep_id)
+            found["blocked_by"] = existing_blocked
+        if add_blocks:
+            existing_blocks = list(found.get("blocks") or [])
+            for dep in add_blocks:
+                dep_id = str(dep).strip()
+                if dep_id and dep_id not in existing_blocks:
+                    existing_blocks.append(dep_id)
+            found["blocks"] = existing_blocks
+        if callable(self._on_todo_update):
+            self._on_todo_update(list(self._todos))
+        return {
+            "summary": f"Tarefa atualizada: {found.get('id')} -> {found.get('status')}",
+            "content": json.dumps(found, ensure_ascii=False, indent=2),
+            "task": dict(found),
+            "todos": list(self._todos),
+            "payload": {
+                "task": dict(found),
+                "todos": list(self._todos),
+                "tool_kind": "planning",
+            },
+        }
+
+    def task_get(self, task_id: str) -> dict[str, Any]:
+        target_id = str(task_id or "").strip()
+        if not target_id:
+            raise AgentToolError("task_id is required.")
+        for item in self._todos:
+            if str(item.get("id", "")) == target_id or (
+                target_id.isdigit() and str(item.get("id", "")) == f"todo_{target_id}"
+            ):
+                return {
+                    "summary": f"Tarefa {item.get('id')}: {item.get('status')}",
+                    "content": json.dumps(item, ensure_ascii=False, indent=2),
+                    "task": dict(item),
+                    "payload": {
+                        "task": dict(item),
+                        "tool_kind": "planning",
+                    },
+                }
+        raise AgentToolError(f"Task '{target_id}' not found.")
+
+    def task_list(self, status: str | None = None) -> dict[str, Any]:
+        clean_status = str(status).strip().lower() if status is not None and str(status).strip() else None
+        tasks = [
+            dict(item)
+            for item in self._todos
+            if clean_status is None or str(item.get("status", "")).lower() == clean_status
+        ]
+        return {
+            "summary": f"{len(tasks)} tarefa(s)",
+            "content": json.dumps(tasks, ensure_ascii=False, indent=2),
+            "tasks": tasks,
+            "count": len(tasks),
+            "total": len(tasks),
+            "payload": {
+                "tasks": [dict(item) for item in tasks[:6]],
+                "todos": tasks,
+                "count": len(tasks),
+                "total": len(tasks),
                 "tool_kind": "planning",
             },
         }

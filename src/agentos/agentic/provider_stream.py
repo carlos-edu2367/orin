@@ -351,8 +351,14 @@ def normalize_ndjson(lines: Iterable[str | bytes]) -> Iterator[NormalizedStreamI
             }))
             sequence += 1
             # Ollama reports "stop" even when the turn ends in a tool call, so
-            # the observed calls decide the reason rather than done_reason.
-            yield NormalizedStreamItem(StreamKind.FINISH, sequence, finish_reason=FinishReason.TOOL_CALLS if saw_tool_call else _finish(payload.get("done_reason")))
+            # the observed calls decide the reason rather than done_reason,
+            # unless generation was cut off by token length (done_reason="length").
+            done_finish = _finish(payload.get("done_reason"))
+            yield NormalizedStreamItem(
+                StreamKind.FINISH,
+                sequence,
+                finish_reason=FinishReason.LENGTH if done_finish is FinishReason.LENGTH else (FinishReason.TOOL_CALLS if saw_tool_call else done_finish),
+            )
     if not pending_flushed:
         yield from flush_tool_calls()
 
