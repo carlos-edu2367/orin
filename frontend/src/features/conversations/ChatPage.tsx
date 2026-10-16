@@ -3,11 +3,12 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, u
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { createBrowserApiClient } from '../../api/client'
 import {
-  cancelConversation, getConversation, listConversations, listOlderConversationActivities, rewindTurn, sendConversationMessage, streamConversationEvents, submitToolPermission, updateConversationPermissionMode,
+  cancelConversation, createConversation, getConversation, listConversations, listOlderConversationActivities, moveConversationToProject, rewindTurn, sendConversationMessage, streamConversationEvents, submitToolPermission, updateConversationPermissionMode,
   type Conversation, type ConversationMessage, type ConversationMode,
 } from '../../api/conversations'
 import { ApiError } from '../../api/errors'
 import { approveMcpServer } from '../../api/mcp'
+import { createProject, listProjects, type Project } from '../../api/projects'
 import { approvePlugin, listPluginCommands, type PluginCommand } from '../../api/plugins'
 import { listSkills, type SkillSummary } from '../../api/skills'
 import {
@@ -33,6 +34,7 @@ import {
   type CodePermissionDockDecision,
   type DockToolPermissionRequest,
 } from './CodePermissionDock'
+import type { CodeSessionProposalDecision } from './CodeSessionProposalCard'
 import { Composer } from './Composer'
 import { ContextIndicator } from './ContextIndicator'
 import { MarkdownMessage } from './MarkdownMessage'
@@ -711,6 +713,10 @@ export function ChatPage() {
           || event.type === 'tool.permission_required'
           || Boolean(event.toolPermission)
           || Boolean(event.planApproval)
+          || Boolean(event.mcpApproval)
+          || Boolean(event.pluginApproval)
+          || Boolean(event.questions)
+          || Boolean((event as { codeSessionProposal?: unknown }).codeSessionProposal)
           || event.tool === 'exit_plan_mode'
           || event.toolName === 'exit_plan_mode'
         )
@@ -960,6 +966,59 @@ export function ChatPage() {
     await sendChatMessage(response)
     await loadSnapshot(false)
   }, [loadSnapshot, openQuestionTurnIds, running, sendChatMessage])
+
+  const submitCodeSessionProposal = useCallback(async (event: ConversationActivityEvent, decision: CodeSessionProposalDecision) => {
+    if (!event.codeSessionProposal) return
+    setError(null)
+    const convProjectId = (conversation as { project_id?: string | null } | null)?.project_id ?? null
+    const targetProjectId = decision.project_id ?? convProjectId ?? projectId ?? null
+    try {
+      const receipt = await createConversation(client, {
+        message: decision.prompt,
+        provider: decision.provider,
+        model_id: decision.model_id,
+        project_id: targetProjectId,
+        workspace_path: decision.workspace_path,
+        workspace_acknowledged_risk: true,
+        mode: 'code',
+        permission_mode: decision.permission_mode,
+      })
+      try {
+        localStorage.setItem(
+          `orin.launched-code-session.${event.codeSessionProposal.proposal_id}`,
+          JSON.stringify({
+            conversation_id: receipt.conversation_id,
+            project_id: targetProjectId,
+            title: decision.title,
+          }),
+        )
+      } catch {
+        // Ignore storage write errors
+      }
+      const nextUrl = targetProjectId
+        ? `/projects/${encodeURIComponent(targetProjectId)}/chats/${encodeURIComponent(receipt.conversation_id)}`
+        : `/chats/${encodeURIComponent(receipt.conversation_id)}`
+      navigate(nextUrl)
+    } catch (caught) {
+      setError('Não foi possível iniciar a sessão no Orin Code. Tente novamente.')
+      throw caught
+    }
+  }, [client, conversation, navigate, projectId])
+
+  const declineCodeSessionProposal = useCallback(async (event: ConversationActivityEvent) => {
+    if (!event.codeSessionProposal || running) return
+    const response = 'Prefiro continuar por aqui no Chat sem abrir o Orin Code.'
+    setError(null)
+    setPendingUserMessage({ message_id: `pending-${Date.now()}`, role: 'user', content: response, status: 'completed', retryable: false, attachments: [], command: null })
+    try {
+      await sendChatMessage(response)
+      await loadSnapshot(false)
+    } catch (caught) {
+      setPendingUserMessage(null)
+      setError('Não foi possível registrar sua escolha. Tente novamente.')
+      throw caught
+    }
+  }, [loadSnapshot, running, sendChatMessage])
 
   const submitToolPermissionDecision = useCallback(async (event: ConversationActivityEvent, decision: ToolPermissionDecision) => {
     const request = event.toolPermission
@@ -1214,6 +1273,98 @@ export function ChatPage() {
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [oversizedInput, pendingToolPermissions.length, previewReference, running, stop, stopping])
 
+  const [projectMenuOpen, setProjectMenuOpen] = useState(false)
+  const [availableProjects, setAvailableProjects] = useState<Project[]>([])
+  const [newProjectName, setNewProjectName] = useState('')
+  const [newProjectDescription, setNewProjectDescription] = useState('')
+  const [projectBusy, setProjectBusy] = useState(false)
+
+  useEffect(() => {
+    setProjectMenuOpen(false)
+  }, [conversationId])
+
+  const toggleProjectMenu = useCallback(() => {
+    setProjectMenuOpen((open) => {
+      const next = !open
+      if (next) {
+        setNewProjectName(conversation?.title || 'Novo projeto')
+        setNewProjectDescription('')
+        void listProjects(client)
+          .then((res) => setAvailableProjects(res.items))
+          .catch(() => undefined)
+      }
+      return next
+    })
+  }, [client, conversation?.title])
+
+  const handleMoveToProject = useCallback(async (targetProjectId: string | null) => {
+    if (projectBusy) return
+    setProjectBusy(true)
+    setError(null)
+    try {
+      const updated = await moveConversationToProject(client, conversationId, targetProjectId)
+      setConversation((prev) =>
+        prev
+          ? {
+              ...prev,
+              project_id: updated.project_id,
+              project_name: updated.project_name,
+              workspace: updated.workspace ?? prev.workspace,
+            }
+          : prev,
+      )
+      setProjectMenuOpen(false)
+      window.dispatchEvent(new CustomEvent('orin:projects-updated'))
+      const nextUrl = targetProjectId
+        ? `/projects/${encodeURIComponent(targetProjectId)}/chats/${encodeURIComponent(conversationId)}`
+        : `/chats/${encodeURIComponent(conversationId)}`
+      navigate(nextUrl)
+    } catch {
+      setError('Não foi possível mover a sessão para o projeto.')
+    } finally {
+      setProjectBusy(false)
+    }
+  }, [client, conversationId, navigate, projectBusy])
+
+  const handleCreateProjectFromSession = useCallback(async (event: React.FormEvent) => {
+    event.preventDefault()
+    if (!newProjectName.trim() || projectBusy) return
+    setProjectBusy(true)
+    setError(null)
+    try {
+      const created = await createProject(client, {
+        name: newProjectName.trim(),
+        description: newProjectDescription.trim(),
+        workspace_path: conversation?.workspace?.kind === 'local' ? conversation.workspace.path : null,
+        workspace_acknowledged_risk: true,
+        source_conversation_id: conversationId,
+      })
+      setConversation((prev) =>
+        prev
+          ? {
+              ...prev,
+              project_id: created.project_id,
+              project_name: created.name,
+            }
+          : prev,
+      )
+      setProjectMenuOpen(false)
+      window.dispatchEvent(new CustomEvent('orin:projects-updated'))
+      await loadSnapshot(false).catch(() => undefined)
+      navigate(`/projects/${encodeURIComponent(created.project_id)}/chats/${encodeURIComponent(conversationId)}`)
+    } catch {
+      setError('Não foi possível criar o projeto a partir desta sessão.')
+    } finally {
+      setProjectBusy(false)
+    }
+  }, [client, conversation?.workspace, conversationId, loadSnapshot, navigate, newProjectDescription, newProjectName, projectBusy])
+
+  const activeConvProjectId = conversation?.project_id ?? projectId ?? null
+  const activeConvProjectName =
+    conversation?.project_name
+    ?? conversation?.workspace?.projectName
+    ?? (activeConvProjectId ? availableProjects.find((p) => p.project_id === activeConvProjectId)?.name ?? null : null)
+
   return (
     <main className="chat">
       <header className="chat__bar">
@@ -1225,6 +1376,100 @@ export function ChatPage() {
             </span>
           )}
           <h1>{conversation?.title ?? 'Conversa'}</h1>
+          <div className="chat__project-control" style={{ position: 'relative', display: 'inline-flex', alignItems: 'center', gap: '6px' }} data-testid="conversation-project-control">
+            {activeConvProjectId && activeConvProjectName ? (
+              <Link
+                to={`/projects/${encodeURIComponent(activeConvProjectId)}`}
+                className="chat__workspace-chip"
+                data-testid="conversation-project-badge"
+              >
+                {activeConvProjectName}
+              </Link>
+            ) : null}
+            <button
+              type="button"
+              className="ghost-button"
+              onClick={toggleProjectMenu}
+              aria-expanded={projectMenuOpen}
+              data-testid="conversation-project-trigger"
+              style={{ fontSize: '12px', padding: '2px 8px' }}
+            >
+              {activeConvProjectId ? 'Trocar projeto' : 'Enviar para projeto'}
+            </button>
+            {projectMenuOpen && (
+              <div
+                role="dialog"
+                aria-label="Organizar em projeto"
+                data-testid="conversation-project-menu"
+                style={{
+                  position: 'absolute',
+                  top: '100%',
+                  left: 0,
+                  marginTop: '6px',
+                  width: '280px',
+                  background: 'var(--orin-surface-2, var(--surface-raised))',
+                  border: '1px solid var(--orin-border-subtle, var(--border-subtle))',
+                  borderRadius: '10px',
+                  padding: '10px',
+                  zIndex: 40,
+                  boxShadow: '0 8px 24px rgba(0, 0, 0, 0.28)',
+                }}
+              >
+                <p className="eyebrow" style={{ margin: '0 0 6px' }}>MOVER PARA PROJETO</p>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', maxHeight: '140px', overflowY: 'auto' }}>
+                  {availableProjects.map((proj) => (
+                    <button
+                      key={proj.project_id}
+                      type="button"
+                      className="ghost-button"
+                      disabled={projectBusy || proj.project_id === activeConvProjectId}
+                      onClick={() => { void handleMoveToProject(proj.project_id) }}
+                      style={{ justifyContent: 'flex-start', textAlign: 'left' }}
+                    >
+                      {proj.name}
+                    </button>
+                  ))}
+                  {activeConvProjectId && (
+                    <button
+                      type="button"
+                      className="ghost-button"
+                      disabled={projectBusy}
+                      onClick={() => { void handleMoveToProject(null) }}
+                      data-testid="remove-from-project-button"
+                      style={{ justifyContent: 'flex-start', textAlign: 'left' }}
+                    >
+                      Remover do projeto (sessão avulsa)
+                    </button>
+                  )}
+                </div>
+                <hr style={{ margin: '8px 0', border: 0, borderTop: '1px solid var(--border-subtle)' }} />
+                <form onSubmit={(e) => { void handleCreateProjectFromSession(e) }} data-testid="create-project-from-session-form">
+                  <p className="eyebrow" style={{ margin: '0 0 6px' }}>CRIAR PROJETO DESTA SESSÃO</p>
+                  <input
+                    type="text"
+                    name="project-name"
+                    value={newProjectName}
+                    onChange={(e) => setNewProjectName(e.target.value)}
+                    placeholder="Nome do novo projeto"
+                    aria-label="Nome do novo projeto"
+                    style={{ width: '100%', marginBottom: '6px' }}
+                  />
+                  <input
+                    type="text"
+                    name="project-description"
+                    value={newProjectDescription}
+                    onChange={(e) => setNewProjectDescription(e.target.value)}
+                    placeholder="Descrição (opcional)"
+                    aria-label="Descrição do novo projeto"
+                    style={{ width: '100%', marginBottom: '8px' }}
+                  />
+                  <button type="submit" className="primary-button" disabled={projectBusy || !newProjectName.trim()} style={{ width: '100%' }}>
+                    Criar projeto e vincular
+                  </button>
+                </form>
+              </div>
+            )}
+          </div>
           {conversationMode === 'code' && (conversation?.workspace?.folderName || conversation?.workspace?.path) && (
             <span
               className="chat__workspace-chip"
@@ -1369,6 +1614,8 @@ export function ChatPage() {
                         onPluginApprove={submitPluginApproval}
                         onPluginDecline={declinePluginApproval}
                         onToolPermission={submitToolPermissionDecision}
+                        onCodeSessionAccept={submitCodeSessionProposal}
+                        onCodeSessionDecline={declineCodeSessionProposal}
                         onRewindTurn={handleRewindTurn}
                         onApprovePlanAcceptEdits={isTurnFinished ? undefined : handleApprovePlanAcceptEdits}
                         onApprovePlanAskPermissions={isTurnFinished ? undefined : handleApprovePlanAskPermissions}
@@ -1433,6 +1680,8 @@ export function ChatPage() {
                     onPluginApprove={submitPluginApproval}
                     onPluginDecline={declinePluginApproval}
                     onToolPermission={submitToolPermissionDecision}
+                    onCodeSessionAccept={submitCodeSessionProposal}
+                    onCodeSessionDecline={declineCodeSessionProposal}
                     onRewindTurn={handleRewindTurn}
                     onApprovePlanAcceptEdits={isUnclaimedTurnActive ? handleApprovePlanAcceptEdits : undefined}
                     onApprovePlanAskPermissions={isUnclaimedTurnActive ? handleApprovePlanAskPermissions : undefined}
@@ -1451,6 +1700,8 @@ export function ChatPage() {
                     onPluginApprove={submitPluginApproval}
                     onPluginDecline={declinePluginApproval}
                     onToolPermission={submitToolPermissionDecision}
+                    onCodeSessionAccept={submitCodeSessionProposal}
+                    onCodeSessionDecline={declineCodeSessionProposal}
                   />
                 )
             })()}

@@ -163,6 +163,7 @@ export type ConversationActivityEvent = {
   questions?: UserQuestion[]
   mcpApproval?: McpApprovalRequest
   pluginApproval?: PluginApprovalRequest
+  codeSessionProposal?: CodeSessionProposalRequest
   occurredAt?: string
   contextUsage?: ContextUsage
   codeStage?: string
@@ -256,6 +257,17 @@ export type PluginApprovalRequest = {
   commands: Array<{ command_id: string; slug: string; description?: string }>
   hooks: Array<{ hook_id: string; event: string; matcher: string; command: string; timeout_seconds: number }>
   contribution_count: number
+}
+
+export type CodeSessionProposalRequest = {
+  proposal_id: string
+  title: string
+  prompt: string
+  workspace_path: string | null
+  provider: string | null
+  model_id: string | null
+  permission_mode: 'accept_edits' | 'plan_mode' | 'ask_permissions'
+  project_id: string | null
 }
 
 /** One rendered row in the chat: a single event or a collapsed run of them. */

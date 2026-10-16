@@ -58,6 +58,7 @@ class ProjectSidebarItem:
     name: str
     description: str | None
     chats: tuple[ProjectSidebarChat, ...]
+    workspace_id: str = ""
 
 
 class PostgresProjectStore:
@@ -135,7 +136,16 @@ class PostgresProjectStore:
                         str(row.get("conversation_mode") or "chat"),
                     )
                 )
-        return tuple(ProjectSidebarItem(record.project_id, record.name, record.description, tuple(grouped.get(record.project_id, ()))) for record in records.values())
+        return tuple(
+            ProjectSidebarItem(
+                record.project_id,
+                record.name,
+                record.description,
+                tuple(grouped.get(record.project_id, ())),
+                record.workspace_id,
+            )
+            for record in records.values()
+        )
 
     def workspace_for_conversation(self, conversation_id: str, user_id: str) -> str | None:
         statement = select(projects.c.workspace_id).join(conversations, conversations.c.project_id == projects.c.project_id).where(

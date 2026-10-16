@@ -49,7 +49,11 @@ CODE_MODE_CORE_TOOLS = frozenset({
     "enter_plan_mode", "exit_plan_mode",
     "todo_write", "task_create", "task_update", "task_get", "task_list",
     "ask_user", "run_subagent", "fetch_url", "web_search", "verify_frontend", "browse_page",
-    "remember", "recall", "use_skill",
+    "remember", "recall",
+    "search_skills", "list_skills", "read_skill_resource", "use_skill", "create_skill", "edit_skill",
+    "list_mcp_catalog", "list_mcp_servers", "configure_mcp", "test_mcp_server",
+    "search_plugin", "inspect_plugin", "install_plugin", "list_plugins", "uninstall_plugin",
+    "list_projects", "create_project_from_session", "move_session_to_project", "read_project_conversation",
 })
 
 # Sentinel distinguishing "no pin resolved yet" from "resolved, and there is

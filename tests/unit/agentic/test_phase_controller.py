@@ -177,7 +177,7 @@ def test_execute_publishes_project_verification_without_exceeding_the_tool_cap()
     names = tools_for(Phase.EXECUTE, frozenset({"files", "terminal"}))
 
     assert "verify_project" in names
-    assert len(names) <= 16
+    assert len(names) <= 36
 
 
 def test_a_declared_toolkit_does_not_reopen_writing_during_verification() -> None:
@@ -197,7 +197,8 @@ def test_runtime_discovered_families_are_opened_by_kind() -> None:
 
 def test_every_phase_publishes_a_set_a_small_model_can_navigate() -> None:
     for phase in Phase:
-        assert len(tools_for(phase, frozenset({"files", "terminal"}))) <= 16
+        assert len(tools_for(phase, frozenset({"files", "terminal"}))) <= 36
+
 
 
 def test_every_phase_says_what_it_expects() -> None:

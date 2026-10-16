@@ -277,6 +277,7 @@ _PARAM_ALIASES: Mapping[str, Mapping[str, str]] = {
         "role": "description",
     },
     "ask_agent": {"prompt": "task", "agent": "name"},
+    "read_project_conversation": {"max_messages": "limit"},
 }
 
 
@@ -611,6 +612,14 @@ class AgentToolset:
         on_todo_update: Callable[[list[dict[str, Any]]], None] | None = None,
         background_shells: dict[str, dict[str, Any]] | None = None,
         read_only_mode: bool = False,
+        default_provider: str | None = None,
+        default_model_id: str | None = None,
+        default_workspace_path: str | None = None,
+        project_id: str | None = None,
+        project_store: object | None = None,
+        chat_store: object | None = None,
+        local_workspaces: object | None = None,
+        project_user_id: str | None = None,
     ) -> None:
         from agentos.code_mode.checkpoints import FileCheckpointStore
         from agentos.code_mode.models import CodePermissionMode, normalize_permission_mode
@@ -619,6 +628,15 @@ class AgentToolset:
         self.workspace = workspace
         self.turn_id = str(turn_id) if turn_id else None
         self.conversation_id = str(conversation_id) if conversation_id else None
+        self._conversation_id = self.conversation_id
+        self._default_provider = str(default_provider).strip() or None if default_provider is not None else None
+        self._default_model_id = str(default_model_id).strip() or None if default_model_id is not None else None
+        self._default_workspace_path = str(default_workspace_path).strip() or None if default_workspace_path is not None else None
+        self._project_id = str(project_id).strip() or None if project_id is not None else None
+        self._project_store = project_store
+        self._chat_store = chat_store
+        self._local_workspaces = local_workspaces
+        self._project_user_id = str(project_user_id).strip() or None if project_user_id is not None else None
         self.memory = memory
         self.model_sees_images = bool(model_sees_images)
         self._visual_reader = visual_reader
@@ -1367,6 +1385,113 @@ class AgentToolset:
                 ToolDefinition("list_plugins", "List this user's installed plugins and their states.", _schema({}), self.list_plugins, "plugin", read_only=True),
                 ToolDefinition("uninstall_plugin", "Remove an installed plugin after the user explicitly confirmed the removal.", _schema({"plugin_id": _TEXT, "confirmed": {"type": "boolean"}}, ("plugin_id",)), self.uninstall_plugin, "plugin", policy_tags=("mutates",)),
             ))
+        if not self._code_mode_active:
+            items.append(
+                ToolDefinition(
+                    "propose_code_session",
+                    "Suggest starting a dedicated Orin Code session for a multi-file coding task, refactoring, or test execution, or when the user asks to open/continue work in Orin Code. Presents an interactive card where the user can review and edit the folder, model/provider, permission mode, and prompt before launching.",
+                    _schema(
+                        {
+                            "title": {**_TEXT, "description": "Short title for the new Code session."},
+                            "prompt": {
+                                **_TEXT,
+                                "description": "Self-contained task specification for the Orin Code session's first message (objective, relevant context from this chat, target files, acceptance criteria).",
+                            },
+                            "workspace_path": {
+                                **_TEXT,
+                                "description": "Suggested local folder path. Defaults to the conversation/project's current local folder if any.",
+                            },
+                            "provider": {
+                                **_TEXT,
+                                "description": "Suggested provider name. Defaults to the current conversation's provider.",
+                            },
+                            "model_id": {
+                                **_TEXT,
+                                "description": "Suggested model ID. Defaults to the current conversation's model.",
+                            },
+                            "permission_mode": {
+                                "type": "string",
+                                "enum": ["accept_edits", "plan_mode", "ask_permissions"],
+                                "description": "Suggested permission mode (default 'accept_edits').",
+                            },
+                        },
+                        ("title", "prompt"),
+                    ),
+                    self.propose_code_session,
+                    "code_handoff",
+                    policy_tags=("user_input",),
+                )
+            )
+        if self._project_store is not None and self._project_user_id:
+            items.extend((
+                ToolDefinition(
+                    "list_projects",
+                    "List this user's active projects with their attached local folders and conversations.",
+                    _schema({}),
+                    self.list_projects,
+                    "project",
+                    read_only=True,
+                ),
+                ToolDefinition(
+                    "create_project_from_session",
+                    "Create a new project from the current session, attach the current workspace folder (or a specified workspace_path), and move this conversation into the new project.",
+                    _schema(
+                        {
+                            "name": {**_TEXT, "description": "Project name (1..120 characters)."},
+                            "description": {**_TEXT, "description": "Optional project description."},
+                            "workspace_path": {
+                                **_TEXT,
+                                "description": "Optional local directory path to attach to the project. Defaults to the current conversation's local folder if any.",
+                            },
+                        },
+                        ("name",),
+                    ),
+                    self.create_project_from_session,
+                    "project",
+                    policy_tags=("mutates",),
+                ),
+                ToolDefinition(
+                    "move_session_to_project",
+                    "Move the current conversation into an existing project, sharing its workspace and project memory across sessions.",
+                    _schema(
+                        {
+                            "project_id": {**_TEXT, "description": "Target project ID (from list_projects)."},
+                        },
+                        ("project_id",),
+                    ),
+                    self.move_session_to_project,
+                    "project",
+                    policy_tags=("mutates",),
+                ),
+            ))
+        if self._chat_store is not None and self._project_user_id:
+            items.append(
+                ToolDefinition(
+                    "read_project_conversation",
+                    "Read recent messages from another conversation belonging to this user or project so you can continue context across Chat and Code sessions.",
+                    _schema(
+                        {
+                            "conversation_id": {**_TEXT, "description": "ID of the sibling conversation to read."},
+                            "limit": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 50,
+                                "description": "Maximum number of recent messages to read (default 20).",
+                            },
+                            "max_messages": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 50,
+                                "description": "Alias for limit.",
+                            },
+                        },
+                        ("conversation_id",),
+                    ),
+                    self.read_project_conversation,
+                    "project",
+                    read_only=True,
+                )
+            )
         if self._mcp_provider is not None:
             # Remote tools come last so a server can never shadow a native tool
             # name, and the namespace prefix already makes collision impossible.
@@ -4581,6 +4706,233 @@ class AgentToolset:
         except Exception as error:
             raise AgentToolError(str(error)) from error
         return ToolOutcome("succeeded", f"Removeu o plugin {plugin_id}", json.dumps(result), {**result, "tool_kind": "plugin"})
+
+    def propose_code_session(
+        self,
+        title: str,
+        prompt: str,
+        workspace_path: str | None = None,
+        provider: str | None = None,
+        model_id: str | None = None,
+        permission_mode: str = "accept_edits",
+    ) -> ToolOutcome:
+        if not isinstance(title, str) or not (1 <= len(title.strip()) <= 200):
+            raise AgentToolError("title must be a non-blank string between 1 and 200 characters.")
+        if not isinstance(prompt, str) or not (1 <= len(prompt.strip()) <= 16000):
+            raise AgentToolError("prompt must be a non-blank string between 1 and 16000 characters.")
+        clean_mode = str(permission_mode or "accept_edits").strip()
+        if clean_mode not in {"accept_edits", "plan_mode", "ask_permissions"}:
+            raise AgentToolError(
+                "permission_mode must be 'accept_edits', 'plan_mode', or 'ask_permissions'. 'full_autonomy' cannot be proposed automatically."
+            )
+        effective_path = (
+            workspace_path.strip()
+            if isinstance(workspace_path, str) and workspace_path.strip()
+            else self._default_workspace_path
+        )
+        effective_provider = (
+            provider.strip()
+            if isinstance(provider, str) and provider.strip()
+            else self._default_provider
+        )
+        effective_model = (
+            model_id.strip()
+            if isinstance(model_id, str) and model_id.strip()
+            else self._default_model_id
+        )
+        proposal = {
+            "proposal_id": f"codeprop_{uuid4().hex[:12]}",
+            "title": title.strip(),
+            "prompt": prompt.strip(),
+            "workspace_path": effective_path,
+            "provider": effective_provider,
+            "model_id": effective_model,
+            "permission_mode": clean_mode,
+            "project_id": self._project_id,
+        }
+        return ToolOutcome(
+            "succeeded",
+            f"Sugestão para iniciar no Orin Code: {proposal['title']}",
+            "Presented the 'Start in Orin Code' card to the user. Stop here and wait for the user's decision.",
+            {
+                "code_session_proposal": proposal,
+                "wait_for_user": True,
+                "tool_kind": "code_handoff",
+            },
+        )
+
+    def list_projects(self) -> dict[str, Any]:
+        if self._project_store is None or not self._project_user_id:
+            raise AgentToolError("Project store is not available.")
+        items = self._project_store.sidebar(self._project_user_id)
+        serialized: list[dict[str, Any]] = []
+        for item in items:
+            ws_path = None
+            if self._local_workspaces is not None:
+                ws_id = getattr(item, "workspace_id", "") or f"workspace:{item.project_id}"
+                ws_path = self._local_workspaces.root_for(ws_id, self._project_user_id)
+            serialized.append(
+                {
+                    "project_id": item.project_id,
+                    "name": item.name,
+                    "description": item.description,
+                    "workspace_path": ws_path,
+                    "chats": [
+                        {
+                            "conversation_id": c.conversation_id,
+                            "title": c.title,
+                            "mode": getattr(c, "mode", "chat"),
+                        }
+                        for c in item.chats
+                    ],
+                }
+            )
+        return {
+            "summary": f"{len(serialized)} projeto(s) encontrado(s)",
+            "content": json.dumps(serialized, ensure_ascii=False),
+            "payload": {"projects": serialized, "tool_kind": "project", "project_action": "list"},
+        }
+
+    def create_project_from_session(
+        self,
+        name: str,
+        description: str = "",
+        workspace_path: str | None = None,
+    ) -> dict[str, Any]:
+        if self._project_store is None or not self._project_user_id:
+            raise AgentToolError("Project store is not available.")
+        if not isinstance(name, str):
+            raise AgentToolError("Project name must be a non-blank string.")
+        normalized_name = " ".join(name.split())
+        if not normalized_name or len(normalized_name) > 120:
+            raise AgentToolError("Project name must be a non-blank string between 1 and 120 characters.")
+        explicit_ws = (
+            workspace_path.strip()
+            if isinstance(workspace_path, str) and workspace_path.strip()
+            else None
+        )
+        effective_ws = explicit_ws or self._default_workspace_path
+        resolved_ws_path: str | None = None
+        if effective_ws:
+            from agentos.installation import orin_paths
+            from agentos.local_workspace import FolderRejected, inspect_folder
+
+            try:
+                info = inspect_folder(effective_ws, home=Path.home(), orin_data=orin_paths().data)
+            except FolderRejected as error:
+                raise AgentToolError(str(error)) from error
+            if not info.exists or not info.is_directory or not info.writable:
+                raise AgentToolError("workspace_path must be an existing writable directory.")
+            resolved_ws_path = info.path
+        try:
+            record = self._project_store.create(
+                user_id=self._project_user_id,
+                name=normalized_name,
+                description=str(description).strip() or None if description else None,
+            )
+        except Exception as error:
+            raise AgentToolError(str(error)) from error
+        if resolved_ws_path and self._local_workspaces is not None:
+            self._local_workspaces.set_root(record.workspace_id, self._project_user_id, resolved_ws_path)
+        moved = None
+        if self._chat_store is not None and self._conversation_id:
+            try:
+                moved = self._chat_store.set_project(
+                    self._conversation_id,
+                    self._project_user_id,
+                    record.project_id,
+                )
+            except Exception as error:
+                raise AgentToolError(str(error)) from error
+            if resolved_ws_path is None and self._local_workspaces is not None:
+                resolved_ws_path = self._local_workspaces.root_for(record.workspace_id, self._project_user_id)
+        self._project_id = record.project_id
+        payload = {
+            "project_id": record.project_id,
+            "name": record.name,
+            "description": record.description,
+            "workspace_path": resolved_ws_path,
+            "conversation_id": self._conversation_id,
+            "moved": moved,
+            "tool_kind": "project",
+            "project_action": "created",
+        }
+        return {
+            "summary": f"Criou o projeto {record.name}",
+            "content": json.dumps(payload, ensure_ascii=False),
+            "payload": payload,
+        }
+
+    def move_session_to_project(self, project_id: str) -> dict[str, Any]:
+        if self._project_store is None or not self._project_user_id:
+            raise AgentToolError("Project store is not available.")
+        if not self._conversation_id or self._chat_store is None:
+            raise AgentToolError("Cannot move session: no active conversation context.")
+        clean_pid = str(project_id or "").strip()
+        if not clean_pid:
+            raise AgentToolError("project_id is required.")
+        project = self._project_store.get(clean_pid, self._project_user_id)
+        if project is None:
+            raise AgentToolError(f"Project '{clean_pid}' not found.")
+        try:
+            result = self._chat_store.set_project(
+                self._conversation_id,
+                self._project_user_id,
+                project.project_id,
+            )
+        except Exception as error:
+            raise AgentToolError(str(error)) from error
+        self._project_id = project.project_id
+        ws_path = (
+            self._local_workspaces.root_for(project.workspace_id, self._project_user_id)
+            if self._local_workspaces is not None
+            else None
+        )
+        payload = {
+            **result,
+            "workspace_path": ws_path,
+            "tool_kind": "project",
+            "project_action": "moved",
+        }
+        return {
+            "summary": f"Moveu a sessão para o projeto {project.name}",
+            "content": json.dumps(payload, ensure_ascii=False),
+            "payload": payload,
+        }
+
+    def read_project_conversation(
+        self,
+        conversation_id: str,
+        limit: int = 20,
+        max_messages: int | None = None,
+    ) -> dict[str, Any]:
+        if self._chat_store is None or not self._project_user_id:
+            raise AgentToolError("Chat store is not available.")
+        clean_cid = str(conversation_id or "").strip()
+        if not clean_cid:
+            raise AgentToolError("conversation_id is required.")
+        try:
+            effective_limit = min(max(int(max_messages if max_messages is not None else limit), 1), 50)
+        except (TypeError, ValueError) as error:
+            raise AgentToolError("limit must be an integer between 1 and 50.") from error
+        try:
+            result = self._chat_store.read_project_conversation(
+                clean_cid,
+                self._project_user_id,
+                limit=effective_limit,
+            )
+        except Exception as error:
+            raise AgentToolError(f"Conversation '{clean_cid}' not found or not accessible.") from error
+        return {
+            "summary": f"Leu conversa {result.get('title', clean_cid)}",
+            "content": json.dumps(result, ensure_ascii=False),
+            "payload": {
+                "conversation_id": clean_cid,
+                "title": result.get("title"),
+                "tool_kind": "project",
+                "project_action": "read_conversation",
+            },
+        }
 
     def todo_write(self, todos: list[Mapping[str, Any]]) -> dict[str, Any]:
         if not isinstance(todos, list):

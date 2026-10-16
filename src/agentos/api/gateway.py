@@ -173,6 +173,10 @@ class UpdateConversationPermissionModeRequest(_RequestModel):
     permission_mode: str = Field(pattern="^(accept_edits|plan_mode|ask_permissions|full_autonomy)$")
 
 
+class UpdateConversationProjectRequest(_RequestModel):
+    project_id: str | None = Field(default=None, min_length=1, max_length=255)
+
+
 class InspectNewWorkspaceFolderRequest(_RequestModel):
     path: str | None = Field(default=None, max_length=4096)
     project_id: str | None = Field(default=None, min_length=1, max_length=255)
@@ -205,6 +209,9 @@ class AttachWorkspaceFolderRequest(_RequestModel):
 class CreateProjectRequest(_RequestModel):
     name: str = Field(min_length=1, max_length=120)
     description: str | None = Field(default=None, max_length=2000)
+    workspace_path: str | None = Field(default=None, max_length=4096)
+    workspace_acknowledged_risk: bool = False
+    source_conversation_id: str | None = Field(default=None, min_length=1, max_length=255)
 
 
 class UpdateProjectRequest(_RequestModel):
@@ -745,6 +752,32 @@ def create_app(services: ApiServices) -> FastAPI:
         result = setter(conversation_id, principal.user_id, payload.permission_mode)
         return JSONResponse(_jsonable(result))
 
+    @app.patch("/v1/conversations/{conversation_id}/project")
+    async def update_conversation_project(
+        conversation_id: str,
+        payload: UpdateConversationProjectRequest,
+        request: Request,
+    ) -> JSONResponse:
+        principal = principal_for(request, mutable=True)
+        services.security.authorize(
+            principal,
+            action="conversation.send",
+            resource_id=conversation_id,
+            purpose="conversation.project",
+        )
+        app_service = require_port(services.conversation_application)
+        setter = getattr(app_service, "set_project", None)
+        if not callable(setter):
+            raise ApplicationValidationError("project assignment not supported")
+        result = setter(
+            conversation_id,
+            principal.user_id,
+            payload.project_id,
+            managed_root=services.managed_root_for(principal.user_id),
+        )
+        conversation = conversation_record(conversation_id, principal)
+        return JSONResponse({**_jsonable(result), "workspace": workspace_state(conversation, principal)})
+
     @app.post("/v1/schedules", status_code=201)
     async def create_scheduled_chat(payload: CreateScheduledChatRequest, request: Request) -> JSONResponse:
         from agentos.scheduler.scheduled_chats import ScheduledChatInput
@@ -786,19 +819,47 @@ def create_app(services: ApiServices) -> FastAPI:
         principal = principal_for(request, mutable=True)
         services.security.authorize(principal, action="project.create", resource_id=None, purpose="project.create")
         store = require_port(services.projects)
-        return JSONResponse(_project_public(store.create(user_id=principal.user_id, name=payload.name, description=payload.description)), status_code=201)
+        inspection = None
+        if payload.workspace_path:
+            try:
+                inspection = inspect_for(principal, payload.workspace_path)
+            except FolderRejected as error:
+                raise ApplicationValidationError("invalid workspace folder") from error
+            if not inspection.is_directory:
+                raise ApplicationValidationError("workspace folder does not exist")
+            if not inspection.writable:
+                raise ApplicationValidationError("workspace folder is not writable")
+            if inspection.risk != "none" and not payload.workspace_acknowledged_risk:
+                return _error(409, "CONFLICT", "workspace_risk_acknowledgement_required", retryable=False)
+        if payload.source_conversation_id:
+            conversation_record(payload.source_conversation_id, principal)
+        project = store.create(user_id=principal.user_id, name=payload.name, description=payload.description)
+        if inspection is not None:
+            local_workspaces_port().set_root(project.workspace_id, principal.user_id, bind_path_for(principal, inspection))
+        if payload.source_conversation_id:
+            app_service = require_port(services.conversation_application)
+            setter = getattr(app_service, "set_project", None)
+            if not callable(setter):
+                raise ApplicationValidationError("project assignment not supported")
+            setter(
+                payload.source_conversation_id,
+                principal.user_id,
+                project.project_id,
+                managed_root=services.managed_root_for(principal.user_id),
+            )
+        return JSONResponse({**_project_public(project), "workspace": project_workspace_state(project, principal)}, status_code=201)
 
     @app.get("/v1/projects")
     async def list_projects(request: Request) -> JSONResponse:
         principal = principal_for(request)
         store = require_port(services.projects)
-        return JSONResponse({"items": [_project_public(item) for item in store.list_active(principal.user_id)]})
+        return JSONResponse({"items": [{**_project_public(item), "workspace": project_workspace_state(item, principal)} for item in store.list_active(principal.user_id)]})
 
     @app.get("/v1/projects/sidebar")
     async def project_sidebar(request: Request) -> JSONResponse:
         principal = principal_for(request)
         store = require_port(services.projects)
-        return JSONResponse({"items": [_project_sidebar_public(item) for item in store.sidebar(principal.user_id)]})
+        return JSONResponse({"items": [{**_project_sidebar_public(item), "workspace": project_workspace_state(item, principal)} for item in store.sidebar(principal.user_id)]})
 
     @app.get("/v1/projects/{project_id}")
     async def get_project(project_id: str, request: Request) -> JSONResponse:
@@ -806,7 +867,7 @@ def create_app(services: ApiServices) -> FastAPI:
         store = require_port(services.projects)
         project = store.get(project_id, principal.user_id)
         if project is None: raise ApplicationNotFoundError(project_id)
-        return JSONResponse(_project_public(project))
+        return JSONResponse({**_project_public(project), "workspace": project_workspace_state(project, principal)})
 
     @app.patch("/v1/projects/{project_id}")
     async def update_project(project_id: str, payload: UpdateProjectRequest, request: Request) -> JSONResponse:
@@ -814,7 +875,39 @@ def create_app(services: ApiServices) -> FastAPI:
         store = require_port(services.projects)
         project = store.update(project_id, principal.user_id, name=payload.name, description=payload.description)
         if project is None: raise ApplicationNotFoundError(project_id)
-        return JSONResponse(_project_public(project))
+        return JSONResponse({**_project_public(project), "workspace": project_workspace_state(project, principal)})
+
+    @app.put("/v1/projects/{project_id}/workspace")
+    async def attach_project_workspace(project_id: str, payload: AttachWorkspaceFolderRequest, request: Request) -> JSONResponse:
+        principal = principal_for(request, mutable=True)
+        services.security.authorize(principal, action="conversation.send", resource_id=project_id, purpose="project.workspace.attach")
+        store = require_port(services.projects)
+        project = store.get(project_id, principal.user_id)
+        if project is None:
+            raise ApplicationNotFoundError(project_id)
+        try:
+            inspection = inspect_for(principal, payload.path)
+        except FolderRejected as error:
+            raise ApplicationValidationError("invalid workspace folder") from error
+        if not inspection.is_directory:
+            raise ApplicationValidationError("workspace folder does not exist")
+        if not inspection.writable:
+            raise ApplicationValidationError("workspace folder is not writable")
+        if inspection.risk != "none" and not payload.acknowledged_risk:
+            return _error(409, "CONFLICT", "workspace_risk_acknowledgement_required", retryable=False)
+        local_workspaces_port().set_root(project.workspace_id, principal.user_id, bind_path_for(principal, inspection))
+        return JSONResponse(project_workspace_state(project, principal))
+
+    @app.delete("/v1/projects/{project_id}/workspace")
+    async def detach_project_workspace(project_id: str, request: Request) -> JSONResponse:
+        principal = principal_for(request, mutable=True)
+        services.security.authorize(principal, action="conversation.send", resource_id=project_id, purpose="project.workspace.detach")
+        store = require_port(services.projects)
+        project = store.get(project_id, principal.user_id)
+        if project is None:
+            raise ApplicationNotFoundError(project_id)
+        local_workspaces_port().clear_root(project.workspace_id, principal.user_id)
+        return JSONResponse(project_workspace_state(project, principal))
 
     @app.post("/v1/projects/{project_id}/archive")
     async def archive_project(project_id: str, request: Request) -> JSONResponse:
@@ -903,6 +996,9 @@ def create_app(services: ApiServices) -> FastAPI:
         project_id = conversation.get("project_id")
         if not isinstance(project_id, str) or not project_id:
             return str(conversation.get("conversation_id") or ""), None
+        if services.projects is None:
+            fallback_name = conversation.get("project_name")
+            return f"workspace:{project_id}", fallback_name if isinstance(fallback_name, str) else None
         project = require_port(services.projects).get(project_id, principal.user_id)
         data = project if isinstance(project, dict) else {"workspace_id": getattr(project, "workspace_id", None), "name": getattr(project, "name", None)}
         workspace_id = data.get("workspace_id")
@@ -921,8 +1017,30 @@ def create_app(services: ApiServices) -> FastAPI:
             return str(resolve_inside(files_root(principal.user_id), inspection.path))
         return inspection.path
 
+    def local_workspaces_port() -> Any:
+        if services.local_workspaces is not None:
+            return services.local_workspaces
+        engine = getattr(services.projects, "_engine", None) or getattr(
+            getattr(services.conversation_application, "store", services.conversation_application),
+            "_engine",
+            None,
+        )
+        if engine is not None:
+            from agentos.local_workspace.store import PostgresLocalWorkspaceStore
+            return PostgresLocalWorkspaceStore(engine)
+        raise RuntimeError("application service is unavailable")
+
     def stored_root_for(workspace_id: str, principal: AuthenticatedPrincipal) -> str | None:
         store = services.local_workspaces
+        if store is None:
+            engine = getattr(services.projects, "_engine", None) or getattr(
+                getattr(services.conversation_application, "store", services.conversation_application),
+                "_engine",
+                None,
+            )
+            if engine is not None:
+                from agentos.local_workspace.store import PostgresLocalWorkspaceStore
+                store = PostgresLocalWorkspaceStore(engine)
         return store.root_for(workspace_id, principal.user_id) if store is not None else None
 
     def local_root_for(workspace_id: str, principal: AuthenticatedPrincipal) -> str | None:
@@ -950,6 +1068,28 @@ def create_app(services: ApiServices) -> FastAPI:
             "path": root,
             "folder_name": Path(root).name if root else None,
             **_workspace_scope(project_name),
+        }
+
+    def project_workspace_state(project: object, principal: AuthenticatedPrincipal) -> dict[str, object]:
+        data = project if isinstance(project, Mapping) else _jsonable(project)
+        if not isinstance(data, Mapping):
+            raise ValueError("project response is invalid")
+        project_id = str(data.get("project_id") or "")
+        workspace_id = str(data.get("workspace_id") or (f"workspace:{project_id}" if project_id else ""))
+        project_name = str(data.get("name") or "") or None
+        stored = stored_root_for(workspace_id, principal)
+        if stored and services.capabilities.profile_files:
+            shown = relative_display(files_root(principal.user_id), stored)
+            if shown is None:
+                return {"kind": "unavailable", "path": None, "folder_name": Path(stored).name, "scope": "project", "project_name": project_name}
+            return {"kind": "local", "path": shown, "folder_name": Path(stored).name, "scope": "project", "project_name": project_name}
+        root = local_root_for(workspace_id, principal)
+        return {
+            "kind": "local" if root else "managed",
+            "path": root,
+            "folder_name": Path(root).name if root else None,
+            "scope": "project",
+            "project_name": project_name,
         }
 
     def conversation_record(conversation_id: str, principal: AuthenticatedPrincipal) -> dict[str, object]:

@@ -63,6 +63,7 @@ export function WorkspaceNavigation({ client, onChatsChange, onNewConversation, 
   const [creatingProject, setCreatingProject] = useState(false)
   const [projectName, setProjectName] = useState('')
   const [projectDescription, setProjectDescription] = useState('')
+  const [projectWorkspacePath, setProjectWorkspacePath] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [mobileOpen, setMobileOpen] = useState(false)
   const [view, setView] = useState<'chats' | 'projects'>(() => (
@@ -126,15 +127,30 @@ export function WorkspaceNavigation({ client, onChatsChange, onNewConversation, 
         if (active) setError('Não foi possível atualizar a navegação.')
       })
     })
-    return () => { active = false }
+    const onProjectsUpdated = () => {
+      void reload().catch(() => undefined)
+    }
+    window.addEventListener('orin:projects-updated', onProjectsUpdated)
+    return () => {
+      active = false
+      window.removeEventListener('orin:projects-updated', onProjectsUpdated)
+    }
   }, [reload])
 
   async function submitProject() {
     if (!projectName.trim()) return
     try {
-      await createProject(apiClient, { name: projectName, description: projectDescription })
+      const trimmedWorkspace = projectWorkspacePath.trim()
+      await createProject(apiClient, {
+        name: projectName,
+        description: projectDescription,
+        ...(trimmedWorkspace
+          ? { workspace_path: trimmedWorkspace, workspace_acknowledged_risk: true }
+          : {}),
+      })
       setProjectName('')
       setProjectDescription('')
+      setProjectWorkspacePath('')
       setCreatingProject(false)
       setError(null)
       await reload()
@@ -424,6 +440,16 @@ export function WorkspaceNavigation({ client, onChatsChange, onNewConversation, 
             <label>
               Descrição
               <input value={projectDescription} onChange={(event) => setProjectDescription(event.target.value)} maxLength={2000} />
+            </label>
+            <label>
+              Pasta local (opcional)
+              <input
+                data-testid="new-project-workspace-path"
+                value={projectWorkspacePath}
+                onChange={(event) => setProjectWorkspacePath(event.target.value)}
+                placeholder="/caminho/da/pasta"
+                maxLength={1024}
+              />
             </label>
             <div>
               <button type="button" onClick={() => setCreatingProject(false)}>Cancelar</button>

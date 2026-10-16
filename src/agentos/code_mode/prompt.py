@@ -97,6 +97,15 @@ def permission_mode_section(
     return f"{modes_overview}\n- {behavior}"
 
 
+def extensions_section() -> str:
+    return (
+        "### Extensões (MCPs, Plugins e Skills)\n"
+        "- Quando a pessoa pedir para instalar ou conectar um servidor MCP, consulte `list_mcp_catalog` e chame `configure_mcp` (informando apenas `secret_names`, nunca valores de credenciais) para exibir o card de aprovação e aguarde a confirmação.\n"
+        "- Quando a pessoa pedir para buscar ou instalar um plugin, use `search_plugin` e `install_plugin` (ou `inspect_plugin`) para exibir o card de aprovação e aguarde a confirmação.\n"
+        "- Quando a pessoa pedir para criar ou atualizar uma Skill reutilizável, pesquise antes com `search_skills` / `list_skills` e use `create_skill` / `edit_skill` com seções explícitas `Workflow` e `Validation`."
+    )
+
+
 def build_code_mode_system_prompt(
     permission_mode: str | CodePermissionMode | CodeAutonomy | None = None,
     *,
@@ -141,6 +150,7 @@ def build_code_mode_system_prompt(
         reversibility_and_blast_radius_section(level=level, permits_push=permits_push),
         dedicated_tools_over_shell_section(),
         parallel_execution_section(),
+        extensions_section(),
         act_dont_rederive_section(),
         "No fim, relate mudanças, testes executados, validação visual, ressalvas e próximos passos com base em evidências reais.",
     ))
@@ -168,6 +178,7 @@ __all__ = [
     "build_code_mode_system_prompt",
     "code_mode_instructions",
     "dedicated_tools_over_shell_section",
+    "extensions_section",
     "parallel_execution_section",
     "permission_mode_section",
     "reversibility_and_blast_radius_section",

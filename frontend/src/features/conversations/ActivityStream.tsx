@@ -5,6 +5,7 @@ import { AgentBirth } from './AgentBirth'
 import { AgentExchange } from './AgentExchange'
 import { BrowserActivityCard } from './BrowserActivityCard'
 import { CodeModeCard } from './CodeModeCard'
+import { CodeSessionProposalCard, type CodeSessionProposalDecision } from './CodeSessionProposalCard'
 import { McpApprovalCard } from './McpApprovalCard'
 import { MemoryLearnedCard } from './MemoryLearnedCard'
 import { PluginApprovalCard } from './PluginApprovalCard'
@@ -25,6 +26,8 @@ type ActivityStreamProps = {
   onPluginApprove?: (event: ConversationActivityEvent) => Promise<void>
   onPluginDecline?: (event: ConversationActivityEvent) => Promise<void>
   onToolPermission?: (event: ConversationActivityEvent, decision: ToolPermissionDecision) => Promise<void>
+  onCodeSessionAccept?: (event: ConversationActivityEvent, decision: CodeSessionProposalDecision) => Promise<void>
+  onCodeSessionDecline?: (event: ConversationActivityEvent) => Promise<void>
   conversationId?: string
   onPreview?: WorkspaceFilePreviewHandler
 }
@@ -38,7 +41,7 @@ const DEFAULT_LIMIT = 120
  * treatment because they carry the product's identity: a subagent being born, and
  * a message crossing between agents.
  */
-export function ActivityStream({ events, limit = DEFAULT_LIMIT, openQuestionTurnIds, onAnswer, onMcpApprove, onMcpDecline, onPluginApprove, onPluginDecline, onToolPermission, conversationId, onPreview }: ActivityStreamProps) {
+export function ActivityStream({ events, limit = DEFAULT_LIMIT, openQuestionTurnIds, onAnswer, onMcpApprove, onMcpDecline, onPluginApprove, onPluginDecline, onToolPermission, onCodeSessionAccept, onCodeSessionDecline, conversationId, onPreview }: ActivityStreamProps) {
   const groups = useMemo(() => {
     const summarized = summarizeActivities(events)
     return summarized.length > limit ? summarized.slice(summarized.length - limit) : summarized
@@ -49,7 +52,7 @@ export function ActivityStream({ events, limit = DEFAULT_LIMIT, openQuestionTurn
   return (
     <ol className="activity-stream" aria-label="Atividade do agente">
       <AnimatePresence initial={false}>
-        {groups.map((group) => <li key={group.id + group.events[0].eventId}>{renderActivityGroup(group, openQuestionTurnIds, onAnswer, conversationId, onPreview, onMcpApprove, onMcpDecline, onPluginApprove, onPluginDecline, onToolPermission)}</li>)}
+        {groups.map((group) => <li key={group.id + group.events[0].eventId}>{renderActivityGroup(group, openQuestionTurnIds, onAnswer, conversationId, onPreview, onMcpApprove, onMcpDecline, onPluginApprove, onPluginDecline, onToolPermission, onCodeSessionAccept, onCodeSessionDecline)}</li>)}
       </AnimatePresence>
     </ol>
   )
@@ -66,6 +69,8 @@ export function renderActivityGroup(
   onPluginApprove?: (event: ConversationActivityEvent) => Promise<void>,
   onPluginDecline?: (event: ConversationActivityEvent) => Promise<void>,
   onToolPermission?: (event: ConversationActivityEvent, decision: ToolPermissionDecision) => Promise<void>,
+  onCodeSessionAccept?: (event: ConversationActivityEvent, decision: CodeSessionProposalDecision) => Promise<void>,
+  onCodeSessionDecline?: (event: ConversationActivityEvent) => Promise<void>,
 ) {
   const first = group.events[0]
   if (first.toolPermission) {
@@ -89,14 +94,13 @@ export function renderActivityGroup(
       />
     )
   }
-  if (first.type.startsWith('code_mode.')) return <CodeModeCard group={group} />
-  if ((first.toolName === 'ask_user' || first.codeApproval) && first.questions && first.turnId && onAnswer) {
+  if ((first.toolName === 'ask_user' || first.codeApproval || first.questions) && first.questions && first.turnId && onAnswer) {
     return <UserQuestionCard questions={first.questions} active={openQuestionTurnIds?.has(first.turnId) ?? false} onSubmit={(answers) => onAnswer(first, answers)} />
   }
-  if (first.toolName === 'install_plugin' && first.pluginApproval && first.turnId && onPluginApprove && onPluginDecline) {
+  if (first.pluginApproval && first.turnId && onPluginApprove && onPluginDecline) {
     return <PluginApprovalCard plugin={first.pluginApproval} active={openQuestionTurnIds?.has(first.turnId) ?? false} onApprove={() => onPluginApprove(first)} onDecline={() => onPluginDecline(first)} />
   }
-  if (first.toolName === 'configure_mcp' && first.mcpApproval && first.turnId && onMcpApprove && onMcpDecline) {
+  if (first.mcpApproval && first.turnId && onMcpApprove && onMcpDecline) {
     return (
       <McpApprovalCard
         server={first.mcpApproval}
@@ -106,6 +110,17 @@ export function renderActivityGroup(
       />
     )
   }
+  if (first.codeSessionProposal && onCodeSessionAccept && onCodeSessionDecline) {
+    return (
+      <CodeSessionProposalCard
+        proposal={first.codeSessionProposal}
+        active={first.turnId ? (openQuestionTurnIds?.has(first.turnId) ?? false) : true}
+        onAccept={(decision) => onCodeSessionAccept(first, decision)}
+        onDecline={() => onCodeSessionDecline(first)}
+      />
+    )
+  }
+  if (first.type.startsWith('code_mode.')) return <CodeModeCard group={group} />
   if (first.type === 'memory.learned') {
     return <>{group.events.map((event) => <MemoryLearnedCard key={event.eventId} event={event} />)}</>
   }

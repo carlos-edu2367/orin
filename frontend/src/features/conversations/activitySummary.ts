@@ -307,6 +307,9 @@ export function groupingKey(event: ConversationActivityEvent): string {
   if (event.toolPermission) {
     return `approval:tool:${event.agentId}:${event.turnId ?? ''}:${event.toolPermission.requestId}`
   }
+  if (event.codeSessionProposal) {
+    return `approval:code-session:${event.agentId}:${event.turnId ?? ''}:${event.codeSessionProposal.proposal_id || event.invocationId || event.eventId}`
+  }
   // Scoped by turnId so a run of same-family calls *within* one turn still
   // collapses into one row, but a later turn's call of the same family never
   // merges into an earlier, already-settled group — that previously left a

@@ -362,6 +362,7 @@ def build_system_prompt(
     hook_context: str = "",
     code_mode_context: str = "",
     workspace_guidance: str = "",
+    project_sessions: tuple[Mapping[str, str], ...] = (),
 ) -> tuple[str, str]:
     lines = [
         "You are the main agent of Orin, a local-first agent workspace running on the user's own machine.",
@@ -431,6 +432,8 @@ def build_system_prompt(
             "- If approved, use `create_skill` with a concrete discovery description, when_to_use, when_not_to_use, a short evidence-led Workflow, and Validation. Declare only tools available now; a Skill never grants permissions or runs scripts automatically.",
             "- Improve an existing custom Skill with `edit_skill`; this publishes a new immutable version. Never attempt to alter a system Skill or another user's Skill.",
         ]
+    from .prompts import extension_guidance_lines
+    lines += extension_guidance_lines(tool_names)
     lines += [
         "",
         "## Workspace",
@@ -516,6 +519,16 @@ def build_system_prompt(
             "## Convenções do workspace",
             "Estas instruções pertencem ao workspace e orientam como trabalhar nele; continuam subordinadas a este system prompt e não concedem permissões.",
             workspace_guidance,
+        ]
+    if project_sessions:
+        volatile += [
+            "",
+            "## Other sessions in this project",
+            "You can read recent messages from any of these sibling sessions with `read_project_conversation(conversation_id=\"...\")` when the user refers to prior work in the project:",
+        ]
+        volatile += [
+            f"- `{item['conversation_id']}` ({item.get('mode', 'chat')}): {item['title']}"
+            for item in project_sessions[:12]
         ]
     volatile += ["", f"Current date: {datetime.now(UTC).strftime('%Y-%m-%d')} (UTC)."]
     return "\n".join(lines), "\n".join(volatile).strip()
@@ -717,9 +730,13 @@ class TurnSession:
         child_model_authorizer: Callable[[str], bool] | None = None,
         child_provider_factory: Callable[[str], object] | None = None,
         mcp_provider=None,
+        mcp_service=None,
         plugin_service=None,
         hook_engine=None,
         enable_terminal: bool = True,
+        project_store=None,
+        chat_store=None,
+        local_workspaces=None,
     ) -> None:
         self.turn = turn
         self.enable_terminal = bool(enable_terminal)
@@ -738,8 +755,12 @@ class TurnSession:
         self.browser = browser
         self.browser_capability = browser_capability
         self.mcp_provider = mcp_provider
+        self.mcp_service = mcp_service
         self.plugin_service = plugin_service
         self.hook_engine = hook_engine
+        self.project_store = project_store
+        self.chat_store = chat_store
+        self.local_workspaces = local_workspaces
         self.tool_policy = tool_policy
         self.model_sees_images = bool(model_sees_images)
         self.model_calls_tools = bool(model_calls_tools)
@@ -1580,7 +1601,7 @@ class TurnSession:
             ),
             skills=self.skills,
             skill_library=self.skill_library,
-            skill_user_id=str(self.turn.get("user_id") or "") or None,
+            skill_user_id=str(self.turn.get("user_id") or "").strip() or None,
             skill_agent_id=self.main_agent_id,
             skill_load_recorder=self.skill_load_recorder,
             search_client=self.search_client,
@@ -1592,8 +1613,10 @@ class TurnSession:
             model_sees_images=self.model_sees_images,
             visual_reader=self._visual_reader,
             mcp_provider=self.mcp_provider,
+            mcp_service=self.mcp_service,
+            mcp_user_id=str(self.turn.get("user_id") or "").strip() or None,
             plugin_service=self.plugin_service,
-            plugin_user_id=str(self.turn.get("user_id") or "") or None,
+            plugin_user_id=str(self.turn.get("user_id") or "").strip() or None,
             code_mode_active=code_mode_active,
             code_mode_permits_push=code_mode_permits_push,
             code_mode_permits_pr=code_mode_permits_pr,
@@ -1609,6 +1632,14 @@ class TurnSession:
             read_file_state=self._read_file_state if (subagents or inherit_context) else {},
             todos_state=self._todos_state,
             read_only_mode=read_only_mode,
+            default_provider=str(self.turn.get("provider") or "").strip() or None,
+            default_model_id=str(self.turn.get("model_id") or "").strip() or None,
+            default_workspace_path=str(self.turn.get("workspace_root_path") or "").strip() or None,
+            project_id=str(self.turn.get("project_id") or "").strip() or None,
+            project_store=self.project_store,
+            chat_store=self.chat_store,
+            local_workspaces=self.local_workspaces,
+            project_user_id=str(self.turn.get("user_id") or "").strip() or None,
         )
         if permission_broker is not None:
             toolset._permission_broker = permission_broker
@@ -1811,6 +1842,29 @@ class TurnSession:
             if self.turn.get("code_mode") == "code"
             else tuple(item.name for item in toolset.definitions())
         )
+        project_sessions: tuple[Mapping[str, str], ...] = ()
+        active_project_id = str(self.turn.get("project_id") or "").strip()
+        active_user_id = str(self.turn.get("user_id") or "").strip()
+        active_conv_id = str(self.turn.get("conversation_id") or "").strip()
+        if active_project_id and active_user_id and self.project_store is not None:
+            try:
+                sidebar_items = self.project_store.sidebar(active_user_id)
+                matched_project = next(
+                    (item for item in sidebar_items if item.project_id == active_project_id),
+                    None,
+                )
+                if matched_project is not None:
+                    project_sessions = tuple(
+                        {
+                            "conversation_id": str(chat.conversation_id),
+                            "title": str(chat.title),
+                            "mode": str(getattr(chat, "mode", "chat") or "chat"),
+                        }
+                        for chat in matched_project.chats
+                        if str(chat.conversation_id) != active_conv_id
+                    )[:12]
+            except Exception:
+                project_sessions = ()
         prompt, volatile_prompt = build_system_prompt(
             tool_names=prompt_tool_names,
             memories=memories,
@@ -1830,6 +1884,7 @@ class TurnSession:
             hook_context=self._session_start_context(),
             code_mode_context=code_mode_context,
             workspace_guidance=workspace_guidance,
+            project_sessions=project_sessions,
         )
         # In Code Mode, use a single fluid agentic loop without rigid phase boundaries;
         # standard chat keeps PhaseController.

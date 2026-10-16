@@ -47,7 +47,9 @@ from agentos.configuration.capabilities import InstanceCapabilities
 from agentos.configuration.mode import current_mode
 from agentos.conversations.chat import PostgresChatStore
 from agentos.installation import orin_paths
+from agentos.local_workspace import PostgresLocalWorkspaceStore
 from agentos.mcp.auth import McpOAuth
+from agentos.projects.store import PostgresProjectStore
 from agentos.mcp.service import McpServerService
 from agentos.mcp.toolset import McpToolProvider
 from agentos.plugins.hook_engine import HookEngine
@@ -1137,8 +1139,12 @@ class ChatWorker:
                 child_model_authorizer=lambda model_id: self._is_favorite_child_model(turn, model_id),
                 child_provider_factory=lambda model_id: self._child_provider_for_turn(turn, model_id),
                 mcp_provider=mcp_provider,
+                mcp_service=mcp_service,
                 plugin_service=plugin_service,
                 hook_engine=self._hook_engine,
+                project_store=PostgresProjectStore(engine),
+                chat_store=self.store,
+                local_workspaces=PostgresLocalWorkspaceStore(engine),
             )
             return session.build_runtime()
         except Exception:

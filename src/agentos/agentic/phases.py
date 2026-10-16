@@ -56,11 +56,19 @@ _READ_TOOLS = ("read_file", "view_file", "transcribe_pdf", "list_files", "search
 # files+terminal contract.
 _WRITE_TOOLS = ("write_file", "edit_file", "run_command", "verify_project")
 _ALWAYS = ("write_contract", "ask_user")
+_SKILL_TOOLS = ("search_skills", "list_skills", "read_skill_resource", "use_skill", "create_skill", "edit_skill")
+_EXTENSION_TOOLS = (
+    "list_mcp_catalog", "list_mcp_servers", "configure_mcp", "test_mcp_server",
+    "search_plugin", "inspect_plugin", "install_plugin", "list_plugins", "uninstall_plugin",
+)
+_PROJECT_TOOLS = (
+    "list_projects", "create_project_from_session", "move_session_to_project", "read_project_conversation",
+)
 
 PHASE_TOOLS: Mapping[Phase, tuple[str, ...]] = {
-    Phase.ORIENT: (*_ALWAYS, *_READ_TOOLS, *_WRITE_TOOLS, "recall", "remember"),
-    Phase.PLAN: (*_ALWAYS, "search_skills", "list_skills", "use_skill", "recall", "list_files", "read_file", "todo_write"),
-    Phase.EXECUTE: (*_ALWAYS, *_READ_TOOLS, *_WRITE_TOOLS, "recall", "remember"),
+    Phase.ORIENT: (*_ALWAYS, *_READ_TOOLS, *_WRITE_TOOLS, *_SKILL_TOOLS, *_EXTENSION_TOOLS, *_PROJECT_TOOLS, "propose_code_session", "recall", "remember"),
+    Phase.PLAN: (*_ALWAYS, *_SKILL_TOOLS, "propose_code_session", "list_projects", "read_project_conversation", "recall", "list_files", "read_file", "todo_write"),
+    Phase.EXECUTE: (*_ALWAYS, *_READ_TOOLS, *_WRITE_TOOLS, *_SKILL_TOOLS, *_EXTENSION_TOOLS, *_PROJECT_TOOLS, "propose_code_session", "recall", "remember"),
     # Verification may look and may run a check; it may not change anything.
     # ``verify_project``/``verify_frontend`` mutate nothing themselves but can
     # install dependencies or start a browser session as a side effect of
@@ -82,6 +90,7 @@ TOOLKIT_TOOLS: Mapping[str, tuple[str, ...]] = {
     "files": (*_READ_TOOLS, *_WRITE_TOOLS),
     "terminal": ("run_command", "read_process_output", "stop_process"),
     "web": ("fetch_url", "web_search"),
+    "skills": _SKILL_TOOLS,
     "browser": (
         "browse_page", "browser_observe", "browser_click", "browser_fill", "browser_press",
         "browser_select", "browser_check", "browser_screenshot", "browser_back",

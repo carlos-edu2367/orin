@@ -3,10 +3,13 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import shutil
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
+from pathlib import Path
 from uuid import uuid4
 
 from sqlalchemy import func, insert, select, update
@@ -16,6 +19,8 @@ from sqlalchemy.exc import IntegrityError
 from agentos.api.contracts import ApplicationNotFoundError
 from agentos.api.events import CursorError
 from agentos.agentic.events import AgentActivityEvent, AgentActivityEventType
+from agentos.agentic.workspace import WorkspaceError, _directory_name, resolve_workspace
+from agentos.installation import orin_paths
 from agentos.persistence.postgres.agentic_activity import ActivityCursorError
 from agentos.persistence.postgres.execution_adapters import ExecutionApplicationAdapter, ExecutionQueryAdapter
 from agentos.agentic import transcript as turn_transcript
@@ -198,6 +203,128 @@ def _total_token_usage(usages) -> dict[str, object]:
 
 
 _VALID_PERMISSION_MODES = frozenset({"accept_edits", "plan_mode", "ask_permissions", "full_autonomy"})
+
+_IGNORED_MIGRATION_PARTS = frozenset({
+    ".git",
+    ".orin",
+    ".env",
+    "node_modules",
+    ".venv",
+    "__pycache__",
+})
+
+
+def _is_symlink_or_junction(path: Path) -> bool:
+    if path.is_symlink():
+        return True
+    is_junction = getattr(path, "is_junction", None)
+    if callable(is_junction):
+        try:
+            return bool(is_junction())
+        except OSError:
+            return True
+    return False
+
+
+def _is_ignored_migration_part(name: str) -> bool:
+    lowered = name.lower()
+    return lowered in _IGNORED_MIGRATION_PARTS or lowered == ".env" or lowered.startswith(".env.")
+
+
+def _has_symlink_between(root: Path, candidate: Path) -> bool:
+    if _is_symlink_or_junction(root) or _is_symlink_or_junction(candidate):
+        return True
+    current = candidate
+    while current != root and current != current.parent:
+        if _is_symlink_or_junction(current):
+            return True
+        current = current.parent
+    return _is_symlink_or_junction(root)
+
+
+def migrate_managed_workspace_files(source_root: Path, target_root: Path) -> list[str]:
+    """Safely copy regular files from a standalone managed workspace into a project workspace."""
+    source = Path(source_root)
+    target = Path(target_root)
+    if not source.exists() or _is_symlink_or_junction(source) or not source.is_dir():
+        return []
+    if target.exists() and (_is_symlink_or_junction(target) or not target.is_dir()):
+        return []
+    try:
+        resolved_source = source.resolve()
+        resolved_target = target.resolve()
+    except OSError:
+        return []
+    if resolved_source == resolved_target:
+        return []
+
+    migrated: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(source, followlinks=False):
+        current_dir = Path(dirpath)
+        if _has_symlink_between(source, current_dir):
+            dirnames[:] = []
+            continue
+        try:
+            rel_dir = current_dir.relative_to(source)
+        except ValueError:
+            dirnames[:] = []
+            continue
+        if any(_is_ignored_migration_part(part) for part in rel_dir.parts):
+            dirnames[:] = []
+            continue
+
+        kept_dirs: list[str] = []
+        for dname in sorted(dirnames):
+            if _is_ignored_migration_part(dname):
+                continue
+            dpath = current_dir / dname
+            if _is_symlink_or_junction(dpath):
+                continue
+            kept_dirs.append(dname)
+        dirnames[:] = kept_dirs
+
+        for fname in sorted(filenames):
+            if _is_ignored_migration_part(fname):
+                continue
+            src_file = current_dir / fname
+            if _is_symlink_or_junction(src_file) or _has_symlink_between(source, src_file):
+                continue
+            try:
+                if not src_file.is_file():
+                    continue
+                resolved_src_file = src_file.resolve()
+                if not resolved_src_file.is_relative_to(resolved_source):
+                    continue
+                rel_path = src_file.relative_to(source)
+            except (OSError, ValueError):
+                continue
+            if any(_is_ignored_migration_part(part) for part in rel_path.parts):
+                continue
+
+            dest_file = target / rel_path
+            if _has_symlink_between(target, dest_file):
+                continue
+            try:
+                resolved_dest_parent = dest_file.parent.resolve()
+                if not resolved_dest_parent.is_relative_to(resolved_target):
+                    continue
+                resolved_dest = resolved_dest_parent / dest_file.name
+                if not resolved_dest.is_relative_to(resolved_target):
+                    continue
+                if dest_file.exists() or _is_symlink_or_junction(dest_file):
+                    continue
+                dest_file.parent.mkdir(parents=True, exist_ok=True)
+                if _has_symlink_between(target, dest_file.parent):
+                    continue
+                if not dest_file.parent.resolve().is_relative_to(target.resolve()):
+                    continue
+                if dest_file.exists() or _is_symlink_or_junction(dest_file):
+                    continue
+                shutil.copy2(src_file, dest_file, follow_symlinks=False)
+                migrated.append(rel_path.as_posix())
+            except OSError:
+                continue
+    return migrated
 
 
 def _ensure_conversation_mode_columns(engine: Engine) -> None:
@@ -765,6 +892,172 @@ class PostgresChatStore:
             "permission_mode": normalized,
         }
 
+    def set_project(
+        self,
+        conversation_id: str,
+        user_id: str,
+        project_id: str | None,
+        *,
+        managed_root: Path | None = None,
+    ) -> dict[str, object]:
+        normalized_project_id = str(project_id).strip() if isinstance(project_id, str) and project_id.strip() else None
+        now = datetime.now(UTC)
+        project_name: str | None = None
+        project_workspace_id: str | None = None
+        project_root_path: str | None = None
+
+        with self._engine.begin() as c:
+            conv = c.execute(
+                select(conversations).where(
+                    conversations.c.conversation_id == conversation_id,
+                    conversations.c.user_id == user_id,
+                )
+            ).mappings().first()
+            if conv is None:
+                raise ApplicationNotFoundError(conversation_id)
+
+            if normalized_project_id is not None:
+                project = c.execute(
+                    select(projects).where(
+                        projects.c.project_id == normalized_project_id,
+                        projects.c.user_id == user_id,
+                        projects.c.archived_at.is_(None),
+                    )
+                ).mappings().first()
+                if project is None:
+                    raise ApplicationNotFoundError(normalized_project_id)
+                project_name = str(project["name"])
+                project_workspace_id = str(project["workspace_id"])
+
+                conv_root_path = c.execute(
+                    select(workspace_roots.c.root_path).where(
+                        workspace_roots.c.workspace_id == conversation_id,
+                        workspace_roots.c.user_id == user_id,
+                    )
+                ).scalar_one_or_none()
+                existing_proj_root = c.execute(
+                    select(workspace_roots.c.root_path).where(
+                        workspace_roots.c.workspace_id == project_workspace_id,
+                        workspace_roots.c.user_id == user_id,
+                    )
+                ).scalar_one_or_none()
+
+                if conv_root_path and not existing_proj_root:
+                    any_proj_root = c.execute(
+                        select(workspace_roots.c.workspace_id).where(
+                            workspace_roots.c.workspace_id == project_workspace_id,
+                        )
+                    ).scalar_one_or_none()
+                    if any_proj_root is None:
+                        c.execute(
+                            insert(workspace_roots).values(
+                                workspace_id=project_workspace_id,
+                                user_id=user_id,
+                                root_path=str(conv_root_path),
+                                created_at=now,
+                                updated_at=now,
+                            )
+                        )
+                        project_root_path = str(conv_root_path)
+                elif existing_proj_root:
+                    project_root_path = str(existing_proj_root)
+
+                c.execute(
+                    update(conversations)
+                    .where(
+                        conversations.c.conversation_id == conversation_id,
+                        conversations.c.user_id == user_id,
+                    )
+                    .values(project_id=normalized_project_id, updated_at=now)
+                )
+                c.execute(
+                    update(projects)
+                    .where(
+                        projects.c.project_id == normalized_project_id,
+                        projects.c.user_id == user_id,
+                    )
+                    .values(updated_at=now)
+                )
+            else:
+                c.execute(
+                    update(conversations)
+                    .where(
+                        conversations.c.conversation_id == conversation_id,
+                        conversations.c.user_id == user_id,
+                    )
+                    .values(project_id=None, updated_at=now)
+                )
+
+        migrated_files: list[str] = []
+        if normalized_project_id is not None and project_workspace_id is not None:
+            base_managed_root = Path(managed_root) if managed_root is not None else orin_paths().user_workspaces(user_id)
+            try:
+                source_root = base_managed_root.resolve() / _directory_name(conversation_id)
+                if source_root.is_dir():
+                    target_root = resolve_workspace(
+                        project_workspace_id,
+                        managed_root=base_managed_root,
+                        local_root=project_root_path,
+                    ).root
+                    if source_root != target_root:
+                        migrated_files = migrate_managed_workspace_files(source_root, target_root)
+            except WorkspaceError:
+                pass
+
+        return {
+            "conversation_id": conversation_id,
+            "project_id": normalized_project_id,
+            "project_name": project_name,
+            "migrated_files": migrated_files,
+        }
+
+    def read_project_conversation(
+        self,
+        conversation_id: str,
+        user_id: str,
+        *,
+        limit: int = 20,
+    ) -> dict[str, object]:
+        bounded = min(max(int(limit), 1), 50)
+        with self._engine.connect() as c:
+            row = c.execute(
+                select(conversations).where(
+                    conversations.c.conversation_id == conversation_id,
+                    conversations.c.user_id == user_id,
+                )
+            ).mappings().first()
+            if row is None:
+                raise ApplicationNotFoundError(conversation_id)
+            recent_messages = c.execute(
+                select(
+                    conversation_messages.c.role,
+                    conversation_messages.c.content,
+                    conversation_messages.c.status,
+                    conversation_messages.c.created_at,
+                )
+                .where(
+                    conversation_messages.c.conversation_id == conversation_id,
+                    conversation_messages.c.user_id == user_id,
+                )
+                .order_by(conversation_messages.c.sequence.desc())
+                .limit(bounded)
+            ).mappings().all()
+        return {
+            "conversation_id": conversation_id,
+            "title": str(row["title"]),
+            "mode": str(row.get("mode") or "chat"),
+            "project_id": str(row["project_id"]) if row.get("project_id") else None,
+            "messages": [
+                {
+                    "role": str(m["role"]),
+                    "content": str(m["content"]),
+                    "status": str(m["status"]),
+                    "created_at": m["created_at"].isoformat() if isinstance(m.get("created_at"), datetime) else str(m.get("created_at") or ""),
+                }
+                for m in reversed(recent_messages)
+            ],
+        }
+
     def list(self, user_id: str) -> dict[str, object]:
         with self._engine.connect() as c: rows = c.execute(select(conversations).where(conversations.c.user_id == user_id, conversations.c.project_id.is_(None)).order_by(conversations.c.updated_at.desc())).mappings().all()
         return {"items": [{"conversation_id": r["conversation_id"], "title": r["title"], "state": r["state"], "mode": str(r.get("mode") or "chat"), "permission_mode": str(r.get("permission_mode") or "ask_permissions"), "updated_at": r["updated_at"].isoformat()} for r in rows]}
@@ -773,6 +1066,16 @@ class PostgresChatStore:
         with self._engine.connect() as c:
             conv = c.execute(select(conversations).where(conversations.c.conversation_id == conversation_id, conversations.c.user_id == user_id)).mappings().first()
             if conv is None: raise ApplicationNotFoundError(conversation_id)
+            project_id = conv.get("project_id")
+            project_name: str | None = None
+            if project_id:
+                project_name = c.execute(
+                    select(projects.c.name).where(
+                        projects.c.project_id == project_id,
+                        projects.c.user_id == user_id,
+                        projects.c.archived_at.is_(None),
+                    )
+                ).scalar_one_or_none()
             messages = c.execute(select(conversation_messages).where(conversation_messages.c.conversation_id == conversation_id).order_by(conversation_messages.c.sequence)).mappings().all()
             turns = c.execute(select(conversation_turns).where(conversation_turns.c.conversation_id == conversation_id).order_by(conversation_turns.c.created_at)).mappings().all()
             attachment_rows = c.execute(select(conversation_message_attachments).where(conversation_message_attachments.c.conversation_id == conversation_id).order_by(conversation_message_attachments.c.id)).mappings().all()
@@ -863,7 +1166,7 @@ class PostgresChatStore:
                 turn_by_message[str(t["user_message_id"])] = t_id_str
             if t.get("assistant_message_id"):
                 turn_by_message[str(t["assistant_message_id"])] = t_id_str
-        return {"conversation_id": conv["conversation_id"], "title": conv["title"], "state": conv["state"], "mode": conv_mode, "permission_mode": conv_perm, "provider": conv["provider"], "model_id": conv["model_id"], "project_id": conv["project_id"], "messages": [{"message_id": m["message_id"], "role": m["role"], "content": m["content"], "status": m["status"], "retryable": bool(m["retryable"]), "attachments": attachments_by_message.get(str(m["message_id"]), []), "command": command_by_message.get(str(m["message_id"])), "turn_id": turn_by_message.get(str(m["message_id"]))} for m in messages], "turns": [{"turn_id": t["turn_id"], "state": t["state"], "created_at": t["created_at"].isoformat(), "started_at": t["started_at"].isoformat() if t["started_at"] else None, "finished_at": t["finished_at"].isoformat() if t["finished_at"] else None, "scheduled_by_schedule_id": t["scheduled_by_schedule_id"], "code_mode": t.get("code_mode")} for t in turns], "activities": activities, "activity_cursor": activity_cursor, "has_older_activities": has_older_activities, "oldest_activity_id": oldest_activity_id, "context_usage": context_usage}
+        return {"conversation_id": conv["conversation_id"], "title": conv["title"], "state": conv["state"], "mode": conv_mode, "permission_mode": conv_perm, "provider": conv["provider"], "model_id": conv["model_id"], "project_id": str(project_id) if project_id else None, "project_name": str(project_name) if project_name else None, "messages": [{"message_id": m["message_id"], "role": m["role"], "content": m["content"], "status": m["status"], "retryable": bool(m["retryable"]), "attachments": attachments_by_message.get(str(m["message_id"]), []), "command": command_by_message.get(str(m["message_id"])), "turn_id": turn_by_message.get(str(m["message_id"]))} for m in messages], "turns": [{"turn_id": t["turn_id"], "state": t["state"], "created_at": t["created_at"].isoformat(), "started_at": t["started_at"].isoformat() if t["started_at"] else None, "finished_at": t["finished_at"].isoformat() if t["finished_at"] else None, "scheduled_by_schedule_id": t["scheduled_by_schedule_id"], "code_mode": t.get("code_mode")} for t in turns], "activities": activities, "activity_cursor": activity_cursor, "has_older_activities": has_older_activities, "oldest_activity_id": oldest_activity_id, "context_usage": context_usage}
 
     def list_older_activities(
         self,
@@ -1666,6 +1969,10 @@ class ChatApplication:
         return receipt
     def set_permission_mode(self, conversation_id: str, user_id: str, permission_mode: str):
         return self.store.set_permission_mode(conversation_id, user_id, permission_mode)
+    def set_project(self, conversation_id: str, user_id: str, project_id: str | None, *, managed_root: Path | None = None):
+        return self.store.set_project(conversation_id, user_id, project_id, managed_root=managed_root)
+    def read_project_conversation(self, conversation_id: str, user_id: str, *, limit: int = 20):
+        return self.store.read_project_conversation(conversation_id, user_id, limit=limit)
     def list(self, user_id: str): return self.store.list(user_id)
     def quality_summary(self, user_id: str, *, days: int = 30): return {"items": self.store.quality_summary(user_id, days=days), "window_days": days}
     def get(self, conversation_id: str, user_id: str): return self.store.get(conversation_id, user_id)
@@ -1704,4 +2011,4 @@ class ChatApplication:
         return self.store.request_cancel(conversation_id, user_id)
     def overview(self, conversation_id: str, user_id: str): return self.store.overview(conversation_id, user_id)
 
-__all__ = ["ChatApplication", "ChatReceipt", "PostgresChatStore"]
+__all__ = ["ChatApplication", "ChatReceipt", "PostgresChatStore", "migrate_managed_workspace_files"]

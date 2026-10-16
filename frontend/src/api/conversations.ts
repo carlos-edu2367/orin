@@ -8,6 +8,7 @@ import {
   type ActivityBashOutput,
   type ActivityDiffHunk,
   type ActivityPlanApproval,
+  type CodeSessionProposalRequest,
   type ContextUsage,
   type ConversationActivityEvent,
   type StructuredPatchHunk,
@@ -60,6 +61,8 @@ export type Conversation = {
   state: string
   mode: ConversationMode
   permission_mode: PermissionMode
+  project_id?: string | null
+  project_name?: string | null
   messages: ConversationMessage[]
   turns: ConversationTurn[]
   provider: string
@@ -574,6 +577,8 @@ export function parseConversationActivityEvent(value: unknown, cursor: string): 
   if (mcpApproval) event.mcpApproval = mcpApproval
   const pluginApproval = parsePluginApprovalRequest(payload)
   if (pluginApproval) event.pluginApproval = pluginApproval
+  const codeSessionProposal = parseCodeSessionProposalRequest(payload)
+  if (codeSessionProposal) event.codeSessionProposal = codeSessionProposal
   const planApproval = parsePlanApproval(payload)
   if (planApproval) {
     event.planApproval = planApproval
@@ -923,6 +928,40 @@ function parseStructuredPatch(value: unknown): StructuredPatchHunk[] | undefined
   return hunks.length > 0 ? hunks : undefined
 }
 
+export type MoveConversationToProjectResponse = {
+  conversation_id: string
+  project_id: string | null
+  project_name: string | null
+  workspace: WorkspaceState
+  migrated_files?: string[]
+}
+
+export function moveConversationToProject(
+  client: ApiClient,
+  conversationId: string,
+  projectId: string | null,
+  intent = client.createMutationIntent(),
+): Promise<MoveConversationToProjectResponse> {
+  return client.request({
+    path: `/v1/conversations/${encodeURIComponent(conversationId)}/project`,
+    method: 'PATCH',
+    intent,
+    body: { project_id: projectId },
+    parse: (value) => {
+      const data = record(value)
+      return {
+        conversation_id: typeof data.conversation_id === 'string' ? data.conversation_id : conversationId,
+        project_id: typeof data.project_id === 'string' && data.project_id ? data.project_id : null,
+        project_name: typeof data.project_name === 'string' && data.project_name ? data.project_name : null,
+        workspace: parseWorkspaceState(data.workspace ?? {}),
+        ...(Array.isArray(data.migrated_files)
+          ? { migrated_files: data.migrated_files.filter((item): item is string => typeof item === 'string') }
+          : {}),
+      }
+    },
+  })
+}
+
 export function parseConversation(value: unknown): Conversation {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw invalidResponseError()
   const data = value as Record<string, unknown>
@@ -943,19 +982,22 @@ export function parseConversation(value: unknown): Conversation {
   })
   const fallbackMode: ConversationMode = turns.some((t) => t.code_mode === 'code') ? 'code' : 'chat'
   const { mode, permission_mode } = parseModeAndPermission(data, fallbackMode)
+  const parsedWorkspace = parseWorkspaceState(data.workspace ?? {})
   return {
     conversation_id: string(data.conversation_id),
     title: string(data.title),
     state: string(data.state),
     mode,
     permission_mode,
+    project_id: typeof data.project_id === 'string' && data.project_id ? data.project_id : null,
+    project_name: typeof data.project_name === 'string' && data.project_name ? data.project_name : parsedWorkspace.projectName,
     provider: string(data.provider),
     model_id: string(data.model_id),
     activities,
     activity_cursor: activityCursor,
     has_older_activities: data.has_older_activities === true,
     oldest_activity_id: typeof data.oldest_activity_id === 'number' && Number.isFinite(data.oldest_activity_id) ? data.oldest_activity_id : null,
-    workspace: parseWorkspaceState(data.workspace ?? {}),
+    workspace: parsedWorkspace,
     context_usage: parseContextUsage(data.context_usage),
     messages: data.messages.map((item) => {
       const m = item as Record<string, unknown>
@@ -1122,6 +1164,35 @@ function parsePluginApprovalRequest(payload: Record<string, unknown>): Conversat
       command: String(item.command ?? ''), timeout_seconds: typeof item.timeout_seconds === 'number' ? item.timeout_seconds : 10,
     })),
     contribution_count: typeof plugin.contribution_count === 'number' ? plugin.contribution_count : 0,
+  }
+}
+
+function parseCodeSessionProposalRequest(payload: Record<string, unknown>): CodeSessionProposalRequest | undefined {
+  if (typeof payload.code_session_proposal !== 'object' || payload.code_session_proposal === null || Array.isArray(payload.code_session_proposal)) {
+    return undefined
+  }
+  const raw = payload.code_session_proposal as Record<string, unknown>
+  const title = optionalText(raw.title, 255)
+  const prompt = typeof raw.prompt === 'string' && raw.prompt.trim().length > 0 && raw.prompt.length <= 32_000 ? raw.prompt : undefined
+  if (!title || !prompt) return undefined
+  const proposal_id = optionalText(raw.proposal_id, 255) ?? 'codeprop_default'
+  const workspace_path = optionalText(raw.workspace_path, 1024) ?? null
+  const provider = optionalText(raw.provider, 64) ?? null
+  const model_id = optionalText(raw.model_id, 128) ?? null
+  const permission_mode: CodeSessionProposalRequest['permission_mode'] =
+    raw.permission_mode === 'plan_mode' || raw.permission_mode === 'ask_permissions'
+      ? raw.permission_mode
+      : 'accept_edits'
+  const project_id = optionalText(raw.project_id, 255) ?? null
+  return {
+    proposal_id,
+    title,
+    prompt,
+    workspace_path,
+    provider,
+    model_id,
+    permission_mode,
+    project_id,
   }
 }
 

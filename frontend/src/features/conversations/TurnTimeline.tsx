@@ -11,6 +11,7 @@ import { WorkspaceFileCard, type WorkspaceFilePreviewHandler } from './Workspace
 import { summarizeActivities } from './activitySummary'
 import { enrichEventsWithStartedMetadata, type TimelineItem } from './turnTimelineFold'
 import type { ActivityGroup, ConversationActivityEvent, ToolPermissionDecision } from './activityTypes'
+import type { CodeSessionProposalDecision } from './CodeSessionProposalCard'
 import type { UserQuestionAnswer } from './UserQuestionCard'
 
 export type TimelineThoughtData = {
@@ -45,6 +46,8 @@ export type TurnTimelineProps = {
   onPluginApprove?: (event: ConversationActivityEvent) => Promise<void>
   onPluginDecline?: (event: ConversationActivityEvent) => Promise<void>
   onToolPermission?: (event: ConversationActivityEvent, decision: ToolPermissionDecision) => Promise<void>
+  onCodeSessionAccept?: (event: ConversationActivityEvent, decision: CodeSessionProposalDecision) => Promise<void>
+  onCodeSessionDecline?: (event: ConversationActivityEvent) => Promise<void>
   onRewindTurn?: (turnId: string) => Promise<void>
   onApprovePlanAcceptEdits?: (event: ConversationActivityEvent) => void | Promise<void>
   onApprovePlanAskPermissions?: (event: ConversationActivityEvent) => void | Promise<void>
@@ -113,6 +116,7 @@ function isCodeToolEvent(
     event.questions ||
     event.mcpApproval ||
     event.pluginApproval ||
+    event.codeSessionProposal ||
     isPlanApprovalEvent(event, permissionMode)
   ) {
     return false
@@ -395,6 +399,8 @@ export function TurnTimeline({
   onPluginApprove,
   onPluginDecline,
   onToolPermission,
+  onCodeSessionAccept,
+  onCodeSessionDecline,
   onRewindTurn,
   onApprovePlanAcceptEdits,
   onApprovePlanAskPermissions,
@@ -725,6 +731,31 @@ export function TurnTimeline({
           renderedNodes.push(renderToolPermissionTimelineNode(event, group))
         } else if (isCodeToolEvent(event, mode, permissionMode)) {
           pendingCodeToolBatch.push(event)
+        } else if (
+          event.mcpApproval ||
+          event.pluginApproval ||
+          event.questions ||
+          Boolean(event.codeSessionProposal)
+        ) {
+          flushCodeToolBatch()
+          renderedNodes.push(
+            <div key={event.eventId}>
+              {renderActivityGroup(
+                { ...group, count: 1, events: [event] },
+                openQuestionTurnIds,
+                onAnswer,
+                conversationId,
+                onPreview,
+                onMcpApprove,
+                onMcpDecline,
+                onPluginApprove,
+                onPluginDecline,
+                onToolPermission,
+                onCodeSessionAccept,
+                onCodeSessionDecline,
+              )}
+            </div>,
+          )
         }
       }
       flushCodeToolBatch()
@@ -770,6 +801,8 @@ export function TurnTimeline({
                 onPluginApprove,
                 onPluginDecline,
                 onToolPermission,
+                onCodeSessionAccept,
+                onCodeSessionDecline,
               )}
             </div>,
           )
@@ -792,6 +825,8 @@ export function TurnTimeline({
         onPluginApprove,
         onPluginDecline,
         onToolPermission,
+        onCodeSessionAccept,
+        onCodeSessionDecline,
       ),
     )
   }
