@@ -10,7 +10,9 @@ from __future__ import annotations
 import json
 import os
 import platform
+import re
 import shutil
+from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -25,13 +27,81 @@ from agentos.retrieval.bundle import RetrievalBundle
 from agentos.retrieval.factory import retrieval_service_for
 from agentos.retrieval.worker import IndexWorker
 
-from .agent_tools import AgentToolset, ToolOutcome
+from .agent_tools import AgentToolset, ToolOutcome, is_verification_command
 from .browser_tools import AgentBrowserView
 from .contract import parse as parse_contract
 from .events import AgentActivityEventType
 from .phases import PhaseController
 from .runtime import AgenticLimits, AgenticTurnRuntime
 from .workspace import resolve_workspace
+
+
+_GENERIC_MODEL_TOKENS = frozenset({
+    "model", "latest", "default", "chat", "instruct", "preview",
+    "base", "pro", "mini", "nano", "fast", "v1", "v2", "v3", "v4",
+})
+
+
+def resolve_child_model_id(
+    requested: str | None,
+    current_model_id: str,
+    allowed_models: Sequence[str],
+    *,
+    model_aliases: Mapping[str, str] | None = None,
+) -> str | None:
+    """Resolve a requested subagent model ID against the current model and allowed favorites."""
+    raw = str(requested or "").strip()
+    clean_current = str(current_model_id or "").strip()
+    if not raw:
+        return clean_current
+
+    candidates: list[str] = []
+    for item in (clean_current, *allowed_models):
+        clean_item = str(item or "").strip()
+        if clean_item and clean_item not in candidates:
+            candidates.append(clean_item)
+
+    non_batch = [c for c in candidates if not c.lower().endswith(":batch")]
+    ordered_candidates = non_batch + [c for c in candidates if c.lower().endswith(":batch")]
+
+    # 1. Exact match
+    if raw in candidates:
+        return raw
+
+    # 2. Explicit alias mapping (e.g. display_name -> model_id)
+    if model_aliases:
+        raw_lower = raw.lower()
+        for alias_key, target_model in model_aliases.items():
+            if str(alias_key or "").strip().lower() == raw_lower:
+                target_clean = str(target_model or "").strip()
+                if target_clean:
+                    return target_clean
+
+    norm_raw = raw.lstrip("~").strip().lower()
+    if not norm_raw:
+        return clean_current
+
+    # 3. Match ignoring leading '~' and case-insensitive
+    for cand in ordered_candidates:
+        if cand.lstrip("~").lower() == norm_raw:
+            return cand
+
+    # 4. Match by slug without vendor prefix (e.g. 'gpt-luna-latest' -> '~openai/gpt-luna-latest')
+    for cand in ordered_candidates:
+        slug = cand.lstrip("~").split("/", 1)[-1].lower()
+        if slug == norm_raw or slug.split(":", 1)[0] == norm_raw:
+            return cand
+
+    # 5. Match by single-token alias (e.g. 'luna' -> '~openai/gpt-luna-latest', 'haiku' -> '~anthropic/claude-haiku-4-5')
+    if len(norm_raw) >= 3 and norm_raw not in _GENERIC_MODEL_TOKENS and not any(
+        sep in norm_raw for sep in ("/", "-", "_", ":", " ")
+    ):
+        for cand in ordered_candidates:
+            tokens = [t for t in re.split(r"[-_/:.]", cand.lstrip("~").lower()) if t]
+            if norm_raw in tokens:
+                return cand
+
+    return None
 
 
 MAX_SUBAGENTS_PER_TURN = 4
@@ -379,10 +449,10 @@ def build_system_prompt(
         lines += [
             "",
             "## Subagents",
-            "- For a large task with a distinct, self-contained part, create a specialist with `create_agent` and hand it that part with `ask_agent`.",
-            "- Omit `model_id` to use the current model. If you supply `model_id`, it must be one of the current provider's favorite model IDs listed below.",
-            "- When two or more delegated parts do not depend on each other, send them together with `ask_agents`; they run at the same time.",
-            "- A subagent cannot see this conversation. Put everything it needs in the task text.",
+            "- For a large task with a distinct, self-contained part, delegate with `run_subagent(subagent_type=\"explore\"|\"plan\"|\"general\"|\"fork\", task=\"...\", description=\"...\", model_id=\"...\")` or create a specialist with `create_agent` and hand it that part with `ask_agent`.",
+            "- Omit `model_id` to use the current model. If you supply `model_id`, copy the exact identifier from the favorite model IDs listed below (including the leading `~` when present).",
+            "- When two or more delegated parts do not depend on each other, send them together with `ask_agents` or parallel `run_subagent` calls; they run at the same time.",
+            "- A subagent cannot see this conversation unless `subagent_type=\"fork\"` is used. Put everything it needs in the task text.",
             "- Do not create a subagent for something you can finish yourself in a step or two.",
         ]
         if child_model_ids:
@@ -734,12 +804,66 @@ class TurnSession:
             total_tokens=total_tokens,
         )
 
-    def emit_lifecycle(self, turn: dict[str, object], state: str, *, agent_id: str | None = None, agent_name: str | None = None, **payload: object) -> None:
+    def emit_lifecycle(
+        self,
+        turn: dict[str, object] | str,
+        state: str | Mapping[str, object] | None = None,
+        *,
+        agent_id: str | None = None,
+        agent_name: str | None = None,
+        **payload: object,
+    ) -> None:
         """Translate a runtime lifecycle callback into a public activity event."""
+        if isinstance(turn, str):
+            if isinstance(state, Mapping):
+                payload = {**dict(state), **payload}
+            state_str = turn
+            turn_dict = self.turn
+        else:
+            turn_dict = turn
+            state_str = str(state or "")
+        state = state_str
         actor = agent_id or self.main_agent_id
+        is_subagent = agent_id is not None and agent_id != self.main_agent_id
         base: dict[str, object] = {"state": state}
         if agent_name:
             base["agent_name"] = agent_name
+        if state == "thinking_delta":
+            thought_event_type = getattr(
+                AgentActivityEventType,
+                "AGENT_THOUGHT_DELTA",
+                AgentActivityEventType.CONTEXT_UPDATED,
+            )
+            self._record(
+                thought_event_type,
+                "Pensando",
+                {
+                    **base,
+                    "title": "Pensando",
+                    "delta": str(payload.get("delta") or ""),
+                    "iteration": payload.get("iteration"),
+                },
+                agent_id=actor,
+            )
+            return
+        if state == "generating_tool_call":
+            tool_name = str(payload.get("tool_name") or "ferramenta")
+            call_id = payload.get("call_id") or payload.get("invocation_id") or ""
+            self._record(
+                AgentActivityEventType.TOOL_PROGRESSED,
+                f"Preparando {tool_name}...",
+                {
+                    **base,
+                    "title": str(payload.get("tool_name") or "tool"),
+                    "tool_name": payload.get("tool_name"),
+                    "call_id": call_id,
+                    "invocation_id": str(call_id),
+                    "phase": "generating_arguments",
+                    "bytes_received": int(payload.get("bytes_received") or 0),
+                },
+                agent_id=actor,
+            )
+            return
         if state == "context_updated":
             self._record(AgentActivityEventType.CONTEXT_UPDATED, "Contexto atualizado", dict(payload), agent_id=actor)
             return
@@ -764,7 +888,9 @@ class TurnSession:
                     if self._code_mode_stage != "implementing":
                         self._code_mode_stage = "implementing"
                         self._record(AgentActivityEventType.CODE_MODE_STAGE_CHANGED, "Implementando alteração", {"stage": "implementing"}, agent_id=actor)
-                elif name in {"run_command", "verify_project", "verify_frontend"}:
+                elif name in {"verify_project", "verify_frontend"} or (
+                    name == "run_command" and is_verification_command(str(payload.get("command") or ""))
+                ):
                     if self._code_mode_stage != "validating":
                         self._code_mode_stage = "validating"
                         self._record(AgentActivityEventType.CODE_MODE_VALIDATION_STARTED, "Executando validação", {"stage": "validating"}, agent_id=actor)
@@ -798,15 +924,18 @@ class TurnSession:
                 "error_code": payload.get("error_code"),
             }, agent_id=actor)
             ledger = getattr(self.store, "record_tool_call", None)
+            tool_arguments: dict[str, Any] = {}
+            if isinstance(payload.get("tool_arguments"), Mapping):
+                tool_arguments = dict(payload.get("tool_arguments") or {})  # type: ignore[arg-type]
             if callable(ledger):
                 try:
-                    tool_arguments = dict(payload.get("tool_arguments") or {})
-                    if name in {"browse_page", "fetch_url"} and isinstance(tool_arguments.get("url"), str):
+                    recorded_args = dict(tool_arguments)
+                    if name in {"browse_page", "fetch_url"} and isinstance(recorded_args.get("url"), str):
                         from .browser_tools import _safe_display_url
 
-                        tool_arguments["url"] = _safe_display_url(str(tool_arguments["url"]))
+                        recorded_args["url"] = _safe_display_url(str(recorded_args["url"]))
                     ledger(
-                        self.turn, tool_name=name, arguments=tool_arguments,
+                        self.turn, tool_name=name, arguments=recorded_args,
                         status=status, summary=summary,
                     )
                 except Exception:
@@ -814,6 +943,7 @@ class TurnSession:
             if status == "succeeded":
                 artifacts = extra.get("artifacts")
                 if isinstance(artifacts, list):
+                    artifact_verb = "Editou" if name in {"edit_file", "notebook_edit"} else "Criou"
                     for artifact in artifacts:
                         if not isinstance(artifact, dict):
                             continue
@@ -832,7 +962,7 @@ class TurnSession:
                                 artifact_payload[extra_key] = artifact[extra_key]
                         self._record(
                             AgentActivityEventType.ARTIFACT_CREATED,
-                            f"Criou {path}",
+                            f"{artifact_verb} {path}",
                             artifact_payload,
                             agent_id=actor,
                         )
@@ -867,7 +997,10 @@ class TurnSession:
                         {"stage": stage, "status": "failed" if cmd_failed else status, "error_code": payload.get("error_code")},
                         agent_id=actor,
                     )
-                elif name in {"run_command", "verify_project", "verify_frontend"}:
+                elif name in {"verify_project", "verify_frontend"} or (
+                    name == "run_command"
+                    and is_verification_command(str(extra.get("command") or tool_arguments.get("command") or ""))
+                ):
                     cmd_failed = (
                         status != "succeeded"
                         or bool(extra.get("failed"))
@@ -896,13 +1029,24 @@ class TurnSession:
             )
             return
         if state == "retrying":
-            self._record(AgentActivityEventType.TURN_STARTED, "Tentando novamente", {**base, "attempt": payload.get("attempt")}, agent_id=actor)
+            if is_subagent:
+                self._record(
+                    AgentActivityEventType.TOOL_PROGRESSED,
+                    f"{agent_name or 'Subagente'} tentando novamente",
+                    {**base, "attempt": payload.get("attempt")},
+                    agent_id=actor,
+                    parent_agent_id=self.main_agent_id,
+                )
+            else:
+                self._record(AgentActivityEventType.TURN_STARTED, "Tentando novamente", {**base, "attempt": payload.get("attempt")}, agent_id=actor)
             return
         if state == "failed":
-            self._record(AgentActivityEventType.TURN_FAILED, "Falhou", {**base, "error_code": payload.get("code")}, agent_id=actor)
+            if not is_subagent:
+                self._record(AgentActivityEventType.TURN_FAILED, "Falhou", {**base, "error_code": payload.get("code")}, agent_id=actor)
             return
         if state == "cancelled":
-            self._record(AgentActivityEventType.TURN_FAILED, "Cancelado", {**base, "error_code": "TURN_CANCELLED"}, agent_id=actor)
+            if not is_subagent:
+                self._record(AgentActivityEventType.TURN_FAILED, "Cancelado", {**base, "error_code": "TURN_CANCELLED"}, agent_id=actor)
             return
         if state == "plugin_hook":
             hook_id = str(payload.get("hook_id") or "")
@@ -917,18 +1061,44 @@ class TurnSession:
 
     # -- subagents ------------------------------------------------------
 
+    def _current_model_id(self) -> str:
+        return str(self.turn.get("model_id") or "").strip()
+
+    def _resolve_child_model(self, requested: str | None) -> str | None:
+        current_model_id = self._current_model_id()
+        resolved = resolve_child_model_id(
+            requested,
+            current_model_id,
+            self.child_model_ids,
+            model_aliases=getattr(self, "child_model_aliases", None),
+        )
+        if resolved is not None:
+            return resolved
+        clean = str(requested or "").strip()
+        if clean and self._child_model_authorizer(clean):
+            return clean
+        return None
+
+    def _allowed_child_models_hint(self) -> str:
+        current = self._current_model_id()
+        valid = [m for m in (current, *self.child_model_ids) if m]
+        deduped = list(dict.fromkeys(valid))
+        if not deduped:
+            return ""
+        return f" Valid model_ids: {', '.join(deduped)}."
+
     def _child_model_allowed(self, model_id: str, *, allow_current: bool = False) -> bool:
         """Authorize a subagent model without trusting the tool call or prompt."""
-        current_model_id = str(self.turn.get("model_id") or "")
+        current_model_id = self._current_model_id()
         return bool(model_id) and ((allow_current and model_id == current_model_id) or self._child_model_authorizer(model_id))
 
     def _create_agent(self, name: str, role: str, model_id: str | None = None) -> ToolOutcome:
         requested_model_id = str(model_id).strip() if model_id is not None else ""
-        selected_model_id = requested_model_id or str(self.turn.get("model_id") or "")
-        if not self._child_model_allowed(selected_model_id, allow_current=not requested_model_id):
+        selected_model_id = self._resolve_child_model(requested_model_id or None)
+        if not selected_model_id or not self._child_model_allowed(selected_model_id, allow_current=True):
             return ToolOutcome(
                 "failed", "Modelo de subagente nao permitido",
-                "When model_id is provided, choose one of the current provider's favorite models.",
+                "When model_id is provided, choose one of the current provider's favorite models." + self._allowed_child_models_hint(),
                 {"tool_kind": "agent"}, "CHILD_MODEL_NOT_FAVORITE",
             )
         clean = " ".join(str(name).split())[:60]
@@ -961,7 +1131,7 @@ class TurnSession:
         spec = _BUILTIN_SUBAGENT_SPECS.get(key)
         if spec is None:
             return None
-        selected_model_id = str(model_id).strip() if model_id is not None and str(model_id).strip() else str(self.turn.get("model_id") or "")
+        selected_model_id = str(model_id).strip() if model_id is not None and str(model_id).strip() else self._current_model_id()
         existing = self.agents_store.find(key) if self.agents_store is not None and hasattr(self.agents_store, "find") else None
         if existing is not None:
             merged = dict(existing)
@@ -998,17 +1168,22 @@ class TurnSession:
         description: str = "",
         model_id: str | None = None,
     ) -> ToolOutcome:
-        clean_type = str(subagent_type or "").strip().lower()
+        raw_type = str(subagent_type or "").strip()
+        clean_type = raw_type.lower()
         if clean_type == "general-purpose":
             clean_type = "general"
         if clean_type not in _BUILTIN_SUBAGENT_SPECS:
-            return ToolOutcome(
-                "failed",
-                f"Tipo de subagente inválido: {clean_type}",
-                "subagent_type must be one of 'explore', 'plan', 'general', or 'fork'.",
-                {"tool_kind": "agent"},
-                "INVALID_ARGUMENTS",
-            )
+            if raw_type and (model_id is None or not str(model_id).strip()) and self._resolve_child_model(raw_type) is not None:
+                model_id = raw_type
+                clean_type = "general"
+            else:
+                return ToolOutcome(
+                    "failed",
+                    f"Tipo de subagente inválido: {clean_type}",
+                    "subagent_type must be one of 'explore', 'plan', 'general', or 'fork'.",
+                    {"tool_kind": "agent"},
+                    "INVALID_ARGUMENTS",
+                )
         return self._ask_agent(clean_type, task, requested_model_id=model_id, description=description)
 
     def _ask_agent(
@@ -1025,21 +1200,38 @@ class TurnSession:
             builtin_key = "general"
             clean = "general"
         builtin_spec = _BUILTIN_SUBAGENT_SPECS.get(builtin_key)
+        explicit_model = str(requested_model_id).strip() if requested_model_id else ""
+        resolved_explicit: str | None = None
+        if explicit_model:
+            resolved_explicit = self._resolve_child_model(explicit_model)
+            if not resolved_explicit or not self._child_model_allowed(resolved_explicit, allow_current=True):
+                return ToolOutcome(
+                    "failed", f"Modelo de {clean} nao permitido",
+                    "This subagent is not configured with the current model or a current favorite model for this provider." + self._allowed_child_models_hint(),
+                    {"agent_name": clean, "label": clean, "tool_kind": "agent"}, "CHILD_MODEL_NOT_FAVORITE",
+                )
+
         record = self.agents_store.find(clean) if self.agents_store is not None else None
         if record is None and builtin_spec is not None:
-            record = self._ensure_builtin_subagent_record(builtin_key, model_id=requested_model_id)
+            record = self._ensure_builtin_subagent_record(builtin_key, model_id=resolved_explicit)
         if record is None:
             return ToolOutcome("failed", f"Agente {clean} não existe", f"No subagent named '{clean}'. Create it first with create_agent.", {"tool_kind": "agent"}, "AGENT_NOT_FOUND")
         # Legacy conversation-agent rows predate provider/model snapshots.
         # Treat their absent values exactly as an omitted model_id: use the
         # current turn model, never an arbitrary catalog model.
         child_provider = str(record.get("provider") or self.turn.get("provider") or "")
-        explicit_model = str(requested_model_id).strip() if requested_model_id else ""
-        child_model_id = explicit_model or str(record.get("model_id") or self.turn.get("model_id") or "")
-        if child_provider != str(self.turn.get("provider") or "") or not self._child_model_allowed(child_model_id, allow_current=not explicit_model):
+        current_model_id = self._current_model_id()
+        if builtin_spec is not None:
+            child_model_id = resolved_explicit or current_model_id
+        else:
+            raw_record_model = str(record.get("model_id") or "").strip()
+            child_model_id = resolved_explicit or (self._resolve_child_model(raw_record_model) if raw_record_model else current_model_id) or raw_record_model
+
+        provider_mismatch = child_provider != str(self.turn.get("provider") or "") and not self._child_model_allowed(child_model_id, allow_current=False)
+        if provider_mismatch or not self._child_model_allowed(child_model_id, allow_current=not explicit_model or child_model_id == current_model_id):
             return ToolOutcome(
                 "failed", f"Modelo de {clean} nao permitido",
-                "This subagent is not configured with the current model or a current favorite model for this provider.",
+                "This subagent is not configured with the current model or a current favorite model for this provider." + self._allowed_child_models_hint(),
                 {"agent_name": clean, "label": clean, "tool_kind": "agent"}, "CHILD_MODEL_NOT_FAVORITE",
             )
         with self._subagent_lock:
@@ -1047,11 +1239,15 @@ class TurnSession:
                 return ToolOutcome("failed", "Limite de subagentes atingido", "The subagent budget for this turn is exhausted; finish the work yourself.", {"tool_kind": "agent"}, "SUBAGENT_LIMIT")
             self._subagent_runs += 1
         agent_id, task_text = str(record["agent_id"]), str(task)
+        if builtin_spec is not None and record.get("model_id") != child_model_id:
+            record["model_id"] = child_model_id
+            update_model = getattr(self.agents_store, "set_model", None)
+            if callable(update_model):
+                update_model(agent_id, child_model_id)
         active_model_id = child_model_id
         try:
             child_provider_instance = self._child_provider_factory(active_model_id)
         except Exception as error:
-            current_model_id = str(self.turn.get("model_id") or "")
             if active_model_id == current_model_id:
                 raise
             # The requested favorite failed before the child could run or
@@ -1111,12 +1307,6 @@ class TurnSession:
             toolset=subagent_tools,
             system_prompt=self._subagent_prompt(enriched_record, task_text, subagent_tools),
             limits=AgenticLimits(
-                # A child belongs to the same durable turn as its parent.  A
-                # separate three-minute timer caused healthy long-running
-                # delegations to fail with TURN_DEADLINE_EXCEEDED while the
-                # parent worker was still allowed to run.  It now inherits
-                # the configured turn deadline and remains cancellable via
-                # the same durable cancellation signal.
                 deadline=self.limits.deadline,
                 max_iterations=self.limits.max_iterations,
                 max_actions=None if self.limits.max_actions is None else SUBAGENT_MAX_ACTIONS,
@@ -1126,6 +1316,58 @@ class TurnSession:
             cancelled=self.cancelled,
         )
         result = runtime.run(str(self.turn["turn_id"]), turn=subagent_turn)
+        if (
+            active_model_id != current_model_id
+            and current_model_id
+            and result.state == "failed"
+            and result.actions == 0
+            and result.error_code in {"PROVIDER_STREAM_FAILED", "PROVIDER_RETRY_EXHAUSTED", "PROVIDER_STREAM_NOT_STARTED"}
+        ):
+            failed_model_id = active_model_id
+            active_model_id = current_model_id
+            try:
+                fallback_provider_instance = self._child_provider_factory(active_model_id)
+            except Exception:
+                fallback_provider_instance = self.provider_factory()
+            update_model = getattr(self.agents_store, "set_model", None)
+            if callable(update_model):
+                update_model(agent_id, active_model_id)
+            self._record(
+                AgentActivityEventType.MODEL_ROUTING_STARTED,
+                f"Modelo de {clean} indisponivel; usando o modelo atual",
+                {
+                    "agent_name": clean,
+                    "requested_model_id": failed_model_id,
+                    "fallback_model_id": active_model_id,
+                    "reason": str(result.error_code or "PROVIDER_STREAM_FAILED"),
+                },
+                agent_id=agent_id,
+                parent_agent_id=self.main_agent_id,
+            )
+            subagent_turn = {**self.turn, "model_id": active_model_id}
+            sub_store = _SubagentStore(
+                self,
+                subagent_turn,
+                agent_id,
+                clean,
+                self._subagent_task(enriched_record, task_text),
+                initial_history=initial_history,
+            )
+            runtime = AgenticTurnRuntime(
+                store=sub_store,
+                provider=fallback_provider_instance,
+                toolset=subagent_tools,
+                system_prompt=self._subagent_prompt(enriched_record, task_text, subagent_tools),
+                limits=AgenticLimits(
+                    deadline=self.limits.deadline,
+                    max_iterations=self.limits.max_iterations,
+                    max_actions=None if self.limits.max_actions is None else SUBAGENT_MAX_ACTIONS,
+                    max_output_tokens=SUBAGENT_MAX_OUTPUT_TOKENS,
+                    max_context_tokens=self.limits.max_context_tokens,
+                ),
+                cancelled=self.cancelled,
+            )
+            result = runtime.run(str(self.turn["turn_id"]), turn=subagent_turn)
         answer = "".join(sub_store.text).strip()
         if result.state != "completed" or not answer:
             reason = result.error_code or ("SUBAGENT_EMPTY_RESPONSE" if not answer else "SUBAGENT_FAILED")

@@ -84,10 +84,49 @@ export type TodoItem = {
   active_form?: string
 }
 
+export type AgentActivityEventType =
+  | 'turn.started'
+  | 'turn.completed'
+  | 'turn.failed'
+  | 'turn.cancelled'
+  | 'turn.waiting_user'
+  | 'assistant.delta'
+  | 'assistant.completed'
+  | 'agent.thought_delta'
+  | 'agent.created'
+  | 'agent.message_sent'
+  | 'agent.message_received'
+  | 'delegation.created'
+  | 'delegation.waiting'
+  | 'delegation.completed'
+  | 'delegation.failed'
+  | 'tool.requested'
+  | 'tool.started'
+  | 'tool.progressed'
+  | 'tool.finished'
+  | 'tool.completed'
+  | 'tool.failed'
+  | 'tool.permission_required'
+  | 'artifact.created'
+  | 'context.updated'
+  | 'memory.learned'
+  | 'todo.updated'
+  | 'code_mode.activated'
+  | 'code_mode.started'
+  | 'code_mode.plan_ready'
+  | 'code_mode.validation_started'
+  | 'code_mode.completed'
+  | 'code_mode.completed_with_caveats'
+  | 'code_mode.blocked'
+  | 'code_mode.file_edited'
+  | 'code_mode.command_batch'
+  | 'code_mode.decision_required'
+  | (string & {})
+
 export type ConversationActivityEvent = {
   eventId: string
   cursor: string
-  type: string
+  type: AgentActivityEventType
   kind: ActivityKind
   state: ActivityState
   agentId: string
@@ -102,6 +141,12 @@ export type ConversationActivityEvent = {
   invocationId?: string
   status?: string
   label?: string
+  title?: string
+  detail?: string
+  delta?: string
+  phase?: string
+  bytesReceived?: number
+  payload?: Record<string, unknown>
   path?: string
   /** Normalized file path for file/plan tools. */
   filePath?: string
@@ -151,6 +196,7 @@ export type ConversationActivityEvent = {
   todos?: TodoItem[]
 }
 
+export type ActivityEvent = ConversationActivityEvent
 export type ActivityToolCall = ConversationActivityEvent
 
 export type ToolPermissionDecision = 'allow_once' | 'allow_always' | 'deny'
@@ -162,6 +208,9 @@ export type ToolPermissionRequest = {
   ruleSuggestion?: string
   command?: string
   path?: string
+  target?: string
+  reason?: string
+  state?: 'pending' | 'allowed' | 'denied'
   structuredPatch?: StructuredPatchHunk[]
   addedLines?: number
   removedLines?: number

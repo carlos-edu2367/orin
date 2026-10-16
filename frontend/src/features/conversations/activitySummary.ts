@@ -15,6 +15,33 @@ import type { ActivityGroup, ActivityState, ConversationActivityEvent } from './
  * trail. Interactive approvals and browser captures stay separate because they
  * need their own controls and preview.
  */
+export function normalizeGeneratingArgumentsEvent(
+  event: ConversationActivityEvent,
+): ConversationActivityEvent {
+  const phase = event.payload?.phase ?? event.phase
+  if (event.type !== 'tool.progressed' || phase !== 'generating_arguments') {
+    return event
+  }
+  const toolName = String(
+    event.payload?.tool_name ?? event.toolName ?? event.tool ?? event.title ?? 'ferramenta',
+  )
+  const hasCustomSummary =
+    Boolean(event.summary) &&
+    event.summary !== 'tool.progressed' &&
+    event.summary.startsWith('Preparando')
+  const summary = hasCustomSummary ? event.summary : `Preparando ${toolName}...`
+  return {
+    ...event,
+    kind: 'tool',
+    state: 'waiting_tool',
+    status: 'running',
+    toolName,
+    tool: toolName,
+    phase: 'generating_arguments',
+    summary,
+  }
+}
+
 export function summarizeActivities(events: ConversationActivityEvent[]): ActivityGroup[] {
   const groups: ActivityGroup[] = []
   const renderedCodeRuns = new Set<string>()
@@ -26,7 +53,8 @@ export function summarizeActivities(events: ConversationActivityEvent[]): Activi
     }
   }
 
-  for (const event of events) {
+  for (const rawEvent of events) {
+    const event = normalizeGeneratingArgumentsEvent(rawEvent)
     if (!isRenderable(event, settled)) continue
     if (event.turnId && firstCodeEventByTurn.has(event.turnId)) {
       const anchor = firstCodeEventByTurn.get(event.turnId)!
@@ -84,6 +112,12 @@ export function applyEventToGroup(group: ActivityGroup, event: ConversationActiv
       const existing = group.events[matchIndex]
       group.events[matchIndex] = {
         ...existing,
+        toolName: event.toolName ?? existing.toolName,
+        toolKind: event.toolKind ?? existing.toolKind,
+        status: event.status ?? existing.status,
+        phase: event.phase ?? existing.phase,
+        bytesReceived: event.bytesReceived ?? existing.bytesReceived,
+        payload: event.payload ?? existing.payload,
         summary: event.summary || existing.summary,
         outputTail: event.outputTail ?? existing.outputTail,
         elapsedMs: event.elapsedMs ?? existing.elapsedMs,
@@ -139,7 +173,26 @@ export function computeSettledEventIds(events: ConversationActivityEvent[]): Set
 
   for (const event of events) {
     const turnScope = `${event.agentId}:${event.turnId ?? ''}`
-    if (event.type === 'tool.started' || event.type === 'tool.progressed') {
+    if (event.type === 'tool.started') {
+      const list = openByTurn.get(turnScope) ?? []
+      const remaining: ConversationActivityEvent[] = []
+      for (const openEvent of list) {
+        const isPreStartProgress =
+          openEvent.type === 'tool.progressed' &&
+          (event.invocationId
+            ? openEvent.invocationId === event.invocationId || !openEvent.invocationId
+            : true)
+        if (isPreStartProgress) {
+          settled.add(openEvent.eventId)
+        } else {
+          remaining.push(openEvent)
+        }
+      }
+      remaining.push(event)
+      openByTurn.set(turnScope, remaining)
+      continue
+    }
+    if (event.type === 'tool.progressed') {
       const list = openByTurn.get(turnScope) ?? []
       list.push(event)
       openByTurn.set(turnScope, list)
@@ -162,7 +215,7 @@ export function computeSettledEventIds(events: ConversationActivityEvent[]): Set
       openByTurn.set(turnScope, remaining)
       continue
     }
-    if (TERMINAL_TURN_TYPES.has(event.type)) {
+    if (TERMINAL_TURN_TYPES.has(event.type) && !event.parentAgentId) {
       for (const [scope, list] of openByTurn.entries()) {
         if (scope === turnScope || (event.turnId && scope.endsWith(`:${event.turnId}`))) {
           for (const openEvent of list) settled.add(openEvent.eventId)
@@ -204,7 +257,7 @@ export function codeModeRunGroup(events: ConversationActivityEvent[], anchor: Co
   const runEvents = events.filter((event) => isCodeModeEvent(event) && codeModeRunKey(event) === id)
   const latest = runEvents.at(-1) ?? anchor
   const turnFailure = anchor.turnId
-    ? [...events].reverse().find((event) => event.turnId === anchor.turnId && event.type === 'turn.failed')
+    ? [...events].reverse().find((event) => event.turnId === anchor.turnId && !event.parentAgentId && event.type === 'turn.failed')
     : undefined
   const state: ActivityState =
     turnFailure?.state === 'cancelled'
@@ -226,6 +279,7 @@ export function codeModeRunGroup(events: ConversationActivityEvent[], anchor: Co
 }
 
 export function isRenderable(event: ConversationActivityEvent, settled: Set<string>): boolean {
+  if (event.type === 'agent.thought_delta' || event.type === 'AGENT_THOUGHT_DELTA') return true
   if (event.type.startsWith('context.')) return false
   if (event.kind === 'message') return false
   // A lifecycle "turn started/working" line adds nothing next to the tool rows

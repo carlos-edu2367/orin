@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react'
 import { motion, useReducedMotion } from 'motion/react'
 import type { ActivityState } from './activityTypes'
 import { activityStateLabel } from './activitySummary'
@@ -5,6 +6,8 @@ import { activityStateLabel } from './activitySummary'
 export type AgentActivityMode =
   | 'idle'
   | 'thinking'
+  | 'planning'
+  | 'responding'
   | 'reading'
   | 'writing'
   | 'terminal'
@@ -15,12 +18,13 @@ export type AgentActivityMode =
   | 'failed'
   | 'cancelled'
 
-type AgentPulseProps = {
+export type AgentPulseProps = {
   mode: AgentActivityMode
   state?: ActivityState | string
   status?: string
   active?: boolean
   detail?: string
+  activeTurnId?: string | null
 }
 
 const INACTIVE_PULSE_STATES = new Set([
@@ -29,6 +33,24 @@ const INACTIVE_PULSE_STATES = new Set([
   'cancelled',
   'canceled',
   'waiting_user',
+  'idle',
+])
+
+const KNOWN_CONVERSATION_STATES = new Set([
+  'queued',
+  'starting',
+  'running',
+  'streaming',
+  'cancelling',
+  'working',
+  'waiting_tool',
+  'waiting_agent',
+  'waiting_user',
+  'retrying',
+  'completed',
+  'failed',
+  'cancelled',
+  'canceled',
   'idle',
 ])
 
@@ -52,34 +74,90 @@ const TERMINAL_CANCELLED_EVENT_TYPES = new Set([
   'EXECUTION_CANCELED',
 ])
 
+export const STALE_RESPONDING_THRESHOLD_MS = 2500
+
+export function formatElapsed(elapsedSec: number): string {
+  const total = Math.max(0, Math.floor(elapsedSec))
+  if (total < 60) return `${total}s`
+  const minutes = Math.floor(total / 60)
+  const seconds = total % 60
+  return `${minutes}m ${seconds}s`
+}
+
 /**
  * The agent's current state, as motion rather than a spinner.
  *
  * Each mode has its own rhythm — a slow breath while thinking, a stepped pulse
  * while a command runs, a travelling dot while waiting on another agent — so the
  * shape of the work is readable from across the room. Every variant collapses to
- * a static mark under reduced motion.
+ * a static mark under reduced motion, while the shimmer label and live elapsed
+ * counter keep progress visible even when OS animations are disabled.
  */
-export function AgentPulse({ mode, state = 'working', status, active, detail }: AgentPulseProps) {
+export function AgentPulse({
+  mode,
+  state = 'working',
+  status,
+  active,
+  detail,
+  activeTurnId,
+}: AgentPulseProps) {
   const reduced = useReducedMotion()
-
-  if (
+  const isInactive =
     active === false ||
     INACTIVE_PULSE_STATES.has(mode) ||
-    (state && INACTIVE_PULSE_STATES.has(state)) ||
-    (status && INACTIVE_PULSE_STATES.has(status))
-  ) {
+    Boolean(state && INACTIVE_PULSE_STATES.has(state)) ||
+    Boolean(status && INACTIVE_PULSE_STATES.has(status))
+
+  const scopeKey = `${activeTurnId ?? '__default__'}:${isInactive ? '0' : '1'}`
+  const [clock, setClock] = useState<{ key: string; sec: number }>(() => ({
+    key: scopeKey,
+    sec: 0,
+  }))
+  const elapsedSec = clock.key === scopeKey ? clock.sec : 0
+
+  useEffect(() => {
+    if (isInactive) return undefined
+    const timer = setInterval(() => {
+      setClock((prev) => ({
+        key: scopeKey,
+        sec: prev.key === scopeKey ? prev.sec + 1 : 1,
+      }))
+    }, 1000)
+    return () => clearInterval(timer)
+  }, [isInactive, scopeKey])
+
+  if (isInactive) {
     return null
   }
 
-  const label = detail ?? modeLabel(mode, state as ActivityState)
+  const effectiveMode: AgentActivityMode =
+    mode === 'responding' && elapsedSec * 1000 >= STALE_RESPONDING_THRESHOLD_MS
+      ? 'thinking'
+      : mode
+
+  const label = detail ?? modeLabel(effectiveMode, state as ActivityState)
+  const isShimmer = effectiveMode === 'thinking' || effectiveMode === 'planning'
+  const labelClassName = isShimmer
+    ? 'agent-pulse__label agent-pulse__label--shimmer'
+    : 'agent-pulse__label'
 
   return (
-    <div className="agent-pulse" data-mode={mode} role="status" aria-live="polite">
+    <div
+      className="agent-pulse"
+      data-mode={effectiveMode}
+      data-turn-id={activeTurnId ?? undefined}
+      role="status"
+      aria-live="polite"
+    >
       <span className="agent-pulse__stage" aria-hidden="true">
-        {reduced ? <span className="agent-pulse__core" /> : <PulseFigure mode={mode} />}
+        {reduced ? <span className="agent-pulse__core" /> : <PulseFigure mode={effectiveMode} />}
       </span>
-      <span className="agent-pulse__label">{label}</span>
+      <span className={labelClassName}>{label}</span>
+      {elapsedSec >= 1 && (
+        <span className="agent-pulse__elapsed" aria-hidden="true">
+          {formatElapsed(elapsedSec)}
+        </span>
+      )}
     </div>
   )
 }
@@ -160,6 +238,8 @@ function PulseFigure({ mode }: { mode: AgentActivityMode }) {
 function modeLabel(mode: AgentActivityMode, state: ActivityState): string {
   switch (mode) {
     case 'thinking': return 'Pensando'
+    case 'planning': return 'Planejando'
+    case 'responding': return 'Respondendo'
     case 'reading': return 'Lendo arquivos'
     case 'writing': return 'Escrevendo arquivos'
     case 'terminal': return 'Executando comandos'
@@ -170,37 +250,122 @@ function modeLabel(mode: AgentActivityMode, state: ActivityState): string {
   }
 }
 
-/** Derive the visual mode from the most recent meaningful event. */
+export type PulseEventCandidate = {
+  type: string
+  toolKind?: string
+  toolName?: string
+  tool?: string
+  title?: string
+  state?: string
+  turnId?: string
+  parentAgentId?: string | null
+  occurredAt?: string
+  phase?: string
+  payload?: Record<string, unknown>
+}
+
+function resolveModeArgs(
+  secondArg?: string | null,
+  thirdArg?: string | number | null,
+  fourthArg?: number,
+): { conversationState: string; activeTurnId: string | null; nowMs: number } {
+  let conversationState = 'running'
+  let activeTurnId: string | null = null
+  let nowMs = typeof fourthArg === 'number' ? fourthArg : Date.now()
+
+  if (typeof thirdArg === 'number') {
+    nowMs = thirdArg
+  }
+
+  if (typeof secondArg === 'string' && secondArg.length > 0) {
+    if (KNOWN_CONVERSATION_STATES.has(secondArg)) {
+      conversationState = secondArg
+      if (typeof thirdArg === 'string' && thirdArg.length > 0 && !KNOWN_CONVERSATION_STATES.has(thirdArg)) {
+        activeTurnId = thirdArg
+      }
+    } else {
+      activeTurnId = secondArg
+      if (typeof thirdArg === 'string' && KNOWN_CONVERSATION_STATES.has(thirdArg)) {
+        conversationState = thirdArg
+      }
+    }
+  } else if (typeof thirdArg === 'string' && thirdArg.length > 0) {
+    if (KNOWN_CONVERSATION_STATES.has(thirdArg)) {
+      conversationState = thirdArg
+    } else {
+      activeTurnId = thirdArg
+    }
+  }
+
+  return { conversationState, activeTurnId, nowMs }
+}
+
+/** Derive the visual mode from the most recent meaningful event of the active turn. */
 export function modeFromEvents(
-  events: { type: string; toolKind?: string; toolName?: string; state: string }[],
-  conversationState: string,
+  events: PulseEventCandidate[],
+  conversationStateOrActiveTurnId?: string | null,
+  activeTurnIdOrNow?: string | number | null,
+  nowMsArg?: number,
 ): AgentActivityMode {
+  const { conversationState, activeTurnId, nowMs } = resolveModeArgs(
+    conversationStateOrActiveTurnId,
+    activeTurnIdOrNow,
+    nowMsArg,
+  )
+
   if (conversationState === 'completed') return 'completed'
   if (conversationState === 'failed') return 'failed'
   if (conversationState === 'cancelled' || conversationState === 'canceled') return 'cancelled'
   if (conversationState === 'idle' || conversationState === 'waiting_user') return 'idle'
 
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    const event = events[index]
-    if (TERMINAL_COMPLETED_EVENT_TYPES.has(event.type)) return 'completed'
-    if (TERMINAL_CANCELLED_EVENT_TYPES.has(event.type) || event.state === 'cancelled') return 'cancelled'
-    if (TERMINAL_FAILED_EVENT_TYPES.has(event.type)) return 'failed'
+  const scopedEvents = activeTurnId
+    ? events.filter((event) => event.turnId === activeTurnId)
+    : events
+
+  for (let index = scopedEvents.length - 1; index >= 0; index -= 1) {
+    const event = scopedEvents[index]
+    if (event.type.startsWith('context.')) continue
+
+    if (!event.parentAgentId) {
+      if (TERMINAL_COMPLETED_EVENT_TYPES.has(event.type)) return 'completed'
+      if (TERMINAL_CANCELLED_EVENT_TYPES.has(event.type) || event.state === 'cancelled') return 'cancelled'
+      if (TERMINAL_FAILED_EVENT_TYPES.has(event.type)) return 'failed'
+    }
+
     if (event.type === 'turn.waiting_user' || event.type === 'tool.permission_required' || event.state === 'waiting_user') {
       return 'idle'
     }
+    if (event.type === 'agent.thought_delta' || event.type === 'AGENT_THOUGHT_DELTA') {
+      return 'thinking'
+    }
+    if (event.type === 'assistant.delta' || event.type === 'ASSISTANT_DELTA') {
+      if (event.occurredAt) {
+        const occurredMs = Date.parse(event.occurredAt)
+        if (Number.isFinite(occurredMs) && nowMs - occurredMs >= STALE_RESPONDING_THRESHOLD_MS) {
+          return 'thinking'
+        }
+      }
+      return 'responding'
+    }
     if (event.type === 'agent.message_sent') return 'waiting_agent'
     if (event.type === 'tool.started' || event.type === 'tool.progressed') {
-      if (INACTIVE_PULSE_STATES.has(event.state)) return 'thinking'
-      switch (event.toolKind ?? toolKindOf(event.toolName)) {
+      const phase = event.payload?.phase ?? event.phase
+      if (event.type === 'tool.progressed' && phase === 'generating_arguments') {
+        return 'thinking'
+      }
+      if (event.state && INACTIVE_PULSE_STATES.has(event.state)) return 'thinking'
+      switch (event.toolKind ?? toolKindOf(event.toolName ?? event.tool)) {
         case 'terminal': return 'terminal'
         case 'web':
         case 'browser': return 'browsing'
         case 'memory': return 'remembering'
         case 'agent': return 'waiting_agent'
-        case 'filesystem':
-          return event.toolName === 'write_file' || event.toolName === 'edit_file' || event.toolName === 'notebook_edit'
+        case 'filesystem': {
+          const name = event.toolName ?? event.tool
+          return name === 'write_file' || name === 'edit_file' || name === 'notebook_edit'
             ? 'writing'
             : 'reading'
+        }
         default: return 'thinking'
       }
     }
@@ -234,4 +399,5 @@ function toolKindOf(toolName: string | undefined): string | undefined {
       return undefined
   }
 }
+
 

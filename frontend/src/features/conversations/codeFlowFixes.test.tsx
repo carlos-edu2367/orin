@@ -297,4 +297,27 @@ describe('Code Flow Bug Fixes (Frontend)', () => {
       expect(btn).toBeDisabled()
     }
   })
+
+  it('CodeToolCallBlock includes payload.model_id or payload.subagent_type in run_subagent Task signature', () => {
+    const subagentEvent = {
+      eventId: 'evt-subagent-luna',
+      cursor: '35',
+      type: 'tool.finished',
+      kind: 'tool',
+      state: 'completed',
+      status: 'succeeded',
+      agentId: 'main',
+      toolName: 'run_subagent',
+      label: 'Copy PT-BR',
+      summary: 'Executou subagente Copy PT-BR',
+      payload: {
+        subagent_type: 'general',
+        model_id: '~openai/gpt-luna-latest',
+      },
+    } as unknown as ConversationActivityEvent
+
+    render(<CodeToolCallBlock event={subagentEvent} />)
+    const block = screen.getByTestId('code-tool-call-block')
+    expect(block).toHaveTextContent('Task(Copy PT-BR · ~openai/gpt-luna-latest)')
+  })
 })

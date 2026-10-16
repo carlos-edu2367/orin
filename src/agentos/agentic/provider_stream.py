@@ -15,7 +15,17 @@ import httpx
 
 from agentos.providers.models import FinishReason, ProviderError, ProviderErrorCategory, ProviderUsage, Retryability
 
-from .provider_content import project_messages
+from .provider_content import project_messages as _raw_project_messages
+
+
+def project_messages(messages: Iterable[Mapping[str, Any]], provider: str) -> list[dict[str, Any]]:
+    projected = _raw_project_messages(messages, provider)
+    return [
+        {k: v for k, v in item.items() if not str(k).startswith("_")}
+        if isinstance(item, Mapping)
+        else item
+        for item in projected
+    ]
 
 
 # Anthropic rejects a request without max_tokens, so a turn that configures no
@@ -27,6 +37,8 @@ ANTHROPIC_REQUIRED_MAX_TOKENS = 8192
 
 class StreamKind(StrEnum):
     TEXT = "text"
+    TEXT_DELTA = "text"
+    THINKING = "thinking"
     TOOL_CALL = "tool-call"
     USAGE = "usage"
     FINISH = "finish"
@@ -53,7 +65,7 @@ class ProviderKeyRejected(Exception):
 @dataclass(frozen=True, slots=True)
 class NormalizedStreamItem:
     kind: StreamKind
-    sequence: int
+    sequence: int = 1
     text: str | None = None
     thinking: str | None = None
     tool_call_id: str | None = None
@@ -64,11 +76,20 @@ class NormalizedStreamItem:
     finish_reason: FinishReason | None = None
     rate_limit: RateLimitInfo | None = None
     error: ProviderError | None = None
+    call_id: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "kind", StreamKind(self.kind))
+        if self.tool_call_id is None and self.call_id is not None:
+            object.__setattr__(self, "tool_call_id", self.call_id)
+        elif self.call_id is None and self.tool_call_id is not None:
+            object.__setattr__(self, "call_id", self.tool_call_id)
         if self.finish_reason is not None and not isinstance(self.finish_reason, FinishReason):
             object.__setattr__(self, "finish_reason", _finish(self.finish_reason))
+
+
+NormalizedStreamEvent = NormalizedStreamItem
+
 
 
 def _anthropic_tool_choice(value: object) -> dict[str, str]:
@@ -166,17 +187,41 @@ def project_rate_limit_headers(headers: Mapping[str, str]) -> RateLimitInfo:
     return RateLimitInfo(integer("x-ratelimit-remaining", "x-ratelimit-remaining-requests"), integer("x-ratelimit-reset", "retry-after"), integer("x-ratelimit-limit", "x-ratelimit-limit-requests"))
 
 
+def _tag_prefix_len(text: str, tag: str) -> int:
+    max_check = min(len(text), len(tag) - 1)
+    for k in range(max_check, 0, -1):
+        if text.endswith(tag[:k]):
+            return k
+    return 0
+
+
 def normalize_sse(lines: Iterable[str | bytes], *, provider: str) -> Iterator[NormalizedStreamItem]:
     """Normalize OpenAI-compatible/OpenRouter and Anthropic SSE lines."""
     sequence = 0
     anthropic_tools: dict[int, tuple[str, str]] = {}
     openai_tools: dict[int, str] = {}
+    in_think_tag = False
+    think_tag_buffer = ""
+
+    def flush_think_tag_buffer() -> Iterator[NormalizedStreamItem]:
+        nonlocal sequence, think_tag_buffer
+        if think_tag_buffer:
+            pending = think_tag_buffer
+            think_tag_buffer = ""
+            sequence += 1
+            if in_think_tag:
+                yield NormalizedStreamItem(StreamKind.THINKING, sequence, thinking=pending)
+            else:
+                yield NormalizedStreamItem(StreamKind.TEXT, sequence, text=pending)
+
     for raw in lines:
         line = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
         if not line.startswith("data:"):
             continue
         body = line[5:].strip()
         if not body or body == "[DONE]":
+            if body == "[DONE]":
+                yield from flush_think_tag_buffer()
             continue
         try:
             payload = json.loads(body)
@@ -194,9 +239,13 @@ def normalize_sse(lines: Iterable[str | bytes], *, provider: str) -> Iterator[No
             event_type = payload.get("type")
             if event_type == "content_block_start":
                 block = payload.get("content_block") or {}
-                if isinstance(block, Mapping) and block.get("type") == "tool_use":
-                    index = int(payload.get("index", 0))
-                    anthropic_tools[index] = (str(block.get("id") or f"tool-call:{index}"), str(block.get("name") or ""))
+                if isinstance(block, Mapping):
+                    if block.get("type") == "tool_use":
+                        index = int(payload.get("index", 0))
+                        anthropic_tools[index] = (str(block.get("id") or f"tool-call:{index}"), str(block.get("name") or ""))
+                    elif block.get("type") == "thinking" and isinstance(block.get("thinking"), str) and block["thinking"]:
+                        sequence += 1
+                        yield NormalizedStreamItem(StreamKind.THINKING, sequence, thinking=block["thinking"])
                 continue
             if event_type == "content_block_delta":
                 delta = payload.get("delta") or {}
@@ -205,6 +254,9 @@ def normalize_sse(lines: Iterable[str | bytes], *, provider: str) -> Iterator[No
                 if delta.get("type") == "text_delta" and isinstance(delta.get("text"), str):
                     sequence += 1
                     yield NormalizedStreamItem(StreamKind.TEXT, sequence, text=delta["text"])
+                elif delta.get("type") == "thinking_delta" and isinstance(delta.get("thinking"), str) and delta["thinking"]:
+                    sequence += 1
+                    yield NormalizedStreamItem(StreamKind.THINKING, sequence, thinking=delta["thinking"])
                 elif delta.get("type") == "input_json_delta":
                     index = int(payload.get("index", 0))
                     call_id, name = anthropic_tools.get(index, (f"tool-call:{index}", ""))
@@ -222,12 +274,70 @@ def normalize_sse(lines: Iterable[str | bytes], *, provider: str) -> Iterator[No
         choice = choices[0] if choices and isinstance(choices[0], Mapping) else {}
         delta = choice.get("delta") if isinstance(choice, Mapping) else {}
         if isinstance(delta, Mapping):
-            if isinstance(delta.get("content"), str) and delta["content"]:
+            reasoning_piece = ""
+            for key in ("reasoning_content", "reasoning", "thinking"):
+                val = delta.get(key)
+                if isinstance(val, str) and val:
+                    reasoning_piece = val
+                    break
+            if not reasoning_piece and isinstance(delta.get("reasoning_details"), list):
+                detail_texts = [
+                    str(d.get("text") or "")
+                    for d in delta["reasoning_details"]
+                    if isinstance(d, Mapping) and isinstance(d.get("text"), str) and d.get("text")
+                ]
+                reasoning_piece = "".join(detail_texts)
+            if reasoning_piece:
                 sequence += 1
-                yield NormalizedStreamItem(StreamKind.TEXT, sequence, text=delta["content"])
+                yield NormalizedStreamItem(StreamKind.THINKING, sequence, thinking=reasoning_piece)
+
+            if isinstance(delta.get("content"), str) and delta["content"]:
+                buf = think_tag_buffer + delta["content"]
+                think_tag_buffer = ""
+                while buf:
+                    if not in_think_tag:
+                        if "<think>" in buf:
+                            before, after = buf.split("<think>", 1)
+                            if before:
+                                sequence += 1
+                                yield NormalizedStreamItem(StreamKind.TEXT, sequence, text=before)
+                            in_think_tag = True
+                            buf = after
+                            continue
+                        prefix_len = _tag_prefix_len(buf, "<think>")
+                        if prefix_len > 0:
+                            emit_part = buf[:-prefix_len]
+                            think_tag_buffer = buf[-prefix_len:]
+                        else:
+                            emit_part = buf
+                        if emit_part:
+                            sequence += 1
+                            yield NormalizedStreamItem(StreamKind.TEXT, sequence, text=emit_part)
+                        break
+                    else:
+                        if "</think>" in buf:
+                            thinking_part, after = buf.split("</think>", 1)
+                            if thinking_part:
+                                sequence += 1
+                                yield NormalizedStreamItem(StreamKind.THINKING, sequence, thinking=thinking_part)
+                            in_think_tag = False
+                            buf = after
+                            continue
+                        prefix_len = _tag_prefix_len(buf, "</think>")
+                        if prefix_len > 0:
+                            emit_part = buf[:-prefix_len]
+                            think_tag_buffer = buf[-prefix_len:]
+                        else:
+                            emit_part = buf
+                        if emit_part:
+                            sequence += 1
+                            yield NormalizedStreamItem(StreamKind.THINKING, sequence, thinking=emit_part)
+                        break
+
             for item in delta.get("tool_calls") or ():
                 if not isinstance(item, Mapping):
                     continue
+                yield from flush_think_tag_buffer()
                 function = item.get("function") if isinstance(item.get("function"), Mapping) else {}
                 sequence += 1
                 index = int(item.get("index", 0))
@@ -238,8 +348,10 @@ def normalize_sse(lines: Iterable[str | bytes], *, provider: str) -> Iterator[No
             sequence += 1
             yield NormalizedStreamItem(StreamKind.USAGE, sequence, usage=_usage(payload["usage"]), cost=_cost(payload.get("cost")))
         if isinstance(choice, Mapping) and choice.get("finish_reason") is not None:
+            yield from flush_think_tag_buffer()
             sequence += 1
             yield NormalizedStreamItem(StreamKind.FINISH, sequence, finish_reason=_finish(choice["finish_reason"]))
+    yield from flush_think_tag_buffer()
 
 
 def normalize_ndjson(lines: Iterable[str | bytes]) -> Iterator[NormalizedStreamItem]:
@@ -298,6 +410,9 @@ def normalize_ndjson(lines: Iterable[str | bytes]) -> Iterator[NormalizedStreamI
             thinking = message.get("thinking")
             if isinstance(thinking, str) and thinking:
                 thinking_parts.append(thinking)
+                if payload.get("done") is not True:
+                    sequence += 1
+                    yield NormalizedStreamItem(StreamKind.THINKING, sequence, thinking=thinking)
             content = message.get("content")
             if isinstance(content, str) and content:
                 sequence += 1
@@ -365,7 +480,7 @@ def normalize_ndjson(lines: Iterable[str | bytes]) -> Iterator[NormalizedStreamI
 
 class HTTPProviderStreamTransport:
     """Small, injectable HTTP transport used only by the worker/runtime edge."""
-    def __init__(self, *, provider: str, base_url: str, api_key: str, model: str, client: httpx.Client | None = None, num_ctx: int | None = None) -> None:
+    def __init__(self, base_url: str = "", api_key: str = "", model: str = "", *, provider: str = "openai", client: httpx.Client | None = None, num_ctx: int | None = None) -> None:
         self.provider, self.base_url, self.model = provider, base_url.rstrip("/"), model
         self._api_key = api_key
         self._num_ctx = num_ctx
@@ -544,7 +659,7 @@ class HTTPProviderStreamTransport:
                     "content": str(message.get("content") or ""),
                 })
                 continue
-            converted.append(dict(message))
+            converted.append({k: v for k, v in message.items() if not str(k).startswith("_")})
         return converted
 
     def _ollama_request(self, messages: list, tools: list, tool_choice: object, requested: object) -> tuple[str, dict[str, str], dict[str, object]]:
@@ -611,4 +726,16 @@ class HTTPProviderStreamTransport:
             self._client.close()
 
 
-__all__ = ["ANTHROPIC_REQUIRED_MAX_TOKENS", "HTTPProviderStreamTransport", "NormalizedStreamItem", "ProviderKeyRejected", "RateLimitInfo", "StreamKind", "normalize_ndjson", "normalize_sse", "project_rate_limit_headers"]
+__all__ = [
+    "ANTHROPIC_REQUIRED_MAX_TOKENS",
+    "HTTPProviderStreamTransport",
+    "NormalizedStreamEvent",
+    "NormalizedStreamItem",
+    "ProviderKeyRejected",
+    "RateLimitInfo",
+    "StreamKind",
+    "normalize_ndjson",
+    "normalize_sse",
+    "project_messages",
+    "project_rate_limit_headers",
+]

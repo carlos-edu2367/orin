@@ -523,11 +523,24 @@ export function formatToolSignature(
           : cleanLabel || event.summary || 'tarefas'
       return { verb: 'TodoWrite', arg }
     }
-    case 'run_subagent':
+    case 'run_subagent': {
+      const baseArg = event.agentName || cleanLabel || event.summary || 'subagente'
+      const rawModel =
+        typeof event.payload?.model_id === 'string' && event.payload.model_id.trim()
+          ? event.payload.model_id.trim()
+          : typeof event.payload?.subagent_type === 'string' && event.payload.subagent_type.trim()
+            ? event.payload.subagent_type.trim()
+            : ''
+      const modelSuffix = rawModel
+        ? rawModel.includes('/') && !rawModel.startsWith('~')
+          ? `~${rawModel}`
+          : rawModel
+        : ''
       return {
         verb: 'Task',
-        arg: event.agentName || cleanLabel || event.summary || 'subagente',
+        arg: modelSuffix ? `${baseArg} · ${modelSuffix}` : baseArg,
       }
+    }
     case 'verify_project':
     case 'verify_frontend':
       return {

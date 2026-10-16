@@ -226,4 +226,166 @@ describe('conversation activity reducer', () => {
     expect(state.status).toBe('failed')
     expect(state.todos.map((t) => t.status)).toEqual(['completed', 'pending', 'pending'])
   })
+
+  it('ignores subagent turn.failed and turn.completed events (parentAgentId set) when resolving parent turn outcome', () => {
+    let state = applyActivityEvent(createActivityState(), {
+      eventId: 'evt-parent-start',
+      cursor: '1',
+      turnId: 'turn-parent-1',
+      type: 'turn.started',
+      kind: 'lifecycle',
+      state: 'working',
+      agentId: 'agent:c:main',
+      summary: 'Parent turn started',
+    })
+
+    state = applyActivityEvent(state, {
+      eventId: 'evt-parent-tool',
+      cursor: '2',
+      turnId: 'turn-parent-1',
+      type: 'tool.started',
+      kind: 'tool',
+      state: 'waiting_tool',
+      status: 'running',
+      toolName: 'run_subagent',
+      agentId: 'agent:c:main',
+      summary: 'Delegando para subagente',
+      todos: [{ id: '1', content: 'Delegar', status: 'in_progress' }],
+    })
+
+    // Subagent fails with parentAgentId populated on the same turnId
+    state = applyActivityEvent(state, {
+      eventId: 'evt-sub-fail',
+      cursor: '3',
+      turnId: 'turn-parent-1',
+      type: 'turn.failed',
+      kind: 'lifecycle',
+      state: 'failed',
+      agentId: 'agent:c:sub-luna',
+      parentAgentId: 'agent:c:main',
+      errorCode: 'PROVIDER_STREAM_FAILED',
+      summary: 'Subagent failed',
+    })
+
+    // Parent turn must remain running and its open tool/todos must not be settled prematurely
+    expect(state.status).toBe('running')
+    expect(state.events.find((e) => e.eventId === 'evt-parent-tool')?.state).toBe('waiting_tool')
+    expect(state.events.find((e) => e.eventId === 'evt-parent-tool')?.status).toBe('running')
+    expect(state.todos[0].status).toBe('in_progress')
+
+    // When the parent turn subsequently completes, it must settle as completed (not poisoned by subagent failure)
+    state = applyActivityEvent(state, {
+      eventId: 'evt-parent-complete',
+      cursor: '4',
+      turnId: 'turn-parent-1',
+      type: 'turn.completed',
+      kind: 'lifecycle',
+      state: 'completed',
+      agentId: 'agent:c:main',
+      summary: 'Turn completed',
+    })
+
+    expect(state.status).toBe('completed')
+    expect(state.todos[0].status).toBe('completed')
+  })
+
+  it('preserves all structural tool, artifact, code_mode and prepend_older events when 1500+ assistant.delta or agent.thought_delta events arrive', () => {
+    let state = activityReducer(createActivityState(), {
+      type: 'prepend_older',
+      events: [
+        {
+          eventId: 'older-tool-1',
+          cursor: '1',
+          turnId: 'turn-0',
+          type: 'tool.finished',
+          kind: 'tool',
+          state: 'completed',
+          agentId: 'agent:c:main',
+          toolName: 'read_file',
+          summary: 'Leu README.md',
+        },
+      ],
+    })
+
+    const structuralIds = ['code-act-1', 'tool-start-1', 'tool-fin-1', 'artifact-1']
+    state = applyActivityEvent(state, {
+      eventId: 'code-act-1',
+      cursor: '2',
+      turnId: 'turn-1',
+      type: 'code_mode.activated',
+      kind: 'lifecycle',
+      state: 'working',
+      agentId: 'agent:c:main',
+      summary: 'Modo Code ativado',
+    })
+    state = applyActivityEvent(state, {
+      eventId: 'tool-start-1',
+      cursor: '3',
+      turnId: 'turn-1',
+      type: 'tool.started',
+      kind: 'tool',
+      state: 'waiting_tool',
+      agentId: 'agent:c:main',
+      toolName: 'write_file',
+      summary: 'Escrevendo app.tsx',
+    })
+    state = applyActivityEvent(state, {
+      eventId: 'tool-fin-1',
+      cursor: '4',
+      turnId: 'turn-1',
+      type: 'tool.finished',
+      kind: 'tool',
+      state: 'completed',
+      agentId: 'agent:c:main',
+      toolName: 'write_file',
+      summary: 'Escreveu app.tsx',
+    })
+    state = applyActivityEvent(state, {
+      eventId: 'artifact-1',
+      cursor: '5',
+      turnId: 'turn-1',
+      type: 'artifact.created',
+      kind: 'artifact',
+      state: 'completed',
+      agentId: 'agent:c:main',
+      path: 'app.tsx',
+      summary: 'Criou app.tsx',
+    })
+
+    let cursorCounter = 6
+    for (let i = 0; i < 800; i += 1) {
+      state = applyActivityEvent(state, {
+        eventId: `thought-${i}`,
+        cursor: String(cursorCounter++),
+        turnId: 'turn-1',
+        type: 'agent.thought_delta',
+        kind: 'lifecycle',
+        state: 'working',
+        agentId: 'agent:c:main',
+        summary: 'Pensando',
+        detail: `raciocinio ${i} `,
+      })
+    }
+    for (let i = 0; i < 800; i += 1) {
+      state = applyActivityEvent(state, {
+        eventId: `delta-${i}`,
+        cursor: String(cursorCounter++),
+        turnId: 'turn-1',
+        type: 'assistant.delta',
+        kind: 'message',
+        state: 'working',
+        agentId: 'agent:c:main',
+        messageId: 'msg-1',
+        content: `palavra ${i} `,
+        summary: '',
+      })
+    }
+
+    const presentIds = new Set(state.events.map((e) => e.eventId))
+    expect(presentIds.has('older-tool-1')).toBe(true)
+    for (const id of structuralIds) {
+      expect(presentIds.has(id)).toBe(true)
+    }
+  })
 })
+

@@ -899,4 +899,127 @@ describe('ChatPage', () => {
     expect(await screen.findByRole('button', { name: 'Copiar resposta' })).toBeInTheDocument()
     expect(screen.getAllByText('Execução cancelada')).toHaveLength(1)
   })
+
+  it('does not erase streamed assistant text when code_mode.validation_started arrives (P0-2) and renders shimmer on empty streaming bubble', async () => {
+    let emitEvents: () => void = () => {}
+    let closeStream: () => void = () => {}
+    globalThis.fetch = vi.fn<typeof fetch>().mockImplementation(async (input) => {
+      const url = typeof input === 'string' ? input : String(input)
+      if (url.includes('/events?')) {
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            closeStream = () => controller.close()
+            emitEvents = () => {
+              controller.enqueue(
+                new TextEncoder().encode(
+                  `id: a.10\nevent: assistant.delta\ndata: ${JSON.stringify(activity(10, 'assistant.delta', 'Explicação importante', { message_id: 'msg-1', content: 'Explicação importante antes da validação.' }))}\n\n` +
+                    `id: a.11\nevent: code_mode.validation_started\ndata: ${JSON.stringify(activity(11, 'code_mode.validation_started', 'Executando validação', { stage: 'validating' }))}\n\n`,
+                ),
+              )
+            }
+          },
+        })
+        return new Response(body, { headers: { 'Content-Type': 'text/event-stream' } })
+      }
+      if (url.endsWith('/v1/projects/sidebar') || url.endsWith('/v1/conversations')) {
+        return new Response(JSON.stringify({ items: [] }), { headers: { 'Content-Type': 'application/json' } })
+      }
+      if (url.includes(`/v1/conversations/${CONVERSATION_ID}`)) {
+        return new Response(
+          JSON.stringify(
+            snapshotBody({
+              state: 'running',
+              messages: [{ message_id: 'msg-1', role: 'assistant', content: '', status: 'streaming', retryable: false }],
+              activities: [],
+            }),
+          ),
+          { headers: { 'Content-Type': 'application/json' } },
+        )
+      }
+      return new Response('{}', { headers: { 'Content-Type': 'application/json' } })
+    })
+
+    renderChat()
+
+    const shimmer = await screen.findByText('Pensando…')
+    expect(shimmer).toHaveClass('agent-pulse__label--shimmer')
+
+    emitEvents()
+
+    await waitFor(() => {
+      expect(screen.getByText('Explicação importante antes da validação.')).toBeInTheDocument()
+    })
+    closeStream()
+  })
+
+  it('renders CodePermissionDock in .chat__foot for pending toolPermission and lets Escape deny permission instead of cancelling the turn', async () => {
+    const cancelled = vi.fn()
+    const permissionPosts: Array<Record<string, unknown>> = []
+    globalThis.fetch = vi.fn<typeof fetch>().mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : String(input)
+      const method = (init?.method ?? 'GET').toUpperCase()
+      if (url.includes('/events?')) {
+        return new Response('event: heartbeat\ndata: {"cursor":"a.9"}\n\n', {
+          headers: { 'Content-Type': 'text/event-stream' },
+        })
+      }
+      if (url.includes('/cancel')) {
+        cancelled()
+        return new Response(JSON.stringify({ conversation_id: CONVERSATION_ID, cancelling: ['turn-1'] }), {
+          status: 202,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      if (url.includes('/tool-permission') && method === 'POST') {
+        const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>
+        permissionPosts.push(body)
+        return new Response(
+          JSON.stringify({ request_id: body.request_id, decision: body.decision, allowed: body.decision !== 'deny' }),
+          { headers: { 'Content-Type': 'application/json' } },
+        )
+      }
+      if (url.endsWith('/v1/projects/sidebar') || url.endsWith('/v1/conversations')) {
+        return new Response(JSON.stringify({ items: [] }), { headers: { 'Content-Type': 'application/json' } })
+      }
+      if (url.includes(`/v1/conversations/${CONVERSATION_ID}`)) {
+        return new Response(
+          JSON.stringify({
+            ...snapshotBody({
+              state: 'running',
+              messages: [{ message_id: 'msg-1', role: 'user', content: 'Rode o túnel', status: 'completed', retryable: false }],
+              activities: [
+                activity(1, 'code_mode.decision_required', 'Permissão necessária', {
+                  stage: 'waiting_decision',
+                  permission_request: {
+                    request_id: 'perm_dock_1',
+                    turn_id: 'turn-1',
+                    tool_name: 'run_command',
+                    command: 'npx vite --port 5173',
+                    suggested_rule: 'run_command(npx vite:*)',
+                  },
+                }),
+              ],
+            }),
+            mode: 'code',
+          }),
+          { headers: { 'Content-Type': 'application/json' } },
+        )
+      }
+      return new Response('{}', { headers: { 'Content-Type': 'application/json' } })
+    })
+
+    renderChat()
+
+    const dock = await screen.findByTestId('code-permission-dock')
+    expect(dock).toBeInTheDocument()
+    expect(screen.getByTestId('chat-composer')).toContainElement(dock)
+
+    fireEvent.keyDown(window, { key: 'Escape' })
+    await waitFor(() => {
+      expect(permissionPosts).toContainEqual(
+        expect.objectContaining({ request_id: 'perm_dock_1', decision: 'deny' }),
+      )
+    })
+    expect(cancelled).not.toHaveBeenCalled()
+  })
 })

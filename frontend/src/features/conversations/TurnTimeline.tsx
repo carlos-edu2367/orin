@@ -13,13 +13,29 @@ import { enrichEventsWithStartedMetadata, type TimelineItem } from './turnTimeli
 import type { ActivityGroup, ConversationActivityEvent, ToolPermissionDecision } from './activityTypes'
 import type { UserQuestionAnswer } from './UserQuestionCard'
 
+export type TimelineThoughtData = {
+  id: string
+  turnId?: string
+  content: string
+  status: 'streaming' | 'completed'
+  startedAt?: number | string
+  endedAt?: number | string
+  durationMs?: number
+}
+
+export type TimelineRenderItem =
+  | TimelineItem
+  | { id: string; kind: 'thought'; thought: TimelineThoughtData }
+
 export type TurnTimelineProps = {
-  items?: TimelineItem[]
+  items?: TimelineRenderItem[]
   events?: ConversationActivityEvent[]
   conversationId?: string
   client?: ApiClient
   mode?: ConversationMode
   permissionMode?: CodePermissionMode
+  turnCompleted?: boolean
+  dockActive?: boolean
   onPreview?: WorkspaceFilePreviewHandler
   onOpenFile?: (path: string) => void
   openQuestionTurnIds?: ReadonlySet<string>
@@ -140,7 +156,7 @@ function normalizeCodeToolEvent(event: ConversationActivityEvent): ConversationA
   return { ...event, toolName }
 }
 
-function turnModifiedTurnId(items: TimelineItem[]): string | null {
+function turnModifiedTurnId(items: TimelineRenderItem[]): string | null {
   for (const item of items) {
     if (item.kind !== 'activity') continue
     for (const event of item.group.events) {
@@ -156,6 +172,93 @@ function turnModifiedTurnId(items: TimelineItem[]): string | null {
     }
   }
   return null
+}
+
+function formatPermissionReceiptLabel(event: ConversationActivityEvent): string {
+  const perm = event.toolPermission as
+    | (NonNullable<ConversationActivityEvent['toolPermission']> & { target?: string })
+    | undefined
+  const toolName = perm?.toolName || resolveEventToolName(event) || 'tool'
+  const rawTarget =
+    perm?.command ||
+    perm?.path ||
+    perm?.target ||
+    event.command ||
+    event.filePath ||
+    event.path ||
+    ''
+  const compactTarget = rawTarget.length > 72 ? `${rawTarget.slice(0, 69)}…` : rawTarget
+
+  if (toolName === 'run_command' || toolName === 'bash') {
+    return compactTarget ? `Bash(${compactTarget})` : 'Bash'
+  }
+  if (toolName === 'edit_file' || toolName === 'notebook_edit') {
+    return compactTarget ? `Update(${compactTarget})` : 'Update'
+  }
+  if (toolName === 'write_file') {
+    return compactTarget ? `Write(${compactTarget})` : 'Write'
+  }
+  return compactTarget ? `${toolName}(${compactTarget})` : toolName
+}
+
+function ThoughtBlock({
+  thought,
+  turnCompleted = false,
+}: {
+  thought: TimelineThoughtData
+  turnCompleted?: boolean
+}) {
+  const isStreaming = thought.status === 'streaming' && !turnCompleted
+  const [expanded, setExpanded] = useState(false)
+
+  const durationSeconds =
+    typeof thought.durationMs === 'number' && Number.isFinite(thought.durationMs) && thought.durationMs >= 500
+      ? Math.max(1, Math.round(thought.durationMs / 1000))
+      : null
+
+  if (isStreaming) {
+    return (
+      <div
+        className="thought-block thought-block--streaming"
+        data-testid="thought-block-streaming"
+      >
+        <div className="thought-block__header">
+          <span className="agent-pulse__dot" aria-hidden="true" />
+          <span className="agent-pulse__label--shimmer">Pensando...</span>
+        </div>
+        {thought.content && (
+          <div className="thought-block__body">
+            {thought.content}
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  const summaryLabel = durationSeconds !== null ? `Pensou por ${durationSeconds}s` : 'Pensou'
+
+  return (
+    <div
+      className="thought-block thought-block--completed"
+      data-testid="thought-block-completed"
+    >
+      <button
+        type="button"
+        onClick={() => setExpanded((prev) => !prev)}
+        aria-expanded={expanded}
+        data-testid="thought-block-toggle"
+        className="thought-block__toggle"
+      >
+        <span aria-hidden="true">{expanded ? '▾' : '▸'}</span>
+        <span>{summaryLabel}</span>
+      </button>
+      {expanded && thought.content && (
+        <div className="thought-block__body">
+          {thought.content}
+        </div>
+      )}
+    </div>
+  )
 }
 
 function RepeatedToolFailureGroup({
@@ -281,6 +384,8 @@ export function TurnTimeline({
   client,
   mode,
   permissionMode,
+  turnCompleted = false,
+  dockActive = false,
   onPreview,
   onOpenFile,
   openQuestionTurnIds,
@@ -303,7 +408,7 @@ export function TurnTimeline({
   const [rewound, setRewound] = useState(false)
   const [rewindError, setRewindError] = useState<string | null>(null)
 
-  const resolvedItems: TimelineItem[] = useMemo(() => {
+  const resolvedItems: TimelineRenderItem[] = useMemo(() => {
     if (items) return items
     if (!events) return []
     const enriched = enrichEventsWithStartedMetadata(events)
@@ -505,6 +610,77 @@ export function TurnTimeline({
     )
   }
 
+  function renderToolPermissionTimelineNode(
+    event: ConversationActivityEvent,
+    group: ActivityGroup,
+  ): ReactNode {
+    if (isPlanApprovalEvent(event, permissionMode)) {
+      return renderPlanApproval(event, group)
+    }
+
+    const perm = event.toolPermission as
+      | (NonNullable<ConversationActivityEvent['toolPermission']> & {
+          state?: 'pending' | 'allowed' | 'denied'
+        })
+      | undefined
+    const permState =
+      perm?.state ??
+      (event.state === 'completed'
+        ? 'allowed'
+        : event.state === 'failed' || event.state === 'cancelled'
+          ? 'denied'
+          : 'pending')
+    const toolLabel = formatPermissionReceiptLabel(event)
+
+    if (permState === 'allowed') {
+      return (
+        <div
+          key={event.eventId}
+          className="perm-receipt perm-receipt--allowed"
+          data-testid="perm-receipt-allowed"
+        >
+          ✓ Permissão concedida · {toolLabel}
+        </div>
+      )
+    }
+
+    if (permState === 'denied') {
+      return (
+        <div
+          key={event.eventId}
+          className="perm-receipt perm-receipt--denied"
+          data-testid="perm-receipt-denied"
+        >
+          ✕ Permissão negada · {toolLabel}
+        </div>
+      )
+    }
+
+    return (
+      <div key={event.eventId}>
+        <div
+          className="perm-receipt perm-receipt--pending"
+          data-testid="perm-receipt-pending"
+        >
+          ⏳ Aguardando permissão: {toolLabel}
+        </div>
+        {!dockActive &&
+          renderActivityGroup(
+            { ...group, count: 1, events: [event] },
+            openQuestionTurnIds,
+            onAnswer,
+            conversationId,
+            onPreview,
+            onMcpApprove,
+            onMcpDecline,
+            onPluginApprove,
+            onPluginDecline,
+            onToolPermission,
+          )}
+      </div>
+    )
+  }
+
   function renderTimelineGroup(group: ActivityGroup): ReactNode {
     const first = group.events[0]
     if (!first) return null
@@ -520,21 +696,7 @@ export function TurnTimeline({
     }
 
     if (first.toolPermission) {
-      if (isPlanApprovalEvent(first, permissionMode)) {
-        return renderPlanApproval(first, group)
-      }
-      return renderActivityGroup(
-        group,
-        openQuestionTurnIds,
-        onAnswer,
-        conversationId,
-        onPreview,
-        onMcpApprove,
-        onMcpDecline,
-        onPluginApprove,
-        onPluginDecline,
-        onToolPermission,
-      )
+      return renderToolPermissionTimelineNode(first, group)
     }
 
     // Retire the 5-stage purple CodeModeCard stepper from normal Code Mode turns,
@@ -560,22 +722,7 @@ export function TurnTimeline({
           }
         } else if (event.toolPermission) {
           flushCodeToolBatch()
-          renderedNodes.push(
-            <div key={event.eventId}>
-              {renderActivityGroup(
-                { ...group, count: 1, events: [event] },
-                openQuestionTurnIds,
-                onAnswer,
-                conversationId,
-                onPreview,
-                onMcpApprove,
-                onMcpDecline,
-                onPluginApprove,
-                onPluginDecline,
-                onToolPermission,
-              )}
-            </div>,
-          )
+          renderedNodes.push(renderToolPermissionTimelineNode(event, group))
         } else if (isCodeToolEvent(event, mode, permissionMode)) {
           pendingCodeToolBatch.push(event)
         }
@@ -603,6 +750,9 @@ export function TurnTimeline({
         if (isPlanApprovalEvent(event, permissionMode)) {
           flushCodeToolBatch()
           nodes.push(renderPlanApproval(event, group))
+        } else if (event.toolPermission) {
+          flushCodeToolBatch()
+          nodes.push(renderToolPermissionTimelineNode(event, group))
         } else if (isCodeToolEvent(event, mode, permissionMode)) {
           pendingCodeToolBatch.push(event)
         } else {
@@ -706,6 +856,13 @@ export function TurnTimeline({
       )}
       <AnimatePresence initial={false}>
         {resolvedItems.map((item) => {
+          if (item.kind === 'thought') {
+            return (
+              <div key={item.id} className="turn-timeline__thought">
+                <ThoughtBlock thought={item.thought} turnCompleted={turnCompleted} />
+              </div>
+            )
+          }
           if (item.kind === 'text') {
             return (
               <div key={item.id} className="turn-timeline__text">

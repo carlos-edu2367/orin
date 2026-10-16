@@ -1,9 +1,56 @@
 import type { ActivityGroup, ConversationActivityEvent } from './activityTypes'
-import { applyEventToGroup, codeModeRunGroup, codeModeRunKey, computeSettledEventIds, groupLabel, groupingKey, isCodeModeEvent, isRenderable } from './activitySummary'
+import {
+  applyEventToGroup,
+  codeModeRunGroup,
+  codeModeRunKey,
+  computeSettledEventIds,
+  groupLabel,
+  groupingKey,
+  isCodeModeEvent,
+  isRenderable,
+  normalizeGeneratingArgumentsEvent,
+} from './activitySummary'
 
+export interface TimelineThought {
+  id: string
+  turnId: string
+  content: string
+  status: 'streaming' | 'completed'
+  startedAt?: string
+  endedAt?: string
+  durationMs?: number
+}
+
+export type TimelineToolCall = ConversationActivityEvent
 export type TimelineTextItem = { id: string; kind: 'text'; content: string }
-export type TimelineActivityItem = { id: string; kind: 'activity'; group: ActivityGroup }
-export type TimelineItem = TimelineTextItem | TimelineActivityItem
+export type TimelineActivityItem = {
+  id: string
+  kind: 'activity'
+  group: ActivityGroup
+  toolCall?: TimelineToolCall
+}
+export type TimelineThoughtItem = {
+  id: string
+  kind: 'thought'
+  thought: TimelineThought
+  group: ActivityGroup
+}
+export type TimelineItem = TimelineTextItem | TimelineActivityItem | TimelineThoughtItem
+export type TurnTimelineItem = TimelineItem
+
+const TERMINAL_TURN_EVENT_TYPES = new Set([
+  'turn.completed',
+  'TURN_COMPLETED',
+  'turn.failed',
+  'TURN_FAILED',
+  'turn.cancelled',
+  'TURN_CANCELLED',
+  'execution.canceled',
+  'EXECUTION_CANCELED',
+  'code_mode.completed',
+  'code_mode.completed_with_caveats',
+  'code_mode.blocked',
+])
 
 /**
  * Backfills missing target metadata (`path`, `filePath`, `command`, `description`,
@@ -24,7 +71,11 @@ export function enrichEventsWithStartedMetadata(
   const lastReadPathByScope = new Map<string, string>()
   let mutated = false
 
-  const next = events.map((event) => {
+  const next = events.map((rawEvent) => {
+    const event = normalizeGeneratingArgumentsEvent(rawEvent)
+    if (event !== rawEvent) {
+      mutated = true
+    }
     const scope = `${event.agentId}:${event.turnId ?? ''}`
     const explicitReadPath =
       event.toolName === 'read_file'
@@ -110,8 +161,39 @@ export function enrichEventsWithStartedMetadata(
  * completed event — the public API has no direct message→turn field.
  */
 export function resolveTurnId(events: ConversationActivityEvent[], messageId: string): string | null {
-  const owner = events.find((event) => event.kind === 'message' && event.messageId === messageId && event.turnId)
+  const owner = events.find(
+    (event) =>
+      (event.kind === 'message' || event.type === 'agent.thought_delta' || event.type === 'AGENT_THOUGHT_DELTA') &&
+      event.messageId === messageId &&
+      event.turnId,
+  )
   return owner?.turnId ?? null
+}
+
+function extractThoughtDelta(event: ConversationActivityEvent): string {
+  const raw =
+    event.payload?.delta ??
+    event.detail ??
+    event.delta ??
+    event.content ??
+    event.payload?.content ??
+    ''
+  return String(raw ?? '')
+}
+
+function computeDurationMs(startedAt?: string, endedAt?: string): number | undefined {
+  if (!startedAt || !endedAt) return undefined
+  const startMs = Date.parse(startedAt)
+  const endMs = Date.parse(endedAt)
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) return undefined
+  return Math.max(0, endMs - startMs)
+}
+
+export type BuildTurnTimelineOptions = {
+  turnId?: string
+  messageId?: string
+  completeContent?: string
+  turnCompleted?: boolean
 }
 
 /**
@@ -121,20 +203,73 @@ export function resolveTurnId(events: ConversationActivityEvent[], messageId: st
  * `summarizeActivities` so one continuous tool sequence still collapses into
  * one card — just interrupted by whatever text fell between it.
  */
-export function buildTurnTimeline(events: ConversationActivityEvent[], turnId: string, messageId: string, completeContent = ''): TimelineItem[] {
-  const turnEvents = enrichEventsWithStartedMetadata(events.filter((event) => event.turnId === turnId))
+export function buildTurnTimeline(
+  events: ConversationActivityEvent[],
+  turnIdOrOptions?: string | BuildTurnTimelineOptions,
+  messageIdOrCompleted?: string | boolean,
+  completeContentOrCompleted: string | boolean = '',
+  turnCompletedArg = false,
+): TurnTimelineItem[] {
+  let turnId = ''
+  let messageId = ''
+  let completeContent = ''
+  let explicitTurnCompleted = turnCompletedArg
+
+  if (typeof turnIdOrOptions === 'object' && turnIdOrOptions !== null) {
+    turnId = turnIdOrOptions.turnId ?? events.find((e) => e.turnId)?.turnId ?? ''
+    messageId = turnIdOrOptions.messageId ?? ''
+    completeContent = turnIdOrOptions.completeContent ?? ''
+    explicitTurnCompleted = Boolean(turnIdOrOptions.turnCompleted)
+  } else {
+    turnId = turnIdOrOptions ?? events.find((e) => e.turnId)?.turnId ?? ''
+    if (typeof messageIdOrCompleted === 'boolean') {
+      explicitTurnCompleted = messageIdOrCompleted
+    } else {
+      messageId = messageIdOrCompleted ?? ''
+    }
+    if (typeof completeContentOrCompleted === 'boolean') {
+      explicitTurnCompleted = completeContentOrCompleted
+    } else {
+      completeContent = completeContentOrCompleted
+    }
+  }
+
+  const hasAnyTurnId = events.some((event) => Boolean(event.turnId))
+  const rawTurnEvents = turnId && hasAnyTurnId
+    ? events.filter((event) => event.turnId === turnId)
+    : events
+  const turnEvents = enrichEventsWithStartedMetadata(rawTurnEvents)
   const settled = computeSettledEventIds(turnEvents)
   const firstCodeEvent = turnEvents.find((event) => isCodeModeEvent(event))
+  const hasTerminalTurnEvent = turnEvents.some(
+    (event) => !event.parentAgentId && TERMINAL_TURN_EVENT_TYPES.has(event.type),
+  )
+  const isTurnCompleted = explicitTurnCompleted || hasTerminalTurnEvent
 
-  const items: TimelineItem[] = []
+  const items: TurnTimelineItem[] = []
   let textBuffer = ''
   let textId = ''
   let group: ActivityGroup | null = null
+  let thoughtBuffer: {
+    id: string
+    turnId: string
+    content: string
+    startedAt?: string
+    endedAt?: string
+    agentId: string
+    agentName?: string
+  } | null = null
   const renderedCodeRuns = new Set<string>()
 
   const flushGroup = () => {
     if (!group) return
-    items.push({ id: `activity:${group.id}:${group.events[0].eventId}`, kind: 'activity', group })
+    const latestTool = [...group.events].reverse().find((ev) => ev.kind === 'tool') ?? group.events[0]
+    items.push({
+      id: `activity:${group.id}:${group.events[0].eventId}`,
+      kind: 'activity',
+      group,
+      ...(group.kind === 'tool' && latestTool ? { toolCall: latestTool } : {}),
+    })
     group = null
   }
   const flushText = () => {
@@ -143,10 +278,72 @@ export function buildTurnTimeline(events: ConversationActivityEvent[], turnId: s
     textBuffer = ''
     textId = ''
   }
+  const flushThought = (completed: boolean, nextEventOccurredAt?: string) => {
+    if (!thoughtBuffer) return
+    const status: 'streaming' | 'completed' = completed ? 'completed' : 'streaming'
+    const rawEndedAt =
+      thoughtBuffer.endedAt && thoughtBuffer.endedAt !== thoughtBuffer.startedAt
+        ? thoughtBuffer.endedAt
+        : nextEventOccurredAt ?? thoughtBuffer.endedAt ?? thoughtBuffer.startedAt
+    const endedAt = completed ? rawEndedAt : thoughtBuffer.endedAt
+    const durationMs = completed ? computeDurationMs(thoughtBuffer.startedAt, endedAt) : undefined
+    const thought: TimelineThought = {
+      id: thoughtBuffer.id,
+      turnId: thoughtBuffer.turnId,
+      content: thoughtBuffer.content,
+      status,
+      ...(thoughtBuffer.startedAt ? { startedAt: thoughtBuffer.startedAt } : {}),
+      ...(endedAt ? { endedAt } : {}),
+      ...(durationMs !== undefined ? { durationMs } : {}),
+    }
+    items.push({
+      id: thought.id,
+      kind: 'thought',
+      thought,
+      group: {
+        id: thought.id,
+        kind: 'lifecycle',
+        state: status === 'completed' ? 'completed' : 'working',
+        label: 'Pensando',
+        count: 1,
+        events: [],
+        agentId: thoughtBuffer.agentId,
+        agentName: thoughtBuffer.agentName,
+        failed: false,
+      },
+    })
+    thoughtBuffer = null
+  }
 
   for (const event of turnEvents) {
+    if (event.type === 'agent.thought_delta' || event.type === 'AGENT_THOUGHT_DELTA') {
+      flushGroup()
+      flushText()
+      const deltaText = extractThoughtDelta(event)
+      if (!thoughtBuffer) {
+        thoughtBuffer = {
+          id: `thought:${event.eventId}`,
+          turnId: event.turnId ?? turnId,
+          content: deltaText,
+          startedAt: event.occurredAt,
+          endedAt: event.occurredAt,
+          agentId: event.agentId,
+          agentName: event.agentName,
+        }
+      } else {
+        thoughtBuffer.content += deltaText
+        if (!thoughtBuffer.startedAt && event.occurredAt) {
+          thoughtBuffer.startedAt = event.occurredAt
+        }
+        if (event.occurredAt) {
+          thoughtBuffer.endedAt = event.occurredAt
+        }
+      }
+      continue
+    }
     if (event.kind === 'message') {
-      if (event.messageId !== messageId) continue
+      if (messageId && event.messageId && event.messageId !== messageId) continue
+      flushThought(true, event.occurredAt)
       flushGroup()
       if (!event.content) continue
       if (!textBuffer) textId = `text:${event.eventId}`
@@ -157,6 +354,7 @@ export function buildTurnTimeline(events: ConversationActivityEvent[], turnId: s
       const codeKey = codeModeRunKey(firstCodeEvent)
       if (!renderedCodeRuns.has(codeKey)) {
         renderedCodeRuns.add(codeKey)
+        flushThought(true, event.occurredAt)
         flushText()
         flushGroup()
         items.push({ id: codeKey, kind: 'activity', group: codeModeRunGroup(turnEvents, firstCodeEvent) })
@@ -166,12 +364,22 @@ export function buildTurnTimeline(events: ConversationActivityEvent[], turnId: s
       const key = codeModeRunKey(event)
       if (renderedCodeRuns.has(key)) continue
       renderedCodeRuns.add(key)
+      flushThought(true, event.occurredAt)
       flushText()
       flushGroup()
       items.push({ id: key, kind: 'activity', group: codeModeRunGroup(turnEvents, event) })
       continue
     }
-    if (!isRenderable(event, settled)) continue
+    if (TERMINAL_TURN_EVENT_TYPES.has(event.type) && !event.parentAgentId) {
+      flushThought(true, event.occurredAt)
+    }
+    if (!isRenderable(event, settled)) {
+      if (event.type.startsWith('tool.')) {
+        flushThought(true, event.occurredAt)
+      }
+      continue
+    }
+    flushThought(true, event.occurredAt)
     flushText()
     if (event.kind === 'artifact' && group && group.kind === 'tool' && group.agentId === event.agentId) {
       group.events.push(event)
@@ -184,9 +392,20 @@ export function buildTurnTimeline(events: ConversationActivityEvent[], turnId: s
       continue
     }
     flushGroup()
-    group = { id: key, kind: event.kind, state: event.state, label: '', count: 1, events: [event], agentId: event.agentId, agentName: event.agentName, failed: event.state === 'failed' }
+    group = {
+      id: key,
+      kind: event.kind,
+      state: event.state,
+      label: '',
+      count: 1,
+      events: [event],
+      agentId: event.agentId,
+      agentName: event.agentName,
+      failed: event.state === 'failed',
+    }
     group.label = groupLabel(group)
   }
+  flushThought(isTurnCompleted)
   flushGroup()
   flushText()
   return reconcileCompleteText(items, completeContent, messageId)
@@ -199,7 +418,7 @@ export function buildTurnTimeline(events: ConversationActivityEvent[], turnId: s
  * answer. If no text delta survived, place the complete message before the
  * remaining activity timeline.
  */
-function reconcileCompleteText(items: TimelineItem[], completeContent: string, messageId: string): TimelineItem[] {
+function reconcileCompleteText(items: TurnTimelineItem[], completeContent: string, messageId: string): TurnTimelineItem[] {
   if (!completeContent) return items
   const visibleContent = items.filter((item): item is TimelineTextItem => item.kind === 'text').map((item) => item.content).join('')
   if (visibleContent === completeContent) return items
@@ -223,19 +442,21 @@ function reconcileCompleteText(items: TimelineItem[], completeContent: string, m
  * existing flat activity stream instead of dropping it.
  */
 export function buildMessageTimelines(
-  messages: { message_id: string; role: string; content?: string; turn_id?: string | null }[],
+  messages: { message_id: string; role: string; content?: string; turn_id?: string | null; status?: string }[],
   events: ConversationActivityEvent[],
-): { timelines: Map<string, TimelineItem[]>; claimedTurnIds: Set<string> } {
-  const timelines = new Map<string, TimelineItem[]>()
+): { timelines: Map<string, TurnTimelineItem[]>; claimedTurnIds: Set<string> } {
+  const timelines = new Map<string, TurnTimelineItem[]>()
   const claimedTurnIds = new Set<string>()
   for (const message of messages) {
     if (message.role !== 'assistant') continue
     const turnId = (typeof message.turn_id === 'string' && message.turn_id ? message.turn_id : null) ?? resolveTurnId(events, message.message_id)
     if (!turnId) continue
-    const timeline = buildTurnTimeline(events, turnId, message.message_id, message.content ?? '')
+    const isMsgCompleted = message.status === 'completed' || message.status === 'failed' || message.status === 'cancelled'
+    const timeline = buildTurnTimeline(events, turnId, message.message_id, message.content ?? '', isMsgCompleted)
     if (timeline.length === 0) continue
     timelines.set(message.message_id, timeline)
     claimedTurnIds.add(turnId)
   }
   return { timelines, claimedTurnIds }
 }
+

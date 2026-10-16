@@ -580,11 +580,43 @@ export function parseConversationActivityEvent(value: unknown, cursor: string): 
     if (planApproval.plan_path) event.planPath = planApproval.plan_path
     if (planApproval.plan_content) event.planContent = planApproval.plan_content
   }
+  const extraPayload: Record<string, unknown> = {}
+  const modelId = optionalText(payload.model_id, 128)
+  const subagentType = optionalText(payload.subagent_type, 128)
+  const phase = optionalText(payload.phase, 64)
+  const callId = optionalText(payload.call_id, 255)
+  const payloadToolName = optionalText(payload.tool_name, 64)
+  if (modelId) extraPayload.model_id = modelId
+  if (subagentType) extraPayload.subagent_type = subagentType
+  if (phase) extraPayload.phase = phase
+  if (callId) extraPayload.call_id = callId
+  if (payloadToolName) extraPayload.tool_name = payloadToolName
+  if (typeof payload.delta === 'string' && payload.delta.length <= 16_000 && !isRedactedValue(payload.delta)) {
+    extraPayload.delta = payload.delta
+  }
+  if (typeof payload.bytes_received === 'number' && Number.isFinite(payload.bytes_received) && payload.bytes_received >= 0) {
+    extraPayload.bytes_received = payload.bytes_received
+  }
+  if (typeof payload.iteration === 'number' && Number.isFinite(payload.iteration) && payload.iteration >= 0) {
+    extraPayload.iteration = payload.iteration
+  }
+  if (Object.keys(extraPayload).length > 0) {
+    event.payload = {
+      ...(event.payload ?? {}),
+      ...extraPayload,
+    }
+  }
   const toolPermission = parseToolPermissionRequest(payload, event.turnId, planApproval)
   if (toolPermission) {
     event.toolPermission = toolPermission
     event.kind = 'tool'
-    event.state = 'waiting_user'
+    if (toolPermission.state === 'allowed') {
+      event.state = 'completed'
+    } else if (toolPermission.state === 'denied') {
+      event.state = 'failed'
+    } else {
+      event.state = 'waiting_user'
+    }
   }
   const structuredPatch = parseStructuredPatch(payload.structured_patch)
   if (structuredPatch) event.structuredPatch = structuredPatch
@@ -637,6 +669,8 @@ export function parseConversationActivityEvent(value: unknown, cursor: string): 
   if (errorCode) event.errorCode = errorCode
   if (typeof payload.content === 'string' && payload.content.length <= 16_000 && !isRedactedValue(payload.content)) {
     event.content = payload.content
+  } else if (type === 'assistant.delta' && typeof payload.delta === 'string' && payload.delta.length <= 16_000 && !isRedactedValue(payload.delta)) {
+    event.content = payload.delta
   } else if (event.state === 'failed') {
     const errorText = optionalText(payload.error ?? payload.detail, 16_000)
     if (errorText && !isRedactedValue(errorText)) {
@@ -794,11 +828,17 @@ function parseTodoItems(value: unknown): TodoItem[] | undefined {
   return items.length > 0 ? items : undefined
 }
 
+type ExtendedToolPermissionRequest = ToolPermissionRequest & {
+  target?: string
+  reason?: string
+  state?: 'pending' | 'allowed' | 'denied'
+}
+
 function parseToolPermissionRequest(
   payload: Record<string, unknown>,
   fallbackTurnId?: string,
   planApproval?: ActivityPlanApproval,
-): ToolPermissionRequest | undefined {
+): ExtendedToolPermissionRequest | undefined {
   const source = typeof payload.permission_request === 'object' && payload.permission_request !== null && !Array.isArray(payload.permission_request)
     ? (payload.permission_request as Record<string, unknown>)
     : payload.tool_permission === true
@@ -819,13 +859,32 @@ function parseToolPermissionRequest(
     : typeof payload.removed_lines === 'number' && Number.isFinite(payload.removed_lines)
       ? payload.removed_lines
       : undefined
+  const command = optionalText(source.command, 2000) ?? optionalText(payload.command, 2000)
+  const path = optionalText(source.path ?? source.file_path ?? source.plan_path, 512) ?? optionalText(payload.path ?? payload.file_path ?? payload.plan_path, 512)
+  const ruleSuggestion =
+    optionalText(source.rule_suggestion ?? source.suggested_rule, 255) ??
+    optionalText(payload.rule_suggestion ?? payload.suggested_rule, 255)
+  const target =
+    optionalText(source.target, 2000) ??
+    optionalText(payload.target, 2000) ??
+    path ??
+    command
+  const reason =
+    optionalText(source.reason, 500) ??
+    optionalText(payload.reason, 500)
+  const rawState = optionalText(source.state ?? payload.state, 32)
+  const state: 'pending' | 'allowed' | 'denied' =
+    rawState === 'allowed' || rawState === 'denied' ? rawState : 'pending'
   return {
     requestId,
     turnId: optionalText(source.turn_id, 255) ?? fallbackTurnId,
     toolName,
-    ruleSuggestion: optionalText(source.rule_suggestion, 255) ?? optionalText(payload.rule_suggestion, 255),
-    command: optionalText(source.command, 2000) ?? optionalText(payload.command, 2000),
-    path: optionalText(source.path ?? source.file_path ?? source.plan_path, 512) ?? optionalText(payload.path ?? payload.file_path ?? payload.plan_path, 512),
+    ruleSuggestion,
+    command,
+    path,
+    target,
+    reason,
+    state,
     structuredPatch,
     addedLines,
     removedLines,

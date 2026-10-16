@@ -417,23 +417,28 @@ def test_snapshot_paginates_recent_activities_and_loads_older_pages() -> None:
     turn = store.claim(receipt.turn_id)
     assert turn is not None
 
-    # Emit 180 distinct tool events plus noisy deltas, then finish the turn
+    # Emit 180 distinct tool events plus multi-token delta segments, then finish the turn
+    for tok in ("Iniciando ", "varredura ", "de arquivos."):
+        store.delta(turn, tok)
     for idx in range(180):
-        store.delta(turn, f"token-{idx} ")
         store.record(
             turn,
             AgentActivityEventType.FILESYSTEM_READ,
             f"Leu arquivo {idx}.txt",
             {"path": f"{idx}.txt", "tool_name": "read_file", "tool_kind": "filesystem"},
         )
+    for tok in ("Concluído ", "com ", "sucesso."):
+        store.delta(turn, tok)
     store.finish(turn)
 
     snapshot = store.get(receipt.conversation_id, "user-1")
-    assert len(snapshot["activities"]) == 150
+    assert len(snapshot["activities"]) <= 150
     assert snapshot["has_older_activities"] is True
     assert isinstance(snapshot["oldest_activity_id"], int)
-    # Settled turns should not include per-token assistant.delta events
-    assert all(item["event_type"] != "assistant.delta" for item in snapshot["activities"])
+    # Settled turns compact consecutive assistant.delta tokens into a single segment event
+    delta_events = [item for item in snapshot["activities"] if item["event_type"] == "assistant.delta"]
+    assert len(delta_events) == 1
+    assert delta_events[0]["payload"]["content"] == "Concluído com sucesso."
 
     older_page = store.list_older_activities(
         receipt.conversation_id,
@@ -447,6 +452,62 @@ def test_snapshot_paginates_recent_activities_and_loads_older_pages() -> None:
     assert older_page["activities"][0]["summary"] == "Execução iniciada" or "Leu arquivo 0.txt" in [
         item["summary"] for item in older_page["activities"]
     ]
+
+
+def test_settled_turn_compacts_consecutive_assistant_and_thought_deltas_preserving_interleaving() -> None:
+    engine = create_engine("sqlite://", future=True)
+    metadata.create_all(engine)
+    store = PostgresChatStore(engine, PostgresAgenticActivityStore(engine, "test-cursor-secret"))
+    receipt = store.create(
+        user_id="user-1",
+        message="Verifique o sistema.",
+        provider="openrouter",
+        model_id="model-a",
+        idempotency_key="request-interleave-settled",
+    )
+    turn = store.claim(receipt.turn_id)
+    assert turn is not None
+
+    from types import SimpleNamespace
+
+    ctx = SimpleNamespace(conversation_id=receipt.conversation_id, turn_id=receipt.turn_id)
+    store.lifecycle(ctx, "thinking_delta", delta="Pensando parte 1, ", iteration=1)
+    store.lifecycle(ctx, "thinking_delta", delta="parte 2.", iteration=1)
+    store.delta(turn, "Vou ler ")
+    store.delta(turn, "o arquivo.")
+    store.lifecycle(
+        ctx,
+        "generating_tool_call",
+        tool_name="read_file",
+        call_id="call-1",
+        bytes_received=24,
+        iteration=1,
+    )
+    store.record(
+        turn,
+        AgentActivityEventType.FILESYSTEM_READ,
+        "Leu config.txt",
+        {"path": "config.txt", "tool_name": "read_file", "tool_kind": "filesystem"},
+    )
+    store.delta(turn, "Tudo ")
+    store.delta(turn, "certo!")
+    store.finish(turn)
+
+    snapshot = store.get(receipt.conversation_id, "user-1")
+    relevant = [
+        (item["event_type"], item["payload"].get("content") or item["payload"].get("delta") or item["summary"])
+        for item in snapshot["activities"]
+        if item["event_type"]
+        in {"agent.thought_delta", "assistant.delta", "tool.progressed", "filesystem.read"}
+    ]
+    assert relevant == [
+        ("agent.thought_delta", "Pensando parte 1, parte 2."),
+        ("assistant.delta", "Vou ler o arquivo."),
+        ("tool.progressed", "Preparando argumentos de read_file"),
+        ("filesystem.read", "Leu config.txt"),
+        ("assistant.delta", "Tudo certo!"),
+    ]
+
 
 
 def test_claim_sets_turn_running_and_cancelled_finish_blocks_code_mode_run_and_deduplicates_turn_failed() -> None:

@@ -8,6 +8,8 @@ from decimal import Decimal
 from itertools import count
 import json
 import re
+import threading
+import time
 from typing import Callable, Mapping
 
 from .action_loop import ActionLoop, MalformedToolCall
@@ -88,7 +90,8 @@ COMPACTION_INSTRUCTION = (
     + "\nUnder 'Arquivos tocados' list each path with what was done to it. Under 'Decisões' "
     "list each decision with its reason. Under 'Dados apurados' list every concrete value, "
     "number or identifier established so far, verbatim. Under 'Pendências' list what is "
-    "still open. Preserve exact paths and figures. Do not invent anything."
+    "still open. Preserve exact paths and figures. Do not invent anything. "
+    "Always preserve the user's language (e.g., Portuguese) in the summary and subsequent responses."
 )
 CODE_COMPACTION_INSTRUCTION = (
     "You are compacting a software engineering session so the agent can continue seamlessly without "
@@ -100,7 +103,8 @@ CODE_COMPACTION_INSTRUCTION = (
     "Under 'Errors and fixes' list errors encountered and how they were resolved. "
     "Under 'All user messages' list every non-tool user request in order. "
     "Under 'Pending Tasks' and 'Current Work' record exact remaining items and what was being worked on immediately before compaction. "
-    "Preserve exact file paths, identifiers, and figures. Do not invent anything."
+    "Preserve exact file paths, identifiers, and figures. Do not invent anything. "
+    "Always preserve the user's language (e.g., Portuguese) in the summary and subsequent responses."
 )
 
 
@@ -314,6 +318,8 @@ class AgenticTurnRuntime:
         code_gate_rejections = 0
         total_tokens = 0
         total_cost = Decimal("0")
+        emitted_text_in_turn = False
+        last_emitted_text_ended_with_newline = True
         iterations = range(1, self.limits.max_iterations + 1) if self.limits.max_iterations is not None else count(1)
         for iteration in iterations:
             self.counters.note_iteration()
@@ -385,6 +391,10 @@ class AgenticTurnRuntime:
                 return self._fail(turn, "PROVIDER_STREAM_FAILED", iteration, action_count)
             text_parts: list[str] = []
             thinking_parts: list[str] = []
+            thinking_buffer: list[str] = []
+            saw_thinking_kind = False
+            last_thinking_flush = time.monotonic()
+            tool_gen_last_emit: dict[str, float] = {}
             calls: dict[str, dict[str, str]] = {}
             input_tokens: int | None = None
             output_tokens: int | None = None
@@ -393,6 +403,16 @@ class AgenticTurnRuntime:
             retryable_error = False
             rate_limited = False
             context_overflow_error = False
+
+            def flush_thinking_buffer() -> None:
+                nonlocal last_thinking_flush
+                if not thinking_buffer:
+                    return
+                delta_text = "".join(thinking_buffer)
+                thinking_buffer.clear()
+                last_thinking_flush = time.monotonic()
+                self._life(turn, "thinking_delta", delta=delta_text, iteration=iteration)
+
             try:
                 for raw_event in events:
                     provider_yielded = True
@@ -403,12 +423,38 @@ class AgenticTurnRuntime:
                         self._effect_finished(turn, provider_effect_id, state="UNKNOWN", error_code="PROVIDER_DEADLINE_DURING_EFFECT")
                         return self._fail(turn, "TURN_DEADLINE_EXCEEDED", iteration, action_count)
                     event = self._coerce(raw_event)
-                    if event.thinking:
+                    if event.kind is StreamKind.THINKING:
+                        saw_thinking_kind = True
+                        if event.thinking:
+                            thinking_parts.append(event.thinking)
+                            thinking_buffer.append(event.thinking)
+                            buffered_chars = sum(len(part) for part in thinking_buffer)
+                            if buffered_chars >= 60 or (time.monotonic() - last_thinking_flush) >= 0.12:
+                                flush_thinking_buffer()
+                        continue
+                    if event.thinking and not saw_thinking_kind:
                         thinking_parts.append(event.thinking)
+                        if self.toolset is not None:
+                            thinking_buffer.append(event.thinking)
+                            buffered_chars = sum(len(part) for part in thinking_buffer)
+                            if buffered_chars >= 60 or (time.monotonic() - last_thinking_flush) >= 0.12:
+                                flush_thinking_buffer()
                     if event.kind is StreamKind.TEXT and event.text:
-                        text_parts.append(event.text)
-                        self.store.delta(turn, event.text)
+                        flush_thinking_buffer()
+                        chunk_text = event.text
+                        if (
+                            not text_parts
+                            and emitted_text_in_turn
+                            and not last_emitted_text_ended_with_newline
+                            and not chunk_text.startswith("\n")
+                        ):
+                            chunk_text = "\n\n" + chunk_text
+                        text_parts.append(chunk_text)
+                        self.store.delta(turn, chunk_text)
+                        emitted_text_in_turn = True
+                        last_emitted_text_ended_with_newline = chunk_text.endswith("\n")
                     elif event.kind is StreamKind.TOOL_CALL and event.tool_call_id:
+                        flush_thinking_buffer()
                         call_id = (
                             f"iter{iteration}-{event.tool_call_id}"
                             if event.tool_call_id.startswith("tool-call:") and iteration > 1
@@ -418,6 +464,18 @@ class AgenticTurnRuntime:
                         if event.tool_name:
                             current["name"] = event.tool_name
                         current["arguments"] += event.arguments_delta or ""
+                        if self.toolset is not None and current["name"]:
+                            now_mono = time.monotonic()
+                            if call_id not in tool_gen_last_emit or (now_mono - tool_gen_last_emit[call_id]) >= 1.5:
+                                tool_gen_last_emit[call_id] = now_mono
+                                self._life(
+                                    turn,
+                                    "generating_tool_call",
+                                    tool_name=current["name"],
+                                    call_id=call_id,
+                                    bytes_received=len(current["arguments"]),
+                                    iteration=iteration,
+                                )
                     elif event.kind is StreamKind.USAGE:
                         total_cost += event.cost or Decimal("0")
                         if event.usage:
@@ -434,6 +492,7 @@ class AgenticTurnRuntime:
                                 cached_input_tokens=event.usage.cached_input_tokens,
                             )
                     elif event.kind is StreamKind.FINISH:
+                        flush_thinking_buffer()
                         finish = event.finish_reason
                     elif event.kind is StreamKind.RATE_LIMIT:
                         rate_limited = True
@@ -442,6 +501,7 @@ class AgenticTurnRuntime:
                         if self._is_context_length_error(err_desc):
                             context_overflow_error = True
                         retryable_error = event.error.retryability.value == "SAFE"
+                flush_thinking_buffer()
             except Exception as exc:
                 if not reactive_compacted and not text_parts and not calls and self._is_context_length_error(exc) and self.clock() < deadline:
                     self._effect_finished(
@@ -641,9 +701,6 @@ class AgenticTurnRuntime:
                     code_gate_rejections += 1
                     if has_text:
                         messages.append({"role": "assistant", "content": "".join(text_parts)})
-                        reset_fn = getattr(self.store, "reset_assistant_message", None)
-                        if callable(reset_fn):
-                            reset_fn(turn)
                     messages.append({
                         "role": "user",
                         "content": f"[Sistema do Modo Code] {gate_reason} Continue a tarefa usando ferramentas; não responda como concluída.",
@@ -667,9 +724,6 @@ class AgenticTurnRuntime:
                         self._life(turn, "phase_changed", phase=str(self.phases.current), previous_phase=str(previous_phase))
                     if has_text:
                         messages.append({"role": "assistant", "content": "".join(text_parts)})
-                        reset_fn = getattr(self.store, "reset_assistant_message", None)
-                        if callable(reset_fn):
-                            reset_fn(turn)
                     messages.append({"role": "user", "content": VERIFY_REQUIRED_MESSAGE})
                     self._life(turn, "running")
                     continue
@@ -1084,9 +1138,36 @@ class AgenticTurnRuntime:
         }
         return "\n".join(f"### {name}\n" + "\n".join(lines) for name, lines in sections.items())
 
-    @staticmethod
-    def _estimated_tokens(message: Mapping[str, object]) -> int:
-        """Cheap upper-bound estimate; four characters per token is the usual rule."""
+    @classmethod
+    def _estimated_tokens(cls, message: Mapping[str, object] | object) -> int:
+        """Cheap upper-bound estimate; four characters per token is the usual rule, with fixed image block cost."""
+        if isinstance(message, Mapping):
+            content = message.get("content")
+            if isinstance(content, list):
+                total = 4
+                for block in content:
+                    if isinstance(block, Mapping):
+                        btype = str(block.get("type") or "")
+                        if btype in {"image_url", "image", "input_image"}:
+                            total += 1200
+                            continue
+                        if btype == "tool_result" and isinstance(block.get("content"), list):
+                            for sub in block.get("content") or ():
+                                if isinstance(sub, Mapping) and str(sub.get("type") or "") in {"image_url", "image", "input_image"}:
+                                    total += 1200
+                                else:
+                                    try:
+                                        sub_payload = json.dumps(sub, ensure_ascii=False, default=str)
+                                    except (TypeError, ValueError):
+                                        sub_payload = str(sub)
+                                    total += max(1, len(sub_payload) // 4)
+                            continue
+                    try:
+                        block_payload = json.dumps(block, ensure_ascii=False, default=str)
+                    except (TypeError, ValueError):
+                        block_payload = str(block)
+                    total += max(1, len(block_payload) // 4)
+                return max(1, total)
         try:
             payload = json.dumps(message, ensure_ascii=False, default=str)
         except (TypeError, ValueError):
@@ -1244,7 +1325,7 @@ class AgenticTurnRuntime:
 
     @staticmethod
     def _is_tool_result_message(message: Mapping[str, object]) -> bool:
-        if message.get("role") == "tool":
+        if message.get("role") == "tool" or bool(message.get("_tool_image_result")):
             return True
         if message.get("role") == "user":
             content = message.get("content")
@@ -1254,7 +1335,7 @@ class AgenticTurnRuntime:
 
     @staticmethod
     def _is_tool_result(message: Mapping[str, object]) -> bool:
-        if message.get("role") == "tool":
+        if message.get("role") == "tool" or bool(message.get("_tool_image_result")):
             return True
         content = message.get("content")
         return isinstance(content, list) and any(isinstance(block, Mapping) and block.get("type") == "tool_result" for block in content)
@@ -1268,7 +1349,7 @@ class AgenticTurnRuntime:
         return f"{text[:AGED_TOOL_RESULT_CHARS]}\n[compressed: {len(text)} characters total; re-run the tool if you need the rest]"
 
     @classmethod
-    def _age_tool_results(cls, messages: list[dict[str, object]], keep_recent: int) -> None:
+    def _age_tool_results(cls, messages: list[dict[str, object]], keep_recent: int) -> list[dict[str, object]]:
         """Shrink tool output the model has already had a chance to read.
 
         The full result is what the model needed on the iteration right after
@@ -1278,6 +1359,9 @@ class AgenticTurnRuntime:
         indexes = [index for index, message in enumerate(messages) if cls._is_tool_result(message)]
         for index in indexes[: max(0, len(indexes) - max(0, int(keep_recent)))]:
             message = messages[index]
+            if bool(message.get("_tool_image_result")):
+                message["content"] = "[earlier tool image omitted]"
+                continue
             content = message.get("content")
             if isinstance(content, str):
                 message["content"] = cls._compress(content)
@@ -1287,6 +1371,7 @@ class AgenticTurnRuntime:
                     if isinstance(block, Mapping) and block.get("type") == "tool_result" else block
                     for block in content
                 ]
+        return messages
 
     @staticmethod
     def _maximum_plausible_input_tokens(request: Mapping[str, object]) -> int:
@@ -1401,8 +1486,10 @@ class AgenticTurnRuntime:
         ]
 
         eligible = [
-            error is None and not duplicate[i] and repeated[i] is None
-            and callable(is_read_only) and is_read_only(name)
+            error is None
+            and not duplicate[i]
+            and repeated[i] is None
+            and ((callable(is_read_only) and is_read_only(name)) or name == "run_subagent")
             for i, (_, name, _, error) in enumerate(prepared)
         ]
 
@@ -1414,53 +1501,97 @@ class AgenticTurnRuntime:
         # ever starting before an earlier call finishes, or from blocking a
         # later independent read.
         outcomes: dict[int, object] = {}
+        checkpoint_lock = threading.Lock()
+
+        def is_persistence_error(exc: BaseException) -> bool:
+            raw = f"{type(exc).__module__}.{type(exc).__name__}: {exc}".lower()
+            return any(
+                marker in raw
+                for marker in (
+                    "sqlite3",
+                    "integrityerror",
+                    "operationalerror",
+                    "[sql:",
+                    "unique constraint failed",
+                    "database is locked",
+                    "sqlalchemy.exc",
+                )
+            )
+
+        def transient_persistence_outcome(tool_name: str) -> ToolOutcome:
+            return ToolOutcome(
+                "failed",
+                f"{tool_name} falhou temporariamente",
+                "Tool execution encountered a transient internal persistence error; you may retry the call.",
+                {"transient": True},
+                "TOOL_TRANSIENT_ERROR",
+            )
 
         def invoke(index: int) -> object:
             call_id, name, arguments, _ = prepared[index]
             assert arguments is not None
-            effect_id = self._effect_started(
-                turn,
-                kind="tool",
-                invocation_ref=f"tool:{call_id}",
-                request_ref=f"conversation-turn:{turn['turn_id']}:tool:{call_id}",
-            )
             read_only = bool(callable(is_read_only) and is_read_only(name))
             # Older toolset adapters only expose is_read_only. Preserve their
             # conservative behaviour, while native toolsets distinguish
             # coordination/planning tools from calls that can mutate state.
-            mutating = bool(is_mutating(name)) if callable(is_mutating) else not read_only
-            if mutating:
-                # Counted before the call, not after: a write that fails may
-                # still have changed something, so a later read must not be
-                # served from a result taken before it.
-                self._writes += 1
+            mutating = (
+                bool(is_mutating(name))
+                if callable(is_mutating)
+                else (not read_only and name != "run_subagent")
+            )
+            with checkpoint_lock:
+                effect_id = self._effect_started(
+                    turn,
+                    kind="tool",
+                    invocation_ref=f"tool:{call_id}",
+                    request_ref=f"conversation-turn:{turn['turn_id']}:tool:{call_id}",
+                )
+                if mutating:
+                    # Counted before the call, not after: a write that fails may
+                    # still have changed something, so a later read must not be
+                    # served from a result taken before it.
+                    self._writes += 1
             try:
                 try:
                     setattr(self.toolset, "_active_invocation_id", call_id)
                 except Exception:
                     pass
                 outcome = self.toolset.invoke(name, arguments)
-            except Exception:
-                self._effect_finished(turn, effect_id, state="UNKNOWN", error_code="TOOL_INTERRUPTED")
+            except Exception as exc:
+                if is_persistence_error(exc):
+                    with checkpoint_lock:
+                        try:
+                            self._effect_finished(
+                                turn,
+                                effect_id,
+                                state="NOT_APPLIED",
+                                error_code="TOOL_TRANSIENT_ERROR",
+                            )
+                        except Exception:
+                            pass
+                    return transient_persistence_outcome(name)
+                with checkpoint_lock:
+                    self._effect_finished(turn, effect_id, state="UNKNOWN", error_code="TOOL_INTERRUPTED")
                 raise
-            if read_only and outcome.status == "succeeded":
-                self._succeeded_reads[self._signature(name, arguments)] = (outcome.content, self._writes)
-            state = "APPLIED" if outcome.status == "succeeded" else "NOT_APPLIED"
-            # A normal failed ToolOutcome is a definite response from the
-            # adapter: the model can read it and choose a different action.
-            # Only an unexpected adapter failure is indeterminate for a
-            # mutating call, because it might have crossed the effect boundary
-            # without returning a receipt. Handlers may also opt in to that
-            # treatment explicitly for a known exceptional integration.
-            effect_unknown = outcome.error_code == "TOOL_FAILED" or outcome.payload.get("effect_state") == "unknown"
-            if outcome.status != "succeeded" and mutating and effect_unknown:
-                state = "UNKNOWN"
-            self._effect_finished(
-                turn, effect_id, state=state,
-                result_ref=f"conversation-turn:{turn['turn_id']}:tool-result:{call_id}",
-                error_code=outcome.error_code,
-                private_result={"status": outcome.status, "content": outcome.content[:12_000]},
-            )
+            with checkpoint_lock:
+                if read_only and outcome.status == "succeeded":
+                    self._succeeded_reads[self._signature(name, arguments)] = (outcome.content, self._writes)
+                state = "APPLIED" if outcome.status == "succeeded" else "NOT_APPLIED"
+                # A normal failed ToolOutcome is a definite response from the
+                # adapter: the model can read it and choose a different action.
+                # Only an unexpected adapter failure is indeterminate for a
+                # mutating call, because it might have crossed the effect boundary
+                # without returning a receipt. Handlers may also opt in to that
+                # treatment explicitly for a known exceptional integration.
+                effect_unknown = outcome.error_code == "TOOL_FAILED" or outcome.payload.get("effect_state") == "unknown"
+                if outcome.status != "succeeded" and mutating and effect_unknown:
+                    state = "UNKNOWN"
+                self._effect_finished(
+                    turn, effect_id, state=state,
+                    result_ref=f"conversation-turn:{turn['turn_id']}:tool-result:{call_id}",
+                    error_code=outcome.error_code,
+                    private_result={"status": outcome.status, "content": outcome.content[:12_000]},
+                )
             return outcome
 
         index = 0
@@ -1486,8 +1617,11 @@ class AgenticTurnRuntime:
                         try:
                             outcomes[i] = future.result()
                         except Exception as error:  # noqa: BLE001 - preserve per-tool failure parity
-                            message = f"{type(error).__name__}: {error}"
-                            outcomes[i] = ToolOutcome("failed", f"{prepared[i][1]} falhou", message[:12_000], {}, "TOOL_FAILED")
+                            if is_persistence_error(error):
+                                outcomes[i] = transient_persistence_outcome(prepared[i][1])
+                            else:
+                                message = f"{type(error).__name__}: {error}"
+                                outcomes[i] = ToolOutcome("failed", f"{prepared[i][1]} falhou", message[:12_000], {}, "TOOL_FAILED")
             else:
                 outcomes[index] = invoke(index)
             index = run_end
@@ -1530,7 +1664,7 @@ class AgenticTurnRuntime:
                 or (callable(is_mutating_fn) and is_mutating_fn(name))
             ):
                 self._failed_signatures.clear()
-            elif outcome.status == "failed" and not duplicate[index]:
+            elif outcome.status == "failed" and not duplicate[index] and not outcome.payload.get("transient"):
                 self._failed_signatures[sig] = outcome.content
             self._life(
                 turn, "tool_finished", tool_name=name, invocation_id=call_id, status=outcome.status,
@@ -1872,7 +2006,7 @@ class AgenticTurnRuntime:
             messages = [{"role": "tool", "tool_call_id": str(result.get("id", "")), "content": content}]
         images = [dict(item) for item in (result.get("images") or ()) if isinstance(item, Mapping)]
         if images:
-            messages.append({"role": "user", "content": [{"type": "text", "text": cls._image_caption(result, content)}, *images]})
+            messages.append({"role": "user", "_tool_image_result": True, "content": [{"type": "text", "text": cls._image_caption(result, content)}, *images]})
         return messages
 
     @staticmethod

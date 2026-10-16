@@ -25,9 +25,30 @@ _PREVIEW_MANIFEST_PATH = ".orin/preview_servers.json"
 _PREVIEW_LOG_DIR = ".orin/logs"
 _SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
 _PORT_REGEX = re.compile(r"(?:--port|-p)\s*[= ]?\s*(\d{2,5})\b")
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
+_LOCAL_URL_PORT_RE = re.compile(r"https?://(?:localhost|127\.0\.0\.1|\[::1\]|0\.0\.0\.0):(\d{2,5})")
 
 _LIVE_PROCESSES_LOCK = threading.Lock()
 _LIVE_PROCESSES: dict[tuple[str, str], subprocess.Popen[bytes]] = {}
+
+
+def _detect_port_from_log(log_path: Path | None, start_offset: int = 0) -> int | None:
+    if log_path is None or not log_path.is_file():
+        return None
+    try:
+        with log_path.open("rb") as fh:
+            if start_offset > 0:
+                fh.seek(start_offset)
+            raw = fh.read()
+        clean = _ANSI_ESCAPE_RE.sub("", raw.decode("utf-8", errors="replace"))
+        matches = _LOCAL_URL_PORT_RE.findall(clean)
+        for m in reversed(matches):
+            port = int(m)
+            if 1 <= port <= 65535:
+                return port
+    except Exception:
+        return None
+    return None
 
 
 class PreviewServerError(RuntimeError):
@@ -87,11 +108,14 @@ def is_port_open(port: int, *, host: str = "127.0.0.1", timeout: float = 0.25) -
     """Return True if a TCP server is accepting connections on ``host:port``."""
     if not isinstance(port, int) or port <= 0 or port > 65535:
         return False
-    try:
-        with socket.create_connection((host, port), timeout=timeout):
-            return True
-    except OSError:
-        return False
+    hosts = (host, "localhost") if host == "127.0.0.1" else (host,)
+    for candidate_host in hosts:
+        try:
+            with socket.create_connection((candidate_host, port), timeout=timeout):
+                return True
+        except OSError:
+            continue
+    return False
 
 
 class PreviewServerManager:
@@ -299,13 +323,25 @@ class PreviewServerManager:
             except ValueError:
                 raise PreviewServerError("configuration cwd must stay inside the workspace")
 
+        initial_port_occupied = is_port_open(config.port)
+        log_offset = 0
         with _LIVE_PROCESSES_LOCK:
             existing_proc = _LIVE_PROCESSES.get(key)
             if existing_proc is not None and existing_proc.poll() is None:
                 proc = existing_proc
+                initial_port_occupied = False
             else:
+                try:
+                    log_offset = abs_log_path.stat().st_size if abs_log_path.is_file() else 0
+                except OSError:
+                    log_offset = 0
                 log_handle = abs_log_path.open("ab")
-                env = {**os.environ, **{str(k): str(v) for k, v in config.env.items()}}
+                env = {
+                    "PYTHONIOENCODING": "utf-8",
+                    "PYTHONUTF8": "1",
+                    **os.environ,
+                    **{str(k): str(v) for k, v in config.env.items()},
+                }
                 creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0
                 try:
                     proc = subprocess.Popen(
@@ -330,15 +366,43 @@ class PreviewServerManager:
                         pass
                 _LIVE_PROCESSES[key] = proc
 
-        ready = self.wait_for_port(config.port, timeout_seconds=wait_timeout, proc=proc)
+        effective_port = config.port
+        ready = False
+        deadline = time.monotonic() + max(0.05, float(wait_timeout))
+        while time.monotonic() < deadline:
+            detected_port = _detect_port_from_log(abs_log_path, log_offset)
+            if detected_port is not None:
+                effective_port = detected_port
+            if effective_port != config.port or not initial_port_occupied:
+                if is_port_open(effective_port):
+                    late_detected = _detect_port_from_log(abs_log_path, log_offset)
+                    if late_detected is not None:
+                        effective_port = late_detected
+                    ready = is_port_open(effective_port)
+                    if ready:
+                        break
+            if proc.poll() is not None:
+                late_detected = _detect_port_from_log(abs_log_path, log_offset)
+                if late_detected is not None:
+                    effective_port = late_detected
+                ready = is_port_open(effective_port)
+                break
+            time.sleep(0.05)
+
+        if not ready:
+            late_detected = _detect_port_from_log(abs_log_path, log_offset)
+            if late_detected is not None:
+                effective_port = late_detected
+            ready = is_port_open(effective_port)
+
         exit_code = proc.poll()
         status = "running" if exit_code is None else ("ready" if ready else "exited")
-        url = config.target_url()
+        url = f"http://127.0.0.1:{effective_port}" if effective_port != config.port else config.target_url()
 
         record = {
             "name": config.name,
             "pid": proc.pid,
-            "port": config.port,
+            "port": effective_port,
             "url": url,
             "command": config.command_string(),
             "source": config.source,
@@ -370,6 +434,8 @@ class PreviewServerManager:
             "logs_tail": logs_snapshot.get("logs", ""),
             "browser": browser_result,
         }
+
+    start = start_server
 
     def stop_server(self, name: str | None = None) -> dict[str, Any]:
         """Stop a running preview server by name (or the active/default one)."""
@@ -422,6 +488,8 @@ class PreviewServerManager:
             "port": record.get("port"),
             "status": "stopped",
         }
+
+    stop = stop_server
 
     def read_logs(self, name: str | None = None, *, tail_lines: int = 100) -> dict[str, Any]:
         """Return bounded tail lines from the preview server's log file."""

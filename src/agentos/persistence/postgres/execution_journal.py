@@ -1,11 +1,14 @@
 """Authorized SQL adapter for durable execution recovery records."""
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
+import threading
 from typing import Mapping
 
 from sqlalchemy import select, update
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import IntegrityError
 
 from agentos.execution.journal import (
     ExecutionCheckpoint,
@@ -81,85 +84,114 @@ class PostgresExecutionJournal:
 
     def __init__(self, engine: Engine) -> None:
         self._engine = engine
+        self._lock = threading.RLock()
 
     def prepare(self, effect: ExecutionEffect) -> ExecutionEffect:
-        with self._engine.begin() as connection:
-            existing = connection.execute(select(execution_effects).where(
-                *_scope_where(execution_effects, effect.scope),
-                execution_effects.c.idempotency_key == effect.idempotency_key,
-            )).mappings().first()
-            if existing is not None:
-                return _effect(existing)
-            connection.execute(execution_effects.insert().values(
-                effect_id=effect.effect_id, execution_id=str(effect.scope.execution_id), user_id=str(effect.scope.user_id),
-                workspace_id=str(effect.scope.workspace_id) if effect.scope.workspace_id is not None else None,
-                agent_id=effect.scope.agent_id, correlation_id=effect.scope.correlation_id,
-                kind=effect.kind.value, invocation_ref=effect.invocation_ref, request_ref=effect.request_ref,
-                result_ref=effect.result_ref, idempotency_key=effect.idempotency_key, state=effect.state.value,
-                retryability=effect.retryability.value, attempt=effect.attempt, result=None,
-                error_code=effect.error_code, prepared_at=effect.prepared_at, started_at=effect.started_at,
-                resolved_at=effect.resolved_at, reconciliation_ref=effect.reconciliation_ref, version=effect.version,
-            ))
-        return effect
+        with self._lock:
+            with self._engine.begin() as connection:
+                existing = connection.execute(select(execution_effects).where(
+                    *_scope_where(execution_effects, effect.scope),
+                    execution_effects.c.idempotency_key == effect.idempotency_key,
+                )).mappings().first()
+                if existing is not None:
+                    return _effect(existing)
+                connection.execute(execution_effects.insert().values(
+                    effect_id=effect.effect_id, execution_id=str(effect.scope.execution_id), user_id=str(effect.scope.user_id),
+                    workspace_id=str(effect.scope.workspace_id) if effect.scope.workspace_id is not None else None,
+                    agent_id=effect.scope.agent_id, correlation_id=effect.scope.correlation_id,
+                    kind=effect.kind.value, invocation_ref=effect.invocation_ref, request_ref=effect.request_ref,
+                    result_ref=effect.result_ref, idempotency_key=effect.idempotency_key, state=effect.state.value,
+                    retryability=effect.retryability.value, attempt=effect.attempt, result=None,
+                    error_code=effect.error_code, prepared_at=effect.prepared_at, started_at=effect.started_at,
+                    resolved_at=effect.resolved_at, reconciliation_ref=effect.reconciliation_ref, version=effect.version,
+                ))
+            return effect
 
     def mark_in_flight(self, effect_id: str, scope: ExecutionJournalScope, *, now: datetime) -> ExecutionEffect:
-        with self._engine.begin() as connection:
-            row = connection.execute(select(execution_effects).where(
-                *_scope_where(execution_effects, scope), execution_effects.c.effect_id == effect_id,
-            )).mappings().one()
-            if row["state"] == ExecutionEffectState.PREPARED.value:
-                connection.execute(update(execution_effects).where(
-                    execution_effects.c.effect_id == effect_id, execution_effects.c.version == row["version"],
-                ).values(state=ExecutionEffectState.IN_FLIGHT.value, started_at=now, version=int(row["version"]) + 1))
-                row = connection.execute(select(execution_effects).where(execution_effects.c.effect_id == effect_id)).mappings().one()
-            return _effect(row)
+        with self._lock:
+            with self._engine.begin() as connection:
+                row = connection.execute(select(execution_effects).where(
+                    *_scope_where(execution_effects, scope), execution_effects.c.effect_id == effect_id,
+                )).mappings().one()
+                if row["state"] == ExecutionEffectState.PREPARED.value:
+                    connection.execute(update(execution_effects).where(
+                        execution_effects.c.effect_id == effect_id, execution_effects.c.version == row["version"],
+                    ).values(state=ExecutionEffectState.IN_FLIGHT.value, started_at=now, version=int(row["version"]) + 1))
+                    row = connection.execute(select(execution_effects).where(execution_effects.c.effect_id == effect_id)).mappings().one()
+                return _effect(row)
 
     def resolve(self, effect_id: str, scope: ExecutionJournalScope, *, state: ExecutionEffectState, now: datetime, result_ref: str | None = None, error_code: str | None = None, private_result: Mapping[str, object] | None = None) -> ExecutionEffect:
         if state not in {ExecutionEffectState.APPLIED, ExecutionEffectState.NOT_APPLIED, ExecutionEffectState.UNKNOWN}:
             raise ValueError("effect resolution must be terminal")
-        with self._engine.begin() as connection:
-            row = connection.execute(select(execution_effects).where(
-                *_scope_where(execution_effects, scope), execution_effects.c.effect_id == effect_id,
-            )).mappings().one()
-            if row["state"] not in {ExecutionEffectState.APPLIED.value, ExecutionEffectState.NOT_APPLIED.value, ExecutionEffectState.UNKNOWN.value}:
-                connection.execute(update(execution_effects).where(
-                    execution_effects.c.effect_id == effect_id, execution_effects.c.version == row["version"],
-                ).values(state=state.value, result_ref=result_ref, error_code=error_code, result=dict(private_result or {}) or None,
-                         resolved_at=now, version=int(row["version"]) + 1))
-                row = connection.execute(select(execution_effects).where(execution_effects.c.effect_id == effect_id)).mappings().one()
-            return _effect(row)
+        with self._lock:
+            with self._engine.begin() as connection:
+                row = connection.execute(select(execution_effects).where(
+                    *_scope_where(execution_effects, scope), execution_effects.c.effect_id == effect_id,
+                )).mappings().one()
+                if row["state"] not in {ExecutionEffectState.APPLIED.value, ExecutionEffectState.NOT_APPLIED.value, ExecutionEffectState.UNKNOWN.value}:
+                    connection.execute(update(execution_effects).where(
+                        execution_effects.c.effect_id == effect_id, execution_effects.c.version == row["version"],
+                    ).values(state=state.value, result_ref=result_ref, error_code=error_code, result=dict(private_result or {}) or None,
+                             resolved_at=now, version=int(row["version"]) + 1))
+                    row = connection.execute(select(execution_effects).where(execution_effects.c.effect_id == effect_id)).mappings().one()
+                return _effect(row)
 
     def save_checkpoint(self, checkpoint: ExecutionCheckpoint) -> ExecutionCheckpoint:
-        with self._engine.begin() as connection:
-            existing = connection.execute(select(execution_checkpoints).where(
-                *_scope_where(execution_checkpoints, checkpoint.scope), execution_checkpoints.c.sequence == checkpoint.sequence,
-            )).mappings().first()
-            if existing is not None:
-                return _checkpoint(existing)
-            connection.execute(execution_checkpoints.insert().values(
-                checkpoint_id=checkpoint.checkpoint_id, execution_id=str(checkpoint.scope.execution_id), user_id=str(checkpoint.scope.user_id),
-                workspace_id=str(checkpoint.scope.workspace_id) if checkpoint.scope.workspace_id is not None else None,
-                agent_id=checkpoint.scope.agent_id, correlation_id=checkpoint.scope.correlation_id,
-                sequence=checkpoint.sequence, execution_state_version=checkpoint.execution_state_version,
-                context_manifest_ref=checkpoint.context_manifest_ref, next_decision=checkpoint.next_decision,
-                pending_effect_id=checkpoint.pending_effect_id, is_safe=checkpoint.is_safe,
-                snapshot=dict(checkpoint.snapshot or {}), created_at=checkpoint.created_at,
-            ))
-        return checkpoint
+        with self._lock:
+            current = checkpoint
+            for _attempt in range(4):
+                try:
+                    with self._engine.begin() as connection:
+                        by_id = connection.execute(select(execution_checkpoints).where(
+                            execution_checkpoints.c.checkpoint_id == current.checkpoint_id,
+                        )).mappings().first()
+                        if by_id is not None:
+                            return _checkpoint(by_id)
+                        existing = connection.execute(select(execution_checkpoints).where(
+                            execution_checkpoints.c.execution_id == str(current.scope.execution_id),
+                            execution_checkpoints.c.sequence == current.sequence,
+                        )).mappings().first()
+                        if existing is not None:
+                            if (
+                                str(existing["user_id"]) == str(current.scope.user_id)
+                                and str(existing["agent_id"]) == current.scope.agent_id
+                                and str(existing["correlation_id"]) == current.scope.correlation_id
+                                and str(existing["context_manifest_ref"]) == current.context_manifest_ref
+                                and str(existing["next_decision"]) == current.next_decision
+                            ):
+                                return _checkpoint(existing)
+                            next_seq = self.next_checkpoint_sequence(current.scope)
+                            current = replace(current, sequence=next_seq)
+                        connection.execute(execution_checkpoints.insert().values(
+                            checkpoint_id=current.checkpoint_id, execution_id=str(current.scope.execution_id), user_id=str(current.scope.user_id),
+                            workspace_id=str(current.scope.workspace_id) if current.scope.workspace_id is not None else None,
+                            agent_id=current.scope.agent_id, correlation_id=current.scope.correlation_id,
+                            sequence=current.sequence, execution_state_version=current.execution_state_version,
+                            context_manifest_ref=current.context_manifest_ref, next_decision=current.next_decision,
+                            pending_effect_id=current.pending_effect_id, is_safe=current.is_safe,
+                            snapshot=dict(current.snapshot or {}), created_at=current.created_at,
+                        ))
+                    return current
+                except IntegrityError:
+                    next_seq = self.next_checkpoint_sequence(current.scope)
+                    current = replace(current, sequence=next_seq)
+            return current
 
     def latest_safe(self, scope: ExecutionJournalScope) -> ExecutionCheckpoint | None:
-        with self._engine.connect() as connection:
-            row = connection.execute(select(execution_checkpoints).where(
-                *_scope_where(execution_checkpoints, scope), execution_checkpoints.c.is_safe.is_(True),
-            ).order_by(execution_checkpoints.c.sequence.desc())).mappings().first()
-        return _checkpoint(row) if row is not None else None
+        with self._lock:
+            with self._engine.connect() as connection:
+                row = connection.execute(select(execution_checkpoints).where(
+                    *_scope_where(execution_checkpoints, scope), execution_checkpoints.c.is_safe.is_(True),
+                ).order_by(execution_checkpoints.c.sequence.desc())).mappings().first()
+            return _checkpoint(row) if row is not None else None
 
     def next_checkpoint_sequence(self, scope: ExecutionJournalScope) -> int:
-        with self._engine.connect() as connection:
-            last = connection.execute(select(execution_checkpoints.c.sequence).where(
-                *_scope_where(execution_checkpoints, scope),
-            ).order_by(execution_checkpoints.c.sequence.desc()).limit(1)).scalar_one_or_none()
-        return int(last or 0) + 1
+        with self._lock:
+            with self._engine.connect() as connection:
+                last = connection.execute(select(execution_checkpoints.c.sequence).where(
+                    execution_checkpoints.c.execution_id == str(scope.execution_id),
+                ).order_by(execution_checkpoints.c.sequence.desc()).limit(1)).scalar_one_or_none()
+            return int(last or 0) + 1
 
     def unresolved(self, scope: ExecutionJournalScope) -> tuple[ExecutionEffect, ...]:
         active = (ExecutionEffectState.PREPARED.value, ExecutionEffectState.IN_FLIGHT.value, ExecutionEffectState.UNKNOWN.value)

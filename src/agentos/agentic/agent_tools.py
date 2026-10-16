@@ -116,13 +116,28 @@ SCAFFOLD_RECIPES: Mapping[str, tuple[str, ...]] = {
 _BLOCKED_COMMAND = re.compile(
     r"(?ix)"
     r"(\brm\s+(-[a-z]*\s+)*-[a-z]*[rf][a-z]*\s+/(\s|$))"        # rm -rf /
-    r"|(\b(mkfs|fdisk|diskpart|format)\b)"
+    r"|(\b(mkfs|fdisk|diskpart)\b|(?<!-)\bformat(?:\.com|\.exe)?\s+[a-zA-Z]:)"
     r"|(\b(shutdown|reboot|halt|poweroff)\b)"
     r"|(\bdel\b.*\s/[sq]\b.*[a-z]:\\)"                            # del /s /q C:\
     r"|(\brd\b\s+/s\b)"
     r"|(:\(\)\s*\{.*\};\s*:)"                                     # fork bomb
     r"|(\bReg(istry)?\s*(delete|Remove-Item\s+HK))"
 )
+
+_VERIFICATION_CMD_RE = re.compile(
+    r"(?:^|[;&|]\s*)(?:pytest|py\.test|(?:[\"']?[^\s;&|]*[/\\])?python(?:\d*(?:\.\d+)?)?(?:\.exe)?[\"']?\s+-m\s+(?:pytest|unittest|ruff|mypy|flake8|py_compile)|"
+    r"(?:npm|pnpm|yarn|bun)\s+(?:test|run\s+(?:test|build|lint|typecheck|check|verify|audit[\w-]*))|"
+    r"npx\s+(?:vitest|jest|tsc|eslint|playwright)|vitest|jest|tsc|ruff\s+check|mypy|flake8|cargo\s+(?:test|check)|go\s+test|"
+    r"node\s+(?:--check\b|[^\s;&|]*(?:audit|verify|check|test)[^\s;&|]*))",
+    re.IGNORECASE,
+)
+
+
+def is_verification_command(command: str) -> bool:
+    """Return True when ``command`` looks like a test, lint, typecheck, build, or audit command."""
+    clean = str(command or "").strip()
+    return bool(clean and _VERIFICATION_CMD_RE.search(clean))
+
 
 _DEV_SERVER_CMD_RE = re.compile(
     r"\b(npm\s+run\s+(dev|start|serve)|pnpm\s+(dev|start)|yarn\s+(dev|start)|"
@@ -253,7 +268,14 @@ _PARAM_ALIASES: Mapping[str, Mapping[str, str]] = {
         "id": "task_id",
     },
     "view_file": {"file_path": "path", "filepath": "path", "file": "path"},
-    "run_subagent": {"prompt": "task", "type": "subagent_type", "agent": "subagent_type"},
+    "run_subagent": {
+        "prompt": "task",
+        "type": "subagent_type",
+        "agent": "subagent_type",
+        "agent_type": "subagent_type",
+        "model": "model_id",
+        "role": "description",
+    },
     "ask_agent": {"prompt": "task", "agent": "name"},
 }
 
@@ -1518,14 +1540,21 @@ class AgentToolset:
                         emit_request=self._on_permission_request,
                     )
                     if perm_result.get("decision") not in {"allow_once", "allow_always"}:
+                        reason_text = str(perm_result.get("reason") or "").strip()
+                        output_text = (
+                            f"O usuário negou a permissão para executar `{name}` e orientou: {reason_text}"
+                            if reason_text
+                            else f"O usuário negou a permissão para executar `{name}`."
+                        )
                         return ToolOutcome(
                             "failed",
                             "Permissão negada pelo usuário",
-                            f"O usuário negou a permissão para executar `{name}`.",
+                            output_text,
                             {
                                 "tool_kind": definition.kind,
                                 "code_mode": True,
                                 "permission_request_id": perm_result.get("request_id"),
+                                **({"reason": reason_text} if reason_text else {}),
                             },
                             "CODE_PERMISSION_DENIED",
                         )
@@ -1683,6 +1712,10 @@ class AgentToolset:
             addition = f"\n\n[diagnóstico automático — {command} ({status})]\n{trimmed}"
         return ToolOutcome(outcome.status, outcome.summary, outcome.content + addition, outcome.payload, outcome.error_code, outcome.images, outcome.data)
 
+    @staticmethod
+    def _is_verification_command(command_str: str) -> bool:
+        return is_verification_command(command_str)
+
     def _observe_mutation_outcome(self, name: str, arguments: Mapping[str, Any], outcome: ToolOutcome) -> None:
         """Track workspace changes, and, in Code mode, the checks run against them.
 
@@ -1730,28 +1763,31 @@ class AgentToolset:
             return
         if name != "run_command" or bool(payload.get("failed")):
             return
+        command_str = str(arguments.get("command") or payload.get("command") or "").strip()
+        is_verif = self._is_verification_command(command_str)
         artifacts = payload.get("artifacts")
         changed_any = False
+        ignored_prefixes = (
+            ".orin/",
+            "shots/",
+            "screenshots/",
+            "test-results/",
+            "playwright-report/",
+            "coverage/",
+            "browser-captures/",
+        )
         if isinstance(artifacts, list):
             for artifact in artifacts:
                 if isinstance(artifact, Mapping) and isinstance(artifact.get("path"), str):
-                    path = str(artifact["path"]).replace("\\", "/")
-                    if not path.startswith(".orin/"):
+                    path = str(artifact["path"]).replace("\\", "/").lstrip("./")
+                    if not path.startswith(ignored_prefixes):
                         self._changed_paths.add(path)
                         changed_any = True
-        if changed_any:
+        if is_verif and payload.get("exit_code") == 0:
+            self._code_mode_verified = True
+        elif changed_any:
             self._change_events += 1
             self._code_mode_verified = False
-        else:
-            command_str = str(arguments.get("command") or payload.get("command") or "").strip()
-            if payload.get("exit_code") == 0 and re.search(
-                r"(?:^|[;&|]\s*)(?:pytest|py\.test|(?:[\"']?[^\s;&|]*[/\\])?python(?:\d*(?:\.\d+)?)?(?:\.exe)?[\"']?\s+-m\s+(?:pytest|unittest|ruff|mypy|flake8|py_compile)|"
-                r"(?:npm|pnpm|yarn|bun)\s+(?:test|run\s+(?:test|build|lint|typecheck|check))|"
-                r"npx\s+(?:vitest|jest|tsc|eslint|playwright)|vitest|jest|tsc|ruff\s+check|cargo\s+(?:test|check)|go\s+test|node\s+--check)\b",
-                command_str,
-                re.IGNORECASE,
-            ):
-                self._code_mode_verified = True
 
     def change_events(self) -> int:
         """How many times a workspace-changing tool call has succeeded this turn.
@@ -2465,6 +2501,11 @@ class AgentToolset:
 
     @staticmethod
     def _normalized_edits(old_text: str | None, new_text: str | None, edits: list[Mapping[str, Any]] | None) -> list[tuple[str, str]]:
+        if isinstance(edits, list) and len(edits) == 0 and (old_text is not None or new_text is not None):
+            edits = None
+        if isinstance(edits, list) and len(edits) > 0 and (old_text is None or old_text == "") and (new_text is None or new_text == ""):
+            old_text = None
+            new_text = None
         single = old_text is not None or new_text is not None
         if single and edits:
             # Some tool providers serialise the same single replacement in both
@@ -4877,11 +4918,16 @@ class AgentToolset:
         description: str = "",
         model_id: str | None = None,
     ) -> ToolOutcome:
-        clean_type = str(subagent_type or "").strip().lower()
+        raw_type = str(subagent_type or "").strip()
+        clean_type = raw_type.lower()
         if clean_type == "general-purpose":
             clean_type = "general"
         if clean_type not in {"explore", "plan", "general", "fork"}:
-            raise AgentToolError("subagent_type must be one of 'explore', 'plan', 'general', or 'fork'.")
+            if raw_type and (model_id is None or not str(model_id).strip()):
+                model_id = raw_type
+                clean_type = "general"
+            else:
+                raise AgentToolError("subagent_type must be one of 'explore', 'plan', 'general', or 'fork'.")
         if not isinstance(task, str) or not task.strip():
             raise AgentToolError("task must be a non-blank string.")
         if self._run_subagent is not None:
@@ -4889,7 +4935,7 @@ class AgentToolset:
                 clean_type,
                 task.strip(),
                 description=str(description or "").strip(),
-                model_id=str(model_id).strip() if model_id is not None else None,
+                model_id=str(model_id).strip() if model_id is not None and str(model_id).strip() else None,
             )
         if self._delegate is not None:
             return self._delegate(clean_type, task.strip())

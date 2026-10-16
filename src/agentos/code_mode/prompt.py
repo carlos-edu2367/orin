@@ -41,9 +41,11 @@ def dedicated_tools_over_shell_section() -> str:
 
 def parallel_execution_section() -> str:
     return (
-        "### Execução Paralela de Ferramentas\n"
+        "### Execução Paralela de Ferramentas e Subagentes\n"
         "- Sempre que precisar ler múltiplos arquivos, buscar em vários padrões ou inspecionar partes independentes do projeto, emita todas as chamadas de ferramenta independentes na mesma resposta.\n"
-        "- Quando houver dependência estrita (ex.: ler um arquivo com `read_file` antes de modificá-lo com `edit_file`), execute sequencialmente."
+        "- Quando houver dependência estrita (ex.: ler um arquivo com `read_file` antes de modificá-lo com `edit_file`), execute sequencialmente.\n"
+        "- Para delegar exploração, auditoria ou tarefas paralelas a subagentes no Modo Code, prefira `run_subagent(subagent_type=\"explore\"|\"plan\"|\"general\"|\"fork\", task=\"...\", description=\"...\", model_id=\"...\")`. "
+        "Ao informar `model_id`, copie o identificador exatamente como listado nos modelos favoritos (incluindo o prefixo `~` quando existir) ou omita `model_id` para usar o modelo atual do turno."
     )
 
 

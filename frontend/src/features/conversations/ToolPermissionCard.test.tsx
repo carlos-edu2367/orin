@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import { parseConversationActivityEvent } from '../../api/conversations'
+import { CodePermissionDock, assessPermissionRisk } from './CodePermissionDock'
 import { Composer } from './Composer'
 import { ToolPermissionCard } from './ToolPermissionCard'
 import { TurnTimeline } from './TurnTimeline'
@@ -143,6 +144,106 @@ describe('Fase B: ToolPermissionCard, 4 Permission Modes & Rewind UI', () => {
     fireEvent.click(confirmBtn)
     await waitFor(() => {
       expect(onRewind).toHaveBeenCalledWith('turn-42')
+    })
+  })
+
+  it('parses suggested_rule, target and reason in parseToolPermissionRequest', () => {
+    const event = parseConversationActivityEvent(
+      {
+        event_id: 'evt-perm-suggested',
+        event_type: 'code_mode.decision_required',
+        turn_id: 'turn-55',
+        agent_id: 'agent:main',
+        summary: 'Permissão necessária para run_command',
+        payload: {
+          stage: 'waiting_decision',
+          permission_request: {
+            request_id: 'perm_abc123',
+            turn_id: 'turn-55',
+            tool_name: 'run_command',
+            command: 'cloudflared tunnel --url http://localhost:5173',
+            suggested_rule: 'run_command(cloudflared:*)',
+            reason: 'Preciso expor o preview local',
+          },
+        },
+      },
+      '10',
+    )
+    expect(event.toolPermission?.requestId).toBe('perm_abc123')
+    expect(event.toolPermission?.ruleSuggestion).toBe('run_command(cloudflared:*)')
+    expect((event.toolPermission as { target?: string })?.target).toBe(
+      'cloudflared tunnel --url http://localhost:5173',
+    )
+    expect((event.toolPermission as { reason?: string })?.reason).toBe('Preciso expor o preview local')
+    expect((event.toolPermission as { state?: string })?.state).toBe('pending')
+  })
+
+  it('renders CodePermissionDock with semantic badges, high-risk indicator, queue badge, keyboard shortcuts, and inline deny+instruct', async () => {
+    expect(assessPermissionRisk({ requestId: '1', toolName: 'run_command', command: 'cloudflared tunnel' })).toBe('high')
+    expect(assessPermissionRisk({ requestId: '2', toolName: 'run_command', command: 'rm -rf dist' })).toBe('high')
+    expect(assessPermissionRisk({ requestId: '3', toolName: 'edit_file', path: '.env.local' })).toBe('high')
+    expect(assessPermissionRisk({ requestId: '4', toolName: 'run_command', command: 'npm test' })).toBe('normal')
+
+    const onResolve = vi.fn().mockResolvedValue(undefined)
+    render(
+      <CodePermissionDock
+        requests={[
+          {
+            requestId: 'req-1',
+            turnId: 'turn-1',
+            toolName: 'run_command',
+            command: 'cloudflared tunnel --url http://localhost:5173',
+            ruleSuggestion: 'run_command(cloudflared:*)',
+            state: 'pending',
+          } as never,
+          {
+            requestId: 'req-2',
+            turnId: 'turn-1',
+            toolName: 'edit_file',
+            path: 'src/App.tsx',
+            ruleSuggestion: 'edit_file(src/App.tsx)',
+            state: 'pending',
+          } as never,
+        ]}
+        onResolve={onResolve}
+      />,
+    )
+
+    const dock = screen.getByTestId('code-permission-dock')
+    expect(dock).toHaveClass('code-perm-dock--queued')
+    expect(dock).toHaveClass('code-perm-dock--high-risk')
+    expect(screen.getByText('Bash')).toBeInTheDocument()
+    expect(screen.getByText('Executar comando no terminal')).toBeInTheDocument()
+    expect(screen.getByText('Também aguardando: 1')).toBeInTheDocument()
+
+    // Shortcut '2' -> Permitir sempre no projeto
+    fireEvent.keyDown(window, { key: '2' })
+    await waitFor(() => {
+      expect(onResolve).toHaveBeenCalledWith(
+        'req-1',
+        expect.objectContaining({
+          behavior: 'allow',
+          scope: 'project',
+          updatedRule: 'run_command(cloudflared:*)',
+        }),
+      )
+    })
+
+    // Test inline guidance ("Negar e orientar...")
+    fireEvent.click(screen.getByTestId('code-perm-deny-instruct-toggle'))
+    const input = screen.getByPlaceholderText('Diga ao Orin como fazer diferente...')
+    fireEvent.change(input, { target: { value: 'Use apenas localhost sem túnel' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+
+    await waitFor(() => {
+      expect(onResolve).toHaveBeenCalledWith(
+        'req-1',
+        expect.objectContaining({
+          behavior: 'deny',
+          scope: 'once',
+          reason: 'Use apenas localhost sem túnel',
+        }),
+      )
     })
   })
 })

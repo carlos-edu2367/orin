@@ -28,6 +28,11 @@ import { WorkspaceNavigation } from '../projects/WorkspaceNavigation'
 import { ActivityStream } from './ActivityStream'
 import { AgentPulse, modeFromEvents } from './AgentPulse'
 import { attachmentNotice } from './attachmentNotice'
+import {
+  CodePermissionDock,
+  type CodePermissionDockDecision,
+  type DockToolPermissionRequest,
+} from './CodePermissionDock'
 import { Composer } from './Composer'
 import { ContextIndicator } from './ContextIndicator'
 import { MarkdownMessage } from './MarkdownMessage'
@@ -570,7 +575,7 @@ export function ChatPage() {
       if (event.type === 'assistant.delta' && Boolean(event.messageId) && Boolean(event.content)) {
         return true
       }
-      if (event.type === 'message.reset' || event.type === 'code_mode.validation_started') {
+      if (event.type === 'message.reset') {
         return Boolean(event.messageId || (event.turnId && turnToMessageId.has(event.turnId)))
       }
       return false
@@ -580,7 +585,7 @@ export function ChatPage() {
     setStreamedByMessage((current) => {
       const next = new Map(current)
       for (const event of unseen) {
-        if (event.type === 'message.reset' || event.type === 'code_mode.validation_started') {
+        if (event.type === 'message.reset') {
           const messageId = event.messageId ?? (event.turnId ? turnToMessageId.get(event.turnId) : undefined)
           if (messageId) {
             next.delete(messageId)
@@ -607,6 +612,8 @@ export function ChatPage() {
     return pendingUserMessage && !alreadyDurable ? [...base, pendingUserMessage] : base
   }, [conversation?.messages, streamedByMessage, pendingUserMessage])
 
+  const [resolvedPermissionDecisions, setResolvedPermissionDecisions] = useState<Map<string, 'allowed' | 'denied'>>(() => new Map())
+
   const consolidatedEvents = useMemo(() => {
     const lastTerminalLifecycleByTurn = new Map<string, string>()
     const cancelledTurns = new Set<string>(cancelledTurnIds)
@@ -620,19 +627,33 @@ export function ChatPage() {
         lastTerminalLifecycleByTurn.set(event.turnId, event.eventId)
       }
     }
-    return activity.events.filter((event) => {
-      if (event.kind === 'lifecycle' && Boolean(event.parentAgentId)) return false
-      if ((event.type === 'delegation.failed' || event.type === 'DELEGATION_FAILED') && event.turnId && cancelledTurns.has(event.turnId)) {
-        return false
-      }
-      const term = terminalConversationState(event)
-      if (event.kind === 'lifecycle' && event.turnId && (term === 'completed' || term === 'failed' || term === 'cancelled')) {
-        const lastId = lastTerminalLifecycleByTurn.get(event.turnId)
-        if (lastId && lastId !== event.eventId) return false
-      }
-      return true
-    })
-  }, [activity.events, cancelledTurnIds])
+    return activity.events
+      .filter((event) => {
+        if (event.kind === 'lifecycle' && Boolean(event.parentAgentId)) return false
+        if ((event.type === 'delegation.failed' || event.type === 'DELEGATION_FAILED') && event.turnId && cancelledTurns.has(event.turnId)) {
+          return false
+        }
+        const term = terminalConversationState(event)
+        if (event.kind === 'lifecycle' && event.turnId && (term === 'completed' || term === 'failed' || term === 'cancelled')) {
+          const lastId = lastTerminalLifecycleByTurn.get(event.turnId)
+          if (lastId && lastId !== event.eventId) return false
+        }
+        return true
+      })
+      .map((event): ConversationActivityEvent => {
+        const reqId = event.toolPermission?.requestId
+        const resolvedState = reqId ? resolvedPermissionDecisions.get(reqId) : undefined
+        if (!resolvedState || !event.toolPermission) return event
+        return {
+          ...event,
+          state: resolvedState === 'allowed' ? 'completed' : 'failed',
+          toolPermission: {
+            ...event.toolPermission,
+            state: resolvedState,
+          },
+        }
+      })
+  }, [activity.events, cancelledTurnIds, resolvedPermissionDecisions])
 
   // Each assistant message gets its own text/action timeline, folded from the
   // turn it belongs to; a turn no message could claim (still running before
@@ -674,14 +695,25 @@ export function ChatPage() {
     )
     for (const event of activity.events) {
       if (!event.turnId || terminalTurnIds.has(event.turnId) || decidedPlanKeys.has(event.turnId) || decidedPlanKeys.has(event.eventId)) continue
+      const permReq = event.toolPermission
+      const isResolvedPerm = Boolean(
+        permReq?.requestId &&
+          (resolvedPermissionDecisions.has(permReq.requestId) ||
+            permReq.state === 'allowed' ||
+            permReq.state === 'denied'),
+      )
       if (
-        event.type === 'turn.waiting_user'
-        || event.type === 'code_mode.blocked'
-        || event.type === 'code_mode.plan_ready'
-        || event.type === 'tool.permission_required'
-        || Boolean(event.planApproval)
-        || event.tool === 'exit_plan_mode'
-        || event.toolName === 'exit_plan_mode'
+        !isResolvedPerm && (
+          event.type === 'turn.waiting_user'
+          || event.type === 'code_mode.blocked'
+          || event.type === 'code_mode.plan_ready'
+          || event.type === 'code_mode.decision_required'
+          || event.type === 'tool.permission_required'
+          || Boolean(event.toolPermission)
+          || Boolean(event.planApproval)
+          || event.tool === 'exit_plan_mode'
+          || event.toolName === 'exit_plan_mode'
+        )
       ) {
         ids.add(event.turnId)
       }
@@ -704,7 +736,46 @@ export function ChatPage() {
       ids.delete(key)
     }
     return ids
-  }, [activity.events, cancelledTurnIds, conversation?.turns, decidedPlanKeys])
+  }, [activity.events, cancelledTurnIds, conversation?.turns, decidedPlanKeys, resolvedPermissionDecisions])
+
+  const pendingToolPermissions = useMemo<DockToolPermissionRequest[]>(() => {
+    const map = new Map<string, DockToolPermissionRequest>()
+    const rawPendingFromState = (activity as { pendingPermissions?: DockToolPermissionRequest[] }).pendingPermissions
+    if (Array.isArray(rawPendingFromState)) {
+      for (const req of rawPendingFromState) {
+        if (
+          req &&
+          req.requestId &&
+          (req.state ?? 'pending') === 'pending' &&
+          req.toolName !== 'exit_plan_mode' &&
+          !req.planApproval &&
+          !resolvedPermissionDecisions.has(req.requestId)
+        ) {
+          map.set(req.requestId, req)
+        }
+      }
+    }
+    for (const event of activity.events) {
+      const req = event.toolPermission as DockToolPermissionRequest | undefined
+      if (!req || !req.requestId) continue
+      if (req.toolName === 'exit_plan_mode' || req.planApproval || event.planApproval) continue
+      const turnId = req.turnId ?? event.turnId
+      const isSettled =
+        resolvedPermissionDecisions.has(req.requestId) ||
+        req.state === 'allowed' ||
+        req.state === 'denied' ||
+        event.state === 'completed' ||
+        event.state === 'failed' ||
+        event.state === 'cancelled' ||
+        (turnId ? cancelledTurnIds.has(turnId) || !openQuestionTurnIds.has(turnId) : false)
+      if (isSettled) {
+        map.delete(req.requestId)
+      } else {
+        map.set(req.requestId, { ...req, turnId })
+      }
+    }
+    return Array.from(map.values())
+  }, [activity, cancelledTurnIds, openQuestionTurnIds, resolvedPermissionDecisions])
 
   const activeTurn = useMemo(
     () =>
@@ -895,8 +966,53 @@ export function ChatPage() {
     const turnId = request?.turnId ?? event.turnId
     if (!request || !turnId || !openQuestionTurnIds.has(turnId)) return
     setError(null)
+    const resolvedState: 'allowed' | 'denied' = decision === 'deny' ? 'denied' : 'allowed'
+    setResolvedPermissionDecisions((current) => {
+      const next = new Map(current)
+      next.set(request.requestId, resolvedState)
+      return next
+    })
     await submitToolPermission(client, conversationId, turnId, request.requestId, decision)
   }, [client, conversationId, openQuestionTurnIds])
+
+  const handleResolveDockPermission = useCallback(async (
+    requestId: string,
+    decisionPayload: CodePermissionDockDecision,
+  ) => {
+    const targetReq = pendingToolPermissions.find((req) => req.requestId === requestId)
+    const turnId = targetReq?.turnId ?? activeTurn?.turn_id
+    if (!turnId) return
+    const apiDecision: ToolPermissionDecision =
+      decisionPayload.behavior === 'deny'
+        ? 'deny'
+        : decisionPayload.scope === 'project' || decisionPayload.scope === 'session'
+          ? 'allow_always'
+          : 'allow_once'
+    const resolvedState: 'allowed' | 'denied' = apiDecision === 'deny' ? 'denied' : 'allowed'
+    setError(null)
+    setResolvedPermissionDecisions((current) => {
+      const next = new Map(current)
+      next.set(requestId, resolvedState)
+      return next
+    })
+    try {
+      await submitToolPermission(
+        client,
+        conversationId,
+        turnId,
+        requestId,
+        apiDecision,
+        decisionPayload.reason,
+      )
+    } catch {
+      setResolvedPermissionDecisions((current) => {
+        const next = new Map(current)
+        next.delete(requestId)
+        return next
+      })
+      setError('Não foi possível enviar a decisão de permissão. Tente novamente.')
+    }
+  }, [activeTurn?.turn_id, client, conversationId, pendingToolPermissions])
 
   const handleApprovePlanAcceptEdits = useCallback(async (event: ConversationActivityEvent) => {
     const request = event.toolPermission
@@ -1088,6 +1204,7 @@ export function ChatPage() {
     if (!running || stopping) return
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape' || event.defaultPrevented) return
+      if (pendingToolPermissions.length > 0) return
       if (oversizedInput || previewReference) return
       if (document.querySelector('[role="dialog"], [role="listbox"]')) return
       event.preventDefault()
@@ -1095,7 +1212,7 @@ export function ChatPage() {
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [oversizedInput, previewReference, running, stop, stopping])
+  }, [oversizedInput, pendingToolPermissions.length, previewReference, running, stop, stopping])
 
   return (
     <main className="chat">
@@ -1192,7 +1309,9 @@ export function ChatPage() {
                       timeline.flatMap((seg) =>
                         seg.kind === 'activity'
                           ? seg.group.events.map((ev) => ev.turnId).filter((id): id is string => Boolean(id))
-                          : [],
+                          : seg.kind === 'thought' && seg.thought.turnId
+                            ? [seg.thought.turnId]
+                            : [],
                       ),
                     ),
                   )
@@ -1240,6 +1359,8 @@ export function ChatPage() {
                         client={client}
                         mode={conversationMode}
                         permissionMode={codePermissionMode}
+                        turnCompleted={isTurnFinished}
+                        dockActive={true}
                         onPreview={setPreviewReference}
                         openQuestionTurnIds={effectiveOpenQuestionTurnIds}
                         onAnswer={submitQuestionAnswers}
@@ -1258,7 +1379,16 @@ export function ChatPage() {
                       ? <MarkdownMessage content={item.content} conversationId={conversationId} client={client} onPreview={setPreviewReference} />
                       : item.command
                         ? <MessageCommandChip command={item.command} />
-                        : <p>{item.content || placeholderFor(item)}</p>}
+                        : item.role === 'assistant' && !item.content && (item.status === 'streaming' || item.status === 'queued')
+                          ? (
+                            <div className="assistant-live-placeholder" data-testid="assistant-live-placeholder">
+                              <span className="agent-pulse__dot" aria-hidden="true" />
+                              <span className="agent-pulse__label--shimmer">
+                                {item.status === 'queued' ? 'Na fila…' : 'Pensando…'}
+                              </span>
+                            </div>
+                          )
+                          : <p>{item.content || placeholderFor(item)}</p>}
                   {item.role === 'assistant' && item.content.trim().length > 0 && item.status === 'completed' && (
                     <div className="bubble__actions" style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '6px' }}>
                       <button
@@ -1294,6 +1424,7 @@ export function ChatPage() {
                     client={client}
                     mode="code"
                     permissionMode={codePermissionMode}
+                    dockActive={true}
                     onPreview={setPreviewReference}
                     openQuestionTurnIds={openQuestionTurnIds}
                     onAnswer={submitQuestionAnswers}
@@ -1333,7 +1464,11 @@ export function ChatPage() {
                   exit={{ opacity: 0 }}
                   transition={{ duration: 0.2 }}
                 >
-                  <AgentPulse mode={mode} state={activity.events.at(-1)?.state ?? 'working'} />
+                  <AgentPulse
+                    mode={mode}
+                    state={activity.events.at(-1)?.state ?? 'working'}
+                    activeTurnId={activeTurn?.turn_id ?? null}
+                  />
                 </motion.div>
               )}
             </AnimatePresence>
@@ -1469,6 +1604,10 @@ export function ChatPage() {
         {activity.connection === 'degraded' && (
           <p className="chat__connection" role="status">Atualizações em tempo real indisponíveis; tentando reconectar.</p>
         )}
+        <CodePermissionDock
+          requests={pendingToolPermissions}
+          onResolve={(requestId, decision) => { void handleResolveDockPermission(requestId, decision) }}
+        />
         <Composer
           value={message}
           onChange={setMessage}

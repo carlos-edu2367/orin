@@ -1,6 +1,6 @@
-import type { ActivityToolCall, ConversationActivityEvent, TodoItem } from './activityTypes'
+import type { ActivityEvent, ActivityToolCall, ConversationActivityEvent, TodoItem } from './activityTypes'
 
-export type { ActivityToolCall }
+export type { ActivityEvent, ActivityToolCall }
 export type ActivityConnectionState = 'snapshot' | 'connecting' | 'live' | 'degraded' | 'resyncing'
 export type TurnLifecycleStatus = 'idle' | 'running' | 'completed' | 'failed' | 'cancelled'
 
@@ -54,7 +54,8 @@ const ACTIVE_ACTIVITY_STATES = new Set([
   'retrying',
 ])
 
-function terminalOutcomeFor(event: ConversationActivityEvent): 'completed' | 'failed' | 'cancelled' | null {
+export function terminalOutcomeFor(event: ActivityEvent): 'completed' | 'failed' | 'cancelled' | null {
+  if (event.parentAgentId) return null
   if (TERMINAL_CANCELLED_TYPES.has(event.type)) return 'cancelled'
   if (TERMINAL_FAILED_TYPES.has(event.type)) {
     return event.errorCode === 'TURN_CANCELLED' || event.status === 'cancelled' || event.state === 'cancelled'
@@ -174,7 +175,7 @@ export function applyActivityEvent(state: ActivityStoreState, event: Conversatio
 
   return {
     ...state,
-    events: trimActivityEvents([...baseEvents, event], Math.max(EVENT_LIMIT, state.events.length)),
+    events: trimActivityEvents([...baseEvents, event], EVENT_LIMIT),
     cursor: event.cursor,
     resyncRequired: false,
     todos: nextTodos,
@@ -259,11 +260,20 @@ export function activityReducer(state: ActivityStoreState, action: ActivityActio
   }
 }
 
+function isStreamingDeltaEvent(event: ConversationActivityEvent): boolean {
+  return (
+    event.type === 'assistant.delta' ||
+    event.type === 'ASSISTANT_DELTA' ||
+    event.type === 'agent.thought_delta' ||
+    event.type === 'AGENT_THOUGHT_DELTA'
+  )
+}
+
 function isEphemeralDeltaOrContext(
   event: ConversationActivityEvent,
   latestContextIdByTurn: Map<string, string>,
 ): boolean {
-  if (event.type === 'assistant.delta' || event.type === 'ASSISTANT_DELTA') {
+  if (isStreamingDeltaEvent(event)) {
     return true
   }
   if (event.type === 'context.updated' || event.type === 'CONTEXT_UPDATED') {
@@ -273,10 +283,38 @@ function isEphemeralDeltaOrContext(
   return false
 }
 
+function mergeAdjacentDelta(
+  older: ConversationActivityEvent,
+  newer: ConversationActivityEvent,
+): ConversationActivityEvent | null {
+  if (older.turnId !== newer.turnId) return null
+  const olderIsThought = older.type === 'agent.thought_delta' || older.type === 'AGENT_THOUGHT_DELTA'
+  const newerIsThought = newer.type === 'agent.thought_delta' || newer.type === 'AGENT_THOUGHT_DELTA'
+  if (olderIsThought && newerIsThought) {
+    const olderText = String(older.payload?.delta ?? older.detail ?? older.delta ?? older.content ?? '')
+    const newerText = String(newer.payload?.delta ?? newer.detail ?? newer.delta ?? newer.content ?? '')
+    const mergedText = `${olderText}${newerText}`
+    return {
+      ...newer,
+      detail: mergedText,
+      ...(newer.payload ? { payload: { ...newer.payload, delta: mergedText } } : { payload: { delta: mergedText } }),
+    }
+  }
+  const olderIsAssistant = older.type === 'assistant.delta' || older.type === 'ASSISTANT_DELTA'
+  const newerIsAssistant = newer.type === 'assistant.delta' || newer.type === 'ASSISTANT_DELTA'
+  if (olderIsAssistant && newerIsAssistant && older.messageId === newer.messageId) {
+    return {
+      ...newer,
+      content: `${older.content ?? ''}${newer.content ?? ''}`,
+    }
+  }
+  return null
+}
+
 /**
- * Slices `events` to `limit` while prioritizing structural tool/lifecycle events
- * over noisy `assistant.delta` / stale `context.updated` events and keeping the
- * initial `code_mode.*` anchor event for any turn still in the window.
+ * Retains structural tool/artifact/lifecycle/prepend_older events unconditionally
+ * while compacting and trimming old `assistant.delta` / `agent.thought_delta` /
+ * stale `context.updated` events so delta floods never evict structural history.
  */
 function trimActivityEvents(events: ConversationActivityEvent[], limit: number): ConversationActivityEvent[] {
   if (events.length <= limit) return events
@@ -291,36 +329,23 @@ function trimActivityEvents(events: ConversationActivityEvent[], limit: number):
   const dropNeeded = events.length - limit
   let dropped = 0
   const filtered: ConversationActivityEvent[] = []
-  for (const event of events) {
+  for (let i = 0; i < events.length; i += 1) {
+    const event = events[i]
     if (dropped < dropNeeded && isEphemeralDeltaOrContext(event, latestContextIdByTurn)) {
+      const next = events[i + 1]
+      if (next && isStreamingDeltaEvent(event) && isStreamingDeltaEvent(next)) {
+        const merged = mergeAdjacentDelta(event, next)
+        if (merged) {
+          events[i + 1] = merged
+        }
+      }
       dropped += 1
       continue
     }
     filtered.push(event)
   }
 
-  if (filtered.length <= limit) return filtered
-
-  const tail = filtered.slice(-limit)
-  const tailIds = new Set(tail.map((item) => item.eventId))
-  const tailTurnIds = new Set(tail.map((item) => item.turnId).filter((id): id is string => Boolean(id)))
-  const pinned: ConversationActivityEvent[] = []
-  const pinnedTurns = new Set<string>()
-  for (const event of filtered) {
-    if (tailIds.has(event.eventId)) break
-    if (
-      event.turnId &&
-      tailTurnIds.has(event.turnId) &&
-      !pinnedTurns.has(event.turnId) &&
-      event.type.startsWith('code_mode.') &&
-      !event.toolPermission
-    ) {
-      pinnedTurns.add(event.turnId)
-      pinned.push(event)
-    }
-  }
-  if (pinned.length === 0) return tail
-  return [...pinned, ...tail.slice(pinned.length)]
+  return filtered
 }
 
 /** True only when both cursors are comparable and the next one moves backwards. */

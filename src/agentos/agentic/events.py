@@ -17,6 +17,7 @@ class AgentActivityEventType(StrEnum):
     CONTEXT_UPDATED = "context.updated"
     CONTEXT_COMPACTED = "context.compacted"
     ASSISTANT_DELTA = "assistant.delta"
+    AGENT_THOUGHT_DELTA = "agent.thought_delta"
     ASSISTANT_COMPLETED = "assistant.completed"
     TOOL_REQUESTED = "tool.requested"
     TOOL_STARTED = "tool.started"

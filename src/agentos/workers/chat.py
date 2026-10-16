@@ -33,7 +33,12 @@ from agentos.code_mode.models import (
     normalize_permission_mode,
 )
 from agentos.agentic.transcript import REHYDRATION_BUDGET_FRACTION
-from agentos.agentic.session import TurnSession, build_retrieval_for_turn, resolve_effective_workspace_id
+from agentos.agentic.session import (
+    TurnSession,
+    build_retrieval_for_turn,
+    resolve_child_model_id,
+    resolve_effective_workspace_id,
+)
 from agentos.agentic.browser_tools import ConversationBrowserRegistry, browser_capability_from_environment, conversation_browser_for
 from agentos.agentic.web_search import search_client_from_environment
 from agentos.retrieval.registry import RetrievalRegistry
@@ -935,12 +940,36 @@ class ChatWorker:
             cooldown_seconds=int(config["key_cooldown_seconds"]), transport_factory=build,
         )
 
+    def _allowed_child_providers(self, connection, turn: dict[str, object]) -> set[str]:
+        allowed = {str(turn.get("provider") or "")}
+        try:
+            enabled_rows = connection.execute(
+                select(provider_configurations.c.provider).where(
+                    provider_configurations.c.user_id == turn["user_id"],
+                    provider_configurations.c.enabled.is_(True),
+                )
+            ).all()
+            for row in enabled_rows:
+                prov = str(getattr(row, "provider", "") or "")
+                if prov:
+                    allowed.add(prov)
+        except Exception:
+            pass
+        allowed.discard("")
+        return allowed
+
     def _favorite_child_model_ids(self, turn: dict[str, object]) -> tuple[str, ...]:
-        """Return this user's favorites, limited to the provider of the active turn."""
+        """Return this user's non-batch favorites across the active turn provider and enabled providers."""
         try:
             with self.store._engine.connect() as connection:
+                allowed_providers = self._allowed_child_providers(connection, turn)
+                if not allowed_providers:
+                    return ()
                 rows = connection.execute(
-                    select(provider_model_catalog.c.model_id)
+                    select(
+                        provider_model_catalog.c.model_id,
+                        provider_model_catalog.c.provider,
+                    )
                     .join(
                         provider_model_favorites,
                         (provider_model_favorites.c.user_id == provider_model_catalog.c.user_id)
@@ -949,18 +978,42 @@ class ChatWorker:
                     )
                     .where(
                         provider_model_catalog.c.user_id == turn["user_id"],
-                        provider_model_catalog.c.provider == turn["provider"],
+                        provider_model_catalog.c.provider.in_(sorted(allowed_providers)),
                     )
                     .order_by(provider_model_catalog.c.display_name, provider_model_catalog.c.model_id)
                 ).all()
         except Exception:
             return ()
-        return tuple(str(row.model_id) for row in rows)
+        active_provider = str(turn.get("provider") or "")
+        ordered_rows = sorted(
+            rows,
+            key=lambda r: (0 if str(r.provider) == active_provider else 1),
+        )
+        seen: list[str] = []
+        for row in ordered_rows:
+            mid = str(row.model_id or "").strip()
+            if not mid or mid.lower().endswith(":batch"):
+                continue
+            if mid not in seen:
+                seen.append(mid)
+        return tuple(seen)
 
     def _is_favorite_child_model(self, turn: dict[str, object], model_id: str) -> bool:
         """Authorize a model at execution time against the durable user catalog."""
+        raw = str(model_id or "").strip()
+        if not raw or raw.lower().endswith(":batch"):
+            return False
+        favorites = self._favorite_child_model_ids(turn)
+        resolved = resolve_child_model_id(raw, str(turn.get("model_id") or ""), favorites) or raw
+        if resolved.lower().endswith(":batch"):
+            return False
+        if resolved in favorites:
+            return True
         try:
             with self.store._engine.connect() as connection:
+                allowed_providers = self._allowed_child_providers(connection, turn)
+                if not allowed_providers:
+                    return False
                 return connection.execute(
                     select(provider_model_catalog.c.id)
                     .join(
@@ -971,12 +1024,49 @@ class ChatWorker:
                     )
                     .where(
                         provider_model_catalog.c.user_id == turn["user_id"],
-                        provider_model_catalog.c.provider == turn["provider"],
-                        provider_model_catalog.c.model_id == model_id,
+                        provider_model_catalog.c.provider.in_(sorted(allowed_providers)),
+                        provider_model_catalog.c.model_id == resolved,
                     )
                 ).scalar_one_or_none() is not None
         except Exception:
             return False
+
+    def _child_provider_for_turn(self, turn: dict[str, object], model_id: str) -> HTTPProviderStreamTransport:
+        favorites = self._favorite_child_model_ids(turn)
+        raw_model_id = str(model_id or "").strip()
+        resolved_model_id = (
+            resolve_child_model_id(
+                raw_model_id,
+                str(turn.get("model_id") or ""),
+                favorites,
+            )
+            or raw_model_id
+        )
+        target_provider = str(turn["provider"])
+        try:
+            with self.store._engine.connect() as connection:
+                allowed_providers = self._allowed_child_providers(connection, turn)
+                rows = connection.execute(
+                    select(provider_model_favorites.c.provider)
+                    .where(
+                        provider_model_favorites.c.user_id == turn["user_id"],
+                        provider_model_favorites.c.model_id == resolved_model_id,
+                        provider_model_favorites.c.provider.in_(sorted(allowed_providers)),
+                    )
+                ).all()
+                matching_providers = [str(r.provider) for r in rows if r.provider]
+                if matching_providers and target_provider not in matching_providers:
+                    target_provider = matching_providers[0]
+        except Exception:
+            pass
+        return self._transport_for(
+            str(turn["user_id"]),
+            target_provider,
+            resolved_model_id,
+            num_ctx=self._num_ctx_for({**turn, "provider": target_provider, "model_id": resolved_model_id})
+            if target_provider == "ollama"
+            else None,
+        )
 
     def _runtime_for(self, turn: dict[str, object]) -> AgenticTurnRuntime:
         if self._runtime_factory is not None:
@@ -1045,10 +1135,7 @@ class ChatWorker:
                 vision_reader_factory=self._vision_reader_factory(turn),
                 child_model_ids=self._favorite_child_model_ids(turn),
                 child_model_authorizer=lambda model_id: self._is_favorite_child_model(turn, model_id),
-                child_provider_factory=lambda model_id: self._transport_for(
-                    str(turn["user_id"]), str(turn["provider"]), model_id,
-                    num_ctx=self._num_ctx_for({**turn, "model_id": model_id}) if str(turn["provider"]) == "ollama" else None,
-                ),
+                child_provider_factory=lambda model_id: self._child_provider_for_turn(turn, model_id),
                 mcp_provider=mcp_provider,
                 plugin_service=plugin_service,
                 hook_engine=self._hook_engine,
@@ -1072,7 +1159,7 @@ class ChatWorker:
                     code_mode_runs.c.user_id == turn["user_id"],
                 )).mappings().first()
                 if run is None:
-                    return turn
+                    return {**turn, "interactive_permissions": bool(turn.get("interactive_permissions", True))}
                 raw_perm = (
                     turn.get("permission_mode")
                     or turn.get("code_mode_permission_mode")
@@ -1121,6 +1208,7 @@ class ChatWorker:
                 "code_mode_autonomy": resolved_autonomy.value,
                 "code_mode_push_authorized": push_authorized,
                 "code_mode_plan_path": plan_path,
+                "interactive_permissions": bool(turn.get("interactive_permissions", True)),
             })
             if stage is CodeStage.PLANNING:
                 self.store._activity(enriched, AgentActivityEventType.CODE_MODE_STAGE_CHANGED, "Planejando entrega de código", {

@@ -927,8 +927,6 @@ class PostgresChatStore:
                 ~(
                     conversation_activity_events.c.turn_id.in_(settled_turns)
                     & conversation_activity_events.c.event_type.in_((
-                        AgentActivityEventType.ASSISTANT_DELTA.value,
-                        "tool.progressed",
                         "tool.requested",
                         "tool.started",
                         "code_mode.validation_started",
@@ -999,8 +997,13 @@ class PostgresChatStore:
             ev_type = str(row["event_type"])
             t_id = str(row["turn_id"])
             r_id = int(row["id"])
-            if t_id in settled_turns and ev_type in {"tool.progressed", "tool.requested", AgentActivityEventType.ASSISTANT_DELTA.value}:
-                continue
+            raw_payload = row["payload"]
+            payload = _plain(raw_payload) if isinstance(raw_payload, Mapping) else {}
+            if t_id in settled_turns:
+                if ev_type == "tool.requested":
+                    continue
+                if ev_type == "tool.progressed" and payload.get("phase") != "generating_arguments":
+                    continue
             if (
                 ev_type == AgentActivityEventType.CONTEXT_UPDATED.value
                 and context_count_by_turn.get(t_id, 0) > 3
@@ -1012,8 +1015,6 @@ class PostgresChatStore:
                 and r_id < last_validation_id_by_turn.get(t_id, 0)
             ):
                 continue
-            raw_payload = row["payload"]
-            payload = _plain(raw_payload) if isinstance(raw_payload, Mapping) else {}
             if ev_type in {
                 AgentActivityEventType.CONTEXT_UPDATED.value,
                 AgentActivityEventType.CONTEXT_COMPACTED.value,
@@ -1039,6 +1040,25 @@ class PostgresChatStore:
                     prev_content = str(prev_payload.get("content") or "")
                     chunk_content = str(payload.get("content") or "")
                     prev_payload["content"] = prev_content + chunk_content
+                    compacted[-1]["sequence"] = int(row["sequence"])
+                    compacted[-1]["cursor"] = str(row["sequence"])
+                    compacted[-1]["occurred_at"] = occurred_at
+                    continue
+
+            if (
+                ev_type == AgentActivityEventType.AGENT_THOUGHT_DELTA.value
+                and compacted
+                and compacted[-1]["event_type"] == AgentActivityEventType.AGENT_THOUGHT_DELTA.value
+                and compacted[-1]["turn_id"] == t_id
+                and compacted[-1]["agent_id"] == agent_id
+            ):
+                prev_payload = compacted[-1].get("payload")
+                if isinstance(prev_payload, dict) and isinstance(payload, dict):
+                    prev_content = str(prev_payload.get("content") or prev_payload.get("delta") or "")
+                    chunk_content = str(payload.get("content") or payload.get("delta") or "")
+                    merged = prev_content + chunk_content
+                    prev_payload["content"] = merged
+                    prev_payload["delta"] = merged
                     compacted[-1]["sequence"] = int(row["sequence"])
                     compacted[-1]["cursor"] = str(row["sequence"])
                     compacted[-1]["occurred_at"] = occurred_at
@@ -1139,18 +1159,71 @@ class PostgresChatStore:
         self._activity(claimed, AgentActivityEventType.TURN_STARTED, "Turn started")
         return claimed
 
-    def lifecycle(self, turn: Mapping[str, object], state: str, **_payload: object) -> None:
-        if state == "running" and turn.get("turn_id"):
+    def _coerce_turn_dict(self, turn: Mapping[str, object] | object) -> dict[str, object]:
+        if isinstance(turn, Mapping):
+            d = dict(turn)
+        else:
+            d = {
+                k: getattr(turn, k)
+                for k in ("turn_id", "conversation_id", "execution_id", "user_id", "assistant_message_id")
+                if hasattr(turn, k)
+            }
+        if d.get("turn_id") and (not d.get("execution_id") or not d.get("user_id") or not d.get("conversation_id")):
+            try:
+                with self._engine.connect() as c:
+                    row = c.execute(
+                        select(conversation_turns).where(conversation_turns.c.turn_id == str(d["turn_id"]))
+                    ).mappings().first()
+                if row is not None:
+                    for k, v in row.items():
+                        d.setdefault(k, v)
+            except Exception:
+                pass
+        return d
+
+    def lifecycle(self, turn: Mapping[str, object] | object, state: str, **_payload: object) -> None:
+        turn_dict = self._coerce_turn_dict(turn)
+        if state == "running" and turn_dict.get("turn_id"):
             now = datetime.now(UTC)
             with self._engine.begin() as c:
                 c.execute(
                     update(conversation_turns)
                     .where(
-                        conversation_turns.c.turn_id == turn["turn_id"],
+                        conversation_turns.c.turn_id == turn_dict["turn_id"],
                         conversation_turns.c.state.in_(("queued", "starting")),
                     )
                     .values(state="running", updated_at=now)
                 )
+        elif state == "thinking_delta" and turn_dict.get("turn_id"):
+            delta = str(_payload.get("delta") or "")
+            if delta:
+                for chunk in _chunks(delta, 480):
+                    self._activity(
+                        turn_dict,
+                        AgentActivityEventType.AGENT_THOUGHT_DELTA,
+                        "Raciocinando",
+                        {
+                            "content": chunk,
+                            "delta": chunk,
+                            **({"iteration": int(_payload["iteration"])} if isinstance(_payload.get("iteration"), int) else {}),
+                        },
+                    )
+        elif state == "generating_tool_call" and turn_dict.get("turn_id"):
+            tool_name = str(_payload.get("tool_name") or "tool")
+            call_id = str(_payload.get("call_id") or "")
+            bytes_received = int(_payload.get("bytes_received") or 0) if isinstance(_payload.get("bytes_received"), int) else 0
+            self._activity(
+                turn_dict,
+                AgentActivityEventType.TOOL_PROGRESSED,
+                f"Preparando argumentos de {tool_name}",
+                {
+                    "phase": "generating_arguments",
+                    "tool_name": tool_name,
+                    "call_id": call_id,
+                    "bytes_received": bytes_received,
+                    **({"iteration": int(_payload["iteration"])} if isinstance(_payload.get("iteration"), int) else {}),
+                },
+            )
 
     def history_for_turn(self, turn: dict[str, object], *, rehydration_budget_tokens: int = 0) -> list[dict[str, object]]:
         """The conversation as the model should see it, including past tool work.

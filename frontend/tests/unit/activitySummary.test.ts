@@ -1,5 +1,9 @@
-import { describe, expect, it } from 'vitest'
-import { summarizeActivities } from '../../src/features/conversations/activitySummary'
+import { createElement } from 'react'
+import { act, render, screen } from '@testing-library/react'
+import { describe, expect, it, vi } from 'vitest'
+import { isRenderable, summarizeActivities } from '../../src/features/conversations/activitySummary'
+import { AgentPulse, modeFromEvents } from '../../src/features/conversations/AgentPulse'
+import { buildTurnTimeline } from '../../src/features/conversations/turnTimelineFold'
 import { kindFor, stateFor, type ConversationActivityEvent } from '../../src/features/conversations/activityTypes'
 
 let sequence = 0
@@ -314,4 +318,229 @@ describe('activity grouping', () => {
     expect(groups[0].count).toBe(1)
     expect(groups[0].state).toBe('cancelled')
   })
+
+  it('treats agent.thought_delta as renderable in isRenderable', () => {
+    const thoughtEvent = event({
+      type: 'agent.thought_delta',
+      turnId: 'turn-1',
+      detail: 'Pensando na arquitetura...',
+    })
+    expect(isRenderable(thoughtEvent, new Set())).toBe(true)
+  })
+
+  it('folds consecutive agent.thought_delta events into a streaming thought item and marks it completed with durationMs once later events arrive', () => {
+    const streamingEvents = [
+      event({
+        type: 'agent.thought_delta',
+        turnId: 'turn-1',
+        occurredAt: '2026-10-16T12:00:00.000Z',
+        payload: { delta: 'Analisando ' },
+      }),
+      event({
+        type: 'agent.thought_delta',
+        turnId: 'turn-1',
+        occurredAt: '2026-10-16T12:00:02.500Z',
+        detail: 'o esquema do banco.',
+      }),
+    ]
+
+    const streamingTimeline = buildTurnTimeline(streamingEvents, 'turn-1', 'msg-1')
+    expect(streamingTimeline).toHaveLength(1)
+    expect(streamingTimeline[0]).toMatchObject({
+      kind: 'thought',
+      thought: {
+        turnId: 'turn-1',
+        content: 'Analisando o esquema do banco.',
+        status: 'streaming',
+        startedAt: '2026-10-16T12:00:00.000Z',
+      },
+    })
+
+    const completedEvents = [
+      ...streamingEvents,
+      event({
+        type: 'assistant.delta',
+        turnId: 'turn-1',
+        messageId: 'msg-1',
+        occurredAt: '2026-10-16T12:00:03.000Z',
+        content: 'Aqui está a solução.',
+      }),
+    ]
+
+    const completedTimeline = buildTurnTimeline(completedEvents, 'turn-1', 'msg-1')
+    expect(completedTimeline.map((item) => item.kind)).toEqual(['thought', 'text'])
+    if (completedTimeline[0].kind === 'thought') {
+      expect(completedTimeline[0].thought.status).toBe('completed')
+      expect(completedTimeline[0].thought.content).toBe('Analisando o esquema do banco.')
+      expect(completedTimeline[0].thought.durationMs).toBeGreaterThanOrEqual(2500)
+    }
+  })
+
+  it('immediately creates a running tool call item when tool.progressed has phase === generating_arguments before tool.started', () => {
+    const events = [
+      event({
+        type: 'tool.progressed',
+        turnId: 'turn-1',
+        invocationId: 'call-gen-1',
+        payload: {
+          phase: 'generating_arguments',
+          tool_name: 'write_file',
+          bytes_received: 4096,
+        },
+      }),
+    ]
+
+    const timeline = buildTurnTimeline(events, 'turn-1', 'msg-1')
+    expect(timeline).toHaveLength(1)
+    expect(timeline[0].kind).toBe('activity')
+    if (timeline[0].kind === 'activity') {
+      expect(timeline[0].group.label).toContain('Preparando write_file...')
+      expect(timeline[0].group.events[0]).toMatchObject({
+        status: 'running',
+        toolName: 'write_file',
+        summary: 'Preparando write_file...',
+      })
+    }
+  })
 })
+
+describe('AgentPulse & modeFromEvents', () => {
+  it('filters events by activeTurnId, recognizes agent.thought_delta and generating_arguments, and transitions stale assistant.delta (>=2500ms) from responding to thinking', () => {
+    const now = Date.parse('2026-10-16T12:10:00.000Z')
+    const pastTurnEvents = [
+      event({ type: 'turn.completed', turnId: 'turn-old', state: 'completed' }),
+    ]
+
+    // Active turn has no events yet -> ignores turn-old's turn.completed and returns 'thinking'
+    expect(modeFromEvents(pastTurnEvents, 'turn-active')).toBe('thinking')
+
+    // Active turn has agent.thought_delta -> 'thinking'
+    expect(
+      modeFromEvents(
+        [
+          ...pastTurnEvents,
+          event({ type: 'agent.thought_delta', turnId: 'turn-active', detail: 'Pensando...' }),
+        ],
+        'turn-active',
+      ),
+    ).toBe('thinking')
+
+    // Active turn has tool.progressed with phase === 'generating_arguments' -> 'thinking'
+    expect(
+      modeFromEvents(
+        [
+          event({
+            type: 'tool.progressed',
+            turnId: 'turn-active',
+            payload: { phase: 'generating_arguments', tool_name: 'edit_file' },
+          }),
+        ],
+        'turn-active',
+      ),
+    ).toBe('thinking')
+
+    // Recent assistant.delta (< 2500ms ago) -> 'responding'
+    expect(
+      modeFromEvents(
+        [
+          event({
+            type: 'assistant.delta',
+            turnId: 'turn-active',
+            occurredAt: new Date(now - 800).toISOString(),
+            content: 'Vou atualizar:',
+          }),
+        ],
+        'turn-active',
+        now,
+      ),
+    ).toBe('responding')
+
+    // Stale assistant.delta (>= 2500ms ago) while turn is still running -> transitions to 'thinking'
+    expect(
+      modeFromEvents(
+        [
+          event({
+            type: 'assistant.delta',
+            turnId: 'turn-active',
+            occurredAt: new Date(now - 3000).toISOString(),
+            content: 'Vou atualizar:',
+          }),
+        ],
+        'turn-active',
+        now,
+      ),
+    ).toBe('thinking')
+  })
+
+  it('renders shimmer class on thinking/planning label and updates live elapsed counter every second even under reduced motion', () => {
+    vi.useFakeTimers()
+    try {
+      const { container, unmount } = render(
+        createElement(AgentPulse, { mode: 'thinking', activeTurnId: 'turn-1' }),
+      )
+
+      const label = container.querySelector('.agent-pulse__label')
+      expect(label).not.toBeNull()
+      expect(label?.className).toContain('agent-pulse__label--shimmer')
+      expect(screen.getByText('Pensando')).toBeInTheDocument()
+      expect(container.querySelector('.agent-pulse__elapsed')).toBeNull()
+
+      act(() => {
+        vi.advanceTimersByTime(3000)
+      })
+
+      const elapsed = container.querySelector('.agent-pulse__elapsed')
+      expect(elapsed).not.toBeNull()
+      expect(elapsed?.textContent).toBe('3s')
+
+      act(() => {
+        vi.advanceTimersByTime(72000)
+      })
+      expect(container.querySelector('.agent-pulse__elapsed')?.textContent).toBe('1m 15s')
+
+      unmount()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('auto-transitions AgentPulse from responding to thinking after >=2500ms of silence and respects prefers-reduced-motion', () => {
+    vi.useFakeTimers()
+    const originalMatchMedia = window.matchMedia
+    window.matchMedia = vi.fn().mockImplementation((query: string) => ({
+      matches: query.includes('reduce'),
+      media: query,
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }))
+    try {
+      const { container, unmount } = render(
+        createElement(AgentPulse, { mode: 'responding', activeTurnId: 'turn-live' }),
+      )
+
+      expect(screen.getByText('Respondendo')).toBeInTheDocument()
+      expect(container.querySelector('.agent-pulse__stage .agent-pulse__core')).not.toBeNull()
+      expect(container.querySelector('.agent-pulse__lines, .agent-pulse__steps, .agent-pulse__scan, .agent-pulse__link')).toBeNull()
+
+      act(() => {
+        vi.advanceTimersByTime(3000)
+      })
+
+      expect(screen.getByText('Pensando')).toBeInTheDocument()
+      expect(container.querySelector('.agent-pulse')?.getAttribute('data-mode')).toBe('thinking')
+      expect(container.querySelector('.agent-pulse__label')?.className).toContain('agent-pulse__label--shimmer')
+      expect(container.querySelector('.agent-pulse__elapsed')?.textContent).toBe('3s')
+
+      unmount()
+    } finally {
+      window.matchMedia = originalMatchMedia
+      vi.useRealTimers()
+    }
+  })
+})
+
+

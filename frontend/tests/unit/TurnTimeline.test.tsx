@@ -323,5 +323,93 @@ describe('TurnTimeline', () => {
     const subagentContainer = screen.getByTestId('subagent-task-group')
     expect(subagentContainer).toHaveTextContent('Explorador')
   })
+
+  it('renders ThoughtBlock while streaming with shimmer and collapses when completed with duration toggle', () => {
+    const streamingItems: TimelineItem[] = [
+      {
+        id: 'thought:1',
+        kind: 'thought',
+        thought: {
+          id: 'thought:1',
+          turnId: 'turn-t1',
+          content: 'Analisando a causa raiz do problema...',
+          status: 'streaming',
+        },
+      } as unknown as TimelineItem,
+    ]
+
+    const { rerender } = render(<TurnTimeline items={streamingItems} mode="code" />)
+
+    expect(screen.getByText('Pensando...')).toHaveClass('agent-pulse__label--shimmer')
+    expect(screen.getByText('Analisando a causa raiz do problema...')).toBeInTheDocument()
+
+    const completedItems: TimelineItem[] = [
+      {
+        id: 'thought:1',
+        kind: 'thought',
+        thought: {
+          id: 'thought:1',
+          turnId: 'turn-t1',
+          content: 'Analisando a causa raiz do problema...',
+          status: 'completed',
+          durationMs: 4200,
+        },
+      } as unknown as TimelineItem,
+    ]
+
+    rerender(<TurnTimeline items={completedItems} mode="code" />)
+
+    const toggleBtn = screen.getByRole('button', { name: /Pensou por 4s/i })
+    expect(toggleBtn).toBeInTheDocument()
+    expect(screen.queryByText('Analisando a causa raiz do problema...')).not.toBeInTheDocument()
+
+    fireEvent.click(toggleBtn)
+    expect(screen.getByText('Analisando a causa raiz do problema...')).toBeInTheDocument()
+  })
+
+  it('renders compact 1-line permission receipts for allowed, denied, and pending toolPermission events', () => {
+    const allowedEvent: ConversationActivityEvent = {
+      eventId: 'evt-perm-allow',
+      cursor: 'a.1',
+      turnId: 'turn-p1',
+      type: 'code_mode.decision_required',
+      kind: 'tool',
+      state: 'completed',
+      agentId: 'agent:main',
+      summary: 'Permissão concedida',
+      toolName: 'run_command',
+      command: 'npm test',
+      toolPermission: {
+        requestId: 'req-allow',
+        turnId: 'turn-p1',
+        toolName: 'run_command',
+        command: 'npm test',
+        state: 'allowed',
+      } as never,
+    }
+    const deniedEvent: ConversationActivityEvent = {
+      eventId: 'evt-perm-deny',
+      cursor: 'a.2',
+      turnId: 'turn-p1',
+      type: 'code_mode.decision_required',
+      kind: 'tool',
+      state: 'failed',
+      agentId: 'agent:main',
+      summary: 'Permissão negada',
+      toolName: 'edit_file',
+      path: 'src/secret.ts',
+      toolPermission: {
+        requestId: 'req-deny',
+        turnId: 'turn-p1',
+        toolName: 'edit_file',
+        path: 'src/secret.ts',
+        state: 'denied',
+      } as never,
+    }
+
+    const { container } = render(<TurnTimeline events={[allowedEvent, deniedEvent]} mode="code" />)
+    expect(container.querySelector('.perm-receipt--allowed')).toHaveTextContent(/✓ Permissão concedida · Bash\(npm test\)/)
+    expect(container.querySelector('.perm-receipt--denied')).toHaveTextContent(/✕ Permissão negada · Update\(src\/secret\.ts\)/)
+  })
 })
 
