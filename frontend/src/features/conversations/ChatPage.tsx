@@ -22,10 +22,10 @@ import {
 } from '../../api/codeMode'
 import { attachWorkspaceFolder, detachWorkspaceFolder, inspectWorkspaceFolder, type WorkspaceState } from '../../api/workspace'
 import { CommandPalette } from '../../components/CommandPalette'
-import { Brand } from '../../components/Brand'
 import { ModelPicker } from '../../components/ModelPicker'
 import { OverviewPanel } from '../overview/OverviewPanel'
 import { WorkspaceNavigation } from '../projects/WorkspaceNavigation'
+import { PreferencesModal } from '../settings/PreferencesModal'
 import { ActivityStream } from './ActivityStream'
 import { AgentPulse, modeFromEvents } from './AgentPulse'
 import { attachmentNotice } from './attachmentNotice'
@@ -42,7 +42,6 @@ import { MessageCommandChip } from './MessageCommandChip'
 import { MessageAttachments } from './MessageAttachments'
 import { TurnTimeline } from './TurnTimeline'
 import { WorkspaceFilePreview, type WorkspaceFileReference } from './WorkspaceFileCard'
-import { WorkspaceFolderButton } from './WorkspaceFolderButton'
 import { activityReducer, createActivityState } from './activityReducer'
 import type { ConversationActivityEvent, ToolPermissionDecision } from './activityTypes'
 import type { UserQuestionAnswer } from './UserQuestionCard'
@@ -1367,6 +1366,8 @@ export function ChatPage() {
     }
   }, [client, conversation, conversationId, loadSnapshot, navigate, newProjectDescription, newProjectName, projectBusy])
 
+  const [preferencesOpen, setPreferencesOpen] = useState(false)
+
   const activeConvProjectId = conversation?.project_id ?? projectId ?? null
   const activeConvProjectName =
     conversation?.project_name
@@ -1375,14 +1376,39 @@ export function ChatPage() {
 
   return (
     <main className="chat">
-      <header className="chat__bar">
-        <Brand to="/" />
-        <div className="chat__title">
+      <header className="chat__bar canvas-header" data-testid="canvas-header">
+        <div className="chat__bar-left canvas-header__left">
+          {effectiveChatProvider && (
+            <ModelPicker
+              variant="unified"
+              providers={[...PROVIDER_NAMES]}
+              provider={effectiveChatProvider}
+              onProviderChange={changeChatProvider}
+              models={chatModels}
+              modelId={effectiveChatModelId}
+              onModelChange={setChatModelId}
+              loading={chatModelsLoading}
+              failed={chatModelsFailed}
+              disabled={running || stopping}
+            />
+          )}
           {conversationMode === 'code' && (
             <span className="chat__code-badge" data-testid="orin-code-badge">
               &gt;_ Orin Code
             </span>
           )}
+          {conversationMode === 'code' && (conversation?.workspace?.folderName || conversation?.workspace?.path) && (
+            <span
+              className="chat__workspace-chip chat__code-workspace-chip"
+              data-testid="orin-code-workspace-chip"
+              title={conversation?.workspace?.path ?? undefined}
+            >
+              {conversation?.workspace?.folderName ?? conversation?.workspace?.path}
+            </span>
+          )}
+        </div>
+
+        <div className="chat__title canvas-header__center">
           <h1>{conversation?.title ?? 'Conversa'}</h1>
           <div className="chat__project-control" style={{ position: 'relative', display: 'inline-flex', alignItems: 'center', gap: '6px' }} data-testid="conversation-project-control">
             {activeConvProjectId && activeConvProjectName ? (
@@ -1420,7 +1446,7 @@ export function ChatPage() {
                   borderRadius: '10px',
                   padding: '10px',
                   zIndex: 40,
-                  boxShadow: '0 8px 24px rgba(0, 0, 0, 0.28)',
+                  boxShadow: 'var(--shadow-popover)',
                 }}
               >
                 <p className="eyebrow" style={{ margin: '0 0 6px' }}>MOVER PARA PROJETO</p>
@@ -1478,20 +1504,12 @@ export function ChatPage() {
               </div>
             )}
           </div>
-          {conversationMode === 'code' && (conversation?.workspace?.folderName || conversation?.workspace?.path) && (
-            <span
-              className="chat__workspace-chip"
-              data-testid="orin-code-workspace-chip"
-              title={conversation?.workspace?.path ?? undefined}
-            >
-              {conversation?.workspace?.folderName ?? conversation?.workspace?.path}
-            </span>
-          )}
           {conversation?.turns.some((turn) => turn.scheduled_by_schedule_id) && <span className="chat__model">execuções agendadas</span>}
-          {conversation && <span className="chat__model">{conversation.provider} · {conversation.model_id}</span>}
-          <ContextIndicator usage={contextUsage} />
+          {conversation && <span className="chat__model visually-hidden">{conversation.provider} · {conversation.model_id}</span>}
         </div>
-        <div className="chat__bar-actions">
+
+        <div className="chat__bar-actions canvas-header__right">
+          <ContextIndicator usage={contextUsage} />
           {conversationMode === 'code' && (
             <button
               type="button"
@@ -1512,12 +1530,23 @@ export function ChatPage() {
             Visão geral
           </button>
           <CommandPalette conversations={chats} />
-          <Link className="ghost-button" to="/settings" aria-label="Abrir Settings">Settings</Link>
         </div>
       </header>
 
+      {preferencesOpen && (
+        <PreferencesModal
+          open={preferencesOpen}
+          onClose={() => setPreferencesOpen(false)}
+          client={client}
+        />
+      )}
+
       <aside className="workspace-navigation">
-        <WorkspaceNavigation client={client} onChatsChange={setChats} />
+        <WorkspaceNavigation
+          client={client}
+          onChatsChange={setChats}
+          onOpenPreferences={() => setPreferencesOpen(true)}
+        />
       </aside>
 
       <div className="chat__body" style={conversationMode === 'code' && workspaceDrawerOpen ? { position: 'relative' } : undefined}>
@@ -1894,29 +1923,22 @@ export function ChatPage() {
           worktreeIsolated={worktreeIsolated}
           onWorktreeIsolatedChange={toggleWorktreeIsolation}
           worktreeBranch={worktreeBranch}
-          settings={
-            <>
-              {effectiveChatProvider && <ModelPicker
-                providers={[...PROVIDER_NAMES]}
-                provider={effectiveChatProvider}
-                onProviderChange={changeChatProvider}
-                models={chatModels}
-                modelId={effectiveChatModelId}
-                onModelChange={setChatModelId}
-                loading={chatModelsLoading}
-                failed={chatModelsFailed}
-                disabled={running || stopping}
-              />}
-              <WorkspaceFolderButton
-                client={client}
-                state={conversation?.workspace ?? MANAGED_WORKSPACE}
-                onInspect={(path) => inspectWorkspaceFolder(client, conversationId, path)}
-                onAttach={(path, acknowledged) => attachWorkspaceFolder(client, conversationId, path, acknowledged)}
-                onDetach={() => detachWorkspaceFolder(client, conversationId)}
-                onChange={(next) => setConversation((current) => (current ? { ...current, workspace: next } : current))}
-              />
-            </>
-          }
+          sessionContext={{
+            mode: conversationMode,
+            permissionMode: codePermissionMode,
+            onPermissionModeChange: changeCodePermissionMode,
+            worktreeIsolated,
+            onWorktreeIsolatedChange: toggleWorktreeIsolation,
+            worktreeBranch,
+            workspaceState: conversation?.workspace ?? MANAGED_WORKSPACE,
+            onInspectWorkspace: (path) => inspectWorkspaceFolder(client, conversationId, path),
+            onAttachWorkspace: (path, acknowledged) => attachWorkspaceFolder(client, conversationId, path, acknowledged),
+            onDetachWorkspace: () => detachWorkspaceFolder(client, conversationId),
+            onWorkspaceChange: (next) => setConversation((current) => (current ? { ...current, workspace: next } : current)),
+            client,
+            activeProjectId: activeConvProjectId,
+            activeProjectName: activeConvProjectName,
+          }}
         />
       </footer>}
       {oversizedInput && (

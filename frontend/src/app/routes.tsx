@@ -26,6 +26,9 @@ import { SchedulesPage } from '../features/schedules/SchedulesPage'
 import { McpSection } from '../features/mcp/McpSection'
 import { PluginsSection } from '../features/plugins/PluginsSection'
 import { UsersSection } from '../features/users/UsersSection'
+import { LibraryHubPage } from '../features/settings/LibraryHubPage'
+import { IntegrationsHubPage } from '../features/settings/IntegrationsHubPage'
+import { WorkspaceShell } from './WorkspaceShell'
 import { useSession } from './useSession'
 
 export type RouteDefinition = {
@@ -42,6 +45,12 @@ export const routes: RouteDefinition[] = [
   { path: '/projects/:projectId/chats/:conversationId/overview', element: <ConversationRoute /> },
   { path: '/projects/:projectId', element: <ProjectPage /> },
   { path: '/projects/:projectId/memory', element: <ProjectMemoryRoute /> },
+  { path: '/library', element: <WorkspaceShell><LibraryHubPage /></WorkspaceShell> },
+  { path: '/library/:tab', element: <WorkspaceShell><LibraryHubPage /></WorkspaceShell> },
+  { path: '/library/:tab/:itemId', element: <WorkspaceShell><LibraryHubPage /></WorkspaceShell> },
+  { path: '/integrations', element: <WorkspaceShell><IntegrationsHubPage /></WorkspaceShell> },
+  { path: '/integrations/:tab', element: <WorkspaceShell><IntegrationsHubPage /></WorkspaceShell> },
+  { path: '/integrations/providers/:provider', element: <WorkspaceShell><IntegrationsHubPage /></WorkspaceShell> },
   { path: '/settings', element: <Navigate to="/settings/general" replace /> },
   { path: '/settings/general', element: <SettingsRoute><RuntimeSettingsPage embedded /></SettingsRoute> },
   { path: '/settings/memory', element: <SettingsRoute><MemoryPage embedded /></SettingsRoute> },
@@ -60,10 +69,10 @@ export const routes: RouteDefinition[] = [
   { path: '/settings/schedules', element: <SettingsRoute><SchedulesPage embedded /></SettingsRoute> },
   { path: '/settings/about', element: <SettingsRoute><AboutSection /></SettingsRoute> },
   { path: '/settings/users', element: <AdminSettingsRoute><UsersSection /></AdminSettingsRoute> },
-  { path: '/providers', element: <Navigate to="/settings/providers" replace /> },
-  { path: '/skills', element: <Navigate to="/settings/skills" replace /> },
-  { path: '/skills/:skillId', element: <Navigate to="/settings/skills" replace /> },
-  { path: '/schedules', element: <Navigate to="/settings/schedules" replace /> },
+  { path: '/providers', element: <Navigate to="/integrations/providers" replace /> },
+  { path: '/skills', element: <Navigate to="/library/skills" replace /> },
+  { path: '/skills/:skillId', element: <Navigate to="/library/skills" replace /> },
+  { path: '/schedules', element: <WorkspaceShell><SchedulesPage embedded /></WorkspaceShell> },
   // Deterministic execution fixtures. They render the legacy execution surface
   // without a backend and exist for visual/a11y regression runs only.
   { path: '/execution/fixture-running', element: <ExecutionPage execution={fixtureExecutions.running} /> },
@@ -74,6 +83,8 @@ export const routes: RouteDefinition[] = [
   { path: '/execution/fixture-collaborating', element: <ExecutionPage execution={fixtureExecutions.running} events={collaborationFixtureEvents} /> },
   { path: '/execution/:executionId', element: <ExecutionRoute /> },
 ]
+
+export const appRoutes = routes
 
 function ProjectMemoryRoute() {
   const { projectId = '' } = useParams()

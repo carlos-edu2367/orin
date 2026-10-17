@@ -1,6 +1,6 @@
 import { motion, useReducedMotion } from 'motion/react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { readBrowserSessionBootstrap, type BrowserSessionBootstrap } from '../api/browserSession'
 import { ApiClient, createBrowserApiClient } from '../api/client'
 import {
@@ -14,14 +14,16 @@ import { listPluginCommands, type PluginCommand } from '../api/plugins'
 import { PROVIDER_NAMES, listProviderModels, type ProviderModel, type ProviderName } from '../api/providers'
 import { listSkills, type SkillSummary } from '../api/skills'
 import { AmbientField } from '../components/three/AmbientField'
-import { Brand } from '../components/Brand'
 import { CommandPalette } from '../components/CommandPalette'
 import { ModelPicker } from '../components/ModelPicker'
-import { Composer, formatPermissionModePill } from '../features/conversations/Composer'
+import { Composer } from '../features/conversations/Composer'
 import { useComposerAttachments } from '../features/conversations/useComposerAttachments'
-import { WorkspaceFolderButton } from '../features/conversations/WorkspaceFolderButton'
 import { inspectNewWorkspaceFolder, type WorkspaceState } from '../api/workspace'
 import { WorkspaceNavigation } from '../features/projects/WorkspaceNavigation'
+import { PreferencesModal } from '../features/settings/PreferencesModal'
+import { useTheme } from './ThemeContext'
+
+// Brand identity (<Brand />) is hosted inside WorkspaceNavigation header.
 
 type HomeProps = {
   client?: ApiClient
@@ -32,17 +34,14 @@ const PROVIDER_STORAGE_KEY = 'agentos.provider'
 const MODEL_STORAGE_KEY = 'agentos.model'
 
 /**
- * The opening screen: one input, two quiet chips, and a slow field behind it.
- *
- * Everything else — history, providers, overview — is one keystroke away in the
- * palette rather than permanently on screen, so nothing competes with the act of
- * describing what you need.
+ * The opening screen: one input, contextual quick chips, and an optional ambient field behind it.
  */
 export function Home({ client, bootstrap }: HomeProps) {
   const { projectId } = useParams()
   const [searchParams, setSearchParams] = useSearchParams()
   const navigate = useNavigate()
   const reduced = useReducedMotion()
+  const { ambient } = useTheme()
   const apiClient = useMemo(() => client ?? createBrowserApiClient(), [client])
   const session = bootstrap ?? (typeof document === 'undefined' ? { status: 'missing_csrf' as const } : readBrowserSessionBootstrap(document))
 
@@ -69,6 +68,7 @@ export function Home({ client, bootstrap }: HomeProps) {
   const [chats, setChats] = useState<Array<{ conversation_id: string; title: string; state: string; mode?: ConversationMode }>>([])
   const [pluginCommands, setPluginCommands] = useState<PluginCommand[]>([])
   const [skills, setSkills] = useState<SkillSummary[]>([])
+  const [preferencesOpen, setPreferencesOpen] = useState(false)
   const activeProjectName = projectId ? projectName : null
 
   const [previousRequestedModeParam, setPreviousRequestedModeParam] = useState(requestedModeParam)
@@ -97,6 +97,7 @@ export function Home({ client, bootstrap }: HomeProps) {
     }).catch(() => { if (active) setProjectName(null) })
     return () => { active = false }
   }, [apiClient, projectId])
+
   useEffect(() => {
     const controller = new AbortController()
     listProviderModels(apiClient, provider, controller.signal)
@@ -113,6 +114,7 @@ export function Home({ client, bootstrap }: HomeProps) {
       .finally(() => { if (!controller.signal.aborted) setLoadingModels(false) })
     return () => controller.abort()
   }, [apiClient, provider])
+
   useEffect(() => {
     const controller = new AbortController()
     Promise.allSettled([
@@ -148,8 +150,6 @@ export function Home({ client, bootstrap }: HomeProps) {
 
   function changeProvider(next: ProviderName) {
     if (next === provider) return
-    // Reset the catalog view here rather than inside the fetch effect: the
-    // change is caused by this interaction, so this is where it belongs.
     setProvider(next)
     setModels([])
     setModelId('')
@@ -217,15 +217,42 @@ export function Home({ client, bootstrap }: HomeProps) {
   return (
     <main className="home">
       <div className="home__backdrop" aria-hidden="true">
-        <div className="home__glow" />
-        <AmbientField active={submitting} />
+        {ambient === 'on' && (
+          <>
+            <div className="home__glow" />
+            <AmbientField active={submitting} />
+          </>
+        )}
       </div>
 
-      <header className="home__bar">
-        <Brand />
-        <Link className="ghost-button" to="/schedules">Agendar</Link>
-        <CommandPalette conversations={chats} />
+      <header className="home__bar canvas-header" data-testid="canvas-header">
+        <div className="canvas-header__left">
+          <ModelPicker
+            variant="unified"
+            providers={[...PROVIDER_NAMES]}
+            provider={provider}
+            onProviderChange={changeProvider}
+            models={models}
+            modelId={modelId}
+            onModelChange={setModelId}
+            loading={loadingModels}
+            failed={catalogFailed}
+            disabled={submitting}
+          />
+        </div>
+        <div className="canvas-header__center" />
+        <div className="canvas-header__right">
+          <CommandPalette conversations={chats} />
+        </div>
       </header>
+
+      {preferencesOpen && (
+        <PreferencesModal
+          open={preferencesOpen}
+          onClose={() => setPreferencesOpen(false)}
+          client={apiClient}
+        />
+      )}
 
       <aside className="workspace-navigation">
         <WorkspaceNavigation
@@ -233,61 +260,11 @@ export function Home({ client, bootstrap }: HomeProps) {
           onChatsChange={setChats}
           onNewConversation={() => resetDraftForMode('chat')}
           onNewCodeConversation={() => resetDraftForMode('code')}
+          onOpenPreferences={() => setPreferencesOpen(true)}
         />
       </aside>
 
       <section className="home__stage" data-testid="home-submit-state" data-submitting={submitting}>
-        <div
-          className="home__mode-switch mb-5 inline-grid w-full max-w-xl grid-cols-2 gap-1.5 rounded-2xl border border-white/10 bg-black/35 p-1.5 backdrop-blur-md"
-          role="group"
-          aria-label="Modo da conversa"
-          data-testid="home-mode-toggle"
-        >
-          <button
-            type="button"
-            data-testid="home-mode-chat"
-            aria-pressed={codeMode === 'chat'}
-            onClick={() => selectMode('chat')}
-            className={`flex flex-col items-start gap-0.5 rounded-xl px-3.5 py-2.5 text-left transition-all ${
-              codeMode === 'chat'
-                ? 'border border-white/15 bg-white/[0.09] text-white shadow-sm'
-                : 'border border-transparent text-white/55 hover:bg-white/[0.04] hover:text-white/80'
-            }`}
-          >
-            <span className="flex items-center gap-2 text-xs font-semibold tracking-tight">
-              <svg className="h-3.5 w-3.5 shrink-0" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true">
-                <path d="M2.5 3.5h11a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H6l-3.5 2.5v-2.5a1 1 0 0 1-1-1v-6a1 1 0 0 1 1-1Z" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-              <span>Chat</span>
-            </span>
-            <span className="text-[11px] leading-snug text-white/50">
-              Conversa geral, pesquisa e criação
-            </span>
-          </button>
-
-          <button
-            type="button"
-            data-testid="home-mode-code"
-            aria-pressed={codeMode === 'code'}
-            onClick={() => selectMode('code')}
-            className={`flex flex-col items-start gap-0.5 rounded-xl px-3.5 py-2.5 text-left transition-all ${
-              codeMode === 'code'
-                ? 'border border-amber-400/35 bg-amber-400/[0.11] text-amber-200 shadow-sm'
-                : 'border border-transparent text-white/55 hover:bg-white/[0.04] hover:text-white/80'
-            }`}
-          >
-            <span className="flex items-center gap-2 text-xs font-semibold tracking-tight">
-              <span className="inline-flex items-center justify-center rounded bg-amber-400/20 px-1 py-0.5 font-mono text-[10px] font-bold leading-none text-amber-300" aria-hidden="true">
-                &gt;_
-              </span>
-              <span>Orin Code</span>
-            </span>
-            <span className="text-[11px] leading-snug text-white/50">
-              Agente de engenharia no seu repositório local
-            </span>
-          </button>
-        </div>
-
         <motion.p
           className="eyebrow"
           initial={reduced ? false : { opacity: 0, y: 8 }}
@@ -304,8 +281,8 @@ export function Home({ client, bootstrap }: HomeProps) {
           transition={{ duration: 0.5, delay: 0.06 }}
         >
           {codeMode === 'code'
-            ? (activeProjectName ? `Orin Code · ${activeProjectName}` : 'Orin Code — Engenharia de software no seu repositório')
-            : (activeProjectName ? 'O que vamos resolver neste projeto?' : 'O que vamos resolver?')}
+            ? (activeProjectName ? `Orin Code · ${activeProjectName}` : 'Qual repositório vamos construir ou evoluir?')
+            : (activeProjectName ? 'O que vamos resolver neste projeto?' : 'Por onde começamos?')}
         </motion.h1>
 
         <motion.div
@@ -314,49 +291,6 @@ export function Home({ client, bootstrap }: HomeProps) {
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.5, delay: 0.14 }}
         >
-          {codeMode === 'code' && (
-            <div
-              className="home__code-workspace-bar mb-2.5 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-400/25 bg-amber-400/[0.06] px-3.5 py-2.5 text-left text-xs"
-              data-testid="home-code-workspace-bar"
-            >
-              <div className="flex min-w-0 items-center gap-2.5">
-                <span className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md border border-amber-400/30 bg-amber-400/15 font-mono text-[11px] font-bold text-amber-300" aria-hidden="true">
-                  &gt;_
-                </span>
-                {workspacePath ? (
-                  <div className="min-w-0">
-                    <span className="block truncate font-mono text-xs font-medium text-amber-200" title={workspacePath}>
-                      {workspacePath}
-                    </span>
-                    <span className="block text-[11px] text-white/55">
-                      Repositório local vinculado · {formatPermissionModePill(codePermissionMode)}
-                    </span>
-                  </div>
-                ) : (
-                  <div className="min-w-0">
-                    <span className="block font-medium text-white/85">
-                      {activeProjectName ? `Workspace do projeto ${activeProjectName}` : 'Workspace padrão gerenciado pelo Orin'}
-                    </span>
-                    <span className="block text-[11px] text-white/55">
-                      Vincule uma pasta local ou envie diretamente para usar o workspace gerenciado
-                    </span>
-                  </div>
-                )}
-              </div>
-              <button
-                type="button"
-                data-testid="home-select-workspace-folder"
-                onClick={() => {
-                  const trigger = document.querySelector<HTMLButtonElement>('.workspace-folder__button')
-                  trigger?.click()
-                }}
-                className="shrink-0 rounded-lg border border-amber-400/35 bg-amber-400/15 px-3 py-1.5 font-mono text-[11px] font-medium text-amber-200 transition-colors hover:bg-amber-400/25"
-              >
-                {workspacePath ? 'Alterar pasta do projeto / repositório' : 'Selecionar pasta do projeto / repositório'}
-              </button>
-            </div>
-          )}
-
           <Composer
             value={message}
             onChange={setMessage}
@@ -382,62 +316,116 @@ export function Home({ client, bootstrap }: HomeProps) {
             onCodeModeChange={(next) => selectMode(next === 'code' ? 'code' : 'chat')}
             codePermissionMode={codePermissionMode}
             onCodePermissionModeChange={changeCodePermissionMode}
-            settings={(
+            modeSwitch={{
+              mode: codeMode === 'code' ? 'code' : 'chat',
+              onModeChange: (next) => selectMode(next),
+            }}
+            sessionContext={{
+              mode: codeMode === 'code' ? 'code' : 'chat',
+              permissionMode: codePermissionMode,
+              onPermissionModeChange: changeCodePermissionMode,
+              workspaceState: workspaceState(workspacePath, projectId, activeProjectName),
+              onInspectWorkspace: (path) => inspectNewWorkspaceFolder(apiClient, path, projectId),
+              onAttachWorkspace: async (path, acknowledgedRisk) => {
+                setWorkspacePath(path)
+                setWorkspaceAcknowledgedRisk(acknowledgedRisk)
+                return workspaceState(path, projectId, activeProjectName)
+              },
+              onDetachWorkspace: async () => {
+                setWorkspacePath(null)
+                setWorkspaceAcknowledgedRisk(false)
+                return workspaceState(null, projectId, activeProjectName)
+              },
+              onWorkspaceChange: () => {},
+              client: apiClient,
+              activeProjectId: projectId ?? null,
+              activeProjectName,
+            }}
+          />
+
+          <div className="home__quick-actions" data-testid="home-quick-actions">
+            {codeMode === 'code' ? (
               <>
-              <ModelPicker
-                providers={[...PROVIDER_NAMES]}
-                provider={provider}
-                onProviderChange={changeProvider}
-                models={models}
-                modelId={modelId}
-                onModelChange={setModelId}
-                loading={loadingModels}
-                failed={catalogFailed}
-                disabled={submitting}
-              />
-              <WorkspaceFolderButton
-                client={apiClient}
-                state={workspaceState(workspacePath, projectId, activeProjectName)}
-                onInspect={(path) => inspectNewWorkspaceFolder(apiClient, path, projectId)}
-                onAttach={async (path, acknowledgedRisk) => {
-                  setWorkspacePath(path)
-                  setWorkspaceAcknowledgedRisk(acknowledgedRisk)
-                  return workspaceState(path, projectId, activeProjectName)
-                }}
-                onDetach={async () => {
-                  setWorkspacePath(null)
-                  setWorkspaceAcknowledgedRisk(false)
-                  return workspaceState(null, projectId, activeProjectName)
-                }}
-                onChange={() => {}}
-              />
+                <button
+                  type="button"
+                  className="home__quick-chip"
+                  onClick={() => {
+                    const trigger = document.querySelector<HTMLButtonElement>('[data-testid="session-context-trigger"]')
+                    trigger?.click()
+                  }}
+                >
+                  Selecionar repositório local
+                </button>
+                <button
+                  type="button"
+                  className="home__quick-chip"
+                  onClick={() => {
+                    changeCodePermissionMode('plan_mode')
+                    setFocusSignal((n) => n + 1)
+                  }}
+                >
+                  Planejar arquitetura / spec
+                </button>
+                <button
+                  type="button"
+                  className="home__quick-chip"
+                  onClick={() => {
+                    setMessage('Execute a suíte de testes, identifique falhas e proponha a correção.')
+                    setFocusSignal((n) => n + 1)
+                  }}
+                >
+                  Revisar testes e corrigir bugs
+                </button>
+              </>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  className="home__quick-chip"
+                  onClick={() => {
+                    setMessage('Pesquise e sintetize sobre: ')
+                    setFocusSignal((n) => n + 1)
+                  }}
+                >
+                  Pesquisar e sintetizar
+                </button>
+                <button
+                  type="button"
+                  className="home__quick-chip"
+                  onClick={() => {
+                    setMessage('Analise os arquivos ou imagens anexados e destaque os pontos principais.')
+                    setFocusSignal((n) => n + 1)
+                  }}
+                >
+                  Analisar arquivos ou imagens
+                </button>
+                <button
+                  type="button"
+                  className="home__quick-chip"
+                  onClick={() => navigate('/library/skills')}
+                >
+                  Usar uma Skill da Biblioteca
+                </button>
               </>
             )}
-          />
+          </div>
         </motion.div>
 
         {chats.length > 0 && (
-          <motion.nav
-            className="home__recent"
-            aria-label="Conversas recentes"
-            initial={reduced ? false : { opacity: 0 }}
-            animate={{ opacity: 1 }}
-            transition={{ duration: 0.5, delay: 0.24 }}
-          >
+          <div className="visually-hidden" aria-label="Atalhos de conversas recentes">
             {chats.slice(0, 4).map((chat) => (
-              <button key={chat.conversation_id} type="button" className="home__recent-item" onClick={() => navigate(`/chats/${encodeURIComponent(chat.conversation_id)}`)}>
-                <span>{chat.title}</span>
-                <small data-state={chat.state}>{chat.state}</small>
+              <button
+                key={chat.conversation_id}
+                type="button"
+                tabIndex={-1}
+                onClick={() => navigate(`/chats/${encodeURIComponent(chat.conversation_id)}`)}
+              >
+                {chat.title}
               </button>
             ))}
-          </motion.nav>
+          </div>
         )}
       </section>
-
-      <footer className="home__foot">
-        <span>local-first · nada sai desta máquina sem seu pedido</span>
-        <kbd>Ctrl K</kbd>
-      </footer>
     </main>
   )
 }
