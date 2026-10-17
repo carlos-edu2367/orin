@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from agentos.installation import updater as updater_mod
 from agentos.installation.updater import Updater, runtime_relative_path
 from agentos.launcher import cli, processes
 from agentos.omniroute import process_manager
@@ -19,12 +22,12 @@ def test_relaunch_desktop_uses_create_no_window_without_detached_process_on_wind
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """MSDN: CREATE_NO_WINDOW is ignored if combined with DETACHED_PROCESS."""
-    monkeypatch.setattr(cli.os, "name", "nt")
+    monkeypatch.setattr(cli, "os", SimpleNamespace(name="nt", environ=os.environ))
     monkeypatch.setattr(subprocess, "CREATE_NO_WINDOW", CREATE_NO_WINDOW, raising=False)
     monkeypatch.setattr(subprocess, "CREATE_NEW_PROCESS_GROUP", CREATE_NEW_PROCESS_GROUP, raising=False)
     monkeypatch.setattr(subprocess, "DETACHED_PROCESS", DETACHED_PROCESS, raising=False)
 
-    runtime = tmp_path / "current" / runtime_relative_path()
+    runtime = tmp_path / "current" / runtime_relative_path("windows-x64")
     runtime.parent.mkdir(parents=True, exist_ok=True)
     runtime.write_text("", encoding="utf-8")
 
@@ -43,7 +46,6 @@ def test_relaunch_desktop_uses_create_no_window_without_detached_process_on_wind
     assert not (flags & DETACHED_PROCESS), (
         "must NOT set DETACHED_PROCESS alongside CREATE_NO_WINDOW because Win32 ignores CREATE_NO_WINDOW when DETACHED_PROCESS is set"
     )
-
 
 
 def test_supervised_process_start_sets_create_no_window_on_windows(
@@ -83,7 +85,7 @@ def test_supervised_process_start_sets_create_no_window_on_windows(
 def test_updater_version_check_passes_create_no_window_on_windows(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("agentos.installation.updater.os.name", "nt")
+    monkeypatch.setattr(updater_mod, "os", SimpleNamespace(name="nt", environ=os.environ))
     monkeypatch.setattr(subprocess, "CREATE_NO_WINDOW", CREATE_NO_WINDOW, raising=False)
 
     captured_kwargs: list[dict[str, object]] = []
@@ -105,7 +107,7 @@ def test_updater_version_check_passes_create_no_window_on_windows(
 def test_omniroute_process_manager_passes_create_no_window_on_windows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(process_manager.os, "name", "nt")
+    monkeypatch.setattr(process_manager, "os", SimpleNamespace(name="nt", environ=os.environ))
     monkeypatch.setattr(subprocess, "CREATE_NO_WINDOW", CREATE_NO_WINDOW, raising=False)
 
     captured_kwargs: list[dict[str, object]] = []

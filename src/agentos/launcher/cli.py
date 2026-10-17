@@ -372,7 +372,7 @@ def _relaunch_desktop(root: Path, *, sleep=sleep, popen=subprocess.Popen) -> boo
     """
     from agentos.installation.updater import runtime_relative_path
 
-    runtime = root / "current" / runtime_relative_path()
+    runtime = root / "current" / runtime_relative_path("windows-x64" if os.name == "nt" else "linux-x64")
     if not runtime.is_file():
         return False
     sleep(RESTART_GRACE_SECONDS)
