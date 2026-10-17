@@ -26,3 +26,22 @@ def test_parse_response_raises_on_an_error_frame():
 def test_parse_response_raises_when_the_id_does_not_match():
     with pytest.raises(McpProtocolError):
         parse_response({"jsonrpc": "2.0", "id": 9, "result": {}}, expected_id=7)
+
+
+def test_parse_response_includes_error_data_details_when_present():
+    with pytest.raises(McpProtocolError) as error:
+        parse_response(
+            {
+                "jsonrpc": "2.0",
+                "id": 7,
+                "error": {
+                    "code": -32602,
+                    "message": "Invalid params",
+                    "data": {"field": "funnelId", "reason": "Required"},
+                },
+            },
+            expected_id=7,
+        )
+    assert "Invalid params" in str(error.value)
+    assert "funnelId" in str(error.value)
+

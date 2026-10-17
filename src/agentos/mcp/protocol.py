@@ -1,7 +1,9 @@
 """Minimal JSON-RPC 2.0 framing for MCP. No transport knowledge here."""
 from __future__ import annotations
 
+import json
 from typing import Any, Mapping
+
 
 PROTOCOL_VERSION = "2025-06-18"
 CLIENT_INFO = {"name": "orin", "version": "1"}
@@ -36,9 +38,18 @@ def parse_response(frame: Mapping[str, Any], *, expected_id: int) -> dict[str, A
         raise McpProtocolError(f"expected a response for request {expected_id}, got {frame.get('id')!r}")
     if "error" in frame:
         error = frame["error"] if isinstance(frame["error"], Mapping) else {}
-        raise McpProtocolError(str(error.get("message") or "the server refused the request")[:512],
+        message = str(error.get("message") or "the server refused the request")
+        data = error.get("data")
+        if data is not None:
+            try:
+                serialized = json.dumps(data, ensure_ascii=False)
+            except TypeError:
+                serialized = str(data)
+            message = f"{message} ({serialized})"
+        raise McpProtocolError(message[:2048],
                                code=error.get("code") if isinstance(error.get("code"), int) else None)
     result = frame.get("result")
+
     if not isinstance(result, Mapping):
         raise McpProtocolError("the response carried no result object")
     return dict(result)

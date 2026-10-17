@@ -16,10 +16,11 @@ export function AboutSection({ client: providedClient }: { client?: ApiClient })
   const { capabilities } = useSession()
   const [status, setStatus] = useState<InstallationStatus | null>(null)
   const [error, setError] = useState(false)
+  const [removeError, setRemoveError] = useState(false)
   const [busy, setBusy] = useState(false)
   const job = useUpdateJob(client, capabilities.ui_updater)
   const [restarting, setRestarting] = useState(false)
-  const load = () => { setError(false); void getInstallationStatus(client).then(setStatus).catch(() => setError(true)) }
+  const load = () => { setError(false); setRemoveError(false); void getInstallationStatus(client).then(setStatus).catch(() => setError(true)) }
   useEffect(() => {
     let active = true
     getInstallationStatus(client).then((value) => { if (active) setStatus(value) }).catch(() => { if (active) setError(true) })
@@ -28,7 +29,8 @@ export function AboutSection({ client: providedClient }: { client?: ApiClient })
   async function remove(version: string) {
     if (busy || !status || !window.confirm(`Excluir a versão ${version}? A versão atual nunca é removida.`)) return
     setBusy(true)
-    try { await removeInstalledVersion(client, version); load() } catch { setError(true) } finally { setBusy(false) }
+    setRemoveError(false)
+    try { await removeInstalledVersion(client, version); load() } catch { setRemoveError(true) } finally { setBusy(false) }
   }
   async function restart() {
     if (restarting) return
@@ -36,8 +38,9 @@ export function AboutSection({ client: providedClient }: { client?: ApiClient })
     if (!(await window.orinDesktop?.applyUpdate?.())) setRestarting(false)
   }
   const canInstall = status?.installation_kind === 'installed' && status?.update_available === true
-  return <SettingsSection eyebrow="SISTEMA / INSTALAÇÃO"><section className="installation-status" aria-labelledby="about-installation-title"><div className="installation-status__heading"><div><p className="eyebrow">SOBRE</p><h2 id="about-installation-title">Estado do Orin</h2></div><button type="button" className="button button--quiet" onClick={load} disabled={busy}>Verificar release</button></div>{error && <p role="alert">Não foi possível consultar a instalação.</p>}{status && <><dl className="installation-status__summary"><div><dt>Versão atual</dt><dd><code>v{status.current_version}</code></dd></div><div><dt>Release mais recente</dt><dd>{status.latest_release ? <a href={status.latest_release.url} target="_blank" rel="noreferrer"><code>v{status.latest_release.version}</code></a> : 'Indisponível no momento'}</dd></div></dl>{!capabilities.ui_updater && <p className="installation-status__managed">A atualização desta instância é feita por quem administra o servidor.</p>}{capabilities.ui_updater && <UpdatePanel job={job} canInstall={canInstall} latest={status.latest_release?.version} desktop={Boolean(window.orinDesktop?.applyUpdate)} restarting={restarting} onRestart={() => void restart()} />}<div className="installation-status__versions"><h3>Versões instaladas</h3>{status.installed_versions.map((item) => <div className={`installation-version${item.is_current ? ' is-current' : ''}`} key={item.version}><code>v{item.version}</code>{item.removable && capabilities.ui_updater ? <button type="button" onClick={() => void remove(item.version)} disabled={busy}>Excluir versão antiga</button> : <span className="installation-version__protected">Protegida</span>}</div>)}</div></>}</section></SettingsSection>
+  return <SettingsSection eyebrow="SISTEMA / INSTALAÇÃO"><section className="installation-status" aria-labelledby="about-installation-title"><div className="installation-status__heading"><div><p className="eyebrow">SOBRE</p><h2 id="about-installation-title">Estado do Orin</h2></div><button type="button" className="button button--quiet" onClick={load} disabled={busy}>Verificar release</button></div>{error && <p role="alert">Não foi possível consultar a instalação.</p>}{removeError && <p role="alert">Não foi possível excluir essa versão.</p>}{status && <><dl className="installation-status__summary"><div><dt>Versão atual</dt><dd><code>v{status.current_version}</code></dd></div><div><dt>Release mais recente</dt><dd>{status.latest_release ? <a href={status.latest_release.url} target="_blank" rel="noreferrer"><code>v{status.latest_release.version}</code></a> : 'Indisponível no momento'}</dd></div></dl>{!capabilities.ui_updater && <p className="installation-status__managed">A atualização desta instância é feita por quem administra o servidor.</p>}{capabilities.ui_updater && <UpdatePanel job={job} canInstall={canInstall} latest={status.latest_release?.version} desktop={Boolean(window.orinDesktop?.applyUpdate)} restarting={restarting} onRestart={() => void restart()} />}<div className="installation-status__versions"><h3>Versões instaladas</h3>{status.installed_versions.map((item) => <div className={`installation-version${item.is_current ? ' is-current' : ''}`} key={item.version}><code>v{item.version}</code>{item.removable && capabilities.ui_updater ? <button type="button" onClick={() => void remove(item.version)} disabled={busy}>Excluir versão antiga</button> : <span className="installation-version__protected">Protegida</span>}</div>)}</div></>}</section></SettingsSection>
 }
+
 
 type UpdatePanelProps = {
   job: ReturnType<typeof useUpdateJob>

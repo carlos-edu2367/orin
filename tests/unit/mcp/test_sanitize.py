@@ -19,6 +19,17 @@ def test_a_name_that_is_not_a_safe_identifier_is_dropped():
     assert sanitize_tool_descriptors([{"name": "rm -rf", "description": "", "inputSchema": {"type": "object"}}]) == ()
 
 
+def test_a_complex_nested_object_schema_survives():
+    schema: dict = {"type": "object", "properties": {}}
+    cursor = schema
+    for _ in range(6):
+        cursor["properties"]["step"] = {"type": "object", "properties": {}}
+        cursor = cursor["properties"]["step"]
+    cursor["properties"]["padding"] = {"type": "string", "description": "x" * 30_000}
+    tools = sanitize_tool_descriptors([{"name": "save_funnel_draft", "description": "d", "inputSchema": schema}])
+    assert [item.name for item in tools] == ["save_funnel_draft"]
+
+
 def test_a_deeply_nested_schema_is_dropped():
     schema: dict = {"type": "object", "properties": {}}
     cursor = schema
@@ -29,11 +40,15 @@ def test_a_deeply_nested_schema_is_dropped():
 
 
 def test_the_descriptor_batch_is_bounded():
-    payload = [{"name": f"t{index}", "description": "", "inputSchema": {"type": "object"}} for index in range(200)]
+    accepted_batch = [{"name": f"t{index}", "description": "", "inputSchema": {"type": "object"}} for index in range(150)]
+    assert len(sanitize_tool_descriptors(accepted_batch)) == 150
+    payload = [{"name": f"t{index}", "description": "", "inputSchema": {"type": "object"}} for index in range(300)]
     with pytest.raises(UntrustedDescriptorRejected):
         sanitize_tool_descriptors(payload)
 
 
+
 def test_the_description_is_truncated_rather_than_dropped():
-    tools = sanitize_tool_descriptors([{"name": "t", "description": "x" * 5000, "inputSchema": {"type": "object"}}])
-    assert len(tools[0].description) == 1024
+    tools = sanitize_tool_descriptors([{"name": "t", "description": "x" * 10_000, "inputSchema": {"type": "object"}}])
+    assert len(tools[0].description) == 8192
+

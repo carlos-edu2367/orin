@@ -5,7 +5,7 @@ from collections.abc import Sequence
 
 EXTENSION_TOOLS_GUIDANCE = (
     "## Extensions (MCP Servers, Plugins, and Skills)\n"
-    "- When the user asks to connect or install an MCP server, call `list_mcp_catalog` first to find the server entry and required credentials, then call `configure_mcp` (passing `secret_names` only, never credential values) to present the approval card and wait for the user.\n"
+    "- When the user asks to connect or install an MCP server, call `list_mcp_catalog` first to find the server entry and required credentials, then call `configure_mcp` (passing `secret_names` only, never credential values) to present the approval card and wait for the user. If the user provides an `https://` MCP URL that is not in the catalog, call `configure_mcp(display_name=..., transport=\"http\", url=...)` directly (omit `secret_names` for OAuth servers; never call `fetch_url`, `browse_page`, or `ask_user` to ask for API keys in chat).\n"
     "- When the user asks to find or install a plugin, call `search_plugin` and `install_plugin(reference)` (or `inspect_plugin` to preview without installing) to present the plugin approval card and wait for the user.\n"
     "- When the user asks to create or update a reusable procedural Skill, search existing Skills with `search_skills` / `list_skills` first, then call `create_skill` or `edit_skill` with explicit `Workflow` and `Validation` sections."
 )

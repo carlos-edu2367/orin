@@ -114,8 +114,8 @@ PHASE_INSTRUCTIONS: Mapping[Phase, str] = {
         "- Entenda o pedido e o estado do workspace, e resolva a tarefa se ela for direta.\n"
         "- Se em poucos passos ficar claro que a tarefa é maior do que parecia, chame `write_contract` "
         "para fixar objetivo, entregáveis, restrições e critérios de aceite antes de continuar.\n"
-        "- Ferramentas de navegador, MCP, plugins e subagentes só ficam disponíveis depois que o "
-        "contrato declarar que você precisa delas."
+        "- Ferramentas de servidores MCP ativos já estão disponíveis. Ferramentas de navegador, "
+        "plugins e subagentes só ficam disponíveis depois que o contrato declarar que você precisa delas."
     ),
     Phase.PLAN: (
         "## Agora\n"
@@ -262,9 +262,11 @@ def tools_for(phase: Phase, toolkits: frozenset[str] | None = None) -> frozenset
     return frozenset(names)
 
 
-def kinds_for(toolkits: frozenset[str] | None) -> frozenset[str]:
+def kinds_for(toolkits: frozenset[str] | None, *, phase: Phase | None = None) -> frozenset[str]:
     """Tool *kinds* the contract opened up, for families discovered at runtime."""
     kinds: set[str] = set()
+    if phase in (Phase.ORIENT, Phase.EXECUTE):
+        kinds.add("mcp")
     for toolkit in toolkits or frozenset():
         kinds.update(TOOLKIT_KINDS.get(toolkit, ()))
     return frozenset(kinds)

@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import itertools
+import json
 from dataclasses import dataclass
 from typing import Any, Mapping, Protocol
+
 
 from .models import McpToolDescriptor
 from .protocol import CLIENT_INFO, PROTOCOL_VERSION, McpProtocolError, notification, parse_response, request
@@ -88,7 +90,14 @@ class McpClient:
         self._require_session()
         result = self._call("tools/call", {"name": name, "arguments": dict(arguments)})
         content = tuple(item for item in (result.get("content") or []) if isinstance(item, Mapping))
+        if not content and result.get("structuredContent") is not None:
+            try:
+                text = json.dumps(result["structuredContent"], ensure_ascii=False)
+            except TypeError:
+                text = str(result["structuredContent"])
+            content = ({"type": "text", "text": text},)
         return McpCallResult(content=content, is_error=bool(result.get("isError")))
+
 
     def close(self) -> None:
         self._negotiation = None

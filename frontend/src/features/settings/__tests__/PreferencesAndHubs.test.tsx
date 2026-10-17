@@ -5,10 +5,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiClient } from '../../../api/client'
 import type { ProviderName } from '../../../api/providers'
 import { ThemeProvider } from '../../../app/ThemeContext'
+import { AboutSection } from '../AboutSection'
 import { IntegrationsHubPage, type IntegrationsTab } from '../IntegrationsHubPage'
 import { LibraryHubPage, type LibraryTab } from '../LibraryHubPage'
 import { PreferencesModal, type PreferencesTab } from '../PreferencesModal'
 import { resetSettingsBadgeCache, useSettingsBadges } from '../useSettingsBadges'
+
 
 function createMockClient() {
   const fetchImpl = vi.fn<typeof fetch>((input) => {
@@ -373,4 +375,67 @@ describe('PreferencesModal & Sidebar Hubs', () => {
     const installationCalls = fetchImpl.mock.calls.filter(([input]) => String(input).includes('/v1/installation'))
     expect(installationCalls).toHaveLength(1)
   })
+
+  it('shows a version-deletion specific alert in AboutSection when removing an old version fails', async () => {
+    const user = userEvent.setup()
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+
+    const fetchImpl = vi.fn<typeof fetch>((input, init) => {
+      const url = String(input)
+      if (url.includes('/v1/installation/versions/') && init?.method === 'DELETE') {
+        return Promise.resolve(
+          new Response(JSON.stringify({ detail: 'locked' }), {
+            status: 500,
+            headers: { 'Content-Type': 'application/json' },
+          }),
+        )
+      }
+      if (url.includes('/v1/installation/status')) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              installation_kind: 'installed',
+              current_version: '0.8.0',
+              installed_versions: [
+                { version: '0.8.0', is_current: true, removable: false },
+                { version: '0.7.8', is_current: false, removable: true },
+              ],
+              latest_release: { version: '0.8.0', url: 'https://github.com/carlos-edu2367/orin/releases/tag/v0.8.0' },
+              latest_release_error: null,
+              update_available: false,
+              checked_at: '2026-10-17T00:00:00Z',
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          ),
+        )
+      }
+      return Promise.resolve(
+        new Response(JSON.stringify({ state: 'idle' }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      )
+    })
+
+    const client = new ApiClient({
+      fetchImpl,
+      csrfToken: 'test-csrf',
+      maxAttempts: 1,
+      createIdempotencyKey: () => 'test-idempotency',
+    })
+
+    render(
+      <MemoryRouter>
+        <AboutSection client={client} />
+      </MemoryRouter>,
+    )
+
+    const deleteBtn = await screen.findByRole('button', { name: /Excluir versão antiga/i })
+    await user.click(deleteBtn)
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Não foi possível excluir essa versão.')
+    expect(screen.queryByText('Não foi possível consultar a instalação.')).toBeNull()
+  })
 })
+
+

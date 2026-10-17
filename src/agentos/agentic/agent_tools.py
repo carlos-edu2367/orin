@@ -4721,9 +4721,14 @@ class AgentToolset:
         )
 
     def test_mcp_server(self, slug: str) -> dict[str, Any]:
-        from agentos.mcp.toolset import discover
+        from agentos.mcp.auth import McpOAuth
+        from agentos.mcp.toolset import connector_for, discover
 
-        result = self._mcp_service.test(self._mcp_user_id, str(slug), discover)
+        oauth = getattr(self._mcp_provider, "_oauth", None)
+        if oauth is None and getattr(self._mcp_service, "engine", None) is not None:
+            oauth = McpOAuth(self._mcp_service.engine)
+        connect = connector_for(oauth) if oauth is not None else discover
+        result = self._mcp_service.test(self._mcp_user_id, str(slug), connect)
         return {"summary": f"Testou {slug}", "content": json.dumps(result, ensure_ascii=False),
                 "payload": {**result, "tool_kind": "mcp", "mcp_action": "test"}}
 

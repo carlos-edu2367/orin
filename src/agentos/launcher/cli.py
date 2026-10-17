@@ -378,11 +378,12 @@ def _relaunch_desktop(root: Path, *, sleep=sleep, popen=subprocess.Popen) -> boo
     sleep(RESTART_GRACE_SECONDS)
     flags = (getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)) if os.name == "nt" else 0
     try:
-        popen([str(runtime), "--desktop"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        popen([str(runtime), "--desktop"], cwd=str(root), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
               close_fds=True, start_new_session=os.name != "nt", creationflags=flags)
     except OSError:
         return False
     return True
+
 
 
 def command_uninstall(

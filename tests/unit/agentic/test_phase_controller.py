@@ -195,6 +195,16 @@ def test_runtime_discovered_families_are_opened_by_kind() -> None:
     assert kinds_for(frozenset({"files"})) == frozenset()
 
 
+def test_orient_and_execute_open_mcp_kind_by_default() -> None:
+    """Active MCP servers that the user already approved should be usable without a contract round-trip."""
+    assert "mcp" in kinds_for(None, phase=Phase.ORIENT)
+    assert "mcp" in kinds_for(None, phase=Phase.EXECUTE)
+    assert "mcp" not in kinds_for(None, phase=Phase.PLAN)
+    assert "mcp" not in kinds_for(None, phase=Phase.VERIFY)
+    assert "mcp" not in kinds_for(None, phase=Phase.RESPOND)
+
+
+
 def test_every_phase_publishes_a_set_a_small_model_can_navigate() -> None:
     for phase in Phase:
         assert len(tools_for(phase, frozenset({"files", "terminal"}))) <= 36

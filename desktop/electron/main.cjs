@@ -179,6 +179,7 @@ async function applyUpdate() {
   if (!command) return false
   try {
     const child = spawn(command[0], command.slice(1), {
+      cwd: path.dirname(command[0]),
       detached: process.platform !== 'win32',
       stdio: 'ignore',
       windowsHide: true,
@@ -239,6 +240,7 @@ async function retryStartup() {
   try {
     const [executable, ...arguments] = status.restart_command
     const child = spawn(executable, [...arguments, '--desktop', '--desktop-reuse'], {
+      cwd: path.dirname(executable),
       detached: process.platform !== 'win32',
       stdio: 'ignore',
       windowsHide: true,
@@ -248,6 +250,7 @@ async function retryStartup() {
   } catch {
     retrying = false
     return false
+
   }
 }
 

@@ -201,3 +201,72 @@ def test_calls_to_one_server_never_overlap():
     for thread in threads:
         thread.join()
     assert active["max"] == 1
+
+
+def test_long_tool_descriptions_are_preserved_in_definitions():
+    long_desc = "Step configuration rules. " * 200  # 5200 chars
+    tools = (McpToolDescriptor(name="save_funnel_draft", description=long_desc, input_schema={"type": "object"}),)
+    provider = McpToolProvider([(_config(), tools, {})], client_factory=lambda config, secrets: FakeClient())
+    definition = provider.definitions()[0]
+    assert len(definition.description) > 5000
+    assert definition.max_result_size_chars >= 100_000
+
+
+def test_large_mcp_result_is_not_truncated_at_12k_chars():
+    client = FakeClient()
+    large_json = '{"steps": "' + ("x" * 45_000) + '"}'
+    client.result = McpCallResult(content=({"type": "text", "text": large_json},), is_error=False)
+    outcome = _provider(client).definitions()[0].handler(q="funnel")
+    assert len(outcome.content) == len(large_json)
+    assert outcome.content.endswith('"}')
+
+
+def test_failed_initialize_closes_the_unregistered_client():
+    closed_clients: list[bool] = []
+
+    class FailingInitClient:
+        def initialize(self):
+            raise RuntimeError("handshake failed")
+
+        def close(self):
+            closed_clients.append(True)
+
+    tools = (McpToolDescriptor(name="search", description="d", input_schema={"type": "object"}),)
+    provider = McpToolProvider([(_config(), tools, {})], client_factory=lambda config, secrets: FailingInitClient())
+    outcome = provider.definitions()[0].handler(q="x")
+    assert outcome.status == "failed"
+    assert closed_clients == [True]
+    assert provider.open_session_count == 0
+
+
+def test_transport_error_during_call_evicts_session_so_next_call_reconnects():
+    created: list[FakeClient] = []
+
+    class FlakyClient(FakeClient):
+        def __init__(self, should_fail: bool) -> None:
+            super().__init__()
+            self.should_fail = should_fail
+
+        def call_tool(self, name, arguments):
+            if self.should_fail:
+                raise RuntimeError("connection reset by peer")
+            return super().call_tool(name, arguments)
+
+    def factory(config, secrets):
+        client = FlakyClient(should_fail=(len(created) == 0))
+        created.append(client)
+        return client
+
+    tools = (McpToolDescriptor(name="search", description="d", input_schema={"type": "object"}),)
+    provider = McpToolProvider([(_config(), tools, {})], client_factory=factory)
+    handler = provider.definitions()[0].handler
+
+    first = handler(q="1")
+    assert first.status == "failed"
+    assert created[0].closed is True
+
+    second = handler(q="2")
+    assert second.status == "succeeded"
+    assert len(created) == 2
+
+

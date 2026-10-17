@@ -74,3 +74,13 @@ def test_close_closes_the_transport():
     client.initialize()
     client.close()
     assert transport.closed is True
+
+
+def test_call_tool_synthesizes_text_from_structured_content_when_content_is_empty():
+    client = McpClient(_transport(**{"tools/call": {"content": [], "structuredContent": {"funnelId": "f_123", "steps": 9}}}))
+    client.initialize()
+    result = client.call_tool("get_funnel", {"id": "f_123"})
+    assert len(result.content) == 1
+    assert result.content[0]["type"] == "text"
+    assert '"funnelId": "f_123"' in result.content[0]["text"]
+

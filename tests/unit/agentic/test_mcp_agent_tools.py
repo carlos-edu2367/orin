@@ -69,3 +69,42 @@ def test_test_mcp_server_passes_a_real_connector_to_the_service(tmp_path):
     result = _toolset(tmp_path, FakeMcpService()).test_mcp_server(slug="github")
     assert result["payload"]["connected"] is True
     assert result["payload"]["tools"] == ["search"]
+
+
+def test_test_mcp_server_uses_oauth_connector_when_provider_has_oauth(tmp_path, monkeypatch):
+    from agentos.mcp.models import McpAuthKind, McpServerConfig, McpServerState, McpTransport
+
+    seen_token_sources: list[object] = []
+
+    def fake_discover(config, secrets, *, token_source=None):
+        seen_token_sources.append(token_source)
+        return "2025-06-18", ()
+
+    monkeypatch.setattr("agentos.mcp.toolset.discover", fake_discover)
+
+    class _FakeOAuth:
+        def has_sign_in(self, config): return True
+        def token_source(self, config): return "oauth-token-source"
+
+    class _FakeProvider:
+        _oauth = _FakeOAuth()
+        def definitions(self): return ()
+        def close(self): pass
+
+    class _OAuthService(FakeMcpService):
+        def test(self, user_id, slug, connect):
+            cfg = McpServerConfig(
+                server_id="s1", user_id=user_id, slug=slug, display_name="Auryly",
+                transport=McpTransport.HTTP, url="https://auryly.com/mcp",
+                state=McpServerState.ACTIVE, auth_kind=McpAuthKind.OAUTH,
+            )
+            connect(cfg, {})
+            return {"connected": True, "protocol_version": "2025-06-18", "tools": ["list_tracks"], "error": None}
+
+    toolset = AgentToolset(
+        ConversationWorkspace(root=tmp_path, conversation_id="c1"),
+        mcp_provider=_FakeProvider(), mcp_service=_OAuthService(), mcp_user_id="u1",
+    )
+    toolset.test_mcp_server(slug="auryly")
+    assert seen_token_sources == ["oauth-token-source"]
+

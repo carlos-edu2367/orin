@@ -58,6 +58,56 @@ def test_remove_version_cannot_remove_current_or_escape_installation(tmp_path: P
         versions.remove_installed_version("..", profile)
 
 
+def test_remove_version_clears_readonly_files_and_marks_cwd_locked_empty_dir_as_removed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import shutil
+    import stat
+
+    profile, root = _profile(tmp_path)
+    old_dir = root / "0.1.11"
+    old_dir.mkdir()
+    readonly_file = old_dir / "locked.dll"
+    readonly_file.write_text("binary", encoding="utf-8")
+    os.chmod(readonly_file, stat.S_IREAD)
+
+    monkeypatch.setattr(versions.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(versions, "_latest_release", lambda: None)
+
+    real_rmtree = shutil.rmtree
+
+    def rmtree_locking_top_dir(path: Path, *args, **kwargs):
+        real_rmtree(path, *args, **kwargs)
+        # Simulate Windows WinError 32 where all children are deleted, but the
+        # top-level directory itself is a running process's CWD and cannot be rmdir'd yet.
+        Path(path).mkdir(exist_ok=True)
+        raise PermissionError(13, "O arquivo já está sendo usado por outro processo", str(path))
+
+    locked = {"active": True}
+    real_rmdir = Path.rmdir
+
+    def rmdir_locking_old(self: Path) -> None:
+        if self == old_dir and locked["active"]:
+            raise PermissionError(13, "O arquivo já está sendo usado por outro processo", str(self))
+        real_rmdir(self)
+
+    monkeypatch.setattr(versions.shutil, "rmtree", rmtree_locking_top_dir)
+    monkeypatch.setattr(Path, "rmdir", rmdir_locking_old)
+
+    assert versions.remove_installed_version("0.1.11", profile) == {"removed_version": "0.1.11"}
+    assert (old_dir / ".removed").is_file()
+    status = versions.read_installation_status(profile)
+    assert [item["version"] for item in status["installed_versions"]] == ["0.1.12"]
+    assert (old_dir / ".removed").is_file()
+
+    locked["active"] = False
+    status_after_unlock = versions.read_installation_status(profile)
+    assert [item["version"] for item in status_after_unlock["installed_versions"]] == ["0.1.12"]
+    assert not old_dir.exists()
+
+
+
+
 def test_development_status_does_not_advertise_removable_versions(monkeypatch: pytest.MonkeyPatch) -> None:
     profile = RuntimeProfile("development", Path("C:/repo"), "0.1.12", Path("C:/repo"))
     monkeypatch.setattr(versions, "_latest_release", lambda: None)

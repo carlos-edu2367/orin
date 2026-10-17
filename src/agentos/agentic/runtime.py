@@ -806,7 +806,7 @@ class AgenticTurnRuntime:
         if not allowed:
             return []
         try:
-            return self.toolset.schemas(allowed, phases.kinds_for(toolkits))
+            return self.toolset.schemas(allowed, phases.kinds_for(toolkits, phase=self.phases.current))
         except TypeError:
             # A toolset that predates phase-aware publication still works; it
             # simply publishes everything, as it did before.

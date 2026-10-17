@@ -11,13 +11,15 @@ from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping, Sequence
 
 from agentos.agentic.agent_tools import ToolOutcome, _bounded
 from .models import McpAuthKind, McpServerConfig, McpToolDescriptor, McpTransport, qualified_tool_name
+from .sanitize import MAX_DESCRIPTION_CHARS
 
 if TYPE_CHECKING:
     from .auth import McpOAuth
     from .client import McpClient
     from .token_source import TokenSource
 
-MAX_MCP_RESULT_CHARS = 12_000
+MAX_MCP_RESULT_CHARS = 100_000
+MAX_MCP_RAW_RESULT_CHARS = 500_000
 MAX_IMAGES_PER_CALL = 4
 
 ServerBundle = tuple[McpServerConfig, tuple[McpToolDescriptor, ...], Mapping[str, str]]
@@ -98,9 +100,24 @@ class McpToolProvider:
                 client = self._client_factory(config, secrets, token_source=self._oauth.token_source(config))
             else:
                 client = self._client_factory(config, secrets)
-            client.initialize()
+            try:
+                client.initialize()
+            except Exception:
+                try:
+                    client.close()
+                except Exception:
+                    pass
+                raise
             self._sessions[config.server_id] = client
         return client
+
+    def _evict_session(self, server_id: str) -> None:
+        broken = self._sessions.pop(server_id, None)
+        if broken is not None:
+            try:
+                broken.close()
+            except Exception:
+                pass
 
     def _handler(self, config: McpServerConfig, secrets: Mapping[str, str], tool: McpToolDescriptor):
         def call(**arguments: Any) -> ToolOutcome:
@@ -110,7 +127,15 @@ class McpToolProvider:
             payload = {"tool_kind": "mcp", "mcp_server": config.slug, "mcp_tool": tool.name}
             try:
                 with self._lock(config.server_id):
-                    result = self._session(config, secrets).call_tool(tool.name, arguments)
+                    try:
+                        result = self._session(config, secrets).call_tool(tool.name, arguments)
+                    except McpReauthRequired:
+                        self._evict_session(config.server_id)
+                        raise
+                    except RuntimeError as error:
+                        if not isinstance(error, McpProtocolError):
+                            self._evict_session(config.server_id)
+                        raise
             except McpReauthRequired as error:
                 message = str(error)
                 return ToolOutcome("failed", message[:240], message[:MAX_MCP_RESULT_CHARS], payload, "MCP_REAUTH_REQUIRED")
@@ -125,13 +150,14 @@ class McpToolProvider:
 
         return call
 
+
     def definitions(self) -> tuple[Any, ...]:
         from agentos.agentic.agent_tools import ToolDefinition
 
         built: list[ToolDefinition] = []
         for config, tools, secrets in self._bundles:
             for tool in tools:
-                description = f"[{config.display_name}] {tool.description}".strip()[:1200]
+                description = f"[{config.display_name}] {tool.description}".strip()[:MAX_DESCRIPTION_CHARS + 128]
                 built.append(ToolDefinition(
                     qualified_tool_name(config.slug, tool.name),
                     description,
@@ -140,6 +166,7 @@ class McpToolProvider:
                     "mcp",
                     read_only=False,
                     policy_tags=("mcp", "mutates", f"mcp:{config.slug}"),
+                    max_result_size_chars=MAX_MCP_RESULT_CHARS,
                 ))
         return tuple(built)
 
@@ -164,8 +191,8 @@ def _render(content: Sequence[Mapping[str, Any]]) -> tuple[str, list[dict[str, s
         elif kind == "resource":
             resource = block.get("resource") if isinstance(block.get("resource"), Mapping) else {}
             parts.append(str(resource.get("text") or resource.get("uri") or ""))
-    text, _ = _bounded("\n".join(part for part in parts if part), MAX_MCP_RESULT_CHARS)
+    text, _ = _bounded("\n".join(part for part in parts if part), MAX_MCP_RAW_RESULT_CHARS)
     return text, images
 
 
-__all__ = ["Connector", "McpToolProvider", "ServerBundle", "build_client", "connector_for", "discover"]
+__all__ = ["Connector", "MAX_MCP_RESULT_CHARS", "McpToolProvider", "ServerBundle", "build_client", "connector_for", "discover"]

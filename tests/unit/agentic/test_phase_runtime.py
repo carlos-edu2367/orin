@@ -386,3 +386,29 @@ def test_writing_a_contract_with_several_deliverables_grows_the_execute_budget()
     runtime.run("turn-1")
 
     assert runtime.phases.budgets[Phase.EXECUTE].iterations > DEFAULT_PHASE_BUDGETS[Phase.EXECUTE].iterations
+
+
+def test_orienting_publishes_active_mcp_tools_immediately() -> None:
+    class _McpToolset(_Toolset):
+        NAMES = (*_Toolset.NAMES, "mcp__auryly__list_tracks")
+        KINDS = {**_Toolset.KINDS, "mcp__auryly__list_tracks": "mcp"}
+
+        def schemas(self, allowed=None, kinds=None):
+            if allowed is None:
+                names = self.NAMES
+            else:
+                allowed_set = set(allowed)
+                kind_set = set(kinds or ())
+                names = [n for n in self.NAMES if n in allowed_set or self.KINDS.get(n) in kind_set]
+            return [{"type": "function", "function": {"name": name, "parameters": {}}} for name in names]
+
+    provider = _ScriptedProvider([_ANSWER])
+    AgenticTurnRuntime(
+        store=_Store(), provider=provider, toolset=_McpToolset(), system_prompt="prompt",
+        limits=AgenticLimits(max_iterations=None, max_actions=None),
+        phase_controller=PhaseController(),
+    ).run("turn-1")
+
+    published = _published(provider.requests[0])
+    assert "mcp__auryly__list_tracks" in published
+    assert "browse_page" not in published

@@ -94,7 +94,7 @@ class HttpTransport:
             return None
         body = response.content[:MAX_RESPONSE_BYTES].decode("utf-8", "replace")
         if "text/event-stream" in response.headers.get("content-type", ""):
-            body = _first_sse_payload(body)
+            body = _first_sse_payload(body, expected_id=frame.get("id"))
         try:
             return json.loads(body)
         except json.JSONDecodeError as error:
@@ -122,11 +122,47 @@ class HttpTransport:
         self._client = None
 
 
-def _first_sse_payload(body: str) -> str:
+def _first_sse_payload(body: str, *, expected_id: Any = None) -> str:
+    candidates: list[str] = []
+    event_lines: list[str] = []
     for line in body.splitlines():
+        if not line.strip():
+            if len(event_lines) > 1:
+                candidates.append("\n".join(event_lines))
+            event_lines = []
+            continue
         if line.startswith("data:"):
-            return line[5:].strip()
-    raise HttpTransportError("the event stream carried no data frame")
+            chunk = line[5:].strip()
+            if chunk:
+                candidates.append(chunk)
+                event_lines.append(chunk)
+    if len(event_lines) > 1:
+        candidates.append("\n".join(event_lines))
+    if not candidates:
+        raise HttpTransportError("the event stream carried no data frame")
+    if expected_id is not None:
+        for chunk in candidates:
+            try:
+                parsed = json.loads(chunk)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, Mapping) and parsed.get("id") == expected_id:
+                return chunk
+        for chunk in candidates:
+            try:
+                parsed = json.loads(chunk)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, Mapping) and ("result" in parsed or "error" in parsed):
+                return chunk
+    for chunk in candidates:
+        try:
+            json.loads(chunk)
+            return chunk
+        except json.JSONDecodeError:
+            continue
+    return candidates[0]
+
 
 
 __all__ = ["HttpTransport", "HttpTransportError", "HttpTransportRefused", "HttpUnauthorized"]

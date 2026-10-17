@@ -8,8 +8,10 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import sys
 from typing import Any
+
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
@@ -79,7 +81,19 @@ def _installed_versions(profile: RuntimeProfile) -> list[dict[str, Any]]:
     for candidate in root.iterdir():
         if not candidate.is_dir() or candidate.is_symlink() or _VERSION.fullmatch(candidate.name) is None:
             continue
+        marker = candidate / ".removed"
+        if marker.is_file():
+            try:
+                marker.unlink(missing_ok=True)
+                candidate.rmdir()
+            except OSError:
+                try:
+                    marker.write_text("", encoding="utf-8")
+                except OSError:
+                    pass
+            continue
         versions.append({
+
             "version": candidate.name,
             "is_current": candidate.resolve() == active,
             "removable": candidate.resolve() != active,
@@ -136,6 +150,11 @@ def start_update(profile: RuntimeProfile | None = None) -> dict[str, Any]:
     return {"started": True, "status": result.status, "version": result.version}
 
 
+def _clear_readonly(func: Any, path: str, _exc_info: Any) -> None:
+    os.chmod(path, stat.S_IWRITE)
+    func(path)
+
+
 def remove_installed_version(version: str, profile: RuntimeProfile | None = None) -> dict[str, Any]:
     profile = profile or RuntimeProfile.detect()
     if _VERSION.fullmatch(version) is None:
@@ -149,8 +168,21 @@ def remove_installed_version(version: str, profile: RuntimeProfile | None = None
         raise FileNotFoundError(version)
     if target.resolve() == active:
         raise ValueError("the current version cannot be removed")
-    shutil.rmtree(target)
+    try:
+        shutil.rmtree(target, onerror=_clear_readonly)
+    except OSError:
+        # On Windows, if a process inherited the old version folder as its CWD,
+        # shutil.rmtree deletes every file inside `target` and only the final
+        # os.rmdir(target) raises WinError 32. If the directory is now empty,
+        # mark it as `.removed` so status hides it and removes the empty folder
+        # once that process exits.
+        remaining = [item.name for item in target.iterdir()] if target.is_dir() else []
+        if remaining and remaining != [".removed"]:
+            raise
+        if target.is_dir():
+            (target / ".removed").write_text("", encoding="utf-8")
     return {"removed_version": version}
+
 
 
 __all__ = ["read_installation_status", "remove_installed_version", "start_update"]

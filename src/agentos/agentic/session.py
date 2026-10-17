@@ -383,7 +383,7 @@ def build_system_prompt(
         # Saying so prevents the model from planning around a tool it cannot
         # currently see -- and tells it how to get that tool back.
         lines.append(
-            "- Not every tool described below is published on every request: each stage of a task offers the tools that stage needs. The '## Agora' block tells you which stage you are in and lists exactly what is published right now. To unlock the browser, MCP, plugins or subagents, declare them in `write_contract`."
+            "- Not every tool described below is published on every request: each stage of a task offers the tools that stage needs. The '## Agora' block tells you which stage you are in and lists exactly what is published right now. Active MCP server tools are already available; to unlock the browser, plugins or subagents, declare them in `write_contract`."
         )
     if code_mode_context:
         lines += ["", code_mode_context]

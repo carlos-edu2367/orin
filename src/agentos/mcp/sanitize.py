@@ -12,10 +12,11 @@ from typing import Any, Iterable, Mapping
 
 from .models import McpToolDescriptor
 
-MAX_TOOLS_PER_SERVER = 128
-MAX_DESCRIPTION_CHARS = 1024
-MAX_SCHEMA_DEPTH = 8
-MAX_SCHEMA_BYTES = 24_000
+MAX_TOOLS_PER_SERVER = 256
+MAX_DESCRIPTION_CHARS = 8192
+MAX_SCHEMA_DEPTH = 20
+MAX_SCHEMA_BYTES = 128_000
+
 _TOOL_NAME = re.compile(r"[a-zA-Z0-9_.-]{1,64}")
 
 

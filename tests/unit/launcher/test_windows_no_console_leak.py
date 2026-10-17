@@ -36,12 +36,14 @@ def test_relaunch_desktop_uses_create_no_window_without_detached_process_on_wind
 
     assert cli._relaunch_desktop(tmp_path, sleep=lambda _: None, popen=fake_popen) is True
     assert len(captured) == 1
+    assert captured[0].get("cwd") == str(tmp_path)
     flags = int(captured[0]["creationflags"])  # type: ignore[arg-type]
     assert flags & CREATE_NO_WINDOW, "must set CREATE_NO_WINDOW on Windows"
     assert flags & CREATE_NEW_PROCESS_GROUP, "must set CREATE_NEW_PROCESS_GROUP on Windows"
     assert not (flags & DETACHED_PROCESS), (
         "must NOT set DETACHED_PROCESS alongside CREATE_NO_WINDOW because Win32 ignores CREATE_NO_WINDOW when DETACHED_PROCESS is set"
     )
+
 
 
 def test_supervised_process_start_sets_create_no_window_on_windows(

@@ -64,6 +64,43 @@ def test_an_sse_response_body_is_decoded_to_the_first_data_frame(monkeypatch):
     assert transport.send({"jsonrpc": "2.0", "id": 1, "method": "ping"})["result"] == {"ok": True}
 
 
+def test_an_sse_stream_skips_notifications_and_returns_the_matching_response_frame(monkeypatch):
+    monkeypatch.setattr("agentos.mcp.transport_http._public_url", lambda url, resolve_dns=False: url)
+    body = (
+        ": keep-alive\n\n"
+        "event: message\n"
+        'data: {"jsonrpc":"2.0","method":"notifications/progress","params":{"progress":50}}\n\n'
+        "event: message\n"
+        'data: {"jsonrpc":"2.0","id":7,"result":{"funnel":"ok"}}\n\n'
+    )
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=body, headers={"content-type": "text/event-stream"})
+
+    transport = HttpTransport(url="https://mcp.example.com/v1", headers={},
+                              client=httpx.Client(transport=httpx.MockTransport(handler)))
+    assert transport.send({"jsonrpc": "2.0", "id": 7, "method": "tools/call"})["result"] == {"funnel": "ok"}
+
+
+def test_an_sse_multiline_data_event_is_joined_and_decoded(monkeypatch):
+    monkeypatch.setattr("agentos.mcp.transport_http._public_url", lambda url, resolve_dns=False: url)
+    body = (
+        "event: message\n"
+        'data: {"jsonrpc":"2.0",\n'
+        'data: "id":11,\n'
+        'data: "result":{"multi":"line"}}\n\n'
+    )
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=body, headers={"content-type": "text/event-stream"})
+
+    transport = HttpTransport(url="https://mcp.example.com/v1", headers={},
+                              client=httpx.Client(transport=httpx.MockTransport(handler)))
+    assert transport.send({"jsonrpc": "2.0", "id": 11, "method": "tools/call"})["result"] == {"multi": "line"}
+
+
+
+
 class FakeTokenSource:
     def __init__(self, tokens: list[str]) -> None:
         self.tokens = tokens

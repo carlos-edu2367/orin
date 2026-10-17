@@ -22,11 +22,11 @@ STEP_ASSISTANT_TOOL_CALL = "assistant_tool_call"
 STEP_TOOL_RESULT = "tool_result"
 STEP_KINDS = (STEP_ASSISTANT_TOOL_CALL, STEP_TOOL_RESULT)
 
-# A tool result already arrives bounded at MAX_TOOL_RESULT_CHARS (12k), so
+# A tool result arrives bounded by its per-tool limit (up to 100k for MCP), so
 # this is a safety net for anything that grows past it rather than the
 # operative limit. It is larger than the execution journal's 12k copy because
 # that record serves recovery and this one serves the agent's memory.
-MAX_STEP_CHARS = 32_768
+MAX_STEP_CHARS = 100_000
 
 # How much of the turn's context budget rehydrated history may occupy. The
 # rest belongs to the system prompt, the tool schemas and the current
