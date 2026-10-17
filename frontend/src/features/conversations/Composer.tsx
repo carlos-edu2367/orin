@@ -9,6 +9,15 @@ import { AttachmentChips, type ComposerAttachment } from './AttachmentChips'
 import { CommandPicker, commandToken, skillToken } from './CommandPicker'
 import { applyFileMention, detectFileMention, FileMentionPicker } from './FileMentionPicker'
 import { TodoBar } from './TodoBar'
+import {
+  SAFE_PERMISSION_CYCLE,
+  SessionContextPopover,
+  formatPermissionModePill,
+  formatPermissionModeTitle,
+  type SessionContextPopoverProps,
+} from './SessionContextPopover'
+
+export { formatPermissionModePill, formatPermissionModeTitle }
 
 export type ComposerProps = {
   value: string
@@ -42,6 +51,10 @@ export type ComposerProps = {
   skills?: SkillSummary[]
   codeMode?: CodeModeChoice
   onCodeModeChange?: (value: CodeModeChoice) => void
+  /** Compact segmented mode switch (`[Chat | >_ Code]`) rendered in the composer bar on Home. */
+  modeSwitch?: { mode: 'chat' | 'code'; onModeChange: (mode: 'chat' | 'code') => void }
+  /** Unified progressive-disclosure popover for workspace, permission, worktree, and project. */
+  sessionContext?: SessionContextPopoverProps
   /** When true, hides the Chat/Code mode toggle button (e.g. inside an active conversation). */
   hideCodeModeToggle?: boolean
   /** Immutable mode of an existing conversation ('chat' | 'code'). */
@@ -62,38 +75,6 @@ export type ComposerProps = {
 
 const MAX_ROWS_HEIGHT = 260
 
-const SAFE_PERMISSION_CYCLE: readonly CodePermissionMode[] = [
-  'accept_edits',
-  'plan_mode',
-  'ask_permissions',
-]
-
-export function formatPermissionModePill(mode: CodePermissionMode): string {
-  switch (mode) {
-    case 'accept_edits':
-      return '⏵⏵ Aceitar edições'
-    case 'plan_mode':
-      return '⏸ Modo Plano'
-    case 'ask_permissions':
-      return '🔒 Pedir permissão'
-    case 'full_autonomy':
-      return '⚡ Sem restrições'
-  }
-}
-
-export function formatPermissionModeTitle(mode: CodePermissionMode): string {
-  switch (mode) {
-    case 'accept_edits':
-      return 'Modo de permissão: Aceitar edições (Shift+Tab para alternar)'
-    case 'plan_mode':
-      return 'Modo de permissão: Modo Plano (Shift+Tab para alternar)'
-    case 'ask_permissions':
-      return 'Modo de permissão: Pedir permissão (Shift+Tab para alternar)'
-    case 'full_autonomy':
-      return 'Modo de permissão: Sem restrições (Shift+Tab para alternar)'
-  }
-}
-
 /**
  * The single place a person types.
  *
@@ -106,28 +87,29 @@ export function Composer({
   value, onChange, onSubmit, onStop, running = false, disabled = false,
   placeholder = 'Descreva o que você precisa…', settings, hint, error, autoFocus, notice, focusSignal = 0, canSend = true,
   attachments = [], onAttach = () => {}, onRemoveAttachment = () => {}, commands = [], skills = [],
-  codeMode = 'auto', onCodeModeChange, hideCodeModeToggle = false, conversationMode,
+  codeMode = 'auto', onCodeModeChange, modeSwitch, sessionContext, hideCodeModeToggle = false, conversationMode,
   codePermissionMode, onCodePermissionModeChange, todos,
   workspaceFiles = [], onSearchWorkspaceFiles,
   worktreeIsolated, onWorktreeIsolatedChange, worktreeBranch = null,
 }: ComposerProps) {
-  const effectiveCodeMode: CodeModeChoice = conversationMode ?? codeMode
-  const showCodeModeToggle = Boolean(onCodeModeChange && !hideCodeModeToggle && conversationMode === undefined)
+  const effectiveCodeMode: CodeModeChoice = modeSwitch?.mode ?? conversationMode ?? codeMode
+  const showCodeModeToggle = Boolean(!modeSwitch && onCodeModeChange && !hideCodeModeToggle && conversationMode === undefined)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [focused, setFocused] = useState(false)
   const [caretPosition, setCaretPosition] = useState<number | undefined>(undefined)
   const [internalPermissionMode, setInternalPermissionMode] = useState<CodePermissionMode>(
-    codePermissionMode ?? (conversationMode === 'code' ? 'accept_edits' : 'ask_permissions'),
+    sessionContext?.permissionMode ?? codePermissionMode ?? (conversationMode === 'code' ? 'accept_edits' : 'ask_permissions'),
   )
   const [internalWorktreeIsolated, setInternalWorktreeIsolated] = useState(false)
-  const activePermissionMode = codePermissionMode ?? internalPermissionMode
-  const activeWorktreeIsolated = worktreeIsolated ?? internalWorktreeIsolated
+  const activePermissionMode = sessionContext?.permissionMode ?? codePermissionMode ?? internalPermissionMode
+  const activeWorktreeIsolated = sessionContext?.worktreeIsolated ?? worktreeIsolated ?? internalWorktreeIsolated
   const reduced = useReducedMotion()
 
   function changePermissionMode(next: CodePermissionMode) {
     setInternalPermissionMode(next)
     onCodePermissionModeChange?.(next)
+    sessionContext?.onPermissionModeChange?.(next)
   }
 
   function stepPermissionMode() {
@@ -143,6 +125,7 @@ export function Composer({
   function changeWorktreeIsolated(next: boolean) {
     setInternalWorktreeIsolated(next)
     onWorktreeIsolatedChange?.(next)
+    sessionContext?.onWorktreeIsolatedChange?.(next)
   }
 
   // The picker only claims the keyboard while the message is exactly a
@@ -355,15 +338,58 @@ export function Composer({
                 <path d="M10.7 4.3 5.4 9.6a2 2 0 1 0 2.8 2.8l5.1-5.1a3.4 3.4 0 1 0-4.8-4.8L3.3 7.7" />
               </svg>
             </button>
-            {showCodeModeToggle && <button
-              type="button"
-              className={`composer__code${effectiveCodeMode === 'code' ? ' is-active' : ''}`}
-              aria-pressed={effectiveCodeMode === 'code'}
-              aria-label={effectiveCodeMode === 'code' ? 'Desativar Modo Code' : 'Ativar Modo Code'}
-              title={effectiveCodeMode === 'code' ? 'Modo Code ativo' : 'Ativar Modo Code'}
-              onClick={() => onCodeModeChange?.(effectiveCodeMode === 'code' ? 'auto' : 'code')}
-            ><span aria-hidden="true">&lt;/&gt;</span><span>Code</span></button>}
-            {effectiveCodeMode === 'code' && (
+            {modeSwitch ? (
+              <div
+                className="composer__mode-switch"
+                role="group"
+                aria-label="Modo da conversa"
+                data-testid="home-mode-toggle"
+              >
+                <button
+                  type="button"
+                  data-testid="home-mode-chat"
+                  aria-pressed={modeSwitch.mode === 'chat'}
+                  className={`composer__mode-pill${modeSwitch.mode === 'chat' ? ' is-active' : ''}`}
+                  onClick={() => modeSwitch.onModeChange('chat')}
+                >
+                  <span>Chat</span>
+                </button>
+                <button
+                  type="button"
+                  data-testid="home-mode-code"
+                  aria-pressed={modeSwitch.mode === 'code'}
+                  className={`composer__mode-pill composer__mode-pill--code${modeSwitch.mode === 'code' ? ' is-active' : ''}`}
+                  onClick={() => modeSwitch.onModeChange('code')}
+                >
+                  <span aria-hidden="true">&gt;_</span>
+                  <span>Orin Code</span>
+                </button>
+              </div>
+            ) : showCodeModeToggle ? (
+              <button
+                type="button"
+                className={`composer__code${effectiveCodeMode === 'code' ? ' is-active' : ''}`}
+                aria-pressed={effectiveCodeMode === 'code'}
+                aria-label={effectiveCodeMode === 'code' ? 'Desativar Modo Code' : 'Ativar Modo Code'}
+                title={effectiveCodeMode === 'code' ? 'Modo Code ativo' : 'Ativar Modo Code'}
+                onClick={() => onCodeModeChange?.(effectiveCodeMode === 'code' ? 'auto' : 'code')}
+              >
+                <span aria-hidden="true">&lt;/&gt;</span>
+                <span>Code</span>
+              </button>
+            ) : null}
+            {sessionContext ? (
+              <SessionContextPopover
+                {...sessionContext}
+                mode={sessionContext.mode ?? (effectiveCodeMode === 'code' ? 'code' : 'chat')}
+                permissionMode={activePermissionMode}
+                onPermissionModeChange={changePermissionMode}
+                worktreeIsolated={activeWorktreeIsolated}
+                onWorktreeIsolatedChange={changeWorktreeIsolated}
+                worktreeBranch={sessionContext.worktreeBranch ?? worktreeBranch}
+                disabled={disabled}
+              />
+            ) : effectiveCodeMode === 'code' ? (
               <>
                 <button
                   type="button"
@@ -406,7 +432,7 @@ export function Composer({
                   <span>{activeWorktreeIsolated && worktreeBranch ? worktreeBranch : 'Worktree'}</span>
                 </button>
               </>
-            )}
+            ) : null}
             {settings}
           </div>
           <div className="composer__actions">

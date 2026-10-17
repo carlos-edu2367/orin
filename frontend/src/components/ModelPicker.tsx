@@ -1,5 +1,5 @@
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { Link } from 'react-router-dom'
 import type { ProviderModel, ProviderName } from '../api/providers'
 
@@ -23,16 +23,19 @@ export type ModelPickerProps = {
   loading?: boolean
   failed?: boolean
   disabled?: boolean
+  variant?: 'split' | 'unified'
 }
 
 /**
- * Provider and model as two quiet chips.
+ * Provider and model selector.
  *
- * They open into a searchable list rather than a native select because a
- * provider catalog is hundreds of entries long, and because an empty catalog has
- * to offer the fix ("Configurar provider") instead of an empty dropdown.
+ * In `unified` mode (used in CanvasHeader), provider and model sit side-by-side
+ * inside a single cohesive pill frame and the model popover includes quick
+ * provider tabs. Both triggers keep their accessible button labels so keyboard
+ * users and existing tests can open either list directly.
  */
 export function ModelPicker(props: ModelPickerProps) {
+  const variant = props.variant ?? 'unified'
   const [open, setOpen] = useState<'provider' | 'model' | null>(null)
   const [query, setQuery] = useState('')
   const containerRef = useRef<HTMLDivElement>(null)
@@ -43,7 +46,13 @@ export function ModelPicker(props: ModelPickerProps) {
     const onPointerDown = (event: PointerEvent) => {
       if (!containerRef.current?.contains(event.target as Node)) setOpen(null)
     }
-    const onKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape') setOpen(null) }
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        event.stopPropagation()
+        setOpen(null)
+      }
+    }
     document.addEventListener('pointerdown', onPointerDown)
     document.addEventListener('keydown', onKeyDown)
     return () => {
@@ -51,6 +60,14 @@ export function ModelPicker(props: ModelPickerProps) {
       document.removeEventListener('keydown', onKeyDown)
     }
   }, [open])
+
+  function handleContainerKeyDown(event: ReactKeyboardEvent<HTMLDivElement>) {
+    if (event.key === 'Escape' && open) {
+      event.preventDefault()
+      event.stopPropagation()
+      setOpen(null)
+    }
+  }
 
   const selected = useMemo(() => props.models.find((model) => model.model_id === props.modelId), [props.models, props.modelId])
   const filtered = useMemo(() => {
@@ -66,31 +83,44 @@ export function ModelPicker(props: ModelPickerProps) {
     : { initial: { opacity: 0, y: 6, scale: 0.98 }, animate: { opacity: 1, y: 0, scale: 1 }, exit: { opacity: 0, y: 4, scale: 0.98 } }
 
   return (
-    <div className="model-picker" ref={containerRef}>
-      <button
-        type="button"
-        className="chip"
-        aria-haspopup="listbox"
-        aria-expanded={open === 'provider'}
-        disabled={props.disabled}
-        onClick={() => setOpen((value) => (value === 'provider' ? null : 'provider'))}
-      >
-        <span className="chip__dot" aria-hidden="true" />
-        {props.provider}
-        <span className="chip__caret" aria-hidden="true">⌄</span>
-      </button>
+    <div
+      className={`model-picker model-picker--${variant}`}
+      data-variant={variant}
+      ref={containerRef}
+      onKeyDown={handleContainerKeyDown}
+    >
+      <div className="model-picker__pill">
+        <button
+          type="button"
+          className="chip model-picker__segment model-picker__segment--provider"
+          data-testid="model-picker-provider-trigger"
+          aria-haspopup="listbox"
+          aria-expanded={open === 'provider'}
+          disabled={props.disabled}
+          onClick={() => setOpen((value) => (value === 'provider' ? null : 'provider'))}
+        >
+          <span className="chip__dot" aria-hidden="true" />
+          {props.provider}
+          <span className="chip__caret" aria-hidden="true">⌄</span>
+        </button>
 
-      <button
-        type="button"
-        className="chip"
-        aria-haspopup="listbox"
-        aria-expanded={open === 'model'}
-        disabled={props.disabled || props.models.length === 0}
-        onClick={() => { setQuery(''); setOpen((value) => (value === 'model' ? null : 'model')) }}
-      >
-        {props.loading ? 'carregando…' : selected?.display_name ?? (props.models.length === 0 ? 'sem modelos' : 'escolher modelo')}
-        <span className="chip__caret" aria-hidden="true">⌄</span>
-      </button>
+        {variant === 'unified' && (
+          <span className="model-picker__divider" aria-hidden="true">/</span>
+        )}
+
+        <button
+          type="button"
+          className="chip model-picker__segment model-picker__segment--model"
+          data-testid="model-picker-model-trigger"
+          aria-haspopup="listbox"
+          aria-expanded={open === 'model'}
+          disabled={props.disabled || props.models.length === 0}
+          onClick={() => { setQuery(''); setOpen((value) => (value === 'model' ? null : 'model')) }}
+        >
+          {props.loading ? 'carregando…' : selected?.display_name ?? (props.models.length === 0 ? 'sem modelos' : 'escolher modelo')}
+          <span className="chip__caret" aria-hidden="true">⌄</span>
+        </button>
+      </div>
 
       <AnimatePresence>
         {open === 'provider' && (
@@ -113,6 +143,22 @@ export function ModelPicker(props: ModelPickerProps) {
 
         {open === 'model' && (
           <motion.div className="picker-panel picker-panel--models" {...panelMotion} transition={{ duration: 0.16 }}>
+            {variant === 'unified' && props.providers.length > 1 && (
+              <div className="picker-provider-tabs" role="tablist" aria-label="Providers">
+                {props.providers.map((item) => (
+                  <button
+                    key={item}
+                    type="button"
+                    role="tab"
+                    aria-selected={item === props.provider}
+                    className={`picker-provider-tab${item === props.provider ? ' is-selected' : ''}`}
+                    onClick={() => props.onProviderChange(item)}
+                  >
+                    {item}
+                  </button>
+                ))}
+              </div>
+            )}
             <input
               className="picker-search"
               type="search"
@@ -152,3 +198,4 @@ export function ModelPicker(props: ModelPickerProps) {
     </div>
   )
 }
+
