@@ -134,7 +134,7 @@ export function SchedulesPage({ embedded = false }: { embedded?: boolean }) {
       </div>
     </section>
   )
-  if (embedded) return <SettingsSection eyebrow="SISTEMA / AGENDA" title="Agendamentos" lede="Conversas que começam sozinhas em um horário.">{content}</SettingsSection>
+  if (embedded) return <div className="hub-page hub-page--schedules" data-testid="schedules-hub-page"><SettingsSection eyebrow="SISTEMA / AGENDA" title="Agendamentos" lede="Conversas que começam sozinhas em um horário.">{content}</SettingsSection></div>
   return (
     <main className="app-shell schedules-shell">
       <header className="topbar">
