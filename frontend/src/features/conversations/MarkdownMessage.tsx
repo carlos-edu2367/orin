@@ -5,6 +5,8 @@ import type { ApiClient } from '../../api/client'
 import {
   InlineWorkspaceFilePill,
   parseWorkspaceReference,
+  previewKindFor,
+  workspaceFileUrl,
   type WorkspaceFilePreviewHandler,
 } from './WorkspaceFileCard'
 
@@ -109,6 +111,21 @@ export function MarkdownMessage({
         urlTransform={(url) => (url.startsWith('workspace://') ? url : defaultUrlTransform(url))}
         components={{
           pre: ({ children }) => <MarkdownCodeBlock>{children}</MarkdownCodeBlock>,
+          img: ({ src, alt }) => {
+            const reference = src ? parseWorkspaceReference(src, conversationId ?? '') : null
+            if (!reference) {
+              return <img src={src} alt={alt ?? ''} />
+            }
+            const inlineUrl = workspaceFileUrl(reference, 'inline')
+            const kind = previewKindFor(reference.path)
+            if (kind === 'audio') {
+              return <audio className="workspace-file-card__media workspace-file-card__audio" controls preload="metadata" src={inlineUrl} aria-label={alt || reference.name || reference.path} />
+            }
+            if (kind === 'video') {
+              return <video className="workspace-file-card__media workspace-file-card__video" controls preload="metadata" src={inlineUrl} aria-label={alt || reference.name || reference.path} />
+            }
+            return <img className="workspace-file-card__media workspace-file-card__image" src={inlineUrl} alt={alt || reference.name || reference.path} loading="lazy" />
+          },
           a: ({ href, children }) => {
             const reference = href ? parseWorkspaceReference(href, conversationId ?? '') : null
             if (!reference) {

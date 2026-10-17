@@ -752,6 +752,8 @@ class TurnSession:
         project_store=None,
         chat_store=None,
         local_workspaces=None,
+        media_policy=None,
+        media_client=None,
     ) -> None:
         self.turn = turn
         self.enable_terminal = bool(enable_terminal)
@@ -776,6 +778,8 @@ class TurnSession:
         self.project_store = project_store
         self.chat_store = chat_store
         self.local_workspaces = local_workspaces
+        self.media_policy = media_policy
+        self.media_client = media_client
         self.tool_policy = tool_policy
         self.model_sees_images = bool(model_sees_images)
         self.model_calls_tools = bool(model_calls_tools)
@@ -1979,6 +1983,8 @@ class TurnSession:
             chat_store=self.chat_store,
             local_workspaces=self.local_workspaces,
             project_user_id=str(self.turn.get("user_id") or "").strip() or None,
+            media_policy=self.media_policy,
+            media_client=self.media_client,
         )
         if permission_broker is not None:
             toolset._permission_broker = permission_broker

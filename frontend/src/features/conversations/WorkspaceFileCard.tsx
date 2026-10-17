@@ -9,7 +9,7 @@ import type { StructuredPatchHunk } from './activityTypes'
 export type WorkspaceFileReference = { conversationId: string; path: string; name?: string }
 export type WorkspaceFilePreviewHandler = (reference: WorkspaceFileReference) => void
 
-type PreviewKind = 'markdown' | 'json' | 'code' | 'image' | 'pdf' | 'unsupported'
+type PreviewKind = 'markdown' | 'json' | 'code' | 'image' | 'audio' | 'video' | 'pdf' | 'unsupported'
 type TextPreview = { content: string; truncated: boolean; invalidJson: boolean }
 
 const TEXT_LIMIT_BYTES = 768 * 1024
@@ -89,6 +89,8 @@ export function previewKindFor(path: string): PreviewKind {
   if (MARKDOWN_EXTENSIONS.has(extension)) return 'markdown'
   if (extension === 'json') return 'json'
   if (['png', 'jpg', 'jpeg', 'gif', 'webp'].includes(extension)) return 'image'
+  if (['mp3', 'wav', 'ogg'].includes(extension)) return 'audio'
+  if (['mp4', 'webm'].includes(extension)) return 'video'
   if (extension === 'pdf') return 'pdf'
   return CODE_EXTENSIONS.has(extension) || !extension ? 'code' : 'unsupported'
 }
@@ -118,7 +120,9 @@ export function WorkspaceFileCard({
   removedLines?: number
 }) {
   const name = reference.name ?? reference.path.split('/').at(-1) ?? reference.path
+  const inlineUrl = workspaceFileUrl(reference, 'inline')
   const downloadUrl = workspaceFileUrl(reference, 'attachment')
+  const kind = previewKindFor(reference.path)
   const { capabilities } = useSession()
   const hasStats = addedLines !== undefined || removedLines !== undefined
   const open = async () => {
@@ -133,6 +137,32 @@ export function WorkspaceFileCard({
 
   return (
     <span className="workspace-file-card" aria-label={`Arquivo ${name}`}>
+      {kind === 'image' && (
+        <img
+          className="workspace-file-card__media workspace-file-card__image"
+          src={inlineUrl}
+          alt={name}
+          loading="lazy"
+        />
+      )}
+      {kind === 'audio' && (
+        <audio
+          className="workspace-file-card__media workspace-file-card__audio"
+          controls
+          preload="metadata"
+          src={inlineUrl}
+          aria-label={`Áudio ${name}`}
+        />
+      )}
+      {kind === 'video' && (
+        <video
+          className="workspace-file-card__media workspace-file-card__video"
+          controls
+          preload="metadata"
+          src={inlineUrl}
+          aria-label={`Vídeo ${name}`}
+        />
+      )}
       <button
         type="button"
         className="workspace-file-card__main"
@@ -377,6 +407,8 @@ export function StructuredDiffView({
 function FilePreview({ reference, name, kind }: { reference: WorkspaceFileReference; name: string; kind: PreviewKind }) {
   const inlineUrl = workspaceFileUrl(reference)
   if (kind === 'image') return <img className="workspace-file-preview__image" src={inlineUrl} alt={`Preview de ${name}`} />
+  if (kind === 'audio') return <audio className="workspace-file-preview__audio" controls preload="metadata" src={inlineUrl} aria-label={`Preview de ${name}`} />
+  if (kind === 'video') return <video className="workspace-file-preview__video" controls preload="metadata" src={inlineUrl} aria-label={`Preview de ${name}`} />
   if (kind === 'pdf') return <iframe title={`Preview de ${name}`} sandbox="allow-scripts" src={inlineUrl} />
   if (kind === 'unsupported') {
     return <div className="workspace-file-preview__unsupported" role="status"><strong>Prévia indisponível neste navegador</strong><span>Abra ou baixe o arquivo para usar o aplicativo local compatível.</span></div>

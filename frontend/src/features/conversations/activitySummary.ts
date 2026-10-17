@@ -430,6 +430,7 @@ export function toolKindLabel(toolKind: string | undefined): string {
     case 'memory': return 'memória'
     case 'agent': return 'agentes'
     case 'artifact': return 'artefatos'
+    case 'media': return 'mídia'
     default: return 'ferramentas'
   }
 }
@@ -498,6 +499,38 @@ export function formatElapsed(totalSeconds: number): string {
   if (seconds < 60) return `${seconds} s`
   const minutes = Math.floor(seconds / 60)
   return `${minutes} min ${String(seconds % 60).padStart(2, '0')} s`
+}
+
+/**
+ * Formats how long a completed turn took from `started_at` to `finished_at`:
+ * `"Trabalhou por 14s"`, `"Trabalhou por 2m 15s"`, `"Trabalhou por 1h 5m"`.
+ */
+export function formatTurnWorkDuration(
+  startedAt: string | null | undefined,
+  finishedAt: string | null | undefined,
+): string | null {
+  if (!startedAt || !finishedAt) return null
+  const startMs = Date.parse(startedAt)
+  const endMs = Date.parse(finishedAt)
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs < startMs) {
+    return null
+  }
+  const totalSeconds = Math.max(1, Math.round((endMs - startMs) / 1000))
+  if (totalSeconds < 60) {
+    return `Trabalhou por ${totalSeconds}s`
+  }
+  if (totalSeconds < 3600) {
+    const minutes = Math.floor(totalSeconds / 60)
+    const seconds = totalSeconds % 60
+    return seconds > 0
+      ? `Trabalhou por ${minutes}m ${seconds}s`
+      : `Trabalhou por ${minutes}m`
+  }
+  const hours = Math.floor(totalSeconds / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+  return minutes > 0
+    ? `Trabalhou por ${hours}h ${minutes}m`
+    : `Trabalhou por ${hours}h`
 }
 
 /**

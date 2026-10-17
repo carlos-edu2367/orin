@@ -6,7 +6,7 @@ import { ApiError } from '../../api/errors'
 import {
   addProviderCustomModel, configureProvider, getOmniRouteInstallationStatus, inspectProvider, installOmniRoute, listProviderModels,
   refreshProviderModels, removeProviderCustomModel, revokeProvider, setProviderModelFavorite, testOllamaConnection, testOmniRouteConnection,
-  type ProviderModel, type ProviderName, type ProviderPublicState,
+  type ModelOutputModality, type ProviderModel, type ProviderName, type ProviderPublicState,
 } from '../../api/providers'
 
 export type ProviderLoadState =
@@ -39,7 +39,7 @@ export type ProviderState = {
   refreshModels: () => Promise<void>
   loadModels: () => Promise<void>
   setFavorite: (model: ProviderModel) => Promise<void>
-  addCustomModel: (modelId: string) => Promise<boolean>
+  addCustomModel: (modelId: string, outputModalities?: ModelOutputModality[]) => Promise<boolean>
   removeCustomModel: (modelId: string) => Promise<boolean>
   testConnection: () => Promise<void>
   install: () => Promise<void>
@@ -149,12 +149,12 @@ export function useProviderState(client: ApiClient = createBrowserApiClient(), p
     } catch (error) { setAction({ pending: false, error: toApiError(error), kind: 'favorite' }) }
   }
 
-  async function addCustomModel(modelId: string): Promise<boolean> {
+  async function addCustomModel(modelId: string, outputModalities?: ModelOutputModality[]): Promise<boolean> {
     if (action.pending || !canRevoke || bootstrap.status === 'missing_csrf') return false
     setAction({ pending: true, error: null, kind: 'custom-model' })
     try {
       const key = `custom-model:add:${modelId}`
-      await addProviderCustomModel(client, provider, modelId, undefined, intentFor(key))
+      await addProviderCustomModel(client, provider, modelId, undefined, intentFor(key), outputModalities)
       intents.current.delete(key)
       await loadModels()
       setAction({ pending: false, error: null, kind: null })

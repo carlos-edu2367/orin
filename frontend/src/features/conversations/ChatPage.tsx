@@ -43,9 +43,10 @@ import { MessageAttachments } from './MessageAttachments'
 import { TurnTimeline } from './TurnTimeline'
 import { WorkspaceFilePreview, type WorkspaceFileReference } from './WorkspaceFileCard'
 import { activityReducer, createActivityState } from './activityReducer'
+import { formatTurnWorkDuration } from './activitySummary'
 import type { ConversationActivityEvent, ToolPermissionDecision } from './activityTypes'
 import type { UserQuestionAnswer } from './UserQuestionCard'
-import { buildMessageTimelines } from './turnTimelineFold'
+import { buildMessageTimelines, resolveTurnId } from './turnTimelineFold'
 import { useComposerAttachments } from './useComposerAttachments'
 
 const TOOL_CAPABILITY_NAMES = new Set(['tools', 'tool_use', 'function_calling'])
@@ -1630,6 +1631,20 @@ export function ChatPage() {
                   return turnRecord ? (turnRecord.state === 'completed' || turnRecord.state === 'failed' || turnRecord.state === 'cancelled') : false
                 })
               const effectiveOpenQuestionTurnIds = isTurnFinished ? EMPTY_TURN_IDS : openQuestionTurnIds
+              const messageTurnId = item.role === 'assistant'
+                ? (item.turn_id ?? timelineTurnIds[0] ?? resolveTurnId(consolidatedEvents, item.message_id))
+                : null
+              const matchedTurn = messageTurnId
+                ? conversation?.turns.find((t) => t.turn_id === messageTurnId)
+                : undefined
+              const isCompletedSuccessTurn = Boolean(
+                matchedTurn
+                && (matchedTurn.state === 'completed' || matchedTurn.state === 'completed_with_caveats')
+                && !cancelledTurnIds.has(matchedTurn.turn_id),
+              )
+              const turnWorkDurationLabel = isCompletedSuccessTurn
+                ? formatTurnWorkDuration(matchedTurn?.started_at, matchedTurn?.finished_at)
+                : null
               const retrySource = item.role === 'assistant' && item.retryable
                 ? messages.slice(0, itemIndex).reverse().find((candidate) => candidate.role === 'user' && candidate.content.trim())
                 : undefined
@@ -1663,6 +1678,8 @@ export function ChatPage() {
                         mode={conversationMode}
                         permissionMode={codePermissionMode}
                         turnCompleted={isTurnFinished}
+                        turnStartedAt={isCompletedSuccessTurn ? matchedTurn?.started_at : null}
+                        turnFinishedAt={isCompletedSuccessTurn ? matchedTurn?.finished_at : null}
                         dockActive={true}
                         onPreview={setPreviewReference}
                         openQuestionTurnIds={effectiveOpenQuestionTurnIds}
@@ -1681,7 +1698,19 @@ export function ChatPage() {
                       />
                     )
                     : item.role === 'assistant' && item.content
-                      ? <MarkdownMessage content={item.content} conversationId={conversationId} client={client} onPreview={setPreviewReference} />
+                      ? (
+                        <>
+                          {turnWorkDurationLabel && (
+                            <div
+                              className="turn-timeline__work-duration font-mono text-[11px] text-[var(--text-muted)] opacity-75 pb-1"
+                              data-testid="turn-work-duration"
+                            >
+                              {turnWorkDurationLabel}
+                            </div>
+                          )}
+                          <MarkdownMessage content={item.content} conversationId={conversationId} client={client} onPreview={setPreviewReference} />
+                        </>
+                      )
                       : item.command
                         ? <MessageCommandChip command={item.command} />
                         : item.role === 'assistant' && !item.content && (item.status === 'streaming' || item.status === 'queued')

@@ -389,6 +389,7 @@ export type TokenUsage = {
   input_tokens: number | null
   output_tokens: number | null
   total_tokens: number | null
+  estimated_cost_usd?: number | null
   usage_reported: boolean
 }
 
@@ -450,6 +451,7 @@ function tokenUsage(value: unknown): TokenUsage {
     input_tokens: count(data.input_tokens),
     output_tokens: count(data.output_tokens),
     total_tokens: count(data.total_tokens),
+    estimated_cost_usd: count(data.estimated_cost_usd),
     usage_reported: data.usage_reported === true,
   }
 }

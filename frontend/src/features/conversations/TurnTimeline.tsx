@@ -8,7 +8,7 @@ import type { ApiClient } from '../../api/client'
 import type { CodePermissionMode } from '../../api/codeMode'
 import { rewindTurn, type ConversationMode } from '../../api/conversations'
 import { WorkspaceFileCard, type WorkspaceFilePreviewHandler } from './WorkspaceFileCard'
-import { summarizeActivities } from './activitySummary'
+import { formatTurnWorkDuration, summarizeActivities } from './activitySummary'
 import { enrichEventsWithStartedMetadata, type TimelineItem } from './turnTimelineFold'
 import type { ActivityGroup, ConversationActivityEvent, ToolPermissionDecision } from './activityTypes'
 import type { CodeSessionProposalDecision } from './CodeSessionProposalCard'
@@ -36,6 +36,8 @@ export type TurnTimelineProps = {
   mode?: ConversationMode
   permissionMode?: CodePermissionMode
   turnCompleted?: boolean
+  turnStartedAt?: string | null
+  turnFinishedAt?: string | null
   dockActive?: boolean
   onPreview?: WorkspaceFilePreviewHandler
   onOpenFile?: (path: string) => void
@@ -585,6 +587,8 @@ export function TurnTimeline({
   mode,
   permissionMode,
   turnCompleted = false,
+  turnStartedAt = null,
+  turnFinishedAt = null,
   dockActive = false,
   onPreview,
   onOpenFile,
@@ -1074,8 +1078,18 @@ export function TurnTimeline({
     )
   }
 
+  const workDurationLabel = turnCompleted ? formatTurnWorkDuration(turnStartedAt, turnFinishedAt) : null
+
   return (
     <div className="turn-timeline">
+      {workDurationLabel && (
+        <div
+          className="turn-timeline__work-duration font-mono text-[11px] text-[var(--text-muted)] opacity-75 pb-1"
+          data-testid="turn-work-duration"
+        >
+          {workDurationLabel}
+        </div>
+      )}
       {canShowRewind && (
         <header
           className="turn-timeline__header turn-timeline__action-bar flex flex-wrap items-center justify-between gap-2 pb-1 text-[11px] text-[var(--text-muted)]"

@@ -46,8 +46,11 @@ def _directory_name(workspace_id: str) -> str:
 
 
 class ConversationWorkspace:
-    def __init__(self, root: Path | str, conversation_id: str) -> None:
-        self.root = Path(root).resolve() / _directory_name(conversation_id)
+    def __init__(self, root: Path | str, conversation_id: str | None = None) -> None:
+        if conversation_id is None:
+            self.root = Path(root).resolve()
+        else:
+            self.root = Path(root).resolve() / _directory_name(conversation_id)
         self.root.mkdir(parents=True, exist_ok=True)
 
     @classmethod

@@ -117,6 +117,7 @@ export function OverviewPanel({ conversationId, client, liveEvents, onClose }: O
             <div><dt>Modelo</dt><dd title={overview.model_id}>{overview.model_id || '—'}</dd></div>
             <div><dt>Provider</dt><dd>{overview.provider || '—'}</dd></div>
             <div><dt>Tokens gastos</dt><dd>{formatTokenUsage(overview.token_usage)}</dd></div>
+            <div><dt>Gasto estimado (USD)</dt><dd data-testid="overview-estimated-cost-usd">{formatUsdCost(overview.token_usage)}</dd></div>
             <div><dt>Duração</dt><dd>{formatDuration(overview.duration_seconds)}</dd></div>
             <div><dt>Eventos</dt><dd>{overview.activity_count}</dd></div>
             <div><dt>Mensagens entre agentes</dt><dd>{overview.messages.length}</dd></div>
@@ -133,6 +134,7 @@ export function OverviewPanel({ conversationId, client, liveEvents, onClose }: O
                 <div><dt>Tokens de entrada</dt><dd>{formatTokenCount(selectedAgent.tokenUsage?.input_tokens ?? null)}</dd></div>
                 <div><dt>Tokens de saída</dt><dd>{formatTokenCount(selectedAgent.tokenUsage?.output_tokens ?? null)}</dd></div>
                 <div><dt>Total de tokens</dt><dd>{formatTokenUsage(selectedAgent.tokenUsage)}</dd></div>
+                <div><dt>Gasto estimado (USD)</dt><dd data-testid="agent-estimated-cost-usd">{formatUsdCost(selectedAgent.tokenUsage)}</dd></div>
               </dl>
             </section>
           )}
@@ -215,4 +217,15 @@ function formatTokenUsage(usage: TokenUsage | AgentNode['tokenUsage'] | undefine
 
 function formatTokenCount(tokens: number | null): string {
   return tokens === null ? 'indisponível' : `${new Intl.NumberFormat('pt-BR').format(tokens)} tokens`
+}
+
+export function formatUsdCost(usage: TokenUsage | AgentNode['tokenUsage'] | undefined): string {
+  if (!usage?.usage_reported || usage.estimated_cost_usd === null || usage.estimated_cost_usd === undefined) {
+    return 'indisponível'
+  }
+  const cost = usage.estimated_cost_usd
+  if (!Number.isFinite(cost) || cost < 0) return 'indisponível'
+  if (cost === 0) return '$0.00'
+  if (cost < 0.01) return `$${cost.toFixed(4)}`
+  return `$${cost.toFixed(2)}`
 }

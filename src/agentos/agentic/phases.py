@@ -64,7 +64,6 @@ _EXTENSION_TOOLS = (
 _PROJECT_TOOLS = (
     "list_projects", "create_project_from_session", "move_session_to_project", "read_project_conversation",
 )
-
 PHASE_TOOLS: Mapping[Phase, tuple[str, ...]] = {
     Phase.ORIENT: (*_ALWAYS, *_READ_TOOLS, *_WRITE_TOOLS, *_SKILL_TOOLS, *_EXTENSION_TOOLS, *_PROJECT_TOOLS, "propose_code_session", "recall", "remember"),
     Phase.PLAN: (*_ALWAYS, *_SKILL_TOOLS, "propose_code_session", "list_projects", "read_project_conversation", "recall", "list_files", "read_file", "todo_write"),
@@ -266,7 +265,7 @@ def kinds_for(toolkits: frozenset[str] | None, *, phase: Phase | None = None) ->
     """Tool *kinds* the contract opened up, for families discovered at runtime."""
     kinds: set[str] = set()
     if phase in (Phase.ORIENT, Phase.EXECUTE):
-        kinds.add("mcp")
+        kinds.update(("mcp", "media"))
     for toolkit in toolkits or frozenset():
         kinds.update(TOOLKIT_KINDS.get(toolkit, ()))
     return frozenset(kinds)

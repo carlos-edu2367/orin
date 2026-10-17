@@ -270,16 +270,23 @@ export function setProviderModelFavorite(client: ApiClient, provider: ProviderNa
   })
 }
 
+export type ModelOutputModality = 'text' | 'image' | 'audio' | 'video'
+
 export function addProviderCustomModel(
   client: ApiClient,
   provider: ProviderName,
   modelId: string,
   displayName?: string,
   intent = client.createMutationIntent(),
+  outputModalities?: ModelOutputModality[],
 ): Promise<ProviderModel> {
   return client.request({
     path: `${providerPath(provider)}/models`, method: 'POST', intent,
-    body: { model_id: modelId, ...(displayName ? { display_name: displayName } : {}) },
+    body: {
+      model_id: modelId,
+      ...(displayName ? { display_name: displayName } : {}),
+      ...(outputModalities && outputModalities.length > 0 ? { output_modalities: outputModalities } : {}),
+    },
     parse: parseProviderModel,
   })
 }

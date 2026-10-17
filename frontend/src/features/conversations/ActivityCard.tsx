@@ -18,6 +18,7 @@ const GLYPHS: Record<string, string> = {
   memory: '◈',
   agent: '◇',
   artifact: '▣',
+  media: '◈',
   lifecycle: '◦',
 }
 

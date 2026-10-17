@@ -25,8 +25,9 @@ from agentos.installation import orin_paths
 from agentos.persistence.postgres.agentic_activity import ActivityCursorError
 from agentos.persistence.postgres.execution_adapters import ExecutionApplicationAdapter, ExecutionQueryAdapter
 from agentos.agentic import transcript as turn_transcript
-from agentos.persistence.postgres.schema import (code_mode_runs, conversation_activity_events, conversation_agent_usage, conversation_agents, conversation_dispatches, conversation_events, conversation_hook_context, conversation_message_attachments, conversation_message_commands, conversation_messages, conversation_tool_records, conversation_turn_steps, conversation_turns, conversations, projects, runtime_heartbeats, turn_quality_metrics, workspace_roots)
+from agentos.persistence.postgres.schema import (code_mode_runs, conversation_activity_events, conversation_agent_usage, conversation_agents, conversation_dispatches, conversation_events, conversation_hook_context, conversation_message_attachments, conversation_message_commands, conversation_messages, conversation_tool_records, conversation_turn_steps, conversation_turns, conversations, projects, provider_model_catalog, runtime_heartbeats, turn_quality_metrics, workspace_roots)
 from agentos.code_mode.models import CodeAutonomy, CodeStage, detect_code_request
+from agentos.provider_catalog.pricing import estimate_cost_usd
 
 
 _LOGGER = logging.getLogger("agentos.conversations.chat")
@@ -174,15 +175,34 @@ def _unavailable_token_usage() -> dict[str, object]:
         "output_tokens": None,
         "total_tokens": None,
         "usage_reported": False,
+        "estimated_cost_usd": None,
     }
 
 
-def _token_usage(row: Mapping[str, object]) -> dict[str, object]:
+def _token_usage(
+    row: Mapping[str, object],
+    catalog_pricing: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    usage_reported = bool(row["usage_reported"])
+    input_tokens = row["input_tokens"]
+    output_tokens = row["output_tokens"]
+    cost = (
+        estimate_cost_usd(
+            provider=str(row.get("provider") or ""),
+            model_id=str(row.get("model_id") or ""),
+            input_tokens=int(input_tokens) if input_tokens is not None else None,
+            output_tokens=int(output_tokens) if output_tokens is not None else None,
+            catalog_pricing=catalog_pricing,
+        )
+        if usage_reported
+        else None
+    )
     return {
-        "input_tokens": row["input_tokens"],
-        "output_tokens": row["output_tokens"],
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
         "total_tokens": row["total_tokens"],
-        "usage_reported": bool(row["usage_reported"]),
+        "usage_reported": usage_reported,
+        "estimated_cost_usd": cost,
     }
 
 
@@ -195,11 +215,17 @@ def _total_token_usage(usages) -> dict[str, object]:
         values = [int(item[field]) for item in items if item[field] is not None]
         return sum(values) if values else None
 
+    costs = [
+        float(item["estimated_cost_usd"])
+        for item in items
+        if item.get("estimated_cost_usd") is not None
+    ]
     return {
         "input_tokens": total("input_tokens"),
         "output_tokens": total("output_tokens"),
         "total_tokens": total("total_tokens"),
         "usage_reported": True,
+        "estimated_cost_usd": round(sum(costs), 6) if costs else None,
     }
 
 
@@ -1861,14 +1887,33 @@ class PostgresChatStore:
                 conversation_agent_usage.c.conversation_id == conversation_id,
                 conversation_agent_usage.c.user_id == user_id,
             )).mappings().all()
+            catalog_rows = c.execute(
+                select(
+                    provider_model_catalog.c.provider,
+                    provider_model_catalog.c.model_id,
+                    provider_model_catalog.c.input_per_million,
+                    provider_model_catalog.c.output_per_million,
+                ).where(provider_model_catalog.c.user_id == user_id)
+            ).mappings().all()
             activity = c.execute(
                 select(conversation_activity_events)
                 .where(conversation_activity_events.c.conversation_id == conversation_id, conversation_activity_events.c.user_id == user_id)
                 .order_by(conversation_activity_events.c.id)
             ).mappings().all()
+        pricing_by_model: dict[tuple[str, str], Mapping[str, object]] = {
+            (str(r["provider"]), str(r["model_id"])): {
+                "input_per_million": r["input_per_million"],
+                "output_per_million": r["output_per_million"],
+            }
+            for r in catalog_rows
+            if r.get("input_per_million") is not None or r.get("output_per_million") is not None
+        }
         main_id = f"agent:{conversation_id}:main"
         usage_by_agent = {
-            str(row["agent_id"]): _token_usage(row)
+            str(row["agent_id"]): _token_usage(
+                row,
+                catalog_pricing=pricing_by_model.get((str(row["provider"]), str(row["model_id"]))),
+            )
             for row in usage_rows
         }
         unavailable_usage = _unavailable_token_usage()

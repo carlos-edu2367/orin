@@ -1145,6 +1145,83 @@ class ChatWorker:
             else None,
         )
 
+    def _media_policy_for_turn(self, turn: dict[str, object]):
+        from agentos.provider_catalog.modalities import SameProviderMediaModelPolicy
+
+        active_provider = str(turn.get("provider") or "").strip().lower()
+        if not active_provider:
+            return SameProviderMediaModelPolicy.from_catalog_models(turn_provider="", favorite_models=())
+        try:
+            with self.store._engine.connect() as connection:
+                rows = connection.execute(
+                    select(
+                        provider_model_catalog.c.provider,
+                        provider_model_catalog.c.model_id,
+                        provider_model_catalog.c.output_modalities,
+                    )
+                    .join(
+                        provider_model_favorites,
+                        (provider_model_favorites.c.user_id == provider_model_catalog.c.user_id)
+                        & (provider_model_favorites.c.provider == provider_model_catalog.c.provider)
+                        & (provider_model_favorites.c.model_id == provider_model_catalog.c.model_id),
+                    )
+                    .where(
+                        provider_model_catalog.c.user_id == turn["user_id"],
+                        provider_model_catalog.c.provider == active_provider,
+                    )
+                    .order_by(provider_model_catalog.c.display_name, provider_model_catalog.c.model_id)
+                ).all()
+        except Exception:
+            rows = []
+        favorites: list[tuple[str, str, tuple[str, ...]]] = []
+        for row in rows:
+            mid = str(row.model_id or "").strip()
+            if not mid or mid.lower().endswith(":batch"):
+                continue
+            raw_mods = row.output_modalities or ()
+            if isinstance(raw_mods, str):
+                mods = tuple(part.strip() for part in raw_mods.split(",") if part.strip())
+            else:
+                mods = tuple(str(part).strip() for part in raw_mods if str(part).strip())
+            favorites.append((str(row.provider or active_provider), mid, mods))
+        return SameProviderMediaModelPolicy.from_catalog_models(
+            turn_provider=active_provider,
+            favorite_models=favorites,
+        )
+
+    def _media_client_for_turn(self, turn: dict[str, object]):
+        from agentos.agentic.media_client import MediaGenerationClient
+
+        def build() -> MediaGenerationClient | None:
+            provider = str(turn.get("provider") or "").strip().lower()
+            user_id = str(turn.get("user_id") or "").strip()
+            if not provider or not user_id:
+                return None
+            with self.store._engine.connect() as c:
+                credential = c.execute(
+                    select(provider_configurations.c.base_url, provider_configurations.c.enabled)
+                    .where(
+                        provider_configurations.c.user_id == user_id,
+                        provider_configurations.c.provider == provider,
+                    )
+                ).mappings().first()
+            if credential is None or not credential["enabled"]:
+                return None
+            chosen = PostgresProviderApiKeyAdapter(
+                self.store._engine,
+                cipher=ProviderSecretCipher.from_environment(required=True),
+            ).next_available_key(user_id, provider)
+            if chosen is None:
+                if provider not in PROVIDERS_WITH_BASE_URL:
+                    return None
+                api_key = ""
+            else:
+                api_key = chosen.plaintext
+            base_url = self._base_url_for(provider, credential)
+            return MediaGenerationClient(provider=provider, base_url=base_url, api_key=api_key)
+
+        return build
+
     def _runtime_for(self, turn: dict[str, object]) -> AgenticTurnRuntime:
         if self._runtime_factory is not None:
             return self._runtime_factory(turn)
@@ -1237,6 +1314,8 @@ class ChatWorker:
                 project_store=PostgresProjectStore(engine),
                 chat_store=self.store,
                 local_workspaces=PostgresLocalWorkspaceStore(engine),
+                media_policy=self._media_policy_for_turn(turn),
+                media_client=self._media_client_for_turn(turn),
             )
             return session.build_runtime()
         except Exception:

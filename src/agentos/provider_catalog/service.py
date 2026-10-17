@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
-from typing import Callable, Mapping
+from typing import Callable, Mapping, Sequence
 
+from .modalities import VALID_OUTPUT_MODALITIES, infer_output_modalities
 from .models import PROVIDERS_WITH_OPTIONAL_KEY, PricingSummary, ProviderCatalogContext, ProviderModelRecord, RefreshReceipt
 from .ports import ProviderCatalogRepository, ProviderCatalogUpstream
 
@@ -61,16 +62,34 @@ class ProviderModelCatalogService:
             raise LookupError("model_id is required")
         return self._repository.set_favorite(context, _provider(provider), model_id, favorite)
 
-    def add_custom(self, context: ProviderCatalogContext, provider: str, model_id: str, display_name: str | None = None) -> ProviderModelRecord:
+    def add_custom(
+        self,
+        context: ProviderCatalogContext,
+        provider: str,
+        model_id: str,
+        display_name: str | None = None,
+        output_modalities: Sequence[str] | None = None,
+    ) -> ProviderModelRecord:
         normalized_provider = _provider(provider)
         normalized_id = _bounded_text(model_id, "model_id", 512)
         normalized_name = _bounded_text(display_name, "display_name", 512) if display_name is not None else normalized_id
+        explicit: list[str] = []
+        if output_modalities is not None:
+            if isinstance(output_modalities, str) or not isinstance(output_modalities, Sequence):
+                raise ValueError("output_modalities must be a sequence of valid modalities")
+            for item in output_modalities:
+                norm = str(item or "").strip().lower()
+                if norm not in VALID_OUTPUT_MODALITIES:
+                    raise ValueError(f"output_modalities contains unsupported modality: {item!r}")
+                if norm not in explicit:
+                    explicit.append(norm)
+        resolved_output = tuple(explicit) if explicit else infer_output_modalities(normalized_id)
         return self._repository.add_custom(
             context,
             normalized_provider,
             ProviderModelRecord(
                 provider=normalized_provider, model_id=normalized_id, display_name=normalized_name,
-                context_window=None, capabilities=(), input_modalities=("text",), output_modalities=("text",),
+                context_window=None, capabilities=(), input_modalities=("text",), output_modalities=resolved_output,
                 pricing=None, refreshed_at=self._now(), is_custom=True,
             ),
         )
@@ -105,7 +124,7 @@ def _normalize_openrouter(raw: dict[str, object], refreshed_at: datetime) -> Pro
         context_window=context_window,
         capabilities=tuple(sorted({_text(value) for value in _list(raw.get("supported_parameters")) if _text(value)})),
         input_modalities=_modalities(architecture.get("input_modalities")),
-        output_modalities=_modalities(architecture.get("output_modalities")),
+        output_modalities=infer_output_modalities(model_id, _modalities(architecture.get("output_modalities"))),
         pricing=_pricing(pricing),
         refreshed_at=refreshed_at,
     )
@@ -122,7 +141,7 @@ def _normalize_openai(raw: dict[str, object], refreshed_at: datetime) -> Provide
         context_window=None,
         capabilities=(),
         input_modalities=("text",),
-        output_modalities=("text",),
+        output_modalities=infer_output_modalities(model_id),
         pricing=None,
         refreshed_at=refreshed_at,
     )
@@ -147,7 +166,7 @@ def _normalize_anthropic(raw: dict[str, object], refreshed_at: datetime) -> Prov
         context_window=context_window,
         capabilities=capability_names,
         input_modalities=input_modalities,
-        output_modalities=("text",),
+        output_modalities=infer_output_modalities(model_id),
         pricing=None,
         refreshed_at=refreshed_at,
     )
@@ -168,7 +187,7 @@ def _normalize_omniroute(raw: dict[str, object], refreshed_at: datetime) -> Prov
         context_window=context_window,
         capabilities=tuple(sorted({_text(value) for value in _list(raw.get("supported_parameters")) if _text(value)})),
         input_modalities=_modalities(raw.get("input_modalities")),
-        output_modalities=_modalities(raw.get("output_modalities")),
+        output_modalities=infer_output_modalities(model_id, _modalities(raw.get("output_modalities"))),
         pricing=None,
         refreshed_at=refreshed_at,
         route_kind="auto" if route_kind == "auto" else "model",
@@ -191,7 +210,7 @@ def _normalize_ollama(raw: dict[str, object], refreshed_at: datetime) -> Provide
         capabilities=capabilities,
         # Ollama reports vision as a capability rather than as a modality list.
         input_modalities=("text", "image") if "vision" in capabilities else ("text",),
-        output_modalities=("text",),
+        output_modalities=infer_output_modalities(model_id),
         # Local inference is free, and the hosted API publishes no per-token price.
         pricing=None,
         refreshed_at=refreshed_at,

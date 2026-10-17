@@ -58,6 +58,7 @@ CODE_MODE_CORE_TOOLS = frozenset({
     "list_mcp_catalog", "list_mcp_servers", "configure_mcp", "test_mcp_server",
     "search_plugin", "inspect_plugin", "install_plugin", "list_plugins", "uninstall_plugin",
     "list_projects", "create_project_from_session", "move_session_to_project", "read_project_conversation",
+    "generate_image", "generate_audio", "generate_video",
 })
 
 # Sentinel distinguishing "no pin resolved yet" from "resolved, and there is

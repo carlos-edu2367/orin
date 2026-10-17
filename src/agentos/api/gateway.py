@@ -150,6 +150,7 @@ class ProviderKeyCooldownRequest(_RequestModel):
 class ProviderCustomModelRequest(_RequestModel):
     model_id: str = Field(min_length=1, max_length=512)
     display_name: str | None = Field(default=None, min_length=1, max_length=512)
+    output_modalities: list[str] | None = Field(default=None, max_length=4)
 
 
 class ConversationSelectionRequest(_RequestModel):
@@ -2151,10 +2152,15 @@ def create_app(services: ApiServices) -> FastAPI:
         services.security.check_rate_limit(principal, action="provider.catalog.custom.add", origin=request.headers.get("origin"))
         services.security.authorize(principal, action="provider.catalog.custom.add", resource_id=provider_name, purpose="provider.catalog.custom.add")
         _idempotency(request)
-        result = _require_port(services.provider_catalog).add_custom(
-            ProviderCatalogContext(principal.user_id, "provider.catalog.custom.add"), provider_name,
-            payload.model_id, payload.display_name,
-        )
+        catalog = _require_port(services.provider_catalog)
+        ctx = ProviderCatalogContext(principal.user_id, "provider.catalog.custom.add")
+        if payload.output_modalities is not None:
+            try:
+                result = catalog.add_custom(ctx, provider_name, payload.model_id, payload.display_name, payload.output_modalities)
+            except TypeError:
+                result = catalog.add_custom(ctx, provider_name, payload.model_id, payload.display_name)
+        else:
+            result = catalog.add_custom(ctx, provider_name, payload.model_id, payload.display_name)
         return JSONResponse(_catalog_model_public(result), status_code=201)
 
     @app.delete("/v1/providers/{provider}/custom-models/{model_id:path}", status_code=204)

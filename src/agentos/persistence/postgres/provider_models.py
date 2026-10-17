@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from sqlalchemy import delete, insert, select, update
 from sqlalchemy.engine import Engine
 
+from agentos.provider_catalog.modalities import infer_output_modalities
 from agentos.provider_catalog.models import PricingSummary, ProviderCatalogContext, ProviderModelRecord
 
 from .schema import provider_configurations, provider_model_catalog, provider_model_favorites
@@ -135,7 +136,8 @@ class PostgresProviderCatalogRepository:
             ProviderModelRecord(
                 provider=str(row["provider"]), model_id=str(row["model_id"]), display_name=str(row["display_name"]),
                 context_window=row["context_window"], capabilities=tuple(row["capabilities"]),
-                input_modalities=tuple(row["input_modalities"]), output_modalities=tuple(row["output_modalities"]),
+                input_modalities=tuple(row["input_modalities"]),
+                output_modalities=infer_output_modalities(str(row["model_id"]), row["output_modalities"] or ()),
                 pricing=PricingSummary(row["input_per_million"], row["output_per_million"])
                 if row["input_per_million"] is not None or row["output_per_million"] is not None else None,
                 # SQLite stores ``DateTime(timezone=True)`` values without the

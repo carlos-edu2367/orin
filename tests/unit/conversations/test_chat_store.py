@@ -60,6 +60,7 @@ def test_overview_returns_model_and_usage_for_each_agent_and_the_whole_conversat
         "output_tokens": 12,
         "total_tokens": 36,
         "usage_reported": True,
+        "estimated_cost_usd": 0.000252,
     }
     assert researcher["provider"] == "openrouter"
     assert researcher["model_id"] == "anthropic/claude-sonnet-4"
@@ -68,6 +69,7 @@ def test_overview_returns_model_and_usage_for_each_agent_and_the_whole_conversat
         "output_tokens": 7,
         "total_tokens": 18,
         "usage_reported": True,
+        "estimated_cost_usd": 0.000138,
     }
 
 
@@ -90,6 +92,7 @@ def test_overview_marks_usage_as_unavailable_when_the_provider_never_reported_it
         "output_tokens": None,
         "total_tokens": None,
         "usage_reported": False,
+        "estimated_cost_usd": None,
     }
 
 

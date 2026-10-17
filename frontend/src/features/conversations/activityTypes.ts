@@ -295,6 +295,7 @@ export type AgentNode = {
     input_tokens: number | null
     output_tokens: number | null
     total_tokens: number | null
+    estimated_cost_usd?: number | null
     usage_reported: boolean
   }
 }
@@ -306,7 +307,7 @@ export type AgentEdge = {
   fact: 'delegation' | 'message' | 'result'
 }
 
-export const TOOL_KINDS = ['filesystem', 'terminal', 'web', 'browser', 'memory', 'agent', 'artifact', 'user_input'] as const
+export const TOOL_KINDS = ['filesystem', 'terminal', 'web', 'browser', 'memory', 'agent', 'artifact', 'media', 'user_input'] as const
 export type ToolKind = (typeof TOOL_KINDS)[number]
 
 const AGENT_TYPES = new Set([

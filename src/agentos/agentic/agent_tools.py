@@ -280,6 +280,16 @@ _PARAM_ALIASES: Mapping[str, Mapping[str, str]] = {
     },
     "ask_agent": {"prompt": "task", "agent": "name"},
     "read_project_conversation": {"max_messages": "limit"},
+    "generate_image": {"path": "output_path", "file_path": "output_path", "model_id": "model"},
+    "generate_audio": {
+        "prompt": "text",
+        "input": "text",
+        "path": "output_path",
+        "file_path": "output_path",
+        "format": "response_format",
+        "model_id": "model",
+    },
+    "generate_video": {"path": "output_path", "file_path": "output_path", "model_id": "model"},
 }
 
 
@@ -626,6 +636,8 @@ class AgentToolset:
         chat_store: object | None = None,
         local_workspaces: object | None = None,
         project_user_id: str | None = None,
+        media_policy: object | None = None,
+        media_client: object | None = None,
     ) -> None:
         from agentos.code_mode.checkpoints import FileCheckpointStore
         from agentos.code_mode.models import CodePermissionMode, normalize_permission_mode
@@ -645,6 +657,8 @@ class AgentToolset:
         self._chat_store = chat_store
         self._local_workspaces = local_workspaces
         self._project_user_id = str(project_user_id).strip() or None if project_user_id is not None else None
+        self._media_policy = media_policy
+        self._media_client = media_client
         self.memory = memory
         self.model_sees_images = bool(model_sees_images)
         self._visual_reader = visual_reader
@@ -1527,6 +1541,98 @@ class AgentToolset:
                     read_only=True,
                 )
             )
+        if self._media_policy is not None and not self._read_only_mode:
+            if self._media_policy.has_modality("image"):
+                img_models = self._media_policy.models_for("image")
+                img_default = self._media_policy.default_model_for("image") or ""
+                items.append(
+                    ToolDefinition(
+                        "generate_image",
+                        "Generate an image using a favorited image model from the active provider and save it into the conversation workspace. Link the returned workspace:// URI in your final response so the user can view it inline.",
+                        _schema(
+                            {
+                                "prompt": {**_TEXT, "description": "Detailed prompt describing the image to generate."},
+                                "model": {
+                                    **_TEXT,
+                                    "description": f"Optional model ID from active provider favorites ({', '.join(img_models)}). Defaults to '{img_default}'.",
+                                },
+                                "size": {
+                                    **_TEXT,
+                                    "description": "Optional image dimensions (e.g. '1024x1024', '1536x1024', '1024x1536'). Defaults to '1024x1024'.",
+                                },
+                                "output_path": {
+                                    **_TEXT,
+                                    "description": "Optional workspace-relative path to save the generated image (e.g. 'generated/banner.png').",
+                                },
+                            },
+                            ("prompt",),
+                        ),
+                        self.generate_image,
+                        "media",
+                        policy_tags=("mutates",),
+                    )
+                )
+            if self._media_policy.has_modality("audio"):
+                aud_models = self._media_policy.models_for("audio")
+                aud_default = self._media_policy.default_model_for("audio") or ""
+                items.append(
+                    ToolDefinition(
+                        "generate_audio",
+                        "Generate audio or speech using a favorited audio model from the active provider and save it into the conversation workspace. Link the returned workspace:// URI in your final response so the user can listen inline.",
+                        _schema(
+                            {
+                                "text": {**_TEXT, "description": "Text to synthesize into speech or audio prompt to generate."},
+                                "model": {
+                                    **_TEXT,
+                                    "description": f"Optional model ID from active provider favorites ({', '.join(aud_models)}). Defaults to '{aud_default}'.",
+                                },
+                                "voice": {
+                                    **_TEXT,
+                                    "description": "Optional voice identifier (e.g. 'alloy', 'nova', 'echo', 'onyx', 'fable', 'shimmer'). Defaults to 'alloy'.",
+                                },
+                                "response_format": {
+                                    "type": "string",
+                                    "enum": ["mp3", "wav", "opus", "aac", "flac"],
+                                    "description": "Optional output audio format (default 'mp3').",
+                                },
+                                "output_path": {
+                                    **_TEXT,
+                                    "description": "Optional workspace-relative path to save the generated audio (e.g. 'generated/audio.mp3').",
+                                },
+                            },
+                            ("text",),
+                        ),
+                        self.generate_audio,
+                        "media",
+                        policy_tags=("mutates",),
+                    )
+                )
+            if self._media_policy.has_modality("video"):
+                vid_models = self._media_policy.models_for("video")
+                vid_default = self._media_policy.default_model_for("video") or ""
+                items.append(
+                    ToolDefinition(
+                        "generate_video",
+                        "Generate a video clip using a favorited video model from the active provider and save it into the conversation workspace. Link the returned workspace:// URI in your final response so the user can watch inline.",
+                        _schema(
+                            {
+                                "prompt": {**_TEXT, "description": "Detailed prompt describing the video to generate."},
+                                "model": {
+                                    **_TEXT,
+                                    "description": f"Optional model ID from active provider favorites ({', '.join(vid_models)}). Defaults to '{vid_default}'.",
+                                },
+                                "output_path": {
+                                    **_TEXT,
+                                    "description": "Optional workspace-relative path to save the generated video (e.g. 'generated/clip.mp4').",
+                                },
+                            },
+                            ("prompt",),
+                        ),
+                        self.generate_video,
+                        "media",
+                        policy_tags=("mutates",),
+                    )
+                )
         if self._mcp_provider is not None:
             # Remote tools come last so a server can never shadow a native tool
             # name, and the namespace prefix already makes collision impossible.
@@ -1544,6 +1650,7 @@ class AgentToolset:
                     if item.read_only and item.name not in {
                         "write_file", "edit_file", "notebook_edit", "run_command", "stop_process",
                         "verify_project", "create_agent", "ask_agent", "ask_agents", "run_subagent", "check_subagent",
+                        "generate_image", "generate_audio", "generate_video",
                     }
                 )
             if self._policy is not None:
@@ -1639,7 +1746,10 @@ class AgentToolset:
         self._active_invocation_id = call_id or invocation_id or getattr(self, "_active_invocation_id", None)
         # A model can hallucinate a tool name, so an unknown tool is a result the
         # model reads and corrects, never an exception that kills the turn.
-        if self._read_only_mode and name in {"write_file", "edit_file", "notebook_edit", "run_command", "stop_process", "verify_project"}:
+        if self._read_only_mode and name in {
+            "write_file", "edit_file", "notebook_edit", "run_command", "stop_process", "verify_project",
+            "generate_image", "generate_audio", "generate_video",
+        }:
             return ToolOutcome(
                 "failed",
                 "Bloqueado em subagente somente-leitura",
@@ -5518,6 +5628,197 @@ class AgentToolset:
             summary[:240],
             json.dumps(result, ensure_ascii=False, indent=2),
             {"tool_kind": "terminal", "preview": {k: v for k, v in result.items() if k != "logs"}},
+        )
+
+    def _resolve_media_client(self):
+        client = self._media_client
+        if callable(client) and not hasattr(client, "generate_image"):
+            client = client()
+            self._media_client = client
+        if self._media_policy is None or client is None:
+            raise AgentToolError("Ferramenta de geração de mídia indisponível para o provedor atual.")
+        return client
+
+    def _resolve_media_output_path(self, output_path: str | None, *, default_prefix: str, ext: str) -> str:
+        clean_ext = (ext or "bin").lstrip(".").lower() or "bin"
+        if output_path is not None and str(output_path).strip():
+            raw_rel = str(output_path).strip().replace("\\", "/").lstrip("/")
+            if "." not in Path(raw_rel).name:
+                raw_rel = f"{raw_rel}.{clean_ext}"
+        else:
+            raw_rel = f"generated/{default_prefix}-{uuid4().hex[:8]}.{clean_ext}"
+        target = self.workspace.resolve(raw_rel)
+        return self.workspace.relative(target)
+
+    def generate_image(
+        self,
+        prompt: str,
+        model: str | None = None,
+        size: str = "1024x1024",
+        output_path: str | None = None,
+    ) -> ToolOutcome:
+        from agentos.agentic.media_client import MediaGenerationError
+
+        clean_prompt = str(prompt or "").strip()
+        if not clean_prompt:
+            raise AgentToolError("O argumento 'prompt' não pode ser vazio.", error_code="INVALID_ARGUMENTS")
+        if self._media_policy is None:
+            raise AgentToolError("Geração de imagem não habilitada para este provedor.", error_code="MEDIA_NOT_AVAILABLE")
+        try:
+            resolved_model = self._media_policy.resolve_model("image", model)
+        except PermissionError as error:
+            raise AgentToolError(str(error), error_code="MODEL_NOT_ALLOWED") from error
+        if resolved_model is None:
+            allowed = ", ".join(self._media_policy.models_for("image")) or "nenhum"
+            raise AgentToolError(
+                f"Modelo de imagem inválido ou não favoritado no provedor ativo ({self._media_policy.turn_provider}). Permitidos: {allowed}",
+                error_code="MODEL_NOT_ALLOWED",
+            )
+        if output_path is not None and str(output_path).strip():
+            self.workspace.resolve(str(output_path))
+        client = self._resolve_media_client()
+        try:
+            data, ext = client.generate_image(
+                model=resolved_model,
+                prompt=clean_prompt,
+                size=str(size or "1024x1024"),
+            )
+        except MediaGenerationError as error:
+            raise AgentToolError(str(error), error_code="MEDIA_GENERATION_FAILED") from error
+        rel_path = self._resolve_media_output_path(output_path, default_prefix="image", ext=ext)
+        written = self.workspace.write_bytes(rel_path, data, maximum_bytes=100 * 1024 * 1024)
+        workspace_uri = f"workspace://{rel_path}"
+        markdown_ref = f"![{Path(rel_path).name}]({workspace_uri})"
+        summary = f"Imagem gerada em {rel_path} ({resolved_model})"
+        payload = {
+            "tool_kind": "media",
+            "modality": "image",
+            "path": rel_path,
+            "uri": workspace_uri,
+            "markdown": markdown_ref,
+            "model": resolved_model,
+            "provider": self._media_policy.turn_provider,
+            "bytes": written,
+        }
+        return ToolOutcome(
+            "succeeded",
+            summary[:240],
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            payload,
+        )
+
+    def generate_audio(
+        self,
+        text: str,
+        model: str | None = None,
+        voice: str = "alloy",
+        response_format: str = "mp3",
+        output_path: str | None = None,
+    ) -> ToolOutcome:
+        from agentos.agentic.media_client import MediaGenerationError
+
+        clean_text = str(text or "").strip()
+        if not clean_text:
+            raise AgentToolError("O argumento 'text' não pode ser vazio.", error_code="INVALID_ARGUMENTS")
+        if self._media_policy is None:
+            raise AgentToolError("Geração de áudio não habilitada para este provedor.", error_code="MEDIA_NOT_AVAILABLE")
+        try:
+            resolved_model = self._media_policy.resolve_model("audio", model)
+        except PermissionError as error:
+            raise AgentToolError(str(error), error_code="MODEL_NOT_ALLOWED") from error
+        if resolved_model is None:
+            allowed = ", ".join(self._media_policy.models_for("audio")) or "nenhum"
+            raise AgentToolError(
+                f"Modelo de áudio inválido ou não favoritado no provedor ativo ({self._media_policy.turn_provider}). Permitidos: {allowed}",
+                error_code="MODEL_NOT_ALLOWED",
+            )
+        if output_path is not None and str(output_path).strip():
+            self.workspace.resolve(str(output_path))
+        client = self._resolve_media_client()
+        try:
+            data, ext = client.generate_audio(
+                model=resolved_model,
+                text=clean_text,
+                voice=str(voice or "alloy"),
+                response_format=str(response_format or "mp3"),
+            )
+        except MediaGenerationError as error:
+            raise AgentToolError(str(error), error_code="MEDIA_GENERATION_FAILED") from error
+        rel_path = self._resolve_media_output_path(output_path, default_prefix="audio", ext=ext)
+        written = self.workspace.write_bytes(rel_path, data, maximum_bytes=100 * 1024 * 1024)
+        workspace_uri = f"workspace://{rel_path}"
+        markdown_ref = f"[{Path(rel_path).name}]({workspace_uri})"
+        summary = f"Áudio gerado em {rel_path} ({resolved_model})"
+        payload = {
+            "tool_kind": "media",
+            "modality": "audio",
+            "path": rel_path,
+            "uri": workspace_uri,
+            "markdown": markdown_ref,
+            "model": resolved_model,
+            "provider": self._media_policy.turn_provider,
+            "bytes": written,
+        }
+        return ToolOutcome(
+            "succeeded",
+            summary[:240],
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            payload,
+        )
+
+    def generate_video(
+        self,
+        prompt: str,
+        model: str | None = None,
+        output_path: str | None = None,
+    ) -> ToolOutcome:
+        from agentos.agentic.media_client import MediaGenerationError
+
+        clean_prompt = str(prompt or "").strip()
+        if not clean_prompt:
+            raise AgentToolError("O argumento 'prompt' não pode ser vazio.", error_code="INVALID_ARGUMENTS")
+        if self._media_policy is None:
+            raise AgentToolError("Geração de vídeo não habilitada para este provedor.", error_code="MEDIA_NOT_AVAILABLE")
+        try:
+            resolved_model = self._media_policy.resolve_model("video", model)
+        except PermissionError as error:
+            raise AgentToolError(str(error), error_code="MODEL_NOT_ALLOWED") from error
+        if resolved_model is None:
+            allowed = ", ".join(self._media_policy.models_for("video")) or "nenhum"
+            raise AgentToolError(
+                f"Modelo de vídeo inválido ou não favoritado no provedor ativo ({self._media_policy.turn_provider}). Permitidos: {allowed}",
+                error_code="MODEL_NOT_ALLOWED",
+            )
+        if output_path is not None and str(output_path).strip():
+            self.workspace.resolve(str(output_path))
+        client = self._resolve_media_client()
+        try:
+            data, ext = client.generate_video(
+                model=resolved_model,
+                prompt=clean_prompt,
+            )
+        except MediaGenerationError as error:
+            raise AgentToolError(str(error), error_code="MEDIA_GENERATION_FAILED") from error
+        rel_path = self._resolve_media_output_path(output_path, default_prefix="video", ext=ext)
+        written = self.workspace.write_bytes(rel_path, data, maximum_bytes=100 * 1024 * 1024)
+        workspace_uri = f"workspace://{rel_path}"
+        markdown_ref = f"[{Path(rel_path).name}]({workspace_uri})"
+        summary = f"Vídeo gerado em {rel_path} ({resolved_model})"
+        payload = {
+            "tool_kind": "media",
+            "modality": "video",
+            "path": rel_path,
+            "uri": workspace_uri,
+            "markdown": markdown_ref,
+            "model": resolved_model,
+            "provider": self._media_policy.turn_provider,
+            "bytes": written,
+        }
+        return ToolOutcome(
+            "succeeded",
+            summary[:240],
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            payload,
         )
 
 
