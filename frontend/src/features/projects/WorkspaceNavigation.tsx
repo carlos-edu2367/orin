@@ -4,17 +4,64 @@ import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { ApiClient, createBrowserApiClient } from '../../api/client'
 import { listConversations, type Conversation, type ConversationMode } from '../../api/conversations'
 import { createProject, listProjectSidebar, type ProjectSidebarItem } from '../../api/projects'
+import { useTheme } from '../../app/ThemeContext'
+import { Brand } from '../../components/Brand'
 import { ProfileMenu } from '../auth/ProfileMenu'
 
-type ConversationSummary = Pick<Conversation, 'conversation_id' | 'title' | 'state'> & {
+export type WorkspaceNavigationConversationSummary = Pick<Conversation, 'conversation_id' | 'title' | 'state'> & {
   mode?: ConversationMode
 }
 
-type Props = {
+export type WorkspaceNavigationProps = {
   client?: ApiClient
-  onChatsChange?: (chats: ConversationSummary[]) => void
+  onChatsChange?: (chats: WorkspaceNavigationConversationSummary[]) => void
   onNewConversation?: () => void
   onNewCodeConversation?: () => void
+  railCollapsed?: boolean
+  onToggleRail?: () => void
+  onOpenPreferences?: () => void
+}
+
+const SIDEBAR_COLLAPSED_STORAGE_KEY = 'orin.sidebar.collapsed'
+
+function readStoredCollapsed(): boolean {
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) return false
+    return window.localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY) === 'true'
+  } catch {
+    return false
+  }
+}
+
+function writeStoredCollapsed(collapsed: boolean): void {
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      window.localStorage.setItem(SIDEBAR_COLLAPSED_STORAGE_KEY, collapsed ? 'true' : 'false')
+    }
+  } catch {
+    // Ignore storage failures in restricted contexts
+  }
+}
+
+function readStoredView(): 'chats' | 'projects' {
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) return 'chats'
+    return window.localStorage.getItem('agentos.navigation-view') === 'projects' ? 'projects' : 'chats'
+  } catch {
+    return 'chats'
+  }
+}
+
+function readStoredCollapsedProjects(): Set<string> {
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) return new Set()
+    const raw = window.localStorage.getItem('agentos.collapsed-projects')
+    if (!raw) return new Set()
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed) ? new Set(parsed.filter((item): item is string => typeof item === 'string')) : new Set()
+  } catch {
+    return new Set()
+  }
 }
 
 function detectApplePlatform(): boolean {
@@ -53,12 +100,24 @@ function ModeBadge({ mode, conversationId }: { mode?: ConversationMode; conversa
   )
 }
 
-export function WorkspaceNavigation({ client, onChatsChange, onNewConversation, onNewCodeConversation }: Props) {
+export function WorkspaceNavigation({
+  client,
+  onChatsChange,
+  onNewConversation,
+  onNewCodeConversation,
+  railCollapsed,
+  onToggleRail,
+  onOpenPreferences,
+}: WorkspaceNavigationProps) {
   const apiClient = useMemo(() => client ?? createBrowserApiClient(), [client])
   const navigate = useNavigate()
   const location = useLocation()
   const reduced = useReducedMotion()
-  const [chats, setChats] = useState<ConversationSummary[]>([])
+  const { resolvedTheme, cycleMode } = useTheme()
+  const [internalCollapsed, setInternalCollapsed] = useState<boolean>(() => readStoredCollapsed())
+  const isRailCollapsed = railCollapsed !== undefined ? railCollapsed : internalCollapsed
+
+  const [chats, setChats] = useState<WorkspaceNavigationConversationSummary[]>([])
   const [projects, setProjects] = useState<ProjectSidebarItem[]>([])
   const [creatingProject, setCreatingProject] = useState(false)
   const [projectName, setProjectName] = useState('')
@@ -66,12 +125,8 @@ export function WorkspaceNavigation({ client, onChatsChange, onNewConversation, 
   const [projectWorkspacePath, setProjectWorkspacePath] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [mobileOpen, setMobileOpen] = useState(false)
-  const [view, setView] = useState<'chats' | 'projects'>(() => (
-    localStorage.getItem('agentos.navigation-view') === 'projects' ? 'projects' : 'chats'
-  ))
-  const [collapsed, setCollapsed] = useState<Set<string>>(() => (
-    new Set(JSON.parse(localStorage.getItem('agentos.collapsed-projects') ?? '[]'))
-  ))
+  const [view, setView] = useState<'chats' | 'projects'>(() => readStoredView())
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => readStoredCollapsedProjects())
 
   const paletteShortcut = useMemo(() => (detectApplePlatform() ? '⌘K' : 'Ctrl+K'), [])
 
@@ -96,9 +151,25 @@ export function WorkspaceNavigation({ client, onChatsChange, onNewConversation, 
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [mobileOpen])
 
+  const handleToggleRail = useCallback(() => {
+    if (onToggleRail) {
+      onToggleRail()
+      return
+    }
+    setInternalCollapsed((current) => {
+      const next = !current
+      writeStoredCollapsed(next)
+      return next
+    })
+  }, [onToggleRail])
+
   function changeView(next: 'chats' | 'projects') {
     setView(next)
-    localStorage.setItem('agentos.navigation-view', next)
+    try {
+      localStorage.setItem('agentos.navigation-view', next)
+    } catch {
+      // Ignore storage errors
+    }
   }
 
   function toggleProject(id: string) {
@@ -106,12 +177,27 @@ export function WorkspaceNavigation({ client, onChatsChange, onNewConversation, 
       const next = new Set(current)
       if (next.has(id)) next.delete(id)
       else next.add(id)
-      localStorage.setItem('agentos.collapsed-projects', JSON.stringify([...next]))
+      try {
+        localStorage.setItem('agentos.collapsed-projects', JSON.stringify([...next]))
+      } catch {
+        // Ignore storage errors
+      }
       return next
     })
   }
 
   const activeProjectId = location.pathname.match(/^\/projects\/([^/]+)/)?.[1]
+  const isLibraryActive =
+    location.pathname.startsWith('/library') ||
+    location.pathname.startsWith('/settings/skills') ||
+    location.pathname.startsWith('/settings/plugins') ||
+    location.pathname.startsWith('/settings/memory')
+  const isIntegrationsActive =
+    location.pathname.startsWith('/integrations') ||
+    location.pathname.startsWith('/settings/providers') ||
+    location.pathname.startsWith('/settings/mcp') ||
+    location.pathname.startsWith('/settings/vision')
+  const isSchedulesActive = location.pathname.startsWith('/schedules')
 
   const reload = useCallback(async () => {
     const [conversationList, sidebar] = await Promise.all([listConversations(apiClient), listProjectSidebar(apiClient)])
@@ -212,6 +298,15 @@ export function WorkspaceNavigation({ client, onChatsChange, onNewConversation, 
     )
   }, [])
 
+  const handleOpenPreferences = useCallback(() => {
+    setMobileOpen(false)
+    if (onOpenPreferences) {
+      onOpenPreferences()
+      return
+    }
+    navigate('/settings')
+  }, [navigate, onOpenPreferences])
+
   return (
     <>
       <button
@@ -238,31 +333,49 @@ export function WorkspaceNavigation({ client, onChatsChange, onNewConversation, 
 
       <nav
         id="workspace-navigation-drawer"
-        className={mobileOpen ? 'project-navigation is-mobile-open' : 'project-navigation'}
+        className={`${mobileOpen ? 'project-navigation is-mobile-open' : 'project-navigation'}${isRailCollapsed ? ' is-rail-collapsed' : ''}`}
+        data-rail-collapsed={isRailCollapsed ? 'true' : 'false'}
         aria-label="Conversas e projetos"
       >
         <header className="project-navigation__header">
-          <div>
-            <p className="project-navigation__eyebrow">Workspace</p>
-            <h2>Seu espaço</h2>
+          <div className="project-navigation__brand-row">
+            <Brand to="/" />
+            <div className="project-navigation__heading-copy project-navigation__rail-hide">
+              <p className="project-navigation__eyebrow">Workspace</p>
+              <h2>Seu espaço</h2>
+            </div>
           </div>
           <div className="project-navigation__header-controls">
             {activeSessionCount > 0 && (
               <span
-                className="project-navigation__active-badge inline-flex items-center gap-1 rounded-full border border-emerald-500/30 bg-emerald-500/15 px-2 py-0.5 font-mono text-[10px] font-semibold text-emerald-300"
+                className="project-navigation__active-badge inline-flex items-center gap-1 rounded-full border border-[var(--orin-success-border)] bg-[var(--orin-success-bg)] px-2 py-0.5 font-mono text-[10px] font-semibold text-[var(--orin-success)]"
                 data-testid="sidebar-active-sessions-badge"
                 data-active-count={activeSessionCount}
                 aria-label={`${activeSessionCount} ${activeSessionCount === 1 ? 'sessão ativa' : 'sessões ativas'}`}
               >
-                <span className="inline-block h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" aria-hidden="true" />
-                <span>
+                <span className="inline-block h-1.5 w-1.5 rounded-full bg-[var(--orin-success)] animate-pulse" aria-hidden="true" />
+                <span className="project-navigation__rail-hide">
                   {activeSessionCount} {activeSessionCount === 1 ? 'ativa' : 'ativas'}
                 </span>
               </span>
             )}
-            <span className="project-navigation__count" aria-label={`${chats.length + projects.length} itens`}>
+            <span className="project-navigation__count project-navigation__rail-hide" aria-label={`${chats.length + projects.length} itens`}>
               {chats.length + projects.length}
             </span>
+            <button
+              type="button"
+              className="project-navigation__rail-toggle"
+              data-testid="sidebar-rail-toggle"
+              aria-expanded={!isRailCollapsed}
+              aria-label={isRailCollapsed ? 'Expandir navegação lateral' : 'Recolher navegação lateral'}
+              title={isRailCollapsed ? 'Expandir navegação lateral' : 'Recolher navegação lateral'}
+              onClick={handleToggleRail}
+            >
+              <svg className="h-4 w-4" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
+                <rect x="2" y="2.5" width="12" height="11" rx="2" />
+                <path d="M6 2.5v11" />
+              </svg>
+            </button>
             {mobileOpen && (
               <button
                 type="button"
@@ -276,24 +389,26 @@ export function WorkspaceNavigation({ client, onChatsChange, onNewConversation, 
           </div>
         </header>
 
-        <div className="mb-2.5 grid grid-cols-2 gap-1.5" role="group" aria-label="Criar nova sessão">
+        <div className="project-navigation__cta-group mb-2.5 grid grid-cols-2 gap-1.5" role="group" aria-label="Criar nova sessão">
           <button
             type="button"
             data-testid="sidebar-new-chat"
             onClick={handleNewChat}
-            className="flex items-center justify-center gap-1.5 rounded-lg border border-[var(--orin-border)] bg-[var(--orin-surface-raised)] px-2.5 py-2 text-xs font-medium text-[var(--orin-text-primary)] transition-colors hover:border-[var(--orin-border-strong)] hover:bg-[var(--orin-surface-hover)]"
+            title="Novo chat"
+            className="project-navigation__cta-btn flex items-center justify-center gap-1.5 rounded-lg border border-[var(--orin-border)] bg-[var(--orin-surface-raised)] px-2.5 py-2 text-xs font-medium text-[var(--orin-text-primary)] transition-colors hover:border-[var(--orin-border-strong)] hover:bg-[var(--orin-surface-hover)]"
           >
             <span aria-hidden="true">+</span>
-            <span>Novo chat</span>
+            <span className="project-navigation__rail-hide">Novo chat</span>
           </button>
           <button
             type="button"
             data-testid="sidebar-new-code"
             onClick={handleNewCode}
-            className="flex items-center justify-center gap-1.5 rounded-lg border border-[var(--orin-border-subtle)] bg-[var(--orin-accent-bg)] px-2.5 py-2 text-xs font-medium text-[var(--orin-text-primary)] transition-colors hover:border-[var(--orin-accent)] hover:bg-[var(--orin-surface-selected)]"
+            title="Novo Code"
+            className="project-navigation__cta-btn flex items-center justify-center gap-1.5 rounded-lg border border-[var(--orin-border-subtle)] bg-[var(--orin-accent-bg)] px-2.5 py-2 text-xs font-medium text-[var(--orin-text-primary)] transition-colors hover:border-[var(--orin-accent)] hover:bg-[var(--orin-surface-selected)]"
           >
             <span className="font-mono text-[10px] font-bold text-[var(--orin-accent-soft)]" aria-hidden="true">&gt;_</span>
-            <span>Novo Code</span>
+            <span className="project-navigation__rail-hide">Novo Code</span>
           </button>
         </div>
 
@@ -301,13 +416,63 @@ export function WorkspaceNavigation({ client, onChatsChange, onNewConversation, 
           type="button"
           className="project-navigation__search-trigger"
           onClick={openCommandPalette}
+          title={`Buscar e comandos (${paletteShortcut})`}
           aria-label={`Buscar conversas e comandos (${paletteShortcut})`}
         >
-          <span>Buscar e comandos…</span>
+          <span className="project-navigation__rail-hide">Buscar e comandos…</span>
           <kbd>{paletteShortcut}</kbd>
         </button>
 
-        <div className="project-navigation__tabs" role="tablist" aria-label="Seções da navegação">
+        <div className="project-navigation__hubs" role="group" aria-label="Hubs do workspace">
+          <Link
+            to="/library/skills"
+            onClick={() => setMobileOpen(false)}
+            aria-current={isLibraryActive ? 'page' : undefined}
+            className={`project-navigation__hub-link${isLibraryActive ? ' is-active' : ''}`}
+            title="Biblioteca"
+          >
+            <span className="project-navigation__hub-icon" aria-hidden="true">
+              <svg className="h-3.5 w-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+                <path d="M3 2.5h8.5A1.5 1.5 0 0 1 13 4v9.5a.5.5 0 0 1-.5.5H3.5A1.5 1.5 0 0 1 2 12.5v-8.5A1.5 1.5 0 0 1 3.5 2.5Z" />
+                <path d="M5.5 5.5h4.5M5.5 8h4.5" strokeLinecap="round" />
+              </svg>
+            </span>
+            <span className="project-navigation__hub-label">Biblioteca</span>
+          </Link>
+
+          <Link
+            to="/integrations/providers"
+            onClick={() => setMobileOpen(false)}
+            aria-current={isIntegrationsActive ? 'page' : undefined}
+            className={`project-navigation__hub-link${isIntegrationsActive ? ' is-active' : ''}`}
+            title="Integrações"
+          >
+            <span className="project-navigation__hub-icon" aria-hidden="true">
+              <svg className="h-3.5 w-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+                <path d="M6 2.5v2.5M10 2.5v2.5M4.5 5h7v2.5a3.5 3.5 0 0 1-7 0V5ZM8 11v2.5" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </span>
+            <span className="project-navigation__hub-label">Integrações</span>
+          </Link>
+
+          <Link
+            to="/schedules"
+            onClick={() => setMobileOpen(false)}
+            aria-current={isSchedulesActive ? 'page' : undefined}
+            className={`project-navigation__hub-link${isSchedulesActive ? ' is-active' : ''}`}
+            title="Automações"
+          >
+            <span className="project-navigation__hub-icon" aria-hidden="true">
+              <svg className="h-3.5 w-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+                <circle cx="8" cy="8" r="5.5" />
+                <path d="M8 5v3.2l2.2 1.3" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </span>
+            <span className="project-navigation__hub-label">Automações</span>
+          </Link>
+        </div>
+
+        <div className="project-navigation__tabs project-navigation__rail-hide" role="tablist" aria-label="Seções da navegação">
           <button
             type="button"
             role="tab"
@@ -332,7 +497,7 @@ export function WorkspaceNavigation({ client, onChatsChange, onNewConversation, 
           </button>
         </div>
 
-        <div className="project-navigation__scroll">
+        <div className="project-navigation__scroll project-navigation__rail-hide">
           <AnimatePresence mode="wait">
             {view === 'chats' ? (
               <motion.div
@@ -459,25 +624,40 @@ export function WorkspaceNavigation({ client, onChatsChange, onNewConversation, 
           {view === 'projects' && (
             <button type="button" className="project-navigation__action project-navigation__action--primary" onClick={() => setCreatingProject(true)}>
               <span className="project-navigation__action-icon" aria-hidden="true">+</span>
-              <span>Novo projeto</span>
+              <span className="project-navigation__rail-hide">Novo projeto</span>
             </button>
           )}
-          <Link
-            className="project-navigation__action project-navigation__action--secondary"
-            to="/schedules"
-            onClick={() => setMobileOpen(false)}
-          >
-            <span className="project-navigation__action-icon project-navigation__action-icon--schedule" aria-hidden="true">◷</span>
-            <span>Ações agendadas</span>
-          </Link>
-          <Link
-            className="project-navigation__action project-navigation__action--secondary"
-            to="/settings"
-            onClick={() => setMobileOpen(false)}
-          >
-            <span className="project-navigation__action-icon" aria-hidden="true">⚙</span>
-            <span>Configurações</span>
-          </Link>
+
+          <div className="project-navigation__footer">
+            <div className="project-navigation__footer-profile project-navigation__rail-hide">
+              <ProfileMenu />
+            </div>
+            <div className="project-navigation__footer-controls">
+              <button
+                type="button"
+                className="project-navigation__footer-btn"
+                data-testid="theme-quick-toggle"
+                onClick={cycleMode}
+                aria-label={`Alternar tema (atual: ${resolvedTheme})`}
+                title={`Alternar tema (${resolvedTheme})`}
+              >
+                <span aria-hidden="true">
+                  {resolvedTheme === 'light' ? '☀' : resolvedTheme === 'carbon' ? '◐' : '☾'}
+                </span>
+              </button>
+              <button
+                type="button"
+                className="project-navigation__footer-btn project-navigation__footer-btn--preferences"
+                data-testid="open-preferences-modal"
+                aria-label="Preferências"
+                title="Preferências (Ctrl+,)"
+                onClick={handleOpenPreferences}
+              >
+                <span aria-hidden="true">⚙</span>
+                <span className="project-navigation__footer-label project-navigation__rail-hide">Preferências</span>
+              </button>
+            </div>
+          </div>
         </div>
       </nav>
       {creatingProject && (
@@ -510,7 +690,6 @@ export function WorkspaceNavigation({ client, onChatsChange, onNewConversation, 
         </div>
       )}
       {error && <p className="workspace-navigation__error" role="status">{error}</p>}
-      <ProfileMenu />
     </>
   )
 }
