@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { createBrowserApiClient, type ApiClient } from '../../api/client'
 import { getInstallationStatus } from '../../api/installation'
 import { listManagedMemories } from '../../api/memory'
@@ -9,18 +9,81 @@ import { listScheduledChats } from '../../api/schedules'
 import { createSkillsClient } from '../../api/skills'
 import type { BadgeMap } from './SettingsNav'
 
+const CACHE_TTL_MS = 30_000
+
 let sessionCache: BadgeMap | null = null
+let sessionCacheAt = 0
 let sessionRequest: Promise<BadgeMap> | null = null
 
-export function useSettingsBadges(client: ApiClient = createBrowserApiClient()): BadgeMap {
+export type UseSettingsBadgesOptions = {
+  mode?: 'full' | 'pending-only'
+  enabled?: boolean
+}
+
+export function useSettingsBadges(
+  providedClient?: ApiClient,
+  options?: UseSettingsBadgesOptions,
+): BadgeMap {
+  const client = useMemo(() => providedClient ?? createBrowserApiClient(), [providedClient])
+  const mode = options?.mode ?? 'full'
+  const enabled = options?.enabled ?? true
   const [badges, setBadges] = useState<BadgeMap>(() => sessionCache ?? {})
+
   useEffect(() => {
+    if (!enabled) return undefined
     let active = true
-    const request = sessionRequest ?? (sessionRequest = loadBadges(client).catch(() => sessionCache ?? {}).then((value) => { sessionCache = value; return value }))
-    request.then((value) => { if (active) setBadges(value) })
-    return () => { active = false }
-  }, [client])
+    const now = Date.now()
+    if (sessionCache !== null && now - sessionCacheAt < CACHE_TTL_MS) {
+      setBadges(sessionCache)
+      return () => {
+        active = false
+      }
+    }
+
+    const request =
+      sessionRequest ??
+      (sessionRequest = (mode === 'pending-only' ? loadPendingBadges(client) : loadBadges(client))
+        .catch(() => sessionCache ?? {})
+        .then((value) => {
+          sessionCache = { ...(sessionCache ?? {}), ...value }
+          sessionCacheAt = Date.now()
+          return sessionCache
+        })
+        .finally(() => {
+          sessionRequest = null
+        }))
+
+    void request.then((value) => {
+      if (active) setBadges(value)
+    })
+
+    return () => {
+      active = false
+    }
+  }, [client, mode, enabled])
+
   return badges
+}
+
+async function loadPendingBadges(client: ApiClient): Promise<BadgeMap> {
+  const result: BadgeMap = {}
+  const [mcp, plugins] = await Promise.allSettled([
+    listMcpServers(client),
+    listPlugins(client),
+  ])
+  if (mcp.status === 'fulfilled') {
+    result.mcp = {
+      value: String(mcp.value.filter((item) => item.state === 'active').length),
+      pending: mcp.value.some((item) => item.state === 'pending_approval'),
+    }
+  }
+  if (plugins.status === 'fulfilled') {
+    result.plugins = {
+      value: String(plugins.value.filter((item) => item.state === 'active').length),
+      pending: plugins.value.some((item) => item.state === 'pending_approval'),
+    }
+  }
+  return result
 }
 
 async function loadBadges(client: ApiClient): Promise<BadgeMap> {
@@ -46,5 +109,6 @@ async function loadBadges(client: ApiClient): Promise<BadgeMap> {
 
 export function resetSettingsBadgeCache(): void {
   sessionCache = null
+  sessionCacheAt = 0
   sessionRequest = null
 }
