@@ -423,6 +423,7 @@ class WorktreeManager:
 
     @staticmethod
     def _run_git(args: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
         try:
             return subprocess.run(
                 ["git", *args],
@@ -431,6 +432,7 @@ class WorktreeManager:
                 text=True,
                 timeout=GIT_WORKTREE_TIMEOUT_SECONDS,
                 check=False,
+                creationflags=creationflags,
             )
         except (OSError, subprocess.SubprocessError) as error:
             return subprocess.CompletedProcess(args=["git", *args], returncode=1, stdout="", stderr=str(error))

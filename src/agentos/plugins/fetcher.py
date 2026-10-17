@@ -103,7 +103,10 @@ class PluginFetcher:
                 command += ["--branch", source.ref]
             command += [source.url or "", str(staging)]
             try:
-                subprocess.run(command, check=True, shell=False, timeout=self.timeout, capture_output=True, text=True, env=environment)
+                subprocess.run(
+                    command, check=True, shell=False, timeout=self.timeout, capture_output=True, text=True, env=environment,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0,
+                )
             except (OSError, subprocess.SubprocessError) as error:
                 raise FetchRejected("plugin repository could not be fetched") from error
             if source.subdirectory:

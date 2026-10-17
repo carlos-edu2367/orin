@@ -391,7 +391,7 @@ class SetupWindow:  # pragma: no cover - exercised by hand and by the Xvfb scree
         self.detail.configure(text=self.model.detail or " ")
 
     def _open(self, result: InstallResult) -> None:
-        flags = (getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)) if os.name == "nt" else 0
+        flags = (getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)) if os.name == "nt" else 0
         try:
             subprocess.Popen(list(result.launch_command), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True, start_new_session=os.name != "nt", creationflags=flags)
         except OSError:

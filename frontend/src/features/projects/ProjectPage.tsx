@@ -8,6 +8,7 @@ import {
   listProjectSidebar,
   type ProjectSidebarItem,
 } from '../../api/projects'
+import { inspectNewWorkspaceFolder } from '../../api/workspace'
 
 export function ProjectPage() {
   const { projectId = '' } = useParams()
@@ -36,6 +37,25 @@ export function ProjectPage() {
       void load()
     })
   }, [load])
+
+  const handlePickWorkspace = async () => {
+    if (wsBusy) return
+    setWsBusy(true)
+    setWsError(null)
+    try {
+      const outcome = await inspectNewWorkspaceFolder(client, null, projectId)
+      if (outcome.kind === 'cancelled') return
+      if (outcome.kind === 'unavailable') {
+        setWsError('Não foi possível abrir o seletor do sistema. Cole o caminho abaixo.')
+        return
+      }
+      setWsPath(outcome.path)
+    } catch {
+      setWsError('Não foi possível selecionar a pasta.')
+    } finally {
+      setWsBusy(false)
+    }
+  }
 
   const handleSaveWorkspace = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault()
@@ -123,6 +143,15 @@ export function ProjectPage() {
               data-testid="project-workspace-input"
               style={{ flex: 1 }}
             />
+            <button
+              type="button"
+              className="ghost-button"
+              disabled={wsBusy}
+              onClick={() => { void handlePickWorkspace() }}
+              data-testid="project-workspace-pick-button"
+            >
+              Selecionar pasta…
+            </button>
             <button type="submit" className="ghost-button" disabled={wsBusy || !wsPath.trim()} data-testid="project-workspace-save-button">
               Vincular pasta
             </button>

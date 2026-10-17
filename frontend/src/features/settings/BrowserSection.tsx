@@ -50,9 +50,11 @@ export function BrowserSection({ client: providedClient }: { client?: ApiClient 
         {status?.state === 'ready' && <p role="status" className="browser-engine__ok">Instalado. O agente já pode usar o navegador.</p>}
         {status?.state === 'unsupported' && <p role="status">{status.error ?? 'O navegador não está disponível nesta instalação.'}</p>}
         {installing && (
-          <div role="status" className="browser-engine__progress">
-            <p>{status?.message ?? 'Instalando'}{status?.progress != null ? ` — ${status.progress}%` : ''}</p>
-            <progress max={100} value={status?.progress ?? undefined} aria-label="Progresso da instalação do navegador" />
+          <div role="status" className="browser-engine__progress orin-progress-card">
+            <div className="orin-progress-card__header">
+              <span className="orin-progress-card__label">{status?.message ?? 'Instalando'}{status?.progress != null ? ` — ${status.progress}%` : ''}</span>
+            </div>
+            <progress className="orin-progress" max={100} value={status?.progress ?? undefined} aria-label="Progresso da instalação do navegador" />
           </div>
         )}
         {status?.state === 'failed' && <p role="alert">{status.error ?? 'A instalação falhou.'} Você pode tentar de novo ou rodar <code>{status.install_command}</code> no terminal.</p>}

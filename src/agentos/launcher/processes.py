@@ -148,7 +148,11 @@ class SupervisedProcess:
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         self._log = open(self.log_path, "ab", buffering=0)  # noqa: SIM115 - closed in stop()
         self._log.write(f"\n--- {self.name} started ---\n".encode())
-        creation_flags = subprocess.CREATE_NEW_PROCESS_GROUP if _WINDOWS else 0
+        creation_flags = (
+            subprocess.CREATE_NEW_PROCESS_GROUP | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            if _WINDOWS
+            else 0
+        )
         self.process = subprocess.Popen(  # noqa: S603 - command comes from the runtime profile, never from user input
             list(self.command),
             cwd=str(cwd),

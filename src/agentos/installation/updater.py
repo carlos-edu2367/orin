@@ -475,8 +475,9 @@ class Updater:
         self._run_version_check(candidate, expected or version_dir.name, step="activate")
 
     def _run_version_check(self, runtime: Path, version: str, *, step: str) -> None:
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
         try:
-            result = subprocess.run([str(runtime), "--version"], capture_output=True, text=True, timeout=SMOKE_TIMEOUT, stdin=subprocess.DEVNULL)
+            result = subprocess.run([str(runtime), "--version"], capture_output=True, text=True, timeout=SMOKE_TIMEOUT, stdin=subprocess.DEVNULL, creationflags=creationflags)
         except subprocess.TimeoutExpired:
             raise UpdateError("A nova versão não respondeu a tempo.", step=step) from None
         except OSError as error:

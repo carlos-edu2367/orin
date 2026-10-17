@@ -120,7 +120,7 @@ function Banner({ eyebrow, title, hint, notes, progress, action }: {
       <div className="update-banner__copy">
         <span className="update-banner__eyebrow">{eyebrow}</span>
         <strong>{title}</strong>
-        {progress !== undefined && <progress className="update-banner__progress" max={100} value={progress ?? undefined} aria-label="Progresso do download da atualização" />}
+        {progress !== undefined && <progress className="update-banner__progress orin-progress" max={100} value={progress ?? undefined} aria-label="Progresso do download da atualização" />}
         <span className="update-banner__hint">{hint}</span>
         {notes && <span className="update-banner__notes">{notes}</span>}
       </div>

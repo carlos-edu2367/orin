@@ -3,8 +3,27 @@ import { ApiClient, createBrowserApiClient } from '../../api/client'
 import { getInstallationStatus, removeInstalledVersion, type InstallationStatus } from '../../api/installation'
 import { getAgentRuntimeSettings, setAgentRuntimeSettings } from '../../api/runtime'
 import { getCodeModeSettings, setCodeModeSettings, type CodeAutonomy, type CodeModeSettings } from '../../api/codeMode'
+import { CustomSelect } from '../../components/CustomSelect'
 import { SettingsPage } from './SettingsPage'
 import { SettingsSection } from './SettingsSection'
+
+const CODE_AUTONOMY_OPTIONS = [
+  {
+    value: 'approval_required',
+    label: 'Sempre pedir aprovação',
+    description: 'Solicita confirmação antes de editar arquivos ou executar comandos.',
+  },
+  {
+    value: 'code_autonomy',
+    label: 'Autonomia de código',
+    description: 'Edita arquivos e roda testes livremente; pede confirmação para ações externas.',
+  },
+  {
+    value: 'full_autonomy',
+    label: 'Autonomia total',
+    description: 'Executa todo o ciclo autonomamente (deploy em produção sempre pede confirmação).',
+  },
+] as const
 
 export function RuntimeSettingsPage({ client, embedded = false }: { client?: ApiClient; embedded?: boolean }) {
   const apiClient = useMemo(() => client ?? createBrowserApiClient(), [client])
@@ -161,13 +180,21 @@ export function RuntimeSettingsPage({ client, embedded = false }: { client?: Api
     <section className="runtime-settings code-mode-settings" aria-busy={codeSettings === null} aria-labelledby="code-mode-settings-title">
       <div><p className="eyebrow">MODO CODE</p><h3 id="code-mode-settings-title">Autonomia e acompanhamento</h3></div>
       <p>O Modo Code planeja, testa e valida alterações antes de concluir. Deploy em produção sempre pede confirmação.</p>
-      <label className="runtime-settings__field">Autonomia padrão
-        <select value={codeSettings?.autonomy ?? 'approval_required'} disabled={codeSettings === null || savingCodeSettings} onChange={(event) => setCodeSettings((current) => current ? { ...current, autonomy: event.target.value as CodeAutonomy } : current)}>
-          <option value="approval_required">Sempre pedir aprovação</option>
-          <option value="code_autonomy">Autonomia de código</option>
-          <option value="full_autonomy">Autonomia total</option>
-        </select>
-      </label>
+      <div className="runtime-settings__field">
+        <label htmlFor="code-mode-autonomy-select">Autonomia padrão</label>
+        <CustomSelect
+          id="code-mode-autonomy-select"
+          ariaLabel="Autonomia padrão"
+          value={codeSettings?.autonomy ?? 'approval_required'}
+          disabled={codeSettings === null || savingCodeSettings}
+          options={CODE_AUTONOMY_OPTIONS}
+          onChange={(nextValue) =>
+            setCodeSettings((current) =>
+              current ? { ...current, autonomy: nextValue as CodeAutonomy } : current,
+            )
+          }
+        />
+      </div>
       <label className="provider-panel__toggle"><input type="checkbox" checked={codeSettings?.monitoring_enabled ?? true} disabled={codeSettings === null || savingCodeSettings} onChange={(event) => setCodeSettings((current) => current ? { ...current, monitoring_enabled: event.target.checked } : current)} />Acompanhar tarefas longas em segundo plano</label>
       <label className="provider-panel__toggle"><input type="checkbox" checked={codeSettings?.system_notifications ?? false} disabled={codeSettings === null || savingCodeSettings} onChange={(event) => setCodeSettings((current) => current ? { ...current, system_notifications: event.target.checked } : current)} />Receber notificações do sistema ao concluir, bloquear ou precisar de decisão</label>
       <button type="button" className="button button--primary" disabled={codeSettings === null || savingCodeSettings} onClick={() => void saveCodeSettings()}>{savingCodeSettings ? 'Salvando…' : 'Salvar preferências do Modo Code'}</button>

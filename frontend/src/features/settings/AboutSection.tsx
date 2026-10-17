@@ -62,10 +62,13 @@ function UpdatePanel({ job, canInstall, latest, desktop, restarting, onRestart }
   }
   if (working) {
     const percent = job.status?.progress != null ? Math.round(job.status.progress * 100) : null
-    const bytes = job.status?.bytes_total ? ` · ${formatMegabytes(job.status.bytes_done)} de ${formatMegabytes(job.status.bytes_total)}` : ''
-    return <div className="installation-status__update" role="status">
-      <p>{job.status?.label ?? 'Preparando'}{percent !== null ? ` — ${percent}%` : ''}{bytes}</p>
-      <progress max={100} value={percent ?? undefined} aria-label="Progresso do download da atualização" />
+    const bytes = job.status?.bytes_total ? `${formatMegabytes(job.status.bytes_done)} de ${formatMegabytes(job.status.bytes_total)}` : null
+    return <div className="installation-status__update orin-progress-card" role="status">
+      <div className="orin-progress-card__header">
+        <span className="orin-progress-card__label">{job.status?.label ?? 'Preparando'}{percent !== null ? ` — ${percent}%` : ''}</span>
+        {bytes && <span className="orin-progress-card__meta">{bytes}</span>}
+      </div>
+      <progress className="orin-progress" max={100} value={percent ?? undefined} aria-label="Progresso do download da atualização" />
     </div>
   }
   if (state === 'failed') {

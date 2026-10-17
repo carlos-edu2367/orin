@@ -110,7 +110,7 @@ def uninstall(
     except Exception:  # noqa: BLE001 - a leftover login entry only points at a folder that is going away
         pass
     command, extra_env = deferred_removal_command(plan.targets, wait_for_pid if wait_for_pid is not None else os.getpid(), system)
-    flags = (getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)) if os.name == "nt" else 0
+    flags = (getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)) if os.name == "nt" else 0
     try:
         popen(
             command, env={**os.environ, **extra_env}, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,

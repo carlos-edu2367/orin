@@ -36,10 +36,12 @@ def _startup_timeout() -> float:
 
 
 def _terminate_tree(pid: int) -> bool:
+    import subprocess
     from subprocess import DEVNULL, run
 
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
     try:
-        return run(["taskkill", "/PID", str(pid), "/T", "/F"], stdout=DEVNULL, stderr=DEVNULL, check=False).returncode == 0  # noqa: S603, S607
+        return run(["taskkill", "/PID", str(pid), "/T", "/F"], stdout=DEVNULL, stderr=DEVNULL, check=False, creationflags=creationflags).returncode == 0  # noqa: S603, S607
     except OSError:
         return False
 
@@ -258,7 +260,10 @@ class OmniRouteProcessManager:
 
     @staticmethod
     def _spawn(command: tuple[str, ...]) -> _Process:
-        return Popen(command, stdin=DEVNULL, stdout=DEVNULL, stderr=DEVNULL)  # noqa: S603
+        import subprocess
+
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+        return Popen(command, stdin=DEVNULL, stdout=DEVNULL, stderr=DEVNULL, creationflags=creationflags)  # noqa: S603
 
     @staticmethod
     def _detected_command() -> tuple[str, ...]:

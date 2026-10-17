@@ -312,10 +312,12 @@ class ConversationWorkspace:
         """
         if not (self.root / ".git").is_dir() or shutil.which("git") is None:
             return None
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
         try:
             completed = subprocess.run(
                 ["git", "status", "--porcelain", "-uall"],
                 cwd=self.root, capture_output=True, text=True, timeout=GIT_STATUS_TIMEOUT_SECONDS, check=False,
+                creationflags=creationflags,
             )
         except (OSError, subprocess.SubprocessError):
             return None

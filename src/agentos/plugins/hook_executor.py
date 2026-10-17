@@ -93,7 +93,8 @@ class HookExecutor:
             completed = subprocess.run(
                 argv, cwd=str(Path(install_path)), env=self._environment(Path(install_path)),
                 input=json.dumps(payload, ensure_ascii=False), capture_output=True, text=True,
-                timeout=timeout_seconds, shell=False, start_new_session=True, check=False,
+                timeout=timeout_seconds, shell=False, start_new_session=os.name != "nt", check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0,
             )
         except subprocess.TimeoutExpired:
             return HookOutcome(hook_id, "timeout", "", "", None, f"hook excedeu {timeout_seconds}s")

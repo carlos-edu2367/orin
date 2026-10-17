@@ -119,10 +119,12 @@ class StdioTransport:
             if value:
                 environment[name] = value
         environment.update(self._env)
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
         try:
             self._process = subprocess.Popen(
                 [executable, *self._args], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL, cwd=self._cwd, env=environment, shell=False, bufsize=0,
+                creationflags=creationflags,
             )
         except OSError as error:
             raise StdioTransportError(f"the MCP server process could not start: {error}") from error

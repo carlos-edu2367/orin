@@ -4,6 +4,7 @@ import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { ApiClient, createBrowserApiClient } from '../../api/client'
 import { listConversations, type Conversation, type ConversationMode } from '../../api/conversations'
 import { createProject, listProjectSidebar, type ProjectSidebarItem } from '../../api/projects'
+import { inspectNewWorkspaceFolder } from '../../api/workspace'
 import { useTheme } from '../../app/ThemeContext'
 import { Brand } from '../../components/Brand'
 import { ProfileMenu } from '../auth/ProfileMenu'
@@ -20,6 +21,7 @@ export type WorkspaceNavigationProps = {
   railCollapsed?: boolean
   onToggleRail?: () => void
   onOpenPreferences?: () => void
+  initialView?: 'chats' | 'projects'
 }
 
 const SIDEBAR_COLLAPSED_STORAGE_KEY = 'orin.sidebar.collapsed'
@@ -108,6 +110,7 @@ export function WorkspaceNavigation({
   railCollapsed,
   onToggleRail,
   onOpenPreferences,
+  initialView,
 }: WorkspaceNavigationProps) {
   const apiClient = useMemo(() => client ?? createBrowserApiClient(), [client])
   const navigate = useNavigate()
@@ -123,9 +126,11 @@ export function WorkspaceNavigation({
   const [projectName, setProjectName] = useState('')
   const [projectDescription, setProjectDescription] = useState('')
   const [projectWorkspacePath, setProjectWorkspacePath] = useState('')
+  const [pickingProjectFolder, setPickingProjectFolder] = useState(false)
+  const [projectPickerNotice, setProjectPickerNotice] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [mobileOpen, setMobileOpen] = useState(false)
-  const [view, setView] = useState<'chats' | 'projects'>(() => readStoredView())
+  const [view, setView] = useState<'chats' | 'projects'>(() => initialView ?? readStoredView())
   const [collapsed, setCollapsed] = useState<Set<string>>(() => readStoredCollapsedProjects())
 
   const paletteShortcut = useMemo(() => (detectApplePlatform() ? '⌘K' : 'Ctrl+K'), [])
@@ -201,9 +206,11 @@ export function WorkspaceNavigation({
 
   const reload = useCallback(async () => {
     const [conversationList, sidebar] = await Promise.all([listConversations(apiClient), listProjectSidebar(apiClient)])
-    setChats(conversationList.items)
-    onChatsChange?.(conversationList.items)
-    setProjects(sidebar.items)
+    const nextChats = Array.isArray(conversationList?.items) ? conversationList.items : []
+    const nextProjects = Array.isArray(sidebar?.items) ? sidebar.items : []
+    setChats(nextChats)
+    onChatsChange?.(nextChats)
+    setProjects(nextProjects)
   }, [apiClient, onChatsChange])
 
   const activeSessionCount = useMemo(() => {
@@ -251,6 +258,25 @@ export function WorkspaceNavigation({
     return () => window.clearInterval(intervalId)
   }, [activeSessionCount, reload])
 
+  async function handlePickProjectFolder() {
+    if (pickingProjectFolder) return
+    setPickingProjectFolder(true)
+    setProjectPickerNotice(null)
+    try {
+      const outcome = await inspectNewWorkspaceFolder(apiClient, null)
+      if (outcome.kind === 'cancelled') return
+      if (outcome.kind === 'unavailable') {
+        setProjectPickerNotice('Não foi possível abrir o seletor do sistema. Digite o caminho abaixo.')
+        return
+      }
+      setProjectWorkspacePath(outcome.path)
+    } catch {
+      setProjectPickerNotice('Não foi possível inspecionar a pasta selecionada.')
+    } finally {
+      setPickingProjectFolder(false)
+    }
+  }
+
   async function submitProject() {
     if (!projectName.trim()) return
     try {
@@ -265,6 +291,7 @@ export function WorkspaceNavigation({
       setProjectName('')
       setProjectDescription('')
       setProjectWorkspacePath('')
+      setProjectPickerNotice(null)
       setCreatingProject(false)
       setError(null)
       await reload()
@@ -477,6 +504,21 @@ export function WorkspaceNavigation({
             aria-controls="navigation-chats"
             onClick={() => changeView('chats')}
           >
+            <svg
+              className="project-navigation__tab-icon"
+              data-testid="sidebar-tab-icon-chats"
+              viewBox="0 0 16 16"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              aria-hidden="true"
+            >
+              <path
+                d="M2.5 3.5h11a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H6l-3.5 2.5v-2.5a1 1 0 0 1-1-1v-6a1 1 0 0 1 1-1Z"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
             <span>Chats</span>
             <small>{chats.length}</small>
           </button>
@@ -488,6 +530,21 @@ export function WorkspaceNavigation({
             aria-controls="navigation-projects"
             onClick={() => changeView('projects')}
           >
+            <svg
+              className="project-navigation__tab-icon"
+              data-testid="sidebar-tab-icon-projects"
+              viewBox="0 0 16 16"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              aria-hidden="true"
+            >
+              <path
+                d="M2 4.5A1.5 1.5 0 0 1 3.5 3h2.88a1.5 1.5 0 0 1 1.06.44l.87.87a.5.5 0 0 0 .35.15h3.84A1.5 1.5 0 0 1 14 5.96v5.54A1.5 1.5 0 0 1 12.5 13h-9A1.5 1.5 0 0 1 2 11.5v-7Z"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
             <span>Projetos</span>
             <small>{projects.length}</small>
           </button>
@@ -529,7 +586,24 @@ export function WorkspaceNavigation({
                     </NavLink>
                   ))
                 ) : (
-                  <p className="project-navigation__empty">Suas novas conversas aparecerão aqui.</p>
+                  <p className="project-navigation__empty">
+                    <svg
+                      className="project-navigation__empty-icon"
+                      data-testid="sidebar-empty-chats-icon"
+                      viewBox="0 0 16 16"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="1.5"
+                      aria-hidden="true"
+                    >
+                      <path
+                        d="M8 2.25a5.75 5.75 0 0 0-4.96 8.66L2.25 13.75l2.84-.79A5.75 5.75 0 1 0 8 2.25Z"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                    </svg>
+                    <span>Suas novas conversas aparecerão aqui</span>
+                  </p>
                 )}
               </motion.div>
             ) : (
@@ -609,7 +683,24 @@ export function WorkspaceNavigation({
                     </section>
                   ))
                 ) : (
-                  <p className="project-navigation__empty">Crie um projeto para organizar conversas e contexto.</p>
+                  <p className="project-navigation__empty">
+                    <svg
+                      className="project-navigation__empty-icon"
+                      data-testid="sidebar-empty-projects-icon"
+                      viewBox="0 0 16 16"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="1.5"
+                      aria-hidden="true"
+                    >
+                      <path
+                        d="M2 4.5A1.5 1.5 0 0 1 3.5 3h2.88a1.5 1.5 0 0 1 1.06.44l.87.87a.5.5 0 0 0 .35.15h3.84A1.5 1.5 0 0 1 14 5.96v5.54A1.5 1.5 0 0 1 12.5 13h-9A1.5 1.5 0 0 1 2 11.5v-7Z"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                    </svg>
+                    <span>Crie um projeto para organizar conversas e contexto</span>
+                  </p>
                 )}
               </motion.div>
             )}
@@ -659,28 +750,56 @@ export function WorkspaceNavigation({
       {creatingProject && (
         <div className="project-dialog" role="dialog" aria-modal="true" aria-label="Criar projeto">
           <form onSubmit={(event) => { event.preventDefault(); void submitProject() }}>
-            <h2>Criar projeto</h2>
+            <div className="project-dialog__header">
+              <h2>Criar projeto</h2>
+              <p className="project-dialog__subtitle">Agrupe conversas, arquivos e contexto em um único workspace.</p>
+            </div>
             <label>
               Nome
-              <input autoFocus value={projectName} onChange={(event) => setProjectName(event.target.value)} maxLength={120} />
+              <input autoFocus value={projectName} onChange={(event) => setProjectName(event.target.value)} placeholder="Ex.: Orin Core" maxLength={120} />
             </label>
             <label>
               Descrição
-              <input value={projectDescription} onChange={(event) => setProjectDescription(event.target.value)} maxLength={2000} />
+              <input value={projectDescription} onChange={(event) => setProjectDescription(event.target.value)} placeholder="Objetivo ou escopo do projeto (opcional)" maxLength={2000} />
             </label>
             <label>
               Pasta local (opcional)
-              <input
-                data-testid="new-project-workspace-path"
-                value={projectWorkspacePath}
-                onChange={(event) => setProjectWorkspacePath(event.target.value)}
-                placeholder="/caminho/da/pasta"
-                maxLength={1024}
-              />
+              <div className="project-dialog__path-row">
+                <input
+                  data-testid="new-project-workspace-path"
+                  value={projectWorkspacePath}
+                  onChange={(event) => setProjectWorkspacePath(event.target.value)}
+                  placeholder="/caminho/da/pasta"
+                  maxLength={1024}
+                />
+                <button
+                  type="button"
+                  className="button button--quiet project-dialog__pick-btn"
+                  data-testid="new-project-pick-folder"
+                  disabled={pickingProjectFolder}
+                  onClick={() => void handlePickProjectFolder()}
+                >
+                  {pickingProjectFolder ? 'Abrindo…' : 'Selecionar pasta…'}
+                </button>
+              </div>
             </label>
-            <div>
-              <button type="button" onClick={() => setCreatingProject(false)}>Cancelar</button>
-              <button type="submit">Criar</button>
+            {pickingProjectFolder && (
+              <p className="project-dialog__notice" role="status">
+                O seletor do sistema está aberto. Se não aparecer, cole o caminho acima.
+              </p>
+            )}
+            {projectPickerNotice && (
+              <p className="project-dialog__notice" role="status">
+                {projectPickerNotice}
+              </p>
+            )}
+            <div className="project-dialog__actions">
+              <button type="button" className="button button--quiet" onClick={() => setCreatingProject(false)}>
+                Cancelar
+              </button>
+              <button type="submit" className="button button--primary">
+                Criar
+              </button>
             </div>
           </form>
         </div>

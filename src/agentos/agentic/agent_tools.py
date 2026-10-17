@@ -489,6 +489,7 @@ def _terminate_pid(pid: int) -> None:
                 capture_output=True,
                 check=False,
                 timeout=5,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
             return
         except (OSError, subprocess.SubprocessError):
@@ -531,6 +532,7 @@ def _process_is_running(pid: int) -> bool:
         try:
             completed = subprocess.run(
                 ["tasklist", "/FI", f"PID eq {pid}"], capture_output=True, text=True, timeout=5, check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
         except (OSError, subprocess.SubprocessError):
             return False
@@ -1855,6 +1857,7 @@ class AgentToolset:
             completed = subprocess.run(
                 command, shell=True, cwd=str(self.workspace.root), capture_output=True, text=True,
                 timeout=DIAGNOSTIC_TIMEOUT_SECONDS, encoding="utf-8", errors="replace",
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0,
             )
         except (OSError, subprocess.SubprocessError):
             return outcome
@@ -3421,7 +3424,9 @@ class AgentToolset:
             "env": environment,
         }
         if os.name == "nt":
-            process_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+            process_options["creationflags"] = (
+                subprocess.CREATE_NEW_PROCESS_GROUP | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            )
         else:
             process_options["start_new_session"] = True
         log_relative = ""
@@ -4093,6 +4098,7 @@ class AgentToolset:
                     command, shell=True, cwd=str(self.workspace.root), capture_output=True, text=True,
                     timeout=VERIFY_STEP_TIMEOUT_SECONDS, encoding="utf-8", errors="replace",
                     env={**os.environ, "CI": "1", "PYTHONIOENCODING": "utf-8", "NO_COLOR": "1"},
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0,
                 )
                 passed = completed.returncode == 0
                 output, _ = _bounded_output(((completed.stdout or "") + (completed.stderr or "")).strip() or "[no output]", MAX_VERIFY_STEP_CHARS)
