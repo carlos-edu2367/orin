@@ -97,7 +97,7 @@ TOOLKIT_TOOLS: Mapping[str, tuple[str, ...]] = {
         "browser_scroll", "browser_wait_for", "browser_submit",
     ),
     "delegation": (
-        "create_agent", "ask_agent", "ask_agents", "run_subagent",
+        "create_agent", "ask_agent", "ask_agents", "run_subagent", "check_subagent",
         "todo_write", "task_create", "task_update", "task_get", "task_list",
     ),
 }

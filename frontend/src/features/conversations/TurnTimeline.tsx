@@ -76,6 +76,7 @@ const CODE_TOOL_NAMES = new Set([
   'enter_plan_mode',
   'exit_plan_mode',
   'run_subagent',
+  'check_subagent',
   'verify_project',
   'verify_frontend',
 ])
@@ -463,12 +464,14 @@ function CodeToolBatch({
 }
 
 function SubagentTaskContainer({
+  agentId,
   agentName,
   count,
   failed = false,
   running = false,
   children,
 }: {
+  agentId?: string
   agentName: string
   count: number
   failed?: boolean
@@ -476,11 +479,26 @@ function SubagentTaskContainer({
   children: ReactNode
 }) {
   const [expanded, setExpanded] = useState(running)
+  const status = failed ? 'failed' : running ? 'running' : 'completed'
+  const statusLabel = failed ? 'Falhou' : running ? 'Em execução' : 'Concluído'
+  const statusBadgeClass = failed
+    ? 'bg-rose-500/15 text-rose-300 border-rose-500/30'
+    : running
+      ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+      : 'bg-emerald-500/10 text-emerald-300 border-emerald-500/20'
+  const dotClass = failed
+    ? 'text-rose-400'
+    : running
+      ? 'text-amber-400 animate-pulse'
+      : 'text-emerald-400'
 
   return (
     <div
       className="subagent-task-group my-1.5 ml-3 rounded-r-lg border-l-2 border-[var(--accent-primary)]/40 bg-[var(--surface-raised)]/40 pl-3 pr-2 py-1.5"
       data-testid="subagent-task-group"
+      data-agent-id={agentId}
+      data-agent-name={agentName}
+      data-status={status}
     >
       <button
         type="button"
@@ -489,9 +507,9 @@ function SubagentTaskContainer({
         data-testid="subagent-task-toggle"
         className="flex w-full items-center justify-between gap-2 text-left font-mono text-[12px]"
       >
-        <div className="flex min-w-0 items-center gap-1.5">
+        <div className="flex min-w-0 flex-wrap items-center gap-1.5">
           <span
-            className={`inline-block w-3.5 shrink-0 text-center ${failed ? 'text-rose-400' : 'text-emerald-400'}`}
+            className={`inline-block w-3.5 shrink-0 text-center ${dotClass}`}
             aria-hidden="true"
           >
             {failed ? '✕' : '●'}
@@ -503,12 +521,54 @@ function SubagentTaskContainer({
           <span className="ml-1 rounded bg-white/5 px-1.5 py-0.5 text-[10px] text-[var(--text-muted)]">
             {count} {count === 1 ? 'ação' : 'ações'}
           </span>
+          <span
+            className={`rounded border px-1.5 py-0.5 text-[10px] font-medium ${statusBadgeClass}`}
+            data-testid="subagent-task-status"
+          >
+            {statusLabel}
+          </span>
         </div>
         <span className="shrink-0 text-[11px] text-[var(--text-muted)]">
           {expanded ? 'Recolher ▴' : 'Expandir ▾'}
         </span>
       </button>
       {expanded && <div className="mt-1.5 space-y-1">{children}</div>}
+    </div>
+  )
+}
+
+function ParallelSubagentsGroup({
+  count,
+  running = false,
+  children,
+}: {
+  count: number
+  running?: boolean
+  children: ReactNode
+}) {
+  return (
+    <div
+      className="parallel-subagents-group my-2 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-raised)]/30 p-2"
+      data-testid="parallel-subagents-group"
+      data-count={count}
+    >
+      <div className="mb-1.5 flex items-center justify-between gap-2 px-1 font-mono text-[11px] text-[var(--text-secondary)]">
+        <div className="flex items-center gap-1.5">
+          <span
+            className={`inline-block text-[10px] ${running ? 'text-amber-400 animate-pulse' : 'text-emerald-400'}`}
+            aria-hidden="true"
+          >
+            ●
+          </span>
+          <span className="font-semibold text-[var(--text-primary)]">
+            {count} subagentes em paralelo
+          </span>
+        </div>
+        <span className="rounded bg-white/5 px-1.5 py-0.5 text-[10px] text-[var(--text-muted)]">
+          {running ? 'Em execução' : 'Concluídos'}
+        </span>
+      </div>
+      <div className="space-y-1.5">{children}</div>
     </div>
   )
 }
@@ -759,17 +819,22 @@ export function TurnTimeline({
     return nodes
   }
 
+  function isSubagentActivityGroup(group: ActivityGroup): boolean {
+    const first = group.events[0]
+    if (!first) return false
+    return (
+      group.kind === 'tool' &&
+      !group.id.startsWith('code-mode:') &&
+      (group.events.some((ev) => Boolean(ev.parentAgentId)) ||
+        Boolean(primaryAgentId && group.agentId && group.agentId !== primaryAgentId))
+    )
+  }
+
   function maybeWrapSubagentGroup(group: ActivityGroup, content: ReactNode): ReactNode {
     if (!content) return null
     const first = group.events[0]
     if (!first) return content
-    const isSubagentGroup =
-      group.kind === 'tool' &&
-      !group.id.startsWith('code-mode:') &&
-      ( group.events.some((ev) => Boolean(ev.parentAgentId)) ||
-        Boolean(primaryAgentId && group.agentId && group.agentId !== primaryAgentId) )
-
-    if (!isSubagentGroup) return content
+    if (!isSubagentActivityGroup(group)) return content
 
     const subagentLabel =
       group.agentName ||
@@ -783,6 +848,7 @@ export function TurnTimeline({
 
     return (
       <SubagentTaskContainer
+        agentId={group.agentId}
         agentName={subagentLabel}
         count={toolCount}
         failed={group.failed}
@@ -1067,34 +1133,113 @@ export function TurnTimeline({
         </header>
       )}
       <AnimatePresence initial={false}>
-        {resolvedItems.map((item) => {
-          if (item.kind === 'thought') {
-            return (
-              <div key={item.id} className="turn-timeline__thought">
-                <ThoughtBlock thought={item.thought} turnCompleted={turnCompleted} />
-              </div>
-            )
+        {(() => {
+          const timelineNodes: ReactNode[] = []
+          let idx = 0
+          while (idx < resolvedItems.length) {
+            const item = resolvedItems[idx]
+            if (item.kind === 'activity' && isSubagentActivityGroup(item.group)) {
+              const subagentWave: Array<{ id: string; group: ActivityGroup; node: ReactNode }> = []
+              const interstitialAgentNodes: ReactNode[] = []
+              let lookahead = idx
+              while (lookahead < resolvedItems.length) {
+                const candidate = resolvedItems[lookahead]
+                if (candidate.kind === 'activity' && isSubagentActivityGroup(candidate.group)) {
+                  const rendered = renderTimelineGroup(candidate.group)
+                  if (rendered !== null) {
+                    subagentWave.push({ id: candidate.id, group: candidate.group, node: rendered })
+                  }
+                  lookahead += 1
+                  continue
+                }
+                if (
+                  candidate.kind === 'activity' &&
+                  candidate.group.kind === 'agent' &&
+                  lookahead + 1 < resolvedItems.length
+                ) {
+                  const nextNonAgent = resolvedItems
+                    .slice(lookahead + 1)
+                    .find((nextItem) => !(nextItem.kind === 'activity' && nextItem.group.kind === 'agent'))
+                  if (nextNonAgent && nextNonAgent.kind === 'activity' && isSubagentActivityGroup(nextNonAgent.group)) {
+                    const renderedAgent = renderTimelineGroup(candidate.group)
+                    if (renderedAgent !== null) {
+                      interstitialAgentNodes.push(
+                        <div key={candidate.id} className="turn-timeline__activity">
+                          {renderedAgent}
+                        </div>,
+                      )
+                    }
+                    lookahead += 1
+                    continue
+                  }
+                }
+                break
+              }
+              timelineNodes.push(...interstitialAgentNodes)
+              if (subagentWave.length >= 2) {
+                const anyRunning =
+                  !turnCompleted &&
+                  subagentWave.some((entry) =>
+                    entry.group.events.some((ev) => resolveVisualStatus(ev) === 'running'),
+                  )
+                timelineNodes.push(
+                  <ParallelSubagentsGroup
+                    key={`parallel-subagents:${subagentWave[0].id}`}
+                    count={subagentWave.length}
+                    running={anyRunning}
+                  >
+                    {subagentWave.map((entry) => (
+                      <div key={entry.id} className="turn-timeline__activity">
+                        {entry.node}
+                      </div>
+                    ))}
+                  </ParallelSubagentsGroup>,
+                )
+              } else if (subagentWave.length === 1) {
+                timelineNodes.push(
+                  <div key={subagentWave[0].id} className="turn-timeline__activity">
+                    {subagentWave[0].node}
+                  </div>,
+                )
+              }
+              idx = lookahead
+              continue
+            }
+            if (item.kind === 'thought') {
+              timelineNodes.push(
+                <div key={item.id} className="turn-timeline__thought">
+                  <ThoughtBlock thought={item.thought} turnCompleted={turnCompleted} />
+                </div>,
+              )
+              idx += 1
+              continue
+            }
+            if (item.kind === 'text') {
+              timelineNodes.push(
+                <div key={item.id} className="turn-timeline__text">
+                  <MarkdownMessage
+                    content={item.content}
+                    conversationId={conversationId}
+                    client={client}
+                    onPreview={onPreview}
+                  />
+                </div>,
+              )
+              idx += 1
+              continue
+            }
+            const rendered = renderTimelineGroup(item.group)
+            if (rendered !== null) {
+              timelineNodes.push(
+                <div key={item.id} className="turn-timeline__activity">
+                  {rendered}
+                </div>,
+              )
+            }
+            idx += 1
           }
-          if (item.kind === 'text') {
-            return (
-              <div key={item.id} className="turn-timeline__text">
-                <MarkdownMessage
-                  content={item.content}
-                  conversationId={conversationId}
-                  client={client}
-                  onPreview={onPreview}
-                />
-              </div>
-            )
-          }
-          const rendered = renderTimelineGroup(item.group)
-          if (rendered === null) return null
-          return (
-            <div key={item.id} className="turn-timeline__activity">
-              {rendered}
-            </div>
-          )
-        })}
+          return timelineNodes
+        })()}
       </AnimatePresence>
     </div>
   )

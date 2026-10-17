@@ -52,7 +52,7 @@ CODE_MODE_CORE_TOOLS = frozenset({
     "enter_worktree", "exit_worktree", "preview_start", "preview_stop", "preview_logs",
     "enter_plan_mode", "exit_plan_mode",
     "todo_write", "task_create", "task_update", "task_get", "task_list",
-    "ask_user", "run_subagent", "fetch_url", "web_search", "verify_frontend", "browse_page",
+    "ask_user", "run_subagent", "check_subagent", "fetch_url", "web_search", "verify_frontend", "browse_page",
     "remember", "recall",
     "search_skills", "list_skills", "read_skill_resource", "use_skill", "create_skill", "edit_skill",
     "list_mcp_catalog", "list_mcp_servers", "configure_mcp", "test_mcp_server",
@@ -1500,6 +1500,8 @@ class AgenticTurnRuntime:
             to know which file a tool touched. ``run_command`` is not
             read-only, so a command that only reads is never served from here.
             """
+            if name in {"check_subagent", "read_process_output", "preview_logs"}:
+                return None
             if not (callable(is_read_only) and is_read_only(name)):
                 return None
             remembered = self._succeeded_reads.get(self._signature(name, arguments))
@@ -1520,7 +1522,7 @@ class AgenticTurnRuntime:
             error is None
             and not duplicate[i]
             and repeated[i] is None
-            and ((callable(is_read_only) and is_read_only(name)) or name == "run_subagent")
+            and ((callable(is_read_only) and is_read_only(name)) or name in {"run_subagent", "ask_agent", "check_subagent"})
             for i, (_, name, _, error) in enumerate(prepared)
         ]
 
@@ -1568,7 +1570,7 @@ class AgenticTurnRuntime:
             mutating = (
                 bool(is_mutating(name))
                 if callable(is_mutating)
-                else (not read_only and name != "run_subagent")
+                else (not read_only and name not in {"run_subagent", "ask_agent", "check_subagent"})
             )
             with checkpoint_lock:
                 effect_id = self._effect_started(

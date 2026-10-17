@@ -26,7 +26,7 @@ import subprocess
 DENIED_TOKENS = ("|", ";", "&&", "||", ">", "<", "`", "$(", "\n", "\r")
 INTERPRETERS = frozenset({"python", "python3", "node", "sh", "bash"})
 MAX_OUTPUT = 12_000
-ENVIRONMENT_ALLOWLIST = ("PATH", "HOME", "USERPROFILE", "SYSTEMROOT", "SystemRoot", "TMPDIR", "TEMP", "LANG")
+ENVIRONMENT_ALLOWLIST = ("PATH", "HOME", "USERPROFILE", "SYSTEMROOT", "SystemRoot", "SYSTEMDRIVE", "SystemDrive", "TMPDIR", "TEMP", "TMP", "LANG")
 
 
 class HookRejected(ValueError):

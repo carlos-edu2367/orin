@@ -275,6 +275,8 @@ _PARAM_ALIASES: Mapping[str, Mapping[str, str]] = {
         "agent_type": "subagent_type",
         "model": "model_id",
         "role": "description",
+        "background": "run_in_background",
+        "resume": "agent_id",
     },
     "ask_agent": {"prompt": "task", "agent": "name"},
     "read_project_conversation": {"max_messages": "limit"},
@@ -572,6 +574,8 @@ class AgentToolset:
         delegate_batch: Callable[[list[Mapping[str, Any]]], ToolOutcome] | None = None,
         create_agent: Callable[[str, str, str | None], ToolOutcome] | None = None,
         run_subagent: Callable[..., ToolOutcome] | None = None,
+        check_subagent: Callable[..., ToolOutcome] | None = None,
+        on_close: Callable[[], None] | None = None,
         on_tool_progress: Callable[[str, str, Mapping[str, Any]], None] | None = None,
         http_client: httpx.Client | None = None,
         search_client: object | None = None,
@@ -626,6 +630,8 @@ class AgentToolset:
         from agentos.code_mode.permissions import ToolPermissionBroker
 
         self.workspace = workspace
+        self._tls = threading.local()
+        self._read_file_lock = threading.Lock()
         self.turn_id = str(turn_id) if turn_id else None
         self.conversation_id = str(conversation_id) if conversation_id else None
         self._conversation_id = self.conversation_id
@@ -644,6 +650,8 @@ class AgentToolset:
         self._delegate_batch = delegate_batch
         self._create_agent = create_agent
         self._run_subagent = run_subagent
+        self._check_subagent = check_subagent
+        self._on_close = on_close
         self._on_tool_progress = on_tool_progress
         self._http_client = http_client
         self._search_client = search_client
@@ -727,6 +735,14 @@ class AgentToolset:
         self._diagnosed_at: dict[str, float] = {}
         self._definitions: tuple[ToolDefinition, ...] | None = None
         self._by_name: dict[str, ToolDefinition] = {}
+
+    @property
+    def _active_invocation_id(self) -> str | None:
+        return getattr(self._tls, "active_invocation_id", None)
+
+    @_active_invocation_id.setter
+    def _active_invocation_id(self, value: str | None) -> None:
+        self._tls.active_invocation_id = value
 
     @property
     def _verified_since_last_edit(self) -> bool:
@@ -1278,7 +1294,7 @@ class AgentToolset:
         if self._run_subagent is not None or self._delegate is not None:
             items.append(ToolDefinition(
                 "run_subagent",
-                "Launch a specialized zero-config builtin subagent ('explore' for read-only codebase search, 'plan' for read-only architecture planning, 'general' for multi-step implementation/research, or 'fork' to inherit the full conversation context) and return its final report.",
+                "Launch or resume a specialized builtin subagent ('explore' for read-only codebase search, 'plan' for read-only architecture planning, 'general' for multi-step implementation/research, or 'fork' to inherit the full conversation context) and return its report or background handle.",
                 _schema({
                     "subagent_type": {
                         "type": "string",
@@ -1288,8 +1304,25 @@ class AgentToolset:
                     "task": {**_TEXT, "description": "Complete task instructions for the subagent."},
                     "description": {**_TEXT, "description": "Short 3-5 word summary of what the subagent will do."},
                     "model_id": {**_TEXT, "description": "Optional favorite model ID from the current provider."},
+                    "agent_id": {**_TEXT, "description": "Optional agent_id from a previous run_subagent call to resume that subagent with its full prior context preserved."},
+                    "run_in_background": {"type": "boolean", "description": "When true, launch the subagent asynchronously in the background and return its agent_id immediately. Use check_subagent to inspect or await its output."},
                 }, ("subagent_type", "task")),
                 self.run_subagent, "agent", policy_tags=("mutates",),
+            ))
+        if self._check_subagent is not None or self._run_subagent is not None:
+            items.append(ToolDefinition(
+                "check_subagent",
+                "Inspect or await a background subagent started with run_subagent(run_in_background=true).",
+                _schema({
+                    "agent_id": {**_TEXT, "description": "The agent_id returned by run_subagent."},
+                    "wait_seconds": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 60,
+                        "description": "Optional seconds to wait for completion (0 polls immediately).",
+                    },
+                }, ("agent_id",)),
+                self.check_subagent, "agent", read_only=True,
             ))
         if self.skills is not None:
             items.extend((
@@ -1508,7 +1541,7 @@ class AgentToolset:
                     item for item in built
                     if item.read_only and item.name not in {
                         "write_file", "edit_file", "notebook_edit", "run_command", "stop_process",
-                        "verify_project", "create_agent", "ask_agent", "ask_agents", "run_subagent",
+                        "verify_project", "create_agent", "ask_agent", "ask_agents", "run_subagent", "check_subagent",
                     }
                 )
             if self._policy is not None:
@@ -2212,14 +2245,15 @@ class AgentToolset:
             raw_bytes = target.read_bytes()
             stat = target.stat()
             sha = hashlib.sha256(raw_bytes).hexdigest()
-            self._read_file_state[norm] = ReadFileRecord(
-                mtime_ns=stat.st_mtime_ns,
-                sha256=sha,
-                offset=offset,
-                limit=limit,
-                total_lines=total_lines,
-                explicit_read=explicit_read,
-            )
+            with self._read_file_lock:
+                self._read_file_state[norm] = ReadFileRecord(
+                    mtime_ns=stat.st_mtime_ns,
+                    sha256=sha,
+                    offset=offset,
+                    limit=limit,
+                    total_lines=total_lines,
+                    explicit_read=explicit_read,
+                )
             return sha
         except Exception:
             return ""
@@ -2237,7 +2271,8 @@ class AgentToolset:
         current_sha = hashlib.sha256(raw_bytes).hexdigest()
         old_content = raw_bytes.decode("utf-8", errors="replace")
         if self._code_mode_active and not norm.startswith(".orin/"):
-            record = self._read_file_state.get(norm)
+            with self._read_file_lock:
+                record = self._read_file_state.get(norm)
             if record is None:
                 raise AgentToolError(
                     "File has not been read yet. Read it first with read_file before writing or editing it.",
@@ -2347,11 +2382,13 @@ class AgentToolset:
         norm_limit = max(1, min(int(limit or 400), 800))
         if target.is_file() and not force_reload:
             norm = target.relative_to(self.workspace.root).as_posix()
-            prev = self._read_file_state.get(norm)
+            with self._read_file_lock:
+                prev = self._read_file_state.get(norm)
+                is_non_code = norm in self._non_code_edited_paths
             if (
                 prev is not None
                 and prev.explicit_read
-                and norm not in self._non_code_edited_paths
+                and not is_non_code
                 and prev.offset == norm_offset
                 and prev.limit == norm_limit
             ):
@@ -4430,6 +4467,11 @@ class AgentToolset:
         )
 
     def close(self) -> None:
+        if callable(self._on_close):
+            try:
+                self._on_close()
+            except Exception:
+                pass
         closer = getattr(self._browser, "close", None)
         if callable(closer):
             try:
@@ -5203,9 +5245,11 @@ class AgentToolset:
     def post_compact_enrichment(self) -> str:
         """Build a re-hydration markdown block after context compaction (top-5 recent files, todos, and active plan)."""
         sections: list[str] = []
-        if self._read_file_state:
+        with self._read_file_lock:
+            read_items = list(self._read_file_state.items())
+        if read_items:
             recent = sorted(
-                self._read_file_state.items(),
+                read_items,
                 key=lambda item: item[1].mtime_ns,
                 reverse=True,
             )[:5]
@@ -5269,6 +5313,8 @@ class AgentToolset:
         task: str,
         description: str = "",
         model_id: str | None = None,
+        agent_id: str | None = None,
+        run_in_background: bool = False,
     ) -> ToolOutcome:
         raw_type = str(subagent_type or "").strip()
         clean_type = raw_type.lower()
@@ -5282,16 +5328,44 @@ class AgentToolset:
                 raise AgentToolError("subagent_type must be one of 'explore', 'plan', 'general', or 'fork'.")
         if not isinstance(task, str) or not task.strip():
             raise AgentToolError("task must be a non-blank string.")
+        clean_agent_id = str(agent_id).strip() if agent_id is not None and str(agent_id).strip() else None
+        clean_model_id = str(model_id).strip() if model_id is not None and str(model_id).strip() else None
         if self._run_subagent is not None:
-            return self._run_subagent(
-                clean_type,
-                task.strip(),
-                description=str(description or "").strip(),
-                model_id=str(model_id).strip() if model_id is not None and str(model_id).strip() else None,
-            )
+            try:
+                return self._run_subagent(
+                    clean_type,
+                    task.strip(),
+                    description=str(description or "").strip(),
+                    model_id=clean_model_id,
+                    agent_id=clean_agent_id,
+                    run_in_background=bool(run_in_background),
+                )
+            except TypeError:
+                return self._run_subagent(
+                    clean_type,
+                    task.strip(),
+                    description=str(description or "").strip(),
+                    model_id=clean_model_id,
+                )
         if self._delegate is not None:
             return self._delegate(clean_type, task.strip())
         raise AgentToolError("Subagents are not available.")
+
+    def check_subagent(
+        self,
+        agent_id: str,
+        wait_seconds: int = 0,
+    ) -> ToolOutcome:
+        if not isinstance(agent_id, str) or not agent_id.strip():
+            raise AgentToolError("agent_id must be a non-blank string.")
+        if self._check_subagent is None:
+            raise AgentToolError("Subagent inspection is not available.")
+        try:
+            raw_wait = int(wait_seconds or 0)
+        except (TypeError, ValueError) as exc:
+            raise AgentToolError("wait_seconds must be an integer between 0 and 60.") from exc
+        wait = max(0, min(raw_wait, 60))
+        return self._check_subagent(agent_id.strip(), wait_seconds=wait)
 
     def enter_worktree(
         self,

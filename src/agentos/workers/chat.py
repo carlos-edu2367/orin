@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
@@ -93,9 +94,11 @@ from agentos.runtime.service import RuntimeService
 from agentos.persistence.postgres.schema import (
     code_mode_runs,
     conversation_dispatches,
+    conversation_turns,
     provider_configurations,
     provider_model_catalog,
     provider_model_favorites,
+    runtime_heartbeats,
     vision_model_selections,
 )
 from agentos.persistence.provider_secrets import ProviderSecretCipher
@@ -388,14 +391,18 @@ class ChatWorker:
         # in-process index, and are refreshed per-user before each turn below.
         self._capabilities = capabilities or InstanceCapabilities.for_mode(current_mode())
         self._hook_engine = HookEngine(enabled=self._capabilities.plugin_hooks)
+        self._state_lock = threading.Lock()
         self._last_heartbeat_mono: float = 0.0
 
     def _refresh_heartbeat_if_due(self) -> None:
         now_mono = time.monotonic()
-        if now_mono - self._last_heartbeat_mono >= HEARTBEAT_REFRESH_SECONDS:
+        with self._state_lock:
+            due = now_mono - self._last_heartbeat_mono >= HEARTBEAT_REFRESH_SECONDS
+            if due:
+                self._last_heartbeat_mono = now_mono
+        if due:
             try:
                 self.store.heartbeat("chat-worker")
-                self._last_heartbeat_mono = now_mono
             except Exception:
                 pass
 
@@ -405,7 +412,8 @@ class ChatWorker:
 
     def run(self, turn_id: str) -> None:
         self.store.heartbeat("chat-worker")
-        self._last_heartbeat_mono = time.monotonic()
+        with self._state_lock:
+            self._last_heartbeat_mono = time.monotonic()
         turn = self.store.claim(turn_id)
         if turn is None:
             return
@@ -425,7 +433,8 @@ class ChatWorker:
                 self.store.finish(turn, failed=True, code="execution_lifecycle_unavailable")
                 return
         if kernel_managed:
-            self._kernel_turns.add(str(turn_id))
+            with self._state_lock:
+                self._kernel_turns.add(str(turn_id))
         runtime = None
         try:
             runtime = self._runtime_for(turn)
@@ -479,7 +488,9 @@ class ChatWorker:
             self.store.finish(turn, failed=True, code="provider_unavailable")
             return
         finally:
-            self._kernel_turns.discard(str(turn_id))
+            with self._state_lock:
+                self._kernel_turns.discard(str(turn_id))
+                self._reconciliation_turns.discard(str(turn_id))
             closer = getattr(runtime, "close", None)
             if callable(closer):
                 try:
@@ -587,15 +598,17 @@ class ChatWorker:
             _LOGGER.exception("could not settle Code mode for turn %s", turn.get("turn_id"))
 
     def _kernel_manages(self, turn: dict[str, object]) -> bool:
-        return str(turn["turn_id"]) in self._kernel_turns
+        with self._state_lock:
+            return str(turn["turn_id"]) in self._kernel_turns
 
-    def _plugin_service(self, engine, *, skill_library, mcp_service) -> PluginService:
+    def _plugin_service(self, engine, *, skill_library, mcp_service, hook_engine: HookEngine | None = None) -> PluginService:
         # The agent can install plugins from a turn, so the worker's service
         # must refuse host paths on a server exactly like the API's does.
         plugin_root = orin_paths().data / "plugins"
         return PluginService(
             engine, plugin_root=plugin_root, skill_library=skill_library, mcp_service=mcp_service,
-            fetcher=PluginFetcher(plugin_root, remote_only=not self._capabilities.host_folders), hook_engine=self._hook_engine,
+            fetcher=PluginFetcher(plugin_root, remote_only=not self._capabilities.host_folders),
+            hook_engine=hook_engine or self._hook_engine,
         )
 
     def _preflight_refusal(self, turn: dict[str, object]) -> str | None:
@@ -674,7 +687,8 @@ class ChatWorker:
             private_result=private_result if isinstance(private_result, dict) else None,
         )
         if resolved.state is ExecutionEffectState.UNKNOWN:
-            self._reconciliation_turns.add(str(turn["turn_id"]))
+            with self._state_lock:
+                self._reconciliation_turns.add(str(turn["turn_id"]))
             return
         self._checkpoint(turn, scope, next_decision="continue", is_safe=True, pending_effect_id=None)
 
@@ -694,15 +708,56 @@ class ChatWorker:
         ))
 
     def _reconciliation_required(self, turn: dict[str, object]) -> bool:
-        return str(turn["turn_id"]) in self._reconciliation_turns
+        with self._state_lock:
+            return str(turn["turn_id"]) in self._reconciliation_turns
 
     def watchdog(self, *, maximum_age: timedelta = timedelta(seconds=30)) -> tuple[str, ...]:
         """Mark unacquired jobs terminal so the UI never waits indefinitely."""
         now = datetime.now(UTC)
         expired: list[str] = []
         with self.store._engine.connect() as c:
-            rows = c.execute(select(conversation_dispatches.c.turn_id, conversation_dispatches.c.queued_at).where(conversation_dispatches.c.state.in_(("pending", "enqueued")))).mappings().all()
+            active_convs = {
+                str(cid)
+                for cid in c.execute(
+                    select(conversation_turns.c.conversation_id)
+                    .outerjoin(
+                        conversation_dispatches,
+                        conversation_dispatches.c.turn_id == conversation_turns.c.turn_id,
+                    )
+                    .where(
+                        conversation_turns.c.state.in_(("running", "starting", "waiting_user"))
+                        | (
+                            (conversation_dispatches.c.state == "active")
+                            & conversation_turns.c.state.in_(("queued", "starting", "running"))
+                        )
+                    )
+                ).scalars()
+            }
+            hb_updated = c.execute(
+                select(runtime_heartbeats.c.updated_at).where(runtime_heartbeats.c.component == "chat-worker")
+            ).scalar_one_or_none()
+            if isinstance(hb_updated, datetime) and hb_updated.tzinfo is None:
+                hb_updated = hb_updated.replace(tzinfo=UTC)
+            worker_alive_and_busy = bool(
+                active_convs
+                and isinstance(hb_updated, datetime)
+                and (now - hb_updated) < maximum_age
+            )
+            rows = c.execute(
+                select(
+                    conversation_dispatches.c.turn_id,
+                    conversation_dispatches.c.queued_at,
+                    conversation_turns.c.conversation_id,
+                )
+                .join(
+                    conversation_turns,
+                    conversation_turns.c.turn_id == conversation_dispatches.c.turn_id,
+                )
+                .where(conversation_dispatches.c.state.in_(("pending", "enqueued")))
+            ).mappings().all()
         for row in rows:
+            if str(row["conversation_id"]) in active_convs or worker_alive_and_busy:
+                continue
             queued_at = row["queued_at"]
             if isinstance(queued_at, datetime) and queued_at.tzinfo is None:
                 queued_at = queued_at.replace(tzinfo=UTC)
@@ -1110,12 +1165,17 @@ class ChatWorker:
             _LOGGER.exception("could not acquire the retrieval index for %s", turn.get("conversation_id"))
             retrieval_bundle = None
         mcp_service = McpServerService(engine, allow_stdio=self._capabilities.mcp_stdio)
-        plugin_service = self._plugin_service(engine, skill_library=skill_library, mcp_service=mcp_service)
-        # A worker process's hook index starts empty; refresh this user's
-        # active, consented hooks before every turn so a plugin approved (or a
-        # consent flipped) from the API process is picked up without a restart.
+        turn_hook_engine = HookEngine(enabled=self._capabilities.plugin_hooks)
+        plugin_service = self._plugin_service(
+            engine,
+            skill_library=skill_library,
+            mcp_service=mcp_service,
+            hook_engine=turn_hook_engine,
+        )
+        # Refresh this user's active, consented hooks into a turn-local
+        # HookEngine so concurrent turns never overwrite each other's index.
         try:
-            rehydrate_hooks(plugin_service, self._hook_engine, user_id=str(turn["user_id"]))
+            rehydrate_hooks(plugin_service, turn_hook_engine, user_id=str(turn["user_id"]))
         except Exception:
             _LOGGER.exception("could not rehydrate plugin hooks for %s", turn["user_id"])
         # A broken MCP configuration must never stop a turn from running.
@@ -1173,7 +1233,7 @@ class ChatWorker:
                 mcp_provider=mcp_provider,
                 mcp_service=mcp_service,
                 plugin_service=plugin_service,
-                hook_engine=self._hook_engine,
+                hook_engine=turn_hook_engine,
                 project_store=PostgresProjectStore(engine),
                 chat_store=self.store,
                 local_workspaces=PostgresLocalWorkspaceStore(engine),

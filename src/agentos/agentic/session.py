@@ -455,6 +455,8 @@ def build_system_prompt(
             "- For a large task with a distinct, self-contained part, delegate with `run_subagent(subagent_type=\"explore\"|\"plan\"|\"general\"|\"fork\", task=\"...\", description=\"...\", model_id=\"...\")` or create a specialist with `create_agent` and hand it that part with `ask_agent`.",
             "- Omit `model_id` to use the current model. If you supply `model_id`, copy the exact identifier from the favorite model IDs listed below (including the leading `~` when present).",
             "- When two or more delegated parts do not depend on each other, send them together with `ask_agents` or parallel `run_subagent` calls; they run at the same time.",
+            "- Every `run_subagent` result includes an `agent_id`. Pass `agent_id` on a follow-up `run_subagent` call to resume that subagent with its full prior context preserved.",
+            "- Set `run_in_background=true` on `run_subagent` to launch long-running work asynchronously and inspect or await it later with `check_subagent(agent_id=\"...\", wait_seconds=...)`.",
             "- A subagent cannot see this conversation unless `subagent_type=\"fork\"` is used. Put everything it needs in the task text.",
             "- Do not create a subagent for something you can finish yourself in a step or two.",
         ]
@@ -808,6 +810,11 @@ class TurnSession:
         self.retrieval = retrieval_bundle.service if retrieval_bundle is not None else None
         self._subagent_runs = 0
         self._subagent_lock = Lock()
+        self._builtin_type_counts: dict[str, int] = {}
+        self._subagent_histories: dict[str, list[dict[str, Any]]] = {}
+        self._subagent_records: dict[str, dict[str, object]] = {}
+        self._background_subagents: dict[str, dict[str, Any]] = {}
+        self._bg_subagent_executor: ThreadPoolExecutor | None = None
         self._read_file_state: dict[str, object] = {}
         self._todos_state: list[dict[str, str]] = []
         raw_perm = str(turn.get("permission_mode") or "").strip().lower()
@@ -916,7 +923,13 @@ class TurnSession:
                 val = payload.get(k)
                 if isinstance(val, str) and val.strip():
                     started_payload[k] = val.strip()[:240]
-            self._record(AgentActivityEventType.TOOL_STARTED, f"Executando {name}", started_payload, agent_id=actor)
+            self._record(
+                AgentActivityEventType.TOOL_STARTED,
+                f"Executando {name}",
+                started_payload,
+                agent_id=actor,
+                parent_agent_id=self.main_agent_id if is_subagent else None,
+            )
             if self.turn.get("code_mode") == "code":
                 if name in {"write_file", "edit_file", "notebook_edit"}:
                     if self._code_mode_stage != "implementing":
@@ -945,6 +958,7 @@ class TurnSession:
                     "elapsed_ms": int(payload.get("elapsed_ms") or 0),
                 },
                 agent_id=actor,
+                parent_agent_id=self.main_agent_id if is_subagent else None,
             )
             return
         if state == "tool_finished":
@@ -952,11 +966,20 @@ class TurnSession:
             status = str(payload.get("status") or "succeeded")
             extra = dict(payload.get("tool_payload") or {})
             summary = str(payload.get("summary") or f"{name} {status}")
-            self._record(AgentActivityEventType.TOOL_FINISHED, summary, {
-                **base, **extra, "tool_name": name, "status": status,
-                "invocation_id": str(payload.get("invocation_id") or ""),
-                "error_code": payload.get("error_code"),
-            }, agent_id=actor)
+            self._record(
+                AgentActivityEventType.TOOL_FINISHED,
+                summary,
+                {
+                    **base,
+                    **extra,
+                    "tool_name": name,
+                    "status": status,
+                    "invocation_id": str(payload.get("invocation_id") or ""),
+                    "error_code": payload.get("error_code"),
+                },
+                agent_id=actor,
+                parent_agent_id=self.main_agent_id if is_subagent else None,
+            )
             ledger = getattr(self.store, "record_tool_call", None)
             tool_arguments: dict[str, Any] = {}
             if isinstance(payload.get("tool_arguments"), Mapping):
@@ -1158,41 +1181,77 @@ class TurnSession:
             {"agent_name": clean, "label": clean, "tool_kind": "agent"},
         )
 
-    def _ensure_builtin_subagent_record(self, subagent_type: str, model_id: str | None = None) -> dict[str, object] | None:
+    def _ensure_builtin_subagent_record(
+        self,
+        subagent_type: str,
+        model_id: str | None = None,
+        *,
+        instance_name: str | None = None,
+    ) -> dict[str, object] | None:
         key = subagent_type.strip().lower()
         if key == "general-purpose":
             key = "general"
         spec = _BUILTIN_SUBAGENT_SPECS.get(key)
         if spec is None:
             return None
+        target_name = (instance_name or key).strip() or key
         selected_model_id = str(model_id).strip() if model_id is not None and str(model_id).strip() else self._current_model_id()
-        existing = self.agents_store.find(key) if self.agents_store is not None and hasattr(self.agents_store, "find") else None
-        if existing is not None:
-            merged = dict(existing)
-            merged.setdefault("builtin_type", key)
-            return merged
+        if target_name == key and self.agents_store is not None and hasattr(self.agents_store, "find"):
+            existing = self.agents_store.find(key)
+            if existing is not None:
+                merged = dict(existing)
+                merged.setdefault("builtin_type", key)
+                return merged
         if self.agents_store is not None and hasattr(self.agents_store, "create"):
             try:
-                created = self.agents_store.create(
-                    key,
-                    str(spec["role"]),
-                    parent_agent_id=self.main_agent_id,
-                    provider=str(self.turn.get("provider") or ""),
-                    model_id=selected_model_id,
-                )
+                try:
+                    created = self.agents_store.create(
+                        target_name,
+                        str(spec["role"]),
+                        parent_agent_id=self.main_agent_id,
+                        provider=str(self.turn.get("provider") or ""),
+                        model_id=selected_model_id,
+                        force_new=(target_name != key),
+                    )
+                except TypeError:
+                    created = self.agents_store.create(
+                        target_name,
+                        str(spec["role"]),
+                        parent_agent_id=self.main_agent_id,
+                        provider=str(self.turn.get("provider") or ""),
+                        model_id=selected_model_id,
+                    )
                 merged = dict(created)
                 merged["builtin_type"] = key
                 return merged
             except Exception:
                 pass
         return {
-            "agent_id": f"agent:{key}",
-            "name": key,
+            "agent_id": f"agent:{target_name}",
+            "name": target_name,
             "role": str(spec["role"]),
             "provider": str(self.turn.get("provider") or ""),
             "model_id": selected_model_id,
             "builtin_type": key,
         }
+
+    def _find_subagent_record_by_id(self, agent_id: str) -> dict[str, object] | None:
+        with self._subagent_lock:
+            cached = self._subagent_records.get(agent_id)
+        if cached is not None:
+            return dict(cached)
+        if self.agents_store is not None:
+            getter = getattr(self.agents_store, "get", None)
+            if callable(getter):
+                found = getter(agent_id)
+                if found is not None:
+                    return dict(found)
+            lister = getattr(self.agents_store, "list", None)
+            if callable(lister):
+                for item in lister():
+                    if isinstance(item, Mapping) and str(item.get("agent_id")) == agent_id:
+                        return dict(item)
+        return None
 
     def _run_subagent(
         self,
@@ -1201,6 +1260,8 @@ class TurnSession:
         *,
         description: str = "",
         model_id: str | None = None,
+        agent_id: str | None = None,
+        run_in_background: bool = False,
     ) -> ToolOutcome:
         raw_type = str(subagent_type or "").strip()
         clean_type = raw_type.lower()
@@ -1218,7 +1279,15 @@ class TurnSession:
                     {"tool_kind": "agent"},
                     "INVALID_ARGUMENTS",
                 )
-        return self._ask_agent(clean_type, task, requested_model_id=model_id, description=description)
+        clean_agent_id = str(agent_id).strip() if agent_id is not None and str(agent_id).strip() else None
+        return self._ask_agent(
+            clean_type,
+            task,
+            requested_model_id=model_id,
+            description=description,
+            resumed_agent_id=clean_agent_id,
+            run_in_background=bool(run_in_background),
+        )
 
     def _ask_agent(
         self,
@@ -1227,6 +1296,8 @@ class TurnSession:
         *,
         requested_model_id: str | None = None,
         description: str = "",
+        resumed_agent_id: str | None = None,
+        run_in_background: bool = False,
     ) -> ToolOutcome:
         clean = " ".join(str(name).split())[:60]
         builtin_key = clean.lower()
@@ -1245,11 +1316,50 @@ class TurnSession:
                     {"agent_name": clean, "label": clean, "tool_kind": "agent"}, "CHILD_MODEL_NOT_FAVORITE",
                 )
 
-        record = self.agents_store.find(clean) if self.agents_store is not None else None
-        if record is None and builtin_spec is not None:
-            record = self._ensure_builtin_subagent_record(builtin_key, model_id=resolved_explicit)
+        record: dict[str, object] | None = None
+        if resumed_agent_id:
+            with self._subagent_lock:
+                bg_entry = self._background_subagents.get(resumed_agent_id)
+            if bg_entry is not None and not bg_entry["future"].done():
+                bg_name = str(bg_entry.get("agent_name") or resumed_agent_id)
+                return ToolOutcome(
+                    "failed",
+                    f"{bg_name} ainda em execução",
+                    f"Subagent '{bg_name}' (agent_id=\"{resumed_agent_id}\") is still running in the background. Wait for it with check_subagent(agent_id=\"{resumed_agent_id}\", wait_seconds=...) before resuming it.",
+                    {"agent_id": resumed_agent_id, "agent_name": bg_name, "status": "running", "tool_kind": "agent"},
+                    "SUBAGENT_STILL_RUNNING",
+                )
+            record = self._find_subagent_record_by_id(resumed_agent_id)
+            if record is None:
+                return ToolOutcome(
+                    "failed",
+                    f"Agente {resumed_agent_id} não existe",
+                    f"No subagent with agent_id '{resumed_agent_id}'.",
+                    {"agent_id": resumed_agent_id, "tool_kind": "agent"},
+                    "AGENT_NOT_FOUND",
+                )
+            clean = str(record.get("name") or clean)
+            if builtin_spec is None:
+                raw_bt = str(record.get("builtin_type") or clean).split("-", 1)[0].lower()
+                if raw_bt in _BUILTIN_SUBAGENT_SPECS:
+                    builtin_key = raw_bt
+                    builtin_spec = _BUILTIN_SUBAGENT_SPECS[builtin_key]
+        elif builtin_spec is not None:
+            with self._subagent_lock:
+                count = self._builtin_type_counts.get(builtin_key, 0) + 1
+                self._builtin_type_counts[builtin_key] = count
+            instance_name = builtin_key if count == 1 else f"{builtin_key}-{count}"
+            clean = instance_name
+            record = self._ensure_builtin_subagent_record(
+                builtin_key,
+                model_id=resolved_explicit,
+                instance_name=instance_name,
+            )
+        else:
+            record = self.agents_store.find(clean) if self.agents_store is not None else None
         if record is None:
             return ToolOutcome("failed", f"Agente {clean} não existe", f"No subagent named '{clean}'. Create it first with create_agent.", {"tool_kind": "agent"}, "AGENT_NOT_FOUND")
+
         # Legacy conversation-agent rows predate provider/model snapshots.
         # Treat their absent values exactly as an omitted model_id: use the
         # current turn model, never an arbitrary catalog model.
@@ -1278,6 +1388,82 @@ class TurnSession:
             update_model = getattr(self.agents_store, "set_model", None)
             if callable(update_model):
                 update_model(agent_id, child_model_id)
+        with self._subagent_lock:
+            self._subagent_records[agent_id] = {
+                **record,
+                "builtin_type": builtin_key if builtin_spec is not None else record.get("builtin_type"),
+            }
+        if run_in_background:
+            with self._subagent_lock:
+                if self._bg_subagent_executor is None:
+                    self._bg_subagent_executor = ThreadPoolExecutor(
+                        max_workers=MAX_SUBAGENTS_PER_TURN,
+                        thread_name_prefix="orin-bg-subagent",
+                    )
+                future = self._bg_subagent_executor.submit(
+                    self._execute_subagent_run,
+                    record=dict(record),
+                    agent_id=agent_id,
+                    clean=clean,
+                    builtin_key=builtin_key,
+                    builtin_spec=builtin_spec,
+                    child_model_id=child_model_id,
+                    current_model_id=current_model_id,
+                    task_text=task_text,
+                    description=description,
+                    resumed_agent_id=resumed_agent_id,
+                )
+                self._background_subagents[agent_id] = {
+                    "future": future,
+                    "agent_id": agent_id,
+                    "agent_name": clean,
+                    "subagent_type": builtin_key if builtin_spec is not None else clean,
+                }
+            return ToolOutcome(
+                "succeeded",
+                f"Iniciou {clean} em segundo plano",
+                (
+                    f"Subagent '{clean}' started in the background (agent_id=\"{agent_id}\"). "
+                    f"Continue with independent work or call check_subagent(agent_id=\"{agent_id}\", wait_seconds=...) to inspect or await its report."
+                ),
+                {
+                    "agent_id": agent_id,
+                    "agent_name": clean,
+                    "subagent_type": builtin_key if builtin_spec is not None else clean,
+                    "status": "running",
+                    "background": True,
+                    "resumed": bool(resumed_agent_id),
+                    "label": clean,
+                    "tool_kind": "agent",
+                },
+            )
+        return self._execute_subagent_run(
+            record=record,
+            agent_id=agent_id,
+            clean=clean,
+            builtin_key=builtin_key,
+            builtin_spec=builtin_spec,
+            child_model_id=child_model_id,
+            current_model_id=current_model_id,
+            task_text=task_text,
+            description=description,
+            resumed_agent_id=resumed_agent_id,
+        )
+
+    def _execute_subagent_run(
+        self,
+        *,
+        record: dict[str, object],
+        agent_id: str,
+        clean: str,
+        builtin_key: str,
+        builtin_spec: Mapping[str, object] | None,
+        child_model_id: str,
+        current_model_id: str,
+        task_text: str,
+        description: str,
+        resumed_agent_id: str | None = None,
+    ) -> ToolOutcome:
         active_model_id = child_model_id
         try:
             child_provider_instance = self._child_provider_factory(active_model_id)
@@ -1316,7 +1502,12 @@ class TurnSession:
         read_only_subagent = bool(builtin_spec and builtin_spec.get("read_only"))
         inherit_context = bool(builtin_spec and builtin_spec.get("inherit_context"))
         initial_history: list[dict[str, Any]] | None = None
-        if inherit_context and hasattr(self.store, "history_for_turn"):
+        if resumed_agent_id:
+            with self._subagent_lock:
+                saved_history = self._subagent_histories.get(resumed_agent_id)
+                if saved_history:
+                    initial_history = [dict(item) for item in saved_history]
+        if initial_history is None and inherit_context and hasattr(self.store, "history_for_turn"):
             try:
                 initial_history = [dict(item) for item in self.store.history_for_turn(self.turn)]
             except Exception:
@@ -1426,6 +1617,12 @@ class TurnSession:
             )
             result = runtime.run(str(self.turn["turn_id"]), turn=subagent_turn)
         answer = sub_store.final_answer()
+        prior_transcript = [dict(item) for item in initial_history] if initial_history else []
+        prior_transcript.append({"role": "user", "content": self._subagent_task(enriched_record, task_text)})
+        if answer:
+            prior_transcript.append({"role": "assistant", "content": answer})
+        with self._subagent_lock:
+            self._subagent_histories[agent_id] = prior_transcript
         limit_stopped = (
             result.error_code in {"ACTION_LIMIT", "ITERATION_LIMIT", "TURN_DEADLINE_EXCEEDED"}
             or result.budget_exhausted
@@ -1441,7 +1638,7 @@ class TurnSession:
                 {"agent_name": clean, "sender_name": clean, "recipient_name": "Main", "label": clean, "error_code": reason},
                 agent_id=agent_id, parent_agent_id=self.main_agent_id,
             )
-            return ToolOutcome("failed", f"{clean} não concluiu", f"Subagent '{clean}' did not finish ({reason}).", {"agent_name": clean, "tool_kind": "agent"}, reason)
+            return ToolOutcome("failed", f"{clean} não concluiu", f"Subagent '{clean}' did not finish ({reason}).", {"agent_id": agent_id, "agent_name": clean, "tool_kind": "agent"}, reason)
         if self.agents_store is not None and hasattr(self.agents_store, "set_state"):
             self.agents_store.set_state(agent_id, "completed")
         self._record(
@@ -1457,6 +1654,7 @@ class TurnSession:
             "subagent_type": builtin_key if builtin_spec is not None else clean,
             "read_only": read_only_subagent,
             "inherited_context": inherit_context,
+            "resumed": bool(resumed_agent_id),
             "label": clean,
             "tool_kind": "agent",
             "partial": bool(limit_stopped),
@@ -1475,6 +1673,93 @@ class TurnSession:
         else:
             content = f"{clean} reported:\n\n{answer}"
         return ToolOutcome("succeeded", f"Recebeu a resposta de {clean}", content, payload)
+
+    def _check_subagent(self, agent_id: str, *, wait_seconds: int = 0) -> ToolOutcome:
+        with self._subagent_lock:
+            entry = self._background_subagents.get(agent_id)
+        if entry is None:
+            return ToolOutcome(
+                "failed",
+                f"Subagente {agent_id} não encontrado",
+                f"No background subagent found with agent_id '{agent_id}'.",
+                {"agent_id": agent_id, "tool_kind": "agent"},
+                "AGENT_NOT_FOUND",
+            )
+        future = entry["future"]
+        agent_name = str(entry.get("agent_name") or agent_id)
+        if not future.done() and wait_seconds > 0:
+            try:
+                future.result(timeout=float(wait_seconds))
+            except Exception:
+                pass
+        if not future.done():
+            return ToolOutcome(
+                "succeeded",
+                f"{agent_name} ainda em execução",
+                f"Subagent '{agent_name}' (agent_id=\"{agent_id}\") is still running in the background.",
+                {
+                    "agent_id": agent_id,
+                    "agent_name": agent_name,
+                    "status": "running",
+                    "background": True,
+                    "label": agent_name,
+                    "tool_kind": "agent",
+                },
+            )
+        try:
+            outcome = future.result(timeout=0)
+        except Exception as error:
+            return ToolOutcome(
+                "failed",
+                f"{agent_name} falhou",
+                f"Background subagent '{agent_name}' raised {type(error).__name__}: {error}",
+                {
+                    "agent_id": agent_id,
+                    "agent_name": agent_name,
+                    "status": "failed",
+                    "background": True,
+                    "label": agent_name,
+                    "tool_kind": "agent",
+                },
+                "SUBAGENT_EXCEPTION",
+            )
+        merged_payload = {
+            **dict(outcome.payload),
+            "agent_id": agent_id,
+            "agent_name": agent_name,
+            "status": "completed" if outcome.status == "succeeded" else "failed",
+            "background": True,
+        }
+        return ToolOutcome(
+            outcome.status,
+            outcome.summary,
+            outcome.content,
+            merged_payload,
+            outcome.error_code,
+            images=outcome.images,
+        )
+
+    def close_background_subagents(self) -> None:
+        with self._subagent_lock:
+            executor = self._bg_subagent_executor
+            self._bg_subagent_executor = None
+            bg_entries = list(self._background_subagents.values())
+        if executor is not None:
+            is_cancelled = False
+            try:
+                is_cancelled = bool(self.cancelled(self.turn))
+            except Exception:
+                pass
+            executor.shutdown(wait=not is_cancelled, cancel_futures=is_cancelled)
+            if self.agents_store is not None and hasattr(self.agents_store, "set_state"):
+                for entry in bg_entries:
+                    future = entry.get("future")
+                    agent_id = str(entry.get("agent_id") or "")
+                    if agent_id and future is not None and (not future.done() or future.cancelled()):
+                        try:
+                            self.agents_store.set_state(agent_id, "cancelled")
+                        except Exception:
+                            pass
 
     def _ask_agents(self, requests: list[Mapping[str, str]]) -> ToolOutcome:
         """Run several independent delegations at once.
@@ -1644,6 +1929,8 @@ class TurnSession:
             delegate=self._ask_agent if subagents else None,
             delegate_batch=self._ask_agents if subagents else None,
             run_subagent=self._run_subagent if subagents else None,
+            check_subagent=self._check_subagent if subagents else None,
+            on_close=self.close_background_subagents if subagents else None,
             on_tool_progress=lambda tool_name, summary, progress_payload: self.emit_lifecycle(
                 self.turn,
                 "tool_progressed",

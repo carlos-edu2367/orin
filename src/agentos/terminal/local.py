@@ -81,6 +81,11 @@ class LocalTerminalAdapter(ReferenceTerminalAdapter):
 
     def _environment(self, refs: tuple[str, ...]) -> dict[str, str]:
         result: dict[str, str] = {}
+        if os.name == "nt":
+            for win_key in ("SystemRoot", "SYSTEMROOT", "SystemDrive", "SYSTEMDRIVE", "TEMP", "TMP", "COMSPEC"):
+                val = os.environ.get(win_key)
+                if isinstance(val, str) and val:
+                    result[win_key] = val
         for ref in refs:
             values = self.secret_resolver(ref)
             for key, value in values.items():

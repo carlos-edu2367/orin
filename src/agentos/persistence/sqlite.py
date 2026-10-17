@@ -17,11 +17,17 @@ def create_local_engine(database_url: str) -> Engine:
     """Create the runtime engine and apply the local durability invariants."""
     if not database_url.startswith("sqlite"):
         raise ValueError("The local Orin runtime requires a SQLite DATABASE_URL.")
+    pool_kwargs: dict[str, int] = (
+        {}
+        if ":memory:" in database_url or database_url in ("sqlite://", "sqlite+pysqlite://")
+        else {"pool_size": 32, "max_overflow": 64, "pool_timeout": 60}
+    )
     engine = create_engine(
         database_url,
         future=True,
         pool_pre_ping=True,
         connect_args={"check_same_thread": False, "timeout": 30},
+        **pool_kwargs,
     )
 
     @event.listens_for(engine, "connect")

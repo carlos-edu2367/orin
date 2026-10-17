@@ -413,8 +413,13 @@
 .project-navigation__chat.is-active .project-navigation__chat-mark { border-color: var(--signal); background: var(--signal); box-shadow: 0 0 7px rgb(var(--orin-accent-rgb) / .55); }
 .project-navigation__chat-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .project-navigation__chat-state { width: 5px; height: 5px; flex: 0 0 auto; margin-left: auto; border-radius: 50%; background: var(--faint); opacity: .7; }
-.project-navigation__chat-state[data-state="running"], .project-navigation__chat-state[data-state="queued"] { background: var(--signal); box-shadow: 0 0 7px rgb(var(--orin-accent-rgb) / .55); }
-.project-navigation__chat-state[data-state="failed"] { background: var(--danger); }
+.project-navigation__chat-state[data-state="running"],
+.project-navigation__chat-state[data-state="streaming"],
+.project-navigation__chat-state[data-state="starting"],
+.project-navigation__chat-state[data-state="queued"],
+.project-navigation__chat-state[data-state="cancelling"] { background: var(--signal); opacity: 1; box-shadow: 0 0 7px rgb(var(--orin-accent-rgb) / .65); }
+.project-navigation__chat-state[data-state="waiting_user"] { background: #fbbf24; opacity: 1; box-shadow: 0 0 7px rgba(251, 191, 36, .55); }
+.project-navigation__chat-state[data-state="failed"] { background: var(--danger); opacity: 1; }
 .project-navigation__empty { margin: 22px 9px; color: var(--faint); font-size: 12px; line-height: 1.55; }
 .project-navigation__empty--project { margin: 7px 8px 8px 37px; font-size: 11px; }
 .project-navigation__actions { display: grid; gap: 7px; margin-top: auto; padding: 14px 4px 0 0; border-top: 1px solid var(--line); background: transparent; }
@@ -467,6 +472,10 @@
     font-weight: 560;
     cursor: pointer;
     box-shadow: 0 4px 14px rgba(0, 0, 0, 0.28);
+  }
+  .workspace-navigation__mobile-trigger[aria-expanded="true"] {
+    opacity: 0;
+    pointer-events: none;
   }
   .workspace-navigation__mobile-trigger:hover {
     border-color: var(--orin-accent);

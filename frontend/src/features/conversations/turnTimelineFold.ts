@@ -246,6 +246,15 @@ export function buildTurnTimeline(
   )
   const isTurnCompleted = explicitTurnCompleted || hasTerminalTurnEvent
 
+  const primaryAgentId = turnEvents.find(
+    (event) => !event.parentAgentId && event.type !== 'agent.created' && event.agentId,
+  )?.agentId
+
+  const isSubagentEvent = (event: ConversationActivityEvent): boolean => {
+    if (event.parentAgentId) return true
+    return Boolean(primaryAgentId && event.agentId && event.agentId !== primaryAgentId && event.type !== 'agent.created')
+  }
+
   const items: TurnTimelineItem[] = []
   let textBuffer = ''
   let textId = ''
@@ -260,6 +269,7 @@ export function buildTurnTimeline(
     agentName?: string
   } | null = null
   const renderedCodeRuns = new Set<string>()
+  const subagentWaveItems = new Map<string, TimelineActivityItem>()
 
   const flushGroup = () => {
     if (!group) return
@@ -319,6 +329,12 @@ export function buildTurnTimeline(
     if (event.type === 'agent.thought_delta' || event.type === 'AGENT_THOUGHT_DELTA') {
       flushGroup()
       flushText()
+      if (!isSubagentEvent(event)) {
+        subagentWaveItems.clear()
+      }
+      if (thoughtBuffer && thoughtBuffer.agentId !== event.agentId) {
+        flushThought(true, event.occurredAt)
+      }
       const deltaText = extractThoughtDelta(event)
       if (!thoughtBuffer) {
         thoughtBuffer = {
@@ -345,6 +361,7 @@ export function buildTurnTimeline(
       if (messageId && event.messageId && event.messageId !== messageId) continue
       flushThought(true, event.occurredAt)
       flushGroup()
+      subagentWaveItems.clear()
       if (!event.content) continue
       if (!textBuffer) textId = `text:${event.eventId}`
       textBuffer += event.content
@@ -381,12 +398,56 @@ export function buildTurnTimeline(
     }
     flushThought(true, event.occurredAt)
     flushText()
-    if (event.kind === 'artifact' && group && group.kind === 'tool' && group.agentId === event.agentId) {
-      group.events.push(event)
-      group.count += 1
-      continue
+    const subagentEvent = isSubagentEvent(event)
+    if (!subagentEvent && event.kind !== 'agent') {
+      subagentWaveItems.clear()
+    }
+    if (event.kind === 'artifact') {
+      if (subagentEvent) {
+        const waveItem = subagentWaveItems.get(`tool:${event.agentId}:${event.turnId ?? ''}`)
+        if (waveItem) {
+          waveItem.group.events.push(event)
+          waveItem.group.count += 1
+          continue
+        }
+      }
+      if (group && group.kind === 'tool' && group.agentId === event.agentId) {
+        group.events.push(event)
+        group.count += 1
+        continue
+      }
     }
     const key = groupingKey(event)
+    if (subagentEvent && event.kind === 'tool' && key.startsWith('tool:')) {
+      flushGroup()
+      const existingWaveItem = subagentWaveItems.get(key)
+      if (existingWaveItem) {
+        applyEventToGroup(existingWaveItem.group, event)
+        existingWaveItem.toolCall = event
+        continue
+      }
+      const createdGroup: ActivityGroup = {
+        id: key,
+        kind: event.kind,
+        state: event.state,
+        label: '',
+        count: 1,
+        events: [event],
+        agentId: event.agentId,
+        agentName: event.agentName,
+        failed: event.state === 'failed',
+      }
+      createdGroup.label = groupLabel(createdGroup)
+      const waveItem: TimelineActivityItem = {
+        id: `activity:${createdGroup.id}:${event.eventId}`,
+        kind: 'activity',
+        group: createdGroup,
+        toolCall: event,
+      }
+      items.push(waveItem)
+      subagentWaveItems.set(key, waveItem)
+      continue
+    }
     if (group && group.id === key && group.kind === event.kind) {
       applyEventToGroup(group, event)
       continue

@@ -47,11 +47,24 @@ export function summarizeActivities(events: ConversationActivityEvent[]): Activi
   const renderedCodeRuns = new Set<string>()
   const settled = computeSettledEventIds(events)
   const firstCodeEventByTurn = new Map<string, ConversationActivityEvent>()
+  const primaryAgentByTurn = new Map<string, string>()
   for (const event of events) {
     if (isCodeModeEvent(event) && event.turnId && !firstCodeEventByTurn.has(event.turnId)) {
       firstCodeEventByTurn.set(event.turnId, event)
     }
+    const turnKey = event.turnId ?? ''
+    if (!primaryAgentByTurn.has(turnKey) && !event.parentAgentId && event.type !== 'agent.created' && event.agentId) {
+      primaryAgentByTurn.set(turnKey, event.agentId)
+    }
   }
+
+  const isSubagentEvent = (event: ConversationActivityEvent): boolean => {
+    if (event.parentAgentId) return true
+    const primary = primaryAgentByTurn.get(event.turnId ?? '')
+    return Boolean(primary && event.agentId && event.agentId !== primary && event.type !== 'agent.created')
+  }
+
+  const subagentWaveGroups = new Map<string, ActivityGroup>()
 
   for (const rawEvent of events) {
     const event = normalizeGeneratingArgumentsEvent(rawEvent)
@@ -74,7 +87,19 @@ export function summarizeActivities(events: ConversationActivityEvent[]): Activi
       groups.push(codeModeRunGroup(events, event))
       continue
     }
+    const subagentEvent = isSubagentEvent(event)
+    if (!subagentEvent && event.kind !== 'agent') {
+      subagentWaveGroups.clear()
+    }
     if (event.kind === 'artifact') {
+      if (subagentEvent) {
+        const waveToolGroup = subagentWaveGroups.get(`tool:${event.agentId}:${event.turnId ?? ''}`)
+        if (waveToolGroup) {
+          waveToolGroup.events.push(event)
+          waveToolGroup.count += 1
+          continue
+        }
+      }
       const previous = groups[groups.length - 1]
       // Attaches to whatever tool batch is already open for this agent/turn --
       // an artifact event carries no record of which tool produced it (the
@@ -93,6 +118,17 @@ export function summarizeActivities(events: ConversationActivityEvent[]): Activi
       continue
     }
     const key = groupingKey(event)
+    if (subagentEvent && event.kind === 'tool' && key.startsWith('tool:')) {
+      const existingWaveGroup = subagentWaveGroups.get(key)
+      if (existingWaveGroup) {
+        applyEventToGroup(existingWaveGroup, event)
+        continue
+      }
+      const created = soloGroup(event)
+      groups.push(created)
+      subagentWaveGroups.set(key, created)
+      continue
+    }
     const previous = groups[groups.length - 1]
     if (previous && previous.id === key && previous.kind === event.kind) {
       applyEventToGroup(previous, event)

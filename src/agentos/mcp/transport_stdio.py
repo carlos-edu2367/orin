@@ -42,7 +42,9 @@ from agentos.agentic.agent_tools import _terminate_process_tree
 # vault server: "Acesso negado ... at path C:\WINDOWS\.tmpXXXX", surfaced to
 # StdioTransport as "the MCP server closed before answering".
 PLATFORM_ENVIRONMENT_PASSTHROUGH = (
-    ("TEMP", "TMP", "USERPROFILE", "APPDATA", "LOCALAPPDATA") if os.name == "nt" else ("HOME", "TMPDIR")
+    ("TEMP", "TMP", "USERPROFILE", "APPDATA", "LOCALAPPDATA")
+    if os.name == "nt"
+    else ("HOME", "TMPDIR")
 )
 
 ALLOWED_COMMANDS = frozenset({"npx", "uvx", "node", "python", "python3", "uv", "deno", "bun"})
@@ -107,6 +109,11 @@ class StdioTransport:
         # need to function at all (see PLATFORM_ENVIRONMENT_PASSTHROUGH),
         # plus the secrets this server was approved with.
         environment = {"PATH": os.environ.get("PATH", ""), "SystemRoot": os.environ.get("SystemRoot", "")}
+        if os.name == "nt":
+            for sys_name in ("SYSTEMROOT", "SystemDrive", "SYSTEMDRIVE"):
+                sys_value = os.environ.get(sys_name)
+                if sys_value:
+                    environment[sys_name] = sys_value
         for name in PLATFORM_ENVIRONMENT_PASSTHROUGH:
             value = os.environ.get(name)
             if value:

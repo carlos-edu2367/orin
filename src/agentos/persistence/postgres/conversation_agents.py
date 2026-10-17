@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from hashlib import sha256
+import threading
+from uuid import uuid4
 
 from sqlalchemy import insert, select, update
 from sqlalchemy.engine import Engine
@@ -20,32 +22,79 @@ class ConversationAgentStore:
         self._engine = engine
         self._conversation_id = conversation_id
         self._user_id = user_id
+        self._lock = threading.Lock()
 
-    def agent_id_for(self, name: str) -> str:
-        digest = sha256(f"{self._conversation_id}|{name.strip().lower()}".encode()).hexdigest()[:24]
+    def agent_id_for(self, name: str, *, unique_suffix: str | None = None) -> str:
+        raw = f"{self._conversation_id}|{name.strip().lower()}"
+        if unique_suffix:
+            raw = f"{raw}|{unique_suffix}"
+        digest = sha256(raw.encode()).hexdigest()[:24]
         return f"agent:{self._conversation_id}:{digest}"
 
-    def create(self, name: str, role: str, *, parent_agent_id: str, provider: str | None = None, model_id: str | None = None) -> dict[str, object]:
+    def create(
+        self,
+        name: str,
+        role: str,
+        *,
+        parent_agent_id: str,
+        provider: str | None = None,
+        model_id: str | None = None,
+        force_new: bool = False,
+        agent_id: str | None = None,
+    ) -> dict[str, object]:
         now = datetime.now(UTC)
-        agent_id = self.agent_id_for(name)
-        with self._engine.begin() as connection:
+        resolved_agent_id = (
+            str(agent_id).strip()
+            if agent_id and str(agent_id).strip()
+            else self.agent_id_for(name, unique_suffix=uuid4().hex if force_new else None)
+        )
+        base_name = name.strip()[:120]
+        with self._lock, self._engine.begin() as connection:
             existing = connection.execute(
-                select(conversation_agents).where(conversation_agents.c.agent_id == agent_id)
+                select(conversation_agents).where(conversation_agents.c.agent_id == resolved_agent_id)
             ).mappings().first()
             if existing is not None:
                 return {**dict(existing), "created": False}
+            persisted_name = base_name
+            if force_new:
+                taken_names = {
+                    str(row["name"])
+                    for row in connection.execute(
+                        select(conversation_agents.c.name).where(
+                            conversation_agents.c.conversation_id == self._conversation_id
+                        )
+                    ).mappings().all()
+                }
+                if persisted_name in taken_names:
+                    idx = 2
+                    while f"{base_name[:110]}-{idx}" in taken_names:
+                        idx += 1
+                    persisted_name = f"{base_name[:110]}-{idx}"
             connection.execute(insert(conversation_agents).values(
-                agent_id=agent_id, conversation_id=self._conversation_id, user_id=self._user_id,
-                parent_agent_id=parent_agent_id, name=name.strip()[:120], role=role.strip()[:512],
+                agent_id=resolved_agent_id, conversation_id=self._conversation_id, user_id=self._user_id,
+                parent_agent_id=parent_agent_id, name=persisted_name, role=role.strip()[:512],
                 provider=provider.strip()[:32] if provider else None,
                 model_id=model_id.strip()[:512] if model_id else None,
                 state="idle", created_at=now, updated_at=now,
             ))
         return {
-            "agent_id": agent_id, "name": name.strip()[:120], "role": role.strip()[:512],
+            "agent_id": resolved_agent_id, "name": persisted_name, "role": role.strip()[:512],
             "parent_agent_id": parent_agent_id, "provider": provider.strip()[:32] if provider else None,
             "model_id": model_id.strip()[:512] if model_id else None, "state": "idle", "created": True,
         }
+
+    def get(self, agent_id: str) -> dict[str, object] | None:
+        clean_id = str(agent_id or "").strip()
+        if not clean_id:
+            return None
+        with self._engine.connect() as connection:
+            row = connection.execute(
+                select(conversation_agents).where(
+                    conversation_agents.c.agent_id == clean_id,
+                    conversation_agents.c.conversation_id == self._conversation_id,
+                )
+            ).mappings().first()
+        return dict(row) if row else None
 
     def find(self, name: str) -> dict[str, object] | None:
         with self._engine.connect() as connection:
@@ -55,14 +104,14 @@ class ConversationAgentStore:
         return dict(row) if row else None
 
     def set_state(self, agent_id: str, state: str) -> None:
-        with self._engine.begin() as connection:
+        with self._lock, self._engine.begin() as connection:
             connection.execute(update(conversation_agents).where(conversation_agents.c.agent_id == agent_id).values(state=state, updated_at=datetime.now(UTC)))
 
     def set_model(self, agent_id: str, model_id: str) -> None:
         """Persist a safe pre-run model fallback for one child agent."""
         if not model_id.strip():
             raise ValueError("model_id must be non-blank")
-        with self._engine.begin() as connection:
+        with self._lock, self._engine.begin() as connection:
             connection.execute(
                 update(conversation_agents)
                 .where(conversation_agents.c.agent_id == agent_id)
@@ -83,7 +132,7 @@ class ConversationAgentStore:
         if any(value is not None and value < 0 for value in values):
             raise ValueError("token usage cannot be negative")
         now = datetime.now(UTC)
-        with self._engine.begin() as connection:
+        with self._lock, self._engine.begin() as connection:
             current = connection.execute(
                 select(conversation_agent_usage).where(
                     conversation_agent_usage.c.conversation_id == self._conversation_id,

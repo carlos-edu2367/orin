@@ -277,6 +277,7 @@ export function ChatPage() {
                   : turn),
               })
               void loadSnapshot(false).catch(() => undefined)
+              window.dispatchEvent(new Event('orin:conversations-updated'))
             }
           },
           onCursor: (cursor) => {
@@ -471,6 +472,10 @@ export function ChatPage() {
     setChatProvider(null)
     setChatModelId('')
     setChatModels([])
+    setPendingUserMessage(null)
+    setStopping(false)
+    setError(null)
+    setOversizedInput(null)
   } else if (conversation && conversation.conversation_id === conversationId && selectionFor !== conversationId) {
     const initialProvider = asProviderName(conversation.provider)
     if (initialProvider) {
@@ -1186,6 +1191,7 @@ export function ChatPage() {
       resetAttachments()
       await loadSnapshot(false)
       void listConversations(client).then((value) => setChats(value.items)).catch(() => undefined)
+      window.dispatchEvent(new Event('orin:conversations-updated'))
     } catch {
       setMessage(text)
       setPendingUserMessage(null)
@@ -1212,6 +1218,7 @@ export function ChatPage() {
       resetAttachments()
       await loadSnapshot(false)
       void listConversations(client).then((value) => setChats(value.items)).catch(() => undefined)
+      window.dispatchEvent(new Event('orin:conversations-updated'))
     } catch {
       if (uploadedId && !sent) void deleteUpload(client, uploadedId).catch(() => undefined)
       if (!sent) {
@@ -1255,6 +1262,7 @@ export function ChatPage() {
         })
       }
       await loadSnapshot(false)
+      window.dispatchEvent(new Event('orin:conversations-updated'))
     } catch {
       setError('Não foi possível parar a execução.')
     } finally {

@@ -120,6 +120,24 @@ export function WorkspaceNavigation({ client, onChatsChange, onNewConversation, 
     setProjects(sidebar.items)
   }, [apiClient, onChatsChange])
 
+  const activeSessionCount = useMemo(() => {
+    const activeStates = new Set(['queued', 'starting', 'running', 'streaming', 'cancelling'])
+    const activeIds = new Set<string>()
+    for (const chat of chats) {
+      if (activeStates.has(chat.state)) {
+        activeIds.add(chat.conversation_id)
+      }
+    }
+    for (const project of projects) {
+      for (const chat of project.chats) {
+        if (activeStates.has(chat.state)) {
+          activeIds.add(chat.conversation_id)
+        }
+      }
+    }
+    return activeIds.size
+  }, [chats, projects])
+
   useEffect(() => {
     let active = true
     queueMicrotask(() => {
@@ -127,15 +145,25 @@ export function WorkspaceNavigation({ client, onChatsChange, onNewConversation, 
         if (active) setError('Não foi possível atualizar a navegação.')
       })
     })
-    const onProjectsUpdated = () => {
+    const onUpdated = () => {
       void reload().catch(() => undefined)
     }
-    window.addEventListener('orin:projects-updated', onProjectsUpdated)
+    window.addEventListener('orin:projects-updated', onUpdated)
+    window.addEventListener('orin:conversations-updated', onUpdated)
     return () => {
       active = false
-      window.removeEventListener('orin:projects-updated', onProjectsUpdated)
+      window.removeEventListener('orin:projects-updated', onUpdated)
+      window.removeEventListener('orin:conversations-updated', onUpdated)
     }
   }, [reload])
+
+  useEffect(() => {
+    if (activeSessionCount === 0) return
+    const intervalId = window.setInterval(() => {
+      void reload().catch(() => undefined)
+    }, 3000)
+    return () => window.clearInterval(intervalId)
+  }, [activeSessionCount, reload])
 
   async function submitProject() {
     if (!projectName.trim()) return
@@ -219,6 +247,19 @@ export function WorkspaceNavigation({ client, onChatsChange, onNewConversation, 
             <h2>Seu espaço</h2>
           </div>
           <div className="project-navigation__header-controls">
+            {activeSessionCount > 0 && (
+              <span
+                className="project-navigation__active-badge inline-flex items-center gap-1 rounded-full border border-emerald-500/30 bg-emerald-500/15 px-2 py-0.5 font-mono text-[10px] font-semibold text-emerald-300"
+                data-testid="sidebar-active-sessions-badge"
+                data-active-count={activeSessionCount}
+                aria-label={`${activeSessionCount} ${activeSessionCount === 1 ? 'sessão ativa' : 'sessões ativas'}`}
+              >
+                <span className="inline-block h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" aria-hidden="true" />
+                <span>
+                  {activeSessionCount} {activeSessionCount === 1 ? 'ativa' : 'ativas'}
+                </span>
+              </span>
+            )}
             <span className="project-navigation__count" aria-label={`${chats.length + projects.length} itens`}>
               {chats.length + projects.length}
             </span>
@@ -318,7 +359,12 @@ export function WorkspaceNavigation({ client, onChatsChange, onNewConversation, 
                     >
                       <ModeBadge mode={chat.mode} conversationId={chat.conversation_id} />
                       <span className="project-navigation__chat-title" title={chat.title}>{chat.title}</span>
-                      <span className="project-navigation__chat-state" data-state={chat.state} aria-hidden="true" />
+                      <span
+                        className="project-navigation__chat-state"
+                        data-testid={`conversation-state-${chat.conversation_id}`}
+                        data-state={chat.state}
+                        aria-hidden="true"
+                      />
                     </NavLink>
                   ))
                 ) : (
@@ -388,7 +434,12 @@ export function WorkspaceNavigation({ client, onChatsChange, onNewConversation, 
                           >
                             <ModeBadge mode={chat.mode} conversationId={chat.conversation_id} />
                             <span className="project-navigation__chat-title" title={chat.title}>{chat.title}</span>
-                            <span className="project-navigation__chat-state" data-state={chat.state} aria-hidden="true" />
+                            <span
+                              className="project-navigation__chat-state"
+                              data-testid={`conversation-state-${chat.conversation_id}`}
+                              data-state={chat.state}
+                              aria-hidden="true"
+                            />
                           </NavLink>
                         ))}
                       {!collapsed.has(project.project_id) && project.chats.length === 0 && (

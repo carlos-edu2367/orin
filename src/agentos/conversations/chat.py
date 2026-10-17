@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import shutil
+import threading
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -366,6 +367,8 @@ class PostgresChatStore:
         self.activity_store = activity_store
         self._command_library = command_library
         self._skill_library = skill_library
+        self._sequence_lock = threading.Lock()
+        self._claim_lock = threading.Lock()
         _ensure_conversation_mode_columns(engine)
 
     def _activity(
@@ -399,32 +402,33 @@ class PostgresChatStore:
         # itself rather than from another table's identity. Concurrent writers
         # (the runtime emits several events back to back) lose the race on the
         # unique constraint and simply take the next free slot.
-        for _ in range(6):
-            sequence = self._next_activity_sequence(str(turn["turn_id"]))
-            try:
-                event = AgentActivityEvent(
-                    event_id=f"activity:{turn['turn_id']}:{sequence}",
-                    conversation_id=str(turn["conversation_id"]), turn_id=str(turn["turn_id"]),
-                    execution_id=str(turn["execution_id"]), user_id=str(turn["user_id"]),
-                    agent_id=effective_agent_id, parent_agent_id=parent_agent_id,
-                    event_type=event_type, sequence=sequence,
-                    summary=summary[:512] or "Atividade", payload=payload or {}, created_at=datetime.now(UTC),
-                )
-            except ValueError:
-                # The event's own content (payload/summary) failed validation —
-                # retrying with the same content fails identically every time.
-                # This is a different failure than the sequence race below, and
-                # must not burn the retry budget meant for that race.
-                return
-            try:
-                self.activity_store.record_event(event)
-                return
-            except ValueError:
-                continue
-            except Exception:
-                # Activity is an audit projection; a projection failure must not
-                # roll back the authoritative conversation transaction.
-                return
+        with self._sequence_lock:
+            for _ in range(16):
+                sequence = self._next_activity_sequence(str(turn["turn_id"]))
+                try:
+                    event = AgentActivityEvent(
+                        event_id=f"activity:{turn['turn_id']}:{sequence}",
+                        conversation_id=str(turn["conversation_id"]), turn_id=str(turn["turn_id"]),
+                        execution_id=str(turn["execution_id"]), user_id=str(turn["user_id"]),
+                        agent_id=effective_agent_id, parent_agent_id=parent_agent_id,
+                        event_type=event_type, sequence=sequence,
+                        summary=summary[:512] or "Atividade", payload=payload or {}, created_at=datetime.now(UTC),
+                    )
+                except ValueError:
+                    # The event's own content (payload/summary) failed validation —
+                    # retrying with the same content fails identically every time.
+                    # This is a different failure than the sequence race below, and
+                    # must not burn the retry budget meant for that race.
+                    return
+                try:
+                    self.activity_store.record_event(event)
+                    return
+                except ValueError:
+                    continue
+                except Exception:
+                    # Activity is an audit projection; a projection failure must not
+                    # roll back the authoritative conversation transaction.
+                    return
 
     def _next_activity_sequence(self, turn_id: str) -> int:
         with self._engine.connect() as connection:
@@ -447,26 +451,27 @@ class PostgresChatStore:
             except Exception:
                 rendered = "<unserializable>"
         now = datetime.now(UTC)
-        for _ in range(6):
-            try:
-                with self._engine.connect() as connection:
-                    current = connection.execute(
-                        select(func.max(conversation_tool_records.c.sequence)).where(conversation_tool_records.c.conversation_id == turn["conversation_id"])
-                    ).scalar()
-                sequence = int(current or 0) + 1
-                with self._engine.begin() as connection:
-                    connection.execute(insert(conversation_tool_records).values(
-                        record_id=f"tool:{turn['conversation_id']}:{sequence}",
-                        conversation_id=str(turn["conversation_id"]), turn_id=str(turn["turn_id"]),
-                        user_id=str(turn["user_id"]), sequence=sequence, tool_name=str(tool_name)[:64],
-                        arguments=rendered, status=str(status)[:16], summary=str(summary)[:512] or str(tool_name)[:512],
-                        created_at=now,
-                    ))
-                return
-            except IntegrityError:
-                continue
-            except Exception:
-                return
+        with self._sequence_lock:
+            for _ in range(16):
+                try:
+                    with self._engine.connect() as connection:
+                        current = connection.execute(
+                            select(func.max(conversation_tool_records.c.sequence)).where(conversation_tool_records.c.conversation_id == turn["conversation_id"])
+                        ).scalar()
+                    sequence = int(current or 0) + 1
+                    with self._engine.begin() as connection:
+                        connection.execute(insert(conversation_tool_records).values(
+                            record_id=f"tool:{turn['conversation_id']}:{sequence}",
+                            conversation_id=str(turn["conversation_id"]), turn_id=str(turn["turn_id"]),
+                            user_id=str(turn["user_id"]), sequence=sequence, tool_name=str(tool_name)[:64],
+                            arguments=rendered, status=str(status)[:16], summary=str(summary)[:512] or str(tool_name)[:512],
+                            created_at=now,
+                        ))
+                    return
+                except IntegrityError:
+                    continue
+                except Exception:
+                    return
 
     def tool_ledger(self, turn: Mapping[str, object], *, limit: int = 20) -> list[dict[str, str]]:
         """The most recent tool steps of this conversation, oldest first."""
@@ -511,32 +516,33 @@ class PostgresChatStore:
         content_bytes = int(payload.get("content_bytes") or len(encoded))
         truncated = bool(payload.get("truncated"))
         now = datetime.now(UTC)
-        for _ in range(3):
-            try:
-                with self._engine.connect() as connection:
-                    current = connection.execute(
-                        select(func.max(conversation_turn_steps.c.sequence)).where(
-                            conversation_turn_steps.c.turn_id == turn["turn_id"],
-                            conversation_turn_steps.c.agent_id == agent_id,
-                        )
-                    ).scalar()
-                sequence = int(current or 0) + 1
-                with self._engine.begin() as connection:
-                    connection.execute(insert(conversation_turn_steps).values(
-                        step_id=f"step:{turn['turn_id']}:{agent_id}:{sequence}",
-                        conversation_id=str(turn["conversation_id"]), turn_id=str(turn["turn_id"]),
-                        user_id=str(turn["user_id"]), agent_id=str(agent_id)[:255], sequence=sequence,
-                        kind=str(kind)[:24], tool_name=str(tool_name)[:64] if tool_name else None,
-                        tool_call_id=str(tool_call_id)[:255] if tool_call_id else None,
-                        payload=encoded, content_bytes=content_bytes, truncated=truncated,
-                        created_at=now,
-                    ))
-                return
-            except IntegrityError:
-                continue
-            except Exception:  # noqa: BLE001 - the transcript never breaks a turn
-                _LOGGER.exception("could not record a turn step for %s", turn.get("turn_id"))
-                return
+        with self._sequence_lock:
+            for _ in range(16):
+                try:
+                    with self._engine.connect() as connection:
+                        current = connection.execute(
+                            select(func.max(conversation_turn_steps.c.sequence)).where(
+                                conversation_turn_steps.c.turn_id == turn["turn_id"],
+                                conversation_turn_steps.c.agent_id == agent_id,
+                            )
+                        ).scalar()
+                    sequence = int(current or 0) + 1
+                    with self._engine.begin() as connection:
+                        connection.execute(insert(conversation_turn_steps).values(
+                            step_id=f"step:{turn['turn_id']}:{agent_id}:{sequence}",
+                            conversation_id=str(turn["conversation_id"]), turn_id=str(turn["turn_id"]),
+                            user_id=str(turn["user_id"]), agent_id=str(agent_id)[:255], sequence=sequence,
+                            kind=str(kind)[:24], tool_name=str(tool_name)[:64] if tool_name else None,
+                            tool_call_id=str(tool_call_id)[:255] if tool_call_id else None,
+                            payload=encoded, content_bytes=content_bytes, truncated=truncated,
+                            created_at=now,
+                        ))
+                    return
+                except IntegrityError:
+                    continue
+                except Exception:  # noqa: BLE001 - the transcript never breaks a turn
+                    _LOGGER.exception("could not record a turn step for %s", turn.get("turn_id"))
+                    return
 
     def turn_steps(self, conversation_id: str, *, turn_ids: Sequence[str]) -> dict[str, list[dict[str, object]]]:
         """Recorded steps for the given turns, grouped by turn, in order."""
@@ -843,7 +849,14 @@ class PostgresChatStore:
                 ))
             c.execute(insert(conversation_dispatches).values(turn_id=turn_id, state="pending", attempts=0, queued_at=now, updated_at=now))
             c.execute(insert(conversation_events).values(conversation_id=conversation_id, user_id=user_id, event_type="turn.queued", message_id=assistant_message_id, payload={"state": "queued"}, created_at=now))
-            c.execute(update(conversations).where(conversations.c.conversation_id == conversation_id).values(state="queued", updated_at=now))
+            has_running = c.execute(
+                select(conversation_turns.c.turn_id).where(
+                    conversation_turns.c.conversation_id == conversation_id,
+                    conversation_turns.c.turn_id != turn_id,
+                    conversation_turns.c.state.in_(("running", "starting")),
+                )
+            ).first() is not None
+            c.execute(update(conversations).where(conversations.c.conversation_id == conversation_id).values(state="running" if has_running else "queued", updated_at=now))
             digest = sha256(f"{user_id}|{turn_id}".encode()).hexdigest()
             execution_result = ExecutionApplicationAdapter(c).create({
                 "operation_id": f"op_{digest}",
@@ -1427,7 +1440,59 @@ class PostgresChatStore:
         return (safe_events, int(rows[-1]["id"]) if rows else after)
 
     def pending(self) -> tuple[str, ...]:
-        with self._engine.connect() as c: return tuple(c.execute(select(conversation_dispatches.c.turn_id).where(conversation_dispatches.c.state == "pending")).scalars())
+        with self._engine.connect() as c:
+            active_convs = {
+                str(cid)
+                for cid in c.execute(
+                    select(conversation_turns.c.conversation_id)
+                    .outerjoin(
+                        conversation_dispatches,
+                        conversation_dispatches.c.turn_id == conversation_turns.c.turn_id,
+                    )
+                    .where(
+                        (conversation_turns.c.state.in_(("running", "starting")))
+                        | (
+                            (conversation_dispatches.c.state == "active")
+                            & conversation_turns.c.state.in_(("queued", "starting", "running"))
+                        )
+                    )
+                ).scalars()
+            }
+            rows = c.execute(
+                select(
+                    conversation_dispatches.c.turn_id,
+                    conversation_turns.c.conversation_id,
+                    conversation_dispatches.c.queued_at,
+                    conversation_turns.c.created_at,
+                )
+                .join(
+                    conversation_turns,
+                    conversation_turns.c.turn_id == conversation_dispatches.c.turn_id,
+                )
+                .outerjoin(
+                    conversation_messages,
+                    conversation_messages.c.message_id == conversation_turns.c.user_message_id,
+                )
+                .where(
+                    conversation_dispatches.c.state == "pending",
+                    conversation_turns.c.state.in_(("queued", "starting")),
+                )
+                .order_by(
+                    conversation_messages.c.sequence.asc(),
+                    conversation_dispatches.c.queued_at.asc(),
+                    conversation_turns.c.created_at.asc(),
+                )
+            ).mappings().all()
+        seen_convs: set[str] = set(active_convs)
+        head_rows: list[Mapping[str, object]] = []
+        for row in rows:
+            conv_id = str(row["conversation_id"])
+            if conv_id in seen_convs:
+                continue
+            seen_convs.add(conv_id)
+            head_rows.append(row)
+        head_rows.sort(key=lambda r: (r["queued_at"] or r["created_at"], r["created_at"]))
+        return tuple(str(r["turn_id"]) for r in head_rows)
 
     def mark_enqueued(self, turn_id: str) -> bool:
         now = datetime.now(UTC)
@@ -1436,28 +1501,55 @@ class PostgresChatStore:
 
     def claim(self, turn_id: str) -> dict[str, object] | None:
         now = datetime.now(UTC)
-        with self._engine.begin() as c:
-            result = c.execute(update(conversation_dispatches).where(conversation_dispatches.c.turn_id == turn_id, conversation_dispatches.c.state.in_(("pending", "enqueued"))).values(state="active", attempts=conversation_dispatches.c.attempts + 1, acquired_at=now, updated_at=now))
-            if result.rowcount != 1: return None
-            effective_workspace_id = func.coalesce(projects.c.workspace_id, conversation_turns.c.conversation_id)
-            turn = c.execute(
-                select(
-                    conversation_turns,
-                    conversations.c.project_id,
-                    conversations.c.mode.label("conversation_mode"),
-                    conversations.c.permission_mode.label("permission_mode"),
-                    projects.c.workspace_id.label("project_workspace_id"),
-                    workspace_roots.c.root_path.label("workspace_root_path"),
-                )
-                .join(conversations, conversations.c.conversation_id == conversation_turns.c.conversation_id)
-                .outerjoin(projects, projects.c.project_id == conversations.c.project_id)
-                .outerjoin(workspace_roots, workspace_roots.c.workspace_id == effective_workspace_id)
-                .where(conversation_turns.c.turn_id == turn_id)
-            ).mappings().one()
-            c.execute(update(conversation_turns).where(conversation_turns.c.turn_id == turn_id).values(state="running", started_at=now, updated_at=now))
-            c.execute(update(conversation_messages).where(conversation_messages.c.message_id == turn["assistant_message_id"]).values(status="streaming", updated_at=now))
-            c.execute(update(conversations).where(conversations.c.conversation_id == turn["conversation_id"]).values(state="running", updated_at=now))
-            c.execute(insert(conversation_events).values(conversation_id=turn["conversation_id"], user_id=turn["user_id"], event_type="turn.running", message_id=turn["assistant_message_id"], payload={"state": "running"}, created_at=now))
+        with self._claim_lock:
+            with self._engine.begin() as c:
+                target_conv_id = c.execute(
+                    select(conversation_turns.c.conversation_id).where(
+                        conversation_turns.c.turn_id == turn_id,
+                        conversation_turns.c.state.in_(("queued", "starting")),
+                    )
+                ).scalar_one_or_none()
+                if target_conv_id is None:
+                    return None
+                already_active = c.execute(
+                    select(conversation_turns.c.turn_id)
+                    .outerjoin(
+                        conversation_dispatches,
+                        conversation_dispatches.c.turn_id == conversation_turns.c.turn_id,
+                    )
+                    .where(
+                        conversation_turns.c.conversation_id == target_conv_id,
+                        conversation_turns.c.turn_id != turn_id,
+                        (conversation_turns.c.state.in_(("running", "starting")))
+                        | (
+                            (conversation_dispatches.c.state == "active")
+                            & conversation_turns.c.state.in_(("queued", "starting", "running"))
+                        ),
+                    )
+                ).first()
+                if already_active is not None:
+                    return None
+                result = c.execute(update(conversation_dispatches).where(conversation_dispatches.c.turn_id == turn_id, conversation_dispatches.c.state.in_(("pending", "enqueued"))).values(state="active", attempts=conversation_dispatches.c.attempts + 1, acquired_at=now, updated_at=now))
+                if result.rowcount != 1: return None
+                effective_workspace_id = func.coalesce(projects.c.workspace_id, conversation_turns.c.conversation_id)
+                turn = c.execute(
+                    select(
+                        conversation_turns,
+                        conversations.c.project_id,
+                        conversations.c.mode.label("conversation_mode"),
+                        conversations.c.permission_mode.label("permission_mode"),
+                        projects.c.workspace_id.label("project_workspace_id"),
+                        workspace_roots.c.root_path.label("workspace_root_path"),
+                    )
+                    .join(conversations, conversations.c.conversation_id == conversation_turns.c.conversation_id)
+                    .outerjoin(projects, projects.c.project_id == conversations.c.project_id)
+                    .outerjoin(workspace_roots, workspace_roots.c.workspace_id == effective_workspace_id)
+                    .where(conversation_turns.c.turn_id == turn_id)
+                ).mappings().one()
+                c.execute(update(conversation_turns).where(conversation_turns.c.turn_id == turn_id).values(state="running", started_at=now, updated_at=now))
+                c.execute(update(conversation_messages).where(conversation_messages.c.message_id == turn["assistant_message_id"]).values(status="streaming", updated_at=now))
+                c.execute(update(conversations).where(conversations.c.conversation_id == turn["conversation_id"]).values(state="running", updated_at=now))
+                c.execute(insert(conversation_events).values(conversation_id=turn["conversation_id"], user_id=turn["user_id"], event_type="turn.running", message_id=turn["assistant_message_id"], payload={"state": "running"}, created_at=now))
         claimed = {**dict(turn), "state": "running", "started_at": now}
         self._activity(claimed, AgentActivityEventType.TURN_STARTED, "Turn started")
         return claimed
@@ -1695,7 +1787,19 @@ class PostgresChatStore:
             c.execute(update(conversation_dispatches).where(conversation_dispatches.c.turn_id == turn["turn_id"]).values(state=state, last_error=code, updated_at=now))
             c.execute(update(conversation_turns).where(conversation_turns.c.turn_id == turn["turn_id"]).values(state=state, finished_at=now, updated_at=now))
             c.execute(update(conversation_messages).where(conversation_messages.c.message_id == turn["assistant_message_id"]).values(status=state, retryable=retryable, updated_at=now))
-            c.execute(update(conversations).where(conversations.c.conversation_id == turn["conversation_id"]).values(state=state, updated_at=now))
+            remaining = c.execute(
+                select(conversation_turns.c.state).where(
+                    conversation_turns.c.conversation_id == turn["conversation_id"],
+                    conversation_turns.c.turn_id != turn["turn_id"],
+                    conversation_turns.c.state.in_(("running", "starting", "queued")),
+                )
+            ).scalars().all()
+            conv_state = (
+                "running"
+                if any(str(s) in ("running", "starting") for s in remaining)
+                else ("queued" if remaining else state)
+            )
+            c.execute(update(conversations).where(conversations.c.conversation_id == turn["conversation_id"]).values(state=conv_state, updated_at=now))
             if state in ("cancelled", "failed"):
                 c.execute(
                     update(code_mode_runs)
