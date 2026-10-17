@@ -94,6 +94,7 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
       root.setAttribute('data-theme-preference', mode)
       root.setAttribute('data-accent', accent)
       root.setAttribute('data-ambient', ambient)
+      root.setAttribute('data-desktop', typeof window !== 'undefined' && Boolean(window.orinDesktop) ? 'true' : 'false')
     }
   }, [mode, resolvedTheme, accent, ambient])
 

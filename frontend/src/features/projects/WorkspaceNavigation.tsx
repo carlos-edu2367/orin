@@ -442,8 +442,22 @@ export function WorkspaceNavigation({
           title={`Buscar e comandos (${paletteShortcut})`}
           aria-label={`Buscar conversas e comandos (${paletteShortcut})`}
         >
-          <span className="project-navigation__rail-hide">Buscar e comandos…</span>
-          <kbd>{paletteShortcut}</kbd>
+          <span className="project-navigation__search-lead">
+            <svg
+              className="project-navigation__search-icon"
+              data-testid="sidebar-search-icon"
+              viewBox="0 0 16 16"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              aria-hidden="true"
+            >
+              <circle cx="7" cy="7" r="4.25" />
+              <path d="M10.25 10.25 13.5 13.5" strokeLinecap="round" />
+            </svg>
+            <span className="project-navigation__rail-hide">Buscar e comandos…</span>
+          </span>
+          <kbd className="project-navigation__rail-hide">{paletteShortcut}</kbd>
         </button>
 
         <div className="project-navigation__hubs" role="group" aria-label="Hubs do workspace">
@@ -709,7 +723,13 @@ export function WorkspaceNavigation({
 
         <div className="project-navigation__actions">
           {view === 'projects' && (
-            <button type="button" className="project-navigation__action project-navigation__action--primary" onClick={() => setCreatingProject(true)}>
+            <button
+              type="button"
+              className="project-navigation__action project-navigation__action--primary"
+              title="Novo projeto"
+              aria-label="Novo projeto"
+              onClick={() => setCreatingProject(true)}
+            >
               <span className="project-navigation__action-icon" aria-hidden="true">+</span>
               <span className="project-navigation__rail-hide">Novo projeto</span>
             </button>

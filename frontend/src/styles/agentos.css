@@ -179,8 +179,8 @@
   isolation: isolate;
   transition: grid-template-columns 0.22s var(--ease);
 }
-.home:has(> .workspace-navigation[data-rail-collapsed="true"]),
-.chat:has(> .workspace-navigation[data-rail-collapsed="true"]) {
+.home:has([data-rail-collapsed="true"]),
+.chat:has([data-rail-collapsed="true"]) {
   grid-template-columns: 64px minmax(0, 1fr);
 }
 
@@ -388,6 +388,12 @@
 }
 .project-navigation__search-trigger:hover {
   border-color: var(--orin-border-strong); background: var(--orin-surface-hover); color: var(--orin-text-primary);
+}
+.project-navigation__search-lead {
+  display: inline-flex; align-items: center; gap: 7px; min-width: 0;
+}
+.project-navigation__search-icon {
+  width: 14px; height: 14px; flex-shrink: 0; color: var(--orin-text-muted, var(--faint));
 }
 .project-navigation__eyebrow { margin: 0 0 5px; color: var(--signal); font-family: var(--mono); font-size: 9px; letter-spacing: .16em; text-transform: uppercase; }
 .project-navigation__count { display: grid; min-width: 25px; height: 25px; place-items: center; border: 1px solid var(--line); border-radius: 8px; color: var(--faint); font-family: var(--mono); font-size: 10px; }
@@ -610,8 +616,8 @@
   .workspace-navigation > .workspace-navigation__error {
     display: none;
   }
-  .home:has(> .workspace-navigation[data-rail-collapsed="true"]),
-  .chat:has(> .workspace-navigation[data-rail-collapsed="true"]) {
+  .home:has([data-rail-collapsed="true"]),
+  .chat:has([data-rail-collapsed="true"]) {
     grid-template-columns: minmax(0, 1fr);
   }
   .home__bar, .chat__bar, .chat__head {
@@ -3061,7 +3067,8 @@ body.has-workspace-file-preview { overflow: hidden; }
 }
 
 .workspace-shell[data-rail-collapsed="true"] > .workspace-navigation,
-.workspace-navigation[data-rail-collapsed="true"] {
+.workspace-navigation[data-rail-collapsed="true"],
+.workspace-navigation:has([data-rail-collapsed="true"]) {
   padding: 14px 8px;
 }
 
@@ -3092,6 +3099,7 @@ body.has-workspace-file-preview { overflow: hidden; }
   min-height: 48px;
   height: auto;
   padding: 8px 18px;
+  padding-right: max(18px, calc(18px + 100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw)));
   border-bottom: 1px solid var(--orin-border-subtle);
   background: rgb(var(--orin-surface-rgb) / 0.78);
   backdrop-filter: blur(12px);
@@ -3099,8 +3107,20 @@ body.has-workspace-file-preview { overflow: hidden; }
   flex-shrink: 0;
 }
 
+html[data-desktop="true"] .canvas-header,
+html[data-desktop="true"] .home__bar,
+html[data-desktop="true"] .chat__bar {
+  padding-right: max(148px, calc(18px + 100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw)));
+}
+
+.canvas-header .palette-trigger,
+.chat__bar .model-picker .chip--action {
+  display: none;
+}
+
 .canvas-header .model-picker {
   flex-wrap: nowrap;
+  flex-shrink: 0;
 }
 
 .canvas-header__left,
@@ -3113,7 +3133,7 @@ body.has-workspace-file-preview { overflow: hidden; }
 }
 
 .canvas-header__left {
-  flex: 0 1 auto;
+  flex: 0 0 auto;
 }
 
 .canvas-header__center {
@@ -3304,16 +3324,32 @@ body.has-workspace-file-preview { overflow: hidden; }
 
 .project-navigation.is-rail-collapsed .project-navigation__cta-group {
   grid-template-columns: 1fr;
+  justify-items: center;
+  gap: 6px;
 }
 
-.project-navigation.is-rail-collapsed .project-navigation__search-trigger {
+.project-navigation.is-rail-collapsed .project-navigation__cta-btn,
+.project-navigation.is-rail-collapsed .project-navigation__search-trigger,
+.project-navigation.is-rail-collapsed .project-navigation__hub-link,
+.project-navigation.is-rail-collapsed .project-navigation__action,
+.project-navigation.is-rail-collapsed .project-navigation__footer-btn {
+  width: 38px;
+  height: 38px;
+  min-height: 38px;
+  min-width: 38px;
+  padding: 0;
+  margin-inline: auto;
   justify-content: center;
-  padding: 5px;
 }
 
-.project-navigation.is-rail-collapsed .project-navigation__hub-link {
+.project-navigation.is-rail-collapsed .project-navigation__search-lead {
   justify-content: center;
-  padding: 6px;
+  gap: 0;
+}
+
+.project-navigation.is-rail-collapsed .project-navigation__actions {
+  padding: 12px 0 0;
+  justify-items: center;
 }
 
 .project-navigation.is-rail-collapsed .project-navigation__footer,
@@ -3391,12 +3427,88 @@ body.has-workspace-file-preview { overflow: hidden; }
 .chat__icon-action {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  min-height: 32px;
+  padding: 0;
+  border-radius: 9px;
+  gap: 0;
   white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .chat__action-icon {
   flex-shrink: 0;
+}
+
+.context-indicator__short {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--orin-text-secondary, var(--muted));
+  letter-spacing: -0.01em;
+}
+
+.chat__project-control {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.chat__session-popover {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  width: 296px;
+  padding: 14px;
+  border: 1px solid var(--orin-border-strong, var(--line-strong));
+  border-radius: 14px;
+  background: var(--orin-surface-2, var(--surface-raised));
+  box-shadow: 0 20px 48px rgb(0 0 0 / 0.48);
+  z-index: 50;
+}
+
+.chat__session-popover form {
+  display: grid;
+  gap: 8px;
+}
+
+.chat__session-popover input {
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0 !important;
+  padding: 8px 11px;
+  border: 1px solid var(--orin-border-strong, var(--line-strong));
+  border-radius: 9px;
+  background: var(--orin-bg, var(--ink));
+  color: var(--orin-text-primary, var(--text));
+  font: inherit;
+  font-size: 12.5px;
+  transition: border-color 0.16s var(--ease), box-shadow 0.16s var(--ease);
+}
+
+.chat__session-popover input:focus {
+  outline: none;
+  border-color: var(--signal-dim);
+  box-shadow: 0 0 0 3px rgb(var(--orin-accent-rgb) / 0.14);
+}
+
+.chat__session-popover-meta {
+  display: grid;
+  gap: 4px;
+  margin-bottom: 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--orin-border-subtle, var(--line));
+}
+
+.chat__session-popover-path {
+  margin: 0;
+  color: var(--orin-text-secondary, var(--muted));
+  font-size: 11.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* Task 5: Canvas Header Slots & Home Quick Actions */
@@ -3406,6 +3518,7 @@ body.has-workspace-file-preview { overflow: hidden; }
   align-items: center;
   gap: 8px;
   min-width: 0;
+  flex: 0 0 auto;
 }
 
 .canvas-header__center {

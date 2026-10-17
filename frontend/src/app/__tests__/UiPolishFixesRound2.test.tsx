@@ -5,6 +5,7 @@ import { ThemeProvider } from '../ThemeContext'
 import { RuntimeSettingsPage } from '../../features/settings/RuntimeSettingsPage'
 import { AboutSection } from '../../features/settings/AboutSection'
 import { WorkspaceNavigation } from '../../features/projects/WorkspaceNavigation'
+import { ContextIndicator } from '../../features/conversations/ContextIndicator'
 import type { ApiClient } from '../../api/client'
 import stylesheet from '../../styles/agentos.css?raw'
 
@@ -238,5 +239,59 @@ describe('UI Polish Fixes Round 2 (Dropdowns, Update Progress, Project Folder Pi
     })
     expect(pathInput.value).toBe('D:\\manter-caminho')
   })
+
+  it('collapses parent .home and .chat grid column when inner project-navigation has data-rail-collapsed="true" and renders compact rail icons', async () => {
+    const client = createMockClient()
+    render(
+      <ThemeProvider>
+        <MemoryRouter>
+          <main className="home">
+            <aside className="workspace-navigation">
+              <WorkspaceNavigation client={client} initialView="projects" />
+            </aside>
+          </main>
+        </MemoryRouter>
+      </ThemeProvider>,
+    )
+
+    const toggleBtn = await screen.findByTestId('sidebar-rail-toggle')
+    fireEvent.click(toggleBtn)
+
+    const nav = screen.getByRole('navigation', { name: /Conversas e projetos/i })
+    expect(nav).toHaveAttribute('data-rail-collapsed', 'true')
+    expect(screen.getByTestId('sidebar-search-icon')).toBeInTheDocument()
+
+    expect(stylesheet).toContain('.home:has([data-rail-collapsed="true"])')
+    expect(stylesheet).toContain('.chat:has([data-rail-collapsed="true"])')
+    expect(stylesheet).toContain('.project-navigation.is-rail-collapsed .project-navigation__action')
+  })
+
+  it('renders a compact symbol/percentage ContextIndicator with full details inside its expandable popover and hides verbose header text', () => {
+    render(
+      <ContextIndicator
+        usage={{
+          used_tokens: 36698,
+          limit_tokens: 262144,
+          percentage: 14,
+          system_prompt_tokens: 1200,
+          history_tokens: 30000,
+          input_tokens: 498,
+          tools_tokens: 3000,
+          skills_tokens: 1000,
+          mcps_tokens: 1000,
+          omitted_messages: 0,
+          compaction_count: 0,
+          compaction_enabled: true,
+        }}
+      />,
+    )
+
+    const shortBadge = screen.getByTestId('context-indicator-short')
+    expect(shortBadge).toHaveTextContent('14%')
+    expect(screen.getByText(/Contexto 36\.698 \/ 262\.144/)).toHaveClass('visually-hidden')
+    expect(stylesheet).toContain('.canvas-header .palette-trigger')
+  })
 })
+
+
 

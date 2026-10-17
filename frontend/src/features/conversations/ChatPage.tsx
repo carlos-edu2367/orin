@@ -1393,62 +1393,77 @@ export function ChatPage() {
             />
           )}
           {conversationMode === 'code' && (
-            <span className="chat__code-badge" data-testid="orin-code-badge">
-              &gt;_ Orin Code
+            <span className="chat__code-badge" data-testid="orin-code-badge" title="Modo Orin Code">
+              &gt;_<span className="visually-hidden"> Orin Code</span>
             </span>
           )}
           {conversationMode === 'code' && (conversation?.workspace?.folderName || conversation?.workspace?.path) && (
             <span
-              className="chat__workspace-chip chat__code-workspace-chip"
+              className="visually-hidden"
               data-testid="orin-code-workspace-chip"
               title={conversation?.workspace?.path ?? undefined}
             >
               {conversation?.workspace?.folderName ?? conversation?.workspace?.path}
             </span>
           )}
+          {activeConvProjectId && activeConvProjectName ? (
+            <Link
+              to={`/projects/${encodeURIComponent(activeConvProjectId)}`}
+              className="chat__workspace-chip"
+              data-testid="conversation-project-badge"
+              title={`Projeto: ${activeConvProjectName}`}
+            >
+              {activeConvProjectName}
+            </Link>
+          ) : null}
         </div>
 
         <div className="chat__title canvas-header__center">
-          <h1>{conversation?.title ?? 'Conversa'}</h1>
-          <div className="chat__project-control" style={{ position: 'relative', display: 'inline-flex', alignItems: 'center', gap: '6px' }} data-testid="conversation-project-control">
-            {activeConvProjectId && activeConvProjectName ? (
-              <Link
-                to={`/projects/${encodeURIComponent(activeConvProjectId)}`}
-                className="chat__workspace-chip"
-                data-testid="conversation-project-badge"
-              >
-                {activeConvProjectName}
-              </Link>
-            ) : null}
+          <h1 title={conversation?.title ?? 'Conversa'}>{conversation?.title ?? 'Conversa'}</h1>
+          {conversation && <span className="chat__model visually-hidden">{conversation.provider} · {conversation.model_id}</span>}
+        </div>
+
+        <div className="chat__bar-actions canvas-header__right">
+          <ContextIndicator usage={contextUsage} />
+
+          <div className="chat__project-control" data-testid="conversation-project-control">
             <button
               type="button"
-              className="ghost-button"
+              className={projectMenuOpen ? 'ghost-button chat__icon-action is-active' : 'ghost-button chat__icon-action'}
               onClick={toggleProjectMenu}
               aria-expanded={projectMenuOpen}
+              aria-label={activeConvProjectId ? 'Trocar projeto' : 'Enviar para projeto'}
+              title={activeConvProjectId ? `Projeto: ${activeConvProjectName ?? 'Trocar projeto'}` : 'Organizar em projeto e detalhes da sessão'}
               data-testid="conversation-project-trigger"
-              style={{ fontSize: '12px', padding: '2px 8px' }}
             >
-              {activeConvProjectId ? 'Trocar projeto' : 'Enviar para projeto'}
+              <svg className="chat__action-icon" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
+                <path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h2.88a1.5 1.5 0 0 1 1.06.44l.87.87a.5.5 0 0 0 .35.15h3.84A1.5 1.5 0 0 1 14 5.96v5.54A1.5 1.5 0 0 1 12.5 13h-9A1.5 1.5 0 0 1 2 11.5v-7Z" strokeLinecap="round" strokeLinejoin="round" />
+                <path d="M8 6.75v3.5M6.25 8.5h3.5" strokeLinecap="round" />
+              </svg>
+              <span className="visually-hidden">
+                {activeConvProjectId ? 'Trocar projeto' : 'Enviar para projeto'}
+              </span>
             </button>
             {projectMenuOpen && (
               <div
                 role="dialog"
                 aria-label="Organizar em projeto"
                 data-testid="conversation-project-menu"
-                style={{
-                  position: 'absolute',
-                  top: '100%',
-                  left: 0,
-                  marginTop: '6px',
-                  width: '280px',
-                  background: 'var(--orin-surface-2, var(--surface-raised))',
-                  border: '1px solid var(--orin-border-subtle, var(--border-subtle))',
-                  borderRadius: '10px',
-                  padding: '10px',
-                  zIndex: 40,
-                  boxShadow: 'var(--shadow-popover)',
-                }}
+                className="chat__session-popover"
               >
+                {(conversation?.workspace?.path || conversation?.turns.some((turn) => turn.scheduled_by_schedule_id)) && (
+                  <div className="chat__session-popover-meta">
+                    <p className="eyebrow" style={{ margin: '0 0 4px' }}>DETALHES DA SESSÃO</p>
+                    {conversation?.workspace?.path && (
+                      <p className="chat__session-popover-path" title={conversation.workspace.path}>
+                        Pasta: <code>{conversation.workspace.folderName ?? conversation.workspace.path}</code>
+                      </p>
+                    )}
+                    {conversation?.turns.some((turn) => turn.scheduled_by_schedule_id) && (
+                      <p className="chat__session-popover-path">Origem: execuções agendadas</p>
+                    )}
+                  </div>
+                )}
                 <p className="eyebrow" style={{ margin: '0 0 6px' }}>MOVER PARA PROJETO</p>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', maxHeight: '140px', overflowY: 'auto' }}>
                   {availableProjects.map((proj) => (
@@ -1476,7 +1491,7 @@ export function ChatPage() {
                     </button>
                   )}
                 </div>
-                <hr style={{ margin: '8px 0', border: 0, borderTop: '1px solid var(--border-subtle)' }} />
+                <hr style={{ margin: '8px 0', border: 0, borderTop: '1px solid var(--orin-border-subtle, var(--border-subtle))' }} />
                 <form onSubmit={(e) => { void handleCreateProjectFromSession(e) }} data-testid="create-project-from-session-form">
                   <p className="eyebrow" style={{ margin: '0 0 6px' }}>CRIAR PROJETO DESTA SESSÃO</p>
                   <input
@@ -1497,19 +1512,14 @@ export function ChatPage() {
                     aria-label="Descrição do novo projeto"
                     style={{ width: '100%', marginBottom: '8px' }}
                   />
-                  <button type="submit" className="primary-button" disabled={projectBusy || !newProjectName.trim()} style={{ width: '100%' }}>
+                  <button type="submit" className="button button--primary" disabled={projectBusy || !newProjectName.trim()} style={{ width: '100%' }}>
                     Criar projeto e vincular
                   </button>
                 </form>
               </div>
             )}
           </div>
-          {conversation?.turns.some((turn) => turn.scheduled_by_schedule_id) && <span className="chat__model">execuções agendadas</span>}
-          {conversation && <span className="chat__model visually-hidden">{conversation.provider} · {conversation.model_id}</span>}
-        </div>
 
-        <div className="chat__bar-actions canvas-header__right">
-          <ContextIndicator usage={contextUsage} />
           {conversationMode === 'code' && (
             <button
               type="button"
@@ -1523,7 +1533,7 @@ export function ChatPage() {
               <svg className="chat__action-icon" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
                 <path d="M2 3.5A1.5 1.5 0 0 1 3.5 2h3.172a1.5 1.5 0 0 1 1.06.44l.829.828a.5.5 0 0 0 .353.147H12.5A1.5 1.5 0 0 1 14 4.915v7.585A1.5 1.5 0 0 1 12.5 14h-9A1.5 1.5 0 0 1 2 12.5v-9Z" />
               </svg>
-              <span className="chat__action-label">Arquivos</span>
+              <span className="chat__action-label visually-hidden">Arquivos</span>
             </button>
           )}
           <button
@@ -1538,7 +1548,7 @@ export function ChatPage() {
               <circle cx="8" cy="8" r="5.5" />
               <circle cx="8" cy="8" r="2" />
             </svg>
-            <span className="chat__action-label">Visão geral</span>
+            <span className="chat__action-label visually-hidden">Visão geral</span>
           </button>
           <CommandPalette conversations={chats} />
         </div>

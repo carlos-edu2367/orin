@@ -8,12 +8,25 @@ export function ContextIndicator({ usage }: { usage: ContextUsage | null }) {
     ['Skills', usage?.skills_tokens], ['MCPs', usage?.mcps_tokens],
   ] as const
   return (
-    <div className={`context-indicator ${tone}`} tabIndex={0} aria-label={usage ? `Contexto: ${usage.used_tokens.toLocaleString('pt-BR')} de ${usage.limit_tokens.toLocaleString('pt-BR')} tokens` : 'Contexto: aguardando cálculo'}>
+    <div
+      className={`context-indicator ${tone}`}
+      tabIndex={0}
+      title={usage ? `Contexto: ${usage.used_tokens.toLocaleString('pt-BR')} / ${usage.limit_tokens.toLocaleString('pt-BR')} tokens (${usage.percentage}%)` : 'Contexto: aguardando cálculo'}
+      aria-label={usage ? `Contexto: ${usage.used_tokens.toLocaleString('pt-BR')} de ${usage.limit_tokens.toLocaleString('pt-BR')} tokens` : 'Contexto: aguardando cálculo'}
+    >
       <span className="context-indicator__dot" aria-hidden="true" />
-      <span className="context-indicator__label">Contexto {usage ? `${usage.used_tokens.toLocaleString('pt-BR')} / ${usage.limit_tokens.toLocaleString('pt-BR')}` : '—'}</span>
+      <span className="context-indicator__short" data-testid="context-indicator-short" aria-hidden="true">
+        {usage ? `${usage.percentage}%` : '—'}
+      </span>
+      <span className="context-indicator__label visually-hidden">
+        Contexto {usage ? `${usage.used_tokens.toLocaleString('pt-BR')} / ${usage.limit_tokens.toLocaleString('pt-BR')}` : '—'}
+      </span>
       <div className="context-indicator__popover" role="tooltip">
         {usage ? <>
-          <div className="context-indicator__heading"><strong>Contexto usado</strong><span>{usage.percentage}%</span></div>
+          <div className="context-indicator__heading">
+            <strong>Contexto usado</strong>
+            <span>{usage.used_tokens.toLocaleString('pt-BR')} / {usage.limit_tokens.toLocaleString('pt-BR')} ({usage.percentage}%)</span>
+          </div>
           <div className="context-indicator__meter" aria-hidden="true"><span style={{ width: `${usage.percentage}%` }} /></div>
           <dl>{rows.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value!.toLocaleString('pt-BR')} tokens</dd></div>)}</dl>
           <p>{usage.compaction_enabled ? 'Compactação automática ativa.' : 'Compactação automática indisponível.'}{usage.compaction_count > 0 ? ` Compactado ${usage.compaction_count} vez${usage.compaction_count === 1 ? '' : 'es'}.` : ''}</p>
@@ -25,3 +38,4 @@ export function ContextIndicator({ usage }: { usage: ContextUsage | null }) {
     </div>
   )
 }
+
