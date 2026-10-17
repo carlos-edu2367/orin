@@ -107,7 +107,6 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
         document.documentElement.setAttribute('data-theme', nextSys)
       }
     }
-    setSystemTheme(media.matches ? 'light' : 'dark')
     if (typeof media.addEventListener === 'function') {
       media.addEventListener('change', onChange)
       return () => media.removeEventListener('change', onChange)
@@ -123,6 +122,9 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     (next: ThemeMode) => {
       const validNext = VALID_MODES.includes(next) ? next : 'dark'
       setModeState(validNext)
+      if (validNext === 'system') {
+        setSystemTheme(resolveSystemTheme())
+      }
       writeStorage(MODE_KEY, validNext)
       applyThemeAttributes(validNext, accent, ambient)
     },

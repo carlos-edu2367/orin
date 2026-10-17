@@ -10,7 +10,7 @@ export function ContextIndicator({ usage }: { usage: ContextUsage | null }) {
   return (
     <div className={`context-indicator ${tone}`} tabIndex={0} aria-label={usage ? `Contexto: ${usage.used_tokens.toLocaleString('pt-BR')} de ${usage.limit_tokens.toLocaleString('pt-BR')} tokens` : 'Contexto: aguardando cálculo'}>
       <span className="context-indicator__dot" aria-hidden="true" />
-      <span>Contexto {usage ? `${usage.used_tokens.toLocaleString('pt-BR')} / ${usage.limit_tokens.toLocaleString('pt-BR')}` : '—'}</span>
+      <span className="context-indicator__label">Contexto {usage ? `${usage.used_tokens.toLocaleString('pt-BR')} / ${usage.limit_tokens.toLocaleString('pt-BR')}` : '—'}</span>
       <div className="context-indicator__popover" role="tooltip">
         {usage ? <>
           <div className="context-indicator__heading"><strong>Contexto usado</strong><span>{usage.percentage}%</span></div>

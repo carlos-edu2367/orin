@@ -62,12 +62,9 @@ export function WorkspaceShell({
   const apiClient = useMemo(() => client ?? createBrowserApiClient(), [client])
   const [railCollapsed, setRailCollapsed] = useState<boolean>(() => readSidebarCollapsed())
   const [preferencesOpen, setPreferencesOpen] = useState<boolean>(defaultPreferencesOpen)
-  const [preferencesTab, setPreferencesTab] = useState<PreferencesTab>(initialPreferencesTab)
+  const [preferencesTabOverride, setPreferencesTabOverride] = useState<PreferencesTab | null>(null)
+  const preferencesTab: PreferencesTab = preferencesTabOverride ?? initialPreferencesTab
   const [internalChats, setInternalChats] = useState<WorkspaceNavigationConversationSummary[]>([])
-
-  useEffect(() => {
-    setPreferencesTab(initialPreferencesTab)
-  }, [initialPreferencesTab])
 
   const toggleRail = useCallback(() => {
     setRailCollapsed((current) => {
@@ -87,10 +84,10 @@ export function WorkspaceShell({
 
   const handleOpenPreferences = useCallback(
     (tab?: PreferencesTab) => {
-      setPreferencesTab(tab ?? initialPreferencesTab)
+      setPreferencesTabOverride(tab ?? null)
       setPreferencesOpen(true)
     },
-    [initialPreferencesTab],
+    [],
   )
 
   useEffect(() => {

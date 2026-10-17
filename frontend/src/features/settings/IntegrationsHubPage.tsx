@@ -1,6 +1,5 @@
 import {
   useCallback,
-  useEffect,
   useMemo,
   useState,
   type JSX,
@@ -81,55 +80,45 @@ export function IntegrationsHubPage({
     [capabilities.omniroute],
   )
 
-  const [tab, setTab] = useState<IntegrationsTab>(() => {
-    if (isValidIntegrationsTab(activeTab)) return activeTab
-    return resolveTabFromPath(location.pathname) ?? 'providers'
-  })
+  const buildSyncKey = useCallback(
+    (pathname: string) => `${activeTab ?? ''}|${ pathname }|${selectedProvider ?? ''}|${params.provider ?? ''}`,
+    [activeTab, params.provider, selectedProvider],
+  )
+  const syncKey = buildSyncKey(location.pathname)
+  const derivedTab: IntegrationsTab = isValidIntegrationsTab(activeTab)
+    ? activeTab
+    : (resolveTabFromPath(location.pathname) ?? 'providers')
+  const derivedProvider: ProviderName | null = sanitizeProvider(
+    selectedProvider !== undefined ? selectedProvider : resolveProviderFromPath(location.pathname, params.provider),
+  )
 
-  const [openProvider, setOpenProvider] = useState<ProviderName | null>(() => {
-    const raw = selectedProvider !== undefined ? selectedProvider : resolveProviderFromPath(location.pathname, params.provider)
-    return sanitizeProvider(raw)
-  })
+  const [localOverride, setLocalOverride] = useState<{
+    key: string
+    tab?: IntegrationsTab
+    provider?: ProviderName | null
+  }>({ key: syncKey })
 
-  useEffect(() => {
-    if (isValidIntegrationsTab(activeTab)) {
-      setTab(activeTab)
-    }
-  }, [activeTab])
-
-  useEffect(() => {
-    const fromPath = resolveTabFromPath(location.pathname)
-    if (fromPath) {
-      setTab(fromPath)
-    }
-  }, [location.pathname])
-
-  useEffect(() => {
-    if (selectedProvider !== undefined) {
-      setOpenProvider(sanitizeProvider(selectedProvider))
-    }
-  }, [selectedProvider, sanitizeProvider])
-
-  useEffect(() => {
-    const fromPath = resolveProviderFromPath(location.pathname, params.provider)
-    if (fromPath !== null) {
-      setOpenProvider(sanitizeProvider(fromPath))
-    } else if (selectedProvider === undefined) {
-      setOpenProvider(null)
-    }
-  }, [location.pathname, params.provider, selectedProvider, sanitizeProvider])
+  const tab: IntegrationsTab =
+    localOverride.key === syncKey && localOverride.tab !== undefined ? localOverride.tab : derivedTab
+  const openProvider: ProviderName | null =
+    localOverride.key === syncKey && localOverride.provider !== undefined ? localOverride.provider : derivedProvider
 
   const handleCloseDrawer = useCallback(() => {
-    setOpenProvider(null)
-    navigate(`${resolvedBasePath}/providers`)
-  }, [navigate, resolvedBasePath])
+    const nextPath = `${resolvedBasePath}/providers`
+    const nextKey = buildSyncKey(nextPath)
+    setLocalOverride((prev) => ({ key: nextKey, tab: prev.key === syncKey ? prev.tab : undefined, provider: null }))
+    navigate(nextPath)
+  }, [buildSyncKey, navigate, resolvedBasePath, syncKey])
 
   function handleSelectTab(nextTab: IntegrationsTab) {
-    setTab(nextTab)
-    if (nextTab !== 'providers') {
-      setOpenProvider(null)
-    }
-    navigate(`${resolvedBasePath}/${nextTab}`)
+    const nextPath = `${resolvedBasePath}/${nextTab}`
+    const nextKey = buildSyncKey(nextPath)
+    setLocalOverride((prev) => ({
+      key: nextKey,
+      tab: nextTab,
+      provider: nextTab !== 'providers' ? null : (prev.key === syncKey ? prev.provider : undefined),
+    }))
+    navigate(nextPath)
   }
 
   function handleProvidersContainerClick(event: ReactMouseEvent<HTMLDivElement>) {
@@ -139,8 +128,14 @@ export function IntegrationsHubPage({
     const clickedProvider = sanitizeProvider(resolveProviderFromPath(href))
     if (!clickedProvider) return
     event.preventDefault()
-    setOpenProvider(clickedProvider)
-    navigate(`${resolvedBasePath}/providers/${clickedProvider}`)
+    const nextPath = `${resolvedBasePath}/providers/${clickedProvider}`
+    const nextKey = buildSyncKey(nextPath)
+    setLocalOverride((prev) => ({
+      key: nextKey,
+      tab: prev.key === syncKey ? prev.tab : undefined,
+      provider: clickedProvider,
+    }))
+    navigate(nextPath)
   }
 
   function handleDrawerKeyDown(event: ReactKeyboardEvent<HTMLElement>) {

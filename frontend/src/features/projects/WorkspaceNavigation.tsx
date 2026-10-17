@@ -319,7 +319,7 @@ export function WorkspaceNavigation({
         onClick={() => setMobileOpen((current) => !current)}
       >
         <span aria-hidden="true">☰</span>
-        <span>Menu</span>
+        <span className="workspace-navigation__mobile-trigger-label">Menu</span>
       </button>
 
       {mobileOpen && (
@@ -340,10 +340,6 @@ export function WorkspaceNavigation({
         <header className="project-navigation__header">
           <div className="project-navigation__brand-row">
             <Brand to="/" />
-            <div className="project-navigation__heading-copy project-navigation__rail-hide">
-              <p className="project-navigation__eyebrow">Workspace</p>
-              <h2>Seu espaço</h2>
-            </div>
           </div>
           <div className="project-navigation__header-controls">
             {activeSessionCount > 0 && (

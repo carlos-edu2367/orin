@@ -100,7 +100,7 @@ export function ModelPicker(props: ModelPickerProps) {
           onClick={() => setOpen((value) => (value === 'provider' ? null : 'provider'))}
         >
           <span className="chip__dot" aria-hidden="true" />
-          {props.provider}
+          <span className="model-picker__provider-text">{props.provider}</span>
           <span className="chip__caret" aria-hidden="true">⌄</span>
         </button>
 
@@ -117,7 +117,9 @@ export function ModelPicker(props: ModelPickerProps) {
           disabled={props.disabled || props.models.length === 0}
           onClick={() => { setQuery(''); setOpen((value) => (value === 'model' ? null : 'model')) }}
         >
-          {props.loading ? 'carregando…' : selected?.display_name ?? (props.models.length === 0 ? 'sem modelos' : 'escolher modelo')}
+          <span className="model-picker__model-text">
+            {props.loading ? 'carregando…' : selected?.display_name ?? (props.models.length === 0 ? 'sem modelos' : 'escolher modelo')}
+          </span>
           <span className="chip__caret" aria-hidden="true">⌄</span>
         </button>
       </div>

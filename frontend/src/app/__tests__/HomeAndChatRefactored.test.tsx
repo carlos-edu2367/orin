@@ -193,6 +193,16 @@ describe('Home, ChatPage, and Routes Refactored Shell', () => {
       const header = await screen.findByTestId('canvas-header');
       expect(await screen.findByRole('heading', { name: 'Refatorar Shell' })).toBeInTheDocument();
       expect(header.querySelector('.canvas-header__left .model-picker')).not.toBeNull();
+      expect(header.querySelector('.model-picker__provider-text')).not.toBeNull();
+      expect(header.querySelector('.model-picker__model-text')).not.toBeNull();
+      expect(header.querySelector('.context-indicator__label')).not.toBeNull();
+      expect(container.querySelector('.workspace-navigation__mobile-trigger-label')).not.toBeNull();
+      const filesBtn = screen.getByTestId('workspace-files-drawer-toggle');
+      expect(filesBtn.querySelector('.chat__action-icon')).not.toBeNull();
+      expect(filesBtn.querySelector('.chat__action-label')).toHaveTextContent('Arquivos');
+      const overviewBtn = screen.getByRole('button', { name: /Visão geral/i });
+      expect(overviewBtn.querySelector('.chat__action-icon')).not.toBeNull();
+      expect(overviewBtn.querySelector('.chat__action-label')).toHaveTextContent('Visão geral');
       expect(container.querySelectorAll('.model-picker').length).toBe(1);
       expect(screen.getByTestId('session-context-trigger')).toBeInTheDocument();
       expect(screen.getByTestId('orin-code-badge')).toBeInTheDocument();

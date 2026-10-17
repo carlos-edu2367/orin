@@ -1513,21 +1513,32 @@ export function ChatPage() {
           {conversationMode === 'code' && (
             <button
               type="button"
-              className={workspaceDrawerOpen ? 'ghost-button is-active' : 'ghost-button'}
+              className={workspaceDrawerOpen ? 'ghost-button chat__icon-action is-active' : 'ghost-button chat__icon-action'}
               aria-pressed={workspaceDrawerOpen}
+              aria-label="Arquivos"
+              title="Arquivos do workspace"
               data-testid="workspace-files-drawer-toggle"
               onClick={toggleWorkspaceDrawer}
             >
-              Arquivos
+              <svg className="chat__action-icon" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
+                <path d="M2 3.5A1.5 1.5 0 0 1 3.5 2h3.172a1.5 1.5 0 0 1 1.06.44l.829.828a.5.5 0 0 0 .353.147H12.5A1.5 1.5 0 0 1 14 4.915v7.585A1.5 1.5 0 0 1 12.5 14h-9A1.5 1.5 0 0 1 2 12.5v-9Z" />
+              </svg>
+              <span className="chat__action-label">Arquivos</span>
             </button>
           )}
           <button
             type="button"
-            className={showOverview ? 'ghost-button is-active' : 'ghost-button'}
+            className={showOverview ? 'ghost-button chat__icon-action is-active' : 'ghost-button chat__icon-action'}
             aria-pressed={showOverview}
+            aria-label="Visão geral"
+            title="Visão geral da conversa"
             onClick={() => navigate(showOverview ? conversationPath : `${conversationPath}/overview`)}
           >
-            Visão geral
+            <svg className="chat__action-icon" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
+              <circle cx="8" cy="8" r="5.5" />
+              <circle cx="8" cy="8" r="2" />
+            </svg>
+            <span className="chat__action-label">Visão geral</span>
           </button>
           <CommandPalette conversations={chats} />
         </div>

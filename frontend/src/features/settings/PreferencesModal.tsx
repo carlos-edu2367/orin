@@ -50,13 +50,14 @@ export function PreferencesModal({ open, initialTab = 'appearance', onClose, cli
   const apiClient = useMemo(() => client ?? createBrowserApiClient(), [client])
   const session = useSession()
   const { mode, accent, ambient, setMode, setAccent, setAmbient } = useTheme()
-  const [activeTab, setActiveTab] = useState<PreferencesTab>(() => normalizeTab(initialTab))
+  const syncKey = `${String(open)}|${String(initialTab)}`
+  const derivedTab = normalizeTab(initialTab)
+  const [localTab, setLocalTab] = useState<{ key: string; tab?: PreferencesTab }>({ key: syncKey })
+  const activeTab: PreferencesTab =
+    localTab.key === syncKey && localTab.tab !== undefined ? localTab.tab : derivedTab
+  const setActiveTab = (next: PreferencesTab) => setLocalTab({ key: syncKey, tab: next })
   const dialogRef = useRef<HTMLDivElement>(null)
   const restoreFocusRef = useRef<HTMLElement | null>(null)
-
-  useEffect(() => {
-    setActiveTab(normalizeTab(initialTab))
-  }, [initialTab, open])
 
   useEffect(() => {
     if (!open) return undefined

@@ -34,7 +34,10 @@ export function useSettingsBadges(
     let active = true
     const now = Date.now()
     if (sessionCache !== null && now - sessionCacheAt < CACHE_TTL_MS) {
-      setBadges(sessionCache)
+      const cached = sessionCache
+      void Promise.resolve(cached).then((value) => {
+        if (active) setBadges(value)
+      })
       return () => {
         active = false
       }

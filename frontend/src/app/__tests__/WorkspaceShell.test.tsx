@@ -56,7 +56,8 @@ describe('WorkspaceShell & Sidebar Hubs', () => {
     expect(container.querySelector('.workspace-shell__canvas')).not.toBeNull()
     expect(container.querySelector('.canvas-stage')).not.toBeNull()
 
-    // Sidebar hubs links exist
+    // Sidebar hubs links exist and redundant "Seu espaço" heading next to logo is removed
+    expect(screen.queryByRole('heading', { name: /Seu espaço/i })).not.toBeInTheDocument()
     expect(screen.getByRole('link', { name: /Biblioteca/i })).toHaveAttribute('href', '/library/skills')
     expect(screen.getByRole('link', { name: /Integrações/i })).toHaveAttribute('href', '/integrations/providers')
     expect(screen.getByRole('link', { name: /Automações/i })).toHaveAttribute('href', '/schedules')

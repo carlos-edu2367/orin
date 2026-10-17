@@ -339,7 +339,7 @@ export function CodeToolCallBlock({
 
       {hasDiffHunks && diffOpen && (
         <div
-          className="border-t border-[var(--border-subtle)] bg-black/25 px-2 py-1.5 text-[12px] font-mono leading-5 overflow-x-auto"
+          className="border-t border-[var(--border-subtle)] bg-[var(--bg-subtle)] px-2 py-1.5 text-[12px] font-mono leading-5 overflow-x-auto"
           data-testid="code-tool-diff-view"
         >
           <div data-testid="code-tool-diff">
@@ -408,7 +408,7 @@ export function CodeToolCallBlock({
       {(toolName === 'run_command' || toolName === 'bash') &&
         (showCommandSubheader || visibleTerminalLines.length > 0) && (
           <div
-            className="border-t border-[var(--border-subtle)] bg-black/30 px-3 py-2 font-mono text-[12px] leading-5"
+            className="border-t border-[var(--border-subtle)] bg-[var(--bg-subtle)] px-3 py-2 font-mono text-[12px] leading-5"
             data-testid="code-tool-terminal-output"
           >
             {showCommandSubheader && (

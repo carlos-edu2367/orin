@@ -143,10 +143,10 @@ describe('ThemeContext & initThemeDom', () => {
         onchange: null,
         addListener: vi.fn(),
         removeListener: vi.fn(),
-        addEventListener: (_event: string, cb: EventListenerOrEventListenerObject) => {
+        addEventListener: (_event: string, cb: unknown) => {
           if (typeof cb === 'function') listeners.add(cb as () => void)
         },
-        removeEventListener: (_event: string, cb: EventListenerOrEventListenerObject) => {
+        removeEventListener: (_event: string, cb: unknown) => {
           if (typeof cb === 'function') listeners.delete(cb as () => void)
         },
         dispatchEvent: vi.fn(),

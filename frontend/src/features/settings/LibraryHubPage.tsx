@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type JSX } from 'react'
+import { useMemo, useState, type JSX } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { createBrowserApiClient, type ApiClient } from '../../api/client'
 import { createSkillsClient } from '../../api/skills'
@@ -43,27 +43,19 @@ export function LibraryHubPage({
   const location = useLocation()
   const navigate = useNavigate()
 
-  const [tab, setTab] = useState<LibraryTab>(() => {
-    if (isValidLibraryTab(activeTab)) return activeTab
-    return resolveTabFromPath(location.pathname) ?? 'skills'
-  })
+  const syncKey = `${activeTab ?? ''}|${location.pathname}`
+  const derivedTab: LibraryTab = isValidLibraryTab(activeTab)
+    ? activeTab
+    : (resolveTabFromPath(location.pathname) ?? 'skills')
 
-  useEffect(() => {
-    if (isValidLibraryTab(activeTab)) {
-      setTab(activeTab)
-    }
-  }, [activeTab])
-
-  useEffect(() => {
-    const fromPath = resolveTabFromPath(location.pathname)
-    if (fromPath) {
-      setTab(fromPath)
-    }
-  }, [location.pathname])
+  const [localOverride, setLocalOverride] = useState<{ key: string; tab?: LibraryTab }>({ key: syncKey })
+  const tab: LibraryTab =
+    localOverride.key === syncKey && localOverride.tab !== undefined ? localOverride.tab : derivedTab
 
   function handleSelectTab(nextTab: LibraryTab) {
-    setTab(nextTab)
-    navigate(`/library/${nextTab}`)
+    const nextPath = `/library/${nextTab}`
+    setLocalOverride({ key: `${activeTab ?? ''}|${nextPath}`, tab: nextTab })
+    navigate(nextPath)
   }
 
   return (

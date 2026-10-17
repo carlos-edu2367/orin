@@ -91,7 +91,7 @@ export function PlanApprovalCard({
           )}
           {planPath && (
             <span
-              className="rounded-md border border-[var(--border-subtle)] bg-black/20 px-2 py-0.5 font-mono text-[11px] text-[var(--text-secondary)]"
+              className="rounded-md border border-[var(--border-subtle)] bg-[var(--bg-subtle)] px-2 py-0.5 font-mono text-[11px] text-[var(--text-secondary)]"
               data-testid="plan-approval-path"
             >
               {planPath}
@@ -101,7 +101,7 @@ export function PlanApprovalCard({
       </header>
 
       <div
-        className="plan-approval-card__body mb-4 max-h-[420px] overflow-y-auto rounded-lg border border-[var(--border-subtle)] bg-black/15 p-3 text-[13px]"
+        className="plan-approval-card__body mb-4 max-h-[420px] overflow-y-auto rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-subtle)] p-3 text-[13px]"
         data-testid="plan-approval-content"
       >
         {planContent && planContent.trim() ? (
@@ -163,7 +163,7 @@ export function PlanApprovalCard({
               }}
               placeholder="Descreva os ajustes desejados no plano..."
               aria-label="Ajustes no plano"
-              className="flex-1 rounded-lg border border-[var(--border-subtle)] bg-black/25 px-3 py-1.5 text-[12px] text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:border-[var(--accent-primary)] focus:outline-none"
+              className="flex-1 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-subtle)] px-3 py-1.5 text-[12px] text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:border-[var(--accent-primary)] focus:outline-none"
             />
             <button
               type="button"
