@@ -22,6 +22,7 @@ from types import MappingProxyType
 from typing import Any, Callable, Mapping
 
 from agentos.installation import orin_paths
+from agentos.agentic.tools.public_names import public_subagent_type
 from agentos.settings import EffectiveSettings, detect_changes, empty_settings, load_effective_settings
 
 from agentos.reading.vision import VisionUnavailable
@@ -39,6 +40,14 @@ from .workspace import resolve_workspace
 
 
 logger = logging.getLogger(__name__)
+
+
+def _emit_lifecycle_safely(bus: Any, event: HookEvent, **payload: Any) -> None:
+    """A lifecycle event that fails to emit must never change the outcome of the work it describes."""
+    try:
+        bus.emit(event, **payload)
+    except Exception:  # noqa: BLE001 - lifecycle never breaks a turn
+        logger.exception("lifecycle emit failed for %s", getattr(event, "value", event))
 
 
 _GENERIC_MODEL_TOKENS = frozenset({
@@ -1492,19 +1501,25 @@ class TurnSession:
     def _execute_subagent_run(self, **kwargs: Any) -> ToolOutcome:
         bus = self.lifecycle
         agent_id = str(kwargs.get("agent_id") or "")
-        agent_type = str(kwargs.get("builtin_key") or kwargs.get("clean") or "")
+        # Public (Claude Code) type name, so hooks can match Explore/Plan/general-purpose.
+        agent_type = public_subagent_type(str(kwargs.get("builtin_key") or kwargs.get("clean") or ""))
         if bus is not None:
-            bus.emit(HookEvent.SUBAGENT_START, agent_id=agent_id, agent_type=agent_type)
-        outcome = self._execute_subagent_run_inner(**kwargs)
-        if bus is not None:
-            bus.emit(
-                HookEvent.SUBAGENT_STOP,
-                agent_id=agent_id,
-                agent_type=agent_type,
-                stop_hook_active=False,
-                status=str(getattr(outcome, "status", "")),
-            )
-        return outcome
+            _emit_lifecycle_safely(bus, HookEvent.SUBAGENT_START, agent_id=agent_id, agent_type=agent_type)
+        status = "failed"  # a crash inside the subagent still closes the start/stop pair
+        try:
+            outcome = self._execute_subagent_run_inner(**kwargs)
+            status = str(getattr(outcome, "status", "") or "failed")
+            return outcome
+        finally:
+            if bus is not None:
+                _emit_lifecycle_safely(
+                    bus,
+                    HookEvent.SUBAGENT_STOP,
+                    agent_id=agent_id,
+                    agent_type=agent_type,
+                    stop_hook_active=False,
+                    status=status,
+                )
 
     def _execute_subagent_run_inner(
         self,

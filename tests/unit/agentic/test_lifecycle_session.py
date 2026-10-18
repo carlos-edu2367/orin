@@ -126,3 +126,22 @@ def test_repository_cannot_turn_on_public_names(tmp_path: Path) -> None:
 def _write_json(path: Path, data: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data), encoding="utf-8")
+
+
+def test_crashed_subagent_still_emits_subagent_stop_with_public_type(tmp_path: Path) -> None:
+    import pytest
+
+    bus, events = _bus()
+    session = _make_session(tmp_path, [{"role": "user", "content": "x"}], lifecycle=bus)
+
+    def crash(**_kwargs):
+        raise RuntimeError("subagent crashed")
+
+    session._execute_subagent_run_inner = crash
+    with pytest.raises(RuntimeError):
+        session._execute_subagent_run(agent_id="agent-1", clean="explore", builtin_key="explore")
+    starts = [dict(e.payload) for e in events if e.name is HookEvent.SUBAGENT_START]
+    stops = [dict(e.payload) for e in events if e.name is HookEvent.SUBAGENT_STOP]
+    assert len(starts) == 1 and len(stops) == 1
+    assert starts[0]["agent_type"] == "Explore" and stops[0]["agent_type"] == "Explore"
+    assert stops[0]["status"] == "failed" and stops[0]["agent_id"] == "agent-1"

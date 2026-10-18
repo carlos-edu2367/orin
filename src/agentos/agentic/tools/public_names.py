@@ -357,6 +357,11 @@ def internal_name(name: str) -> str:
     return _INTERNAL_BY_LOWER_PUBLIC.get(name.lower(), name)
 
 
+def public_subagent_type(internal: str) -> str:
+    """The Claude Code name of a built-in subagent type (``explore`` -> ``Explore``), else unchanged."""
+    return _SUBAGENT_TYPES_OUT.get(str(internal or "").strip().lower(), str(internal or ""))
+
+
 def public_schema(internal: str) -> tuple[str, dict[str, Any]] | None:
     entry = _PUBLIC_SCHEMAS.get(internal)
     if entry is None:
