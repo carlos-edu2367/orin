@@ -4,6 +4,8 @@ import json
 import os
 from pathlib import Path
 
+import pytest
+
 from agentos.settings import load_effective_settings, merge_settings
 from agentos.settings.paths import SettingsPaths, claude_user_dir, orin_managed_dir, orin_user_dir
 
@@ -161,3 +163,57 @@ def test_user_dir_env_override_is_respected(tmp_path: Path, monkeypatch) -> None
     monkeypatch.delenv("ORIN_USER_DIR")
     assert orin_user_dir() == Path.home() / ".orin"
     assert os.environ.get("ORIN_USER_DIR") is None
+
+
+_HOSTILE_PROJECT_FILES = {
+    "invalid_utf8": b'{"a":"\xff"}',
+    "utf16_with_bom": json.dumps({"a": 1}).encode("utf-16"),
+    "deep_brackets": ("[" * 200_000 + "]" * 200_000).encode("ascii"),
+    "deep_objects": ('{"a":' * 5000 + "1" + "}" * 5000).encode("ascii"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(_HOSTILE_PROJECT_FILES), ids=sorted(_HOSTILE_PROJECT_FILES))
+def test_hostile_project_file_never_drops_managed_or_user_layers(tmp_path: Path, name: str) -> None:
+    project = tmp_path / "repo"
+    managed = orin_managed_dir() / "managed-settings.json"
+    _write(managed, {"permissions": {"deny": ["Bash(rm *)"]}})
+    _write(orin_user_dir() / "settings.json", {"model": "user-model"})
+    target = project / ".claude" / "settings.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(_HOSTILE_PROJECT_FILES[name])
+
+    settings = load_effective_settings(project)
+
+    assert ("Bash(rm *)", "managed") in settings.permission_rules("deny")
+    assert settings.get("model") == "user-model"
+    project_errors = [error for error in settings.errors if Path(error.path) == target]
+    assert len(project_errors) == 1
+
+
+def test_unexpected_error_in_one_file_does_not_drop_other_layers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from agentos.settings import loader
+
+    project = tmp_path / "repo"
+    _write(orin_user_dir() / "settings.json", {"model": "user-model"})
+    _write(project / ".orin" / "settings.json", {"model": "project-model"})
+    real_read = loader._read
+
+    def exploding_read(path: Path):
+        if path.parent.name == ".orin" and path.name == "settings.json":
+            raise RuntimeError("boom")
+        return real_read(path)
+
+    monkeypatch.setattr(loader, "_read", exploding_read)
+    settings = load_effective_settings(project)
+    assert settings.get("model") == "user-model"
+    assert any(Path(error.path).parent.name == ".orin" for error in settings.errors)
+
+
+def test_nesting_depth_is_bounded(tmp_path: Path) -> None:
+    project = tmp_path / "repo"
+    nested = '{"a":' * 40 + "1" + "}" * 40
+    _write(project / ".orin" / "settings.json", nested)
+    settings = load_effective_settings(project)
+    assert settings.get("a") is None
+    assert any("deeper" in error.message or "nest" in error.message for error in settings.errors)

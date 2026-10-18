@@ -14,6 +14,7 @@ from .paths import SettingsPaths
 
 LAYER_ORDER = ("user", "project", "local", "cli", "managed")  # lowest -> highest
 MAX_SETTINGS_BYTES = 1024 * 1024
+MAX_SETTINGS_DEPTH = 32  # bounds merge, provenance and copy work on hostile files
 _FILTERABLE_SOURCES = {"user", "project", "local"}
 
 # Never honoured from a repository's settings: they are organisation/user decisions.
@@ -101,24 +102,49 @@ def _filter_project(data: dict[str, Any], *, trusted: bool) -> dict[str, Any]:
     return filtered
 
 
+def _nesting_depth(value: Any) -> int:
+    """Container depth, computed iteratively so a hostile file cannot exhaust the stack."""
+    deepest = 0
+    stack: list[tuple[Any, int]] = [(value, 0)]
+    while stack:
+        node, level = stack.pop()
+        if isinstance(node, Mapping):
+            deepest = max(deepest, level + 1)
+            stack.extend((child, level + 1) for child in node.values())
+        elif isinstance(node, list):
+            deepest = max(deepest, level + 1)
+            stack.extend((child, level + 1) for child in node)
+    return deepest
+
+
 def _read(path: Path) -> tuple[dict[str, Any] | None, str | None]:
     try:
         if not path.is_file():
             return None, None
-        size = path.stat().st_size
-        if size > MAX_SETTINGS_BYTES:
-            return None, f"file is larger than {MAX_SETTINGS_BYTES} bytes"
-        raw = path.read_text(encoding="utf-8-sig")
+        # Bounded read: the size is checked on the bytes actually read, not on a
+        # stat taken earlier, so a file that grows between the two cannot bypass it.
+        with path.open("rb") as handle:
+            raw_bytes = handle.read(MAX_SETTINGS_BYTES + 1)
     except OSError as error:
         return None, f"cannot read file: {error}"
+    if len(raw_bytes) > MAX_SETTINGS_BYTES:
+        return None, f"file is larger than {MAX_SETTINGS_BYTES} bytes"
+    try:
+        raw = raw_bytes.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return None, "file is not valid UTF-8"
     if not raw.strip():
         return {}, None
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError as error:
         return None, f"invalid JSON at line {error.lineno} column {error.colno}: {error.msg}"
+    except RecursionError:
+        return None, "JSON nesting is too deep"
     if not isinstance(parsed, dict):
         return None, "the top level must be a JSON object"
+    if _nesting_depth(parsed) > MAX_SETTINGS_DEPTH:
+        return None, f"settings nest deeper than {MAX_SETTINGS_DEPTH} levels"
     return parsed, None
 
 
@@ -191,14 +217,20 @@ def load_effective_settings(
         if layer in _FILTERABLE_SOURCES and layer not in allowed_sources:
             continue
         for path in files:
-            data, error = _read(path)
-            if error is not None:
-                errors.append(SettingsError(str(path), error))
+            # One bad file must never cost another file's layer: every failure is
+            # recorded against the file that caused it and loading continues.
+            try:
+                data, error = _read(path)
+                if error is not None:
+                    errors.append(SettingsError(str(path), error))
+                    continue
+                if data is None:
+                    continue
+                if layer in {"project", "local"}:
+                    data = _filter_project(data, trusted=trusted)
+            except Exception as failure:  # noqa: BLE001 - recorded, never fatal
+                errors.append(SettingsError(str(path), f"unexpected error: {type(failure).__name__}"))
                 continue
-            if data is None:
-                continue
-            if layer in {"project", "local"}:
-                data = _filter_project(data, trusted=trusted)
             layers.append(SettingsLayer(layer, path, data))
     merged: dict[str, Any] = {}
     provenance: dict[str, str] = {}

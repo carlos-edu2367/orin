@@ -8,6 +8,7 @@ reported.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import platform
 import re
@@ -35,6 +36,9 @@ from .lifecycle import HookEvent, LifecycleBus
 from .phases import PhaseController
 from .runtime import AgenticLimits, AgenticTurnRuntime
 from .workspace import resolve_workspace
+
+
+logger = logging.getLogger(__name__)
 
 
 _GENERIC_MODEL_TOKENS = frozenset({
@@ -2174,7 +2178,12 @@ class TurnSession:
         try:
             self.effective_settings = load_effective_settings(self.workspace.root)
         except Exception:  # noqa: BLE001 - settings never stop a turn from starting
-            self.effective_settings = empty_settings()
+            logger.exception("effective settings failed to load; keeping managed settings only")
+            try:
+                # Managed layers survive even when the whole load fails: they are organisation policy.
+                self.effective_settings = load_effective_settings(None, sources=())
+            except Exception:  # noqa: BLE001
+                self.effective_settings = empty_settings()
         if self.lifecycle is None:
             self.lifecycle = LifecycleBus()
         self.lifecycle.bind(

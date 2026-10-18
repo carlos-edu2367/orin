@@ -77,7 +77,10 @@ def _replace(source: Path, target: Path) -> None:
 def _read_object(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
-    raw = path.read_text(encoding="utf-8-sig")
+    try:
+        raw = path.read_bytes().decode("utf-8-sig")
+    except UnicodeDecodeError as error:
+        raise SettingsWriteError(f"refusing to overwrite non-UTF-8 file {path}") from error
     if not raw.strip():
         return {}
     try:

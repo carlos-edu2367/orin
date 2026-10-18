@@ -88,3 +88,12 @@ def test_stale_lock_is_recovered(tmp_path: Path) -> None:
     os.utime(lock, (old, old))
     update_settings_file(target, lambda data: data.update(ok=True))
     assert json.loads(target.read_text(encoding="utf-8")) == {"ok": True}
+
+
+def test_refuses_to_overwrite_non_utf8_file_and_leaves_bytes_unchanged(tmp_path: Path) -> None:
+    target = tmp_path / "settings.json"
+    original = json.dumps({"model": "x"}).encode("utf-16")
+    target.write_bytes(original)
+    with pytest.raises(SettingsWriteError):
+        update_settings_file(target, lambda data: data.setdefault("permissions", {}))
+    assert target.read_bytes() == original
