@@ -1593,7 +1593,14 @@ class TurnSession:
         # Public (Claude Code) type name, so hooks can match Explore/Plan/general-purpose.
         agent_type = public_subagent_type(str(kwargs.get("builtin_key") or kwargs.get("clean") or ""))
         if bus is not None:
-            _emit_lifecycle_safely(bus, HookEvent.SUBAGENT_START, agent_id=agent_id, agent_type=agent_type)
+            start = None
+            try:
+                start = bus.emit(HookEvent.SUBAGENT_START, agent_id=agent_id, agent_type=agent_type)
+            except Exception:  # noqa: BLE001 - lifecycle never breaks a delegation
+                logger.exception("lifecycle emit failed for SubagentStart")
+            context = [item for item in (start.additional_context if start is not None else []) if item]
+            if context and isinstance(kwargs.get("task_text"), str):
+                kwargs["task_text"] = f"{kwargs['task_text']}\n\n{system_reminder(chr(10).join(context))}"
         status = "failed"  # a crash inside the subagent still closes the start/stop pair
         try:
             outcome = self._execute_subagent_run_inner(**kwargs)
@@ -2157,13 +2164,22 @@ class TurnSession:
         system prompt, extra prompt-level context, and a reason when a UserPromptSubmit
         hook refused the prompt.
         """
-        result: dict[str, Any] = {"session_context": [], "prompt_context": [], "blocked": None}
+        result: dict[str, Any] = {"session_context": [], "prompt_context": [], "blocked": None, "config_blocked": None}
         bus = self.lifecycle
         if bus is None:
             return result
         try:
+            refused: list[tuple[Path, str]] = []
             for source, path in self._config_change_events():
-                bus.emit(HookEvent.CONFIG_CHANGE, source=source, file_path=str(path))
+                change = bus.emit(HookEvent.CONFIG_CHANGE, source=source, file_path=str(path))
+                # Managed policy changes always apply; any other change a hook refuses keeps the turn from running.
+                if (change.blocked or change.stop) and source != "policy_settings":
+                    refused.append((path, change.reason or change.stop_reason or "blocked by hook"))
+            if refused:
+                from agentos.settings.watcher import forget
+
+                forget(f"{self.turn.get('conversation_id') or ''}|{self.workspace.root}", [path for path, _ in refused])
+                result["config_blocked"] = "; ".join(f"{path.name}: {reason}" for path, reason in refused)[:2000]
             memory = getattr(self, "_memory", None)
             if memory is not None:
                 from agentos.memory_files import instructions_payload
@@ -3043,6 +3059,7 @@ class TurnSession:
             hook_engine=self.hook_engine,
             lifecycle=self.lifecycle,
             prompt_block_reason=turn_start["blocked"],
+            config_block_reason=turn_start["config_blocked"],
             phase_controller=phase_controller,
             learning_sink=learning_sink_for(
                 self.memory, self._record,

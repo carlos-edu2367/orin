@@ -1926,6 +1926,39 @@ class AgentToolset:
             outcome.summary = public_text(outcome.summary)
         return outcome
 
+    def _task_hook_block(self, bus: LifecycleBus, internal: str, arguments: Mapping[str, Any]) -> ToolOutcome | None:
+        """TaskCreated/TaskCompleted run before the change; a block leaves the task list exactly as it was."""
+        if internal == "task_create":
+            event = HookEvent.TASK_CREATED
+            payload = {
+                "task_id": self._next_task_id(),
+                "task_subject": str(arguments.get("subject") or arguments.get("content") or arguments.get("title") or ""),
+                "task_description": str(arguments.get("description") or ""),
+            }
+        elif internal == "task_update" and str(arguments.get("status") or "").strip().lower() == "completed":
+            event = HookEvent.TASK_COMPLETED
+            task_id = str(arguments.get("taskId") or arguments.get("task_id") or arguments.get("id") or "")
+            found = next(
+                (item for item in self._todos if str(item.get("id")) == task_id or (task_id.isdigit() and str(item.get("id")) == f"todo_{task_id}")),
+                {},
+            )
+            payload = {
+                "task_id": task_id,
+                "task_subject": str(found.get("subject") or found.get("content") or ""),
+                "task_description": str(found.get("description") or ""),
+            }
+        else:
+            return None
+        decision = self._emit_lifecycle(bus, event, **payload)
+        if decision is None or not (decision.blocked or decision.permission_decision == "deny"):
+            return None
+        reason = decision.reason or "blocked by hook"
+        return ToolOutcome(
+            "failed", "Bloqueado por hook",
+            f"A {event.value} hook refused this change: {reason}",
+            {"tool_kind": "planning"}, "HOOK_BLOCKED_TASK",
+        )
+
     def invoke(
         self,
         name: str,
@@ -1972,6 +2005,9 @@ class AgentToolset:
                     tool_input = _safe_public_input(internal, arguments)
                 except Exception:  # noqa: BLE001 - a hook's malformed input must never crash the turn
                     logger.warning("PreToolUse hook returned input that cannot be applied to %s", internal)
+        blocked_task = self._task_hook_block(bus, internal, arguments)
+        if blocked_task is not None:
+            return self._speak_public(blocked_task)
         cwd_before = self._current_cwd
         hook_permission = pre.permission_decision if pre is not None else None
         outcome = self._invoke_unobserved(
@@ -2042,22 +2078,7 @@ class AgentToolset:
         cwd_before: Path,
     ) -> None:
         payload = outcome.payload or {}
-        if internal == "task_create":
-            task = payload.get("task") if isinstance(payload.get("task"), Mapping) else {}
-            self._emit_lifecycle(
-                bus,
-                HookEvent.TASK_CREATED,
-                task_id=str(task.get("id") or payload.get("task_id") or ""),
-                task_subject=str(arguments.get("subject") or arguments.get("content") or ""),
-                task_description=str(arguments.get("description") or ""),
-            )
-        elif internal == "task_update" and str(arguments.get("status") or "") == "completed":
-            self._emit_lifecycle(
-                bus,
-                HookEvent.TASK_COMPLETED,
-                task_id=str(arguments.get("taskId") or arguments.get("task_id") or arguments.get("id") or ""),
-            )
-        elif internal == "enter_worktree":
+        if internal == "enter_worktree":
             self._emit_lifecycle(bus, HookEvent.WORKTREE_CREATE, worktree=dict(payload.get("worktree") or {}))
         elif internal == "exit_worktree" and str(arguments.get("action") or "keep") == "remove":
             # exit_worktree clears the active name before this runs, so the outcome carries it

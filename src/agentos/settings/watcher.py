@@ -32,3 +32,13 @@ def detect_changes(key: str, paths: Iterable[Path]) -> tuple[Path, ...]:
 def reset_snapshots() -> None:
     with _lock:
         _snapshots.clear()
+
+
+def forget(key: str, paths: Iterable[Path]) -> None:
+    """Report these files as changed again on the next check (a ConfigChange a hook refused)."""
+    with _lock:
+        snapshot = _snapshots.get(key)
+        if snapshot is None:
+            return
+        for path in paths:
+            snapshot.pop(Path(path), None)

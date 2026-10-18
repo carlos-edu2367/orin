@@ -260,6 +260,7 @@ class AgenticTurnRuntime:
         compact_request: str | None = None,
         effort: str | None = None,
         on_completed: Callable[[], None] | None = None,
+        config_block_reason: str | None = None,
     ) -> None:
         self.store, self.provider = store, provider
         # Set for a /compact turn: the turn only summarizes the conversation (instructions may be empty).
@@ -271,6 +272,8 @@ class AgenticTurnRuntime:
         self.lifecycle = lifecycle
         # Set when a UserPromptSubmit hook refused the prompt: the turn ends before any model call.
         self.prompt_block_reason = prompt_block_reason
+        # Set when a ConfigChange hook refused a settings change: the turn does not run until a hook accepts it.
+        self.config_block_reason = config_block_reason
         # Releases what the turn owns outside the loop (its hook dispatcher); called once from close().
         self._on_close = on_close
         # Notes that reach the model as one <system-reminder> user message before the next request.
@@ -603,6 +606,16 @@ class AgenticTurnRuntime:
             self.store.finish(turn, code="HOOK_BLOCKED_PROMPT")
             self._settle_quality(turn, "completed")
             return AgenticRunResult("completed", 0, 0, "HOOK_BLOCKED_PROMPT")
+        if self.config_block_reason:
+            self.store.delta(
+                turn,
+                "⚠️ Uma mudança de configuração foi bloqueada por um hook, então esta mensagem não foi executada: "
+                f"{self.config_block_reason}. Desfaça a mudança ou ajuste o hook e envie a mensagem de novo.",
+            )
+            self._life(turn, "completed")
+            self.store.finish(turn, code="HOOK_BLOCKED_CONFIG")
+            self._settle_quality(turn, "completed")
+            return AgenticRunResult("completed", 0, 0, "HOOK_BLOCKED_CONFIG")
         if self.compact_request is not None:
             return self._run_manual_compaction(turn)
         messages = list(self.store.history_for_turn(turn))

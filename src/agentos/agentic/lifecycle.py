@@ -70,7 +70,7 @@ NON_BLOCKING_EVENTS: frozenset[HookEvent] = frozenset({
 })
 
 # Non-blocking events that may still inject context into the conversation.
-_CONTEXT_EVENTS = frozenset({HookEvent.SESSION_START, HookEvent.SUBAGENT_START})
+_CONTEXT_EVENTS = frozenset({HookEvent.SESSION_START, HookEvent.SUBAGENT_START, HookEvent.POST_TOOL_USE_FAILURE})
 _DECISION_RANK = {"allow": 1, "ask": 2, "deny": 3}
 
 
