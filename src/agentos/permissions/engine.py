@@ -11,7 +11,7 @@ from typing import Any
 from agentos.code_mode.models import CodePermissionMode, normalize_permission_mode
 from agentos.settings import EffectiveSettings
 
-from .paths import is_protected_path
+from .paths import is_protected_path, workspace_path
 from .rules import EDIT_FAMILY, MatchContext, PermissionRule, command_allowed, parse_rule, rule_matches
 from .shell import analyze_command, default_shell
 
@@ -88,8 +88,7 @@ class PermissionEngine:
         raw = args.get("path") or args.get("file_path") or args.get("notebook_path")
         if not raw:
             return None
-        candidate = Path(str(raw))
-        return candidate if candidate.is_absolute() else self.workspace_root / candidate
+        return workspace_path(str(raw), self.workspace_root)
 
     def _inside(self, path: Path) -> bool:
         try:
@@ -108,20 +107,22 @@ class PermissionEngine:
     def _command_tokens(self, subcommand: str) -> list[str]:
         return [token.strip("'\"") for token in subcommand.split(" ")[1:] if token and not token.startswith("-")]
 
-    def _token_path(self, token: str) -> Path:
-        # "/tmp/x" is not absolute on Windows (no drive) but still means "outside":
-        # resolve it from the filesystem root instead of from the workspace.
+    def _token_paths(self, token: str) -> list[Path]:
+        """Every meaning a shell token can have as a path.
+
+        A root-relative token ("/tmp/x", "\.env") is checked both as the real
+        filesystem path the shell opens and as the workspace path the tools open.
+        """
         if token.startswith("~"):
-            return Path(token).expanduser()
-        candidate = Path(token)
-        if candidate.is_absolute() or token.startswith(("/", "\\")):
-            return candidate
-        return self.workspace_root / candidate
+            return [Path(token).expanduser()]
+        if token.startswith(("/", "\\")):
+            return [Path(token), workspace_path(token, self.workspace_root)]
+        return [workspace_path(token, self.workspace_root)]
 
     def _mentions_protected(self, analysis) -> bool:
         for sub in analysis.subcommands:
             for token in self._command_tokens(sub):
-                if is_protected_path(self._token_path(token), workspace_root=self.workspace_root):
+                if any(is_protected_path(path, workspace_root=self.workspace_root) for path in self._token_paths(token)):
                     return True
         return False
 
@@ -133,9 +134,9 @@ class PermissionEngine:
             if name not in SAFE_FILE_COMMANDS:
                 return False
             for token in self._command_tokens(sub):
-                target = self._token_path(token)
-                if not self._inside(target) or is_protected_path(target, workspace_root=self.workspace_root):
-                    return False
+                for target in self._token_paths(token):
+                    if not self._inside(target) or is_protected_path(target, workspace_root=self.workspace_root):
+                        return False
         return True
 
     def _bash_allowed(self, analysis, args: Mapping[str, Any]) -> PermissionRule | None:

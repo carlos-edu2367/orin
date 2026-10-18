@@ -76,6 +76,29 @@ def _resolved(path: Path) -> Path:
         return Path(os.path.abspath(path))
 
 
+_DRIVE_PREFIX = re.compile(r"^[A-Za-z]:")
+
+
+def workspace_path(raw: str, root: Path) -> Path:
+    """Target of a tool path, resolved the way ``ConversationWorkspace.resolve`` does.
+
+    Separators are normalized and leading separators dropped, so ``/.env``,
+    ``\.env`` and ``//.env`` name the workspace file the tool will open.
+    Drive-qualified paths keep their plain meaning.
+    """
+    text = str(raw).strip()
+    if _DRIVE_PREFIX.match(text):
+        candidate = Path(text)
+        return candidate if candidate.is_absolute() else root / candidate
+    segments = [segment for segment in text.replace("\\", "/").split("/") if segment not in ("", ".")]
+    return root.joinpath(*segments) if segments else root
+
+
+def _ntfs_name(part: str) -> str:
+    """The name NTFS opens for a component: a stream suffix is ignored, trailing dots and spaces are not part of it."""
+    return part.split(":", 1)[0].rstrip(" .")
+
+
 def _relative(target: Path, base: Path) -> str | None:
     target_text = _posix(_resolved(target))
     base_text = _posix(_resolved(base)).rstrip("/")
@@ -84,7 +107,10 @@ def _relative(target: Path, base: Path) -> str | None:
     if compare_target == compare_base:
         return ""
     if compare_target.startswith(compare_base + "/"):
-        return target_text[len(base_text) + 1:]
+        relative = target_text[len(base_text) + 1:]
+        if _CASE_INSENSITIVE:
+            relative = "/".join(name for name in (_ntfs_name(part) for part in relative.split("/")) if name)
+        return relative
     return None
 
 

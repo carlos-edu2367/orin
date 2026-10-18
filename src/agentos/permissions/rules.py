@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 
 from agentos.agentic.tools.public_names import internal_name
 
-from .paths import path_rule_matches
+from .paths import path_rule_matches, workspace_path
 from .shell import ShellAnalysis, analyze_command
 
 _ASSIGNMENT_WORD = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
@@ -203,8 +203,7 @@ def _target(internal: str, arguments: Mapping[str, Any], ctx: MatchContext) -> P
         return ctx.workspace_root
     if not raw:
         return None
-    candidate = Path(str(raw))
-    return candidate if candidate.is_absolute() else ctx.workspace_root / candidate
+    return workspace_path(str(raw), ctx.workspace_root)
 
 
 def rule_matches(
