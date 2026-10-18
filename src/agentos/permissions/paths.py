@@ -114,6 +114,10 @@ def path_rule_matches(spec: str, target: Path, *, workspace_root: Path, home: Pa
     rx = glob_to_regex(pattern, case_insensitive=_CASE_INSENSITIVE)
     if "/" not in pattern:
         return any(rx.match(part) for part in relative.split("/") if part)
+    if pattern.endswith("/**"):
+        # "dir/**" also covers the directory itself: a search rooted at it reads its contents.
+        if glob_to_regex(pattern[:-3], case_insensitive=_CASE_INSENSITIVE).match(relative):
+            return True
     return bool(rx.match(relative))
 
 
