@@ -124,3 +124,13 @@ def test_payload_is_read_only() -> None:
         pass
     else:
         raise AssertionError("payload must be immutable")
+
+
+def test_updated_tool_output_merges_first_and_is_dropped_for_non_blocking() -> None:
+    from agentos.agentic.lifecycle import HookEvent, LifecycleBus, LifecycleDecision
+
+    bus = LifecycleBus()
+    bus.subscribe(lambda event: LifecycleDecision(updated_tool_output={"a": 1}))
+    bus.subscribe(lambda event: LifecycleDecision(updated_tool_output={"a": 2}))
+    assert bus.emit(HookEvent.POST_TOOL_USE).updated_tool_output == {"a": 1}
+    assert bus.emit(HookEvent.POST_COMPACT).updated_tool_output is None

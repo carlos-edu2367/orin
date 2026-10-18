@@ -85,6 +85,7 @@ class LifecycleDecision:
     permission_decision: str | None = None
     reason: str | None = None
     updated_input: dict[str, Any] | None = None
+    updated_tool_output: Any = None
     blocked: bool = False
     stop: bool = False
     stop_reason: str | None = None
@@ -100,6 +101,8 @@ class LifecycleDecision:
             self.reason = other.reason
         if self.updated_input is None and other.updated_input is not None:
             self.updated_input = dict(other.updated_input)
+        if self.updated_tool_output is None and other.updated_tool_output is not None:
+            self.updated_tool_output = other.updated_tool_output
         self.blocked = self.blocked or other.blocked
         if other.stop and not self.stop:
             self.stop = True
