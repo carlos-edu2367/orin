@@ -30,6 +30,14 @@ def test_the_state_needs_enough_turns_and_time(tmp_path: Path) -> None:
     assert state.due("u", now + timedelta(hours=25)) is True
 
 
+def test_a_naive_timestamp_in_the_state_file_is_read_as_utc(tmp_path: Path) -> None:
+    path = tmp_path / "state.json"
+    path.write_text(json.dumps({"u": {"turns": 9, "last_run": "2026-01-01T00:00:00"}}), encoding="utf-8")
+    state = ConsolidationState(path)
+    assert state.due("u", datetime(2026, 1, 1, 12, tzinfo=UTC)) is False
+    assert state.due("u", datetime(2026, 1, 2, 1, tzinfo=UTC)) is True
+
+
 def test_a_corrupt_state_file_starts_over(tmp_path: Path) -> None:
     path = tmp_path / "state.json"
     path.write_text("{not json", encoding="utf-8")

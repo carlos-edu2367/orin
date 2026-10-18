@@ -76,6 +76,9 @@ class ConsolidationState:
             last = datetime.fromisoformat(str(record["last_run"])) if record.get("last_run") else None
         except ValueError:
             last = None
+        if last is not None and last.tzinfo is None:
+            # A hand-edited or foreign timestamp without an offset is read as UTC, never a crash.
+            last = last.replace(tzinfo=UTC)
         return last is None or now - last >= CONSOLIDATION_INTERVAL
 
     def mark_run(self, user_id: str, now: datetime) -> None:
