@@ -122,3 +122,23 @@ def test_tool_stop_request_ends_the_turn() -> None:
     provider = ToolThenText()
     result = AgenticTurnRuntime(store=store, provider=provider, toolset=Toolset()).run("t")
     assert result.error_code == "HOOK_STOPPED" and provider.n == 1 and store.finished[-1] == (False, "HOOK_STOPPED")
+
+
+def test_blocked_prompt_is_erased_before_the_turn_finishes() -> None:
+    # W2-R6: the runtime asks the store to erase the refused prompt, and only then finishes the turn.
+    class ErasingStore(Store):
+        def __init__(self):
+            super().__init__()
+            self.order = []
+
+        def exclude_from_context(self, turn):
+            self.order.append("erased")
+
+        def finish(self, turn, *, failed=False, code=None):
+            self.order.append("finished")
+            super().finish(turn, failed=failed, code=code)
+
+    store = ErasingStore()
+    provider = Texts("never")
+    AgenticTurnRuntime(store=store, provider=provider, prompt_block_reason="secrets in prompt").run("t")
+    assert store.order == ["erased", "finished"] and provider.requests == []

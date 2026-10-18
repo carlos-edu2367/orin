@@ -2494,24 +2494,27 @@ class TurnSession:
         history = self.store.history_for_turn(self.turn)
         task = next((str(item.get("content") or "") for item in reversed(history) if item.get("role") == "user"), "")
         turn_start = self._emit_turn_start_events(history, task)
+        # W2-R6: a prompt a UserPromptSubmit hook refused is not used for anything else in this turn: no @-mention
+        # reads, no memory ranking, no plan scaffold, no skill catalog. The runtime only reports the block.
+        prompt_blocked = bool(turn_start["blocked"])
         self._settings_session_context = list(turn_start["session_context"])
         try:
             toolset._extra_env.update(self._hook_extra_env())
         except Exception:  # noqa: BLE001 - hook env never stops a turn
             pass
-        if task:
+        if task and not prompt_blocked:
             try:
                 from agentos.code_mode.mentions import expand_file_mentions
 
                 expand_file_mentions(task, self.workspace, self._read_file_state)
             except Exception:
                 pass
-        memories = memories_for_task(self.memory, task)
+        memories = [] if prompt_blocked else memories_for_task(self.memory, task)
         code_mode_context = ""
         if self.turn.get("code_mode") == "code":
             from agentos.code_mode.prompt import build_code_mode_system_prompt
             plan_path = str(self.turn.get("code_mode_plan_path") or f".orin/plans/{self.turn['turn_id']}-plan.md")
-            if self._in_plan_mode:
+            if self._in_plan_mode and not prompt_blocked:
                 self._ensure_code_mode_plan(plan_path, task)
                 self._record(
                     AgentActivityEventType.CODE_MODE_PLAN_READY,
@@ -2525,7 +2528,7 @@ class TurnSession:
                 plan_path=plan_path if self._in_plan_mode else None,
                 permits_push=bool(self.turn.get("code_mode_push_authorized")),
             )
-        skill_catalog = self._skill_catalog(task, toolset)
+        skill_catalog = () if prompt_blocked else self._skill_catalog(task, toolset)
         prompt_tool_names = (
             tuple(item.name for item in toolset.definitions() if item.name in CODE_MODE_CORE_TOOLS)
             if self.turn.get("code_mode") == "code"

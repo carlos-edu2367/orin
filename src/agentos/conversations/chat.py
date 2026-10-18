@@ -37,6 +37,12 @@ def _id(prefix: str) -> str: return f"{prefix}_{uuid4().hex}"
 def _title(message: str) -> str: return " ".join(message.split())[:80] or "Nova conversa"
 
 
+# A prompt a UserPromptSubmit hook blocked is erased from what the model sees (W2-R6). Its user message is
+# marked with this status, and history_for_turn skips it together with its turn's assistant message.
+BLOCKED_BY_HOOK_STATUS = "blocked_by_hook"
+BLOCKED_PROMPT_PLACEHOLDER = "[mensagem bloqueada por hook]"
+
+
 def _attachment_label(record: Mapping[str, object]) -> str:
     kinds = {"image": "imagem", "pdf": "PDF", "office": "documento", "text": "texto"}
     kind = kinds.get(str(record.get("kind") or ""), "arquivo")
@@ -1652,6 +1658,29 @@ class PostgresChatStore:
                 },
             )
 
+    def exclude_from_context(self, turn: dict[str, object]) -> None:
+        """Erase a hook-blocked prompt from storage and from every later turn's history (W2-R6).
+
+        The user message's text, its command expansion and the conversation title derived from it are
+        replaced, so the refused text is not kept. Only this method marks the message; it does not depend
+        on ``finish`` (kernel-managed turns never call it with a code).
+        """
+        now = datetime.now(UTC)
+        user_message_id = str(turn["user_message_id"])
+        conversation_id = str(turn["conversation_id"])
+        with self._engine.begin() as c:
+            original = c.execute(select(conversation_messages.c.content).where(conversation_messages.c.message_id == user_message_id)).scalar()
+            c.execute(update(conversation_messages).where(conversation_messages.c.message_id == user_message_id).values(
+                content=BLOCKED_PROMPT_PLACEHOLDER, status=BLOCKED_BY_HOOK_STATUS, updated_at=now,
+            ))
+            c.execute(update(conversation_message_commands).where(conversation_message_commands.c.message_id == user_message_id).values(
+                arguments="", expanded_body=BLOCKED_PROMPT_PLACEHOLDER,
+            ))
+            if original is not None:
+                title = c.execute(select(conversations.c.title).where(conversations.c.conversation_id == conversation_id)).scalar()
+                if title is not None and str(title) == _title(str(original)):
+                    c.execute(update(conversations).where(conversations.c.conversation_id == conversation_id).values(title="Mensagem bloqueada", updated_at=now))
+
     def history_for_turn(self, turn: dict[str, object], *, rehydration_budget_tokens: int = 0) -> list[dict[str, object]]:
         """The conversation as the model should see it, including past tool work.
 
@@ -1667,6 +1696,8 @@ class PostgresChatStore:
         """
         with self._engine.connect() as c:
             rows = c.execute(select(conversation_messages.c.message_id, conversation_messages.c.role, conversation_messages.c.content).where(conversation_messages.c.conversation_id == turn["conversation_id"], conversation_messages.c.sequence <= select(conversation_messages.c.sequence).where(conversation_messages.c.message_id == turn["user_message_id"]).scalar_subquery()).order_by(conversation_messages.c.sequence)).mappings().all()
+            blocked_user_ids = {str(row) for row in c.execute(select(conversation_messages.c.message_id).where(conversation_messages.c.conversation_id == turn["conversation_id"], conversation_messages.c.status == BLOCKED_BY_HOOK_STATUS)).scalars()}
+            blocked_turn_rows = c.execute(select(conversation_turns.c.user_message_id, conversation_turns.c.assistant_message_id).where(conversation_turns.c.conversation_id == turn["conversation_id"])).mappings().all() if blocked_user_ids else []
             attachment_rows = c.execute(select(conversation_message_attachments).where(conversation_message_attachments.c.conversation_id == turn["conversation_id"]).order_by(conversation_message_attachments.c.id)).mappings().all()
             command_rows = c.execute(select(
                 conversation_message_commands.c.message_id, conversation_message_commands.c.expanded_body
@@ -1674,6 +1705,9 @@ class PostgresChatStore:
             turn_rows = c.execute(select(
                 conversation_turns.c.turn_id, conversation_turns.c.assistant_message_id
             ).where(conversation_turns.c.conversation_id == turn["conversation_id"])).mappings().all() if rehydration_budget_tokens > 0 else []
+        skipped: set[str] = set(blocked_user_ids)
+        skipped.update(str(row["assistant_message_id"]) for row in blocked_turn_rows if str(row["user_message_id"]) in blocked_user_ids)
+        rows = [row for row in rows if str(row["message_id"]) not in skipped]
         grouped: dict[str, list[dict[str, object]]] = {}
         for row in attachment_rows:
             grouped.setdefault(str(row["message_id"]), []).append(dict(row))

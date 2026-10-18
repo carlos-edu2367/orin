@@ -556,3 +556,35 @@ def test_claim_sets_turn_running_and_cancelled_finish_blocks_code_mode_run_and_d
     assert code_row["caveats"] == "TURN_CANCELLED"
 
 
+
+
+def test_a_prompt_blocked_by_a_hook_never_reaches_a_later_turn() -> None:
+    # W2-R6: the blocked text is erased from storage and skipped by history_for_turn of later turns.
+    from sqlalchemy import select as _select
+
+    from agentos.persistence.postgres.schema import conversation_message_commands
+
+    engine = create_engine("sqlite://", future=True)
+    metadata.create_all(engine)
+    store = PostgresChatStore(engine)
+    first = store.create(
+        user_id="user-1", message="my password is hunter2", provider="openrouter", model_id="model-a", idempotency_key="request-1",
+    )
+    turn = store.claim(first.turn_id)
+    assert turn is not None
+    store.delta(turn, "⚠️ Mensagem bloqueada por um hook: no secrets")
+    store.exclude_from_context(turn)
+    store.finish(turn, code="HOOK_BLOCKED_PROMPT")
+
+    second = store.create(
+        user_id="user-1", conversation_id=first.conversation_id, message="what is two plus two", provider="openrouter",
+        model_id="model-a", idempotency_key="request-2",
+    )
+    next_turn = store.claim(second.turn_id)
+    assert next_turn is not None
+    history = store.history_for_turn(next_turn)
+    assert [item["role"] for item in history] == ["user"]
+    assert history[0]["content"] == "what is two plus two"
+    with engine.connect() as c:
+        stored = c.execute(_select(conversation_messages.c.content).where(conversation_messages.c.message_id == turn["user_message_id"])).scalar()
+    assert "hunter2" not in str(stored)

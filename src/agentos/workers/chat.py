@@ -188,6 +188,12 @@ class _RuntimeStore:
         if not self._worker._kernel_manages(turn):
             self._store.finish(turn, failed=failed, code=code)
 
+    def exclude_from_context(self, turn: dict[str, object]) -> None:
+        # Not gated on kernel management: the erasure must happen on every path that blocked the prompt.
+        excluder = getattr(self._store, "exclude_from_context", None)
+        if callable(excluder):
+            excluder(turn)
+
     def lifecycle(self, turn: dict[str, object], state: str, **payload: object) -> None:
         self._worker._refresh_heartbeat_if_due()
         # Public activity is published by the session before this is called;

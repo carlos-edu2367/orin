@@ -345,6 +345,11 @@ class AgenticTurnRuntime:
         self._stop_continuations = 0
         if self.prompt_block_reason:
             self.store.delta(turn, f"⚠️ Mensagem bloqueada por um hook: {self.prompt_block_reason}")
+            # W2-R6: erase the refused prompt before the turn finishes; if this fails the turn fails loudly
+            # rather than letting the prompt reach the model on the next turn.
+            excluder = getattr(self.store, "exclude_from_context", None)
+            if callable(excluder):
+                excluder(turn)
             self._life(turn, "completed")
             self.store.finish(turn, code="HOOK_BLOCKED_PROMPT")
             self._settle_quality(turn, "completed")

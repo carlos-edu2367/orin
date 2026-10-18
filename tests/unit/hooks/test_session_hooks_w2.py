@@ -118,3 +118,24 @@ def test_agent_verifier_cannot_start_another_verifier(tmp_path):
     assert session._hook_agent("outer check") == "nested=''"
     assert calls == ["outer check"]
     assert session._hook_agent_running is False
+
+
+def test_a_prompt_blocked_by_a_hook_is_not_expanded_or_written_to_a_plan(tmp_path):
+    # W2-R6: a blocked prompt triggers no @-mention read and no plan scaffold.
+    import sys
+    script = tmp_path / "block.py"
+    script.write_text("import sys, json; d=json.load(sys.stdin); sys.exit(2 if 'hunter2' in d['prompt'] else 0)", encoding="utf-8")
+    _user({"hooks": {"UserPromptSubmit": [{"hooks": [{"command": f'"{sys.executable}" "{script}"'}]}]}})
+    store = Store([{"role": "user", "content": "my password is hunter2, plan this @notes.txt"}])
+    (tmp_path / "notes.txt").write_text("notes\n", encoding="utf-8")
+    turn = {**TURN, "code_mode": "code", "permission_mode": "plan_mode", "code_mode_plan_path": ".orin/plans/turn-1-plan.md"}
+    session = TurnSession(
+        turn=turn, store=store, agents_store=Agents(), memory_store=None,
+        provider_factory=lambda: object(), workspace_root=tmp_path, enable_subagents=False,
+    )
+    runtime = session.build_runtime()
+    assert runtime.prompt_block_reason == "blocked by hook"
+    written = [path for path in session.workspace.root.rglob("*") if path.is_file() and ".orin" in path.parts]
+    assert all("hunter2" not in path.read_text(encoding="utf-8", errors="replace") for path in written)
+    assert not any(path.name.endswith("-plan.md") for path in written)
+    assert session._read_file_state == {}
