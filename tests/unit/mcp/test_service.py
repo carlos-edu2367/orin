@@ -179,3 +179,26 @@ def test_removing_a_server_removes_its_oauth_rows(service):
         for table in (mcp_oauth_clients, oauth_pending_authorizations):
             assert connection.execute(select(table)).first() is None
         assert connection.execute(select(oauth_tokens)).first() is None
+
+
+def test_propose_hydrates_transport_and_command_from_catalog_id(service):
+    created = service.propose({
+        "user_id": "u1",
+        "catalog_id": "playwright",
+        "display_name": "Playwright",
+    })
+    assert created["catalog_id"] == "playwright"
+    assert created["transport"] == "stdio"
+    assert created["command"] == "npx"
+    assert "@playwright/mcp@latest" in created["args"]
+    assert created["secret_names"] == []
+
+
+def test_propose_rejects_unknown_catalog_id_without_transport(service):
+    with pytest.raises(McpServiceError, match="catalog"):
+        service.propose({
+            "user_id": "u1",
+            "catalog_id": "nonexistent-catalog",
+            "display_name": "Unknown",
+        })
+

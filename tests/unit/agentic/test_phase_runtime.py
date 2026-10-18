@@ -68,10 +68,10 @@ class _Toolset:
     NAMES = (
         "write_contract", "report_verification", "ask_user", "read_file", "view_file", "transcribe_pdf",
         "list_files", "search_files", "search_code", "project_map", "write_file", "edit_file", "run_command",
-        "verify_project", "verify_frontend", "recall", "remember", "browse_page", "browser_click", "browser_observe",
+        "verify_project", "recall", "remember",
         "create_agent", "ask_agent", "ask_agents", "fetch_url", "web_search",
     )
-    KINDS = {"browse_page": "browser", "browser_click": "browser", "browser_observe": "browser"}
+    KINDS: dict[str, str] = {}
 
     def __init__(self) -> None:
         self._change_events = 0
@@ -92,7 +92,7 @@ class _Toolset:
             payload = arguments if isinstance(arguments, dict) and arguments else {
                 "objective": "Reformular o orçamento.",
                 "acceptance": [{"id": "t", "check": "o total confere", "how": "inspection"}],
-                "toolkits": ["files", "browser"],
+                "toolkits": ["files", "delegation"],
             }
             contract = parse(payload)
             return ToolOutcome("succeeded", "contrato", "ok", {"contract": contract.as_payload()})
@@ -129,7 +129,7 @@ def test_orienting_publishes_a_working_set_not_the_whole_registry() -> None:
 
     published = _published(provider.requests[0])
     assert "write_file" in published and "read_file" in published
-    assert "browse_page" not in published and "ask_agents" not in published
+    assert "ask_agents" not in published
     assert len(published) < len(_Toolset.NAMES)
 
 
@@ -147,8 +147,8 @@ def test_declaring_a_toolkit_opens_it_on_the_next_request() -> None:
     runtime = _runtime(provider, PhaseController())
     runtime.run("turn-1")
 
-    assert "browse_page" not in _published(provider.requests[0])
-    assert "browse_page" in _published(provider.requests[1])
+    assert "ask_agent" not in _published(provider.requests[0])
+    assert "ask_agent" in _published(provider.requests[1])
     assert runtime.phases.current is Phase.EXECUTE
 
 
@@ -328,7 +328,7 @@ def test_verify_project_and_verify_frontend_are_published_during_verification() 
 
     verifying = [r for r in provider.requests if "critério por critério" in str(r["messages"])]
     assert verifying
-    assert {"verify_project", "verify_frontend", "report_verification"} <= _published(verifying[0])
+    assert {"verify_project", "report_verification"} <= _published(verifying[0])
     assert "write_file" not in _published(verifying[0])
 
 

@@ -169,3 +169,37 @@ def test_turn_session_wires_defaults_and_phase_controller_exposes_propose_code_s
         subagents_enabled=False,
     )
     assert "propose_code_session" in stable_prompt
+
+
+def test_propose_code_session_prompt_is_not_redacted_in_activity_event_and_ignores_default_model_placeholder(
+    tmp_path: Path,
+) -> None:
+    from agentos.agentic.models import sanitize_public_mapping
+
+    workspace = ConversationWorkspace(tmp_path, "conv-handoff-redaction")
+    toolset = AgentToolset(
+        workspace,
+        code_mode_active=False,
+        default_provider="openrouter",
+        default_model_id="qwen/qwen-3.7-flash",
+    )
+    long_prompt = "Traduzir aulas 7 e 8 do módulo 5 mantendo formatação markdown.\n" * 40
+    outcome = toolset.propose_code_session(
+        title="Tradução Aulas 7 e 8",
+        prompt=long_prompt,
+        provider="openai",
+        model_id="default",
+    )
+    proposal = outcome.payload["code_session_proposal"]
+    assert proposal["provider"] == "openrouter"
+    assert proposal["model_id"] == "qwen/qwen-3.7-flash"
+
+    sanitized = sanitize_public_mapping(outcome.payload)
+    assert sanitized["code_session_proposal"]["prompt"] == long_prompt.strip()
+    assert sanitized["code_session_proposal"]["prompt"] != "[REDACTED]"
+    # Adversarial check: top-level or nested 'prompt' outside code_session_proposal is STILL redacted!
+    adversarial = sanitize_public_mapping({"prompt": "secret system prompt", "nested": {"prompt": "secret"}})
+    assert adversarial["prompt"] == "[REDACTED]"
+    assert adversarial["nested"]["prompt"] == "[REDACTED]"
+
+

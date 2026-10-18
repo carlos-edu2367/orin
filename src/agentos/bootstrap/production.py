@@ -55,7 +55,7 @@ from agentos.filesystem.local import LocalFilesystemAdapter, LocalWorkspaceRootR
 from agentos.filesystem.service import FilesystemService
 from agentos.terminal.local import LocalTerminalAdapter
 from agentos.terminal.service import TerminalService
-from agentos.browser.playwright_adapter import PlaywrightBrowserAdapter
+from agentos.browser.reference import ReferenceBrowserAdapter
 from agentos.browser.service import BrowserService
 from agentos.tool_runtime.adapters import BrowserNavigateAtomicTool, FilesystemAtomicTool, TerminalCommandAtomicTool
 from agentos.tool_runtime.production import ProductionToolRuntime
@@ -238,7 +238,7 @@ def compose_agentic_tool_runtime(*, workspace_root: str | Path | None = None, en
     )
     browser = BrowserService(
         resource_manager=resource_manager,
-        adapter=PlaywrightBrowserAdapter(),
+        adapter=ReferenceBrowserAdapter(),
     )
     bindings = {
         "filesystem.read": FilesystemAtomicTool(filesystem, "read"),

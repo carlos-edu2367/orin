@@ -22,7 +22,7 @@ from typing import Mapping, Sequence
 # Coarse families of capability a task can need. Naming them in the contract
 # is what lets a phase publish ten relevant tools instead of fifty, which is
 # the difference between a small model choosing well and choosing at random.
-TOOLKITS = frozenset({"files", "terminal", "web", "browser", "delegation", "mcp", "plugins"})
+TOOLKITS = frozenset({"files", "terminal", "web", "delegation", "mcp", "plugins"})
 
 # How an acceptance criterion gets confirmed: by running something, or by
 # looking at something. Anything else is not a criterion, it is a hope.
@@ -54,8 +54,6 @@ def _require_mechanical_acceptance(
         raise ContractError("Tarefas de software precisam declarar o toolkit 'terminal' para verificar instalação, build, typecheck, lint ou testes.")
     if not any(item.how == "tool" for item in acceptance):
         raise ContractError("Tarefas de software precisam de ao menos um critério de aceite com how='tool' para uma verificação mecânica.")
-    if _is_frontend_work(objective, deliverables) and "browser" not in toolkits:
-        raise ContractError("Tarefas de frontend precisam declarar o toolkit 'browser' para verificar que uma rota renderiza.")
 
 
 class ContractError(ValueError):
@@ -195,8 +193,7 @@ def synthesize(request: str) -> TaskContract:
     from agentos.code_mode.models import detect_code_request
 
     objective = (request or "Atender ao pedido da pessoa.").strip()[:MAX_OBJECTIVE_CHARS]
-    software = detect_code_request(objective) is not None
-    frontend = _is_frontend_work(objective)
+    software = detect_code_request(objective) is not None or _is_frontend_work(objective)
     acceptance = [Acceptance(id="pedido", check=f"O pedido foi atendido: {objective}", how="inspection")]
     toolkits = {"files"}
     if software:
@@ -206,11 +203,6 @@ def synthesize(request: str) -> TaskContract:
             how="tool",
         ))
         toolkits.add("terminal")
-    if frontend:
-        acceptance.append(Acceptance(
-            id="renderizacao", check="A rota principal renderiza no navegador isolado.", how="tool",
-        ))
-        toolkits.add("browser")
     return TaskContract(
         objective=objective,
         acceptance=tuple(acceptance),

@@ -1,7 +1,12 @@
-import { useMemo, useState, type FormEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { Link } from 'react-router-dom'
 import type { ApiClient } from '../../api/client'
-import { PROVIDER_NAMES, type ProviderModel, type ProviderName } from '../../api/providers'
+import {
+  listProviderModels,
+  PROVIDER_NAMES,
+  type ProviderModel,
+  type ProviderName,
+} from '../../api/providers'
 import { inspectNewWorkspaceFolder } from '../../api/workspace'
 import type { CodeSessionProposalRequest } from './activityTypes'
 
@@ -32,6 +37,14 @@ type LaunchedSessionRecord = {
   title?: string
 }
 
+const PROVIDER_DISPLAY_LABELS: Record<ProviderName, string> = {
+  openai: 'OpenAI',
+  anthropic: 'Anthropic',
+  openrouter: 'OpenRouter',
+  omniroute: 'OmniRoute',
+  ollama: 'Ollama',
+}
+
 const FALLBACK_MODELS_BY_PROVIDER: Record<ProviderName, string[]> = {
   openai: ['gpt-5', 'gpt-4.1', 'o4-mini'],
   anthropic: ['claude-sonnet-4-5', 'claude-opus-4-1', 'claude-haiku-3-5'],
@@ -40,10 +53,29 @@ const FALLBACK_MODELS_BY_PROVIDER: Record<ProviderName, string[]> = {
   ollama: ['qwen2.5-coder:32b', 'llama3.3:70b', 'deepseek-r1:14b'],
 }
 
+const PLACEHOLDER_MODEL_IDS = new Set(['default', 'current', 'none'])
+
+function sanitizeProposalModelId(
+  raw: string | null | undefined,
+  provider?: string | null,
+): string {
+  const trimmed = raw?.trim() ?? ''
+  if (!trimmed) return ''
+  const lower = trimmed.toLowerCase()
+  if (PLACEHOLDER_MODEL_IDS.has(lower)) return ''
+  if (lower === 'auto' && provider !== 'omniroute') return ''
+  return trimmed
+}
+
 function resolveInitialProvider(
   candidate: string | null | undefined,
+  proposalModelId: string | null | undefined,
   fallback?: ProviderName,
 ): ProviderName {
+  const explicitModel = sanitizeProposalModelId(proposalModelId, candidate)
+  if (!explicitModel && fallback && PROVIDER_NAMES.includes(fallback)) {
+    return fallback
+  }
   if (candidate && PROVIDER_NAMES.includes(candidate as ProviderName)) {
     return candidate as ProviderName
   }
@@ -77,9 +109,14 @@ export function CodeSessionProposalCard({
   onAccept,
   onDecline,
 }: CodeSessionProposalCardProps) {
-  const initialProvider = resolveInitialProvider(proposal.provider, defaultProvider)
+  const sanitizedProposalModel = sanitizeProposalModelId(proposal.model_id, proposal.provider)
+  const initialProvider = resolveInitialProvider(
+    proposal.provider,
+    proposal.model_id,
+    defaultProvider,
+  )
   const initialModelId =
-    proposal.model_id?.trim() ||
+    sanitizedProposalModel ||
     defaultModelId?.trim() ||
     models?.[initialProvider]?.[0]?.model_id ||
     FALLBACK_MODELS_BY_PROVIDER[initialProvider][0]
@@ -96,36 +133,72 @@ export function CodeSessionProposalCard({
   const [submitting, setSubmitting] = useState<'accept' | 'decline' | null>(null)
   const [pickingFolder, setPickingFolder] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [fetchedModels, setFetchedModels] = useState<Partial<Record<ProviderName, ProviderModel[]>>>({})
+  const userEditedSelectionRef = useRef(false)
   const [launched, setLaunched] = useState<LaunchedSessionRecord | null>(() =>
     readLaunchedSession(proposal.proposal_id),
+  )
+
+  useEffect(() => {
+    if (userEditedSelectionRef.current || sanitizedProposalModel) return
+    if (defaultProvider && PROVIDER_NAMES.includes(defaultProvider)) {
+      setProvider(defaultProvider)
+    }
+    if (defaultModelId?.trim()) {
+      setModelId(defaultModelId.trim())
+    }
+  }, [defaultModelId, defaultProvider, sanitizedProposalModel])
+
+  useEffect(() => {
+    if (!client) return
+    if (models?.[provider]?.length || fetchedModels[provider]?.length) return
+    const controller = new AbortController()
+    listProviderModels(client, provider, controller.signal)
+      .then((items) => {
+        if (controller.signal.aborted) return
+        setFetchedModels((prev) => ({ ...prev, [provider]: items }))
+      })
+      .catch(() => {
+        // Ignore model catalog fetch errors; fallback list remains available
+      })
+    return () => controller.abort()
+  }, [client, fetchedModels, models, provider])
+
+  const effectiveModelsForProvider = useMemo(
+    () => models?.[provider] ?? fetchedModels[provider] ?? [],
+    [fetchedModels, models, provider],
   )
 
   const modelOptions = useMemo(() => {
     const seen = new Set<string>()
     const list: Array<{ id: string; label: string }> = []
+    const labelByModelId = new Map<string, string>()
+    for (const item of effectiveModelsForProvider) {
+      if (item.model_id && item.display_name) {
+        labelByModelId.set(item.model_id, item.display_name)
+      }
+    }
+
     const addOption = (id: string | null | undefined, label?: string) => {
-      const trimmed = id?.trim()
+      const trimmed = sanitizeProposalModelId(id, provider)
       if (!trimmed || seen.has(trimmed)) return
       seen.add(trimmed)
-      list.push({ id: trimmed, label: label || trimmed })
+      list.push({ id: trimmed, label: label || labelByModelId.get(trimmed) || trimmed })
     }
 
     addOption(modelId)
-    addOption(proposal.model_id)
-    addOption(defaultModelId)
-    for (const item of models?.[provider] ?? []) {
+    addOption(sanitizedProposalModel)
+    if (!provider || provider === defaultProvider) {
+      addOption(defaultModelId)
+    }
+    for (const item of effectiveModelsForProvider) {
       addOption(item.model_id, item.display_name || item.model_id)
     }
     for (const fallbackId of FALLBACK_MODELS_BY_PROVIDER[provider] ?? []) {
       addOption(fallbackId)
     }
-    for (const providerList of Object.values(FALLBACK_MODELS_BY_PROVIDER)) {
-      for (const fallbackId of providerList) {
-        addOption(fallbackId)
-      }
-    }
     return list
-  }, [defaultModelId, modelId, models, proposal.model_id, provider])
+  }, [defaultModelId, defaultProvider, effectiveModelsForProvider, modelId, provider, sanitizedProposalModel])
 
   async function handleChooseFolder() {
     if (!client || pickingFolder || submitting !== null) return
@@ -154,7 +227,7 @@ export function CodeSessionProposalCard({
         prompt: prompt.trim(),
         workspace_path: workspacePath.trim() || null,
         provider,
-        model_id: modelId.trim() || initialModelId,
+        model_id: sanitizeProposalModelId(modelId, provider) || initialModelId,
         permission_mode: permissionMode,
         project_id: proposal.project_id,
       })
@@ -231,23 +304,23 @@ export function CodeSessionProposalCard({
       </header>
 
       <form className="approval-card__form" onSubmit={(event) => void handleAccept(event)}>
-        <fieldset disabled={!active || submitting !== null} className="space-y-2.5">
+        <fieldset disabled={!active || submitting !== null}>
           <div className="approval-card__field">
             <label htmlFor={`code-prop-folder-${proposal.proposal_id}`}>Pasta do projeto</label>
-            <div className="flex items-center gap-2">
+            <div className="approval-card__folder-row">
               <input
                 id={`code-prop-folder-${proposal.proposal_id}`}
                 type="text"
                 data-testid="code-proposal-workspace-input"
                 value={workspacePath}
                 onChange={(event) => setWorkspacePath(event.target.value)}
-                placeholder="Workspace gerenciado (ou informe o caminho da pasta local)"
-                className="flex-1"
+                placeholder="Workspace gerenciado (ou selecione uma pasta local)"
               />
               {client && (
                 <button
                   type="button"
-                  className="ghost-button"
+                  className="ghost-button approval-card__folder-btn"
+                  data-testid="code-proposal-choose-folder-button"
                   onClick={() => void handleChooseFolder()}
                   disabled={pickingFolder || submitting !== null}
                 >
@@ -257,39 +330,27 @@ export function CodeSessionProposalCard({
             </div>
           </div>
 
-          <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <label className="approval-card__field">
-              <span>Provider</span>
+              <span>Provedor</span>
               <select
                 data-testid="code-proposal-provider-select"
                 value={provider}
                 onChange={(event) => {
+                  userEditedSelectionRef.current = true
                   const nextProvider = event.target.value as ProviderName
                   setProvider(nextProvider)
-                  const nextModels = models?.[nextProvider]
+                  const nextModels = models?.[nextProvider] ?? fetchedModels[nextProvider]
                   if (nextModels && nextModels.length > 0) {
                     setModelId(nextModels[0].model_id)
+                  } else {
+                    setModelId(FALLBACK_MODELS_BY_PROVIDER[nextProvider]?.[0] ?? '')
                   }
                 }}
               >
                 {PROVIDER_NAMES.map((p) => (
                   <option key={p} value={p}>
-                    {p}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <label className="approval-card__field">
-              <span>Modelo</span>
-              <select
-                data-testid="code-proposal-model-select"
-                value={modelId}
-                onChange={(event) => setModelId(event.target.value)}
-              >
-                {modelOptions.map((opt) => (
-                  <option key={opt.id} value={opt.id}>
-                    {opt.label}
+                    {PROVIDER_DISPLAY_LABELS[p] ?? p}
                   </option>
                 ))}
               </select>
@@ -306,17 +367,35 @@ export function CodeSessionProposalCard({
                   )
                 }
               >
-                <option value="accept_edits">Aceitar edições</option>
-                <option value="plan_mode">Modo Plano</option>
-                <option value="ask_permissions">Pedir permissão</option>
+                <option value="accept_edits">Aceitar edições automaticamente</option>
+                <option value="plan_mode">Modo Plano (aprovar plano antes)</option>
+                <option value="ask_permissions">Pedir permissão a cada ação</option>
               </select>
             </label>
           </div>
 
           <label className="approval-card__field">
+            <span>Modelo</span>
+            <select
+              data-testid="code-proposal-model-select"
+              value={modelId}
+              onChange={(event) => {
+                userEditedSelectionRef.current = true
+                setModelId(event.target.value)
+              }}
+            >
+              {modelOptions.map((opt) => (
+                <option key={opt.id} value={opt.id}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label className="approval-card__field">
             <span>Prompt / Especificação</span>
             <textarea
-              rows={4}
+              rows={5}
               data-testid="code-proposal-prompt-input"
               value={prompt}
               onChange={(event) => setPrompt(event.target.value)}

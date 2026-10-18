@@ -24,18 +24,6 @@ def test_the_openai_shape_is_preserved_for_the_tool_message():
     assert messages[1]["role"] == "user"
 
 
-def test_a_browser_screenshot_is_captioned_as_the_current_page_not_a_file():
-    result = {
-        "id": "call-1", "name": "browse_page",
-        "content": "https://example.test/page\n\nsome page text",
-        "images": [{"type": "image", "media_type": "image/png", "data": "QUJD"}],
-    }
-    messages = AgenticTurnRuntime._tool_result_messages(TURN, result)
-    caption = messages[1]["content"][0]
-    assert caption["type"] == "text"
-    assert caption["text"] == "Captura da página atual (https://example.test/page):"
-
-
 def test_a_non_browser_image_keeps_the_generic_file_caption():
     result = {
         "id": "call-1", "name": "view_file",

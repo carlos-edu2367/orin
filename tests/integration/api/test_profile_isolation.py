@@ -99,7 +99,6 @@ INSTANCE = {
     ("DELETE", "/v1/installation/versions/{version}"), ("POST", "/v1/installation/update"),
     ("GET", "/v1/installation/update/status"), ("POST", "/v1/installation/update/prepare"),
     ("GET", "/v1/installation/autostart"), ("PUT", "/v1/installation/autostart"),
-    ("GET", "/v1/runtime/browser"), ("POST", "/v1/runtime/browser/install"),
     ("POST", "/v1/providers/omniroute/test"), ("POST", "/v1/providers/omniroute/install"), ("GET", "/v1/providers/omniroute/install"),
     ("GET", "/v1/providers/omniroute/runtime"), ("PUT", "/v1/providers/omniroute/runtime"), ("POST", "/v1/providers/omniroute/runtime/actions"),
     # Bound to a single-use state value created by the profile that started the sign-in.

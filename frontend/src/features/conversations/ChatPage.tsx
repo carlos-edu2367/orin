@@ -1620,11 +1620,14 @@ export function ChatPage() {
                     ),
                   )
                 : []
+              const isTurnWaitingOnUser = timelineTurnIds.some((tid) => openQuestionTurnIds.has(tid))
               const isTurnFinished =
                 hasSubsequentUserMessage
-                || item.status === 'completed'
-                || item.status === 'failed'
-                || item.status === 'cancelled'
+                || (!isTurnWaitingOnUser && (
+                  item.status === 'completed'
+                  || item.status === 'failed'
+                  || item.status === 'cancelled'
+                ))
                 || timelineTurnIds.some((tid) => {
                   if (cancelledTurnIds.has(tid) || decidedPlanKeys.has(tid)) return true
                   const turnRecord = conversation?.turns.find((t) => t.turn_id === tid)
@@ -1675,6 +1678,9 @@ export function ChatPage() {
                         items={timeline}
                         conversationId={conversationId}
                         client={client}
+                        defaultProvider={effectiveChatProvider ?? undefined}
+                        defaultModelId={effectiveChatModelId || undefined}
+                        models={effectiveChatProvider ? { [effectiveChatProvider]: chatModels } : undefined}
                         mode={conversationMode}
                         permissionMode={codePermissionMode}
                         turnCompleted={isTurnFinished}
@@ -1700,15 +1706,15 @@ export function ChatPage() {
                     : item.role === 'assistant' && item.content
                       ? (
                         <>
+                          <MarkdownMessage content={item.content} conversationId={conversationId} client={client} onPreview={setPreviewReference} />
                           {turnWorkDurationLabel && (
                             <div
-                              className="turn-timeline__work-duration font-mono text-[11px] text-[var(--text-muted)] opacity-75 pb-1"
+                              className="turn-timeline__work-duration font-mono text-[11px] text-[var(--text-secondary)] pt-1"
                               data-testid="turn-work-duration"
                             >
                               {turnWorkDurationLabel}
                             </div>
                           )}
-                          <MarkdownMessage content={item.content} conversationId={conversationId} client={client} onPreview={setPreviewReference} />
                         </>
                       )
                       : item.command
@@ -1756,6 +1762,9 @@ export function ChatPage() {
                     events={unclaimedEvents}
                     conversationId={conversationId}
                     client={client}
+                    defaultProvider={effectiveChatProvider ?? undefined}
+                    defaultModelId={effectiveChatModelId || undefined}
+                    models={effectiveChatProvider ? { [effectiveChatProvider]: chatModels } : undefined}
                     mode="code"
                     permissionMode={codePermissionMode}
                     dockActive={true}
@@ -1779,6 +1788,10 @@ export function ChatPage() {
                   <ActivityStream
                     events={unclaimedEvents}
                     conversationId={conversationId}
+                    client={client}
+                    defaultProvider={effectiveChatProvider ?? undefined}
+                    defaultModelId={effectiveChatModelId || undefined}
+                    models={effectiveChatProvider ? { [effectiveChatProvider]: chatModels } : undefined}
                     onPreview={setPreviewReference}
                     openQuestionTurnIds={openQuestionTurnIds}
                     onAnswer={submitQuestionAnswers}

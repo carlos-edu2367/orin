@@ -1,9 +1,10 @@
 import { AnimatePresence } from 'motion/react'
 import { useMemo } from 'react'
+import type { ApiClient } from '../../api/client'
+import type { ProviderModel, ProviderName } from '../../api/providers'
 import { ActivityCard } from './ActivityCard'
 import { AgentBirth } from './AgentBirth'
 import { AgentExchange } from './AgentExchange'
-import { BrowserActivityCard } from './BrowserActivityCard'
 import { CodeModeCard } from './CodeModeCard'
 import { CodeSessionProposalCard, type CodeSessionProposalDecision } from './CodeSessionProposalCard'
 import { McpApprovalCard } from './McpApprovalCard'
@@ -14,6 +15,13 @@ import { summarizeActivities } from './activitySummary'
 import type { ActivityGroup, ConversationActivityEvent, ToolPermissionDecision } from './activityTypes'
 import { UserQuestionCard, type UserQuestionAnswer } from './UserQuestionCard'
 import type { WorkspaceFilePreviewHandler } from './WorkspaceFileCard'
+
+export type CodeSessionProposalContext = {
+  client?: ApiClient
+  defaultProvider?: ProviderName
+  defaultModelId?: string
+  models?: Partial<Record<ProviderName, ProviderModel[]>>
+}
 
 type ActivityStreamProps = {
   events: ConversationActivityEvent[]
@@ -30,6 +38,10 @@ type ActivityStreamProps = {
   onCodeSessionDecline?: (event: ConversationActivityEvent) => Promise<void>
   conversationId?: string
   onPreview?: WorkspaceFilePreviewHandler
+  client?: ApiClient
+  defaultProvider?: ProviderName
+  defaultModelId?: string
+  models?: Partial<Record<ProviderName, ProviderModel[]>>
 }
 
 const DEFAULT_LIMIT = 120
@@ -41,7 +53,25 @@ const DEFAULT_LIMIT = 120
  * treatment because they carry the product's identity: a subagent being born, and
  * a message crossing between agents.
  */
-export function ActivityStream({ events, limit = DEFAULT_LIMIT, openQuestionTurnIds, onAnswer, onMcpApprove, onMcpDecline, onPluginApprove, onPluginDecline, onToolPermission, onCodeSessionAccept, onCodeSessionDecline, conversationId, onPreview }: ActivityStreamProps) {
+export function ActivityStream({
+  events,
+  limit = DEFAULT_LIMIT,
+  openQuestionTurnIds,
+  onAnswer,
+  onMcpApprove,
+  onMcpDecline,
+  onPluginApprove,
+  onPluginDecline,
+  onToolPermission,
+  onCodeSessionAccept,
+  onCodeSessionDecline,
+  conversationId,
+  onPreview,
+  client,
+  defaultProvider,
+  defaultModelId,
+  models,
+}: ActivityStreamProps) {
   const groups = useMemo(() => {
     const summarized = summarizeActivities(events)
     return summarized.length > limit ? summarized.slice(summarized.length - limit) : summarized
@@ -52,7 +82,25 @@ export function ActivityStream({ events, limit = DEFAULT_LIMIT, openQuestionTurn
   return (
     <ol className="activity-stream" aria-label="Atividade do agente">
       <AnimatePresence initial={false}>
-        {groups.map((group) => <li key={group.id + group.events[0].eventId}>{renderActivityGroup(group, openQuestionTurnIds, onAnswer, conversationId, onPreview, onMcpApprove, onMcpDecline, onPluginApprove, onPluginDecline, onToolPermission, onCodeSessionAccept, onCodeSessionDecline)}</li>)}
+        {groups.map((group) => (
+          <li key={group.id + group.events[0].eventId}>
+            {renderActivityGroup(
+              group,
+              openQuestionTurnIds,
+              onAnswer,
+              conversationId,
+              onPreview,
+              onMcpApprove,
+              onMcpDecline,
+              onPluginApprove,
+              onPluginDecline,
+              onToolPermission,
+              onCodeSessionAccept,
+              onCodeSessionDecline,
+              { client, defaultProvider, defaultModelId, models },
+            )}
+          </li>
+        ))}
       </AnimatePresence>
     </ol>
   )
@@ -71,6 +119,7 @@ export function renderActivityGroup(
   onToolPermission?: (event: ConversationActivityEvent, decision: ToolPermissionDecision) => Promise<void>,
   onCodeSessionAccept?: (event: ConversationActivityEvent, decision: CodeSessionProposalDecision) => Promise<void>,
   onCodeSessionDecline?: (event: ConversationActivityEvent) => Promise<void>,
+  codeSessionContext?: CodeSessionProposalContext,
 ) {
   const first = group.events[0]
   if (first.toolPermission) {
@@ -115,6 +164,10 @@ export function renderActivityGroup(
       <CodeSessionProposalCard
         proposal={first.codeSessionProposal}
         active={first.turnId ? (openQuestionTurnIds?.has(first.turnId) ?? false) : true}
+        client={codeSessionContext?.client}
+        defaultProvider={codeSessionContext?.defaultProvider}
+        defaultModelId={codeSessionContext?.defaultModelId}
+        models={codeSessionContext?.models}
         onAccept={(decision) => onCodeSessionAccept(first, decision)}
         onDecline={() => onCodeSessionDecline(first)}
       />
@@ -128,6 +181,5 @@ export function renderActivityGroup(
   if (group.kind === 'agent' && (first.type === 'agent.message_sent' || first.type === 'agent.message_received')) {
     return <>{group.events.map((event) => <AgentExchange key={event.eventId} event={event} />)}</>
   }
-  if (first.toolKind === 'browser') return <BrowserActivityCard group={group} conversationId={conversationId} onPreview={onPreview} />
   return <ActivityCard group={group} conversationId={conversationId} onPreview={onPreview} />
 }

@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import { TurnTimeline } from '../../src/features/conversations/TurnTimeline'
 import type { ConversationActivityEvent } from '../../src/features/conversations/activityTypes'
-import type { TimelineItem } from '../../src/features/conversations/turnTimelineFold'
+import { buildTurnTimeline, type TimelineItem } from '../../src/features/conversations/turnTimelineFold'
 
 describe('TurnTimeline', () => {
   it('renders text and activity items in the order given', () => {
@@ -324,7 +324,7 @@ describe('TurnTimeline', () => {
     expect(subagentContainer).toHaveTextContent('Explorador')
   })
 
-  it('renders ThoughtBlock while streaming with shimmer and collapses when completed with duration toggle', () => {
+  it('renders ThoughtBlock collapsed by default while streaming, expands on click, and preserves expansion when completed', () => {
     const streamingItems: TimelineItem[] = [
       {
         id: 'thought:1',
@@ -340,7 +340,15 @@ describe('TurnTimeline', () => {
 
     const { rerender } = render(<TurnTimeline items={streamingItems} mode="code" />)
 
+    expect(screen.getByTestId('thought-block-streaming')).toBeInTheDocument()
+    const streamingToggleBtn = screen.getByTestId('thought-block-toggle')
+    expect(streamingToggleBtn).toHaveAttribute('aria-expanded', 'false')
     expect(screen.getByText('Pensando...')).toHaveClass('agent-pulse__label--shimmer')
+    expect(screen.queryByText('Analisando a causa raiz do problema...')).not.toBeInTheDocument()
+
+    // Clicking while streaming expands the thought body live
+    fireEvent.click(streamingToggleBtn)
+    expect(streamingToggleBtn).toHaveAttribute('aria-expanded', 'true')
     expect(screen.getByText('Analisando a causa raiz do problema...')).toBeInTheDocument()
 
     const completedItems: TimelineItem[] = [
@@ -359,12 +367,118 @@ describe('TurnTimeline', () => {
 
     rerender(<TurnTimeline items={completedItems} mode="code" />)
 
-    const toggleBtn = screen.getByRole('button', { name: /Pensou por 4s/i })
-    expect(toggleBtn).toBeInTheDocument()
+    // Since user expanded it while streaming, it stays expanded on completion
+    const completedToggleBtn = screen.getByRole('button', { name: /Pensou por 4s/i })
+    expect(completedToggleBtn).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getByText('Analisando a causa raiz do problema...')).toBeInTheDocument()
+
+    // Clicking collapses it
+    fireEvent.click(completedToggleBtn)
+    expect(completedToggleBtn).toHaveAttribute('aria-expanded', 'false')
     expect(screen.queryByText('Analisando a causa raiz do problema...')).not.toBeInTheDocument()
+  })
+
+  it('keeps ThoughtBlock collapsed on completion when untouched during streaming', () => {
+    const streamingItems: TimelineItem[] = [
+      {
+        id: 'thought:2',
+        kind: 'thought',
+        thought: {
+          id: 'thought:2',
+          turnId: 'turn-t2',
+          content: 'Pensamento silencioso...',
+          status: 'streaming',
+        },
+      } as unknown as TimelineItem,
+    ]
+
+    const { rerender } = render(<TurnTimeline items={streamingItems} mode="code" />)
+    expect(screen.queryByText('Pensamento silencioso...')).not.toBeInTheDocument()
+
+    const completedItems: TimelineItem[] = [
+      {
+        id: 'thought:2',
+        kind: 'thought',
+        thought: {
+          id: 'thought:2',
+          turnId: 'turn-t2',
+          content: 'Pensamento silencioso...',
+          status: 'completed',
+          durationMs: 3000,
+        },
+      } as unknown as TimelineItem,
+    ]
+
+    rerender(<TurnTimeline items={completedItems} mode="code" />)
+    const toggleBtn = screen.getByRole('button', { name: /Pensou por 3s/i })
+    expect(toggleBtn).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.queryByText('Pensamento silencioso...')).not.toBeInTheDocument()
 
     fireEvent.click(toggleBtn)
-    expect(screen.getByText('Analisando a causa raiz do problema...')).toBeInTheDocument()
+    expect(screen.getByText('Pensamento silencioso...')).toBeInTheDocument()
+  })
+
+  it('keeps ParallelSubagentsGroup intact when subagents emit thought_delta events during a parallel wave', () => {
+    const events: ConversationActivityEvent[] = [
+      {
+        eventId: 'evt-main-start',
+        cursor: 'c.1',
+        turnId: 'turn-w1',
+        type: 'turn.started',
+        kind: 'lifecycle',
+        state: 'working',
+        agentId: 'agent:main',
+        summary: 'Iniciado',
+      },
+      {
+        eventId: 'evt-sub1-tool',
+        cursor: 'c.2',
+        turnId: 'turn-w1',
+        type: 'tool.started',
+        kind: 'tool',
+        state: 'working',
+        agentId: 'agent:sub:1',
+        parentAgentId: 'agent:main',
+        agentName: 'explore-1',
+        toolName: 'read_file',
+        path: 'src/a.ts',
+        summary: 'Lendo src/a.ts',
+      },
+      {
+        eventId: 'evt-sub2-thought',
+        cursor: 'c.3',
+        turnId: 'turn-w1',
+        type: 'agent.thought_delta',
+        kind: 'lifecycle',
+        state: 'working',
+        agentId: 'agent:sub:2',
+        parentAgentId: 'agent:main',
+        agentName: 'explore-2',
+        detail: 'Pensando no subagente 2...',
+        summary: 'Pensando',
+      },
+      {
+        eventId: 'evt-sub2-tool',
+        cursor: 'c.4',
+        turnId: 'turn-w1',
+        type: 'tool.started',
+        kind: 'tool',
+        state: 'working',
+        agentId: 'agent:sub:2',
+        parentAgentId: 'agent:main',
+        agentName: 'explore-2',
+        toolName: 'read_file',
+        path: 'src/b.ts',
+        summary: 'Lendo src/b.ts',
+      },
+    ]
+
+    const { rerender } = render(<TurnTimeline events={events} mode="code" />)
+    expect(screen.getByTestId('parallel-subagents-group')).toBeInTheDocument()
+
+    const foldedItems = buildTurnTimeline(events, 'turn-w1')
+    rerender(<TurnTimeline items={foldedItems} mode="code" />)
+    expect(screen.getByTestId('parallel-subagents-group')).toBeInTheDocument()
   })
 
   it('renders compact 1-line permission receipts for allowed, denied, and pending toolPermission events', () => {

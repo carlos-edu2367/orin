@@ -42,7 +42,6 @@ from agentos.agentic.session import (
     resolve_child_model_id,
     resolve_effective_workspace_id,
 )
-from agentos.agentic.browser_tools import ConversationBrowserRegistry, browser_capability_from_environment, conversation_browser_for
 from agentos.agentic.web_search import search_client_from_environment
 from agentos.retrieval.registry import RetrievalRegistry
 from agentos.accounts.store import UserStore
@@ -361,7 +360,6 @@ class ChatWorker:
         workspace_root: str | None = None,
         enable_subagents: bool = True,
         runtime_settings: AgentRuntimeSettingsStore | None = None,
-        browser_registry: ConversationBrowserRegistry | None = None,
         retrieval_registry: RetrievalRegistry | None = None,
         capabilities: InstanceCapabilities | None = None,
     ) -> None:
@@ -373,12 +371,7 @@ class ChatWorker:
         self._workspace_root = workspace_root
         self._enable_subagents = enable_subagents
         self._runtime_settings = runtime_settings or AgentRuntimeSettingsStore()
-        # A conversation's browser survives across turns (a login or a
-        # multi-step flow needs the same tab back), bounded by idle eviction
-        # and a cap on concurrent sessions so an abandoned conversation does
-        # not leak a Chromium process forever.
-        self._browser_registry = browser_registry or ConversationBrowserRegistry(factory=conversation_browser_for)
-        # A project's retrieval index likewise survives across turns (and
+        # A project's retrieval index survives across turns (and
         # across every conversation about that project): building it fresh per
         # turn would open a new sqlite connection, a new embedder HTTP client
         # and a new background indexing thread every single time with nothing
@@ -497,13 +490,6 @@ class ChatWorker:
                     closer()
                 except Exception:
                     _LOGGER.exception("chat runtime cleanup for turn %s failed", turn_id)
-            # A long turn only touches the registry's idle clock at
-            # acquire()-time otherwise; this keeps a still-active
-            # conversation from being evicted by an unrelated one's sweep.
-            try:
-                self._browser_registry.release(turn)
-            except Exception:
-                _LOGGER.exception("browser registry release for turn %s failed", turn_id)
         result_state = result.state
         error_code = result.error_code
         if result_state not in {"completed", "completed_with_caveats", "waiting_user", "cancelled", "reconciliation_required"}:
@@ -1229,7 +1215,6 @@ class ChatWorker:
         skill_library = PostgresSkillLibraryService(engine)
         configured_limits = self._runtime_settings.get(str(turn["user_id"]))
         turn = self._hydrate_code_mode(turn)
-        browser = self._browser_registry.acquire(turn)
         local_root = turn.get("workspace_root_path")
         try:
             retrieval_bundle = self._retrieval_registry.acquire(
@@ -1262,68 +1247,60 @@ class ChatWorker:
             _LOGGER.exception("could not load the MCP servers for %s", turn["user_id"])
             mcp_bundles = []
         mcp_provider = McpToolProvider(mcp_bundles, oauth=McpOAuth(engine)) if mcp_bundles else None
-        try:
-            session = TurnSession(
-                turn=turn,
-                store=_RuntimeStore(self, turn),
-                agents_store=ConversationAgentStore(engine, conversation_id=str(turn["conversation_id"]), user_id=str(turn["user_id"])),
-                memory_store=PostgresAgentMemoryStore(
-                    engine, str(turn["user_id"]), conversation_id=str(turn["conversation_id"]),
-                    project_id=str(turn["project_id"]) if turn.get("project_id") else None,
-                    execution_id=str(turn["execution_id"]),
+        session = TurnSession(
+            turn=turn,
+            store=_RuntimeStore(self, turn),
+            agents_store=ConversationAgentStore(engine, conversation_id=str(turn["conversation_id"]), user_id=str(turn["user_id"])),
+            memory_store=PostgresAgentMemoryStore(
+                engine, str(turn["user_id"]), conversation_id=str(turn["conversation_id"]),
+                project_id=str(turn["project_id"]) if turn.get("project_id") else None,
+                execution_id=str(turn["execution_id"]),
+            ),
+            provider_factory=lambda: self._provider_transport(turn),
+            workspace_root=self._workspace_root,
+            enable_terminal=self._capabilities.shell,
+            cancelled=self._is_turn_cancelled,
+            reconciliation_required=self._reconciliation_required,
+            limits=AgenticLimits(
+                deadline=TURN_DEADLINE,
+                max_iterations=configured_limits["max_iterations"],
+                max_actions=None if configured_limits["max_iterations"] is None else max(24, configured_limits["max_iterations"] * 2),
+                max_context_tokens=self._max_context_tokens_for(turn),
+                context_window_tokens=self._context_window_for(turn),
+                subagent_max_iterations=configured_limits.get("subagent_max_iterations", configured_limits["max_iterations"]),
+                subagent_max_actions=(
+                    None
+                    if configured_limits.get("subagent_max_iterations", configured_limits["max_iterations"]) is None
+                    else max(24, int(configured_limits.get("subagent_max_iterations", configured_limits["max_iterations"]) or 12) * 2)
                 ),
-                provider_factory=lambda: self._provider_transport(turn),
-                workspace_root=self._workspace_root,
-                enable_terminal=self._capabilities.shell,
-                cancelled=self._is_turn_cancelled,
-                reconciliation_required=self._reconciliation_required,
-                limits=AgenticLimits(
-                    deadline=TURN_DEADLINE,
-                    max_iterations=configured_limits["max_iterations"],
-                    max_actions=None if configured_limits["max_iterations"] is None else max(24, configured_limits["max_iterations"] * 2),
-                    max_context_tokens=self._max_context_tokens_for(turn),
-                    context_window_tokens=self._context_window_for(turn),
-                    subagent_max_iterations=configured_limits.get("subagent_max_iterations", configured_limits["max_iterations"]),
-                    subagent_max_actions=(
-                        None
-                        if configured_limits.get("subagent_max_iterations", configured_limits["max_iterations"]) is None
-                        else max(24, int(configured_limits.get("subagent_max_iterations", configured_limits["max_iterations"]) or 12) * 2)
-                    ),
-                ),
-                skills=skill_library.registry_for(str(turn["user_id"]), agent_id=str(self.store.main_agent_id(turn))),
-                skill_library=skill_library,
-                skill_load_recorder=lambda loaded: skill_library.record_load(
-                    user_id=str(turn["user_id"]), execution_id=str(turn["execution_id"]),
-                    agent_id=str(self.store.main_agent_id(turn)), loaded=loaded,
-                ),
-                search_client=search_client_from_environment(),
-                retrieval_bundle=retrieval_bundle,
-                browser=browser,
-                browser_capability=browser_capability_from_environment(),
-                enable_subagents=self._enable_subagents,
-                model_sees_images=self._model_sees_images(turn),
-                model_calls_tools=self._model_calls_tools(turn),
-                vision_reader_factory=self._vision_reader_factory(turn),
-                child_model_ids=self._favorite_child_model_ids(turn),
-                child_model_authorizer=lambda model_id: self._is_favorite_child_model(turn, model_id),
-                child_provider_factory=lambda model_id: self._child_provider_for_turn(turn, model_id),
-                mcp_provider=mcp_provider,
-                mcp_service=mcp_service,
-                plugin_service=plugin_service,
-                hook_engine=turn_hook_engine,
-                project_store=PostgresProjectStore(engine),
-                chat_store=self.store,
-                local_workspaces=PostgresLocalWorkspaceStore(engine),
-                media_policy=self._media_policy_for_turn(turn),
-                media_client=self._media_client_for_turn(turn),
-            )
-            return session.build_runtime()
-        except Exception:
-            # Setup failed before the turn ever ran: discard rather than
-            # leave a possibly-broken session cached for the next attempt.
-            if browser is not None:
-                self._browser_registry.discard(str(turn.get("conversation_id") or ""))
-            raise
+            ),
+            skills=skill_library.registry_for(str(turn["user_id"]), agent_id=str(self.store.main_agent_id(turn))),
+            skill_library=skill_library,
+            skill_load_recorder=lambda loaded: skill_library.record_load(
+                user_id=str(turn["user_id"]), execution_id=str(turn["execution_id"]),
+                agent_id=str(self.store.main_agent_id(turn)), loaded=loaded,
+            ),
+            search_client=search_client_from_environment(),
+            retrieval_bundle=retrieval_bundle,
+            browser=None,
+            enable_subagents=self._enable_subagents,
+            model_sees_images=self._model_sees_images(turn),
+            model_calls_tools=self._model_calls_tools(turn),
+            vision_reader_factory=self._vision_reader_factory(turn),
+            child_model_ids=self._favorite_child_model_ids(turn),
+            child_model_authorizer=lambda model_id: self._is_favorite_child_model(turn, model_id),
+            child_provider_factory=lambda model_id: self._child_provider_for_turn(turn, model_id),
+            mcp_provider=mcp_provider,
+            mcp_service=mcp_service,
+            plugin_service=plugin_service,
+            hook_engine=turn_hook_engine,
+            project_store=PostgresProjectStore(engine),
+            chat_store=self.store,
+            local_workspaces=PostgresLocalWorkspaceStore(engine),
+            media_policy=self._media_policy_for_turn(turn),
+            media_client=self._media_client_for_turn(turn),
+        )
+        return session.build_runtime()
 
     def _hydrate_code_mode(self, turn: dict[str, object]) -> dict[str, object]:
         """Attach durable Code run policy to the otherwise generic chat turn."""

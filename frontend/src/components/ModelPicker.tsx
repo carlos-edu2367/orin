@@ -94,6 +94,7 @@ export function ModelPicker(props: ModelPickerProps) {
           type="button"
           className="chip model-picker__segment model-picker__segment--provider"
           data-testid="model-picker-provider-trigger"
+          aria-label={`Provedor: ${props.provider || 'selecionar'}`}
           aria-haspopup="listbox"
           aria-expanded={open === 'provider'}
           disabled={props.disabled}

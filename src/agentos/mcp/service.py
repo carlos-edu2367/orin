@@ -162,6 +162,22 @@ class McpServerService:
         display_name = str(command.get("display_name") or "").strip()
         if not display_name:
             raise McpServiceError("a proposal requires display_name")
+        command = dict(command)
+        catalog_id = command.get("catalog_id")
+        if catalog_id and not command.get("transport"):
+            from .catalog import find_catalog_entry
+            entry = find_catalog_entry(str(catalog_id))
+            if entry is None:
+                raise McpServiceError(f"unknown MCP catalog_id '{catalog_id}'")
+            command.setdefault("transport", entry.transport.value)
+            if entry.command is not None:
+                command.setdefault("command", entry.command)
+            if entry.args and not command.get("args"):
+                command["args"] = list(entry.args)
+            if entry.url is not None:
+                command.setdefault("url", entry.url)
+            if entry.secrets and not command.get("secret_names"):
+                command["secret_names"] = [item.name for item in entry.secrets]
         try:
             transport = McpTransport(str(command.get("transport") or ""))
         except ValueError as error:

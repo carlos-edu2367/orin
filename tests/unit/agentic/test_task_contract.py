@@ -99,8 +99,9 @@ def test_synthesis_bounds_a_very_long_request() -> None:
 def test_software_synthesis_adds_mechanical_checks_and_required_toolkits() -> None:
     contract = synthesize("Crie um frontend React para trilhas de estudo.")
 
-    assert {"files", "terminal", "browser"} <= contract.toolkits
-    assert sum(item.how == "tool" for item in contract.acceptance) >= 2
+    assert {"files", "terminal"} <= contract.toolkits
+    assert "browser" not in contract.toolkits
+    assert sum(item.how == "tool" for item in contract.acceptance) >= 1
 
 
 def test_a_software_contract_cannot_skip_mechanical_verification() -> None:
@@ -108,16 +109,16 @@ def test_a_software_contract_cannot_skip_mechanical_verification() -> None:
         parse(_payload(objective="Implemente uma API Python.", toolkits=["files", "terminal"]))
 
 
-def test_a_frontend_contract_requires_browser_verification() -> None:
-    with pytest.raises(ContractError, match="browser"):
-        parse(_payload(
-            objective="Crie uma tela React.", toolkits=["files", "terminal"],
-            acceptance=[{"id": "build", "check": "build passa", "how": "tool"}],
-        ))
+def test_a_frontend_contract_does_not_require_internal_browser_toolkit() -> None:
+    contract = parse(_payload(
+        objective="Crie uma tela React.", toolkits=["files", "terminal"],
+        acceptance=[{"id": "build", "check": "build passa", "how": "tool"}],
+    ))
+    assert contract.toolkits == frozenset({"files", "terminal"})
 
 
 def test_every_declared_toolkit_name_is_known() -> None:
-    assert TOOLKITS == frozenset({"files", "terminal", "web", "browser", "delegation", "mcp", "plugins"})
+    assert TOOLKITS == frozenset({"files", "terminal", "web", "delegation", "mcp", "plugins"})
 
 
 # -- runtime pinning --------------------------------------------------------

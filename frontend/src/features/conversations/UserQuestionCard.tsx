@@ -18,6 +18,7 @@ type AnswerMap = Record<string, UserQuestionAnswer>
  */
 export function UserQuestionCard({ questions, active, submitting = false, onSubmit }: UserQuestionCardProps) {
   const [answers, setAnswers] = useState<AnswerMap>({})
+  const [expandedNotes, setExpandedNotes] = useState<Record<string, boolean>>({})
   const [currentIndex, setCurrentIndex] = useState(0)
   const [error, setError] = useState<string | null>(null)
 
@@ -26,6 +27,7 @@ export function UserQuestionCard({ questions, active, submitting = false, onSubm
   const current = questions[Math.min(currentIndex, questions.length - 1)]
   const currentAnswer = answers[current.id] ?? emptyAnswer(current.id)
   const isLast = currentIndex === questions.length - 1
+  const showOptionalNote = Boolean(expandedNotes[current.id] || currentAnswer.note)
 
   function choose(question: UserQuestion, optionId: string, checked: boolean) {
     setAnswers((currentAnswers) => {
@@ -67,7 +69,7 @@ export function UserQuestionCard({ questions, active, submitting = false, onSubm
   }
 
   return (
-    <section className="user-question-card" data-active={active} aria-label="Perguntas do agente">
+    <section className="user-question-card" data-testid="user-question-card" data-active={active} aria-label="Perguntas do agente">
       <header className="user-question-card__header">
         <span className="user-question-card__glyph" aria-hidden="true">?</span>
         <div>
@@ -90,6 +92,7 @@ export function UserQuestionCard({ questions, active, submitting = false, onSubm
               <legend><span>{String(currentIndex + 1).padStart(2, '0')}</span>{current.question}</legend>
               {current.mode === 'text' ? (
                 <textarea
+                  aria-label={current.question}
                   value={currentAnswer.note}
                   onChange={(event) => setNote(current.id, event.target.value)}
                   placeholder={current.placeholder || 'Escreva sua resposta (opcional)'}
@@ -107,7 +110,26 @@ export function UserQuestionCard({ questions, active, submitting = false, onSubm
                   })}
                 </div>
               )}
-              {current.mode !== 'text' && <textarea value={currentAnswer.note} onChange={(event) => setNote(current.id, event.target.value)} placeholder={current.placeholder || 'Observação adicional (opcional)'} maxLength={1200} />}
+              {current.mode !== 'text' && (
+                showOptionalNote ? (
+                  <textarea
+                    aria-label="Observação (opcional)"
+                    value={currentAnswer.note}
+                    onChange={(event) => setNote(current.id, event.target.value)}
+                    placeholder={current.placeholder || 'Observação adicional (opcional)'}
+                    maxLength={1200}
+                  />
+                ) : (
+                  <button
+                    type="button"
+                    className="user-question-card__note-toggle"
+                    data-testid="user-question-note-toggle"
+                    onClick={() => setExpandedNotes((prev) => ({ ...prev, [current.id]: true }))}
+                  >
+                    + Adicionar observação (opcional)
+                  </button>
+                )
+              )}
             </fieldset>
             <footer className="user-question-card__actions">
               {currentIndex > 0 && <button className="user-question-card__back" type="button" onClick={() => setCurrentIndex((index) => index - 1)}>← Voltar</button>}

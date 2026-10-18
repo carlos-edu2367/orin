@@ -385,7 +385,6 @@ def test_chat_worker_isolates_hook_engine_per_turn(monkeypatch) -> None:
         def main_agent_id(self, turn: object) -> str:
             return "agent-main"
 
-    monkeypatch.setattr(chat_module, "conversation_browser_for", lambda turn: None)
     monkeypatch.setattr(chat_module, "PostgresSkillLibraryService", lambda engine: SkillLibrary())
     monkeypatch.setattr(chat_module, "ConversationAgentStore", lambda *args, **kwargs: object())
     monkeypatch.setattr(chat_module, "PostgresAgentMemoryStore", lambda *args, **kwargs: None)

@@ -85,72 +85,6 @@ def test_chat_worker_closes_runtime_when_execution_raises() -> None:
     assert runtime.closed == 1
 
 
-def test_runtime_construction_failure_closes_the_optional_browser(monkeypatch: pytest.MonkeyPatch) -> None:
-    class Browser:
-        def __init__(self):
-            self.closed = 0
-
-        def close(self):
-            self.closed += 1
-
-    class Settings:
-        def get(self, user_id):
-            return {"max_iterations": 8}
-
-    class SkillLibrary:
-        def registry_for(self, user_id, *, agent_id):
-            return None
-
-    browser = Browser()
-    monkeypatch.setattr(chat_module, "conversation_browser_for", lambda turn: browser)
-    monkeypatch.setattr(chat_module, "PostgresSkillLibraryService", lambda engine: SkillLibrary())
-    monkeypatch.setattr(chat_module, "ConversationAgentStore", lambda *args, **kwargs: object())
-    monkeypatch.setattr(chat_module, "PostgresAgentMemoryStore", lambda *args, **kwargs: None)
-    monkeypatch.setattr(chat_module, "search_client_from_environment", lambda: None)
-    monkeypatch.setattr(chat_module, "TurnSession", lambda **kwargs: (_ for _ in ()).throw(RuntimeError("construction failed")))
-    worker = ChatWorker(Store(), runtime_settings=Settings())
-
-    with pytest.raises(RuntimeError, match="construction failed"):
-        worker._runtime_for(dict(TURN))
-
-    assert browser.closed == 1
-
-
-def test_runtime_for_reuses_the_same_browser_across_two_turns_of_one_conversation(monkeypatch: pytest.MonkeyPatch) -> None:
-    class Browser:
-        def close(self):
-            pass
-
-    class Settings:
-        def get(self, user_id):
-            return {"max_iterations": 8}
-
-    class SkillLibrary:
-        def registry_for(self, user_id, *, agent_id):
-            return None
-
-    class FakeSession:
-        def __init__(self, **kwargs):
-            pass
-
-        def build_runtime(self):
-            return object()
-
-    built = []
-    monkeypatch.setattr(chat_module, "conversation_browser_for", lambda turn: built.append(Browser()) or built[-1])
-    monkeypatch.setattr(chat_module, "PostgresSkillLibraryService", lambda engine: SkillLibrary())
-    monkeypatch.setattr(chat_module, "ConversationAgentStore", lambda *args, **kwargs: object())
-    monkeypatch.setattr(chat_module, "PostgresAgentMemoryStore", lambda *args, **kwargs: None)
-    monkeypatch.setattr(chat_module, "search_client_from_environment", lambda: None)
-    monkeypatch.setattr(chat_module, "TurnSession", FakeSession)
-    worker = ChatWorker(Store(), runtime_settings=Settings())
-
-    worker._runtime_for(dict(TURN))
-    worker._runtime_for(dict(TURN))
-
-    assert len(built) == 1  # the second turn of the same conversation reused it
-
-
 def test_runtime_for_reuses_the_same_retrieval_bundle_across_two_turns_of_one_project(monkeypatch: pytest.MonkeyPatch) -> None:
     """Regression test: a bundle built fresh every turn leaked a thread and a
     sqlite connection per turn, since nothing ever tore the previous one down."""
@@ -181,7 +115,6 @@ def test_runtime_for_reuses_the_same_retrieval_bundle_across_two_turns_of_one_pr
         return bundle
 
     registry = RetrievalRegistry(factory=factory)
-    monkeypatch.setattr(chat_module, "conversation_browser_for", lambda turn: None)
     monkeypatch.setattr(chat_module, "PostgresSkillLibraryService", lambda engine: SkillLibrary())
     monkeypatch.setattr(chat_module, "ConversationAgentStore", lambda *args, **kwargs: object())
     monkeypatch.setattr(chat_module, "PostgresAgentMemoryStore", lambda *args, **kwargs: None)
@@ -194,25 +127,6 @@ def test_runtime_for_reuses_the_same_retrieval_bundle_across_two_turns_of_one_pr
 
     assert len(built) == 1  # the second turn of the same project reused it
     assert captured[0] is captured[1] is built[0]
-
-
-def test_run_releases_the_browser_registry_so_a_long_turn_is_not_evicted_as_idle() -> None:
-    class Registry:
-        def __init__(self) -> None:
-            self.released: list[dict[str, object]] = []
-
-        def release(self, turn):
-            self.released.append(turn)
-
-    runtime = ClosableRuntime(AgenticRunResult("completed"))
-    registry = Registry()
-    worker = ChatWorker(Store(), runtime_factory=lambda turn: runtime, browser_registry=registry)
-    worker._project = lambda *args, **kwargs: None
-
-    worker.run("turn-1")
-
-    assert len(registry.released) == 1
-    assert registry.released[0]["turn_id"] == "turn-1"
 
 
 def test_default_worker_runs_the_chat_through_the_canonical_kernel() -> None:
@@ -257,7 +171,6 @@ def test_unlimited_runtime_setting_removes_the_action_limit(monkeypatch: pytest.
             return None
 
     captured = {}
-    monkeypatch.setattr(chat_module, "conversation_browser_for", lambda turn: None)
     monkeypatch.setattr(chat_module, "PostgresSkillLibraryService", lambda engine: SkillLibrary())
     monkeypatch.setattr(chat_module, "ConversationAgentStore", lambda *args, **kwargs: object())
     monkeypatch.setattr(chat_module, "PostgresAgentMemoryStore", lambda *args, **kwargs: None)

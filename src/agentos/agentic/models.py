@@ -27,7 +27,15 @@ MAX_USER_QUESTION_TEXT = MAX_ACTION_TEXT
 MAX_APPROVAL_DEPTH = MAX_ACTION_DEPTH + 2
 MAX_APPROVAL_ITEMS = 1600
 MAX_APPROVAL_TEXT = 2000
-_LARGE_BUDGET_KEYS = frozenset({"questions", "plugin", "server", "structured_patch", "artifacts", "permission_request", "todos"})
+MAX_CODE_PROPOSAL_TEXT = 16000
+_LARGE_BUDGET_KEYS = frozenset({
+    "questions", "plugin", "server", "structured_patch", "artifacts",
+    "permission_request", "todos", "code_session_proposal",
+})
+_CODE_PROPOSAL_PUBLIC_KEYS = frozenset({
+    "proposal_id", "title", "prompt", "workspace_path",
+    "provider", "model_id", "permission_mode", "project_id",
+})
 REDACTED = "[REDACTED]"
 
 _SENSITIVE_KEY_PARTS = (
@@ -104,6 +112,7 @@ def _bounded(
     depth_limit: int = MAX_ACTION_DEPTH,
     item_limit: int = MAX_ACTION_ITEMS,
     text_limit: int = MAX_ACTION_TEXT,
+    parent_key: str | None = None,
 ) -> object:
     if depth > depth_limit:
         raise ValueError("payload exceeds nesting limit")
@@ -129,6 +138,36 @@ def _bounded(
                 is_numeric = isinstance(item, (int, float)) and not isinstance(item, bool)
                 result[key] = item if is_boolean_flag or is_numeric else REDACTED
                 continue
+            if (
+                depth == 1
+                and parent_key == "code_session_proposal"
+                and normalized_key in _CODE_PROPOSAL_PUBLIC_KEYS
+            ):
+                if normalized_key == "prompt" and isinstance(item, str):
+                    cleaned_prompt = sanitize_summary(item) if redact else item
+                    result[key] = _bounded(
+                        cleaned_prompt,
+                        depth=depth + 1,
+                        count=count,
+                        redact=redact,
+                        depth_limit=depth_limit,
+                        item_limit=item_limit,
+                        text_limit=MAX_CODE_PROPOSAL_TEXT,
+                        parent_key=normalized_key,
+                    )
+                    continue
+                if isinstance(item, str) or item is None:
+                    result[key] = _bounded(
+                        item,
+                        depth=depth + 1,
+                        count=count,
+                        redact=redact,
+                        depth_limit=depth_limit,
+                        item_limit=item_limit,
+                        text_limit=text_limit,
+                        parent_key=normalized_key,
+                    )
+                    continue
             if redact and _sensitive_key(key):
                 result[key] = REDACTED
                 continue
@@ -139,6 +178,7 @@ def _bounded(
             # limits inside it.
             if depth == 0 and key in _LARGE_BUDGET_KEYS and isinstance(item, (Mapping, tuple, list)):
                 is_questions = key == "questions"
+                is_code_proposal = key == "code_session_proposal"
                 result[key] = _bounded(
                     item,
                     depth=depth + 1,
@@ -146,7 +186,12 @@ def _bounded(
                     redact=redact,
                     depth_limit=MAX_USER_QUESTION_DEPTH if is_questions else MAX_APPROVAL_DEPTH,
                     item_limit=MAX_USER_QUESTION_ITEMS if is_questions else MAX_APPROVAL_ITEMS,
-                    text_limit=MAX_USER_QUESTION_TEXT if is_questions else MAX_APPROVAL_TEXT,
+                    text_limit=(
+                        MAX_CODE_PROPOSAL_TEXT
+                        if is_code_proposal
+                        else (MAX_USER_QUESTION_TEXT if is_questions else MAX_APPROVAL_TEXT)
+                    ),
+                    parent_key=normalized_key,
                 )
             elif depth == 0 and key in {"output_tail", "plan_content"} and isinstance(item, str):
                 result[key] = _bounded(
@@ -157,6 +202,7 @@ def _bounded(
                     depth_limit=depth_limit,
                     item_limit=item_limit,
                     text_limit=MAX_APPROVAL_TEXT,
+                    parent_key=normalized_key,
                 )
             else:
                 result[key] = _bounded(
@@ -167,6 +213,7 @@ def _bounded(
                     depth_limit=depth_limit,
                     item_limit=item_limit,
                     text_limit=text_limit,
+                    parent_key=normalized_key,
                 )
         return MappingProxyType(result)
     if isinstance(value, (tuple, list)):
@@ -183,6 +230,7 @@ def _bounded(
             depth_limit=depth_limit,
             item_limit=item_limit,
             text_limit=text_limit,
+            parent_key=parent_key,
         ) for item in value)
     raise ValueError("payload contains an unsupported value")
 

@@ -94,10 +94,6 @@ def build_parser() -> argparse.ArgumentParser:
     commands.add_parser("status", help="show whether Orin is running, and where")
     autostart = commands.add_parser("autostart", help="start Orin in the background when you sign in to the computer")
     autostart.add_argument("action", choices=("on", "off", "status"), nargs="?", default="status")
-    browser = commands.add_parser("browser", help="manage the optional browser engine the agent uses")
-    browser_commands = browser.add_subparsers(dest="browser_command", metavar="action", required=True)
-    browser_commands.add_parser("install", help="download Chromium (about 150 MB) so the agent can open web pages")
-    browser_commands.add_parser("status", help="show whether the browser engine is installed")
     commands.add_parser("serve", help="run Orin as a multi-profile server in the foreground (needs ORIN_PUBLIC_URL)")
     user = commands.add_parser("user", help="manage server profiles from the terminal")
     user_commands = user.add_subparsers(dest="user_command", metavar="action", required=True)
@@ -469,9 +465,6 @@ def main(argv: list[str] | None = None) -> int:
         if command == "serve":
             from .serve import command_serve
             return command_serve(paths, profile, console)
-        if command == "browser":
-            from .browser import command_browser
-            return command_browser(arguments, paths, profile, console)
         if command == "autostart":
             return command_autostart(arguments, profile, console)
         if command == "user":

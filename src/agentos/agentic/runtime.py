@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from itertools import count
 import json
+import os
 import re
 import threading
 import time
@@ -22,7 +23,8 @@ from .learning import LearnedMemory, TurnLearningLedger
 from . import phases, transcript
 from .phases import DEFAULT_PHASE_BUDGETS, Phase, PhaseBudget, PhaseController
 
-MAX_PARALLEL_TOOLS = 4
+MAX_PARALLEL_TOOLS = 8
+MAX_PARALLEL_SUBAGENT_TOOLS = max(8, int(os.environ.get("ORIN_MAX_CONCURRENT_SUBAGENTS", "16") or "16"))
 AGED_TOOL_RESULT_CHARS = 1600
 RECENT_UNAGED_TOOL_RESULTS = 8
 MAX_STREAM_KEEPALIVE_STALL_SECONDS = 180.0
@@ -41,10 +43,7 @@ MICROCOMPACT_THRESHOLD = 0.65
 PREFIX_CACHING_PROVIDERS = frozenset({"anthropic"})
 CONTEXT_COMPACTION_THRESHOLD = 0.82
 CONTEXT_COMPACTION_KEEP_UNITS = 6
-BROWSER_TOOL_NAMES = frozenset({
-    "browse_page", "browser_observe", "browser_click", "browser_fill",
-    "browser_press", "browser_select", "browser_check", "browser_screenshot",
-})
+BROWSER_TOOL_NAMES: frozenset[str] = frozenset()
 CODE_MODE_CORE_TOOLS = frozenset({
     "read_file", "view_file", "transcribe_pdf", "write_file", "edit_file", "notebook_edit",
     "glob_files", "list_files", "search_files", "search_code", "project_map",
@@ -52,7 +51,7 @@ CODE_MODE_CORE_TOOLS = frozenset({
     "enter_worktree", "exit_worktree", "preview_start", "preview_stop", "preview_logs",
     "enter_plan_mode", "exit_plan_mode",
     "todo_write", "task_create", "task_update", "task_get", "task_list",
-    "ask_user", "run_subagent", "check_subagent", "fetch_url", "web_search", "verify_frontend", "browse_page",
+    "ask_user", "run_subagent", "check_subagent", "fetch_url", "web_search",
     "remember", "recall",
     "search_skills", "list_skills", "read_skill_resource", "use_skill", "create_skill", "edit_skill",
     "list_mcp_catalog", "list_mcp_servers", "configure_mcp", "test_mcp_server",
@@ -785,13 +784,6 @@ class AgenticTurnRuntime:
         if self.phases is None:
             if getattr(self.toolset, "_code_mode_active", False) or turn.get("code_mode") == "code":
                 allowed = set(CODE_MODE_CORE_TOOLS)
-                if getattr(self.toolset, "_last_browser_navigation_url", None):
-                    allowed.update({
-                        "browser_observe", "browser_click", "browser_fill",
-                        "browser_press", "browser_select", "browser_check",
-                        "browser_screenshot", "browser_back", "browser_wait_for",
-                        "browser_scroll", "browser_submit",
-                    })
                 active_mcp = getattr(self.toolset, "active_mcp_tool_names", ())
                 if active_mcp:
                     allowed.update(active_mcp)
@@ -1643,7 +1635,12 @@ class AgenticTurnRuntime:
                 run_end += 1
             run_indexes = list(range(index, run_end))
             if len(run_indexes) > 1:
-                with ThreadPoolExecutor(max_workers=min(len(run_indexes), MAX_PARALLEL_TOOLS)) as pool:
+                has_subagent_calls = any(
+                    prepared[i][1] in {"run_subagent", "ask_agent", "check_subagent"}
+                    for i in run_indexes
+                )
+                batch_max_workers = MAX_PARALLEL_SUBAGENT_TOOLS if has_subagent_calls else MAX_PARALLEL_TOOLS
+                with ThreadPoolExecutor(max_workers=min(len(run_indexes), batch_max_workers)) as pool:
                     futures = {i: pool.submit(invoke, i) for i in run_indexes}
                     for i, future in futures.items():
                         try:

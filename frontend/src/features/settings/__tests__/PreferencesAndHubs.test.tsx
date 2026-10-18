@@ -6,6 +6,7 @@ import { ApiClient } from '../../../api/client'
 import type { ProviderName } from '../../../api/providers'
 import { ThemeProvider } from '../../../app/ThemeContext'
 import { AboutSection } from '../AboutSection'
+import { BrowserSection } from '../BrowserSection'
 import { IntegrationsHubPage, type IntegrationsTab } from '../IntegrationsHubPage'
 import { LibraryHubPage, type LibraryTab } from '../LibraryHubPage'
 import { PreferencesModal, type PreferencesTab } from '../PreferencesModal'
@@ -435,6 +436,207 @@ describe('PreferencesModal & Sidebar Hubs', () => {
 
     expect(await screen.findByRole('alert')).toHaveTextContent('Não foi possível excluir essa versão.')
     expect(screen.queryByText('Não foi possível consultar a instalação.')).toBeNull()
+  })
+
+  it('installs, activates, tests, toggles, and removes Playwright MCP from BrowserSection in 1 click', async () => {
+    const user = userEvent.setup()
+    let servers: Array<Record<string, unknown>> = []
+
+    const makeDetail = (state: string) => ({
+      server_id: 'srv-pw',
+      slug: 'playwright',
+      display_name: 'Playwright',
+      transport: 'stdio',
+      command: 'npx',
+      args: ['-y', '@playwright/mcp@latest'],
+      url: null,
+      secret_names: [],
+      catalog_id: 'playwright',
+      state,
+      state_reason: '',
+      protocol_version: '2024-11-05',
+      tool_count: 14,
+      auth_kind: 'none',
+      tools: [{ name: 'browser_navigate', description: 'Navigate to URL', enabled: true }],
+    })
+
+    const fetchImpl = vi.fn<typeof fetch>((input, init) => {
+      const url = String(input)
+      const method = (init?.method ?? 'GET').toUpperCase()
+      if (url.endsWith('/v1/mcp/servers') && method === 'GET') {
+        return Promise.resolve(
+          new Response(JSON.stringify(servers), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          }),
+        )
+      }
+      if (url.endsWith('/v1/mcp/servers') && method === 'POST') {
+        const created = makeDetail('pending_approval')
+        servers = [created]
+        return Promise.resolve(
+          new Response(JSON.stringify(created), {
+            status: 201,
+            headers: { 'Content-Type': 'application/json' },
+          }),
+        )
+      }
+      if (url.endsWith('/v1/mcp/servers/srv-pw/approve') && method === 'POST') {
+        const active = makeDetail('active')
+        servers = [active]
+        return Promise.resolve(
+          new Response(JSON.stringify(active), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          }),
+        )
+      }
+      if (url.endsWith('/v1/mcp/servers/srv-pw/test') && method === 'POST') {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              connected: true,
+              protocol_version: '2024-11-05',
+              tools: ['browser_navigate', 'browser_click'],
+              error: null,
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          ),
+        )
+      }
+      if (url.endsWith('/v1/mcp/servers/srv-pw/enabled') && method === 'PUT') {
+        const body = JSON.parse(String(init?.body ?? '{}')) as { enabled: boolean }
+        const next = makeDetail(body.enabled ? 'active' : 'disabled')
+        servers = [next]
+        return Promise.resolve(
+          new Response(JSON.stringify(next), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          }),
+        )
+      }
+      if (url.endsWith('/v1/mcp/servers/srv-pw') && method === 'DELETE') {
+        servers = []
+        return Promise.resolve(new Response(null, { status: 204 }))
+      }
+      return Promise.resolve(
+        new Response(JSON.stringify({}), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+      )
+    })
+
+    const client = new ApiClient({
+      fetchImpl,
+      csrfToken: 'test-csrf',
+      maxAttempts: 1,
+      createIdempotencyKey: () => 'test-idempotency',
+    })
+
+    render(
+      <MemoryRouter>
+        <BrowserSection client={client} />
+      </MemoryRouter>,
+    )
+
+    expect(await screen.findByRole('heading', { name: /Playwright MCP/i })).toBeInTheDocument()
+    expect(screen.getByText(/npx -y @playwright\/mcp@latest/i)).toBeInTheDocument()
+
+    const installBtn = await screen.findByRole('button', { name: /Instalar e ativar Playwright MCP/i })
+    await user.click(installBtn)
+
+    expect(await screen.findByTestId('playwright-mcp-status')).toHaveTextContent('Ativo')
+    expect(screen.getByRole('button', { name: /Testar conexão/i })).toBeInTheDocument()
+
+    const disableBtn = screen.getByRole('button', { name: /Desativar/i })
+    await user.click(disableBtn)
+    expect(await screen.findByTestId('playwright-mcp-status')).toHaveTextContent('Desativado')
+
+    const enableBtn = screen.getByRole('button', { name: /^Ativar$/i })
+    await user.click(enableBtn)
+    expect(await screen.findByTestId('playwright-mcp-status')).toHaveTextContent('Ativo')
+
+    const removeBtn = screen.getByRole('button', { name: /Remover/i })
+    await user.click(removeBtn)
+    expect(await screen.findByRole('button', { name: /Instalar e ativar Playwright MCP/i })).toBeInTheDocument()
+  })
+
+  it('recovers gracefully when Playwright MCP creation succeeds but approval fails on first try', async () => {
+    const user = userEvent.setup()
+    let approveAttempts = 0
+    const pendingServer = {
+      server_id: 'srv-pw',
+      slug: 'playwright',
+      display_name: 'Playwright',
+      transport: 'stdio',
+      command: 'npx',
+      args: ['-y', '@playwright/mcp@latest'],
+      url: null,
+      secret_names: [],
+      catalog_id: 'playwright',
+      state: 'pending_approval',
+      state_reason: '',
+      protocol_version: '2024-11-05',
+      tool_count: 0,
+      auth_kind: 'none',
+      tools: [],
+    }
+
+    const fetchImpl = vi.fn<typeof fetch>((input, init) => {
+      const url = String(input)
+      const method = (init?.method ?? 'GET').toUpperCase()
+      if (url.endsWith('/v1/mcp/servers') && method === 'GET') {
+        return Promise.resolve(new Response(JSON.stringify([]), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+      }
+      if (url.endsWith('/v1/mcp/servers') && method === 'POST') {
+        return Promise.resolve(new Response(JSON.stringify(pendingServer), { status: 201, headers: { 'Content-Type': 'application/json' } }))
+      }
+      if (url.endsWith('/v1/mcp/servers/srv-pw/approve') && method === 'POST') {
+        approveAttempts += 1
+        if (approveAttempts === 1) {
+          return Promise.resolve(new Response(JSON.stringify({ detail: 'npx missing' }), { status: 500, headers: { 'Content-Type': 'application/json' } }))
+        }
+        return Promise.resolve(
+          new Response(JSON.stringify({ ...pendingServer, state: 'active', tool_count: 14 }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          }),
+        )
+      }
+      if (url.endsWith('/v1/mcp/servers/srv-pw/test') && method === 'POST') {
+        return Promise.resolve(
+          new Response(JSON.stringify({ connected: true, protocol_version: '2024-11-05', tools: ['browser_navigate'], error: null }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          }),
+        )
+      }
+      return Promise.resolve(new Response(JSON.stringify({}), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    })
+
+    const client = new ApiClient({
+      fetchImpl,
+      csrfToken: 'test-csrf',
+      maxAttempts: 1,
+      createIdempotencyKey: () => 'test-idempotency',
+    })
+
+    render(
+      <MemoryRouter>
+        <BrowserSection client={client} />
+      </MemoryRouter>,
+    )
+
+    const installBtn = await screen.findByRole('button', { name: /Instalar e ativar Playwright MCP/i })
+    await user.click(installBtn)
+
+    // Shows error alert and keeps pending_approval state so user can retry activation without re-creating
+    expect(await screen.findByRole('alert')).toHaveTextContent(/Node\.js \(npx\)/i)
+    expect(screen.getByTestId('playwright-mcp-status')).toHaveTextContent('Pendente de aprovação')
+
+    const retryBtn = screen.getByRole('button', { name: /Ativar Playwright MCP/i })
+    await user.click(retryBtn)
+
+    expect(await screen.findByTestId('playwright-mcp-status')).toHaveTextContent('Ativo')
+    expect(screen.queryByRole('alert')).toBeNull()
   })
 })
 

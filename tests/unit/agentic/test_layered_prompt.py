@@ -72,10 +72,10 @@ def test_a_retrieved_skill_does_not_disturb_the_cached_layer() -> None:
 
 def test_the_reference_material_stays_in_the_cached_layer() -> None:
     """Tool guidance is long and unchanging; it is exactly what should be cached."""
-    stable, _ = _prompt(tool_names=("browse_page", "transcribe_pdf", "ask_user", "create_skill"))
-    assert "## Browser" in stable
+    stable, _ = _prompt(tool_names=("transcribe_pdf", "ask_user", "create_skill"))
     assert "## PDFs" in stable
     assert "## Asking the person" in stable
+    assert "## Continuous learning with Skills" in stable
 
 
 def test_two_turns_that_differ_only_in_volatile_context_share_the_cached_layer() -> None:

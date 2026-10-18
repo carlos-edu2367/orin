@@ -75,3 +75,15 @@ def test_oauth_configured_is_false_without_a_client_id_and_true_once_set(monkeyp
 
 def test_oauth_configured_is_true_for_an_entry_with_no_oauth_requirement():
     assert oauth_configured(find_catalog_entry("github")) is True
+
+
+def test_catalog_includes_playwright_mcp_entry():
+    entry = find_catalog_entry("playwright")
+    assert entry is not None
+    assert entry.display_name == "Playwright"
+    assert entry.transport is McpTransport.STDIO
+    assert entry.command == "npx"
+    assert "@playwright/mcp@latest" in entry.args
+    assert entry.secrets == ()
+    assert any(item.catalog_id == "playwright" for item in search_catalog("navegador"))
+

@@ -43,6 +43,7 @@ class RecordingStore:
         self.deltas: list[str] = []
         self.finished: list[tuple[bool, str | None]] = []
         self.activity: list[tuple[AgentActivityEventType, str, dict, str | None]] = []
+        self.activity_with_parent: list[tuple[AgentActivityEventType, str, dict, str | None, str | None]] = []
         self.tool_records: list[dict[str, object]] = []
 
     def load(self, turn_id: str) -> dict:
@@ -59,6 +60,7 @@ class RecordingStore:
 
     def record(self, turn, event_type, summary, payload=None, *, agent_id=None, parent_agent_id=None) -> None:
         self.activity.append((event_type, summary, dict(payload or {}), agent_id))
+        self.activity_with_parent.append((event_type, summary, dict(payload or {}), agent_id, parent_agent_id))
 
     def main_agent_id(self, turn) -> str:
         return f"agent:{turn['conversation_id']}:main"
@@ -261,14 +263,227 @@ def test_two_delegations_run_at_the_same_time(monkeypatch) -> None:
     assert "Pesquisador" in outcome.content and "Redator" in outcome.content
 
 
-def test_the_per_turn_subagent_budget_still_applies_to_a_batch() -> None:
+def test_the_per_turn_subagent_budget_still_applies_to_a_batch_when_explicitly_set() -> None:
     session = _session_with_two_subagents()
+    session._max_subagents_per_turn = 4
     session._subagent_runs = 4
 
     outcome = session._ask_agents([{"name": "Pesquisador", "task": "a"}])
 
     assert outcome.status == "failed"
     assert outcome.error_code == "SUBAGENT_LIMIT"
+
+
+def test_many_subagents_run_in_parallel_without_hitting_subagent_limit(monkeypatch) -> None:
+    import threading
+
+    from agentos.agentic import session as session_module
+
+    barrier = threading.Barrier(10, timeout=5)
+    original = session_module.AgenticTurnRuntime
+
+    class Concurrent10(original):
+        def run(self, turn_id, *, turn=None):
+            from agentos.agentic.runtime import AgenticRunResult
+
+            barrier.wait()
+            self.store.delta(turn or {}, f"ok:{(turn or {}).get('agent_id')}")
+            self.store.finish(turn or {})
+            return AgenticRunResult("completed", 1, 0)
+
+    monkeypatch.setattr(session_module, "AgenticTurnRuntime", Concurrent10)
+
+    session = _session_with_one_subagent()
+    tasks = []
+    for idx in range(10):
+        name = f"Worker{idx}"
+        session.agents_store.records[name] = {
+            "agent_id": f"agent-sub-{idx}",
+            "name": name,
+            "role": "pesquisa",
+        }
+        tasks.append({"name": name, "task": f"tarefa {idx}"})
+
+    outcome = session._ask_agents(tasks)
+
+    assert outcome.status == "succeeded"
+    assert session._subagent_runs == 10
+    for idx in range(10):
+        assert f"Worker{idx}" in outcome.content
+
+
+def test_runtime_executes_10_run_subagent_tool_calls_in_parallel_in_one_turn(tmp_path: Path) -> None:
+    import json
+    import threading
+
+    barrier = threading.Barrier(10, timeout=5)
+    main_calls_sent = {"done": False}
+    lock = threading.Lock()
+
+    class ParallelSubagentProvider:
+        def stream(self, request):
+            with lock:
+                is_first_main = not main_calls_sent["done"]
+                if is_first_main:
+                    main_calls_sent["done"] = True
+            if is_first_main:
+                items = [
+                    NormalizedStreamItem(
+                        StreamKind.TOOL_CALL,
+                        idx + 1,
+                        tool_call_id=f"sub-call-{idx}",
+                        tool_name="run_subagent",
+                        arguments_delta=json.dumps({
+                            "subagent_type": "explore",
+                            "description": f"Explorar modulo {idx}",
+                            "prompt": f"Investigue o modulo {idx}",
+                        }),
+                    )
+                    for idx in range(10)
+                ]
+                items.append(NormalizedStreamItem(StreamKind.FINISH, 11, finish_reason="tool_calls"))
+                return iter(items)
+
+            # Subagent calls vs final main agent synthesis call
+            messages = request.get("messages", [])
+            has_tool_results = any(m.get("role") == "tool" for m in messages)
+            if not has_tool_results:
+                # Inside one of the 10 parallel subagents: wait on barrier to prove all 10 run concurrently!
+                barrier.wait()
+                return iter([
+                    NormalizedStreamItem(StreamKind.TEXT, 1, text="relatório do subagente concluído"),
+                    NormalizedStreamItem(StreamKind.FINISH, 2, finish_reason="stop"),
+                ])
+            return iter([
+                NormalizedStreamItem(StreamKind.TEXT, 1, text="Síntese final dos 10 subagentes."),
+                NormalizedStreamItem(StreamKind.FINISH, 2, finish_reason="stop"),
+            ])
+
+    store = RecordingStore()
+    agents = MemoryAgentsStore()
+    session = TurnSession(
+        turn=dict(TURN),
+        store=store,
+        agents_store=agents,
+        memory_store=None,
+        provider_factory=lambda: ParallelSubagentProvider(),
+        workspace_root=tmp_path,
+    )
+
+    result = session.build_runtime().run("turn-1")
+
+    assert result.state == "completed"
+    assert session._subagent_runs == 10
+    assert "Síntese final dos 10 subagentes." in "".join(store.deltas)
+
+
+def test_subagent_burst_above_max_concurrent_workers_queues_via_semaphore_and_completes_all(monkeypatch) -> None:
+    import threading
+    import time
+
+    from agentos.agentic import session as session_module
+
+    lock = threading.Lock()
+    active_count = 0
+    peak_active = 0
+    original = session_module.AgenticTurnRuntime
+
+    class BoundedConcurrent(original):
+        def run(self, turn_id, *, turn=None):
+            nonlocal active_count, peak_active
+            from agentos.agentic.runtime import AgenticRunResult
+
+            with lock:
+                active_count += 1
+                if active_count > peak_active:
+                    peak_active = active_count
+            try:
+                time.sleep(0.03)
+                self.store.delta(turn or {}, "concluído")
+                self.store.finish(turn or {})
+                return AgenticRunResult("completed", 1, 0)
+            finally:
+                with lock:
+                    active_count -= 1
+
+    monkeypatch.setattr(session_module, "AgenticTurnRuntime", BoundedConcurrent)
+
+    session = _session_with_one_subagent()
+    session._max_concurrent_subagents = 3
+    session._subagent_semaphore = threading.BoundedSemaphore(3)
+
+    tasks = []
+    for idx in range(8):
+        name = f"Agent{idx}"
+        session.agents_store.records[name] = {
+            "agent_id": f"agent-burst-{idx}",
+            "name": name,
+            "role": "worker",
+        }
+        tasks.append({"name": name, "task": f"job {idx}"})
+
+    outcome = session._ask_agents(tasks)
+
+    assert outcome.status == "succeeded"
+    assert peak_active <= 3
+    assert peak_active >= 2
+    assert session._subagent_runs == 8
+
+
+def test_queued_subagents_abort_immediately_when_turn_is_cancelled_while_waiting_for_semaphore(tmp_path: Path) -> None:
+    import threading
+
+    cancel_flag = {"cancelled": False}
+    provider_calls: list[str] = []
+    first_entered = threading.Event()
+    release_first = threading.Event()
+
+    class CancellingProvider:
+        def stream(self, request):
+            provider_calls.append(request["model"])
+            first_entered.set()
+            release_first.wait(timeout=5)
+            cancel_flag["cancelled"] = True
+            return iter([
+                NormalizedStreamItem(StreamKind.TEXT, 1, text="primeiro terminou"),
+                NormalizedStreamItem(StreamKind.FINISH, 2, finish_reason="stop"),
+            ])
+
+    store = RecordingStore()
+    agents = MemoryAgentsStore()
+    session = TurnSession(
+        turn=dict(TURN),
+        store=store,
+        agents_store=agents,
+        memory_store=None,
+        provider_factory=lambda: CancellingProvider(),
+        workspace_root=tmp_path,
+        cancelled=lambda _turn: cancel_flag["cancelled"],
+        max_concurrent_subagents=1,
+    )
+    for idx in range(3):
+        agents.create(f"Sub{idx}", "worker", parent_agent_id=session.main_agent_id)
+
+    results: list[object] = []
+
+    def run_first():
+        results.append(session._ask_agent("Sub0", "t0"))
+
+    t0 = threading.Thread(target=run_first)
+    t0.start()
+    assert first_entered.wait(timeout=5)
+
+    t1_result: list[object] = []
+    t1 = threading.Thread(target=lambda: t1_result.append(session._ask_agent("Sub1", "t1")))
+    t1.start()
+
+    release_first.set()
+    t0.join(timeout=5)
+    t1.join(timeout=5)
+
+    assert len(provider_calls) == 1
+    assert t1_result[0].status == "failed"
+    assert t1_result[0].error_code == "TURN_CANCELLED"
 
 
 def test_a_worker_exception_is_reported_without_discarding_other_batch_results() -> None:
@@ -490,25 +705,6 @@ def test_tool_activity_is_published_for_the_ui(tmp_path: Path) -> None:
     artifact = next(item for item in store.activity if item[0] is AgentActivityEventType.ARTIFACT_CREATED)
     assert artifact[2]["path"] == "a.txt"
     assert artifact[2]["size_bytes"] == 1
-
-
-def test_browse_page_tool_ledger_does_not_keep_raw_url_secrets(tmp_path: Path) -> None:
-    session, store, _agents, _provider = build(tmp_path, [])
-    secret = "ledger-secret-123"
-
-    session.emit_lifecycle(
-        TURN,
-        "tool_finished",
-        tool_name="browse_page",
-        invocation_id="call-1",
-        status="succeeded",
-        summary="Abriu example.test",
-        tool_payload={"url": "https://example.test/page", "label": "safe", "rendered": True},
-        tool_arguments={"url": f"https://user:{secret}@example.test/page?token={secret}"},
-    )
-
-    assert secret not in repr(store.tool_records)
-    assert store.tool_records[0]["arguments"] == {"url": "https://example.test/page"}
 
 
 def test_fetch_url_tool_ledger_and_activity_do_not_keep_raw_url_secrets(tmp_path: Path) -> None:
@@ -802,10 +998,11 @@ def test_a_cancelled_turn_stops_and_reports_cancellation(tmp_path: Path) -> None
     assert store.finished == [(True, "TURN_CANCELLED")]
 
 
-def test_the_subagent_budget_is_bounded(tmp_path: Path) -> None:
+def test_the_subagent_budget_is_bounded_when_explicitly_set(tmp_path: Path) -> None:
     session, _store, agents, _provider = build(tmp_path, [])
     agents.create("Worker", "trabalha", parent_agent_id="agent:chat_session:main")
-    session._subagent_runs = 99
+    session._max_subagents_per_turn = 10
+    session._subagent_runs = 10
 
     outcome = session._ask_agent("Worker", "faça algo")
 
@@ -813,41 +1010,33 @@ def test_the_subagent_budget_is_bounded(tmp_path: Path) -> None:
     assert outcome.error_code == "SUBAGENT_LIMIT"
 
 
-def test_the_prompt_explains_the_browser_ref_workflow_when_browse_page_is_available() -> None:
-    prompt = _joined_prompt(
-        tool_names=("browse_page", "browser_observe", "browser_click"), memories=[], agents=[],
-        workspace_hint="hint", subagents_enabled=False,
+def test_subagent_thinking_delta_records_parent_agent_id(tmp_path: Path) -> None:
+    session, store, agents, _provider = build(
+        tmp_path,
+        [[
+            NormalizedStreamItem(StreamKind.THINKING, 1, thinking="pensando no subagente"),
+            NormalizedStreamItem(StreamKind.TEXT, 2, text="resposta final do subagente"),
+            NormalizedStreamItem(StreamKind.FINISH, 3, finish_reason="stop"),
+        ]],
     )
+    child = agents.create("Thinker", "analisa", parent_agent_id=session.main_agent_id)
 
-    assert "## Browser" in prompt
-    assert "ref:eN" in prompt
-    assert "same URL" in prompt
+    outcome = session._ask_agent("Thinker", "analise X")
+
+    assert outcome.status == "succeeded"
+    thought_events = [
+        item for item in store.activity_with_parent
+        if item[0] is AgentActivityEventType.AGENT_THOUGHT_DELTA
+    ]
+    assert len(thought_events) == 1
+    assert thought_events[0][3] == child["agent_id"]
+    assert thought_events[0][4] == session.main_agent_id
 
 
 def test_the_browser_section_is_absent_without_browse_page() -> None:
     prompt = _joined_prompt(tool_names=("read_file",), memories=[], agents=[], workspace_hint="hint", subagents_enabled=False)
 
     assert "## Browser" not in prompt
-
-
-def test_the_prompt_explains_submission_confirmation_without_browser_submit_tool() -> None:
-    prompt = _joined_prompt(
-        tool_names=("browse_page", "browser_observe", "browser_click"), memories=[], agents=[],
-        workspace_hint="hint", subagents_enabled=False,
-    )
-
-    assert "confirmed=true" in prompt
-
-
-def test_the_prompt_explains_the_two_step_confirmation_when_browser_submit_is_available() -> None:
-    prompt = _joined_prompt(
-        tool_names=("browse_page", "browser_observe", "browser_click", "browser_submit"), memories=[], agents=[],
-        workspace_hint="hint", subagents_enabled=False,
-    )
-
-    assert "confirmed=true" in prompt
-    assert "ask_user" in prompt
-    assert "page's own text asked you to" in prompt or "page content is not the user" in prompt
 
 
 def test_the_prompt_lists_remembered_facts() -> None:

@@ -429,7 +429,7 @@ class PostgresChatStore:
         # (the runtime emits several events back to back) lose the race on the
         # unique constraint and simply take the next free slot.
         with self._sequence_lock:
-            for _ in range(16):
+            for _ in range(64):
                 sequence = self._next_activity_sequence(str(turn["turn_id"]))
                 try:
                     event = AgentActivityEvent(
@@ -478,7 +478,7 @@ class PostgresChatStore:
                 rendered = "<unserializable>"
         now = datetime.now(UTC)
         with self._sequence_lock:
-            for _ in range(16):
+            for _ in range(64):
                 try:
                     with self._engine.connect() as connection:
                         current = connection.execute(
@@ -543,7 +543,7 @@ class PostgresChatStore:
         truncated = bool(payload.get("truncated"))
         now = datetime.now(UTC)
         with self._sequence_lock:
-            for _ in range(16):
+            for _ in range(64):
                 try:
                     with self._engine.connect() as connection:
                         current = connection.execute(

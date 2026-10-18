@@ -163,6 +163,16 @@ CATALOG: tuple[McpCatalogEntry, ...] = (
         # metadata (see McpOAuthRequirement docstring) rather than guessed here.
         oauth=McpOAuthRequirement(client_id_env_var="AGENTOS_OAUTH_VERCEL_CLIENT_ID", scopes=()),
     ),
+    McpCatalogEntry(
+        catalog_id="playwright",
+        display_name="Playwright",
+        summary="Navegador automatizado via Playwright MCP para abrir páginas dinâmicas, clicar, preencher formulários e capturar telas.",
+        transport=McpTransport.STDIO,
+        command="npx",
+        args=("-y", "@playwright/mcp@latest"),
+        setup_instructions="Requer Node.js (npx) disponível no ambiente. Nenhuma chave ou credencial é necessária.",
+        keywords=("playwright", "browser", "navegador", "web", "chromium", "automacao", "pagina"),
+    ),
 )
 
 

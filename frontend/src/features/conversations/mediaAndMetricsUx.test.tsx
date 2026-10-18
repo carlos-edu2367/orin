@@ -51,7 +51,12 @@ describe('Media generation previews & UX metrics (Turn Duration + Overview USD C
         turnFinishedAt="2026-10-17T12:00:19Z"
       />,
     )
-    expect(screen.getByTestId('turn-work-duration')).toHaveTextContent('Trabalhou por 19s')
+    const textEl = screen.getByText('Resposta final pronta.')
+    const durationEl = screen.getByTestId('turn-work-duration')
+    expect(durationEl).toHaveTextContent('Trabalhou por 19s')
+    expect(
+      Boolean(textEl.compareDocumentPosition(durationEl) & Node.DOCUMENT_POSITION_FOLLOWING),
+    ).toBe(true)
   })
 
   it('formatUsdCost formats sub-cent, standard USD, zero, and unavailable/adversarial costs', () => {

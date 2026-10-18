@@ -7,6 +7,7 @@ import { PlanApprovalCard } from './PlanApprovalCard'
 import type { ApiClient } from '../../api/client'
 import type { CodePermissionMode } from '../../api/codeMode'
 import { rewindTurn, type ConversationMode } from '../../api/conversations'
+import type { ProviderModel, ProviderName } from '../../api/providers'
 import { WorkspaceFileCard, type WorkspaceFilePreviewHandler } from './WorkspaceFileCard'
 import { formatTurnWorkDuration, summarizeActivities } from './activitySummary'
 import { enrichEventsWithStartedMetadata, type TimelineItem } from './turnTimelineFold'
@@ -26,13 +27,16 @@ export type TimelineThoughtData = {
 
 export type TimelineRenderItem =
   | TimelineItem
-  | { id: string; kind: 'thought'; thought: TimelineThoughtData }
+  | { id: string; kind: 'thought'; thought: TimelineThoughtData; group?: ActivityGroup }
 
 export type TurnTimelineProps = {
   items?: TimelineRenderItem[]
   events?: ConversationActivityEvent[]
   conversationId?: string
   client?: ApiClient
+  defaultProvider?: ProviderName
+  defaultModelId?: string
+  models?: Partial<Record<ProviderName, ProviderModel[]>>
   mode?: ConversationMode
   permissionMode?: CodePermissionMode
   turnCompleted?: boolean
@@ -223,31 +227,12 @@ function ThoughtBlock({
       ? Math.max(1, Math.round(thought.durationMs / 1000))
       : null
 
-  if (isStreaming) {
-    return (
-      <div
-        className="thought-block thought-block--streaming"
-        data-testid="thought-block-streaming"
-      >
-        <div className="thought-block__header">
-          <span className="agent-pulse__dot" aria-hidden="true" />
-          <span className="agent-pulse__label--shimmer">Pensando...</span>
-        </div>
-        {thought.content && (
-          <div className="thought-block__body">
-            {thought.content}
-          </div>
-        )}
-      </div>
-    )
-  }
-
   const summaryLabel = durationSeconds !== null ? `Pensou por ${durationSeconds}s` : 'Pensou'
 
   return (
     <div
-      className="thought-block thought-block--completed"
-      data-testid="thought-block-completed"
+      className={`thought-block ${isStreaming ? 'thought-block--streaming' : 'thought-block--completed'}`}
+      data-testid={isStreaming ? 'thought-block-streaming' : 'thought-block-completed'}
     >
       <button
         type="button"
@@ -257,7 +242,14 @@ function ThoughtBlock({
         className="thought-block__toggle"
       >
         <span aria-hidden="true">{expanded ? '▾' : '▸'}</span>
-        <span>{summaryLabel}</span>
+        {isStreaming ? (
+          <>
+            <span className="agent-pulse__dot" aria-hidden="true" />
+            <span className="agent-pulse__label--shimmer">Pensando...</span>
+          </>
+        ) : (
+          <span>{summaryLabel}</span>
+        )}
       </button>
       {expanded && thought.content && (
         <div className="thought-block__body">
@@ -584,6 +576,9 @@ export function TurnTimeline({
   events,
   conversationId,
   client,
+  defaultProvider,
+  defaultModelId,
+  models,
   mode,
   permissionMode,
   turnCompleted = false,
@@ -613,6 +608,10 @@ export function TurnTimeline({
   const [rewinding, setRewinding] = useState(false)
   const [rewound, setRewound] = useState(false)
   const [rewindError, setRewindError] = useState<string | null>(null)
+  const codeSessionContext = useMemo(
+    () => ({ client, defaultProvider, defaultModelId, models }),
+    [client, defaultModelId, defaultProvider, models],
+  )
 
   const hasLegacyCodeModeStarted = useMemo(
     () => Boolean(events?.some((ev) => ev.type === 'code_mode.started')),
@@ -636,6 +635,14 @@ export function TurnTimeline({
       for (const ev of item.group.events) {
         if (!ev.parentAgentId && ev.type !== 'agent.created' && ev.agentId) {
           return ev.agentId
+        }
+      }
+    }
+    for (const item of resolvedItems) {
+      if (item.kind !== 'activity') continue
+      for (const ev of item.group.events) {
+        if (ev.parentAgentId) {
+          return ev.parentAgentId
         }
       }
     }
@@ -929,6 +936,9 @@ export function TurnTimeline({
             onPluginApprove,
             onPluginDecline,
             onToolPermission,
+            onCodeSessionAccept,
+            onCodeSessionDecline,
+            codeSessionContext,
           )}
       </div>
     )
@@ -1000,6 +1010,7 @@ export function TurnTimeline({
                 onToolPermission,
                 onCodeSessionAccept,
                 onCodeSessionDecline,
+                codeSessionContext,
               )}
             </div>,
           )
@@ -1050,6 +1061,7 @@ export function TurnTimeline({
                 onToolPermission,
                 onCodeSessionAccept,
                 onCodeSessionDecline,
+                codeSessionContext,
               )}
             </div>,
           )
@@ -1074,22 +1086,35 @@ export function TurnTimeline({
         onToolPermission,
         onCodeSessionAccept,
         onCodeSessionDecline,
+        codeSessionContext,
       ),
     )
   }
 
   const workDurationLabel = turnCompleted ? formatTurnWorkDuration(turnStartedAt, turnFinishedAt) : null
 
+  function isInterstitialSubagentWaveItem(candidate: TimelineRenderItem): boolean {
+    if (candidate.kind === 'activity') {
+      if (candidate.group.kind === 'agent') return true
+      if (
+        candidate.group.kind === 'lifecycle' &&
+        (candidate.group.events.some((ev) => Boolean(ev.parentAgentId)) ||
+          Boolean(primaryAgentId && candidate.group.agentId && candidate.group.agentId !== primaryAgentId))
+      ) {
+        return true
+      }
+    }
+    if (
+      candidate.kind === 'thought' &&
+      Boolean(primaryAgentId && candidate.group?.agentId && candidate.group.agentId !== primaryAgentId)
+    ) {
+      return true
+    }
+    return false
+  }
+
   return (
     <div className="turn-timeline">
-      {workDurationLabel && (
-        <div
-          className="turn-timeline__work-duration font-mono text-[11px] text-[var(--text-muted)] opacity-75 pb-1"
-          data-testid="turn-work-duration"
-        >
-          {workDurationLabel}
-        </div>
-      )}
       {canShowRewind && (
         <header
           className="turn-timeline__header turn-timeline__action-bar flex flex-wrap items-center justify-between gap-2 pb-1 text-[11px] text-[var(--text-muted)]"
@@ -1167,21 +1192,22 @@ export function TurnTimeline({
                   continue
                 }
                 if (
-                  candidate.kind === 'activity' &&
-                  candidate.group.kind === 'agent' &&
+                  isInterstitialSubagentWaveItem(candidate) &&
                   lookahead + 1 < resolvedItems.length
                 ) {
-                  const nextNonAgent = resolvedItems
+                  const nextNonInterstitial = resolvedItems
                     .slice(lookahead + 1)
-                    .find((nextItem) => !(nextItem.kind === 'activity' && nextItem.group.kind === 'agent'))
-                  if (nextNonAgent && nextNonAgent.kind === 'activity' && isSubagentActivityGroup(nextNonAgent.group)) {
-                    const renderedAgent = renderTimelineGroup(candidate.group)
-                    if (renderedAgent !== null) {
-                      interstitialAgentNodes.push(
-                        <div key={candidate.id} className="turn-timeline__activity">
-                          {renderedAgent}
-                        </div>,
-                      )
+                    .find((nextItem) => !isInterstitialSubagentWaveItem(nextItem))
+                  if (nextNonInterstitial && nextNonInterstitial.kind === 'activity' && isSubagentActivityGroup(nextNonInterstitial.group)) {
+                    if (candidate.kind === 'activity' && candidate.group.kind === 'agent') {
+                      const renderedAgent = renderTimelineGroup(candidate.group)
+                      if (renderedAgent !== null) {
+                        interstitialAgentNodes.push(
+                          <div key={candidate.id} className="turn-timeline__activity">
+                            {renderedAgent}
+                          </div>,
+                        )
+                      }
                     }
                     lookahead += 1
                     continue
@@ -1255,6 +1281,14 @@ export function TurnTimeline({
           return timelineNodes
         })()}
       </AnimatePresence>
+      {workDurationLabel && (
+        <div
+          className="turn-timeline__work-duration font-mono text-[11px] text-[var(--text-secondary)] pt-1"
+          data-testid="turn-work-duration"
+        >
+          {workDurationLabel}
+        </div>
+      )}
     </div>
   )
 }

@@ -76,25 +76,19 @@ PHASE_TOOLS: Mapping[Phase, tuple[str, ...]] = {
     Phase.VERIFY: (
         "read_file", "view_file", "list_files", "search_files",
         "run_command", "read_process_output", "verify_project",
-        "browser_observe", "browser_screenshot", "verify_frontend",
         "report_verification", "todo_write",
     ),
     Phase.RESPOND: (),
 }
 
 # Families a contract can declare. Only what the contract asked for is
-# published, which is what keeps the browser's twelve tools and every MCP
+# published, which is what keeps specialized toolkits and every MCP
 # server out of a request that has no use for them.
 TOOLKIT_TOOLS: Mapping[str, tuple[str, ...]] = {
     "files": (*_READ_TOOLS, *_WRITE_TOOLS),
     "terminal": ("run_command", "read_process_output", "stop_process"),
     "web": ("fetch_url", "web_search"),
     "skills": _SKILL_TOOLS,
-    "browser": (
-        "browse_page", "browser_observe", "browser_click", "browser_fill", "browser_press",
-        "browser_select", "browser_check", "browser_screenshot", "browser_back",
-        "browser_scroll", "browser_wait_for", "browser_submit",
-    ),
     "delegation": (
         "create_agent", "ask_agent", "ask_agents", "run_subagent", "check_subagent",
         "todo_write", "task_create", "task_update", "task_get", "task_list",
@@ -114,7 +108,7 @@ PHASE_INSTRUCTIONS: Mapping[Phase, str] = {
         "- Se em poucos passos ficar claro que a tarefa é maior do que parecia, chame `write_contract` "
         "para fixar objetivo, entregáveis, restrições e critérios de aceite antes de continuar.\n"
         "- Ferramentas de servidores MCP ativos são carregadas sob demanda via `search_mcp_tools`, `inspect_mcp_server` e `call_mcp_tool`. "
-        "Ferramentas de navegador, plugins e subagentes só ficam disponíveis depois que o contrato declarar que você precisa delas."
+        "Plugins e subagentes só ficam disponíveis depois que o contrato declarar que você precisa deles."
     ),
     Phase.PLAN: (
         "## Agora\n"
@@ -135,7 +129,7 @@ PHASE_INSTRUCTIONS: Mapping[Phase, str] = {
         "## Agora\n"
         "- Pare de produzir e confira o que existe, critério por critério do contrato.\n"
         "- Você só pode ler e rodar verificações; nada de alterar arquivos nesta etapa.\n"
-        "- Prefira `verify_project` a adivinhar comandos, e `verify_frontend` para confirmar que uma página renderiza de verdade.\n"
+        "- Prefira `verify_project` a adivinhar comandos.\n"
         "- Um critério que você não conseguir verificar deve ser declarado como não verificado.\n"
         "- Termine chamando `report_verification` com o resultado real. Se algo não se sustentar, descreva o erro "
         "concreto — você voltará para corrigir. Uma resposta em texto livre não encerra esta etapa."

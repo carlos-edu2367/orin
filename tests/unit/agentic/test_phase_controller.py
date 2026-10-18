@@ -152,13 +152,14 @@ def test_orienting_withholds_the_families_that_caused_the_bloat() -> None:
 
 
 def test_a_declared_toolkit_opens_its_family() -> None:
-    names = tools_for(Phase.EXECUTE, frozenset({"browser"}))
-    assert "browse_page" in names
-    assert "browser_click" in names
+    names = tools_for(Phase.EXECUTE, frozenset({"delegation"}))
+    assert "ask_agents" in names
+    assert "create_agent" in names
 
 
 def test_an_undeclared_family_stays_closed() -> None:
-    assert "browse_page" not in tools_for(Phase.EXECUTE, frozenset({"files"}))
+    assert "ask_agents" not in tools_for(Phase.EXECUTE, frozenset({"files"}))
+    assert "browse_page" not in tools_for(Phase.EXECUTE, frozenset(TOOLKITS))
 
 
 def test_verification_can_look_but_never_change() -> None:
@@ -170,7 +171,9 @@ def test_verification_can_look_but_never_change() -> None:
 
 def test_verification_carries_its_own_mechanical_checks_and_a_way_to_conclude() -> None:
     names = tools_for(Phase.VERIFY)
-    assert {"verify_project", "verify_frontend", "report_verification"} <= names
+    assert {"verify_project", "report_verification"} <= names
+    assert "verify_frontend" not in names
+    assert "browser_observe" not in names
 
 
 def test_execute_publishes_project_verification_without_exceeding_the_tool_cap() -> None:
