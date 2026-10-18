@@ -727,6 +727,7 @@ class AgentToolset:
         extra_env: Mapping[str, str] | None = None,
         lifecycle_context: Mapping[str, str] | None = None,
         reminders: object | None = None,
+        memory_tracker: object | None = None,
     ) -> None:
         from agentos.code_mode.checkpoints import FileCheckpointStore
         from agentos.code_mode.models import CodePermissionMode, normalize_permission_mode
@@ -853,6 +854,7 @@ class AgentToolset:
         self.stop_requested: str | None = None
         # Shared with the runtime: tools queue <system-reminder> notes for the next model request.
         self.reminders = reminders
+        self.memory_tracker = memory_tracker
 
     @property
     def active_mcp_tool_names(self) -> frozenset[str]:
@@ -2771,6 +2773,33 @@ class AgentToolset:
         except Exception:
             return ""
 
+    def _note_memory_for(self, target: Path) -> None:
+        """A read below a directory brings in its instruction files and matching rules (once each)."""
+        tracker = self.memory_tracker
+        if tracker is None:
+            return
+        try:
+            loaded = list(tracker.on_file_read(target))
+        except Exception:  # noqa: BLE001 - memory enrichment never fails a read
+            return
+        if not loaded:
+            return
+        from agentos.memory_files import instructions_payload
+
+        for item in loaded:
+            if self._lifecycle is not None:
+                self._emit_lifecycle(self._lifecycle, HookEvent.INSTRUCTIONS_LOADED, **instructions_payload(item, trigger=target))
+            if self.reminders is not None:
+                reason = "its directory" if item.load_reason == "nested_traversal" else "a rule matching it"
+                try:
+                    self.reminders.add(
+                        "memory",
+                        f"Instructions from {item.path.name} ({reason}) apply to the files you are working on:\n{item.content[:8000]}",
+                        key=f"memory:{item.path}",
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+
     def _check_read_file_guard(self, path: str) -> tuple[str | None, str]:
         """Verify read-before-edit/overwrite and anti-staleness in Code mode.
 
@@ -2952,6 +2981,7 @@ class AgentToolset:
             total_lines=total,
             explicit_read=True,
         )
+        self._note_memory_for(target)
         norm = target.relative_to(self.workspace.root).as_posix() if target.exists() else path
         if not lines:
             body = "[empty file]" if total == 0 else f"[no lines at offset {first}; the file has {total} lines]"
