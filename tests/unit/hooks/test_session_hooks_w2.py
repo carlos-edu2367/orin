@@ -183,3 +183,26 @@ def test_a_cancelled_verifier_is_told_to_stop(tmp_path):
     session._run_subagent = fake_subagent
     session._hook_agent("check", cancel)
     assert seen == [False, True]
+
+
+def test_untrusted_linked_repository_hooks_never_run(tmp_path):
+    # W2-R2: a .claude directory that is a junction/symlink to a folder outside the workspace is still untrusted.
+    import os
+    import subprocess
+
+    outside = tmp_path / "clone" / "tooling" / "cfg"
+    outside.mkdir(parents=True)
+    marker = tmp_path / "ran.txt"
+    (outside / "settings.json").write_text(json.dumps({"hooks": {"UserPromptSubmit": [{"hooks": [{"command": f'echo x > "{marker}"'}]}]}}), encoding="utf-8")
+    store = Store([{"role": "user", "content": "hi"}])
+    session = TurnSession(
+        turn=dict(TURN), store=store, agents_store=Agents(), memory_store=None,
+        provider_factory=lambda: object(), workspace_root=tmp_path / "repo", enable_subagents=False,
+    )
+    link = session.workspace.root / ".claude"
+    if os.name == "nt":
+        subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(outside)], check=True, capture_output=True)
+    else:
+        os.symlink(outside, link, target_is_directory=True)
+    session.build_runtime()
+    assert not marker.exists()
