@@ -2526,6 +2526,18 @@ class TurnSession:
             logger.debug("prompt snapshot could not be stored", exc_info=True)
         return rendered
 
+    def _code_stable_prompt(self) -> str:
+        """Code mode's stable prompt for the options of this turn (memory files join it in Task 16)."""
+        from agentos.code_mode.system_prompt import render_code_system_prompt
+
+        options = getattr(self, "_code_prompt_options", None)
+        return render_code_system_prompt(options) if options is not None else ""
+
+    def _render_code_prompt_again(self) -> str:
+        """After a compaction: render the stable prompt again and store it as the conversation's new snapshot."""
+        rendered = self._code_stable_prompt()
+        return self._snapshotted_prompt(rendered) if rendered else ""
+
     def _code_prompt_parts(self, *, toolset: AgentToolset, plan_path: str | None, environment: Mapping[str, str], trusted: bool) -> tuple[str, str]:
         """Code mode's stable prompt and its per-turn context."""
         from agentos.agentic.runtime import CODE_MODE_CORE_TOOLS
@@ -2536,7 +2548,7 @@ class TurnSession:
         public = toolset.name_translator is not None
         options = CodePromptOptions(tool_names=names, public_names=public, subagents_enabled=self.enable_subagents)
         self._code_prompt_options = options
-        stable = render_code_system_prompt(options)
+        stable = self._code_stable_prompt()
         dynamic = render_code_turn_context(
             permission_mode=self.permission_mode,
             plan_path=plan_path,
@@ -2843,6 +2855,7 @@ class TurnSession:
             ),
             first_user_context=first_user_context,
             autocompact=self._autocompact_setting(),
+            prompt_renderer=self._render_code_prompt_again if self.turn.get("code_mode") == "code" else None,
         )
         if resumed is not None:
             runtime.contract = resumed

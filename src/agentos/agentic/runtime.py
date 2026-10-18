@@ -255,6 +255,7 @@ class AgenticTurnRuntime:
         fallback_provider_factory: Callable[[str], object] | None = None,
         first_user_context: str = "",
         autocompact: object = "auto",
+        prompt_renderer: Callable[[], str] | None = None,
     ) -> None:
         self.store, self.provider = store, provider
         self.lifecycle = lifecycle
@@ -273,6 +274,8 @@ class AgenticTurnRuntime:
         # Per-machine context kept out of the system prompt (excludeDynamicSystemPromptSections); see _request_messages.
         self.first_user_context = str(first_user_context or "")
         self.autocompact = autocompact
+        # Renders the stable system prompt again after a compaction (Code mode); None keeps the current one.
+        self._prompt_renderer = prompt_renderer
         self._stop_hook_active = False
         self._stop_continuations = 0
         self._max_tokens_recoveries = 0
@@ -1407,6 +1410,7 @@ class AgenticTurnRuntime:
             )
         self._hooks(turn, "PostCompact", compaction_count=self._compaction_count)
         self._emit(HookEvent.POST_COMPACT, trigger=trigger, compaction_count=self._compaction_count, pre_tokens=pre_tokens, post_tokens=post_tokens)
+        self._after_compaction(turn)
         return True
 
     def _persist_compact_boundary(self, turn: Mapping[str, object], **values: object) -> None:
@@ -1418,6 +1422,27 @@ class AgenticTurnRuntime:
             recorder(turn, **values)
         except Exception:  # noqa: BLE001
             pass
+
+    def _after_compaction(self, turn: Mapping[str, object]) -> None:
+        """A compaction ends the prompt snapshot and opens a new session segment (SessionStart source=compact)."""
+        conversation_id = str(turn.get("conversation_id") or "")
+        clearer = getattr(self.store, "clear_prompt_snapshot", None)
+        if callable(clearer) and conversation_id:
+            try:
+                clearer(conversation_id)
+            except Exception:  # noqa: BLE001
+                pass
+        if self._prompt_renderer is not None:
+            try:
+                rendered = self._prompt_renderer()
+                if isinstance(rendered, str) and rendered.strip():
+                    self.system_prompt = rendered
+            except Exception:  # noqa: BLE001 - the old prompt is still a valid prompt
+                pass
+        decision = self._emit(HookEvent.SESSION_START, source="compact")
+        if decision is not None:
+            for item in decision.additional_context:
+                self.reminders.add("session_start", item)
 
     def _compact_source(self, messages: list[dict[str, object]], indices: set[int]) -> str:
         parts: list[str] = []

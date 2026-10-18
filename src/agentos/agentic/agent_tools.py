@@ -18,6 +18,7 @@ from datetime import UTC, datetime
 import difflib
 import hashlib
 from html.parser import HTMLParser
+import itertools
 from ipaddress import ip_address
 import json
 import logging
@@ -86,6 +87,10 @@ def sanitize_page_text(value: str) -> str:
     return _JWT_VALUE.sub("[REDACTED TOKEN]", value)
 
 
+# Global read order: a later read always has a larger number, across toolsets sharing one read state.
+_READ_ORDER = itertools.count(1)
+
+
 @dataclass(slots=True)
 class ReadFileRecord:
     """Tracks the last observed file state for anti-staleness and read-before-edit checks."""
@@ -96,6 +101,7 @@ class ReadFileRecord:
     limit: int = 400
     total_lines: int = 0
     explicit_read: bool = False
+    read_seq: int = 0
 
 
 from .contract import TOOLKITS, VERIFICATION_MODES, ContractError, parse as parse_contract
@@ -2759,6 +2765,7 @@ class AgentToolset:
                     limit=limit,
                     total_lines=total_lines,
                     explicit_read=explicit_read,
+                    read_seq=next(_READ_ORDER),
                 )
             return sha
         except Exception:
@@ -5741,7 +5748,7 @@ class AgentToolset:
         if read_items:
             recent = sorted(
                 read_items,
-                key=lambda item: item[1].mtime_ns,
+                key=lambda item: (item[1].read_seq, item[1].mtime_ns),
                 reverse=True,
             )[:5]
             file_blocks: list[str] = []
@@ -5750,8 +5757,8 @@ class AgentToolset:
                     content, _ = self.workspace.read_text(rel_path)
                 except Exception:
                     continue
-                snippet = content[:2000]
-                if len(content) > 2000:
+                snippet = content[:3000]
+                if len(content) > 3000:
                     snippet += "\n... [truncated for post-compact re-hydration]"
                 file_blocks.append(f"#### `{rel_path}`\n```\n{snippet}\n```")
             if file_blocks:
@@ -5774,7 +5781,7 @@ class AgentToolset:
         except Exception:
             plan_files = []
         if plan_files:
-            plan_path = plan_files[-1]
+            plan_path = max(plan_files, key=lambda rel: (self.workspace.root / rel).stat().st_mtime_ns)
             try:
                 plan_text, _ = self.workspace.read_text(plan_path)
                 if plan_text.strip():

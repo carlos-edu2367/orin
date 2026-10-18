@@ -92,7 +92,8 @@ def test_compaction_emits_pre_and_post() -> None:
     )
     runtime._run_compaction(messages, _turn())
     names = [event.name for event in events]
-    assert names == [HookEvent.PRE_COMPACT, HookEvent.POST_COMPACT]
+    assert names == [HookEvent.PRE_COMPACT, HookEvent.POST_COMPACT, HookEvent.SESSION_START]
+    assert dict(events[2].payload)["source"] == "compact"
     assert dict(events[0].payload)["trigger"] == "auto"
 
 
