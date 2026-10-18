@@ -431,6 +431,13 @@ def _ensure_conversation_mode_columns(engine: Engine) -> None:
         _LOGGER.exception("could not add the queue idempotency index")
 
 
+def _same_queued_text(earlier: dict[str, object], text: str) -> dict[str, object]:
+    # A blocked row no longer holds its text (W3-R22), so it cannot be compared; it is returned as it is.
+    if earlier.get("state") != "blocked" and str(earlier.get("content") or "") != text:
+        raise ApplicationValidationError("the Idempotency-Key was already used for a different message")
+    return earlier
+
+
 @dataclass(frozen=True, slots=True)
 class ChatReceipt:
     conversation_id: str
@@ -1748,7 +1755,8 @@ class PostgresChatStore:
         """Keep text typed while a turn runs; the turn reads it between tool rounds.
 
         A repeated ``idempotency_key`` in the conversation returns the row the first call made: a retried POST
-        queues its text once. The unique index settles a race between two identical requests.
+        queues its text once. The unique index settles a race between two identical requests. The same key with
+        different text is refused rather than dropping that text silently.
         """
         text = str(content or "").strip()
         if not text or len(text) > 16000:
@@ -1757,14 +1765,27 @@ class PostgresChatStore:
         if key is not None:
             earlier = self.queued_input_for_key(conversation_id, user_id, key)
             if earlier is not None:
-                return earlier
+                return _same_queued_text(earlier, text)
         try:
             return self._insert_queued_input(user_id=user_id, conversation_id=conversation_id, text=text, key=key)
         except IntegrityError:
             earlier = self.queued_input_for_key(conversation_id, user_id, key) if key is not None else None
             if earlier is None:
                 raise
-            return earlier
+            return _same_queued_text(earlier, text)
+
+    def turn_for_idempotency_key(self, user_id: str, idempotency_key: str) -> dict[str, object] | None:
+        """The turn a person's earlier request made with this key, with the text it sent."""
+        with self._engine.connect() as c:
+            row = c.execute(select(
+                conversation_turns.c.conversation_id, conversation_turns.c.turn_id,
+                conversation_turns.c.assistant_message_id, conversation_turns.c.state, conversation_messages.c.content,
+            ).select_from(conversation_turns.outerjoin(
+                conversation_messages, conversation_messages.c.message_id == conversation_turns.c.user_message_id,
+            )).where(
+                conversation_turns.c.user_id == user_id, conversation_turns.c.idempotency_key == idempotency_key,
+            )).mappings().first()
+        return dict(row) if row is not None else None
 
     def queued_input_for_key(self, conversation_id: str, user_id: str, idempotency_key: str) -> dict[str, object] | None:
         with self._engine.connect() as c:
@@ -2621,10 +2642,20 @@ class ChatApplication:
 
     def enqueue(self, user_id: str, conversation_id: str, message: str, idempotency_key: str) -> dict[str, object]:
         """Queue text for the running turn, or send it now when nothing is running."""
-        # A retry of a request that already queued its text must not send it again once the turn has ended.
-        earlier = self.store.queued_input_for_key(conversation_id, user_id, idempotency_key) if idempotency_key else None
-        if earlier is not None:
-            return {"queued": True, **earlier}
+        text = str(message or "").strip()
+        if idempotency_key:
+            # A retry of a request that already sent its text as a turn must not queue it into that turn.
+            sent = self.store.turn_for_idempotency_key(user_id, idempotency_key)
+            if sent is not None:
+                sent_text = str(sent.get("content") or "").strip()
+                # A prompt a hook refused was erased (W2-R6) and cannot be compared; the conversation still must match.
+                if str(sent["conversation_id"]) != conversation_id or sent_text not in {text, BLOCKED_PROMPT_PLACEHOLDER}:
+                    raise ApplicationValidationError("the Idempotency-Key was already used for a different message")
+                return {"queued": False, "turn_id": sent["turn_id"], "message_id": sent["assistant_message_id"], "state": sent["state"]}
+            # A retry of a request that already queued its text must not send it again once the turn has ended.
+            earlier = self.store.queued_input_for_key(conversation_id, user_id, idempotency_key)
+            if earlier is not None:
+                return {"queued": True, **_same_queued_text(earlier, text)}
         if not self._has_live_turn(conversation_id, user_id):
             receipt = self.send(user_id, conversation_id, message, idempotency_key)
             return {"queued": False, "turn_id": receipt.turn_id, "message_id": receipt.message_id, "state": receipt.state}

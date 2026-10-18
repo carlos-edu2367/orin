@@ -270,6 +270,37 @@ def test_the_store_returns_the_row_of_a_repeated_key() -> None:
     assert len(store.queued_inputs(conversation_id, "u")) == 1
 
 
+def test_a_reused_key_with_a_different_message_is_refused() -> None:
+    """W3-R20 fail closed: a key reused for other text must not drop that text silently."""
+    store = _store()
+    turn = _running_turn(store)
+    conversation_id = str(turn["conversation_id"])
+    app = ChatApplication(store)
+    app.enqueue("u", conversation_id, "also do X", "same-key")
+    with pytest.raises(ApplicationValidationError):
+        app.enqueue("u", conversation_id, "something else entirely", "same-key")
+    with pytest.raises(ApplicationValidationError):
+        store.enqueue_input(user_id="u", conversation_id=conversation_id, content="other", idempotency_key="same-key")
+    assert [item["content"] for item in store.queued_inputs(conversation_id, "u")] == ["also do X"]
+
+
+def test_a_retry_of_a_sent_message_is_not_queued_into_its_own_turn() -> None:
+    """W3-R20: the first POST found no live turn and sent the text; its retry must not queue it again."""
+    store = _store()
+    turn = _running_turn(store)
+    conversation_id = str(turn["conversation_id"])
+    store.finish(turn)
+    app = ChatApplication(store)
+    first = app.enqueue("u", conversation_id, "follow up", "same-key")
+    assert first["queued"] is False
+    again = app.enqueue("u", conversation_id, "follow up", "same-key")
+    assert again["queued"] is False and again["turn_id"] == first["turn_id"]
+    assert store.queued_inputs(conversation_id, "u") == []
+    with pytest.raises(ApplicationValidationError):
+        app.enqueue("u", conversation_id, "a different follow up", "same-key")
+    assert store.queued_inputs(conversation_id, "u") == []
+
+
 def test_a_queued_text_a_hook_refused_is_not_kept_in_the_database() -> None:
     """W3-R22: a queued message a UserPromptSubmit hook refuses is replaced by the blocked placeholder."""
     from agentos.agentic.lifecycle import HookEvent, LifecycleBus, LifecycleDecision
