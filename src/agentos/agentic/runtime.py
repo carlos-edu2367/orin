@@ -26,6 +26,7 @@ from .phases import DEFAULT_PHASE_BUDGETS, Phase, PhaseBudget, PhaseController
 from .lifecycle import HookEvent, LifecycleBus
 from .tools.public_names import public_name as _public_tool_name
 from .reminders import ReminderQueue, render_reminders, system_reminder
+from .retry import backoff_delay, is_retryable, retry_after_of, status_code_of
 
 MAX_PARALLEL_TOOLS = 8
 MAX_PARALLEL_SUBAGENT_TOOLS = max(8, int(os.environ.get("ORIN_MAX_CONCURRENT_SUBAGENTS", "16") or "16"))
@@ -266,6 +267,9 @@ class AgenticTurnRuntime:
         on_close: Callable[[], None] | None = None,
         reminders: ReminderQueue | None = None,
         cost_estimator: Callable[[int | None, int | None], object] | None = None,
+        sleep: Callable[[float], None] | None = None,
+        fallback_models: tuple[str, ...] | list[str] = (),
+        fallback_provider_factory: Callable[[str], object] | None = None,
     ) -> None:
         self.store, self.provider = store, provider
         self.lifecycle = lifecycle
@@ -277,6 +281,10 @@ class AgenticTurnRuntime:
         self.reminders = reminders if reminders is not None else ReminderQueue()
         # Prices a model call when the provider reports no cost (most do not); feeds max_budget_usd.
         self._cost_estimator = cost_estimator
+        self._sleep = sleep or time.sleep
+        # Models tried, in order, when the current one keeps failing; consumed as they are tried.
+        self._fallback_models: list[str] = [str(model).strip() for model in fallback_models if str(model or "").strip()]
+        self._fallback_provider_factory = fallback_provider_factory
         self._stop_hook_active = False
         self._stop_continuations = 0
         self.hook_engine = hook_engine
@@ -350,6 +358,81 @@ class AgenticTurnRuntime:
         body = render_reminders(pending)
         if body:
             messages.append({"role": "user", "content": body, "_reminder": True})
+
+    def _wait(self, turn: dict[str, object], seconds: float) -> bool:
+        """Sleep in short slices so a cancel is noticed; False when the turn was cancelled meanwhile."""
+        remaining = max(0.0, float(seconds))
+        while remaining > 1e-9:
+            if self.cancelled(turn):
+                return False
+            step = min(0.25, remaining)
+            self._sleep(step)
+            remaining -= step
+        return not self.cancelled(turn)
+
+    def _retry_wait(self, turn: dict[str, object], attempt: int, error: object | None) -> str:
+        """"retry" after waiting, "cancelled", or "exhausted" when the server asks for longer than allowed."""
+        base = self.limits.retry_base_delay_seconds
+        if base <= 0:
+            return "retry"
+        retry_after = retry_after_of(error) if isinstance(error, BaseException) else None
+        if retry_after is not None and retry_after > self.limits.max_retry_after_seconds:
+            return "exhausted"
+        delay = backoff_delay(attempt, base=base, maximum=self.limits.retry_max_delay_seconds, retry_after=retry_after)
+        return "retry" if self._wait(turn, delay) else "cancelled"
+
+    def _recover_provider_failure(self, turn: dict[str, object], error: object | None, *, retries_used: int, deadline: datetime, code: str) -> str:
+        """Retry with backoff, then the fallback chain, then give up: "retry", "fallback", "cancel" or "fail"."""
+        retryable = not isinstance(error, BaseException) or is_retryable(error)
+        if retryable and retries_used < self.limits.max_provider_retries and self.clock() < deadline:
+            self._life(turn, "retrying", attempt=retries_used + 1)
+            waited = self._retry_wait(turn, retries_used + 1, error)
+            if waited == "cancelled":
+                return "cancel"
+            if waited == "retry":
+                return "retry"
+        model_missing = isinstance(error, BaseException) and status_code_of(error) == 404
+        if (retryable or model_missing) and self._switch_to_fallback(turn, reason=code):
+            return "fallback"
+        return "fail"
+
+    def _switch_to_fallback(self, turn: dict[str, object], *, reason: str) -> bool:
+        """Move to the next fallback model of the same provider. A PreModelSwitch block keeps the current one."""
+        factory = self._fallback_provider_factory
+        if factory is None:
+            return False
+        while self._fallback_models:
+            candidate = self._fallback_models.pop(0)
+            current = str(turn.get("model_id") or "")
+            if not candidate or candidate == current:
+                continue
+            try:
+                provider = factory(candidate)
+            except Exception:  # noqa: BLE001 - an unbuildable fallback is skipped, the next one is tried
+                provider = None
+            if provider is None:
+                continue
+            decision = self._emit(HookEvent.PRE_MODEL_SWITCH, from_model=current, to_model=candidate, reason="fallback", error_code=reason)
+            if decision is not None and (decision.blocked or decision.stop or decision.permission_decision == "deny"):
+                closer = getattr(provider, "close", None)
+                if callable(closer):
+                    try:
+                        closer()
+                    except Exception:  # noqa: BLE001
+                        pass
+                return False
+            previous, self.provider = self.provider, provider
+            closer = getattr(previous, "close", None)
+            if callable(closer):
+                try:
+                    closer()
+                except Exception:  # noqa: BLE001
+                    pass
+            turn["model_id"] = candidate
+            self._life(turn, "model_switched", from_model=current, to_model=candidate, reason=reason)
+            self._emit(HookEvent.POST_MODEL_SWITCH, from_model=current, to_model=candidate, reason="fallback", error_code=reason)
+            return True
+        return False
 
     def run(self, turn_id: str, *, turn: dict[str, object] | None = None) -> AgenticRunResult:
         try:
@@ -491,10 +574,15 @@ class AgenticTurnRuntime:
                     reactive_compacted = True
                     if self._force_compact(messages, turn, tool_schemas):
                         continue
-                if provider_retries < self.limits.max_provider_retries and self.clock() < deadline:
+                recovery = self._recover_provider_failure(turn, exc, retries_used=provider_retries, deadline=deadline, code="PROVIDER_STREAM_FAILED")
+                if recovery == "retry":
                     provider_retries += 1
-                    self._life(turn, "retrying", attempt=provider_retries)
                     continue
+                if recovery == "fallback":
+                    provider_retries = 0
+                    continue
+                if recovery == "cancel":
+                    return self._cancel(turn, iteration, action_count)
                 return self._fail(turn, "PROVIDER_STREAM_FAILED", iteration, action_count)
             text_parts: list[str] = []
             thinking_parts: list[str] = []
@@ -654,10 +742,15 @@ class AgenticTurnRuntime:
                     self._emit(HookEvent.STOP_FAILURE, error_code="PROVIDER_STREAM_INTERRUPTED")
                     self._settle_quality(turn, "reconciliation_required", "PROVIDER_STREAM_INTERRUPTED")
                     return AgenticRunResult("reconciliation_required", iteration, action_count, "PROVIDER_STREAM_INTERRUPTED")
-                if provider_retries < self.limits.max_provider_retries and self.clock() < deadline:
+                recovery = self._recover_provider_failure(turn, exc, retries_used=provider_retries, deadline=deadline, code="PROVIDER_STREAM_FAILED")
+                if recovery == "retry":
                     provider_retries += 1
-                    self._life(turn, "retrying", attempt=provider_retries)
                     continue
+                if recovery == "fallback":
+                    provider_retries = 0
+                    continue
+                if recovery == "cancel":
+                    return self._cancel(turn, iteration, action_count)
                 return self._fail(turn, "PROVIDER_STREAM_FAILED", iteration, action_count)
             # One provider call is over; fold its usage into the turn total
             # before the next call starts reporting its own.
@@ -690,13 +783,21 @@ class AgenticTurnRuntime:
                 reactive_compacted = True
                 if self._force_compact(messages, turn, tool_schemas):
                     continue
-            if (retryable_error or rate_limited) and not text_parts and not calls and provider_retries < self.limits.max_provider_retries and self.clock() < deadline:
-                self._effect_finished(turn, provider_effect_id, state="NOT_APPLIED", error_code="PROVIDER_RETRY")
-                provider_retries += 1
-                self._life(turn, "retrying", attempt=provider_retries)
-                continue
             if (retryable_error or rate_limited) and not text_parts and not calls:
-                self._effect_finished(turn, provider_effect_id, state="NOT_APPLIED", error_code="PROVIDER_RETRY_EXHAUSTED")
+                can_retry = provider_retries < self.limits.max_provider_retries and self.clock() < deadline
+                self._effect_finished(
+                    turn, provider_effect_id, state="NOT_APPLIED",
+                    error_code="PROVIDER_RETRY" if can_retry else "PROVIDER_RETRY_EXHAUSTED",
+                )
+                recovery = self._recover_provider_failure(turn, None, retries_used=provider_retries, deadline=deadline, code="PROVIDER_RETRY_EXHAUSTED")
+                if recovery == "retry":
+                    provider_retries += 1
+                    continue
+                if recovery == "fallback":
+                    provider_retries = 0
+                    continue
+                if recovery == "cancel":
+                    return self._cancel(turn, iteration, action_count)
                 return self._fail(turn, "PROVIDER_RETRY_EXHAUSTED", iteration, action_count)
             if (calls or (finish is not None and finish.value == "TOOL_CALLS")) and not final_iteration:
                 self._effect_finished(

@@ -16,6 +16,7 @@ import httpx
 from agentos.providers.models import FinishReason, ProviderError, ProviderErrorCategory, ProviderUsage, Retryability
 
 from .provider_content import project_messages as _raw_project_messages
+from .retry import parse_retry_after
 
 
 def project_messages(messages: Iterable[Mapping[str, Any]], provider: str) -> list[dict[str, Any]]:
@@ -61,6 +62,9 @@ class ProviderKeyRejected(Exception):
     for this provider can retry with a different one; any other error (a
     bad request, a provider-side failure, a mid-stream drop after content
     already flowed) is not this."""
+
+    status_code: int | None = None
+    retry_after_seconds: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -723,7 +727,10 @@ class HTTPProviderStreamTransport:
                     response.raise_for_status()
                 except httpx.HTTPStatusError as error:
                     if error.response.status_code in (401, 403, 429):
-                        raise ProviderKeyRejected(str(error)) from error
+                        rejected = ProviderKeyRejected(str(error))
+                        rejected.status_code = error.response.status_code
+                        rejected.retry_after_seconds = parse_retry_after(error.response.headers)
+                        raise rejected from error
                     raise
                 limit = project_rate_limit_headers(response.headers)
                 has_limit = any(value is not None for value in (limit.remaining, limit.reset_after_seconds, limit.limit))

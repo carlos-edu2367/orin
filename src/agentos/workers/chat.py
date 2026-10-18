@@ -1322,6 +1322,7 @@ class ChatWorker:
             media_policy=self._media_policy_for_turn(turn),
             media_client=self._media_client_for_turn(turn),
             catalog_pricing=self._catalog_pricing_for(turn),
+            fallback_provider_factory=lambda model_id: self._provider_transport({**turn, "model_id": model_id}),
         )
         return session.build_runtime()
 

@@ -28,6 +28,11 @@ ALWAYS_IGNORED_FROM_PROJECT = (
     "deniedMcpServers",
     "managedMcpServers",
     "autoMode.model",  # the classifier model is operator policy: a repository never picks it
+    "fallbackModel",  # which model a turn falls back to is the user's decision (cost, provider)
+    "effort",  # reasoning effort is billed to the user
+    "effortLevel",
+    "autoDreamEnabled",  # background consolidation spends the user's tokens
+    "permissions.nonInteractiveAsk",  # whether an unattended run may skip a confirmation
 )
 # Ignored until the user trusts the workspace: they run code or widen permissions.
 UNTRUSTED_IGNORED_FROM_PROJECT = (

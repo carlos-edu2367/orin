@@ -809,11 +809,13 @@ class TurnSession:
         max_concurrent_subagents: int = MAX_CONCURRENT_SUBAGENTS,
         lifecycle: LifecycleBus | None = None,
         catalog_pricing: Mapping[str, object] | None = None,
+        fallback_provider_factory: Callable[[str], object] | None = None,
     ) -> None:
         self.turn = turn
         self.lifecycle: LifecycleBus | None = lifecycle
         # The turn model's catalog prices; the cost estimator uses them when the provider reports no cost.
         self.catalog_pricing = dict(catalog_pricing) if catalog_pricing else None
+        self.fallback_provider_factory = fallback_provider_factory
         self.effective_settings: EffectiveSettings = empty_settings()
         self.enable_terminal = bool(enable_terminal)
         self.store = store
@@ -1175,6 +1177,14 @@ class TurnSession:
                 )
             else:
                 self._record(AgentActivityEventType.TURN_STARTED, "Tentando novamente", {**base, "attempt": payload.get("attempt")}, agent_id=actor)
+            return
+        if state == "model_switched":
+            self._record(
+                AgentActivityEventType.TURN_STARTED,
+                f"Trocando para o modelo de reserva {payload.get('to_model')}",
+                {**base, "from_model": payload.get("from_model"), "to_model": payload.get("to_model"), "reason": payload.get("reason")},
+                agent_id=actor,
+            )
             return
         if state == "failed":
             if not is_subagent:
@@ -2424,6 +2434,25 @@ class TurnSession:
 
         return estimate
 
+    def _fallback_models(self) -> tuple[str, ...]:
+        """The user's fallback chain (``fallbackModel``: comma list or array), never set by a repository."""
+        from .loop_settings import operator_value
+
+        raw = operator_value(self.effective_settings, "fallbackModel")
+        if isinstance(raw, str):
+            items = raw.split(",")
+        elif isinstance(raw, list):
+            items = [item for item in raw if isinstance(item, str)]
+        else:
+            return ()
+        current = str(self.turn.get("model_id") or "").strip()
+        chain: list[str] = []
+        for item in items:
+            model = item.strip()[:512]
+            if model and model != current and model not in chain:
+                chain.append(model)
+        return tuple(chain[:5])
+
     def build_runtime(self) -> AgenticTurnRuntime:
         import inspect
         from agentos.agentic.runtime import CODE_MODE_CORE_TOOLS
@@ -2683,6 +2712,8 @@ class TurnSession:
             on_close=self._close_hook_dispatcher,
             reminders=self._reminders,
             cost_estimator=self._cost_estimator(),
+            fallback_models=self._fallback_models(),
+            fallback_provider_factory=self.fallback_provider_factory,
             reconciliation_required=self.reconciliation_required,
             tool_kinds={item.name: item.kind for item in definitions},
             skill_prompt_tokens=_skill_prompt_tokens(skill_catalog),
