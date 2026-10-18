@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from itertools import count
@@ -240,6 +240,8 @@ class AgenticRunResult:
     # iteration (the tool_choice="none" closing turn), never on an ordinary
     # completion that finished with budget to spare.
     budget_exhausted: bool = False
+    # How many queued messages from the person reached the model during this turn.
+    queued_turn_count: int = 0
 
 
 def _accepts_call_id(invoke: Callable[..., object]) -> bool:
@@ -299,6 +301,7 @@ class AgenticTurnRuntime:
         self._max_tokens_recoveries = 0
         # Raised for the rest of the turn after a tool call was cut by the output limit.
         self._output_cap: int | None = None
+        self._queued_turn_count = 0
         self.hook_engine = hook_engine
         # ``toolset`` is the agent-facing path: its results are returned to the
         # model verbatim. ``actions`` remains the policy-projected path used by
@@ -370,6 +373,38 @@ class AgenticTurnRuntime:
         body = render_reminders(pending)
         if body:
             messages.append({"role": "user", "content": body, "_reminder": True})
+
+    def _inject_queued_inputs(self, turn: dict[str, object], messages: list[dict[str, object]]) -> None:
+        """Text the person queued while tools ran joins the conversation now, through UserPromptSubmit."""
+        claim = getattr(self.store, "claim_queued_inputs", None)
+        if not callable(claim):
+            return
+        try:
+            items = list(claim(turn) or ())
+        except Exception:  # noqa: BLE001 - the queue never breaks a turn
+            return
+        for item in items:
+            text = str((item or {}).get("content") or "").strip()
+            queue_id = str((item or {}).get("queue_id") or "")
+            if not text:
+                continue
+            decision = self._emit(HookEvent.USER_PROMPT_SUBMIT, prompt=text)
+            if decision is not None and (decision.blocked or decision.stop):
+                marker = getattr(self.store, "mark_queued_input_blocked", None)
+                if callable(marker):
+                    try:
+                        marker(queue_id)
+                    except Exception:  # noqa: BLE001
+                        pass
+                reason = decision.reason or decision.stop_reason or "blocked by hook"
+                self.store.delta(turn, f"\n\n⚠️ Mensagem da fila bloqueada por um hook: {reason}\n\n")
+                continue
+            extra = [entry for entry in (decision.additional_context if decision is not None else []) if entry]
+            content = f"{text}\n\n{system_reminder(chr(10).join(extra))}" if extra else text
+            messages.append({"role": "user", "content": content})
+            self._queued_turn_count += 1
+            self._record_step(turn, kind=transcript.STEP_QUEUED_INPUT, payload={"content": text})
+            self._life(turn, "queued_input", queued_text=text[:2000], queue_id=queue_id)
 
     def _wait(self, turn: dict[str, object], seconds: float) -> bool:
         """Sleep in short slices so a cancel is noticed; False when the turn was cancelled meanwhile."""
@@ -506,11 +541,14 @@ class AgenticTurnRuntime:
 
     def run(self, turn_id: str, *, turn: dict[str, object] | None = None) -> AgenticRunResult:
         try:
-            return self._run(turn_id, turn=turn)
+            result = self._run(turn_id, turn=turn)
         except BaseException:
             # An exception that escapes the loop is still a failed turn: exactly one StopFailure.
             self._emit(HookEvent.STOP_FAILURE, error_code="RUNTIME_EXCEPTION")
             raise
+        if self._queued_turn_count:
+            result = replace(result, queued_turn_count=self._queued_turn_count)
+        return result
 
     def _run(self, turn_id: str, *, turn: dict[str, object] | None = None) -> AgenticRunResult:
         turn = turn or self._load(turn_id)
@@ -536,6 +574,7 @@ class AgenticTurnRuntime:
         self._stop_continuations = 0
         self._max_tokens_recoveries = 0
         self._output_cap = None
+        self._queued_turn_count = 0
         if self.prompt_block_reason:
             self.store.delta(turn, f"⚠️ Mensagem bloqueada por um hook: {self.prompt_block_reason}")
             # W2-R6: erase the refused prompt before the turn finishes; if this fails the turn fails loudly
@@ -983,6 +1022,7 @@ class AgenticTurnRuntime:
                     return AgenticRunResult("reconciliation_required", iteration, action_count, "EFFECT_RECONCILIATION_REQUIRED")
                 if self.limits.safety_max_tool_rounds is not None and tool_rounds >= self.limits.safety_max_tool_rounds:
                     return self._pause_for_safety(turn, iteration, action_count)
+                self._inject_queued_inputs(turn, messages)
                 self._life(turn, "running")
                 continue
             has_text = bool("".join(text_parts).strip())

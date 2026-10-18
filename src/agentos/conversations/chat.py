@@ -17,7 +17,7 @@ from sqlalchemy import func, insert, select, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 
-from agentos.api.contracts import ApplicationNotFoundError
+from agentos.api.contracts import ApplicationNotFoundError, ApplicationValidationError
 from agentos.api.events import CursorError
 from agentos.agentic.events import AgentActivityEvent, AgentActivityEventType
 from agentos.agentic.workspace import WorkspaceError, _directory_name, resolve_workspace
@@ -48,6 +48,7 @@ BLOCKED_BY_HOOK_STATUS = "blocked_by_hook"
 BLOCKED_PROMPT_PLACEHOLDER = "[mensagem bloqueada por hook]"
 # A message in one of these states is final: a late delta must not reopen it.
 _TERMINAL_MESSAGE_STATES = ("completed", "failed", "cancelled", "waiting_user")
+MAX_QUEUED_INPUTS = 20
 
 
 def _attachment_label(record: Mapping[str, object]) -> str:
@@ -1708,6 +1709,97 @@ class PostgresChatStore:
                 if title is not None and str(title) == _title(str(original)):
                     c.execute(update(conversations).where(conversations.c.conversation_id == conversation_id).values(title="Mensagem bloqueada", updated_at=now))
 
+    def _owned(self, c, conversation_id: str, user_id: str) -> None:
+        owned = c.execute(select(conversations.c.conversation_id).where(
+            conversations.c.conversation_id == conversation_id, conversations.c.user_id == user_id,
+        )).first()
+        if owned is None:
+            raise ApplicationNotFoundError(conversation_id)
+
+    def enqueue_input(self, *, user_id: str, conversation_id: str, content: str) -> dict[str, object]:
+        """Keep text typed while a turn runs; the turn reads it between tool rounds."""
+        text = str(content or "").strip()
+        if not text or len(text) > 16000:
+            raise ValueError("message must be a bounded non-blank string")
+        now = datetime.now(UTC)
+        queue_id = _id("queue")
+        with self._engine.begin() as c:
+            self._owned(c, conversation_id, user_id)
+            pending = int(c.execute(select(func.count()).select_from(conversation_input_queue).where(
+                conversation_input_queue.c.conversation_id == conversation_id,
+                conversation_input_queue.c.state == "pending",
+            )).scalar() or 0)
+            if pending >= MAX_QUEUED_INPUTS:
+                raise ApplicationValidationError("the input queue is full")
+            c.execute(insert(conversation_input_queue).values(
+                queue_id=queue_id, conversation_id=conversation_id, user_id=user_id, content=text,
+                state="pending", turn_id=None, created_at=now, updated_at=now,
+            ))
+        return {"queue_id": queue_id, "state": "pending", "content": text}
+
+    def queued_inputs(self, conversation_id: str, user_id: str) -> list[dict[str, object]]:
+        with self._engine.connect() as c:
+            self._owned(c, conversation_id, user_id)
+            rows = c.execute(select(
+                conversation_input_queue.c.queue_id, conversation_input_queue.c.content, conversation_input_queue.c.created_at,
+            ).where(
+                conversation_input_queue.c.conversation_id == conversation_id,
+                conversation_input_queue.c.user_id == user_id,
+                conversation_input_queue.c.state == "pending",
+            ).order_by(conversation_input_queue.c.id)).mappings().all()
+        return [{"queue_id": str(row["queue_id"]), "content": str(row["content"]), "created_at": row["created_at"].isoformat()} for row in rows]
+
+    def cancel_queued_input(self, conversation_id: str, user_id: str, queue_id: str) -> bool:
+        now = datetime.now(UTC)
+        with self._engine.begin() as c:
+            result = c.execute(update(conversation_input_queue).where(
+                conversation_input_queue.c.queue_id == str(queue_id),
+                conversation_input_queue.c.conversation_id == conversation_id,
+                conversation_input_queue.c.user_id == user_id,
+                conversation_input_queue.c.state == "pending",
+            ).values(state="cancelled", updated_at=now))
+        return result.rowcount == 1
+
+    def claim_queued_inputs(self, turn: Mapping[str, object], *, limit: int = MAX_QUEUED_INPUTS, state: str = "injected") -> list[dict[str, object]]:
+        """Take the pending input of the turn's conversation, oldest first. Each row is taken by one caller only."""
+        now = datetime.now(UTC)
+        claimed: list[dict[str, object]] = []
+        with self._engine.begin() as c:
+            rows = c.execute(select(conversation_input_queue.c.queue_id, conversation_input_queue.c.content).where(
+                conversation_input_queue.c.conversation_id == str(turn["conversation_id"]),
+                conversation_input_queue.c.user_id == str(turn["user_id"]),
+                conversation_input_queue.c.state == "pending",
+            ).order_by(conversation_input_queue.c.id).limit(max(1, int(limit)))).mappings().all()
+            for row in rows:
+                result = c.execute(update(conversation_input_queue).where(
+                    conversation_input_queue.c.queue_id == row["queue_id"], conversation_input_queue.c.state == "pending",
+                ).values(state=state, turn_id=str(turn.get("turn_id") or "") or None, updated_at=now))
+                if result.rowcount == 1:
+                    claimed.append({"queue_id": str(row["queue_id"]), "content": str(row["content"])})
+        return claimed
+
+    def mark_queued_input_blocked(self, queue_id: str) -> None:
+        with self._engine.begin() as c:
+            c.execute(update(conversation_input_queue).where(conversation_input_queue.c.queue_id == str(queue_id)).values(
+                state="blocked", updated_at=datetime.now(UTC),
+            ))
+
+    def take_queued_inputs(self, turn: Mapping[str, object]) -> tuple[str, list[str]] | None:
+        """Pending input joined into one message for a follow-up turn, or None."""
+        items = self.claim_queued_inputs(turn, state="promoted")
+        if not items:
+            return None
+        return "\n\n".join(str(item["content"]) for item in items)[:16000], [str(item["queue_id"]) for item in items]
+
+    def restore_queued_inputs(self, queue_ids: Sequence[str]) -> None:
+        ids = [str(item) for item in queue_ids]
+        if not ids:
+            return
+        with self._engine.begin() as c:
+            c.execute(update(conversation_input_queue).where(
+                conversation_input_queue.c.queue_id.in_(ids), conversation_input_queue.c.state == "promoted",
+            ).values(state="pending", turn_id=None, updated_at=datetime.now(UTC)))
+
     def history_for_turn(self, turn: dict[str, object], *, rehydration_budget_tokens: int = 0) -> list[dict[str, object]]:
         """The conversation as the model should see it, including past tool work.
 
@@ -2244,6 +2336,43 @@ class ChatApplication:
                 "requested_at": datetime.now(UTC),
             })
         return self.store.request_cancel(conversation_id, user_id)
+    def _has_live_turn(self, conversation_id: str, user_id: str) -> bool:
+        with self.store._engine.connect() as connection:
+            return connection.execute(select(conversation_turns.c.turn_id).where(
+                conversation_turns.c.conversation_id == conversation_id,
+                conversation_turns.c.user_id == user_id,
+                conversation_turns.c.state.in_(("queued", "starting", "running", "cancelling")),
+            )).first() is not None
+
+    def enqueue(self, user_id: str, conversation_id: str, message: str, idempotency_key: str) -> dict[str, object]:
+        """Queue text for the running turn, or send it now when nothing is running."""
+        if not self._has_live_turn(conversation_id, user_id):
+            receipt = self.send(user_id, conversation_id, message, idempotency_key)
+            return {"queued": False, "turn_id": receipt.turn_id, "message_id": receipt.message_id, "state": receipt.state}
+        item = self.store.enqueue_input(user_id=user_id, conversation_id=conversation_id, content=message)
+        if not self._has_live_turn(conversation_id, user_id):
+            # The turn ended between the check and the insert: nothing would read the queue now.
+            self.promote_queued_inputs(conversation_id, user_id)
+        return {"queued": True, **item}
+
+    def queued_inputs(self, conversation_id: str, user_id: str) -> list[dict[str, object]]:
+        return self.store.queued_inputs(conversation_id, user_id)
+
+    def cancel_queued_input(self, conversation_id: str, user_id: str, queue_id: str) -> bool:
+        return self.store.cancel_queued_input(conversation_id, user_id, queue_id)
+
+    def promote_queued_inputs(self, conversation_id: str, user_id: str, *, source_turn_id: str | None = None):
+        """Input still queued when a turn ends becomes the conversation's next turn."""
+        taken = self.store.take_queued_inputs({"conversation_id": conversation_id, "user_id": user_id, "turn_id": source_turn_id})
+        if taken is None:
+            return None
+        message, ids = taken
+        try:
+            return self.send(user_id, conversation_id, message, f"queue:{ids[0]}")
+        except Exception:
+            self.store.restore_queued_inputs(ids)
+            raise
+
     def overview(self, conversation_id: str, user_id: str): return self.store.overview(conversation_id, user_id)
 
 __all__ = ["ChatApplication", "ChatReceipt", "PostgresChatStore", "migrate_managed_workspace_files"]

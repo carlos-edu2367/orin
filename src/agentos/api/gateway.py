@@ -223,6 +223,10 @@ class UpdateMemoryRequest(_RequestModel):
     fact: str = Field(min_length=1, max_length=2000)
 
 
+class QueueConversationInputRequest(_RequestModel):
+    message: str = Field(min_length=1, max_length=16000)
+
+
 class SendConversationMessageRequest(_RequestModel):
     message: str = Field(default="", max_length=16000)
     attachments: list[str] = Field(default_factory=list, max_length=MAX_FILES_PER_MESSAGE)
@@ -1367,6 +1371,40 @@ def create_app(services: ApiServices) -> FastAPI:
         services.security.authorize(principal, action="conversation.cancel", resource_id=conversation_id, purpose="conversation.cancel")
         result = require_port(services.conversation_application).cancel(conversation_id, principal.user_id)  # type: ignore[union-attr]
         return JSONResponse(_jsonable(result), status_code=202)
+
+    @app.post("/v1/conversations/{conversation_id}/queue", status_code=201)
+    async def queue_conversation_input(conversation_id: str, payload: QueueConversationInputRequest, request: Request) -> JSONResponse:
+        principal = principal_for(request, mutable=True)
+        services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.queue")
+        idempotency = _idempotency(request)
+        result = await run_in_threadpool(
+            require_port(services.conversation_application).enqueue,  # type: ignore[union-attr]
+            principal.user_id, conversation_id, payload.message, idempotency,
+        )
+        return JSONResponse(_jsonable(result), status_code=201)
+
+    @app.get("/v1/conversations/{conversation_id}/queue")
+    async def list_conversation_queue(conversation_id: str, request: Request) -> JSONResponse:
+        principal = principal_for(request)
+        services.security.authorize(principal, action="conversation.read", resource_id=conversation_id, purpose="conversation.queue")
+        items = await run_in_threadpool(
+            require_port(services.conversation_application).queued_inputs, conversation_id, principal.user_id,  # type: ignore[union-attr]
+        )
+        return JSONResponse({"items": _jsonable(items)})
+
+    @app.delete("/v1/conversations/{conversation_id}/queue/{queue_id}")
+    async def cancel_conversation_queue_item(conversation_id: str, queue_id: str, request: Request) -> JSONResponse:
+        principal = principal_for(request, mutable=True)
+        services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.queue")
+        if not queue_id or len(queue_id) > 255:
+            raise ApplicationNotFoundError(queue_id)
+        cancelled = await run_in_threadpool(
+            require_port(services.conversation_application).cancel_queued_input,  # type: ignore[union-attr]
+            conversation_id, principal.user_id, queue_id,
+        )
+        if not cancelled:
+            raise ApplicationNotFoundError(queue_id)
+        return JSONResponse({"queue_id": queue_id, "cancelled": True})
 
     @app.get("/v1/conversations/{conversation_id}/workspace-trust")
     async def get_workspace_trust(conversation_id: str, request: Request) -> JSONResponse:

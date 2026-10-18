@@ -1178,6 +1178,14 @@ class TurnSession:
             else:
                 self._record(AgentActivityEventType.TURN_STARTED, "Tentando novamente", {**base, "attempt": payload.get("attempt")}, agent_id=actor)
             return
+        if state == "queued_input":
+            self._record(
+                AgentActivityEventType.TURN_STARTED,
+                "Mensagem da fila entregue ao agente",
+                {**base, "queued_text": str(payload.get("queued_text") or "")[:2000], "queue_id": payload.get("queue_id")},
+                agent_id=actor,
+            )
+            return
         if state == "model_switched":
             self._record(
                 AgentActivityEventType.TURN_STARTED,

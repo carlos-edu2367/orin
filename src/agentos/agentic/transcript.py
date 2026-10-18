@@ -20,7 +20,9 @@ from typing import Iterable, Mapping, Sequence
 
 STEP_ASSISTANT_TOOL_CALL = "assistant_tool_call"
 STEP_TOOL_RESULT = "tool_result"
-STEP_KINDS = (STEP_ASSISTANT_TOOL_CALL, STEP_TOOL_RESULT)
+# Text the person queued while the turn ran, injected between two tool rounds.
+STEP_QUEUED_INPUT = "queued_input"
+STEP_KINDS = (STEP_ASSISTANT_TOOL_CALL, STEP_TOOL_RESULT, STEP_QUEUED_INPUT)
 
 # A tool result arrives bounded by its per-tool limit (up to 100k for MCP), so
 # this is a safety net for anything that grows past it rather than the
@@ -137,6 +139,10 @@ def project(steps: Sequence[Mapping[str, object]], provider: str) -> list[dict[s
             messages.append(assistant_message(provider, str(payload.get("text") or ""), calls))
         elif step.get("kind") == STEP_TOOL_RESULT:
             messages.append(tool_result_message(provider, payload))
+        elif step.get("kind") == STEP_QUEUED_INPUT:
+            content = str(payload.get("content") or "").strip()
+            if content:
+                messages.append({"role": "user", "content": content})
     return messages
 
 
@@ -180,7 +186,7 @@ def within_budget(steps: Sequence[Mapping[str, object]], budget_tokens: int) -> 
 
 __all__ = [
     "MAX_STEP_CHARS", "REHYDRATION_BUDGET_FRACTION", "STEP_ASSISTANT_TOOL_CALL", "STEP_KINDS",
-    "STEP_TOOL_RESULT", "assistant_message", "assistant_tool_call_payload", "bound",
+    "STEP_QUEUED_INPUT", "STEP_TOOL_RESULT", "assistant_message", "assistant_tool_call_payload", "bound",
     "estimated_tokens", "project", "tool_result_message", "tool_result_payload", "units",
     "within_budget",
 ]

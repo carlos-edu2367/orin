@@ -237,6 +237,12 @@ class _RuntimeStore:
     def latest_contract(self, conversation_id: str):
         return self._store.latest_contract(conversation_id)
 
+    def claim_queued_inputs(self, turn: dict[str, object]):
+        return self._store.claim_queued_inputs(turn)
+
+    def mark_queued_input_blocked(self, queue_id: str) -> None:
+        self._store.mark_queued_input_blocked(queue_id)
+
     # -- session seams ---------------------------------------------------
 
     def record(self, *args, **kwargs) -> None:
@@ -545,6 +551,7 @@ class ChatWorker:
                     self.store.finish(turn, failed=True, code=error_code or "agentic_runtime_failed")
         finally:
             self._settle_code_mode(turn, result_state, error_code=error_code)
+        self._promote_queued_inputs(turn, result_state)
 
     def _settle_code_mode(self, turn: dict[str, object], result_state: str, *, error_code: str | None) -> None:
         if turn.get("code_mode") != "code":
@@ -597,6 +604,21 @@ class ChatWorker:
             )
         except Exception:
             _LOGGER.exception("could not settle Code mode for turn %s", turn.get("turn_id"))
+
+    def _promote_queued_inputs(self, turn: dict[str, object], result_state: str) -> None:
+        """Queued text the turn never read becomes the next turn; a cancelled or failed turn leaves it queued."""
+        if result_state not in {"completed", "completed_with_caveats", "waiting_user"}:
+            return
+        if not callable(getattr(self.store, "take_queued_inputs", None)):
+            return
+        from agentos.conversations.chat import ChatApplication
+
+        try:
+            ChatApplication(self.store).promote_queued_inputs(
+                str(turn["conversation_id"]), str(turn["user_id"]), source_turn_id=str(turn["turn_id"]),
+            )
+        except Exception:
+            _LOGGER.exception("could not promote the queued input of turn %s", turn.get("turn_id"))
 
     def _kernel_manages(self, turn: dict[str, object]) -> bool:
         with self._state_lock:
