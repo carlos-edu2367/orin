@@ -208,3 +208,64 @@ def test_messages_out_rewrites_openai_and_anthropic_tool_calls() -> None:
 )
 def test_permission_category(internal: str, kind: str, read_only: bool, tags: tuple[str, ...], expected: str) -> None:
     assert permission_category(internal, kind=kind, read_only=read_only, policy_tags=tags) == expected
+
+
+def _id(value: object) -> str:
+    return repr(value)[:40]
+
+
+HOSTILE_VALUES = ["--5", "²", "9" * 5000, 10**400, float("inf"), float("nan"), [], {}, None, True]
+
+
+@pytest.mark.parametrize("value", HOSTILE_VALUES, ids=_id)
+def test_run_command_timeout_never_raises_on_hostile_values(value: object) -> None:
+    result = arguments_in("run_command", {"command": "ls", "timeout": value})
+    assert isinstance(result, dict)
+    result = arguments_in("run_command", {"command": "ls", "timeout_seconds": value})
+    assert isinstance(result, dict)
+    assert isinstance(arguments_out("run_command", {"command": "ls", "timeout_seconds": value}), dict)
+
+
+@pytest.mark.parametrize("value", HOSTILE_VALUES, ids=_id)
+def test_pid_and_task_id_never_raise_on_hostile_values(value: object) -> None:
+    assert isinstance(arguments_in("read_process_output", {"task_id": value}), dict)
+    assert isinstance(arguments_in("stop_process", {"pid": value}), dict)
+    assert isinstance(arguments_out("read_process_output", {"pid": value}), dict)
+
+
+@pytest.mark.parametrize("options", [5, True, "abc", None, {"label": "x"}], ids=_id)
+def test_ask_user_options_never_raise_on_hostile_values(options: object) -> None:
+    public = {"questions": [{"question": "Q?", "header": "H", "options": options, "multiSelect": False}]}
+    assert isinstance(arguments_in("ask_user", public), dict)
+    internal = {"questions": [{"id": "q1", "question": "Q?", "mode": "single_choice", "options": options}]}
+    assert isinstance(arguments_out("ask_user", internal), dict)
+
+
+def test_messages_out_keeps_poisoned_history_instead_of_raising() -> None:
+    messages = [{
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [{
+            "id": "c1", "type": "function",
+            "function": {"name": "run_command", "arguments": json.dumps({"command": "ls", "timeout_seconds": "--5"})},
+        }],
+    }]
+    out = PublicToolNames().messages_out(messages)
+    call = out[0]["tool_calls"][0]["function"]
+    assert call["name"] == "Bash"
+    assert json.loads(call["arguments"])["command"] == "ls"
+
+
+def test_messages_out_survives_unparseable_tool_use_block() -> None:
+    deep = "[" * 5000
+    messages = [{
+        "role": "assistant",
+        "content": [
+            {"type": "tool_use", "id": "t1", "name": "run_command", "input": {"command": "ls", "timeout_seconds": "--5"}},
+            {"type": "tool_use", "id": "t2", "name": "read_file", "input": deep},
+        ],
+    }]
+    out = PublicToolNames().messages_out(messages)
+    names = [block["name"] for block in out[0]["content"]]
+    assert names[0] == "Bash"
+    assert len(out[0]["content"]) == 2

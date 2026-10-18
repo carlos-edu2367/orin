@@ -1464,6 +1464,9 @@ class AgenticTurnRuntime:
                         "your output may have been truncated at max_tokens — write smaller modular "
                         "files or use edit_file in chunks."
                     )
+            except Exception as error:  # noqa: BLE001 - model-chosen values must never crash the turn
+                parsed_args = None
+                parse_err = f"Invalid arguments for {name}: {type(error).__name__}"
             started_meta: dict[str, object] = {}
             if isinstance(parsed_args, Mapping):
                 desc = parsed_args.get("description") or parsed_args.get("subject")

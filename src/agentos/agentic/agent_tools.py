@@ -390,6 +390,14 @@ class ToolDefinition:
         return {"type": "function", "function": {"name": self.name, "description": self.description, "parameters": dict(self.parameters)}}
 
 
+def _safe_public_input(internal: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
+    """The public (Claude Code) shape of a call for hook payloads; the raw shape if it cannot be encoded."""
+    try:
+        return _public_arguments_out(internal, dict(arguments or {}))
+    except Exception:  # noqa: BLE001 - payload building is best-effort
+        return dict(arguments or {})
+
+
 @dataclass(slots=True)
 class ToolOutcome:
     status: str
@@ -1878,31 +1886,44 @@ class AgentToolset:
             return self._invoke_unobserved(name, arguments, call_id=call_id, invocation_id=invocation_id)
         internal = _internal_tool_name(name)
         if internal != name:
-            arguments = _public_arguments_in(internal, dict(arguments or {}))
+            try:
+                arguments = _public_arguments_in(internal, dict(arguments or {}))
+            except Exception:  # noqa: BLE001 - a model-chosen value must never crash the turn
+                return ToolOutcome("failed", "Argumentos inválidos"[:240], f"Invalid arguments for {name}.", {}, "INVALID_ARGUMENTS")
         tool_name = _public_tool_name(internal)
-        tool_input = _public_arguments_out(internal, dict(arguments or {}))
+        tool_input = _safe_public_input(internal, arguments)
         tool_use_id = str(call_id or invocation_id or getattr(self, "_active_invocation_id", None) or "")
-        bus.emit(HookEvent.PRE_TOOL_USE, tool_name=tool_name, tool_input=tool_input, tool_use_id=tool_use_id)
+        self._emit_lifecycle(bus, HookEvent.PRE_TOOL_USE, tool_name=tool_name, tool_input=tool_input, tool_use_id=tool_use_id)
         cwd_before = self._current_cwd
         outcome = self._invoke_unobserved(internal, arguments, call_id=call_id, invocation_id=invocation_id)
         common = {"tool_name": tool_name, "tool_input": tool_input, "tool_use_id": tool_use_id}
         if outcome.error_code in PERMISSION_DENIAL_CODES:
-            bus.emit(HookEvent.PERMISSION_DENIED, **common, reason=outcome.content[:2000])
+            self._emit_lifecycle(bus, HookEvent.PERMISSION_DENIED, **common, reason=outcome.content[:2000])
         elif outcome.status == "succeeded":
-            bus.emit(
+            self._emit_lifecycle(
+                bus,
                 HookEvent.POST_TOOL_USE,
                 **common,
                 tool_response={"status": outcome.status, "summary": outcome.summary, "content": outcome.content[:4000]},
             )
             self._emit_tool_side_events(bus, internal, dict(arguments or {}), outcome, cwd_before)
         else:
-            bus.emit(
+            self._emit_lifecycle(
+                bus,
                 HookEvent.POST_TOOL_USE_FAILURE,
                 **common,
                 error=outcome.content[:2000] or outcome.summary,
                 error_code=outcome.error_code,
             )
         return outcome
+
+    @staticmethod
+    def _emit_lifecycle(bus: LifecycleBus, event: HookEvent, **payload: Any) -> None:
+        """Emit a lifecycle event; a failing payload or subscriber never breaks the tool call."""
+        try:
+            bus.emit(event, **payload)
+        except Exception:  # noqa: BLE001 - lifecycle never breaks a turn
+            logger.exception("lifecycle emit failed for %s", getattr(event, "value", event))
 
     def _emit_tool_side_events(
         self,
@@ -1915,23 +1936,25 @@ class AgentToolset:
         payload = outcome.payload or {}
         if internal == "task_create":
             task = payload.get("task") if isinstance(payload.get("task"), Mapping) else {}
-            bus.emit(
+            self._emit_lifecycle(
+                bus,
                 HookEvent.TASK_CREATED,
                 task_id=str(task.get("id") or payload.get("task_id") or ""),
                 task_subject=str(arguments.get("subject") or arguments.get("content") or ""),
                 task_description=str(arguments.get("description") or ""),
             )
         elif internal == "task_update" and str(arguments.get("status") or "") == "completed":
-            bus.emit(
+            self._emit_lifecycle(
+                bus,
                 HookEvent.TASK_COMPLETED,
                 task_id=str(arguments.get("taskId") or arguments.get("task_id") or arguments.get("id") or ""),
             )
         elif internal == "enter_worktree":
-            bus.emit(HookEvent.WORKTREE_CREATE, worktree=dict(payload.get("worktree") or {}))
+            self._emit_lifecycle(bus, HookEvent.WORKTREE_CREATE, worktree=dict(payload.get("worktree") or {}))
         elif internal == "exit_worktree" and str(arguments.get("action") or "keep") == "remove":
-            bus.emit(HookEvent.WORKTREE_REMOVE, worktree_name=str(self._active_worktree_name or ""))
+            self._emit_lifecycle(bus, HookEvent.WORKTREE_REMOVE, worktree_name=str(self._active_worktree_name or ""))
         if self._current_cwd != cwd_before:
-            bus.emit(HookEvent.CWD_CHANGED, old_cwd=str(cwd_before), new_cwd=str(self._current_cwd))
+            self._emit_lifecycle(bus, HookEvent.CWD_CHANGED, old_cwd=str(cwd_before), new_cwd=str(self._current_cwd))
 
     def _invoke_unobserved(
         self,
@@ -1944,7 +1967,10 @@ class AgentToolset:
         requested_name = name
         name = _internal_tool_name(name)
         if requested_name != name:
-            arguments = _public_arguments_in(name, dict(arguments or {}))
+            try:
+                arguments = _public_arguments_in(name, dict(arguments or {}))
+            except Exception:  # noqa: BLE001 - a model-chosen value must never crash the turn
+                return ToolOutcome("failed", "Argumentos inválidos"[:240], f"Invalid arguments for {requested_name}.", {}, "INVALID_ARGUMENTS")
         self._active_invocation_id = call_id or invocation_id or getattr(self, "_active_invocation_id", None)
         # A model can hallucinate a tool name, so an unknown tool is a result the
         # model reads and corrects, never an exception that kills the turn.
@@ -2004,10 +2030,11 @@ class AgentToolset:
             if perm_decision == "ask":
                 if self._interactive_permissions:
                     if self._lifecycle is not None:
-                        self._lifecycle.emit(
+                        self._emit_lifecycle(
+                            self._lifecycle,
                             HookEvent.PERMISSION_REQUEST,
                             tool_name=_public_tool_name(name),
-                            tool_input=_public_arguments_out(name, dict(arguments)),
+                            tool_input=_safe_public_input(name, arguments),
                             permission_suggestions=[],
                         )
                     perm_result = self._permission_broker.request_and_wait(

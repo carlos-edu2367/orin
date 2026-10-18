@@ -103,3 +103,22 @@ def test_runtime_speaks_public_names_to_the_model_and_internal_names_to_orin(tmp
     # Orin's own activity keeps the internal id the UI understands
     finished = [payload for state, payload in store.events if state == "tool_finished"]
     assert finished and finished[0]["tool_name"] == "read_file" and finished[0]["status"] == "succeeded"
+
+
+def test_hostile_timeout_from_model_completes_the_turn(tmp_path: Path) -> None:
+    store = Store()
+    toolset = AgentToolset(_workspace(tmp_path), public_tool_names=True)
+    provider = Provider("Bash", {"command": "echo hi", "timeout": "--5"})
+    result = AgenticTurnRuntime(store=store, provider=provider, toolset=toolset).run("turn-1")
+    assert result.state == "completed"
+    assert any(state == "tool_finished" for state, _ in store.events)
+
+
+def test_flag_off_hostile_timeout_with_lifecycle_does_not_crash_turn(tmp_path: Path) -> None:
+    from agentos.agentic.lifecycle import LifecycleBus
+
+    store = Store()
+    toolset = AgentToolset(_workspace(tmp_path), lifecycle=LifecycleBus())
+    provider = Provider("run_command", {"command": "echo hi", "timeout_seconds": "--5"})
+    result = AgenticTurnRuntime(store=store, provider=provider, toolset=toolset).run("turn-1")
+    assert result.state == "completed"

@@ -14,6 +14,7 @@ from __future__ import annotations
 import copy
 import json
 import math
+import re
 from collections.abc import Mapping
 from typing import Any
 
@@ -371,16 +372,32 @@ def public_argument_names(internal: str) -> frozenset[str] | None:
     return frozenset(entry[1].get("properties", {}))
 
 
+# Model-supplied numbers are untrusted: only a plain decimal literal of at most
+# 18 digits is accepted (ASCII only, so "²" and 5000-digit strings are rejected).
+_INTEGER_TEXT = re.compile(r"-?[0-9]{1,18}")
+_EXACT_FLOAT_LIMIT = 2**53
+
+
 def _as_int(value: Any) -> int | None:
+    """Total conversion: any value the model can send yields an int or None, never an exception."""
     if isinstance(value, bool):
         return None
     if isinstance(value, int):
         return value
-    if isinstance(value, float) and math.isfinite(value):
+    if isinstance(value, float):
+        if not math.isfinite(value) or abs(value) > _EXACT_FLOAT_LIMIT:
+            return None
         return int(value)
-    if isinstance(value, str) and value.strip().lstrip("-").isdigit():
-        return int(value.strip())
+    if isinstance(value, str):
+        text = value.strip()
+        if _INTEGER_TEXT.fullmatch(text):
+            return int(text)
     return None
+
+
+def _options_list(raw: Mapping[str, Any]) -> list[Any]:
+    options = raw.get("options")
+    return options if isinstance(options, list) else []
 
 
 def _ask_user_in(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -395,7 +412,7 @@ def _ask_user_in(arguments: dict[str, Any]) -> dict[str, Any]:
             converted.append(raw)  # let the tool's own validation report it
             continue
         options: list[dict[str, str]] = []
-        for option_index, option in enumerate(raw.get("options") or [], start=1):
+        for option_index, option in enumerate(_options_list(raw), start=1):
             if not isinstance(option, Mapping):
                 continue
             label = str(option.get("label") or "").strip()
@@ -427,7 +444,7 @@ def _ask_user_out(arguments: dict[str, Any]) -> dict[str, Any]:
             "multiSelect": raw.get("mode") == "checkbox",
             "options": [
                 {"label": option.get("label", "")}
-                for option in raw.get("options") or []
+                for option in _options_list(raw)
                 if isinstance(option, Mapping)
             ],
         })
@@ -446,7 +463,8 @@ def arguments_in(internal: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
     if internal == "run_command" and "timeout" in result:
         milliseconds = _as_int(result.pop("timeout"))
         if milliseconds is not None and milliseconds > 0 and "timeout_seconds" not in result:
-            result["timeout_seconds"] = max(1, min(MAX_BASH_TIMEOUT_SECONDS, math.ceil(milliseconds / 1000)))
+            seconds = -(-milliseconds // 1000)  # integer ceiling: no float division, no OverflowError
+            result["timeout_seconds"] = max(1, min(MAX_BASH_TIMEOUT_SECONDS, seconds))
     elif internal == "edit_file" and isinstance(result.get("edits"), list):
         result["edits"] = [
             arguments_in("edit_file", item) if isinstance(item, Mapping) else item
@@ -475,9 +493,11 @@ def arguments_out(internal: str, arguments: Mapping[str, Any]) -> dict[str, Any]
             value = result.pop(internal_key)
             result.setdefault(public_key, value)
     if internal == "run_command" and "timeout_seconds" in result:
-        seconds = _as_int(result.pop("timeout_seconds"))
-        if seconds is not None and "timeout" not in result:
-            result["timeout"] = seconds * 1000
+        seconds = _as_int(result["timeout_seconds"])
+        if seconds is not None:  # an unparseable value is left exactly as it was
+            result.pop("timeout_seconds")
+            if "timeout" not in result:
+                result["timeout"] = seconds * 1000
     elif internal == "edit_file" and isinstance(result.get("edits"), list):
         result["edits"] = [
             arguments_out("edit_file", item) if isinstance(item, Mapping) else item
@@ -556,15 +576,26 @@ class PublicToolNames:
 
     def messages_out(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
+        # History is re-encoded every iteration: one poisoned entry must never
+        # make the whole conversation unusable, so each item keeps its original
+        # form when it cannot be translated.
         for message in messages:
-            if not isinstance(message, Mapping) or message.get("role") != "assistant":
+            try:
+                out.append(self._message_out(message))
+            except Exception:  # noqa: BLE001 - translation is best-effort on stored history
                 out.append(message)
-                continue
-            changed = dict(message)
-            tool_calls = message.get("tool_calls")
-            if isinstance(tool_calls, list):
-                new_calls = []
-                for call in tool_calls:
+        return out
+
+    @staticmethod
+    def _message_out(message: Any) -> Any:
+        if not isinstance(message, Mapping) or message.get("role") != "assistant":
+            return message
+        changed = dict(message)
+        tool_calls = message.get("tool_calls")
+        if isinstance(tool_calls, list):
+            new_calls: list[Any] = []
+            for call in tool_calls:
+                try:
                     function = call.get("function") if isinstance(call, Mapping) else None
                     if not isinstance(function, Mapping):
                         new_calls.append(call)
@@ -576,11 +607,14 @@ class PublicToolNames:
                         "arguments": _translate_tool_call_arguments(internal, function.get("arguments")),
                     }
                     new_calls.append({**call, "function": new_function})
-                changed["tool_calls"] = new_calls
-            content = message.get("content")
-            if isinstance(content, list):
-                new_blocks = []
-                for block in content:
+                except Exception:  # noqa: BLE001
+                    new_calls.append(call)
+            changed["tool_calls"] = new_calls
+        content = message.get("content")
+        if isinstance(content, list):
+            new_blocks: list[Any] = []
+            for block in content:
+                try:
                     if isinstance(block, Mapping) and block.get("type") == "tool_use":
                         internal = str(block.get("name") or "")
                         new_blocks.append({
@@ -590,6 +624,7 @@ class PublicToolNames:
                         })
                     else:
                         new_blocks.append(block)
-                changed["content"] = new_blocks
-            out.append(changed)
-        return out
+                except Exception:  # noqa: BLE001
+                    new_blocks.append(block)
+            changed["content"] = new_blocks
+        return changed
