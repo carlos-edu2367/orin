@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import difflib
+import hashlib
+import os
 from datetime import UTC, datetime
 from fnmatch import fnmatchcase
 import json
@@ -14,7 +16,7 @@ from uuid import uuid4
 # agentos.permissions.* imports agentos.code_mode.models, so the engine/rules
 # imports stay inside the functions that use them (import cycle through code_mode/__init__).
 from agentos.settings import load_effective_settings
-from agentos.settings.paths import SettingsPaths
+from agentos.settings.paths import SettingsPaths, orin_user_dir
 from agentos.settings.writer import add_permission_rule
 
 from .models import CodeAutonomy, CodePermissionMode, normalize_permission_mode
@@ -413,7 +415,14 @@ class ToolPermissionBroker:
 
     @property
     def permissions_dir(self) -> Path:
-        return self.workspace_root / ".orin" / "permissions"
+        """Pending requests live in the user's directory, never in the repository.
+
+        Anything running inside the workspace (a dev server, a postinstall, a
+        watcher) could otherwise write a reply file and mint a grant. Processes
+        of the same user outside the workspace remain out of scope.
+        """
+        digest = hashlib.sha256(os.path.normcase(str(self.workspace_root)).encode("utf-8")).hexdigest()[:16]
+        return orin_user_dir() / "permissions" / digest
 
     @property
     def settings_path(self) -> Path:
@@ -603,7 +612,12 @@ class ToolPermissionBroker:
         reason: str | None = None,
         rule: str | None = None,
     ) -> dict[str, Any]:
-        """Record the user's decision and persist ``allow_always`` rules when requested."""
+        """Record the user's decision and persist ``allow_always`` rules when requested.
+
+        Only the rule the request itself was created with (``suggested_rule``) can
+        become a grant. A ``rule`` argument cannot widen it, and a request without a
+        suggested rule is treated as ``allow_once``.
+        """
         if decision not in {"allow_once", "allow_always", "deny"}:
             raise ValueError(f"Invalid permission decision: {decision}")
         path = self.request_path(request_id)
@@ -613,17 +627,11 @@ class ToolPermissionBroker:
         if not isinstance(record, dict):
             raise LookupError(f"Permission request '{request_id}' is corrupted")
 
-        effective_rule = (rule or "").strip() or str(record.get("suggested_rule") or "").strip()
-        if decision == "allow_always":
-            if not effective_rule:
-                effective_rule = suggest_permission_rule(
-                    str(record.get("tool_name") or ""),
-                    {"command": record.get("command"), "path": record.get("path")},
-                    workspace=self.workspace_root,
-                )
-            self.add_allow_rule(effective_rule)
-
-        persisted_rule = effective_rule if decision == "allow_always" else (rule or None)
+        suggested = str(record.get("suggested_rule") or "").strip()
+        persisted_rule = None
+        if decision == "allow_always" and suggested:
+            self.add_allow_rule(suggested)
+            persisted_rule = suggested
         record["status"] = "resolved"
         record["decision"] = decision
         record["allowed"] = decision in {"allow_once", "allow_always"}
@@ -682,9 +690,10 @@ class ToolPermissionBroker:
                 status = current.get("status")
                 if decision in {"allow_once", "allow_always", "deny"} and (status == "resolved" or status == "pending"):
                     if decision == "allow_always":
-                        rule_to_save = str(current.get("rule") or current.get("suggested_rule") or "").strip()
-                        if rule_to_save:
-                            self.add_allow_rule(rule_to_save)
+                        # The grant is the rule this request was created with, never one the reply file names.
+                        suggested = str(record.get("suggested_rule") or "").strip()
+                        if suggested:
+                            self.add_allow_rule(suggested)
                     if status != "resolved":
                         current["status"] = "resolved"
                     current["allowed"] = decision in {"allow_once", "allow_always"}
