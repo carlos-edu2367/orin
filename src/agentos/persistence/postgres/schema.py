@@ -616,6 +616,7 @@ conversation_turns = Table(
     Column("idempotency_key", String(255), nullable=False), Column("created_at", DateTime(timezone=True), nullable=False),
     Column("scheduled_by_schedule_id", String(255), nullable=True),
     Column("code_mode", String(16), nullable=True),
+    Column("turn_kind", String(16), nullable=True),
     Column("started_at", DateTime(timezone=True)), Column("finished_at", DateTime(timezone=True)), Column("updated_at", DateTime(timezone=True), nullable=False),
     UniqueConstraint("user_id", "idempotency_key", name="uq_conversation_turn_idempotency"),
 )
@@ -690,9 +691,50 @@ conversation_dispatches = Table(
     "conversation_dispatches", metadata,
     Column("id", Integer, primary_key=True), Column("turn_id", String(255), nullable=False, unique=True), Column("state", String(32), nullable=False),
     Column("attempts", Integer, nullable=False, server_default="0"), Column("last_error", String(96)), Column("queued_at", DateTime(timezone=True), nullable=False),
-    Column("acquired_at", DateTime(timezone=True)), Column("updated_at", DateTime(timezone=True), nullable=False),
+    Column("acquired_at", DateTime(timezone=True)), Column("lease_renewed_at", DateTime(timezone=True), nullable=True), Column("updated_at", DateTime(timezone=True), nullable=False),
 )
 Index("ix_conversation_dispatch_state", conversation_dispatches.c.state, conversation_dispatches.c.queued_at)
+
+# W3: input typed while a turn runs. Injected between tool rounds, or promoted to a turn of its own.
+conversation_input_queue = Table(
+    "conversation_input_queue", metadata,
+    Column("id", Integer, primary_key=True), Column("queue_id", String(255), nullable=False, unique=True),
+    Column("conversation_id", String(255), nullable=False), Column("user_id", String(255), nullable=False),
+    Column("content", String(16000), nullable=False), Column("state", String(16), nullable=False),
+    Column("turn_id", String(255), nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False), Column("updated_at", DateTime(timezone=True), nullable=False),
+)
+Index("ix_conversation_input_queue_pending", conversation_input_queue.c.conversation_id, conversation_input_queue.c.state, conversation_input_queue.c.id)
+
+# W3: the stable system prompt a conversation runs with, reused byte for byte until its next compaction.
+conversation_prompt_snapshots = Table(
+    "conversation_prompt_snapshots", metadata,
+    Column("conversation_id", String(255), primary_key=True), Column("user_id", String(255), nullable=False),
+    Column("snapshot_key", String(64), nullable=False), Column("sha256", String(64), nullable=False),
+    Column("content", Text(), nullable=False), Column("created_at", DateTime(timezone=True), nullable=False),
+)
+
+# W3: where a conversation was compacted. History up to ``through_sequence`` is replaced by ``summary``.
+conversation_compact_boundaries = Table(
+    "conversation_compact_boundaries", metadata,
+    Column("id", Integer, primary_key=True), Column("boundary_id", String(255), nullable=False, unique=True),
+    Column("conversation_id", String(255), nullable=False), Column("user_id", String(255), nullable=False),
+    Column("turn_id", String(255), nullable=False), Column("kind", String(16), nullable=False),
+    Column("compact_trigger", String(16), nullable=False), Column("pre_tokens", Integer, nullable=False),
+    Column("post_tokens", Integer, nullable=True), Column("cumulative_dropped_tokens", Integer, nullable=True),
+    Column("summary", Text(), nullable=True), Column("through_sequence", Integer, nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+)
+Index("ix_conversation_compact_boundaries_conversation", conversation_compact_boundaries.c.conversation_id, conversation_compact_boundaries.c.id)
+
+# W3: the conversation's session as hooks see it (SessionStart source, W0-R14).
+conversation_sessions = Table(
+    "conversation_sessions", metadata,
+    Column("conversation_id", String(255), primary_key=True), Column("user_id", String(255), nullable=False),
+    Column("started_at", DateTime(timezone=True), nullable=False), Column("last_source", String(16), nullable=False),
+    Column("start_count", Integer, nullable=False, server_default="1"),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+)
 
 # The chat transcript is a projection of an execution, not its recovery
 # authority.  These records are deliberately narrow: they hold the durable

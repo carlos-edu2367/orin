@@ -66,6 +66,10 @@ def test_persistence_schema_contains_only_the_durable_boundary_tables():
             "users",
             "instance_setup",
             "auth_login_attempts",
+            "conversation_input_queue",
+            "conversation_prompt_snapshots",
+            "conversation_compact_boundaries",
+            "conversation_sessions",
         }
 
 

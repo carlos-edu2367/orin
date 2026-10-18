@@ -25,7 +25,7 @@ from agentos.installation import orin_paths
 from agentos.persistence.postgres.agentic_activity import ActivityCursorError
 from agentos.persistence.postgres.execution_adapters import ExecutionApplicationAdapter, ExecutionQueryAdapter
 from agentos.agentic import transcript as turn_transcript
-from agentos.persistence.postgres.schema import (code_mode_runs, conversation_activity_events, conversation_agent_usage, conversation_agents, conversation_dispatches, conversation_events, conversation_hook_context, conversation_message_attachments, conversation_message_commands, conversation_messages, conversation_tool_records, conversation_turn_steps, conversation_turns, conversations, projects, provider_model_catalog, runtime_heartbeats, turn_quality_metrics, workspace_roots)
+from agentos.persistence.postgres.schema import (code_mode_runs, conversation_activity_events, conversation_agent_usage, conversation_agents, conversation_compact_boundaries, conversation_dispatches, conversation_events, conversation_hook_context, conversation_input_queue, conversation_message_attachments, conversation_message_commands, conversation_messages, conversation_prompt_snapshots, conversation_sessions, conversation_tool_records, conversation_turn_steps, conversation_turns, conversations, metadata, projects, provider_model_catalog, runtime_heartbeats, turn_quality_metrics, workspace_roots)
 from agentos.code_mode.models import CodeAutonomy, CodeStage, detect_code_request, known_permission_mode
 from agentos.provider_catalog.pricing import estimate_cost_usd
 
@@ -364,7 +364,7 @@ def migrate_managed_workspace_files(source_root: Path, target_root: Path) -> lis
 
 
 def _ensure_conversation_mode_columns(engine: Engine) -> None:
-    """Ensure existing local SQLite/Postgres databases have mode and permission_mode on conversations."""
+    """Bring a database that skipped migrations up to what this store queries (mode columns and W3 state)."""
     from sqlalchemy import inspect as sa_inspect, text
     try:
         inspector = sa_inspect(engine)
@@ -383,6 +383,26 @@ def _ensure_conversation_mode_columns(engine: Engine) -> None:
                 ))
     except Exception:
         pass
+    timestamp = "TIMESTAMP WITH TIME ZONE" if engine.dialect.name == "postgresql" else "DATETIME"
+    for table, column, ddl in (
+        ("conversation_turns", "turn_kind", "VARCHAR(16)"),
+        ("conversation_dispatches", "lease_renewed_at", timestamp),
+    ):
+        try:
+            inspector = sa_inspect(engine)
+            if inspector.has_table(table) and column not in {col["name"] for col in inspector.get_columns(table)}:
+                with engine.begin() as conn:
+                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}"))
+        except Exception:
+            _LOGGER.exception("could not add %s.%s", table, column)
+    try:
+        metadata.create_all(
+            engine,
+            tables=[conversation_input_queue, conversation_prompt_snapshots, conversation_compact_boundaries, conversation_sessions],
+            checkfirst=True,
+        )
+    except Exception:
+        _LOGGER.exception("could not create the W3 conversation tables")
 
 
 @dataclass(frozen=True, slots=True)
