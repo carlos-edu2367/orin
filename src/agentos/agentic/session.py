@@ -47,6 +47,7 @@ from .agent_tools import AgentToolset, ToolOutcome, is_verification_command
 from .contract import parse as parse_contract
 from .events import AgentActivityEventType
 from .lifecycle import HookEvent, LifecycleBus
+from .loop_settings import BudgetMeter
 from .reminders import ReminderQueue, system_reminder
 from .phases import PhaseController
 from .runtime import AgenticLimits, AgenticTurnRuntime
@@ -864,6 +865,8 @@ class TurnSession:
         self.lifecycle: LifecycleBus | None = lifecycle
         # The turn model's catalog prices; the cost estimator uses them when the provider reports no cost.
         self.catalog_pricing = dict(catalog_pricing) if catalog_pricing else None
+        # The turn's spending, shared by the main agent and every subagent (max_budget_usd is one budget for both).
+        self._budget_meter = BudgetMeter()
         self.fallback_provider_factory = fallback_provider_factory
         # The catalog's capability names for the turn's model (reasoning, tools, ...); effort depends on them.
         self.model_capabilities = tuple(str(item) for item in model_capabilities or ())
@@ -1696,6 +1699,35 @@ class TurnSession:
                 hook_cancel=hook_cancel,
             )
 
+    def _subagent_limits(self, *, max_iterations: int | None, max_actions: int | None, code_mode: bool) -> AgenticLimits:
+        """A subagent's limits. In Code mode it shares the turn's deadline, retries and budget (W3-R7); Chat keeps its own."""
+        common = {
+            "max_iterations": max_iterations,
+            "max_actions": max_actions,
+            "max_output_tokens": SUBAGENT_MAX_OUTPUT_TOKENS,
+            "max_context_tokens": self.limits.max_context_tokens,
+        }
+        if not code_mode:
+            return AgenticLimits(deadline=self.limits.deadline, **common)
+        turn_limits = self._turn_limits()
+        return AgenticLimits(
+            deadline=turn_limits.deadline,
+            max_budget_usd=turn_limits.max_budget_usd,
+            max_provider_retries=turn_limits.max_provider_retries,
+            retry_base_delay_seconds=turn_limits.retry_base_delay_seconds,
+            **common,
+        )
+
+    def _subagent_accounting(self, model_id: str, *, code_mode: bool) -> dict[str, object]:
+        """A Code-mode subagent prices its calls for its own model and spends from the turn's meter."""
+        if not code_mode:
+            return {}
+        primary = str(self.turn.get("model_id") or "")
+        pricing = _TurnPricing(
+            str(self.turn.get("provider") or ""), model_id, self.catalog_pricing if model_id == primary else None,
+        )
+        return {"cost_estimator": pricing, "budget_meter": self._budget_meter}
+
     def _execute_subagent_run_unlocked(
         self,
         *,
@@ -1797,17 +1829,12 @@ class TurnSession:
             provider=child_provider_instance,
             toolset=subagent_tools,
             system_prompt=self._subagent_prompt(enriched_record, task_text, subagent_tools),
-            limits=AgenticLimits(
-                deadline=self.limits.deadline,
-                max_iterations=sub_max_iterations,
-                max_actions=sub_max_actions,
-                max_output_tokens=SUBAGENT_MAX_OUTPUT_TOKENS,
-                max_context_tokens=self.limits.max_context_tokens,
-            ),
+            limits=self._subagent_limits(max_iterations=sub_max_iterations, max_actions=sub_max_actions, code_mode=is_code_mode),
             tool_kinds={item.name: item.kind for item in sub_definitions},
             hook_engine=self.hook_engine,
             phase_controller=None,
             cancelled=self._child_cancelled(hook_cancel),
+            **self._subagent_accounting(active_model_id, code_mode=is_code_mode),
         )
         result = runtime.run(str(self.turn["turn_id"]), turn=subagent_turn)
         if (
@@ -1852,17 +1879,12 @@ class TurnSession:
                 provider=fallback_provider_instance,
                 toolset=subagent_tools,
                 system_prompt=self._subagent_prompt(enriched_record, task_text, subagent_tools),
-                limits=AgenticLimits(
-                    deadline=self.limits.deadline,
-                    max_iterations=sub_max_iterations,
-                    max_actions=sub_max_actions,
-                    max_output_tokens=SUBAGENT_MAX_OUTPUT_TOKENS,
-                    max_context_tokens=self.limits.max_context_tokens,
-                ),
+                limits=self._subagent_limits(max_iterations=sub_max_iterations, max_actions=sub_max_actions, code_mode=is_code_mode),
                 tool_kinds={item.name: item.kind for item in sub_definitions},
                 hook_engine=self.hook_engine,
                 phase_controller=None,
                 cancelled=self._child_cancelled(hook_cancel),
+                **self._subagent_accounting(active_model_id, code_mode=is_code_mode),
             )
             result = runtime.run(str(self.turn["turn_id"]), turn=subagent_turn)
         answer = sub_store.final_answer()
@@ -3096,6 +3118,7 @@ class TurnSession:
             reminders=self._reminders,
             cost_estimator=pricing,
             model_switched=pricing.switched,
+            budget_meter=self._budget_meter,
             effort_supported=lambda model_id: reasoning_supported(
                 str(self.turn.get("provider") or ""), model_id,
                 self.model_capabilities if model_id == str(self.turn.get("model_id") or "") else (),

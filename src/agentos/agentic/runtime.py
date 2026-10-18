@@ -24,6 +24,7 @@ from .learning import LearnedMemory, TurnLearningLedger
 from . import phases, transcript
 from .phases import DEFAULT_PHASE_BUDGETS, Phase, PhaseBudget, PhaseController
 from .lifecycle import HookEvent, LifecycleBus
+from .loop_settings import BudgetMeter
 from .tools.public_names import public_name as _public_tool_name
 from .reminders import ReminderQueue, render_reminders, system_reminder
 from .retry import backoff_delay, is_retryable, retry_after_of, status_code_of
@@ -261,6 +262,7 @@ class AgenticTurnRuntime:
         effort: str | None = None,
         effort_supported: Callable[[str], bool] | None = None,
         model_switched: Callable[[str], None] | None = None,
+        budget_meter: BudgetMeter | None = None,
         on_completed: Callable[[], None] | None = None,
         config_block_reason: str | None = None,
     ) -> None:
@@ -286,6 +288,8 @@ class AgenticTurnRuntime:
         self.reminders = reminders if reminders is not None else ReminderQueue()
         # Prices a model call when the provider reports no cost (most do not); feeds max_budget_usd.
         self._cost_estimator = cost_estimator
+        # The turn's money, shared with its subagents: max_budget_usd is checked against this total when it is set.
+        self._budget_meter = budget_meter
         self._sleep = sleep or time.sleep
         # Models tried, in order, when the current one keeps failing; consumed as they are tried.
         self._fallback_models: list[str] = [str(model).strip() for model in fallback_models if str(model or "").strip()]
@@ -468,6 +472,14 @@ class AgenticTurnRuntime:
         if (retryable or model_missing) and self._switch_to_fallback(turn, reason=code):
             return "fallback"
         return "fail"
+
+    def _add_spending(self, amount: object) -> None:
+        if self._budget_meter is not None:
+            self._budget_meter.add(amount)
+
+    def _spent_usd(self, local_total: Decimal) -> Decimal:
+        """The turn's spending so far: the shared meter when there is one, else this runtime's own calls."""
+        return self._budget_meter.total if self._budget_meter is not None else local_total
 
     def _model_accepts_effort(self, model: str) -> bool:
         if self._effort_supported is None:
@@ -678,7 +690,7 @@ class AgenticTurnRuntime:
                 return self._fail(turn, "PROVIDER_TOKEN_LIMIT", iteration, action_count)
             if self.limits.max_turns is not None and model_turns >= self.limits.max_turns:
                 return self._fail(turn, "MAX_TURNS", iteration, action_count)
-            if self.limits.max_budget_usd is not None and total_cost >= self.limits.max_budget_usd:
+            if self.limits.max_budget_usd is not None and self._spent_usd(total_cost) >= self.limits.max_budget_usd:
                 return self._fail(turn, "MAX_BUDGET_USD", iteration, action_count)
             final_iteration = (
                 (self.limits.max_iterations is not None and iteration == self.limits.max_iterations)
@@ -868,6 +880,7 @@ class AgenticTurnRuntime:
                                 )
                     elif event.kind is StreamKind.USAGE:
                         total_cost += event.cost or Decimal("0")
+                        self._add_spending(event.cost)
                         if event.cost:
                             call_cost_reported = True
                         if event.usage:
@@ -946,6 +959,7 @@ class AgenticTurnRuntime:
                         estimated = self._cost_estimator(input_tokens, output_tokens)
                         if estimated is not None:
                             total_cost += Decimal(str(estimated))
+                            self._add_spending(estimated)
                     except Exception:  # noqa: BLE001 - pricing never breaks a turn
                         pass
             if self.limits.max_provider_tokens is not None and total_tokens > self.limits.max_provider_tokens:

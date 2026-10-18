@@ -66,3 +66,27 @@ def test_managed_wins_over_user_for_operator_values(tmp_path: Path) -> None:
 def test_operator_value_never_reads_a_repository(tmp_path: Path) -> None:
     _write(tmp_path / ".orin" / "settings.json", {"someKey": "repo"})
     assert operator_value(load_effective_settings(tmp_path, trusted=True), "someKey") is None
+
+
+def test_a_budget_meter_adds_from_many_threads_and_ignores_what_is_not_money() -> None:
+    import threading
+    from decimal import Decimal
+
+    from agentos.agentic.loop_settings import BudgetMeter
+
+    meter = BudgetMeter()
+
+    def spend() -> None:
+        for _ in range(500):
+            meter.add(0.001)
+
+    threads = [threading.Thread(target=spend) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    meter.add(None)
+    meter.add("not a number")
+    meter.add(Decimal("NaN"))
+    meter.add(-5)
+    assert meter.total == Decimal("4.000")

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
@@ -10,6 +11,31 @@ from typing import Any
 DEFAULT_SAFETY_MAX_TOOL_ROUNDS = 500
 MAX_SAFETY_MAX_TOOL_ROUNDS = 10_000
 OPERATOR_LAYERS = frozenset({"user", "cli", "managed"})
+
+
+class BudgetMeter:
+    """What one turn has spent, shared by its main runtime and every subagent runtime (thread-safe)."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._total = Decimal("0")
+
+    def add(self, amount: object) -> None:
+        if amount is None:
+            return
+        try:
+            value = amount if isinstance(amount, Decimal) else Decimal(str(amount))
+        except (InvalidOperation, ValueError):
+            return
+        if not value.is_finite() or value <= 0:  # NaN cannot be ordered: check finiteness first
+            return
+        with self._lock:
+            self._total += value
+
+    @property
+    def total(self) -> Decimal:
+        with self._lock:
+            return self._total
 
 
 def _get(data: Mapping[str, Any], dotted: str) -> Any:

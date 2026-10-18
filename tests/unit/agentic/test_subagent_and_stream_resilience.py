@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -15,11 +17,13 @@ from agentos.agentic.runtime import (
     AgenticLimits,
     AgenticTurnRuntime,
 )
-from agentos.agentic.session import SUBAGENT_MAX_ACTIONS, TurnSession
+from agentos.agentic import session as session_module
+from agentos.agentic.session import CODE_TURN_DEADLINE, SUBAGENT_MAX_ACTIONS, TurnSession
 from agentos.conversations.chat import PostgresChatStore
 from agentos.persistence.postgres.schema import conversation_dispatches, metadata
 from agentos.workers import chat as chat_module
 from agentos.workers import publisher as publisher_module
+from agentos.settings.paths import orin_user_dir
 from agentos.workers.chat import ChatWorker
 
 
@@ -538,3 +542,70 @@ def test_fix6_subagent_runs_in_code_mode_loop_and_recovers_partial_output_like_c
     assert outcome.payload.get("partial") is True
     assert isinstance(outcome.payload.get("usage"), dict)
 
+
+def _costly_code_session(tmp_path: Path, calls: list[str], cost: Decimal, **limits: object) -> tuple[TurnSession, _SimpleStore]:
+    """A Code-mode turn with maxBudgetUsd 0.5 whose every model call (main or subagent) reports ``cost``."""
+    orin_user_dir().mkdir(parents=True, exist_ok=True)
+    (orin_user_dir() / "settings.json").write_text(json.dumps({"maxBudgetUsd": 0.5}), encoding="utf-8")
+
+    class Costly:
+        def stream(self, request: dict[str, object]):
+            calls.append(str(request.get("model")))
+            return iter([
+                NormalizedStreamItem(StreamKind.TEXT, 1, text="achado"),
+                NormalizedStreamItem(StreamKind.USAGE, 2, cost=cost),
+                NormalizedStreamItem(StreamKind.FINISH, 3, finish_reason="stop"),
+            ])
+
+    store = _SimpleStore()
+    store.turn["code_mode"] = "code"
+    store.turn["permission_mode"] = "accept_edits"
+    agents = _MemoryAgentsStore()
+    agents.create("general", "general-purpose", parent_agent_id="agent-main")
+    session = TurnSession(
+        turn=dict(store.turn), store=store, agents_store=agents, memory_store=None,
+        provider_factory=lambda: Costly(), workspace_root=tmp_path,
+        limits=AgenticLimits(max_iterations=None, max_actions=None, **limits),
+    )
+    return session, store
+
+
+def test_a_code_subagent_spends_from_the_turn_budget(tmp_path: Path) -> None:
+    calls: list[str] = []
+    session, store = _costly_code_session(tmp_path, calls, Decimal("0.6"))
+    runtime = session.build_runtime()
+    assert session._ask_agent("general", "Inspecione o repositório").status == "succeeded"
+    assert len(calls) == 1
+    result = runtime.run(str(store.turn["turn_id"]))
+    # The subagent's 0.60 USD is the turn's spending: the main agent stops before its first model call.
+    assert result.error_code == "MAX_BUDGET_USD" and len(calls) == 1
+
+
+def test_a_code_subagent_stops_when_the_turn_budget_is_already_spent(tmp_path: Path) -> None:
+    calls: list[str] = []
+    session, _store = _costly_code_session(tmp_path, calls, Decimal("0.6"))
+    session.build_runtime()
+    session._ask_agent("general", "primeiro")
+    assert len(calls) == 1
+    outcome = session._ask_agent("general", "segundo")
+    assert len(calls) == 1 and outcome.status != "succeeded"  # the second subagent never reached the model
+
+
+def test_a_code_subagent_inherits_the_turn_deadline_retries_and_budget(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: list[AgenticLimits] = []
+    real_runtime = session_module.AgenticTurnRuntime
+
+    class Capturing(real_runtime):
+        def __init__(self, *args, **kwargs):
+            captured.append(kwargs["limits"])
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(session_module, "AgenticTurnRuntime", Capturing)
+    session, _store = _costly_code_session(tmp_path, [], Decimal("0.1"), max_provider_retries=8, retry_base_delay_seconds=0.5)
+    session.build_runtime()
+    captured.clear()
+    session._ask_agent("general", "Inspecione")
+    child = captured[0]
+    assert child.deadline == CODE_TURN_DEADLINE  # a 24 h turn's subagent is not cut at the Chat-era hour
+    assert child.max_budget_usd == Decimal("0.5")
+    assert child.max_provider_retries == 8 and child.retry_base_delay_seconds == 0.5
