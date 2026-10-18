@@ -106,3 +106,76 @@ That is the batch A total (2906) plus the 30 tests added here (7 + 2 + 10 + 11).
 - No live provider run. The prompt is checked for section headings and public names, not for quality.
 - Frontend untouched (W3 does not touch it). Backend only, so no visual check.
 - Queue promotion at the end of a turn (`ChatWorker._promote_queued_inputs`) is exercised only through the store and application tests, not through a worker run.
+
+## Execution notes — batch C (Tasks 9-12)
+
+### Task 9 — Prompt snapshot per conversation, `excludeDynamicSystemPromptSections`, safe git status
+
+- Commit: `a9149f3` `feat(prompt): per-conversation prompt snapshot, dynamic sections in the first message, safe git status`
+- Tests added: `tests/unit/code_mode/test_git_context.py` (4), `tests/unit/agentic/test_prompt_snapshot.py` (8). Total 12.
+- Red: `test_git_context.py` failed at collection (`ModuleNotFoundError: agentos.code_mode.git_context`), as planned. That run stopped at the collection error, so `test_prompt_snapshot.py` did not run in the red phase. It was checked afterwards: with the pre-task `session.py`, `runtime.py`, `conversations/chat.py` and `workers/chat.py` (from `153b535`) temporarily restored, that file gave 6 failed, 2 passed. The two passing tests are guards (`test_the_snapshot_can_be_turned_off`, `test_chat_mode_has_no_snapshot`) that hold on the old code too. HEAD was then restored and re-verified.
+- Deviations: none in code.
+- Existing test expectations changed: none.
+
+### Task 10 — Standard compaction sections and a persisted `compact_boundary`
+
+- Commit: `0b52f9e` `feat(compaction): one set of nine sections and a persisted compact_boundary the next turn starts from`
+- Tests added: `tests/unit/agentic/test_compact_boundary.py` (5).
+- Red: `ModuleNotFoundError: agentos.agentic.compaction`, as planned. The Step 7 expectations were run before they were changed: 7 failed (the ones listed below), then they were changed.
+- Deviations:
+  1. The old Portuguese four-section fallback (`_fallback_compaction_summary`) was deleted. The nine-section fallback (formerly `_fallback_code_compaction_summary`) took its name, and the old name stays as an alias. The plan describes this in prose; the deletion is written out here.
+  2. The comments on the removed old header ("The old header ended with ...") went with the definitions they described. The comment on why summaries have fixed headings was kept.
+  3. `COMPACTION_HEADER` stays imported (re-exported) in `runtime.py`, though `runtime.py` no longer uses it.
+- Existing test expectations changed (file::test, old → new):
+  - `tests/unit/agentic/test_structured_compaction.py`: `_SummarizingProvider.stream` returned the four Portuguese sections → returns the nine sections (`### {section}\n- detail`). `COMPACTION_HEADING` added to the import.
+  - Same file, `test_the_compacted_replacement_keeps_the_structured_sections`, `test_the_compaction_header_does_not_invite_rework`, `test_the_fallback_still_produces_every_section`, `test_the_fallback_names_the_tools_whose_results_were_folded_away`: `startswith("## Contexto compactado")` → `startswith(COMPACTION_HEADING)`.
+  - `tests/unit/agentic/test_context_window.py::test_auto_compaction_keeps_the_current_request_and_reduces_old_units`: `"## Contexto compactado" in ...` → `COMPACTION_HEADING in ...`.
+  - `tests/unit/agentic/test_prefix_stability.py::test_compaction_is_the_only_thing_that_rewrites_the_prefix`: `"Contexto compactado" in ...` → `COMPACTION_HEADING in ...`.
+  - `tests/unit/test_orin_code_phase_c.py::test_three_tier_compaction_and_top_5_file_rehydration`: `startswith("## Contexto compactado")` → `startswith(COMPACTION_HEADING)`.
+  - Not changed: the `_SummarizingProvider` docstring in `test_structured_compaction.py` still says "four required sections" (stale wording only).
+
+### Task 11 — Microcompact keeps the 8 newest results; `microcompact_boundary`; autocompact threshold and `autoCompact`
+
+- Commit: `41830f8` `feat(compaction): microcompact clears all but the 8 newest results, autocompact follows the window`
+- Tests added: `tests/unit/agentic/test_microcompact.py` (7).
+- Red: 5 failed, 2 passed. The two that pass are guards (`test_small_results_are_not_worth_clearing`, `test_the_pinned_request_is_never_touched`).
+- Deviations: none.
+- Existing test expectations changed: none.
+
+### Task 12 — After a compaction: reattach by read order, SessionStart `compact`, new snapshot
+
+- Commit: `36fa43e` `feat(compaction): reattach files by read order, fire SessionStart compact and re-render the snapshot`
+- Tests added: `tests/unit/agentic/test_post_compact.py` (2).
+- Red: 2 failed, as planned (the read-order test listed `a.py`; `AgenticTurnRuntime` had no `prompt_renderer`).
+- Deviations:
+  1. `TurnSession._code_prompt_parts` still imports `render_code_system_prompt` but no longer calls it (the plan changes only the call). Cosmetic. `pyproject.toml` has no ruff configuration and CI does not lint, so it stays as the plan has it.
+- Existing test expectations changed (file::test, old → new):
+  - `tests/unit/agentic/test_lifecycle_runtime.py::test_compaction_emits_pre_and_post`: `names == [PRE_COMPACT, POST_COMPACT]` → `names == [PRE_COMPACT, POST_COMPACT, SESSION_START]`, plus `dict(events[2].payload)["source"] == "compact"` (plan Step 6).
+
+### Verification notes (batch C)
+
+- Pytest was run with directories only (`tests/unit/agentic`, not a file together with its own directory).
+- Line endings: the index is LF for every file. The working copies of `runtime.py`, `session.py`, `agent_tools.py` and `workers/chat.py` are CRLF; `chat.py` is LF. `git diff --stat` shows only the intended changes.
+- Commit trailer: `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
+
+### Full backend suite after batch C
+
+`uv run pytest -q tests/unit` → **2962 passed, 53 skipped, 0 failed** (191 s). That is batch B's 2936 plus the 26 new tests (12 + 5 + 7 + 2). No existing test failed in batch C.
+
+### Not verified in batch C
+
+- PostgreSQL: everything ran on SQLite. The new queries (the snapshot `delete`/`insert`, the boundary `order_by(id desc).limit(1)`, `is_not(None)`, the `through_sequence` comparison) were not run on Postgres.
+- A real `git status` inside a trusted workspace, end to end: `test_git_context.py` uses a temporary repository; `test_prompt_snapshot.py` checks the trust gate with `git_status_summary` stubbed. The fsmonitor test was checked to be meaningful: the control `git status` created the marker file, the Orin call did not.
+- No live provider run. Summary quality with a real model is not measured, and nothing was measured against prompt-cache hits.
+- No lint or type check (ruff, ty) was run.
+- Backend only, so no visual check.
+- Worker-level flows for the snapshot and the boundary (a `ChatWorker` turn against the real chat store) are not exercised end to end.
+
+### Limitations found while testing (not fixed)
+
+1. `git_status_summary` runs synchronously in `build_runtime` for every Code turn in a trusted local folder (2 s timeout). In a large repository that adds up to 2 s before the turn starts.
+2. A `compact` boundary covers the history before the compacting turn's user message, but the summary also contains that turn's earlier tool work. On the next turn, the replay of that turn's stored steps (inside the rehydration budget) may repeat part of it. Not tested.
+3. `_microcompact` rewrites old results on each check above 65% of the budget; every rewrite changes the cached prefix. Not measured.
+4. `post_compact_enrichment` calls `stat()` on the plan file outside its `try`. If the plan is deleted between the glob and the stat, `_run_compaction`'s enricher guard catches the exception: the compaction still happens, but its enrichment is silently empty.
+5. Microcompact boundaries are persisted but do not replace history, as the plan specifies. The next turn's replay of stored steps is unchanged, so a microcompact does not shrink the next turn's prompt. This is by design, noted so it is not mistaken for a bug.
+6. `tests/unit/agentic/test_lifecycle_runtime.py` and `tests/unit/hooks/test_runtime_decisions.py` still stub the summarizer with the old Portuguese four-heading text. The runtime now rejects that shape and uses the fallback. Both tests pass because they assert nothing about the summary text. They are not in the plan's list and were not changed.
