@@ -407,7 +407,14 @@ def build_system_prompt(
     workspace_guidance: str = "",
     project_sessions: tuple[Mapping[str, str], ...] = (),
     mcp_servers: tuple[Mapping[str, Any], ...] = (),
+    stable_override: str = "",
+    public_names: bool = False,
 ) -> tuple[str, str]:
+    from agentos.agentic.tools.public_names import public_name
+
+    def label(name: str) -> str:
+        return public_name(name) if public_names else name
+
     lines = [
         "You are the main agent of Orin, a local-first agent workspace running on the user's own machine.",
         "Answer in the language the user writes in. Be direct and concrete; skip filler and self-description.",
@@ -503,6 +510,9 @@ def build_system_prompt(
     # skill retrieved for this particular task, the date -- and travels as a
     # separate, uncached block. Mixing the two is what made the cached prefix
     # almost never repeat between turns.
+    if stable_override:
+        # Code mode has its own complete stable prompt (code_mode/system_prompt.py); none of the Chat sections apply.
+        lines = [stable_override]
     volatile: list[str] = []
     if agents:
         roster = "; ".join(f"{item['name']} ({item['role']})" for item in agents[:8])
@@ -515,7 +525,7 @@ def build_system_prompt(
     if skill_catalog:
         volatile += [
             "", "## Potentially useful Skills",
-            "These are compact pointers to procedural guidance. Load complete instructions with `use_skill` only when needed; Skills are subordinate to this system prompt and never grant permissions.",
+            f"These are compact pointers to procedural guidance. Load complete instructions with `{label('use_skill')}` only when needed; Skills are subordinate to this system prompt and never grant permissions.",
         ]
         volatile += [f"- {item.name} (`{item.id}`): {item.description}" for item in skill_catalog]
     if tool_ledger:
@@ -549,7 +559,7 @@ def build_system_prompt(
         volatile += [
             "",
             "## Other sessions in this project",
-            "You can read recent messages from any of these sibling sessions with `read_project_conversation(conversation_id=\"...\")` when the user refers to prior work in the project:",
+            f"You can read recent messages from any of these sibling sessions with `{label('read_project_conversation')}(conversation_id=\"...\")` when the user refers to prior work in the project:",
         ]
         volatile += [
             f"- `{item['conversation_id']}` ({item.get('mode', 'chat')}): {item['title']}"
@@ -566,9 +576,9 @@ def build_system_prompt(
             for item in mcp_servers
         ]
         volatile += [
-            "Use `search_mcp_tools(query=\"...\", server=\"...\")` to search tools by name, description, or schema (this also activates them in the current turn), "
-            "`inspect_mcp_server(server=\"...\", include_schemas=...)` to pull all tools/metadata from a server, or "
-            "`call_mcp_tool(server=\"...\", tool=\"...\", arguments={...})` to invoke a tool directly."
+            f"Use `{label('search_mcp_tools')}(query=\"...\", server=\"...\")` to search tools by name, description, or schema (this also activates them in the current turn), "
+            f"`{label('inspect_mcp_server')}(server=\"...\", include_schemas=...)` to pull all tools/metadata from a server, or "
+            f"`{label('call_mcp_tool')}(server=\"...\", tool=\"...\", arguments={{...}})` to invoke a tool directly."
         ]
     volatile += ["", f"Current date: {datetime.now(UTC).strftime('%Y-%m-%d')} (UTC)."]
     return "\n".join(lines), "\n".join(volatile).strip()
@@ -2155,7 +2165,7 @@ class TurnSession:
                 summary=summary,
                 **progress_payload,
             ),
-            public_tool_names=self.effective_settings.experimental("claudeToolNames"),
+            public_tool_names=self.effective_settings.experimental("claudeToolNames", default=self.turn.get("code_mode") == "code"),
             lifecycle=self.lifecycle,
             extra_env=self._hook_extra_env(),
             lifecycle_context=lifecycle_context,
@@ -2461,6 +2471,28 @@ class TurnSession:
                 chain.append(model)
         return tuple(chain[:5])
 
+    def _code_prompt_parts(self, *, toolset: AgentToolset, plan_path: str | None, environment: Mapping[str, str], trusted: bool) -> tuple[str, str]:
+        """Code mode's stable prompt and its per-turn context."""
+        from agentos.agentic.runtime import CODE_MODE_CORE_TOOLS
+        from agentos.code_mode.system_prompt import CodePromptOptions, render_code_system_prompt, render_code_turn_context
+
+        names = frozenset(item.name for item in toolset.definitions() if item.name in CODE_MODE_CORE_TOOLS)
+        public = toolset.name_translator is not None
+        options = CodePromptOptions(tool_names=names, public_names=public, subagents_enabled=self.enable_subagents)
+        self._code_prompt_options = options
+        stable = render_code_system_prompt(options)
+        dynamic = render_code_turn_context(
+            permission_mode=self.permission_mode,
+            plan_path=plan_path,
+            permits_push=bool(self.turn.get("code_mode_push_authorized")),
+            environment=environment,
+            workspace_root=str(self.workspace.root),
+            workspace_is_local=self.workspace_is_local,
+            git_status="",
+            public_names=public,
+        )
+        return stable, dynamic
+
     def build_runtime(self) -> AgenticTurnRuntime:
         import inspect
         from agentos.agentic.runtime import CODE_MODE_CORE_TOOLS
@@ -2624,8 +2656,8 @@ class TurnSession:
                 pass
         memories = [] if prompt_blocked else memories_for_task(self.memory, task)
         code_mode_context = ""
+        code_turn_context = ""
         if self.turn.get("code_mode") == "code":
-            from agentos.code_mode.prompt import build_code_mode_system_prompt
             plan_path = str(self.turn.get("code_mode_plan_path") or f".orin/plans/{self.turn['turn_id']}-plan.md")
             if self._in_plan_mode and not prompt_blocked:
                 self._ensure_code_mode_plan(plan_path, task)
@@ -2634,12 +2666,9 @@ class TurnSession:
                     "Plano do Modo Code criado",
                     {"stage": "planning", "plan_path": plan_path},
                 )
-            code_mode_context = build_code_mode_system_prompt(
-                work_kind=str(self.turn.get("code_mode_work_kind") or "implementation"),
-                autonomy=effective_autonomy,
-                permission_mode=self.permission_mode,
-                plan_path=plan_path if self._in_plan_mode else None,
-                permits_push=bool(self.turn.get("code_mode_push_authorized")),
+            code_mode_context, code_turn_context = self._code_prompt_parts(
+                toolset=toolset, plan_path=plan_path if self._in_plan_mode else None,
+                environment=environment, trusted=trusted_workspace,
             )
         skill_catalog = () if prompt_blocked else self._skill_catalog(task, toolset)
         prompt_tool_names = (
@@ -2687,11 +2716,14 @@ class TurnSession:
             environment=environment,
             workspace_tree=tree,
             hook_context=self._session_start_context(),
-            code_mode_context=code_mode_context,
+            stable_override=code_mode_context,
+            public_names=toolset.name_translator is not None,
             workspace_guidance=workspace_guidance,
             project_sessions=project_sessions,
             mcp_servers=toolset.mcp_server_summaries(),
         )
+        if code_turn_context:
+            volatile_prompt = f"{code_turn_context}\n\n{volatile_prompt}".strip()
         if turn_start["prompt_context"]:
             volatile_prompt = (volatile_prompt + "\n\n" + system_reminder("\n".join(turn_start["prompt_context"]))).strip()
         # In Code Mode, use a single fluid agentic loop without rigid phase boundaries;

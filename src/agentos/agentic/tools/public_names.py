@@ -100,7 +100,7 @@ _RENAMES: dict[str, dict[str, str]] = {
     "edit_file": {"file_path": "path", "old_string": "old_text", "new_string": "new_text"},
     "search_files": {"-A": "after_context", "-B": "before_context", "-C": "context_lines", "-i": "ignore_case"},
     "run_command": {"run_in_background": "background"},
-    "run_subagent": {"prompt": "task", "resume": "agent_id"},
+    "run_subagent": {"prompt": "task", "resume": "agent_id", "model": "model_id"},
     "use_skill": {"skill": "skill_id"},
     "search_mcp_tools": {"max_results": "limit"},
     "exit_plan_mode": {"plan": "summary", "allowedPrompts": "allowed_prompts"},
@@ -115,7 +115,6 @@ _DROPPED: dict[str, frozenset[str]] = {
     "fetch_url": frozenset({"prompt"}),
     "web_search": frozenset({"allowed_domains", "blocked_domains"}),
     "use_skill": frozenset({"args"}),
-    "run_subagent": frozenset({"model"}),
 }
 
 _SUBAGENT_TYPES_IN = {
@@ -357,6 +356,23 @@ def internal_name(name: str) -> str:
     return _INTERNAL_BY_LOWER_PUBLIC.get(name.lower(), name)
 
 
+_UNDERSCORED_INTERNAL = tuple(sorted((name for name in PUBLIC_NAMES if "_" in name), key=len, reverse=True))
+_INTERNAL_WORD = re.compile(
+    r"(?<![\w./\-])(" + "|".join(re.escape(name) for name in _UNDERSCORED_INTERNAL) + r")(?![\w-]|\.\w)"
+)
+
+
+def public_text(text: str) -> str:
+    """Orin-authored guidance with internal tool ids (``read_file``) rewritten to public names (``Read``).
+
+    Only for text Orin wrote itself. File contents, command output and repository text never pass
+    through here: ``read_file(`` inside a source file must stay exactly as it is.
+    """
+    if not text or "_" not in text:
+        return text
+    return _INTERNAL_WORD.sub(lambda match: PUBLIC_NAMES.get(match.group(1), match.group(1)), text)
+
+
 def public_subagent_type(internal: str) -> str:
     """The Claude Code name of a built-in subagent type (``explore`` -> ``Explore``), else unchanged."""
     return _SUBAGENT_TYPES_OUT.get(str(internal or "").strip().lower(), str(internal or ""))
@@ -480,6 +496,13 @@ def arguments_in(internal: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
         if number is not None:
             result["pid"] = number
     elif internal == "run_subagent":
+        # Aliases the internal handler also accepts must be resolved before the default below,
+        # or a call that names its type with `agent_type` silently becomes a `general` subagent.
+        if "subagent_type" not in result:
+            for alias in ("agent_type", "type", "agent"):
+                if alias in result:
+                    result["subagent_type"] = result.pop(alias)
+                    break
         raw_type = result.get("subagent_type")
         if raw_type is None or (isinstance(raw_type, str) and not raw_type.strip()):
             result["subagent_type"] = "general"  # the documented default, not a widening

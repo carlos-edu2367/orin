@@ -518,8 +518,8 @@ def test_fix6_subagent_runs_in_code_mode_loop_and_recovers_partial_output_like_c
         str((t.get("function") or {}).get("name"))
         for t in (captured_requests[0].get("tools") or [])  # type: ignore[union-attr]
     ]
-    assert "glob_files" in tools_sent
-    assert "propose_code_session" not in tools_sent
+    assert "Glob" in tools_sent
+    assert "ProposeCodeSession" not in tools_sent
 
     # 2. Subagent prompt includes workspace guidance (CLAUDE.md) and Claude Code operational rules
     sys_msgs = [

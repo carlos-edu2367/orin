@@ -53,6 +53,7 @@ from .tools.public_names import (
     arguments_out as _public_arguments_out,
     internal_name as _internal_tool_name,
     public_name as _public_tool_name,
+    public_text,
 )
 
 
@@ -113,6 +114,12 @@ PERMISSION_DENIAL_CODES = frozenset({
     "CODE_PLAN_APPROVAL_REQUIRED",
     "CODE_DEPLOY_CONFIRMATION_REQUIRED",
     "CODE_PUSH_CONFIRMATION_REQUIRED",
+})
+# Failures whose whole text Orin wrote (no file content, no command output): safe to rewrite tool ids.
+_ORIN_AUTHORED_CODES = frozenset({
+    "FILE_NOT_READ", "STALE_FILE_READ", "INVALID_ARGUMENTS", "UNKNOWN_TOOL", "CODE_PERMISSION_DENIED",
+    "CODE_PLAN_MODE_READONLY", "CODE_PLAN_APPROVAL_REQUIRED", "READ_ONLY_SUBAGENT", "HOOK_DENIED",
+    "CODE_DEPLOY_CONFIRMATION_REQUIRED", "CODE_PUSH_CONFIRMATION_REQUIRED",
 })
 DEFAULT_COMMAND_TIMEOUT_SECONDS = 120
 MAX_COMMAND_TIMEOUT_SECONDS = 600
@@ -1903,6 +1910,13 @@ class AgentToolset:
             out.setdefault(key, val)
         return out
 
+    def _speak_public(self, outcome: ToolOutcome) -> ToolOutcome:
+        """With Claude Code names on, Orin's own error text names tools the way the model sees them."""
+        if self.name_translator is not None and outcome.status != "succeeded" and outcome.error_code in _ORIN_AUTHORED_CODES:
+            outcome.content = public_text(outcome.content)
+            outcome.summary = public_text(outcome.summary)
+        return outcome
+
     def invoke(
         self,
         name: str,
@@ -1913,7 +1927,7 @@ class AgentToolset:
     ) -> ToolOutcome:
         bus = self._lifecycle
         if bus is None:
-            return self._invoke_unobserved(name, arguments, call_id=call_id, invocation_id=invocation_id)
+            return self._speak_public(self._invoke_unobserved(name, arguments, call_id=call_id, invocation_id=invocation_id))
         internal = _internal_tool_name(name) if self.name_translator is not None else name
         if internal != name:
             try:
@@ -1991,7 +2005,7 @@ class AgentToolset:
             if failure is not None:
                 reminders.extend(failure.additional_context)
             _append_reminder(outcome, reminders, MAX_TOOL_RESULT_CHARS)
-        return outcome
+        return self._speak_public(outcome)
 
     def _tool_kind_for_hooks(self, internal: str) -> str:
         try:
@@ -2292,6 +2306,8 @@ class AgentToolset:
                     "narrow the request instead of repeating it: use read_file with offset/limit, "
                     "search_files with a tighter pattern, or a command that prints less]"
                 )
+                if self.name_translator is not None:
+                    notice = public_text(notice)
                 # The notice itself counts against the budget, so make room for it
                 # rather than growing content past the tool result limit.
                 content, _ = _bounded(raw_content, max(0, limit - len(notice)))
@@ -2893,6 +2909,8 @@ class AgentToolset:
                         f"[File unchanged since last read ({norm}, lines {start_line}-{end_line}, "
                         f"sha256={current_sha[:12]}). Refer to previous read_file output in context.]"
                     )
+                    if self.name_translator is not None:
+                        stub = public_text(stub)
                     payload = {
                         "ok": True,
                         "path": norm,
@@ -2934,7 +2952,10 @@ class AgentToolset:
             body = "\n".join(f"{first + index:6}\t{line}" for index, line in enumerate(lines))
         next_line = first + len(lines)
         if lines and next_line <= total:
-            body += f"\n\n[{total - next_line + 1} more lines; continue with read_file(path=\"{path}\", offset={next_line})]"
+            if self.name_translator is not None:
+                body += f"\n\n[{total - next_line + 1} more lines; continue with Read(file_path=\"{path}\", offset={next_line})]"
+            else:
+                body += f"\n\n[{total - next_line + 1} more lines; continue with read_file(path=\"{path}\", offset={next_line})]"
         if truncated:
             body += "\n\n[file exceeds the workspace read limit; the tail was not loaded]"
         end_line = first + len(lines) - 1 if lines else first

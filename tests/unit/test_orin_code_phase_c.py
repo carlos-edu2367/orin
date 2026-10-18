@@ -204,11 +204,11 @@ def test_builtin_subagents_explore_plan_general_and_fork(tmp_path: Path) -> None
     assert "Subagent completed task concisely." in explore_res.content
     explore_req = provider.requests[-1]
     explore_tools = set(explore_req["tools"])
-    assert "read_file" in explore_tools
-    assert "search_files" in explore_tools
-    assert "write_file" not in explore_tools
-    assert "edit_file" not in explore_tools
-    assert "run_command" not in explore_tools
+    assert "Read" in explore_tools
+    assert "Grep" in explore_tools
+    assert "Write" not in explore_tools
+    assert "Edit" not in explore_tools
+    assert "Bash" not in explore_tools
 
     # Also verify read_only_mode blocks direct invocation of mutating tools on AgentToolset
     ro_toolset = AgentToolset(workspace, read_only_mode=True)
@@ -221,17 +221,17 @@ def test_builtin_subagents_explore_plan_general_and_fork(tmp_path: Path) -> None
     assert plan_res.status == "succeeded"
     plan_req = provider.requests[-1]
     plan_tools = set(plan_req["tools"])
-    assert "write_file" not in plan_tools
-    assert "edit_file" not in plan_tools
-    assert "run_command" not in plan_tools
+    assert "Write" not in plan_tools
+    assert "Edit" not in plan_tools
+    assert "Bash" not in plan_tools
 
     # 3. `general` has full subagent toolset (including write_file / run_command)
     general_res = session._run_subagent("general", "Implement helper module", description="General worker")
     assert general_res.status == "succeeded"
     general_req = provider.requests[-1]
     general_tools = set(general_req["tools"])
-    assert "write_file" in general_tools
-    assert "run_command" in general_tools
+    assert "Write" in general_tools
+    assert "Bash" in general_tools
 
     # 4. `fork` inherits the parent's conversation history so prompt cache prefix is preserved
     fork_res = session._run_subagent("fork", "Run heavy verification on the auth refactor", description="Forked verifier")

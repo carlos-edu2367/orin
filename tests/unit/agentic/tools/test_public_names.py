@@ -93,7 +93,7 @@ def test_agent_maps_types_and_prompt() -> None:
     # an unknown type is passed through for the internal validation to reject, never widened to general
     assert arguments_in("run_subagent", {"description": "d", "prompt": "p", "subagent_type": "my-custom"})["subagent_type"] == "my-custom"
     assert arguments_in("run_subagent", {"description": "d", "prompt": "p", "resume": "agent-1", "model": "opus"}) == {
-        "description": "d", "task": "p", "subagent_type": "general", "agent_id": "agent-1",
+        "description": "d", "task": "p", "subagent_type": "general", "agent_id": "agent-1", "model_id": "opus",
     }
     assert arguments_out("run_subagent", {"subagent_type": "plan", "task": "p", "description": "d"}) == {
         "subagent_type": "Plan", "prompt": "p", "description": "d",

@@ -404,7 +404,7 @@ def test_project_tools_exposed_in_phases_code_mode_and_turn_session_prompt(tmp_p
     assert expected.issubset(tool_names)
     assert "chat-sibling-spec" in runtime.volatile_prompt
     assert "Spec de Autenticação" in runtime.volatile_prompt
-    assert "read_project_conversation" in runtime.volatile_prompt
+    assert "ReadProjectConversation" in runtime.volatile_prompt
 
 
 def test_project_tools_red_team_edge_cases_and_read_only_mode(tmp_path: Path) -> None:

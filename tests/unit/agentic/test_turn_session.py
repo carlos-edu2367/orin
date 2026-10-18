@@ -607,7 +607,7 @@ def test_new_managed_code_workspace_skips_plan_approval(tmp_path: Path) -> None:
     managed_runtime = session.build_runtime()
 
     assert managed_runtime.toolset._code_mode_requires_approval is False
-    assert "autonomia de código" in managed_runtime.system_prompt
+    assert "code autonomy" in managed_runtime.volatile_prompt
 
 
 def test_the_system_prompt_uses_orin_as_the_public_product_name() -> None:

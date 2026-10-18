@@ -374,6 +374,13 @@ class AgenticTurnRuntime:
         if body:
             messages.append({"role": "user", "content": body, "_reminder": True})
 
+    def _label(self, internal: str) -> str:
+        """A tool as the model knows it (Claude Code name when the translator is on)."""
+        return _public_tool_name(internal) if self._names is not None else internal
+
+    def _labels(self, *internals: str) -> str:
+        return ", ".join(self._label(name) for name in internals)
+
     def _inject_queued_inputs(self, turn: dict[str, object], messages: list[dict[str, object]]) -> None:
         """Text the person queued while tools ran joins the conversation now, through UserPromptSubmit."""
         claim = getattr(self.store, "claim_queued_inputs", None)
@@ -935,7 +942,7 @@ class AgenticTurnRuntime:
                                     f"{result.get('content') or ''} "
                                     "Hint: Ensure 'path' is provided first; if you are writing a large file, "
                                     "your output may have been truncated at max_tokens — write smaller modular "
-                                    "files or use edit_file in chunks."
+                                    f"files or use {self._label('edit_file')} in chunks."
                                 ).strip()
                     action_count += len(results)
                     self._advance_phase(turn, results)
@@ -1037,7 +1044,7 @@ class AgenticTurnRuntime:
                         "role": "user",
                         "content": (
                             "[Sistema] Sua resposta anterior veio sem texto e sem chamadas de ferramentas. "
-                            "Use as ferramentas disponíveis (como list_files, read_file, write_file, edit_file, run_command, verify_project) "
+                            f"Use as ferramentas disponíveis (como {self._labels('list_files', 'read_file', 'write_file', 'edit_file', 'run_command', 'verify_project')}) "
                             "para executar a tarefa ou responda diretamente ao usuário."
                         ),
                     })
@@ -1814,7 +1821,7 @@ class AgenticTurnRuntime:
                     parse_err = (
                         f"{parse_err} Hint: Ensure 'path' is provided first; if you are writing a large file, "
                         "your output may have been truncated at max_tokens — write smaller modular "
-                        "files or use edit_file in chunks."
+                        f"files or use {self._label('edit_file')} in chunks."
                     )
             except Exception as error:  # noqa: BLE001 - model-chosen values must never crash the turn
                 parsed_args = None
@@ -1873,7 +1880,7 @@ class AgenticTurnRuntime:
             if remembered is None or remembered[1] != self._writes:
                 return None
             content = (
-                f"{remembered[0]}\n\n[resultado da chamada anterior a {name} neste mesmo turno; "
+                f"{remembered[0]}\n\n[resultado da chamada anterior a {self._label(name)} neste mesmo turno; "
                 "nada foi escrito desde então, então o conteúdo não mudou]"
             )
             return ToolOutcome("succeeded", f"{name} reaproveitado da chamada anterior", content, {})
