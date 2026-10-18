@@ -195,3 +195,40 @@ def test_a_delivered_queued_message_stays_in_the_conversation() -> None:
     for budget in (0, 1_500, 100_000):
         text = "\n".join(str(message.get("content")) for message in store.history_for_turn(next_turn, rehydration_budget_tokens=budget))
         assert text.count("never touch payments") == 1, f"budget {budget}"
+
+
+def test_a_safety_pause_is_stored_as_waiting_for_the_person() -> None:
+    """The stored chat turn reads waiting_user after the safety pause, as it does after ask_user."""
+    store = _store()
+    receipt = store.create(user_id="u", message="big job", provider="openrouter", model_id="m", idempotency_key="k9")
+    running = store.claim(receipt.turn_id)
+    assert running is not None
+
+    class Adapter:  # what the worker's runtime store forwards
+        def load(self, turn_id): return dict(running)
+        def history_for_turn(self, t): return store.history_for_turn(t)
+        def lifecycle(self, t, state, **payload): pass
+        def delta(self, t, text): store.delta(t, text)
+        def finish(self, t, *, failed=False, code=None): store.finish(t, failed=failed, code=code)
+
+    class Provider:
+        def stream(self, request):
+            return iter([
+                NormalizedStreamItem(StreamKind.TOOL_CALL, 1, tool_call_id="c1", tool_name="read_file", arguments_delta='{"path": "a"}'),
+                NormalizedStreamItem(StreamKind.FINISH, 2, finish_reason="tool_calls"),
+            ])
+
+    class Toolset:
+        def schemas(self, allowed=None): return []
+        def is_read_only(self, name): return True
+        def argument_names(self, name): return frozenset({"path"})
+        def invoke(self, name, arguments): return ToolOutcome("succeeded", "ok", "content")
+
+    result = AgenticTurnRuntime(
+        store=Adapter(), provider=Provider(), toolset=Toolset(),
+        limits=AgenticLimits(max_iterations=None, max_actions=None, deadline=timedelta(hours=1), safety_max_tool_rounds=2),
+    ).run(str(running["turn_id"]))
+    assert (result.state, result.error_code) == ("waiting_user", "SAFETY_TOOL_ROUNDS")
+    with store._engine.connect() as connection:
+        state = connection.execute(select(conversation_turns.c.state).where(conversation_turns.c.turn_id == running["turn_id"])).scalar_one()
+    assert state == "waiting_user"

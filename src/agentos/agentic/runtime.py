@@ -2568,7 +2568,9 @@ class AgenticTurnRuntime:
         )
         self._life(turn, "waiting_user")
         self._emit(HookEvent.STOP, stop_hook_active=False, stop_reason="safety_max_tool_rounds", last_assistant_message="")
-        self.store.finish(turn, code="SAFETY_TOOL_ROUNDS")
+        # The stored turn must read waiting_user (only that code maps to it in the store); the
+        # result keeps SAFETY_TOOL_ROUNDS as the reason.
+        self.store.finish(turn, code="WAITING_USER")
         self._settle_quality(turn, "waiting_user", "SAFETY_TOOL_ROUNDS")
         return AgenticRunResult("waiting_user", iteration, actions, "SAFETY_TOOL_ROUNDS")
 

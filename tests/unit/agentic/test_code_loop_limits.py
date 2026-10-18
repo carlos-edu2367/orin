@@ -103,7 +103,7 @@ def test_the_safety_cap_pauses_and_asks_to_continue() -> None:
     result = AgenticTurnRuntime(store=store, provider=provider, toolset=Toolset(), limits=_limits(safety_max_tool_rounds=4)).run("t")
     assert (result.state, result.error_code, provider.calls) == ("waiting_user", "SAFETY_TOOL_ROUNDS", 4)
     assert any("safetyMaxToolRounds" in text for text in store.deltas)
-    assert store.finished == [("SAFETY_TOOL_ROUNDS", False)]
+    assert store.finished == [("WAITING_USER", False)]
 
 
 @pytest.mark.parametrize("values", [
