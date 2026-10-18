@@ -116,3 +116,49 @@ def test_windows_walk_never_returns_orin_or_its_ancestors() -> None:
         _close_handles(handles)
         root.kill()
         root.wait()
+
+
+def test_capture_keeps_a_bounded_prefix_and_drains_the_rest() -> None:
+    # W2-R9: a chatty hook can never grow the worker's memory past one capture buffer per stream.
+    from agentos.hooks.processes import MAX_CAPTURE_BYTES, _Capture
+
+    total = 10 * MAX_CAPTURE_BYTES
+
+    class Source:
+        def __init__(self) -> None:
+            self.remaining = total
+            self.drained = 0
+
+        def read1(self, size: int) -> bytes:
+            size = min(size, self.remaining)
+            self.remaining -= size
+            self.drained += size
+            return b"x" * size
+
+        def close(self) -> None:
+            pass
+
+    source = Source()
+    capture = _Capture(source)
+    capture.start()
+    capture.join(timeout=20)
+    assert len(capture.value()) == MAX_CAPTURE_BYTES
+    assert source.drained == total  # everything was drained, so the child never blocks on a full pipe
+
+
+def test_a_chatty_hook_returns_within_its_timeout_with_capped_output(tmp_path: Path) -> None:
+    script = tmp_path / "chatty.py"
+    script.write_text("import sys\nsys.stdout.write('y' * 50_000_000)\nsys.stdout.flush()\n", encoding="utf-8")
+    started = time.monotonic()
+    result = run_shell_command(_py(script), cwd=str(tmp_path), env=dict(os.environ), stdin_text="", timeout_seconds=60)
+    assert result.exit_code == 0 and not result.timed_out
+    assert len(result.stdout) <= MAX_OUTPUT_CHARS
+    assert time.monotonic() - started < 30
+
+
+def test_a_large_payload_on_stdin_does_not_deadlock(tmp_path: Path) -> None:
+    script = tmp_path / "count.py"
+    script.write_text("import sys\nprint(len(sys.stdin.read()))\n", encoding="utf-8")
+    payload = "z" * 3_000_000
+    result = run_shell_command(_py(script), cwd=str(tmp_path), env=dict(os.environ), stdin_text=payload, timeout_seconds=60)
+    assert result.exit_code == 0 and result.stdout.strip() == str(len(payload))

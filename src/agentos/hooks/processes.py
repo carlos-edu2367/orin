@@ -5,10 +5,14 @@ from __future__ import annotations
 import os
 import signal
 import subprocess
+import threading
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
 MAX_OUTPUT_CHARS = 12_000
+# Bytes kept per output stream. A chatty hook is drained beyond this, never buffered (W2-R9).
+MAX_CAPTURE_BYTES = 1_048_576
+_READ_CHUNK = 65_536
 
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 _PROCESS_TERMINATE = 0x0001
@@ -320,6 +324,59 @@ def _kill_tree(process: subprocess.Popen[bytes], job: _WindowsJob | None, descen
         pass
 
 
+class _Capture:
+    """Reads one pipe on its own thread. Keeps the first ``MAX_CAPTURE_BYTES`` and drains the rest.
+
+    Draining (not stopping) matters: a child that is still writing must never block on a full pipe,
+    and the worker must never hold more than the cap, whatever the hook prints (W2-R9).
+    """
+
+    def __init__(self, stream) -> None:  # noqa: ANN001 - a binary pipe
+        self._stream = stream
+        self._buffer = bytearray()
+        self._thread = threading.Thread(target=self._pump, name="orin-hook-capture", daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def join(self, timeout: float) -> None:
+        self._thread.join(timeout)
+
+    def value(self) -> bytes:
+        return bytes(self._buffer)
+
+    def _pump(self) -> None:
+        reader = getattr(self._stream, "read1", None) or self._stream.read
+        try:
+            while True:
+                chunk = reader(_READ_CHUNK)
+                if not chunk:
+                    break
+                room = MAX_CAPTURE_BYTES - len(self._buffer)
+                if room > 0:
+                    self._buffer.extend(chunk[:room])
+        except (OSError, ValueError):
+            pass
+        finally:
+            try:
+                self._stream.close()
+            except (OSError, ValueError):
+                pass
+
+
+def _feed(stream, data: bytes) -> None:  # noqa: ANN001 - a binary pipe
+    """Writes the event payload on its own thread, so a large payload cannot deadlock against output."""
+    try:
+        stream.write(data)
+    except (OSError, ValueError):  # the child exited before reading its input
+        pass
+    finally:
+        try:
+            stream.close()
+        except (OSError, ValueError):
+            pass
+
+
 def run_shell_command(
     command: str,
     *,
@@ -351,10 +408,18 @@ def run_shell_command(
             job.assign(process.pid)
         except OSError:
             job = None
+    feeder = threading.Thread(target=_feed, args=(process.stdin, stdin_text.encode("utf-8")), name="orin-hook-stdin", daemon=True)
+    stdout_capture = _Capture(process.stdout)
+    stderr_capture = _Capture(process.stderr)
+    feeder.start()
+    stdout_capture.start()
+    stderr_capture.start()
+    timed_out = False
     try:
         try:
-            stdout, stderr = process.communicate(input=stdin_text.encode("utf-8"), timeout=max(0.1, float(timeout_seconds)))
+            process.wait(timeout=max(0.1, float(timeout_seconds)))
         except subprocess.TimeoutExpired:
+            timed_out = True
             descendants: dict[int, int] = {}
             if os.name == "nt":
                 try:
@@ -363,11 +428,15 @@ def run_shell_command(
                     descendants = {}
             _kill_tree(process, job, descendants)
             try:
-                stdout, stderr = process.communicate(timeout=5)
+                process.wait(timeout=5)
             except (subprocess.TimeoutExpired, OSError, ValueError):
-                stdout, stderr = b"", b""
-            return ProcessResult(None, _decode(stdout), _decode(stderr), True)
-        return ProcessResult(process.returncode, _decode(stdout), _decode(stderr), False)
+                pass
     finally:
         if job is not None:
             job.close()
+    # A grandchild may keep a pipe open after the hook itself exited; never wait on it for longer than this.
+    for worker in (feeder, stdout_capture, stderr_capture):
+        worker.join(5 if timed_out else 2)
+    if timed_out:
+        return ProcessResult(None, _decode(stdout_capture.value()), _decode(stderr_capture.value()), True)
+    return ProcessResult(process.returncode, _decode(stdout_capture.value()), _decode(stderr_capture.value()), False)

@@ -150,3 +150,23 @@ def test_a_timed_out_prompt_hook_stops_reading_the_provider_stream(monkeypatch) 
     time.sleep(0.3)
     assert len(consumed) == settled, "the stream kept being read after the timeout"
     runner.close()
+
+
+def test_http_hook_body_is_read_only_up_to_its_cap() -> None:
+    # W2-R9: a hook endpoint that streams 10 MB is read only as far as the cap, not to its end.
+    from agentos.hooks.runners import MAX_HTTP_BODY
+
+    consumed = [0]
+
+    def chunks():
+        for _ in range(160):
+            consumed[0] += 65_536
+            yield b"x" * 65_536
+
+    def handler(request):
+        return httpx.Response(200, content=chunks())
+
+    runner = HttpHookRunner(lambda: httpx.Client(transport=httpx.MockTransport(handler)))
+    result = runner.run(_spec(type="http", url="https://hooks.example.com/x", timeout=5), {})
+    assert result.exit_code == 0 and len(result.stdout) <= MAX_HTTP_BODY
+    assert consumed[0] <= 2 * 1024 * 1024, f"read {consumed[0]} bytes of a 10 MB body"

@@ -80,17 +80,23 @@ class HttpHookRunner:
         headers.setdefault("Content-Type", "application/json")
         try:
             client = self.client_factory() if self.client_factory else httpx.Client()
-            with client:
-                response = client.post(
-                    spec.url, content=_payload_text(payload).encode("utf-8"), headers=headers,
-                    timeout=spec.timeout, follow_redirects=False,
-                )
-                body = response.text[:MAX_HTTP_BODY]
+            with client, client.stream(
+                "POST", spec.url, content=_payload_text(payload).encode("utf-8"), headers=headers,
+                timeout=spec.timeout, follow_redirects=False,
+            ) as response:
+                # Read only as far as the cap (W2-R9): a hook endpoint cannot make the worker buffer its whole body.
+                collected = bytearray()
+                for chunk in response.iter_bytes():
+                    collected.extend(chunk[: MAX_HTTP_BODY - len(collected)])
+                    if len(collected) >= MAX_HTTP_BODY:
+                        break
+                status = response.status_code
+                body = bytes(collected).decode("utf-8", errors="replace")[:MAX_HTTP_BODY]
         except (httpx.HTTPError, OSError, ValueError) as error:
             return HookRun(None, "", "", error=f"{type(error).__name__}: {error}"[:500])
-        if 200 <= response.status_code < 300:
+        if 200 <= status < 300:
             return HookRun(0, body, "")
-        return HookRun(1, "", f"HTTP {response.status_code}")
+        return HookRun(1, "", f"HTTP {status}")
 
 
 def _run_bounded(executor: ThreadPoolExecutor, function: Callable[[], Any], timeout: float, cancel: threading.Event) -> Any:
