@@ -22,6 +22,10 @@ MAX_IMPORT_DEPTH = 5
 MAX_FILE_BYTES = 64 * 1024
 MAX_TOTAL_CHARS = 40_000
 MAX_RULE_FILES = 64
+# A repository's rule files choose these patterns and every read re-checks them, so they are bounded.
+MAX_PATTERNS_PER_RULE = 32
+MAX_PATTERNS_TOTAL = 256
+MAX_PATTERN_CHARS = 200
 DIRECTORY_FILES = ("AGENTS.md", "CONVENTIONS.md", "CLAUDE.md", ".claude/CLAUDE.md", "ORIN.md", ".orin/ORIN.md")
 LOCAL_FILES = ("CLAUDE.local.md", "ORIN.local.md")
 RULE_DIRS = (".claude/rules", ".orin/rules")
@@ -279,6 +283,7 @@ class MemoryFiles:
         self._seen: set[str] = set()
         self.files: list[MemoryFile] = []
         self.conditional: list[MemoryFile] = []
+        self._pattern_count = 0
         self._project_root = self._find_project_root(walk_up)
         for path in managed_files:
             self.files += self._add(Path(path), MANAGED, "session_start")
@@ -393,10 +398,15 @@ class MemoryFiles:
             if text is None:
                 continue
             meta, body = split_frontmatter(text)
-            globs = frontmatter_list(meta, "paths")
-            if globs:
-                if body.strip():
-                    self.conditional.append(MemoryFile(path, memory_type, "path_glob_match", body.strip(), globs))
+            patterns = frontmatter_list(meta, "paths")
+            if patterns:
+                # Patterns longer than MAX_PATTERN_CHARS are ignored; the rest are capped per rule and in total.
+                # A rule left with no pattern is never loaded (it could never match), not loaded unconditionally.
+                usable = [item for item in patterns if len(item) <= MAX_PATTERN_CHARS][:MAX_PATTERNS_PER_RULE]
+                usable = usable[: max(0, MAX_PATTERNS_TOTAL - self._pattern_count)]
+                if usable and body.strip():
+                    self._pattern_count += len(usable)
+                    self.conditional.append(MemoryFile(path, memory_type, "path_glob_match", body.strip(), tuple(usable)))
                 continue
             self.files += self._add(path, memory_type, "session_start", content=body)
 

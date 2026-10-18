@@ -155,6 +155,43 @@ def test_a_hostile_glob_cannot_stall_a_read() -> None:
     assert time.perf_counter() - started < 1.0
 
 
+def test_a_hostile_rule_set_cannot_stall_a_read(tmp_path: Path) -> None:
+    # 64 repository rule files, each with 134 patterns of 484 characters (the shape that took 11 s per read).
+    root = tmp_path / "r"
+    pattern = "**/" + "*a" * 240 + "Z"
+    for index in range(64):
+        body = "".join(f"- {pattern}\n" for _ in range(134))
+        _mk(root / ".claude" / "rules" / f"r{index:02}.md", f"---\npaths:\n{body}---\nrule body\n")
+    target = _mk(root / "src" / ("a" * 60) / ("a" * 60 + ".py"), "x = 1\n")
+    files = MemoryFiles(root, trusted=False)  # the load itself is dominated by file opens, so only the read is timed
+    started = time.perf_counter()
+    assert files.on_file_read(target) == []
+    assert time.perf_counter() - started < 0.5
+
+
+def test_rule_patterns_are_bounded_per_rule_and_in_total(tmp_path: Path) -> None:
+    root = tmp_path / "r"
+    for index in range(64):
+        body = "".join(f"- src{index:02}/{number}/*.py\n" for number in range(40))
+        _mk(root / ".claude" / "rules" / f"r{index:02}.md", f"---\npaths:\n{body}---\nrule {index}\n")
+    files = MemoryFiles(root, trusted=False)
+    counts = [len(item.globs) for item in files.conditional]
+    assert max(counts) <= 32
+    assert sum(counts) == 256
+    assert files.on_file_read(root / "src00" / "3" / "x.py")  # the first rule's patterns are within the bound
+    assert files.on_file_read(root / "src63" / "3" / "x.py") == []  # its patterns fall outside the total bound
+
+
+def test_rule_patterns_longer_than_200_characters_are_ignored(tmp_path: Path) -> None:
+    root = tmp_path / "r"
+    _mk(root / ".claude" / "rules" / "long.md", "---\npaths:\n- " + "*" * 201 + ".py\n- src/**/*.ts\n---\nTS rule\n")
+    files = MemoryFiles(root, trusted=False)
+    assert [item.globs for item in files.conditional] == [("src/**/*.ts",)]
+    _mk(root / ".claude" / "rules" / "only_long.md", "---\npaths:\n- " + "*" * 201 + ".py\n---\nnever loaded\n")
+    files = MemoryFiles(root, trusted=False)
+    assert all("never loaded" not in item.content for item in files.files + files.conditional)
+
+
 def test_render_is_bounded_and_labelled(tmp_path: Path) -> None:
     root = tmp_path / "r"
     _mk(root / "CLAUDE.md", "z" * 5000)
