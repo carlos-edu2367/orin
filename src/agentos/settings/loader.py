@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from .merge import merge_settings
-from .paths import SettingsPaths
+from .paths import SettingsPaths, workspace_grants_file
 
 LAYER_ORDER = ("user", "project", "local", "cli", "managed")  # lowest -> highest
 MAX_SETTINGS_BYTES = 1024 * 1024
@@ -190,6 +191,12 @@ def _inside(path: Path, root: Path) -> bool:
         return False
 
 
+def _is_grants_file(path: Path, project_root: Path | str) -> bool:
+    """Lexical comparison: the user-owned grants file is the only repository-scoped file outside the repo."""
+    grants = workspace_grants_file(Path(project_root))
+    return os.path.normcase(os.path.abspath(path)) == os.path.normcase(os.path.abspath(grants))
+
+
 def _flatten(data: Mapping[str, Any], prefix: str = "") -> list[str]:
     keys: list[str] = []
     for key, value in data.items():
@@ -272,10 +279,16 @@ def load_effective_settings(
                     continue
                 if data is None:
                     continue
-                # Only files inside the repository are filtered; the user-owned grants file is not.
-                if layer in {"project", "local"} and paths.project_root is not None and _inside(path, Path(paths.project_root)):
+                # Filtering follows where the file was FOUND (a lexical path under the workspace), not where it
+                # resolves: a .claude/.orin junction or symlink that points outside the workspace is still a
+                # repository file. Only the user-owned grants file is exempt.
+                if layer in {"project", "local"} and paths.project_root is not None and not _is_grants_file(path, paths.project_root):
                     data, dropped = _filter_project(data, trusted=trusted)
                     awaiting.update(dropped)
+                    if not trusted and not _inside(path, Path(paths.project_root)):
+                        # An untrusted repository may not reach outside its own root through a link.
+                        awaiting.add("settings link outside the workspace")
+                        continue
             except Exception as failure:  # noqa: BLE001 - recorded, never fatal
                 errors.append(SettingsError(str(path), f"unexpected error: {type(failure).__name__}"))
                 continue

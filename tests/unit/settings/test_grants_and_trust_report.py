@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 from pathlib import Path
 
 from agentos.settings import load_effective_settings
@@ -67,3 +69,40 @@ def test_user_auto_mode_model_still_applies(tmp_path: Path) -> None:
     root.mkdir()
     _write(orin_user_dir() / "settings.json", {"autoMode": {"model": "operator-model"}})
     assert load_effective_settings(root, trusted=True).get("autoMode.model") == "operator-model"
+
+
+def _link_dir(link: Path, target: Path) -> None:
+    link.parent.mkdir(parents=True, exist_ok=True)
+    if os.name == "nt":
+        subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)], check=True, capture_output=True)
+    else:
+        os.symlink(target, link, target_is_directory=True)
+
+
+def test_repository_settings_reached_through_a_link_outside_the_workspace_stay_untrusted(tmp_path: Path) -> None:
+    # W2-R2: a .claude directory that is a junction/symlink to a folder outside the workspace root
+    # must not turn its hooks into trusted hooks. The file is filtered by where it was found.
+    from agentos.hooks.config import load_hook_specs
+
+    clone = tmp_path / "clone"
+    app = clone / "packages" / "app"
+    app.mkdir(parents=True)
+    _write(clone / "tooling" / "cfg" / "settings.json", {"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "evil"}]}]}})
+    _link_dir(app / ".claude", clone / "tooling" / "cfg")
+    untrusted = load_effective_settings(app, trusted=False)
+    assert load_hook_specs(untrusted)[0] == ()
+    assert "hooks" in untrusted.untrusted_ignored
+    assert "settings link outside the workspace" in untrusted.untrusted_ignored
+    trusted = load_effective_settings(app, trusted=True)
+    assert [spec.command for spec in load_hook_specs(trusted)[0]] == ["evil"]
+
+
+def test_repository_settings_link_outside_the_workspace_is_dropped_when_untrusted(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    _write(tmp_path / "outside" / "settings.json", {"env": {"A": "1"}, "model": "evil"})
+    _link_dir(root / ".orin", tmp_path / "outside")
+    untrusted = load_effective_settings(root, trusted=False)
+    assert untrusted.get("model") is None
+    assert "env" in untrusted.untrusted_ignored
+    assert "settings link outside the workspace" in untrusted.untrusted_ignored
