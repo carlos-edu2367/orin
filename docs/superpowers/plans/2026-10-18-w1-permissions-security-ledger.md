@@ -38,7 +38,7 @@ Desvios adicionais, todos durante a execução:
 
 ## Pendências e limitações conhecidas
 
-- **`autoMode.model` é ignorado pelo provedor real.** O classificador envia `model` na requisição, mas `AnthropicStream`/`HTTPProviderStream` usam `self.model`, fixado na criação do provedor. O veredito do modo auto usa, na prática, o modelo do turno. Correção: criar um provedor para o modelo do classificador.
+- **`autoMode.model` é ignorado pelo provedor real.** O classificador envia `model` na requisição, mas o transporte HTTP de `provider_stream.py` monta o payload com `self.model`, fixado na criação do provedor. O veredito do modo auto usa, na prática, o modelo do turno. Correção: criar um provedor para o modelo do classificador.
 - **Disjuntor do modo auto vale por turno.** O classificador é recriado em `build_runtime`, então os contadores de negação zeram a cada turno.
 - **Classificador não testado contra o provedor real.** Os testes usam um provedor falso com o contrato `stream(request)`. O contrato real bate nas chaves `messages`, `tools` e `max_output_tokens`, mas nenhuma execução ponta a ponta foi feita.
 - **Turnos não interativos ainda executam decisões `ask` comuns.** Só as decisões `requires_human` (regra `ask` explícita ou caminho protegido) são bloqueadas. Isso é o comportamento documentado no plano para W2/W7.
