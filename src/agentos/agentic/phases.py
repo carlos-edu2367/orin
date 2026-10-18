@@ -66,7 +66,7 @@ _PROJECT_TOOLS = (
 )
 PHASE_TOOLS: Mapping[Phase, tuple[str, ...]] = {
     Phase.ORIENT: (*_ALWAYS, *_READ_TOOLS, *_WRITE_TOOLS, *_SKILL_TOOLS, *_EXTENSION_TOOLS, *_PROJECT_TOOLS, "propose_code_session", "recall", "remember"),
-    Phase.PLAN: (*_ALWAYS, *_SKILL_TOOLS, "propose_code_session", "list_projects", "read_project_conversation", "recall", "list_files", "read_file", "todo_write"),
+    Phase.PLAN: (*_ALWAYS, *_SKILL_TOOLS, "search_mcp_tools", "inspect_mcp_server", "propose_code_session", "list_projects", "read_project_conversation", "recall", "list_files", "read_file", "todo_write"),
     Phase.EXECUTE: (*_ALWAYS, *_READ_TOOLS, *_WRITE_TOOLS, *_SKILL_TOOLS, *_EXTENSION_TOOLS, *_PROJECT_TOOLS, "propose_code_session", "recall", "remember"),
     # Verification may look and may run a check; it may not change anything.
     # ``verify_project``/``verify_frontend`` mutate nothing themselves but can
@@ -113,8 +113,8 @@ PHASE_INSTRUCTIONS: Mapping[Phase, str] = {
         "- Entenda o pedido e o estado do workspace, e resolva a tarefa se ela for direta.\n"
         "- Se em poucos passos ficar claro que a tarefa é maior do que parecia, chame `write_contract` "
         "para fixar objetivo, entregáveis, restrições e critérios de aceite antes de continuar.\n"
-        "- Ferramentas de servidores MCP ativos já estão disponíveis. Ferramentas de navegador, "
-        "plugins e subagentes só ficam disponíveis depois que o contrato declarar que você precisa delas."
+        "- Ferramentas de servidores MCP ativos são carregadas sob demanda via `search_mcp_tools`, `inspect_mcp_server` e `call_mcp_tool`. "
+        "Ferramentas de navegador, plugins e subagentes só ficam disponíveis depois que o contrato declarar que você precisa delas."
     ),
     Phase.PLAN: (
         "## Agora\n"

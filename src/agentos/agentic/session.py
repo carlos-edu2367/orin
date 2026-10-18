@@ -363,6 +363,7 @@ def build_system_prompt(
     code_mode_context: str = "",
     workspace_guidance: str = "",
     project_sessions: tuple[Mapping[str, str], ...] = (),
+    mcp_servers: tuple[Mapping[str, Any], ...] = (),
 ) -> tuple[str, str]:
     lines = [
         "You are the main agent of Orin, a local-first agent workspace running on the user's own machine.",
@@ -383,7 +384,7 @@ def build_system_prompt(
         # Saying so prevents the model from planning around a tool it cannot
         # currently see -- and tells it how to get that tool back.
         lines.append(
-            "- Not every tool described below is published on every request: each stage of a task offers the tools that stage needs. The '## Agora' block tells you which stage you are in and lists exactly what is published right now. Active MCP server tools are already available; to unlock the browser, plugins or subagents, declare them in `write_contract`."
+            "- Not every tool described below is published on every request: each stage of a task offers the tools that stage needs. The '## Agora' block tells you which stage you are in and lists exactly what is published right now. Active MCP server tools are lazy-loaded via `search_mcp_tools`, `inspect_mcp_server`, and `call_mcp_tool`; to unlock the browser, plugins or subagents, declare them in `write_contract`."
         )
     if code_mode_context:
         lines += ["", code_mode_context]
@@ -531,6 +532,21 @@ def build_system_prompt(
         volatile += [
             f"- `{item['conversation_id']}` ({item.get('mode', 'chat')}): {item['title']}"
             for item in project_sessions[:12]
+        ]
+    if mcp_servers:
+        volatile += [
+            "",
+            "## Connected MCP servers (lazy-loaded)",
+            "Tool schemas from connected MCP servers are lazy-loaded to save context window:",
+        ]
+        volatile += [
+            f"- `{item.get('slug')}` ({item.get('display_name', item.get('slug'))}): {item.get('tool_count', 0)} tools available on demand."
+            for item in mcp_servers
+        ]
+        volatile += [
+            "Use `search_mcp_tools(query=\"...\", server=\"...\")` to search tools by name, description, or schema (this also activates them in the current turn), "
+            "`inspect_mcp_server(server=\"...\", include_schemas=...)` to pull all tools/metadata from a server, or "
+            "`call_mcp_tool(server=\"...\", tool=\"...\", arguments={...})` to invoke a tool directly."
         ]
     volatile += ["", f"Current date: {datetime.now(UTC).strftime('%Y-%m-%d')} (UTC)."]
     return "\n".join(lines), "\n".join(volatile).strip()
@@ -1895,6 +1911,17 @@ class TurnSession:
         if catalog:
             prompt += "\n\nRelevant procedural Skills are available as metadata only. Load one with use_skill only if it helps:"
             prompt += "".join(f"\n- {item.name} ({item.id}): {item.description}" for item in catalog)
+        mcp_summaries = toolset.mcp_server_summaries()
+        if mcp_summaries:
+            prompt += "\n\n## Connected MCP servers (lazy-loaded)"
+            prompt += "".join(
+                f"\n- `{item.get('slug')}` ({item.get('display_name', item.get('slug'))}): {item.get('tool_count', 0)} tools available on demand."
+                for item in mcp_summaries
+            )
+            prompt += (
+                "\nUse `search_mcp_tools(query=\"...\", server=\"...\")` or `inspect_mcp_server(server=\"...\")` to inspect MCP tools"
+                + ("." if toolset._read_only_mode else ", or `call_mcp_tool(server=\"...\", tool=\"...\", arguments={...})` to invoke them.")
+            )
         return prompt
 
     # -- runtime --------------------------------------------------------
@@ -2231,6 +2258,7 @@ class TurnSession:
             code_mode_context=code_mode_context,
             workspace_guidance=workspace_guidance,
             project_sessions=project_sessions,
+            mcp_servers=toolset.mcp_server_summaries(),
         )
         # In Code Mode, use a single fluid agentic loop without rigid phase boundaries;
         # standard chat keeps PhaseController.

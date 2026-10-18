@@ -56,6 +56,7 @@ CODE_MODE_CORE_TOOLS = frozenset({
     "remember", "recall",
     "search_skills", "list_skills", "read_skill_resource", "use_skill", "create_skill", "edit_skill",
     "list_mcp_catalog", "list_mcp_servers", "configure_mcp", "test_mcp_server",
+    "search_mcp_tools", "inspect_mcp_server", "call_mcp_tool",
     "search_plugin", "inspect_plugin", "install_plugin", "list_plugins", "uninstall_plugin",
     "list_projects", "create_project_from_session", "move_session_to_project", "read_project_conversation",
     "generate_image", "generate_audio", "generate_video",
@@ -791,12 +792,9 @@ class AgenticTurnRuntime:
                         "browser_screenshot", "browser_back", "browser_wait_for",
                         "browser_scroll", "browser_submit",
                     })
-                mcp_provider = getattr(self.toolset, "_mcp_provider", None)
-                if mcp_provider is not None and hasattr(mcp_provider, "definitions"):
-                    try:
-                        allowed.update(item.name for item in mcp_provider.definitions())
-                    except Exception:
-                        pass
+                active_mcp = getattr(self.toolset, "active_mcp_tool_names", ())
+                if active_mcp:
+                    allowed.update(active_mcp)
                 try:
                     return self.toolset.schemas(allowed)
                 except TypeError:

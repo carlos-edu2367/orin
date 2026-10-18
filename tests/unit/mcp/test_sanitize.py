@@ -39,12 +39,16 @@ def test_a_deeply_nested_schema_is_dropped():
     assert sanitize_tool_descriptors([{"name": "deep", "description": "", "inputSchema": schema}]) == ()
 
 
-def test_the_descriptor_batch_is_bounded():
-    accepted_batch = [{"name": f"t{index}", "description": "", "inputSchema": {"type": "object"}} for index in range(150)]
-    assert len(sanitize_tool_descriptors(accepted_batch)) == 150
-    payload = [{"name": f"t{index}", "description": "", "inputSchema": {"type": "object"}} for index in range(300)]
-    with pytest.raises(UntrustedDescriptorRejected):
-        sanitize_tool_descriptors(payload)
+def test_large_descriptor_batches_are_accepted_without_artificial_cap():
+    payload = [
+        {"name": f"tool_{index}", "description": f"Tool {index}", "inputSchema": {"type": "object"}}
+        for index in range(500)
+    ]
+    payload.append({"name": "bad tool name!", "description": "dropped", "inputSchema": {"type": "object"}})
+    sanitized = sanitize_tool_descriptors(payload)
+    assert len(sanitized) == 500
+    assert sanitized[0].name == "tool_0"
+    assert sanitized[-1].name == "tool_499"
 
 
 

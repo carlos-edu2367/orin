@@ -270,3 +270,37 @@ def test_transport_error_during_call_evicts_session_so_next_call_reconnects():
     assert len(created) == 2
 
 
+def test_provider_exposes_server_summaries_and_inspection():
+    tools = (
+        McpToolDescriptor(
+            name="search",
+            description="Search pages",
+            input_schema={"type": "object", "properties": {"query": {"type": "string"}}},
+        ),
+        McpToolDescriptor(
+            name="create_page",
+            description="Create page",
+            input_schema={"type": "object", "properties": {"title": {"type": "string"}}},
+        ),
+    )
+    provider = McpToolProvider([(_config(), tools, {})], client_factory=lambda config, secrets: FakeClient())
+    summaries = provider.server_summaries()
+    assert summaries == ({"slug": "notion", "display_name": "Notion", "tool_count": 2},)
+
+    inspected = provider.inspect_server("notion", include_schemas=False)
+    assert inspected is not None
+    assert inspected["slug"] == "notion"
+    assert inspected["tool_count"] == 2
+    assert [t["name"] for t in inspected["tools"]] == ["search", "create_page"]
+    assert "input_schema" not in inspected["tools"][0]
+
+    inspected_with_schema = provider.inspect_server("Notion", include_schemas=True)
+    assert inspected_with_schema is not None
+    assert inspected_with_schema["tools"][0]["input_schema"]["properties"]["query"]["type"] == "string"
+
+    hits = provider.search_tools("title")
+    assert hits
+    assert hits[0].qualified_name == "mcp__notion__create_page"
+
+
+

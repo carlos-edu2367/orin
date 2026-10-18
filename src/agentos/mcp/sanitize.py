@@ -36,10 +36,6 @@ def _depth(value: Any, level: int = 0) -> int:
 
 def sanitize_tool_descriptors(payload: Iterable[Mapping[str, Any]]) -> tuple[McpToolDescriptor, ...]:
     items = list(payload)
-    if len(items) > MAX_TOOLS_PER_SERVER:
-        raise UntrustedDescriptorRejected(
-            f"the server published {len(items)} tools; the limit is {MAX_TOOLS_PER_SERVER}"
-        )
     accepted: list[McpToolDescriptor] = []
     seen: set[str] = set()
     for raw in items:

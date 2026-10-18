@@ -158,17 +158,48 @@ class MediaGenerationClient:
             return content, ext
 
     def _extract_error(self, response: httpx.Response) -> str:
+        status_prefix = f"HTTP {response.status_code}"
         try:
             payload = response.json()
             if isinstance(payload, Mapping):
                 err = payload.get("error")
-                if isinstance(err, Mapping) and err.get("message"):
-                    return str(err["message"])[:300]
-                if isinstance(err, str) and err:
-                    return err[:300]
+                if isinstance(err, Mapping):
+                    base_msg = str(err.get("message") or "").strip()[:300]
+                    metadata = err.get("metadata")
+                    meta_parts: list[str] = []
+                    if isinstance(metadata, Mapping):
+                        provider_name = str(metadata.get("provider_name") or "").strip()
+                        if provider_name:
+                            meta_parts.append(provider_name)
+                        raw_meta = metadata.get("raw")
+                        raw_detail = ""
+                        if isinstance(raw_meta, str) and raw_meta.strip():
+                            try:
+                                parsed_raw = json.loads(raw_meta)
+                                if isinstance(parsed_raw, Mapping):
+                                    inner_err = parsed_raw.get("error")
+                                    if isinstance(inner_err, Mapping) and inner_err.get("message"):
+                                        raw_detail = str(inner_err["message"]).strip()
+                                    elif parsed_raw.get("message"):
+                                        raw_detail = str(parsed_raw["message"]).strip()
+                            except Exception:
+                                raw_detail = raw_meta.strip()
+                            if not raw_detail:
+                                raw_detail = raw_meta.strip()
+                        elif isinstance(raw_meta, Mapping):
+                            raw_detail = str(raw_meta.get("message") or raw_meta).strip()
+                        if raw_detail:
+                            meta_parts.append(raw_detail[:240])
+                    detail_suffix = f" ({': '.join(meta_parts)})" if meta_parts else ""
+                    if base_msg:
+                        return f"{status_prefix}: {base_msg}{detail_suffix}"
+                    if detail_suffix:
+                        return f"{status_prefix}{detail_suffix}"
+                if isinstance(err, str) and err.strip():
+                    return f"{status_prefix}: {err.strip()[:300]}"
         except Exception:
             pass
-        return f"HTTP {response.status_code}"
+        return status_prefix
 
     def generate_image(
         self,

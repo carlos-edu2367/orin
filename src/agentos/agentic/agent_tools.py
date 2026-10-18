@@ -751,6 +751,32 @@ class AgentToolset:
         self._diagnosed_at: dict[str, float] = {}
         self._definitions: tuple[ToolDefinition, ...] | None = None
         self._by_name: dict[str, ToolDefinition] = {}
+        self._active_mcp_tool_names: set[str] = set()
+
+    @property
+    def active_mcp_tool_names(self) -> frozenset[str]:
+        return frozenset(self._active_mcp_tool_names)
+
+    def mcp_server_summaries(self) -> tuple[dict[str, Any], ...]:
+        if self._mcp_provider is None:
+            return ()
+        summaries_fn = getattr(self._mcp_provider, "server_summaries", None)
+        if callable(summaries_fn):
+            try:
+                return tuple(summaries_fn())
+            except Exception:
+                return ()
+        counts: dict[str, int] = {}
+        for item in getattr(self._mcp_provider, "definitions", lambda: ())():
+            name = getattr(item, "name", "")
+            if isinstance(name, str) and name.startswith("mcp__"):
+                parts = name.split("__", 2)
+                if len(parts) == 3 and parts[1]:
+                    counts[parts[1]] = counts.get(parts[1], 0) + 1
+        return tuple(
+            {"slug": slug, "display_name": slug, "tool_count": count}
+            for slug, count in counts.items()
+        )
 
     @property
     def _active_invocation_id(self) -> str | None:
@@ -1634,6 +1660,103 @@ class AgentToolset:
                     )
                 )
         if self._mcp_provider is not None:
+            items.extend((
+                ToolDefinition(
+                    "search_mcp_tools",
+                    "Search tools across connected MCP servers by tool name, description, or JSON schema (parameter names, descriptions, enum values). Returns the full input_schema of matching tools and activates them in the current turn so they can also be called directly.",
+                    _schema(
+                        {
+                            "query": {
+                                **_TEXT,
+                                "description": "Keywords, tool name, parameter name, or concept to search for (supports Portuguese and English). Leave empty to list tools alphabetically.",
+                            },
+                            "server": {
+                                **_TEXT,
+                                "description": "Optional MCP server slug or display name to filter results.",
+                            },
+                            "limit": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 50,
+                                "description": "Maximum number of matching tools to return (default 10).",
+                            },
+                            "activate": {
+                                "type": "boolean",
+                                "description": "Whether to activate the matched tools in the current turn's tool schemas (default true).",
+                            },
+                        },
+                        (),
+                    ),
+                    self.search_mcp_tools,
+                    "mcp",
+                    read_only=True,
+                    policy_tags=("mcp",),
+                    max_result_size_chars=100_000,
+                ),
+                ToolDefinition(
+                    "inspect_mcp_server",
+                    "Pull complete metadata and the full list of tools from a connected MCP server. Optionally include full JSON input_schemas or activate all returned tools in the current turn.",
+                    _schema(
+                        {
+                            "server": {
+                                **_TEXT,
+                                "description": "MCP server slug or display name to inspect.",
+                            },
+                            "include_schemas": {
+                                "type": "boolean",
+                                "description": "If true, include the full JSON input_schema for every returned tool (default false).",
+                            },
+                            "activate_all": {
+                                "type": "boolean",
+                                "description": "If true, activate all returned tools in the current turn's tool schemas (default false).",
+                            },
+                            "offset": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "description": "Pagination offset (default 0).",
+                            },
+                            "limit": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 500,
+                                "description": "Maximum number of tools to return in this page (default 200).",
+                            },
+                        },
+                        ("server",),
+                    ),
+                    self.inspect_mcp_server,
+                    "mcp",
+                    read_only=True,
+                    policy_tags=("mcp",),
+                    max_result_size_chars=100_000,
+                ),
+                ToolDefinition(
+                    "call_mcp_tool",
+                    "Invoke a tool on a connected MCP server directly by server slug/name and tool name without waiting for a new turn iteration.",
+                    _schema(
+                        {
+                            "server": {
+                                **_TEXT,
+                                "description": "MCP server slug or display name (e.g. 'auryly').",
+                            },
+                            "tool": {
+                                **_TEXT,
+                                "description": "Tool name on the server (e.g. 'get_funnel_metrics') or qualified name ('mcp__auryly__get_funnel_metrics').",
+                            },
+                            "arguments": {
+                                "type": "object",
+                                "description": "Arguments object matching the tool's input_schema.",
+                            },
+                        },
+                        ("server", "tool"),
+                    ),
+                    self.call_mcp_tool,
+                    "mcp",
+                    read_only=False,
+                    policy_tags=("mcp", "mutates"),
+                    max_result_size_chars=100_000,
+                ),
+            ))
             # Remote tools come last so a server can never shadow a native tool
             # name, and the namespace prefix already makes collision impossible.
             native = {item.name for item in items}
@@ -1659,19 +1782,26 @@ class AgentToolset:
             self._by_name = {item.name: item for item in self._definitions}
         return self._definitions
 
+    def _is_mcp_schema_published(self, item: ToolDefinition) -> bool:
+        if item.kind == "mcp" and item.name.startswith("mcp__"):
+            return item.name in self._active_mcp_tool_names
+        return True
+
     def schemas(self, allowed: Collection[str] | None = None, kinds: Collection[str] | None = None) -> list[dict[str, Any]]:
         """Provider-facing schemas, optionally narrowed to one phase's tools.
 
-        ``allowed=None`` publishes everything, which is what the tool-runtime
-        contract tests and any caller without a phase expect. A phase passes
-        the names it publishes; ``kinds`` lets a family discovered at runtime
-        (MCP servers, plugin tools) through by kind, since their names are
-        not known when the phase sets are written.
+        Remote ``mcp__<slug>__<tool>`` definitions are lazy-loaded: only tools
+        activated via ``search_mcp_tools`` / ``inspect_mcp_server`` / ``call_mcp_tool``
+        in the current turn are published as individual tool schemas.
         """
         if allowed is None:
-            return [item.schema() for item in self.definitions()]
+            return [item.schema() for item in self.definitions() if self._is_mcp_schema_published(item)]
         names, families = set(allowed), set(kinds or ())
-        return [item.schema() for item in self.definitions() if item.name in names or item.kind in families]
+        return [
+            item.schema()
+            for item in self.definitions()
+            if (item.name in names or item.kind in families) and self._is_mcp_schema_published(item)
+        ]
 
     def resolve(self, name: str) -> ToolDefinition:
         self.definitions()
@@ -4841,6 +4971,224 @@ class AgentToolset:
         result = self._mcp_service.test(self._mcp_user_id, str(slug), connect)
         return {"summary": f"Testou {slug}", "content": json.dumps(result, ensure_ascii=False),
                 "payload": {**result, "tool_kind": "mcp", "mcp_action": "test"}}
+
+    def _mcp_search_documents(self) -> tuple[Any, ...]:
+        from agentos.mcp.models import McpToolDescriptor
+        from agentos.mcp.search import McpToolSearchDocument
+
+        if self._mcp_provider is None:
+            return ()
+        docs_fn = getattr(self._mcp_provider, "search_documents", None)
+        if callable(docs_fn):
+            try:
+                return tuple(docs_fn())
+            except Exception:
+                pass
+        docs: list[McpToolSearchDocument] = []
+        for item in getattr(self._mcp_provider, "definitions", lambda: ())():
+            name = getattr(item, "name", "")
+            if isinstance(name, str) and name.startswith("mcp__"):
+                parts = name.split("__", 2)
+                if len(parts) == 3:
+                    _, slug, bare = parts
+                    docs.append(
+                        McpToolSearchDocument.from_descriptor(
+                            server_slug=slug,
+                            server_name=slug,
+                            descriptor=McpToolDescriptor(
+                                name=bare,
+                                description=str(getattr(item, "description", "") or ""),
+                                input_schema=dict(getattr(item, "parameters", {}) or {"type": "object"}),
+                            ),
+                        )
+                    )
+        return tuple(docs)
+
+    def search_mcp_tools(
+        self,
+        query: str = "",
+        server: str | None = None,
+        limit: int = 10,
+        activate: bool = True,
+    ) -> dict[str, Any]:
+        from agentos.mcp.search import McpToolSearchEngine
+
+        if self._mcp_provider is None:
+            raise AgentToolError("No active MCP servers are connected in this conversation.")
+        safe_limit = max(1, min(int(limit or 10), 50))
+        engine = McpToolSearchEngine(self._mcp_search_documents())
+        matches = engine.search(str(query or ""), server=server, limit=safe_limit)
+        tools_payload = [item.to_dict(include_schema=True) for item in matches]
+        activated: list[str] = []
+        if activate and not self._read_only_mode:
+            for item in matches:
+                self._active_mcp_tool_names.add(item.qualified_name)
+                activated.append(item.qualified_name)
+        payload = {
+            "query": str(query or ""),
+            "server": server,
+            "count": len(tools_payload),
+            "activated": activated,
+            "tools": tools_payload,
+            "servers": list(self.mcp_server_summaries()),
+            "tool_kind": "mcp",
+            "mcp_action": "search_tools",
+        }
+        return {
+            "summary": f"{len(tools_payload)} ferramenta(s) MCP encontrada(s)",
+            "content": json.dumps(payload, ensure_ascii=False),
+            "payload": payload,
+        }
+
+    def inspect_mcp_server(
+        self,
+        server: str,
+        include_schemas: bool = False,
+        activate_all: bool = False,
+        offset: int = 0,
+        limit: int = 200,
+    ) -> dict[str, Any]:
+        if self._mcp_provider is None:
+            raise AgentToolError("No active MCP servers are connected in this conversation.")
+        clean_server = str(server or "").strip()
+        if not clean_server:
+            raise AgentToolError("Provide a non-empty 'server' slug or display name.")
+        safe_offset = max(0, int(offset or 0))
+        safe_limit = max(1, min(int(limit or 200), 500))
+        inspect_fn = getattr(self._mcp_provider, "inspect_server", None)
+        inspected: dict[str, Any] | None = None
+        if callable(inspect_fn):
+            inspected = inspect_fn(
+                clean_server,
+                include_schemas=bool(include_schemas),
+                offset=safe_offset,
+                limit=safe_limit,
+            )
+        else:
+            # Fallback for duck-typed providers in unit tests
+            docs = [
+                doc for doc in self._mcp_search_documents()
+                if doc.server_slug.lower() == clean_server.lower() or clean_server.lower() in doc.server_slug.lower()
+            ]
+            if docs:
+                page = docs[safe_offset : safe_offset + safe_limit]
+                inspected = {
+                    "slug": docs[0].server_slug,
+                    "display_name": docs[0].server_name,
+                    "transport": "unknown",
+                    "tool_count": len(docs),
+                    "offset": safe_offset,
+                    "limit": safe_limit,
+                    "returned_count": len(page),
+                    "has_more": (safe_offset + safe_limit) < len(docs),
+                    "tools": [
+                        {
+                            "name": doc.tool_name,
+                            "qualified_name": doc.qualified_name,
+                            "description": doc.description,
+                            "parameters": list(doc.parameter_names),
+                            **({"input_schema": dict(doc.input_schema)} if include_schemas else {}),
+                        }
+                        for doc in page
+                    ],
+                }
+        if inspected is None:
+            available = ", ".join(item["slug"] for item in self.mcp_server_summaries()) or "none"
+            raise AgentToolError(f"MCP server '{clean_server}' is not connected. Connected servers: {available}.")
+
+        activated: list[str] = []
+        if activate_all and not self._read_only_mode:
+            for item in inspected.get("tools", ()):
+                qname = item.get("qualified_name")
+                if isinstance(qname, str) and qname:
+                    self._active_mcp_tool_names.add(qname)
+                    activated.append(qname)
+        payload = {
+            **inspected,
+            "activated": activated,
+            "tool_kind": "mcp",
+            "mcp_action": "inspect_server",
+        }
+        return {
+            "summary": f"Inspecionou MCP {inspected['display_name']} ({inspected['returned_count']}/{inspected['tool_count']} tools)",
+            "content": json.dumps(payload, ensure_ascii=False),
+            "payload": payload,
+        }
+
+    def call_mcp_tool(
+        self,
+        server: str,
+        tool: str,
+        arguments: Mapping[str, Any] | str | None = None,
+    ) -> ToolOutcome:
+        from agentos.mcp.models import qualified_tool_name
+
+        if self._read_only_mode:
+            raise AgentToolError("call_mcp_tool is not allowed in read-only mode.")
+        if self._mcp_provider is None:
+            raise AgentToolError("No active MCP servers are connected in this conversation.")
+
+        clean_server = str(server or "").strip()
+        clean_tool = str(tool or "").strip()
+        if not clean_tool:
+            raise AgentToolError("Provide the MCP 'tool' name to invoke.")
+
+        parsed_args: dict[str, Any] = {}
+        if isinstance(arguments, Mapping):
+            parsed_args = dict(arguments)
+        elif isinstance(arguments, str) and arguments.strip():
+            try:
+                loaded = json.loads(arguments)
+            except ValueError as err:
+                raise AgentToolError(f"Invalid JSON in 'arguments': {err}") from err
+            if not isinstance(loaded, Mapping):
+                raise AgentToolError("'arguments' must be a JSON object.")
+            parsed_args = dict(loaded)
+        elif arguments is not None:
+            raise AgentToolError("'arguments' must be an object/dictionary.")
+
+        self.definitions()
+        candidates: list[str] = []
+        if clean_tool.startswith("mcp__"):
+            candidates.append(clean_tool)
+        if clean_server:
+            candidates.append(qualified_tool_name(clean_server.lower(), clean_tool))
+            for summary in self.mcp_server_summaries():
+                if clean_server.lower() in {summary["slug"].lower(), summary["display_name"].lower()}:
+                    candidates.append(qualified_tool_name(summary["slug"], clean_tool))
+
+        resolved_def: ToolDefinition | None = None
+        for qname in candidates:
+            if qname in self._by_name:
+                resolved_def = self._by_name[qname]
+                break
+        if resolved_def is None:
+            suffix = f"__{clean_tool}"
+            for name, definition in self._by_name.items():
+                if name.startswith("mcp__") and name.endswith(suffix):
+                    if not clean_server or clean_server.lower() in name.lower():
+                        resolved_def = definition
+                        break
+        if resolved_def is None:
+            raise AgentToolError(
+                f"MCP tool '{clean_tool}' was not found on server '{clean_server}'. "
+                "Call search_mcp_tools or inspect_mcp_server to check the exact tool name and schema."
+            )
+
+        self._active_mcp_tool_names.add(resolved_def.name)
+        try:
+            raw_result = resolved_def.handler(**parsed_args)
+        except TypeError as err:
+            raise AgentToolError(f"Invalid arguments for MCP tool '{resolved_def.name}': {err}") from err
+        if isinstance(raw_result, ToolOutcome):
+            return raw_result
+        return ToolOutcome(
+            "succeeded",
+            str(raw_result.get("summary") or resolved_def.name)[:240],
+            str(raw_result.get("content") or ""),
+            dict(raw_result.get("payload") or {"tool_kind": "mcp"}),
+        )
+
 
     def search_plugin(self, query: str = "") -> dict[str, Any]:
         results = self._plugin_service.search(str(query or ""))

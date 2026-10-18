@@ -84,3 +84,64 @@ def test_call_tool_synthesizes_text_from_structured_content_when_content_is_empt
     assert result.content[0]["type"] == "text"
     assert '"funnelId": "f_123"' in result.content[0]["text"]
 
+
+def test_list_tools_paginates_beyond_eight_pages():
+    class PaginatedTransport(FakeTransport):
+        def __init__(self) -> None:
+            super().__init__({})
+            self.page = 0
+
+        def send(self, frame: Mapping[str, Any]) -> dict[str, Any] | None:
+            self.sent.append(dict(frame))
+            if "id" not in frame:
+                return None
+            if frame["method"] == "initialize":
+                return {"jsonrpc": "2.0", "id": frame["id"], "result": {"protocolVersion": "2025-06-18", "serverInfo": {"name": "demo"}, "capabilities": {"tools": {}}}}
+            self.page += 1
+            next_cursor = f"cursor_{self.page}" if self.page < 12 else None
+            return {
+                "jsonrpc": "2.0",
+                "id": frame["id"],
+                "result": {
+                    "tools": [{"name": f"t_{self.page}", "description": "d", "inputSchema": {"type": "object"}}],
+                    **({"nextCursor": next_cursor} if next_cursor else {}),
+                },
+            }
+
+    client = McpClient(PaginatedTransport())
+    client.initialize()
+    tools = client.list_tools()
+    assert len(tools) == 12
+    assert [t.name for t in tools] == [f"t_{i}" for i in range(1, 13)]
+
+
+def test_list_tools_stops_on_repeating_cursor_cycle():
+    class CyclingTransport(FakeTransport):
+        def __init__(self) -> None:
+            super().__init__({})
+            self.calls = 0
+
+        def send(self, frame: Mapping[str, Any]) -> dict[str, Any] | None:
+            self.sent.append(dict(frame))
+            if "id" not in frame:
+                return None
+            if frame["method"] == "initialize":
+                return {"jsonrpc": "2.0", "id": frame["id"], "result": {"protocolVersion": "2025-06-18", "serverInfo": {"name": "demo"}, "capabilities": {"tools": {}}}}
+            self.calls += 1
+            return {
+                "jsonrpc": "2.0",
+                "id": frame["id"],
+                "result": {
+                    "tools": [{"name": f"t_{self.calls}", "description": "d", "inputSchema": {"type": "object"}}],
+                    "nextCursor": "same_cursor",
+                },
+            }
+
+    transport = CyclingTransport()
+    client = McpClient(transport)
+    client.initialize()
+    tools = client.list_tools()
+    assert len(tools) == 2
+    assert transport.calls == 2
+
+

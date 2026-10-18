@@ -5,6 +5,7 @@ from collections.abc import Sequence
 
 EXTENSION_TOOLS_GUIDANCE = (
     "## Extensions (MCP Servers, Plugins, and Skills)\n"
+    "- Tools from connected MCP servers are lazy-loaded to preserve context window. Use `search_mcp_tools(query=..., server=...)` to search tools by name, description, or schema (which also activates their schemas for this turn), `inspect_mcp_server(server=..., include_schemas=...)` to pull all tools and metadata from a server, or `call_mcp_tool(server=..., tool=..., arguments={...})` to invoke a tool directly.\n"
     "- When the user asks to connect or install an MCP server, call `list_mcp_catalog` first to find the server entry and required credentials, then call `configure_mcp` (passing `secret_names` only, never credential values) to present the approval card and wait for the user. If the user provides an `https://` MCP URL that is not in the catalog, call `configure_mcp(display_name=..., transport=\"http\", url=...)` directly (omit `secret_names` for OAuth servers; never call `fetch_url`, `browse_page`, or `ask_user` to ask for API keys in chat).\n"
     "- When the user asks to find or install a plugin, call `search_plugin` and `install_plugin(reference)` (or `inspect_plugin` to preview without installing) to present the plugin approval card and wait for the user.\n"
     "- When the user asks to create or update a reusable procedural Skill, search existing Skills with `search_skills` / `list_skills` first, then call `create_skill` or `edit_skill` with explicit `Workflow` and `Validation` sections."
@@ -29,7 +30,7 @@ PROJECT_TOOLS_GUIDANCE = (
 def extension_guidance_lines(tool_names: Sequence[str]) -> list[str]:
     names = set(tool_names)
     out: list[str] = []
-    if {"list_mcp_catalog", "configure_mcp", "search_plugin", "install_plugin"} & names:
+    if {"list_mcp_catalog", "configure_mcp", "search_mcp_tools", "inspect_mcp_server", "call_mcp_tool", "search_plugin", "install_plugin"} & names:
         out.extend(["", EXTENSION_TOOLS_GUIDANCE])
     if "propose_code_session" in names:
         out.extend(["", PROPOSE_CODE_SESSION_GUIDANCE])

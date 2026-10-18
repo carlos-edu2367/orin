@@ -11,7 +11,7 @@ from .models import McpToolDescriptor
 from .protocol import CLIENT_INFO, PROTOCOL_VERSION, McpProtocolError, notification, parse_response, request
 from .sanitize import sanitize_tool_descriptors
 
-MAX_TOOL_PAGES = 8
+MAX_TOOL_PAGES = 1000
 
 
 class McpTransportPort(Protocol):
@@ -76,14 +76,17 @@ class McpClient:
         self._require_session()
         collected: list[Mapping[str, Any]] = []
         cursor: str | None = None
+        seen_cursors: set[str] = set()
         for _ in range(MAX_TOOL_PAGES):
             params = {"cursor": cursor} if cursor else {}
             result = self._call("tools/list", params)
             raw = result.get("tools")
             collected.extend(item for item in (raw or []) if isinstance(item, Mapping))
-            cursor = result.get("nextCursor") if isinstance(result.get("nextCursor"), str) else None
-            if not cursor:
+            next_cursor = result.get("nextCursor")
+            cursor = next_cursor.strip() if isinstance(next_cursor, str) else None
+            if not cursor or cursor in seen_cursors:
                 break
+            seen_cursors.add(cursor)
         return sanitize_tool_descriptors(collected)
 
     def call_tool(self, name: str, arguments: Mapping[str, Any]) -> McpCallResult:

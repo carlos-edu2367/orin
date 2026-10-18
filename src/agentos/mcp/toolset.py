@@ -170,6 +170,99 @@ class McpToolProvider:
                 ))
         return tuple(built)
 
+    def server_summaries(self) -> tuple[dict[str, Any], ...]:
+        summaries: list[dict[str, Any]] = []
+        for config, tools, _ in self._bundles:
+            summaries.append({
+                "slug": config.slug,
+                "display_name": config.display_name,
+                "tool_count": len(tools),
+            })
+        return tuple(summaries)
+
+    def search_documents(self) -> tuple[Any, ...]:
+        from .search import McpToolSearchDocument
+
+        docs: list[McpToolSearchDocument] = []
+        for config, tools, _ in self._bundles:
+            for tool in tools:
+                docs.append(
+                    McpToolSearchDocument.from_descriptor(
+                        server_slug=config.slug,
+                        server_name=config.display_name,
+                        descriptor=tool,
+                    )
+                )
+        return tuple(docs)
+
+    def search_tools(
+        self,
+        query: str = "",
+        *,
+        server: str | None = None,
+        limit: int = 10,
+        semantic_scorer: Any = None,
+    ) -> list[Any]:
+        from .search import McpToolSearchEngine
+
+        engine = McpToolSearchEngine(self.search_documents(), semantic_scorer=semantic_scorer)
+        return engine.search(query, server=server, limit=limit)
+
+    def inspect_server(
+        self,
+        server: str,
+        *,
+        include_schemas: bool = False,
+        offset: int = 0,
+        limit: int = 200,
+    ) -> dict[str, Any] | None:
+        target = (server or "").strip().lower()
+        if not target:
+            return None
+        matched_bundle = None
+        for config, tools, secrets in self._bundles:
+            if config.slug.lower() == target or config.display_name.lower() == target:
+                matched_bundle = (config, tools, secrets)
+                break
+        if matched_bundle is None:
+            for config, tools, secrets in self._bundles:
+                if target in config.slug.lower() or target in config.display_name.lower():
+                    matched_bundle = (config, tools, secrets)
+                    break
+        if matched_bundle is None:
+            return None
+
+        config, tools, _ = matched_bundle
+        safe_offset = max(0, int(offset or 0))
+        safe_limit = max(1, min(int(limit or 200), 500))
+        page = tools[safe_offset : safe_offset + safe_limit]
+        tool_items: list[dict[str, Any]] = []
+        for tool in page:
+            props = tool.input_schema.get("properties") if isinstance(tool.input_schema, Mapping) else {}
+            req = tool.input_schema.get("required") if isinstance(tool.input_schema, Mapping) else ()
+            entry: dict[str, Any] = {
+                "name": tool.name,
+                "qualified_name": qualified_tool_name(config.slug, tool.name),
+                "description": tool.description,
+                "parameters": list(props.keys()) if isinstance(props, Mapping) else [],
+                "required": list(req) if isinstance(req, Sequence) and not isinstance(req, (str, bytes)) else [],
+            }
+            if include_schemas:
+                entry["input_schema"] = dict(tool.input_schema)
+            tool_items.append(entry)
+
+        return {
+            "slug": config.slug,
+            "display_name": config.display_name,
+            "transport": config.transport.value,
+            "tool_count": len(tools),
+            "offset": safe_offset,
+            "limit": safe_limit,
+            "returned_count": len(tool_items),
+            "has_more": (safe_offset + safe_limit) < len(tools),
+            "tools": tool_items,
+        }
+
     def close(self) -> None:
         for client in list(self._sessions.values()):
             try:
@@ -196,3 +289,4 @@ def _render(content: Sequence[Mapping[str, Any]]) -> tuple[str, list[dict[str, s
 
 
 __all__ = ["Connector", "MAX_MCP_RESULT_CHARS", "McpToolProvider", "ServerBundle", "build_client", "connector_for", "discover"]
+

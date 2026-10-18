@@ -205,3 +205,36 @@ def test_media_client_rejects_redirect_and_unsafe_video_job_id(tmp_path: Path) -
     assert res["status"] == "failed"
     assert res["error_code"] == "READ_ONLY_SUBAGENT"
 
+
+def test_openrouter_media_error_surfaces_http_status_and_upstream_metadata() -> None:
+    def rate_limited_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            429,
+            json={
+                "error": {
+                    "message": "Provider returned error",
+                    "code": 429,
+                    "metadata": {
+                        "provider_name": "Google AI Studio",
+                        "raw": '{"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED"}}',
+                    },
+                }
+            },
+        )
+
+    client = MediaGenerationClient(
+        provider="openrouter",
+        base_url="https://openrouter.ai/api/v1",
+        api_key="sk-or-test",
+        transport=httpx.MockTransport(rate_limited_handler),
+    )
+    with pytest.raises(MediaGenerationError) as exc_info:
+        client.generate_image(model="google/gemini-nano-banana-2.1", prompt="A banana")
+
+    msg = str(exc_info.value)
+    assert "HTTP 429" in msg
+    assert "Provider returned error" in msg
+    assert "Google AI Studio" in msg
+    assert "Resource has been exhausted" in msg
+
+
