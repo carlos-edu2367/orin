@@ -406,6 +406,23 @@ class AgenticTurnRuntime:
             self._record_step(turn, kind=transcript.STEP_QUEUED_INPUT, payload={"content": text})
             self._life(turn, "queued_input", queued_text=text[:2000], queue_id=queue_id)
 
+    def _check_external_changes(self, turn: dict[str, object]) -> None:
+        """FileChanged for files the turn read that changed outside it; the model hears about it in a reminder."""
+        detector = getattr(self.toolset, "detect_external_changes", None)
+        if not callable(detector):
+            return
+        try:
+            changes = list(detector())[:20]
+        except Exception:  # noqa: BLE001
+            return
+        for relative, absolute, event in changes:
+            self._emit(HookEvent.FILE_CHANGED, file_path=absolute, event=event)
+            if event == "unlink":
+                note = f"{relative} was deleted since you read it."
+            else:
+                note = f"{relative} changed on disk since you last read it (not through your file tools). Read it again before you edit it."
+            self.reminders.add("file_changed", note, key=f"file_changed:{relative}:{event}")
+
     def _wait(self, turn: dict[str, object], seconds: float) -> bool:
         """Sleep in short slices so a cancel is noticed; False when the turn was cancelled meanwhile."""
         remaining = max(0.0, float(seconds))
@@ -633,6 +650,7 @@ class AgenticTurnRuntime:
                 (self.limits.max_iterations is not None and iteration == self.limits.max_iterations)
                 or (self.phases is not None and self.phases.is_final)
             )
+            self._check_external_changes(turn)
             self._inject_reminders(messages)
             tool_schemas = self._tool_schemas(turn)
             if self._names is not None:

@@ -736,6 +736,7 @@ class AgentToolset:
         self.workspace = workspace
         self._tls = threading.local()
         self._read_file_lock = threading.Lock()
+        self._reported_changes: set[tuple[str, str, str]] = set()
         self.turn_id = str(turn_id) if turn_id else None
         self.conversation_id = str(conversation_id) if conversation_id else None
         self._conversation_id = self.conversation_id
@@ -2799,6 +2800,41 @@ class AgentToolset:
                     )
                 except Exception:  # noqa: BLE001
                     pass
+
+    def detect_external_changes(self, *, limit: int = 200) -> list[tuple[str, str, str]]:
+        """Files read in this turn that changed on disk since, other than through these tools; each reported once."""
+        with self._read_file_lock:
+            items = sorted(self._read_file_state.items(), key=lambda item: item[1].read_seq, reverse=True)[: max(0, int(limit))]
+        changes: list[tuple[str, str, str]] = []
+        for relative, record in items:
+            try:
+                target = self.workspace.resolve(relative)
+            except Exception:  # noqa: BLE001 - an unresolvable entry is not a change
+                continue
+            try:
+                stat = target.stat()
+            except FileNotFoundError:
+                event = "unlink"
+            except OSError:
+                continue
+            else:
+                if stat.st_mtime_ns == record.mtime_ns:
+                    continue
+                try:
+                    digest = hashlib.sha256(target.read_bytes()).hexdigest()
+                except OSError:
+                    continue
+                if digest == record.sha256:
+                    with self._read_file_lock:
+                        record.mtime_ns = stat.st_mtime_ns  # touched, not changed
+                    continue
+                event = "change"
+            marker = (relative, record.sha256, event)
+            if marker in self._reported_changes:
+                continue
+            self._reported_changes.add(marker)
+            changes.append((relative, str(target), event))
+        return changes
 
     def _check_read_file_guard(self, path: str) -> tuple[str | None, str]:
         """Verify read-before-edit/overwrite and anti-staleness in Code mode.
