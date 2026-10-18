@@ -120,7 +120,7 @@ def test_non_string_is_complex() -> None:
 def test_escaped_blank_does_not_open_a_comment(sep: str) -> None:
     # W1-R1: after "\<space>" the "#" is still part of the word for /bin/sh, so the
     # appended command runs. The analyzer must keep it and mark the line complex.
-    analysis = analyze_command(f"git status \{sep}#; rm -rf ~", shell="posix")
+    analysis = analyze_command(f"git status \\{sep}#; rm -rf ~", shell="posix")
     assert analysis.complex is True
     assert "rm -rf ~" in analysis.subcommands
 

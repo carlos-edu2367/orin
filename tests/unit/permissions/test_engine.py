@@ -148,8 +148,30 @@ def test_has_rules(root: Path) -> None:
     assert _engine(root, user={"permissions": {"deny": ["Bash(rm:*)"]}}).has_rules() is True
 
 
-@pytest.mark.parametrize("payload", ["git status \ #; rm -rf ~", "git status \\t#; rm -rf ~"])
+@pytest.mark.parametrize("payload", ["git status \ #; rm -rf ~", "git status \	#; rm -rf ~"])
 def test_escaped_blank_before_hash_cannot_smuggle_a_command(root: Path, payload: str) -> None:
     # W1-R1: a broad allow rule must not approve the text that /bin/sh still runs.
     engine = _engine(root, user={"permissions": {"allow": ["Bash(git:*)"]}})
     assert b(engine.decide("run_command", {"command": payload}, M.ASK_PERMISSIONS)) == "ask"
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["/bin/rm -rf x", "\\rm -rf x", '"rm" -rf x', "command rm -rf x", "env rm -rf x", "sudo rm -rf x", "xargs rm -rf"],
+)
+def test_deny_wins_over_bypass_for_wrapped_rm(root: Path, command: str) -> None:
+    # W1-R2: a deny rule must see the program that actually runs, even in bypass mode.
+    engine = _engine(root, user={"permissions": {"deny": ["Bash(rm:*)"]}})
+    assert b(engine.decide("run_command", {"command": command}, M.FULL_AUTONOMY)) == "deny", command
+
+
+def test_cmd_dialect_deny_is_case_and_extension_insensitive(root: Path) -> None:
+    engine = _engine(root, user={"permissions": {"deny": ["Bash(del:*)", "Bash(git push:*)"]}}, shell="cmd")
+    for command in ("DEL x", "del.exe x", "GIT push", "git.exe push", '"git" push'):
+        assert b(engine.decide("run_command", {"command": command}, M.FULL_AUTONOMY)) == "deny", command
+
+
+def test_allow_rule_does_not_approve_a_planted_binary_named_like_the_program(root: Path) -> None:
+    engine = _engine(root, user={"permissions": {"allow": ["Bash(git:*)"]}})
+    for command in ("./git status", "/tmp/evil/git status", "sudo git status"):
+        assert b(engine.decide("run_command", {"command": command}, M.ASK_PERMISSIONS)) == "ask", command

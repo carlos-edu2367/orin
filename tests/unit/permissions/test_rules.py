@@ -108,3 +108,83 @@ def test_suggestions_use_public_syntax(ctx: MatchContext) -> None:
     assert suggest_rule("write_file", {"path": "notes.md"}, ctx) == "Edit(*.md)"
     assert suggest_rule("fetch_url", {"url": "https://docs.python.org/3/"}, ctx) == "WebFetch(domain:docs.python.org)"
     assert suggest_rule("mcp__github__list_issues", {}, ctx) == "mcp__github__list_issues"
+
+
+POSIX_RM_VARIANTS = (
+    "/bin/rm -rf x",
+    "./rm -rf x",
+    "\\rm -rf x",
+    '"rm" -rf x',
+    "'rm' -rf x",
+    "r''m -rf x",
+    "command rm -rf x",
+    "builtin rm -rf x",
+    "exec rm -rf x",
+    "env rm -rf x",
+    "env FOO=1 rm -rf x",
+    "sudo rm -rf x",
+    "sudo -u root rm -rf x",
+    "nice -n 5 rm -rf x",
+    "xargs rm -rf",
+    "command env FOO=1 /bin/rm -rf x",
+)
+
+
+@pytest.mark.parametrize("command", POSIX_RM_VARIANTS)
+def test_deny_rule_sees_through_path_quotes_and_wrappers(ctx: MatchContext, command: str) -> None:
+    deny = parse_rule("Bash(rm:*)", kind="deny", source="user")
+    assert rule_matches(deny, "run_command", {"command": command}, ctx), command
+
+
+@pytest.fixture
+def cmd_ctx(tmp_path: Path) -> MatchContext:
+    root = tmp_path / "ws"
+    root.mkdir(exist_ok=True)
+    return MatchContext(workspace_root=root, home=tmp_path / "home", shell="cmd")
+
+
+@pytest.mark.parametrize(
+    ("spec", "command"),
+    [
+        ("del:*", "DEL x"),
+        ("del:*", "del.exe x"),
+        ("del:*", "C:\Windows\System32\del.exe x"),
+        ("del:*", '"del" x'),
+        ("git push:*", "GIT push origin main"),
+        ("git push:*", "git.exe push"),
+        ("git push:*", '"git" push'),
+        ("git push:*", "git.cmd push"),
+    ],
+)
+def test_deny_rule_is_case_and_extension_insensitive_on_cmd(cmd_ctx: MatchContext, spec: str, command: str) -> None:
+    deny = parse_rule(f"Bash({spec})", kind="deny", source="user")
+    assert rule_matches(deny, "run_command", {"command": command}, cmd_ctx), command
+
+
+@pytest.mark.parametrize(
+    ("spec", "sub"),
+    [
+        ("git:*", "/tmp/evil/git status"),
+        ("git:*", "./git status"),
+        ("git:*", "sudo git status"),
+        ("git:*", 'env -S "git status; rm -rf /"'),
+    ],
+)
+def test_allow_matching_never_widens_through_paths_or_privilege_wrappers(spec: str, sub: str) -> None:
+    from agentos.permissions.rules import command_allowed
+
+    assert command_allowed(spec, sub, shell="posix") is False, sub
+
+
+@pytest.mark.parametrize("sub", ['"git" status', "command git status", "env FOO=1 git status"])
+def test_allow_matching_accepts_exact_normalized_forms(sub: str) -> None:
+    from agentos.permissions.rules import command_allowed
+
+    assert command_allowed("git:*", sub, shell="posix") is True
+
+
+def test_cmd_allow_matching_is_case_insensitive_posix_is_not() -> None:
+    from agentos.permissions.rules import command_allowed
+
+    assert command_allowed("git:*", "GIT status", shell="cmd") is True
+    assert command_allowed("git:*", "GIT status", shell="posix") is False

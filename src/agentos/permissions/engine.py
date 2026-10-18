@@ -12,7 +12,7 @@ from agentos.code_mode.models import CodePermissionMode, normalize_permission_mo
 from agentos.settings import EffectiveSettings
 
 from .paths import is_protected_path
-from .rules import EDIT_FAMILY, MatchContext, PermissionRule, command_matches, parse_rule, rule_matches
+from .rules import EDIT_FAMILY, MatchContext, PermissionRule, command_allowed, parse_rule, rule_matches
 from .shell import analyze_command, default_shell
 
 logger = logging.getLogger(__name__)
@@ -147,7 +147,7 @@ class PermissionEngine:
             return None
         matched: PermissionRule | None = None
         for sub in analysis.subcommands:
-            rule = next((r for r in bash_rules if command_matches(r.specifier, sub)), None)
+            rule = next((r for r in bash_rules if command_allowed(r.specifier, sub, shell=self.ctx.shell)), None)
             if rule is None:
                 return None
             matched = matched or rule

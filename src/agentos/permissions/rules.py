@@ -15,6 +15,7 @@ from agentos.agentic.tools.public_names import internal_name
 from .paths import path_rule_matches
 from .shell import ShellAnalysis, analyze_command
 
+_ASSIGNMENT_WORD = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _RULE = re.compile(r"^\s*([A-Za-z0-9_.*-]+)(?:\((.*)\))?\s*$", re.DOTALL)
 _LEGACY = {"shell": "run_command", "bash": "run_command", "grep": "search_files", "grep_files": "search_files"}
 
@@ -78,13 +79,94 @@ def rule_applies_to_tool(rule: PermissionRule, internal: str) -> bool:
     return rule.tool == internal
 
 
-def command_matches(specifier: str | None, subcommand: str) -> bool:
-    if specifier is None:
-        return True
-    command = " ".join(str(subcommand).split())
-    spec = " ".join(specifier.split())
-    if not spec or spec == "*":
-        return True
+_EXECUTABLE_SUFFIXES = (".exe", ".cmd", ".bat", ".com")
+# Wrappers that only re-dispatch to another program. Deny and ask matching peels
+# all of them (options and VAR=value arguments are skipped as well).
+_DENY_WRAPPERS = frozenset({"command", "builtin", "exec", "env", "sudo", "nice", "xargs"})
+# Allow matching is strict: only wrappers that run the named program unchanged.
+_ALLOW_WRAPPERS = frozenset({"command", "builtin", "exec", "env"})
+_MAX_FORMS_SCANNED = 8
+
+
+def _unquote(word: str) -> str:
+    return word.replace('"', "").replace("'", "")
+
+
+def _program(word: str, shell: str) -> str:
+    """Name of the program a first word runs: quotes, path, ``.exe`` and case removed."""
+    text = _unquote(word).replace("\\", "/")
+    name = PurePosixPath(text).name if text else ""
+    lowered = name.lower()
+    for suffix in _EXECUTABLE_SUFFIXES:
+        if lowered.endswith(suffix) and len(name) > len(suffix):
+            name = name[: -len(suffix)]
+            break
+    return name.lower() if shell == "cmd" else name
+
+
+def _deny_forms(subcommand: str, shell: str) -> list[str]:
+    """Every reading of a simple command that a deny or ask rule must see.
+
+    The literal text is kept, and so is each form obtained by normalizing the
+    program name at a position that wrappers could make the program run from.
+    Over-matching here only blocks more, never allows more.
+    """
+    text = " ".join(str(subcommand).split())
+    if not text:
+        return [text]
+    tokens = text.split(" ")
+    forms = [text]
+    after_option = False
+    index = 0
+    while index < min(len(tokens), _MAX_FORMS_SCANNED):
+        token = tokens[index]
+        forms.append(" ".join([_program(token, shell), *tokens[index + 1:]]))
+        skippable = (
+            after_option
+            or token.startswith("-")
+            or bool(_ASSIGNMENT_WORD.match(token))
+            or _program(token, shell).lower() in _DENY_WRAPPERS
+        )
+        if not skippable:
+            break
+        after_option = token.startswith("-") and not after_option
+        index += 1
+    return list(dict.fromkeys(forms))
+
+
+def _allow_forms(subcommand: str, shell: str) -> list[str]:
+    """Readings an allow rule may approve: the literal text, plus one exact normalized form.
+
+    A path-qualified program (``./git``, ``/tmp/x/git``) is never reduced to its
+    name: a planted binary would otherwise inherit the rule of the real one. The
+    normalized form must re-analyse as one simple, non-complex command.
+    """
+    text = " ".join(str(subcommand).split())
+    tokens = text.split(" ") if text else []
+    if not tokens:
+        return [text]
+    index = 0
+    env_seen = False
+    while index < len(tokens) - 1 and _unquote(tokens[index]) in _ALLOW_WRAPPERS:
+        env_seen = env_seen or _unquote(tokens[index]) == "env"
+        index += 1
+        while env_seen and index < len(tokens) - 1 and _ASSIGNMENT_WORD.match(tokens[index]):
+            index += 1
+    head = _unquote(tokens[index])
+    if not head or "/" in head or "\\" in head:
+        return [text]
+    if shell == "cmd":
+        head = head.lower()
+    candidate = " ".join([head, *tokens[index + 1:]])
+    if candidate == text:
+        return [text]
+    analysis = analyze_command(candidate, shell=shell)
+    if analysis.complex or analysis.subcommands != (candidate,):
+        return [text]
+    return [text, candidate]
+
+
+def _spec_matches(spec: str, command: str) -> bool:
     if spec.endswith(":*"):
         prefix = spec[:-2].strip()
         return not prefix or command == prefix or command.startswith(prefix + " ")
@@ -93,6 +175,26 @@ def command_matches(specifier: str | None, subcommand: str) -> bool:
         if command == prefix or command.startswith(prefix + " "):
             return True
     return command == spec or fnmatchcase(command, spec)
+
+
+def command_matches(specifier: str | None, subcommand: str, *, shell: str = "posix") -> bool:
+    """Deny/ask matching: the literal command or any normalized reading of it matches."""
+    if specifier is None:
+        return True
+    spec = " ".join(specifier.split())
+    if not spec or spec == "*":
+        return True
+    return any(_spec_matches(spec, form) for form in _deny_forms(subcommand, shell))
+
+
+def command_allowed(specifier: str | None, subcommand: str, *, shell: str = "posix") -> bool:
+    """Allow matching: strict, see ``_allow_forms``."""
+    if specifier is None:
+        return True
+    spec = " ".join(specifier.split())
+    if not spec or spec == "*":
+        return True
+    return any(_spec_matches(spec, form) for form in _allow_forms(subcommand, shell))
 
 
 def _target(internal: str, arguments: Mapping[str, Any], ctx: MatchContext) -> Path | None:
@@ -122,9 +224,9 @@ def rule_matches(
     if internal == "run_command":
         command = str(args.get("command") or "")
         parsed = analysis or analyze_command(command, shell=ctx.shell)
-        if command_matches(spec, command):
+        if command_matches(spec, command, shell=ctx.shell):
             return True
-        return any(command_matches(spec, sub) for sub in parsed.subcommands)
+        return any(command_matches(spec, sub, shell=ctx.shell) for sub in parsed.subcommands)
     if internal in EDIT_FAMILY or internal in READ_FAMILY:
         target = _target(internal, args, ctx)
         return target is not None and path_rule_matches(spec, target, workspace_root=ctx.workspace_root, home=ctx.home)
