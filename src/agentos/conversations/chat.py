@@ -1838,9 +1838,10 @@ class PostgresChatStore:
         return claimed
 
     def mark_queued_input_blocked(self, queue_id: str) -> None:
+        # The refused text is erased, as a refused prompt is (W2-R6); only the placeholder stays.
         with self._engine.begin() as c:
             c.execute(update(conversation_input_queue).where(conversation_input_queue.c.queue_id == str(queue_id)).values(
-                state="blocked", updated_at=datetime.now(UTC),
+                state="blocked", content=BLOCKED_PROMPT_PLACEHOLDER, updated_at=datetime.now(UTC),
             ))
 
     def take_queued_inputs(self, turn: Mapping[str, object]) -> tuple[str, list[str]] | None:

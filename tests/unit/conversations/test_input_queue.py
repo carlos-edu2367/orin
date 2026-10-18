@@ -10,7 +10,7 @@ from agentos.agentic.provider_stream import NormalizedStreamItem, StreamKind
 from agentos.agentic.runtime import AgenticLimits, AgenticTurnRuntime
 from agentos.api.contracts import ApplicationNotFoundError, ApplicationValidationError
 from agentos.conversations.chat import MAX_QUEUED_INPUTS, ChatApplication, PostgresChatStore
-from agentos.persistence.postgres.schema import conversation_messages, conversation_turns, metadata
+from agentos.persistence.postgres.schema import conversation_input_queue, conversation_messages, conversation_turns, metadata
 
 
 def _store() -> PostgresChatStore:
@@ -268,3 +268,53 @@ def test_the_store_returns_the_row_of_a_repeated_key() -> None:
     again = store.enqueue_input(user_id="u", conversation_id=conversation_id, content="a", idempotency_key="k")
     assert again["queue_id"] == first["queue_id"]
     assert len(store.queued_inputs(conversation_id, "u")) == 1
+
+
+def test_a_queued_text_a_hook_refused_is_not_kept_in_the_database() -> None:
+    """W3-R22: a queued message a UserPromptSubmit hook refuses is replaced by the blocked placeholder."""
+    from agentos.agentic.lifecycle import HookEvent, LifecycleBus, LifecycleDecision
+    from agentos.conversations.chat import BLOCKED_PROMPT_PLACEHOLDER
+
+    store = _store()
+    turn = _running_turn(store)
+    conversation_id = str(turn["conversation_id"])
+    assert ChatApplication(store).enqueue("u", conversation_id, "the prod password is hunter2", "k2")["queued"] is True
+
+    class Adapter:
+        def load(self, turn_id): return dict(turn)
+        def history_for_turn(self, t): return store.history_for_turn(t)
+        def lifecycle(self, t, state, **payload): pass
+        def delta(self, t, text): store.delta(t, text)
+        def finish(self, t, *, failed=False, code=None): store.finish(t, failed=failed, code=code)
+        def record_step(self, t, **values): store.record_step(t, **values)
+        def claim_queued_inputs(self, t): return store.claim_queued_inputs(t)
+        def mark_queued_input_blocked(self, queue_id): store.mark_queued_input_blocked(queue_id)
+
+    class Provider:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def stream(self, request):
+            self.calls += 1
+            if self.calls == 1:
+                return iter([
+                    NormalizedStreamItem(StreamKind.TOOL_CALL, 1, tool_call_id="c1", tool_name="read_file", arguments_delta='{"path": "a"}'),
+                    NormalizedStreamItem(StreamKind.FINISH, 2, finish_reason="tool_calls"),
+                ])
+            return iter([NormalizedStreamItem(StreamKind.TEXT, 1, text="done"), NormalizedStreamItem(StreamKind.FINISH, 2, finish_reason="stop")])
+
+    class Toolset:
+        def schemas(self, allowed=None): return []
+        def is_read_only(self, name): return True
+        def argument_names(self, name): return frozenset({"path"})
+        def invoke(self, name, arguments): return ToolOutcome("succeeded", "ok", "content")
+
+    bus = LifecycleBus()
+    bus.subscribe(lambda event: LifecycleDecision(blocked=True, reason="no secrets") if event.name is HookEvent.USER_PROMPT_SUBMIT and "password" in str(dict(event.payload).get("prompt")) else None)
+    AgenticTurnRuntime(
+        store=Adapter(), provider=Provider(), toolset=Toolset(), lifecycle=bus,
+        limits=AgenticLimits(max_iterations=None, max_actions=None, deadline=timedelta(hours=1)),
+    ).run(str(turn["turn_id"]))
+    with store._engine.connect() as connection:
+        rows = connection.execute(select(conversation_input_queue.c.state, conversation_input_queue.c.content)).all()
+    assert [(state, content) for state, content in rows] == [("blocked", BLOCKED_PROMPT_PLACEHOLDER)]
