@@ -34,7 +34,7 @@ export function WorkspaceTrustCard({ event, conversationId, trust }: Props) {
   }
   return (
     <article className="activity-card workspace-trust" data-state={state === 'trusted' ? 'completed' : 'waiting'} data-kind="lifecycle">
-      <span className="activity-card__glyph" aria-hidden="true">⚠</span>
+      <span className="activity-card__glyph" aria-hidden="true">{state === 'trusted' ? '✓' : '⚠'}</span>
       <div className="workspace-trust__body">
         <span className="activity-card__label">
           {state === 'trusted' ? 'Pasta confiável — vale a partir da próxima mensagem.' : event.summary}
