@@ -45,7 +45,14 @@ from .diagnostics import STEP_ORDER, detect_recipe, file_diagnostic_command
 from .workspace import MAX_LIST_DEPTH, MAX_SEARCH_RESULTS, ConversationWorkspace, WorkspaceError
 from .models import MAX_USER_QUESTION_ITEMS
 from .file_preview import media_type_for
-from .tools.public_names import PublicToolNames, arguments_in as _public_arguments_in, internal_name as _internal_tool_name
+from .lifecycle import HookEvent, LifecycleBus
+from .tools.public_names import (
+    PublicToolNames,
+    arguments_in as _public_arguments_in,
+    arguments_out as _public_arguments_out,
+    internal_name as _internal_tool_name,
+    public_name as _public_tool_name,
+)
 
 
 _SENSITIVE_NAME = r"(?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|password|secret|authorization|cookie|credential)"
@@ -96,6 +103,16 @@ from .provider_content import image_block
 logger = logging.getLogger(__name__)
 
 MAX_TOOL_RESULT_CHARS = 12_000
+
+# Error codes that mean the call was refused by policy rather than failing.
+PERMISSION_DENIAL_CODES = frozenset({
+    "CODE_PERMISSION_DENIED",
+    "CODE_PLAN_MODE_READONLY",
+    "READ_ONLY_SUBAGENT",
+    "CODE_PLAN_APPROVAL_REQUIRED",
+    "CODE_DEPLOY_CONFIRMATION_REQUIRED",
+    "CODE_PUSH_CONFIRMATION_REQUIRED",
+})
 DEFAULT_COMMAND_TIMEOUT_SECONDS = 120
 MAX_COMMAND_TIMEOUT_SECONDS = 600
 # Leaves headroom under MAX_TOOL_RESULT_CHARS for the "exit=" line and the
@@ -667,6 +684,7 @@ class AgentToolset:
         media_policy: object | None = None,
         media_client: object | None = None,
         public_tool_names: bool = False,
+        lifecycle: LifecycleBus | None = None,
     ) -> None:
         from agentos.code_mode.checkpoints import FileCheckpointStore
         from agentos.code_mode.models import CodePermissionMode, normalize_permission_mode
@@ -784,6 +802,7 @@ class AgentToolset:
         # Claude Code-compatible names/arguments at the model boundary
         # (experimental.claudeToolNames). Internal ids stay snake_case.
         self.name_translator: PublicToolNames | None = PublicToolNames() if public_tool_names else None
+        self._lifecycle: LifecycleBus | None = lifecycle
 
     @property
     def active_mcp_tool_names(self) -> frozenset[str]:
@@ -1854,6 +1873,74 @@ class AgentToolset:
         call_id: str | None = None,
         invocation_id: str | None = None,
     ) -> ToolOutcome:
+        bus = self._lifecycle
+        if bus is None:
+            return self._invoke_unobserved(name, arguments, call_id=call_id, invocation_id=invocation_id)
+        internal = _internal_tool_name(name)
+        if internal != name:
+            arguments = _public_arguments_in(internal, dict(arguments or {}))
+        tool_name = _public_tool_name(internal)
+        tool_input = _public_arguments_out(internal, dict(arguments or {}))
+        tool_use_id = str(call_id or invocation_id or getattr(self, "_active_invocation_id", None) or "")
+        bus.emit(HookEvent.PRE_TOOL_USE, tool_name=tool_name, tool_input=tool_input, tool_use_id=tool_use_id)
+        cwd_before = self._current_cwd
+        outcome = self._invoke_unobserved(internal, arguments, call_id=call_id, invocation_id=invocation_id)
+        common = {"tool_name": tool_name, "tool_input": tool_input, "tool_use_id": tool_use_id}
+        if outcome.error_code in PERMISSION_DENIAL_CODES:
+            bus.emit(HookEvent.PERMISSION_DENIED, **common, reason=outcome.content[:2000])
+        elif outcome.status == "succeeded":
+            bus.emit(
+                HookEvent.POST_TOOL_USE,
+                **common,
+                tool_response={"status": outcome.status, "summary": outcome.summary, "content": outcome.content[:4000]},
+            )
+            self._emit_tool_side_events(bus, internal, dict(arguments or {}), outcome, cwd_before)
+        else:
+            bus.emit(
+                HookEvent.POST_TOOL_USE_FAILURE,
+                **common,
+                error=outcome.content[:2000] or outcome.summary,
+                error_code=outcome.error_code,
+            )
+        return outcome
+
+    def _emit_tool_side_events(
+        self,
+        bus: LifecycleBus,
+        internal: str,
+        arguments: Mapping[str, Any],
+        outcome: ToolOutcome,
+        cwd_before: Path,
+    ) -> None:
+        payload = outcome.payload or {}
+        if internal == "task_create":
+            task = payload.get("task") if isinstance(payload.get("task"), Mapping) else {}
+            bus.emit(
+                HookEvent.TASK_CREATED,
+                task_id=str(task.get("id") or payload.get("task_id") or ""),
+                task_subject=str(arguments.get("subject") or arguments.get("content") or ""),
+                task_description=str(arguments.get("description") or ""),
+            )
+        elif internal == "task_update" and str(arguments.get("status") or "") == "completed":
+            bus.emit(
+                HookEvent.TASK_COMPLETED,
+                task_id=str(arguments.get("taskId") or arguments.get("task_id") or arguments.get("id") or ""),
+            )
+        elif internal == "enter_worktree":
+            bus.emit(HookEvent.WORKTREE_CREATE, worktree=dict(payload.get("worktree") or {}))
+        elif internal == "exit_worktree" and str(arguments.get("action") or "keep") == "remove":
+            bus.emit(HookEvent.WORKTREE_REMOVE, worktree_name=str(self._active_worktree_name or ""))
+        if self._current_cwd != cwd_before:
+            bus.emit(HookEvent.CWD_CHANGED, old_cwd=str(cwd_before), new_cwd=str(self._current_cwd))
+
+    def _invoke_unobserved(
+        self,
+        name: str,
+        arguments: Mapping[str, Any],
+        *,
+        call_id: str | None = None,
+        invocation_id: str | None = None,
+    ) -> ToolOutcome:
         requested_name = name
         name = _internal_tool_name(name)
         if requested_name != name:
@@ -1916,6 +2003,13 @@ class AgentToolset:
                 )
             if perm_decision == "ask":
                 if self._interactive_permissions:
+                    if self._lifecycle is not None:
+                        self._lifecycle.emit(
+                            HookEvent.PERMISSION_REQUEST,
+                            tool_name=_public_tool_name(name),
+                            tool_input=_public_arguments_out(name, dict(arguments)),
+                            permission_suggestions=[],
+                        )
                     perm_result = self._permission_broker.request_and_wait(
                         tool_name=name,
                         arguments=arguments,
