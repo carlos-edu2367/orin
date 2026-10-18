@@ -5637,7 +5637,10 @@ class AgentToolset:
                 model_id = raw_type
                 clean_type = "general"
             else:
-                raise AgentToolError("subagent_type must be one of 'explore', 'plan', 'general', or 'fork'.")
+                raise AgentToolError(
+                    "subagent_type must be one of 'explore', 'plan', 'general', or 'fork' "
+                    "(public names: Explore, Plan, general-purpose, fork)."
+                )
         if not isinstance(task, str) or not task.strip():
             raise AgentToolError("task must be a non-blank string.")
         clean_agent_id = str(agent_id).strip() if agent_id is not None and str(agent_id).strip() else None

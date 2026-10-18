@@ -90,7 +90,8 @@ def test_agent_maps_types_and_prompt() -> None:
     }
     assert arguments_in("run_subagent", {"description": "d", "prompt": "p", "subagent_type": "general-purpose"})["subagent_type"] == "general"
     assert arguments_in("run_subagent", {"description": "d", "prompt": "p"})["subagent_type"] == "general"
-    assert arguments_in("run_subagent", {"description": "d", "prompt": "p", "subagent_type": "my-custom"})["subagent_type"] == "general"
+    # an unknown type is passed through for the internal validation to reject, never widened to general
+    assert arguments_in("run_subagent", {"description": "d", "prompt": "p", "subagent_type": "my-custom"})["subagent_type"] == "my-custom"
     assert arguments_in("run_subagent", {"description": "d", "prompt": "p", "resume": "agent-1", "model": "opus"}) == {
         "description": "d", "task": "p", "subagent_type": "general", "agent_id": "agent-1",
     }
@@ -269,3 +270,15 @@ def test_messages_out_survives_unparseable_tool_use_block() -> None:
     names = [block["name"] for block in out[0]["content"]]
     assert names[0] == "Bash"
     assert len(out[0]["content"]) == 2
+
+
+@pytest.mark.parametrize("raw", ["explorer", "code-reviewer", ["x"], 7], ids=repr)
+def test_unknown_subagent_type_is_never_widened_to_general(raw: object) -> None:
+    result = arguments_in("run_subagent", {"description": "d", "prompt": "p", "subagent_type": raw})
+    assert result["subagent_type"] == raw
+
+
+def test_missing_subagent_type_defaults_to_general_and_known_names_map() -> None:
+    assert arguments_in("run_subagent", {"description": "d", "prompt": "p"})["subagent_type"] == "general"
+    assert arguments_in("run_subagent", {"description": "d", "prompt": "p", "subagent_type": ""})["subagent_type"] == "general"
+    assert arguments_in("run_subagent", {"description": "d", "prompt": "p", "subagent_type": "Explore"})["subagent_type"] == "explore"

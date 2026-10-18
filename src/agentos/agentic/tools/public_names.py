@@ -475,8 +475,12 @@ def arguments_in(internal: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
         if number is not None:
             result["pid"] = number
     elif internal == "run_subagent":
-        raw_type = str(result.get("subagent_type") or "").strip().lower()
-        result["subagent_type"] = _SUBAGENT_TYPES_IN.get(raw_type, "general")
+        raw_type = result.get("subagent_type")
+        if raw_type is None or (isinstance(raw_type, str) and not raw_type.strip()):
+            result["subagent_type"] = "general"  # the documented default, not a widening
+        elif isinstance(raw_type, str) and raw_type.strip().lower() in _SUBAGENT_TYPES_IN:
+            result["subagent_type"] = _SUBAGENT_TYPES_IN[raw_type.strip().lower()]
+        # anything else is kept as sent, so the internal validation rejects it instead of granting general
     elif internal == "ask_user":
         result = _ask_user_in(result)
     return result

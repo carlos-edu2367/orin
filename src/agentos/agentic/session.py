@@ -1313,7 +1313,8 @@ class TurnSession:
                 return ToolOutcome(
                     "failed",
                     f"Tipo de subagente inválido: {clean_type}",
-                    "subagent_type must be one of 'explore', 'plan', 'general', or 'fork'.",
+                    "subagent_type must be one of 'explore', 'plan', 'general', or 'fork' "
+                    "(public names: Explore, Plan, general-purpose, fork).",
                     {"tool_kind": "agent"},
                     "INVALID_ARGUMENTS",
                 )
