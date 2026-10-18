@@ -51,3 +51,36 @@ Desvios adicionais, todos durante a execução:
 - Subcomandos `auto-mode` da CLI e `--permission-prompt-tool` → W6.
 - Editor `/permissions` e cartão de permissão com três opções → W7.
 - Itens de W0 ainda abertos: R10, R11, R14, R15, R18, R20, R21.
+
+## Correções da revisão adversarial (`reviews/2026-10-18-w1-review.md`)
+
+Cada item foi corrigido com teste escrito antes da implementação (exceto onde indicado) e um commit `fix(w1): W1-Rn ...`.
+
+| ID | Status | O que mudou | Testes |
+|---|---|---|---|
+| R1 | corrigido | `\<espaço>` e `\<tab>` marcam o comando como complexo; `#` só inicia comentário em fronteira de palavra não escapada | `test_shell.py`, `test_engine.py` |
+| R2 | corrigido | regras deny/ask casam também formas normalizadas (aspas, caminho, `.exe/.cmd/.bat/.com`, caixa no cmd, prefixos `command/builtin/exec/env/sudo/nice/xargs`). Allow é estrito: caminho com `/` ou `\` nunca vira nome; prefixos de privilégio não são removidos; a forma normalizada precisa reanalisar como um comando simples | `test_rules.py`, `test_engine.py` |
+| R3 | corrigido | alvos de ferramenta seguem `ConversationWorkspace.resolve` (`workspace_path`); tokens de shell iniciados por `/` ou `\` são verificados como caminho real e como caminho do workspace; no Windows, componentes ignoram ponto/espaço finais e sufixo de stream NTFS | `test_w1_review_regressions.py`, `test_paths.py` |
+| R4 | corrigido | `cp`/`mv`: `-t DIR`, `--target-directory=DIR`, `-T` entendidos; flag desconhecida pede confirmação; glob que não pode ser canonizado não é seguro; destino protegido vira `ask` + `requires_human` mesmo em acceptEdits | `test_w1_review_regressions.py` |
+| R5 | corrigido | `autoMode` é filtrado até a confiança (entra no cartão de confiança); `autoMode.model` é sempre ignorado quando vem do projeto | `test_grants_and_trust_report.py` |
+| R6 | corrigido | pedidos pendentes ficam em `ORIN_USER_DIR/permissions/<sha256 do root normalizado, 16 hex>`; worker e API calculam o mesmo caminho; `allow_always` só persiste a `suggested_rule` do próprio pedido, nunca uma regra informada no arquivo de resposta | `test_w1_review_regressions.py` |
+| R7 | corrigido | o veredito lê todos os objetos com `decision`; vereditos divergentes viram `ask`; iguais usam o último | `test_w1_review_regressions.py` |
+| R8 | corrigido | comando com mais de 10.000 caracteres pede confirmação sem regex e sem modelo; padrões com lacunas limitadas a 10.000 | `test_w1_review_regressions.py` |
+| R11 | corrigido | `BrowserSection` busca dentro do efeito com guarda `cancelled`; `CodeSessionProposalCard` tem `eslint-disable-next-line` justificado | `npm run lint` verde |
+| R12 | corrigido | `ShellAnalysis.redirect_targets` registra o alvo de redirecionamento não trivial; o engine o verifica como argumento: `ask` + `requires_human` em default/acceptEdits/auto, `deny` em dontAsk | `test_w1_review_regressions.py` |
+| R9 | diferido (W2/W7) | — | — |
+| R10 | diferido (W6) | — | — |
+
+Ajustes de testes existentes: nenhum teste foi removido. `tests/unit/permissions/test_w1_review_regressions.py` é novo e concentra os regressivos de R3–R8 e R12.
+
+### Riscos residuais (honestos)
+
+- **R6 — escopo.** Processos do mesmo usuário fora do workspace continuam fora do modelo de ameaça: podem escrever no diretório do usuário. O que mudou é que nada rodando dentro do repositório consegue mais emitir uma resposta.
+- **R2 — Windows.** Um `git.cmd` plantado no diretório atual pode ser executado por `cmd` antes do programa do PATH. Allow não acompanha isso (o nome nu já era confiado antes); só o deny é reforçado.
+- **R2 — `command_matches` legado.** `code_mode/permissions.py::matches_permission_rule` ainda usa a semântica antiga de primeiro token. Não é usado para decidir (apenas exportado e coberto por testes legados), mas é um caminho que um futuro uso poderia pegar por engano.
+- **R7 — formato.** A leitura só considera objetos planos `{...}` sem chaves aninhadas. Um veredito aninhado vira `ask`, nunca `allow`.
+- **R3 — links simbólicos e junções.** Um `.orin` que seja junção para fora do repositório continua fora do filtro de confiança (já registrado na revisão como baixo, para W4).
+- **R12 — alvo entre aspas com espaço.** O alvo do redirecionamento é lido até o primeiro espaço; um alvo como `> ".git/hooks/x y"` tem o nome cortado. Os demais casos, incluindo aspas simples/duplas sem espaço, são verificados.
+- **Verificação visual** dos cartões e dos modos continua não feita (já registrada acima).
+- **Passo RED.** Observado (falha antes da correção) para R1, R2, R4, R5, R6, R7 e R8. Para R3 e R12 os testes foram escritos e rodados só depois da implementação; a falha prévia não foi observada.
+- **Commits.** R7 e R8 foram commitados juntos (`324ca38`); os demais têm um commit por item.
