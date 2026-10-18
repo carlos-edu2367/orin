@@ -1812,7 +1812,8 @@ class AgentToolset:
     def resolve(self, name: str) -> ToolDefinition:
         self.definitions()
         definition = self._by_name.get(name)
-        if definition is None:
+        if definition is None and self.name_translator is not None:
+            # public names resolve only when the experimental translator is on
             definition = self._by_name.get(_internal_tool_name(name))
         if definition is None:
             raise AgentToolError(f"Unknown tool '{name}'.")
@@ -1884,7 +1885,7 @@ class AgentToolset:
         bus = self._lifecycle
         if bus is None:
             return self._invoke_unobserved(name, arguments, call_id=call_id, invocation_id=invocation_id)
-        internal = _internal_tool_name(name)
+        internal = _internal_tool_name(name) if self.name_translator is not None else name
         if internal != name:
             try:
                 arguments = _public_arguments_in(internal, dict(arguments or {}))
@@ -1965,7 +1966,7 @@ class AgentToolset:
         invocation_id: str | None = None,
     ) -> ToolOutcome:
         requested_name = name
-        name = _internal_tool_name(name)
+        name = _internal_tool_name(name) if self.name_translator is not None else name
         if requested_name != name:
             try:
                 arguments = _public_arguments_in(name, dict(arguments or {}))
