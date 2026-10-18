@@ -23,6 +23,7 @@ from typing import Any, Callable, Mapping
 
 from agentos.installation import orin_paths
 from agentos.agentic.tools.public_names import public_subagent_type
+from agentos.code_mode.models import INTERNAL_PERMISSION_MODES, known_permission_mode, public_permission_mode
 from agentos.settings import EffectiveSettings, detect_changes, empty_settings, load_effective_settings
 
 from agentos.reading.vision import VisionUnavailable
@@ -863,10 +864,11 @@ class TurnSession:
         self._bg_subagent_executor: ThreadPoolExecutor | None = None
         self._read_file_state: dict[str, object] = {}
         self._todos_state: list[dict[str, str]] = []
-        raw_perm = str(turn.get("permission_mode") or "").strip().lower()
+        raw_perm = str(turn.get("permission_mode") or "").strip()
+        raw_perm = known_permission_mode(raw_perm)
         self.permission_mode: str = (
             raw_perm
-            if raw_perm in {"accept_edits", "plan_mode", "ask_permissions", "full_autonomy"}
+            if raw_perm in INTERNAL_PERMISSION_MODES
             else ("accept_edits" if turn.get("code_mode") == "code" else "ask_permissions")
         )
         self._in_plan_mode: bool = self.permission_mode == "plan_mode"
@@ -2225,7 +2227,8 @@ class TurnSession:
             if self.turn.get("code_mode") == "code" and configured_autonomy == "approval_required" and self._managed_workspace_is_new() and explicit_perm != "plan_mode"
             else configured_autonomy
         )
-        if explicit_perm in {"accept_edits", "plan_mode", "ask_permissions", "full_autonomy"}:
+        explicit_perm = known_permission_mode(explicit_perm)
+        if explicit_perm in INTERNAL_PERMISSION_MODES:
             self.permission_mode = explicit_perm
         elif self.turn.get("code_mode") == "code":
             if effective_autonomy == "full_autonomy":
@@ -2237,7 +2240,7 @@ class TurnSession:
         else:
             self.permission_mode = "ask_permissions"
         self._in_plan_mode = self.permission_mode == "plan_mode"
-        self.lifecycle.bind(permission_mode=self.permission_mode)
+        self.lifecycle.bind(permission_mode=public_permission_mode(self.permission_mode))
         if self._in_plan_mode:
             self._code_mode_stage = "planning"
         code_requires_approval = (

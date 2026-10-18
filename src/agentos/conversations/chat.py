@@ -26,7 +26,7 @@ from agentos.persistence.postgres.agentic_activity import ActivityCursorError
 from agentos.persistence.postgres.execution_adapters import ExecutionApplicationAdapter, ExecutionQueryAdapter
 from agentos.agentic import transcript as turn_transcript
 from agentos.persistence.postgres.schema import (code_mode_runs, conversation_activity_events, conversation_agent_usage, conversation_agents, conversation_dispatches, conversation_events, conversation_hook_context, conversation_message_attachments, conversation_message_commands, conversation_messages, conversation_tool_records, conversation_turn_steps, conversation_turns, conversations, projects, provider_model_catalog, runtime_heartbeats, turn_quality_metrics, workspace_roots)
-from agentos.code_mode.models import CodeAutonomy, CodeStage, detect_code_request
+from agentos.code_mode.models import CodeAutonomy, CodeStage, detect_code_request, known_permission_mode
 from agentos.provider_catalog.pricing import estimate_cost_usd
 
 
@@ -229,7 +229,10 @@ def _total_token_usage(usages) -> dict[str, object]:
     }
 
 
-_VALID_PERMISSION_MODES = frozenset({"accept_edits", "plan_mode", "ask_permissions", "full_autonomy"})
+_VALID_PERMISSION_MODES = frozenset({"accept_edits", "plan_mode", "ask_permissions", "full_autonomy", "auto", "dont_ask"})
+
+
+
 
 _IGNORED_MIGRATION_PARTS = frozenset({
     ".git",
@@ -773,7 +776,7 @@ class PostgresChatStore:
                 conversation_id = new_conversation_id or _id("chat")
                 conv_mode = "code" if requested_code_mode == "code" else "chat"
                 default_perm = "accept_edits" if conv_mode == "code" else "ask_permissions"
-                conv_perm = str(permission_mode or default_perm)
+                conv_perm = known_permission_mode(permission_mode) or default_perm
                 if conv_perm not in _VALID_PERMISSION_MODES:
                     raise ValueError("permission_mode is invalid")
                 code_active = conv_mode == "code"
@@ -793,6 +796,7 @@ class PostgresChatStore:
                 if row is None: raise ApplicationNotFoundError(conversation_id)
                 conv_mode = "code" if str(row.get("mode") or "chat") == "code" else "chat"
                 conv_perm = str(row.get("permission_mode") or ("accept_edits" if conv_mode == "code" else "ask_permissions"))
+                permission_mode = known_permission_mode(permission_mode)
                 if permission_mode and permission_mode in _VALID_PERMISSION_MODES and permission_mode != conv_perm:
                     conv_perm = permission_mode
                     c.execute(update(conversations).where(
@@ -863,6 +867,8 @@ class PostgresChatStore:
                     "plan_mode": CodeAutonomy.PLAN_MODE.value,
                     "ask_permissions": CodeAutonomy.APPROVAL_REQUIRED.value,
                     "full_autonomy": CodeAutonomy.FULL_AUTONOMY.value,
+                    "auto": CodeAutonomy.AUTO.value,
+                    "dont_ask": CodeAutonomy.DONT_ASK.value,
                 }
                 c.execute(insert(code_mode_runs).values(
                     run_id=f"code_{turn_id}", execution_id=execution_id, turn_id=turn_id,
@@ -910,7 +916,7 @@ class PostgresChatStore:
         return receipt
 
     def set_permission_mode(self, conversation_id: str, user_id: str, permission_mode: str) -> dict[str, object]:
-        normalized = str(permission_mode or "").strip()
+        normalized = known_permission_mode(permission_mode)
         if normalized not in _VALID_PERMISSION_MODES:
             raise ValueError("permission_mode is invalid")
         now = datetime.now(UTC)

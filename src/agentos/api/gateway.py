@@ -66,7 +66,7 @@ from agentos.code_mode import (
     WorktreeManager,
     list_workspace_files,
 )
-from agentos.code_mode.models import CodeAutonomy
+from agentos.code_mode.models import CodeAutonomy, normalize_permission_mode
 
 
 # Conversation SSE pacing. The active poll is fast enough to feel like token
@@ -166,11 +166,11 @@ class CreateConversationRequest(_RequestModel):
     workspace_acknowledged_risk: bool = False
     attachments: list[str] = Field(default_factory=list, max_length=MAX_FILES_PER_MESSAGE)
     code_mode: str = Field(default="chat", pattern="^(auto|code|chat)$")
-    permission_mode: str | None = Field(default=None, pattern="^(accept_edits|plan_mode|ask_permissions|full_autonomy)$")
+    permission_mode: str | None = Field(default=None, pattern="^(accept_edits|plan_mode|ask_permissions|full_autonomy|auto|dont_ask|default|acceptEdits|plan|bypassPermissions|dontAsk|manual)$")
 
 
 class UpdateConversationPermissionModeRequest(_RequestModel):
-    permission_mode: str = Field(pattern="^(accept_edits|plan_mode|ask_permissions|full_autonomy)$")
+    permission_mode: str = Field(pattern="^(accept_edits|plan_mode|ask_permissions|full_autonomy|auto|dont_ask|default|acceptEdits|plan|bypassPermissions|dontAsk|manual)$")
 
 
 class UpdateConversationProjectRequest(_RequestModel):
@@ -228,7 +228,7 @@ class SendConversationMessageRequest(_RequestModel):
     attachments: list[str] = Field(default_factory=list, max_length=MAX_FILES_PER_MESSAGE)
     selection: ConversationSelectionRequest | None = None
     code_mode: str = Field(default="chat", pattern="^(auto|code|chat)$")
-    permission_mode: str | None = Field(default=None, pattern="^(accept_edits|plan_mode|ask_permissions|full_autonomy)$")
+    permission_mode: str | None = Field(default=None, pattern="^(accept_edits|plan_mode|ask_permissions|full_autonomy|auto|dont_ask|default|acceptEdits|plan|bypassPermissions|dontAsk|manual)$")
 
 
 class SkillDependenciesRequest(_RequestModel):
@@ -317,7 +317,7 @@ class AgentRuntimeSettingsRequest(_RequestModel):
 
 class CodeModeSettingsRequest(_RequestModel):
     autonomy: str = Field(
-        pattern="^(approval_required|code_autonomy|full_autonomy|ask_permissions|accept_edits|plan_mode)$"
+        pattern="^(approval_required|code_autonomy|full_autonomy|ask_permissions|accept_edits|plan_mode|auto|dont_ask)$"
     )
     system_notifications: bool = False
     monitoring_enabled: bool = True
@@ -704,7 +704,7 @@ def create_app(services: ApiServices) -> FastAPI:
                 "code_mode": payload.code_mode,
             }
             if payload.permission_mode is not None:
-                create_kwargs["permission_mode"] = payload.permission_mode
+                create_kwargs["permission_mode"] = normalize_permission_mode(payload.permission_mode).value
             result = application.create(  # type: ignore[union-attr]
                 ProviderCatalogContext(principal.user_id, "conversation.create"),
                 **create_kwargs,
@@ -750,7 +750,7 @@ def create_app(services: ApiServices) -> FastAPI:
         setter = getattr(app_service, "set_permission_mode", None)
         if not callable(setter):
             raise ApplicationValidationError("permission_mode update not supported")
-        result = setter(conversation_id, principal.user_id, payload.permission_mode)
+        result = setter(conversation_id, principal.user_id, normalize_permission_mode(payload.permission_mode).value)
         return JSONResponse(_jsonable(result))
 
     @app.patch("/v1/conversations/{conversation_id}/project")
@@ -929,7 +929,7 @@ def create_app(services: ApiServices) -> FastAPI:
         try:
             create_kwargs: dict[str, object] = {}
             if payload.permission_mode is not None:
-                create_kwargs["permission_mode"] = payload.permission_mode
+                create_kwargs["permission_mode"] = normalize_permission_mode(payload.permission_mode).value
             result = application.create(  # type: ignore[union-attr]
                 ProviderCatalogContext(principal.user_id, "project.conversation.create"),
                 message=payload.message, provider=provider, model_id=payload.selection.model_id,
@@ -1350,7 +1350,7 @@ def create_app(services: ApiServices) -> FastAPI:
         try:
             send_kwargs: dict[str, object] = {}
             if payload.permission_mode is not None:
-                send_kwargs["permission_mode"] = payload.permission_mode
+                send_kwargs["permission_mode"] = normalize_permission_mode(payload.permission_mode).value
             result = require_port(services.conversation_application).send(
                 principal.user_id, conversation_id, payload.message, _idempotency(request),
                 attachments=attachments, provider=provider, model_id=model_id, code_mode=payload.code_mode,

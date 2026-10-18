@@ -11,20 +11,33 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 
+_PUBLIC_TO_INTERNAL = {
+    "default": "ask_permissions",
+    "manual": "ask_permissions",
+    "acceptedits": "accept_edits",
+    "plan": "plan_mode",
+    "bypasspermissions": "full_autonomy",
+    "auto": "auto",
+    "dontask": "dont_ask",
+    "approval_required": "ask_permissions",
+    "code_autonomy": "accept_edits",
+}
+
+
 class CodePermissionMode(StrEnum):
     ASK_PERMISSIONS = "ask_permissions"
     ACCEPT_EDITS = "accept_edits"
     PLAN_MODE = "plan_mode"
     FULL_AUTONOMY = "full_autonomy"
+    AUTO = "auto"
+    DONT_ASK = "dont_ask"
 
     @classmethod
     def _missing_(cls, value: object) -> CodePermissionMode | None:
         if isinstance(value, str):
-            normalized = value.strip().lower()
-            if normalized == "approval_required":
-                return cls.ASK_PERMISSIONS
-            if normalized == "code_autonomy":
-                return cls.ACCEPT_EDITS
+            mapped = _PUBLIC_TO_INTERNAL.get(value.strip().lower())
+            if mapped is not None:
+                return cls(mapped)
         return None
 
 
@@ -33,6 +46,8 @@ class CodeAutonomy(StrEnum):
     CODE_AUTONOMY = "code_autonomy"
     PLAN_MODE = "plan_mode"
     FULL_AUTONOMY = "full_autonomy"
+    AUTO = "auto"
+    DONT_ASK = "dont_ask"
 
     @classmethod
     def _missing_(cls, value: object) -> CodeAutonomy | None:
@@ -42,7 +57,26 @@ class CodeAutonomy(StrEnum):
                 return cls.APPROVAL_REQUIRED
             if normalized == "accept_edits":
                 return cls.CODE_AUTONOMY
+            mapped = _PUBLIC_TO_INTERNAL.get(normalized)
+            if mapped == "ask_permissions":
+                return cls.APPROVAL_REQUIRED
+            if mapped == "accept_edits":
+                return cls.CODE_AUTONOMY
+            if mapped is not None:
+                return cls(mapped)
         return None
+
+
+INTERNAL_PERMISSION_MODES: frozenset[str] = frozenset(mode.value for mode in CodePermissionMode)
+
+_INTERNAL_TO_PUBLIC = {
+    "ask_permissions": "default",
+    "accept_edits": "acceptEdits",
+    "plan_mode": "plan",
+    "full_autonomy": "bypassPermissions",
+    "auto": "auto",
+    "dont_ask": "dontAsk",
+}
 
 
 def normalize_permission_mode(value: str | CodePermissionMode | CodeAutonomy | None) -> CodePermissionMode:
@@ -56,6 +90,23 @@ def normalize_permission_mode(value: str | CodePermissionMode | CodeAutonomy | N
         except ValueError:
             pass
     return CodePermissionMode.ASK_PERMISSIONS
+
+
+def known_permission_mode(value: object) -> str:
+    """Internal id for a known mode name (Claude Code aliases included).
+
+    Unknown text is returned unchanged so the caller's validation still rejects it.
+    """
+    text = str(value or "").strip()
+    try:
+        return CodePermissionMode(text).value
+    except ValueError:
+        return text
+
+
+def public_permission_mode(value: str | CodePermissionMode | CodeAutonomy | None) -> str:
+    """Claude Code's public name for a mode (hooks, SDK, settings ``permissions.defaultMode``)."""
+    return _INTERNAL_TO_PUBLIC[normalize_permission_mode(value).value]
 
 
 def normalize_code_autonomy(value: str | CodePermissionMode | CodeAutonomy | None) -> CodeAutonomy:
