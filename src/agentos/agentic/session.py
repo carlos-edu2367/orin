@@ -174,9 +174,27 @@ _PROCESS_SESSIONS_LOCK = threading.Lock()
 
 
 def reset_process_sessions() -> None:
-    """Forget which sessions this process started (tests; a real restart starts empty)."""
+    """Forget which sessions this process started, and which instruction files hooks were told about (tests; a real restart starts empty)."""
     with _PROCESS_SESSIONS_LOCK:
         _PROCESS_SESSIONS.clear()
+    with _REPORTED_INSTRUCTIONS_LOCK:
+        _REPORTED_INSTRUCTIONS.clear()
+
+
+# Digest of each instruction file as InstructionsLoaded last reported it, per conversation. In process memory: a restart reports everything once.
+_REPORTED_INSTRUCTIONS: dict[str, dict[str, str | None]] = {}
+_REPORTED_INSTRUCTIONS_LOCK = threading.Lock()
+
+
+def _text_digest(text: str) -> str:
+    return hashlib.sha256(str(text).encode("utf-8")).hexdigest()
+
+
+def _file_digest(path: Path) -> str | None:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None  # unreadable: it is reported every time rather than hidden
 # Code mode stops on end_turn, interruption, maxTurns, maxBudgetUsd or the safety cap — not on a clock.
 CODE_TURN_DEADLINE = timedelta(hours=24)
 CODE_MAX_PROVIDER_RETRIES = 8
@@ -2206,6 +2224,15 @@ class TurnSession:
             _PROCESS_SESSIONS.add(conversation_id)
         return source
 
+    def _unreported_instructions(self, files: list[tuple[str, str | None]]) -> set[str]:
+        """The instruction files whose digest differs from what hooks were last told for this conversation (all, at first)."""
+        key = str(self.turn.get("conversation_id") or "")
+        with _REPORTED_INSTRUCTIONS_LOCK:
+            seen = _REPORTED_INSTRUCTIONS.setdefault(key, {})
+            changed = {path for path, digest in files if digest is None or seen.get(path) != digest}
+            seen.update(files)
+        return changed
+
     def _emit_turn_start_events(self, history: list[Mapping[str, object]], task: str) -> dict[str, Any]:
         """Lifecycle events for the start of a turn.
 
@@ -2237,12 +2264,18 @@ class TurnSession:
             if memory is not None:
                 from agentos.memory_files import instructions_payload
 
-                for item in memory.files:
-                    bus.emit(HookEvent.INSTRUCTIONS_LOADED, **instructions_payload(item))
+                items = list(memory.files)
+                changed = self._unreported_instructions([(str(item.path), _text_digest(item.content)) for item in items])
+                for item in items:
+                    if str(item.path) in changed:
+                        bus.emit(HookEvent.INSTRUCTIONS_LOADED, **instructions_payload(item))
             else:
                 files = _workspace_guidance_files(self.workspace.root)
                 if files:
-                    bus.emit(HookEvent.INSTRUCTIONS_LOADED, file_paths=[str(path) for path in files], memory_type="Project")
+                    changed = self._unreported_instructions([(str(path), _file_digest(path)) for path in files])
+                    reported = [str(path) for path in files if str(path) in changed]
+                    if reported:
+                        bus.emit(HookEvent.INSTRUCTIONS_LOADED, file_paths=reported, memory_type="Project")
             source = self._session_start_source(history)
             if source is not None:
                 start = bus.emit(HookEvent.SESSION_START, source=source)
@@ -2604,11 +2637,17 @@ class TurnSession:
         return str(value).strip().lower() not in {"off", "false", "0", "no"}
 
     def _snapshot_key(self) -> str:
-        """What the stable prompt depends on. Memory files are deliberately not part of it (they snapshot too)."""
+        """What the stable prompt depends on: the Code prompt and the instruction files it carries.
+
+        An edited instruction file changes the key, so the next turn re-renders the snapshot (one cache miss) and the
+        model follows the edit, instead of the text it had before until the next compaction (W3-R13).
+        """
         from agentos.code_mode.system_prompt import PROMPT_VERSION
 
         options = getattr(self, "_code_prompt_options", None)
+        memory = getattr(self, "_memory", None)
         material = {
+            "memory_sha": _text_digest(memory.render() if memory is not None else ""),
             "version": PROMPT_VERSION,
             "tools": sorted(options.tool_names) if options is not None else [],
             "public": bool(options is not None and options.public_names),

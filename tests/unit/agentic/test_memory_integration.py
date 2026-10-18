@@ -86,7 +86,8 @@ def test_code_mode_snapshots_memory_with_the_stable_prompt(tmp_path: Path) -> No
     assert "first version" in first.system_prompt and "first version" not in first.volatile_prompt
     _write(session.workspace.root / "CLAUDE.md", "second version")
     again = _session(tmp_path, store=store, code_mode="code").build_runtime()
-    assert "first version" in again.system_prompt  # applies after the next compaction, like Claude Code
+    # W3-R13: an edited instruction file reaches the model on the next turn (the snapshot re-renders, one cache miss).
+    assert "second version" in again.system_prompt and "first version" not in again.system_prompt
 
 
 def test_excludes_and_managed_text_come_from_settings(tmp_path: Path) -> None:
@@ -130,3 +131,30 @@ def test_a_repository_cannot_exclude_the_users_own_instructions(tmp_path: Path, 
     text = runtime.system_prompt + "\n" + runtime.volatile_prompt
     assert "USER-POLICY never push without asking" in text and "USER-POLICY-2 never delete outside src" in text
     assert "repository readme" not in text  # the repository still hides its own file
+
+
+def test_an_edited_instruction_file_reaches_the_model_next_turn(tmp_path: Path) -> None:
+    store = Store()
+    session = _session(tmp_path, store=store, code_mode="code")
+    _write(session.workspace.root / "CLAUDE.md", "RULE-V1: use tabs")
+    assert "RULE-V1" in session.build_runtime().system_prompt
+    _write(session.workspace.root / "CLAUDE.md", "RULE-V2: use spaces")
+    for _ in range(2):  # the edit is in the model's prompt on every later turn, not only the first one after it
+        later = _session(tmp_path, store=store, code_mode="code").build_runtime()
+        assert "RULE-V2" in later.system_prompt and "RULE-V1" not in later.system_prompt
+
+
+def test_unchanged_instruction_files_are_reported_only_when_they_change(tmp_path: Path) -> None:
+    store = Store()
+    reported: list[str] = []
+    bus = LifecycleBus()
+    bus.subscribe(lambda event: reported.append(str(event.payload["file_path"])) if event.name is HookEvent.INSTRUCTIONS_LOADED else None)
+    session = _session(tmp_path, store=store, bus=bus)
+    _write(session.workspace.root / "CLAUDE.md", "RULE-V1")
+    session.build_runtime()
+    assert len(reported) == 1
+    _session(tmp_path, store=store, bus=bus).build_runtime()  # unchanged: hooks are not told again
+    assert len(reported) == 1
+    _write(session.workspace.root / "CLAUDE.md", "RULE-V2")
+    _session(tmp_path, store=store, bus=bus).build_runtime()
+    assert len(reported) == 2 and reported[1].endswith("CLAUDE.md")
