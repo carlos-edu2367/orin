@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from itertools import count
+import inspect
 import json
 import os
 import re
@@ -213,6 +214,15 @@ class AgenticRunResult:
     # iteration (the tool_choice="none" closing turn), never on an ordinary
     # completion that finished with budget to spare.
     budget_exhausted: bool = False
+
+
+def _accepts_call_id(invoke: Callable[..., object]) -> bool:
+    """Whether a toolset's invoke takes ``call_id``; older adapters do not."""
+    try:
+        parameters = inspect.signature(invoke).parameters
+    except (TypeError, ValueError):
+        return False
+    return "call_id" in parameters or any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values())
 
 
 class AgenticTurnRuntime:
@@ -1614,7 +1624,11 @@ class AgenticTurnRuntime:
                     setattr(self.toolset, "_active_invocation_id", call_id)
                 except Exception:
                     pass
-                outcome = self.toolset.invoke(name, arguments)
+                # Passed explicitly: the shared _active_invocation_id is not safe under the parallel pool.
+                if _accepts_call_id(self.toolset.invoke):
+                    outcome = self.toolset.invoke(name, arguments, call_id=call_id)
+                else:
+                    outcome = self.toolset.invoke(name, arguments)
             except Exception as exc:
                 if is_persistence_error(exc):
                     with checkpoint_lock:

@@ -180,3 +180,15 @@ def test_exception_escaping_run_emits_stop_failure_and_reraises() -> None:
     with pytest.raises(RuntimeError, match="store unavailable"):
         runtime.run("turn-1")
     assert _terminal_events(events) == [HookEvent.STOP_FAILURE]
+
+
+def test_each_tool_call_carries_its_own_call_id() -> None:
+    seen: list[object] = []
+
+    class RecordingToolset(Toolset):
+        def invoke(self, name, arguments, *, call_id=None):
+            seen.append(call_id)
+            return ToolOutcome("succeeded", "ok", "content")
+
+    AgenticTurnRuntime(store=Store(), provider=ToolThenText(), toolset=RecordingToolset(), lifecycle=_bus()[0]).run("turn-1")
+    assert seen == ["c1"]
