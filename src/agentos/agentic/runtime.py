@@ -139,6 +139,8 @@ CLOSING_INSTRUCTION = (
 # satisfy would loop until the turn's outer deadline, which is a worse
 # failure mode than an honest "still broken" answer.
 MAX_VERIFY_REPAIR_ROUNDS = 3
+# How many times a Stop hook may send the model back to work in one turn.
+MAX_STOP_CONTINUATIONS = 5
 
 VERIFY_REQUIRED_MESSAGE = (
     "[Sistema] Você alterou o workspace nesta tarefa e ainda não verificou o resultado. Antes de responder, "
@@ -246,9 +248,14 @@ class AgenticTurnRuntime:
         phase_controller: PhaseController | None = None,
         learning_sink: Callable[[tuple[LearnedMemory, ...]], None] | None = None,
         lifecycle: LifecycleBus | None = None,
+        prompt_block_reason: str | None = None,
     ) -> None:
         self.store, self.provider = store, provider
         self.lifecycle = lifecycle
+        # Set when a UserPromptSubmit hook refused the prompt: the turn ends before any model call.
+        self.prompt_block_reason = prompt_block_reason
+        self._stop_hook_active = False
+        self._stop_continuations = 0
         self.hook_engine = hook_engine
         # ``toolset`` is the agent-facing path: its results are returned to the
         # model verbatim. ``actions`` remains the policy-projected path used by
@@ -334,6 +341,14 @@ class AgenticTurnRuntime:
         self._started_at = self.clock()
         deadline = self._started_at + self.limits.deadline
         self._life(turn, "running")
+        self._stop_hook_active = False
+        self._stop_continuations = 0
+        if self.prompt_block_reason:
+            self.store.delta(turn, f"⚠️ Mensagem bloqueada por um hook: {self.prompt_block_reason}")
+            self._life(turn, "completed")
+            self.store.finish(turn, code="HOOK_BLOCKED_PROMPT")
+            self._settle_quality(turn, "completed")
+            return AgenticRunResult("completed", 0, 0, "HOOK_BLOCKED_PROMPT")
         messages = list(self.store.history_for_turn(turn))
         action_count = 0
         self._failed_signatures: dict[str, str] = {}
@@ -687,6 +702,13 @@ class AgenticTurnRuntime:
                         tool_name=str(result.get("name") or ""), tool_call_id=str(result.get("id") or ""),
                     )
                     messages.extend(self._tool_result_messages(turn, result))
+                stop_reason = getattr(self.toolset, "stop_requested", None)
+                if stop_reason:
+                    self.store.delta(turn, f"\n\n⏹ Interrompido por hook: {stop_reason}")
+                    self._life(turn, "completed")
+                    self.store.finish(turn, code="HOOK_STOPPED")
+                    self._settle_quality(turn, "completed")
+                    return AgenticRunResult("completed", iteration, action_count, "HOOK_STOPPED")
                 if max(self._consecutive_tool_failures.values(), default=0) >= 3:
                     return self._fail(turn, "REPEATED_TOOL_FAILURE", iteration, action_count)
                 if self._phase_transition_note:
@@ -794,12 +816,29 @@ class AgenticTurnRuntime:
                     messages.append({"role": "user", "content": VERIFY_REQUIRED_MESSAGE})
                     self._life(turn, "running")
                     continue
+                stop_decision = self._emit(
+                    HookEvent.STOP, stop_hook_active=self._stop_hook_active, stop_reason="completed",
+                    last_assistant_message="".join(text_parts)[:4000],
+                )
+                if stop_decision is not None and stop_decision.blocked and not stop_decision.stop and self._stop_continuations < MAX_STOP_CONTINUATIONS:
+                    # A Stop hook refused the answer: the model gets its reason and the turn goes on.
+                    self._effect_finished(
+                        turn, provider_effect_id, state="APPLIED",
+                        result_ref=f"conversation-turn:{turn_id}:stop-hook:{iteration}",
+                        private_result={"outcome": "stop_hook_blocked"},
+                    )
+                    self._stop_continuations += 1
+                    self._stop_hook_active = True
+                    if has_text:
+                        messages.append({"role": "assistant", "content": "".join(text_parts)})
+                    messages.append({"role": "user", "content": f"[Hook Stop] {stop_decision.reason or 'continue working'}"})
+                    self._life(turn, "running")
+                    continue
                 self._effect_finished(
                     turn, provider_effect_id, state="APPLIED",
                     result_ref=f"conversation-message:{turn['assistant_message_id']}",
                     private_result={"outcome": "final"},
                 )
-                self._emit(HookEvent.STOP, stop_hook_active=False, stop_reason="completed", last_assistant_message="".join(text_parts)[:4000])
                 self._settle_remaining_todos(turn, str(turn_id))
                 self._life(turn, "completed")
                 self.store.finish(turn)
@@ -996,7 +1035,7 @@ class AgenticTurnRuntime:
         """Level 3 reactive compaction: force immediate microcompaction + summary compaction on context overflow."""
         shrunk = self._microcompact(messages, keep_recent_units=1, max_chars=AGED_TOOL_RESULT_CHARS)
         before_len = len(messages)
-        self._run_compaction(messages, turn, keep_units=min(2, CONTEXT_COMPACTION_KEEP_UNITS))
+        self._run_compaction(messages, turn, keep_units=min(2, CONTEXT_COMPACTION_KEEP_UNITS), allow_block=False)
         self._age_tool_results(messages, keep_recent=1)
         return shrunk > 0 or len(messages) < before_len
 
@@ -1019,6 +1058,7 @@ class AgenticTurnRuntime:
         turn: Mapping[str, object],
         *,
         keep_units: int = CONTEXT_COMPACTION_KEEP_UNITS,
+        allow_block: bool = True,
     ) -> None:
         units = self._group_tool_units(messages)
         pinned = getattr(self, "_pinned_index", _PIN_UNSET)
@@ -1029,10 +1069,14 @@ class AgenticTurnRuntime:
         compact_indices = {index for unit in compact_units for index in unit}
         if not compact_indices:
             return
-        self._emit(HookEvent.PRE_COMPACT, trigger="auto", custom_instructions="")
+        pre = self._emit(HookEvent.PRE_COMPACT, trigger="auto", custom_instructions="")
+        if pre is not None and pre.blocked and allow_block:
+            return
         if self.context_reporting:
             self._life(turn, "context_compacting", removed_messages=len(compact_indices), compaction_count=self._compaction_count + 1)
         source = self._compact_source(messages, compact_indices)
+        if pre is not None and pre.additional_context:
+            source = "Instruções adicionais para o resumo:\n" + "\n".join(pre.additional_context) + "\n\n" + source
         code_mode = self._is_code_compaction(turn)
         summary = strip_analysis_block(self._request_compaction_summary(source, turn, code_mode=code_mode))
         if code_mode:
