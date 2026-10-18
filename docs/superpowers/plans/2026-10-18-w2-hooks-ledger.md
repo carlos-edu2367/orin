@@ -86,3 +86,32 @@ SessionStart, Stop, PreCompact, PermissionRequest.
 - Non-interactive "ask" handling (W1-R9): still open.
 - Hook activity records include a label of up to 120 characters of the command text. A secret typed
   inline in a hook command would therefore appear in activity. Hook stdout and stdin are never recorded.
+
+## Review fixes (2026-10-18-w2-review.md)
+
+Each finding was reproduced as a failing test first, then fixed. Commits: R1 `3ace026`, R2 `10bd80e` (+ `fef698d`), R3 `0e1bb4c`, R4+R5 `9e4bcd5`, R6 `a4a4522`, R7 `37fcda7`, R8 `1703201`, R9 `746370c`.
+
+| Finding | Status | What changed | Residual risk |
+|---|---|---|---|
+| W2-R1 (critical) | fixed | A pure `_descendants_from(rows, root_pid, root_created, exclude)` accepts a child only if created no earlier than its parent and the root. Candidates are opened once; their handles stay open and are terminated through those handles. Orin's PID and ancestors are excluded. `taskkill /T` is gone. Deviation 1 corrected above. | Only exercised on Windows with Store-backed Python. No non-Store interpreter exists on this machine, so the non-Store variant was not run. Processes started after the snapshot and outside the Job can still survive. The pure rule is tested; the walk is tested only on our own processes. |
+| W2-R2 (high) | fixed | Repository settings are filtered by where the file was found (lexical), not where it resolves. An untrusted link that leaves the workspace is dropped and reported as `settings link outside the workspace`. | A trusted workspace still loads through a link (intended: the trust decision covers the workspace). Link tests use a junction on Windows and a symlink elsewhere; the symlink branch was not run here. |
+| W2-R3 (high) | fixed | `disableAllHooks` is decided per layer. Managed `true` turns every hook off. User or CLI `true` turns off every non-managed layer. A trusted repository's `true` does the same. An untrusted repository's value is reported in `untrusted_ignored`. | Design choice to confirm: a trusted repository's switch also silences user hooks (the review's reading of Claude Code). |
+| W2-R4 (high) | fixed | A PermissionRequest `allow` with `updatedInput` is coerced, checked by plan mode and the permission engine, and only then runs. A deny always stands. | none beyond the engine's own rules |
+| W2-R5 (med-high) | fixed | A PreToolUse `allow` skips only ordinary asks. `requires_human` asks (protected paths, ask rules) still go to a person or fail closed without one. The same rule covers PermissionRequest `allow`. | Behaviour change: a hook can no longer auto-approve a protected-path write, even in acceptEdits. This matches spec 4.5. |
+| W2-R6 (high) | fixed (see notes) | A blocked prompt is erased: its text, command expansion and the title derived from it are replaced, and its user message is marked `blocked_by_hook` (existing status column, no migration). `history_for_turn` skips the marked message and its turn's assistant message. The runtime calls the erasure before `finish`, so kernel-managed turns are covered. A blocked turn skips @-mention reads, memory ranking, the plan scaffold and the skill catalog. | (a) The minimal `last_error` approach was rejected: kernel-managed turns never write that code. (b) The user sees a placeholder where their blocked text was. (c) Attachments of a blocked message stay on disk. (d) `SessionStart` counts messages in the filtered history, so it may fire again on the first accepted prompt after a blocked first prompt. Not fixed. |
+| W2-R7 (med) | fixed | `parse_verdict` returns the last `ok: false` candidate if there is one, otherwise the last `ok: true`. The old test that encoded the disagreement-is-None behaviour was updated (`test_verdicts`). | A forged `ok: true` with no refusal still approves; the verifier model's own output is the limit. |
+| W2-R8 (med) | fixed (see notes) | Timed-out prompt and agent hooks are cancelled: the verifier child observes the event, the prompt stream is closed, queued calls never start. One bounded pool per runner (2 workers). The verifier guard is a non-blocking lock. The dispatcher closes when superseded and when the turn's runtime closes. | A verifier that ignores cancel keeps running and holds the lock, so later agent hooks in that turn return no verdict (fail-open unless `onFailure: block`). Cancel is checked between child iterations, not inside a long blocking tool call. Up to 2 threads per runner can stay stuck. The concurrent-verifier test passed before the fix too: the old race was not reliably reproducible. |
+| W2-R9 (med) | fixed | Each shell pipe is drained on its own thread and keeps at most 1 MiB; the stdin payload is written on its own thread. HTTP hook bodies are streamed and read only to the 64 KiB cap. | Pipe readers are joined for at most 2 s (5 s after a timeout). A grandchild holding a pipe leaves a daemon reader thread behind. RSS was not measured; the cap was asserted through the buffer and the bytes read. |
+
+### Verification
+
+- `uv run pytest -q tests/unit`: 2857 passed, 53 skipped, 0 failed (baseline before fixes: 2830 passed).
+- `npm --prefix frontend test`: 100 files, 596 tests passed.
+- `npm --prefix frontend run lint`: clean.
+- Throwaway re-check of the review reproductions (R1 pure rule, R2 to R9), kept outside the repo: 14 of 14 checks pass. R6 is covered by its tests only, not by the re-check script.
+- Each fix was shown red first, on the unfixed code. R2's session-level test was also shown to fail on the pre-R2 loader.
+
+### Not done
+
+- Linux and macOS were not run. The symlink branches and the POSIX process paths are unverified here.
+- Visual checks are not applicable: no UI changed in this pass.
