@@ -240,6 +240,8 @@ class AgenticTurnRuntime:
         # model verbatim. ``actions`` remains the policy-projected path used by
         # the tool-runtime contract tests, where results are summaries only.
         self.toolset = toolset
+        # Present when the toolset speaks Claude Code tool names to the model.
+        self._names = getattr(toolset, "name_translator", None)
         self.actions = actions or ActionLoop(None, None)
         self.limits = limits or AgenticLimits()
         self.clock = clock or (lambda: datetime.now(UTC))
@@ -349,10 +351,14 @@ class AgenticTurnRuntime:
                 or (self.phases is not None and self.phases.is_final)
             )
             tool_schemas = self._tool_schemas(turn)
+            if self._names is not None:
+                tool_schemas = self._names.schemas_out(tool_schemas)
             self._maybe_compact(messages, turn, tool_schemas)
             if self.cancelled(turn):
                 return self._cancel(turn, iteration, action_count)
             window = self._request_messages(messages)
+            if self._names is not None:
+                window = self._names.messages_out(window)
             if self.phases is not None:
                 # Last, so the stage the agent is in is the nearest thing to
                 # the conversation rather than something it read paragraphs ago.
@@ -489,9 +495,12 @@ class AgenticTurnRuntime:
                             if event.tool_call_id.startswith("tool-call:") and iteration > 1
                             else event.tool_call_id
                         )
-                        current = calls.setdefault(call_id, {"id": call_id, "name": event.tool_name or "", "arguments": ""})
-                        if event.tool_name:
-                            current["name"] = event.tool_name
+                        incoming_name = event.tool_name or ""
+                        if incoming_name and self._names is not None:
+                            incoming_name = self._names.name_in(incoming_name)
+                        current = calls.setdefault(call_id, {"id": call_id, "name": incoming_name, "arguments": ""})
+                        if incoming_name:
+                            current["name"] = incoming_name
                         current["arguments"] += event.arguments_delta or ""
                         if self.toolset is not None and current["name"]:
                             now_mono = time.monotonic()
@@ -1432,11 +1441,14 @@ class AgenticTurnRuntime:
             argument_names = getattr(self.toolset, "argument_names", None)
             parsed_args: dict[str, object] | None = None
             parse_err: str | None = None
+            names_translator = getattr(self, "_names", None)
+            known_keys = names_translator.argument_names(name) if names_translator is not None else None
+            if known_keys is None and callable(argument_names):
+                known_keys = argument_names(name)
             try:
-                parsed_args = parse_arguments(
-                    call.get("arguments") or "{}",
-                    argument_names(name) if callable(argument_names) else None,
-                )
+                parsed_args = parse_arguments(call.get("arguments") or "{}", known_keys)
+                if names_translator is not None and isinstance(parsed_args, dict):
+                    parsed_args = names_translator.arguments_in(name, parsed_args)
             except AgentToolError as error:
                 parse_err = str(error)
                 if name in {"write_file", "edit_file"} and "truncated at max_tokens" not in parse_err:

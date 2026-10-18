@@ -45,6 +45,7 @@ from .diagnostics import STEP_ORDER, detect_recipe, file_diagnostic_command
 from .workspace import MAX_LIST_DEPTH, MAX_SEARCH_RESULTS, ConversationWorkspace, WorkspaceError
 from .models import MAX_USER_QUESTION_ITEMS
 from .file_preview import media_type_for
+from .tools.public_names import PublicToolNames, arguments_in as _public_arguments_in, internal_name as _internal_tool_name
 
 
 _SENSITIVE_NAME = r"(?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|password|secret|authorization|cookie|credential)"
@@ -665,6 +666,7 @@ class AgentToolset:
         project_user_id: str | None = None,
         media_policy: object | None = None,
         media_client: object | None = None,
+        public_tool_names: bool = False,
     ) -> None:
         from agentos.code_mode.checkpoints import FileCheckpointStore
         from agentos.code_mode.models import CodePermissionMode, normalize_permission_mode
@@ -779,6 +781,9 @@ class AgentToolset:
         self._definitions: tuple[ToolDefinition, ...] | None = None
         self._by_name: dict[str, ToolDefinition] = {}
         self._active_mcp_tool_names: set[str] = set()
+        # Claude Code-compatible names/arguments at the model boundary
+        # (experimental.claudeToolNames). Internal ids stay snake_case.
+        self.name_translator: PublicToolNames | None = PublicToolNames() if public_tool_names else None
 
     @property
     def active_mcp_tool_names(self) -> frozenset[str]:
@@ -1781,6 +1786,8 @@ class AgentToolset:
         self.definitions()
         definition = self._by_name.get(name)
         if definition is None:
+            definition = self._by_name.get(_internal_tool_name(name))
+        if definition is None:
             raise AgentToolError(f"Unknown tool '{name}'.")
         return definition
 
@@ -1847,6 +1854,10 @@ class AgentToolset:
         call_id: str | None = None,
         invocation_id: str | None = None,
     ) -> ToolOutcome:
+        requested_name = name
+        name = _internal_tool_name(name)
+        if requested_name != name:
+            arguments = _public_arguments_in(name, dict(arguments or {}))
         self._active_invocation_id = call_id or invocation_id or getattr(self, "_active_invocation_id", None)
         # A model can hallucinate a tool name, so an unknown tool is a result the
         # model reads and corrects, never an exception that kills the turn.
