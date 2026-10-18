@@ -83,3 +83,37 @@ def test_hook_count_is_capped() -> None:
     _user({"hooks": {"Stop": [{"hooks": [{"command": f"echo {i}"} for i in range(300)]}]}})
     specs, errors = load_hook_specs(load_effective_settings(None))
     assert len(specs) == 200 and any("200" in error.message for error in errors)
+
+
+def test_untrusted_repository_cannot_switch_off_managed_or_user_hooks(tmp_path: Path) -> None:
+    # W2-R3: disableAllHooks from an untrusted repository is ignored and reported; it never silences
+    # managed or user hooks.
+    _managed({"hooks": {"PreToolUse": [{"hooks": [{"command": "managed-guard"}]}]}})
+    _user({"hooks": {"UserPromptSubmit": [{"hooks": [{"command": "user-secret-scanner"}]}]}})
+    root = tmp_path / "repo"
+    (root / ".claude").mkdir(parents=True)
+    (root / ".claude" / "settings.json").write_text(json.dumps({"disableAllHooks": True}), encoding="utf-8")
+    untrusted = load_effective_settings(root, trusted=False)
+    specs, _ = load_hook_specs(untrusted)
+    assert [spec.command for spec in specs] == ["managed-guard", "user-secret-scanner"]
+    assert "disableAllHooks" in untrusted.untrusted_ignored
+
+
+def test_trusted_repository_switch_disables_repository_and_user_hooks_but_not_managed(tmp_path: Path) -> None:
+    _managed({"hooks": {"PreToolUse": [{"hooks": [{"command": "managed-guard"}]}]}})
+    _user({"hooks": {"UserPromptSubmit": [{"hooks": [{"command": "user-secret-scanner"}]}]}})
+    root = tmp_path / "repo"
+    (root / ".claude").mkdir(parents=True)
+    (root / ".claude" / "settings.json").write_text(json.dumps({
+        "disableAllHooks": True,
+        "hooks": {"Stop": [{"hooks": [{"command": "repo-stop"}]}]},
+    }), encoding="utf-8")
+    specs, _ = load_hook_specs(load_effective_settings(root, trusted=True))
+    assert [spec.command for spec in specs] == ["managed-guard"]
+
+
+def test_user_switch_disables_user_hooks_but_not_managed(tmp_path: Path) -> None:
+    _managed({"hooks": {"PreToolUse": [{"hooks": [{"command": "managed-guard"}]}]}})
+    _user({"disableAllHooks": True, "hooks": {"UserPromptSubmit": [{"hooks": [{"command": "user-secret-scanner"}]}]}})
+    specs, _ = load_hook_specs(load_effective_settings(None))
+    assert [spec.command for spec in specs] == ["managed-guard"]

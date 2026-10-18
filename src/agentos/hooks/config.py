@@ -91,15 +91,20 @@ def _entry(event: HookEvent, matcher: str, source: str, raw: Any) -> HookSpec | 
 
 
 def load_hook_specs(settings: EffectiveSettings) -> tuple[tuple[HookSpec, ...], tuple[HookConfigError, ...]]:
-    if settings.get("disableAllHooks") is True:
-        return (), ()
     layers = list(settings.layers)
+    # W2-R3: "disableAllHooks" is decided per layer, never on the merged value. Only managed settings
+    # can switch off managed hooks. A user or CLI switch switches off every non-managed layer; a
+    # repository switch counts only once the workspace is trusted (the loader drops it before that).
+    if any(layer.name == "managed" and layer.data.get("disableAllHooks") is True for layer in layers):
+        return (), ()
+    switchable = {"user", "cli"} | ({"project", "local"} if settings.trusted else set())
+    non_managed_off = any(layer.name in switchable and layer.data.get("disableAllHooks") is True for layer in layers)
     managed_only = any(layer.name == "managed" and layer.data.get("allowManagedHooksOnly") is True for layer in layers)
     ordered = sorted(layers, key=lambda layer: _PRECEDENCE.index(layer.name) if layer.name in _PRECEDENCE else len(_PRECEDENCE))
     specs: list[HookSpec] = []
     errors: list[HookConfigError] = []
     for layer in ordered:
-        if managed_only and layer.name != "managed":
+        if (managed_only or non_managed_off) and layer.name != "managed":
             continue
         declared = layer.data.get("hooks")
         if declared is None:

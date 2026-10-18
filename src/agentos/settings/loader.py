@@ -47,6 +47,8 @@ UNTRUSTED_IGNORED_FROM_PROJECT = (
     "permissions.additionalDirectories",
     # Free text placed into the auto-mode classifier prompt: inert until the user trusts the repo.
     "autoMode",
+    # A repository may only add restrictions; a repository "switch off" is decided once it is trusted.
+    "disableAllHooks",
 )
 # A repository can never turn these on: it may only switch them off (a restriction).
 PROJECT_TRUE_IGNORED = ("permissions.allowBypassPermissionsMode",)
