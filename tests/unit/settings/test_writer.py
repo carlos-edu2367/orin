@@ -97,3 +97,88 @@ def test_refuses_to_overwrite_non_utf8_file_and_leaves_bytes_unchanged(tmp_path:
     with pytest.raises(SettingsWriteError):
         update_settings_file(target, lambda data: data.setdefault("permissions", {}))
     assert target.read_bytes() == original
+
+
+def _age(path: Path, seconds: float = 120) -> None:
+    import os
+    import time
+
+    old = time.time() - seconds
+    os.utime(path, (old, old))
+
+
+def test_lock_path_that_is_a_directory_fails_fast(tmp_path: Path) -> None:
+    from agentos.settings.writer import LOCK_TIMEOUT_SECONDS
+
+    target = tmp_path / "settings.json"
+    lock = tmp_path / "settings.json.lock"
+    lock.mkdir()
+    (lock / "README").write_text("not a lock", encoding="utf-8")
+    _age(lock)
+    seen: dict[str, BaseException] = {}
+
+    def run() -> None:
+        try:
+            add_permission_rule(target, "allow", "Read")
+        except BaseException as error:  # noqa: BLE001 - captured for the assertion below
+            seen["error"] = error
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    thread.join(LOCK_TIMEOUT_SECONDS + 1)
+    assert not thread.is_alive(), "writer spun on a lock directory"
+    assert isinstance(seen.get("error"), SettingsWriteError)
+
+
+def test_uninspectable_lock_times_out_instead_of_spinning(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from pathlib import Path as _Path
+
+    from agentos.settings import writer
+
+    monkeypatch.setattr(writer, "LOCK_TIMEOUT_SECONDS", 0.3)
+    lock = tmp_path / "settings.json.lock"
+    lock.write_text("123", encoding="utf-8")
+    _age(lock)
+    original_stat = _Path.stat
+
+    def failing_stat(self: _Path, *args, **kwargs):
+        if self.name == "settings.json.lock":
+            raise OSError("cannot inspect lock")
+        return original_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(_Path, "stat", failing_stat)
+    with pytest.raises(SettingsWriteError):
+        update_settings_file(tmp_path / "settings.json", lambda data: None)
+
+
+def test_release_never_removes_a_lock_now_owned_by_someone_else(tmp_path: Path) -> None:
+    from agentos.settings import writer
+
+    lock = tmp_path / "settings.json.lock"
+    with writer._file_lock(tmp_path / "settings.json"):
+        lock.write_text("foreign-token", encoding="utf-8")  # our lock was stolen while we held it
+    assert lock.read_text(encoding="utf-8") == "foreign-token"
+
+
+def test_four_writers_recover_one_stale_lock_exactly_once(tmp_path: Path) -> None:
+    target = tmp_path / "settings.json"
+    lock = tmp_path / "settings.json.lock"
+    lock.write_text("999999", encoding="utf-8")
+    _age(lock)
+    errors: list[BaseException] = []
+
+    def worker(index: int) -> None:
+        try:
+            add_permission_rule(target, "allow", f"Bash(writer-{index})")
+        except BaseException as error:  # noqa: BLE001
+            errors.append(error)
+
+    threads = [threading.Thread(target=worker, args=(index,)) for index in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert not errors
+    rules = json.loads(target.read_text(encoding="utf-8"))["permissions"]["allow"]
+    assert len(rules) == 4 and len(set(rules)) == 4
+    assert not lock.exists()

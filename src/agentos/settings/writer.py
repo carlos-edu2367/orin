@@ -26,40 +26,88 @@ class SettingsWriteError(RuntimeError):
     pass
 
 
+def _is_directory(path: Path) -> bool:
+    try:
+        return path.is_dir()
+    except OSError:
+        return False
+
+
+def _break_if_stale(lock: Path) -> None:
+    """Remove a lock that is older than STALE_LOCK_SECONDS, atomically.
+
+    The lock is first renamed to a unique name: ``os.replace`` succeeds for only
+    one stealer, so two waiters can never both delete each other's fresh lock.
+    """
+    try:
+        age = time.time() - lock.stat().st_mtime
+    except OSError:
+        return  # gone, or cannot be inspected: the caller retries until its deadline
+    if age <= STALE_LOCK_SECONDS:
+        return
+    stolen = lock.with_name(f"{lock.name}.stale.{uuid4().hex}")
+    try:
+        os.replace(lock, stolen)
+    except OSError:
+        return  # another waiter already took it
+    try:
+        if time.time() - stolen.stat().st_mtime <= STALE_LOCK_SECONDS:
+            # Someone re-created the lock between our check and our rename: put it back.
+            try:
+                os.replace(stolen, lock)
+                return
+            except OSError:
+                pass
+    except OSError:
+        pass
+    try:
+        stolen.unlink()
+    except OSError:
+        pass
+
+
+def _release(lock: Path, token: str) -> None:
+    """Remove the lock only if it still carries our token; a stolen lock is not ours to delete."""
+    try:
+        if lock.read_text(encoding="ascii") != token:
+            return
+    except (OSError, UnicodeDecodeError):
+        return
+    try:
+        lock.unlink()
+    except OSError:
+        pass
+
+
 @contextmanager
 def _file_lock(path: Path) -> Iterator[None]:
     lock = path.with_name(path.name + ".lock")
+    token = uuid4().hex
     deadline = time.monotonic() + LOCK_TIMEOUT_SECONDS
     while True:
+        # Checked on every pass: a directory at the lock path can never be acquired.
+        if _is_directory(lock):
+            raise SettingsWriteError(f"settings lock path is a directory: {lock}")
         try:
             descriptor = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError:
-            try:
-                age = time.time() - lock.stat().st_mtime
-            except OSError:
-                continue
-            if age > STALE_LOCK_SECONDS:
-                try:
-                    lock.unlink()
-                except OSError:
-                    pass
-                continue
+        except (FileExistsError, PermissionError):
+            # Windows reports a lock in delete-pending state as PermissionError.
+            _break_if_stale(lock)
             if time.monotonic() > deadline:
                 raise SettingsWriteError(f"settings file is locked by another writer: {path}") from None
             time.sleep(0.02)
             continue
+        except OSError as error:
+            raise SettingsWriteError(f"cannot create settings lock {lock}: {error}") from error
         try:
-            os.write(descriptor, str(os.getpid()).encode("ascii"))
+            os.write(descriptor, token.encode("ascii"))
         finally:
             os.close(descriptor)
         break
     try:
         yield
     finally:
-        try:
-            lock.unlink()
-        except OSError:
-            pass
+        _release(lock, token)
 
 
 def _replace(source: Path, target: Path) -> None:
