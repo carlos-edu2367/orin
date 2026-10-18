@@ -241,3 +241,69 @@ That is the batch A total (2906) plus the 30 tests added here (7 + 2 + 10 + 11).
 4. A manual compaction summarizes the whole history (`keep_units=0`), so nothing stays verbatim after `/compact`. This is by design.
 5. In `history_for_turn`, the local name `blocked_user_ids` now also holds command-turn ids (`COMMAND_STATUS`). The behaviour is right; the name is misleading (cosmetic).
 6. In `_memory_files`, the settings reads (`effective_settings.get`, `layer_values`) sit outside the `try`, as the plan has them. Both helpers are defensive, so the risk is low, but the global rule "a turn never breaks because of an enrichment" would prefer them inside.
+
+## Execution notes — batch E (Tasks 17-20)
+
+### Task 17 — Output styles (Default, Explanatory, Learning, custom files)
+
+- Commit: `eb412da` `feat(prompt): output styles (Default, Explanatory, Learning and custom files)`. Follow-up fix: `867f67d` `fix(prompt): a repository's output styles count only for a trusted workspace` (deviation 2).
+- Tests added: `tests/unit/agentic/test_output_styles.py` (5 from the plan, plus 1 regression test added with the fix). Total 6.
+- Red: `ModuleNotFoundError: agentos.agentic.output_styles` before implementation. The session test, run as written, failed with `assert '# Output style: Learning' in ''` (deviation 1).
+- Deviations:
+  1. Plan test defect. `test_the_session_uses_the_style_and_it_changes_the_snapshot_key` built its turn without `code_mode`. The Code prompt and `_code_prompt_options` exist only in Code mode (Chat keeps its prompt, plan deviation 11), so `_code_stable_prompt()` returned an empty string and both snapshot keys were equal. Fix: `"code_mode": "code"` added to that test's Store turn. Implementation unchanged.
+  2. Security gap in plan code, found by trying to break it. `load_output_styles` read `.claude/output-styles` and `.orin/output-styles` even for an untrusted workspace, and project files override user and built-in names. An untrusted repository's `.orin/output-styles/explanatory.md` replaced the user's chosen `Explanatory` style and went into the system prompt, dropping the coding guidance (file styles default to `keep-coding-instructions: false`). Reproduced by script before the fix. Why it matters: the plan's Global Constraints gate project-level memory content on trust. Fix (TDD: the new test failed with `source == 'project'` for an untrusted workspace): `load_output_styles(workspace_root, *, trusted=True)` skips project directories when `trusted` is false, and `resolve_output_style` passes `settings.trusted`. The default stays `True`, so the plan's `test_custom_styles_from_user_and_project_dirs` is unchanged. After the fix the same script resolves to the built-in style.
+- Existing test expectations changed: none.
+
+### Task 18 — Effort (thinking budget, reasoning effort) and Anthropic thinking signatures
+
+- Commit: `bf88cc7` `feat(loop): effort as thinking budget or reasoning effort, with signed thinking kept across tool calls`
+- Tests added: `tests/unit/agentic/test_effort.py` (9).
+- Red: `ModuleNotFoundError: agentos.agentic.effort` before implementation.
+- Deviations: none.
+- Existing test expectations changed: none.
+
+### Task 19 — `autoMemoryEnabled` and opt-in consolidation (`autoDreamEnabled`)
+
+- Commit: `2c616b8` `feat(memory): autoMemoryEnabled pause and opt-in daily consolidation (autoDreamEnabled)`. Follow-up fix: `44d8c37` `fix(memory): a state-file timestamp without an offset is read as UTC` (deviation 1).
+- Tests added: `tests/unit/memory/test_consolidation.py` (7 from the plan, plus 1 regression test added with the fix). Total 8.
+- Red: `ModuleNotFoundError: agentos.memory.consolidation` before implementation.
+- Deviations:
+  1. Found by probing, not in the plan. `ConsolidationState.due` raised `TypeError` (offset-naive vs offset-aware datetimes) when the state file held a timestamp without an offset, for example after a hand edit. The runtime swallowed it (`_settle_quality` wraps `on_completed`), so no turn broke, but consolidation stopped for that user. Fix: a naive timestamp is read as UTC. The regression test failed with that `TypeError` before the fix.
+- Existing test expectations changed: none.
+
+### Task 20 — SessionStart source from the store and SessionEnd at worker shutdown
+
+- Commit: `2571e5e` `feat(hooks): SessionStart source from the store (startup/resume) and SessionEnd at worker shutdown`
+- Tests added: `tests/unit/agentic/test_session_source.py` (3), `tests/unit/hooks/test_session_end.py` (3). Total 6.
+- Red: `ImportError: cannot import name 'reset_process_sessions'` and `agentos.hooks.session_end` missing, before implementation.
+- Deviations: none. The SessionEnd tests start real subprocesses through the command runner (the shell on this machine is cmd.exe) with the timeouts as written (30 s hook timeout, 1.0 s shutdown budget).
+- Existing test expectations changed: none.
+
+### Verification notes (batch E)
+
+- Pytest was run with directories only, never a file together with its own directory.
+- Commits: every task commit ends with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`, as the batch instruction specifies. The attribution reminder in that session named Haiku 5.5; the batch instruction was followed.
+- The two follow-up fixes are extra commits, outside the one-commit-per-task rule. Each is logged above with its own RED step.
+- Line endings: the ledger is LF; code files are CRLF in the working copy. The "LF will be replaced by CRLF" warnings on new files are normal with `core.autocrlf`.
+- No frontend or visual change in this batch.
+
+### Full backend suite after batch E
+
+`uv run pytest -q tests/unit` → **3021 passed, 53 skipped, 0 failed** (197 s). That is batch D's 2992 plus 29 new tests: 6 (Task 17), 9 (Task 18), 8 (Task 19), 6 (Task 20). A full run before the two follow-up fixes gave 3019 passed, 53 skipped, 0 failed.
+
+### Not verified in batch E
+
+- No lint or type check. `ruff`, `ty` and `pyflakes` are not installed in the project environment, and no dependency was added for this. `py_compile` passed on the new modules.
+- PostgreSQL. Everything ran on SQLite. The `IntegrityError` retry in `record_session_start` (two workers creating the same session row at once) is not exercised by any test.
+- No live provider call. The Anthropic thinking round-trip (signature, redacted block, tool loop) is verified only against mocked SSE and request payloads. A real API run is still needed.
+- No cross-process test of the consolidation state file. The module lock is per process.
+- No browser or app run. The batch is backend only.
+
+### Limitations found while testing (not fixed)
+
+1. Effort on Anthropic: `apply_effort` raises `max_tokens` to `budget + 4000` (up to 32,000) even when the turn's explicit output cap is smaller, so an explicit cap is overridden whenever effort is set. The raised value is also not bounded by the remaining context (`remaining_tokens`). Plan deviation 4 covers escalation only. Suggested fix: never raise above the explicit cap, and bound the raise by the remaining context.
+2. Consolidation: `mark_run` writes the state before the background job starts, so a job interrupted by worker shutdown is not retried for 24 h. `note_completed_turn` and `mark_run` are read-modify-write on one JSON file, so two worker processes can lose an increment, and the fixed temp name `auto-dream.tmp` can clash. Failures are swallowed. Best effort only; suggested fix if it matters: a unique temp name per write.
+3. SessionEnd runs only on a graceful worker exit (the `finally` in `publisher.main`). A hard kill (SIGKILL, crash) skips it. This follows plan deviation 8.
+4. The ignored-effort notice is recorded on every turn for an unsupported model, so a conversation on Ollama with `effort` set gets one notice per turn.
+5. `load_output_styles` defaults to `trusted=True` (kept so the plan's test is unchanged). Production code reaches it only through the trust-gated `resolve_output_style`. Any new caller that serves an untrusted workspace must pass `trusted=False`.
+6. `_PROCESS_SESSIONS` is process-global. A test in the same process that uses a store with `session_state` must call `reset_process_sessions()`; the new session tests do.
