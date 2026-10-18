@@ -37,6 +37,11 @@ def _id(prefix: str) -> str: return f"{prefix}_{uuid4().hex}"
 def _title(message: str) -> str: return " ".join(message.split())[:80] or "Nova conversa"
 
 
+def _execution_duration_limit(code_active: bool) -> int:
+    """A Code turn may run for hours; the canonical execution must not fail it after one."""
+    return 86_400 if code_active else 3_600
+
+
 # A prompt a UserPromptSubmit hook blocked is erased from what the model sees (W2-R6). Its user message is
 # marked with this status, and history_for_turn skips it together with its turn's assistant message.
 BLOCKED_BY_HOOK_STATUS = "blocked_by_hook"
@@ -927,7 +932,7 @@ class PostgresChatStore:
                     "purpose": "conversation.turn",
                 },
                 "task_ref": f"conversation-turn:{turn_id}",
-                "limits": {"max_duration_seconds": 3600},
+                "limits": {"max_duration_seconds": _execution_duration_limit(code_active)},
                 "expected_agent_version": 1,
                 "idempotency_key": f"chat:{idempotency_key}",
                 "requested_at": now,
@@ -2111,10 +2116,23 @@ class PostgresChatStore:
                 .where(
                     conversation_dispatches.c.state == "active",
                     conversation_dispatches.c.acquired_at.is_not(None),
-                    conversation_dispatches.c.acquired_at < cutoff,
+                    # A worker renews the lease of every turn it is still running; only an abandoned turn goes stale.
+                    func.coalesce(conversation_dispatches.c.lease_renewed_at, conversation_dispatches.c.acquired_at) < cutoff,
                 )
             ).mappings().all()
         return tuple(dict(row) for row in rows)
+
+    def renew_dispatch_leases(self, turn_ids: Sequence[str]) -> int:
+        """Mark turns this worker is still running as alive, so recovery never takes them over."""
+        ids = [str(item) for item in turn_ids if str(item or "").strip()]
+        if not ids:
+            return 0
+        now = datetime.now(UTC)
+        with self._engine.begin() as c:
+            result = c.execute(update(conversation_dispatches).where(
+                conversation_dispatches.c.turn_id.in_(ids), conversation_dispatches.c.state == "active",
+            ).values(lease_renewed_at=now))
+        return int(result.rowcount or 0)
 
     def requeue_recovered(self, turn: Mapping[str, object], *, reason: str) -> bool:
         now = datetime.now(UTC)

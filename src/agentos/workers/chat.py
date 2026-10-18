@@ -147,6 +147,15 @@ TURN_DEADLINE = timedelta(seconds=3600)
 HEARTBEAT_REFRESH_SECONDS = 10.0
 
 
+def _retry_limits(turn: Mapping[str, object]) -> dict[str, object]:
+    """Code turns retry a failing provider 8 times with exponential backoff; Chat keeps one immediate retry."""
+    from agentos.agentic.session import CODE_MAX_PROVIDER_RETRIES, CODE_RETRY_BASE_DELAY_SECONDS
+
+    if turn.get("code_mode") == "code":
+        return {"max_provider_retries": CODE_MAX_PROVIDER_RETRIES, "retry_base_delay_seconds": CODE_RETRY_BASE_DELAY_SECONDS}
+    return {"max_provider_retries": 1, "retry_base_delay_seconds": 0.0}
+
+
 class _RuntimeStore:
     """Worker-scoped view that keeps the chat store outside the runtime API.
 
@@ -804,6 +813,12 @@ class ChatWorker:
             return None
         return dict(row) if row else None
 
+    def _catalog_pricing_for(self, turn: dict[str, object]) -> dict[str, object] | None:
+        """The turn model's catalog prices, used to estimate cost when the provider reports none."""
+        row = self._catalog_row_for(turn) or {}
+        pricing = {key: row.get(key) for key in ("input_per_million", "output_per_million") if row.get(key) is not None}
+        return pricing or None
+
     def _context_window_for(self, turn: dict[str, object]) -> int | None:
         """The turn model's real context window, or None if it is unknown."""
         row = self._catalog_row_for(turn) or {}
@@ -1279,6 +1294,7 @@ class ChatWorker:
                     if configured_limits.get("subagent_max_iterations", configured_limits["max_iterations"]) is None
                     else max(24, int(configured_limits.get("subagent_max_iterations", configured_limits["max_iterations"]) or 12) * 2)
                 ),
+                **_retry_limits(turn),
             ),
             skills=skill_library.registry_for(str(turn["user_id"]), agent_id=str(self.store.main_agent_id(turn))),
             skill_library=skill_library,
@@ -1305,6 +1321,7 @@ class ChatWorker:
             local_workspaces=PostgresLocalWorkspaceStore(engine),
             media_policy=self._media_policy_for_turn(turn),
             media_client=self._media_client_for_turn(turn),
+            catalog_pricing=self._catalog_pricing_for(turn),
         )
         return session.build_runtime()
 

@@ -61,6 +61,11 @@ class ConcurrentTurnRunner:
         with self._lock:
             return len(self._in_flight)
 
+    def in_flight_ids(self) -> tuple[str, ...]:
+        self.reap()
+        with self._lock:
+            return tuple(self._in_flight)
+
     def submit_pending(self) -> tuple[str, ...]:
         slots = self.available_slots()
         if slots <= 0:
@@ -102,6 +107,20 @@ def recover_once(store, *, has_in_flight: bool = False) -> tuple[str, ...]:
     return tuple({*recovered, *stale})
 
 
+def renew_leases(runner: ConcurrentTurnRunner) -> None:
+    """Renew the dispatch lease of every turn this process is still running."""
+    renew = getattr(runner.worker.store, "renew_dispatch_leases", None)
+    if not callable(renew):
+        return
+    ids = runner.in_flight_ids()
+    if not ids:
+        return
+    try:
+        renew(ids)
+    except Exception:
+        _LOGGER.exception("could not renew the leases of %d running turns", len(ids))
+
+
 def poll_once(worker_or_runner: ChatWorker | ConcurrentTurnRunner, next_sweep: float) -> tuple[bool, float]:
     """Run one polling tick: claim pending turns before running watchdog sweeps."""
     has_in_flight = False
@@ -132,6 +151,8 @@ def poll_once(worker_or_runner: ChatWorker | ConcurrentTurnRunner, next_sweep: f
     if now_mono >= next_sweep:
         worker.store.heartbeat("chat-worker")
         next_sweep = now_mono + SWEEP_EVERY_SECONDS
+        if isinstance(worker_or_runner, ConcurrentTurnRunner):
+            renew_leases(worker_or_runner)
         recover_once(worker.store, has_in_flight=has_in_flight)
     return False, next_sweep
 

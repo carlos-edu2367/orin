@@ -166,6 +166,10 @@ SUBAGENT_MAX_ACTIONS = 20
 MAX_PRE_READ_FILES = 4
 WORKSPACE_INSTRUCTION_FILES = ("AGENTS.md", "CLAUDE.md", "CONVENTIONS.md")
 MAX_WORKSPACE_GUIDANCE_CHARS = 12_000
+# Code mode stops on end_turn, interruption, maxTurns, maxBudgetUsd or the safety cap — not on a clock.
+CODE_TURN_DEADLINE = timedelta(hours=24)
+CODE_MAX_PROVIDER_RETRIES = 8
+CODE_RETRY_BASE_DELAY_SECONDS = 0.5
 
 
 class ProjectWorkspaceResolutionError(RuntimeError):
@@ -804,9 +808,12 @@ class TurnSession:
         max_subagents_per_turn: int | None = MAX_SUBAGENTS_PER_TURN,
         max_concurrent_subagents: int = MAX_CONCURRENT_SUBAGENTS,
         lifecycle: LifecycleBus | None = None,
+        catalog_pricing: Mapping[str, object] | None = None,
     ) -> None:
         self.turn = turn
         self.lifecycle: LifecycleBus | None = lifecycle
+        # The turn model's catalog prices; the cost estimator uses them when the provider reports no cost.
+        self.catalog_pricing = dict(catalog_pricing) if catalog_pricing else None
         self.effective_settings: EffectiveSettings = empty_settings()
         self.enable_terminal = bool(enable_terminal)
         self.store = store
@@ -2384,6 +2391,39 @@ class TurnSession:
         except Exception:  # noqa: BLE001 - unknown trust means untrusted
             return False
 
+    def _turn_limits(self) -> AgenticLimits:
+        """Code mode runs until the work is done; Chat mode keeps the limits it was given."""
+        if self.turn.get("code_mode") != "code":
+            return self.limits
+        from dataclasses import replace
+
+        from .loop_settings import code_loop_settings
+
+        loop = code_loop_settings(self.effective_settings)
+        # Retry counts and backoff come from the caller's limits: the worker sets the Code-mode values
+        # (workers/chat.py `_retry_limits`), so tests that build a session directly never sleep.
+        return replace(
+            self.limits,
+            max_iterations=None,
+            max_actions=None,
+            deadline=CODE_TURN_DEADLINE,
+            max_turns=loop.max_turns,
+            max_budget_usd=loop.max_budget_usd,
+            safety_max_tool_rounds=loop.safety_max_tool_rounds,
+        )
+
+    def _cost_estimator(self):
+        """Prices a call from the catalog (or Orin's fallback table); reads the model at call time (fallback may switch it)."""
+        from agentos.provider_catalog.pricing import estimate_cost_usd
+
+        def estimate(input_tokens: int | None, output_tokens: int | None) -> object:
+            return estimate_cost_usd(
+                provider=str(self.turn.get("provider") or ""), model_id=str(self.turn.get("model_id") or ""),
+                input_tokens=input_tokens, output_tokens=output_tokens, catalog_pricing=self.catalog_pricing,
+            )
+
+        return estimate
+
     def build_runtime(self) -> AgenticTurnRuntime:
         import inspect
         from agentos.agentic.runtime import CODE_MODE_CORE_TOOLS
@@ -2639,9 +2679,10 @@ class TurnSession:
             )
         runtime = AgenticTurnRuntime(
             store=_MainAgentStore(self, self.store, toolset), provider=self.provider_factory(), toolset=toolset,
-            system_prompt=prompt, volatile_prompt=volatile_prompt, limits=self.limits, cancelled=self.cancelled,
+            system_prompt=prompt, volatile_prompt=volatile_prompt, limits=self._turn_limits(), cancelled=self.cancelled,
             on_close=self._close_hook_dispatcher,
             reminders=self._reminders,
+            cost_estimator=self._cost_estimator(),
             reconciliation_required=self.reconciliation_required,
             tool_kinds={item.name: item.kind for item in definitions},
             skill_prompt_tokens=_skill_prompt_tokens(skill_catalog),

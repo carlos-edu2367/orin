@@ -197,6 +197,13 @@ class AgenticLimits:
     context_window_tokens: int | None = None
     subagent_max_iterations: int | None = None
     subagent_max_actions: int | None = None
+    # W3 (Code mode). None means no ceiling. ``retry_base_delay_seconds`` 0.0 keeps the old immediate retry.
+    max_turns: int | None = None
+    max_budget_usd: Decimal | None = None
+    safety_max_tool_rounds: int | None = None
+    retry_base_delay_seconds: float = 0.0
+    retry_max_delay_seconds: float = 32.0
+    max_retry_after_seconds: float = 60.0
 
     def __post_init__(self) -> None:
         if (self.max_actions is not None and self.max_actions < 0) or (self.max_iterations is not None and self.max_iterations < 1) or self.max_provider_retries < 0 or self.deadline <= timedelta(0):
@@ -204,6 +211,12 @@ class AgenticLimits:
         if (self.subagent_max_actions is not None and self.subagent_max_actions < 0) or (self.subagent_max_iterations is not None and self.subagent_max_iterations < 1):
             raise ValueError("agentic limits are invalid")
         if (self.max_output_tokens is not None and self.max_output_tokens < 1) or self.max_context_tokens < 1_000 or (self.context_window_tokens is not None and self.context_window_tokens < 1_000):
+            raise ValueError("agentic limits are invalid")
+        if (self.max_turns is not None and self.max_turns < 1) or (self.safety_max_tool_rounds is not None and self.safety_max_tool_rounds < 1):
+            raise ValueError("agentic limits are invalid")
+        if self.max_budget_usd is not None and self.max_budget_usd < 0:
+            raise ValueError("agentic limits are invalid")
+        if self.retry_base_delay_seconds < 0 or self.retry_max_delay_seconds < 0 or self.max_retry_after_seconds < 0:
             raise ValueError("agentic limits are invalid")
 
 
@@ -252,6 +265,7 @@ class AgenticTurnRuntime:
         prompt_block_reason: str | None = None,
         on_close: Callable[[], None] | None = None,
         reminders: ReminderQueue | None = None,
+        cost_estimator: Callable[[int | None, int | None], object] | None = None,
     ) -> None:
         self.store, self.provider = store, provider
         self.lifecycle = lifecycle
@@ -261,6 +275,8 @@ class AgenticTurnRuntime:
         self._on_close = on_close
         # Notes that reach the model as one <system-reminder> user message before the next request.
         self.reminders = reminders if reminders is not None else ReminderQueue()
+        # Prices a model call when the provider reports no cost (most do not); feeds max_budget_usd.
+        self._cost_estimator = cost_estimator
         self._stop_hook_active = False
         self._stop_continuations = 0
         self.hook_engine = hook_engine
@@ -398,6 +414,8 @@ class AgenticTurnRuntime:
         empty_response_retries = 0
         total_tokens = 0
         total_cost = Decimal("0")
+        model_turns = 0
+        tool_rounds = 0
         emitted_text_in_turn = False
         last_emitted_text_ended_with_newline = True
         iterations = range(1, self.limits.max_iterations + 1) if self.limits.max_iterations is not None else count(1)
@@ -410,6 +428,10 @@ class AgenticTurnRuntime:
             remaining_tokens = None if self.limits.max_provider_tokens is None else self.limits.max_provider_tokens - total_tokens
             if remaining_tokens is not None and remaining_tokens <= 0:
                 return self._fail(turn, "PROVIDER_TOKEN_LIMIT", iteration, action_count)
+            if self.limits.max_turns is not None and model_turns >= self.limits.max_turns:
+                return self._fail(turn, "MAX_TURNS", iteration, action_count)
+            if self.limits.max_budget_usd is not None and total_cost >= self.limits.max_budget_usd:
+                return self._fail(turn, "MAX_BUDGET_USD", iteration, action_count)
             final_iteration = (
                 (self.limits.max_iterations is not None and iteration == self.limits.max_iterations)
                 or (self.phases is not None and self.phases.is_final)
@@ -488,6 +510,7 @@ class AgenticTurnRuntime:
             retryable_error = False
             rate_limited = False
             context_overflow_error = False
+            call_cost_reported = False
 
             def flush_thinking_buffer() -> None:
                 nonlocal last_thinking_flush
@@ -581,6 +604,8 @@ class AgenticTurnRuntime:
                                 )
                     elif event.kind is StreamKind.USAGE:
                         total_cost += event.cost or Decimal("0")
+                        if event.cost:
+                            call_cost_reported = True
                         if event.usage:
                             # Some streaming protocols send input usage at the
                             # start and output usage at the end. Keep the latest
@@ -637,6 +662,7 @@ class AgenticTurnRuntime:
             # One provider call is over; fold its usage into the turn total
             # before the next call starts reporting its own.
             self.counters.settle_provider_call()
+            model_turns += 1
             provider_total_tokens = reported_total_tokens
             if provider_total_tokens is None and input_tokens is not None and output_tokens is not None:
                 provider_total_tokens = input_tokens + output_tokens
@@ -646,6 +672,13 @@ class AgenticTurnRuntime:
                 reporter = getattr(self.store, "record_usage", None)
                 if callable(reporter) and any(value is not None for value in (input_tokens, output_tokens, provider_total_tokens)):
                     reporter(turn, input_tokens=input_tokens, output_tokens=output_tokens, total_tokens=provider_total_tokens)
+                if not call_cost_reported and self._cost_estimator is not None and (input_tokens is not None or output_tokens is not None):
+                    try:
+                        estimated = self._cost_estimator(input_tokens, output_tokens)
+                        if estimated is not None:
+                            total_cost += Decimal(str(estimated))
+                    except Exception:  # noqa: BLE001 - pricing never breaks a turn
+                        pass
             if self.limits.max_provider_tokens is not None and total_tokens > self.limits.max_provider_tokens:
                 self._effect_finished(turn, provider_effect_id, state="APPLIED", error_code="PROVIDER_TOKEN_LIMIT")
                 return self._fail(turn, "PROVIDER_TOKEN_LIMIT", iteration, action_count)
@@ -687,6 +720,7 @@ class AgenticTurnRuntime:
                                 ).strip()
                     action_count += len(results)
                     self._advance_phase(turn, results)
+                    tool_rounds += 1
                 else:
                     try:
                         for _ in calls.values():
@@ -765,6 +799,8 @@ class AgenticTurnRuntime:
                     self._emit(HookEvent.STOP_FAILURE, error_code="EFFECT_RECONCILIATION_REQUIRED")
                     self._settle_quality(turn, "reconciliation_required", "EFFECT_RECONCILIATION_REQUIRED")
                     return AgenticRunResult("reconciliation_required", iteration, action_count, "EFFECT_RECONCILIATION_REQUIRED")
+                if self.limits.safety_max_tool_rounds is not None and tool_rounds >= self.limits.safety_max_tool_rounds:
+                    return self._pause_for_safety(turn, iteration, action_count)
                 self._life(turn, "running")
                 continue
             has_text = bool("".join(text_parts).strip())
@@ -2104,6 +2140,20 @@ class AgenticTurnRuntime:
                 self._learning_sink(learned)
         except Exception:  # noqa: BLE001 - learning never breaks a turn
             pass
+
+    def _pause_for_safety(self, turn: dict[str, object], iteration: int, actions: int) -> AgenticRunResult:
+        """The safety ceiling ends the turn the way a question does: the person decides whether it goes on."""
+        limit = self.limits.safety_max_tool_rounds
+        self.store.delta(
+            turn,
+            f"\n\n⏸ Pausei depois de {limit} rodadas de ferramentas (limite de segurança `safetyMaxToolRounds`). "
+            "Responda \"continuar\" para eu seguir de onde parei.",
+        )
+        self._life(turn, "waiting_user")
+        self._emit(HookEvent.STOP, stop_hook_active=False, stop_reason="safety_max_tool_rounds", last_assistant_message="")
+        self.store.finish(turn, code="SAFETY_TOOL_ROUNDS")
+        self._settle_quality(turn, "waiting_user", "SAFETY_TOOL_ROUNDS")
+        return AgenticRunResult("waiting_user", iteration, actions, "SAFETY_TOOL_ROUNDS")
 
     def _fail(self, turn: dict[str, object], code: str, iteration: int, actions: int) -> AgenticRunResult:
         self._emit(HookEvent.STOP_FAILURE, error_code=code)
