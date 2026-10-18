@@ -2187,6 +2187,21 @@ class TurnSession:
             # Skills enhance the turn but never become a single point of failure.
             return ()
 
+    def _auto_mode_classifier(self):
+        from agentos.permissions.auto_mode import AutoModeClassifier
+
+        try:
+            model_setting = self.effective_settings.get("autoMode.model")
+            model_id = str(model_setting).strip() if isinstance(model_setting, str) and model_setting.strip() else str(self.turn.get("model_id") or "")
+            history = self.store.history_for_turn(self.turn)
+            task = next((str(item.get("content") or "") for item in reversed(history) if item.get("role") == "user"), "")
+            return AutoModeClassifier(
+                self.provider_factory(), provider_name=str(self.turn.get("provider") or ""), model_id=model_id,
+                settings=self.effective_settings, context=task, workspace_root=self.workspace.root,
+            )
+        except Exception:  # noqa: BLE001 - no classifier means auto mode asks
+            return None
+
     def _workspace_trusted(self) -> bool:
         from agentos.permissions.trust import WorkspaceTrustStore
 
@@ -2270,6 +2285,7 @@ class TurnSession:
         )
         broker_kwargs: dict[str, Any] = {
             "trusted": trusted_workspace,
+            "classifier": self._auto_mode_classifier() if self.permission_mode == "auto" else None,
             "event_emitter": lambda _event_name, summary, payload: self._record(
                 AgentActivityEventType.CODE_MODE_DECISION_REQUIRED,
                 summary,

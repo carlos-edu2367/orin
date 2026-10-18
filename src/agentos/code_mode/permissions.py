@@ -11,9 +11,8 @@ import time
 from typing import Any, Callable, Literal, Mapping
 from uuid import uuid4
 
-from agentos.permissions.engine import PermissionDecision, PermissionEngine
-from agentos.permissions.rules import MatchContext, suggest_rule
-from agentos.permissions.shell import default_shell
+# agentos.permissions.* imports agentos.code_mode.models, so the engine/rules
+# imports stay inside the functions that use them (import cycle through code_mode/__init__).
 from agentos.settings import load_effective_settings
 from agentos.settings.paths import SettingsPaths
 from agentos.settings.writer import add_permission_rule
@@ -217,6 +216,9 @@ def _canonical_internal(name: str) -> str:
 
 def suggest_permission_rule(tool_name: str, arguments: Mapping[str, Any] | None = None, *, workspace: Path | None = None) -> str:
     """Reusable rule in Claude Code syntax for ``allow_always``."""
+    from agentos.permissions.rules import MatchContext, suggest_rule
+    from agentos.permissions.shell import default_shell
+
     root = Path(workspace) if workspace is not None else Path.cwd()
     internal = _canonical_internal(tool_name)
     return suggest_rule(internal, dict(arguments or {}), MatchContext(root, Path.home(), default_shell()))
@@ -417,7 +419,9 @@ class ToolPermissionBroker:
     def settings_path(self) -> Path:
         return self.workspace_root / ".orin" / "settings.json"
 
-    def engine(self) -> PermissionEngine:
+    def engine(self):
+        from agentos.permissions.engine import PermissionEngine
+
         # Fresh settings on every call, so a new grant applies to the next call.
         settings = load_effective_settings(self.workspace_root, cli=self.cli_settings, trusted=self.trusted)
         return PermissionEngine(self.workspace_root, settings, classifier=self.classifier)
