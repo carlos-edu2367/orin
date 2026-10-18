@@ -46,20 +46,25 @@ BUILTIN_STYLES: dict[str, OutputStyle] = {
 }
 
 
-def _style_dirs(workspace_root: Path | str) -> tuple[tuple[Path, str], ...]:
+def _style_dirs(workspace_root: Path | str, trusted: bool) -> tuple[tuple[Path, str], ...]:
     root = Path(workspace_root)
-    return (
+    dirs: list[tuple[Path, str]] = [
         (claude_user_dir() / "output-styles", "user"),
         (orin_user_dir() / "output-styles", "user"),
-        (root / ".claude" / "output-styles", "project"),
-        (root / ".orin" / "output-styles", "project"),
-    )
+    ]
+    # A repository's own style files replace prompt text, so they count only for a trusted workspace.
+    if trusted:
+        dirs += [
+            (root / ".claude" / "output-styles", "project"),
+            (root / ".orin" / "output-styles", "project"),
+        ]
+    return tuple(dirs)
 
 
-def load_output_styles(workspace_root: Path | str) -> dict[str, OutputStyle]:
-    """Built-ins, then user files, then project files; a later file with the same name wins."""
+def load_output_styles(workspace_root: Path | str, *, trusted: bool = True) -> dict[str, OutputStyle]:
+    """Built-ins, then user files, then project files (trusted workspaces only); a later file with the same name wins."""
     styles = dict(BUILTIN_STYLES)
-    for directory, source in _style_dirs(workspace_root):
+    for directory, source in _style_dirs(workspace_root, trusted):
         try:
             if not directory.is_dir():
                 continue
@@ -94,7 +99,7 @@ def resolve_output_style(settings: object, workspace_root: Path | str) -> Output
     key = raw.strip().lower()
     if key == "default":
         return None
-    style = load_output_styles(workspace_root).get(key)
+    style = load_output_styles(workspace_root, trusted=bool(getattr(settings, "trusted", False))).get(key)
     return style if style is not None and style.instructions else None
 
 
