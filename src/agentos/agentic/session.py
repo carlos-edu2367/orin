@@ -785,6 +785,32 @@ _BUILTIN_SUBAGENT_SPECS: Mapping[str, Mapping[str, object]] = {
 }
 
 
+class _TurnPricing:
+    """Prices each provider call of a turn at the model that made it.
+
+    The catalog's rates belong to the model the turn started with. After a fallback switch
+    (``switched``) the call is priced from Orin's own table by the fallback's id.
+    """
+
+    def __init__(self, provider: str, model_id: str, catalog_pricing: Mapping[str, object] | None) -> None:
+        self.provider = provider
+        self.primary_model_id = model_id
+        self.model_id = model_id
+        self.catalog_pricing = catalog_pricing
+
+    def switched(self, model_id: str) -> None:
+        self.model_id = str(model_id or "")
+
+    def __call__(self, input_tokens: int | None, output_tokens: int | None) -> object:
+        from agentos.provider_catalog.pricing import estimate_cost_usd
+
+        on_primary = self.model_id == self.primary_model_id
+        return estimate_cost_usd(
+            provider=self.provider, model_id=self.model_id, input_tokens=input_tokens, output_tokens=output_tokens,
+            catalog_pricing=self.catalog_pricing if on_primary else None,
+        )
+
+
 class TurnSession:
     """Builds the runtime for a turn and owns its subagent lifecycle."""
 
@@ -2529,18 +2555,6 @@ class TurnSession:
             safety_max_tool_rounds=loop.safety_max_tool_rounds,
         )
 
-    def _cost_estimator(self):
-        """Prices a call from the catalog (or Orin's fallback table); reads the model at call time (fallback may switch it)."""
-        from agentos.provider_catalog.pricing import estimate_cost_usd
-
-        def estimate(input_tokens: int | None, output_tokens: int | None) -> object:
-            return estimate_cost_usd(
-                provider=str(self.turn.get("provider") or ""), model_id=str(self.turn.get("model_id") or ""),
-                input_tokens=input_tokens, output_tokens=output_tokens, catalog_pricing=self.catalog_pricing,
-            )
-
-        return estimate
-
     def _fallback_models(self) -> tuple[str, ...]:
         """The user's fallback chain (``fallbackModel``: comma list or array), never set by a repository."""
         from .loop_settings import operator_value
@@ -3072,12 +3086,20 @@ class TurnSession:
                 "Selecionando rota",
                 {"requested_route": str(self.turn.get("model_id") or ""), "provider": "omniroute"},
             )
+        from .effort import reasoning_supported
+
+        pricing = _TurnPricing(str(self.turn.get("provider") or ""), str(self.turn.get("model_id") or ""), self.catalog_pricing)
         runtime = AgenticTurnRuntime(
             store=_MainAgentStore(self, self.store, toolset), provider=self.provider_factory(), toolset=toolset,
             system_prompt=prompt, volatile_prompt=volatile_prompt, limits=self._turn_limits(), cancelled=self.cancelled,
             on_close=self._close_hook_dispatcher,
             reminders=self._reminders,
-            cost_estimator=self._cost_estimator(),
+            cost_estimator=pricing,
+            model_switched=pricing.switched,
+            effort_supported=lambda model_id: reasoning_supported(
+                str(self.turn.get("provider") or ""), model_id,
+                self.model_capabilities if model_id == str(self.turn.get("model_id") or "") else (),
+            ),
             fallback_models=self._fallback_models(),
             fallback_provider_factory=self.fallback_provider_factory,
             reconciliation_required=self.reconciliation_required,

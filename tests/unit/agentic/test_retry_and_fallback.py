@@ -5,11 +5,14 @@ from datetime import timedelta
 from pathlib import Path
 
 import httpx
+import pytest
 
 from agentos.agentic.agent_tools import ToolOutcome
 from agentos.agentic.lifecycle import HookEvent, LifecycleBus, LifecycleDecision
 from agentos.agentic.provider_stream import NormalizedStreamItem, ProviderKeyRejected, StreamKind
 from agentos.agentic.runtime import AgenticLimits, AgenticTurnRuntime
+from agentos.agentic.session import TurnSession
+from agentos.providers.models import ProviderUsage
 from agentos.settings.paths import orin_user_dir
 
 
@@ -211,3 +214,68 @@ def test_fallback_models_come_from_user_settings_only(tmp_path: Path) -> None:
     runtime = session.build_runtime()
     assert runtime._fallback_models == ["a", "b"]
     assert session.effective_settings.get("fallbackModel") == "a, b, primary, a"
+
+
+class _Agents:
+    def list(self):
+        return []
+
+    def record_usage(self, *args, **kwargs):
+        return None
+
+
+class Recording:
+    """A provider that answers, keeping every request it was sent; ``usage`` reports the tokens of each answer."""
+
+    def __init__(self, usage: ProviderUsage | None = None) -> None:
+        self.requests: list[dict] = []
+        self.usage = usage
+
+    def stream(self, request):
+        self.requests.append(dict(request))
+        items = [NormalizedStreamItem(StreamKind.TEXT, 1, text="ok")]
+        if self.usage is not None:
+            items.append(NormalizedStreamItem(StreamKind.USAGE, 2, usage=self.usage))
+        items.append(NormalizedStreamItem(StreamKind.FINISH, 3, finish_reason="stop"))
+        return iter(items)
+
+
+@pytest.mark.parametrize("supported", [True, False])
+def test_a_fallback_keeps_or_drops_the_effort_by_what_the_model_accepts(supported: bool) -> None:
+    fallback = Recording()
+    runtime = _runtime(AlwaysDown(), base=0.0, retries=1, effort="high",
+                       fallback_models=("backup",), fallback_provider_factory=lambda model_id: fallback,
+                       effort_supported=lambda model_id: supported)
+    assert runtime.run("t").state == "completed"
+    assert len(fallback.requests) == 1
+    assert fallback.requests[0].get("effort") == ("high" if supported else None)
+
+
+def test_a_fallback_is_priced_as_the_fallback_model(monkeypatch, tmp_path: Path) -> None:
+    from agentos.provider_catalog import pricing
+    from agentos.settings.paths import orin_user_dir as _user_dir
+
+    priced: list[dict] = []
+    real_estimate = pricing.estimate_cost_usd
+
+    def spy(**kwargs):
+        priced.append(kwargs)
+        return real_estimate(**kwargs)
+
+    monkeypatch.setattr(pricing, "estimate_cost_usd", spy)
+    fallback_model = "claude-3-5-haiku-20241022"
+    _write(_user_dir() / "settings.json", {"fallbackModel": fallback_model})
+    turn = {
+        "turn_id": "t", "conversation_id": "c", "user_id": "u", "execution_id": "e", "provider": "anthropic",
+        "model_id": "claude-sonnet-4-5", "user_message_id": "um", "assistant_message_id": "am",
+    }
+    store = Store()
+    store.turn = turn
+    session = TurnSession(turn=dict(turn), store=store, agents_store=_Agents(), memory_store=None,
+                          provider_factory=lambda: AlwaysDown(), workspace_root=tmp_path, enable_subagents=False,
+                          fallback_provider_factory=lambda model_id: Recording(ProviderUsage(200, 1_000, 1_200, None, measurement="CONFIRMED")))
+    session.catalog_pricing = {"input_per_million": 3.0, "output_per_million": 15.0}  # the primary's catalog row
+    runtime = session.build_runtime()
+    assert runtime.run("t").state == "completed"
+    assert priced and priced[-1]["model_id"] == fallback_model
+    assert priced[-1]["catalog_pricing"] is None  # the primary's rates never price the fallback's calls

@@ -259,6 +259,8 @@ class AgenticTurnRuntime:
         prompt_renderer: Callable[[], str] | None = None,
         compact_request: str | None = None,
         effort: str | None = None,
+        effort_supported: Callable[[str], bool] | None = None,
+        model_switched: Callable[[str], None] | None = None,
         on_completed: Callable[[], None] | None = None,
         config_block_reason: str | None = None,
     ) -> None:
@@ -267,6 +269,10 @@ class AgenticTurnRuntime:
         self.compact_request = compact_request
         # Reasoning effort for this turn (already checked against the model); None sends nothing.
         self.effort = effort
+        # Whether a model accepts the reasoning effort. A fallback that does not loses the effort (it would be rejected).
+        self._effort_supported = effort_supported
+        # Told which model a fallback switch moved to, so the cost of later calls is priced at that model.
+        self._model_switched = model_switched
         # Called once after a turn that completed (not failed or cancelled); its errors never change the turn.
         self._on_completed = on_completed
         self.lifecycle = lifecycle
@@ -463,6 +469,14 @@ class AgenticTurnRuntime:
             return "fallback"
         return "fail"
 
+    def _model_accepts_effort(self, model: str) -> bool:
+        if self._effort_supported is None:
+            return True
+        try:
+            return bool(self._effort_supported(model))
+        except Exception:  # noqa: BLE001 - a model that cannot be checked gets no reasoning control
+            return False
+
     def _switch_to_fallback(self, turn: dict[str, object], *, reason: str) -> bool:
         """Move to the next fallback model of the same provider. A PreModelSwitch block keeps the current one."""
         factory = self._fallback_provider_factory
@@ -496,6 +510,13 @@ class AgenticTurnRuntime:
                 except Exception:  # noqa: BLE001
                     pass
             turn["model_id"] = candidate
+            if self.effort and not self._model_accepts_effort(candidate):
+                self.effort = None
+            if self._model_switched is not None:
+                try:
+                    self._model_switched(candidate)
+                except Exception:  # noqa: BLE001 - pricing never breaks a turn
+                    pass
             self._life(turn, "model_switched", from_model=current, to_model=candidate, reason=reason)
             self._emit(HookEvent.POST_MODEL_SWITCH, from_model=current, to_model=candidate, reason="fallback", error_code=reason)
             return True
