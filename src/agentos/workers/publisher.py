@@ -10,6 +10,7 @@ from concurrent.futures import Future, ThreadPoolExecutor, wait
 from datetime import timedelta
 import logging
 import os
+import signal
 import threading
 import time
 
@@ -157,8 +158,37 @@ def poll_once(worker_or_runner: ChatWorker | ConcurrentTurnRunner, next_sweep: f
     return False, next_sweep
 
 
+def install_shutdown_handlers() -> None:
+    """Turn the supervisor's stop signal into SystemExit so that main()'s ``finally`` runs (SessionEnd).
+
+    Python's default for SIGTERM and SIGBREAK ends the process without unwinding, so the launcher's stop never
+    reached the cleanup. Only the first signal unwinds: the launcher escalates to terminate() after its grace
+    period, and a second signal must not cut the shutdown short. Off the main thread this does nothing, because
+    the signal module only accepts handlers there.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        return
+    stopping = threading.Event()
+
+    def on_stop(signum: int, frame: object) -> None:
+        if stopping.is_set():
+            return
+        stopping.set()
+        raise SystemExit(0)
+
+    for name in ("SIGTERM", "SIGBREAK"):
+        signum = getattr(signal, name, None)
+        if signum is None:
+            continue
+        try:
+            signal.signal(signum, on_stop)
+        except (OSError, ValueError):
+            _LOGGER.warning("could not install the %s shutdown handler", name)
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    install_shutdown_handlers()
     worker = create_chat_worker()
     runner = ConcurrentTurnRunner(worker)
     next_sweep = 0.0
@@ -172,13 +202,14 @@ def main() -> None:
                 _LOGGER.exception("worker tick failed")
             time.sleep(POLL_SECONDS)
     finally:
-        runner.shutdown(wait=True)
+        # SessionEnd first, with its own budget: it must fit the launcher's grace period even when turns are in flight.
         try:
             from agentos.hooks.session_end import end_sessions
 
-            end_sessions("other")
+            end_sessions("other", timeout_seconds=5.0)
         except Exception:
             _LOGGER.exception("SessionEnd hooks could not run at shutdown")
+        runner.shutdown(wait=True)
 
 
 if __name__ == "__main__":

@@ -130,6 +130,22 @@ class ProcessGroup:
             self._job = None
 
 
+def _attached_to_console() -> bool:
+    """Whether this process has a console, visible or the hidden one CREATE_NO_WINDOW gives it.
+
+    A child that inherits that console opens no window of its own, and a Ctrl+Break from this process reaches it.
+    A process with no console at all (a GUI interpreter) must keep CREATE_NO_WINDOW, or the child would open a window.
+    Any failure answers False, which keeps the flag.
+    """
+    try:
+        import ctypes
+
+        attached = (ctypes.c_ulong * 2)()
+        return ctypes.windll.kernel32.GetConsoleProcessList(attached, 2) > 0
+    except Exception:
+        return False
+
+
 @dataclass
 class SupervisedProcess:
     """One child, its log file, and the last thing it said before dying."""
@@ -148,11 +164,11 @@ class SupervisedProcess:
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         self._log = open(self.log_path, "ab", buffering=0)  # noqa: SIM115 - closed in stop()
         self._log.write(f"\n--- {self.name} started ---\n".encode())
-        creation_flags = (
-            subprocess.CREATE_NEW_PROCESS_GROUP | getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            if _WINDOWS
-            else 0
-        )
+        creation_flags = 0
+        if _WINDOWS:
+            creation_flags = subprocess.CREATE_NEW_PROCESS_GROUP
+            if not _attached_to_console():
+                creation_flags |= getattr(subprocess, "CREATE_NO_WINDOW", 0)
         self.process = subprocess.Popen(  # noqa: S603 - command comes from the runtime profile, never from user input
             list(self.command),
             cwd=str(cwd),

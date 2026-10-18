@@ -53,6 +53,7 @@ def test_supervised_process_start_sets_create_no_window_on_windows(
 ) -> None:
     """When Supervisor runs without a console after update restart, children (backend, worker, scheduler) must not allocate console windows."""
     monkeypatch.setattr(processes, "_WINDOWS", True)
+    monkeypatch.setattr(processes, "_attached_to_console", lambda: False)
     monkeypatch.setattr(subprocess, "CREATE_NO_WINDOW", CREATE_NO_WINDOW, raising=False)
     monkeypatch.setattr(subprocess, "CREATE_NEW_PROCESS_GROUP", CREATE_NEW_PROCESS_GROUP, raising=False)
 
@@ -127,3 +128,41 @@ def test_omniroute_process_manager_passes_create_no_window_on_windows(
 def test_electron_main_does_not_combine_detached_and_windows_hide_on_win32() -> None:
     main_cjs = (Path(__file__).resolve().parents[3] / "desktop" / "electron" / "main.cjs").read_text(encoding="utf-8")
     assert "detached: process.platform !== 'win32'" in main_cjs
+
+
+def test_a_child_of_an_attached_supervisor_shares_its_console_so_ctrl_break_reaches_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CREATE_NO_WINDOW gives the child a console of its own, which no Ctrl+Break from the supervisor reaches.
+
+    A child that inherits the supervisor's console opens no window, so only a detached supervisor keeps the flag.
+    """
+    monkeypatch.setattr(processes, "_WINDOWS", True)
+    monkeypatch.setattr(processes, "_attached_to_console", lambda: True)
+    monkeypatch.setattr(subprocess, "CREATE_NO_WINDOW", CREATE_NO_WINDOW, raising=False)
+    monkeypatch.setattr(subprocess, "CREATE_NEW_PROCESS_GROUP", CREATE_NEW_PROCESS_GROUP, raising=False)
+
+    captured_flags: list[int] = []
+
+    class DummyPopen:
+        pid = 12345
+
+        def __init__(self, _cmd: list[str], **kwargs: object) -> None:
+            captured_flags.append(int(kwargs.get("creationflags", 0)))  # type: ignore[arg-type]
+
+        def poll(self) -> int | None:
+            return 0
+
+    monkeypatch.setattr(processes.subprocess, "Popen", DummyPopen)
+
+    group = processes.ProcessGroup()
+    monkeypatch.setattr(group, "adopt", lambda _pid: True)
+    child = processes.SupervisedProcess("worker", ("orin.exe", "_internal", "worker"), tmp_path / "worker.log")
+    try:
+        child.start(environment={}, cwd=tmp_path, group=group)
+    finally:
+        child.stop()
+
+    assert len(captured_flags) == 1
+    assert captured_flags[0] & CREATE_NEW_PROCESS_GROUP
+    assert not (captured_flags[0] & CREATE_NO_WINDOW)
