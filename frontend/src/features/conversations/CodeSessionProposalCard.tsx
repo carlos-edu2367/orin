@@ -142,6 +142,7 @@ export function CodeSessionProposalCard({
   useEffect(() => {
     if (userEditedSelectionRef.current || sanitizedProposalModel) return
     if (defaultProvider && PROVIDER_NAMES.includes(defaultProvider)) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- syncs late-arriving provider/model defaults from props
       setProvider(defaultProvider)
     }
     if (defaultModelId?.trim()) {

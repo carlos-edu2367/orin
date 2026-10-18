@@ -59,8 +59,24 @@ export function BrowserSection({ client: providedClient }: { client?: ApiClient 
   }, [client])
 
   useEffect(() => {
-    void refresh()
-  }, [refresh])
+    // Inline fetch: setState only happens after the awaited request, and a stale response is dropped.
+    let cancelled = false
+    listMcpServers(client)
+      .then((list) => {
+        if (cancelled) return
+        setErrorMessage(null)
+        setServer(findPlaywrightServer(list))
+      })
+      .catch(() => {
+        if (!cancelled) setErrorMessage('Não foi possível consultar os servidores MCP.')
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [client])
 
   async function handleInstallAndActivate() {
     if (busyAction) return
