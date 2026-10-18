@@ -260,6 +260,12 @@ class _RuntimeStore:
 
     # -- session seams ---------------------------------------------------
 
+    def session_state(self, conversation_id: str):
+        return self._store.session_state(conversation_id)
+
+    def record_session_start(self, conversation_id: str, **values) -> None:
+        self._store.record_session_start(conversation_id, **values)
+
     def record(self, *args, **kwargs) -> None:
         self._store.record(*args, **kwargs)
 

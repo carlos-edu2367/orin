@@ -167,6 +167,15 @@ SUBAGENT_MAX_ACTIONS = 20
 MAX_PRE_READ_FILES = 4
 WORKSPACE_INSTRUCTION_FILES = ("AGENTS.md", "CLAUDE.md", "CONVENTIONS.md")
 MAX_WORKSPACE_GUIDANCE_CHARS = 12_000
+# Conversations whose session this process already started: a new process (a restart) resumes them.
+_PROCESS_SESSIONS: set[str] = set()
+_PROCESS_SESSIONS_LOCK = threading.Lock()
+
+
+def reset_process_sessions() -> None:
+    """Forget which sessions this process started (tests; a real restart starts empty)."""
+    with _PROCESS_SESSIONS_LOCK:
+        _PROCESS_SESSIONS.clear()
 # Code mode stops on end_turn, interruption, maxTurns, maxBudgetUsd or the safety cap — not on a clock.
 CODE_TURN_DEADLINE = timedelta(hours=24)
 CODE_MAX_PROVIDER_RETRIES = 8
@@ -2117,6 +2126,30 @@ class TurnSession:
 
     # -- runtime --------------------------------------------------------
 
+    def _session_start_source(self, history: list[Mapping[str, object]]) -> str | None:
+        """W0-R14: "startup" for a new conversation, "resume" the first time this process serves an existing one, else None."""
+        reader = getattr(self.store, "session_state", None)
+        writer = getattr(self.store, "record_session_start", None)
+        conversation_id = str(self.turn.get("conversation_id") or "")
+        if not callable(reader) or not callable(writer) or not conversation_id:
+            # Stores without session state keep the W0 rule: the first user message starts the session.
+            user_messages = sum(1 for item in history if item.get("role") == "user" and isinstance(item.get("content"), str))
+            return "startup" if user_messages <= 1 else None
+        with _PROCESS_SESSIONS_LOCK:
+            if conversation_id in _PROCESS_SESSIONS:
+                return None
+            try:
+                state = reader(conversation_id)
+            except Exception:  # noqa: BLE001 - an unknown state never starts a session twice
+                return None
+            source = "startup" if state is None else "resume"
+            try:
+                writer(conversation_id, user_id=str(self.turn.get("user_id") or ""), source=source)
+            except Exception:  # noqa: BLE001
+                logger.debug("session start could not be recorded", exc_info=True)
+            _PROCESS_SESSIONS.add(conversation_id)
+        return source
+
     def _emit_turn_start_events(self, history: list[Mapping[str, object]], task: str) -> dict[str, Any]:
         """Lifecycle events for the start of a turn.
 
@@ -2141,9 +2174,9 @@ class TurnSession:
                 files = _workspace_guidance_files(self.workspace.root)
                 if files:
                     bus.emit(HookEvent.INSTRUCTIONS_LOADED, file_paths=[str(path) for path in files], memory_type="Project")
-            user_messages = sum(1 for item in history if item.get("role") == "user" and isinstance(item.get("content"), str))
-            if user_messages <= 1:
-                start = bus.emit(HookEvent.SESSION_START, source="startup")
+            source = self._session_start_source(history)
+            if source is not None:
+                start = bus.emit(HookEvent.SESSION_START, source=source)
                 result["session_context"].extend(start.additional_context)
                 result["prompt_context"].extend(f"Hook: {message}" for message in start.system_messages)
             if str(self.turn.get("turn_kind") or "") != "compact":
@@ -2755,6 +2788,15 @@ class TurnSession:
             cwd=str(self.workspace.root),
         )
         self._install_hooks()
+        try:
+            from agentos.hooks.session_end import register_session
+
+            register_session(
+                str(self.turn.get("conversation_id") or ""), workspace_root=self.workspace.root,
+                user_id=str(self.turn.get("user_id") or ""), trusted=trusted_workspace,
+            )
+        except Exception:  # noqa: BLE001 - SessionEnd bookkeeping never stops a turn
+            logger.debug("session could not be registered for SessionEnd", exc_info=True)
         resumed = self._resumed_contract()
         explicit_perm = str(self.turn.get("permission_mode") or "").strip().lower()
         raw_autonomy = str(

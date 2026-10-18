@@ -173,6 +173,12 @@ def main() -> None:
             time.sleep(POLL_SECONDS)
     finally:
         runner.shutdown(wait=True)
+        try:
+            from agentos.hooks.session_end import end_sessions
+
+            end_sessions("other")
+        except Exception:
+            _LOGGER.exception("SessionEnd hooks could not run at shutdown")
 
 
 if __name__ == "__main__":

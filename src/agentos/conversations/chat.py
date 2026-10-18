@@ -1911,6 +1911,34 @@ class PostgresChatStore:
             }
         return {"conversation_id": conversation_id, "available": False, "categories": []}
 
+    def session_state(self, conversation_id: str) -> dict[str, object] | None:
+        with self._engine.connect() as c:
+            row = c.execute(select(conversation_sessions).where(conversation_sessions.c.conversation_id == conversation_id)).mappings().first()
+        if row is None:
+            return None
+        return {"started_at": row["started_at"].isoformat(), "last_source": str(row["last_source"]), "start_count": int(row["start_count"] or 0)}
+
+    def record_session_start(self, conversation_id: str, *, user_id: str, source: str) -> None:
+        now = datetime.now(UTC)
+        values = {"last_source": str(source)[:16], "updated_at": now}
+        for _ in range(2):
+            try:
+                with self._engine.begin() as c:
+                    current = c.execute(select(conversation_sessions.c.start_count).where(
+                        conversation_sessions.c.conversation_id == conversation_id,
+                    )).scalar()
+                    if current is None:
+                        c.execute(insert(conversation_sessions).values(
+                            conversation_id=conversation_id, user_id=user_id, started_at=now, start_count=1, **values,
+                        ))
+                    else:
+                        c.execute(update(conversation_sessions).where(conversation_sessions.c.conversation_id == conversation_id).values(
+                            start_count=int(current) + 1, **values,
+                        ))
+                return
+            except IntegrityError:
+                continue  # another worker created the row first: update it on the second pass
+
     def history_for_turn(self, turn: dict[str, object], *, rehydration_budget_tokens: int = 0) -> list[dict[str, object]]:
         """The conversation as the model should see it, including past tool work.
 
