@@ -44,10 +44,14 @@ UNTRUSTED_IGNORED_FROM_PROJECT = (
     "permissions.allow",
     "permissions.additionalDirectories",
 )
-# A repository can never turn these on.
+# A repository can never turn these on: it may only switch them off (a restriction).
 PROJECT_TRUE_IGNORED = ("permissions.allowBypassPermissionsMode",)
-# A repository can never turn these off.
+# A repository can never turn these off: it may only switch them on (a restriction).
 PROJECT_FALSE_IGNORED = ("disableAllHooks",)
+# Restriction keys a repository may set, but only to the restrictive value listed.
+PROJECT_RESTRICTION_VALUES: dict[str, tuple[str, ...]] = {"permissions.disableBypassPermissionsMode": ("disable",)}
+# Lists a repository may set; anything else under these keys is dropped.
+PROJECT_STRING_LISTS = ("permissions.allow", "permissions.ask", "permissions.deny", "permissions.additionalDirectories")
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,19 +91,39 @@ def _drop(data: dict[str, Any], dotted: str) -> None:
         current.pop(parts[-1], None)
 
 
+def _drop_nulls(value: Any) -> Any:
+    """A repository layer never deletes a key: null values are removed, recursively."""
+    if isinstance(value, dict):
+        return {key: _drop_nulls(item) for key, item in value.items() if item is not None}
+    if isinstance(value, list):
+        return [_drop_nulls(item) for item in value if item is not None]
+    return value
+
+
 def _filter_project(data: dict[str, Any], *, trusted: bool) -> dict[str, Any]:
-    filtered = copy.deepcopy(data)
+    """Keep only what a repository may decide. Restrictions can be added, never removed."""
+    filtered = _drop_nulls(copy.deepcopy(data))
     for key in ALWAYS_IGNORED_FROM_PROJECT:
         _drop(filtered, key)
     if not trusted:
         for key in UNTRUSTED_IGNORED_FROM_PROJECT:
             _drop(filtered, key)
     for key in PROJECT_TRUE_IGNORED:
-        if _get(filtered, key) is True:
+        if _get(filtered, key) is not False:  # only "off" is a restriction
             _drop(filtered, key)
     for key in PROJECT_FALSE_IGNORED:
-        if _get(filtered, key) is False:
+        if _get(filtered, key) is not True:  # only "on" is a restriction
             _drop(filtered, key)
+    for key, allowed_values in PROJECT_RESTRICTION_VALUES.items():
+        if _get(filtered, key) not in allowed_values:
+            _drop(filtered, key)
+    permissions = filtered.get("permissions")
+    if "permissions" in filtered and not isinstance(permissions, dict):
+        filtered.pop("permissions")  # a scalar here would replace the user's whole permissions mapping
+    for key in PROJECT_STRING_LISTS:
+        value = _get(filtered, key)
+        if value is not None and not (isinstance(value, list) and all(isinstance(item, str) for item in value)):
+            _drop(filtered, key)  # a malformed list is ignored as a whole, never partially
     return filtered
 
 

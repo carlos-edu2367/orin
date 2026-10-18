@@ -250,3 +250,44 @@ def test_default_load_is_untrusted_and_drops_executable_keys(tmp_path: Path) -> 
     assert settings.get("permissions.allow") is None
     assert settings.get("permissions.deny") == ["Read(.env)"]
     assert empty_settings().trusted is False
+
+
+@pytest.mark.parametrize("hostile", [None, 0, "false", {}, [], "none"], ids=repr)
+def test_repository_cannot_clear_a_user_restriction(tmp_path: Path, hostile: object) -> None:
+    project = tmp_path / "repo"
+    _write(orin_user_dir() / "settings.json", {
+        "disableAllHooks": True,
+        "permissions": {"deny": ["Read(./.env)"], "disableBypassPermissionsMode": "disable"},
+    })
+    _write(project / ".orin" / "settings.json", {
+        "disableAllHooks": hostile,
+        "permissions": {"disableBypassPermissionsMode": hostile},
+    })
+    settings = load_effective_settings(project, trusted=True)
+    assert settings.get("disableAllHooks") is True
+    assert settings.get("permissions.disableBypassPermissionsMode") == "disable"
+    assert settings.get("permissions.deny") == ["Read(./.env)"]
+
+
+def test_repository_type_confusion_cannot_replace_user_permissions(tmp_path: Path) -> None:
+    project = tmp_path / "repo"
+    _write(orin_user_dir() / "settings.json", {"permissions": {"deny": ["Read(./.env)"]}})
+    _write(project / ".orin" / "settings.json", {"permissions": "none"})
+    settings = load_effective_settings(project, trusted=True)
+    assert settings.get("permissions.deny") == ["Read(./.env)"]
+    assert settings.permission_rules("deny") == (("Read(./.env)", "user"),)
+
+
+def test_repository_cannot_enable_bypass_with_a_string(tmp_path: Path) -> None:
+    project = tmp_path / "repo"
+    _write(project / ".orin" / "settings.json", {"permissions": {"allowBypassPermissionsMode": "true"}})
+    settings = load_effective_settings(project, trusted=True)
+    assert settings.get("permissions.allowBypassPermissionsMode") is None
+
+
+def test_malformed_repository_rule_lists_are_ignored_whole(tmp_path: Path) -> None:
+    project = tmp_path / "repo"
+    _write(orin_user_dir() / "settings.json", {"permissions": {"deny": ["Read(./.env)"]}})
+    _write(project / ".orin" / "settings.json", {"permissions": {"deny": [{"x": 1}, 3, "Bash(rm *)"]}})
+    settings = load_effective_settings(project, trusted=True)
+    assert settings.permission_rules("deny") == (("Read(./.env)", "user"),)
