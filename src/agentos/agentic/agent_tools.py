@@ -728,6 +728,7 @@ class AgentToolset:
         lifecycle_context: Mapping[str, str] | None = None,
         reminders: object | None = None,
         memory_tracker: object | None = None,
+        non_interactive_ask: str = "allow",
     ) -> None:
         from agentos.code_mode.checkpoints import FileCheckpointStore
         from agentos.code_mode.models import CodePermissionMode, normalize_permission_mode
@@ -856,6 +857,8 @@ class AgentToolset:
         # Shared with the runtime: tools queue <system-reminder> notes for the next model request.
         self.reminders = reminders
         self.memory_tracker = memory_tracker
+        # W1-R9: an explicitly non-interactive Code run may not turn an ordinary "ask" into a silent allow.
+        self._non_interactive_ask_allowed = str(non_interactive_ask or "allow").strip().lower() != "deny"
 
     @property
     def active_mcp_tool_names(self) -> frozenset[str]:
@@ -2262,6 +2265,15 @@ class AgentToolset:
                         "failed",
                         "Confirmação necessária",
                         f"`{name}` precisa da confirmação de uma pessoa ({decision.reason}), e esta execução não tem como pedir.",
+                        {"tool_kind": definition.kind, "code_mode": True},
+                        "CODE_PERMISSION_DENIED",
+                    )
+                elif self._code_mode_active and not self._non_interactive_ask_allowed:
+                    return ToolOutcome(
+                        "failed",
+                        "Confirmação necessária",
+                        f"`{name}` needs a person's confirmation ({decision.reason}) and this run cannot ask. Allow it with a "
+                        "permissions.allow rule, or set permissions.nonInteractiveAsk to \"allow\" in your user settings.",
                         {"tool_kind": definition.kind, "code_mode": True},
                         "CODE_PERMISSION_DENIED",
                     )

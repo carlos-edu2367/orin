@@ -1753,6 +1753,7 @@ class TurnSession:
             read_only_mode=read_only_subagent,
             inherit_context=inherit_context,
             lifecycle_context={"agent_id": agent_id, "agent_type": public_subagent_type(builtin_key or clean)},
+            non_interactive_ask=self._non_interactive_ask(),
         )
         sub_max_iterations = (
             self.limits.subagent_max_iterations
@@ -2223,6 +2224,7 @@ class TurnSession:
         inherit_context: bool = True,
         lifecycle_context: Mapping[str, str] | None = None,
         reminders: ReminderQueue | None = None,
+        non_interactive_ask: str = "allow",
     ) -> AgentToolset:
         browser = None if read_only_mode else self.browser
         actor_id = browser_agent_key or self.main_agent_id
@@ -2248,6 +2250,7 @@ class TurnSession:
             extra_env=self._hook_extra_env(),
             lifecycle_context=lifecycle_context,
             reminders=reminders,
+            non_interactive_ask=non_interactive_ask,
             skills=self.skills,
             skill_library=self.skill_library,
             skill_user_id=str(self.turn.get("user_id") or "").strip() or None,
@@ -2772,6 +2775,15 @@ class TurnSession:
 
         self._background_runner(job)
 
+    def _non_interactive_ask(self) -> str:
+        """W1-R9: a Code turn declared non-interactive refuses an ordinary ask unless the user opted in."""
+        from .loop_settings import operator_value
+
+        if self.turn.get("code_mode") != "code" or self.turn.get("interactive_permissions") is not False:
+            return "allow"
+        opted_in = str(operator_value(self.effective_settings, "permissions.nonInteractiveAsk") or "").strip().lower() == "allow"
+        return "allow" if opted_in else "deny"
+
     def build_runtime(self) -> AgenticTurnRuntime:
         import inspect
         from agentos.agentic.runtime import CODE_MODE_CORE_TOOLS
@@ -2879,6 +2891,7 @@ class TurnSession:
         self._reminders = ReminderQueue()
         toolset = self._toolset(
             subagents=self.enable_subagents,
+            non_interactive_ask=self._non_interactive_ask(),
             code_mode_active=self.turn.get("code_mode") == "code",
             code_mode_permits_push=(
                 effective_autonomy == "full_autonomy"
