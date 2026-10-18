@@ -96,3 +96,30 @@ def test_subagent_start_context_joins_the_subagent_task(tmp_path: Path) -> None:
     session._execute_subagent_run_inner = lambda **kwargs: captured.update(kwargs) or ToolOutcome("succeeded", "ok", "done")
     session._execute_subagent_run(agent_id="a1", builtin_key="explore", clean="explore", task_text="find the bug")
     assert captured["task_text"].startswith("find the bug") and "use the staging database" in captured["task_text"]
+
+
+def test_a_refused_config_change_runs_none_of_its_hooks(tmp_path: Path) -> None:
+    import sys
+
+    from agentos.settings.paths import orin_user_dir
+
+    reset_snapshots()
+    mode = {"block": True}
+    bus = LifecycleBus()
+    bus.subscribe(lambda event: LifecycleDecision(blocked=True, reason="settings are frozen") if event.name is HookEvent.CONFIG_CHANGE and mode["block"] else None)
+    store = Store()
+    _runtime(tmp_path, bus, store)  # the snapshot of the settings files, before the change
+    marker = tmp_path / "hook-ran.txt"
+    script = tmp_path / "hook.py"
+    script.write_text(f"import pathlib; pathlib.Path(r'{marker}').open('a').write('x')", encoding="utf-8")
+    orin_user_dir().mkdir(parents=True, exist_ok=True)
+    (orin_user_dir() / "settings.json").write_text(json.dumps({"hooks": {"UserPromptSubmit": [{"hooks": [
+        {"type": "command", "command": f'"{sys.executable}" "{script}"'}]}]}}), encoding="utf-8")
+
+    for _ in range(2):  # every blocked turn, not just the first
+        blocked = _runtime(tmp_path, bus, store)
+        assert blocked.config_block_reason and "settings are frozen" in blocked.config_block_reason
+        assert not marker.exists()
+    mode["block"] = False
+    _runtime(tmp_path, bus, store)  # accepted: the hook runs once, at this turn's prompt submission
+    assert marker.read_text() == "x"

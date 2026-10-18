@@ -2176,11 +2176,15 @@ class TurnSession:
                 # Managed policy changes always apply; any other change a hook refuses keeps the turn from running.
                 if (change.blocked or change.stop) and source != "policy_settings":
                     refused.append((path, change.reason or change.stop_reason or "blocked by hook"))
+                    # The settings hooks installed for this turn came from the refused configuration: they stop now.
+                    self._remove_settings_hooks()
             if refused:
                 from agentos.settings.watcher import forget
 
                 forget(f"{self.turn.get('conversation_id') or ''}|{self.workspace.root}", [path for path, _ in refused])
                 result["config_blocked"] = "; ".join(f"{path.name}: {reason}" for path, reason in refused)[:2000]
+                # A refused change runs no hook of its own: no instructions, session start or prompt hooks this turn.
+                return result
             memory = getattr(self, "_memory", None)
             if memory is not None:
                 from agentos.memory_files import instructions_payload
@@ -2313,13 +2317,7 @@ class TurnSession:
         bus = self.lifecycle
         if bus is None:
             return
-        if self._hook_unsubscribe is not None:
-            try:
-                self._hook_unsubscribe()
-            except Exception:  # noqa: BLE001 - replacing hooks never stops a turn
-                logger.debug("previous settings hooks could not be removed", exc_info=True)
-            self._hook_unsubscribe = None
-        self._close_hook_dispatcher()
+        self._remove_settings_hooks()
         try:
             specs, errors = load_hook_specs(self.effective_settings)
             for error in errors:
@@ -2342,6 +2340,16 @@ class TurnSession:
             self._hook_unsubscribe = bus.subscribe(dispatcher)
         except Exception:  # noqa: BLE001 - hook setup never stops a turn
             logger.exception("settings hooks could not be installed")
+
+    def _remove_settings_hooks(self) -> None:
+        """Unsubscribe the settings hooks of this session from the bus. Never stops a turn."""
+        unsubscribe, self._hook_unsubscribe = self._hook_unsubscribe, None
+        if unsubscribe is not None:
+            try:
+                unsubscribe()
+            except Exception:  # noqa: BLE001 - removing hooks never stops a turn
+                logger.debug("previous settings hooks could not be removed", exc_info=True)
+        self._close_hook_dispatcher()
 
     def _hook_env_file(self) -> Path:
         """Where a SessionStart hook may write variables for this conversation's commands."""
