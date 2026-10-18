@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from sqlalchemy import create_engine, inspect
+from pathlib import Path
+
+from sqlalchemy import create_engine, inspect, text
 
 from agentos.conversations.chat import PostgresChatStore
 from agentos.persistence.postgres.migrate import upgrade
@@ -40,3 +42,24 @@ def test_the_store_patches_a_database_that_predates_w3() -> None:
     assert {table.name for table in W3_TABLES} <= set(inspector.get_table_names())
     assert "turn_kind" in {column["name"] for column in inspector.get_columns("conversation_turns")}
     assert "lease_renewed_at" in {column["name"] for column in inspector.get_columns("conversation_dispatches")}
+
+
+def test_the_migration_reaches_head_after_the_store_patched_the_database(tmp_path: Path) -> None:
+    # A database that skipped migrations, self-patched by the store, must still take 0048 (it creates only what is missing).
+    engine = create_engine(f"sqlite:///{(tmp_path / 'orin.db').as_posix()}")
+    upgrade(engine, "0047_conversation_mode_and_permission")
+    PostgresChatStore(engine)
+    upgrade(engine)
+    with engine.connect() as connection:
+        assert connection.execute(text("select version_num from alembic_version")).scalar() == "0048_w3_loop_and_context"
+    inspector = inspect(engine)
+    assert {table.name for table in W3_TABLES} <= set(inspector.get_table_names())
+    assert "turn_kind" in {column["name"] for column in inspector.get_columns("conversation_turns")}
+    assert "lease_renewed_at" in {column["name"] for column in inspector.get_columns("conversation_dispatches")}
+
+
+def test_the_store_starts_on_a_database_that_is_already_at_head(tmp_path: Path) -> None:
+    engine = create_engine(f"sqlite:///{(tmp_path / 'orin.db').as_posix()}")
+    upgrade(engine)
+    PostgresChatStore(engine)
+    assert {table.name for table in W3_TABLES} <= set(inspect(engine).get_table_names())
