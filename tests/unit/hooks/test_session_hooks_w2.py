@@ -139,3 +139,47 @@ def test_a_prompt_blocked_by_a_hook_is_not_expanded_or_written_to_a_plan(tmp_pat
     assert all("hunter2" not in path.read_text(encoding="utf-8", errors="replace") for path in written)
     assert not any(path.name.endswith("-plan.md") for path in written)
     assert session._read_file_state == {}
+
+
+def test_concurrent_agent_hooks_run_exactly_one_verifier(tmp_path):
+    # W2-R8: the guard is atomic; a second verifier started while one runs is refused, not queued.
+    import threading
+    import time
+
+    session, _ = _session(tmp_path, [{"role": "user", "content": "x"}])
+    calls = []
+
+    def slow_subagent(subagent_type, task, *, description="", **_kwargs):
+        calls.append(task)
+        time.sleep(0.4)
+        return type("Outcome", (), {"content": '{"ok": true}'})()
+
+    session._run_subagent = slow_subagent
+    results = []
+    threads = [threading.Thread(target=lambda: results.append(session._hook_agent("check"))) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert len(calls) == 1
+    assert sorted(results) == ["", '{"ok": true}']
+    assert session._hook_agent_running is False
+
+
+def test_a_cancelled_verifier_is_told_to_stop(tmp_path):
+    # W2-R8: the cancel event of a timed-out verifier reaches the verifier's own subagent predicate.
+    import threading
+
+    session, _ = _session(tmp_path, [{"role": "user", "content": "x"}])
+    cancel = threading.Event()
+    seen = []
+
+    def fake_subagent(subagent_type, task, *, description="", hook_cancel=None, **_kwargs):
+        seen.append(session._child_cancelled(hook_cancel)({"turn_id": "child"}))
+        cancel.set()
+        seen.append(session._child_cancelled(hook_cancel)({"turn_id": "child"}))
+        return type("Outcome", (), {"content": ""})()
+
+    session._run_subagent = fake_subagent
+    session._hook_agent("check", cancel)
+    assert seen == [False, True]

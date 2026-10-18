@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import re
+import threading
 from collections.abc import Callable, Mapping
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -91,23 +93,52 @@ class HttpHookRunner:
         return HookRun(1, "", f"HTTP {response.status_code}")
 
 
-def _with_timeout(function: Callable[[], Any], timeout: float) -> Any:
-    executor = ThreadPoolExecutor(max_workers=1)
+def _run_bounded(executor: ThreadPoolExecutor, function: Callable[[], Any], timeout: float, cancel: threading.Event) -> Any:
+    """Run ``function`` on the runner's own pool and return its result, or None after ``timeout``.
+
+    A call that outlives its deadline is cancelled: the ``cancel`` event is set so the work can stop
+    itself, and a call still queued never starts. A running call cannot be killed from outside, so it
+    must honour the event; ``_run_bounded`` never waits for it.
+    """
     try:
-        return executor.submit(function).result(timeout=timeout)
-    except (FutureTimeout, Exception):  # noqa: BLE001 - a hook failure is a missing verdict
+        future = executor.submit(function)
+    except RuntimeError:  # the pool was closed with the dispatcher
         return None
-    finally:
-        executor.shutdown(wait=False, cancel_futures=True)
+    try:
+        return future.result(timeout=timeout)
+    except Exception:  # noqa: BLE001 - a timeout or a hook failure is a missing verdict
+        cancel.set()
+        future.cancel()
+        return None
 
 
-class PromptHookRunner:
+def _accepts_cancel(agent: Callable[..., Any]) -> bool:
+    try:
+        parameters = list(inspect.signature(agent).parameters.values())
+    except (TypeError, ValueError):
+        return False
+    positional = [item for item in parameters if item.kind in (item.POSITIONAL_ONLY, item.POSITIONAL_OR_KEYWORD)]
+    return len(positional) >= 2 or any(item.kind is item.VAR_POSITIONAL for item in parameters)
+
+
+class _BoundedRunner:
+    """One small worker pool per runner. Its lifetime is the dispatcher's, closed by ``close``."""
+
+    def __init__(self, prefix: str) -> None:
+        self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix=prefix)
+
+    def close(self) -> None:
+        self._executor.shutdown(wait=False, cancel_futures=True)
+
+
+class PromptHookRunner(_BoundedRunner):
     def __init__(self, provider_factory: Callable[[], object], *, provider_name: str, default_model: str) -> None:
+        super().__init__("orin-hook-prompt")
         self.provider_factory = provider_factory
         self.provider_name = provider_name
         self.default_model = default_model
 
-    def _ask(self, spec: HookSpec, payload: Mapping[str, Any]) -> str:
+    def _ask(self, spec: HookSpec, payload: Mapping[str, Any], cancel: threading.Event) -> str:
         from agentos.agentic.runtime import AgenticTurnRuntime
 
         request = {
@@ -116,24 +147,39 @@ class PromptHookRunner:
             "tools": [], "max_output_tokens": 300,
         }
         parts: list[str] = []
-        for raw in self.provider_factory().stream(request):
-            event = AgenticTurnRuntime._coerce(raw)
-            if event.text:
-                parts.append(event.text)
+        stream = self.provider_factory().stream(request)
+        try:
+            for raw in stream:
+                if cancel.is_set():  # the deadline passed: stop reading the provider
+                    break
+                event = AgenticTurnRuntime._coerce(raw)
+                if event.text:
+                    parts.append(event.text)
+        finally:
+            closer = getattr(stream, "close", None)
+            if callable(closer):
+                closer()
         return "".join(parts)
 
     def run(self, spec: HookSpec, payload: Mapping[str, Any]) -> dict[str, Any] | None:
-        reply = _with_timeout(lambda: self._ask(spec, payload), spec.timeout)
+        cancel = threading.Event()
+        reply = _run_bounded(self._executor, lambda: self._ask(spec, payload, cancel), spec.timeout, cancel)
         return parse_verdict(reply) if isinstance(reply, str) else None
 
 
-class AgentHookRunner:
-    def __init__(self, agent: Callable[[str], str] | None) -> None:
+class AgentHookRunner(_BoundedRunner):
+    def __init__(self, agent: Callable[..., str] | None) -> None:
+        super().__init__("orin-hook-verify")
         self.agent = agent
+        self._takes_cancel = agent is not None and _accepts_cancel(agent)
 
     def run(self, spec: HookSpec, payload: Mapping[str, Any]) -> dict[str, Any] | None:
         if self.agent is None:
             return None
         prompt = _with_arguments(spec.prompt, payload) + '\n\nWhen you are done, answer with {"ok": true|false, "reason": "..."}.'
-        reply = _with_timeout(lambda: self.agent(prompt), spec.timeout)
+        cancel = threading.Event()
+        if self._takes_cancel:
+            reply = _run_bounded(self._executor, lambda: self.agent(prompt, cancel), spec.timeout, cancel)
+        else:
+            reply = _run_bounded(self._executor, lambda: self.agent(prompt), spec.timeout, cancel)
         return parse_verdict(reply) if isinstance(reply, str) else None

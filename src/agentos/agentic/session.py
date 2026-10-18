@@ -13,6 +13,7 @@ import os
 import platform
 import re
 import shutil
+import threading
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
@@ -830,7 +831,10 @@ class TurnSession:
         # Removes this session's settings hooks from its bus (set when they are installed).
         self._hook_unsubscribe: Callable[[], None] | None = None
         # True while an agent-type hook's verifier runs: its own tool calls must not start another verifier.
+        # The guard is a lock taken without blocking, so two verifiers can never both start (W2-R8).
         self._hook_agent_running = False
+        self._hook_agent_guard = threading.Lock()
+        self._hook_dispatcher = None
         self.project_store = project_store
         self.chat_store = chat_store
         self.local_workspaces = local_workspaces
@@ -1327,6 +1331,7 @@ class TurnSession:
         model_id: str | None = None,
         agent_id: str | None = None,
         run_in_background: bool = False,
+        hook_cancel: threading.Event | None = None,
     ) -> ToolOutcome:
         raw_type = str(subagent_type or "").strip()
         clean_type = raw_type.lower()
@@ -1353,6 +1358,7 @@ class TurnSession:
             description=description,
             resumed_agent_id=clean_agent_id,
             run_in_background=bool(run_in_background),
+            hook_cancel=hook_cancel,
         )
 
     def _ask_agent(
@@ -1364,6 +1370,7 @@ class TurnSession:
         description: str = "",
         resumed_agent_id: str | None = None,
         run_in_background: bool = False,
+        hook_cancel: threading.Event | None = None,
     ) -> ToolOutcome:
         clean = " ".join(str(name).split())[:60]
         builtin_key = clean.lower()
@@ -1504,6 +1511,7 @@ class TurnSession:
                 },
             )
         return self._execute_subagent_run(
+            hook_cancel=hook_cancel,
             record=record,
             agent_id=agent_id,
             clean=clean,
@@ -1552,6 +1560,7 @@ class TurnSession:
         task_text: str,
         description: str,
         resumed_agent_id: str | None = None,
+        hook_cancel: threading.Event | None = None,
     ) -> ToolOutcome:
         with self._subagent_semaphore:
             if self.cancelled(self.turn):
@@ -1588,6 +1597,7 @@ class TurnSession:
                 task_text=task_text,
                 description=description,
                 resumed_agent_id=resumed_agent_id,
+                hook_cancel=hook_cancel,
             )
 
     def _execute_subagent_run_unlocked(
@@ -1603,6 +1613,7 @@ class TurnSession:
         task_text: str,
         description: str,
         resumed_agent_id: str | None = None,
+        hook_cancel: threading.Event | None = None,
     ) -> ToolOutcome:
         active_model_id = child_model_id
         try:
@@ -1699,7 +1710,7 @@ class TurnSession:
             tool_kinds={item.name: item.kind for item in sub_definitions},
             hook_engine=self.hook_engine,
             phase_controller=None,
-            cancelled=self.cancelled,
+            cancelled=self._child_cancelled(hook_cancel),
         )
         result = runtime.run(str(self.turn["turn_id"]), turn=subagent_turn)
         if (
@@ -1754,7 +1765,7 @@ class TurnSession:
                 tool_kinds={item.name: item.kind for item in sub_definitions},
                 hook_engine=self.hook_engine,
                 phase_controller=None,
-                cancelled=self.cancelled,
+                cancelled=self._child_cancelled(hook_cancel),
             )
             result = runtime.run(str(self.turn["turn_id"]), turn=subagent_turn)
         answer = sub_store.final_answer()
@@ -2187,6 +2198,7 @@ class TurnSession:
             except Exception:  # noqa: BLE001 - replacing hooks never stops a turn
                 logger.debug("previous settings hooks could not be removed", exc_info=True)
             self._hook_unsubscribe = None
+        self._close_hook_dispatcher()
         try:
             specs, errors = load_hook_specs(self.effective_settings)
             for error in errors:
@@ -2205,6 +2217,7 @@ class TurnSession:
                 agent_runner=AgentHookRunner(self._hook_agent),
                 recorder=self._record_hook,
             )
+            self._hook_dispatcher = dispatcher
             self._hook_unsubscribe = bus.subscribe(dispatcher)
         except Exception:  # noqa: BLE001 - hook setup never stops a turn
             logger.exception("settings hooks could not be installed")
@@ -2228,22 +2241,38 @@ class TurnSession:
             dict(record),
         )
 
-    def _hook_agent(self, prompt: str) -> str:
+    def _hook_agent(self, prompt: str, cancel: threading.Event | None = None) -> str:
         """Runs an agent-type hook as a read-only verification subagent and returns its text.
 
-        Re-entry is refused: the verifier's tool calls fire the same hooks, and a verifier
-        that starts another verifier would recurse without bound.
+        Re-entry is refused, atomically: the verifier's tool calls fire the same hooks, so a verifier
+        that starts another verifier would recurse without bound, and two verifiers must never run at
+        once. ``cancel`` is set when the hook times out; the verifier's child runtime observes it and stops.
         """
-        if self._hook_agent_running:
+        if not self._hook_agent_guard.acquire(blocking=False):
             return ""
         self._hook_agent_running = True
         try:
-            outcome = self._run_subagent("explore", prompt, description="Hook de verificação")
+            outcome = self._run_subagent("explore", prompt, description="Hook de verificação", hook_cancel=cancel)
             return str(getattr(outcome, "content", "") or "")
         except Exception:  # noqa: BLE001 - a failed verifier is a missing verdict
             return ""
         finally:
             self._hook_agent_running = False
+            self._hook_agent_guard.release()
+
+    def _child_cancelled(self, hook_cancel: threading.Event | None):
+        """The cancel predicate of a subagent: the turn's own cancel, plus its verifier's timeout when it is one."""
+        if hook_cancel is None:
+            return self.cancelled
+        return lambda turn: bool(self.cancelled(turn)) or hook_cancel.is_set()
+
+    def _close_hook_dispatcher(self) -> None:
+        dispatcher, self._hook_dispatcher = self._hook_dispatcher, None
+        if dispatcher is not None:
+            try:
+                dispatcher.close()
+            except Exception:  # noqa: BLE001 - closing hooks never stops a turn
+                logger.debug("settings hook dispatcher did not close cleanly", exc_info=True)
 
     def _config_change_events(self) -> list[tuple[str, Path]]:
         """Settings files that changed since the last turn, classified like Claude Code's ConfigChange sources."""
@@ -2606,6 +2635,7 @@ class TurnSession:
         runtime = AgenticTurnRuntime(
             store=_MainAgentStore(self, self.store, toolset), provider=self.provider_factory(), toolset=toolset,
             system_prompt=prompt, volatile_prompt=volatile_prompt, limits=self.limits, cancelled=self.cancelled,
+            on_close=self._close_hook_dispatcher,
             reconciliation_required=self.reconciliation_required,
             tool_kinds={item.name: item.kind for item in definitions},
             skill_prompt_tokens=_skill_prompt_tokens(skill_catalog),

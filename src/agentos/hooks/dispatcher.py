@@ -36,7 +36,15 @@ class HookDispatcher:
         self._background = ThreadPoolExecutor(max_workers=4, thread_name_prefix="orin-hook-async")
 
     def close(self) -> None:
-        self._background.shutdown(wait=False, cancel_futures=False)
+        """Release the pools this dispatcher owns. Safe to call more than once."""
+        self._background.shutdown(wait=False, cancel_futures=True)
+        for runner in self.runners.values():
+            closer = getattr(runner, "close", None)
+            if callable(closer):
+                try:
+                    closer()
+                except Exception:  # noqa: BLE001 - closing never breaks the turn
+                    logger.debug("hook runner did not close cleanly", exc_info=True)
 
     def _record(self, spec: HookSpec, status: str, exit_code: int | None, decision: LifecycleDecision, started: float) -> None:
         if self.recorder is None:

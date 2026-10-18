@@ -249,11 +249,14 @@ class AgenticTurnRuntime:
         learning_sink: Callable[[tuple[LearnedMemory, ...]], None] | None = None,
         lifecycle: LifecycleBus | None = None,
         prompt_block_reason: str | None = None,
+        on_close: Callable[[], None] | None = None,
     ) -> None:
         self.store, self.provider = store, provider
         self.lifecycle = lifecycle
         # Set when a UserPromptSubmit hook refused the prompt: the turn ends before any model call.
         self.prompt_block_reason = prompt_block_reason
+        # Releases what the turn owns outside the loop (its hook dispatcher); called once from close().
+        self._on_close = on_close
         self._stop_hook_active = False
         self._stop_continuations = 0
         self.hook_engine = hook_engine
@@ -310,6 +313,11 @@ class AgenticTurnRuntime:
         if callable(closer):
             try:
                 closer()
+            except Exception:
+                pass
+        if callable(self._on_close):
+            try:
+                self._on_close()
             except Exception:
                 pass
 

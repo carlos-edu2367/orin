@@ -85,3 +85,68 @@ def test_read_env_file(tmp_path: Path) -> None:
     big = tmp_path / "big.env"
     big.write_text("A=" + "x" * 300_000, encoding="utf-8")
     assert read_env_file(big) == {}
+
+
+def test_a_timed_out_agent_verifier_is_cancelled_and_leaves_no_thread_behind() -> None:
+    # W2-R8: a verifier that outlives its timeout is told to stop, and the runner does not grow a thread per call.
+    import threading
+    import time
+
+    observed = []
+
+    def slow_agent(prompt, cancel):
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not cancel.is_set():
+            time.sleep(0.02)
+        observed.append(cancel.is_set())
+        return '{"ok": true}'
+
+    runner = AgentHookRunner(slow_agent)
+    before = threading.active_count()
+    started = time.monotonic()
+    for _ in range(5):
+        assert runner.run(_spec(type="agent", prompt="check", timeout=0.3), {}) is None
+    assert time.monotonic() - started < 4
+    deadline = time.monotonic() + 4
+    while len(observed) < 5 and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert observed == [True] * len(observed) and len(observed) >= 1
+    assert threading.active_count() <= before + 2
+    runner.close()
+
+
+def test_a_timed_out_prompt_hook_stops_reading_the_provider_stream(monkeypatch) -> None:
+    # W2-R8: the prompt hook's worker does not keep consuming a provider stream after its deadline.
+    import time
+
+    from agentos.agentic.runtime import AgenticTurnRuntime
+
+    class Chunk:
+        def __init__(self, text):
+            self.text = text
+
+    consumed = []
+
+    class Stream:
+        def __iter__(self):
+            for index in range(100_000):
+                consumed.append(index)
+                time.sleep(0.001)
+                yield Chunk("x")
+
+        def close(self):
+            consumed.append("closed")
+
+    class Provider:
+        def stream(self, request):
+            return Stream()
+
+    monkeypatch.setattr(AgenticTurnRuntime, "_coerce", staticmethod(lambda raw: raw))
+    runner = PromptHookRunner(lambda: Provider(), provider_name="openrouter", default_model="m")
+    assert runner.run(_spec(type="prompt", prompt="check", timeout=0.2), {}) is None
+    time.sleep(0.3)
+    assert len(consumed) > 0, "the stream was never read, so the test proves nothing"
+    settled = len(consumed)
+    time.sleep(0.3)
+    assert len(consumed) == settled, "the stream kept being read after the timeout"
+    runner.close()
