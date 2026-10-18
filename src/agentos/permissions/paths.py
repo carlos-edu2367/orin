@@ -83,7 +83,7 @@ def workspace_path(raw: str, root: Path) -> Path:
     """Target of a tool path, resolved the way ``ConversationWorkspace.resolve`` does.
 
     Separators are normalized and leading separators dropped, so ``/.env``,
-    ``\.env`` and ``//.env`` name the workspace file the tool will open.
+    ``\\.env`` and ``//.env`` name the workspace file the tool will open.
     Drive-qualified paths keep their plain meaning.
     """
     text = str(raw).strip()

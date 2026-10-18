@@ -163,7 +163,7 @@ class PermissionEngine:
     def _token_paths(self, token: str) -> list[Path]:
         """Every meaning a shell token can have as a path.
 
-        A root-relative token ("/tmp/x", "\.env") is checked both as the real
+        A root-relative token ("/tmp/x", "\\.env") is checked both as the real
         filesystem path the shell opens and as the workspace path the tools open.
         """
         if token.startswith("~"):

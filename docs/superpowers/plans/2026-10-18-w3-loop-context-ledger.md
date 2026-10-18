@@ -307,3 +307,212 @@ That is the batch A total (2906) plus the 30 tests added here (7 + 2 + 10 + 11).
 4. The ignored-effort notice is recorded on every turn for an unsupported model, so a conversation on Ollama with `effort` set gets one notice per turn.
 5. `load_output_styles` defaults to `trusted=True` (kept so the plan's test is unchanged). Production code reaches it only through the trust-gated `resolve_output_style`. Any new caller that serves an untrusted workspace must pass `trusted=False`.
 6. `_PROCESS_SESSIONS` is process-global. A test in the same process that uses a store with `session_state` must call `reset_process_sessions()`; the new session tests do.
+
+## Execution notes — batch F (Tasks 21-24)
+
+### Task 21 — FileChanged for files changed outside the session
+
+- Commit: `7cea7b9` `feat(hooks): FileChanged for files changed outside the session, with a reminder to re-read`
+- Tests added: `tests/unit/agentic/test_file_changed.py` (4).
+- Red: 4 failed before the change (`AttributeError` for `detect_external_changes`; `IndexError` in the runtime test because no FILE_CHANGED event was emitted).
+- Anchors found as planned: `self._inject_reminders(messages)` in `AgenticTurnRuntime._run`, `_read_file_lock` and `_read_file_state` in `AgentToolset`.
+- Deviations: none in code.
+- Existing test expectations changed: none.
+- Limitations (by reading the code, not measured or tested): the check runs before every model request and stats up to 200 files the turn read. A change made by a shell command the model runs (for example `sed -i` through `run_command`) is also reported as an external change, because only the toolset's own writes update the read state.
+
+### Task 22 — TaskCreated/TaskCompleted and ConfigChange blocks; PostToolUseFailure and SubagentStart context
+
+- Commit: `933644a` `feat(hooks): task and config blocks take effect; PostToolUseFailure and SubagentStart context reach the model`
+- Tests added: `tests/unit/hooks/test_w3_hook_decisions.py` (5).
+- Red: 5 failed before the change, each for the expected reason (task blocks ignored, failure context dropped, `config_block_reason` missing, SubagentStart context missing).
+- Deviations: none in code.
+- Existing test expectations changed: none. `test_task_events` (W2) passes unchanged.
+- Limitation found by probing (plan design, not fixed): TaskCreated now fires before the tool validates its input. A `task_create` with a blank subject emitted `TaskCreated` (subject `"   "`) and was then refused with `TOOL_REFUSED`, and `PostToolUseFailure` followed. A hook therefore sees creates the task list never receives. By reading the code, the same happens to `task_update` with `status: completed` for an id that does not exist (`_task_hook_block` runs before the tool's own checks; not probed). Suggested fix: apply the tool's own validation in `_task_hook_block` and skip the event when it would fail; or emit TaskCreated after a successful create and keep only a pre-check for blocking.
+
+### Task 23 — W1-R9: an explicitly non-interactive Code turn refuses an ordinary ask
+
+- Commit: `703d629` `fix(permissions): W1-R9 a non-interactive Code turn refuses an ordinary ask unless the user opts in`
+- Tests added: `tests/unit/permissions/test_non_interactive_ask.py` (2).
+- Red: 2 failed before the change (`TypeError` for the new `non_interactive_ask` keyword; `AttributeError` for `_non_interactive_ask_allowed`).
+- Deviations: none in code.
+- Existing test expectations changed: none.
+- The second test writes `permissions.nonInteractiveAsk` into the user settings directory. `tests/conftest.py` points `ORIN_USER_DIR` at a temporary folder for every test, so the developer's `~/.orin` is not touched.
+
+### Task 24 — Regression, warnings and ledger
+
+- Warning fix: `src/agentos/permissions/engine.py` (`_token_paths` docstring, line 166) and `src/agentos/permissions/paths.py` (`workspace_path` docstring, line 86): `\.` became `\.` in the docstrings. No runtime text changed.
+- Verification method (deviation): the plan's Step 1 command (`python -W error::SyntaxWarning -c "import ..."`) does not recompile a module whose bytecode cache is still valid, so it can pass without reading the source. I ran it only after the fix (it printed nothing and exited 0), so my own runs do not show that it would have caught the bug. The check that confirmed the bug and the fix compiles each source file with `compile()` under `-W error::SyntaxWarning`: it failed before the fix (`SyntaxError: invalid escape sequence '\.'` in both files) and passes after it. The same check over every `src/agentos/**/*.py` file found no other file with the warning.
+- Ledger commit: this commit (see Verification).
+
+## Spec §6 delivered
+
+Paths are relative to `src/agentos/` (code) and `tests/unit/` (tests). "Delivered" means the code and the listed tests exist and pass in the full backend suite. What is still unverified is listed under Pending and known limitations.
+
+| Item | Where | Tests |
+|---|---|---|
+| Code-mode turns without caps (maxTurns, maxBudgetUsd, safetyMaxToolRounds=500), durable leases, 24 h execution deadline | `agentic/loop_settings.py`; `agentic/runtime.py` (MAX_TURNS, MAX_BUDGET_USD, safety pause, TURN_DEADLINE_EXCEEDED); `agentic/session.py` (`CODE_TURN_DEADLINE` = 24 h); `conversations/chat.py` (lease predicate, `renew_dispatch_leases`); `workers/publisher.py` (lease renewal) | `agentic/test_loop_settings.py`, `agentic/test_code_loop_limits.py`, `conversations/test_dispatch_leases.py` |
+| Retry with backoff/jitter/retry-after; fallback chain with Pre/PostModelSwitch | `agentic/retry.py`; `agentic/runtime.py` (fallback switch; PreModelSwitch can refuse the candidate); `agentic/provider_stream.py` (retry-after on rejection) | `agentic/test_retry.py`, `agentic/test_retry_and_fallback.py` |
+| max_tokens recovery | `agentic/runtime.py` (`_output_cap`, `_max_tokens_recoveries`); `agentic/provider_stream.py` (`max_tokens` finish) | `agentic/test_output_limit_recovery.py` |
+| Input queue (API only) | `conversations/chat.py` (`enqueue_input`, `claim_queued_inputs`, `cancel_queued_input`); `agentic/runtime.py` (`_inject_queued_inputs`); `workers/chat.py` (`_promote_queued_inputs`); `agentic/transcript.py` (queued-input step); `api/gateway.py` (queue endpoints) | `conversations/test_input_queue.py`, `agentic/test_queue_injection.py`, `api/test_queue_api.py` |
+| Interruption keeps partial text; interrupted tool results | `agentic/runtime.py` (`INTERRUPTED_TOOL_RESULT`, `_cancel`) | `agentic/test_interruption.py` |
+| One `<system-reminder>` mechanism | `agentic/reminders.py`, used by `agentic/runtime.py`, `agentic/agent_tools.py`, `agentic/session.py` | `agentic/test_reminders.py` |
+| Clean-room Code prompt, public tool names by default in Code mode (W0-R20) | `code_mode/system_prompt.py`; `agentic/tools/public_names.py`; `agentic/session.py` | `agentic/test_code_prompt.py` (plus the expectation changes listed below) |
+| Prompt snapshot, excludeDynamicSystemPromptSections, safe git status | `conversations/chat.py` (`prompt_snapshot`, `save_prompt_snapshot`, `clear_prompt_snapshot`); `agentic/session.py`; `code_mode/git_context.py` | `agentic/test_prompt_snapshot.py`, `code_mode/test_git_context.py` |
+| compact_boundary, microcompact_boundary, /compact, /context, reattach, nine sections | `agentic/compaction.py`; `agentic/runtime.py` (`_run_compaction`, `_run_manual_compaction`, `_microcompact`); `conversations/chat.py` (`record_compact_boundary`, `context_usage`); `api/gateway.py` (`POST /v1/conversations/{id}/compact`, `GET /v1/conversations/{id}/context`) | `agentic/test_compact_boundary.py`, `agentic/test_microcompact.py`, `agentic/test_post_compact.py`, `agentic/test_manual_compact_runtime.py`, `conversations/test_manual_compact.py`, `conversations/test_context_usage.py` |
+| Memory hierarchy (ORIN.md/CLAUDE.md, rules, local files, @imports, lazy subdirectories, claudeMdExcludes, InstructionsLoaded per file) | `memory_files/__init__.py`, `memory_files/loader.py`; `agentic/session.py` (`_memory_files`); `agentic/agent_tools.py` (`_note_memory_for`, lazy load on `read_file`) | `memory_files/test_loader.py`, `agentic/test_memory_integration.py` |
+| Output styles, effort, autoMemoryEnabled, autoDreamEnabled | `agentic/output_styles.py`; `agentic/effort.py`; `agentic/provider_stream.py` (thinking budget, reasoning effort, signed thinking); `memory/consolidation.py`; `agentic/session.py` | `agentic/test_output_styles.py`, `agentic/test_effort.py`, `memory/test_consolidation.py` |
+| SessionStart source (startup/resume/compact) from the store, SessionEnd, FileChanged (W0-R14 / W2-R6 residual) | `agentic/session.py` (`_session_start_source`); `conversations/chat.py` (`record_session_start`); `hooks/session_end.py` and `workers/publisher.py` (SessionEnd at shutdown); `agentic/agent_tools.py` (`detect_external_changes`); `agentic/runtime.py` (`_check_external_changes`) | `agentic/test_session_source.py`, `hooks/test_session_end.py`, `agentic/test_file_changed.py` |
+| TaskCreated/TaskCompleted/ConfigChange blocks; PostToolUseFailure and SubagentStart context | `agentic/agent_tools.py` (`_task_hook_block`); `agentic/session.py` (`_emit_turn_start_events`, `_execute_subagent_run`); `agentic/runtime.py` (`config_block_reason`); `settings/watcher.py` (`forget`); `agentic/lifecycle.py` (`_CONTEXT_EVENTS`) | `hooks/test_w3_hook_decisions.py` |
+| W1-R9 decision (non-interactive ask) | `agentic/agent_tools.py` (`non_interactive_ask`); `agentic/session.py` (`_non_interactive_ask`) | `permissions/test_non_interactive_ask.py` |
+| Five keys never read from a repository (`fallbackModel`, `effort`, `effortLevel`, `autoDreamEnabled`, `permissions.nonInteractiveAsk`) | `settings/loader.py` (5 added lines) | No dedicated W3 test for these five keys. `agentic/test_effort.py` covers the repository-effort case. |
+| Public context telemetry keys | `agentic/models.py` (`_PUBLIC_CONTEXT_TELEMETRY_KEYS`) | No W3 test was added for this constant. The pre-existing `agentic/test_activity_contracts.py` refers to the public-context helper. |
+| Schema: 4 tables, 2 columns, migration 0048 | `persistence/postgres/migrations/versions/0048_w3_loop_and_context.py`; `persistence/postgres/schema.py` | `persistence/test_w3_schema.py`, `persistence/test_postgres_schema.py` (tests ran on SQLite only) |
+
+## Lifecycle events after W3
+
+Status against the W2 table (`2026-10-18-w2-hooks-ledger.md`). W2: 21 of 33 events emitted. After W3: 25 emitted (the code calls `bus.emit` for them, counted by grep over `src/agentos`). Only the rows that changed are listed.
+
+| Event | W2 | After W3 | Where |
+|---|---|---|---|
+| SessionStart | emitted; context and env file applied | emitted; `source` is `startup`, `resume` (first time this process serves an existing conversation) or `compact` (after a compaction) | `session.py` (`_session_start_source`); `runtime.py` (compact) |
+| SessionEnd | not emitted | emitted at worker shutdown with `reason: "other"`; informational | `hooks/session_end.py` (`end_sessions`); `workers/publisher.py` |
+| FileChanged | not emitted | emitted for files the turn read that changed outside it, payload `{file_path, event}`; informational plus a reminder to re-read | `agentic/runtime.py` (`_check_external_changes`); `agentic/agent_tools.py` |
+| PreModelSwitch | not emitted | emitted before a fallback model is used; a block or deny keeps the current model | `agentic/runtime.py` (fallback switch) |
+| PostModelSwitch | not emitted | emitted after a fallback switch; informational | `agentic/runtime.py` |
+| PostToolUseFailure | emitted; context dropped by the bus | context applied: appended to the failed tool result | `agentic/lifecycle.py` (`_CONTEXT_EVENTS`); `agentic/agent_tools.py` (`invoke`) |
+| SubagentStart | emitted; context not injected | context applied: appended to the subagent's task text | `agentic/session.py` (`_execute_subagent_run`) |
+| TaskCreated | emitted after the change; blocking deferred | emitted before the change; a block leaves the task list unchanged. See the limitation on refused creates. | `agentic/agent_tools.py` (`_task_hook_block`) |
+| TaskCompleted | emitted after the change; blocking deferred | emitted before the change; a block keeps the task open | `agentic/agent_tools.py` (`_task_hook_block`) |
+| ConfigChange | emitted; blocking deferred | a block stops the turn (fail-closed, `HOOK_BLOCKED_CONFIG`) and the change is reported again next turn until a hook accepts it; managed policy changes are never blocked | `agentic/session.py` (`_emit_turn_start_events`); `settings/watcher.py` (`forget`); `agentic/runtime.py` |
+| InstructionsLoaded | emitted once per turn for the project files | emitted per loaded memory file with `memory_type` and `load_reason`; also emitted when a read brings in subdirectory files | `agentic/session.py`; `agentic/agent_tools.py` (`_note_memory_for`); `memory_files/` |
+| PreCompact / PostCompact | emitted | payloads now carry `trigger` and `custom_instructions` (PreCompact), and `trigger`, `compaction_count`, `pre_tokens`, `post_tokens` (PostCompact) | `agentic/runtime.py` (`_run_compaction`) |
+
+Not listed above: PreToolUse, PostToolUse, PostToolBatch, UserPromptSubmit, Stop, StopFailure, SubagentStop, PermissionRequest, PermissionDenied, WorktreeCreate, WorktreeRemove and CwdChanged. The batch notes record no change to them, but I did not re-audit them. Not emitted (as in W2): Notification, UserPromptExpansion, Setup, Elicitation, ElicitationResult, TeammateIdle, DirectoryAdded, MessageDisplay.
+
+## Deviations
+
+### Plan deviations (from the plan header, same numbering)
+
+1. Settings key names chosen by Orin: `maxTurns`, `maxBudgetUsd`, `safetyMaxToolRounds` (500), `fallbackModel`, `systemPromptSnapshot`, `excludeDynamicSystemPromptSections`, `autoCompact`, `outputStyle`, `effort` (alias `effortLevel`), `autoMemoryEnabled`, `autoDreamEnabled`, `claudeMdExcludes`, `permissions.nonInteractiveAsk`.
+2. Hook payload fields not in the notes are Orin's choice (PreModelSwitch/PostModelSwitch, FileChanged, InstructionsLoaded, SessionEnd, PreCompact, PostCompact).
+3. `maxTurns` counts completed model responses; `maxBudgetUsd` is checked before each model call.
+4. Output-cap escalation goes up to 32,000 tokens, only when the turn has no explicit `max_output_tokens` and the provider sent a cap. Batch E found that effort can still raise the cap above an explicit value (see Pending).
+5. Fallback models stay on the turn's provider; the primary is used again on the next turn.
+6. Input queue is API only; queued text is injected between tool rounds and promoted to a follow-up turn if left over.
+7. `/compact` and `/context` are API endpoints in W3; slash commands and the grid are W7.
+8. SessionEnd fires at worker shutdown (`reason: "other"`) only.
+9. Effort is sent only to models that reason (OpenRouter/OmniRoute `reasoning`, Anthropic `thinking`, OpenAI o-series/gpt-5); otherwise ignored with a visible note. Ollama is always ignored.
+10. Consolidation runs after a completed turn, at most once per 24 h per user and after 5 completed turns since the last run, with the turn's own model.
+11. Chat mode keeps its caps, its single immediate retry and its prompt.
+12. PostToolUseFailure and SubagentStart `additionalContext` are honoured; TaskCreated and TaskCompleted blocks prevent the change.
+13. ConfigChange block: the turn does not run and the change is reported again until a hook accepts it.
+14. Subdirectory memory loads on `Read`/`read_file` only.
+15. Prompt snapshot is keyed by `PROMPT_VERSION`, the published tool names, the names flag and the output style; compaction deletes it.
+16. W1-R9: an explicitly non-interactive Code turn denies an ordinary `ask` unless `permissions.nonInteractiveAsk` is `allow`. Chat mode and turns without the key are unchanged.
+17. FileChanged watches files read during the current turn.
+
+### Execution deviations (batches A-F)
+
+- E1 (A, Task 2): `tests/unit/persistence/test_postgres_schema.py` asserts the exact table set and was not in the plan's list; the four W3 tables were added to the expected set (additive).
+- E2 (A, Task 3): anchor placement: the `catalog_pricing` line sits after the annotated `self.lifecycle: LifecycleBus | None = lifecycle` line.
+- E3 (A, Task 1): import order only in `session.py`.
+- E4 (B, Task 5): 3 of the 7 new tests passed before the change; they were kept as regression guards.
+- E5 (B, Task 8): `arguments_in` in `agentic/tools/public_names.py` set `subagent_type` to `general` before resolving the aliases `agent_type`, `type` and `agent`. This was latent until Claude Code names became the default in Code mode. Fixed in the `run_subagent` branch; not in the plan.
+- E6 (B, Task 8): the snake_case rule (plan Step 8) was also applied to the plan and general blocks of `test_orin_code_phase_c.py::test_builtin_subagents_explore_plan_general_and_fork`, beyond the explore block in Step 7.
+- E7 (B, Task 8): `model` maps to `model_id` for `Agent`/`run_subagent` (plan Step 3), so `test_public_names.py::test_agent_maps_types_and_prompt` changed; not in the plan's list.
+- E8 (B through F): test command form. When a file is passed together with its own directory, pytest collects only the file. Batches used directories or files, never both.
+- E9 (C, Task 9): `test_git_context.py` failed at collection, so the snapshot test did not run in the red phase. It was checked afterwards by temporarily restoring the pre-task files (6 failed, 2 passed), then HEAD was restored.
+- E10 (C, Task 10): the old Portuguese four-section fallback was deleted; the nine-section fallback took its name (the old name stays as an alias); comments on the removed header were removed.
+- E11 (C, Task 10): `COMPACTION_HEADER` is still re-exported from `runtime.py` though unused there.
+- E12 (C, Task 12): `TurnSession._code_prompt_parts` still imports `render_code_system_prompt` but no longer calls it (cosmetic).
+- E13 (D, Task 15, security): the plan's regex glob matcher was replaced by a token matcher (`_glob_tokens`, `_glob_accepts`): match time grew about 6x per `*` (about 8 s at 8 stars). Regression test `test_a_hostile_glob_cannot_stall_a_read` added.
+- E14 (D, Task 16): process: the implementation was written before the new test was first run; it was checked afterwards by stashing the implementation (4 failed, then pass with it restored).
+- E15 (E, Task 17, plan test defect): `test_the_session_uses_the_style_and_it_changes_the_snapshot_key` built a non-Code turn. `"code_mode": "code"` was added to that test's turn. Implementation unchanged.
+- E16 (E, Task 17, security): follow-up commit `867f67d`. Project and local output styles were read for untrusted workspaces and overrode user and built-in names. `load_output_styles(..., trusted=...)` now skips project directories when untrusted; regression test added.
+- E17 (E, Task 19): follow-up commit `44d8c37`. A state-file timestamp without an offset raised `TypeError` in `ConsolidationState.due`; it is now read as UTC. Regression test added.
+- E18 (E): the two follow-up fixes (E16, E17) are extra commits outside the one-commit-per-task rule.
+- E19 (F, Task 24): the plan's Step 1 import command does not recompile a module with a valid bytecode cache, so it can pass without reading the source. A source-level compile check was used to confirm the bug and the fix (see the Task 24 notes).
+
+## Existing tests whose expectations changed (and why)
+
+Each line is an existing test whose assertion was edited. No existing test was deleted, skipped or weakened.
+
+- `tests/unit/persistence/test_postgres_schema.py::test_persistence_schema_contains_only_the_durable_boundary_tables`: expected table set gained the four W3 tables (`conversation_input_queue`, `conversation_prompt_snapshots`, `conversation_compact_boundaries`, `conversation_sessions`). Reason: the test asserts the exact set; the tables are new by design.
+- `tests/unit/agentic/test_structured_compaction.py::_SummarizingProvider.stream` (test double): returned the old four Portuguese sections; now returns the nine sections. `COMPACTION_HEADING` imported. Reason: one set of nine sections.
+- `tests/unit/agentic/test_structured_compaction.py`: `test_the_compacted_replacement_keeps_the_structured_sections`, `test_the_compaction_header_does_not_invite_rework`, `test_the_fallback_still_produces_every_section`, `test_the_fallback_names_the_tools_whose_results_were_folded_away`: `startswith("## Contexto compactado")` now `startswith(COMPACTION_HEADING)`. Reason: the header is a constant in `compaction.py`.
+- `tests/unit/agentic/test_context_window.py::test_auto_compaction_keeps_the_current_request_and_reduces_old_units`: `"## Contexto compactado" in ...` now `COMPACTION_HEADING in ...`. Same reason.
+- `tests/unit/agentic/test_prefix_stability.py::test_compaction_is_the_only_thing_that_rewrites_the_prefix`: `"Contexto compactado" in ...` now `COMPACTION_HEADING in ...`. Same reason.
+- `tests/unit/test_orin_code_phase_c.py::test_three_tier_compaction_and_top_5_file_rehydration`: `startswith("## Contexto compactado")` now `startswith(COMPACTION_HEADING)`. Same reason.
+- `tests/unit/agentic/test_turn_session.py::test_new_managed_code_workspace_skips_plan_approval`: `"autonomia de código" in managed_runtime.system_prompt` now `"code autonomy" in managed_runtime.volatile_prompt`. Reason: the Code prompt is Orin's own clean-room text and the dynamic part moved to the first message.
+- `tests/unit/agentic/test_subagent_and_stream_resilience.py::test_fix6_subagent_runs_in_code_mode_loop_and_recovers_partial_output_like_claude_code`: `"glob_files" in tools_sent` now `"Glob" in tools_sent`; `"propose_code_session" not in tools_sent` now `"ProposeCodeSession" not in tools_sent`. Reason: public tool names are on by default in Code mode.
+- `tests/unit/test_orin_code_phase_c.py::test_builtin_subagents_explore_plan_general_and_fork`: explore block `read_file` now `Read`, `search_files` now `Grep`, and `write_file`, `edit_file`, `run_command` are checked as `Write`, `Edit`, `Bash` (absent). Plan block `write_file` now `Write`, `edit_file` now `Edit`, `run_command` now `Bash` (absent). General block `write_file` now `Write`, `run_command` now `Bash` (present). Reason: plan Step 7 and the Step 8 rule.
+- `tests/unit/agentic/test_project_session_tools.py::test_project_tools_exposed_in_phases_code_mode_and_turn_session_prompt`: `"read_project_conversation" in runtime.volatile_prompt` now `"ReadProjectConversation" in ...`. Reason: public tool names by default in Code mode.
+- `tests/unit/agentic/tools/test_public_names.py::test_agent_maps_types_and_prompt`: expected dict for `arguments_in("run_subagent", {... "model": "opus"})` gained `"model_id": "opus"`. Reason: E7; not in the plan's list.
+- `tests/unit/agentic/test_lifecycle_runtime.py::test_compaction_emits_pre_and_post`: `names == [PRE_COMPACT, POST_COMPACT]` now `[PRE_COMPACT, POST_COMPACT, SESSION_START]`, plus `source == "compact"` on the third event. Reason: a compaction now also emits a session-start with source `compact`.
+
+Batch F changed no existing test.
+
+## Pending and known limitations
+
+Known defects found in the batches and not fixed, most important first:
+
+- Effort on Anthropic (batch E): `apply_effort` raises `max_tokens` to `budget + 4000` (up to 32,000) even when the turn's explicit output cap is smaller, so an explicit cap is overridden whenever effort is set. The raised value is not bounded by the remaining context either. Suggested fix: never raise above the explicit cap, and bound the raise by the remaining context.
+- TaskCreated and TaskCompleted fire before the tool validates its input (batch F, probed). A refused `task_create` with a blank subject still emits TaskCreated, then PostToolUseFailure. A hook therefore sees creates the task list never receives. By reading the code, the same happens to `task_update` with `status: completed` for an unknown id (not probed). Suggested fix in the Task 22 notes above.
+- Consolidation (batch E): `mark_run` writes the state before the background job starts, so a job interrupted by shutdown is not retried for 24 h. The state is a read-modify-write JSON file, so two worker processes can lose an increment, and the fixed temp name `auto-dream.tmp` can clash. Failures are swallowed. Best effort only; suggested fix: a unique temp name per write.
+- Queue POST is not idempotent on the live-turn path (batch B): `enqueue_input` takes no `Idempotency-Key`, so a retried POST queues the text twice.
+- `git_status_summary` runs synchronously in `build_runtime` for every Code turn in a trusted local folder (2 s timeout). In a large repository this adds up to 2 s before the turn starts (batch C).
+- Subagent toolsets get no `memory_tracker` (batch D), so a subagent's read does not bring in subdirectory instruction files or path rules. Needs per-agent trackers (W4).
+- `post_compact_enrichment` calls `stat()` on the plan file outside its `try` (batch C). If the plan is deleted between the glob and the stat, the compaction still happens but its enrichment is silently empty.
+- The ignored-effort notice is recorded on every turn for an unsupported model (batch E): a conversation on Ollama with `effort` set gets one notice per turn.
+- A compact boundary covers history before the compacting turn's user message, but the summary also contains that turn's earlier tool work; the next turn's replay may repeat part of it. Not tested (batch C).
+- `_PROCESS_SESSIONS` is process-global (batch E). A test in the same process that uses a store with `session_state` must call `reset_process_sessions()`; the new session tests do.
+- `load_output_styles` defaults to `trusted=True` (batch E). Production code reaches it only through the trust-gated `resolve_output_style`; any new caller serving an untrusted workspace must pass `trusted=False`.
+- FileChanged detection cost is not measured, and shell-driven edits to read files are reported as external changes (batch F, from reading the code, not tested).
+- Glob matching is bounded but not free: about 0.35 s per match for a 500-char pattern on a 4000-char path (batch D).
+- Stale tests not in the plan's list (batch C): `tests/unit/agentic/test_lifecycle_runtime.py` and `tests/unit/hooks/test_runtime_decisions.py` still stub the summarizer with the old Portuguese four-heading text. The runtime now rejects that shape and uses the fallback. Both pass because they assert nothing about the summary text.
+- `ChatWorker._promote_queued_inputs` has no direct test (batch B); it is covered only through the store and application tests.
+- Cosmetic: `history_for_turn`'s local `blocked_user_ids` also holds command-turn ids (batch D); `_memory_files` settings reads sit outside their `try` (batch D; the helpers they call are defensive).
+- Manual compaction summarises the whole history, so nothing stays verbatim after `/compact` (by design, batch D).
+- Subagent prompts still name some tools in snake_case inside repository text (carried from the plan's checklist; not re-verified in batch F).
+- Deferred to W7 by the plan: the queue, `/compact` and `/context` UIs, and slash commands (a `/compact` typed in a message is an ordinary prompt).
+- SessionEnd runs only on a graceful worker exit (`publisher.main`); a hard kill skips it (plan deviation 8). It is not called on conversation delete or archive, because Orin has none yet.
+- Effort is not sent to Ollama (plan deviation 9).
+- Consolidation uses the turn's model; Orin has no fast-model setting yet (plan deviation 10).
+- ConfigChange hooks are judged with the new settings (plan deviation 13); Orin keeps no copy of the previous settings across processes.
+- Linux was not run. All runs were on Windows.
+
+Verification gaps (from the batch notes, still true):
+
+- PostgreSQL: every test ran on SQLite, and migration 0048 was applied only on SQLite. Not run on Postgres: the Postgres branch of `_ensure_conversation_mode_columns` (`TIMESTAMP WITH TIME ZONE`), the `func.coalesce` lease predicate, the queue `func.count`/`notin_`/`in_` queries, the snapshot delete/insert, the boundary `order_by(id desc).limit(1)`, `mark_command_turn`, `status.in_(...)`, and the `context_usage` query. The `IntegrityError` retry in `record_session_start` is not exercised by any test.
+- No live provider run in any batch. The Anthropic thinking round trip (signature, redacted block, tool loop) is verified only against mocked SSE and request payloads. Compaction summary quality with a real model and prompt-cache behaviour were not measured.
+- No lint or type check of the W3 Python code: `ruff`, `ty` and `pyflakes` are not installed in the project environment, and no dependency was added. `py_compile` passed on the new modules.
+- Retry timing was tested with a fake `sleep`; the real `time.sleep` path and cancellation during a real wait were not timed.
+- A refused PreModelSwitch still builds the fallback provider object before the hook runs (the plan's order). The object is discarded and no network call is made.
+- No browser or app run. W3 is backend only; the frontend was not changed (zero frontend files in the range).
+- Consolidation state file: no cross-process test (the lock is per process).
+- The SessionEnd tests start real subprocesses through the command runner (the shell on this machine is cmd.exe).
+- Worker-level flows (ChatWorker turns for the snapshot and the boundary, `/compact`, queue promotion, PreCompact/PostCompact through the plugin hook engine) are not exercised end to end; the tests use stubs around the real store, runtime and route.
+
+## Verification
+
+Full backend suite after batch F (`uv run pytest -q tests/unit`, run once, 200.5 s):
+
+- **3032 passed, 53 skipped, 0 failed.** Batch E ended at 3021 passed, 53 skipped; batch F adds 11 tests (Task 21: 4, Task 22: 5, Task 23: 2) and nothing else changed the count.
+- 31 warnings, all DeprecationWarnings or Starlette notices from existing code (`bootstrap/production.py`, SQLAlchemy's datetime adapter, FastAPI's test client). None was traced to W3 code.
+
+Targeted runs during batch F (directory form):
+
+- Task 21: `tests/unit/agentic tests/unit/test_orin_code_phase_b.py` → 838 passed, 2 skipped.
+- Task 22: `tests/unit/hooks tests/unit/agentic tests/unit/settings` → 965 passed, 5 skipped.
+- Task 23: `tests/unit/permissions tests/unit/agentic tests/unit/code_mode tests/unit/test_orin_code_phase_a.py tests/unit/test_orin_code_phase_d.py` → 1087 passed, 3 skipped.
+
+Frontend (W3 changed no file under `frontend/`):
+
+- `npm --prefix frontend test` (vitest): 100 test files, 596 tests passed, exit 0. No rerun was needed.
+- `npm --prefix frontend run lint` (`eslint . --max-warnings=0`): exit 0, no output.
+- `npm --prefix frontend run build` (`tsc -b && vite build`): exit 0. Vite warns that some chunks exceed 500 kB; that warning comes from existing frontend code, not from W3.
+
+Other checks:
+
+- `compile()` with `-W error::SyntaxWarning` over every `src/agentos/**/*.py` file: 0 files with a warning or error (after the Task 24 fix).
+- Not run: a visual or browser check (backend only); lint or type checks of the Python code (tools not installed); PostgreSQL; a live provider. See Verification gaps and Pending above.
