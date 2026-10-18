@@ -2300,6 +2300,7 @@ class TurnSession:
             public_tool_names=self.effective_settings.experimental("claudeToolNames", default=self.turn.get("code_mode") == "code"),
             lifecycle=self.lifecycle,
             extra_env=self._hook_extra_env(),
+            cancel_check=lambda: bool(self.cancelled(self.turn)),
             lifecycle_context=lifecycle_context,
             reminders=reminders,
             non_interactive_ask=non_interactive_ask,

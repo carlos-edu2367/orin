@@ -128,6 +128,8 @@ _ORIN_AUTHORED_CODES = frozenset({
     "CODE_DEPLOY_CONFIRMATION_REQUIRED", "CODE_PUSH_CONFIRMATION_REQUIRED",
 })
 DEFAULT_COMMAND_TIMEOUT_SECONDS = 120
+# How often a running command asks whether the person stopped the turn; the check reads the database.
+CANCEL_CHECK_SECONDS = 0.5
 MAX_COMMAND_TIMEOUT_SECONDS = 600
 # Leaves headroom under MAX_TOOL_RESULT_CHARS for the "exit=" line and the
 # generic truncation notice, so our own head+tail bounding is what applies —
@@ -729,6 +731,7 @@ class AgentToolset:
         reminders: object | None = None,
         memory_tracker: object | None = None,
         non_interactive_ask: str = "allow",
+        cancel_check: Callable[[], bool] | None = None,
     ) -> None:
         from agentos.code_mode.checkpoints import FileCheckpointStore
         from agentos.code_mode.models import CodePermissionMode, normalize_permission_mode
@@ -736,6 +739,8 @@ class AgentToolset:
 
         self.workspace = workspace
         self._tls = threading.local()
+        # Asked while a foreground command runs: True stops the command (the turn was interrupted).
+        self._cancel_check = cancel_check
         self._read_file_lock = threading.Lock()
         self._reported_changes: set[tuple[str, str, str]] = set()
         self.turn_id = str(turn_id) if turn_id else None
@@ -1871,6 +1876,16 @@ class AgentToolset:
         try:
             return self.resolve(name).read_only
         except AgentToolError:
+            return False
+
+    def _cancel_requested(self) -> bool:
+        """Whether the person has stopped the turn. A check that raises never stops a healthy command."""
+        check = self._cancel_check
+        if check is None:
+            return False
+        try:
+            return bool(check())
+        except Exception:  # noqa: BLE001 - a broken check must not kill the command
             return False
 
     def is_mutating(self, name: str) -> bool:
@@ -4171,6 +4186,7 @@ class AgentToolset:
                 t_out.start()
                 t_err.start()
                 started_at = time.monotonic()
+                next_cancel_check = 0.0
                 last_emit_at = 0.0
                 last_emitted_count = 0
                 is_dev_server_cmd = bool(_DEV_SERVER_CMD_RE.search(command))
@@ -4180,6 +4196,17 @@ class AgentToolset:
                 while process.poll() is None or t_out.is_alive() or t_err.is_alive():
                     now = time.monotonic()
                     elapsed = now - started_at
+                    if now >= next_cancel_check:
+                        next_cancel_check = now + CANCEL_CHECK_SECONDS
+                        if self._cancel_requested():
+                            _terminate_process_tree(process)
+                            t_out.join(timeout=0.5)
+                            t_err.join(timeout=0.5)
+                            try:
+                                process.wait(timeout=0.5)  # the readers own the pipes now; communicate() would read them again
+                            except Exception:
+                                pass
+                            raise AgentToolError("Interrupted by user: the command was stopped.", error_code="INTERRUPTED_BY_USER")
                     if elapsed >= timeout:
                         _terminate_process_tree(process)
                         t_out.join(timeout=0.5)

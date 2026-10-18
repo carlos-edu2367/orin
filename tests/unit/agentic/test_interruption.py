@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from pathlib import Path
+import sys
+import time
 
 from sqlalchemy import create_engine, select
 
-from agentos.agentic.agent_tools import ToolOutcome
+from agentos.agentic import agent_tools
+from agentos.agentic.agent_tools import AgentToolset, ToolOutcome
+from agentos.agentic.workspace import ConversationWorkspace
 from agentos.agentic.provider_stream import NormalizedStreamItem, StreamKind
 from agentos.agentic.runtime import INTERRUPTED_TOOL_RESULT, AgenticLimits, AgenticTurnRuntime
 from agentos.conversations.chat import PostgresChatStore
@@ -101,3 +106,26 @@ def test_a_late_delta_never_reopens_a_cancelled_message() -> None:
             conversation_messages.c.message_id == turn["assistant_message_id"],
         )).one()
     assert (row.content, row.status) == ("partial ", "cancelled")
+
+
+def test_a_cancel_stops_the_running_command(tmp_path: Path) -> None:
+    """Spec 6.1: a tool in execution gets "interrupted by user"; the command is stopped, not waited for."""
+    pid_file = tmp_path / "pid.txt"
+    script = f"import os, pathlib, time; pathlib.Path(r'{pid_file}').write_text(str(os.getpid())); time.sleep(30)"
+    command = f'"{sys.executable}" -c "{script}"'
+    checks: list[float] = []
+
+    def cancel_check() -> bool:
+        checks.append(time.monotonic())
+        return pid_file.exists()  # the person stops the turn once the command is running
+
+    toolset = AgentToolset(ConversationWorkspace(tmp_path, "chat_cancel"), cancel_check=cancel_check)
+    started = time.monotonic()
+    outcome = toolset.invoke("run_command", {"command": command})
+    elapsed = time.monotonic() - started
+
+    assert outcome.error_code == "INTERRUPTED_BY_USER"
+    assert elapsed < 3, f"the command ran {elapsed:.1f} s after the stop"
+    assert not agent_tools._process_is_running(int(pid_file.read_text(encoding="utf-8")))
+    # The check reads the database, so the command polls it at most every half second.
+    assert all(later - earlier >= 0.45 for earlier, later in zip(checks, checks[1:]))
