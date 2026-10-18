@@ -43,12 +43,23 @@ class MemoryFile:
     parent: Path | None = None
 
 
-def _key(path: Path) -> str:
+def _is_remote(text: str) -> bool:
+    """A UNC, device or extended-length path. Resolving one opens it, which can reach a network host."""
+    return text.replace("/", "\\").startswith("\\\\")
+
+
+def _resolved(path: Path) -> Path:
+    """``Path.resolve()`` for local paths. A remote path is never opened: it is returned as given (made absolute)."""
+    if _is_remote(str(path)):
+        return Path(os.path.abspath(path))
     try:
-        resolved = Path(path).resolve()
+        return Path(path).resolve()
     except OSError:
-        resolved = Path(path).absolute()
-    return os.path.normcase(str(resolved))
+        return Path(path).absolute()
+
+
+def _key(path: Path) -> str:
+    return os.path.normcase(str(_resolved(path)))
 
 
 def _read_text(path: Path) -> str | None:
@@ -219,11 +230,14 @@ def _import_targets(content: str) -> list[str]:
     return targets
 
 
-def _resolve_import(target: str, importer: Path) -> Path:
+def _resolve_import(target: str, importer: Path) -> Path | None:
+    """The file an ``@target`` names, or None for a remote target (refused for every layer, before any I/O)."""
     if target.startswith(("~/", "~\\")):
-        return Path.home() / target[2:]
-    candidate = Path(target)
-    return candidate if candidate.is_absolute() else importer.parent / candidate
+        resolved = Path.home() / target[2:]
+    else:
+        candidate = Path(target)
+        resolved = candidate if candidate.is_absolute() else importer.parent / candidate
+    return None if _is_remote(str(resolved)) else resolved
 
 
 def instructions_payload(item: MemoryFile, *, trigger: Path | None = None) -> dict[str, object]:
@@ -301,6 +315,17 @@ class MemoryFiles:
         return list(reversed(chain))
 
     def _inside_project(self, path: Path) -> bool:
+        """Decided lexically first: a path outside the project is refused with no filesystem access.
+
+        Only a path that lies inside lexically is resolved, to catch a symlink or junction that leads out.
+        """
+        try:
+            lexical = os.path.normcase(os.path.abspath(path))
+            base = os.path.normcase(os.path.abspath(self._project_root))
+            if os.path.commonpath([lexical, base]) != base:
+                return False
+        except (OSError, ValueError):  # different drives have no common path
+            return False
         try:
             Path(path).resolve().relative_to(self._project_root.resolve())
             return True
@@ -312,7 +337,7 @@ class MemoryFiles:
             return False
         absolute = Path(path).absolute().as_posix()
         try:
-            relative = Path(path).resolve().relative_to(self.root.resolve()).as_posix()
+            relative = _resolved(Path(path)).relative_to(self.root.resolve()).as_posix()
         except (OSError, ValueError):
             relative = ""
         return any(glob_match(pattern, absolute) or (relative and glob_match(pattern, relative)) for pattern in self.excludes)
@@ -341,7 +366,7 @@ class MemoryFiles:
         if depth < MAX_IMPORT_DEPTH:
             for target in _import_targets(body):
                 resolved = _resolve_import(target, Path(path))
-                if resolved.suffix.lower() not in TEXT_SUFFIXES:
+                if resolved is None or resolved.suffix.lower() not in TEXT_SUFFIXES:
                     continue
                 if memory_type in {PROJECT, LOCAL} and not self.trusted and not self._inside_project(resolved):
                     continue

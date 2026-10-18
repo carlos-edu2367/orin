@@ -189,3 +189,43 @@ def test_a_linked_directory_cannot_pull_files_from_outside_an_untrusted_project(
     if not _link_dir(root / ".claude", outside):
         pytest.skip("cannot create a directory link here")
     assert "OUTSIDE" not in [item.content for item in MemoryFiles(root, trusted=False).files]
+
+
+def _path_spy(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record every path the loader resolves or stats. A remote path is never opened, so none may show up."""
+    touched: list[str] = []
+    real_resolve, real_stat = Path.resolve, Path.stat
+
+    def resolve(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        touched.append(f"resolve {self}")
+        return real_resolve(self, *args, **kwargs)
+
+    def stat(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        touched.append(f"stat {self}")
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", resolve)
+    monkeypatch.setattr(Path, "stat", stat)
+    return touched
+
+
+@pytest.mark.parametrize("target", ["//192.0.2.1/share/team-notes.md", r"\\192.0.2.1\share\team-notes.md", r"\\.\UNC\192.0.2.1\share\team-notes.md"])
+@pytest.mark.parametrize("trusted", [False, True])
+def test_an_untrusted_unc_import_never_touches_the_network(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target: str, trusted: bool) -> None:
+    root = _repo(tmp_path)
+    _mk(root / "CLAUDE.md", f"Project notes. See @{target} for more.")
+    touched = _path_spy(monkeypatch)
+    start = time.monotonic()
+    files = MemoryFiles(root, trusted=trusted).files
+    assert time.monotonic() - start < 1.0
+    assert [item.content for item in files] == ["Project notes. See @" + target + " for more."]
+    assert not [call for call in touched if "192.0.2.1" in call or call.split(" ", 1)[1].startswith(("\\\\", "//"))]
+
+
+def test_an_absolute_local_path_outside_an_untrusted_project_is_refused_without_resolving(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    secret = _mk(tmp_path / "outside" / "secret.md", "SECRET")
+    root = _repo(tmp_path)
+    _mk(root / "CLAUDE.md", f"see @{secret}")
+    touched = _path_spy(monkeypatch)
+    assert "SECRET" not in [item.content for item in MemoryFiles(root, trusted=False).files]
+    assert not [call for call in touched if str(secret) in call]
