@@ -46,14 +46,21 @@ def analyze_command(command: str, *, shell: str | None = None) -> ShellAnalysis:
     subs: list[str] = []
     current: list[str] = []
 
+    # Index just past the last escaped character. An escaped blank is part of the
+    # word for /bin/sh, so a "#" right after it is not a comment. Misjudging here
+    # only keeps text (fail-closed); it never drops text the shell would run.
+    escaped_end = -1
+
     def flush() -> None:
+        nonlocal escaped_end
         text = "".join(current).strip()
         current.clear()
+        escaped_end = -1
         if text:
             subs.append(" ".join(text.split()))
 
     def at_word_start() -> bool:
-        return not current or current[-1] in " \t"
+        return not current or (current[-1] in " \t" and len(current) != escaped_end)
 
     i = 0
     n = len(command)
@@ -142,11 +149,12 @@ def analyze_command(command: str, *, shell: str | None = None) -> ShellAnalysis:
             elif ch in "{}":
                 reasons.append("brace group")
             elif ch == "\\":
-                if i + 1 < n and command[i + 1] in ";&|<>()$`\n\r'\"{}":
+                if i + 1 < n and command[i + 1] in ";&|<>()$`\n\r'\"{} \t":
                     reasons.append("escaped operator")
                 current.append(ch)
                 if i + 1 < n:
                     current.append(command[i + 1])
+                    escaped_end = len(current)
                 i += 2
                 continue
             elif ch == "#" and at_word_start():

@@ -114,3 +114,18 @@ def test_posix_comment_is_dropped_and_background_amp_splits() -> None:
 
 def test_non_string_is_complex() -> None:
     assert analyze_command(None).complex  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("sep", [" ", "\t"])
+def test_escaped_blank_does_not_open_a_comment(sep: str) -> None:
+    # W1-R1: after "\<space>" the "#" is still part of the word for /bin/sh, so the
+    # appended command runs. The analyzer must keep it and mark the line complex.
+    analysis = analyze_command(f"git status \{sep}#; rm -rf ~", shell="posix")
+    assert analysis.complex is True
+    assert "rm -rf ~" in analysis.subcommands
+
+
+def test_hash_after_unescaped_blank_is_still_a_comment() -> None:
+    analysis = analyze_command("git status # note; rm -rf ~", shell="posix")
+    assert analysis.subcommands == ("git status",)
+    assert analysis.complex is False

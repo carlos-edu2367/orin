@@ -146,3 +146,10 @@ def test_repository_allow_rules_are_ignored_when_untrusted(root: Path) -> None:
 def test_has_rules(root: Path) -> None:
     assert _engine(root).has_rules() is False
     assert _engine(root, user={"permissions": {"deny": ["Bash(rm:*)"]}}).has_rules() is True
+
+
+@pytest.mark.parametrize("payload", ["git status \ #; rm -rf ~", "git status \\t#; rm -rf ~"])
+def test_escaped_blank_before_hash_cannot_smuggle_a_command(root: Path, payload: str) -> None:
+    # W1-R1: a broad allow rule must not approve the text that /bin/sh still runs.
+    engine = _engine(root, user={"permissions": {"allow": ["Bash(git:*)"]}})
+    assert b(engine.decide("run_command", {"command": payload}, M.ASK_PERMISSIONS)) == "ask"
