@@ -143,3 +143,9 @@ def test_orin_authored_errors_and_hints_use_public_names(tmp_path: Path) -> None
     assert "read_file" not in refused.content and "Read" in refused.content
     page = toolset.invoke("Read", {"file_path": "a.txt", "limit": 10})
     assert 'Read(file_path="a.txt", offset=11)' in page.content
+
+
+def test_public_text_leaves_a_windows_path_alone() -> None:
+    """W3-R30: a backslash before a tool id is a path separator, so the id inside a path is not rewritten."""
+    assert public_text(r"C:\tools\read_file") == r"C:\tools\read_file"
+    assert public_text(r"see C:\tools\read_file and read_file") == r"see C:\tools\read_file and Read"

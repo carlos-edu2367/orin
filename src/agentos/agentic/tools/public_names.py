@@ -358,7 +358,7 @@ def internal_name(name: str) -> str:
 
 _UNDERSCORED_INTERNAL = tuple(sorted((name for name in PUBLIC_NAMES if "_" in name), key=len, reverse=True))
 _INTERNAL_WORD = re.compile(
-    r"(?<![\w./\-])(" + "|".join(re.escape(name) for name in _UNDERSCORED_INTERNAL) + r")(?![\w-]|\.\w)"
+    r"(?<![\w./\\-])(" + "|".join(re.escape(name) for name in _UNDERSCORED_INTERNAL) + r")(?![\w-]|\.\w)"
 )
 
 

@@ -2721,7 +2721,7 @@ class TurnSession:
         """Code mode's stable prompt and its per-turn context."""
         from agentos.agentic.runtime import CODE_MODE_CORE_TOOLS
         from agentos.code_mode import git_context
-        from agentos.code_mode.system_prompt import CodePromptOptions, render_code_system_prompt, render_code_turn_context
+        from agentos.code_mode.system_prompt import CodePromptOptions, render_code_turn_context
 
         names = frozenset(item.name for item in toolset.definitions() if item.name in CODE_MODE_CORE_TOOLS)
         public = toolset.name_translator is not None
@@ -2787,19 +2787,19 @@ class TurnSession:
 
         from .loop_settings import OPERATOR_LAYERS, layer_values
 
-        managed_text = ""
-        for name, value in layer_values(self.effective_settings, "claudeMd"):
-            if name == "managed" and isinstance(value, str):
-                managed_text = value  # claudeMd is honoured only from managed policy
-        # claudeMdExcludes per layer: the operator's excludes hide files of every layer, a repository's only its own.
-        excludes: list[str] = []
-        repository_excludes: list[str] = []
-        for name, value in layer_values(self.effective_settings, "claudeMdExcludes"):
-            if not isinstance(value, list):
-                continue
-            items = [item for item in value if isinstance(item, str)]
-            (excludes if name in OPERATOR_LAYERS else repository_excludes).extend(items)
         try:
+            managed_text = ""
+            for name, value in layer_values(self.effective_settings, "claudeMd"):
+                if name == "managed" and isinstance(value, str):
+                    managed_text = value  # claudeMd is honoured only from managed policy
+            # claudeMdExcludes per layer: the operator's excludes hide files of every layer, a repository's only its own.
+            excludes: list[str] = []
+            repository_excludes: list[str] = []
+            for name, value in layer_values(self.effective_settings, "claudeMdExcludes"):
+                if not isinstance(value, list):
+                    continue
+                items = [item for item in value if isinstance(item, str)]
+                (excludes if name in OPERATOR_LAYERS else repository_excludes).extend(items)
             return MemoryFiles(
                 self.workspace.root,
                 trusted=trusted,

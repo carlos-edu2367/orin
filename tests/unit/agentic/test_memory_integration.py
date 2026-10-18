@@ -158,3 +158,15 @@ def test_unchanged_instruction_files_are_reported_only_when_they_change(tmp_path
     _write(session.workspace.root / "CLAUDE.md", "RULE-V2")
     _session(tmp_path, store=store, bus=bus).build_runtime()
     assert len(reported) == 2 and reported[1].endswith("CLAUDE.md")
+
+
+def test_a_settings_read_failure_never_stops_the_memory_load(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """W3-R30: the settings reads for memory sit inside the guard: a failure there means no memory, not a crash."""
+    from agentos.agentic import loop_settings
+
+    def unreadable(*args, **kwargs):
+        raise RuntimeError("settings unreadable")
+
+    session = _session(tmp_path)
+    monkeypatch.setattr(loop_settings, "layer_values", unreadable)
+    assert session._memory_files(trusted=True) is None
