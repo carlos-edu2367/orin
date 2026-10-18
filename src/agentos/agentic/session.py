@@ -829,6 +829,8 @@ class TurnSession:
         self._settings_session_context: list[str] = []
         # Removes this session's settings hooks from its bus (set when they are installed).
         self._hook_unsubscribe: Callable[[], None] | None = None
+        # True while an agent-type hook's verifier runs: its own tool calls must not start another verifier.
+        self._hook_agent_running = False
         self.project_store = project_store
         self.chat_store = chat_store
         self.local_workspaces = local_workspaces
@@ -2227,12 +2229,21 @@ class TurnSession:
         )
 
     def _hook_agent(self, prompt: str) -> str:
-        """Runs an agent-type hook as a read-only verification subagent and returns its text."""
+        """Runs an agent-type hook as a read-only verification subagent and returns its text.
+
+        Re-entry is refused: the verifier's tool calls fire the same hooks, and a verifier
+        that starts another verifier would recurse without bound.
+        """
+        if self._hook_agent_running:
+            return ""
+        self._hook_agent_running = True
         try:
             outcome = self._run_subagent("explore", prompt, description="Hook de verificação")
             return str(getattr(outcome, "content", "") or "")
         except Exception:  # noqa: BLE001 - a failed verifier is a missing verdict
             return ""
+        finally:
+            self._hook_agent_running = False
 
     def _config_change_events(self) -> list[tuple[str, Path]]:
         """Settings files that changed since the last turn, classified like Claude Code's ConfigChange sources."""

@@ -103,3 +103,18 @@ def test_config_change_has_claude_code_shape(tmp_path):
     second.build_runtime()
     changes = [dict(e.payload) for e in events if e.name is HookEvent.CONFIG_CHANGE]
     assert changes and changes[0]["source"] == "project_settings" and changes[0]["file_path"].endswith("settings.json")
+
+
+def test_agent_verifier_cannot_start_another_verifier(tmp_path):
+    session, _ = _session(tmp_path, [{"role": "user", "content": "x"}])
+    calls = []
+
+    def fake_subagent(subagent_type, task, *, description="", **_kwargs):
+        calls.append(task)
+        nested = session._hook_agent("nested check")  # the verifier's own tool call firing the hook
+        return type("Outcome", (), {"content": f"nested={nested!r}"})()
+
+    session._run_subagent = fake_subagent
+    assert session._hook_agent("outer check") == "nested=''"
+    assert calls == ["outer check"]
+    assert session._hook_agent_running is False
