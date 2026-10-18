@@ -31,8 +31,11 @@ class Store:
 
 
 def _bulky() -> list[dict[str, object]]:
-    messages: list[dict[str, object]] = [{"role": "user", "content": f"step {index} " + "x" * 600} for index in range(10)]
-    messages.append({"role": "user", "content": "current request"})
+    # Each message carries the stored sequence the runtime reads when it persists the boundary.
+    messages: list[dict[str, object]] = [
+        {"role": "user", "content": f"step {index} " + "x" * 600, "_sequence": index + 1} for index in range(10)
+    ]
+    messages.append({"role": "user", "content": "current request", "_sequence": 11})
     return messages
 
 
@@ -108,3 +111,74 @@ def test_a_microcompact_boundary_does_not_replace_history() -> None:
     first = _turn(store, "one", "k1")
     store.record_compact_boundary(first, kind="microcompact", trigger="auto", pre_tokens=900, post_tokens=400)
     assert [item["content"] for item in store.history_for_turn(first)] == ["one"]
+
+
+def _fact_numbers(messages: list[dict[str, object]]) -> set[int]:
+    import re
+
+    text = "\n".join(str(item.get("content", "")) for item in messages)
+    return {int(match) for match in re.findall(r"FACT-(\d+)", text)}
+
+
+class FactSummarizer:
+    """Lists the FACT markers it was given, so the test can tell what the summary covers."""
+
+    def stream(self, request):
+        import re
+
+        source = "\n".join(str(m.get("content")) for m in request["messages"])
+        facts = ", ".join(sorted({f"FACT-{n}" for n in re.findall(r"FACT-(\d+)", source)}, key=lambda f: int(f.split("-")[1])))
+        body = "\n".join(f"### {section}\n- " + (facts if section == "All user messages" else "none") for section in COMPACTION_SECTIONS)
+        return iter([NormalizedStreamItem(StreamKind.TEXT, 1, text=body)])
+
+
+def _nine_turns_then_compact(*, force: bool) -> PostgresChatStore:
+    """Eight finished turns carrying FACT-1..8, then a ninth turn whose history is compacted in-turn."""
+    store = _db_store()
+    conversation_id = None
+    for index in range(1, 9):
+        turn = _turn(store, f"user says FACT-{index}", f"k{index}", conversation_id)
+        conversation_id = str(turn["conversation_id"])
+        store.delta(turn, f"assistant ack FACT-{index}")
+        store.finish(turn)
+    ninth = _turn(store, "current request FACT-9", "k9", conversation_id)
+    messages = list(store.history_for_turn(ninth))
+    runtime = AgenticTurnRuntime(store=store, provider=FactSummarizer(), limits=AgenticLimits(max_context_tokens=1_000))
+    runtime._pinned_index = len(messages) - 1
+    if force:
+        runtime._force_compact(messages, ninth, [])
+    else:
+        assert runtime._run_compaction(messages, ninth) is True  # the default keep_units
+    store.delta(ninth, "done")
+    store.finish(ninth)
+    store.test_conversation_id = conversation_id
+    return store
+
+
+def _facts_in_next_turn(store: PostgresChatStore) -> set[int]:
+    conversation_id = store.test_conversation_id
+    tenth = _turn(store, "next request FACT-10", "k10", conversation_id)
+    return _fact_numbers(store.history_for_turn(tenth))
+
+
+def test_auto_compaction_never_drops_retained_turns() -> None:
+    # The newest six units stay verbatim in memory; the boundary must not claim them as summarised.
+    store = _nine_turns_then_compact(force=False)
+    assert _facts_in_next_turn(store) == set(range(1, 11))
+
+
+def test_reactive_compaction_never_drops_retained_turns() -> None:
+    # The reactive path keeps only two units verbatim.
+    store = _nine_turns_then_compact(force=True)
+    assert _facts_in_next_turn(store) == set(range(1, 11))
+
+
+def test_a_compaction_that_folds_no_stored_message_persists_no_boundary() -> None:
+    # Nothing folded has a stored sequence, so no history row is summarized: writing a boundary would be a lie.
+    store = Store()
+    runtime = AgenticTurnRuntime(store=store, provider=Summarizer(), limits=AgenticLimits(max_context_tokens=1_000))
+    messages: list[dict[str, object]] = [{"role": "user", "content": f"step {index} " + "x" * 600} for index in range(10)]
+    messages.append({"role": "user", "content": "current request"})
+    runtime._pinned_index = len(messages) - 1
+    assert runtime._run_compaction(messages, {"turn_id": "t"}) is True
+    assert store.boundaries == []

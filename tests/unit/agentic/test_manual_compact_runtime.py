@@ -49,9 +49,10 @@ class Summarizer:
         return iter([NormalizedStreamItem(StreamKind.TEXT, 1, text="\n".join(f"### {s}\n- d" for s in COMPACTION_SECTIONS))])
 
 
+# Stored sequences, as the real store attaches them: a compaction records the sequence it folded.
 HISTORY = [
-    {"role": "user", "content": "build the API"}, {"role": "assistant", "content": "done " + "x" * 400},
-    {"role": "user", "content": "add tests"}, {"role": "assistant", "content": "added " + "y" * 400},
+    {"role": "user", "content": "build the API", "_sequence": 1}, {"role": "assistant", "content": "done " + "x" * 400, "_sequence": 2},
+    {"role": "user", "content": "add tests", "_sequence": 3}, {"role": "assistant", "content": "added " + "y" * 400, "_sequence": 4},
 ]
 
 

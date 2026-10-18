@@ -115,6 +115,9 @@ def _repair_context_usage(payload: Mapping[str, object]) -> dict[str, object]:
 
 MAX_EXPANDED_COMMAND_BODY = 200_000
 
+# Default for ``through_sequence``: the caller did not pass it (``None`` means nothing was folded).
+_UNSET = object()
+
 
 @dataclass(frozen=True, slots=True)
 class _ExpandedInvocation:
@@ -1845,15 +1848,23 @@ class PostgresChatStore:
         pre_tokens: int,
         post_tokens: int | None = None,
         summary: str | None = None,
+        through_sequence: int | None | object = _UNSET,
     ) -> dict[str, object] | None:
-        """Persist a compaction. A ``compact`` boundary covers the history before this turn's request."""
+        """Persist a compaction.
+
+        ``through_sequence`` is the last message sequence the summary replaces. The
+        runtime passes the sequence it actually folded; without it (legacy callers)
+        a ``compact`` boundary covers the history before this turn's request.
+        """
         if kind not in {"compact", "microcompact"}:
             raise ValueError("unknown boundary kind")
         now = datetime.now(UTC)
         conversation_id = str(turn["conversation_id"])
         with self._engine.begin() as c:
             through: int | None = None
-            if kind == "compact":
+            if kind == "compact" and through_sequence is not _UNSET:
+                through = None if through_sequence is None else int(through_sequence)
+            elif kind == "compact":
                 user_sequence = c.execute(select(conversation_messages.c.sequence).where(
                     conversation_messages.c.message_id == turn.get("user_message_id"),
                 )).scalar()
@@ -2004,7 +2015,9 @@ class PostgresChatStore:
             records = grouped.get(message_id, [])
             if records:
                 content = f"{content}{_attachment_marker(records)}"
-            history.append({"role": str(row["role"]), "content": content})
+            # ``_sequence`` lets the runtime know which messages a compaction folded;
+            # keys starting with ``_`` never reach the provider.
+            history.append({"role": str(row["role"]), "content": content, "_sequence": int(row["sequence"])})
         if compacted:
             history.insert(0, compaction_message(str(boundary["summary"])))
         return history

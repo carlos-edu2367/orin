@@ -1418,6 +1418,16 @@ class AgenticTurnRuntime:
         compact_indices = {index for unit in compact_units for index in unit}
         if not compact_indices:
             return False
+        # The stored boundary must cover exactly what was folded: the retained units
+        # stay verbatim, so their messages must not be treated as summarized.
+        folded_through = max(
+            (
+                int(messages[index]["_sequence"])
+                for index in compact_indices
+                if isinstance(messages[index].get("_sequence"), int) and not isinstance(messages[index].get("_sequence"), bool)
+            ),
+            default=None,
+        )
         pre = self._emit(HookEvent.PRE_COMPACT, trigger=trigger, custom_instructions=custom_instructions)
         if pre is not None and pre.blocked and allow_block:
             self._last_compaction_block = pre.reason or "blocked by hook"
@@ -1461,7 +1471,13 @@ class AgenticTurnRuntime:
         self._compaction_count += 1
         post_tokens = self._estimated_tokens({"messages": messages})
         self._last_compaction = {"pre_tokens": pre_tokens, "post_tokens": post_tokens}
-        self._persist_compact_boundary(turn, kind="compact", trigger=trigger, pre_tokens=pre_tokens, post_tokens=post_tokens, summary=body)
+        if folded_through is not None:
+            # No sequenced message was folded (only this turn's own steps): nothing
+            # in the stored history is summarized, so no boundary is written.
+            self._persist_compact_boundary(
+                turn, kind="compact", trigger=trigger, pre_tokens=pre_tokens, post_tokens=post_tokens,
+                summary=body, through_sequence=folded_through,
+            )
         if self.context_reporting:
             self._life(
                 turn, "context_compacted", removed_messages=len(compact_indices),
