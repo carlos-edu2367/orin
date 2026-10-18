@@ -7,6 +7,7 @@ that came from a file or a hook can never close the block early or forge a new o
 
 from __future__ import annotations
 
+import re
 import threading
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -15,10 +16,13 @@ REMINDER_OPEN = "<system-reminder>"
 REMINDER_CLOSE = "</system-reminder>"
 MAX_REMINDER_CHARS = 10_000
 MAX_PENDING_REMINDERS = 32
+# Any spelling of the reminder tag, opening or closing: case, inner spaces and a short attribute list. Text that
+# came from a hook or a file must never close the block early or open a new one.
+_REMINDER_TAG = re.compile(r"<([\s/]*)system\s*[-_]\s*reminder\b[^>]{0,200}>", re.IGNORECASE)
 
 
 def _neutralize(text: str) -> str:
-    return text.replace(REMINDER_CLOSE, "</system_reminder>").replace(REMINDER_OPEN, "<system_reminder>")
+    return _REMINDER_TAG.sub(lambda match: "</system_reminder>" if "/" in match.group(1) else "<system_reminder>", text)
 
 
 def system_reminder(text: str, *, limit: int = MAX_REMINDER_CHARS) -> str:

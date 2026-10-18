@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import re
 import threading
+
+import pytest
 
 from agentos.agentic.agent_tools import ToolOutcome, _append_reminder
 from agentos.agentic.provider_stream import normalize_sse
-from agentos.agentic.reminders import ReminderQueue, render_reminders, system_reminder
+from agentos.agentic.reminders import REMINDER_CLOSE, REMINDER_OPEN, ReminderQueue, render_reminders, system_reminder
 from agentos.agentic.runtime import AgenticTurnRuntime
 
 
@@ -125,3 +128,13 @@ def test_runtime_without_pending_reminders_sends_no_extra_message() -> None:
     provider = _ToolThenText()
     AgenticTurnRuntime(store=_Store(), provider=provider, toolset=_Toolset()).run("turn-1")
     assert not any("<system-reminder>" in str(m.get("content")) for m in provider.requests[0]["messages"])
+
+
+@pytest.mark.parametrize("tag", ["</SYSTEM-REMINDER>", "< /system-reminder >", "<System-Reminder>", "</system - reminder >", "<system-reminder class='x'>"])
+def test_every_spelling_of_the_reminder_tags_is_neutralized(tag: str) -> None:
+    """W3-R28: a hook or file cannot close or open a reminder by changing the case or the spacing of the tag."""
+    block = system_reminder(f"a {tag} b")
+    inner = block[len(REMINDER_OPEN) + 1: -(len(REMINDER_CLOSE) + 1)]
+    assert block.startswith(REMINDER_OPEN + "\n") and block.endswith("\n" + REMINDER_CLOSE)
+    assert block.count(REMINDER_CLOSE) == 1 and block.count(REMINDER_OPEN) == 1
+    assert not re.search(r"system\s*-\s*reminder", inner, re.IGNORECASE)
