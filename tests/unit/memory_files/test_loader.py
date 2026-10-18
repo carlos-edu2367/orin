@@ -229,3 +229,29 @@ def test_an_absolute_local_path_outside_an_untrusted_project_is_refused_without_
     touched = _path_spy(monkeypatch)
     assert "SECRET" not in [item.content for item in MemoryFiles(root, trusted=False).files]
     assert not [call for call in touched if str(secret) in call]
+
+
+def test_a_repository_cannot_exclude_the_users_own_instructions(tmp_path: Path) -> None:
+    user = _mk(tmp_path / "home" / "CLAUDE.md", "USER-POLICY")
+    root = _repo(tmp_path)
+    _mk(root / "CLAUDE.md", "PROJECT-RULE")
+    files = MemoryFiles(root, trusted=True, user_files=(user,), repository_excludes=("**/CLAUDE.md",)).files
+    contents = [item.content for item in files]
+    assert "USER-POLICY" in contents and "PROJECT-RULE" not in contents
+
+
+def test_an_operator_exclude_hides_a_project_file_and_a_repository_exclude_hides_its_own(tmp_path: Path) -> None:
+    root = _repo(tmp_path)
+    _mk(root / "CLAUDE.md", "PROJECT-RULE")
+    _mk(root / "CLAUDE.local.md", "LOCAL-RULE")
+    operator = MemoryFiles(root, trusted=False, excludes=("**/CLAUDE.local.md",)).files
+    assert [item.content for item in operator] == ["PROJECT-RULE"]
+    repository = MemoryFiles(root, trusted=False, repository_excludes=("**/CLAUDE.local.md",)).files
+    assert [item.content for item in repository] == ["PROJECT-RULE"]
+
+
+def test_a_repository_exclude_never_hides_managed_text(tmp_path: Path) -> None:
+    managed = _mk(tmp_path / "managed" / "CLAUDE.md", "MANAGED-POLICY")
+    root = _repo(tmp_path)
+    files = MemoryFiles(root, trusted=False, managed_files=(managed,), repository_excludes=("**/CLAUDE.md", "**/*")).files
+    assert [item.content for item in files] == ["MANAGED-POLICY"]

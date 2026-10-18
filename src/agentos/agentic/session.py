@@ -2684,18 +2684,26 @@ class TurnSession:
         from agentos.memory_files import MemoryFiles
         from agentos.settings.paths import claude_managed_dir, claude_user_dir, orin_managed_dir
 
-        from .loop_settings import layer_values
+        from .loop_settings import OPERATOR_LAYERS, layer_values
 
-        excludes = self.effective_settings.get("claudeMdExcludes")
         managed_text = ""
         for name, value in layer_values(self.effective_settings, "claudeMd"):
             if name == "managed" and isinstance(value, str):
                 managed_text = value  # claudeMd is honoured only from managed policy
+        # claudeMdExcludes per layer: the operator's excludes hide files of every layer, a repository's only its own.
+        excludes: list[str] = []
+        repository_excludes: list[str] = []
+        for name, value in layer_values(self.effective_settings, "claudeMdExcludes"):
+            if not isinstance(value, list):
+                continue
+            items = [item for item in value if isinstance(item, str)]
+            (excludes if name in OPERATOR_LAYERS else repository_excludes).extend(items)
         try:
             return MemoryFiles(
                 self.workspace.root,
                 trusted=trusted,
-                excludes=tuple(item for item in excludes if isinstance(item, str)) if isinstance(excludes, list) else (),
+                excludes=tuple(excludes),
+                repository_excludes=tuple(repository_excludes),
                 walk_up=self.workspace_is_local,
                 user_files=(claude_user_dir() / "CLAUDE.md", orin_user_dir() / "ORIN.md"),
                 managed_files=(claude_managed_dir() / "CLAUDE.md", orin_managed_dir() / "ORIN.md"),

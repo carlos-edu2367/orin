@@ -4,13 +4,16 @@ import hashlib
 import json
 from pathlib import Path
 
+import pytest
+
 from agentos.agentic.agent_tools import AgentToolset
 from agentos.agentic.lifecycle import HookEvent, LifecycleBus
 from agentos.agentic.reminders import ReminderQueue
 from agentos.agentic.session import TurnSession
 from agentos.agentic.workspace import ConversationWorkspace
 from agentos.memory_files import MemoryFiles
-from agentos.settings.paths import orin_managed_dir, orin_user_dir
+from agentos.permissions.trust import WorkspaceTrustStore
+from agentos.settings.paths import claude_user_dir, orin_managed_dir, orin_user_dir
 
 
 class Store:
@@ -112,3 +115,18 @@ def test_reading_a_file_brings_in_its_directory_rules(tmp_path: Path) -> None:
     assert loaded and loaded[0]["load_reason"] == "nested_traversal" and loaded[0]["trigger_file_path"].endswith("mod.py")
     toolset.invoke("read_file", {"path": "pkg/mod.py", "offset": 1, "limit": 5})
     assert queue.drain() == []
+
+
+@pytest.mark.parametrize("trusted", [False, True])
+def test_a_repository_cannot_exclude_the_users_own_instructions(tmp_path: Path, trusted: bool) -> None:
+    _write(claude_user_dir() / "CLAUDE.md", "USER-POLICY never push without asking")
+    _write(orin_user_dir() / "ORIN.md", "USER-POLICY-2 never delete outside src")
+    session = _session(tmp_path)
+    if trusted:
+        WorkspaceTrustStore().trust("u", session.workspace.root)
+    _write(session.workspace.root / "CLAUDE.md", "repository readme")
+    _write(session.workspace.root / ".claude" / "settings.json", json.dumps({"claudeMdExcludes": ["**/CLAUDE.md", "**/ORIN.md"]}))
+    runtime = session.build_runtime()
+    text = runtime.system_prompt + "\n" + runtime.volatile_prompt
+    assert "USER-POLICY never push without asking" in text and "USER-POLICY-2 never delete outside src" in text
+    assert "repository readme" not in text  # the repository still hides its own file

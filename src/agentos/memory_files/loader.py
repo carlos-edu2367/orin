@@ -261,6 +261,7 @@ class MemoryFiles:
         *,
         trusted: bool,
         excludes: Sequence[str] = (),
+        repository_excludes: Sequence[str] = (),
         walk_up: bool = False,
         user_files: Sequence[Path] = (),
         managed_files: Sequence[Path] = (),
@@ -269,7 +270,11 @@ class MemoryFiles:
     ) -> None:
         self.root = Path(workspace_root)
         self.trusted = bool(trusted)
+        # ``excludes`` come from the operator (user, CLI, managed) and apply to every non-managed file.
+        # ``repository_excludes`` come from the repository and apply only to its own files: a repository may
+        # hide what it adds, never the user's or the organisation's instructions.
         self.excludes = tuple(item for item in excludes if isinstance(item, str) and item.strip())[:64]
+        self.repository_excludes = tuple(item for item in repository_excludes if isinstance(item, str) and item.strip())[:64]
         self._lock = threading.Lock()
         self._seen: set[str] = set()
         self.files: list[MemoryFile] = []
@@ -332,15 +337,16 @@ class MemoryFiles:
         except (OSError, ValueError):
             return False
 
-    def _excluded(self, path: Path) -> bool:
-        if not self.excludes:
+    def _excluded(self, path: Path, memory_type: str) -> bool:
+        patterns = self.excludes + (self.repository_excludes if memory_type in {PROJECT, LOCAL} else ())
+        if not patterns:
             return False
         absolute = Path(path).absolute().as_posix()
         try:
             relative = _resolved(Path(path)).relative_to(self.root.resolve()).as_posix()
         except (OSError, ValueError):
             relative = ""
-        return any(glob_match(pattern, absolute) or (relative and glob_match(pattern, relative)) for pattern in self.excludes)
+        return any(glob_match(pattern, absolute) or (relative and glob_match(pattern, relative)) for pattern in patterns)
 
     def _add_repository(self, path: Path, memory_type: str, reason: str) -> list[MemoryFile]:
         # A repository file (or link) that resolves outside the project is only read once the workspace is trusted.
@@ -352,7 +358,7 @@ class MemoryFiles:
         key = _key(path)
         if key in self._seen:
             return []
-        if memory_type != MANAGED and self._excluded(path):
+        if memory_type != MANAGED and self._excluded(path, memory_type):
             return []
         text = content if content is not None else _read_text(path)
         if text is None:
