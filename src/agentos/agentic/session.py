@@ -21,6 +21,7 @@ from types import MappingProxyType
 from typing import Any, Callable, Mapping
 
 from agentos.installation import orin_paths
+from agentos.settings import EffectiveSettings, detect_changes, empty_settings, load_effective_settings
 
 from agentos.reading.vision import VisionUnavailable
 from agentos.retrieval.bundle import RetrievalBundle
@@ -30,6 +31,7 @@ from agentos.retrieval.worker import IndexWorker
 from .agent_tools import AgentToolset, ToolOutcome, is_verification_command
 from .contract import parse as parse_contract
 from .events import AgentActivityEventType
+from .lifecycle import HookEvent, LifecycleBus
 from .phases import PhaseController
 from .runtime import AgenticLimits, AgenticTurnRuntime
 from .workspace import resolve_workspace
@@ -542,6 +544,19 @@ def build_system_prompt(
     return "\n".join(lines), "\n".join(volatile).strip()
 
 
+def _workspace_guidance_files(root: Path) -> tuple[Path, ...]:
+    """The conventional instruction files present at the workspace root."""
+    found: list[Path] = []
+    for name in WORKSPACE_INSTRUCTION_FILES:
+        path = root / name
+        try:
+            if path.is_file() and path.stat().st_size > 0:
+                found.append(path)
+        except OSError:
+            continue
+    return tuple(found)
+
+
 def _workspace_guidance(root: Path) -> str:
     """Read conventional root-level project instructions for this turn."""
     remaining = MAX_WORKSPACE_GUIDANCE_CHARS
@@ -762,8 +777,11 @@ class TurnSession:
         media_client=None,
         max_subagents_per_turn: int | None = MAX_SUBAGENTS_PER_TURN,
         max_concurrent_subagents: int = MAX_CONCURRENT_SUBAGENTS,
+        lifecycle: LifecycleBus | None = None,
     ) -> None:
         self.turn = turn
+        self.lifecycle: LifecycleBus | None = lifecycle
+        self.effective_settings: EffectiveSettings = empty_settings()
         self.enable_terminal = bool(enable_terminal)
         self.store = store
         self.agents_store = agents_store
@@ -1466,7 +1484,24 @@ class TurnSession:
             resumed_agent_id=resumed_agent_id,
         )
 
-    def _execute_subagent_run(
+    def _execute_subagent_run(self, **kwargs: Any) -> ToolOutcome:
+        bus = self.lifecycle
+        agent_id = str(kwargs.get("agent_id") or "")
+        agent_type = str(kwargs.get("builtin_key") or kwargs.get("clean") or "")
+        if bus is not None:
+            bus.emit(HookEvent.SUBAGENT_START, agent_id=agent_id, agent_type=agent_type)
+        outcome = self._execute_subagent_run_inner(**kwargs)
+        if bus is not None:
+            bus.emit(
+                HookEvent.SUBAGENT_STOP,
+                agent_id=agent_id,
+                agent_type=agent_type,
+                stop_hook_active=False,
+                status=str(getattr(outcome, "status", "")),
+            )
+        return outcome
+
+    def _execute_subagent_run_inner(
         self,
         *,
         record: dict[str, object],
@@ -1973,6 +2008,24 @@ class TurnSession:
 
     # -- runtime --------------------------------------------------------
 
+    def _emit_turn_start_events(self, history: list[Mapping[str, object]], task: str) -> None:
+        bus = self.lifecycle
+        if bus is None:
+            return
+        try:
+            changed = detect_changes(str(self.workspace.root), self.effective_settings.candidate_files)
+            if changed:
+                bus.emit(HookEvent.CONFIG_CHANGE, source="settings", file_paths=[str(path) for path in changed])
+            files = _workspace_guidance_files(self.workspace.root)
+            if files:
+                bus.emit(HookEvent.INSTRUCTIONS_LOADED, file_paths=[str(path) for path in files], memory_type="Project")
+            user_messages = sum(1 for item in history if item.get("role") == "user" and isinstance(item.get("content"), str))
+            if user_messages <= 1:
+                bus.emit(HookEvent.SESSION_START, source="startup")
+            bus.emit(HookEvent.USER_PROMPT_SUBMIT, prompt=task)
+        except Exception:  # noqa: BLE001 - lifecycle never stops a turn
+            return
+
     def _toolset(
         self,
         *,
@@ -2009,6 +2062,8 @@ class TurnSession:
                 summary=summary,
                 **progress_payload,
             ),
+            public_tool_names=self.effective_settings.experimental("claudeToolNames"),
+            lifecycle=self.lifecycle,
             skills=self.skills,
             skill_library=self.skill_library,
             skill_user_id=str(self.turn.get("user_id") or "").strip() or None,
@@ -2116,6 +2171,16 @@ class TurnSession:
         from agentos.code_mode.models import normalize_code_autonomy
         from agentos.code_mode.permissions import ToolPermissionBroker
 
+        try:
+            self.effective_settings = load_effective_settings(self.workspace.root)
+        except Exception:  # noqa: BLE001 - settings never stop a turn from starting
+            self.effective_settings = empty_settings()
+        if self.lifecycle is None:
+            self.lifecycle = LifecycleBus()
+        self.lifecycle.bind(
+            session_id=str(self.turn.get("conversation_id") or ""),
+            cwd=str(self.workspace.root),
+        )
         resumed = self._resumed_contract()
         explicit_perm = str(self.turn.get("permission_mode") or "").strip().lower()
         raw_autonomy = str(
@@ -2146,6 +2211,7 @@ class TurnSession:
         else:
             self.permission_mode = "ask_permissions"
         self._in_plan_mode = self.permission_mode == "plan_mode"
+        self.lifecycle.bind(permission_mode=self.permission_mode)
         if self._in_plan_mode:
             self._code_mode_stage = "planning"
         code_requires_approval = (
@@ -2223,6 +2289,7 @@ class TurnSession:
         workspace_guidance = _workspace_guidance(self.workspace.root)
         history = self.store.history_for_turn(self.turn)
         task = next((str(item.get("content") or "") for item in reversed(history) if item.get("role") == "user"), "")
+        self._emit_turn_start_events(history, task)
         if task:
             try:
                 from agentos.code_mode.mentions import expand_file_mentions
@@ -2328,6 +2395,7 @@ class TurnSession:
             skill_prompt_tokens=_skill_prompt_tokens(skill_catalog),
             context_reporting=True,
             hook_engine=self.hook_engine,
+            lifecycle=self.lifecycle,
             phase_controller=phase_controller,
             learning_sink=learning_sink_for(
                 self.memory, self._record,
