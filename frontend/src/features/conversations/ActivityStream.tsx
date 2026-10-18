@@ -14,6 +14,7 @@ import { ToolPermissionCard } from './ToolPermissionCard'
 import { summarizeActivities } from './activitySummary'
 import type { ActivityGroup, ConversationActivityEvent, ToolPermissionDecision } from './activityTypes'
 import { UserQuestionCard, type UserQuestionAnswer } from './UserQuestionCard'
+import { WorkspaceTrustCard } from './WorkspaceTrustCard'
 import type { WorkspaceFilePreviewHandler } from './WorkspaceFileCard'
 
 export type CodeSessionProposalContext = {
@@ -174,6 +175,9 @@ export function renderActivityGroup(
     )
   }
   if (first.type.startsWith('code_mode.')) return <CodeModeCard group={group} />
+  if (first.type === 'workspace.trust_required' && conversationId) {
+    return <>{group.events.map((event) => <WorkspaceTrustCard key={event.eventId} event={event} conversationId={conversationId} />)}</>
+  }
   if (first.type === 'memory.learned') {
     return <>{group.events.map((event) => <MemoryLearnedCard key={event.eventId} event={event} />)}</>
   }

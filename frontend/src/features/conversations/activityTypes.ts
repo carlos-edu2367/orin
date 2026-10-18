@@ -110,6 +110,7 @@ export type AgentActivityEventType =
   | 'artifact.created'
   | 'context.updated'
   | 'memory.learned'
+  | 'workspace.trust_required'
   | 'todo.updated'
   | 'code_mode.activated'
   | 'code_mode.started'
@@ -171,6 +172,8 @@ export type ConversationActivityEvent = {
   /** Set only on `memory.learned`: what the agent stored, and where. */
   memoryId?: string
   memoryScope?: 'user' | 'project'
+  /** Set only on `workspace.trust_required`: what stays disabled until the folder is trusted. */
+  workspaceTrust?: { path: string; items: string[] }
   memoryProjectId?: string
   /** Structured unified diff hunks emitted by write_file / edit_file. */
   structuredPatch?: StructuredPatchHunk[]

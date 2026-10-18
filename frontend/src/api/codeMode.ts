@@ -1,7 +1,7 @@
 import type { ApiClient } from './client'
 import { invalidResponseError } from './errors'
 
-export type CodePermissionMode = 'accept_edits' | 'plan_mode' | 'ask_permissions' | 'full_autonomy'
+export type CodePermissionMode = 'accept_edits' | 'plan_mode' | 'ask_permissions' | 'full_autonomy' | 'auto' | 'dont_ask'
 export type PermissionMode = CodePermissionMode
 export type CodeAutonomy =
   | 'approval_required'
@@ -10,6 +10,8 @@ export type CodeAutonomy =
   | 'plan_mode'
   | 'ask_permissions'
   | 'accept_edits'
+  | 'auto'
+  | 'dont_ask'
 
 export type CodeModeSettings = {
   autonomy: CodeAutonomy
@@ -27,6 +29,8 @@ export const CODE_PERMISSION_MODES: ReadonlyArray<{
   { mode: 'plan_mode', autonomy: 'plan_mode', label: 'Modo Plano', shortLabel: 'Plano' },
   { mode: 'ask_permissions', autonomy: 'approval_required', label: 'Perguntar permissões', shortLabel: 'Perguntar' },
   { mode: 'full_autonomy', autonomy: 'full_autonomy', label: 'Autonomia total', shortLabel: 'Autonomia total' },
+  { mode: 'auto', autonomy: 'auto', label: 'Automático (classificador decide)', shortLabel: 'Automático' },
+  { mode: 'dont_ask', autonomy: 'dont_ask', label: 'Não perguntar (nega o que pediria confirmação)', shortLabel: 'Não perguntar' },
 ]
 
 const VALID_AUTONOMY = new Set<string>([
@@ -36,6 +40,8 @@ const VALID_AUTONOMY = new Set<string>([
   'plan_mode',
   'ask_permissions',
   'accept_edits',
+  'auto',
+  'dont_ask',
 ])
 
 export function normalizeCodePermissionMode(value: string | undefined | null): CodePermissionMode {
@@ -49,7 +55,20 @@ export function normalizeCodePermissionMode(value: string | undefined | null): C
     case 'plan_mode':
       return 'plan_mode'
     case 'full_autonomy':
+    case 'bypassPermissions':
       return 'full_autonomy'
+    case 'default':
+    case 'manual':
+      return 'ask_permissions'
+    case 'acceptEdits':
+      return 'accept_edits'
+    case 'plan':
+      return 'plan_mode'
+    case 'auto':
+      return 'auto'
+    case 'dontAsk':
+    case 'dont_ask':
+      return 'dont_ask'
     default:
       return 'ask_permissions'
   }
@@ -65,11 +84,15 @@ export function permissionModeToAutonomy(mode: CodePermissionMode): CodeAutonomy
       return 'plan_mode'
     case 'full_autonomy':
       return 'full_autonomy'
+    case 'auto':
+      return 'auto'
+    case 'dont_ask':
+      return 'dont_ask'
   }
 }
 
 export function nextCodePermissionMode(current: CodePermissionMode): CodePermissionMode {
-  if (current === 'full_autonomy') return 'ask_permissions'
+  if (current === 'full_autonomy' || current === 'auto' || current === 'dont_ask') return 'ask_permissions'
   const order: CodePermissionMode[] = ['accept_edits', 'plan_mode', 'ask_permissions']
   const idx = order.indexOf(current)
   return order[(idx === -1 ? 0 : idx + 1) % order.length]

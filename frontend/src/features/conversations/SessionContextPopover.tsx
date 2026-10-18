@@ -23,6 +23,10 @@ export function formatPermissionModePill(mode: CodePermissionMode): string {
       return '🔒 Pedir permissão'
     case 'full_autonomy':
       return '⚡ Sem restrições'
+    case 'auto':
+      return '◎ Automático'
+    case 'dont_ask':
+      return '⊘ Não perguntar'
   }
 }
 
@@ -36,6 +40,10 @@ export function formatPermissionModeTitle(mode: CodePermissionMode): string {
       return 'Modo de permissão: Pedir permissão (Shift+Tab para alternar)'
     case 'full_autonomy':
       return 'Modo de permissão: Sem restrições (Shift+Tab para alternar)'
+    case 'auto':
+      return 'Modo de permissão: Automático (Shift+Tab para alternar)'
+    case 'dont_ask':
+      return 'Modo de permissão: Não perguntar (Shift+Tab para alternar)'
   }
 }
 

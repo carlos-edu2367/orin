@@ -579,6 +579,15 @@ export function parseConversationActivityEvent(value: unknown, cursor: string): 
   assign('memoryId', optionalText(payload.memory_id, 255))
   assign('memoryProjectId', optionalText(payload.project_id, 255))
   if (payload.scope === 'user' || payload.scope === 'project') event.memoryScope = payload.scope
+  const trust = payload.workspace_trust
+  if (trust && typeof trust === 'object' && !Array.isArray(trust)) {
+    const trustRecord = trust as Record<string, unknown>
+    const trustPath = optionalText(trustRecord.path, 1024)
+    const items = Array.isArray(trustRecord.items)
+      ? trustRecord.items.filter((item): item is string => typeof item === 'string').slice(0, 20).map((item) => item.slice(0, 80))
+      : []
+    if (trustPath) event.workspaceTrust = { path: trustPath, items }
+  }
   assign('occurredAt', optionalText(item.occurred_at, 64))
   const contextUsage = parseContextUsage(payload)
   if (contextUsage) event.contextUsage = contextUsage
@@ -1210,4 +1219,21 @@ function parseCodeSessionProposalRequest(payload: Record<string, unknown>): Code
 function record(value: unknown): Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw invalidResponseError()
   return value as Record<string, unknown>
+}
+
+export function trustConversationWorkspace(
+  client: ApiClient,
+  conversationId: string,
+  intent = client.createMutationIntent(),
+): Promise<{ trusted: boolean; path: string }> {
+  return client.request({
+    path: `/v1/conversations/${encodeURIComponent(conversationId)}/workspace-trust`,
+    method: 'POST',
+    intent,
+    parse: (value: unknown) => {
+      const data = (value ?? {}) as Record<string, unknown>
+      if (typeof data.trusted !== 'boolean' || typeof data.path !== 'string') throw invalidResponseError()
+      return { trusted: data.trusted, path: data.path }
+    },
+  })
 }
