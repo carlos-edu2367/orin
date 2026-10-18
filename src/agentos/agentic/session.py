@@ -46,6 +46,7 @@ from .agent_tools import AgentToolset, ToolOutcome, is_verification_command
 from .contract import parse as parse_contract
 from .events import AgentActivityEventType
 from .lifecycle import HookEvent, LifecycleBus
+from .reminders import ReminderQueue, system_reminder
 from .phases import PhaseController
 from .runtime import AgenticLimits, AgenticTurnRuntime
 from .workspace import resolve_workspace
@@ -835,6 +836,8 @@ class TurnSession:
         self._hook_agent_running = False
         self._hook_agent_guard = threading.Lock()
         self._hook_dispatcher = None
+        # One reminder queue per runtime: the toolset fills it, the runtime drains it before each request.
+        self._reminders = ReminderQueue()
         self.project_store = project_store
         self.chat_store = chat_store
         self.local_workspaces = local_workspaces
@@ -2106,6 +2109,7 @@ class TurnSession:
         read_only_mode: bool = False,
         inherit_context: bool = True,
         lifecycle_context: Mapping[str, str] | None = None,
+        reminders: ReminderQueue | None = None,
     ) -> AgentToolset:
         browser = None if read_only_mode else self.browser
         actor_id = browser_agent_key or self.main_agent_id
@@ -2130,6 +2134,7 @@ class TurnSession:
             lifecycle=self.lifecycle,
             extra_env=self._hook_extra_env(),
             lifecycle_context=lifecycle_context,
+            reminders=reminders,
             skills=self.skills,
             skill_library=self.skill_library,
             skill_user_id=str(self.turn.get("user_id") or "").strip() or None,
@@ -2474,6 +2479,7 @@ class TurnSession:
         )
         setattr(permission_broker, "mode", self.permission_mode)
         self._active_permission_broker = permission_broker
+        self._reminders = ReminderQueue()
         toolset = self._toolset(
             subagents=self.enable_subagents,
             code_mode_active=self.turn.get("code_mode") == "code",
@@ -2492,6 +2498,7 @@ class TurnSession:
             permission_broker=permission_broker,
             permission_mode=self.permission_mode,
             interactive_permissions=bool(self.turn.get("interactive_permissions")),
+            reminders=self._reminders,
         )
         agents = self.agents_store.list() if self.agents_store is not None else []
         reader = getattr(self.store, "tool_ledger", None)
@@ -2609,9 +2616,7 @@ class TurnSession:
             mcp_servers=toolset.mcp_server_summaries(),
         )
         if turn_start["prompt_context"]:
-            volatile_prompt = (
-                volatile_prompt + "\n\n<system-reminder>\n" + "\n".join(turn_start["prompt_context"]) + "\n</system-reminder>"
-            ).strip()
+            volatile_prompt = (volatile_prompt + "\n\n" + system_reminder("\n".join(turn_start["prompt_context"]))).strip()
         # In Code Mode, use a single fluid agentic loop without rigid phase boundaries;
         # standard chat keeps PhaseController.
         phase_controller = (
@@ -2636,6 +2641,7 @@ class TurnSession:
             store=_MainAgentStore(self, self.store, toolset), provider=self.provider_factory(), toolset=toolset,
             system_prompt=prompt, volatile_prompt=volatile_prompt, limits=self.limits, cancelled=self.cancelled,
             on_close=self._close_hook_dispatcher,
+            reminders=self._reminders,
             reconciliation_required=self.reconciliation_required,
             tool_kinds={item.name: item.kind for item in definitions},
             skill_prompt_tokens=_skill_prompt_tokens(skill_catalog),

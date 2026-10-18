@@ -46,6 +46,7 @@ from .workspace import MAX_LIST_DEPTH, MAX_SEARCH_RESULTS, ConversationWorkspace
 from .models import MAX_USER_QUESTION_ITEMS
 from .file_preview import media_type_for
 from .lifecycle import HookEvent, LifecycleBus, LifecycleDecision
+from .reminders import system_reminder
 from .tools.public_names import (
     PublicToolNames,
     arguments_in as _public_arguments_in,
@@ -635,7 +636,7 @@ def _append_reminder(outcome: ToolOutcome, items: list[str], limit: int) -> None
     clean = [item for item in items if isinstance(item, str) and item.strip()]
     if not clean:
         return
-    block = "\n\n<system-reminder>\n" + "\n".join(clean) + "\n</system-reminder>"
+    block = "\n\n" + system_reminder("\n".join(clean))
     head = outcome.content[: max(0, limit - len(block))]
     outcome.content = head + block
 
@@ -712,6 +713,7 @@ class AgentToolset:
         lifecycle: LifecycleBus | None = None,
         extra_env: Mapping[str, str] | None = None,
         lifecycle_context: Mapping[str, str] | None = None,
+        reminders: object | None = None,
     ) -> None:
         from agentos.code_mode.checkpoints import FileCheckpointStore
         from agentos.code_mode.models import CodePermissionMode, normalize_permission_mode
@@ -836,6 +838,8 @@ class AgentToolset:
         self._extra_env: dict[str, str] = {str(k): str(v) for k, v in dict(extra_env or {}).items()}
         # Set when a hook asked to stop the turn; the runtime ends the turn after this tool batch.
         self.stop_requested: str | None = None
+        # Shared with the runtime: tools queue <system-reminder> notes for the next model request.
+        self.reminders = reminders
 
     @property
     def active_mcp_tool_names(self) -> frozenset[str]:
@@ -4329,7 +4333,7 @@ class AgentToolset:
                 pass
         if not notices:
             return ""
-        return "\n\n<system-reminder>\n" + "\n".join(notices) + "\n</system-reminder>"
+        return "\n\n" + system_reminder("\n".join(notices))
 
     def _load_process_manifest(self) -> dict[str, dict[str, Any]]:
         try:

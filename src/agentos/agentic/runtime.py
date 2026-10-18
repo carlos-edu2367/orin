@@ -25,6 +25,7 @@ from . import phases, transcript
 from .phases import DEFAULT_PHASE_BUDGETS, Phase, PhaseBudget, PhaseController
 from .lifecycle import HookEvent, LifecycleBus
 from .tools.public_names import public_name as _public_tool_name
+from .reminders import ReminderQueue, render_reminders, system_reminder
 
 MAX_PARALLEL_TOOLS = 8
 MAX_PARALLEL_SUBAGENT_TOOLS = max(8, int(os.environ.get("ORIN_MAX_CONCURRENT_SUBAGENTS", "16") or "16"))
@@ -250,6 +251,7 @@ class AgenticTurnRuntime:
         lifecycle: LifecycleBus | None = None,
         prompt_block_reason: str | None = None,
         on_close: Callable[[], None] | None = None,
+        reminders: ReminderQueue | None = None,
     ) -> None:
         self.store, self.provider = store, provider
         self.lifecycle = lifecycle
@@ -257,6 +259,8 @@ class AgenticTurnRuntime:
         self.prompt_block_reason = prompt_block_reason
         # Releases what the turn owns outside the loop (its hook dispatcher); called once from close().
         self._on_close = on_close
+        # Notes that reach the model as one <system-reminder> user message before the next request.
+        self.reminders = reminders if reminders is not None else ReminderQueue()
         self._stop_hook_active = False
         self._stop_continuations = 0
         self.hook_engine = hook_engine
@@ -320,6 +324,16 @@ class AgenticTurnRuntime:
                 self._on_close()
             except Exception:
                 pass
+
+    def _inject_reminders(self, messages: list[dict[str, object]]) -> None:
+        """Pending reminders become one user message at the end of the history (append-only, cache-safe)."""
+        try:
+            pending = self.reminders.drain()
+        except Exception:  # noqa: BLE001 - a reminder never breaks a turn
+            return
+        body = render_reminders(pending)
+        if body:
+            messages.append({"role": "user", "content": body, "_reminder": True})
 
     def run(self, turn_id: str, *, turn: dict[str, object] | None = None) -> AgenticRunResult:
         try:
@@ -400,6 +414,7 @@ class AgenticTurnRuntime:
                 (self.limits.max_iterations is not None and iteration == self.limits.max_iterations)
                 or (self.phases is not None and self.phases.is_final)
             )
+            self._inject_reminders(messages)
             tool_schemas = self._tool_schemas(turn)
             if self._names is not None:
                 tool_schemas = self._names.schemas_out(tool_schemas)
