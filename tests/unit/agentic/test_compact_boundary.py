@@ -182,3 +182,33 @@ def test_a_compaction_that_folds_no_stored_message_persists_no_boundary() -> Non
     runtime._pinned_index = len(messages) - 1
     assert runtime._run_compaction(messages, {"turn_id": "t"}) is True
     assert store.boundaries == []
+
+
+class _Loads:
+    """The chat store, plus the turn lookup the runtime expects from a worker's store."""
+
+    def __init__(self, store: PostgresChatStore, turn: dict) -> None:
+        self._store, self._turn = store, turn
+
+    def __getattr__(self, name: str):
+        return getattr(self._store, name)
+
+    def load(self, turn_id: str) -> dict:
+        return self._turn
+
+
+def test_a_manual_compaction_still_covers_the_whole_history() -> None:
+    store = _db_store()
+    conversation_id = None
+    for index in range(1, 4):
+        turn = _turn(store, f"user FACT-{index}", f"k{index}", conversation_id)
+        conversation_id = str(turn["conversation_id"])
+        store.delta(turn, f"assistant ack FACT-{index}")
+        store.finish(turn)
+    command = _turn(store, "/compact", "kc", conversation_id)
+    runtime = AgenticTurnRuntime(store=_Loads(store, command), provider=FactSummarizer(), limits=AgenticLimits(max_context_tokens=1_000), compact_request="")
+    assert runtime.run(str(command["turn_id"])).state == "completed"
+    nxt = _turn(store, "next request FACT-9", "kn", conversation_id)
+    history = store.history_for_turn(nxt)
+    assert history[0]["role"] == "system" and _fact_numbers(history[:1]) == {1, 2, 3}
+    assert not [item for item in history[1:] if "FACT-1" in str(item["content"]) or "FACT-2" in str(item["content"]) or "FACT-3" in str(item["content"])]
