@@ -98,3 +98,85 @@ def test_compaction_emits_pre_and_post() -> None:
 
 def test_no_bus_is_fine() -> None:
     assert AgenticTurnRuntime(store=Store(), provider=ToolThenText(), toolset=Toolset()).run("turn-1").state == "completed"
+
+
+class TextOnly:
+    def stream(self, request):
+        return normalize_sse(['data: {"choices":[{"delta":{"content":"final answer"},"finish_reason":"stop"}]}', "data: [DONE]"], provider="openrouter")
+
+
+class CaveatToolset(Toolset):
+    def code_completion_gate(self):
+        return False, "run the tests first"
+
+
+class WaitingToolset(Toolset):
+    def invoke(self, name, arguments):
+        return ToolOutcome("succeeded", "waiting", "wait for the user", {"wait_for_user": True})
+
+
+class CutMidStream:
+    def stream(self, request):
+        yield from normalize_sse(['data: {"choices":[{"delta":{"content":"partial"}}]}'], provider="openrouter")
+        raise RuntimeError("connection cut")
+
+
+class BrokenHistoryStore(Store):
+    def history_for_turn(self, turn):
+        raise RuntimeError("store unavailable")
+
+
+def _terminal_events(events) -> list[HookEvent]:
+    return [event.name for event in events if event.name in {HookEvent.STOP, HookEvent.STOP_FAILURE}]
+
+
+def test_completed_with_caveats_emits_exactly_one_stop() -> None:
+    from agentos.agentic.runtime import AgenticLimits
+
+    bus, events = _bus()
+    runtime = AgenticTurnRuntime(
+        store=Store(), provider=TextOnly(), toolset=CaveatToolset(), lifecycle=bus,
+        limits=AgenticLimits(max_iterations=1),
+    )
+    result = runtime.run("turn-1")
+    assert result.state == "completed_with_caveats"
+    assert _terminal_events(events) == [HookEvent.STOP]
+    assert dict(events[-1].payload)["stop_reason"] == "completed_with_caveats"
+
+
+def test_waiting_user_emits_exactly_one_stop() -> None:
+    bus, events = _bus()
+    result = AgenticTurnRuntime(store=Store(), provider=ToolThenText(), toolset=WaitingToolset(), lifecycle=bus).run("turn-1")
+    assert result.state == "waiting_user"
+    assert _terminal_events(events) == [HookEvent.STOP]
+    assert dict(events[-1].payload)["stop_reason"] == "waiting_user"
+
+
+def test_effect_reconciliation_emits_exactly_one_stop_failure() -> None:
+    bus, events = _bus()
+    runtime = AgenticTurnRuntime(
+        store=Store(), provider=ToolThenText(), toolset=Toolset(), lifecycle=bus,
+        reconciliation_required=lambda _turn: True,
+    )
+    result = runtime.run("turn-1")
+    assert result.state == "reconciliation_required"
+    assert _terminal_events(events) == [HookEvent.STOP_FAILURE]
+    assert dict(events[-1].payload)["error_code"] == "EFFECT_RECONCILIATION_REQUIRED"
+
+
+def test_interrupted_stream_with_output_emits_exactly_one_stop_failure() -> None:
+    bus, events = _bus()
+    result = AgenticTurnRuntime(store=Store(), provider=CutMidStream(), toolset=Toolset(), lifecycle=bus).run("turn-1")
+    assert result.state == "reconciliation_required"
+    assert _terminal_events(events) == [HookEvent.STOP_FAILURE]
+    assert dict(events[-1].payload)["error_code"] == "PROVIDER_STREAM_INTERRUPTED"
+
+
+def test_exception_escaping_run_emits_stop_failure_and_reraises() -> None:
+    import pytest
+
+    bus, events = _bus()
+    runtime = AgenticTurnRuntime(store=BrokenHistoryStore(), provider=TextOnly(), toolset=Toolset(), lifecycle=bus)
+    with pytest.raises(RuntimeError, match="store unavailable"):
+        runtime.run("turn-1")
+    assert _terminal_events(events) == [HookEvent.STOP_FAILURE]

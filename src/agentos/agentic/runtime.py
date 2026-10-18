@@ -297,6 +297,14 @@ class AgenticTurnRuntime:
                 pass
 
     def run(self, turn_id: str, *, turn: dict[str, object] | None = None) -> AgenticRunResult:
+        try:
+            return self._run(turn_id, turn=turn)
+        except BaseException:
+            # An exception that escapes the loop is still a failed turn: exactly one StopFailure.
+            self._emit(HookEvent.STOP_FAILURE, error_code="RUNTIME_EXCEPTION")
+            raise
+
+    def _run(self, turn_id: str, *, turn: dict[str, object] | None = None) -> AgenticRunResult:
         turn = turn or self._load(turn_id)
         # A successful read, and how many writes had happened when it ran. A
         # later identical read is only safe to serve from here if that count
@@ -565,6 +573,7 @@ class AgenticTurnRuntime:
                     error_code="PROVIDER_STREAM_INTERRUPTED",
                 )
                 if effective_yielded:
+                    self._emit(HookEvent.STOP_FAILURE, error_code="PROVIDER_STREAM_INTERRUPTED")
                     self._settle_quality(turn, "reconciliation_required", "PROVIDER_STREAM_INTERRUPTED")
                     return AgenticRunResult("reconciliation_required", iteration, action_count, "PROVIDER_STREAM_INTERRUPTED")
                 if provider_retries < self.limits.max_provider_retries and self.clock() < deadline:
@@ -688,10 +697,12 @@ class AgenticTurnRuntime:
                 # the next authenticated chat message starts the follow-up turn.
                 if any(bool(result.get("wait_for_user")) for result in results):
                     self._life(turn, "waiting_user")
+                    self._emit(HookEvent.STOP, stop_hook_active=False, stop_reason="waiting_user", last_assistant_message="".join(text_parts)[:4000])
                     self.store.finish(turn, code="WAITING_USER")
                     self._settle_quality(turn, "waiting_user")
                     return AgenticRunResult("waiting_user", iteration, action_count)
                 if self.reconciliation_required(turn):
+                    self._emit(HookEvent.STOP_FAILURE, error_code="EFFECT_RECONCILIATION_REQUIRED")
                     self._settle_quality(turn, "reconciliation_required", "EFFECT_RECONCILIATION_REQUIRED")
                     return AgenticRunResult("reconciliation_required", iteration, action_count, "EFFECT_RECONCILIATION_REQUIRED")
                 self._life(turn, "running")
@@ -740,6 +751,7 @@ class AgenticTurnRuntime:
                         self.store.delta(turn, caveat)
                         self._settle_remaining_todos(turn, str(turn_id))
                         self._life(turn, "completed_with_caveats", reason=gate_reason)
+                        self._emit(HookEvent.STOP, stop_hook_active=False, stop_reason="completed_with_caveats", last_assistant_message="".join(text_parts)[:4000])
                         self.store.finish(turn, code="CODE_VALIDATION_REQUIRED")
                         self._settle_quality(turn, "completed_with_caveats", "CODE_VALIDATION_REQUIRED")
                         return AgenticRunResult("completed_with_caveats", iteration, action_count, "CODE_VALIDATION_REQUIRED", budget_exhausted=True)
@@ -777,7 +789,7 @@ class AgenticTurnRuntime:
                     result_ref=f"conversation-message:{turn['assistant_message_id']}",
                     private_result={"outcome": "final"},
                 )
-                self._emit(HookEvent.STOP, stop_hook_active=False, last_assistant_message="".join(text_parts)[:4000])
+                self._emit(HookEvent.STOP, stop_hook_active=False, stop_reason="completed", last_assistant_message="".join(text_parts)[:4000])
                 self._settle_remaining_todos(turn, str(turn_id))
                 self._life(turn, "completed")
                 self.store.finish(turn)

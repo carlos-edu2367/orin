@@ -13,8 +13,8 @@ Companion to `2026-10-18-w0-foundations.md`. Lists which of the 35 `HookEvent` v
 | UserPromptExpansion | no | — | W7 |
 | SessionStart | yes | `TurnSession._emit_turn_start_events` | — |
 | SessionEnd | no | — | W3 |
-| Stop | yes | `AgenticTurnRuntime.run` | — |
-| StopFailure | yes | `AgenticTurnRuntime._fail` | — |
+| Stop | yes | `AgenticTurnRuntime._run`: completed, completed_with_caveats (`stop_reason`), waiting_user (`stop_reason`) | — |
+| StopFailure | yes | `AgenticTurnRuntime._fail`, the two `reconciliation_required` returns, and `AgenticTurnRuntime.run` when an exception escapes (`error_code=RUNTIME_EXCEPTION`) | — |
 | SubagentStart | yes | `TurnSession._execute_subagent_run` | — |
 | SubagentStop | yes | `TurnSession._execute_subagent_run` | — |
 | PreCompact | yes | `AgenticTurnRuntime._run_compaction` | — |
