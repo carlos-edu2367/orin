@@ -856,6 +856,14 @@ class ChatWorker:
         pricing = {key: row.get(key) for key in ("input_per_million", "output_per_million") if row.get(key) is not None}
         return pricing or None
 
+    def _catalog_capabilities_for(self, turn: dict[str, object]) -> tuple[str, ...]:
+        """The turn model's catalog capability names (reasoning, tools, thinking, ...); empty when unknown."""
+        row = self._catalog_row_for(turn) or {}
+        capabilities = row.get("capabilities") or ()
+        if isinstance(capabilities, str):
+            capabilities = [item.strip() for item in capabilities.split(",")]
+        return tuple(str(item) for item in capabilities if str(item).strip())
+
     def _context_window_for(self, turn: dict[str, object]) -> int | None:
         """The turn model's real context window, or None if it is unknown."""
         row = self._catalog_row_for(turn) or {}
@@ -1359,6 +1367,7 @@ class ChatWorker:
             media_policy=self._media_policy_for_turn(turn),
             media_client=self._media_client_for_turn(turn),
             catalog_pricing=self._catalog_pricing_for(turn),
+            model_capabilities=self._catalog_capabilities_for(turn),
             fallback_provider_factory=lambda model_id: self._provider_transport({**turn, "model_id": model_id}),
         )
         return session.build_runtime()

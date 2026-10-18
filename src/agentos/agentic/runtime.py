@@ -258,10 +258,13 @@ class AgenticTurnRuntime:
         autocompact: object = "auto",
         prompt_renderer: Callable[[], str] | None = None,
         compact_request: str | None = None,
+        effort: str | None = None,
     ) -> None:
         self.store, self.provider = store, provider
         # Set for a /compact turn: the turn only summarizes the conversation (instructions may be empty).
         self.compact_request = compact_request
+        # Reasoning effort for this turn (already checked against the model); None sends nothing.
+        self.effort = effort
         self.lifecycle = lifecycle
         # Set when a UserPromptSubmit hook refused the prompt: the turn ends before any model call.
         self.prompt_block_reason = prompt_block_reason
@@ -659,6 +662,8 @@ class AgenticTurnRuntime:
                 "messages": window, "tools": tool_schemas,
                 "max_output_tokens": min([value for value in (self._output_cap or self.limits.max_output_tokens, remaining_tokens) if value is not None], default=None),
             }
+            if self.effort:
+                request["effort"] = self.effort
             if final_iteration:
                 request["tool_choice"] = "none"
             provider_effect_id = self._effect_started(
@@ -694,6 +699,8 @@ class AgenticTurnRuntime:
                 return self._fail(turn, "PROVIDER_STREAM_FAILED", iteration, action_count)
             text_parts: list[str] = []
             thinking_parts: list[str] = []
+            thinking_signature: str | None = None
+            redacted_blocks: list[str] = []
             thinking_buffer: list[str] = []
             saw_thinking_kind = False
             last_thinking_flush = time.monotonic()
@@ -744,6 +751,10 @@ class AgenticTurnRuntime:
                         last_progress_at = now_clock
                     if event.kind is StreamKind.THINKING:
                         saw_thinking_kind = True
+                        if getattr(event, "signature", None):
+                            thinking_signature = str(event.signature)
+                        if getattr(event, "redacted_thinking", None):
+                            redacted_blocks.append(str(event.redacted_thinking))
                         if event.thinking:
                             thinking_parts.append(event.thinking)
                             thinking_buffer.append(event.thinking)
@@ -961,7 +972,10 @@ class AgenticTurnRuntime:
                             error_code=result.get("error_code"), result_ref=result.get("result_ref"),
                             tool_arguments=dict(arguments),
                         )
-                messages.append(self._assistant_tool_message(turn, text_parts, calls, thinking_parts))
+                messages.append(self._assistant_tool_message(
+                    turn, text_parts, calls, thinking_parts,
+                    thinking_signature=thinking_signature, redacted_thinking=redacted_blocks,
+                ))
                 # Record the trajectory so the *next* turn of this conversation
                 # starts knowing what this one already read and wrote, instead
                 # of rediscovering it.
@@ -2458,10 +2472,24 @@ class AgenticTurnRuntime:
         return str(safe)
 
     @classmethod
-    def _assistant_tool_message(cls, turn: Mapping[str, object], text_parts: list[str], calls: Mapping[str, Mapping[str, str]], thinking_parts: list[str] | None = None) -> dict[str, object]:
+    def _assistant_tool_message(
+        cls,
+        turn: Mapping[str, object],
+        text_parts: list[str],
+        calls: Mapping[str, Mapping[str, str]],
+        thinking_parts: list[str] | None = None,
+        *,
+        thinking_signature: str | None = None,
+        redacted_thinking: list[str] | None = None,
+    ) -> dict[str, object]:
         provider = str(turn.get("provider", "")).lower()
         if provider == "anthropic":
             blocks: list[dict[str, object]] = []
+            # With extended thinking on, the signed thinking block must precede the tool calls it led to.
+            if thinking_signature:
+                blocks.append({"type": "thinking", "thinking": "".join(thinking_parts or []), "signature": thinking_signature})
+            for data in redacted_thinking or ():
+                blocks.append({"type": "redacted_thinking", "data": data})
             if text_parts:
                 blocks.append({"type": "text", "text": "".join(text_parts)})
             for call in calls.values():

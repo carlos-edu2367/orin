@@ -16,6 +16,7 @@ import httpx
 from agentos.providers.models import FinishReason, ProviderError, ProviderErrorCategory, ProviderUsage, Retryability
 
 from .provider_content import project_messages as _raw_project_messages
+from .effort import apply_effort
 from .retry import parse_retry_after
 
 
@@ -82,6 +83,9 @@ class NormalizedStreamItem:
     rate_limit: RateLimitInfo | None = None
     error: ProviderError | None = None
     call_id: str | None = None
+    # Anthropic extended thinking: the block's signature, and an encrypted (redacted) block.
+    signature: str | None = None
+    redacted_thinking: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "kind", StreamKind(self.kind))
@@ -267,6 +271,9 @@ def normalize_sse(lines: Iterable[str | bytes], *, provider: str) -> Iterator[No
                     elif block.get("type") == "thinking" and isinstance(block.get("thinking"), str) and block["thinking"]:
                         sequence += 1
                         yield NormalizedStreamItem(StreamKind.THINKING, sequence, thinking=block["thinking"])
+                    elif block.get("type") == "redacted_thinking" and isinstance(block.get("data"), str) and block["data"]:
+                        sequence += 1
+                        yield NormalizedStreamItem(StreamKind.THINKING, sequence, redacted_thinking=block["data"])
                 continue
             if event_type == "content_block_delta":
                 delta = payload.get("delta") or {}
@@ -278,6 +285,9 @@ def normalize_sse(lines: Iterable[str | bytes], *, provider: str) -> Iterator[No
                 elif delta.get("type") == "thinking_delta" and isinstance(delta.get("thinking"), str) and delta["thinking"]:
                     sequence += 1
                     yield NormalizedStreamItem(StreamKind.THINKING, sequence, thinking=delta["thinking"])
+                elif delta.get("type") == "signature_delta" and isinstance(delta.get("signature"), str) and delta["signature"]:
+                    sequence += 1
+                    yield NormalizedStreamItem(StreamKind.THINKING, sequence, signature=delta["signature"])
                 elif delta.get("type") == "input_json_delta":
                     index = int(payload.get("index", 0))
                     call_id, name = anthropic_tools.get(index, (f"tool-call:{index}", ""))
@@ -707,12 +717,15 @@ class HTTPProviderStreamTransport:
             headers["authorization"] = f"Bearer {self._api_key}"
         return f"{self.base_url}/api/chat", headers, payload
 
-    def _request_for(self, messages: list, tools: list, tool_choice: object, requested: object) -> tuple[str, dict[str, str], dict[str, object]]:
+    def _request_for(self, messages: list, tools: list, tool_choice: object, requested: object, effort: object = None) -> tuple[str, dict[str, str], dict[str, object]]:
         if self.provider == "anthropic":
-            return self._anthropic_request(messages, tools, tool_choice, requested)
-        if self.provider == "ollama":
-            return self._ollama_request(messages, tools, tool_choice, requested)
-        return self._openai_request(messages, tools, tool_choice, requested)
+            endpoint, headers, payload = self._anthropic_request(messages, tools, tool_choice, requested)
+        elif self.provider == "ollama":
+            endpoint, headers, payload = self._ollama_request(messages, tools, tool_choice, requested)
+        else:
+            endpoint, headers, payload = self._openai_request(messages, tools, tool_choice, requested)
+        apply_effort(self.provider, payload, effort)
+        return endpoint, headers, payload
 
     def stream(self, request: Mapping[str, object]) -> Iterator[NormalizedStreamItem]:
         endpoint, headers, payload = self._request_for(
@@ -720,6 +733,7 @@ class HTTPProviderStreamTransport:
             list(request.get("tools") or []),
             request.get("tool_choice"),
             request.get("max_output_tokens"),
+            request.get("effort"),
         )
         try:
             with self._client.stream("POST", endpoint, headers=headers, json=payload) as response:

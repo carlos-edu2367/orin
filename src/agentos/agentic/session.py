@@ -821,12 +821,15 @@ class TurnSession:
         lifecycle: LifecycleBus | None = None,
         catalog_pricing: Mapping[str, object] | None = None,
         fallback_provider_factory: Callable[[str], object] | None = None,
+        model_capabilities: tuple[str, ...] = (),
     ) -> None:
         self.turn = turn
         self.lifecycle: LifecycleBus | None = lifecycle
         # The turn model's catalog prices; the cost estimator uses them when the provider reports no cost.
         self.catalog_pricing = dict(catalog_pricing) if catalog_pricing else None
         self.fallback_provider_factory = fallback_provider_factory
+        # The catalog's capability names for the turn's model (reasoning, tools, ...); effort depends on them.
+        self.model_capabilities = tuple(str(item) for item in model_capabilities or ())
         self.effective_settings: EffectiveSettings = empty_settings()
         self.enable_terminal = bool(enable_terminal)
         self.store = store
@@ -2643,6 +2646,29 @@ class TurnSession:
         text = str(task or "").strip()
         return text[len("/compact"):].strip() if text.startswith("/compact") else ""
 
+    def _effort(self) -> str | None:
+        """The turn's effort (turn value, else the user's ``effort``/``effortLevel``), if this model can use it."""
+        from .effort import normalize_effort, reasoning_supported
+        from .loop_settings import operator_value
+
+        level = normalize_effort(self.turn.get("effort")) or normalize_effort(
+            operator_value(self.effective_settings, "effort") or operator_value(self.effective_settings, "effortLevel")
+        )
+        if level is None:
+            return None
+        provider, model = str(self.turn.get("provider") or ""), str(self.turn.get("model_id") or "")
+        if reasoning_supported(provider, model, self.model_capabilities):
+            return level
+        try:
+            self._record(
+                AgentActivityEventType.TURN_STARTED,
+                f"Esforço '{level}' ignorado: o modelo {model} não aceita controle de raciocínio",
+                {"effort": level, "ignored": True},
+            )
+        except Exception:  # noqa: BLE001 - a notice never blocks a turn
+            pass
+        return None
+
     def build_runtime(self) -> AgenticTurnRuntime:
         import inspect
         from agentos.agentic.runtime import CODE_MODE_CORE_TOOLS
@@ -2930,6 +2956,7 @@ class TurnSession:
             autocompact=self._autocompact_setting(),
             prompt_renderer=self._render_code_prompt_again if self.turn.get("code_mode") == "code" else None,
             compact_request=self._compact_request(task),
+            effort=self._effort(),
         )
         if resumed is not None:
             runtime.contract = resumed
