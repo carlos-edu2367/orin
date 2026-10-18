@@ -1004,6 +1004,9 @@ class TurnSession:
         if state == "context_compacting":
             self._record(AgentActivityEventType.CONTEXT_UPDATED, "Compactando contexto", {"compacting": True, **payload}, agent_id=actor)
             return
+        if state == "context_microcompacted":
+            self._record(AgentActivityEventType.CONTEXT_UPDATED, "Resultados antigos de ferramentas limpos", {"boundary": "microcompact", **payload}, agent_id=actor)
+            return
         if state == "context_compacted":
             summary = "Contexto compactado" if payload.get("trigger") == "manual" else "Contexto compactado automaticamente"
             self._record(AgentActivityEventType.CONTEXT_COMPACTED, summary, {"compacting": False, **payload}, agent_id=actor)
@@ -2546,6 +2549,19 @@ class TurnSession:
         )
         return stable, dynamic
 
+    def _autocompact_setting(self) -> object:
+        """``autoCompact``: "auto" (default), a token threshold, or false; ``autoCompactEnabled: false`` also turns it off."""
+        if self.effective_settings.get("autoCompactEnabled") is False:
+            return False
+        value = self.effective_settings.get("autoCompact")
+        if value is False or (isinstance(value, str) and value.strip().lower() in {"false", "off", "0", "no"}):
+            return False
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            return value
+        if isinstance(value, str) and value.strip().isdigit() and int(value.strip()) > 0:
+            return int(value.strip())
+        return "auto"
+
     def build_runtime(self) -> AgenticTurnRuntime:
         import inspect
         from agentos.agentic.runtime import CODE_MODE_CORE_TOOLS
@@ -2826,6 +2842,7 @@ class TurnSession:
                 str(self.turn["project_id"]) if self.turn.get("project_id") else None,
             ),
             first_user_context=first_user_context,
+            autocompact=self._autocompact_setting(),
         )
         if resumed is not None:
             runtime.contract = resumed

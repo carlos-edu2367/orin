@@ -47,6 +47,11 @@ RECENT_UNAGED_TOOL_RESULTS = 8
 MAX_STREAM_KEEPALIVE_STALL_SECONDS = 180.0
 MICROCOMPACT_TOOL_RESULT_CHARS = 3_000
 MICROCOMPACT_THRESHOLD = 0.65
+# Results shorter than this cost less than the marker that would replace them.
+MICROCOMPACT_MIN_CHARS = 200
+# Autocompact fires at the window minus room for one full reply and a fixed margin.
+AUTOCOMPACT_OUTPUT_RESERVE_TOKENS = 20_000
+AUTOCOMPACT_MARGIN_TOKENS = 13_000
 
 # Providers whose prompt cache this runtime can actually address. For these the
 # message list is append-only, because prompt caching keys on an exact prefix:
@@ -249,6 +254,7 @@ class AgenticTurnRuntime:
         fallback_models: tuple[str, ...] | list[str] = (),
         fallback_provider_factory: Callable[[str], object] | None = None,
         first_user_context: str = "",
+        autocompact: object = "auto",
     ) -> None:
         self.store, self.provider = store, provider
         self.lifecycle = lifecycle
@@ -266,6 +272,7 @@ class AgenticTurnRuntime:
         self._fallback_provider_factory = fallback_provider_factory
         # Per-machine context kept out of the system prompt (excludeDynamicSystemPromptSections); see _request_messages.
         self.first_user_context = str(first_user_context or "")
+        self.autocompact = autocompact
         self._stop_hook_active = False
         self._stop_continuations = 0
         self._max_tokens_recoveries = 0
@@ -1242,54 +1249,45 @@ class AgenticTurnRuntime:
         self,
         messages: list[dict[str, object]],
         *,
-        keep_recent_units: int = 4,
-        max_chars: int = MICROCOMPACT_TOOL_RESULT_CHARS,
+        keep_recent: int = RECENT_UNAGED_TOOL_RESULTS,
+        keep_recent_units: int | None = None,
+        max_chars: int | None = None,
     ) -> int:
-        """Level 1 compaction: shrink old large tool results before invoking LLM summarization."""
-        units = self._group_tool_units(messages)
+        """Level 1, no model call: clear every tool result except the ``keep_recent`` newest."""
+        keep = max(0, int(keep_recent_units if keep_recent_units is not None else keep_recent))
+        floor = int(max_chars) if max_chars is not None else MICROCOMPACT_MIN_CHARS
         pinned = getattr(self, "_pinned_index", _PIN_UNSET)
-        eligible = [unit for unit in units if pinned is _PIN_UNSET or pinned not in unit]
-        if len(eligible) <= keep_recent_units:
-            return 0
-        old_indices = {index for unit in eligible[:-keep_recent_units] for index in unit}
-        shrunk = 0
-        preview_chars = min(800, max(200, max_chars // 4))
-
-        def shrink_text(text: str) -> tuple[str, bool]:
-            if len(text) <= max_chars or "[microcompacted: " in text or "\n[compressed: " in text:
-                return text, False
-            return (
-                f"{text[:preview_chars]}\n[microcompacted: {len(text)} characters total; key output preserved above]",
-                True,
-            )
-
-        for index in sorted(old_indices):
+        protected: set[int] = set()
+        if isinstance(pinned, int):
+            protected = set(next((unit for unit in self._group_tool_units(messages) if pinned in unit), [pinned]))
+        indexes = [index for index, message in enumerate(messages) if index not in protected and self._is_tool_result(message)]
+        cleared = 0
+        for index in indexes[: max(0, len(indexes) - keep)]:
             message = messages[index]
-            if not self._is_tool_result(message):
+            if bool(message.get("_tool_image_result")):
+                if message.get("content") != "[earlier tool image omitted]":
+                    message["content"] = "[earlier tool image omitted]"
+                    cleared += 1
                 continue
             content = message.get("content")
             if isinstance(content, str):
-                new_text, changed = shrink_text(content)
-                if changed:
-                    message["content"] = new_text
-                    shrunk += 1
+                if content != MICROCOMPACT_MARKER and len(content) > floor:
+                    message["content"] = MICROCOMPACT_MARKER
+                    cleared += 1
             elif isinstance(content, list):
-                new_blocks: list[object] = []
-                changed_any = False
+                changed = False
+                blocks: list[object] = []
                 for block in content:
-                    if isinstance(block, Mapping) and block.get("type") == "tool_result":
-                        new_text, changed = shrink_text(str(block.get("content", "")))
-                        if changed:
-                            new_blocks.append({**block, "content": new_text})
-                            changed_any = True
-                        else:
-                            new_blocks.append(block)
+                    text = str(block.get("content", "")) if isinstance(block, Mapping) else ""
+                    if isinstance(block, Mapping) and block.get("type") == "tool_result" and text != MICROCOMPACT_MARKER and len(text) > floor:
+                        blocks.append({**block, "content": MICROCOMPACT_MARKER})
+                        changed = True
                     else:
-                        new_blocks.append(block)
-                if changed_any:
-                    message["content"] = new_blocks
-                    shrunk += 1
-        return shrunk
+                        blocks.append(block)
+                if changed:
+                    message["content"] = blocks
+                    cleared += 1
+        return cleared
 
     def _force_compact(
         self,
@@ -1305,17 +1303,36 @@ class AgenticTurnRuntime:
         return shrunk > 0 or len(messages) < before_len
 
     def _maybe_compact(self, messages: list[dict[str, object]], turn: Mapping[str, object], tool_schemas: list[dict[str, object]]) -> None:
-        """Summarize old exchanges before ordinary trimming becomes lossy."""
+        """Clear old tool results first; summarize only when that is not enough."""
         if self._compaction_count >= 8 or len(messages) < CONTEXT_COMPACTION_KEEP_UNITS + 2:
             return
         estimate = self._estimated_tokens({"messages": messages, "tools": tool_schemas})
         limit = self.limits.max_context_tokens
         if estimate >= int(limit * MICROCOMPACT_THRESHOLD):
+            before = estimate
             if self._microcompact(messages):
                 estimate = self._estimated_tokens({"messages": messages, "tools": tool_schemas})
-        if estimate < int(limit * CONTEXT_COMPACTION_THRESHOLD):
+                self._persist_compact_boundary(turn, kind="microcompact", trigger="auto", pre_tokens=before, post_tokens=estimate)
+                if self.context_reporting:
+                    self._life(turn, "context_microcompacted", pre_tokens=before, post_tokens=estimate)
+        threshold = self._autocompact_threshold()
+        if threshold is None or estimate < threshold:
             return
         self._run_compaction(messages, turn, keep_units=CONTEXT_COMPACTION_KEEP_UNITS)
+
+    def _autocompact_threshold(self) -> int | None:
+        """Tokens at which the conversation is summarized; None when ``autoCompact`` is off."""
+        setting = self.autocompact
+        if setting is False:
+            return None
+        limit = self.limits.max_context_tokens
+        if isinstance(setting, int) and not isinstance(setting, bool) and setting > 0:
+            return max(1_000, min(int(setting), limit))
+        window = self.limits.context_window_tokens
+        if window:
+            reserve = (self.limits.max_output_tokens or AUTOCOMPACT_OUTPUT_RESERVE_TOKENS) + AUTOCOMPACT_MARGIN_TOKENS
+            return max(1_000, min(limit, window - reserve))
+        return int(limit * CONTEXT_COMPACTION_THRESHOLD)
 
     def _run_compaction(
         self,
