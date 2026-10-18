@@ -281,6 +281,7 @@ class AgenticTurnRuntime:
         sleep: Callable[[float], None] | None = None,
         fallback_models: tuple[str, ...] | list[str] = (),
         fallback_provider_factory: Callable[[str], object] | None = None,
+        first_user_context: str = "",
     ) -> None:
         self.store, self.provider = store, provider
         self.lifecycle = lifecycle
@@ -296,6 +297,8 @@ class AgenticTurnRuntime:
         # Models tried, in order, when the current one keeps failing; consumed as they are tried.
         self._fallback_models: list[str] = [str(model).strip() for model in fallback_models if str(model or "").strip()]
         self._fallback_provider_factory = fallback_provider_factory
+        # Per-machine context kept out of the system prompt (excludeDynamicSystemPromptSections); see _request_messages.
+        self.first_user_context = str(first_user_context or "")
         self._stop_hook_active = False
         self._stop_continuations = 0
         self._max_tokens_recoveries = 0
@@ -1632,6 +1635,10 @@ class AgenticTurnRuntime:
             previous = index
         if marker is not None and not marker_inserted:
             window.append(marker)
+        if self.first_user_context:
+            # excludeDynamicSystemPromptSections: per-machine context rides with the first message, not the system prompt.
+            position = next((offset for offset, item in enumerate(window) if item.get("role") in {"user", "assistant"}), len(window))
+            window.insert(position, {"role": "user", "content": system_reminder(self.first_user_context)})
         # The contract is rebuilt into every request instead of living in
         # ``messages``: a message can be trimmed away or folded into a
         # compaction summary, and the definition of the task must outlive

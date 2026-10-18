@@ -7,6 +7,7 @@ reported.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -2471,9 +2472,60 @@ class TurnSession:
                 chain.append(model)
         return tuple(chain[:5])
 
+    def _snapshot_enabled(self) -> bool:
+        value = self.effective_settings.get("systemPromptSnapshot", "on")
+        if value is False:
+            return False
+        return str(value).strip().lower() not in {"off", "false", "0", "no"}
+
+    def _snapshot_key(self) -> str:
+        """What the stable prompt depends on. Memory files are deliberately not part of it (they snapshot too)."""
+        from agentos.code_mode.system_prompt import PROMPT_VERSION
+
+        options = getattr(self, "_code_prompt_options", None)
+        material = {
+            "version": PROMPT_VERSION,
+            "tools": sorted(options.tool_names) if options is not None else [],
+            "public": bool(options is not None and options.public_names),
+            "subagents": bool(options is not None and options.subagents_enabled),
+            "style": options.output_style_name if options is not None else "",
+            "style_sha": hashlib.sha256((options.output_style_instructions if options is not None else "").encode("utf-8")).hexdigest(),
+            "keep": bool(options.keep_coding_instructions) if options is not None else True,
+        }
+        return hashlib.sha256(json.dumps(material, sort_keys=True).encode("utf-8")).hexdigest()
+
+    def _snapshotted_prompt(self, rendered: str) -> str:
+        """The conversation's stored stable prompt, byte for byte, until its next compaction (systemPromptSnapshot)."""
+        if not rendered or not self._snapshot_enabled():
+            return rendered
+        reader = getattr(self.store, "prompt_snapshot", None)
+        writer = getattr(self.store, "save_prompt_snapshot", None)
+        conversation_id = str(self.turn.get("conversation_id") or "")
+        if not conversation_id or not callable(reader) or not callable(writer):
+            return rendered
+        key = self._snapshot_key()
+        try:
+            stored = reader(conversation_id)
+        except Exception:  # noqa: BLE001 - an unreadable snapshot means a fresh render
+            return rendered
+        if isinstance(stored, Mapping):
+            content = stored.get("content")
+            if (
+                stored.get("snapshot_key") == key
+                and isinstance(content, str) and content
+                and hashlib.sha256(content.encode("utf-8")).hexdigest() == stored.get("sha256")
+            ):
+                return content
+        try:
+            writer(conversation_id, user_id=str(self.turn.get("user_id") or ""), snapshot_key=key, content=rendered)
+        except Exception:  # noqa: BLE001 - a snapshot that cannot be stored costs only cache hits
+            logger.debug("prompt snapshot could not be stored", exc_info=True)
+        return rendered
+
     def _code_prompt_parts(self, *, toolset: AgentToolset, plan_path: str | None, environment: Mapping[str, str], trusted: bool) -> tuple[str, str]:
         """Code mode's stable prompt and its per-turn context."""
         from agentos.agentic.runtime import CODE_MODE_CORE_TOOLS
+        from agentos.code_mode import git_context
         from agentos.code_mode.system_prompt import CodePromptOptions, render_code_system_prompt, render_code_turn_context
 
         names = frozenset(item.name for item in toolset.definitions() if item.name in CODE_MODE_CORE_TOOLS)
@@ -2488,7 +2540,7 @@ class TurnSession:
             environment=environment,
             workspace_root=str(self.workspace.root),
             workspace_is_local=self.workspace_is_local,
-            git_status="",
+            git_status=git_context.git_status_summary(self.workspace.root) if (self.workspace_is_local and trusted) else "",
             public_names=public,
         )
         return stable, dynamic
@@ -2722,8 +2774,14 @@ class TurnSession:
             project_sessions=project_sessions,
             mcp_servers=toolset.mcp_server_summaries(),
         )
+        first_user_context = ""
         if code_turn_context:
-            volatile_prompt = f"{code_turn_context}\n\n{volatile_prompt}".strip()
+            if self.effective_settings.get("excludeDynamicSystemPromptSections") is True:
+                first_user_context = code_turn_context
+            else:
+                volatile_prompt = f"{code_turn_context}\n\n{volatile_prompt}".strip()
+        if self.turn.get("code_mode") == "code":
+            prompt = self._snapshotted_prompt(prompt)
         if turn_start["prompt_context"]:
             volatile_prompt = (volatile_prompt + "\n\n" + system_reminder("\n".join(turn_start["prompt_context"]))).strip()
         # In Code Mode, use a single fluid agentic loop without rigid phase boundaries;
@@ -2766,6 +2824,7 @@ class TurnSession:
                 self.memory, self._record,
                 str(self.turn["project_id"]) if self.turn.get("project_id") else None,
             ),
+            first_user_context=first_user_context,
         )
         if resumed is not None:
             runtime.contract = resumed

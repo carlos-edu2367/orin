@@ -13,7 +13,7 @@ from hashlib import sha256
 from pathlib import Path
 from uuid import uuid4
 
-from sqlalchemy import func, insert, select, update
+from sqlalchemy import delete, func, insert, select, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 
@@ -1799,6 +1799,29 @@ class PostgresChatStore:
             c.execute(update(conversation_input_queue).where(
                 conversation_input_queue.c.queue_id.in_(ids), conversation_input_queue.c.state == "promoted",
             ).values(state="pending", turn_id=None, updated_at=datetime.now(UTC)))
+
+    def prompt_snapshot(self, conversation_id: str) -> dict[str, object] | None:
+        with self._engine.connect() as c:
+            row = c.execute(select(conversation_prompt_snapshots).where(
+                conversation_prompt_snapshots.c.conversation_id == conversation_id,
+            )).mappings().first()
+        if row is None:
+            return None
+        return {"snapshot_key": str(row["snapshot_key"]), "sha256": str(row["sha256"]), "content": str(row["content"])}
+
+    def save_prompt_snapshot(self, conversation_id: str, *, user_id: str, snapshot_key: str, content: str) -> None:
+        now = datetime.now(UTC)
+        digest = sha256(content.encode("utf-8")).hexdigest()
+        with self._engine.begin() as c:
+            c.execute(delete(conversation_prompt_snapshots).where(conversation_prompt_snapshots.c.conversation_id == conversation_id))
+            c.execute(insert(conversation_prompt_snapshots).values(
+                conversation_id=conversation_id, user_id=user_id, snapshot_key=str(snapshot_key)[:64],
+                sha256=digest, content=content, created_at=now,
+            ))
+
+    def clear_prompt_snapshot(self, conversation_id: str) -> None:
+        with self._engine.begin() as c:
+            c.execute(delete(conversation_prompt_snapshots).where(conversation_prompt_snapshots.c.conversation_id == conversation_id))
 
     def history_for_turn(self, turn: dict[str, object], *, rehydration_budget_tokens: int = 0) -> list[dict[str, object]]:
         """The conversation as the model should see it, including past tool work.

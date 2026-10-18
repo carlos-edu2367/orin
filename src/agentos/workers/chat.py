@@ -243,6 +243,15 @@ class _RuntimeStore:
     def mark_queued_input_blocked(self, queue_id: str) -> None:
         self._store.mark_queued_input_blocked(queue_id)
 
+    def prompt_snapshot(self, conversation_id: str):
+        return self._store.prompt_snapshot(conversation_id)
+
+    def save_prompt_snapshot(self, conversation_id: str, **values) -> None:
+        self._store.save_prompt_snapshot(conversation_id, **values)
+
+    def clear_prompt_snapshot(self, conversation_id: str) -> None:
+        self._store.clear_prompt_snapshot(conversation_id)
+
     # -- session seams ---------------------------------------------------
 
     def record(self, *args, **kwargs) -> None:
