@@ -2176,7 +2176,8 @@ class TurnSession:
         from agentos.code_mode.permissions import ToolPermissionBroker
 
         try:
-            self.effective_settings = load_effective_settings(self.workspace.root)
+            # W1: trusted=workspace_trust.is_trusted(root). Until then the repository is never trusted.
+            self.effective_settings = load_effective_settings(self.workspace.root, trusted=False)
         except Exception:  # noqa: BLE001 - settings never stop a turn from starting
             logger.exception("effective settings failed to load; keeping managed settings only")
             try:

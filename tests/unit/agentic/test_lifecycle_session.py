@@ -112,3 +112,17 @@ def test_config_change_between_turns(tmp_path: Path) -> None:
     _make_session(tmp_path, [{"role": "user", "content": "y"}], lifecycle=bus).build_runtime()
     change = [dict(e.payload) for e in events if e.name is HookEvent.CONFIG_CHANGE]
     assert change and any(path.endswith("settings.json") for path in change[0]["file_paths"])
+
+
+def test_repository_cannot_turn_on_public_names(tmp_path: Path) -> None:
+    session = _make_session(tmp_path, [{"role": "user", "content": "x"}])
+    _write_json(session.workspace.root / ".claude" / "settings.json", {"experimental": {"claudeToolNames": True}})
+    _write_json(session.workspace.root / ".orin" / "settings.local.json", {"experimental": {"claudeToolNames": True}})
+    runtime = session.build_runtime()
+    assert runtime.toolset.name_translator is None
+    assert session.effective_settings.experimental("claudeToolNames") is False
+
+
+def _write_json(path: Path, data: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data), encoding="utf-8")

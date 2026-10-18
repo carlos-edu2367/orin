@@ -46,7 +46,7 @@ def test_orin_beats_claude_in_the_same_layer_and_both_are_read(tmp_path: Path) -
     _write(project / ".claude" / "settings.json", {"model": "claude", "outputStyle": "Explanatory", "permissions": {"allow": ["Read"]}})
     _write(project / ".orin" / "settings.json", {"model": "orin", "permissions": {"allow": ["Edit"]}})
     _write(claude_user_dir() / "settings.json", {"permissions": {"deny": ["Bash(rm -rf *)"]}})
-    settings = load_effective_settings(project)
+    settings = load_effective_settings(project, trusted=True)  # repository allow rules need a trust decision
     assert settings.get("model") == "orin"
     assert settings.get("outputStyle") == "Explanatory"
     assert set(settings.get("permissions.allow")) == {"Read", "Edit"}
@@ -133,7 +133,7 @@ def test_experimental_flags_and_permission_rules_with_sources(tmp_path: Path) ->
     project = tmp_path / "repo"
     _write(orin_user_dir() / "settings.json", {"experimental": {"claudeToolNames": True}, "permissions": {"allow": ["Read", "Edit"]}})
     _write(project / ".orin" / "settings.json", {"experimental": {"other": "yes"}, "permissions": {"allow": ["Read", "Bash(npm test)"]}})
-    settings = load_effective_settings(project)
+    settings = load_effective_settings(project, trusted=True)
     assert settings.experimental("claudeToolNames") is True
     assert settings.experimental("other") is False  # non-bool is not a flag
     assert settings.experimental("missing") is False
@@ -217,3 +217,36 @@ def test_nesting_depth_is_bounded(tmp_path: Path) -> None:
     settings = load_effective_settings(project)
     assert settings.get("a") is None
     assert any("deeper" in error.message or "nest" in error.message for error in settings.errors)
+
+
+def test_experimental_flags_are_never_taken_from_the_repository(tmp_path: Path) -> None:
+    project = tmp_path / "repo"
+    _write(project / ".claude" / "settings.json", {"experimental": {"claudeToolNames": True}})
+    _write(project / ".orin" / "settings.local.json", {"experimental": {"claudeToolNames": True}})
+    for trusted in (False, True):
+        settings = load_effective_settings(project, trusted=trusted)
+        assert settings.experimental("claudeToolNames") is False
+        assert settings.get("experimental.claudeToolNames") is None
+
+
+def test_experimental_flag_from_user_layer_is_honoured(tmp_path: Path) -> None:
+    project = tmp_path / "repo"
+    _write(project / ".claude" / "settings.json", {"experimental": {"claudeToolNames": False}})
+    _write(orin_user_dir() / "settings.json", {"experimental": {"claudeToolNames": True}})
+    assert load_effective_settings(project).experimental("claudeToolNames") is True
+
+
+def test_default_load_is_untrusted_and_drops_executable_keys(tmp_path: Path) -> None:
+    from agentos.settings import empty_settings
+
+    project = tmp_path / "repo"
+    _write(project / ".orin" / "settings.json", {
+        "hooks": {"PreToolUse": []}, "env": {"A": "1"}, "permissions": {"allow": ["Bash(*)"], "deny": ["Read(.env)"]},
+    })
+    settings = load_effective_settings(project)
+    assert settings.trusted is False
+    assert settings.get("hooks") is None
+    assert settings.get("env") is None
+    assert settings.get("permissions.allow") is None
+    assert settings.get("permissions.deny") == ["Read(.env)"]
+    assert empty_settings().trusted is False

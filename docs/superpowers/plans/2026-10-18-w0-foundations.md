@@ -1285,6 +1285,8 @@ git commit -m "feat(tools): speak Claude Code tool names at the model boundary b
 
 ### Task 4: Settings — paths, merge, loader with provenance and project security filter
 
+Amended after review W0-R3: fail closed until W1 workspace trust.
+
 **Files:**
 - Create: `src/agentos/settings/__init__.py`, `src/agentos/settings/paths.py`, `src/agentos/settings/merge.py`, `src/agentos/settings/loader.py`
 - Test: `tests/unit/settings/test_loader.py`
@@ -1294,7 +1296,7 @@ git commit -m "feat(tools): speak Claude Code tool names at the model boundary b
   - `paths.orin_user_dir() -> Path`, `claude_user_dir()`, `orin_managed_dir()`, `claude_managed_dir()`
   - `paths.SettingsPaths(project_root: Path | None)` with `files_for(layer: str) -> tuple[Path, ...]` (lowest precedence first) and `writable_file(layer: str) -> Path`
   - `merge.merge_settings(base: Mapping, overlay: Mapping) -> dict` (overlay wins; lists unioned, overlay items first)
-  - `loader.load_effective_settings(project_root: Path | str | None, *, cli: Mapping | None = None, sources: Collection[str] | None = None, trusted: bool = True) -> EffectiveSettings`
+  - `loader.load_effective_settings(project_root: Path | str | None, *, cli: Mapping | None = None, sources: Collection[str] | None = None, trusted: bool = False) -> EffectiveSettings`
   - `EffectiveSettings` fields: `data`, `provenance: Mapping[str, str]`, `layers: tuple[SettingsLayer, ...]`, `errors: tuple[SettingsError, ...]`, `trusted: bool`, `candidate_files: tuple[Path, ...]`; methods `get(dotted, default=None)`, `experimental(name, default=False) -> bool`, `permission_rules(kind) -> tuple[tuple[str, str], ...]` returning `(rule, layer)` highest precedence first
   - `LAYER_ORDER = ("user", "project", "local", "cli", "managed")` (lowest → highest)
 
@@ -1791,7 +1793,7 @@ def load_effective_settings(
     *,
     cli: Mapping[str, Any] | None = None,
     sources: Collection[str] | None = None,
-    trusted: bool = True,
+    trusted: bool = False,
 ) -> EffectiveSettings:
     paths = SettingsPaths(Path(project_root) if project_root is not None else None)
     allowed_sources = set(sources) if sources is not None else set(_FILTERABLE_SOURCES)

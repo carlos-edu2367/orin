@@ -19,6 +19,7 @@ _FILTERABLE_SOURCES = {"user", "project", "local"}
 
 # Never honoured from a repository's settings: they are organisation/user decisions.
 ALWAYS_IGNORED_FROM_PROJECT = (
+    "experimental",  # opt-in gates are user, CLI or managed decisions, trusted or not
     "claudeMd",
     "memory",
     "autoMemoryDirectory",
@@ -192,7 +193,7 @@ class EffectiveSettings:
 
 
 def empty_settings() -> EffectiveSettings:
-    return EffectiveSettings({}, {}, (), (), True, ())
+    return EffectiveSettings({}, {}, (), (), False, ())
 
 
 def load_effective_settings(
@@ -200,8 +201,10 @@ def load_effective_settings(
     *,
     cli: Mapping[str, Any] | None = None,
     sources: Collection[str] | None = None,
-    trusted: bool = True,
+    trusted: bool = False,
 ) -> EffectiveSettings:
+    """Load the five layers. Fails closed: ``trusted`` defaults to False, so repository hooks,
+    env, allow rules and experimental flags are ignored unless the caller has a trust decision."""
     paths = SettingsPaths(Path(project_root) if project_root is not None else None)
     allowed_sources = set(sources) if sources is not None else set(_FILTERABLE_SOURCES)
     layers: list[SettingsLayer] = []
