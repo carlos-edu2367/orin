@@ -513,5 +513,9 @@ def test_conversation_provider_port_preserves_completed_with_caveats() -> None:
     assert port.error_code == "CODE_COMPLETION_GATE_FAILED"
 
 
+def test_conversation_provider_port_carries_the_queued_count() -> None:
+    runtime = ClosableRuntime(AgenticRunResult("completed", queued_turn_count=2))
+    port = chat_module._ConversationProviderPort(runtime, TURN)
+    port.generate(None)
 
-
+    assert port.queued_turn_count == 2

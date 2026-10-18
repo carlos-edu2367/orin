@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+from datetime import timedelta
+
 import pytest
 from sqlalchemy import create_engine, select
 
+from agentos.agentic.agent_tools import ToolOutcome
+from agentos.agentic.provider_stream import NormalizedStreamItem, StreamKind
+from agentos.agentic.runtime import AgenticLimits, AgenticTurnRuntime
 from agentos.api.contracts import ApplicationNotFoundError, ApplicationValidationError
 from agentos.conversations.chat import MAX_QUEUED_INPUTS, ChatApplication, PostgresChatStore
 from agentos.persistence.postgres.schema import conversation_messages, conversation_turns, metadata
@@ -139,3 +144,54 @@ def test_queued_text_is_promoted_after_a_finished_turn(result_state: str) -> Non
     ChatWorker(store)._promote_queued_inputs(dict(turn), result_state)
     assert store.queued_inputs(conversation_id, "u") == []
     assert _turn_count(store, conversation_id) == 2
+
+
+def test_a_delivered_queued_message_stays_in_the_conversation() -> None:
+    """A queued message the model received mid-turn is in every later turn's history, whatever the budget."""
+    store = _store()
+    app = ChatApplication(store)
+    receipt = store.create(user_id="u", message="migrate the db layer", provider="openrouter", model_id="m", idempotency_key="k1")
+    turn = store.claim(receipt.turn_id)
+    assert turn is not None
+
+    class Adapter:  # what the worker's runtime store forwards
+        def load(self, turn_id): return dict(turn)
+        def history_for_turn(self, t): return store.history_for_turn(t)
+        def lifecycle(self, t, state, **payload): pass
+        def delta(self, t, text): store.delta(t, text)
+        def finish(self, t, *, failed=False, code=None): store.finish(t, failed=failed, code=code)
+        def record_step(self, t, **values): store.record_step(t, **values)
+        def claim_queued_inputs(self, t): return store.claim_queued_inputs(t)
+
+    class Provider:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def stream(self, request):
+            self.calls += 1
+            if self.calls == 1:
+                app.enqueue("u", receipt.conversation_id, "IMPORTANT: never touch payments/legacy.py", "k-q")
+            if self.calls <= 3:
+                return iter([
+                    NormalizedStreamItem(StreamKind.TOOL_CALL, 1, tool_call_id=f"c{self.calls}", tool_name="read_file", arguments_delta='{"path": "a"}'),
+                    NormalizedStreamItem(StreamKind.FINISH, 2, finish_reason="tool_calls"),
+                ])
+            return iter([NormalizedStreamItem(StreamKind.TEXT, 1, text="ok, done"), NormalizedStreamItem(StreamKind.FINISH, 2, finish_reason="stop")])
+
+    class Toolset:
+        def schemas(self, allowed=None): return []
+        def is_read_only(self, name): return True
+        def argument_names(self, name): return frozenset({"path"})
+        def invoke(self, name, arguments): return ToolOutcome("succeeded", "ok", "file content " + "x" * 4000)
+
+    runtime = AgenticTurnRuntime(
+        store=Adapter(), provider=Provider(), toolset=Toolset(),
+        limits=AgenticLimits(max_iterations=None, max_actions=None, deadline=timedelta(hours=1)),
+    )
+    assert runtime.run(str(turn["turn_id"])).queued_turn_count == 1
+
+    next_turn = store.claim(app.send("u", receipt.conversation_id, "now add the tests", "k2").turn_id)
+    assert next_turn is not None
+    for budget in (0, 1_500, 100_000):
+        text = "\n".join(str(message.get("content")) for message in store.history_for_turn(next_turn, rehydration_budget_tokens=budget))
+        assert text.count("never touch payments") == 1, f"budget {budget}"

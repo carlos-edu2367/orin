@@ -52,6 +52,9 @@ COMMAND_STATUS = "context_command"
 # A message in one of these states is final: a late delta must not reopen it.
 _TERMINAL_MESSAGE_STATES = ("completed", "failed", "cancelled", "waiting_user")
 MAX_QUEUED_INPUTS = 20
+# A queued instruction replays in later turns outside the rehydration budget, so it is bounded on its own.
+MAX_QUEUED_REPLAY_CHARS = 16_000
+MAX_QUEUED_REPLAY_PER_TURN = 20
 
 
 def _attachment_label(record: Mapping[str, object]) -> str:
@@ -1960,8 +1963,9 @@ class PostgresChatStore:
         answer, which is where they happened.
 
         ``rehydration_budget_tokens`` bounds what the replayed trajectory may
-        cost; zero (the default, used by every caller that only wants the
-        readable transcript) reproduces the previous behaviour exactly.
+        cost. The instructions the person queued during an earlier turn are
+        not part of that trajectory: they always replay, whatever the budget,
+        because they are the only record of what the person asked for mid-turn.
         """
         with self._engine.connect() as c:
             rows = c.execute(select(conversation_messages.c.message_id, conversation_messages.c.role, conversation_messages.c.content, conversation_messages.c.sequence).where(conversation_messages.c.conversation_id == turn["conversation_id"], conversation_messages.c.sequence <= select(conversation_messages.c.sequence).where(conversation_messages.c.message_id == turn["user_message_id"]).scalar_subquery()).order_by(conversation_messages.c.sequence)).mappings().all()
@@ -1973,7 +1977,7 @@ class PostgresChatStore:
             ).where(conversation_message_commands.c.conversation_id == turn["conversation_id"])).mappings().all()
             turn_rows = c.execute(select(
                 conversation_turns.c.turn_id, conversation_turns.c.assistant_message_id
-            ).where(conversation_turns.c.conversation_id == turn["conversation_id"])).mappings().all() if rehydration_budget_tokens > 0 else []
+            ).where(conversation_turns.c.conversation_id == turn["conversation_id"])).mappings().all()
             boundary = c.execute(select(
                 conversation_compact_boundaries.c.summary, conversation_compact_boundaries.c.through_sequence,
             ).where(
@@ -2005,11 +2009,14 @@ class PostgresChatStore:
             (str(row["message_id"]), earlier_turns[str(row["message_id"])])
             for row in rows if str(row["message_id"]) in earlier_turns
         ]
-        replay = self._rehydrated_steps(turn, ordered, rehydration_budget_tokens) if ordered else {}
+        replay = self._rehydrated_steps(turn, ordered, rehydration_budget_tokens) if ordered and rehydration_budget_tokens > 0 else {}
+        queued = self._queued_inputs_for(turn, ordered) if ordered else {}
         history: list[dict[str, object]] = []
         for row in rows:
             message_id = str(row["message_id"])
             for message in replay.get(message_id, ()):
+                history.append(message)
+            for message in queued.get(message_id, ()):
                 history.append(message)
             content = expansions.get(message_id, str(row["content"]))
             records = grouped.get(message_id, [])
@@ -2021,6 +2028,53 @@ class PostgresChatStore:
         if compacted:
             history.insert(0, compaction_message(str(boundary["summary"])))
         return history
+
+    def _queued_inputs_for(
+        self,
+        turn: Mapping[str, object],
+        ordered_turns: Sequence[tuple[str, str]],
+    ) -> dict[str, list[dict[str, object]]]:
+        """The instructions queued during each earlier turn, as user messages before that turn's answer.
+
+        Replayed on every budget, including zero: a budget that trims the tool
+        trajectory must never trim what the person asked for. The position
+        is after that turn's trajectory, which is approximate: the queued text
+        reached the model between its tool calls.
+        """
+        turn_ids = [turn_id for _, turn_id in ordered_turns]
+        try:
+            with self._engine.connect() as connection:
+                rows = connection.execute(
+                    select(conversation_turn_steps.c.turn_id, conversation_turn_steps.c.payload)
+                    .where(
+                        conversation_turn_steps.c.conversation_id == turn["conversation_id"],
+                        conversation_turn_steps.c.turn_id.in_(turn_ids),
+                        conversation_turn_steps.c.kind == turn_transcript.STEP_QUEUED_INPUT,
+                        conversation_turn_steps.c.agent_id == "main",
+                    )
+                    .order_by(conversation_turn_steps.c.turn_id, conversation_turn_steps.c.sequence)
+                ).mappings().all()
+        except Exception:  # noqa: BLE001 - a missing record degrades to the conversation without it
+            _LOGGER.exception("could not read the queued inputs of %s", turn["conversation_id"])
+            return {}
+        texts: dict[str, list[str]] = {}
+        for row in rows:
+            try:
+                payload = json.loads(str(row["payload"]))
+            except (TypeError, ValueError):
+                continue
+            content = str(payload.get("content") or "").strip() if isinstance(payload, Mapping) else ""
+            if content:
+                texts.setdefault(str(row["turn_id"]), []).append(content)
+        replay: dict[str, list[dict[str, object]]] = {}
+        for message_id, turn_id in ordered_turns:
+            messages = [
+                {"role": "user", "content": content[:MAX_QUEUED_REPLAY_CHARS]}
+                for content in texts.get(turn_id, [])[:MAX_QUEUED_REPLAY_PER_TURN]
+            ]
+            if messages:
+                replay[message_id] = messages
+        return replay
 
     def _rehydrated_steps(
         self,
@@ -2049,7 +2103,10 @@ class PostgresChatStore:
             steps = stored.get(turn_id)
             if not steps:
                 continue
-            kept = turn_transcript.within_budget(steps, remaining)
+            # Queued instructions replay on their own (see _queued_inputs_for); counting them here would repeat them.
+            kept = turn_transcript.within_budget(
+                [step for step in steps if step.get("kind") != turn_transcript.STEP_QUEUED_INPUT], remaining,
+            )
             if not kept:
                 continue
             remaining -= sum(turn_transcript.estimated_tokens(step.get("payload")) for step in kept)

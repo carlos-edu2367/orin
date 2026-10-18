@@ -367,10 +367,12 @@ class _ConversationProviderPort:
         self.reconciliation_required = False
         self.completed_with_caveats = False
         self.error_code: str | None = None
+        self.queued_turn_count = 0
 
     def generate(self, request):
         result = self._runtime.run(str(self._turn["turn_id"]))
         self.error_code = result.error_code
+        self.queued_turn_count = int(getattr(result, "queued_turn_count", 0) or 0)
         if result.state == "completed":
             return ProviderFinal(f"conversation-message:{self._turn['assistant_message_id']}")
         if result.state == "completed_with_caveats":
@@ -497,16 +499,18 @@ class ChatWorker:
                     result = AgenticRunResult(
                         "completed_with_caveats" if provider_port.completed_with_caveats else "completed",
                         error_code=provider_port.error_code,
+                        queued_turn_count=provider_port.queued_turn_count,
                     )
                 elif isinstance(outcome, WaitingOutcome):
                     result = AgenticRunResult(
                         "reconciliation_required" if provider_port.reconciliation_required or outcome.state is ExecutionState.PAUSED else "waiting_user",
                         error_code="EFFECT_RECONCILIATION_REQUIRED" if provider_port.reconciliation_required or outcome.state is ExecutionState.PAUSED else None,
+                        queued_turn_count=provider_port.queued_turn_count,
                     )
                 elif isinstance(outcome, CancelledOutcome):
-                    result = AgenticRunResult("cancelled")
+                    result = AgenticRunResult("cancelled", queued_turn_count=provider_port.queued_turn_count)
                 elif isinstance(outcome, FailedOutcome):
-                    result = AgenticRunResult("failed", error_code=outcome.error.code)
+                    result = AgenticRunResult("failed", error_code=outcome.error.code, queued_turn_count=provider_port.queued_turn_count)
                 else:
                     raise AssertionError("unknown conversational Kernel outcome")
             else:
