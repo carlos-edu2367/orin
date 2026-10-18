@@ -151,6 +151,7 @@ CONTINUE_AFTER_OUTPUT_LIMIT = (
     "Your previous reply was cut off by the output length limit. Continue exactly where it stopped: "
     "do not repeat what you already wrote, do not apologize and do not summarize."
 )
+INTERRUPTED_TOOL_RESULT = "Interrupted by user: this tool call was not run."
 
 VERIFY_REQUIRED_MESSAGE = (
     "[Sistema] Você alterou o workspace nesta tarefa e ainda não verificou o resultado. Antes de responder, "
@@ -943,6 +944,8 @@ class AgenticTurnRuntime:
                         tool_name=str(result.get("name") or ""), tool_call_id=str(result.get("id") or ""),
                     )
                     messages.extend(self._tool_result_messages(turn, result))
+                if self.cancelled(turn):
+                    return self._cancel(turn, iteration, action_count)
                 stop_reason = getattr(self.toolset, "stop_requested", None)
                 if stop_reason:
                     self.store.delta(turn, f"\n\n⏹ Interrompido por hook: {stop_reason}")
@@ -1882,6 +1885,9 @@ class AgenticTurnRuntime:
                 "TOOL_TRANSIENT_ERROR",
             )
 
+        def interrupted_outcome() -> ToolOutcome:
+            return ToolOutcome("failed", "Interrompido pelo usuário", INTERRUPTED_TOOL_RESULT, {}, "INTERRUPTED_BY_USER")
+
         def invoke(index: int) -> object:
             call_id, name, arguments, _ = prepared[index]
             assert arguments is not None
@@ -1955,6 +1961,12 @@ class AgenticTurnRuntime:
 
         index = 0
         while index < len(prepared):
+            if self.cancelled(turn):
+                # Calls not started yet still get a result: a call without one is a shape every provider rejects.
+                for rest in range(index, len(prepared)):
+                    if prepared[rest][3] is None and rest not in outcomes:
+                        outcomes[rest] = interrupted_outcome()
+                break
             if not eligible[index]:
                 _, name, arguments, error = prepared[index]
                 if duplicate[index]:

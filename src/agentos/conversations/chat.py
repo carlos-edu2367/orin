@@ -46,6 +46,8 @@ def _execution_duration_limit(code_active: bool) -> int:
 # marked with this status, and history_for_turn skips it together with its turn's assistant message.
 BLOCKED_BY_HOOK_STATUS = "blocked_by_hook"
 BLOCKED_PROMPT_PLACEHOLDER = "[mensagem bloqueada por hook]"
+# A message in one of these states is final: a late delta must not reopen it.
+_TERMINAL_MESSAGE_STATES = ("completed", "failed", "cancelled", "waiting_user")
 
 
 def _attachment_label(record: Mapping[str, object]) -> str:
@@ -1832,7 +1834,13 @@ class PostgresChatStore:
         if not text: return
         now = datetime.now(UTC)
         with self._engine.begin() as c:
-            c.execute(update(conversation_messages).where(conversation_messages.c.message_id == turn["assistant_message_id"]).values(content=conversation_messages.c.content + text, status="streaming", updated_at=now))
+            changed = c.execute(update(conversation_messages).where(
+                conversation_messages.c.message_id == turn["assistant_message_id"],
+                conversation_messages.c.status.notin_(_TERMINAL_MESSAGE_STATES),
+            ).values(content=conversation_messages.c.content + text, status="streaming", updated_at=now))
+            if not changed.rowcount:
+                # The turn already ended (cancelled while the provider was still streaming): keep what was shown.
+                return
             c.execute(insert(conversation_events).values(conversation_id=turn["conversation_id"], user_id=turn["user_id"], event_type="message.delta", message_id=turn["assistant_message_id"], payload={"content": text}, created_at=now))
         # The assistant message stays the durable content projection; the delta
         # event carries the same chunk so an attached client can render the text
