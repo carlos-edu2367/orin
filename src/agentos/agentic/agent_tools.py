@@ -111,6 +111,8 @@ from .provider_content import image_block
 logger = logging.getLogger(__name__)
 
 MAX_TOOL_RESULT_CHARS = 12_000
+# A file over this size is not hashed by the external-change check: a moved (mtime, size) stamp counts as a change.
+EXTERNAL_CHANGE_HASH_LIMIT_BYTES = 8 * 1024 * 1024
 
 # Error codes that mean the call was refused by policy rather than failing.
 PERMISSION_DENIAL_CODES = frozenset({
@@ -743,6 +745,8 @@ class AgentToolset:
         self._cancel_check = cancel_check
         self._read_file_lock = threading.Lock()
         self._reported_changes: set[tuple[str, str, str]] = set()
+        # (mtime_ns, size) of each path at its last external-change examination; an unchanged stamp is not re-hashed.
+        self._external_stamps: dict[str, tuple[int, int]] = {}
         self.turn_id = str(turn_id) if turn_id else None
         self.conversation_id = str(conversation_id) if conversation_id else None
         self._conversation_id = self.conversation_id
@@ -2868,15 +2872,23 @@ class AgentToolset:
             else:
                 if stat.st_mtime_ns == record.mtime_ns:
                     continue
-                try:
-                    digest = hashlib.sha256(target.read_bytes()).hexdigest()
-                except OSError:
-                    continue
-                if digest == record.sha256:
-                    with self._read_file_lock:
-                        record.mtime_ns = stat.st_mtime_ns  # touched, not changed
-                    continue
-                event = "change"
+                stamp = (stat.st_mtime_ns, stat.st_size)
+                with self._read_file_lock:
+                    if self._external_stamps.get(relative) == stamp:
+                        continue  # examined at this stamp already: nothing new to report or hash
+                    self._external_stamps[relative] = stamp
+                if stat.st_size > EXTERNAL_CHANGE_HASH_LIMIT_BYTES:
+                    event = "change"  # too large to read on every request: the moved stamp is the change
+                else:
+                    try:
+                        digest = hashlib.sha256(target.read_bytes()).hexdigest()
+                    except OSError:
+                        continue
+                    if digest == record.sha256:
+                        with self._read_file_lock:
+                            record.mtime_ns = stat.st_mtime_ns  # touched, not changed
+                        continue
+                    event = "change"
             marker = (relative, record.sha256, event)
             if marker in self._reported_changes:
                 continue
