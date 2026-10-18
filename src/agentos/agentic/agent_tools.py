@@ -1953,7 +1953,8 @@ class AgentToolset:
         elif internal == "enter_worktree":
             self._emit_lifecycle(bus, HookEvent.WORKTREE_CREATE, worktree=dict(payload.get("worktree") or {}))
         elif internal == "exit_worktree" and str(arguments.get("action") or "keep") == "remove":
-            self._emit_lifecycle(bus, HookEvent.WORKTREE_REMOVE, worktree_name=str(self._active_worktree_name or ""))
+            # exit_worktree clears the active name before this runs, so the outcome carries it
+            self._emit_lifecycle(bus, HookEvent.WORKTREE_REMOVE, worktree_name=str(payload.get("worktree_name") or ""))
         if self._current_cwd != cwd_before:
             self._emit_lifecycle(bus, HookEvent.CWD_CHANGED, old_cwd=str(cwd_before), new_cwd=str(self._current_cwd))
 
