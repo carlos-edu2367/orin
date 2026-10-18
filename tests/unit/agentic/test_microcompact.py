@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+from decimal import Decimal
 from pathlib import Path
 
 from agentos.agentic.compaction import COMPACTION_SECTIONS, MICROCOMPACT_MARKER
+from agentos.agentic.loop_settings import BudgetMeter
 from agentos.agentic.provider_stream import NormalizedStreamItem, StreamKind
 from agentos.agentic.runtime import AgenticLimits, AgenticTurnRuntime
+from agentos.providers.models import ProviderUsage
 from agentos.settings.paths import orin_user_dir
 
 
@@ -96,7 +99,7 @@ def test_autocompact_off_never_summarizes() -> None:
     assert calls == []
 
 
-def _session_autocompact(tmp_path: Path, settings: dict) -> object:
+def _session_autocompact(tmp_path: Path, settings: dict, repository: dict | None = None) -> object:
     from agentos.agentic.session import TurnSession
 
     path = orin_user_dir() / "settings.json"
@@ -121,6 +124,10 @@ def _session_autocompact(tmp_path: Path, settings: dict) -> object:
     store = _Store()
     session = TurnSession(turn=dict(store.turn), store=store, agents_store=_Agents(), memory_store=None,
                           provider_factory=lambda: object(), workspace_root=tmp_path, enable_subagents=False)
+    if repository is not None:  # the workspace is a folder of its own (per conversation), not tmp_path
+        repo_path = session.workspace.root / ".claude" / "settings.json"
+        repo_path.parent.mkdir(parents=True, exist_ok=True)
+        repo_path.write_text(json.dumps(repository), encoding="utf-8")
     return session.build_runtime().autocompact
 
 
@@ -129,3 +136,43 @@ def test_the_session_reads_autocompact(tmp_path: Path) -> None:
     assert _session_autocompact(tmp_path, {"autoCompact": False}) is False
     assert _session_autocompact(tmp_path, {"autoCompact": "120000"}) == 120_000
     assert _session_autocompact(tmp_path, {"autoCompactEnabled": False}) is False
+
+
+def test_a_repository_cannot_lower_the_autocompact_threshold(tmp_path: Path) -> None:
+    assert _session_autocompact(tmp_path, {}, repository={"autoCompact": 1}) == "auto"
+    # The operator's threshold stands; a repository's integer is ignored, not averaged or summed.
+    assert _session_autocompact(tmp_path, {"autoCompact": 120000}, repository={"autoCompact": 1}) == 120_000
+    # A repository may still turn autocompaction off, and a repository "auto" changes nothing.
+    assert _session_autocompact(tmp_path, {}, repository={"autoCompact": False}) is False
+    assert _session_autocompact(tmp_path, {"autoCompact": 120000}, repository={"autoCompact": "auto"}) == 120_000
+
+
+def test_an_operator_threshold_has_a_floor() -> None:
+    runtime = _runtime(max_context_tokens=180_000, context_window_tokens=200_000)
+    runtime.autocompact = 1
+    assert runtime._autocompact_threshold() == 45_000  # 25% of max_context_tokens
+    runtime.autocompact = 45_000
+    assert runtime._autocompact_threshold() == 45_000
+
+
+class CostedSummarizer:
+    def stream(self, request):
+        return iter([
+            NormalizedStreamItem(StreamKind.TEXT, 1, text="\n".join(f"### {s}\n- d" for s in COMPACTION_SECTIONS)),
+            NormalizedStreamItem(StreamKind.USAGE, 2, usage=ProviderUsage(1_000, 200, 1_200, None, measurement="CONFIRMED")),
+        ])
+
+
+def test_the_summary_call_counts_toward_the_budget() -> None:
+    meter = BudgetMeter()
+    runtime = AgenticTurnRuntime(
+        store=Store(), provider=CostedSummarizer(),
+        limits=AgenticLimits(max_context_tokens=4_000, max_budget_usd=Decimal("0.2")),
+        cost_estimator=lambda input_tokens, output_tokens: Decimal("0.25"),
+        budget_meter=meter,
+    )
+    messages = _conversation(20)
+    runtime._pinned_index = 0
+    assert runtime._run_compaction(messages, {"turn_id": "t"}, keep_units=2)
+    assert meter.total == Decimal("0.25")
+    assert runtime._spent_usd(Decimal("0")) >= Decimal("0.2")  # the next budget check sees the summary

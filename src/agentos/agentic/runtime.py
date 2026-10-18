@@ -290,6 +290,8 @@ class AgenticTurnRuntime:
         self._cost_estimator = cost_estimator
         # The turn's money, shared with its subagents: max_budget_usd is checked against this total when it is set.
         self._budget_meter = budget_meter
+        # What the summarizer's calls cost when there is no meter (the summary is billed like any other call).
+        self._summary_spent = Decimal("0")
         self._sleep = sleep or time.sleep
         # Models tried, in order, when the current one keeps failing; consumed as they are tried.
         self._fallback_models: list[str] = [str(model).strip() for model in fallback_models if str(model or "").strip()]
@@ -478,8 +480,29 @@ class AgenticTurnRuntime:
             self._budget_meter.add(amount)
 
     def _spent_usd(self, local_total: Decimal) -> Decimal:
-        """The turn's spending so far: the shared meter when there is one, else this runtime's own calls."""
-        return self._budget_meter.total if self._budget_meter is not None else local_total
+        """The turn's spending so far: the shared meter when there is one, else this runtime's own calls and summaries."""
+        return self._budget_meter.total if self._budget_meter is not None else local_total + self._summary_spent
+
+    def _charge_summary(self, reported: Decimal | None, input_tokens: int | None, output_tokens: int | None) -> None:
+        """Bill one summarizer call: the provider's reported cost, else the estimate, as the main loop does."""
+        cost = reported
+        if cost is None and self._cost_estimator is not None and (input_tokens is not None or output_tokens is not None):
+            try:
+                cost = self._cost_estimator(input_tokens, output_tokens)
+            except Exception:  # noqa: BLE001 - pricing never breaks a compaction
+                cost = None
+        if cost is None:
+            return
+        try:
+            amount = Decimal(str(cost))
+        except (ArithmeticError, ValueError):
+            return
+        if not amount.is_finite() or amount <= 0:
+            return
+        if self._budget_meter is not None:
+            self._budget_meter.add(amount)
+        else:
+            self._summary_spent += amount
 
     def _model_accepts_effort(self, model: str) -> bool:
         if self._effort_supported is None:
@@ -1425,7 +1448,8 @@ class AgenticTurnRuntime:
             return None
         limit = self.limits.max_context_tokens
         if isinstance(setting, int) and not isinstance(setting, bool) and setting > 0:
-            return max(1_000, min(int(setting), limit))
+            # Floored at a quarter of the context: a tiny threshold would summarize on nearly every request.
+            return max(limit // 4, min(int(setting), limit))
         window = self.limits.context_window_tokens
         if window:
             reserve = (self.limits.max_output_tokens or AUTOCOMPACT_OUTPUT_RESERVE_TOKENS) + AUTOCOMPACT_MARGIN_TOKENS
@@ -1575,6 +1599,9 @@ class AgenticTurnRuntime:
 
     def _request_compaction_summary(self, source: str, turn: Mapping[str, object], *, code_mode: bool = False) -> str:
         instruction = COMPACTION_INSTRUCTION
+        reported: Decimal | None = None
+        input_tokens: int | None = None
+        output_tokens: int | None = None
         try:
             events = self.provider.stream({
                 "turn_id": str(turn.get("turn_id") or "") + ":context-compaction",
@@ -1589,9 +1616,17 @@ class AgenticTurnRuntime:
                 event = self._coerce(raw)
                 if event.kind is StreamKind.TEXT and event.text:
                     parts.append(event.text)
+                elif event.kind is StreamKind.USAGE:
+                    if event.cost:
+                        reported = (reported or Decimal("0")) + Decimal(str(event.cost))
+                    if event.usage is not None:
+                        input_tokens = event.usage.input_tokens if event.usage.input_tokens is not None else input_tokens
+                        output_tokens = event.usage.output_tokens if event.usage.output_tokens is not None else output_tokens
             return "".join(parts).strip()
         except Exception:
             return ""
+        finally:
+            self._charge_summary(reported, input_tokens, output_tokens)
 
     @staticmethod
     def _has_sections(summary: str) -> bool:

@@ -2703,17 +2703,33 @@ class TurnSession:
         return stable, dynamic
 
     def _autocompact_setting(self) -> object:
-        """``autoCompact``: "auto" (default), a token threshold, or false; ``autoCompactEnabled: false`` also turns it off."""
+        """``autoCompact``: "auto" (default), a token threshold, or false; ``autoCompactEnabled: false`` also turns it off.
+
+        Only the operator (user, CLI, managed policy) sets a threshold. A repository may turn autocompaction off and
+        nothing more: its threshold would summarize on nearly every request, and its "auto" changes nothing.
+        """
+        from .loop_settings import OPERATOR_LAYERS, layer_values, positive_int
+
+        def parse(raw: object) -> object | None:
+            if raw is False or (isinstance(raw, str) and raw.strip().lower() in {"false", "off", "0", "no"}):
+                return False
+            if isinstance(raw, str) and raw.strip().lower() == "auto":
+                return "auto"
+            return positive_int(raw)  # a token threshold, or None for anything else (ignored)
+
         if self.effective_settings.get("autoCompactEnabled") is False:
             return False
-        value = self.effective_settings.get("autoCompact")
-        if value is False or (isinstance(value, str) and value.strip().lower() in {"false", "off", "0", "no"}):
-            return False
-        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
-            return value
-        if isinstance(value, str) and value.strip().isdigit() and int(value.strip()) > 0:
-            return int(value.strip())
-        return "auto"
+        chosen: object = "auto"
+        repository_off = False
+        for name, raw in layer_values(self.effective_settings, "autoCompact"):  # lowest precedence first
+            value = parse(raw)
+            if value is None:
+                continue
+            if name in OPERATOR_LAYERS:
+                chosen = value
+            elif value is False:
+                repository_off = True
+        return False if repository_off else chosen
 
     def _memory_files(self, trusted: bool):
         """This turn's instruction files (managed, user, project, rules, local); None if they cannot be read."""
