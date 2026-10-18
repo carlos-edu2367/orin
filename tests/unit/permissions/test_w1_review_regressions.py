@@ -70,3 +70,40 @@ def test_ntfs_edit_into_protected_dir_asks_for_a_human_in_accept_edits(root: Pat
 def test_ntfs_trailing_space_env_is_denied_by_read_rule(root: Path) -> None:
     engine = _engine(root, user={"permissions": {"deny": ["Read(.env)"]}})
     assert engine.decide("read_file", {"path": ".env "}, M.FULL_AUTONOMY).behavior == "deny"
+
+
+# -- W1-R4: cp/mv destinations are vetted, options and glob/quote tricks included ---
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cp --target-directory=.git/hooks pre-commit",
+        "cp -t .git/hooks pre-commit",
+        "cp -t.git/hooks pre-commit",
+        "mv --target-directory=.orin settings.json",
+        "mv -t .claude x",
+        '"cp" -t ".git/hooks" x',
+        "mv '.git' x",
+        'mv ".g"it x',
+        "mv .\\git x",
+        "mv .git/config x",
+        "cp x .git/hooks/pre-commit",
+    ],
+)
+def test_acceptedits_never_auto_allows_a_protected_transfer(root: Path, command: str) -> None:
+    engine = _engine(root)
+    decision = engine.decide("run_command", {"command": command}, M.ACCEPT_EDITS)
+    assert decision.behavior == "ask" and decision.requires_human is True, command
+
+
+@pytest.mark.parametrize("command", ["cp evil.json .ori?/settings.json", "mv .gi? x", "cp a [.]git/x", "mv *.py .."])
+def test_acceptedits_asks_when_a_glob_cannot_be_canonicalized(root: Path, command: str) -> None:
+    engine = _engine(root)
+    assert engine.decide("run_command", {"command": command}, M.ACCEPT_EDITS).behavior == "ask", command
+
+
+def test_plain_inside_transfer_stays_allowed(root: Path) -> None:
+    engine = _engine(root)
+    assert engine.decide("run_command", {"command": "cp a.txt b.txt"}, M.ACCEPT_EDITS).behavior == "allow"
+    assert engine.decide("run_command", {"command": "mv src/a.py src/b.py"}, M.ACCEPT_EDITS).behavior == "allow"

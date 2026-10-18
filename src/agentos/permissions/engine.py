@@ -28,6 +28,21 @@ READ_ONLY_TOOLS: frozenset[str] = frozenset({
 DELEGATION_TOOLS: frozenset[str] = frozenset({"run_subagent", "create_agent", "ask_agent", "ask_agents"})
 SAFE_FILE_COMMANDS: frozenset[str] = frozenset({"mkdir", "touch", "cp", "mv"})
 _PLAN_SUBAGENTS = frozenset({"explore", "plan"})
+# cp/mv flags that cannot redirect a write elsewhere. Any other flag makes the call ask.
+_SAFE_TRANSFER_FLAGS = frozenset({
+    "-r", "-R", "-f", "-i", "-p", "-v", "-a", "-n", "-u", "--recursive", "--force", "--verbose",
+    "--preserve", "--no-clobber", "--interactive", "--archive", "--update",
+})
+
+
+def _canonical_variants(word: str) -> list[str]:
+    """Readings of one shell word: quotes removed, backslash as an escape or as a Windows separator."""
+    base = str(word).replace('"', "").replace("'", "")
+    return list(dict.fromkeys([base.replace("\\", ""), base.replace("\\", "/")]))
+
+
+def _has_glob(word: str) -> bool:
+    return any(char in word for char in "*?[")
 
 Classifier = Callable[[str, Mapping[str, Any]], "PermissionDecision"]
 
@@ -105,7 +120,45 @@ class PermissionEngine:
         return relative.lower().startswith(".orin/plans/") and len(relative.split("/")) >= 3
 
     def _command_tokens(self, subcommand: str) -> list[str]:
-        return [token.strip("'\"") for token in subcommand.split(" ")[1:] if token and not token.startswith("-")]
+        """Every reading of every argument, options included (``--target-directory=DIR``, ``-tDIR``)."""
+        words: list[str] = []
+        for token in subcommand.split(" ")[1:]:
+            if not token:
+                continue
+            if token.startswith("-"):
+                body = token.lstrip("-")
+                words.extend([body, token[2:]])
+                if "=" in body:
+                    words.append(body.split("=", 1)[1])
+            else:
+                words.append(token)
+        return [variant for word in words for variant in _canonical_variants(word)]
+
+    def _transfer_operands(self, subcommand: str) -> tuple[list[str], list[str]] | None:
+        """``cp``/``mv`` operands and explicit target directories, or None when a flag is not understood."""
+        operands: list[str] = []
+        targets: list[str] = []
+        tokens = [token for token in subcommand.split(" ")[1:] if token]
+        index = 0
+        while index < len(tokens):
+            token = tokens[index]
+            if token in {"-t", "--target-directory"} and index + 1 < len(tokens):
+                targets.append(tokens[index + 1])
+                index += 2
+                continue
+            if token.startswith("--target-directory="):
+                targets.append(token.split("=", 1)[1])
+            elif token.startswith("-t") and not token.startswith("--"):
+                targets.append(token[2:])
+            elif token in {"-T", "--no-target-directory"}:
+                pass
+            elif token.startswith("-"):
+                if token not in _SAFE_TRANSFER_FLAGS:
+                    return None
+            else:
+                operands.append(token)
+            index += 1
+        return operands, targets
 
     def _token_paths(self, token: str) -> list[Path]:
         """Every meaning a shell token can have as a path.
@@ -126,6 +179,15 @@ class PermissionEngine:
                     return True
         return False
 
+    def _inside_unprotected(self, word: str) -> bool:
+        for variant in _canonical_variants(word):
+            if _has_glob(variant):
+                return False
+            for target in self._token_paths(variant):
+                if not self._inside(target) or is_protected_path(target, workspace_root=self.workspace_root):
+                    return False
+        return True
+
     def _safe_file_command(self, analysis) -> bool:
         if analysis.complex or not analysis.subcommands:
             return False
@@ -133,10 +195,21 @@ class PermissionEngine:
             name = sub.split(" ", 1)[0]
             if name not in SAFE_FILE_COMMANDS:
                 return False
-            for token in self._command_tokens(sub):
-                for target in self._token_paths(token):
-                    if not self._inside(target) or is_protected_path(target, workspace_root=self.workspace_root):
-                        return False
+            if name in {"cp", "mv"}:
+                parsed = self._transfer_operands(sub)
+                if parsed is None:
+                    return False
+                operands, targets = parsed
+                if not operands and not targets:
+                    return False
+                if not targets and len(operands) < 2:
+                    return False
+                if not all(self._inside_unprotected(word) for word in operands + targets):
+                    return False
+                continue
+            for token in [token for token in sub.split(" ")[1:] if token and not token.startswith("-")]:
+                if not self._inside_unprotected(token):
+                    return False
         return True
 
     def _bash_allowed(self, analysis, args: Mapping[str, Any]) -> PermissionRule | None:
