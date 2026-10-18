@@ -45,7 +45,7 @@ from .diagnostics import STEP_ORDER, detect_recipe, file_diagnostic_command
 from .workspace import MAX_LIST_DEPTH, MAX_SEARCH_RESULTS, ConversationWorkspace, WorkspaceError
 from .models import MAX_USER_QUESTION_ITEMS
 from .file_preview import media_type_for
-from .lifecycle import HookEvent, LifecycleBus
+from .lifecycle import HookEvent, LifecycleBus, LifecycleDecision
 from .tools.public_names import (
     PublicToolNames,
     arguments_in as _public_arguments_in,
@@ -623,6 +623,16 @@ def _process_is_running(pid: int) -> bool:
     return True
 
 
+def _append_reminder(outcome: ToolOutcome, items: list[str], limit: int) -> None:
+    """Append hook feedback as a system-reminder block, keeping the whole result under ``limit``."""
+    clean = [item for item in items if isinstance(item, str) and item.strip()]
+    if not clean:
+        return
+    block = "\n\n<system-reminder>\n" + "\n".join(clean) + "\n</system-reminder>"
+    head = outcome.content[: max(0, limit - len(block))]
+    outcome.content = head + block
+
+
 class AgentToolset:
     """Builds the tool schemas and executes the model's calls.
 
@@ -693,6 +703,8 @@ class AgentToolset:
         media_client: object | None = None,
         public_tool_names: bool = False,
         lifecycle: LifecycleBus | None = None,
+        extra_env: Mapping[str, str] | None = None,
+        lifecycle_context: Mapping[str, str] | None = None,
     ) -> None:
         from agentos.code_mode.checkpoints import FileCheckpointStore
         from agentos.code_mode.models import CodePermissionMode, normalize_permission_mode
@@ -811,6 +823,12 @@ class AgentToolset:
         # (experimental.claudeToolNames). Internal ids stay snake_case.
         self.name_translator: PublicToolNames | None = PublicToolNames() if public_tool_names else None
         self._lifecycle: LifecycleBus | None = lifecycle
+        # Fields merged into every lifecycle payload this toolset emits (e.g. the subagent's id).
+        self._lifecycle_context: dict[str, str] = {str(k): str(v) for k, v in dict(lifecycle_context or {}).items()}
+        # Environment added to run_command (a SessionStart hook's env file).
+        self._extra_env: dict[str, str] = {str(k): str(v) for k, v in dict(extra_env or {}).items()}
+        # Set when a hook asked to stop the turn; the runtime ends the turn after this tool batch.
+        self.stop_requested: str | None = None
 
     @property
     def active_mcp_tool_names(self) -> frozenset[str]:
@@ -1894,37 +1912,92 @@ class AgentToolset:
         tool_name = _public_tool_name(internal)
         tool_input = _safe_public_input(internal, arguments)
         tool_use_id = str(call_id or invocation_id or getattr(self, "_active_invocation_id", None) or "")
-        self._emit_lifecycle(bus, HookEvent.PRE_TOOL_USE, tool_name=tool_name, tool_input=tool_input, tool_use_id=tool_use_id)
+        kind = self._tool_kind_for_hooks(internal)
+        pre = self._emit_lifecycle(bus, HookEvent.PRE_TOOL_USE, tool_name=tool_name, tool_input=tool_input, tool_use_id=tool_use_id)
+        reminders: list[str] = []
+        if pre is not None:
+            reminders.extend(pre.additional_context)
+            if pre.stop:
+                reason = pre.stop_reason or pre.reason or "sem motivo informado"
+                self.stop_requested = pre.stop_reason or pre.reason or "stopped by hook"
+                return ToolOutcome("failed", "Interrompido por hook", reason[:2000], {"tool_kind": kind}, "HOOK_STOPPED")
+            if pre.blocked or pre.permission_decision == "deny":
+                reason = pre.reason or "sem motivo informado"
+                self._emit_lifecycle(
+                    bus, HookEvent.PERMISSION_DENIED,
+                    tool_name=tool_name, tool_input=tool_input, tool_use_id=tool_use_id, reason=reason[:2000],
+                )
+                return ToolOutcome(
+                    "failed", "Bloqueado por hook",
+                    f"Um hook PreToolUse bloqueou `{tool_name}`: {reason}",
+                    {"tool_kind": kind}, "HOOK_DENIED",
+                )
+            if isinstance(pre.updated_input, Mapping):
+                try:
+                    arguments = _public_arguments_in(internal, dict(pre.updated_input))
+                    tool_input = _safe_public_input(internal, arguments)
+                except Exception:  # noqa: BLE001 - a hook's malformed input must never crash the turn
+                    logger.warning("PreToolUse hook returned input that cannot be applied to %s", internal)
         cwd_before = self._current_cwd
-        outcome = self._invoke_unobserved(internal, arguments, call_id=call_id, invocation_id=invocation_id)
+        hook_permission = pre.permission_decision if pre is not None else None
+        outcome = self._invoke_unobserved(
+            internal, arguments, call_id=call_id, invocation_id=invocation_id, hook_permission=hook_permission,
+        )
         common = {"tool_name": tool_name, "tool_input": tool_input, "tool_use_id": tool_use_id}
         if outcome.error_code in PERMISSION_DENIAL_CODES:
             self._emit_lifecycle(bus, HookEvent.PERMISSION_DENIED, **common, reason=outcome.content[:2000])
         elif outcome.status == "succeeded":
-            self._emit_lifecycle(
+            post = self._emit_lifecycle(
                 bus,
                 HookEvent.POST_TOOL_USE,
                 **common,
                 tool_response={"status": outcome.status, "summary": outcome.summary, "content": outcome.content[:4000]},
             )
+            if post is not None:
+                if post.stop:
+                    self.stop_requested = post.stop_reason or post.reason or "stopped by hook"
+                if post.updated_tool_output is not None and internal.startswith("mcp__"):
+                    replaced = post.updated_tool_output
+                    if not isinstance(replaced, str):
+                        try:
+                            replaced = json.dumps(replaced, ensure_ascii=False, default=str)
+                        except (TypeError, ValueError):
+                            replaced = str(replaced)
+                    outcome.content = replaced[:MAX_TOOL_RESULT_CHARS]
+                reminders.extend(post.additional_context)
+                if post.blocked:
+                    reminders.append(f"PostToolUse hook: {post.reason or 'feedback from hook'}")
+            _append_reminder(outcome, reminders, MAX_TOOL_RESULT_CHARS)
             self._emit_tool_side_events(bus, internal, dict(arguments or {}), outcome, cwd_before)
         else:
-            self._emit_lifecycle(
+            failure = self._emit_lifecycle(
                 bus,
                 HookEvent.POST_TOOL_USE_FAILURE,
                 **common,
                 error=outcome.content[:2000] or outcome.summary,
                 error_code=outcome.error_code,
             )
+            if failure is not None:
+                reminders.extend(failure.additional_context)
+            _append_reminder(outcome, reminders, MAX_TOOL_RESULT_CHARS)
         return outcome
 
-    @staticmethod
-    def _emit_lifecycle(bus: LifecycleBus, event: HookEvent, **payload: Any) -> None:
-        """Emit a lifecycle event; a failing payload or subscriber never breaks the tool call."""
+    def _tool_kind_for_hooks(self, internal: str) -> str:
         try:
-            bus.emit(event, **payload)
+            return self.resolve(internal).kind
+        except Exception:  # noqa: BLE001 - an unknown tool still needs a payload
+            return ""
+
+    def _emit_lifecycle(self, bus: LifecycleBus, event: HookEvent, **payload: Any) -> LifecycleDecision | None:
+        """Emit a lifecycle event and return the merged decision.
+
+        A failing payload or subscriber never breaks the tool call: the result is None.
+        """
+        try:
+            return bus.emit(event, **{**self._lifecycle_context, **payload})
         except Exception:  # noqa: BLE001 - lifecycle never breaks a turn
             logger.exception("lifecycle emit failed for %s", getattr(event, "value", event))
+            return None
 
     def _emit_tool_side_events(
         self,
@@ -1965,6 +2038,7 @@ class AgentToolset:
         *,
         call_id: str | None = None,
         invocation_id: str | None = None,
+        hook_permission: str | None = None,
     ) -> ToolOutcome:
         requested_name = name
         name = _internal_tool_name(name) if self.name_translator is not None else name
@@ -2011,13 +2085,20 @@ class AgentToolset:
                     {"tool_kind": definition.kind, "code_mode": True, "plan_mode": True},
                     "CODE_PLAN_MODE_READONLY",
                 )
-        if self._code_mode_active or self._interactive_permissions or self._permission_broker.has_rules():
+        if hook_permission == "ask" or self._code_mode_active or self._interactive_permissions or self._permission_broker.has_rules():
             decision = self._permission_broker.decide(
                 broker_tool_name,
                 broker_args,
                 self._permission_mode,
                 plan_mode_active=self._plan_mode_active,
             )
+            from agentos.permissions.engine import PermissionDecision
+
+            # A PreToolUse hook's verdict wins over the engine's ask/allow; deny rules still stand.
+            if hook_permission == "allow" and decision.behavior == "ask":
+                decision = PermissionDecision("allow", "approved by a PreToolUse hook")
+            elif hook_permission == "ask" and decision.behavior == "allow":
+                decision = PermissionDecision("ask", "a PreToolUse hook asked for confirmation", requires_human=True)
             perm_decision = decision.behavior
             if perm_decision == "deny":
                 return ToolOutcome(
@@ -2027,16 +2108,34 @@ class AgentToolset:
                     {"tool_kind": definition.kind, "code_mode": True},
                     "CODE_PERMISSION_DENIED",
                 )
+            if perm_decision == "ask" and self._lifecycle is not None:
+                request = self._emit_lifecycle(
+                    self._lifecycle,
+                    HookEvent.PERMISSION_REQUEST,
+                    tool_name=_public_tool_name(name),
+                    tool_input=_safe_public_input(name, arguments),
+                    permission_suggestions=[],
+                )
+                if request is not None:
+                    if request.stop:
+                        self.stop_requested = request.stop_reason or request.reason or "stopped by hook"
+                        return ToolOutcome(
+                            "failed", "Permissão interrompida por hook",
+                            f"Um hook PermissionRequest interrompeu a execução de `{name}`: {request.reason or request.stop_reason or 'sem motivo informado'}",
+                            {"tool_kind": definition.kind, "code_mode": True}, "CODE_PERMISSION_DENIED",
+                        )
+                    if request.permission_decision == "deny":
+                        return ToolOutcome(
+                            "failed", "Permissão negada por hook",
+                            f"Um hook PermissionRequest negou `{name}`: {request.reason or 'sem motivo informado'}",
+                            {"tool_kind": definition.kind, "code_mode": True}, "CODE_PERMISSION_DENIED",
+                        )
+                    if request.permission_decision == "allow":
+                        if isinstance(request.updated_input, Mapping):
+                            arguments = _public_arguments_in(name, dict(request.updated_input))
+                        perm_decision = "allow"
             if perm_decision == "ask":
                 if self._interactive_permissions:
-                    if self._lifecycle is not None:
-                        self._emit_lifecycle(
-                            self._lifecycle,
-                            HookEvent.PERMISSION_REQUEST,
-                            tool_name=_public_tool_name(name),
-                            tool_input=_safe_public_input(name, arguments),
-                            permission_suggestions=[],
-                        )
                     perm_result = self._permission_broker.request_and_wait(
                         tool_name=name,
                         arguments=arguments,
@@ -3741,6 +3840,7 @@ class AgentToolset:
         change_baseline = self.workspace.begin_change_tracking()
         environment = {
             **os.environ,
+            **self._extra_env,
             "PYTHONIOENCODING": "utf-8",
             "NO_COLOR": "1",
             # A model cannot answer an interactive prompt, so an installer or
