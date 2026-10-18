@@ -625,3 +625,10 @@ Full backend suite after batch 3 (`uv run pytest -q tests/unit`, run once, 247.2
 - **3100 passed, 53 skipped, 0 failed**, 31 warnings (the same kinds as before). Before this batch: 3075 passed, 53 skipped. The 25 new tests are the regression tests above (R14: 1, R15: 3, R16: 2, R17: 1, R18: 1, R19: 2, R20: 4, R21: 2, R22: 1, R27: 1, R28: 5, R30: 2).
 
 Not verified in this batch: PostgreSQL (the migration's inspector calls, the new unique index, its self-patch, and the insert-race branch), POSIX (the R17 symlink branch), a live provider, a console-less supervisor, lint and type checks (not run, as before), and the frontend (no file under `frontend/` changed).
+
+## Coordinator verification (after batch 3)
+
+- Follow-up to W3-R20 (`9eb8ce9`), fail closed: the same queue Idempotency-Key with a different text now returns 422 (`ApplicationValidationError`) instead of silently dropping the second text. A retry of a request whose first call found no live turn and sent the text as a turn now returns that turn instead of queueing the text into it (before, the retry queued the same instruction into its own turn). A hook-refused row (text erased by W3-R22) or an erased turn prompt (W2-R6) cannot be compared and is returned as it is. Tests: `test_input_queue.py::test_a_reused_key_with_a_different_message_is_refused`, `::test_a_retry_of_a_sent_message_is_not_queued_into_its_own_turn` (both red before the fix).
+- Full backend suite: `uv run pytest -q tests/unit` → **3102 passed, 53 skipped, 0 failed** (255.96 s).
+- Frontend: W3 changed nothing under `frontend/`; the checks run after batch F stay valid. No visual change in W3, so no visual check was needed.
+- Not verified here: PostgreSQL, Linux/POSIX paths, a live provider, a console-less supervisor (W3-R8 residual).
