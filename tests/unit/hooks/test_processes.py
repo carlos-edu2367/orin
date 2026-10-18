@@ -3,8 +3,11 @@ from __future__ import annotations
 import os
 import sys
 import textwrap
+import subprocess
 import time
 from pathlib import Path
+
+import pytest
 
 from agentos.agentic.agent_tools import _process_is_running
 from agentos.hooks.processes import MAX_OUTPUT_CHARS, run_shell_command
@@ -61,3 +64,55 @@ def test_timeout_kills_the_whole_tree(tmp_path: Path) -> None:
 def test_missing_cwd_is_an_error_not_an_exception(tmp_path: Path) -> None:
     result = run_shell_command("echo hi", cwd=str(tmp_path / "nope"), env=dict(os.environ), stdin_text="", timeout_seconds=5)
     assert result.error is not None and result.exit_code is None
+
+
+def test_descendants_rule_rejects_recycled_parent_pids() -> None:
+    # Windows keeps th32ParentProcessID after the parent dies and recycles PIDs. A child counts
+    # only when it was created no earlier than its parent and no earlier than the root.
+    from agentos.hooks.processes import _descendants_from
+
+    rows = [(500, 100, 10), (600, 100, 30), (700, 600, 35), (800, 600, 5)]
+    assert _descendants_from(rows, 100, 20) == [600, 700]
+
+
+def test_descendants_rule_never_descends_through_a_rejected_node() -> None:
+    from agentos.hooks.processes import _descendants_from
+
+    # 400 predates the root (rejected), so its child 401 is not reached even though it is newer.
+    rows = [(400, 100, 1), (401, 400, 50)]
+    assert _descendants_from(rows, 100, 20) == []
+
+
+def test_descendants_rule_excludes_protected_pids() -> None:
+    from agentos.hooks.processes import _descendants_from
+
+    rows = [(600, 100, 30), (700, 600, 35)]
+    assert _descendants_from(rows, 100, 20, exclude=frozenset({600})) == []
+
+
+def test_windows_walk_never_returns_orin_or_its_ancestors() -> None:
+    """Only our own processes are spawned here; the walk returns handles and nothing is terminated by it."""
+    if os.name != "nt":
+        pytest.skip("Windows process table")
+    from agentos.hooks.processes import _close_handles, _terminate_handles, _windows_descendants
+
+    root = subprocess.Popen([
+        sys.executable, "-c",
+        "import subprocess, sys, time; subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); time.sleep(60)",
+    ])
+    handles: dict[int, int] = {}
+    try:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            handles = _windows_descendants(root)
+            if handles:
+                break
+            time.sleep(0.2)
+        assert handles, "the walk did not find our own grandchild"
+        assert os.getpid() not in handles
+        assert root.pid not in handles
+    finally:
+        _terminate_handles(handles)
+        _close_handles(handles)
+        root.kill()
+        root.wait()

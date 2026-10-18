@@ -45,11 +45,15 @@ SessionStart, Stop, PreCompact, PermissionRequest.
 
 ## Deviations from the plan (and why)
 
-1. **Process tree on Windows.** The Job Object alone did not kill grandchildren (a child created by a
-   process already inside the Job was not always placed in it; `TerminateJobObject` left it running).
-   `processes.py` now also walks the process table (`CreateToolhelp32Snapshot`) for descendants of the
-   hook process while it is still alive, and terminates them before the Job and `taskkill`. A
-   suspended-start variant was tried and reverted because it did not fix the test.
+1. **Process tree on Windows (diagnosis corrected by review W2-R1).** The Job Object works: `cmd`,
+   `powershell` and `ping` grandchildren are all captured and killed by `TerminateJobObject`. What escapes
+   the Job is a process started by a **Microsoft Store (MSIX) Python** (a packaged app is activated outside
+   its creator's job); the venv interpreter here is backed by that Store Python. `processes.py` therefore
+   still walks the process table for descendants while the hook process is alive, but it now accepts a
+   process only when its creation time is consistent with its parent and root (a dead parent PID is
+   recycled by Windows, so the parent-PID link alone is not proof), keeps the validated handles open,
+   terminates through those handles, never returns Orin's own PID or ancestors, and no longer runs
+   `taskkill /T`. See "Review fixes" below.
 2. **Matcher and toolset tests** were written in the same step as their implementation for two tasks
    (Task 3 and Task 7). Red was verified afterwards: Task 3 by moving the module aside; Task 7 by
    running the new tests against the HEAD version of `agent_tools.py`.
