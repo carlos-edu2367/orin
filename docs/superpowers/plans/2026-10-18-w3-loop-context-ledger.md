@@ -363,7 +363,7 @@ Paths are relative to `src/agentos/` (code) and `tests/unit/` (tests). "Delivere
 | Output styles, effort, autoMemoryEnabled, autoDreamEnabled | `agentic/output_styles.py`; `agentic/effort.py`; `agentic/provider_stream.py` (thinking budget, reasoning effort, signed thinking); `memory/consolidation.py`; `agentic/session.py` | `agentic/test_output_styles.py`, `agentic/test_effort.py`, `memory/test_consolidation.py` |
 | SessionStart source (startup/resume/compact) from the store, SessionEnd, FileChanged (W0-R14 / W2-R6 residual) | `agentic/session.py` (`_session_start_source`); `conversations/chat.py` (`record_session_start`); `hooks/session_end.py` and `workers/publisher.py` (SessionEnd at shutdown); `agentic/agent_tools.py` (`detect_external_changes`); `agentic/runtime.py` (`_check_external_changes`) | `agentic/test_session_source.py`, `hooks/test_session_end.py`, `agentic/test_file_changed.py` |
 | TaskCreated/TaskCompleted/ConfigChange blocks; PostToolUseFailure and SubagentStart context | `agentic/agent_tools.py` (`_task_hook_block`); `agentic/session.py` (`_emit_turn_start_events`, `_execute_subagent_run`); `agentic/runtime.py` (`config_block_reason`); `settings/watcher.py` (`forget`); `agentic/lifecycle.py` (`_CONTEXT_EVENTS`) | `hooks/test_w3_hook_decisions.py` |
-| W1-R9 decision (non-interactive ask) | `agentic/agent_tools.py` (`non_interactive_ask`); `agentic/session.py` (`_non_interactive_ask`) | `permissions/test_non_interactive_ask.py` |
+| W1-R9 decision (non-interactive ask) | `agentic/agent_tools.py` (`non_interactive_ask`); `agentic/session.py` (`_non_interactive_ask`) | `permissions/test_non_interactive_ask.py`. No production path makes a turn non-interactive, so the rule never applies today (W3-R24, deferred to W6). |
 | Five keys never read from a repository (`fallbackModel`, `effort`, `effortLevel`, `autoDreamEnabled`, `permissions.nonInteractiveAsk`) | `settings/loader.py` (5 added lines) | No dedicated W3 test for these five keys. `agentic/test_effort.py` covers the repository-effort case. |
 | Public context telemetry keys | `agentic/models.py` (`_PUBLIC_CONTEXT_TELEMETRY_KEYS`) | No W3 test was added for this constant. The pre-existing `agentic/test_activity_contracts.py` refers to the public-context helper. |
 | Schema: 4 tables, 2 columns, migration 0048 | `persistence/postgres/migrations/versions/0048_w3_loop_and_context.py`; `persistence/postgres/schema.py` | `persistence/test_w3_schema.py`, `persistence/test_postgres_schema.py` (tests ran on SQLite only) |
@@ -375,15 +375,15 @@ Status against the W2 table (`2026-10-18-w2-hooks-ledger.md`). W2: 21 of 33 even
 | Event | W2 | After W3 | Where |
 |---|---|---|---|
 | SessionStart | emitted; context and env file applied | emitted; `source` is `startup`, `resume` (first time this process serves an existing conversation) or `compact` (after a compaction) | `session.py` (`_session_start_source`); `runtime.py` (compact) |
-| SessionEnd | not emitted | emitted at worker shutdown with `reason: "other"`; informational | `hooks/session_end.py` (`end_sessions`); `workers/publisher.py` |
+| SessionEnd | not emitted | emitted at worker shutdown with `reason: "other"`; informational. A supervised stop runs it since W3-R8 (on Windows only when the supervisor has a console; see Pending) | `hooks/session_end.py` (`end_sessions`); `workers/publisher.py` |
 | FileChanged | not emitted | emitted for files the turn read that changed outside it, payload `{file_path, event}`; informational plus a reminder to re-read | `agentic/runtime.py` (`_check_external_changes`); `agentic/agent_tools.py` |
 | PreModelSwitch | not emitted | emitted before a fallback model is used; a block or deny keeps the current model | `agentic/runtime.py` (fallback switch) |
 | PostModelSwitch | not emitted | emitted after a fallback switch; informational | `agentic/runtime.py` |
 | PostToolUseFailure | emitted; context dropped by the bus | context applied: appended to the failed tool result | `agentic/lifecycle.py` (`_CONTEXT_EVENTS`); `agentic/agent_tools.py` (`invoke`) |
 | SubagentStart | emitted; context not injected | context applied: appended to the subagent's task text | `agentic/session.py` (`_execute_subagent_run`) |
-| TaskCreated | emitted after the change; blocking deferred | emitted before the change; a block leaves the task list unchanged. See the limitation on refused creates. | `agentic/agent_tools.py` (`_task_hook_block`) |
+| TaskCreated | emitted after the change; blocking deferred | emitted before the change; a block leaves the task list unchanged. A call the tool refuses (blank subject, unknown id) emits no event (W3-R21). | `agentic/agent_tools.py` (`_task_hook_block`) |
 | TaskCompleted | emitted after the change; blocking deferred | emitted before the change; a block keeps the task open | `agentic/agent_tools.py` (`_task_hook_block`) |
-| ConfigChange | emitted; blocking deferred | a block stops the turn (fail-closed, `HOOK_BLOCKED_CONFIG`) and the change is reported again next turn until a hook accepts it; managed policy changes are never blocked | `agentic/session.py` (`_emit_turn_start_events`); `settings/watcher.py` (`forget`); `agentic/runtime.py` |
+| ConfigChange | emitted; blocking deferred | a block stops the turn (fail-closed, `HOOK_BLOCKED_CONFIG`): no hook of the refused settings runs in that turn or in the later blocked ones (W3-R3). The refused file's own ConfigChange hooks still run before the refusal is known, which is inherent. The change is reported again next turn until a hook accepts it; managed policy changes are never blocked | `agentic/session.py` (`_emit_turn_start_events`); `settings/watcher.py` (`forget`); `agentic/runtime.py` |
 | InstructionsLoaded | emitted once per turn for the project files | emitted per loaded memory file with `memory_type` and `load_reason`; also emitted when a read brings in subdirectory files | `agentic/session.py`; `agentic/agent_tools.py` (`_note_memory_for`); `memory_files/` |
 | PreCompact / PostCompact | emitted | payloads now carry `trigger` and `custom_instructions` (PreCompact), and `trigger`, `compaction_count`, `pre_tokens`, `post_tokens` (PostCompact) | `agentic/runtime.py` (`_run_compaction`) |
 
@@ -408,8 +408,9 @@ Not listed above: PreToolUse, PostToolUse, PostToolBatch, UserPromptSubmit, Stop
 13. ConfigChange block: the turn does not run and the change is reported again until a hook accepts it.
 14. Subdirectory memory loads on `Read`/`read_file` only.
 15. Prompt snapshot is keyed by `PROMPT_VERSION`, the published tool names, the names flag and the output style; compaction deletes it.
-16. W1-R9: an explicitly non-interactive Code turn denies an ordinary `ask` unless `permissions.nonInteractiveAsk` is `allow`. Chat mode and turns without the key are unchanged.
+16. W1-R9: an explicitly non-interactive Code turn denies an ordinary `ask` unless `permissions.nonInteractiveAsk` is `allow`. Chat mode and turns without the key are unchanged. No production path makes a turn non-interactive yet, so the rule does not run in production (W3-R24, W6).
 17. FileChanged watches files read during the current turn.
+18. No gate: W3 behaviour is on by default in Code mode. There is no `experimental.w3` gate, although spec §2 and §16 put each wave behind `experimental.<wave>` until it stabilises (W3-R25). This is a deviation, not reverted by batch 3.
 
 ### Execution deviations (batches A-F)
 
@@ -449,6 +450,7 @@ Each line is an existing test whose assertion was edited. No existing test was d
 - `tests/unit/agentic/test_project_session_tools.py::test_project_tools_exposed_in_phases_code_mode_and_turn_session_prompt`: `"read_project_conversation" in runtime.volatile_prompt` now `"ReadProjectConversation" in ...`. Reason: public tool names by default in Code mode.
 - `tests/unit/agentic/tools/test_public_names.py::test_agent_maps_types_and_prompt`: expected dict for `arguments_in("run_subagent", {... "model": "opus"})` gained `"model_id": "opus"`. Reason: E7; not in the plan's list.
 - `tests/unit/agentic/test_lifecycle_runtime.py::test_compaction_emits_pre_and_post`: `names == [PRE_COMPACT, POST_COMPACT]` now `[PRE_COMPACT, POST_COMPACT, SESSION_START]`, plus `source == "compact"` on the third event. Reason: a compaction now also emits a session-start with source `compact`.
+- `tests/unit/agentic/test_code_loop_limits.py::test_the_safety_cap_pauses_and_asks_to_continue` (batch 3, W3-R14): `store.finished` expectation changed from `("SAFETY_TOOL_ROUNDS", False)` to `("WAITING_USER", False)`. Reason: the safety pause now finishes the stored turn as `waiting_user`.
 
 Batch F changed no existing test.
 
@@ -456,15 +458,15 @@ Batch F changed no existing test.
 
 Known defects found in the batches and not fixed, most important first:
 
-- Effort on Anthropic (batch E): `apply_effort` raises `max_tokens` to `budget + 4000` (up to 32,000) even when the turn's explicit output cap is smaller, so an explicit cap is overridden whenever effort is set. The raised value is not bounded by the remaining context either. Suggested fix: never raise above the explicit cap, and bound the raise by the remaining context.
-- TaskCreated and TaskCompleted fire before the tool validates its input (batch F, probed). A refused `task_create` with a blank subject still emits TaskCreated, then PostToolUseFailure. A hook therefore sees creates the task list never receives. By reading the code, the same happens to `task_update` with `status: completed` for an unknown id (not probed). Suggested fix in the Task 22 notes above.
+- Effort on Anthropic (batch E), explicit cap: fixed in batch 2 (W3-R12). The cap is never raised, and a cap below 2,048 sends no thinking. Still open: without an explicit cap, effort raises `max_tokens` to budget + 4000, and that raise is not bounded by the remaining context.
+- TaskCreated and TaskCompleted fired for calls the tool then refused: fixed in batch 3 (W3-R21). No event fires for a refused create or for an unknown task id.
 - Consolidation (batch E): `mark_run` writes the state before the background job starts, so a job interrupted by shutdown is not retried for 24 h. The state is a read-modify-write JSON file, so two worker processes can lose an increment, and the fixed temp name `auto-dream.tmp` can clash. Failures are swallowed. Best effort only; suggested fix: a unique temp name per write.
-- Queue POST is not idempotent on the live-turn path (batch B): `enqueue_input` takes no `Idempotency-Key`, so a retried POST queues the text twice.
+- Queue POST idempotency: fixed in batch 3 (W3-R20). A repeated Idempotency-Key in a conversation returns the first queue row. Still open: a key reused with a different body is not refused. It returns the first row, so the second text is dropped without an error. The row did not ask for a refusal.
 - `git_status_summary` runs synchronously in `build_runtime` for every Code turn in a trusted local folder (2 s timeout). In a large repository this adds up to 2 s before the turn starts (batch C).
 - Subagent toolsets get no `memory_tracker` (batch D), so a subagent's read does not bring in subdirectory instruction files or path rules. Needs per-agent trackers (W4).
 - `post_compact_enrichment` calls `stat()` on the plan file outside its `try` (batch C). If the plan is deleted between the glob and the stat, the compaction still happens but its enrichment is silently empty.
 - The ignored-effort notice is recorded on every turn for an unsupported model (batch E): a conversation on Ollama with `effort` set gets one notice per turn.
-- A compact boundary covers history before the compacting turn's user message, but the summary also contains that turn's earlier tool work; the next turn's replay may repeat part of it. Not tested (batch C).
+- Compact boundary (corrected by W3-R1, batch 1): a `compact` boundary now covers exactly the stored messages that were folded (`through_sequence`), so no retained message is lost. Still open: the summary also contains the compacting turn's earlier tool work, and the next turn's replay may repeat part of it (no content is lost). The W3-R1 tests cover the loss, not the repeat.
 - `_PROCESS_SESSIONS` is process-global (batch E). A test in the same process that uses a store with `session_state` must call `reset_process_sessions()`; the new session tests do.
 - `load_output_styles` defaults to `trusted=True` (batch E). Production code reaches it only through the trust-gated `resolve_output_style`; any new caller serving an untrusted workspace must pass `trusted=False`.
 - FileChanged detection cost is not measured, and shell-driven edits to read files are reported as external changes (batch F, from reading the code, not tested).
@@ -475,11 +477,14 @@ Known defects found in the batches and not fixed, most important first:
 - Manual compaction summarises the whole history, so nothing stays verbatim after `/compact` (by design, batch D).
 - Subagent prompts still name some tools in snake_case inside repository text (carried from the plan's checklist; not re-verified in batch F).
 - Deferred to W7 by the plan: the queue, `/compact` and `/context` UIs, and slash commands (a `/compact` typed in a message is an ordinary prompt).
-- SessionEnd runs only on a graceful worker exit (`publisher.main`); a hard kill skips it (plan deviation 8). It is not called on conversation delete or archive, because Orin has none yet.
+- SessionEnd runs only on a graceful worker exit (`publisher.main`). A supervised stop runs it since W3-R8, but on Windows only when the supervisor has a console: a supervisor with no console cannot deliver Ctrl+Break, so its children keep `CREATE_NO_WINDOW` and a stop there is terminate-after-grace without SessionEnd (needs a decision: a stop-request file or a hidden console). A hard kill skips it (plan deviation 8). It is not called on conversation delete or archive, because Orin has none yet.
 - Effort is not sent to Ollama (plan deviation 9).
 - Consolidation uses the turn's model; Orin has no fast-model setting yet (plan deviation 10).
 - ConfigChange hooks are judged with the new settings (plan deviation 13); Orin keeps no copy of the previous settings across processes.
 - Linux was not run. All runs were on Windows.
+- W1-R9 rule has no production caller (W3-R24): no path sets `interactive_permissions` to False, so a non-interactive ask never reaches the rule. Deferred to W6 (headless `--permission-prompts none`).
+- Not delivered from spec §6 (W3-R25), by wave. `--json-schema` structured output with retries (§6.1): W6. `/memory` (edit) and `/init` (generates ORIN.md) (§6.4): W7. `/pause-memory` (pauses learning and consolidation) (§6.4): W7. Next-prompt suggestion, opt-in with the fast model (§6.5): W7. "Send now" (interrupt and send, §6.1): W7. Todo reminders in the `<system-reminder>` mechanism (§6.1): W4. Plan-mode reminder (§6.1): the review gives no wave; this ledger places it in W4 with the todo reminder.
+- No `experimental.w3` gate (deviation 18): no setting turns the W3 loop off as a wave. The per-feature settings (`maxTurns`, `autoCompact`, `systemPromptSnapshot`, and the others) still apply.
 
 Verification gaps (from the batch notes, still true):
 
