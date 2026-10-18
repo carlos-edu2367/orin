@@ -822,6 +822,8 @@ class TurnSession:
         catalog_pricing: Mapping[str, object] | None = None,
         fallback_provider_factory: Callable[[str], object] | None = None,
         model_capabilities: tuple[str, ...] = (),
+        consolidation_state=None,
+        background_runner: Callable[[Callable[[], None]], object] | None = None,
     ) -> None:
         self.turn = turn
         self.lifecycle: LifecycleBus | None = lifecycle
@@ -830,6 +832,11 @@ class TurnSession:
         self.fallback_provider_factory = fallback_provider_factory
         # The catalog's capability names for the turn's model (reasoning, tools, ...); effort depends on them.
         self.model_capabilities = tuple(str(item) for item in model_capabilities or ())
+        # Opt-in consolidation (autoDreamEnabled): counters file, and how its job runs (a thread by default).
+        self._consolidation_state = consolidation_state
+        self._background_runner = background_runner or (
+            lambda job: threading.Thread(target=job, name="orin-auto-dream", daemon=True).start()
+        )
         self.effective_settings: EffectiveSettings = empty_settings()
         self.enable_terminal = bool(enable_terminal)
         self.store = store
@@ -2669,6 +2676,53 @@ class TurnSession:
             pass
         return None
 
+    def _auto_memory_enabled(self) -> bool:
+        """``autoMemoryEnabled: false`` in any layer pauses learning and consolidation (a repository may only pause)."""
+        from .loop_settings import layer_values
+
+        return not any(value is False for _name, value in layer_values(self.effective_settings, "autoMemoryEnabled"))
+
+    def _after_completed_turn(self) -> None:
+        """Opt-in consolidation (``autoDreamEnabled``), at most once a day per user, in the background."""
+        from agentos.memory.consolidation import ConsolidationState, MemoryConsolidator
+
+        from .loop_settings import operator_value
+
+        if self.memory is None or not self._auto_memory_enabled() or operator_value(self.effective_settings, "autoDreamEnabled") is not True:
+            return
+        user_id = str(self.turn.get("user_id") or "")
+        if not user_id:
+            return
+        state = self._consolidation_state or ConsolidationState()
+        state.note_completed_turn(user_id)
+        now = datetime.now(UTC)
+        if not state.due(user_id, now):
+            return
+        state.mark_run(user_id, now)
+        try:
+            history = list(self.store.history_for_turn(self.turn))
+        except Exception:  # noqa: BLE001
+            return
+        provider_factory, memory = self.provider_factory, self.memory
+        provider_name, model_id = str(self.turn.get("provider") or ""), str(self.turn.get("model_id") or "")
+
+        def job() -> None:
+            provider = None
+            try:
+                provider = provider_factory()
+                MemoryConsolidator(provider, provider_name=provider_name, model_id=model_id, memory_store=memory).run(history)
+            except Exception:  # noqa: BLE001 - consolidation is best effort
+                logger.exception("memory consolidation failed")
+            finally:
+                closer = getattr(provider, "close", None)
+                if callable(closer):
+                    try:
+                        closer()
+                    except Exception:  # noqa: BLE001
+                        pass
+
+        self._background_runner(job)
+
     def build_runtime(self) -> AgenticTurnRuntime:
         import inspect
         from agentos.agentic.runtime import CODE_MODE_CORE_TOOLS
@@ -2951,12 +3005,13 @@ class TurnSession:
             learning_sink=learning_sink_for(
                 self.memory, self._record,
                 str(self.turn["project_id"]) if self.turn.get("project_id") else None,
-            ),
+            ) if self._auto_memory_enabled() else None,
             first_user_context=first_user_context,
             autocompact=self._autocompact_setting(),
             prompt_renderer=self._render_code_prompt_again if self.turn.get("code_mode") == "code" else None,
             compact_request=self._compact_request(task),
             effort=self._effort(),
+            on_completed=self._after_completed_turn,
         )
         if resumed is not None:
             runtime.contract = resumed

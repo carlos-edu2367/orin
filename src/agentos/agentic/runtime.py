@@ -259,12 +259,15 @@ class AgenticTurnRuntime:
         prompt_renderer: Callable[[], str] | None = None,
         compact_request: str | None = None,
         effort: str | None = None,
+        on_completed: Callable[[], None] | None = None,
     ) -> None:
         self.store, self.provider = store, provider
         # Set for a /compact turn: the turn only summarizes the conversation (instructions may be empty).
         self.compact_request = compact_request
         # Reasoning effort for this turn (already checked against the model); None sends nothing.
         self.effort = effort
+        # Called once after a turn that completed (not failed or cancelled); its errors never change the turn.
+        self._on_completed = on_completed
         self.lifecycle = lifecycle
         # Set when a UserPromptSubmit hook refused the prompt: the turn ends before any model call.
         self.prompt_block_reason = prompt_block_reason
@@ -2372,6 +2375,11 @@ class AgenticTurnRuntime:
         self._quality_recorded = True
         if outcome in {"completed", "completed_with_caveats"}:
             self._commit_learning("project" if turn.get("project_id") else "user")
+            if callable(self._on_completed):
+                try:
+                    self._on_completed()
+                except Exception:  # noqa: BLE001 - after-turn work never changes the turn
+                    pass
         recorder = getattr(self.store, "record_quality", None)
         if not callable(recorder):
             return
