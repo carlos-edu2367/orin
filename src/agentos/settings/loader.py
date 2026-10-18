@@ -26,6 +26,7 @@ ALWAYS_IGNORED_FROM_PROJECT = (
     "allowedMcpServers",
     "deniedMcpServers",
     "managedMcpServers",
+    "autoMode.model",  # the classifier model is operator policy: a repository never picks it
 )
 # Ignored until the user trusts the workspace: they run code or widen permissions.
 UNTRUSTED_IGNORED_FROM_PROJECT = (
@@ -43,6 +44,8 @@ UNTRUSTED_IGNORED_FROM_PROJECT = (
     "enabledPlugins",
     "permissions.allow",
     "permissions.additionalDirectories",
+    # Free text placed into the auto-mode classifier prompt: inert until the user trusts the repo.
+    "autoMode",
 )
 # A repository can never turn these on: it may only switch them off (a restriction).
 PROJECT_TRUE_IGNORED = ("permissions.allowBypassPermissionsMode",)
