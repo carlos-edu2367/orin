@@ -22,6 +22,8 @@ from .quality import TurnQualityCounters
 from .learning import LearnedMemory, TurnLearningLedger
 from . import phases, transcript
 from .phases import DEFAULT_PHASE_BUDGETS, Phase, PhaseBudget, PhaseController
+from .lifecycle import HookEvent, LifecycleBus
+from .tools.public_names import public_name as _public_tool_name
 
 MAX_PARALLEL_TOOLS = 8
 MAX_PARALLEL_SUBAGENT_TOOLS = max(8, int(os.environ.get("ORIN_MAX_CONCURRENT_SUBAGENTS", "16") or "16"))
@@ -233,8 +235,10 @@ class AgenticTurnRuntime:
         hook_engine=None,
         phase_controller: PhaseController | None = None,
         learning_sink: Callable[[tuple[LearnedMemory, ...]], None] | None = None,
+        lifecycle: LifecycleBus | None = None,
     ) -> None:
         self.store, self.provider = store, provider
+        self.lifecycle = lifecycle
         self.hook_engine = hook_engine
         # ``toolset`` is the agent-facing path: its results are returned to the
         # model verbatim. ``actions`` remains the policy-projected path used by
@@ -773,6 +777,7 @@ class AgenticTurnRuntime:
                     result_ref=f"conversation-message:{turn['assistant_message_id']}",
                     private_result={"outcome": "final"},
                 )
+                self._emit(HookEvent.STOP, stop_hook_active=False, last_assistant_message="".join(text_parts)[:4000])
                 self._settle_remaining_todos(turn, str(turn_id))
                 self._life(turn, "completed")
                 self.store.finish(turn)
@@ -1002,6 +1007,7 @@ class AgenticTurnRuntime:
         compact_indices = {index for unit in compact_units for index in unit}
         if not compact_indices:
             return
+        self._emit(HookEvent.PRE_COMPACT, trigger="auto", custom_instructions="")
         if self.context_reporting:
             self._life(turn, "context_compacting", removed_messages=len(compact_indices), compaction_count=self._compaction_count + 1)
         source = self._compact_source(messages, compact_indices)
@@ -1041,6 +1047,7 @@ class AgenticTurnRuntime:
         if self.context_reporting:
             self._life(turn, "context_compacted", removed_messages=len(compact_indices), summary_tokens=self._estimated_tokens(replacement), compaction_count=self._compaction_count)
         self._hooks(turn, "PostCompact", compaction_count=self._compaction_count)
+        self._emit(HookEvent.POST_COMPACT, trigger="auto", compaction_count=self._compaction_count)
 
     def _compact_source(self, messages: list[dict[str, object]], indices: set[int]) -> str:
         parts: list[str] = []
@@ -1719,6 +1726,13 @@ class AgenticTurnRuntime:
                 "wait_for_user": bool(outcome.payload.get("wait_for_user")),
                 "error_code": outcome.error_code,
             })
+        self._emit(
+            HookEvent.POST_TOOL_BATCH,
+            tool_calls=[
+                {"tool_name": _public_tool_name(str(item.get("name") or "")), "tool_use_id": str(item.get("id") or ""), "status": str(item.get("status") or "")}
+                for item in results
+            ],
+        )
         return results
 
     def _settle_remaining_todos(self, turn: dict[str, object], turn_id: str, *, failed: bool = False) -> None:
@@ -1782,6 +1796,15 @@ class AgenticTurnRuntime:
                 turn, effect_id=effect_id, state=state, result_ref=result_ref,
                 error_code=error_code, private_result=private_result,
             )
+
+    def _emit(self, name: HookEvent, **payload: object):
+        bus = getattr(self, "lifecycle", None)
+        if bus is None:
+            return None
+        try:
+            return bus.emit(name, **payload)
+        except Exception:  # noqa: BLE001 - lifecycle never breaks a turn
+            return None
 
     def _hooks(self, turn: Mapping[str, object], event: str, **payload: object) -> None:
         """Notify plugin hooks and surface their result. Never raises, never influences the turn."""
@@ -1982,6 +2005,7 @@ class AgenticTurnRuntime:
             pass
 
     def _fail(self, turn: dict[str, object], code: str, iteration: int, actions: int) -> AgenticRunResult:
+        self._emit(HookEvent.STOP_FAILURE, error_code=code)
         self._life(turn, "failed", code=code)
         self.store.finish(turn, failed=True, code=code)
         self._settle_quality(turn, "failed", code)
