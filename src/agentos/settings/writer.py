@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import stat
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -140,8 +141,21 @@ def _read_object(path: Path) -> dict[str, Any]:
     return parsed
 
 
+PRIVATE_FILE_MODE = 0o600  # settings can hold env secrets, so a new file is private by default
+
+
+def _target_mode(target: Path) -> int:
+    try:
+        return stat.S_IMODE(target.stat().st_mode)
+    except OSError:
+        return PRIVATE_FILE_MODE
+
+
 def update_settings_file(path: Path | str, mutate: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
     target = Path(path)
+    if target.is_symlink():
+        # A dotfile symlink stays a symlink: the real file is what gets updated.
+        target = target.resolve()
     target.parent.mkdir(parents=True, exist_ok=True)
     with _process_lock, _file_lock(target):
         current = _read_object(target)
@@ -151,11 +165,15 @@ def update_settings_file(path: Path | str, mutate: Callable[[dict[str, Any]], No
             raise SettingsWriteError("settings must remain a JSON object")
         text = json.dumps(updated, indent=2, ensure_ascii=False) + "\n"
         temporary = target.with_name(f".{target.name}.{os.getpid()}.{uuid4().hex[:8]}.tmp")
+        mode = _target_mode(target)
         try:
-            with open(temporary, "w", encoding="utf-8", newline="\n") as handle:
+            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, PRIVATE_FILE_MODE)
+            with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
                 handle.write(text)
                 handle.flush()
                 os.fsync(handle.fileno())
+            # Installed with the mode the user chose, so `chmod 600` survives the write.
+            os.chmod(temporary, mode)
             _replace(temporary, target)
         finally:
             if temporary.exists():

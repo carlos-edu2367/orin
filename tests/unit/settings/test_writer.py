@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 import threading
 from pathlib import Path
 
@@ -182,3 +184,31 @@ def test_four_writers_recover_one_stale_lock_exactly_once(tmp_path: Path) -> Non
     rules = json.loads(target.read_text(encoding="utf-8"))["permissions"]["allow"]
     assert len(rules) == 4 and len(set(rules)) == 4
     assert not lock.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX file modes and symlink semantics")
+def test_write_keeps_the_file_mode_of_the_target(tmp_path: Path) -> None:
+    target = tmp_path / "settings.json"
+    target.write_text("{}", encoding="utf-8")
+    os.chmod(target, 0o600)
+    update_settings_file(target, lambda data: data.update(model="x"))
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX file modes and symlink semantics")
+def test_new_settings_file_is_private_by_default(tmp_path: Path) -> None:
+    target = tmp_path / "settings.json"
+    update_settings_file(target, lambda data: data.update(env={"TOKEN": "x"}))
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX file modes and symlink semantics")
+def test_write_through_a_symlink_keeps_the_link(tmp_path: Path) -> None:
+    real = tmp_path / "dotfiles" / "settings.json"
+    real.parent.mkdir()
+    real.write_text("{}", encoding="utf-8")
+    link = tmp_path / "settings.json"
+    link.symlink_to(real)
+    update_settings_file(link, lambda data: data.update(model="x"))
+    assert link.is_symlink()
+    assert json.loads(real.read_text(encoding="utf-8")) == {"model": "x"}
