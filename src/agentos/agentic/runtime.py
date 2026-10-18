@@ -256,8 +256,11 @@ class AgenticTurnRuntime:
         first_user_context: str = "",
         autocompact: object = "auto",
         prompt_renderer: Callable[[], str] | None = None,
+        compact_request: str | None = None,
     ) -> None:
         self.store, self.provider = store, provider
+        # Set for a /compact turn: the turn only summarizes the conversation (instructions may be empty).
+        self.compact_request = compact_request
         self.lifecycle = lifecycle
         # Set when a UserPromptSubmit hook refused the prompt: the turn ends before any model call.
         self.prompt_block_reason = prompt_block_reason
@@ -575,6 +578,8 @@ class AgenticTurnRuntime:
             self.store.finish(turn, code="HOOK_BLOCKED_PROMPT")
             self._settle_quality(turn, "completed")
             return AgenticRunResult("completed", 0, 0, "HOOK_BLOCKED_PROMPT")
+        if self.compact_request is not None:
+            return self._run_manual_compaction(turn)
         messages = list(self.store.history_for_turn(turn))
         action_count = 0
         self._failed_signatures: dict[str, str] = {}
@@ -2378,6 +2383,34 @@ class AgenticTurnRuntime:
                 self._learning_sink(learned)
         except Exception:  # noqa: BLE001 - learning never breaks a turn
             pass
+
+    def _run_manual_compaction(self, turn: dict[str, object]) -> AgenticRunResult:
+        """/compact: summarize the whole conversation into a boundary, then end the turn."""
+        marker = getattr(self.store, "mark_command_turn", None)
+        if callable(marker):
+            try:
+                marker(turn)
+            except Exception:  # noqa: BLE001 - an unmarked command turn only costs history space
+                pass
+        messages = [dict(item) for item in self.store.history_for_turn(turn)]
+        if messages and str(messages[-1].get("content") or "").startswith("/compact"):
+            messages = messages[:-1]
+        self._pinned_index = None
+        instructions = str(self.compact_request or "").strip()
+        compacted = len(messages) >= 2 and self._run_compaction(
+            messages, turn, keep_units=0, trigger="manual", custom_instructions=instructions,
+        )
+        if compacted:
+            info = self._last_compaction or {}
+            self.store.delta(turn, f"Conversa compactada: cerca de {info.get('pre_tokens', 0)} → {info.get('post_tokens', 0)} tokens.")
+        elif self._last_compaction_block:
+            self.store.delta(turn, f"⚠️ A compactação foi bloqueada por um hook: {self._last_compaction_block}")
+        else:
+            self.store.delta(turn, "Ainda não há histórico suficiente para compactar.")
+        self._life(turn, "completed")
+        self.store.finish(turn)
+        self._settle_quality(turn, "completed")
+        return AgenticRunResult("completed", 0, 0, None if compacted else "NOTHING_TO_COMPACT")
 
     def _pause_for_safety(self, turn: dict[str, object], iteration: int, actions: int) -> AgenticRunResult:
         """The safety ceiling ends the turn the way a question does: the person decides whether it goes on."""

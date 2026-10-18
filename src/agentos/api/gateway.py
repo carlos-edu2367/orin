@@ -227,6 +227,10 @@ class QueueConversationInputRequest(_RequestModel):
     message: str = Field(min_length=1, max_length=16000)
 
 
+class CompactConversationRequest(_RequestModel):
+    instructions: str | None = Field(default=None, max_length=4000)
+
+
 class SendConversationMessageRequest(_RequestModel):
     message: str = Field(default="", max_length=16000)
     attachments: list[str] = Field(default_factory=list, max_length=MAX_FILES_PER_MESSAGE)
@@ -1405,6 +1409,17 @@ def create_app(services: ApiServices) -> FastAPI:
         if not cancelled:
             raise ApplicationNotFoundError(queue_id)
         return JSONResponse({"queue_id": queue_id, "cancelled": True})
+
+    @app.post("/v1/conversations/{conversation_id}/compact", status_code=202)
+    async def compact_conversation(conversation_id: str, payload: CompactConversationRequest, request: Request) -> JSONResponse:
+        principal = principal_for(request, mutable=True)
+        services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.compact")
+        idempotency = _idempotency(request)
+        receipt = await run_in_threadpool(
+            require_port(services.conversation_application).request_compaction,  # type: ignore[union-attr]
+            principal.user_id, conversation_id, payload.instructions or "", idempotency,
+        )
+        return JSONResponse(_jsonable(receipt), status_code=202)
 
     @app.get("/v1/conversations/{conversation_id}/workspace-trust")
     async def get_workspace_trust(conversation_id: str, request: Request) -> JSONResponse:

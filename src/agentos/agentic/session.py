@@ -2123,11 +2123,12 @@ class TurnSession:
                 start = bus.emit(HookEvent.SESSION_START, source="startup")
                 result["session_context"].extend(start.additional_context)
                 result["prompt_context"].extend(f"Hook: {message}" for message in start.system_messages)
-            prompt = bus.emit(HookEvent.USER_PROMPT_SUBMIT, prompt=task)
-            if prompt.blocked or prompt.stop:
-                result["blocked"] = prompt.reason or prompt.stop_reason or "blocked by hook"
-            result["prompt_context"].extend(prompt.additional_context)
-            result["prompt_context"].extend(f"Hook: {message}" for message in prompt.system_messages)
+            if str(self.turn.get("turn_kind") or "") != "compact":
+                prompt = bus.emit(HookEvent.USER_PROMPT_SUBMIT, prompt=task)
+                if prompt.blocked or prompt.stop:
+                    result["blocked"] = prompt.reason or prompt.stop_reason or "blocked by hook"
+                result["prompt_context"].extend(prompt.additional_context)
+                result["prompt_context"].extend(f"Hook: {message}" for message in prompt.system_messages)
         except Exception:  # noqa: BLE001 - lifecycle never stops a turn
             logger.exception("turn-start lifecycle events failed")
         return result
@@ -2574,6 +2575,13 @@ class TurnSession:
             return int(value.strip())
         return "auto"
 
+    def _compact_request(self, task: str) -> str | None:
+        """The instructions of a /compact turn ("" for none), or None for an ordinary turn."""
+        if str(self.turn.get("turn_kind") or "") != "compact":
+            return None
+        text = str(task or "").strip()
+        return text[len("/compact"):].strip() if text.startswith("/compact") else ""
+
     def build_runtime(self) -> AgenticTurnRuntime:
         import inspect
         from agentos.agentic.runtime import CODE_MODE_CORE_TOOLS
@@ -2856,6 +2864,7 @@ class TurnSession:
             first_user_context=first_user_context,
             autocompact=self._autocompact_setting(),
             prompt_renderer=self._render_code_prompt_again if self.turn.get("code_mode") == "code" else None,
+            compact_request=self._compact_request(task),
         )
         if resumed is not None:
             runtime.contract = resumed

@@ -255,6 +255,9 @@ class _RuntimeStore:
     def record_compact_boundary(self, turn: dict[str, object], **values: object):
         return self._store.record_compact_boundary(turn, **values)
 
+    def mark_command_turn(self, turn: dict[str, object]) -> None:
+        self._store.mark_command_turn(turn)
+
     # -- session seams ---------------------------------------------------
 
     def record(self, *args, **kwargs) -> None:

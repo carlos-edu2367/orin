@@ -47,6 +47,8 @@ def _execution_duration_limit(code_active: bool) -> int:
 # marked with this status, and history_for_turn skips it together with its turn's assistant message.
 BLOCKED_BY_HOOK_STATUS = "blocked_by_hook"
 BLOCKED_PROMPT_PLACEHOLDER = "[mensagem bloqueada por hook]"
+# A command turn (/compact) is not part of the conversation the model sees afterwards.
+COMMAND_STATUS = "context_command"
 # A message in one of these states is final: a late delta must not reopen it.
 _TERMINAL_MESSAGE_STATES = ("completed", "failed", "cancelled", "waiting_user")
 MAX_QUEUED_INPUTS = 20
@@ -783,10 +785,13 @@ class PostgresChatStore:
         # Stable across turns so the conversation-level graph keeps one root node.
         return f"agent:{turn['conversation_id']}:main"
 
-    def create(self, *, user_id: str, message: str, provider: str, model_id: str, idempotency_key: str, conversation_id: str | None = None, project_id: str | None = None, workspace_id: str | None = None, attachments: Sequence[Mapping[str, object]] = (), new_conversation_id: str | None = None, scheduled_by_schedule_id: str | None = None, code_mode: str = "chat", permission_mode: str | None = None) -> ChatReceipt:
+    def create(self, *, user_id: str, message: str, provider: str, model_id: str, idempotency_key: str, conversation_id: str | None = None, project_id: str | None = None, workspace_id: str | None = None, attachments: Sequence[Mapping[str, object]] = (), new_conversation_id: str | None = None, scheduled_by_schedule_id: str | None = None, code_mode: str = "chat", permission_mode: str | None = None, turn_kind: str | None = None) -> ChatReceipt:
         message = message.strip()
         attachments = list(attachments)
-        expansion = _expand_command(self._command_library, self._skill_library, user_id, message)
+        if turn_kind not in (None, "compact"):
+            raise ValueError("turn_kind is invalid")
+        # /compact is Orin's own command; a plugin command of the same name never expands it.
+        expansion = None if turn_kind == "compact" else _expand_command(self._command_library, self._skill_library, user_id, message)
         if len(message) > 16000: raise ValueError("message must be a bounded non-blank string")
         if not message and not attachments: raise ValueError("message must be a bounded non-blank string")
         title_source = message or str(attachments[0].get("original_name") or "Arquivo enviado")
@@ -894,7 +899,7 @@ class PostgresChatStore:
                     "media_type": str(item["media_type"]), "kind": str(item["kind"]),
                     "bytes": int(item["bytes"]), "created_at": now,
                 } for item in attachments])
-            c.execute(insert(conversation_turns).values(turn_id=turn_id, conversation_id=conversation_id, user_id=user_id, execution_id=execution_id, user_message_id=user_message_id, assistant_message_id=assistant_message_id, provider=provider, model_id=model_id, state="queued", idempotency_key=idempotency_key, scheduled_by_schedule_id=scheduled_by_schedule_id, code_mode="code" if code_active else None, created_at=now, updated_at=now))
+            c.execute(insert(conversation_turns).values(turn_id=turn_id, conversation_id=conversation_id, user_id=user_id, execution_id=execution_id, user_message_id=user_message_id, assistant_message_id=assistant_message_id, provider=provider, model_id=model_id, state="queued", idempotency_key=idempotency_key, scheduled_by_schedule_id=scheduled_by_schedule_id, code_mode="code" if code_active else None, turn_kind=turn_kind, created_at=now, updated_at=now))
             if code_active:
                 work_kind = detect_code_request(message)
                 autonomy_map = {
@@ -1687,6 +1692,13 @@ class PostgresChatStore:
                 },
             )
 
+    def mark_command_turn(self, turn: Mapping[str, object]) -> None:
+        """Keep a command turn's request and reply out of every later turn's history."""
+        with self._engine.begin() as c:
+            c.execute(update(conversation_messages).where(conversation_messages.c.message_id == str(turn["user_message_id"])).values(
+                status=COMMAND_STATUS, updated_at=datetime.now(UTC),
+            ))
+
     def exclude_from_context(self, turn: dict[str, object]) -> None:
         """Erase a hook-blocked prompt from storage and from every later turn's history (W2-R6).
 
@@ -1879,7 +1891,7 @@ class PostgresChatStore:
         """
         with self._engine.connect() as c:
             rows = c.execute(select(conversation_messages.c.message_id, conversation_messages.c.role, conversation_messages.c.content, conversation_messages.c.sequence).where(conversation_messages.c.conversation_id == turn["conversation_id"], conversation_messages.c.sequence <= select(conversation_messages.c.sequence).where(conversation_messages.c.message_id == turn["user_message_id"]).scalar_subquery()).order_by(conversation_messages.c.sequence)).mappings().all()
-            blocked_user_ids = {str(row) for row in c.execute(select(conversation_messages.c.message_id).where(conversation_messages.c.conversation_id == turn["conversation_id"], conversation_messages.c.status == BLOCKED_BY_HOOK_STATUS)).scalars()}
+            blocked_user_ids = {str(row) for row in c.execute(select(conversation_messages.c.message_id).where(conversation_messages.c.conversation_id == turn["conversation_id"], conversation_messages.c.status.in_((BLOCKED_BY_HOOK_STATUS, COMMAND_STATUS)))).scalars()}
             blocked_turn_rows = c.execute(select(conversation_turns.c.user_message_id, conversation_turns.c.assistant_message_id).where(conversation_turns.c.conversation_id == turn["conversation_id"])).mappings().all() if blocked_user_ids else []
             attachment_rows = c.execute(select(conversation_message_attachments).where(conversation_message_attachments.c.conversation_id == turn["conversation_id"]).order_by(conversation_message_attachments.c.id)).mappings().all()
             command_rows = c.execute(select(
@@ -2355,9 +2367,9 @@ class ChatApplication:
         return _id("chat")
     def create(self, context, *, message: str, provider: str, model_id: str, workspace_id: str | None, idempotency_key: str, project_id: str | None = None, attachments=(), new_conversation_id: str | None = None, code_mode: str = "chat", permission_mode: str | None = None):
         return self.store.create(user_id=context.user_id, message=message, provider=provider, model_id=model_id, idempotency_key=idempotency_key, project_id=project_id, workspace_id=workspace_id, attachments=attachments, new_conversation_id=new_conversation_id, code_mode=code_mode, permission_mode=permission_mode)
-    def send(self, user_id: str, conversation_id: str, message: str, idempotency_key: str, attachments=(), provider: str = "", model_id: str = "", code_mode: str = "chat", permission_mode: str | None = None):
+    def send(self, user_id: str, conversation_id: str, message: str, idempotency_key: str, attachments=(), provider: str = "", model_id: str = "", code_mode: str = "chat", permission_mode: str | None = None, turn_kind: str | None = None):
         waiting = self.store.waiting_execution_ids(conversation_id, user_id)
-        receipt = self.store.create(user_id=user_id, message=message, provider=provider, model_id=model_id, idempotency_key=idempotency_key, conversation_id=conversation_id, attachments=attachments, code_mode=code_mode, permission_mode=permission_mode)
+        receipt = self.store.create(user_id=user_id, message=message, provider=provider, model_id=model_id, idempotency_key=idempotency_key, conversation_id=conversation_id, attachments=attachments, code_mode=code_mode, permission_mode=permission_mode, turn_kind=turn_kind)
         # A normal follow-up is the durable answer to an ask_user effect. The
         # old execution is resumed through its canonical input command before
         # the new turn is allowed to become the only visible continuation.
@@ -2374,6 +2386,13 @@ class ChatApplication:
                     "input_ref": f"conversation-turn:{receipt.turn_id}:input",
                 })
         return receipt
+    def request_compaction(self, user_id: str, conversation_id: str, instructions: str, idempotency_key: str):
+        """/compact [instructions]: a turn that only summarizes the conversation so far."""
+        text = str(instructions or "").strip()
+        if len(text) > 4000:
+            raise ApplicationValidationError("compaction instructions are too long")
+        message = "/compact" + (f" {text}" if text else "")
+        return self.send(user_id, conversation_id, message, idempotency_key, turn_kind="compact")
     def set_permission_mode(self, conversation_id: str, user_id: str, permission_mode: str):
         return self.store.set_permission_mode(conversation_id, user_id, permission_mode)
     def set_project(self, conversation_id: str, user_id: str, project_id: str | None, *, managed_root: Path | None = None):
