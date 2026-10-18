@@ -701,10 +701,11 @@ conversation_input_queue = Table(
     Column("id", Integer, primary_key=True), Column("queue_id", String(255), nullable=False, unique=True),
     Column("conversation_id", String(255), nullable=False), Column("user_id", String(255), nullable=False),
     Column("content", String(16000), nullable=False), Column("state", String(16), nullable=False),
-    Column("turn_id", String(255), nullable=True),
+    Column("turn_id", String(255), nullable=True), Column("idempotency_key", String(255), nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=False), Column("updated_at", DateTime(timezone=True), nullable=False),
 )
 Index("ix_conversation_input_queue_pending", conversation_input_queue.c.conversation_id, conversation_input_queue.c.state, conversation_input_queue.c.id)
+Index("ux_conversation_input_queue_idempotency", conversation_input_queue.c.conversation_id, conversation_input_queue.c.idempotency_key, unique=True)
 
 # W3: the stable system prompt a conversation runs with, reused byte for byte until its next compaction.
 conversation_prompt_snapshots = Table(

@@ -63,3 +63,22 @@ def test_the_store_starts_on_a_database_that_is_already_at_head(tmp_path: Path) 
     upgrade(engine)
     PostgresChatStore(engine)
     assert {table.name for table in W3_TABLES} <= set(inspect(engine).get_table_names())
+
+
+def test_the_store_adds_the_idempotency_key_to_an_older_queue_table(tmp_path: Path) -> None:
+    # A queue table created before the idempotency key existed gets the column and its unique index at start.
+    engine = create_engine(f"sqlite:///{(tmp_path / 'orin.db').as_posix()}")
+    upgrade(engine, "0047_conversation_mode_and_permission")
+    with engine.begin() as connection:
+        connection.execute(text(
+            "CREATE TABLE conversation_input_queue (id INTEGER PRIMARY KEY, queue_id VARCHAR(255) NOT NULL UNIQUE, "
+            "conversation_id VARCHAR(255) NOT NULL, user_id VARCHAR(255) NOT NULL, content VARCHAR(16000) NOT NULL, "
+            "state VARCHAR(16) NOT NULL, turn_id VARCHAR(255), created_at DATETIME NOT NULL, updated_at DATETIME NOT NULL)"
+        ))
+    PostgresChatStore(engine)
+    inspector = inspect(engine)
+    assert "idempotency_key" in {column["name"] for column in inspector.get_columns("conversation_input_queue")}
+    assert "ux_conversation_input_queue_idempotency" in {index["name"] for index in inspector.get_indexes("conversation_input_queue")}
+    upgrade(engine)
+    with engine.connect() as connection:
+        assert connection.execute(text("select version_num from alembic_version")).scalar() == "0048_w3_loop_and_context"

@@ -404,6 +404,7 @@ def _ensure_conversation_mode_columns(engine: Engine) -> None:
     for table, column, ddl in (
         ("conversation_turns", "turn_kind", "VARCHAR(16)"),
         ("conversation_dispatches", "lease_renewed_at", timestamp),
+        ("conversation_input_queue", "idempotency_key", "VARCHAR(255)"),
     ):
         try:
             inspector = sa_inspect(engine)
@@ -420,6 +421,14 @@ def _ensure_conversation_mode_columns(engine: Engine) -> None:
         )
     except Exception:
         _LOGGER.exception("could not create the W3 conversation tables")
+    try:
+        inspector = sa_inspect(engine)
+        if inspector.has_table("conversation_input_queue") and "idempotency_key" in {col["name"] for col in inspector.get_columns("conversation_input_queue")}:
+            if "ux_conversation_input_queue_idempotency" not in {index["name"] for index in inspector.get_indexes("conversation_input_queue")}:
+                with engine.begin() as conn:
+                    conn.execute(text("CREATE UNIQUE INDEX ux_conversation_input_queue_idempotency ON conversation_input_queue (conversation_id, idempotency_key)"))
+    except Exception:
+        _LOGGER.exception("could not add the queue idempotency index")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1735,11 +1744,42 @@ class PostgresChatStore:
         if owned is None:
             raise ApplicationNotFoundError(conversation_id)
 
-    def enqueue_input(self, *, user_id: str, conversation_id: str, content: str) -> dict[str, object]:
-        """Keep text typed while a turn runs; the turn reads it between tool rounds."""
+    def enqueue_input(self, *, user_id: str, conversation_id: str, content: str, idempotency_key: str | None = None) -> dict[str, object]:
+        """Keep text typed while a turn runs; the turn reads it between tool rounds.
+
+        A repeated ``idempotency_key`` in the conversation returns the row the first call made: a retried POST
+        queues its text once. The unique index settles a race between two identical requests.
+        """
         text = str(content or "").strip()
         if not text or len(text) > 16000:
             raise ValueError("message must be a bounded non-blank string")
+        key = str(idempotency_key) if idempotency_key else None
+        if key is not None:
+            earlier = self.queued_input_for_key(conversation_id, user_id, key)
+            if earlier is not None:
+                return earlier
+        try:
+            return self._insert_queued_input(user_id=user_id, conversation_id=conversation_id, text=text, key=key)
+        except IntegrityError:
+            earlier = self.queued_input_for_key(conversation_id, user_id, key) if key is not None else None
+            if earlier is None:
+                raise
+            return earlier
+
+    def queued_input_for_key(self, conversation_id: str, user_id: str, idempotency_key: str) -> dict[str, object] | None:
+        with self._engine.connect() as c:
+            self._owned(c, conversation_id, user_id)
+            row = c.execute(select(
+                conversation_input_queue.c.queue_id, conversation_input_queue.c.state, conversation_input_queue.c.content,
+            ).where(
+                conversation_input_queue.c.conversation_id == conversation_id,
+                conversation_input_queue.c.idempotency_key == idempotency_key,
+            )).mappings().first()
+        if row is None:
+            return None
+        return {"queue_id": row["queue_id"], "state": row["state"], "content": row["content"]}
+
+    def _insert_queued_input(self, *, user_id: str, conversation_id: str, text: str, key: str | None) -> dict[str, object]:
         now = datetime.now(UTC)
         queue_id = _id("queue")
         with self._engine.begin() as c:
@@ -1752,7 +1792,7 @@ class PostgresChatStore:
                 raise ApplicationValidationError("the input queue is full")
             c.execute(insert(conversation_input_queue).values(
                 queue_id=queue_id, conversation_id=conversation_id, user_id=user_id, content=text,
-                state="pending", turn_id=None, created_at=now, updated_at=now,
+                state="pending", turn_id=None, idempotency_key=key, created_at=now, updated_at=now,
             ))
         return {"queue_id": queue_id, "state": "pending", "content": text}
 
@@ -2580,10 +2620,14 @@ class ChatApplication:
 
     def enqueue(self, user_id: str, conversation_id: str, message: str, idempotency_key: str) -> dict[str, object]:
         """Queue text for the running turn, or send it now when nothing is running."""
+        # A retry of a request that already queued its text must not send it again once the turn has ended.
+        earlier = self.store.queued_input_for_key(conversation_id, user_id, idempotency_key) if idempotency_key else None
+        if earlier is not None:
+            return {"queued": True, **earlier}
         if not self._has_live_turn(conversation_id, user_id):
             receipt = self.send(user_id, conversation_id, message, idempotency_key)
             return {"queued": False, "turn_id": receipt.turn_id, "message_id": receipt.message_id, "state": receipt.state}
-        item = self.store.enqueue_input(user_id=user_id, conversation_id=conversation_id, content=message)
+        item = self.store.enqueue_input(user_id=user_id, conversation_id=conversation_id, content=message, idempotency_key=idempotency_key or None)
         if not self._has_live_turn(conversation_id, user_id):
             # The turn ended between the check and the insert: nothing would read the queue now.
             self.promote_queued_inputs(conversation_id, user_id)

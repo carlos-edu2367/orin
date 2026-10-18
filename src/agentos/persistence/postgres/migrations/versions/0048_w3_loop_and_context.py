@@ -44,6 +44,11 @@ def upgrade() -> None:
         )
     if "ix_conversation_input_queue_pending" not in _indexes(bind, "conversation_input_queue"):
         op.create_index("ix_conversation_input_queue_pending", "conversation_input_queue", ["conversation_id", "state", "id"])
+    if "idempotency_key" not in _columns(bind, "conversation_input_queue"):
+        with op.batch_alter_table("conversation_input_queue") as batch:
+            batch.add_column(sa.Column("idempotency_key", sa.String(255), nullable=True))
+    if "ux_conversation_input_queue_idempotency" not in _indexes(bind, "conversation_input_queue"):
+        op.create_index("ux_conversation_input_queue_idempotency", "conversation_input_queue", ["conversation_id", "idempotency_key"], unique=True)
     if "conversation_prompt_snapshots" not in _tables(bind):
         op.create_table(
             "conversation_prompt_snapshots",

@@ -232,3 +232,39 @@ def test_a_safety_pause_is_stored_as_waiting_for_the_person() -> None:
     with store._engine.connect() as connection:
         state = connection.execute(select(conversation_turns.c.state).where(conversation_turns.c.turn_id == running["turn_id"])).scalar_one()
     assert state == "waiting_user"
+
+
+def test_a_repeated_idempotency_key_returns_the_first_queue_row() -> None:
+    """W3-R20: a retried queue POST with the same Idempotency-Key queues its text once."""
+    store = _store()
+    turn = _running_turn(store)
+    conversation_id = str(turn["conversation_id"])
+    app = ChatApplication(store)
+    first = app.enqueue("u", conversation_id, "also do X", "same-key")
+    second = app.enqueue("u", conversation_id, "also do X", "same-key")
+    assert second["queue_id"] == first["queue_id"]
+    assert [item["content"] for item in store.queued_inputs(conversation_id, "u")] == ["also do X"]
+
+
+def test_a_retry_after_the_turn_ended_neither_queues_nor_sends_again() -> None:
+    store = _store()
+    turn = _running_turn(store)
+    conversation_id = str(turn["conversation_id"])
+    app = ChatApplication(store)
+    first = app.enqueue("u", conversation_id, "also do X", "same-key")
+    store.finish(turn)
+    assert app.promote_queued_inputs(conversation_id, "u") is not None
+    assert _turn_count(store, conversation_id) == 2
+    again = app.enqueue("u", conversation_id, "also do X", "same-key")
+    assert again["queue_id"] == first["queue_id"]
+    assert _turn_count(store, conversation_id) == 2
+
+
+def test_the_store_returns_the_row_of_a_repeated_key() -> None:
+    store = _store()
+    turn = _running_turn(store)
+    conversation_id = str(turn["conversation_id"])
+    first = store.enqueue_input(user_id="u", conversation_id=conversation_id, content="a", idempotency_key="k")
+    again = store.enqueue_input(user_id="u", conversation_id=conversation_id, content="a", idempotency_key="k")
+    assert again["queue_id"] == first["queue_id"]
+    assert len(store.queued_inputs(conversation_id, "u")) == 1
