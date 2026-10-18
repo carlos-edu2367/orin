@@ -26,6 +26,8 @@ class ShellAnalysis:
     subcommands: tuple[str, ...]
     complex: bool
     reasons: tuple[str, ...]
+    # Words that a non-trivial redirection writes to or reads from (e.g. ".git/hooks/x" in "> .git/hooks/x").
+    redirect_targets: tuple[str, ...] = ()
 
 
 def default_shell() -> str:
@@ -39,6 +41,7 @@ def analyze_command(command: str, *, shell: str | None = None) -> ShellAnalysis:
     if not isinstance(command, str):
         return ShellAnalysis((), True, ("not a string",))
     reasons: list[str] = []
+    redirect_targets: list[str] = []
     if len(command) > MAX_COMMAND_CHARS:
         return ShellAnalysis((), True, ("command too long",))
     if "\x00" in command:
@@ -133,6 +136,8 @@ def analyze_command(command: str, *, shell: str | None = None) -> ShellAnalysis:
             if token not in _SAFE_REDIRECTS[dialect]:
                 reasons.append(f"redirection {token}")
                 current.append(f" {token} ")
+                if command[k:m]:
+                    redirect_targets.append(command[k:m])
             i = m
             continue
         if ch in ";|&":
@@ -173,4 +178,4 @@ def analyze_command(command: str, *, shell: str | None = None) -> ShellAnalysis:
         if _ASSIGNMENT.match(first):
             reasons.append("environment assignment")
     unique = tuple(dict.fromkeys(reasons))
-    return ShellAnalysis(tuple(subs), bool(unique), unique)
+    return ShellAnalysis(tuple(subs), bool(unique), unique, tuple(redirect_targets))

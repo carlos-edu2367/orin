@@ -237,3 +237,30 @@ def test_oversized_command_asks_without_matching_or_calling_the_model() -> None:
     assert elapsed < 0.5
     decision = classifier("run_command", {"command": "dd if=" * 20_000})
     assert decision.behavior == "ask" and provider.requests == []
+
+
+# -- W1-R12: redirection targets are checked like command arguments -----------
+
+
+def test_redirect_target_is_recorded_by_the_analyzer() -> None:
+    from agentos.permissions.shell import analyze_command
+
+    analysis = analyze_command("echo x > .git/hooks/pre-commit", shell="posix")
+    assert analysis.complex is True
+    assert analysis.redirect_targets == (".git/hooks/pre-commit",)
+    assert analyze_command("echo x 2>&1", shell="posix").redirect_targets == ()
+
+
+@pytest.mark.parametrize("command", ["echo x > .git/hooks/pre-commit", "cat y >> .orin/settings.json", "echo x >.\\.git\\config"])
+def test_redirect_into_protected_path_asks_for_a_human(root: Path, command: str) -> None:
+    engine = _engine(root)
+    for mode in (M.ACCEPT_EDITS, M.AUTO):
+        decision = engine.decide("run_command", {"command": command}, mode)
+        assert decision.behavior == "ask" and decision.requires_human is True, (command, mode)
+    assert engine.decide("run_command", {"command": command}, M.DONT_ASK).behavior == "deny"
+
+
+def test_redirect_into_plain_workspace_file_is_still_only_an_ask(root: Path) -> None:
+    engine = _engine(root)
+    decision = engine.decide("run_command", {"command": "echo x > notes.txt"}, M.ACCEPT_EDITS)
+    assert decision.behavior == "ask" and decision.requires_human is False

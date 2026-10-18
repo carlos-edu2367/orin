@@ -177,6 +177,10 @@ class PermissionEngine:
             for token in self._command_tokens(sub):
                 if any(is_protected_path(path, workspace_root=self.workspace_root) for path in self._token_paths(token)):
                     return True
+        for target in analysis.redirect_targets:
+            for variant in _canonical_variants(target):
+                if any(is_protected_path(path, workspace_root=self.workspace_root) for path in self._token_paths(variant)):
+                    return True
         return False
 
     def _inside_unprotected(self, word: str) -> bool:
