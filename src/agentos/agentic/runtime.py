@@ -241,6 +241,7 @@ class AgenticTurnRuntime:
         volatile_prompt: str = "",
         tool_kinds: Mapping[str, str] | None = None,
         skill_prompt_tokens: int = 0,
+        memory_prompt_tokens: int = 0,
         context_reporting: bool = False,
         hook_engine=None,
         phase_controller: PhaseController | None = None,
@@ -305,6 +306,7 @@ class AgenticTurnRuntime:
         self.volatile_prompt = volatile_prompt or ""
         self.tool_kinds = dict(tool_kinds or {})
         self.skill_prompt_tokens = max(0, int(skill_prompt_tokens))
+        self.memory_prompt_tokens = max(0, int(memory_prompt_tokens))
         self.context_reporting = bool(context_reporting)
         self._compaction_count = 0
         self._last_compaction: dict[str, int] | None = None
@@ -1190,6 +1192,9 @@ class AgenticTurnRuntime:
             if item.get("role") == "system" and item.get("content") != self.system_prompt
         )
         system = max(0, full_system - self.skill_prompt_tokens) + system_extras
+        # Instruction files and remembered facts live inside the system prompt; report them on their own.
+        memory = min(self.memory_prompt_tokens, system)
+        system -= memory
         pinned = getattr(self, "_pinned_index", None)
         pinned_message = messages[pinned] if isinstance(pinned, int) and 0 <= pinned < len(messages) else None
         input_tokens = 0
@@ -1202,7 +1207,7 @@ class AgenticTurnRuntime:
                 input_tokens += tokens
             else:
                 history += tokens
-        used = system + history + input_tokens + tools + skills + mcps
+        used = system + memory + history + input_tokens + tools + skills + mcps
         limit = self.limits.context_window_tokens or self.limits.max_context_tokens
         kept_message_ids = {id(item) for item in window if item.get("role") != "system"}
         omitted = max(0, len(messages) - sum(1 for item in messages if id(item) in kept_message_ids))
@@ -1216,6 +1221,8 @@ class AgenticTurnRuntime:
             "tools_tokens": tools,
             "skills_tokens": skills,
             "mcps_tokens": mcps,
+            "memory_tokens": memory,
+            "free_tokens": max(0, limit - used),
             "omitted_messages": omitted,
             "compaction_count": self._compaction_count,
             "compaction_enabled": True,

@@ -1876,6 +1876,41 @@ class PostgresChatStore:
             "post_tokens": post_tokens, "cumulative_dropped_tokens": cumulative,
         }
 
+    def context_usage(self, conversation_id: str, user_id: str) -> dict[str, object]:
+        """The latest context measurement of the conversation, by category (data for /context)."""
+        with self._engine.connect() as c:
+            self._owned(c, conversation_id, user_id)
+            rows = c.execute(select(conversation_activity_events.c.payload, conversation_activity_events.c.created_at).where(
+                conversation_activity_events.c.conversation_id == conversation_id,
+                conversation_activity_events.c.user_id == user_id,
+                conversation_activity_events.c.event_type == AgentActivityEventType.CONTEXT_UPDATED.value,
+            ).order_by(conversation_activity_events.c.id.desc()).limit(50)).mappings().all()
+        for row in rows:
+            payload = _repair_context_usage(dict(row["payload"] or {}))
+            if "used_tokens" not in payload or "limit_tokens" not in payload:
+                continue  # compaction notices carry no measurement
+
+            def number(key: str) -> int:
+                value = payload.get(key)
+                return int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0
+
+            limit, used = number("limit_tokens"), number("used_tokens")
+            return {
+                "conversation_id": conversation_id, "available": True, "limit_tokens": limit, "used_tokens": used,
+                "percentage": number("percentage"), "compaction_count": number("compaction_count"),
+                "categories": [
+                    {"key": "system_prompt", "tokens": number("system_prompt_tokens")},
+                    {"key": "memory", "tokens": number("memory_tokens")},
+                    {"key": "tools", "tokens": number("tools_tokens")},
+                    {"key": "mcp_tools", "tokens": number("mcps_tokens")},
+                    {"key": "skills", "tokens": number("skills_tokens")},
+                    {"key": "messages", "tokens": number("history_tokens") + number("input_tokens")},
+                    {"key": "free", "tokens": max(0, limit - used)},
+                ],
+                "measured_at": row["created_at"].isoformat(),
+            }
+        return {"conversation_id": conversation_id, "available": False, "categories": []}
+
     def history_for_turn(self, turn: dict[str, object], *, rehydration_budget_tokens: int = 0) -> list[dict[str, object]]:
         """The conversation as the model should see it, including past tool work.
 
@@ -2393,6 +2428,8 @@ class ChatApplication:
             raise ApplicationValidationError("compaction instructions are too long")
         message = "/compact" + (f" {text}" if text else "")
         return self.send(user_id, conversation_id, message, idempotency_key, turn_kind="compact")
+    def context_usage(self, conversation_id: str, user_id: str):
+        return self.store.context_usage(conversation_id, user_id)
     def set_permission_mode(self, conversation_id: str, user_id: str, permission_mode: str):
         return self.store.set_permission_mode(conversation_id, user_id, permission_mode)
     def set_project(self, conversation_id: str, user_id: str, project_id: str | None, *, managed_root: Path | None = None):

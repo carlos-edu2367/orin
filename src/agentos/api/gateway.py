@@ -1421,6 +1421,15 @@ def create_app(services: ApiServices) -> FastAPI:
         )
         return JSONResponse(_jsonable(receipt), status_code=202)
 
+    @app.get("/v1/conversations/{conversation_id}/context")
+    async def conversation_context(conversation_id: str, request: Request) -> JSONResponse:
+        principal = principal_for(request)
+        services.security.authorize(principal, action="conversation.read", resource_id=conversation_id, purpose="conversation.context")
+        usage = await run_in_threadpool(
+            require_port(services.conversation_application).context_usage, conversation_id, principal.user_id,  # type: ignore[union-attr]
+        )
+        return JSONResponse(_jsonable(usage))
+
     @app.get("/v1/conversations/{conversation_id}/workspace-trust")
     async def get_workspace_trust(conversation_id: str, request: Request) -> JSONResponse:
         from agentos.permissions.trust import WorkspaceTrustStore

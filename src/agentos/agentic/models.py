@@ -75,6 +75,8 @@ _PUBLIC_CONTEXT_TELEMETRY_KEYS = frozenset({
     "omitted_messages",
     "compaction_count",
     "compaction_enabled",
+    "memory_tokens",
+    "free_tokens",
 })
 
 

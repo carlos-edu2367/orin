@@ -2744,6 +2744,7 @@ class TurnSession:
             except Exception:
                 pass
         memories = [] if prompt_blocked else memories_for_task(self.memory, task)
+        memory_prompt_tokens = (len(workspace_guidance) + sum(len(str(item.get("fact") or "")) for item in memories[:12])) // 4
         code_mode_context = ""
         code_turn_context = ""
         if self.turn.get("code_mode") == "code":
@@ -2852,6 +2853,7 @@ class TurnSession:
             reconciliation_required=self.reconciliation_required,
             tool_kinds={item.name: item.kind for item in definitions},
             skill_prompt_tokens=_skill_prompt_tokens(skill_catalog),
+            memory_prompt_tokens=memory_prompt_tokens,
             context_reporting=True,
             hook_engine=self.hook_engine,
             lifecycle=self.lifecycle,
