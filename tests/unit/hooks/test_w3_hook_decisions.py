@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 from pathlib import Path
+
+import pytest
 
 from agentos.agentic.agent_tools import AgentToolset, ToolOutcome
 from agentos.agentic.lifecycle import HookEvent, LifecycleBus, LifecycleDecision
 from agentos.agentic.session import TurnSession
 from agentos.agentic.workspace import ConversationWorkspace
+from agentos.settings.paths import claude_user_dir, orin_user_dir, workspace_grants_file
 from agentos.settings.watcher import reset_snapshots
 
 
@@ -123,3 +128,32 @@ def test_a_refused_config_change_runs_none_of_its_hooks(tmp_path: Path) -> None:
     mode["block"] = False
     _runtime(tmp_path, bus, store)  # accepted: the hook runs once, at this turn's prompt submission
     assert marker.read_text() == "x"
+
+
+def _link_directory(link: Path, target: Path) -> None:
+    link.parent.mkdir(parents=True, exist_ok=True)
+    if os.name == "nt":  # a junction needs no administrator rights, unlike a directory symlink
+        subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)], check=True, capture_output=True)
+    else:
+        os.symlink(target, link, target_is_directory=True)
+
+
+def test_a_settings_file_reached_through_a_link_is_still_a_project_file(tmp_path: Path) -> None:
+    """W3-R17: a repository's .claude that is a junction to a folder outside the workspace is still a project file."""
+    root = (tmp_path / "clone").resolve()
+    (root / ".git").mkdir(parents=True)
+    shared = (tmp_path / "shared" / "cfg").resolve()
+    shared.mkdir(parents=True)
+    (shared / "settings.json").write_text("{}", encoding="utf-8")
+    try:
+        _link_directory(root / "packages" / "app" / ".claude", shared)
+    except (OSError, subprocess.CalledProcessError) as error:
+        pytest.skip(f"this machine cannot create a directory link: {error}")
+    user_dirs = (orin_user_dir(), claude_user_dir())
+    grants = workspace_grants_file(root)
+    linked = root / "packages" / "app" / ".claude" / "settings.json"
+    assert TurnSession._settings_source(linked, root, grants, user_dirs) == "project_settings"
+    assert TurnSession._settings_source(root / "packages" / "app" / ".claude" / "settings.local.json", root, grants, user_dirs) == "local_settings"
+    # A file that really lies outside the workspace is still policy (ConfigChange never blocks it).
+    elsewhere = (tmp_path / "elsewhere" / "settings.json").resolve()
+    assert TurnSession._settings_source(elsewhere, root, grants, user_dirs) == "policy_settings"

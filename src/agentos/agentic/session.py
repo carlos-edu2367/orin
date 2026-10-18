@@ -2501,6 +2501,15 @@ class TurnSession:
 
     @staticmethod
     def _settings_source(path: Path, root: Path, grants: Path, user_dirs: tuple[Path, ...]) -> str:
+        # Lexical first, as the memory loader is (W2-R2): a file under the workspace is a repository file even when
+        # its folder is a junction or symlink to somewhere else. Only a file outside the root is resolved.
+        try:
+            base = os.path.normcase(os.path.abspath(root))
+            lexical_inside = os.path.commonpath([os.path.normcase(os.path.abspath(path)), base]) == base
+        except (OSError, ValueError):  # different drives have no common path
+            lexical_inside = False
+        if lexical_inside:
+            return "local_settings" if Path(path).name == "settings.local.json" else "project_settings"
         try:
             resolved = Path(path).resolve()
         except OSError:
