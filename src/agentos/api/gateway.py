@@ -1368,6 +1368,29 @@ def create_app(services: ApiServices) -> FastAPI:
         result = require_port(services.conversation_application).cancel(conversation_id, principal.user_id)  # type: ignore[union-attr]
         return JSONResponse(_jsonable(result), status_code=202)
 
+    @app.get("/v1/conversations/{conversation_id}/workspace-trust")
+    async def get_workspace_trust(conversation_id: str, request: Request) -> JSONResponse:
+        from agentos.permissions.trust import WorkspaceTrustStore
+
+        principal = principal_for(request)
+        services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.workspace_trust")
+        workspace = conversation_workspace(conversation_id, principal)
+        root = Path(getattr(workspace, "root", workspace))
+        trusted = await run_in_threadpool(WorkspaceTrustStore().is_trusted, principal.user_id, root)
+        return JSONResponse({"trusted": bool(trusted), "path": str(root)})
+
+    @app.post("/v1/conversations/{conversation_id}/workspace-trust")
+    async def trust_workspace(conversation_id: str, request: Request) -> JSONResponse:
+        from agentos.permissions.trust import WorkspaceTrustStore
+
+        principal = principal_for(request, mutable=True)
+        services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.workspace_trust")
+        _idempotency(request)
+        workspace = conversation_workspace(conversation_id, principal)
+        root = Path(getattr(workspace, "root", workspace))
+        await run_in_threadpool(WorkspaceTrustStore().trust, principal.user_id, root)
+        return JSONResponse({"trusted": True, "path": str(root)})
+
     @app.post("/v1/conversations/{conversation_id}/turns/{turn_id}/tool-permission")
     async def submit_turn_tool_permission(
         conversation_id: str,

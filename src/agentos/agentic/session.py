@@ -2188,8 +2188,15 @@ class TurnSession:
             return ()
 
     def _workspace_trusted(self) -> bool:
-        # Task 8 replaces this with the WorkspaceTrustStore lookup.
-        return False
+        from agentos.permissions.trust import WorkspaceTrustStore
+
+        user_id = str(self.turn.get("user_id") or "").strip()
+        if not user_id:
+            return False
+        try:
+            return WorkspaceTrustStore().is_trusted(user_id, self.workspace.root)
+        except Exception:  # noqa: BLE001 - unknown trust means untrusted
+            return False
 
     def build_runtime(self) -> AgenticTurnRuntime:
         import inspect
@@ -2207,6 +2214,15 @@ class TurnSession:
                 self.effective_settings = load_effective_settings(None, sources=())
             except Exception:  # noqa: BLE001
                 self.effective_settings = empty_settings()
+        if not self.effective_settings.trusted and self.effective_settings.untrusted_ignored:
+            try:
+                self._record(
+                    AgentActivityEventType.WORKSPACE_TRUST_REQUIRED,
+                    "Esta pasta tem configurações desativadas até você confiar nela",
+                    {"workspace_trust": {"path": str(self.workspace.root), "items": list(self.effective_settings.untrusted_ignored)}},
+                )
+            except Exception:  # noqa: BLE001 - a notice never blocks a turn
+                pass
         if self.lifecycle is None:
             self.lifecycle = LifecycleBus()
         self.lifecycle.bind(
