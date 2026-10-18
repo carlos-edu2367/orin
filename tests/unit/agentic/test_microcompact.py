@@ -37,6 +37,17 @@ def test_the_eight_newest_results_stay_intact() -> None:
     assert runtime._microcompact(messages) == 0
 
 
+def test_results_after_the_last_tool_call_are_never_cleared() -> None:
+    """W3-R18: one batch of 12 results the model has not read yet is kept whole, even beyond the 8 newest."""
+    calls = [{"id": f"c{i}", "type": "function", "function": {"name": "read_file", "arguments": json.dumps({"path": f"f{i}.py"})}} for i in range(12)]
+    messages: list[dict[str, object]] = [{"role": "user", "content": "review these twelve files"}, {"role": "assistant", "content": "", "tool_calls": calls}]
+    messages += [{"role": "tool", "tool_call_id": f"c{i}", "content": f"contents of f{i}.py " + "x" * 400} for i in range(12)]
+    runtime = _runtime()
+    runtime._pinned_index = 0
+    assert runtime._microcompact(messages) == 0
+    assert all(m["content"] != MICROCOMPACT_MARKER for m in messages if m.get("role") == "tool")
+
+
 def test_small_results_are_not_worth_clearing() -> None:
     messages = _conversation(12, size=50)
     runtime = _runtime()

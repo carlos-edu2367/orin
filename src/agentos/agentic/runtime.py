@@ -1382,8 +1382,12 @@ class AgenticTurnRuntime:
         if isinstance(pinned, int):
             protected = set(next((unit for unit in self._group_tool_units(messages) if pinned in unit), [pinned]))
         indexes = [index for index, message in enumerate(messages) if index not in protected and self._is_tool_result(message)]
+        # Results after the last tool-call message are the batch the model has not read yet: never cleared.
+        last_call = max((index for index, message in enumerate(messages) if self._is_tool_call_message(message)), default=-1)
         cleared = 0
         for index in indexes[: max(0, len(indexes) - keep)]:
+            if index > last_call:
+                continue
             message = messages[index]
             if bool(message.get("_tool_image_result")):
                 if message.get("content") != "[earlier tool image omitted]":
