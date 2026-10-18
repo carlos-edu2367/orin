@@ -17,14 +17,17 @@ from .engine import PermissionDecision
 from .rules import MatchContext, parse_rule, rule_matches
 from .shell import default_shell
 
+# Commands longer than this are not matched or sent to the model: they ask a person.
+# It also bounds the gaps in the patterns below, so matching stays cheap.
+MAX_CLASSIFIED_COMMAND_CHARS = 10_000
 DEFAULT_HARD_DENY_PATTERNS: tuple[str, ...] = (
     r"\brm\s+(-[a-zA-Z]*r[a-zA-Z]*f|-[a-zA-Z]*f[a-zA-Z]*r)\s+(/|~|\$HOME|\*)(\s|$)",
-    r"\b(curl|wget)\b[^|]*\|\s*(sudo\s+)?(sh|bash|zsh|pwsh|powershell)\b",
-    r"\bgit\s+push\b.*(--force\b|-f\b|--force-with-lease\b)",
+    r"\b(curl|wget)\b[^|]{0,10000}\|\s*(sudo\s+)?(sh|bash|zsh|pwsh|powershell)\b",
+    r"\bgit\s+push\b.{0,10000}(--force\b|-f\b|--force-with-lease\b)",
     r"\bmkfs(\.\w+)?\b",
-    r"\bdd\s+if=.*\bof=/dev/",
+    r"\bdd\s+if=.{0,10000}\bof=/dev/",
     r"\bformat\s+[a-zA-Z]:",
-    r"\bdel\s+/[sq].*[a-zA-Z]:\\\s*$",
+    r"\bdel\s+/[sq].{0,10000}[a-zA-Z]:\\\s*$",
 )
 MAX_CONSECUTIVE_DENIALS = 3
 MAX_TOTAL_DENIALS = 20
@@ -44,15 +47,27 @@ def _strings(value: Any) -> list[str]:
     return [str(item) for item in value if isinstance(item, str) and item.strip()] if isinstance(value, list) else []
 
 
-def _first_json_object(text: str) -> dict[str, Any] | None:
+def _verdict_from(text: str) -> dict[str, Any] | None:
+    """The single verdict in a reply, or a conflict marked ``ask``.
+
+    The model may echo the call (which is attacker-influenced) before its own
+    answer, so every object carrying a ``decision`` is read. Disagreeing verdicts
+    are ambiguous and become ``ask``; identical ones resolve to the last.
+    """
+    found: list[dict[str, Any]] = []
     for match in re.finditer(r"\{[^{}]*\}", text, re.DOTALL):
         try:
             value = json.loads(match.group(0))
         except ValueError:
             continue
-        if isinstance(value, dict):
-            return value
-    return None
+        if isinstance(value, dict) and "decision" in value:
+            found.append(value)
+    if not found:
+        return None
+    decisions = {str(item.get("decision") or "").strip().lower() for item in found}
+    if len(decisions) > 1:
+        return {"decision": "ask", "reason": "auto mode classifier gave conflicting verdicts"}
+    return found[-1]
 
 
 class AutoModeClassifier:
@@ -87,6 +102,8 @@ class AutoModeClassifier:
     def _hard_denied(self, internal: str, arguments: Mapping[str, Any]) -> str | None:
         if internal == "run_command":
             command = str(arguments.get("command") or "")
+            if len(command) > MAX_CLASSIFIED_COMMAND_CHARS:
+                return None  # handled by __call__: asks a person without matching or calling the model
             for pattern in DEFAULT_HARD_DENY_PATTERNS:
                 if re.search(pattern, command, re.IGNORECASE):
                     return "matches a built-in hard-deny pattern"
@@ -127,6 +144,8 @@ class AutoModeClassifier:
         return "".join(text)
 
     def __call__(self, internal: str, arguments: Mapping[str, Any]) -> PermissionDecision:
+        if internal == "run_command" and len(str(arguments.get("command") or "")) > MAX_CLASSIFIED_COMMAND_CHARS:
+            return PermissionDecision("ask", "command too long for auto mode")
         reason = self._hard_denied(internal, arguments)
         if reason is not None:
             return PermissionDecision("deny", reason)
@@ -144,7 +163,7 @@ class AutoModeClassifier:
                 return PermissionDecision("ask", "auto mode classifier failed")
         finally:
             executor.shutdown(wait=False, cancel_futures=True)
-        verdict = _first_json_object(reply or "")
+        verdict = _verdict_from(reply or "")
         behavior = str((verdict or {}).get("decision") or "").strip().lower()
         if behavior not in {"allow", "ask", "deny"}:
             return PermissionDecision("ask", "auto mode classifier gave no usable decision")
