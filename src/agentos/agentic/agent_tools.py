@@ -338,6 +338,13 @@ _PARAM_ALIASES: Mapping[str, Mapping[str, str]] = {
 }
 
 
+def _broker_arguments(name: str, arguments: Mapping[str, Any]) -> Mapping[str, Any]:
+    """The arguments the permission engine judges, mapped the way ``_invoke_unobserved`` maps them."""
+    if name == "notebook_edit":
+        return {**arguments, "path": str(arguments.get("notebook_path") or arguments.get("path") or "")}
+    return arguments
+
+
 def coerce_tool_arguments(tool_name: str, arguments: Mapping[str, Any]) -> tuple[dict[str, Any], str | None]:
     """Map common model parameter aliases to canonical schema names."""
     aliases = _PARAM_ALIASES.get(tool_name)
@@ -2095,7 +2102,8 @@ class AgentToolset:
             from agentos.permissions.engine import PermissionDecision
 
             # A PreToolUse hook's verdict wins over the engine's ask/allow; deny rules still stand.
-            if hook_permission == "allow" and decision.behavior == "ask":
+            # W2-R5: a hook may skip an ordinary prompt, never one that only a person may approve (protected paths, ask rules).
+            if hook_permission == "allow" and decision.behavior == "ask" and not decision.requires_human:
                 decision = PermissionDecision("allow", "approved by a PreToolUse hook")
             elif hook_permission == "ask" and decision.behavior == "allow":
                 decision = PermissionDecision("ask", "a PreToolUse hook asked for confirmation", requires_human=True)
@@ -2132,8 +2140,46 @@ class AgentToolset:
                         )
                     if request.permission_decision == "allow":
                         if isinstance(request.updated_input, Mapping):
-                            arguments = _public_arguments_in(name, dict(request.updated_input))
-                        perm_decision = "allow"
+                            # W2-R4: a rewritten input is a new request. It is coerced and checked by the plan mode and
+                            # the permission engine exactly as the original was; a deny rule always stands.
+                            try:
+                                candidate, _ = coerce_tool_arguments(name, _public_arguments_in(name, dict(request.updated_input)))
+                            except Exception:  # noqa: BLE001 - a hook's malformed input must never crash the turn
+                                return ToolOutcome(
+                                    "failed", "Argumentos inválidos", f"Invalid arguments for {name}.",
+                                    {"tool_kind": definition.kind, "code_mode": True}, "INVALID_ARGUMENTS",
+                                )
+                            candidate_broker_args = _broker_arguments(name, candidate)
+                            if self._plan_mode_active or self._permission_mode.value == "plan_mode":
+                                if self._permission_broker.evaluate(
+                                    broker_tool_name, candidate_broker_args, self._permission_mode, plan_mode_active=True,
+                                ) == "deny":
+                                    return ToolOutcome(
+                                        "failed",
+                                        "Bloqueado no Modo Plano",
+                                        "No Modo Plano (plan_mode), apenas ferramentas de leitura e escrita de planos em `.orin/plans/` são permitidas. Use `exit_plan_mode` quando o plano estiver concluído.",
+                                        {"tool_kind": definition.kind, "code_mode": True, "plan_mode": True},
+                                        "CODE_PLAN_MODE_READONLY",
+                                    )
+                            recheck = self._permission_broker.decide(
+                                broker_tool_name,
+                                candidate_broker_args,
+                                self._permission_mode,
+                                plan_mode_active=self._plan_mode_active,
+                            )
+                            if recheck.behavior == "deny":
+                                return ToolOutcome(
+                                    "failed",
+                                    "Permissão negada por regra do projeto",
+                                    f"A execução de `{name}` foi bloqueada pelas regras de permissão (settings).",
+                                    {"tool_kind": definition.kind, "code_mode": True},
+                                    "CODE_PERMISSION_DENIED",
+                                )
+                            arguments = candidate
+                            decision = recheck
+                        # The hook's allow never overrides a decision that only a person may make.
+                        if not decision.requires_human:
+                            perm_decision = "allow"
             if perm_decision == "ask":
                 if self._interactive_permissions:
                     perm_result = self._permission_broker.request_and_wait(
