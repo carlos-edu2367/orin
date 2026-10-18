@@ -25,6 +25,16 @@ from agentos.installation import orin_paths
 from agentos.agentic.tools.public_names import public_subagent_type
 from agentos.code_mode.models import INTERNAL_PERMISSION_MODES, known_permission_mode, public_permission_mode
 from agentos.settings import EffectiveSettings, detect_changes, empty_settings, load_effective_settings
+from agentos.settings.paths import claude_user_dir, orin_user_dir, workspace_grants_file
+from agentos.hooks import (
+    AgentHookRunner,
+    CommandHookRunner,
+    HookDispatcher,
+    HttpHookRunner,
+    PromptHookRunner,
+    load_hook_specs,
+)
+from agentos.hooks.env_file import read_env_file
 
 from agentos.reading.vision import VisionUnavailable
 from agentos.retrieval.bundle import RetrievalBundle
@@ -815,6 +825,10 @@ class TurnSession:
         self.mcp_service = mcp_service
         self.plugin_service = plugin_service
         self.hook_engine = hook_engine
+        # SessionStart output from settings hooks, carried into the first system prompt of the conversation.
+        self._settings_session_context: list[str] = []
+        # Removes this session's settings hooks from its bus (set when they are installed).
+        self._hook_unsubscribe: Callable[[], None] | None = None
         self.project_store = project_store
         self.chat_store = chat_store
         self.local_workspaces = local_workspaces
@@ -1655,6 +1669,7 @@ class TurnSession:
             interactive_permissions=bool(self.turn.get("interactive_permissions")),
             read_only_mode=read_only_subagent,
             inherit_context=inherit_context,
+            lifecycle_context={"agent_id": agent_id, "agent_type": public_subagent_type(builtin_key or clean)},
         )
         sub_max_iterations = (
             self.limits.subagent_max_iterations
@@ -2030,23 +2045,36 @@ class TurnSession:
 
     # -- runtime --------------------------------------------------------
 
-    def _emit_turn_start_events(self, history: list[Mapping[str, object]], task: str) -> None:
+    def _emit_turn_start_events(self, history: list[Mapping[str, object]], task: str) -> dict[str, Any]:
+        """Lifecycle events for the start of a turn.
+
+        Returns what the hooks asked this turn to carry: SessionStart context for the
+        system prompt, extra prompt-level context, and a reason when a UserPromptSubmit
+        hook refused the prompt.
+        """
+        result: dict[str, Any] = {"session_context": [], "prompt_context": [], "blocked": None}
         bus = self.lifecycle
         if bus is None:
-            return
+            return result
         try:
-            changed = detect_changes(str(self.workspace.root), self.effective_settings.candidate_files)
-            if changed:
-                bus.emit(HookEvent.CONFIG_CHANGE, source="settings", file_paths=[str(path) for path in changed])
+            for source, path in self._config_change_events():
+                bus.emit(HookEvent.CONFIG_CHANGE, source=source, file_path=str(path))
             files = _workspace_guidance_files(self.workspace.root)
             if files:
                 bus.emit(HookEvent.INSTRUCTIONS_LOADED, file_paths=[str(path) for path in files], memory_type="Project")
             user_messages = sum(1 for item in history if item.get("role") == "user" and isinstance(item.get("content"), str))
             if user_messages <= 1:
-                bus.emit(HookEvent.SESSION_START, source="startup")
-            bus.emit(HookEvent.USER_PROMPT_SUBMIT, prompt=task)
+                start = bus.emit(HookEvent.SESSION_START, source="startup")
+                result["session_context"].extend(start.additional_context)
+                result["prompt_context"].extend(f"Hook: {message}" for message in start.system_messages)
+            prompt = bus.emit(HookEvent.USER_PROMPT_SUBMIT, prompt=task)
+            if prompt.blocked or prompt.stop:
+                result["blocked"] = prompt.reason or prompt.stop_reason or "blocked by hook"
+            result["prompt_context"].extend(prompt.additional_context)
+            result["prompt_context"].extend(f"Hook: {message}" for message in prompt.system_messages)
         except Exception:  # noqa: BLE001 - lifecycle never stops a turn
-            return
+            logger.exception("turn-start lifecycle events failed")
+        return result
 
     def _toolset(
         self,
@@ -2064,6 +2092,7 @@ class TurnSession:
         interactive_permissions: bool = False,
         read_only_mode: bool = False,
         inherit_context: bool = True,
+        lifecycle_context: Mapping[str, str] | None = None,
     ) -> AgentToolset:
         browser = None if read_only_mode else self.browser
         actor_id = browser_agent_key or self.main_agent_id
@@ -2086,6 +2115,8 @@ class TurnSession:
             ),
             public_tool_names=self.effective_settings.experimental("claudeToolNames"),
             lifecycle=self.lifecycle,
+            extra_env=self._hook_extra_env(),
+            lifecycle_context=lifecycle_context,
             skills=self.skills,
             skill_library=self.skill_library,
             skill_user_id=str(self.turn.get("user_id") or "").strip() or None,
@@ -2140,19 +2171,111 @@ class TurnSession:
             toolset._plan_mode_active = True
         return toolset
 
-    def _session_start_context(self) -> str:
-        """The SessionStart hook output for this conversation.
+    def _install_hooks(self) -> None:
+        """Subscribe the hooks declared in settings to this session's bus.
 
-        Runs the hooks on the conversation's first turn and stores the result;
+        A broken hook configuration is logged and skipped; it never stops a turn.
+        """
+        bus = self.lifecycle
+        if bus is None:
+            return
+        if self._hook_unsubscribe is not None:
+            try:
+                self._hook_unsubscribe()
+            except Exception:  # noqa: BLE001 - replacing hooks never stops a turn
+                logger.debug("previous settings hooks could not be removed", exc_info=True)
+            self._hook_unsubscribe = None
+        try:
+            specs, errors = load_hook_specs(self.effective_settings)
+            for error in errors:
+                logger.warning("hook configuration (%s): %s", error.source, error.message)
+            if not specs:
+                return
+            dispatcher = HookDispatcher(
+                specs,
+                command_runner=CommandHookRunner(self.workspace.root, env_file=self._hook_env_file()),
+                http_runner=HttpHookRunner(),
+                prompt_runner=PromptHookRunner(
+                    self.provider_factory,
+                    provider_name=str(self.turn.get("provider") or ""),
+                    default_model=str(self.turn.get("model_id") or ""),
+                ),
+                agent_runner=AgentHookRunner(self._hook_agent),
+                recorder=self._record_hook,
+            )
+            self._hook_unsubscribe = bus.subscribe(dispatcher)
+        except Exception:  # noqa: BLE001 - hook setup never stops a turn
+            logger.exception("settings hooks could not be installed")
+
+    def _hook_env_file(self) -> Path:
+        """Where a SessionStart hook may write variables for this conversation's commands."""
+        conversation_id = str(self.turn.get("conversation_id") or "session")
+        safe = re.sub(r"[^A-Za-z0-9_.-]", "_", conversation_id)[:120] or "session"
+        return orin_user_dir() / "session-env" / f"{safe}.env"
+
+    def _hook_extra_env(self) -> dict[str, str]:
+        try:
+            return read_env_file(self._hook_env_file())
+        except Exception:  # noqa: BLE001 - hook env never stops a turn
+            return {}
+
+    def _record_hook(self, record: Mapping[str, object]) -> None:
+        self._record(
+            AgentActivityEventType.PLUGIN_HOOK_EXECUTED,
+            f"Hook {record.get('hook_event')} ({record.get('source')}): {record.get('status')}",
+            dict(record),
+        )
+
+    def _hook_agent(self, prompt: str) -> str:
+        """Runs an agent-type hook as a read-only verification subagent and returns its text."""
+        try:
+            outcome = self._run_subagent("explore", prompt, description="Hook de verificação")
+            return str(getattr(outcome, "content", "") or "")
+        except Exception:  # noqa: BLE001 - a failed verifier is a missing verdict
+            return ""
+
+    def _config_change_events(self) -> list[tuple[str, Path]]:
+        """Settings files that changed since the last turn, classified like Claude Code's ConfigChange sources."""
+        candidates = tuple(self.effective_settings.candidate_files)
+        failed = {str(item.path) for item in self.effective_settings.errors}
+        if any(str(path) in failed for path in candidates):
+            # A file that failed to load keeps its previous snapshot until it reads cleanly.
+            return []
+        key = f"{self.turn.get('conversation_id') or ''}|{self.workspace.root}"
+        changed = detect_changes(key, candidates)
+        root = Path(self.workspace.root).resolve()
+        grants = workspace_grants_file(root)
+        user_dirs = (orin_user_dir(), claude_user_dir())
+        return [(self._settings_source(path, root, grants, user_dirs), path) for path in changed]
+
+    @staticmethod
+    def _settings_source(path: Path, root: Path, grants: Path, user_dirs: tuple[Path, ...]) -> str:
+        try:
+            resolved = Path(path).resolve()
+        except OSError:
+            resolved = Path(path)
+        if resolved.is_relative_to(root):
+            return "local_settings" if resolved.name == "settings.local.json" else "project_settings"
+        if resolved == grants.resolve():
+            return "local_settings"
+        if any(resolved.is_relative_to(user_dir.resolve()) for user_dir in user_dirs):
+            return "user_settings"
+        return "policy_settings"
+
+    def _session_start_context(self) -> str:
+        """The SessionStart output for this conversation: plugin hooks and settings hooks.
+
+        Runs the plugin hooks on the conversation's first turn and stores the result;
         later turns of the same conversation reuse it rather than relaunching a
         process on the hot path of every turn.
         """
-        if self.hook_engine is None:
+        settings_body = "\n\n".join(item for item in self._settings_session_context if item)
+        if self.hook_engine is None and not settings_body:
             return ""
         conversation_id = str(self.turn.get("conversation_id") or "")
         user_id = str(self.turn.get("user_id") or "")
         if not conversation_id or not user_id:
-            return ""
+            return settings_body
         reader = getattr(self.store, "hook_context", None)
         try:
             stored = reader(conversation_id) if callable(reader) else None
@@ -2160,13 +2283,16 @@ class TurnSession:
             stored = None
         if stored is not None:
             return stored
-        try:
-            outcomes = self.hook_engine.dispatch(
-                user_id=user_id, event="SessionStart", payload={"conversation_id": conversation_id}
-            )
-        except Exception:  # noqa: BLE001 - a hook never breaks prompt assembly
-            outcomes = ()
-        body = "\n\n".join(outcome.stdout.strip() for outcome in outcomes if outcome.status == "ok" and outcome.stdout.strip())
+        outcomes: Sequence[Any] = ()
+        if self.hook_engine is not None:
+            try:
+                outcomes = self.hook_engine.dispatch(
+                    user_id=user_id, event="SessionStart", payload={"conversation_id": conversation_id}
+                )
+            except Exception:  # noqa: BLE001 - a hook never breaks prompt assembly
+                outcomes = ()
+        plugin_body = "\n\n".join(outcome.stdout.strip() for outcome in outcomes if outcome.status == "ok" and outcome.stdout.strip())
+        body = "\n\n".join(part for part in (plugin_body, settings_body) if part)
         recorder = getattr(self.store, "record_hook_context", None)
         if callable(recorder):
             try:
@@ -2244,6 +2370,7 @@ class TurnSession:
             session_id=str(self.turn.get("conversation_id") or ""),
             cwd=str(self.workspace.root),
         )
+        self._install_hooks()
         resumed = self._resumed_contract()
         explicit_perm = str(self.turn.get("permission_mode") or "").strip().lower()
         raw_autonomy = str(
@@ -2355,7 +2482,12 @@ class TurnSession:
         workspace_guidance = _workspace_guidance(self.workspace.root)
         history = self.store.history_for_turn(self.turn)
         task = next((str(item.get("content") or "") for item in reversed(history) if item.get("role") == "user"), "")
-        self._emit_turn_start_events(history, task)
+        turn_start = self._emit_turn_start_events(history, task)
+        self._settings_session_context = list(turn_start["session_context"])
+        try:
+            toolset._extra_env.update(self._hook_extra_env())
+        except Exception:  # noqa: BLE001 - hook env never stops a turn
+            pass
         if task:
             try:
                 from agentos.code_mode.mentions import expand_file_mentions
@@ -2433,6 +2565,10 @@ class TurnSession:
             project_sessions=project_sessions,
             mcp_servers=toolset.mcp_server_summaries(),
         )
+        if turn_start["prompt_context"]:
+            volatile_prompt = (
+                volatile_prompt + "\n\n<system-reminder>\n" + "\n".join(turn_start["prompt_context"]) + "\n</system-reminder>"
+            ).strip()
         # In Code Mode, use a single fluid agentic loop without rigid phase boundaries;
         # standard chat keeps PhaseController.
         phase_controller = (
@@ -2462,6 +2598,7 @@ class TurnSession:
             context_reporting=True,
             hook_engine=self.hook_engine,
             lifecycle=self.lifecycle,
+            prompt_block_reason=turn_start["blocked"],
             phase_controller=phase_controller,
             learning_sink=learning_sink_for(
                 self.memory, self._record,

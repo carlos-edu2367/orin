@@ -111,7 +111,7 @@ def test_config_change_between_turns(tmp_path: Path) -> None:
     events.clear()
     _make_session(tmp_path, [{"role": "user", "content": "y"}], lifecycle=bus).build_runtime()
     change = [dict(e.payload) for e in events if e.name is HookEvent.CONFIG_CHANGE]
-    assert change and any(path.endswith("settings.json") for path in change[0]["file_paths"])
+    assert change and change[0]["source"] == "project_settings" and change[0]["file_path"].endswith("settings.json")
 
 
 def test_repository_cannot_turn_on_public_names(tmp_path: Path) -> None:
