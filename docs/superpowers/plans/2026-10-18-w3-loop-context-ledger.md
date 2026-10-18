@@ -179,3 +179,65 @@ That is the batch A total (2906) plus the 30 tests added here (7 + 2 + 10 + 11).
 4. `post_compact_enrichment` calls `stat()` on the plan file outside its `try`. If the plan is deleted between the glob and the stat, `_run_compaction`'s enricher guard catches the exception: the compaction still happens, but its enrichment is silently empty.
 5. Microcompact boundaries are persisted but do not replace history, as the plan specifies. The next turn's replay of stored steps is unchanged, so a microcompact does not shrink the next turn's prompt. This is by design, noted so it is not mistaken for a bug.
 6. `tests/unit/agentic/test_lifecycle_runtime.py` and `tests/unit/hooks/test_runtime_decisions.py` still stub the summarizer with the old Portuguese four-heading text. The runtime now rejects that shape and uses the fallback. Both tests pass because they assert nothing about the summary text. They are not in the plan's list and were not changed.
+
+## Execution notes — batch D (Tasks 13-16)
+
+### Task 13 — `/compact [instructions]` as a compaction-only turn behind `POST /compact`
+
+- Commit: `68cf1cd` `feat(compaction): /compact [instructions] as a compaction-only turn behind POST /compact`
+- Tests added: `tests/unit/conversations/test_manual_compact.py` (3), `tests/unit/agentic/test_manual_compact_runtime.py` (4). Total 7.
+- Red: all 7 failed before implementation (`request_compaction`, `compact_request`, `turn_kind` missing). The route test's failure message was not inspected separately.
+- Deviations: none.
+- Existing test expectations changed: none.
+
+### Task 14 — Context usage by category (memory and free space), `GET /context`
+
+- Commit: `694351e` `feat(context): context usage by category with memory and free space, served at GET /context`
+- Tests added: `tests/unit/conversations/test_context_usage.py` (3).
+- Red: 3 failed before implementation (`memory_prompt_tokens` unknown keyword, `context_usage` missing, route missing). The route test's failure message was not inspected separately.
+- Deviations: none.
+- Existing test expectations changed: none.
+
+### Task 15 — ORIN.md/CLAUDE.md hierarchy (pure loader)
+
+- Commit: `3500500` `feat(memory): ORIN.md/CLAUDE.md hierarchy with rules, local files, bounded @imports and lazy subdirectories`
+- Tests added: `tests/unit/memory_files/test_loader.py` (15 from the plan, plus 1 added: `test_a_hostile_glob_cannot_stall_a_read`), and the empty `tests/unit/memory_files/__init__.py`. Total 16.
+- Red: `ModuleNotFoundError: agentos.memory_files` before implementation.
+- Deviation (security fix, found by trying to break the code): the plan's `glob_match` compiled `paths:` and `claudeMdExcludes` patterns into a backtracking `re` regex. Match time grows about 6x per extra `*` (0.46 s at 6 stars, about 8 s at 8 stars on a 41-char path). Repository rule files supply `paths:` patterns, so a hostile repository could stall every read that matches them. `_glob_regex` was replaced by `_glob_tokens` (pattern to tokens) and `_glob_accepts` (set-of-positions matcher: each token is applied once, no backtracking). Worst measured case: 0.35 s for a 500-char pattern on a 4000-char path. The added regression test failed (8.3 s) before the change and passes after it.
+- Equivalence check: a scratch differential run of the old regex against the new matcher on 60,000 random pattern/path pairs (alphabet `ab/*?.A`, with and without `**/`) found 0 mismatches. The script lives in the session scratchpad and is not committed.
+- Existing test expectations changed: none (`test_glob_semantics` and all other tests unchanged).
+
+### Task 16 — Memory files in the session, the toolset and subagents
+
+- Commit: `5bbe120` `feat(memory): load the instruction hierarchy per turn, report each file, bring rules in on read`
+- Tests added: `tests/unit/agentic/test_memory_integration.py` (4).
+- Red: verified after the implementation, not before (process deviation). The implementation was written before the new test was first run. Afterwards `session.py` and `agent_tools.py` were stashed and the test was run: 4 failed (`.claude/rules`, `CLAUDE.local.md`, user files, managed `claudeMd` and `memory_tracker` all missing). The stash was restored and the 4 tests passed with the implementation.
+- Deviations: none in code. The `_memory_files` settings reads sit outside its `try`, as in the plan; the helpers they call are defensive (see limitations).
+- Existing test expectations changed: none. `test_root_workspace_conventions_are_injected_into_the_volatile_prompt` and `test_first_turn_emits_session_start_prompt_and_instructions` pass unchanged.
+
+### Verification notes (batch D)
+
+- Pytest was run with files or directories only, never a file together with its own directory.
+- Line endings: the modified files are CRLF in the working copy, as before. `git diff --stat` shows only the intended changes. The "LF will be replaced by CRLF" warnings on new files are normal with `core.autocrlf`.
+- Commit trailer: `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`, as the plan specifies (the attribution reminder names Haiku 5.5; the plan and the launching instruction were followed).
+
+### Full backend suite after batch D
+
+`uv run pytest -q tests/unit` → **2992 passed, 53 skipped, 0 failed** (193 s). That is batch C's 2962 plus the 30 new tests (7 + 3 + 16 + 4). No existing test failed in batch D.
+
+### Not verified in batch D
+
+- PostgreSQL: everything ran on SQLite. Not run on Postgres: the `mark_command_turn` update, `status.in_((...))` in `history_for_turn`, the `turn_kind` insert, and the `context_usage` query (`order_by(id desc).limit(50)`).
+- No lint or type check (ruff, ty).
+- No live provider run. The quality of a manual compaction summary with a real model is not measured.
+- Backend only, so no visual check. The frontend is untouched.
+- End-to-end `ChatWorker` flows for `/compact` (queue promotion, PreCompact/PostCompact through the plugin hook engine) are not exercised. The tests use stubs around the real store, runtime, session and route.
+
+### Limitations found while testing (not fixed)
+
+1. Subagent toolsets (`TurnSession._toolset`, built for `_subagent_prompt` runs) get no `memory_tracker`, so a subagent's `read_file` does not bring in subdirectory instruction files or path rules. The subagent prompt does include the project memory. Sharing the turn's tracker would let a subagent's read consume the once-only load before the main agent sees its reminder, so this needs per-agent trackers (W4 territory).
+2. Only `POST /compact` is a command. A message typed as `/compact` through `POST /messages` is an ordinary prompt (slash commands are W7).
+3. Glob matching is bounded but not free: about 0.35 s per match for a 500-char pattern on a 4000-char path. With up to 64 rule files per directory, a repository full of such patterns slows each matching read. A tighter path or pattern cap would reduce this.
+4. A manual compaction summarizes the whole history (`keep_units=0`), so nothing stays verbatim after `/compact`. This is by design.
+5. In `history_for_turn`, the local name `blocked_user_ids` now also holds command-turn ids (`COMMAND_STATUS`). The behaviour is right; the name is misleading (cosmetic).
+6. In `_memory_files`, the settings reads (`effective_settings.get`, `layer_values`) sit outside the `try`, as the plan has them. Both helpers are defensive, so the risk is low, but the global rule "a turn never breaks because of an enrichment" would prefer them inside.
