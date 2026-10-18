@@ -1951,6 +1951,11 @@ class AgentToolset:
     def _task_hook_block(self, bus: LifecycleBus, internal: str, arguments: Mapping[str, Any]) -> ToolOutcome | None:
         """TaskCreated/TaskCompleted run before the change; a block leaves the task list exactly as it was."""
         if internal == "task_create":
+            # Mirrors the tool's refusals: a blank subject or an unknown status creates nothing, so no event.
+            subject_text = str(arguments.get("subject") or arguments.get("content") or "").strip()
+            clean_status = str(arguments.get("status") or "pending").strip().lower()
+            if not subject_text or clean_status not in {"pending", "in_progress", "completed"}:
+                return None
             event = HookEvent.TASK_CREATED
             payload = {
                 "task_id": self._next_task_id(),
@@ -1962,8 +1967,10 @@ class AgentToolset:
             task_id = str(arguments.get("taskId") or arguments.get("task_id") or arguments.get("id") or "")
             found = next(
                 (item for item in self._todos if str(item.get("id")) == task_id or (task_id.isdigit() and str(item.get("id")) == f"todo_{task_id}")),
-                {},
+                None,
             )
+            if found is None:
+                return None  # the tool refuses an unknown id: nothing is completed, so no event
             payload = {
                 "task_id": task_id,
                 "task_subject": str(found.get("subject") or found.get("content") or ""),

@@ -157,3 +157,21 @@ def test_a_settings_file_reached_through_a_link_is_still_a_project_file(tmp_path
     # A file that really lies outside the workspace is still policy (ConfigChange never blocks it).
     elsewhere = (tmp_path / "elsewhere" / "settings.json").resolve()
     assert TurnSession._settings_source(elsewhere, root, grants, user_dirs) == "policy_settings"
+
+
+def test_a_task_create_the_tool_refuses_fires_no_hook(tmp_path: Path) -> None:
+    """W3-R21: a create refused for a blank subject emits no TaskCreated (nothing is created)."""
+    seen: list[HookEvent] = []
+    toolset = _toolset(tmp_path, lambda event: seen.append(event.name) or None)
+    outcome = toolset.invoke("task_create", {"subject": "   "})
+    assert outcome.status == "failed"
+    assert HookEvent.TASK_CREATED not in seen and toolset._todos == []
+
+
+def test_a_completion_of_an_unknown_task_fires_no_hook(tmp_path: Path) -> None:
+    """W3-R21: completing an id that does not exist emits no TaskCompleted."""
+    seen: list[HookEvent] = []
+    toolset = _toolset(tmp_path, lambda event: seen.append(event.name) or None)
+    outcome = toolset.invoke("task_update", {"taskId": "todo_99", "status": "completed"})
+    assert outcome.status == "failed"
+    assert HookEvent.TASK_COMPLETED not in seen
