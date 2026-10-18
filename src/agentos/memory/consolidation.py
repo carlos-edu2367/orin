@@ -115,12 +115,16 @@ def parse_facts(text: str) -> list[str]:
 
 
 def transcript_excerpt(history: Sequence[Mapping[str, Any]]) -> str:
-    """The newest user/assistant text that fits the excerpt budget, in order."""
+    """The newest text of the person's own messages that fits the excerpt budget, in order.
+
+    Assistant text is left out: it can echo tool, web or repository content, and consolidation would
+    persist whatever an injected page said as a "fact" (W3-R27).
+    """
     parts: list[str] = []
     remaining = MAX_TRANSCRIPT_CHARS
     for item in reversed(list(history)):
         role, content = item.get("role"), item.get("content")
-        if role not in {"user", "assistant"} or not isinstance(content, str) or not content.strip():
+        if role != "user" or not isinstance(content, str) or not content.strip():
             continue
         line = f"{role}: {content.strip()}"
         if len(line) > remaining:
