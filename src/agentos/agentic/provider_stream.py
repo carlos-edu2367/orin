@@ -133,7 +133,7 @@ def _anthropic_tool_choice(value: object) -> dict[str, str]:
     return {"type": choice_type}
 
 def _finish(value: object) -> FinishReason:
-    mapping = {"stop": FinishReason.STOP, "length": FinishReason.LENGTH, "tool_calls": FinishReason.TOOL_CALLS, "tool_use": FinishReason.TOOL_CALLS, "content_filter": FinishReason.CONTENT_FILTER, "refusal": FinishReason.REFUSAL, "error": FinishReason.ERROR}
+    mapping = {"stop": FinishReason.STOP, "length": FinishReason.LENGTH, "max_tokens": FinishReason.LENGTH, "tool_calls": FinishReason.TOOL_CALLS, "tool_use": FinishReason.TOOL_CALLS, "content_filter": FinishReason.CONTENT_FILTER, "refusal": FinishReason.REFUSAL, "error": FinishReason.ERROR}
     return mapping.get(str(value).lower(), FinishReason.UNKNOWN)
 
 

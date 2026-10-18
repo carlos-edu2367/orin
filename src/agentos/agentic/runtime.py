@@ -17,7 +17,7 @@ from typing import Callable, Mapping
 from agentos.providers.models import ProviderError, ProviderErrorCategory, Retryability
 
 from .action_loop import ActionLoop, MalformedToolCall
-from .provider_stream import NormalizedStreamItem, StreamKind
+from .provider_stream import ANTHROPIC_REQUIRED_MAX_TOKENS, NormalizedStreamItem, StreamKind
 from .contract import ContractError, TaskContract, parse as parse_contract, synthesize as synthesize_contract
 from .quality import TurnQualityCounters
 from .learning import LearnedMemory, TurnLearningLedger
@@ -143,6 +143,14 @@ CLOSING_INSTRUCTION = (
 MAX_VERIFY_REPAIR_ROUNDS = 3
 # How many times a Stop hook may send the model back to work in one turn.
 MAX_STOP_CONTINUATIONS = 5
+# A reply cut by the output limit is continued (text) or retried with a larger cap (a cut tool call),
+# at most this many times per turn.
+MAX_OUTPUT_RECOVERIES = 3
+MAX_ESCALATED_OUTPUT_TOKENS = 32_000
+CONTINUE_AFTER_OUTPUT_LIMIT = (
+    "Your previous reply was cut off by the output length limit. Continue exactly where it stopped: "
+    "do not repeat what you already wrote, do not apologize and do not summarize."
+)
 
 VERIFY_REQUIRED_MESSAGE = (
     "[Sistema] Você alterou o workspace nesta tarefa e ainda não verificou o resultado. Antes de responder, "
@@ -287,6 +295,9 @@ class AgenticTurnRuntime:
         self._fallback_provider_factory = fallback_provider_factory
         self._stop_hook_active = False
         self._stop_continuations = 0
+        self._max_tokens_recoveries = 0
+        # Raised for the rest of the turn after a tool call was cut by the output limit.
+        self._output_cap: int | None = None
         self.hook_engine = hook_engine
         # ``toolset`` is the agent-facing path: its results are returned to the
         # model verbatim. ``actions`` remains the policy-projected path used by
@@ -434,6 +445,64 @@ class AgenticTurnRuntime:
             return True
         return False
 
+    def _recover_from_output_limit(
+        self,
+        turn: dict[str, object],
+        effect_id: str | None,
+        finish: object,
+        text_parts: list[str],
+        calls: Mapping[str, Mapping[str, str]],
+        messages: list[dict[str, object]],
+        request: Mapping[str, object],
+        final_iteration: bool,
+    ) -> bool:
+        """A reply cut by max_tokens: a cut tool call is never run, a cut answer is continued. At most three times."""
+        if final_iteration or finish is None or str(getattr(finish, "value", finish)).upper() != "LENGTH":
+            return False
+        if self._max_tokens_recoveries >= MAX_OUTPUT_RECOVERIES:
+            return False
+        text = "".join(text_parts)
+        truncated_call = bool(calls) and any(not self._arguments_complete(call) for call in calls.values())
+        if not truncated_call and (calls or not text.strip()):
+            return False
+        self._max_tokens_recoveries += 1
+        self._effect_finished(turn, effect_id, state="APPLIED", private_result={"outcome": "max_tokens"})
+        if text.strip():
+            messages.append({"role": "assistant", "content": text})
+        if truncated_call:
+            raised = self._raise_output_cap(turn, request)
+            cap_note = f" The output limit for this turn is now {raised} tokens." if raised else ""
+            messages.append({"role": "user", "content": system_reminder(
+                "Your last tool call was cut off by the output length limit before its arguments were complete, "
+                f"so it was not run.{cap_note} Make the call again; if it carries a lot of content, split it into "
+                "several smaller calls (write a long file in parts, or edit it in pieces)."
+            )})
+        else:
+            messages.append({"role": "user", "content": system_reminder(CONTINUE_AFTER_OUTPUT_LIMIT)})
+        return True
+
+    @staticmethod
+    def _arguments_complete(call: Mapping[str, str]) -> bool:
+        try:
+            return isinstance(json.loads(call.get("arguments") or "{}"), dict)
+        except (TypeError, ValueError):
+            return False
+
+    def _raise_output_cap(self, turn: Mapping[str, object], request: Mapping[str, object]) -> int | None:
+        """Double the reply cap (up to 32k) when the provider had one and the person set none."""
+        if self.limits.max_output_tokens is not None:
+            return None
+        current = request.get("max_output_tokens")
+        if current is None and str(turn.get("provider") or "").lower() == "anthropic":
+            current = ANTHROPIC_REQUIRED_MAX_TOKENS
+        if not isinstance(current, int) or isinstance(current, bool) or current <= 0:
+            return None
+        raised = min(MAX_ESCALATED_OUTPUT_TOKENS, current * 2)
+        if raised <= current:
+            return None
+        self._output_cap = raised
+        return raised
+
     def run(self, turn_id: str, *, turn: dict[str, object] | None = None) -> AgenticRunResult:
         try:
             return self._run(turn_id, turn=turn)
@@ -464,6 +533,8 @@ class AgenticTurnRuntime:
         self._life(turn, "running")
         self._stop_hook_active = False
         self._stop_continuations = 0
+        self._max_tokens_recoveries = 0
+        self._output_cap = None
         if self.prompt_block_reason:
             self.store.delta(turn, f"⚠️ Mensagem bloqueada por um hook: {self.prompt_block_reason}")
             # W2-R6: erase the refused prompt before the turn finishes; if this fails the turn fails loudly
@@ -501,6 +572,7 @@ class AgenticTurnRuntime:
         tool_rounds = 0
         emitted_text_in_turn = False
         last_emitted_text_ended_with_newline = True
+        continuing_text = False
         iterations = range(1, self.limits.max_iterations + 1) if self.limits.max_iterations is not None else count(1)
         for iteration in iterations:
             self.counters.note_iteration()
@@ -549,7 +621,7 @@ class AgenticTurnRuntime:
             request = {
                 "turn_id": turn_id, "provider": str(turn.get("provider", "")), "model": str(turn.get("model_id", "")),
                 "messages": window, "tools": tool_schemas,
-                "max_output_tokens": min([value for value in (self.limits.max_output_tokens, remaining_tokens) if value is not None], default=None),
+                "max_output_tokens": min([value for value in (self._output_cap or self.limits.max_output_tokens, remaining_tokens) if value is not None], default=None),
             }
             if final_iteration:
                 request["tool_choice"] = "none"
@@ -658,9 +730,11 @@ class AgenticTurnRuntime:
                             and emitted_text_in_turn
                             and not last_emitted_text_ended_with_newline
                             and not chunk_text.startswith("\n")
+                            and not continuing_text
                         ):
                             chunk_text = "\n\n" + chunk_text
                         text_parts.append(chunk_text)
+                        continuing_text = False
                         self.store.delta(turn, chunk_text)
                         emitted_text_in_turn = True
                         last_emitted_text_ended_with_newline = chunk_text.endswith("\n")
@@ -799,6 +873,10 @@ class AgenticTurnRuntime:
                 if recovery == "cancel":
                     return self._cancel(turn, iteration, action_count)
                 return self._fail(turn, "PROVIDER_RETRY_EXHAUSTED", iteration, action_count)
+            if self._recover_from_output_limit(turn, provider_effect_id, finish, text_parts, calls, messages, request, final_iteration):
+                continuing_text = not calls
+                self._life(turn, "running")
+                continue
             if (calls or (finish is not None and finish.value == "TOOL_CALLS")) and not final_iteration:
                 self._effect_finished(
                     turn, provider_effect_id, state="APPLIED",
