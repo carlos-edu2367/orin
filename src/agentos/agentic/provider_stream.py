@@ -724,7 +724,7 @@ class HTTPProviderStreamTransport:
             endpoint, headers, payload = self._ollama_request(messages, tools, tool_choice, requested)
         else:
             endpoint, headers, payload = self._openai_request(messages, tools, tool_choice, requested)
-        apply_effort(self.provider, payload, effort)
+        apply_effort(self.provider, payload, effort, explicit_cap=requested)
         return endpoint, headers, payload
 
     def stream(self, request: Mapping[str, object]) -> Iterator[NormalizedStreamItem]:

@@ -126,3 +126,24 @@ def test_a_repository_cannot_choose_the_effort(tmp_path: Path) -> None:
 def test_a_turn_level_effort_wins(tmp_path: Path) -> None:
     _user_settings({"effort": "low"})
     assert _effort_for(tmp_path, "anthropic", "claude-sonnet-4-5", effort="max")[0] == "max"
+
+
+def test_effort_never_raises_an_explicit_cap() -> None:
+    # The caller asked for at most 1,000 output tokens: effort must not raise that to 32,000.
+    transport = HTTPProviderStreamTransport("https://api.anthropic.com/v1", "k", "claude-sonnet-4-5", provider="anthropic", client=httpx.Client())
+    _, _, payload = transport._request_for([{"role": "user", "content": "hi"}], [], None, 1_000, "max")
+    assert payload["max_tokens"] == 1_000
+    assert "thinking" not in payload
+
+    # With room for it, the thinking budget fits inside the cap and the cap stays where it was.
+    fitted = apply_effort("anthropic", {"max_tokens": 8_192}, "max", explicit_cap=8_192)
+    assert fitted["max_tokens"] == 8_192
+    assert fitted["thinking"] == {"type": "enabled", "budget_tokens": 8_192 - 1_024}
+
+
+def test_a_cap_below_2048_sends_no_thinking() -> None:
+    for cap in (1, 1_000, 2_047):
+        assert apply_effort("anthropic", {"max_tokens": cap}, "high", explicit_cap=cap) == {"max_tokens": cap}
+    smallest = apply_effort("anthropic", {"max_tokens": 2_048}, "high", explicit_cap=2_048)
+    assert smallest["thinking"] == {"type": "enabled", "budget_tokens": 1_024}
+    assert smallest["max_tokens"] == 2_048
