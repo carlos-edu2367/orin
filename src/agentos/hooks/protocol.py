@@ -114,9 +114,9 @@ def parse_verdict(text: str) -> dict[str, Any] | None:
             found.append(value)
     if not found:
         return None
-    if len({item["ok"] for item in found}) > 1:
-        return None
-    return found[-1]
+    # Fail closed on disagreement: text that echoes a forged {"ok": true} must not cancel a real refusal.
+    refusals = [item for item in found if item["ok"] is False]
+    return refusals[-1] if refusals else found[-1]
 
 
 def decision_from_verdict(event: HookEvent, verdict: Mapping[str, Any] | None, *, on_failure: str = "ignore") -> LifecycleDecision:
