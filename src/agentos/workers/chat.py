@@ -627,8 +627,12 @@ class ChatWorker:
             _LOGGER.exception("could not settle Code mode for turn %s", turn.get("turn_id"))
 
     def _promote_queued_inputs(self, turn: dict[str, object], result_state: str) -> None:
-        """Queued text the turn never read becomes the next turn; a cancelled or failed turn leaves it queued."""
-        if result_state not in {"completed", "completed_with_caveats", "waiting_user"}:
+        """Queued text the turn never read becomes the next turn, but only after a turn that finished.
+
+        A turn that ends ``waiting_user`` (a question, or a safety pause) leaves the queue to the person: queued
+        text written before the question existed would otherwise answer it. A cancelled or failed turn leaves it too.
+        """
+        if result_state not in {"completed", "completed_with_caveats"}:
             return
         if not callable(getattr(self.store, "take_queued_inputs", None)):
             return

@@ -92,3 +92,50 @@ def test_input_left_in_the_queue_becomes_the_next_turn() -> None:
         ).where(conversation_turns.c.turn_id == receipt.turn_id)).scalar_one()
     assert user_message == "one\n\ntwo"
     assert app.promote_queued_inputs(conversation_id, "u") is None
+
+
+def _turn_count(store: PostgresChatStore, conversation_id: str) -> int:
+    with store._engine.connect() as connection:
+        return len(connection.execute(select(conversation_turns.c.turn_id).where(conversation_turns.c.conversation_id == conversation_id)).all())
+
+
+def test_queued_text_never_answers_a_question() -> None:
+    from agentos.workers.chat import ChatWorker
+
+    store = _store()
+    turn = _running_turn(store)
+    conversation_id = str(turn["conversation_id"])
+    assert ChatApplication(store).enqueue("u", conversation_id, "also update the README", "k2")["queued"] is True
+    store.delta(turn, "Before I continue: should I DROP the legacy_invoices table? (yes/no)")
+    store.finish(turn, code="WAITING_USER")
+    ChatWorker(store)._promote_queued_inputs(dict(turn), "waiting_user")
+    # The question stays open for the person; the queued text is still theirs to send or delete.
+    assert [item["content"] for item in store.queued_inputs(conversation_id, "u")] == ["also update the README"]
+    assert _turn_count(store, conversation_id) == 1
+
+
+def test_queued_text_waits_out_a_safety_pause() -> None:
+    from agentos.workers.chat import ChatWorker
+
+    store = _store()
+    turn = _running_turn(store)
+    conversation_id = str(turn["conversation_id"])
+    assert ChatApplication(store).enqueue("u", conversation_id, "keep going", "k2")["queued"] is True
+    store.finish(turn, code="SAFETY_TOOL_ROUNDS")
+    ChatWorker(store)._promote_queued_inputs(dict(turn), "waiting_user")
+    assert [item["content"] for item in store.queued_inputs(conversation_id, "u")] == ["keep going"]
+    assert _turn_count(store, conversation_id) == 1
+
+
+@pytest.mark.parametrize("result_state", ["completed", "completed_with_caveats"])
+def test_queued_text_is_promoted_after_a_finished_turn(result_state: str) -> None:
+    from agentos.workers.chat import ChatWorker
+
+    store = _store()
+    turn = _running_turn(store)
+    conversation_id = str(turn["conversation_id"])
+    assert ChatApplication(store).enqueue("u", conversation_id, "also do Y", "k2")["queued"] is True
+    store.finish(turn)
+    ChatWorker(store)._promote_queued_inputs(dict(turn), result_state)
+    assert store.queued_inputs(conversation_id, "u") == []
+    assert _turn_count(store, conversation_id) == 2
