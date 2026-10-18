@@ -11,6 +11,7 @@ from agentos.agentic.provider_stream import NormalizedStreamItem, StreamKind
 from agentos.agentic.events import AgentActivityEventType
 from agentos.agentic.runtime import (
     CODE_COMPACTION_SECTIONS,
+    COMPACTION_HEADING,
     AgenticLimits,
     AgenticTurnRuntime,
     strip_analysis_block,
@@ -404,7 +405,7 @@ def test_three_tier_compaction_and_top_5_file_rehydration(tmp_path: Path) -> Non
 
     assert runtime._compaction_count == 1
     compacted_msg = next(
-        item for item in bulky_messages if str(item.get("content", "")).startswith("## Contexto compactado")
+        item for item in bulky_messages if str(item.get("content", "")).startswith(COMPACTION_HEADING)
     )
     compacted_text = str(compacted_msg["content"])
 

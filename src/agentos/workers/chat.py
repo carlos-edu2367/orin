@@ -252,6 +252,9 @@ class _RuntimeStore:
     def clear_prompt_snapshot(self, conversation_id: str) -> None:
         self._store.clear_prompt_snapshot(conversation_id)
 
+    def record_compact_boundary(self, turn: dict[str, object], **values: object):
+        return self._store.record_compact_boundary(turn, **values)
+
     # -- session seams ---------------------------------------------------
 
     def record(self, *args, **kwargs) -> None:

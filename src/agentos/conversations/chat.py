@@ -25,6 +25,7 @@ from agentos.installation import orin_paths
 from agentos.persistence.postgres.agentic_activity import ActivityCursorError
 from agentos.persistence.postgres.execution_adapters import ExecutionApplicationAdapter, ExecutionQueryAdapter
 from agentos.agentic import transcript as turn_transcript
+from agentos.agentic.compaction import compaction_message
 from agentos.persistence.postgres.schema import (code_mode_runs, conversation_activity_events, conversation_agent_usage, conversation_agents, conversation_compact_boundaries, conversation_dispatches, conversation_events, conversation_hook_context, conversation_input_queue, conversation_message_attachments, conversation_message_commands, conversation_messages, conversation_prompt_snapshots, conversation_sessions, conversation_tool_records, conversation_turn_steps, conversation_turns, conversations, metadata, projects, provider_model_catalog, runtime_heartbeats, turn_quality_metrics, workspace_roots)
 from agentos.code_mode.models import CodeAutonomy, CodeStage, detect_code_request, known_permission_mode
 from agentos.provider_catalog.pricing import estimate_cost_usd
@@ -1823,6 +1824,46 @@ class PostgresChatStore:
         with self._engine.begin() as c:
             c.execute(delete(conversation_prompt_snapshots).where(conversation_prompt_snapshots.c.conversation_id == conversation_id))
 
+    def record_compact_boundary(
+        self,
+        turn: Mapping[str, object],
+        *,
+        kind: str,
+        trigger: str,
+        pre_tokens: int,
+        post_tokens: int | None = None,
+        summary: str | None = None,
+    ) -> dict[str, object] | None:
+        """Persist a compaction. A ``compact`` boundary covers the history before this turn's request."""
+        if kind not in {"compact", "microcompact"}:
+            raise ValueError("unknown boundary kind")
+        now = datetime.now(UTC)
+        conversation_id = str(turn["conversation_id"])
+        with self._engine.begin() as c:
+            through: int | None = None
+            if kind == "compact":
+                user_sequence = c.execute(select(conversation_messages.c.sequence).where(
+                    conversation_messages.c.message_id == turn.get("user_message_id"),
+                )).scalar()
+                through = int(user_sequence) - 1 if user_sequence is not None else None
+            previous = c.execute(select(conversation_compact_boundaries.c.cumulative_dropped_tokens).where(
+                conversation_compact_boundaries.c.conversation_id == conversation_id,
+            ).order_by(conversation_compact_boundaries.c.id.desc()).limit(1)).scalar()
+            dropped = max(0, int(pre_tokens) - int(post_tokens)) if post_tokens is not None else None
+            cumulative = int(previous or 0) + dropped if dropped is not None else (int(previous) if previous is not None else None)
+            boundary_id = _id("boundary")
+            c.execute(insert(conversation_compact_boundaries).values(
+                boundary_id=boundary_id, conversation_id=conversation_id, user_id=str(turn["user_id"]),
+                turn_id=str(turn.get("turn_id") or ""), kind=kind, compact_trigger=str(trigger or "auto")[:16],
+                pre_tokens=max(0, int(pre_tokens)), post_tokens=None if post_tokens is None else max(0, int(post_tokens)),
+                cumulative_dropped_tokens=cumulative, summary=(summary[:200_000] if summary else None),
+                through_sequence=through, created_at=now,
+            ))
+        return {
+            "boundary_id": boundary_id, "kind": kind, "trigger": trigger, "pre_tokens": int(pre_tokens),
+            "post_tokens": post_tokens, "cumulative_dropped_tokens": cumulative,
+        }
+
     def history_for_turn(self, turn: dict[str, object], *, rehydration_budget_tokens: int = 0) -> list[dict[str, object]]:
         """The conversation as the model should see it, including past tool work.
 
@@ -1837,7 +1878,7 @@ class PostgresChatStore:
         readable transcript) reproduces the previous behaviour exactly.
         """
         with self._engine.connect() as c:
-            rows = c.execute(select(conversation_messages.c.message_id, conversation_messages.c.role, conversation_messages.c.content).where(conversation_messages.c.conversation_id == turn["conversation_id"], conversation_messages.c.sequence <= select(conversation_messages.c.sequence).where(conversation_messages.c.message_id == turn["user_message_id"]).scalar_subquery()).order_by(conversation_messages.c.sequence)).mappings().all()
+            rows = c.execute(select(conversation_messages.c.message_id, conversation_messages.c.role, conversation_messages.c.content, conversation_messages.c.sequence).where(conversation_messages.c.conversation_id == turn["conversation_id"], conversation_messages.c.sequence <= select(conversation_messages.c.sequence).where(conversation_messages.c.message_id == turn["user_message_id"]).scalar_subquery()).order_by(conversation_messages.c.sequence)).mappings().all()
             blocked_user_ids = {str(row) for row in c.execute(select(conversation_messages.c.message_id).where(conversation_messages.c.conversation_id == turn["conversation_id"], conversation_messages.c.status == BLOCKED_BY_HOOK_STATUS)).scalars()}
             blocked_turn_rows = c.execute(select(conversation_turns.c.user_message_id, conversation_turns.c.assistant_message_id).where(conversation_turns.c.conversation_id == turn["conversation_id"])).mappings().all() if blocked_user_ids else []
             attachment_rows = c.execute(select(conversation_message_attachments).where(conversation_message_attachments.c.conversation_id == turn["conversation_id"]).order_by(conversation_message_attachments.c.id)).mappings().all()
@@ -1847,9 +1888,23 @@ class PostgresChatStore:
             turn_rows = c.execute(select(
                 conversation_turns.c.turn_id, conversation_turns.c.assistant_message_id
             ).where(conversation_turns.c.conversation_id == turn["conversation_id"])).mappings().all() if rehydration_budget_tokens > 0 else []
+            boundary = c.execute(select(
+                conversation_compact_boundaries.c.summary, conversation_compact_boundaries.c.through_sequence,
+            ).where(
+                conversation_compact_boundaries.c.conversation_id == turn["conversation_id"],
+                conversation_compact_boundaries.c.kind == "compact",
+                conversation_compact_boundaries.c.through_sequence.is_not(None),
+                conversation_compact_boundaries.c.summary.is_not(None),
+            ).order_by(conversation_compact_boundaries.c.id.desc()).limit(1)).mappings().first()
         skipped: set[str] = set(blocked_user_ids)
         skipped.update(str(row["assistant_message_id"]) for row in blocked_turn_rows if str(row["user_message_id"]) in blocked_user_ids)
         rows = [row for row in rows if str(row["message_id"]) not in skipped]
+        current_sequence = max((int(row["sequence"]) for row in rows), default=0)
+        through = int(boundary["through_sequence"]) if boundary is not None else None
+        compacted = through is not None and through < current_sequence
+        if compacted:
+            # Everything up to the boundary is represented by its summary.
+            rows = [row for row in rows if int(row["sequence"]) > through]
         grouped: dict[str, list[dict[str, object]]] = {}
         for row in attachment_rows:
             grouped.setdefault(str(row["message_id"]), []).append(dict(row))
@@ -1875,6 +1930,8 @@ class PostgresChatStore:
             if records:
                 content = f"{content}{_attachment_marker(records)}"
             history.append({"role": str(row["role"]), "content": content})
+        if compacted:
+            history.insert(0, compaction_message(str(boundary["summary"])))
         return history
 
     def _rehydrated_steps(

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from agentos.agentic.provider_stream import NormalizedStreamItem, StreamKind
-from agentos.agentic.runtime import COMPACTION_SECTIONS, AgenticLimits, AgenticTurnRuntime
+from agentos.agentic.runtime import COMPACTION_HEADING, COMPACTION_SECTIONS, AgenticLimits, AgenticTurnRuntime
 
 
 # Wording that used to appear in the compaction header and the trim marker.
@@ -18,12 +18,7 @@ class _SummarizingProvider:
 
     def stream(self, request):
         self.requests.append(request)
-        body = (
-            "### Arquivos tocados\n- orcamento.xlsx — recalculado\n"
-            "### Decisões\n- manter margem de 18% — pedido do cliente\n"
-            "### Dados apurados\n- total: 45320.10\n"
-            "### Pendências\n- confirmar prazo de entrega\n"
-        )
+        body = "\n".join(f"### {section}\n- detail" for section in COMPACTION_SECTIONS)
         return iter([NormalizedStreamItem(StreamKind.TEXT, 1, text=body)])
 
 
@@ -69,7 +64,7 @@ def test_the_compacted_replacement_keeps_the_structured_sections() -> None:
 
     runtime._maybe_compact(messages, {"turn_id": "turn-1"}, [])
 
-    replacement = next(item for item in messages if str(item.get("content", "")).startswith("## Contexto compactado"))
+    replacement = next(item for item in messages if str(item.get("content", "")).startswith(COMPACTION_HEADING))
     for section in COMPACTION_SECTIONS:
         assert section in str(replacement["content"])
 
@@ -81,7 +76,7 @@ def test_the_compaction_header_does_not_invite_rework() -> None:
 
     runtime._maybe_compact(messages, {"turn_id": "turn-1"}, [])
 
-    replacement = next(item for item in messages if str(item.get("content", "")).startswith("## Contexto compactado"))
+    replacement = next(item for item in messages if str(item.get("content", "")).startswith(COMPACTION_HEADING))
     header = str(replacement["content"]).lower()
     for phrase in REWORK_PHRASES:
         assert phrase not in header
@@ -95,7 +90,7 @@ def test_the_fallback_still_produces_every_section() -> None:
 
     runtime._maybe_compact(messages, {"turn_id": "turn-1"}, [])
 
-    replacement = next(item for item in messages if str(item.get("content", "")).startswith("## Contexto compactado"))
+    replacement = next(item for item in messages if str(item.get("content", "")).startswith(COMPACTION_HEADING))
     for section in COMPACTION_SECTIONS:
         assert section in str(replacement["content"])
 
@@ -114,7 +109,7 @@ def test_the_fallback_names_the_tools_whose_results_were_folded_away() -> None:
 
     runtime._maybe_compact(messages, {"turn_id": "turn-1"}, [])
 
-    replacement = next(item for item in messages if str(item.get("content", "")).startswith("## Contexto compactado"))
+    replacement = next(item for item in messages if str(item.get("content", "")).startswith(COMPACTION_HEADING))
     assert "read_file" in str(replacement["content"])
 
 

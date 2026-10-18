@@ -11,7 +11,7 @@ import json
 
 from agentos.agentic.agent_tools import ToolOutcome
 from agentos.agentic.provider_stream import normalize_sse
-from agentos.agentic.runtime import AgenticLimits, AgenticTurnRuntime
+from agentos.agentic.runtime import COMPACTION_HEADING, AgenticLimits, AgenticTurnRuntime
 
 
 def _turn(provider: str = "anthropic") -> dict[str, object]:
@@ -147,7 +147,7 @@ def test_compaction_is_the_only_thing_that_rewrites_the_prefix() -> None:
     # Every rewrite is a compaction: the request that follows one carries the
     # compaction summary.
     for index in rewrites:
-        assert any("Contexto compactado" in str(item.get("content", "")) for item in provider.requests[index])
+        assert any(COMPACTION_HEADING in str(item.get("content", "")) for item in provider.requests[index])
 
 
 def test_a_provider_without_caching_still_shrinks_old_results() -> None:

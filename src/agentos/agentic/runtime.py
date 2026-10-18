@@ -27,6 +27,18 @@ from .lifecycle import HookEvent, LifecycleBus
 from .tools.public_names import public_name as _public_tool_name
 from .reminders import ReminderQueue, render_reminders, system_reminder
 from .retry import backoff_delay, is_retryable, retry_after_of, status_code_of
+from .compaction import (
+    COMPACTION_HEADER,
+    COMPACTION_HEADING,
+    COMPACTION_INSTRUCTION,
+    COMPACTION_SECTIONS,
+    MICROCOMPACT_MARKER,
+    compaction_message,
+)
+
+# Kept for callers written when Code mode had its own headings: there is one set now.
+CODE_COMPACTION_SECTIONS = COMPACTION_SECTIONS
+CODE_COMPACTION_INSTRUCTION = COMPACTION_INSTRUCTION
 
 MAX_PARALLEL_TOOLS = 8
 MAX_PARALLEL_SUBAGENT_TOOLS = max(8, int(os.environ.get("ORIN_MAX_CONCURRENT_SUBAGENTS", "16") or "16"))
@@ -74,52 +86,7 @@ _PIN_UNSET = object()
 # A compacted summary has one job: let the model keep working without going
 # back to the tools. Free prose loses exactly the parts that make that
 # possible -- the paths, the numbers, the decisions already taken -- so the
-# summary is requested and rendered under fixed headings instead.
-COMPACTION_SECTIONS = ("Arquivos tocados", "Decisões", "Dados apurados", "Pendências")
-CODE_COMPACTION_SECTIONS = (
-    "Primary Request and Intent",
-    "Key Technical Concepts",
-    "Files and Code Sections",
-    "Errors and fixes",
-    "Problem Solving",
-    "All user messages",
-    "Pending Tasks",
-    "Current Work",
-    "Optional Next Step",
-)
-COMPACTION_HEADING = "## Contexto compactado"
-# The old header ended with "use os arquivos e ferramentas para confirmar
-# detalhes", which invited the model to re-run everything it had just been
-# told. The summary is authoritative for what it contains.
-COMPACTION_HEADER = (
-    f"{COMPACTION_HEADING}\n"
-    "[Este resumo é confiável para caminhos, decisões e valores registrados abaixo. "
-    "Releia um arquivo apenas se esperar que ele tenha mudado desde então.]"
-)
-COMPACTION_INSTRUCTION = (
-    "You are compacting a conversation so another agent can continue the work without "
-    "repeating it. Reply with exactly these four markdown sections, in this order, even "
-    "when a section is empty (write '- nenhum'):\n"
-    + "\n".join(f"### {section}" for section in COMPACTION_SECTIONS)
-    + "\nUnder 'Arquivos tocados' list each path with what was done to it. Under 'Decisões' "
-    "list each decision with its reason. Under 'Dados apurados' list every concrete value, "
-    "number or identifier established so far, verbatim. Under 'Pendências' list what is "
-    "still open. Preserve exact paths and figures. Do not invent anything. "
-    "Always preserve the user's language (e.g., Portuguese) in the summary and subsequent responses."
-)
-CODE_COMPACTION_INSTRUCTION = (
-    "You are compacting a software engineering session so the agent can continue seamlessly without "
-    "re-reading files or repeating searches.\n"
-    "First, write a brief internal scratchpad inside <analysis>...</analysis> tags to review the trajectory chronologically.\n"
-    "Then, outside the <analysis> block, reply with exactly these nine markdown sections, in this order, even when a section is empty (write '- none'):\n"
-    + "\n".join(f"### {section}" for section in CODE_COMPACTION_SECTIONS)
-    + "\nUnder 'Files and Code Sections' list every file read or modified with exact paths and key symbols/changes. "
-    "Under 'Errors and fixes' list errors encountered and how they were resolved. "
-    "Under 'All user messages' list every non-tool user request in order. "
-    "Under 'Pending Tasks' and 'Current Work' record exact remaining items and what was being worked on immediately before compaction. "
-    "Preserve exact file paths, identifiers, and figures. Do not invent anything. "
-    "Always preserve the user's language (e.g., Portuguese) in the summary and subsequent responses."
-)
+# summary is requested and rendered under fixed headings instead. The definitions live in compaction.py.
 
 
 def strip_analysis_block(text: str) -> str:
@@ -327,6 +294,8 @@ class AgenticTurnRuntime:
         self.skill_prompt_tokens = max(0, int(skill_prompt_tokens))
         self.context_reporting = bool(context_reporting)
         self._compaction_count = 0
+        self._last_compaction: dict[str, int] | None = None
+        self._last_compaction_block: str | None = None
         self._closed = False
         self.counters = TurnQualityCounters()
         self.ledger = TurnLearningLedger()
@@ -1355,32 +1324,36 @@ class AgenticTurnRuntime:
         *,
         keep_units: int = CONTEXT_COMPACTION_KEEP_UNITS,
         allow_block: bool = True,
-    ) -> None:
+        trigger: str = "auto",
+        custom_instructions: str = "",
+    ) -> bool:
+        self._last_compaction = None
+        self._last_compaction_block = None
         units = self._group_tool_units(messages)
         pinned = getattr(self, "_pinned_index", _PIN_UNSET)
         eligible = [unit for unit in units if pinned is _PIN_UNSET or pinned not in unit]
         if len(eligible) <= keep_units:
-            return
-        compact_units = eligible[:-keep_units]
+            return False
+        compact_units = eligible[:-keep_units] if keep_units > 0 else list(eligible)
         compact_indices = {index for unit in compact_units for index in unit}
         if not compact_indices:
-            return
-        pre = self._emit(HookEvent.PRE_COMPACT, trigger="auto", custom_instructions="")
+            return False
+        pre = self._emit(HookEvent.PRE_COMPACT, trigger=trigger, custom_instructions=custom_instructions)
         if pre is not None and pre.blocked and allow_block:
-            return
+            self._last_compaction_block = pre.reason or "blocked by hook"
+            return False
+        pre_tokens = self._estimated_tokens({"messages": messages})
         if self.context_reporting:
             self._life(turn, "context_compacting", removed_messages=len(compact_indices), compaction_count=self._compaction_count + 1)
         source = self._compact_source(messages, compact_indices)
-        if pre is not None and pre.additional_context:
-            source = "Instruções adicionais para o resumo:\n" + "\n".join(pre.additional_context) + "\n\n" + source
-        code_mode = self._is_code_compaction(turn)
-        summary = strip_analysis_block(self._request_compaction_summary(source, turn, code_mode=code_mode))
-        if code_mode:
-            if not (self._has_code_sections(summary) or self._has_sections(summary)):
-                summary = self._fallback_code_compaction_summary(messages, compact_indices)
-        else:
-            if not self._has_sections(summary):
-                summary = self._fallback_compaction_summary(messages, compact_indices)
+        instructions = [item for item in ([custom_instructions.strip()] if custom_instructions.strip() else []) if item]
+        if pre is not None:
+            instructions.extend(item for item in pre.additional_context if item)
+        if instructions:
+            source = "Instruções adicionais para o resumo:\n" + "\n".join(instructions) + "\n\n" + source
+        summary = strip_analysis_block(self._request_compaction_summary(source, turn, code_mode=self._is_code_compaction(turn)))
+        if not self._has_sections(summary):
+            summary = self._fallback_compaction_summary(messages, compact_indices)
         enrichment = ""
         enricher = getattr(self.toolset, "post_compact_enrichment", None)
         if callable(enricher):
@@ -1390,10 +1363,10 @@ class AgenticTurnRuntime:
                 enrichment = ""
         body = summary[:8_000]
         if enrichment:
-            body = f"{body}\n\n{enrichment[:8_000]}"
+            body = f"{body}\n\n{enrichment[:20_000]}"
         insert_at = min(compact_indices)
         pinned_item = messages[pinned] if isinstance(pinned, int) and 0 <= pinned < len(messages) else None
-        replacement = {"role": "system", "content": f"{COMPACTION_HEADER}\n{body}"}
+        replacement = compaction_message(body)
         retained = [item for index, item in enumerate(messages) if index not in compact_indices]
         original_to_retained = [(index, item) for index, item in enumerate(messages) if index not in compact_indices]
         position = next((offset for offset, (index, _item) in enumerate(original_to_retained) if index > insert_at), len(retained))
@@ -1406,10 +1379,28 @@ class AgenticTurnRuntime:
         if pinned_item is not None:
             self._pinned_index = next((index for index, item in enumerate(messages) if item is pinned_item), None)
         self._compaction_count += 1
+        post_tokens = self._estimated_tokens({"messages": messages})
+        self._last_compaction = {"pre_tokens": pre_tokens, "post_tokens": post_tokens}
+        self._persist_compact_boundary(turn, kind="compact", trigger=trigger, pre_tokens=pre_tokens, post_tokens=post_tokens, summary=body)
         if self.context_reporting:
-            self._life(turn, "context_compacted", removed_messages=len(compact_indices), summary_tokens=self._estimated_tokens(replacement), compaction_count=self._compaction_count)
+            self._life(
+                turn, "context_compacted", removed_messages=len(compact_indices),
+                summary_tokens=self._estimated_tokens(replacement), compaction_count=self._compaction_count,
+                boundary="compact", trigger=trigger, pre_tokens=pre_tokens, post_tokens=post_tokens,
+            )
         self._hooks(turn, "PostCompact", compaction_count=self._compaction_count)
-        self._emit(HookEvent.POST_COMPACT, trigger="auto", compaction_count=self._compaction_count)
+        self._emit(HookEvent.POST_COMPACT, trigger=trigger, compaction_count=self._compaction_count, pre_tokens=pre_tokens, post_tokens=post_tokens)
+        return True
+
+    def _persist_compact_boundary(self, turn: Mapping[str, object], **values: object) -> None:
+        """Record the boundary so the next turn starts from the summary. A lost boundary costs a re-summary, never the turn."""
+        recorder = getattr(self.store, "record_compact_boundary", None)
+        if not callable(recorder):
+            return
+        try:
+            recorder(turn, **values)
+        except Exception:  # noqa: BLE001
+            pass
 
     def _compact_source(self, messages: list[dict[str, object]], indices: set[int]) -> str:
         parts: list[str] = []
@@ -1430,7 +1421,7 @@ class AgenticTurnRuntime:
         return "\n".join(parts)
 
     def _request_compaction_summary(self, source: str, turn: Mapping[str, object], *, code_mode: bool = False) -> str:
-        instruction = CODE_COMPACTION_INSTRUCTION if code_mode else COMPACTION_INSTRUCTION
+        instruction = COMPACTION_INSTRUCTION
         try:
             events = self.provider.stream({
                 "turn_id": str(turn.get("turn_id") or "") + ":context-compaction",
@@ -1451,55 +1442,13 @@ class AgenticTurnRuntime:
 
     @staticmethod
     def _has_sections(summary: str) -> bool:
-        """Whether a provider reply is usable as a structured summary.
-
-        A model that ignored the format and answered in prose is worse than
-        the local fallback, which at least keeps the paths and the tool names.
-        """
+        """Whether a provider reply is usable as a structured summary (all nine headings)."""
         return bool(summary) and all(section in summary for section in COMPACTION_SECTIONS)
 
-    @staticmethod
-    def _has_code_sections(summary: str) -> bool:
-        return bool(summary) and all(section in summary for section in CODE_COMPACTION_SECTIONS)
+    _has_code_sections = _has_sections
 
     @classmethod
     def _fallback_compaction_summary(cls, messages: list[dict[str, object]], indices: set[int]) -> str:
-        """Build the same four sections locally when the provider cannot.
-
-        This runs when the summarizer call fails or answers in the wrong
-        shape. It cannot infer decisions, but it can name every tool whose
-        result is being folded away and every path those calls mentioned --
-        which is what stops the model from rediscovering them.
-        """
-        touched: list[str] = []
-        pending: list[str] = []
-        for index in sorted(indices):
-            item = messages[index]
-            for call in item.get("tool_calls") or ():
-                if not isinstance(call, Mapping):
-                    continue
-                function = call.get("function") if isinstance(call.get("function"), Mapping) else {}
-                name = str(function.get("name") or "")
-                arguments = str(function.get("arguments") or "")[:160]
-                if name:
-                    touched.append(f"- {name}({arguments})")
-            content = item.get("content")
-            if isinstance(content, list):
-                for block in content:
-                    if isinstance(block, Mapping) and block.get("type") == "tool_use":
-                        touched.append(f"- {block.get('name')}({json.dumps(block.get('input') or {}, ensure_ascii=False)[:160]})")
-            elif isinstance(content, str) and content.strip() and str(item.get("role")) == "user":
-                pending.append(f"- {content.strip()[:200]}")
-        sections = {
-            COMPACTION_SECTIONS[0]: touched[-12:] or ["- nenhum"],
-            COMPACTION_SECTIONS[1]: ["- não registradas: a compactação semântica não ficou disponível"],
-            COMPACTION_SECTIONS[2]: ["- não registrados: a compactação semântica não ficou disponível"],
-            COMPACTION_SECTIONS[3]: pending[-6:] or ["- nenhuma"],
-        }
-        return "\n".join(f"### {name}\n" + "\n".join(lines) for name, lines in sections.items())
-
-    @classmethod
-    def _fallback_code_compaction_summary(cls, messages: list[dict[str, object]], indices: set[int]) -> str:
         """Build the nine Claude Code compaction sections locally when the provider cannot."""
         touched: list[str] = []
         user_messages: list[str] = []
@@ -1537,6 +1486,8 @@ class AgenticTurnRuntime:
             CODE_COMPACTION_SECTIONS[8]: ["- continue with the active request"],
         }
         return "\n".join(f"### {name}\n" + "\n".join(lines) for name, lines in sections.items())
+
+    _fallback_code_compaction_summary = _fallback_compaction_summary
 
     @classmethod
     def _estimated_tokens(cls, message: Mapping[str, object] | object) -> int:

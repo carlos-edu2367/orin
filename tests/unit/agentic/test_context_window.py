@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from agentos.agentic.runtime import AgenticLimits, AgenticTurnRuntime
+from agentos.agentic.runtime import COMPACTION_HEADING, AgenticLimits, AgenticTurnRuntime
 
 
 def _runtime(**limits) -> AgenticTurnRuntime:
@@ -70,7 +70,7 @@ def test_auto_compaction_keeps_the_current_request_and_reduces_old_units() -> No
 
     assert runtime._compaction_count == 1
     assert any(item.get("content") == "current request" for item in messages)
-    assert any("## Contexto compactado" in str(item.get("content")) for item in messages)
+    assert any(COMPACTION_HEADING in str(item.get("content")) for item in messages)
     assert len(messages) < 9
 
 

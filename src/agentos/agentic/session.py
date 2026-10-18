@@ -1005,7 +1005,8 @@ class TurnSession:
             self._record(AgentActivityEventType.CONTEXT_UPDATED, "Compactando contexto", {"compacting": True, **payload}, agent_id=actor)
             return
         if state == "context_compacted":
-            self._record(AgentActivityEventType.CONTEXT_COMPACTED, "Contexto compactado automaticamente", {"compacting": False, **payload}, agent_id=actor)
+            summary = "Contexto compactado" if payload.get("trigger") == "manual" else "Contexto compactado automaticamente"
+            self._record(AgentActivityEventType.CONTEXT_COMPACTED, summary, {"compacting": False, **payload}, agent_id=actor)
             return
         if state == "tool_started":
             name = str(payload.get("tool_name") or "tool")
