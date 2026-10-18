@@ -2570,7 +2570,18 @@ class TurnSession:
 
         names = frozenset(item.name for item in toolset.definitions() if item.name in CODE_MODE_CORE_TOOLS)
         public = toolset.name_translator is not None
-        options = CodePromptOptions(tool_names=names, public_names=public, subagents_enabled=self.enable_subagents)
+        from .output_styles import resolve_output_style
+
+        try:
+            style = resolve_output_style(self.effective_settings, self.workspace.root)
+        except Exception:  # noqa: BLE001 - a broken style file means the default style
+            style = None
+        options = CodePromptOptions(
+            tool_names=names, public_names=public, subagents_enabled=self.enable_subagents,
+            output_style_name=style.name if style is not None else "",
+            output_style_instructions=style.instructions if style is not None else "",
+            keep_coding_instructions=style.keep_coding_instructions if style is not None else True,
+        )
         self._code_prompt_options = options
         stable = self._code_stable_prompt()
         dynamic = render_code_turn_context(
