@@ -11,6 +11,13 @@ import time
 from typing import Any, Callable, Literal, Mapping
 from uuid import uuid4
 
+from agentos.permissions.engine import PermissionDecision, PermissionEngine
+from agentos.permissions.rules import MatchContext, suggest_rule
+from agentos.permissions.shell import default_shell
+from agentos.settings import load_effective_settings
+from agentos.settings.paths import SettingsPaths
+from agentos.settings.writer import add_permission_rule
+
 from .models import CodeAutonomy, CodePermissionMode, normalize_permission_mode
 
 PermissionEvaluation = Literal["allow", "ask", "deny"]
@@ -62,8 +69,8 @@ _TOOL_NAME_ALIASES: dict[str, str] = {
     "read_file": "read_file",
     "glob": "glob_files",
     "glob_files": "glob_files",
-    "grep": "grep_files",
-    "grep_files": "grep_files",
+    "grep": "search_files",
+    "grep_files": "search_files",
 }
 
 _RULE_PATTERN = re.compile(r"^\s*([A-Za-z0-9_.-]+)(?:\((.*)\))?\s*$")
@@ -201,31 +208,18 @@ def matches_permission_rule(
     return fnmatchcase(primary, specifier)
 
 
+def _canonical_internal(name: str) -> str:
+    from agentos.agentic.tools.public_names import internal_name
+
+    cleaned = str(name or "").strip()
+    return _TOOL_NAME_ALIASES.get(cleaned.lower()) or internal_name(cleaned)
+
+
 def suggest_permission_rule(tool_name: str, arguments: Mapping[str, Any] | None = None, *, workspace: Path | None = None) -> str:
-    """Generate a pragmatic reusable project rule for ``allow_always``."""
-    canonical = _canonical_tool_name(tool_name)
-    args = dict(arguments or {})
-    if canonical == "run_command":
-        command = " ".join(str(args.get("command") or "").strip().split())
-        if not command:
-            return "run_command(*)"
-        tokens = command.split(" ")
-        first = tokens[0]
-        if first in _COMPOUND_CMD_PREFIXES and len(tokens) >= 2 and not tokens[1].startswith("-"):
-            return f"run_command({first} {tokens[1]}:*)"
-        return f"run_command({first}:*)"
-    if canonical in {"write_file", "edit_file"}:
-        rel_path = _normalize_rel_path(str(args.get("path") or ""), workspace)
-        if not rel_path:
-            return f"{canonical}(*)"
-        parts = PurePosixPath(rel_path).parts
-        if len(parts) > 1:
-            return f"{canonical}({parts[0]}/**)"
-        suffix = PurePosixPath(rel_path).suffix
-        if suffix:
-            return f"{canonical}(*{suffix})"
-        return f"{canonical}({rel_path})"
-    return f"{canonical}(*)"
+    """Reusable rule in Claude Code syntax for ``allow_always``."""
+    root = Path(workspace) if workspace is not None else Path.cwd()
+    internal = _canonical_internal(tool_name)
+    return suggest_rule(internal, dict(arguments or {}), MatchContext(root, Path.home(), default_shell()))
 
 
 def _compute_preview_structured_patch(
@@ -387,18 +381,29 @@ def save_workspace_permission_rule(
 
 
 class ToolPermissionBroker:
-    """Evaluates and coordinates granular tool permissions for a workspace."""
+    """Evaluates and coordinates granular tool permissions for a workspace.
+
+    Decisions come from ``PermissionEngine`` over the 5-layer settings. Repository
+    rules only apply once the workspace is trusted; "always allow" grants are
+    written to a user-owned file outside the repository.
+    """
 
     def __init__(
         self,
         workspace: Path | object,
         *,
+        trusted: bool = False,
+        classifier: Callable[[str, Mapping[str, Any]], PermissionDecision] | None = None,
+        cli_settings: Mapping[str, Any] | None = None,
         event_emitter: Callable[[str, str, dict[str, Any]], None] | None = None,
         cancelled: Callable[[], bool] | None = None,
         poll_interval_seconds: float = 0.2,
         timeout_seconds: float = 300.0,
     ) -> None:
         self.workspace_root = _workspace_root(workspace)
+        self.trusted = bool(trusted)
+        self.classifier = classifier
+        self.cli_settings = dict(cli_settings) if cli_settings is not None else None
         self.event_emitter = event_emitter
         self.cancelled = cancelled
         self.poll_interval_seconds = max(0.01, float(poll_interval_seconds))
@@ -412,17 +417,52 @@ class ToolPermissionBroker:
     def settings_path(self) -> Path:
         return self.workspace_root / ".orin" / "settings.json"
 
+    def engine(self) -> PermissionEngine:
+        # Fresh settings on every call, so a new grant applies to the next call.
+        settings = load_effective_settings(self.workspace_root, cli=self.cli_settings, trusted=self.trusted)
+        return PermissionEngine(self.workspace_root, settings, classifier=self.classifier)
+
+    def has_rules(self) -> bool:
+        try:
+            return self.engine().has_rules()
+        except Exception:  # noqa: BLE001 - unreadable settings mean no rules, never a crash
+            return False
+
     def load_rules(self) -> dict[str, list[str]]:
-        return load_workspace_permission_rules(self.workspace_root)
+        settings = load_effective_settings(self.workspace_root, cli=self.cli_settings, trusted=self.trusted)
+        return {kind: [rule for rule, _source in settings.permission_rules(kind)] for kind in ("allow", "ask", "deny")}
+
+    def _grants_file(self) -> Path:
+        return SettingsPaths(self.workspace_root).writable_file("local")
 
     def add_allow_rule(self, rule: str) -> dict[str, list[str]]:
-        return save_workspace_permission_rule(self.workspace_root, "allow", rule)
+        add_permission_rule(self._grants_file(), "allow", rule)
+        return self.load_rules()
 
     def add_ask_rule(self, rule: str) -> dict[str, list[str]]:
-        return save_workspace_permission_rule(self.workspace_root, "ask", rule)
+        add_permission_rule(self._grants_file(), "ask", rule)
+        return self.load_rules()
 
     def add_deny_rule(self, rule: str) -> dict[str, list[str]]:
-        return save_workspace_permission_rule(self.workspace_root, "deny", rule)
+        add_permission_rule(self._grants_file(), "deny", rule)
+        return self.load_rules()
+
+    def decide(
+        self,
+        tool_name: str,
+        arguments: Mapping[str, Any] | None = None,
+        permission_mode: str | CodePermissionMode | CodeAutonomy = CodePermissionMode.ASK_PERMISSIONS,
+        *,
+        mode: str | CodePermissionMode | CodeAutonomy | None = None,
+        plan_mode_active: bool = False,
+    ) -> PermissionDecision:
+        effective = mode if mode is not None else permission_mode
+        return self.engine().decide(
+            _canonical_internal(tool_name),
+            dict(arguments or {}),
+            normalize_permission_mode(effective),
+            plan_mode_active=plan_mode_active,
+        )
 
     def evaluate(
         self,
@@ -434,58 +474,7 @@ class ToolPermissionBroker:
         plan_mode_active: bool = False,
     ) -> PermissionEvaluation:
         """Evaluate ``(tool_name, arguments, permission_mode)`` -> ``'allow' | 'ask' | 'deny'``."""
-        canonical = _canonical_tool_name(tool_name)
-        args = dict(arguments or {})
-        effective_mode_input = mode if mode is not None else permission_mode
-        resolved_mode = CodePermissionMode.PLAN_MODE if plan_mode_active else normalize_permission_mode(effective_mode_input)
-        rules = self.load_rules()
-
-        # 1. Explicit deny rules always win first.
-        for rule in rules["deny"]:
-            if matches_permission_rule(rule, canonical, args, workspace=self.workspace_root):
-                return "deny"
-
-        # 2. Plan mode enforces read-only + .orin/plans/** regardless of allow rules.
-        if resolved_mode is CodePermissionMode.PLAN_MODE:
-            if canonical in READ_ONLY_TOOLS:
-                return "allow"
-            if canonical in {"run_subagent", "ask_agent"}:
-                sub_type = str(args.get("subagent_type") or args.get("name") or "").strip().lower()
-                if sub_type in {"explore", "plan"}:
-                    return "allow"
-            if canonical in FILE_EDIT_TOOLS and is_plan_file_path(str(args.get("path") or ""), self.workspace_root):
-                return "allow"
-            return "deny"
-
-        # 3. Explicit ask rules override allow rules and mode defaults.
-        for rule in rules["ask"]:
-            if matches_permission_rule(rule, canonical, args, workspace=self.workspace_root):
-                return "ask"
-
-        # 4. Explicit allow rules in .orin/settings.json grant execution.
-        for rule in rules["allow"]:
-            if matches_permission_rule(rule, canonical, args, workspace=self.workspace_root):
-                return "allow"
-
-        # 5. Read-only tools and subagent delegation are allowed across non-Plan modes.
-        if canonical in READ_ONLY_TOOLS or canonical in {"run_subagent", "create_agent", "ask_agent", "ask_agents"}:
-            return "allow"
-
-        # Writing inside .orin/ control directory (such as plans) is non-destructive metadata.
-        if canonical in FILE_EDIT_TOOLS:
-            rel_path = _normalize_rel_path(str(args.get("path") or ""), self.workspace_root)
-            if rel_path.startswith(".orin/"):
-                return "allow"
-
-        # 6. Mode-specific defaults.
-        if resolved_mode is CodePermissionMode.FULL_AUTONOMY:
-            return "allow"
-        if resolved_mode is CodePermissionMode.ACCEPT_EDITS:
-            if canonical in FILE_EDIT_TOOLS or canonical == "git_commit":
-                return "allow"
-            return "ask"
-        # ASK_PERMISSIONS (default)
-        return "ask"
+        return self.decide(tool_name, arguments, permission_mode, mode=mode, plan_mode_active=plan_mode_active).behavior  # type: ignore[return-value]
 
     def request_path(self, request_id: str) -> Path:
         safe_id = re.sub(r"[^A-Za-z0-9_.-]", "_", str(request_id).strip())
@@ -509,7 +498,7 @@ class ToolPermissionBroker:
         args = dict(arguments or {})
         mode = normalize_permission_mode(permission_mode)
         req_id = str(request_id or f"perm_{uuid4().hex[:12]}")
-        suggested_rule = suggest_permission_rule(canonical, args, workspace=self.workspace_root)
+        suggested_rule = suggest_permission_rule(tool_name, args, workspace=self.workspace_root)
         preview = _compute_preview_structured_patch(self.workspace_root, canonical, args)
 
         command_preview = str(args.get("command") or "") if canonical == "run_command" else ""

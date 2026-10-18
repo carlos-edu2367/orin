@@ -2187,15 +2187,19 @@ class TurnSession:
             # Skills enhance the turn but never become a single point of failure.
             return ()
 
+    def _workspace_trusted(self) -> bool:
+        # Task 8 replaces this with the WorkspaceTrustStore lookup.
+        return False
+
     def build_runtime(self) -> AgenticTurnRuntime:
         import inspect
         from agentos.agentic.runtime import CODE_MODE_CORE_TOOLS
         from agentos.code_mode.models import normalize_code_autonomy
         from agentos.code_mode.permissions import ToolPermissionBroker
 
+        trusted_workspace = self._workspace_trusted()
         try:
-            # W1: trusted=workspace_trust.is_trusted(root). Until then the repository is never trusted.
-            self.effective_settings = load_effective_settings(self.workspace.root, trusted=False)
+            self.effective_settings = load_effective_settings(self.workspace.root, trusted=trusted_workspace)
         except Exception:  # noqa: BLE001 - settings never stop a turn from starting
             logger.exception("effective settings failed to load; keeping managed settings only")
             try:
@@ -2249,6 +2253,7 @@ class TurnSession:
             and resumed is None
         )
         broker_kwargs: dict[str, Any] = {
+            "trusted": trusted_workspace,
             "event_emitter": lambda _event_name, summary, payload: self._record(
                 AgentActivityEventType.CODE_MODE_DECISION_REQUIRED,
                 summary,

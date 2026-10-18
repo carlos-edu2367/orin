@@ -1995,10 +1995,7 @@ class AgentToolset:
         broker_tool_name = name
         broker_args: Mapping[str, Any] = arguments
         if name == "notebook_edit":
-            broker_tool_name = "edit_file"
             broker_args = {**arguments, "path": str(arguments.get("notebook_path") or arguments.get("path") or "")}
-        elif name in {"task_create", "task_update", "task_get", "task_list"}:
-            broker_tool_name = "todo_write"
         if self._plan_mode_active or self._permission_mode.value == "plan_mode":
             plan_decision = self._permission_broker.evaluate(
                 broker_tool_name,
@@ -2014,18 +2011,19 @@ class AgentToolset:
                     {"tool_kind": definition.kind, "code_mode": True, "plan_mode": True},
                     "CODE_PLAN_MODE_READONLY",
                 )
-        if self._code_mode_active or self._interactive_permissions or self._permission_broker.settings_path.exists():
-            perm_decision = self._permission_broker.evaluate(
+        if self._code_mode_active or self._interactive_permissions or self._permission_broker.has_rules():
+            decision = self._permission_broker.decide(
                 broker_tool_name,
                 broker_args,
                 self._permission_mode,
                 plan_mode_active=self._plan_mode_active,
             )
+            perm_decision = decision.behavior
             if perm_decision == "deny":
                 return ToolOutcome(
                     "failed",
                     "Permissão negada por regra do projeto",
-                    f"A execução de `{name}` foi bloqueada pelas regras de permissão do projeto (.orin/settings.json).",
+                    f"A execução de `{name}` foi bloqueada pelas regras de permissão (settings).",
                     {"tool_kind": definition.kind, "code_mode": True},
                     "CODE_PERMISSION_DENIED",
                 )
@@ -2066,6 +2064,14 @@ class AgentToolset:
                             },
                             "CODE_PERMISSION_DENIED",
                         )
+                elif decision.requires_human:
+                    return ToolOutcome(
+                        "failed",
+                        "Confirmação necessária",
+                        f"`{name}` precisa da confirmação de uma pessoa ({decision.reason}), e esta execução não tem como pedir.",
+                        {"tool_kind": definition.kind, "code_mode": True},
+                        "CODE_PERMISSION_DENIED",
+                    )
                 elif self._code_mode_requires_approval and name in {"write_file", "edit_file", "notebook_edit", "run_command", "verify_project"}:
                     path = str(arguments.get("path") or arguments.get("notebook_path") or "")
                     if not (name in {"write_file", "edit_file", "notebook_edit"} and path.replace("\\", "/").lstrip("./").startswith(".orin/plans/")):

@@ -12,6 +12,7 @@ from agentos.agentic.settings import AgentRuntimeSettingsStore
 from agentos.agentic.workspace import ConversationWorkspace
 from agentos.api.gateway import ApiServices, create_app
 from agentos.api.security import LoopbackSecurityService
+from agentos.settings.paths import workspace_grants_file
 from agentos.code_mode import (
     CodeAutonomy,
     CodeModeSettings,
@@ -24,6 +25,16 @@ from agentos.code_mode import (
     parse_permission_rule,
     suggest_permission_rule,
 )
+
+
+def _grant_allow(workspace) -> list[str]:
+    """Allow rules in the user-owned grants file for a workspace (where "always allow" is stored now)."""
+    import json
+
+    path = workspace_grants_file(Path(getattr(workspace, "root", workspace)))
+    if not path.exists():
+        return []
+    return list(json.loads(path.read_text(encoding="utf-8")).get("permissions", {}).get("allow", []))
 
 
 def test_four_permission_modes_and_backward_compatible_aliases() -> None:
@@ -51,9 +62,9 @@ def test_permission_rules_parsing_and_matching(tmp_path: Path) -> None:
 
     assert parse_permission_rule("run_command(npm test:*)") == ("run_command", "npm test:*")
     assert parse_permission_rule("write_file") == ("write_file", None)
-    assert suggest_permission_rule("run_command", {"command": "npm test"}) == "run_command(npm test:*)"
-    assert suggest_permission_rule("run_command", {"command": "pytest tests/unit"}) == "run_command(pytest tests/unit:*)"
-    assert suggest_permission_rule("edit_file", {"path": "src/app.py"}) == "edit_file(src/**)"
+    assert suggest_permission_rule("run_command", {"command": "npm test"}) == "Bash(npm test:*)"
+    assert suggest_permission_rule("run_command", {"command": "pytest tests/unit"}) == "Bash(pytest tests/unit:*)"
+    assert suggest_permission_rule("edit_file", {"path": "src/app.py"}) == "Edit(src/**)"
 
     assert matches_permission_rule("run_command(npm test:*)", "run_command", {"command": "npm test -- --watch"}) is True
     assert matches_permission_rule("run_command(npm test:*)", "run_command", {"command": "rm -rf build"}) is False
@@ -102,8 +113,8 @@ def test_permission_broker_ipc_and_allow_always_persistence(tmp_path: Path) -> N
 
     assert decision["allowed"] is True
     assert decision["decision"] == "allow_always"
-    saved_rules = load_workspace_permission_rules(workspace)
-    assert "run_command(npm test:*)" in saved_rules["allow"]
+    saved_rules = {"allow": _grant_allow(workspace)}
+    assert "Bash(npm test:*)" in saved_rules["allow"]
     assert broker.evaluate("run_command", {"command": "npm test -- --run"}, mode="ask_permissions") == "allow"
 
 
@@ -352,7 +363,7 @@ def test_gateway_tool_permission_rewind_and_four_mode_settings_endpoints(tmp_pat
     )
     assert perm_resp.status_code == 200
     assert perm_resp.json()["allowed"] is True
-    assert "run_command(pytest:*)" in load_workspace_permission_rules(workspace)["allow"]
+    assert "Bash(pytest:*)" in _grant_allow(workspace)
 
     # 3. Test /v1/conversations/{id}/turns/{turn_id}/rewind
     store = FileCheckpointStore(workspace)

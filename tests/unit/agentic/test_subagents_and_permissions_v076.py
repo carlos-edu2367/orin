@@ -647,12 +647,12 @@ def test_interactive_permissions_enabled_and_permission_broker_emits_both_rule_k
     assert len(emitted_events) == 1
     ev_type, _summary, payload = emitted_events[0]
     assert ev_type == "code_mode.decision_required"
-    assert payload.get("suggested_rule") == "run_command(git status:*)"
-    assert payload.get("rule_suggestion") == "run_command(git status:*)"
+    assert payload.get("suggested_rule") == "Bash(git status:*)"
+    assert payload.get("rule_suggestion") == "Bash(git status:*)"
     nested = payload.get("permission_request")
     assert isinstance(nested, dict)
-    assert nested.get("suggested_rule") == "run_command(git status:*)"
-    assert nested.get("rule_suggestion") == "run_command(git status:*)"
+    assert nested.get("suggested_rule") == "Bash(git status:*)"
+    assert nested.get("rule_suggestion") == "Bash(git status:*)"
 
 
 def test_blocked_command_allows_format_table_and_flags_but_blocks_disk_format() -> None:
