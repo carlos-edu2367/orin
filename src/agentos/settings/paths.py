@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import sys
 from dataclasses import dataclass
@@ -41,6 +42,13 @@ def claude_managed_dir() -> Path:
     return Path("/etc/claude-code")
 
 
+def workspace_grants_file(project_root: Path) -> Path:
+    """User-owned per-workspace grants ("always allow"), outside the repository."""
+    canonical = os.path.normcase(str(Path(project_root).resolve()))
+    key = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+    return orin_user_dir() / "workspaces" / key / "settings.local.json"
+
+
 def _managed_files(directory: Path) -> list[Path]:
     files = [directory / "managed-settings.json"]
     dropins = directory / "managed-settings.d"
@@ -71,7 +79,11 @@ class SettingsPaths:
         if layer == "project":
             return (root / ".claude" / "settings.json", root / ".orin" / "settings.json")
         if layer == "local":
-            return (root / ".claude" / "settings.local.json", root / ".orin" / "settings.local.json")
+            return (
+                root / ".claude" / "settings.local.json",
+                root / ".orin" / "settings.local.json",
+                workspace_grants_file(root),
+            )
         return ()
 
     def writable_file(self, layer: str) -> Path:
@@ -82,5 +94,5 @@ class SettingsPaths:
         if layer == "project":
             return Path(self.project_root) / ".orin" / "settings.json"
         if layer == "local":
-            return Path(self.project_root) / ".orin" / "settings.local.json"
+            return workspace_grants_file(Path(self.project_root))
         raise ValueError(f"settings layer '{layer}' is not writable")

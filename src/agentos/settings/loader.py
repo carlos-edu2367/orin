@@ -100,13 +100,19 @@ def _drop_nulls(value: Any) -> Any:
     return value
 
 
-def _filter_project(data: dict[str, Any], *, trusted: bool) -> dict[str, Any]:
-    """Keep only what a repository may decide. Restrictions can be added, never removed."""
+def _filter_project(data: dict[str, Any], *, trusted: bool) -> tuple[dict[str, Any], list[str]]:
+    """Keep only what a repository may decide. Restrictions can be added, never removed.
+
+    Also returns the keys dropped only because the workspace is not trusted yet.
+    """
     filtered = _drop_nulls(copy.deepcopy(data))
     for key in ALWAYS_IGNORED_FROM_PROJECT:
         _drop(filtered, key)
+    awaiting_trust: list[str] = []
     if not trusted:
         for key in UNTRUSTED_IGNORED_FROM_PROJECT:
+            if _get(filtered, key) is not None:
+                awaiting_trust.append(key)
             _drop(filtered, key)
     for key in PROJECT_TRUE_IGNORED:
         if _get(filtered, key) is not False:  # only "off" is a restriction
@@ -124,7 +130,7 @@ def _filter_project(data: dict[str, Any], *, trusted: bool) -> dict[str, Any]:
         value = _get(filtered, key)
         if value is not None and not (isinstance(value, list) and all(isinstance(item, str) for item in value)):
             _drop(filtered, key)  # a malformed list is ignored as a whole, never partially
-    return filtered
+    return filtered, awaiting_trust
 
 
 def _nesting_depth(value: Any) -> int:
@@ -173,6 +179,14 @@ def _read(path: Path) -> tuple[dict[str, Any] | None, str | None]:
     return parsed, None
 
 
+def _inside(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except (OSError, ValueError):
+        return False
+
+
 def _flatten(data: Mapping[str, Any], prefix: str = "") -> list[str]:
     keys: list[str] = []
     for key, value in data.items():
@@ -192,6 +206,7 @@ class EffectiveSettings:
     errors: tuple[SettingsError, ...]
     trusted: bool
     candidate_files: tuple[Path, ...] = field(default_factory=tuple)
+    untrusted_ignored: tuple[str, ...] = ()
 
     def get(self, dotted: str, default: Any = None) -> Any:
         value = _get(self.data, dotted)
@@ -234,6 +249,7 @@ def load_effective_settings(
     layers: list[SettingsLayer] = []
     errors: list[SettingsError] = []
     candidates: list[Path] = []
+    awaiting: set[str] = set()
     for layer in LAYER_ORDER:
         if layer == "cli":
             if cli:
@@ -253,8 +269,10 @@ def load_effective_settings(
                     continue
                 if data is None:
                     continue
-                if layer in {"project", "local"}:
-                    data = _filter_project(data, trusted=trusted)
+                # Only files inside the repository are filtered; the user-owned grants file is not.
+                if layer in {"project", "local"} and paths.project_root is not None and _inside(path, Path(paths.project_root)):
+                    data, dropped = _filter_project(data, trusted=trusted)
+                    awaiting.update(dropped)
             except Exception as failure:  # noqa: BLE001 - recorded, never fatal
                 errors.append(SettingsError(str(path), f"unexpected error: {type(failure).__name__}"))
                 continue
@@ -265,4 +283,7 @@ def load_effective_settings(
         merged = merge_settings(merged, item.data)
         for key in _flatten(item.data):
             provenance[key] = item.name
-    return EffectiveSettings(merged, provenance, tuple(layers), tuple(errors), bool(trusted), tuple(candidates))
+    return EffectiveSettings(
+        merged, provenance, tuple(layers), tuple(errors), bool(trusted), tuple(candidates),
+        untrusted_ignored=tuple(sorted(awaiting)),
+    )

@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from agentos.settings import load_effective_settings, merge_settings
-from agentos.settings.paths import SettingsPaths, claude_user_dir, orin_managed_dir, orin_user_dir
+from agentos.settings.paths import SettingsPaths, claude_user_dir, orin_managed_dir, orin_user_dir, workspace_grants_file
 
 
 def _write(path: Path, data: object) -> Path:
@@ -153,7 +153,7 @@ def test_candidate_files_include_missing_ones(tmp_path: Path) -> None:
 def test_writable_files_are_orin_files(tmp_path: Path) -> None:
     paths = SettingsPaths(tmp_path)
     assert paths.writable_file("project") == tmp_path / ".orin" / "settings.json"
-    assert paths.writable_file("local") == tmp_path / ".orin" / "settings.local.json"
+    assert paths.writable_file("local") == workspace_grants_file(tmp_path)  # DEVIATION: user-owned grants (plan Task 5)
     assert paths.writable_file("user") == orin_user_dir() / "settings.json"
 
 
