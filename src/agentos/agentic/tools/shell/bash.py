@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Mapping, Literal
 from uuid import uuid4
 
-from pydantic import Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from agentos.agentic.workspace import WorkspaceError
 from agentos.agentic.reminders import system_reminder
@@ -36,8 +36,40 @@ from agentos.agentic.tools._shared import (
     _terminate_process_tree,
     _TEXT,
     _schema,
+    logger,
 )
 from agentos.agentic.tools.spec import ToolSpec, ToolInput
+
+SESSION_CWD_PATH = ".orin/state/cwd.json"
+MAX_OUTPUT_FIELD_CHARS = 30_000
+# Exit codes that are an answer, not a failure, for common read-only programs.
+_RETURN_CODE_MEANINGS = {
+    ("grep", 1): "No matches found", ("rg", 1): "No matches found", ("findstr", 1): "No matches found",
+    ("diff", 1): "Files differ", ("cmp", 1): "Files differ", ("test", 1): "Condition is false",
+}
+
+
+def _bash_output(
+    stdout: str, stderr: str, *, command: str, exit_code: int | None = None,
+    persisted: Path | None = None, size: int | None = None, background_id: str | None = None,
+) -> dict[str, Any]:
+    """Claude Code's Bash result for one call (Orin adds ``exitCode``)."""
+    output: dict[str, Any] = {
+        "stdout": stdout[:MAX_OUTPUT_FIELD_CHARS], "stderr": stderr[:MAX_OUTPUT_FIELD_CHARS], "interrupted": False,
+    }
+    if exit_code is not None:
+        output["exitCode"] = exit_code
+        words = command.strip().split(None, 1)
+        program = Path(words[0].strip("\"'")).name.lower().removesuffix(".exe") if words else ""
+        meaning = _RETURN_CODE_MEANINGS.get((program, exit_code))
+        if meaning:
+            output["returnCodeInterpretation"] = meaning
+    if persisted is not None:
+        output["persistedOutputPath"] = str(persisted)
+        output["persistedOutputSize"] = size
+    if background_id:
+        output["backgroundTaskId"] = background_id
+    return output
 
 
 class BashTools:
@@ -66,6 +98,30 @@ class BashTools:
             current = candidate
         return current
 
+    def _restore_session_cwd(self) -> None:
+        """Start where the conversation's last command left off (Claude Code keeps the directory across turns)."""
+        try:
+            raw = json.loads((self.workspace.root / SESSION_CWD_PATH).read_text(encoding="utf-8"))
+            relative = str(raw.get("cwd") or "") if isinstance(raw, dict) else ""
+            if not relative or relative == ".":
+                return
+            target = self.workspace.resolve(relative)  # refuses `..`, links out and absolute paths elsewhere
+        except Exception:  # noqa: BLE001 - missing, unreadable or outside: start at the root
+            return
+        if target.is_dir():
+            self._current_cwd = target
+
+    def _remember_session_cwd(self) -> None:
+        try:
+            relative = self._current_cwd.resolve().relative_to(self.workspace.root.resolve()).as_posix() or "."
+            path = self.workspace.root / SESSION_CWD_PATH
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = path.with_name(f"cwd.{uuid4().hex}.tmp")
+            temporary.write_text(json.dumps({"cwd": relative}), encoding="utf-8")
+            os.replace(temporary, path)
+        except Exception:  # noqa: BLE001 - losing the directory only means the next turn starts at the root
+            logger.debug("could not remember the session directory", exc_info=True)
+
     def run_command(
         self,
         command: str,
@@ -90,6 +146,7 @@ class BashTools:
             if not working_directory.is_dir():
                 raise AgentToolError(f"'{cwd}' is not a directory in this workspace")
             self._current_cwd = working_directory
+            self._remember_session_cwd()
         self._resolve_cwd_after_command(command, working_directory, precheck=True)
         change_baseline = self.workspace.begin_change_tracking()
         environment = {
@@ -211,6 +268,7 @@ class BashTools:
                         "log_path": log_relative,
                         "artifacts": artifacts,
                     },
+                    "tool_output": _bash_output("", "", command=command, background_id=shell_id),
                 }
             if getattr(process, "stdout", None) is not None and getattr(process, "stderr", None) is not None and hasattr(process, "poll"):
                 stdout_chunks: list[bytes] = []
@@ -393,6 +451,7 @@ class BashTools:
                             "summary": f"Auto-backgrounded dev server: {(clean_description or command)[:60]}"[:240],
                             "content": "\n".join(content_parts),
                             "payload": payload,
+                            "tool_output": _bash_output(stdout_now, stderr_now, command=command, background_id=shell_id),
                         }
 
                     if callable(self._on_tool_progress):
@@ -460,13 +519,21 @@ class BashTools:
         stdout = stdout_bytes.decode("utf-8", "replace").strip()
         stderr = stderr_bytes.decode("utf-8", "replace").strip()
         body = "\n".join(part for part in (stdout, f"[stderr]\n{stderr}" if stderr else "") if part) or "[no output]"
+        full_body = body
         body, output_truncated = _bounded_output(body, MAX_COMMAND_OUTPUT_CHARS)
+        persisted_path = self._persist_truncated_output("run_command", full_body) if output_truncated else None
+        if persisted_path:
+            body += (
+                f"\n\n[the full output ({len(full_body)} characters) is saved at {persisted_path}; "
+                "read the part you need with offset and limit]"
+            )
         fg_tail = "\n".join(p for p in (stdout, stderr) if p)[-2000:]
         succeeded = process.returncode == 0
         if succeeded:
             next_cwd = self._resolve_cwd_after_command(command, working_directory, precheck=False)
             if next_cwd.is_dir():
                 self._current_cwd = next_cwd
+                self._remember_session_cwd()
         artifacts = self.workspace.end_change_tracking(change_baseline)
         for artifact in artifacts:
             artifact_path = str(artifact.get("path") or "") if isinstance(artifact, Mapping) else ""
@@ -511,6 +578,11 @@ class BashTools:
                 "output_truncated": output_truncated,
                 "cwd": rel_cwd,
             },
+            "tool_output": _bash_output(
+                stdout, stderr, command=command, exit_code=process.returncode,
+                persisted=(self.workspace.root / persisted_path) if persisted_path else None,
+                size=len(full_body.encode("utf-8")) if persisted_path else None,
+            ),
         }
 
     def _check_exited_background_processes(self) -> str:
@@ -587,6 +659,18 @@ class BashInput(ToolInput):
     )
 
 
+class BashOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    stdout: str
+    stderr: str
+    interrupted: bool
+    exitCode: int | None = None
+    returnCodeInterpretation: str | None = None
+    persistedOutputPath: str | None = None
+    persistedOutputSize: int | None = None
+    backgroundTaskId: str | None = None
+
+
 # Tool specs, moved from AgentToolset._build_definitions (W4).
 SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
@@ -607,6 +691,7 @@ SPECS: tuple[ToolSpec, ...] = (
         handler="run_command",
         kind="terminal",
         input_model=BashInput,
+        output_model=BashOutput,
         public_description='Run a shell command in the workspace. Prefer the file tools over shell commands for reading, searching and editing files. Give a short description. Use run_in_background for long-lived processes such as dev servers.',
         policy_tags=("mutates",),
         available=lambda self: (self._enable_terminal),

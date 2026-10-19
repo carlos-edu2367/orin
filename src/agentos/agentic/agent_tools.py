@@ -385,6 +385,7 @@ class AgentToolset(
         self._on_todo_update: Callable[[list[dict[str, Any]]], None] | None = on_todo_update
         self._background_shells: dict[str, dict[str, Any]] = background_shells if background_shells is not None else {}
         self._current_cwd: Path = self.workspace.root
+        self._restore_session_cwd()
         self._original_workspace_root: Path = self.workspace.root
         self._active_worktree_name: str | None = None
         self._notified_exited_pids: set[int] = set()
