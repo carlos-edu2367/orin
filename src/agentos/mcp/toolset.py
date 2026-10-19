@@ -174,6 +174,27 @@ class McpToolProvider:
         config, _tools, secrets = bundle
         return self._with_session(config, secrets, lambda client: client.read_resource(uri))
 
+    def get_prompt(self, server: str, prompt: str, words: Sequence[str]) -> str:
+        """Run one of a server's prompts: ``words`` fill its arguments in order (the last one takes the rest)."""
+        bundle = self.find_server(server)
+        if bundle is None:
+            raise LookupError(f"no MCP server named {server!r}")
+        config, _tools, secrets = bundle
+        known = self._with_session(config, secrets, lambda client: client.list_prompts())
+        spec = next((item for item in known if item["name"] == prompt), None)
+        if spec is None:
+            raise LookupError(f"{config.display_name} has no prompt named {prompt!r}")
+        names = [item["name"] for item in spec["arguments"]]
+        values = list(words)
+        if names and len(values) > len(names):
+            values = [*values[: len(names) - 1], " ".join(values[len(names) - 1:])]
+        arguments = dict(zip(names, values))
+        missing = [item["name"] for item in spec["arguments"] if item["required"] and not arguments.get(item["name"])]
+        if missing:
+            raise ValueError(f"missing argument(s): {', '.join(missing)} (expected: {' '.join(names)})")
+        messages = self._with_session(config, secrets, lambda client: client.get_prompt(prompt, arguments))
+        return _render_prompt(messages)
+
     def _replace_tools(self, server_id: str, tools: tuple[McpToolDescriptor, ...]) -> None:
         self._bundles = [(config, tools if config.server_id == server_id else old, secrets) for config, old, secrets in self._bundles]
 
@@ -393,6 +414,23 @@ class McpToolProvider:
             except Exception:  # closing must never fail a finished turn
                 pass
         self._sessions.clear()
+
+
+def _render_prompt(messages: Sequence[Mapping[str, Any]]) -> str:
+    lines: list[str] = []
+    for message in messages:
+        content = message.get("content") if isinstance(message.get("content"), Mapping) else {}
+        kind = str(content.get("type") or "")
+        if kind == "text":
+            body = str(content.get("text") or "")
+        elif kind == "resource":
+            resource = content.get("resource") if isinstance(content.get("resource"), Mapping) else {}
+            body = str(resource.get("text") or resource.get("uri") or "")
+        else:
+            body = f"[{kind or 'unknown'} content]"
+        lines.append(f"[{str(message.get('role') or 'user')[:20]}] {body}")
+    text, _ = _bounded("\n\n".join(lines), 60_000)
+    return text
 
 
 def _render(content: Sequence[Mapping[str, Any]]) -> tuple[str, list[dict[str, str]]]:

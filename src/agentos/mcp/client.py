@@ -177,6 +177,34 @@ class McpClient:
         result = self._call("resources/read", {"uri": str(uri)})
         return tuple(item for item in (result.get("contents") or []) if isinstance(item, Mapping))
 
+    def list_prompts(self) -> tuple[dict[str, Any], ...]:
+        """The server's prompts (W5): name, description and arguments (name, description, required)."""
+        self._require_session()
+        items: list[dict[str, Any]] = []
+        cursor: str | None = None
+        seen_cursors: set[str] = set()
+        for _ in range(MAX_RESOURCE_PAGES):
+            result = self._call("prompts/list", {"cursor": cursor} if cursor else {})
+            for raw in result.get("prompts") or []:
+                if not isinstance(raw, Mapping) or not isinstance(raw.get("name"), str):
+                    continue
+                arguments = [
+                    {"name": str(item["name"])[:100], "description": str(item.get("description") or "")[:500], "required": item.get("required") is True}
+                    for item in (raw.get("arguments") or []) if isinstance(item, Mapping) and isinstance(item.get("name"), str)
+                ][:20]
+                items.append({"name": raw["name"][:200], "description": str(raw.get("description") or "")[:1000], "arguments": arguments})
+            next_cursor = result.get("nextCursor")
+            cursor = next_cursor.strip() if isinstance(next_cursor, str) else None
+            if not cursor or cursor in seen_cursors:
+                break
+            seen_cursors.add(cursor)
+        return tuple(items)
+
+    def get_prompt(self, name: str, arguments: Mapping[str, str]) -> tuple[Mapping[str, Any], ...]:
+        self._require_session()
+        result = self._call("prompts/get", {"name": str(name), "arguments": {str(k): str(v) for k, v in arguments.items()}})
+        return tuple(item for item in (result.get("messages") or []) if isinstance(item, Mapping))
+
     def close(self) -> None:
         self._negotiation = None
         self._transport.close()

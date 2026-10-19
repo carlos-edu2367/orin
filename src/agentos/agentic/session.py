@@ -3280,6 +3280,9 @@ class TurnSession:
         if not text.startswith("/") or len(text) < 2:
             return
         name, _, arguments = text[1:].partition(" ")
+        if name.startswith("mcp__"):
+            self._apply_mcp_prompt(name, arguments.strip())
+            return
         skill = toolset.disk_skill(name)
         if skill is None or not skill.user_invocable:
             return  # not a command the person can run: the message stays an ordinary message
@@ -3294,6 +3297,28 @@ class TurnSession:
         self._reminders.add(
             COMMAND_KIND, f"The person ran {invocation}. Carry out its instructions.{fork}\n{content}", key=f"command:{skill.name}",
         )
+
+    def _apply_mcp_prompt(self, name: str, arguments: str) -> None:
+        """``/mcp__server__prompt args`` runs that MCP prompt; its messages join the turn as the person's command (W5)."""
+        import shlex
+
+        from agentos.agentic.reminders import COMMAND_KIND
+
+        server, _, prompt = name[len("mcp__"):].partition("__")
+        provider = self.mcp_provider
+        if provider is None or not server or not prompt or not callable(getattr(provider, "get_prompt", None)):
+            return  # no such prompt here: the message stays an ordinary message
+        try:
+            words = shlex.split(arguments, posix=True) if arguments else []
+        except ValueError:
+            words = arguments.split()
+        try:
+            text = provider.get_prompt(server, prompt, words)
+        except Exception as error:  # noqa: BLE001 - the model tells the person why
+            self._reminders.add(COMMAND_KIND, f"/{name} could not run: {str(error)[:500]}", key=f"command:{name}")
+            return
+        invocation = f"/{name}" + (f" {arguments}" if arguments else "")
+        self._reminders.add(COMMAND_KIND, f"The person ran the MCP prompt {invocation}. Its messages:\n{text}", key=f"command:{name}")
 
     def _auto_mode_classifier(self):
         from agentos.permissions.auto_mode import AutoModeClassifier
