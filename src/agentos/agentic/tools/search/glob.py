@@ -3,10 +3,11 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from agentos.agentic.workspace import MAX_SEARCH_RESULTS, MAX_LIST_DEPTH
 from agentos.agentic.tools._shared import AgentToolError, _GLOB_IGNORED_DIRS, _TEXT, _schema
@@ -86,6 +87,7 @@ class GlobTools:
     ) -> dict[str, Any]:
         if not isinstance(pattern, str) or not pattern.strip():
             raise AgentToolError("pattern must be a non-blank glob string.")
+        started = time.monotonic()
         clean_pattern = pattern.strip()
         cap = max(1, min(int(max_results or 200), 1000))
         base_root = self.workspace.resolve(path) if (isinstance(path, str) and path.strip()) else self.workspace.root
@@ -146,6 +148,14 @@ class GlobTools:
             "summary": f"Buscou arquivos '{clean_pattern[:60]}': {len(matches)} {'resultado' if len(matches) == 1 else 'resultados'}",
             "content": body,
             "payload": payload,
+            "tool_output": {
+                "durationMs": int((time.monotonic() - started) * 1000),
+                "numFiles": len(matches),
+                "filenames": [str(self.workspace.root / rel) for rel in matches],
+                "truncated": truncated,
+                "totalMatches": len(matched),
+                "countIsComplete": True,
+            },
         }
 
     def list_files(self, path: str = "", depth: int = 1, pattern: str = "") -> dict[str, Any]:
@@ -172,6 +182,16 @@ class GlobTools:
 class GlobInput(ToolInput):
     pattern: str = Field(description="Glob pattern.")
     path: str | None = Field(None, description="Directory to search in. Defaults to the workspace root.")
+
+
+class GlobOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    durationMs: int
+    numFiles: int
+    filenames: list[str]
+    truncated: bool
+    totalMatches: int | None = None
+    countIsComplete: bool | None = None
 
 
 # Tool specs, moved from AgentToolset._build_definitions (W4).
@@ -201,6 +221,7 @@ SPECS: tuple[ToolSpec, ...] = (
         handler="glob_files",
         kind="filesystem",
         input_model=GlobInput,
+        output_model=GlobOutput,
         public_description="Find files by glob pattern (e.g. '**/*.py'), newest first.",
         read_only=True,
         order=80,
