@@ -716,3 +716,25 @@ None. No existing test file changed in part 2: every test added is in a new file
 - `npm --prefix frontend test`: 104 files, 613 tests passed (after part 1: 609); 4 added.
 - `npm --prefix frontend run lint`: exit 0. `npm --prefix frontend run build` (`tsc -b` and `vite build`): exit 0 (the existing chunk-size warning).
 - `src/agentos/agentic/agent_tools.py`: 1698 lines (the limit is 1700).
+
+## Coordinator verification (W5 closed)
+
+- **Review authorship:** the reviewer agent investigated and wrote the reproductions (`scratchpad\w5review\test_r01`–`test_r18`, `r02_alias_bomb.py`) but was stopped by a safety classifier before writing the document. The coordinator re-ran every reproduction under isolation and wrote `docs/superpowers/reviews/2026-10-19-w5-review.md` (`712c4b2`). All sixteen "Must fix before W6" findings were fixed by the two correction passes above.
+- **Coordinator fixes after the passes:**
+  - `bbc15bf`: the plugin card's consent switch had no styles since it was added (plain text past the card's padding, no on/off or disabled look). It now draws a pill that follows its state, dims while the plugin waits for approval, and a refused change shows a message; on narrow screens the name keeps its row and the state badge wraps under it.
+  - `684834e`: closes the R13 leftover the second pass reported. A closed `LspManager` starts no server, and one that was starting when the turn closed is stopped.
+- **Visual check** (`PluginCard`, harness outside the repository): desktop 1280 px dark and mobile 375 px light. States checked: pending (switch disabled), hooks not allowed, hooks allowed, language-server-only plugin, and a refused change. The first screenshots showed the unstyled switch, an invisible thumb when on, and the mobile name truncated to one letter; all three are fixed in `bbc15bf` and were re-shot.
+- **Final suites on `684834e`:** `uv run pytest -q tests/unit` 3945 passed, 60 skipped; `tests/integration` 78 passed, 65 skipped (no PostgreSQL DSN); frontend 104 files, 615 tests passed; lint exit 0; build exit 0 (the existing chunk-size warning).
+- **Open, carried to the owner:**
+  - The person must allow the plugins' hooks and language servers once more: consent is now per content, and older rows count as none.
+  - Consent covers the declared command, not the script it runs.
+  - A project skill may still grant a whole program (`Bash(git:*)`).
+  - On a shared Orin, a user `http` hook's public-address check is not pinned to the connection.
+  - The install dialog shows counts only, not the hooks or language servers it will install (W7).
+  - The plugin action toggles other than the consent switch still show nothing when they fail.
+  - The deferred items W5-D1 to W5-D5.
+  - Postgres-backed tests and POSIX paths not run here.
+- **Side effects found on the owner's machine (not caused by W5 code):**
+  - `C:\Users\carlos\.claude\settings.json` holds `{ not json` and `C:\Users\carlos\.orin\settings.json` holds a test `UserPromptSubmit` hook, both dated 2026-10-18 17:51. They were written by a W3-review reproduction script (`scratchpad\review_w3\tests\test_r_config_change.py`) that ran without isolation.
+  - The W5 reviewer's first unisolated reproduction added a `profile-b` entry (pytest temp folders) to `C:\Users\carlos\.orin\trusted-workspaces.json`.
+  - None was changed by the coordinator; the owner should restore them.
