@@ -236,6 +236,8 @@ def _import_targets(content: str) -> list[str]:
 
 def _resolve_import(target: str, importer: Path) -> Path | None:
     """The file an ``@target`` names, or None for a remote target (refused for every layer, before any I/O)."""
+    if _is_remote(target):
+        return None  # a UNC or device path is refused as written, on every system (POSIX would read it as relative)
     if target.startswith(("~/", "~\\")):
         resolved = Path.home() / target[2:]
     else:
