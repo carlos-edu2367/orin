@@ -27,16 +27,16 @@ class WriteTools:
             else:
                 original_sha = ""
                 old_content = None
-            self._snapshot_before_write(path)
+            note = self._snapshot_before_write(path)
             written, total = self.workspace.append_text(path, content)
             new_content = (old_content or "") + content
-            body = f"Appended {written} bytes to {path}; it now holds {total} bytes."
+            body = f"Appended {written} bytes to {path}; it now holds {total} bytes." + (f" {note}" if note else "")
         else:
             old_content, original_sha = self._check_read_file_guard(path)
-            self._snapshot_before_write(path)
+            note = self._snapshot_before_write(path)
             written = total = self.workspace.write_text(path, content)
             new_content = content
-            body = f"Wrote {written} bytes to {path}."
+            body = f"Wrote {written} bytes to {path}." + (f" {note}" if note else "")
         updated_sha = self._record_file_read(
             path, offset=1, limit=400, total_lines=len(new_content.splitlines()),
         )

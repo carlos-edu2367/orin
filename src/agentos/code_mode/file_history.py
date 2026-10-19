@@ -199,7 +199,12 @@ class FileHistory:
     # -- rewind --------------------------------------------------------------
 
     def rewind(self, message_id: str, *, roots: Iterable[Path]) -> dict[str, Any]:
-        """Restore every file ``message_id`` or a later message changed to its state just before ``message_id``."""
+        """Restore every file ``message_id`` or a later message changed to its state just before ``message_id``.
+
+        Two phases (W4-R10). First every file is checked, and its current content is copied into a new undo
+        snapshot. Only when every file passes is anything written. A blocked rewind writes nothing: ``blocked`` is
+        true, and ``skipped`` names each file that blocked it.
+        """
         allowed = [Path(root) for root in roots]
         with _LOCK:
             manifests = self._manifests()
@@ -218,8 +223,30 @@ class FileHistory:
                         if isinstance(entry, dict):
                             plan.setdefault(key, entry)
             undo_id = f"undo-{_safe_name(message_id)}-{int(datetime.now(UTC).timestamp() * 1000)}"
-            for entry in plan.values():
-                self.snapshot_before_write(undo_id, Path(str(entry.get("path"))), kind="undo")
+            # Phase 1: check every file and copy its current content. Nothing in the workspace is written here.
+            blockers: list[dict[str, str]] = []
+            undo_files: dict[str, dict[str, Any]] = {}
+            for key, entry in plan.items():
+                path = str(entry.get("path") or "")
+                reason = self._blocker(entry, allowed)
+                if reason is None and Path(path).exists():
+                    try:
+                        undo_files[key] = self._record(Path(path))
+                    except Exception as error:  # noqa: BLE001 - the copy decides whether the rewind may run
+                        reason = f"its current content could not be copied for undo ({type(error).__name__})"
+                if reason is not None:
+                    blockers.append({"path": path, "reason": reason})
+            if blockers:
+                return _rewind_result(message_id, skipped=blockers, blocked=True)
+            undo_manifest = {
+                "message_id": undo_id, "turn_id": "", "kind": "undo", "created_at": _now(), "rewound_at": None, "files": undo_files,
+            }
+            try:
+                self._save(undo_id, undo_manifest)
+            except Exception as error:  # noqa: BLE001 - no undo copy, no rewind
+                reason = f"the undo snapshot could not be saved ({type(error).__name__})"
+                return _rewind_result(message_id, skipped=[{"path": str(self._manifest_path(undo_id)), "reason": reason}], blocked=True)
+            # Phase 2: apply. Every file is checked again just before it is written.
             restored: list[str] = []
             deleted: list[str] = []
             unchanged: list[str] = []
@@ -242,50 +269,73 @@ class FileHistory:
             for item in affected:
                 item["rewound_at"] = stamp
                 self._save(str(item["message_id"]), item)
-        return {
-            "message_id": str(message_id), "restored": sorted(restored), "deleted": sorted(deleted),
-            "unchanged": sorted(unchanged), "skipped": skipped, "undo_id": undo_id,
-        }
+        return _rewind_result(message_id, restored=restored, deleted=deleted, unchanged=unchanged, skipped=skipped, undo_id=undo_id)
 
-    def _restore(self, entry: dict[str, Any], roots: Sequence[Path]) -> str:
+    def _blocker(self, entry: dict[str, Any], roots: Sequence[Path]) -> str | None:
+        """Why ``entry`` cannot be rewound, or None. Reads the workspace and the history; writes nothing."""
         target = Path(str(entry.get("path") or ""))
         if not str(target) or not target.is_absolute():
-            return "skip: not an absolute path"
+            return "not an absolute path"
         if entry.get("unsupported"):
-            return "skip: it was not a regular file when it was recorded"
+            return "it was not a regular file when it was recorded"
         if entry.get("too_large"):
-            return "skip: it was too large to keep a copy"
+            return "it was too large to keep a copy"
         if not _inside(target, roots):
-            return "skip: it is outside the working directories"
+            return "it is outside the working directories"
         parent = target.parent
         recorded_parent = entry.get("parent_identity")
         current_parent = _identity(parent)
         if _is_link(parent) or (recorded_parent and current_parent is not None and current_parent != recorded_parent):
-            return "skip: its directory was replaced after the snapshot"
+            return "its directory was replaced after the snapshot"
         if _is_link(target):
-            return "skip: it is now a link"
+            return "it is now a link"
         if target.exists() and not target.is_file():
-            return "skip: it is no longer a regular file"
+            return "it is no longer a regular file"
+        if target.exists() and target.stat().st_size > MAX_BLOB_BYTES:
+            # Restoring or deleting it would destroy content that no undo snapshot can hold (W4-R10).
+            return "its current content is too large to keep an undo copy"
+        if not entry.get("existed"):
+            return None
+        digest = str(entry.get("sha256") or "")
+        try:
+            data = self._blob_path(digest).read_bytes()
+        except (OSError, ValueError):
+            return "its backup is missing"
+        if _digest(data) != digest:
+            return "its backup does not match its checksum"
+        return None
+
+    def _restore(self, entry: dict[str, Any], roots: Sequence[Path]) -> str:
+        reason = self._blocker(entry, roots)
+        if reason is not None:
+            return f"skip: {reason}"
+        target = Path(str(entry.get("path") or ""))
         if not entry.get("existed"):
             if not target.exists():
                 return "unchanged"
             target.unlink()  # the turn created it; the rewind removes it again
             return "deleted"
         digest = str(entry.get("sha256") or "")
-        try:
-            data = self._blob_path(digest).read_bytes()
-        except (OSError, ValueError):
-            return "skip: its backup is missing"
-        if _digest(data) != digest:
-            return "skip: its backup does not match its checksum"
+        data = self._blob_path(digest).read_bytes()
         if target.exists() and _digest(target.read_bytes()) == digest:
             return "unchanged"
+        parent = target.parent
         parent.mkdir(parents=True, exist_ok=True)
         # Checked once more just before the swap; os.replace never follows a link at the target.
         if _is_link(parent) or _is_link(target):
             return "skip: it became a link during the rewind"
         _atomic_write(target, data)
         return "restored"
+
+
+def _rewind_result(
+    message_id: str, *, restored: Sequence[str] = (), deleted: Sequence[str] = (), unchanged: Sequence[str] = (),
+    skipped: Sequence[dict[str, str]] = (), blocked: bool = False, undo_id: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "message_id": str(message_id), "restored": sorted(restored), "deleted": sorted(deleted),
+        "unchanged": sorted(unchanged), "skipped": list(skipped), "blocked": blocked, "undo_id": undo_id,
+    }
 
 
 __all__ = ["FileHistory", "MAX_BLOB_BYTES"]

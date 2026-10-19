@@ -58,6 +58,7 @@ from .tools.public_names import (
 )
 
 
+from agentos.agentic.tools.files import UNREWINDABLE_NOTE
 from agentos.agentic.tools.files.read import ReadTools
 from agentos.agentic.tools.files.write import WriteTools
 from agentos.agentic.tools.files.edit import EditTools
@@ -1285,17 +1286,23 @@ class AgentToolset(
 
     # -- handlers -------------------------------------------------------
 
-    def _snapshot_before_write(self, path: str) -> None:
-        """Keep the file as it is now: in the per-turn checkpoint (today's UI rewind) and the per-message history."""
+    def _snapshot_before_write(self, path: str) -> str:
+        """Keep the file as it is now: in the per-turn checkpoint (today's UI rewind) and the per-message history.
+
+        Returns a note for the tool result when this write cannot be rewound (W4-R10), else "".
+        """
         self._checkpoint_store.snapshot_before_write(self.turn_id or "turn-default", path)
         history = self._file_history
         if history is None or not self._history_message_id:
-            return
+            return ""
         try:
             target = self.workspace.resolve(path)
         except Exception:  # noqa: BLE001 - the edit itself reports a bad path
-            return
-        history.snapshot_before_write(self._history_message_id, target, turn_id=self.turn_id or "")
+            return ""
+        entry = history.snapshot_before_write(self._history_message_id, target, turn_id=self.turn_id or "")
+        if entry is None or entry.get("too_large"):
+            return UNREWINDABLE_NOTE
+        return ""
 
     def rewind_turn(self, turn_id: str | None = None) -> dict[str, Any]:
         """Restore workspace files modified during ``turn_id`` back to their pre-turn state."""

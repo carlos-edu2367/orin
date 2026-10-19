@@ -1548,6 +1548,9 @@ def create_app(services: ApiServices) -> FastAPI:
             result = await run_in_threadpool(history.rewind, message_id, roots=roots)
         except LookupError as error:
             raise ApplicationNotFoundError(message_id) from error
+        if result["blocked"]:
+            # Nothing was changed: the response names the files that blocked the rewind (W4-R10).
+            return _error(409, "CONFLICT", "rewind_blocked", retryable=False, details={"files": result["skipped"]})
         return JSONResponse(_jsonable(result))
 
     @app.get("/v1/conversations/{conversation_id}/directories", dependencies=[capability("host_folders")])
@@ -2613,8 +2616,10 @@ def json_dumps(value: object) -> str:
     return json.dumps(value, separators=(",", ":"), default=str)
 
 
-def _error(status: int, category: str, code: str, *, retryable: bool, retry_after: int | None = None) -> JSONResponse:
+def _error(status: int, category: str, code: str, *, retryable: bool, retry_after: int | None = None, details: object | None = None) -> JSONResponse:
     correlation_id = f"corr_{uuid4().hex}"
     content = {"error": {"code": code, "category": category, "message_key": code, "correlation_id": correlation_id, "retryable": retryable, "retry_after": retry_after}}
+    if details is not None:
+        content["error"]["details"] = details
     headers = {"Retry-After": str(retry_after)} if retry_after is not None else None
     return JSONResponse(content, status_code=status, headers=headers)
