@@ -48,7 +48,10 @@ from agentos.accounts.store import UserStore
 from agentos.configuration.capabilities import InstanceCapabilities
 from agentos.configuration.mode import current_mode
 from agentos.conversations.chat import PostgresChatStore
+from agentos.agentic.workspace import resolve_workspace
+from pathlib import Path
 from agentos.installation import orin_paths
+from agentos.code_mode.workspace_lock import enter_turn, exit_turn
 from agentos.local_workspace import PostgresLocalWorkspaceStore
 from agentos.mcp.auth import McpOAuth
 from agentos.projects.store import PostgresProjectStore
@@ -455,6 +458,30 @@ class ChatWorker:
         turn = self.store.claim(turn_id)
         if turn is None:
             return
+        # W4-R11: while this turn runs, a rewind of its folder is refused; a rewind in progress holds the turn back.
+        folder = self._turn_folder(turn)
+        key = enter_turn(folder) if folder is not None else None
+        try:
+            self._run_claimed(turn)
+        finally:
+            if key is not None:
+                exit_turn(key)
+
+    def _turn_folder(self, turn: Mapping[str, object]) -> Path | None:
+        """The folder TurnSession writes into for this turn, resolved the same way (W4-R11); None when it does not resolve."""
+        local_root = turn.get("workspace_root_path")
+        try:
+            workspace = resolve_workspace(
+                resolve_effective_workspace_id(turn),
+                managed_root=self._workspace_root or orin_paths().user_workspaces(str(turn.get("user_id") or "")),
+                local_root=local_root if isinstance(local_root, str) else None,
+            )
+        except Exception:  # noqa: BLE001 - a turn whose folder does not resolve fails before it writes anything
+            return None
+        return Path(workspace.root)
+
+    def _run_claimed(self, turn: dict[str, object]) -> None:
+        turn_id = str(turn["turn_id"])
         refusal = self._preflight_refusal(turn)
         if refusal is not None:
             self._refuse(turn, refusal)

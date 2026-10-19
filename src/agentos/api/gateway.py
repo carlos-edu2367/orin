@@ -67,6 +67,7 @@ from agentos.code_mode import (
     list_workspace_files,
 )
 from agentos.code_mode.file_history import FileHistory
+from agentos.code_mode.workspace_lock import WorkspaceBusy, exclusive_folder
 from agentos.agentic.directories import DirectoryError
 from agentos.code_mode.models import CodeAutonomy, normalize_permission_mode
 
@@ -1520,11 +1521,17 @@ def create_app(services: ApiServices) -> FastAPI:
             resource_id=conversation_id,
             purpose="conversation.rewind",
         )
-        if _turn_in_flight(conversation_record(conversation_id, principal)):
-            return _error(409, "CONFLICT", "turn_running", retryable=True)
         workspace = conversation_workspace(conversation_id, principal)
         store = FileCheckpointStore(workspace)
-        result = await run_in_threadpool(store.rewind_turn, turn_id)
+        try:
+            # The busy check and the rewind run under the folder's lock, so no turn of the folder starts in between
+            # and a sibling chat's turn in the same folder counts too (W4-R11).
+            with exclusive_folder(workspace.root):
+                if _turn_in_flight(conversation_record(conversation_id, principal)):
+                    return _error(409, "CONFLICT", "turn_running", retryable=True)
+                result = await run_in_threadpool(store.rewind_turn, turn_id)
+        except WorkspaceBusy:
+            return _error(409, "CONFLICT", "turn_running", retryable=True)
         return JSONResponse(_jsonable(result))
 
     @app.post("/v1/conversations/{conversation_id}/messages/{message_id}/rewind")
@@ -1535,8 +1542,6 @@ def create_app(services: ApiServices) -> FastAPI:
         services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.rewind")
         if payload.mode != "code":
             raise ApplicationValidationError("only mode 'code' is available; conversation rewind arrives with the W7 interface")
-        if _turn_in_flight(conversation_record(conversation_id, principal)):
-            return _error(409, "CONFLICT", "turn_running", retryable=True)
         workspace = conversation_workspace(conversation_id, principal)
         history = FileHistory(services.history_root(), conversation_id)
         roots = [Path(workspace.root)]
@@ -1545,7 +1550,13 @@ def create_app(services: ApiServices) -> FastAPI:
             # Folders added with /add-dir are working directories too: their files are restored, nothing else is.
             roots += [Path(path) for path in await run_in_threadpool(directories.paths, principal.user_id, conversation_id)]  # type: ignore[union-attr]
         try:
-            result = await run_in_threadpool(history.rewind, message_id, roots=roots)
+            # The busy check and the rewind run under the folder's lock (W4-R11): see the per-turn route.
+            with exclusive_folder(workspace.root):
+                if _turn_in_flight(conversation_record(conversation_id, principal)):
+                    return _error(409, "CONFLICT", "turn_running", retryable=True)
+                result = await run_in_threadpool(history.rewind, message_id, roots=roots)
+        except WorkspaceBusy:
+            return _error(409, "CONFLICT", "turn_running", retryable=True)
         except LookupError as error:
             raise ApplicationNotFoundError(message_id) from error
         if result["blocked"]:

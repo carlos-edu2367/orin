@@ -1,10 +1,16 @@
-"""W4 review fixes for the rewind routes: a blocked rewind is a 409 that names the blocking file (R10)."""
+"""W4 review fixes for the rewind routes: a blocked rewind is a 409 that names the blocking file (R10), and a rewind
+never overlaps a turn of the same folder, including a sibling chat's (R11)."""
 from __future__ import annotations
 
 from pathlib import Path
 
-from agentos.agentic.workspace import ConversationWorkspace
+from fastapi.testclient import TestClient
+
+from agentos.agentic.workspace import ConversationWorkspace, resolve_workspace
+from agentos.api.gateway import ApiServices, create_app
+from agentos.api.security import AuthenticatedPrincipal, InMemorySecurityService
 from agentos.code_mode.file_history import FileHistory
+from agentos.code_mode.workspace_lock import enter_turn, exit_turn
 from tests.unit.api.test_rewind_while_running import HEADERS, _client
 
 
@@ -40,3 +46,47 @@ def test_a_rewind_that_applies_reports_it_is_not_blocked(tmp_path: Path) -> None
 
     assert response.status_code == 200 and response.json()["blocked"] is False
     assert target.read_bytes() == b"original\n"
+
+
+def _project_client(tmp_path: Path) -> TestClient:
+    """Two chats of one project: both resolve to the project's folder."""
+
+    class _Conversations:
+        def get(self, conversation_id: str, user_id: str) -> dict[str, object]:
+            return {"conversation_id": conversation_id, "project_id": "p1", "title": "T", "state": "idle", "provider": "openai",
+                    "model_id": "m", "messages": [], "turns": [{"turn_id": "t", "state": "completed"}], "activities": [], "activity_cursor": "0"}
+
+    security = InMemorySecurityService()
+    security.add_pat("pat", AuthenticatedPrincipal(user_id="user-1", credential_ref="pat-1", scopes=frozenset({"api"})))
+    services = ApiServices(
+        security=security, conversation_application=_Conversations(),  # type: ignore[arg-type]
+        workspace_root=tmp_path / "workspaces", file_history_root=tmp_path / "history",
+    )
+    return TestClient(create_app(services))
+
+
+def test_a_sibling_chats_running_turn_refuses_a_rewind_in_this_chat(tmp_path: Path) -> None:
+    client = _project_client(tmp_path)
+    shared = resolve_workspace("workspace:p1", managed_root=tmp_path / "workspaces", local_root=None)
+    service_py = shared.root / "service.py"
+    _write(service_py, b"v0\n")
+    FileHistory(tmp_path / "history", "chat_a").snapshot_before_write("msg_a", service_py, turn_id="ta")
+    _write(service_py, b"v1 (chat A)\n")
+    running = enter_turn(shared.root)  # chat B's turn runs in the same folder
+    try:
+        message = client.post("/v1/conversations/chat_a/messages/msg_a/rewind", json={"mode": "code"}, headers=HEADERS)
+        turn = client.post("/v1/conversations/chat_a/turns/ta/rewind", headers=HEADERS)
+    finally:
+        exit_turn(running)
+
+    assert message.status_code == 409 and message.json()["error"]["code"] == "turn_running"
+    assert turn.status_code == 409 and turn.json()["error"]["code"] == "turn_running"
+    assert service_py.read_bytes() == b"v1 (chat A)\n"
+
+    response = client.post("/v1/conversations/chat_a/messages/msg_a/rewind", json={"mode": "code"}, headers=HEADERS)
+    assert response.status_code == 200 and service_py.read_bytes() == b"v0\n"
+
+
+def _write(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
