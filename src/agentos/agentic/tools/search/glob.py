@@ -4,11 +4,13 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
+
+from pydantic import Field
 
 from agentos.agentic.workspace import MAX_SEARCH_RESULTS, MAX_LIST_DEPTH
 from agentos.agentic.tools._shared import AgentToolError, _GLOB_IGNORED_DIRS, _TEXT, _schema
-from agentos.agentic.tools.spec import ToolSpec
+from agentos.agentic.tools.spec import ToolSpec, ToolInput
 
 
 class GlobTools:
@@ -167,6 +169,11 @@ class GlobTools:
         }
 
 
+class GlobInput(ToolInput):
+    pattern: str = Field(description="Glob pattern.")
+    path: str | None = Field(None, description="Directory to search in. Defaults to the workspace root.")
+
+
 # Tool specs, moved from AgentToolset._build_definitions (W4).
 SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
@@ -193,6 +200,8 @@ SPECS: tuple[ToolSpec, ...] = (
         }, ("pattern",)),
         handler="glob_files",
         kind="filesystem",
+        input_model=GlobInput,
+        public_description="Find files by glob pattern (e.g. '**/*.py'), newest first.",
         read_only=True,
         order=80,
     ),

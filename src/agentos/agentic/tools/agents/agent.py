@@ -1,10 +1,12 @@
 """Agent tools: methods of AgentToolset that live in their own module (W4 split)."""
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import Any, Mapping, Literal
+
+from pydantic import Field
 
 from agentos.agentic.tools._shared import AgentToolError, ToolOutcome, _TEXT, _schema
-from agentos.agentic.tools.spec import ToolSpec
+from agentos.agentic.tools.spec import ToolSpec, ToolInput
 
 
 class AgentTools:
@@ -89,6 +91,15 @@ class AgentTools:
         return self._check_subagent(agent_id.strip(), wait_seconds=wait)
 
 
+class AgentInput(ToolInput):
+    description: str = Field(description="3-5 word summary.")
+    prompt: str = Field(description="Complete instructions; the subagent does not see this conversation.")
+    subagent_type: str | None = Field(None, description="Explore, Plan, general-purpose or fork.")
+    model: str | None = Field(None, description="Optional model alias.")
+    run_in_background: bool | None = Field(None, description="Return immediately and notify on completion.")
+    resume: str | None = Field(None, description="Id of a previous subagent to continue.")
+
+
 # Tool specs, moved from AgentToolset._build_definitions (W4).
 SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
@@ -147,6 +158,8 @@ SPECS: tuple[ToolSpec, ...] = (
         }, ("subagent_type", "task")),
         handler="run_subagent",
         kind="agent",
+        input_model=AgentInput,
+        public_description="Delegate a self-contained task to a subagent. Types: 'Explore' (fast read-only search), 'Plan' (read-only design), 'general-purpose' (full toolset), 'fork' (inherits this conversation).",
         policy_tags=("mutates",),
         available=lambda self: (self._run_subagent is not None or self._delegate is not None),
         order=380,

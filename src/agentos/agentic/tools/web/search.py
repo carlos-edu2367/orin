@@ -1,12 +1,13 @@
 """Search tools: methods of AgentToolset that live in their own module (W4 split)."""
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 import httpx
+from pydantic import Field
 
 from agentos.agentic.tools._shared import AgentToolError, _public_url, _TEXT, _schema
-from agentos.agentic.tools.spec import ToolSpec
+from agentos.agentic.tools.spec import ToolSpec, ToolInput
 
 
 class WebSearchTools:
@@ -46,6 +47,12 @@ class WebSearchTools:
             raise AgentToolError("The search provider returned an invalid response.") from None
 
 
+class WebSearchInput(ToolInput):
+    query: str = Field(description="Search query.")
+    allowed_domains: list[str] | None = None
+    blocked_domains: list[str] | None = None
+
+
 # Tool specs, moved from AgentToolset._build_definitions (W4).
 SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
@@ -54,6 +61,8 @@ SPECS: tuple[ToolSpec, ...] = (
         legacy_schema=_schema({"query": _TEXT, "limit": {"type": "integer", "minimum": 1, "maximum": 10}}, ("query",)),
         handler="web_search",
         kind="web",
+        input_model=WebSearchInput,
+        public_description='Search the web and return titles, URLs and snippets.',
         read_only=True,
         policy_tags=("network",),
         available=lambda self: (self._search_client is not None),

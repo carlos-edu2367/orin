@@ -1,11 +1,13 @@
 """Ask user tools: methods of AgentToolset that live in their own module (W4 split)."""
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import Any, Mapping, Literal
+
+from pydantic import Field
 
 from agentos.agentic.models import MAX_USER_QUESTION_ITEMS
 from agentos.agentic.tools._shared import AgentToolError, ToolOutcome, _QUESTION_ID, _TEXT, _schema
-from agentos.agentic.tools.spec import ToolSpec
+from agentos.agentic.tools.spec import ToolSpec, ToolInput
 
 
 class AskUserTools:
@@ -77,6 +79,22 @@ class AskUserTools:
         )
 
 
+class QuestionOption(ToolInput):
+    label: str = Field(description="Option text (1-5 words).")
+    description: str = Field(description="What choosing it means.")
+
+
+class Question(ToolInput):
+    question: str = Field(description="The full question.")
+    header: str = Field(max_length=12, description="Very short label for the question.")
+    options: list[QuestionOption] = Field(min_length=2, max_length=4)
+    multiSelect: bool = Field(description="Allow several answers.")
+
+
+class AskUserQuestionInput(ToolInput):
+    questions: list[Question] = Field(min_length=1, max_length=4)
+
+
 # Tool specs, moved from AgentToolset._build_definitions (W4).
 SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
@@ -99,6 +117,8 @@ SPECS: tuple[ToolSpec, ...] = (
         }, ("questions",)),
         handler="ask_user",
         kind="user_input",
+        input_model=AskUserQuestionInput,
+        public_description='Ask the user 1-4 multiple-choice questions when you are blocked on a decision only they can make, then stop and wait for the answer.',
         policy_tags=("user_input",),
         order=200,
     ),

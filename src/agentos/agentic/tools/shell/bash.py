@@ -11,8 +11,10 @@ import threading
 import time
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Literal
 from uuid import uuid4
+
+from pydantic import Field
 
 from agentos.agentic.workspace import WorkspaceError
 from agentos.agentic.reminders import system_reminder
@@ -35,7 +37,7 @@ from agentos.agentic.tools._shared import (
     _TEXT,
     _schema,
 )
-from agentos.agentic.tools.spec import ToolSpec
+from agentos.agentic.tools.spec import ToolSpec, ToolInput
 
 
 class BashTools:
@@ -575,6 +577,16 @@ class BashTools:
         self.workspace.write_text(_PROCESS_MANIFEST_PATH, json.dumps(trimmed))
 
 
+class BashInput(ToolInput):
+    command: str = Field(description="The command to run.")
+    description: str | None = Field(None, description="What the command does, in 5-10 words.")
+    timeout: int | None = Field(None, ge=1000, le=600_000, description="Timeout in milliseconds.")
+    run_in_background: bool | None = Field(None, description="Start it in the background and return immediately.")
+    cwd: str | None = Field(
+        None, description="Orin: workspace-relative directory to run in. Defaults to the session's current directory.",
+    )
+
+
 # Tool specs, moved from AgentToolset._build_definitions (W4).
 SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
@@ -594,6 +606,8 @@ SPECS: tuple[ToolSpec, ...] = (
         }, ("command",)),
         handler="run_command",
         kind="terminal",
+        input_model=BashInput,
+        public_description='Run a shell command in the workspace. Prefer the file tools over shell commands for reading, searching and editing files. Give a short description. Use run_in_background for long-lived processes such as dev servers.',
         policy_tags=("mutates",),
         available=lambda self: (self._enable_terminal),
         order=240,

@@ -1,10 +1,12 @@
 """Edit tools: methods of AgentToolset that live in their own module (W4 split)."""
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import Any, Mapping, Literal
+
+from pydantic import Field
 
 from agentos.agentic.tools._shared import AgentToolError, compute_structured_patch, _TEXT, _schema
-from agentos.agentic.tools.spec import ToolSpec
+from agentos.agentic.tools.spec import ToolSpec, ToolInput
 
 
 class EditTools:
@@ -109,6 +111,22 @@ class EditTools:
         }
 
 
+class EditItem(ToolInput):
+    old_string: str = Field(description="Exact text to replace, including indentation.")
+    new_string: str = Field(description="Replacement text.")
+
+
+class EditInput(ToolInput):
+    file_path: str = Field(description="Path of the file to edit.")
+    old_string: str = Field(description="Exact text to replace, including indentation.")
+    new_string: str = Field(description="Replacement text.")
+    replace_all: bool | None = Field(None, description="Replace every occurrence.")
+    edits: list[EditItem] | None = Field(
+        None,
+        description="Orin: several replacements applied in order as one change; send empty old_string and new_string with it.",
+    )
+
+
 # Tool specs, moved from AgentToolset._build_definitions (W4).
 SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
@@ -127,6 +145,8 @@ SPECS: tuple[ToolSpec, ...] = (
         }, ("path",)),
         handler="edit_file",
         kind="filesystem",
+        input_model=EditInput,
+        public_description='Replace an exact string in a file you have read. old_string must occur exactly once unless replace_all is true.',
         policy_tags=("mutates",),
         order=50,
     ),

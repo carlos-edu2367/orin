@@ -142,7 +142,7 @@ def test_exit_plan_mode_skill_toolsearch_and_web_tools() -> None:
 def test_public_schemas_use_public_field_names() -> None:
     description, schema = public_schema("read_file")
     assert description and "file_path" in schema["properties"] and schema["required"] == ["file_path"]
-    assert public_argument_names("read_file") == frozenset({"file_path", "offset", "limit", "pages"})
+    assert public_argument_names("read_file") == frozenset({"file_path", "offset", "limit", "pages", "force_reload"})
     _, bash = public_schema("run_command")
     assert {"command", "description", "timeout", "run_in_background"} <= set(bash["properties"])
     _, grep = public_schema("search_files")

@@ -1,9 +1,8 @@
 """Claude Code–compatible public names and argument shapes for Orin's tools.
 
-Orin's tools keep their internal snake_case ids (``read_file``) until W4
-rewrites them. What the *model*, permission rules and hooks see can already be
-the Claude Code surface (``Read`` with ``file_path``): this module converts
-between the two shapes at the model boundary.
+Orin's tools keep their snake_case keys (``read_file``) as stable ids. What the *model*,
+permission rules and hooks see can already be the Claude Code surface (``Read`` with
+``file_path``): this module converts between the two shapes at the model boundary.
 
 Every conversion is idempotent: translating already-translated input is a
 no-op, so a value that crosses the boundary twice is never corrupted.
@@ -106,6 +105,7 @@ _RENAMES: dict[str, dict[str, str]] = {
     "exit_plan_mode": {"plan": "summary", "allowedPrompts": "allowed_prompts"},
     "read_process_output": {"task_id": "pid"},
     "stop_process": {"task_id": "pid", "shell_id": "pid"},
+    "exit_worktree": {"discard_changes": "force"},
 }
 
 # public keys Orin cannot honour yet (W4 implements them); dropped on the way in
@@ -125,220 +125,6 @@ _SUBAGENT_TYPES_IN = {
     "fork": "fork",
 }
 _SUBAGENT_TYPES_OUT = {"explore": "Explore", "plan": "Plan", "general": "general-purpose", "fork": "fork"}
-
-_STRING = {"type": "string"}
-
-
-def _obj(properties: Mapping[str, Any], required: tuple[str, ...] = ()) -> dict[str, Any]:
-    return {"type": "object", "properties": dict(properties), "required": list(required), "additionalProperties": False}
-
-
-# Descriptions are Orin's own wording; field names follow Claude Code's public interface.
-_PUBLIC_SCHEMAS: dict[str, tuple[str, dict[str, Any]]] = {
-    "read_file": (
-        "Read a file from the workspace. Text comes back line-numbered; use offset and limit to page through a long "
-        "file, and pages (e.g. '1-5') for a PDF. Read a file before you edit or overwrite it.",
-        _obj({
-            "file_path": {**_STRING, "description": "Path of the file, relative to the workspace or absolute inside it."},
-            "offset": {"type": "integer", "minimum": 1, "description": "First line to read (1-based)."},
-            "limit": {"type": "integer", "minimum": 1, "maximum": 800, "description": "How many lines to read."},
-            "pages": {**_STRING, "description": "PDF page range such as '1-5' or '3'."},
-        }, ("file_path",)),
-    ),
-    "write_file": (
-        "Create a file, or replace an existing one you have already read in this session.",
-        _obj({
-            "file_path": {**_STRING, "description": "Path of the file to write."},
-            "content": {**_STRING, "description": "The complete new content."},
-        }, ("file_path", "content")),
-    ),
-    "edit_file": (
-        "Replace an exact string in a file you have read. old_string must occur exactly once unless replace_all is true.",
-        _obj({
-            "file_path": {**_STRING, "description": "Path of the file to edit."},
-            "old_string": {**_STRING, "description": "Exact text to replace, including indentation."},
-            "new_string": {**_STRING, "description": "Replacement text."},
-            "replace_all": {"type": "boolean", "description": "Replace every occurrence."},
-        }, ("file_path", "old_string", "new_string")),
-    ),
-    "notebook_edit": (
-        "Replace, insert or delete one cell of a Jupyter notebook.",
-        _obj({
-            "notebook_path": {**_STRING, "description": "Path of the .ipynb file."},
-            "new_source": {**_STRING, "description": "New cell source (replace and insert)."},
-            "cell_id": {**_STRING, "description": "Cell id, or 0-based index as a string."},
-            "cell_type": {"type": "string", "enum": ["code", "markdown"]},
-            "edit_mode": {"type": "string", "enum": ["replace", "insert", "delete"]},
-        }, ("notebook_path",)),
-    ),
-    "glob_files": (
-        "Find files by glob pattern (e.g. '**/*.py'), newest first.",
-        _obj({
-            "pattern": {**_STRING, "description": "Glob pattern."},
-            "path": {**_STRING, "description": "Directory to search in. Defaults to the workspace root."},
-        }, ("pattern",)),
-    ),
-    "search_files": (
-        "Search file contents with a regular expression.",
-        _obj({
-            "pattern": {**_STRING, "description": "Regular expression to search for."},
-            "path": {**_STRING, "description": "File or directory to search."},
-            "glob": {**_STRING, "description": "Only search files matching this glob."},
-            "type": {**_STRING, "description": "Only search this file type, e.g. 'py'."},
-            "output_mode": {"type": "string", "enum": ["content", "files_with_matches", "count"]},
-            "-A": {"type": "integer", "minimum": 0, "maximum": 50, "description": "Lines after each match."},
-            "-B": {"type": "integer", "minimum": 0, "maximum": 50, "description": "Lines before each match."},
-            "-C": {"type": "integer", "minimum": 0, "maximum": 50, "description": "Lines around each match."},
-            "-i": {"type": "boolean", "description": "Case-insensitive search."},
-            "-n": {"type": "boolean", "description": "Show line numbers (always on)."},
-            "multiline": {"type": "boolean", "description": "Let patterns span lines."},
-            "head_limit": {"type": "integer", "minimum": 1, "maximum": 500, "description": "Return at most this many entries."},
-            "offset": {"type": "integer", "minimum": 0, "description": "Skip this many entries first."},
-        }, ("pattern",)),
-    ),
-    "run_command": (
-        "Run a shell command in the workspace. Prefer the file tools over shell commands for reading, searching and "
-        "editing files. Give a short description. Use run_in_background for long-lived processes such as dev servers.",
-        _obj({
-            "command": {**_STRING, "description": "The command to run."},
-            "description": {**_STRING, "description": "What the command does, in 5-10 words."},
-            "timeout": {"type": "integer", "minimum": 1000, "maximum": MAX_BASH_TIMEOUT_SECONDS * 1000, "description": "Timeout in milliseconds."},
-            "run_in_background": {"type": "boolean", "description": "Start it in the background and return immediately."},
-        }, ("command",)),
-    ),
-    "read_process_output": (
-        "Read the output of a background command started with run_in_background.",
-        _obj({"task_id": {**_STRING, "description": "Id returned when the command started."}}, ("task_id",)),
-    ),
-    "stop_process": (
-        "Stop a background command.",
-        _obj({"task_id": {**_STRING, "description": "Id of the background command."}}, ("task_id",)),
-    ),
-    "todo_write": (
-        "Write the session's todo list. Keep exactly one item in_progress while you work.",
-        _obj({
-            "todos": {
-                "type": "array",
-                "maxItems": 40,
-                "items": _obj({
-                    "content": {**_STRING, "description": "The task, in imperative form."},
-                    "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]},
-                    "activeForm": {**_STRING, "description": "Present-continuous label shown while in progress."},
-                }, ("content", "status")),
-            },
-        }, ("todos",)),
-    ),
-    "task_create": (
-        "Create a task in the session task list.",
-        _obj({
-            "subject": {**_STRING, "description": "Short imperative title."},
-            "description": {**_STRING, "description": "What the task involves."},
-            "activeForm": {**_STRING, "description": "Present-continuous label shown while in progress."},
-            "metadata": {"type": "object", "additionalProperties": True},
-        }, ("subject",)),
-    ),
-    "task_update": (
-        "Update a task: status, text, ownership or dependencies.",
-        _obj({
-            "taskId": _STRING,
-            "status": {"type": "string", "enum": ["pending", "in_progress", "completed", "deleted"]},
-            "subject": _STRING,
-            "description": _STRING,
-            "activeForm": _STRING,
-            "owner": _STRING,
-            "addBlocks": {"type": "array", "items": _STRING},
-            "addBlockedBy": {"type": "array", "items": _STRING},
-            "metadata": {"type": "object", "additionalProperties": True},
-        }, ("taskId",)),
-    ),
-    "task_get": ("Get one task by id.", _obj({"taskId": _STRING}, ("taskId",))),
-    "task_list": ("List the session's tasks.", _obj({})),
-    "ask_user": (
-        "Ask the user 1-4 multiple-choice questions when you are blocked on a decision only they can make, then stop "
-        "and wait for the answer.",
-        _obj({
-            "questions": {
-                "type": "array",
-                "minItems": 1,
-                "maxItems": 4,
-                "items": _obj({
-                    "question": {**_STRING, "description": "The full question."},
-                    "header": {**_STRING, "maxLength": 12, "description": "Very short label for the question."},
-                    "multiSelect": {"type": "boolean", "description": "Allow several answers."},
-                    "options": {
-                        "type": "array",
-                        "minItems": 2,
-                        "maxItems": 4,
-                        "items": _obj({
-                            "label": {**_STRING, "description": "Option text (1-5 words)."},
-                            "description": {**_STRING, "description": "What choosing it means."},
-                        }, ("label",)),
-                    },
-                }, ("question", "header", "options", "multiSelect")),
-            },
-        }, ("questions",)),
-    ),
-    "enter_plan_mode": ("Switch to plan mode: explore read-only and prepare a plan before changing code.", _obj({})),
-    "exit_plan_mode": (
-        "Present the finished plan to the user for approval and leave plan mode.",
-        _obj({
-            "plan": {**_STRING, "description": "The plan, in Markdown."},
-            "allowedPrompts": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
-        }),
-    ),
-    "enter_worktree": (
-        "Create (or switch to) an isolated git worktree for this session.",
-        _obj({
-            "name": {**_STRING, "description": "Optional worktree name."},
-            "base_branch": {**_STRING, "description": "Git ref to branch from. Defaults to HEAD."},
-        }),
-    ),
-    "exit_worktree": (
-        "Leave the current worktree, keeping or removing it.",
-        _obj({
-            "action": {"type": "string", "enum": ["keep", "remove"]},
-            "force": {"type": "boolean", "description": "Remove even with uncommitted changes."},
-        }),
-    ),
-    "fetch_url": (
-        "Fetch a public URL and return its readable content.",
-        _obj({
-            "url": {**_STRING, "description": "The URL to fetch."},
-            "prompt": {**_STRING, "description": "What you want to learn from the page."},
-        }, ("url",)),
-    ),
-    "web_search": (
-        "Search the web and return titles, URLs and snippets.",
-        _obj({
-            "query": {**_STRING, "description": "Search query."},
-            "allowed_domains": {"type": "array", "items": _STRING},
-            "blocked_domains": {"type": "array", "items": _STRING},
-        }, ("query",)),
-    ),
-    "run_subagent": (
-        "Delegate a self-contained task to a subagent. Types: 'Explore' (fast read-only search), 'Plan' (read-only "
-        "design), 'general-purpose' (full toolset), 'fork' (inherits this conversation).",
-        _obj({
-            "description": {**_STRING, "description": "3-5 word summary."},
-            "prompt": {**_STRING, "description": "Complete instructions; the subagent does not see this conversation."},
-            "subagent_type": {**_STRING, "description": "Explore, Plan, general-purpose or fork."},
-            "model": {**_STRING, "description": "Optional model alias."},
-            "run_in_background": {"type": "boolean", "description": "Return immediately and notify on completion."},
-            "resume": {**_STRING, "description": "Id of a previous subagent to continue."},
-        }, ("description", "prompt")),
-    ),
-    "use_skill": (
-        "Load a skill's instructions when the task matches it.",
-        _obj({"skill": {**_STRING, "description": "Skill name."}, "args": {**_STRING, "description": "Optional arguments."}}, ("skill",)),
-    ),
-    "search_mcp_tools": (
-        "Find deferred MCP tools by keyword and load their schemas so they can be called.",
-        _obj({
-            "query": {**_STRING, "description": "Keywords or a tool name."},
-            "max_results": {"type": "integer", "minimum": 1, "maximum": 50},
-        }, ("query",)),
-    ),
-}
 
 
 def public_name(internal: str) -> str:
@@ -379,15 +165,16 @@ def public_subagent_type(internal: str) -> str:
 
 
 def public_schema(internal: str) -> tuple[str, dict[str, Any]] | None:
-    entry = _PUBLIC_SCHEMAS.get(internal)
-    if entry is None:
-        return None
-    description, schema = entry
-    return description, copy.deepcopy(schema)
+    """The Claude Code (description, schema) of a tool: its registry Input model; None for Orin-only tools."""
+    # Imported here: the registry imports every tool module, and they import this one.
+    from agentos.agentic.tools.registry import default_registry
+
+    spec = default_registry().get(internal)
+    return spec.public_schema() if spec is not None and spec.key == internal else None
 
 
 def public_argument_names(internal: str) -> frozenset[str] | None:
-    entry = _PUBLIC_SCHEMAS.get(internal)
+    entry = public_schema(internal)
     if entry is None:
         return None
     return frozenset(entry[1].get("properties", {}))

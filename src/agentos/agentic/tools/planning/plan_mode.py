@@ -1,7 +1,9 @@
 """Plan mode tools: methods of AgentToolset that live in their own module (W4 split)."""
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import Any, Mapping, Literal
+
+from pydantic import Field
 
 from agentos.agentic.tools._shared import (
     ContractError,
@@ -12,7 +14,7 @@ from agentos.agentic.tools._shared import (
     _TEXT,
     _schema,
 )
-from agentos.agentic.tools.spec import ToolSpec
+from agentos.agentic.tools.spec import ToolSpec, ToolInput
 
 
 class PlanModeTools:
@@ -158,6 +160,15 @@ class PlanModeTools:
         )
 
 
+class EnterPlanModeInput(ToolInput):
+    pass
+
+
+class ExitPlanModeInput(ToolInput):
+    plan: str | None = Field(None, description="The plan, in Markdown.")
+    allowedPrompts: list[dict[str, Any]] | None = None
+
+
 # Tool specs, moved from AgentToolset._build_definitions (W4).
 SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
@@ -209,6 +220,8 @@ SPECS: tuple[ToolSpec, ...] = (
         }),
         handler="enter_plan_mode",
         kind="planning",
+        input_model=EnterPlanModeInput,
+        public_description='Switch to plan mode: explore read-only and prepare a plan before changing code.',
         read_only=True,
         order=120,
     ),
@@ -230,6 +243,8 @@ SPECS: tuple[ToolSpec, ...] = (
         }),
         handler="exit_plan_mode",
         kind="planning",
+        input_model=ExitPlanModeInput,
+        public_description='Present the finished plan to the user for approval and leave plan mode.',
         read_only=True,
         order=130,
     ),

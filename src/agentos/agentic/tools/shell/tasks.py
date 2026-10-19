@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Literal
+
+from pydantic import Field
 
 from agentos.agentic.workspace import WorkspaceError
 from agentos.agentic.tools._shared import (
@@ -12,7 +14,7 @@ from agentos.agentic.tools._shared import (
     _terminate_pid,
     _schema,
 )
-from agentos.agentic.tools.spec import ToolSpec
+from agentos.agentic.tools.spec import ToolSpec, ToolInput
 
 
 class ShellTaskTools:
@@ -188,6 +190,15 @@ class ShellTaskTools:
         }
 
 
+class TaskOutputInput(ToolInput):
+    task_id: str = Field(description="Id returned when the command started.")
+
+
+class TaskStopInput(ToolInput):
+    task_id: str | None = Field(None, description="Id of the background command.")
+    shell_id: str | None = Field(None, description="Older name of task_id.")
+
+
 # Tool specs, moved from AgentToolset._build_definitions (W4).
 SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
@@ -204,6 +215,8 @@ SPECS: tuple[ToolSpec, ...] = (
         }),
         handler="read_process_output",
         kind="terminal",
+        input_model=TaskOutputInput,
+        public_description='Read the output of a background command started with run_in_background.',
         read_only=True,
         available=lambda self: (self._enable_terminal),
         order=250,
@@ -214,6 +227,8 @@ SPECS: tuple[ToolSpec, ...] = (
         legacy_schema=_schema({"pid": {"type": "integer", "description": "Process id to stop, from run_command or read_process_output."}}, ("pid",)),
         handler="stop_process",
         kind="terminal",
+        input_model=TaskStopInput,
+        public_description='Stop a background command.',
         policy_tags=("mutates",),
         available=lambda self: (self._enable_terminal),
         order=260,

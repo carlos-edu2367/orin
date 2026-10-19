@@ -1,10 +1,12 @@
 """Todo tools: methods of AgentToolset that live in their own module (W4 split)."""
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import Any, Mapping, Literal
+
+from pydantic import Field
 
 from agentos.agentic.tools._shared import AgentToolError, _TEXT, _schema
-from agentos.agentic.tools.spec import ToolSpec
+from agentos.agentic.tools.spec import ToolSpec, ToolInput
 
 
 class TodoTools:
@@ -89,6 +91,16 @@ class TodoTools:
         return [dict(item) for item in self._todos]
 
 
+class TodoItem(ToolInput):
+    content: str = Field(description="The task, in imperative form.")
+    status: Literal["pending", "in_progress", "completed"]
+    activeForm: str = Field(description="Present-continuous label shown while in progress.")
+
+
+class TodoWriteInput(ToolInput):
+    todos: list[TodoItem] = Field(max_length=40)
+
+
 # Tool specs, moved from AgentToolset._build_definitions (W4).
 SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
@@ -110,6 +122,8 @@ SPECS: tuple[ToolSpec, ...] = (
         }, ("todos",)),
         handler="todo_write",
         kind="planning",
+        input_model=TodoWriteInput,
+        public_description="Write the session's todo list. Keep exactly one item in_progress while you work.",
         read_only=True,
         order=140,
     ),

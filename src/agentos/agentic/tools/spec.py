@@ -12,11 +12,12 @@ and every alias, resolve to the same spec.
 from __future__ import annotations
 
 import copy
+from functools import lru_cache
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from agentos.agentic.tools.public_names import permission_category, public_name
 
@@ -85,6 +86,12 @@ class ToolSpec:
         )
 
 
+class ToolInput(BaseModel):
+    """Base of every Claude Code Input model: field names are that public interface; unknown keys are refused."""
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+
 class ToolRegistryError(ValueError):
     """Two specs claim the same key, name or alias: refused when the registry is built."""
 
@@ -122,6 +129,12 @@ _DROPPED_KEYS = frozenset({"title", "default", "examples"})
 
 def provider_schema(model: type[BaseModel]) -> dict[str, Any]:
     """A JSON Schema every provider accepts: no titles, no $ref, optional fields as plain types."""
+    return copy.deepcopy(_cached_schema(model))
+
+
+@lru_cache(maxsize=None)
+def _cached_schema(model: type[BaseModel]) -> dict[str, Any]:
+    # Schemas are rebuilt for every model request; a model class never changes, so build each once.
     raw = model.model_json_schema(by_alias=True, mode="validation")
     definitions = raw.pop("$defs", {})
     return _clean(raw, definitions)

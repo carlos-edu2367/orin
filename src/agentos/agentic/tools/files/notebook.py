@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Mapping
+from typing import Any, Mapping, Literal
 from uuid import uuid4
 
+from pydantic import Field
+
 from agentos.agentic.tools._shared import AgentToolError, _TEXT, _schema
-from agentos.agentic.tools.spec import ToolSpec
+from agentos.agentic.tools.spec import ToolSpec, ToolInput
 
 
 class NotebookTools:
@@ -130,6 +132,14 @@ class NotebookTools:
         }
 
 
+class NotebookEditInput(ToolInput):
+    notebook_path: str = Field(description="Path of the .ipynb file.")
+    new_source: str = Field(description="New cell source; empty for delete.")
+    cell_id: str | None = Field(None, description="Cell id, or 0-based index as a string.")
+    cell_type: Literal["code", "markdown"] | None = None
+    edit_mode: Literal["replace", "insert", "delete"] | None = None
+
+
 # Tool specs, moved from AgentToolset._build_definitions (W4).
 SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
@@ -152,6 +162,8 @@ SPECS: tuple[ToolSpec, ...] = (
         }, ("notebook_path",)),
         handler="notebook_edit",
         kind="filesystem",
+        input_model=NotebookEditInput,
+        public_description='Replace, insert or delete one cell of a Jupyter notebook.',
         policy_tags=("mutates",),
         order=60,
     ),

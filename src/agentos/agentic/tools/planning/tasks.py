@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Mapping
+from typing import Any, Mapping, Literal
+
+from pydantic import Field
 
 from agentos.agentic.tools._shared import AgentToolError, _TEXT, _schema
-from agentos.agentic.tools.spec import ToolSpec
+from agentos.agentic.tools.spec import ToolSpec, ToolInput
 
 
 class TaskTools:
@@ -200,6 +202,33 @@ class TaskTools:
         }
 
 
+class TaskCreateInput(ToolInput):
+    subject: str = Field(description="Short imperative title.")
+    description: str = Field(description="What the task involves.")
+    activeForm: str | None = Field(None, description="Present-continuous label shown while in progress.")
+    metadata: dict[str, Any] | None = None
+
+
+class TaskUpdateInput(ToolInput):
+    taskId: str
+    status: Literal["pending", "in_progress", "completed", "deleted"] | None = None
+    subject: str | None = None
+    description: str | None = None
+    activeForm: str | None = None
+    owner: str | None = None
+    addBlocks: list[str] | None = None
+    addBlockedBy: list[str] | None = None
+    metadata: dict[str, Any] | None = None
+
+
+class TaskGetInput(ToolInput):
+    taskId: str
+
+
+class TaskListInput(ToolInput):
+    pass
+
+
 # Tool specs, moved from AgentToolset._build_definitions (W4).
 SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
@@ -217,6 +246,8 @@ SPECS: tuple[ToolSpec, ...] = (
         }, ("subject",)),
         handler="task_create",
         kind="planning",
+        input_model=TaskCreateInput,
+        public_description='Create a task in the session task list.',
         read_only=True,
         order=150,
     ),
@@ -241,6 +272,8 @@ SPECS: tuple[ToolSpec, ...] = (
         }),
         handler="task_update",
         kind="planning",
+        input_model=TaskUpdateInput,
+        public_description='Update a task: status, text, ownership or dependencies.',
         read_only=True,
         order=160,
     ),
@@ -254,6 +287,8 @@ SPECS: tuple[ToolSpec, ...] = (
         }),
         handler="task_get",
         kind="planning",
+        input_model=TaskGetInput,
+        public_description='Get one task by id.',
         read_only=True,
         order=170,
     ),
@@ -269,6 +304,8 @@ SPECS: tuple[ToolSpec, ...] = (
         }),
         handler="task_list",
         kind="planning",
+        input_model=TaskListInput,
+        public_description="List the session's tasks.",
         read_only=True,
         order=180,
     ),

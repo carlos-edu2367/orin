@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import hashlib
-from typing import Any
+from typing import Any, Literal
+
+from pydantic import Field
 
 from agentos.agentic.tools._shared import AgentToolError, compute_structured_patch, _TEXT, _schema
-from agentos.agentic.tools.spec import ToolSpec
+from agentos.agentic.tools.spec import ToolSpec, ToolInput
 
 
 class WriteTools:
@@ -68,6 +70,14 @@ class WriteTools:
         }
 
 
+class WriteInput(ToolInput):
+    file_path: str = Field(description="Path of the file to write.")
+    content: str = Field(description="The complete new content.")
+    mode: Literal["overwrite", "append"] | None = Field(
+        None, description="Orin: 'append' adds to the end, for a file longer than one reply; default 'overwrite'.",
+    )
+
+
 # Tool specs, moved from AgentToolset._build_definitions (W4).
 SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
@@ -84,6 +94,8 @@ SPECS: tuple[ToolSpec, ...] = (
         }, ("path", "content")),
         handler="write_file",
         kind="filesystem",
+        input_model=WriteInput,
+        public_description='Create a file, or replace an existing one you have already read in this session.',
         policy_tags=("mutates",),
         order=40,
     ),

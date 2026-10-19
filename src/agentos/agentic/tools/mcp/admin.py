@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Mapping
+from typing import Any, Mapping, Literal
+
+from pydantic import Field
 
 from agentos.agentic.tools._shared import AgentToolError, ToolDefinition, ToolOutcome, _TEXT, _schema
-from agentos.agentic.tools.spec import ToolSpec
+from agentos.agentic.tools.spec import ToolSpec, ToolInput
 
 
 class McpTools:
@@ -295,6 +297,11 @@ class McpTools:
         )
 
 
+class ToolSearchInput(ToolInput):
+    query: str = Field(description="Keywords or a tool name.")
+    max_results: int | None = Field(None, ge=1, le=50)
+
+
 # Tool specs, moved from AgentToolset._build_definitions (W4).
 SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
@@ -372,6 +379,8 @@ SPECS: tuple[ToolSpec, ...] = (
         ),
         handler="search_mcp_tools",
         kind="mcp",
+        input_model=ToolSearchInput,
+        public_description='Find deferred MCP tools by keyword and load their schemas so they can be called.',
         read_only=True,
         policy_tags=("mcp",),
         max_result_chars=100_000,

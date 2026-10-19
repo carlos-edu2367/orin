@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import json
 from dataclasses import field
-from typing import Any, Mapping
+from typing import Any, Mapping, Literal
+
+from pydantic import Field
 
 from agentos.agentic.tools._shared import AgentToolError, _bounded, _TEXT, _schema
-from agentos.agentic.tools.spec import ToolSpec
+from agentos.agentic.tools.spec import ToolSpec, ToolInput
 
 
 class SkillTools:
@@ -161,6 +163,11 @@ class SkillTools:
         return self._published_skill(result, action="updated")
 
 
+class SkillInput(ToolInput):
+    skill: str = Field(description="Skill name.")
+    args: str | None = Field(None, description="Optional arguments.")
+
+
 # Tool specs, moved from AgentToolset._build_definitions (W4).
 _SKILL_FIELDS = {
     "name": {**_TEXT, "description": "Specific, reusable skill name. The persisted id is derived from it."},
@@ -215,6 +222,8 @@ SPECS: tuple[ToolSpec, ...] = (
         legacy_schema=_schema({"skill_id": _TEXT, "version": _TEXT}, ("skill_id",)),
         handler="use_skill",
         kind="skill",
+        input_model=SkillInput,
+        public_description="Load a skill's instructions when the task matches it.",
         available=lambda self: (self.skills is not None),
         order=430,
     ),

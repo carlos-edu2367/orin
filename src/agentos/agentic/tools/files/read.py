@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
+
+from pydantic import Field
 
 from agentos.reading.extract import extract_text
 from agentos.reading.render import ImageTooLarge, normalize_image, render_pdf_pages
@@ -21,7 +23,7 @@ from agentos.agentic.tools._shared import (
     _TEXT,
     _schema,
 )
-from agentos.agentic.tools.spec import ToolSpec
+from agentos.agentic.tools.spec import ToolSpec, ToolInput
 
 
 class ReadTools:
@@ -482,6 +484,16 @@ class ReadTools:
         }
 
 
+class ReadInput(ToolInput):
+    file_path: str = Field(description="Path of the file, relative to the workspace or absolute inside it.")
+    offset: int | None = Field(None, ge=1, description="First line to read (1-based).")
+    limit: int | None = Field(None, ge=1, le=800, description="How many lines to read.")
+    pages: str | None = Field(None, description="PDF page range such as '1-5' or '3'.")
+    force_reload: bool | None = Field(
+        None, description="Orin: read the full content again even if it is unchanged since the last read.",
+    )
+
+
 # Tool specs, moved from AgentToolset._build_definitions (W4).
 SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
@@ -496,6 +508,8 @@ SPECS: tuple[ToolSpec, ...] = (
         }, ("path",)),
         handler="read_file",
         kind="filesystem",
+        input_model=ReadInput,
+        public_description="Read a file from the workspace. Text comes back line-numbered; use offset and limit to page through a long file, and pages (e.g. '1-5') for a PDF. Read a file before you edit or overwrite it.",
         read_only=True,
         order=10,
     ),

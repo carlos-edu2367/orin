@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urljoin, urlparse
 
 import httpx
+from pydantic import Field
 
 from agentos.agentic.tools._shared import (
     AgentToolError,
@@ -18,7 +19,7 @@ from agentos.agentic.tools._shared import (
     _TEXT,
     _schema,
 )
-from agentos.agentic.tools.spec import ToolSpec
+from agentos.agentic.tools.spec import ToolSpec, ToolInput
 
 
 class FetchTools:
@@ -74,6 +75,11 @@ class FetchTools:
         }
 
 
+class WebFetchInput(ToolInput):
+    url: str = Field(description="The URL to fetch.")
+    prompt: str | None = Field(None, description="What you want to learn from the page.")
+
+
 # Tool specs, moved from AgentToolset._build_definitions (W4).
 SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
@@ -82,6 +88,8 @@ SPECS: tuple[ToolSpec, ...] = (
         legacy_schema=_schema({"url": _TEXT}, ("url",)),
         handler="fetch_url",
         kind="web",
+        input_model=WebFetchInput,
+        public_description='Fetch a public URL and return its readable content.',
         read_only=True,
         policy_tags=("network",),
         order=190,

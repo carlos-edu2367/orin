@@ -4,11 +4,13 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
+
+from pydantic import Field
 
 from agentos.agentic.workspace import MAX_SEARCH_RESULTS
 from agentos.agentic.tools._shared import AgentToolError, _GLOB_IGNORED_DIRS, _TEXT, _schema
-from agentos.agentic.tools.spec import ToolSpec
+from agentos.agentic.tools.spec import ToolSpec, ToolInput
 
 
 class GrepTools:
@@ -271,6 +273,22 @@ class GrepTools:
         }
 
 
+class GrepInput(ToolInput):
+    pattern: str = Field(description="Regular expression to search for.")
+    path: str | None = Field(None, description="File or directory to search.")
+    glob: str | None = Field(None, description="Only search files matching this glob.")
+    type: str | None = Field(None, description="Only search this file type, e.g. 'py'.")
+    output_mode: Literal["content", "files_with_matches", "count"] | None = None
+    after: int | None = Field(None, alias="-A", ge=0, le=50, description="Lines after each match.")
+    before: int | None = Field(None, alias="-B", ge=0, le=50, description="Lines before each match.")
+    around: int | None = Field(None, alias="-C", ge=0, le=50, description="Lines around each match.")
+    ignore_case: bool | None = Field(None, alias="-i", description="Case-insensitive search.")
+    line_numbers: bool | None = Field(None, alias="-n", description="Show line numbers (always on).")
+    multiline: bool | None = Field(None, description="Let patterns span lines.")
+    head_limit: int | None = Field(None, ge=1, le=500, description="Return at most this many entries.")
+    offset: int | None = Field(None, ge=0, description="Skip this many entries first.")
+
+
 # Tool specs, moved from AgentToolset._build_definitions (W4).
 SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
@@ -301,6 +319,8 @@ SPECS: tuple[ToolSpec, ...] = (
         }),
         handler="search_files",
         kind="filesystem",
+        input_model=GrepInput,
+        public_description='Search file contents with a regular expression.',
         read_only=True,
         order=90,
     ),

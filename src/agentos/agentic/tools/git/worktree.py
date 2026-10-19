@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Literal
+
+from pydantic import Field
 
 from agentos.agentic.tools._shared import AgentToolError, ToolOutcome, _TEXT, _schema
-from agentos.agentic.tools.spec import ToolSpec
+from agentos.agentic.tools.spec import ToolSpec, ToolInput
 
 
 class WorktreeTools:
@@ -95,6 +97,16 @@ class WorktreeTools:
         )
 
 
+class EnterWorktreeInput(ToolInput):
+    name: str | None = Field(None, description="Optional worktree name.")
+    base_branch: str | None = Field(None, description="Orin: git ref to branch from. Defaults to HEAD.")
+
+
+class ExitWorktreeInput(ToolInput):
+    action: Literal["keep", "remove"]
+    discard_changes: bool | None = Field(None, description="Remove even with uncommitted changes.")
+
+
 # Tool specs, moved from AgentToolset._build_definitions (W4).
 SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
@@ -106,6 +118,8 @@ SPECS: tuple[ToolSpec, ...] = (
         }),
         handler="enter_worktree",
         kind="terminal",
+        input_model=EnterWorktreeInput,
+        public_description='Create (or switch to) an isolated git worktree for this session.',
         policy_tags=("mutates",),
         available=lambda self: (self._enable_terminal),
         order=280,
@@ -123,6 +137,8 @@ SPECS: tuple[ToolSpec, ...] = (
         }),
         handler="exit_worktree",
         kind="terminal",
+        input_model=ExitWorktreeInput,
+        public_description='Leave the current worktree, keeping or removing it.',
         policy_tags=("mutates",),
         available=lambda self: (self._enable_terminal),
         order=290,
