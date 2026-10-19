@@ -410,6 +410,14 @@ class ToolDefinition:
     policy_tags: tuple[str, ...] = ()
     # Per-tool result budget before truncation and disk persistence.
     max_result_size_chars: int = MAX_TOOL_RESULT_CHARS
+    # Registry metadata (W4): the canonical name the model, rules and hooks see, the other spellings that resolve
+    # to this tool, its permission family, whether it may run alongside others, and its Claude Code models.
+    public_name: str = ""
+    aliases: tuple[str, ...] = ()
+    permission_category: str = ""
+    concurrency_safe: bool = False
+    input_model: Any = None
+    output_model: Any = None
 
     def schema(self) -> dict[str, Any]:
         return {"type": "function", "function": {"name": self.name, "description": self.description, "parameters": dict(self.parameters)}}
