@@ -44,7 +44,7 @@
 | B | 6–11 | Hardening of A; agent definitions in files; per-agent reminders and memory (W3-R26); background agents |
 | C | 12–15 | Hardening of B; agent team mailbox; teams with SendMessage and TeammateIdle |
 | D | 16–19 | Hardening of C; MCP servers from the managed, user, local and project files (approval, trust, `${VAR}`, allow/deny lists) |
-| E | | MCP protocol: SSE and WebSocket transports, stdio shutdown, output limits, resources, prompts, elicitation |
+| E | 20–26 | MCP protocol: server requests and notifications, SSE and WebSocket transports, stdio shutdown, `MAX_MCP_OUTPUT_TOKENS`, resources and RefreshMcpTools, prompts as commands, elicitation |
 | F | | Plugins: manifests, layout, `userConfig` vault, marketplaces |
 | G | | One hook system: plugin, skill and agent hooks in the dispatcher |
 | H | | LSP diagnostics after edits |
@@ -6310,4 +6310,2831 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - [ ] **Step 1:** Run `uv run pytest -q tests/unit` (timeout 600000 ms) and `uv run pytest -q tests/integration`. Expected: all pass.
 - [ ] **Step 2:** Append a "## Batch D — MCP servers in configuration files (Tasks 16–19)" section to `docs/superpowers/plans/2026-10-19-w5-extensibility-ledger.md`: commits, suite results, deviations 16–22, and anything done differently from this plan.
 - [ ] **Step 3:** Commit with `docs(w5): ledger, batch D` + blank line + the Co-Authored-By line.
+
+## Batch E — The MCP protocol
+
+Orin's MCP client only sent requests and read the next frame as the answer: a server that logged a notification, asked for input or pinged in the middle of a call broke the call. It spoke stdio and streamable HTTP only, killed stdio servers outright, had a fixed output limit, and knew nothing of resources, prompts or elicitation. This batch makes the client a proper JSON-RPC peer (Task 20), adds the legacy SSE and WebSocket transports (Task 21), a graceful stdio shutdown and `MAX_MCP_OUTPUT_TOKENS` (Task 22), resources and tool refresh as four tools (Task 23), prompts as `/mcp__server__prompt` commands (Task 24) and elicitation (Task 25).
+
+New deviations (also in the ledger):
+
+23. **Elicitation is declined unless an `Elicitation` hook answers it**; the model is told the server asked. Orin's input card arrives with W7. Sampling requests are refused (Claude Code does not offer them either); `roots/list` returns no roots yet.
+24. **`ReadMcpResourceDir` lists the resources whose address starts with the given uri** (Orin's reading of "a folder of resources"); binary resources other than images are described, not saved.
+25. **`RefreshMcpTools` and a server's `list_changed` replace a configuration-file server's tools; Orin's own servers keep the tools the person approved** and report the difference (a new approval in Settings > MCP takes them).
+26. **No warning above 10,000 tokens of MCP output** (Claude Code shows one in its terminal); the cut at `MAX_MCP_OUTPUT_TOKENS` (default 25,000, counted as 4 characters a token) applies, and the rest goes to a file as before.
+27. **MCP prompts are not listed in a `/` menu yet** (W7); the person types `/mcp__server__prompt args` and the words fill the prompt's arguments in order, the last argument taking the rest.
+28. **SSE and WebSocket are for configuration-file servers only**: the model's `configure_mcp` still proposes stdio or HTTP. A stdio server gets 0.3 s to exit after its input closes; Orin does not put MCP servers in a Windows Job Object.
+
+### Task 20: The client answers the server's requests and notes its notifications
+
+While a call waits, the server may send notifications (logs, progress, `list_changed`) and requests of its own (`ping`, `roots/list`, `elicitation/create`, `sampling/createMessage`). `dispatch_server_message` turns each into the frame to send back: the client's handler (`McpClient._handle_server_message`, which the client sets as the transport's `on_message`) answers `ping` and `roots/list`, hands elicitation to its `elicit` callback (declined without one), refuses everything else with "method not found", and notes `list_changed` in `client.changed`. The stdio transport keeps reading until the answer with the request's id (skipping up to 1000 non-JSON lines, such as a banner), writing each reply to the server and restarting the wait after it; the streamable-HTTP transport now reads an event stream as it arrives (it no longer waits for the whole body), posting replies back. The client declares the `roots` and `elicitation` capabilities.
+
+**Files:**
+- Modify: `src/agentos/mcp/protocol.py`
+- Modify: `src/agentos/mcp/client.py`
+- Modify: `src/agentos/mcp/transport_stdio.py`
+- Modify: `src/agentos/mcp/transport_http.py`
+- Test: `tests/unit/mcp/test_server_messages.py`
+
+**Interfaces:**
+- Produces: `agentos.mcp.protocol.dispatch_server_message(message, handler)`, `response`, `error_response`, `METHOD_NOT_FOUND`, `INTERNAL_ERROR`; `McpClient(transport, *, roots=(), elicit=None, on_notification=None)`, `McpClient.changed`; `StdioTransport.on_message`, `HttpTransport.on_message`; `transport_stdio.MAX_SKIPPED_LINES`.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `tests/unit/mcp/test_server_messages.py`:
+
+```python
+"""W5: what an MCP server sends besides answers — its requests are answered, its notifications noted."""
+from __future__ import annotations
+
+import json
+import sys
+from typing import Any, Mapping
+
+import httpx
+
+from agentos.mcp.client import McpClient
+from agentos.mcp.protocol import METHOD_NOT_FOUND, dispatch_server_message
+from agentos.mcp.transport_http import HttpTransport
+from agentos.mcp.transport_stdio import StdioTransport
+
+
+class _Transport:
+    kind = "fake"
+
+    def __init__(self) -> None:
+        self.sent: list[dict[str, Any]] = []
+        self.on_message = None
+
+    def open(self) -> None:
+        pass
+
+    def send(self, frame: Mapping[str, Any]) -> dict[str, Any] | None:
+        self.sent.append(dict(frame))
+        if "id" not in frame:
+            return None
+        return {"jsonrpc": "2.0", "id": frame["id"], "result": {"protocolVersion": "2025-06-18", "serverInfo": {"name": "s"}, "capabilities": {}}}
+
+    def close(self) -> None:
+        pass
+
+
+def _request(method: str, params: dict | None = None, request_id: object = "s1") -> dict:
+    return {"jsonrpc": "2.0", "id": request_id, "method": method, **({"params": params} if params is not None else {})}
+
+
+def test_the_client_answers_the_servers_requests() -> None:
+    asked: list[dict] = []
+    transport = _Transport()
+    client = McpClient(transport, roots=(("file:///C:/work", "work"),), elicit=lambda params: asked.append(params) or {"action": "accept", "content": {"name": "x"}})
+    client.initialize()
+    assert transport.sent[0]["params"]["capabilities"] == {"roots": {"listChanged": False}, "elicitation": {}}
+    handle = transport.on_message
+    assert dispatch_server_message(_request("ping"), handle) == {"jsonrpc": "2.0", "id": "s1", "result": {}}
+    assert dispatch_server_message(_request("roots/list"), handle)["result"] == {"roots": [{"uri": "file:///C:/work", "name": "work"}]}
+    answer = dispatch_server_message(_request("elicitation/create", {"message": "Name?", "requestedSchema": {"type": "object"}}), handle)
+    assert answer["result"] == {"action": "accept", "content": {"name": "x"}} and asked[0]["message"] == "Name?"
+    refused = dispatch_server_message(_request("sampling/createMessage", {}), handle)
+    assert refused["error"]["code"] == METHOD_NOT_FOUND
+
+
+def test_without_a_handler_an_elicitation_is_declined() -> None:
+    transport = _Transport()
+    McpClient(transport)
+    assert dispatch_server_message(_request("elicitation/create", {"message": "?"}), transport.on_message)["result"] == {"action": "decline"}
+
+
+def test_list_changed_notifications_are_noted() -> None:
+    seen: list[str] = []
+    transport = _Transport()
+    client = McpClient(transport, on_notification=lambda method, params: seen.append(method))
+    for method in ("notifications/tools/list_changed", "notifications/resources/list_changed", "notifications/message"):
+        assert dispatch_server_message({"jsonrpc": "2.0", "method": method}, transport.on_message) is None
+    assert client.changed == {"tools", "resources"} and seen[-1] == "notifications/message"
+
+
+def test_a_handler_that_fails_answers_with_an_error() -> None:
+    def broken(_message):
+        raise RuntimeError("boom")
+
+    assert dispatch_server_message(_request("ping"), broken)["error"]["code"] == -32603
+    assert dispatch_server_message({"jsonrpc": "2.0", "method": "notifications/x"}, broken) is None
+
+
+CHATTY_SERVER = """
+import json, sys
+print("Server starting...", flush=True)  # not JSON: skipped
+for line in sys.stdin:
+    frame = json.loads(line)
+    if "id" not in frame or "method" not in frame:
+        continue
+    sys.stdout.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}) + "\\n")
+    sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": "srv-1", "method": "ping"}) + "\\n")
+    sys.stdout.flush()
+    reply = json.loads(sys.stdin.readline())
+    sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": frame["id"], "result": {"pong_seen": reply.get("id") == "srv-1" and reply.get("result") == {}}}) + "\\n")
+    sys.stdout.flush()
+"""
+
+
+def test_stdio_answers_a_server_request_in_the_middle_of_a_call(tmp_path) -> None:
+    script = tmp_path / "chatty.py"
+    script.write_text(CHATTY_SERVER, encoding="utf-8")
+    transport = StdioTransport(command=sys.executable, args=(str(script),), env={}, allow_any_command=True, timeout=10)
+    notes: list[str] = []
+    transport.on_message = lambda message: notes.append(message["method"]) or ({} if message.get("id") is not None else None)
+    transport.open()
+    try:
+        answer = transport.send({"jsonrpc": "2.0", "id": 1, "method": "tools/call"})
+    finally:
+        transport.close()
+    assert answer["result"] == {"pong_seen": True} and notes == ["notifications/tools/list_changed", "ping"]
+
+
+def test_streamable_http_answers_a_server_request_inside_the_event_stream(monkeypatch) -> None:
+    monkeypatch.setattr("agentos.mcp.transport_http._public_url", lambda url, resolve_dns=False: url)
+    replies: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        frame = json.loads(request.content)
+        if "method" not in frame:  # our answer to the server's request
+            replies.append(frame)
+            return httpx.Response(202)
+        events = (
+            'data: {"jsonrpc":"2.0","id":"e1","method":"elicitation/create","params":{"message":"?"}}\n\n'
+            'data: {"jsonrpc":"2.0","id":3,"result":{"done":true}}\n\n'
+        )
+        return httpx.Response(200, text=events, headers={"content-type": "text/event-stream"})
+
+    transport = HttpTransport(url="https://mcp.example.com/mcp", headers={}, client=httpx.Client(transport=httpx.MockTransport(handler)))
+    transport.on_message = lambda message: {"action": "decline"} if message.get("method") == "elicitation/create" else None
+    assert transport.send({"jsonrpc": "2.0", "id": 3, "method": "tools/call"})["result"] == {"done": True}
+    assert replies == [{"jsonrpc": "2.0", "id": "e1", "result": {"action": "decline"}}]
+```
+
+- [ ] **Step 2: Run it to verify it fails**
+
+Run: `uv run pytest -q tests/unit/mcp/test_server_messages.py`
+Expected: FAIL — `ImportError: cannot import name 'METHOD_NOT_FOUND' from 'agentos.mcp.protocol'` (collection error).
+
+- [ ] **Step 3: Implement**
+
+Then make these edits, in order (each `replace` block occurs exactly once in its file; if one does not, stop and report — do not guess):
+
+1. In `src/agentos/mcp/protocol.py`, replace
+
+```python
+import json
+from typing import Any, Mapping
+```
+
+   with
+
+```python
+import json
+from typing import Any, Callable, Mapping
+```
+
+2. In `src/agentos/mcp/protocol.py`, replace
+
+```python
+__all__ = ["CLIENT_INFO", "PROTOCOL_VERSION", "McpProtocolError", "notification", "parse_response", "request"]
+```
+
+   with
+
+```python
+METHOD_NOT_FOUND = -32601
+INTERNAL_ERROR = -32603
+
+
+def response(request_id: Any, result: Mapping[str, Any]) -> dict[str, Any]:
+    return {"jsonrpc": "2.0", "id": request_id, "result": dict(result)}
+
+
+def error_response(request_id: Any, code: int, message: str) -> dict[str, Any]:
+    return {"jsonrpc": "2.0", "id": request_id, "error": {"code": int(code), "message": str(message)[:500]}}
+
+
+def dispatch_server_message(message: Mapping[str, Any], handler: Callable[[Mapping[str, Any]], Any] | None) -> dict[str, Any] | None:
+    """A request or notification the server sent us: the frame to send back (requests only), or None.
+
+    ``handler`` returns the result object for a request it supports and None otherwise (answered "method not
+    found"); for a notification its return value is ignored. A handler that raises answers with an internal error.
+    """
+    method = message.get("method")
+    if not isinstance(method, str):
+        return None  # a stray response: nothing to answer
+    is_request = message.get("id") is not None
+    try:
+        result = handler(message) if handler is not None else None
+    except Exception:  # noqa: BLE001 - the server gets an error answer, the call goes on
+        return error_response(message["id"], INTERNAL_ERROR, f"the client could not handle {method[:80]}") if is_request else None
+    if not is_request:
+        return None
+    if not isinstance(result, Mapping):
+        return error_response(message["id"], METHOD_NOT_FOUND, f"method not supported: {method[:80]}")
+    return response(message["id"], result)
+
+
+__all__ = [
+    "CLIENT_INFO", "INTERNAL_ERROR", "METHOD_NOT_FOUND", "PROTOCOL_VERSION", "McpProtocolError", "dispatch_server_message",
+    "error_response", "notification", "parse_response", "request", "response",
+]
+```
+
+3. In `src/agentos/mcp/client.py`, replace
+
+```python
+"""The MCP client: negotiate once, discover tools, call one tool at a time."""
+from __future__ import annotations
+
+import itertools
+import json
+from dataclasses import dataclass
+from typing import Any, Mapping, Protocol
+```
+
+   with
+
+```python
+"""The MCP client: negotiate once, discover tools, call one tool at a time.
+
+While a call is in flight the server may send its own requests and notifications (W5). The transport hands
+them to ``on_message`` (set on the transport by the client): ``ping`` and ``roots/list`` are answered,
+``elicitation/create`` goes to the ``elicit`` callback (declined without one), anything else is refused, and a
+``list_changed`` notification is noted in ``changed`` so the caller can list again.
+"""
+from __future__ import annotations
+
+import itertools
+import json
+from dataclasses import dataclass
+from typing import Any, Callable, Mapping, Protocol
+```
+
+4. In `src/agentos/mcp/client.py`, replace
+
+```python
+class McpClient:
+    def __init__(self, transport: McpTransportPort) -> None:
+        self._transport = transport
+        self._ids = itertools.count(1)
+        self._negotiation: McpNegotiation | None = None
+```
+
+   with
+
+```python
+_CHANGED = {
+    "notifications/tools/list_changed": "tools",
+    "notifications/resources/list_changed": "resources",
+    "notifications/prompts/list_changed": "prompts",
+}
+
+
+class McpClient:
+    def __init__(
+        self,
+        transport: McpTransportPort,
+        *,
+        roots: tuple[tuple[str, str], ...] = (),
+        elicit: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
+        on_notification: Callable[[str, Mapping[str, Any]], None] | None = None,
+    ) -> None:
+        self._transport = transport
+        self._ids = itertools.count(1)
+        self._negotiation: McpNegotiation | None = None
+        self._roots = tuple(roots)
+        self._elicit = elicit
+        self._on_notification = on_notification
+        self.changed: set[str] = set()  # "tools", "resources", "prompts" the server said have changed
+        try:
+            transport.on_message = self._handle_server_message  # type: ignore[attr-defined]
+        except AttributeError:  # a transport that cannot take it simply never delivers server messages
+            pass
+
+    def _handle_server_message(self, message: Mapping[str, Any]) -> Mapping[str, Any] | None:
+        method = str(message.get("method") or "")
+        params = message.get("params") if isinstance(message.get("params"), Mapping) else {}
+        if message.get("id") is None:
+            kind = _CHANGED.get(method)
+            if kind is not None:
+                self.changed.add(kind)
+            if self._on_notification is not None:
+                self._on_notification(method, params)
+            return None
+        if method == "ping":
+            return {}
+        if method == "roots/list":
+            return {"roots": [{"uri": uri, "name": name} for uri, name in self._roots]}
+        if method == "elicitation/create":
+            if self._elicit is None:
+                return {"action": "decline"}
+            return dict(self._elicit(params))
+        return None  # sampling and anything else: not supported
+```
+
+5. In `src/agentos/mcp/client.py`, replace
+
+```python
+            "capabilities": {},
+```
+
+   with
+
+```python
+            "capabilities": {"roots": {"listChanged": False}, "elicitation": {}},
+```
+
+6. In `src/agentos/mcp/transport_stdio.py`, replace
+
+```python
+import json
+import os
+import queue
+import shutil
+import subprocess
+import threading
+from typing import Any, Mapping
+
+from agentos.agentic.agent_tools import _terminate_process_tree
+```
+
+   with
+
+```python
+import json
+import os
+import queue
+import shutil
+import subprocess
+import threading
+import time
+from typing import Any, Mapping
+
+from agentos.agentic.agent_tools import _terminate_process_tree
+
+from .protocol import dispatch_server_message
+```
+
+7. In `src/agentos/mcp/transport_stdio.py`, replace
+
+```python
+DEFAULT_TIMEOUT_SECONDS = 45.0
+MAX_LINE_BYTES = 4_000_000
+```
+
+   with
+
+```python
+DEFAULT_TIMEOUT_SECONDS = 45.0
+MAX_LINE_BYTES = 4_000_000
+# Lines that are not JSON (a server printing a banner on stdout) are skipped, up to this many per call.
+MAX_SKIPPED_LINES = 1000
+```
+
+8. In `src/agentos/mcp/transport_stdio.py`, replace
+
+```python
+        self._reader_thread: threading.Thread | None = None
+```
+
+   with
+
+```python
+        self._reader_thread: threading.Thread | None = None
+        # Set by the client: receives the server's own requests and notifications (W5).
+        self.on_message: Any = None
+```
+
+9. In `src/agentos/mcp/transport_stdio.py`, replace
+
+```python
+        payload = (json.dumps(frame) + "\n").encode()
+        with self._lock:
+            try:
+                process.stdin.write(payload)
+                process.stdin.flush()
+            except OSError as error:
+                raise StdioTransportError(f"the MCP server closed its input: {error}") from error
+            if "id" not in frame:
+                return None
+            try:
+                line = self._replies.get(timeout=self._timeout)
+            except queue.Empty:
+                _terminate_process_tree(process)
+                self._process = None
+                raise StdioTransportError(
+                    f"the MCP server did not answer within {self._timeout}s and was terminated"
+                )
+        if not line:
+            raise StdioTransportError("the MCP server closed before answering")
+        try:
+            return json.loads(line)
+        except json.JSONDecodeError as error:
+            raise StdioTransportError("the MCP server answered with invalid JSON") from error
+```
+
+   with
+
+```python
+        with self._lock:
+            self._write(process, frame)
+            if "id" not in frame:
+                return None
+            deadline = time.monotonic() + self._timeout
+            skipped = 0
+            while True:
+                try:
+                    line = self._replies.get(timeout=max(0.0, deadline - time.monotonic()))
+                except queue.Empty:
+                    _terminate_process_tree(process)
+                    self._process = None
+                    raise StdioTransportError(
+                        f"the MCP server did not answer within {self._timeout}s and was terminated"
+                    )
+                if not line:
+                    raise StdioTransportError("the MCP server closed before answering")
+                try:
+                    message = json.loads(line)
+                except json.JSONDecodeError as error:
+                    skipped += 1
+                    if skipped > MAX_SKIPPED_LINES:
+                        raise StdioTransportError("the MCP server answered with invalid JSON") from error
+                    continue
+                if not isinstance(message, dict):
+                    continue
+                if message.get("id") == frame["id"] and ("result" in message or "error" in message):
+                    return message
+                if "method" in message:
+                    reply = dispatch_server_message(message, self.on_message)
+                    if reply is not None:
+                        self._write(process, reply)
+                        deadline = time.monotonic() + self._timeout  # the server waited on us: its clock starts again
+
+    @staticmethod
+    def _write(process: subprocess.Popen[bytes], frame: Mapping[str, Any]) -> None:
+        assert process.stdin is not None
+        try:
+            process.stdin.write((json.dumps(frame) + "\n").encode())
+            process.stdin.flush()
+        except OSError as error:
+            raise StdioTransportError(f"the MCP server closed its input: {error}") from error
+```
+
+10. In `src/agentos/mcp/transport_http.py`, replace
+
+```python
+from agentos.agentic.agent_tools import _public_url
+```
+
+   with
+
+```python
+from agentos.agentic.agent_tools import _public_url
+
+from .protocol import dispatch_server_message
+```
+
+11. In `src/agentos/mcp/transport_http.py`, replace
+
+```python
+        self.session_id: str | None = None
+```
+
+   with
+
+```python
+        self.session_id: str | None = None
+        # Set by the client: receives the server's own requests and notifications (W5).
+        self.on_message: Any = None
+```
+
+12. In `src/agentos/mcp/transport_http.py`, replace
+
+```python
+        token = self._token_source.current() if self._token_source is not None else None
+        response = self._post(frame, token)
+        if response.status_code == 401:
+            if self._token_source is None or token is None:
+                raise HttpUnauthorized(response.headers.get("www-authenticate"))
+            # One renewal and one retry: a token the server rejects right after
+            # renewing means the grant itself is gone.
+            token = self._token_source.force_refresh(token)
+            response = self._post(frame, token)
+            if response.status_code == 401:
+                self._token_source.invalidate("Reconexão necessária: o servidor recusou o acesso renovado")
+        self.session_id = response.headers.get("mcp-session-id") or self.session_id
+        if response.status_code >= 400:
+            raise HttpTransportError(f"the MCP endpoint answered {response.status_code}")
+        if "id" not in frame:
+            return None
+        body = response.content[:MAX_RESPONSE_BYTES].decode("utf-8", "replace")
+        if "text/event-stream" in response.headers.get("content-type", ""):
+            body = _first_sse_payload(body, expected_id=frame.get("id"))
+        try:
+            return json.loads(body)
+        except json.JSONDecodeError as error:
+            raise HttpTransportError("the MCP endpoint answered with invalid JSON") from error
+
+    def _post(self, frame: Mapping[str, Any], token: str | None) -> httpx.Response:
+```
+
+   with
+
+```python
+        token = self._token_source.current() if self._token_source is not None else None
+        response = self._post(frame, token)
+        try:
+            if response.status_code == 401:
+                if self._token_source is None or token is None:
+                    raise HttpUnauthorized(response.headers.get("www-authenticate"))
+                # One renewal and one retry: a token the server rejects right after
+                # renewing means the grant itself is gone.
+                response.close()
+                token = self._token_source.force_refresh(token)
+                response = self._post(frame, token)
+                if response.status_code == 401:
+                    self._token_source.invalidate("Reconexão necessária: o servidor recusou o acesso renovado")
+            self.session_id = response.headers.get("mcp-session-id") or self.session_id
+            if response.status_code >= 400:
+                raise HttpTransportError(f"the MCP endpoint answered {response.status_code}")
+            if "id" not in frame:
+                return None
+            if "text/event-stream" in response.headers.get("content-type", ""):
+                return self._answer_from_events(response, frame.get("id"), token)
+            body = _bounded_body(response)
+        finally:
+            response.close()
+        try:
+            return json.loads(body)
+        except json.JSONDecodeError as error:
+            raise HttpTransportError("the MCP endpoint answered with invalid JSON") from error
+
+    def _answer_from_events(self, response: httpx.Response, request_id: Any, token: str | None) -> dict[str, Any]:
+        """Read the event stream until the answer to ``request_id``, answering the server's own requests on the way."""
+        fallback: dict[str, Any] | None = None
+        size = 0
+        try:
+            for data in _events(response):
+                size += len(data)
+                if size > MAX_RESPONSE_BYTES:
+                    raise HttpTransportError("the event stream is larger than 4 MB")
+                try:
+                    message = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(message, Mapping):
+                    continue
+                if message.get("id") == request_id and ("result" in message or "error" in message):
+                    return dict(message)
+                if "method" in message:
+                    reply = dispatch_server_message(message, self.on_message)
+                    if reply is not None:
+                        self._post_reply(reply, token)
+                elif fallback is None and ("result" in message or "error" in message):
+                    fallback = dict(message)
+        except httpx.HTTPError as error:
+            raise HttpTransportError(f"the event stream broke: {error}") from error
+        if fallback is not None:
+            return fallback
+        raise HttpTransportError("the event stream carried no answer")
+
+    def _post_reply(self, reply: Mapping[str, Any], token: str | None) -> None:
+        response = self._post(reply, token)
+        try:
+            if response.status_code >= 400:
+                raise HttpTransportError(f"the MCP endpoint refused our answer ({response.status_code})")
+        finally:
+            response.close()
+
+    def _post(self, frame: Mapping[str, Any], token: str | None) -> httpx.Response:
+```
+
+13. In `src/agentos/mcp/transport_http.py`, replace
+
+```python
+        try:
+            return self._client.post(self._url, json=dict(frame), headers=headers, timeout=self._timeout)
+        except httpx.HTTPError as error:
+            raise HttpTransportError(f"the MCP endpoint did not answer: {error}") from error
+```
+
+   with
+
+```python
+        try:
+            request = self._client.build_request("POST", self._url, json=dict(frame), headers=headers, timeout=self._timeout)
+            return self._client.send(request, stream=True)
+        except httpx.HTTPError as error:
+            raise HttpTransportError(f"the MCP endpoint did not answer: {error}") from error
+```
+
+14. In `src/agentos/mcp/transport_http.py`, replace
+
+```python
+def _first_sse_payload(body: str, *, expected_id: Any = None) -> str:
+    candidates: list[str] = []
+    event_lines: list[str] = []
+    for line in body.splitlines():
+        if not line.strip():
+            if len(event_lines) > 1:
+                candidates.append("\n".join(event_lines))
+            event_lines = []
+            continue
+        if line.startswith("data:"):
+            chunk = line[5:].strip()
+            if chunk:
+                candidates.append(chunk)
+                event_lines.append(chunk)
+    if len(event_lines) > 1:
+        candidates.append("\n".join(event_lines))
+    if not candidates:
+        raise HttpTransportError("the event stream carried no data frame")
+    if expected_id is not None:
+        for chunk in candidates:
+            try:
+                parsed = json.loads(chunk)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, Mapping) and parsed.get("id") == expected_id:
+                return chunk
+        for chunk in candidates:
+            try:
+                parsed = json.loads(chunk)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, Mapping) and ("result" in parsed or "error" in parsed):
+                return chunk
+    for chunk in candidates:
+        try:
+            json.loads(chunk)
+            return chunk
+        except json.JSONDecodeError:
+            continue
+    return candidates[0]
+
+
+
+```
+
+   with
+
+```python
+def _bounded_body(response: httpx.Response) -> str:
+    chunks: list[bytes] = []
+    size = 0
+    for chunk in response.iter_bytes():
+        chunks.append(chunk)
+        size += len(chunk)
+        if size >= MAX_RESPONSE_BYTES:
+            break
+    return b"".join(chunks)[:MAX_RESPONSE_BYTES].decode("utf-8", "replace")
+
+
+def _events(response: httpx.Response):
+    """Each server-sent event's data (its ``data:`` lines joined), as it arrives."""
+    lines: list[str] = []
+    for line in response.iter_lines():
+        if not line.strip():
+            if lines:
+                yield "\n".join(lines)
+                lines = []
+            continue
+        if line.startswith("data:"):
+            chunk = line[5:]
+            lines.append(chunk[1:] if chunk.startswith(" ") else chunk)
+    if lines:
+        yield "\n".join(lines)
+
+
+```
+
+- [ ] **Step 4: Run the tests and see them pass**
+
+Run: `uv run pytest -q tests/unit/mcp/test_server_messages.py`
+Expected: PASS.
+
+Also run `uv run pytest -q tests/unit/mcp`: expected PASS (the existing transport tests still pass: an event stream is now read as it arrives).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add tests/unit/mcp/test_server_messages.py src/agentos/mcp/protocol.py src/agentos/mcp/client.py src/agentos/mcp/transport_stdio.py src/agentos/mcp/transport_http.py
+git commit -m "feat(w5): the MCP client answers the server's requests and notes its notifications
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+### Task 21: Legacy SSE and WebSocket transports
+
+Configuration files may name `"type": "sse"` (the 2024-11-05 HTTP+SSE transport: one event stream, messages posted to the endpoint the server names, which must be on the stream's origin) and `"type": "ws"` (one WebSocket, subprotocol `mcp`). Both answer the server's requests like Task 20's transports. `McpTransport` gains `SSE` and `WEBSOCKET`; `build_client` builds them with the file's headers; without `allow_local` (Orin's own servers) the address must be public `https://`/`wss://`. `McpServerService.propose` still accepts only stdio and http, so the model cannot propose the new transports.
+
+**Files:**
+- Create: `src/agentos/mcp/transport_sse.py`
+- Create: `src/agentos/mcp/transport_ws.py`
+- Modify: `src/agentos/mcp/models.py`
+- Modify: `src/agentos/mcp/service.py`
+- Modify: `src/agentos/mcp/toolset.py`
+- Modify: `src/agentos/mcp/file_servers.py`
+- Test: `tests/unit/mcp/test_sse_ws_transports.py`
+
+**Interfaces:**
+- Consumes: Task 20's `dispatch_server_message`; Batch D's `file_bundle`.
+- Produces: `agentos.mcp.transport_sse`: `SseTransport(*, url, headers=None, client=None, timeout=45.0, allow_local=False)`, `SseTransportError`, `checked_url(url, *, allow_local, secure='https://', plain='http://')`; `agentos.mcp.transport_ws`: `WebSocketTransport(*, url, headers=None, timeout=45.0, allow_local=False, connect=None)`, `WebSocketTransportError`; `McpTransport.SSE`, `McpTransport.WEBSOCKET`.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `tests/unit/mcp/test_sse_ws_transports.py`:
+
+```python
+"""W5: the legacy HTTP+SSE and the WebSocket transports, for MCP servers in configuration files."""
+from __future__ import annotations
+
+import json
+import queue
+import threading
+
+import httpx
+import pytest
+from sqlalchemy import create_engine
+
+from agentos.mcp.file_config import parse_server
+from agentos.mcp.file_servers import file_bundle
+from agentos.mcp.models import McpTransport
+from agentos.mcp.service import McpServerService, McpServiceError
+from agentos.mcp.toolset import build_client
+from agentos.mcp.transport_sse import SseTransport, SseTransportError
+from agentos.mcp.transport_ws import WebSocketTransport, WebSocketTransportError
+from agentos.persistence.postgres.schema import metadata
+
+
+def _sse_client(events: "queue.Queue[bytes | None]", on_post):
+    def stream():
+        while True:
+            item = events.get(timeout=5)
+            if item is None:
+                return
+            yield item
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=stream())
+        on_post(str(request.url), json.loads(request.content))
+        return httpx.Response(202)
+
+    return httpx.Client(transport=httpx.MockTransport(handler))
+
+
+def test_sse_posts_to_the_named_endpoint_and_reads_answers_from_the_stream() -> None:
+    events: queue.Queue[bytes | None] = queue.Queue()
+    events.put(b"event: endpoint\ndata: /messages?session=abc\n\n")
+    posted: list[tuple[str, dict]] = []
+
+    def on_post(url: str, frame: dict) -> None:
+        posted.append((url, frame))
+        if frame.get("method") == "tools/call":
+            events.put(b'event: message\ndata: {"jsonrpc":"2.0","id":"s9","method":"ping"}\n\n')
+        elif "result" in frame:  # our answer to the server's ping
+            events.put(b'event: message\ndata: {"jsonrpc":"2.0","id":4,"result":{"ok":true}}\n\n')
+
+    transport = SseTransport(url="http://127.0.0.1:9/sse", client=_sse_client(events, on_post), allow_local=True, timeout=5)
+    transport.on_message = lambda message: {} if message.get("method") == "ping" else None
+    transport.open()
+    try:
+        assert transport.send({"jsonrpc": "2.0", "id": 4, "method": "tools/call"})["result"] == {"ok": True}
+    finally:
+        events.put(None)
+        transport.close()
+    assert posted[0][0] == "http://127.0.0.1:9/messages?session=abc"
+    assert posted[1][1] == {"jsonrpc": "2.0", "id": "s9", "result": {}}
+
+
+def test_sse_refuses_an_endpoint_on_another_origin() -> None:
+    events: queue.Queue[bytes | None] = queue.Queue()
+    events.put(b"event: endpoint\ndata: https://elsewhere.example.com/messages\n\n")
+    transport = SseTransport(url="http://127.0.0.1:9/sse", client=_sse_client(events, lambda *_: None), allow_local=True, timeout=5)
+    with pytest.raises(SseTransportError, match="another origin"):
+        transport.open()
+    events.put(None)
+
+
+def test_without_allow_local_the_addresses_must_be_public_and_secure() -> None:
+    with pytest.raises(SseTransportError):
+        SseTransport(url="http://127.0.0.1:9/sse")
+    with pytest.raises(WebSocketTransportError):
+        WebSocketTransport(url="ws://127.0.0.1:9/mcp")
+
+
+def test_websocket_round_trips_and_answers_the_servers_requests() -> None:
+    from websockets.sync.server import serve
+
+    def handler(connection) -> None:
+        for raw in connection:
+            frame = json.loads(raw)
+            if frame.get("method") != "tools/call":
+                continue
+            connection.send(json.dumps({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}))
+            connection.send(json.dumps({"jsonrpc": "2.0", "id": "w1", "method": "ping"}))
+            reply = json.loads(connection.recv())
+            connection.send(json.dumps({"jsonrpc": "2.0", "id": frame["id"], "result": {"pong": reply.get("result") == {}, "protocol": connection.subprotocol}}))
+
+    with serve(handler, "127.0.0.1", 0, subprotocols=["mcp"]) as server:
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        port = server.socket.getsockname()[1]
+        transport = WebSocketTransport(url=f"ws://127.0.0.1:{port}/mcp", allow_local=True, timeout=5)
+        seen: list[str] = []
+        transport.on_message = lambda message: seen.append(message["method"]) or ({} if message.get("id") is not None else None)
+        transport.open()
+        try:
+            answer = transport.send({"jsonrpc": "2.0", "id": 1, "method": "tools/call"})
+        finally:
+            transport.close()
+            server.shutdown()
+    assert answer["result"] == {"pong": True, "protocol": "mcp"}
+    assert seen == ["notifications/tools/list_changed", "ping"]
+
+
+def test_file_servers_may_use_sse_and_websocket() -> None:
+    sse = parse_server("live", {"type": "sse", "url": "http://127.0.0.1:9/sse", "headers": {"K": "v"}}, scope="user", source="t", environ={})
+    config, _, secrets = file_bundle(sse, user_id="u1")
+    assert config.transport is McpTransport.SSE
+    client = build_client(config, secrets)
+    assert isinstance(client._transport, SseTransport) and client._transport._headers == {"K": "v"}
+    sock = parse_server("sock", {"type": "ws", "url": "ws://127.0.0.1:9/mcp"}, scope="user", source="t", environ={})
+    config, _, secrets = file_bundle(sock, user_id="u1")
+    assert config.transport is McpTransport.WEBSOCKET and isinstance(build_client(config, secrets)._transport, WebSocketTransport)
+
+
+def test_the_model_cannot_propose_an_sse_or_websocket_server(monkeypatch) -> None:
+    monkeypatch.setenv("AGENTOS_PROVIDER_ENCRYPTION_KEY", "wYIYy1yzr2r_LRw2P0FE8zpO6zRQmYtP6cn0FdOtBOA=")
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    metadata.create_all(engine)
+    service = McpServerService(engine)
+    for transport, url in (("sse", "https://mcp.example.com/sse"), ("ws", "wss://mcp.example.com/mcp")):
+        with pytest.raises(McpServiceError):
+            service.propose({"user_id": "u1", "display_name": f"x-{transport}", "transport": transport, "url": url})
+```
+
+- [ ] **Step 2: Run it to verify it fails**
+
+Run: `uv run pytest -q tests/unit/mcp/test_sse_ws_transports.py`
+Expected: FAIL — `ModuleNotFoundError: No module named 'agentos.mcp.transport_sse'` (collection error).
+
+- [ ] **Step 3: Implement**
+
+Create `src/agentos/mcp/transport_sse.py`:
+
+```python
+"""The legacy HTTP+SSE transport for a remote MCP server (protocol 2024-11-05), for servers in configuration files.
+
+The client opens one event stream (GET); the server's first ``endpoint`` event names where to POST messages, and
+every answer arrives on the stream. The endpoint must be on the stream's own origin. Only a server the person wrote
+in a configuration file uses this transport (``allow_local`` lets it be local or plain http); without
+``allow_local`` the address must be public HTTPS, checked again before every message.
+"""
+from __future__ import annotations
+
+import json
+import queue
+import threading
+import time
+from typing import Any, Mapping
+from urllib.parse import urljoin, urlsplit
+
+import httpx
+
+from agentos.agentic.agent_tools import _public_url
+
+from .protocol import dispatch_server_message
+
+DEFAULT_TIMEOUT_SECONDS = 45.0
+MAX_EVENT_BYTES = 4_000_000
+
+
+class SseTransportError(RuntimeError):
+    """The event stream or a message post failed."""
+
+
+def checked_url(url: str, *, allow_local: bool, secure: str = "https://", plain: str = "http://") -> str:
+    """The address, if the endpoint policy allows it: public and ``secure`` unless ``allow_local``."""
+    text = str(url or "").strip()
+    if allow_local:
+        if not text.lower().startswith((secure, plain)):
+            raise SseTransportError(f"an MCP endpoint must start with {secure} or {plain}")
+        return text
+    if not text.lower().startswith(secure):
+        raise SseTransportError(f"an MCP endpoint must use {secure.rstrip(':/')}")
+    try:
+        _public_url("https://" + text[len(secure):], resolve_dns=True)
+    except Exception as error:  # the policy raises its own refusal type
+        raise SseTransportError(str(error)) from error
+    return text
+
+
+class SseTransport:
+    kind = "sse"
+
+    def __init__(self, *, url: str, headers: Mapping[str, str] | None = None, client: httpx.Client | None = None,
+                 timeout: float = DEFAULT_TIMEOUT_SECONDS, allow_local: bool = False) -> None:
+        self._allow_local = allow_local
+        self._url = checked_url(url, allow_local=allow_local)
+        self._headers = dict(headers or {})
+        self._timeout = timeout
+        self._client = client
+        self._owns_client = client is None
+        self._endpoint: str | None = None
+        self._failure = ""
+        self._messages: queue.Queue[dict[str, Any] | None] = queue.Queue()
+        self._ready = threading.Event()
+        self._ended = threading.Event()
+        self._reader: threading.Thread | None = None
+        self._response: httpx.Response | None = None
+        self._lock = threading.Lock()
+        self.on_message: Any = None  # set by the client: the server's own requests and notifications
+
+    def open(self) -> None:
+        if self._reader is not None:
+            return
+        if self._client is None:
+            self._client = httpx.Client(timeout=httpx.Timeout(self._timeout, read=None), follow_redirects=False)
+        self._reader = threading.Thread(target=self._read_stream, name="orin-mcp-sse", daemon=True)
+        self._reader.start()
+        if not self._ready.wait(self._timeout) or self._endpoint is None:
+            self.close()
+            raise SseTransportError(self._failure or f"the server named no endpoint within {self._timeout:g}s")
+
+    def _read_stream(self) -> None:
+        assert self._client is not None
+        size = 0
+        try:
+            with self._client.stream("GET", self._url, headers={"accept": "text/event-stream", **self._headers}) as response:
+                self._response = response
+                if response.status_code >= 400:
+                    self._failure = f"the MCP endpoint answered {response.status_code}"
+                    return
+                name, data = "", []
+                for line in response.iter_lines():
+                    size += len(line)
+                    if size > MAX_EVENT_BYTES * 16:
+                        self._failure = "the event stream sent too much"
+                        return
+                    if not line.strip():
+                        if data:
+                            self._event(name or "message", "\n".join(data))
+                        name, data = "", []
+                    elif line.startswith("event:"):
+                        name = line[6:].strip()
+                    elif line.startswith("data:"):
+                        chunk = line[5:]
+                        data.append(chunk[1:] if chunk.startswith(" ") else chunk)
+        except Exception as error:  # noqa: BLE001 - the next send reports it
+            if not self._failure:
+                self._failure = f"the event stream broke: {str(error)[:200]}"
+        finally:
+            self._ended.set()
+            self._ready.set()
+            self._messages.put(None)
+
+    def _event(self, name: str, data: str) -> None:
+        if name == "endpoint":
+            endpoint = urljoin(self._url, data.strip())
+            if urlsplit(endpoint)[:2] != urlsplit(self._url)[:2]:
+                self._failure = "the server named an endpoint on another origin"
+            else:
+                self._endpoint = endpoint
+            self._ready.set()
+            return
+        if name != "message" or len(data) > MAX_EVENT_BYTES:
+            return
+        try:
+            message = json.loads(data)
+        except json.JSONDecodeError:
+            return
+        if isinstance(message, dict):
+            self._messages.put(message)
+
+    def _post(self, frame: Mapping[str, Any]) -> None:
+        if self._endpoint is None or self._client is None:
+            raise SseTransportError("the event stream is not open")
+        if not self._allow_local:
+            checked_url(self._endpoint, allow_local=False)
+        try:
+            response = self._client.post(self._endpoint, json=dict(frame), headers={"content-type": "application/json", **self._headers},
+                                         timeout=self._timeout)
+        except httpx.HTTPError as error:
+            raise SseTransportError(f"the MCP endpoint did not answer: {error}") from error
+        if response.status_code >= 400:
+            raise SseTransportError(f"the MCP endpoint answered {response.status_code}")
+
+    def send(self, frame: Mapping[str, Any]) -> dict[str, Any] | None:
+        with self._lock:
+            self._post(frame)
+            if "id" not in frame:
+                return None
+            deadline = time.monotonic() + self._timeout
+            while True:
+                try:
+                    message = self._messages.get(timeout=max(0.0, deadline - time.monotonic()))
+                except queue.Empty:
+                    raise SseTransportError(f"the MCP server did not answer within {self._timeout:g}s") from None
+                if message is None:
+                    self._messages.put(None)  # every later send sees the end too
+                    raise SseTransportError(self._failure or "the event stream closed")
+                if message.get("id") == frame["id"] and ("result" in message or "error" in message):
+                    return message
+                if "method" in message:
+                    reply = dispatch_server_message(message, self.on_message)
+                    if reply is not None:
+                        self._post(reply)
+                        deadline = time.monotonic() + self._timeout
+
+    def close(self) -> None:
+        response, self._response = self._response, None
+        if response is not None:
+            try:
+                response.close()
+            except Exception:  # noqa: BLE001 - closing never fails a turn
+                pass
+        if self._owns_client and self._client is not None:
+            self._client.close()
+            self._client = None
+
+
+__all__ = ["SseTransport", "SseTransportError", "checked_url"]
+```
+
+Create `src/agentos/mcp/transport_ws.py`:
+
+```python
+"""The WebSocket transport for an MCP server in a configuration file (``"type": "ws"``).
+
+One connection (subprotocol ``mcp``); each JSON-RPC message is one text frame. The server's own requests that
+arrive while a call waits are answered on the same connection. Without ``allow_local`` the address must be public
+``wss://``.
+"""
+from __future__ import annotations
+
+import json
+import threading
+import time
+from typing import Any, Callable, Mapping
+
+from .protocol import dispatch_server_message
+from .transport_sse import checked_url
+
+DEFAULT_TIMEOUT_SECONDS = 45.0
+MAX_FRAME_BYTES = 4_000_000
+
+
+class WebSocketTransportError(RuntimeError):
+    """The connection failed or closed."""
+
+
+def _default_connect(url: str, **options: Any) -> Any:
+    from websockets.sync.client import connect
+
+    return connect(url, **options)
+
+
+class WebSocketTransport:
+    kind = "ws"
+
+    def __init__(self, *, url: str, headers: Mapping[str, str] | None = None, timeout: float = DEFAULT_TIMEOUT_SECONDS,
+                 allow_local: bool = False, connect: Callable[..., Any] | None = None) -> None:
+        try:
+            self._url = checked_url(url, allow_local=allow_local, secure="wss://", plain="ws://")
+        except RuntimeError as error:
+            raise WebSocketTransportError(str(error)) from error
+        self._headers = dict(headers or {})
+        self._timeout = timeout
+        self._connect = connect or _default_connect
+        self._socket: Any = None
+        self._lock = threading.Lock()
+        self.on_message: Any = None  # set by the client: the server's own requests and notifications
+
+    def open(self) -> None:
+        if self._socket is not None:
+            return
+        try:
+            self._socket = self._connect(
+                self._url, subprotocols=["mcp"], additional_headers=self._headers or None,
+                open_timeout=self._timeout, max_size=MAX_FRAME_BYTES,
+            )
+        except Exception as error:  # noqa: BLE001 - reported for this server only
+            raise WebSocketTransportError(f"could not connect: {str(error)[:200]}") from error
+
+    def _write(self, frame: Mapping[str, Any]) -> None:
+        try:
+            self._socket.send(json.dumps(frame))
+        except Exception as error:  # noqa: BLE001
+            raise WebSocketTransportError(f"the connection closed: {str(error)[:200]}") from error
+
+    def send(self, frame: Mapping[str, Any]) -> dict[str, Any] | None:
+        if self._socket is None:
+            raise WebSocketTransportError("the connection is not open")
+        with self._lock:
+            self._write(frame)
+            if "id" not in frame:
+                return None
+            deadline = time.monotonic() + self._timeout
+            while True:
+                try:
+                    raw = self._socket.recv(timeout=max(0.0, deadline - time.monotonic()))
+                except TimeoutError:
+                    raise WebSocketTransportError(f"the MCP server did not answer within {self._timeout:g}s") from None
+                except Exception as error:  # noqa: BLE001 - a closed connection
+                    raise WebSocketTransportError(f"the connection closed: {str(error)[:200]}") from error
+                try:
+                    message = json.loads(raw)
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                if not isinstance(message, dict):
+                    continue
+                if message.get("id") == frame["id"] and ("result" in message or "error" in message):
+                    return message
+                if "method" in message:
+                    reply = dispatch_server_message(message, self.on_message)
+                    if reply is not None:
+                        self._write(reply)
+                        deadline = time.monotonic() + self._timeout
+
+    def close(self) -> None:
+        socket, self._socket = self._socket, None
+        if socket is not None:
+            try:
+                socket.close()
+            except Exception:  # noqa: BLE001 - closing never fails a turn
+                pass
+
+
+__all__ = ["WebSocketTransport", "WebSocketTransportError"]
+```
+
+Then make these edits, in order (each `replace` block occurs exactly once in its file; if one does not, stop and report — do not guess):
+
+1. In `src/agentos/mcp/models.py`, replace
+
+```python
+class McpTransport(StrEnum):
+    STDIO = "stdio"
+    HTTP = "http"
+```
+
+   with
+
+```python
+class McpTransport(StrEnum):
+    STDIO = "stdio"
+    HTTP = "http"
+    # W5: only servers in configuration files use these two (the model can propose stdio or http only).
+    SSE = "sse"
+    WEBSOCKET = "ws"
+```
+
+2. In `src/agentos/mcp/models.py`, replace
+
+```python
+        if self.transport is McpTransport.HTTP and not self.url:
+            raise ValueError("an http mcp server requires a url")
+```
+
+   with
+
+```python
+        if self.transport is not McpTransport.STDIO and not self.url:
+            raise ValueError(f"an {self.transport.value} mcp server requires a url")
+```
+
+3. In `src/agentos/mcp/service.py`, replace
+
+```python
+            transport = McpTransport(str(command.get("transport") or ""))
+        except ValueError as error:
+            raise McpServiceError("transport must be 'stdio' or 'http'") from error
+```
+
+   with
+
+```python
+            transport = McpTransport(str(command.get("transport") or ""))
+        except ValueError as error:
+            raise McpServiceError("transport must be 'stdio' or 'http'") from error
+        if transport not in (McpTransport.STDIO, McpTransport.HTTP):
+            raise McpServiceError("transport must be 'stdio' or 'http'")  # SSE and WebSocket come only from configuration files
+```
+
+4. In `src/agentos/mcp/toolset.py`, replace
+
+```python
+    from .client import McpClient
+    from .transport_http import HttpTransport
+    from .transport_stdio import StdioTransport
+```
+
+   with
+
+```python
+    from .client import McpClient
+    from .transport_http import HttpTransport
+    from .transport_sse import SseTransport
+    from .transport_stdio import StdioTransport
+    from .transport_ws import WebSocketTransport
+```
+
+5. In `src/agentos/mcp/toolset.py`, replace
+
+```python
+    if config.transport is McpTransport.STDIO:
+        transport = StdioTransport(command=str(config.command), args=config.args, env=dict(secrets), cwd=config.cwd,
+                                   allow_any_command=from_file)
+    else:
+```
+
+   with
+
+```python
+    file_headers = {name[len("header:"):]: value for name, value in secrets.items() if name.startswith("header:")}
+    if config.transport is McpTransport.STDIO:
+        transport = StdioTransport(command=str(config.command), args=config.args, env=dict(secrets), cwd=config.cwd,
+                                   allow_any_command=from_file)
+    elif config.transport is McpTransport.SSE:
+        transport = SseTransport(url=str(config.url), headers=file_headers if from_file else {}, allow_local=from_file)
+    elif config.transport is McpTransport.WEBSOCKET:
+        transport = WebSocketTransport(url=str(config.url), headers=file_headers if from_file else {}, allow_local=from_file)
+    else:
+```
+
+6. In `src/agentos/mcp/toolset.py`, replace
+
+```python
+        if from_file:
+            headers.update({name[len("header:"):]: value for name, value in secrets.items() if name.startswith("header:")})
+```
+
+   with
+
+```python
+        if from_file:
+            headers.update(file_headers)
+```
+
+7. In `src/agentos/mcp/file_servers.py`, replace
+
+```python
+    if server.transport not in ("stdio", "http"):
+        raise McpConfigError(f"the {server.transport} transport is not supported yet")
+    slug = slugify(server.name)
+    stdio = server.transport == "stdio"
+```
+
+   with
+
+```python
+    slug = slugify(server.name)
+    stdio = server.transport == "stdio"
+    transport = {"stdio": McpTransport.STDIO, "http": McpTransport.HTTP, "sse": McpTransport.SSE, "ws": McpTransport.WEBSOCKET}.get(server.transport)
+    if transport is None:
+        raise McpConfigError(f"the {server.transport} transport is not supported")
+```
+
+8. In `src/agentos/mcp/file_servers.py`, replace
+
+```python
+        transport=McpTransport.STDIO if stdio else McpTransport.HTTP, command=server.command or None, args=server.args,
+```
+
+   with
+
+```python
+        transport=transport, command=server.command or None, args=server.args,
+```
+
+- [ ] **Step 4: Run the tests and see them pass**
+
+Run: `uv run pytest -q tests/unit/mcp/test_sse_ws_transports.py`
+Expected: PASS.
+
+Also run `uv run pytest -q tests/unit/mcp`: expected PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/agentos/mcp/transport_sse.py src/agentos/mcp/transport_ws.py tests/unit/mcp/test_sse_ws_transports.py src/agentos/mcp/models.py src/agentos/mcp/service.py src/agentos/mcp/toolset.py src/agentos/mcp/file_servers.py
+git commit -m "feat(w5): legacy SSE and WebSocket transports for MCP servers in configuration files
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+### Task 22: A graceful stdio shutdown and MAX_MCP_OUTPUT_TOKENS
+
+Closing a stdio server now closes its input and gives it 0.3 s to exit before its process tree is killed (a server that exits on its own is never killed). An MCP tool's output limit follows `MAX_MCP_OUTPUT_TOKENS` (default 25,000 tokens, 4 characters each, kept between 1,000 and 250,000 tokens); past it, the toolset keeps the rest in a file as it already does.
+
+**Files:**
+- Modify: `src/agentos/mcp/transport_stdio.py`
+- Modify: `src/agentos/mcp/toolset.py`
+- Modify: `tests/unit/mcp/test_transport_stdio.py`
+- Modify: `tests/unit/mcp/test_file_mcp_servers.py`
+
+**Interfaces:**
+- Produces: `transport_stdio.GRACEFUL_EXIT_SECONDS = 0.3`; `agentos.mcp.toolset.mcp_output_limit_chars()`, `DEFAULT_MCP_OUTPUT_TOKENS = 25_000`.
+
+- [ ] **Step 1: Write the failing test**
+
+Append to the end of `tests/unit/mcp/test_transport_stdio.py` (after its last line, separated by one blank line):
+
+```python
+POLITE_SERVER = """
+import sys
+print("ready", flush=True)
+for line in sys.stdin:
+    pass
+"""
+
+STUBBORN_SERVER = """
+import time
+print("ready", flush=True)
+while True:
+    time.sleep(1)
+"""
+
+
+def _closing(tmp_path, monkeypatch, source):
+    import agentos.mcp.transport_stdio as module
+
+    killed: list[int] = []
+    original = module._terminate_process_tree
+    monkeypatch.setattr(module, "_terminate_process_tree", lambda process: killed.append(process.pid) or original(process))
+    script = tmp_path / "server.py"
+    script.write_text(source, encoding="utf-8")
+    transport = StdioTransport(command=sys.executable, args=(str(script),), env={}, allow_any_command=True)
+    transport.open()
+    assert transport._replies.get(timeout=20).strip() == b"ready"  # the server is running before it is closed
+    process = transport._process
+    started = time.monotonic()
+    transport.close()
+    return killed, process, time.monotonic() - started
+
+
+def test_a_server_that_exits_when_its_input_closes_is_not_killed(tmp_path, monkeypatch):
+    killed, process, _ = _closing(tmp_path, monkeypatch, POLITE_SERVER)
+    assert killed == [] and process.poll() is not None
+
+
+def test_a_server_that_ignores_its_closed_input_is_killed_after_a_short_wait(tmp_path, monkeypatch):
+    killed, process, elapsed = _closing(tmp_path, monkeypatch, STUBBORN_SERVER)
+    assert killed == [process.pid] and 0.25 <= elapsed < 5
+```
+
+Append to the end of `tests/unit/mcp/test_file_mcp_servers.py` (after its last line, separated by one blank line):
+
+```python
+def test_the_output_limit_follows_max_mcp_output_tokens(monkeypatch) -> None:
+    config, _, secrets = file_bundle(_server(), user_id="u1")
+    provider = McpToolProvider([(config, (TOOL,), secrets)])
+    assert provider.definitions()[0].max_result_size_chars == 100_000  # 25,000 tokens by default
+    monkeypatch.setenv("MAX_MCP_OUTPUT_TOKENS", "1000")
+    assert provider.definitions()[0].max_result_size_chars == 4_000
+    monkeypatch.setenv("MAX_MCP_OUTPUT_TOKENS", "not a number")
+    assert provider.definitions()[0].max_result_size_chars == 100_000
+```
+
+- [ ] **Step 2: Run it to verify it fails**
+
+Run: `uv run pytest -q tests/unit/mcp/test_transport_stdio.py tests/unit/mcp/test_file_mcp_servers.py`
+Expected: FAIL — `test_a_server_that_exits_when_its_input_closes_is_not_killed` (it is killed at once), `test_a_server_that_ignores_its_closed_input_is_killed_after_a_short_wait` (no wait), and `test_the_output_limit_follows_max_mcp_output_tokens` (the limit stays 100,000).
+
+- [ ] **Step 3: Implement**
+
+Then make these edits, in order (each `replace` block occurs exactly once in its file; if one does not, stop and report — do not guess):
+
+1. In `src/agentos/mcp/transport_stdio.py`, replace
+
+```python
+# Lines that are not JSON (a server printing a banner on stdout) are skipped, up to this many per call.
+MAX_SKIPPED_LINES = 1000
+```
+
+   with
+
+```python
+# Lines that are not JSON (a server printing a banner on stdout) are skipped, up to this many per call.
+MAX_SKIPPED_LINES = 1000
+# W5: closing a server closes its input first and gives it this long to exit on its own before its tree is killed.
+GRACEFUL_EXIT_SECONDS = 0.3
+```
+
+2. In `src/agentos/mcp/transport_stdio.py`, replace
+
+```python
+        try:
+            if process.stdin is not None:
+                process.stdin.close()
+        except OSError:
+            pass
+        _terminate_process_tree(process)
+```
+
+   with
+
+```python
+        try:
+            if process.stdin is not None:
+                process.stdin.close()
+        except OSError:
+            pass
+        try:
+            process.wait(timeout=GRACEFUL_EXIT_SECONDS)
+            return
+        except subprocess.TimeoutExpired:
+            pass
+        _terminate_process_tree(process)
+```
+
+3. In `src/agentos/mcp/toolset.py`, replace
+
+```python
+import threading
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping, Sequence
+```
+
+   with
+
+```python
+import os
+import threading
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping, Sequence
+```
+
+4. In `src/agentos/mcp/toolset.py`, replace
+
+```python
+MAX_IMAGES_PER_CALL = 4
+```
+
+   with
+
+```python
+MAX_IMAGES_PER_CALL = 4
+DEFAULT_MCP_OUTPUT_TOKENS = 25_000
+
+
+def mcp_output_limit_chars() -> int:
+    """How much of an MCP tool's answer reaches the model before the rest goes to a file: ``MAX_MCP_OUTPUT_TOKENS``
+    (default 25,000 tokens, counted as 4 characters each; at least 1,000 and at most 250,000 tokens)."""
+    try:
+        tokens = int(str(os.environ.get("MAX_MCP_OUTPUT_TOKENS") or DEFAULT_MCP_OUTPUT_TOKENS).strip())
+    except ValueError:
+        tokens = DEFAULT_MCP_OUTPUT_TOKENS
+    return max(1_000, min(tokens, 250_000)) * 4
+```
+
+5. In `src/agentos/mcp/toolset.py`, replace
+
+```python
+                    max_result_size_chars=MAX_MCP_RESULT_CHARS,
+```
+
+   with
+
+```python
+                    max_result_size_chars=mcp_output_limit_chars(),
+```
+
+- [ ] **Step 4: Run the tests and see them pass**
+
+Run: `uv run pytest -q tests/unit/mcp/test_transport_stdio.py tests/unit/mcp/test_file_mcp_servers.py`
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/agentos/mcp/transport_stdio.py src/agentos/mcp/toolset.py tests/unit/mcp/test_transport_stdio.py tests/unit/mcp/test_file_mcp_servers.py
+git commit -m "feat(w5): stdio MCP servers stop gracefully; MAX_MCP_OUTPUT_TOKENS sets the output limit
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+### Task 23: Resources and tool refresh: four tools
+
+`ListMcpResources` (`list_mcp_resources`), `ReadMcpResource` (`read_mcp_resource`), `ReadMcpResourceDir` (`read_mcp_resource_dir`) and `RefreshMcpTools` (`refresh_mcp_tools`) are offered whenever an MCP server is connected, and allowed like the other read-only tools. The client lists and reads resources; the provider lists them per server (a failing server says why), reads one, and lists tools again: a configuration-file server's list is replaced, Orin's own servers keep the approved list and report the difference. A `list_changed` notice during a call replaces a configuration-file server's tools at once. The new tools live in a module mixed into `McpTools`, so `agent_tools.py` does not grow. Deliberate expectation changes: the tool ledger moves the four tools to included (36 included, 1 deferred) and the public contract test pins their fields.
+
+**Files:**
+- Create: `src/agentos/agentic/tools/mcp/resources.py`
+- Modify: `src/agentos/mcp/client.py`
+- Modify: `src/agentos/mcp/toolset.py`
+- Modify: `src/agentos/agentic/tools/mcp/admin.py`
+- Modify: `src/agentos/agentic/tools/registry.py`
+- Modify: `src/agentos/agentic/tools/public_names.py`
+- Modify: `src/agentos/agentic/runtime.py`
+- Modify: `src/agentos/permissions/engine.py`
+- Modify: `src/agentos/agentic/tools/ledger.py`
+- Modify: `tests/unit/agentic/tools/test_tool_ledger.py`
+- Modify: `tests/unit/agentic/tools/test_public_contract.py`
+- Test: `tests/unit/mcp/test_mcp_resources.py`
+
+**Interfaces:**
+- Consumes: Task 20 (`client.changed`).
+- Produces: `McpClient.list_resources()`, `.read_resource(uri)`, `MAX_RESOURCE_PAGES = 100`; `McpToolProvider.find_server(server)`, `.list_resources(server=None)`, `.read_resource(server, uri)`, `.refresh_tools(server=None)`; `agentos.agentic.tools.mcp.resources`: `McpResourceTools`, `SPECS`, the four Input models.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `tests/unit/mcp/test_mcp_resources.py`:
+
+```python
+"""W5: MCP resources (ListMcpResources, ReadMcpResource, ReadMcpResourceDir) and RefreshMcpTools."""
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+from agentos.agentic.agent_tools import AgentToolset
+from agentos.agentic.workspace import ConversationWorkspace
+from agentos.mcp.client import McpClient
+from agentos.mcp.models import McpServerConfig, McpServerState, McpToolDescriptor, McpTransport
+from agentos.mcp.toolset import McpToolProvider
+
+FETCH = {"name": "fetch", "description": "f", "inputSchema": {"type": "object"}}
+
+
+class _Server:
+    """A fake transport that answers like a small MCP server."""
+
+    kind = "fake"
+
+    def __init__(self) -> None:
+        self.tools: list[dict[str, Any]] = [{"name": "search", "description": "d", "inputSchema": {"type": "object"}}]
+        self.on_message = None
+        self.announce_change = False
+
+    def open(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+    def send(self, frame):
+        if "id" not in frame:
+            return None
+        method, params = frame["method"], frame.get("params") or {}
+        if method == "initialize":
+            result: dict[str, Any] = {"protocolVersion": "2025-06-18", "serverInfo": {"name": "s"}, "capabilities": {}}
+        elif method == "tools/list":
+            result = {"tools": list(self.tools)}
+        elif method == "resources/list":
+            result = {"resources": [
+                {"uri": "file:///docs/a.md", "name": "a", "mimeType": "text/markdown"},
+                {"uri": "file:///docs/img.png", "name": "img"},
+                {"uri": "db://x", "name": "x"},
+            ]}
+        elif method == "resources/read":
+            uri = params["uri"]
+            if uri.endswith(".png"):
+                result = {"contents": [{"uri": uri, "mimeType": "image/png", "blob": "iVBORw0KGgo="}]}
+            elif uri == "file:///docs/a.md":
+                result = {"contents": [{"uri": uri, "mimeType": "text/markdown", "text": "# A"}]}
+            else:
+                return {"jsonrpc": "2.0", "id": frame["id"], "error": {"code": -32002, "message": "Resource not found"}}
+        elif method == "tools/call":
+            if self.announce_change and self.on_message is not None:
+                self.on_message({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"})
+            result = {"content": [{"type": "text", "text": "ok"}]}
+        else:
+            return {"jsonrpc": "2.0", "id": frame["id"], "error": {"code": -32601, "message": "no"}}
+        return {"jsonrpc": "2.0", "id": frame["id"], "result": result}
+
+
+def _provider(server: _Server, origin: str = "user") -> McpToolProvider:
+    config = McpServerConfig(
+        server_id=f"{origin}:docs", user_id="u1", slug="docs", display_name="Docs", transport=McpTransport.HTTP,
+        url="https://mcp.example.com/mcp", state=McpServerState.ACTIVE, origin=origin,
+    )
+    tools = (McpToolDescriptor("search", "d", {"type": "object"}),)
+    return McpToolProvider([(config, tools, {})], client_factory=lambda config, secrets, **_: McpClient(server))
+
+
+def _toolset(tmp_path: Path, provider: McpToolProvider) -> AgentToolset:
+    return AgentToolset(ConversationWorkspace(tmp_path / "w", "c1"), mcp_provider=provider, public_tool_names=True)
+
+
+def _names(provider: McpToolProvider) -> set[str]:
+    return {item.name for item in provider.definitions()}
+
+
+def test_resources_are_listed_and_read(tmp_path: Path) -> None:
+    toolset = _toolset(tmp_path, _provider(_Server()))
+    listed = toolset.invoke("ListMcpResources", {})
+    assert listed.status == "succeeded" and "file:///docs/a.md" in listed.content and '"server": "docs"' in listed.content
+    read = toolset.invoke("ReadMcpResource", {"server": "docs", "uri": "file:///docs/a.md"})
+    assert read.status == "succeeded" and read.content == "# A"
+    image = toolset.invoke("ReadMcpResource", {"server": "Docs", "uri": "file:///docs/img.png"})
+    assert image.images and image.images[0]["media_type"] == "image/png"
+    missing = toolset.invoke("ReadMcpResource", {"server": "docs", "uri": "db://nope"})
+    assert missing.status == "failed" and "Resource not found" in missing.content
+    folder = toolset.invoke("ReadMcpResourceDir", {"server": "docs", "uri": "file:///docs/"})
+    assert "a.md" in folder.content and "db://x" not in folder.content
+    assert toolset.invoke("ListMcpResources", {"server": "nope"}).status == "failed"
+
+
+def test_the_resource_tools_need_a_connected_server(tmp_path: Path) -> None:
+    toolset = AgentToolset(ConversationWorkspace(tmp_path / "w", "c1"), public_tool_names=True)
+    assert "list_mcp_resources" not in {item.name for item in toolset.definitions()}
+
+
+def test_refresh_replaces_a_file_servers_tools_but_not_orins_own(tmp_path: Path) -> None:
+    server = _Server()
+    provider = _provider(server)
+    server.tools.append(FETCH)
+    refreshed = _toolset(tmp_path, provider).invoke("RefreshMcpTools", {})
+    assert refreshed.status == "succeeded" and '"fetch"' in refreshed.content
+    assert _names(provider) == {"mcp__docs__search", "mcp__docs__fetch"}
+    own_server = _Server()
+    own = _provider(own_server, origin="orin")
+    own_server.tools.append(FETCH)
+    report = own.refresh_tools(None)
+    assert report[0]["applied"] is False and report[0]["added"] == ["fetch"]
+    assert _names(own) == {"mcp__docs__search"}
+
+
+def test_a_list_changed_notice_during_a_call_refreshes_a_file_servers_tools() -> None:
+    server = _Server()
+    provider = _provider(server)
+    server.announce_change = True
+    server.tools.append(FETCH)
+    search = next(item for item in provider.definitions() if item.name == "mcp__docs__search")
+    assert search.handler().status == "succeeded"
+    assert "mcp__docs__fetch" in _names(provider)
+```
+
+- [ ] **Step 2: Run it to verify it fails**
+
+Run: `uv run pytest -q tests/unit/mcp/test_mcp_resources.py`
+Expected: FAIL — `test_resources_are_listed_and_read`, `test_refresh_replaces_a_file_servers_tools_but_not_orins_own` and `test_a_list_changed_notice_during_a_call_refreshes_a_file_servers_tools` (the tools and provider methods do not exist yet); `test_the_resource_tools_need_a_connected_server` already passes.
+
+- [ ] **Step 3: Implement**
+
+Create `src/agentos/agentic/tools/mcp/resources.py`:
+
+```python
+"""MCP resources and tool refresh (W5): ListMcpResources, ReadMcpResource, ReadMcpResourceDir, RefreshMcpTools.
+
+Mixed into ``AgentToolset`` through ``McpTools``; ``self`` is the toolset. A resource's text reaches the model as
+data; an image arrives as an image; other binary content is described, not shown.
+"""
+from __future__ import annotations
+
+import base64
+import json
+from typing import Any
+
+from pydantic import Field
+
+from agentos.agentic.tools._shared import AgentToolError, ToolOutcome, _TEXT, _schema
+from agentos.agentic.tools.spec import ToolInput, ToolSpec
+
+MAX_LISTED_RESOURCES = 500
+MAX_RESOURCE_TEXT_CHARS = 100_000
+MAX_RESOURCE_IMAGES = 4
+
+
+class McpResourceTools:
+    """Mixed into ``AgentToolset``; ``self`` is the toolset."""
+
+    def _resource_provider(self) -> Any:
+        provider = getattr(self, "_mcp_provider", None)
+        if provider is None:
+            raise AgentToolError("No MCP server is connected in this turn.")
+        return provider
+
+    def _known_server(self, provider: Any, server: str | None) -> str | None:
+        clean = str(server or "").strip()
+        if clean and provider.find_server(clean) is None:
+            names = ", ".join(sorted(provider.server_slugs())) or "none"
+            raise AgentToolError(f"No MCP server named '{clean[:80]}'. Connected servers: {names}.")
+        return clean or None
+
+    def list_mcp_resources(self, server: str | None = None) -> ToolOutcome:
+        provider = self._resource_provider()
+        items = provider.list_resources(self._known_server(provider, server))
+        return _listing(items, "recursos MCP")
+
+    def read_mcp_resource_dir(self, server: str, uri: str) -> ToolOutcome:
+        provider = self._resource_provider()
+        clean_server = self._known_server(provider, server)
+        prefix = str(uri or "").strip()
+        if not clean_server or not prefix:
+            raise AgentToolError("Give the server and the address (uri) of the folder of resources.")
+        items = [item for item in provider.list_resources(clean_server) if "error" in item or str(item.get("uri", "")).startswith(prefix)]
+        return _listing(items, f"recursos em {prefix[:80]}")
+
+    def read_mcp_resource(self, server: str, uri: str) -> ToolOutcome:
+        provider = self._resource_provider()
+        clean_server = self._known_server(provider, server)
+        clean_uri = str(uri or "").strip()
+        if not clean_server or not clean_uri:
+            raise AgentToolError("Give the server and the resource's address (uri).")
+        try:
+            contents = provider.read_resource(clean_server, clean_uri)
+        except Exception as error:  # noqa: BLE001 - the server's failure is the tool's answer
+            message = f"{clean_server} could not read {clean_uri[:200]}: {str(error)[:500]}"
+            return ToolOutcome("failed", message[:240], message, {"tool_kind": "mcp", "mcp_server": clean_server}, "MCP_UNAVAILABLE")
+        parts: list[str] = []
+        images: list[dict[str, str]] = []
+        for item in contents:
+            mime = str(item.get("mimeType") or "")
+            if isinstance(item.get("text"), str):
+                parts.append(item["text"])
+            elif isinstance(item.get("blob"), str):
+                if mime.startswith("image/") and len(images) < MAX_RESOURCE_IMAGES:
+                    images.append({"media_type": mime, "data": item["blob"]})
+                else:
+                    size = len(base64.b64decode(item["blob"], validate=False)) if item["blob"] else 0
+                    parts.append(f"[binary content of {size} bytes, {mime or 'unknown type'}, not shown]")
+        text = "\n\n".join(parts)
+        if len(text) > MAX_RESOURCE_TEXT_CHARS:
+            text = text[:MAX_RESOURCE_TEXT_CHARS] + "\n[truncated]"
+        payload = {"tool_kind": "mcp", "mcp_server": clean_server, "uri": clean_uri[:500]}
+        return ToolOutcome("succeeded", f"Leu {clean_uri[:120]}", text or "(the resource is empty)", payload, None, images)
+
+    def refresh_mcp_tools(self, server: str | None = None) -> ToolOutcome:
+        provider = self._resource_provider()
+        report = provider.refresh_tools(self._known_server(provider, server))
+        changed = sum(len(item.get("added", [])) + len(item.get("removed", [])) for item in report)
+        return ToolOutcome(
+            "succeeded", f"Ferramentas MCP atualizadas ({changed} mudança(s))", json.dumps(report, ensure_ascii=False, indent=1),
+            {"tool_kind": "mcp", "servers": [item.get("server") for item in report]},
+        )
+
+
+def _listing(items: list[dict[str, Any]], what: str) -> ToolOutcome:
+    shown = items[:MAX_LISTED_RESOURCES]
+    content = json.dumps(shown, ensure_ascii=False, indent=1)
+    if len(items) > len(shown):
+        content += f"\n[{len(items) - len(shown)} more not shown]"
+    return ToolOutcome("succeeded", f"{len([item for item in items if 'uri' in item])} {what}", content, {"tool_kind": "mcp"})
+
+
+class ListMcpResourcesInput(ToolInput):
+    server: str | None = Field(None, description="Only this server's resources.")
+
+
+class ReadMcpResourceInput(ToolInput):
+    server: str = Field(description="The MCP server.")
+    uri: str = Field(description="The resource's address.")
+
+
+class ReadMcpResourceDirInput(ToolInput):
+    server: str = Field(description="The MCP server.")
+    uri: str = Field(description="The address the listed resources start with.")
+
+
+class RefreshMcpToolsInput(ToolInput):
+    server: str | None = Field(None, description="Only this server.")
+
+
+_ON = {"read_only": True, "kind": "mcp", "policy_tags": ("mcp",), "max_result_chars": 100_000}
+
+
+def _available(toolset: Any) -> bool:
+    return getattr(toolset, "_mcp_provider", None) is not None
+
+
+SPECS: tuple[ToolSpec, ...] = (
+    ToolSpec(
+        key="list_mcp_resources",
+        description="List the resources (files, records, documents) the connected MCP servers offer, optionally for one server.",
+        legacy_schema=_schema({"server": _TEXT}, ()),
+        handler="list_mcp_resources", input_model=ListMcpResourcesInput,
+        public_description="List the resources the connected MCP servers offer.", available=_available, order=640, **_ON,
+    ),
+    ToolSpec(
+        key="read_mcp_resource",
+        description="Read one resource from an MCP server by its address (uri).",
+        legacy_schema=_schema({"server": _TEXT, "uri": _TEXT}, ("server", "uri")),
+        handler="read_mcp_resource", input_model=ReadMcpResourceInput,
+        public_description="Read a resource from an MCP server by its address.", available=_available, order=641, **_ON,
+    ),
+    ToolSpec(
+        key="read_mcp_resource_dir",
+        description="List the resources of an MCP server whose address starts with the given uri (a folder of resources).",
+        legacy_schema=_schema({"server": _TEXT, "uri": _TEXT}, ("server", "uri")),
+        handler="read_mcp_resource_dir", input_model=ReadMcpResourceDirInput,
+        public_description="List the resources of an MCP server under an address.", available=_available, order=642, **_ON,
+    ),
+    ToolSpec(
+        key="refresh_mcp_tools",
+        description="Ask the connected MCP servers (or one) for their tools again. Servers from configuration files get the new list; Orin's own servers keep the tools the person approved and report the difference.",
+        legacy_schema=_schema({"server": _TEXT}, ()),
+        handler="refresh_mcp_tools", input_model=RefreshMcpToolsInput,
+        public_description="List the MCP servers' tools again.", available=_available, order=643, **_ON,
+    ),
+)
+
+__all__ = [
+    "ListMcpResourcesInput", "McpResourceTools", "ReadMcpResourceDirInput", "ReadMcpResourceInput", "RefreshMcpToolsInput", "SPECS",
+]
+```
+
+Then make these edits, in order (each `replace` block occurs exactly once in its file; if one does not, stop and report — do not guess):
+
+1. In `src/agentos/mcp/client.py`, replace
+
+```python
+MAX_TOOL_PAGES = 1000
+```
+
+   with
+
+```python
+MAX_TOOL_PAGES = 1000
+MAX_RESOURCE_PAGES = 100
+```
+
+2. In `src/agentos/mcp/client.py`, replace
+
+```python
+    def close(self) -> None:
+        self._negotiation = None
+```
+
+   with
+
+```python
+    def list_resources(self) -> tuple[dict[str, str], ...]:
+        """The server's resources (W5): address, name, description and type, bounded."""
+        self._require_session()
+        items: list[dict[str, str]] = []
+        cursor: str | None = None
+        seen_cursors: set[str] = set()
+        for _ in range(MAX_RESOURCE_PAGES):
+            result = self._call("resources/list", {"cursor": cursor} if cursor else {})
+            for raw in result.get("resources") or []:
+                if isinstance(raw, Mapping) and isinstance(raw.get("uri"), str):
+                    items.append({
+                        "uri": raw["uri"][:2000], "name": str(raw.get("name") or "")[:200],
+                        "description": str(raw.get("description") or "")[:1000], "mimeType": str(raw.get("mimeType") or "")[:100],
+                    })
+            next_cursor = result.get("nextCursor")
+            cursor = next_cursor.strip() if isinstance(next_cursor, str) else None
+            if not cursor or cursor in seen_cursors:
+                break
+            seen_cursors.add(cursor)
+        return tuple(items)
+
+    def read_resource(self, uri: str) -> tuple[Mapping[str, Any], ...]:
+        self._require_session()
+        result = self._call("resources/read", {"uri": str(uri)})
+        return tuple(item for item in (result.get("contents") or []) if isinstance(item, Mapping))
+
+    def close(self) -> None:
+        self._negotiation = None
+```
+
+3. In `src/agentos/mcp/toolset.py`, replace
+
+```python
+                    try:
+                        result = self._session(config, secrets).call_tool(tool.name, arguments)
+                    except McpReauthRequired:
+```
+
+   with
+
+```python
+                    try:
+                        client = self._session(config, secrets)
+                        result = client.call_tool(tool.name, arguments)
+                        self._follow_changes(config, client)
+                    except McpReauthRequired:
+```
+
+4. In `src/agentos/mcp/toolset.py`, replace
+
+```python
+    def server_slugs(self) -> frozenset[str]:
+        return frozenset(config.slug for config, _, _ in self._bundles)
+```
+
+   with
+
+```python
+    def server_slugs(self) -> frozenset[str]:
+        return frozenset(config.slug for config, _, _ in self._bundles)
+
+    # -- resources and tool refresh (W5) ------------------------------------
+
+    def find_server(self, server: str) -> ServerBundle | None:
+        target = str(server or "").strip().lower()
+        for bundle in self._bundles:
+            if target in (bundle[0].slug.lower(), bundle[0].display_name.lower()):
+                return bundle
+        return None
+
+    def _targets(self, server: str | None) -> list[ServerBundle]:
+        if not server:
+            return list(self._bundles)
+        found = self.find_server(server)
+        return [found] if found is not None else []
+
+    def _with_session(self, config: McpServerConfig, secrets: Mapping[str, str], action: Callable[[Any], Any]) -> Any:
+        from .protocol import McpProtocolError
+
+        with self._lock(config.server_id):
+            try:
+                client = self._session(config, secrets)
+                return action(client)
+            except RuntimeError as error:
+                if not isinstance(error, McpProtocolError):
+                    self._evict_session(config.server_id)
+                raise
+
+    def list_resources(self, server: str | None = None) -> list[dict[str, Any]]:
+        """Every resource of the servers (or of one), each tagged with its server; a server that fails says why."""
+        found: list[dict[str, Any]] = []
+        for config, _tools, secrets in self._targets(server):
+            try:
+                items = self._with_session(config, secrets, lambda client: client.list_resources())
+            except Exception as error:  # noqa: BLE001 - one server's failure is reported, the rest are listed
+                found.append({"server": config.slug, "error": str(error)[:300]})
+                continue
+            found.extend({"server": config.slug, **item} for item in items)
+        return found
+
+    def read_resource(self, server: str, uri: str) -> tuple[Mapping[str, Any], ...]:
+        bundle = self.find_server(server)
+        if bundle is None:
+            raise LookupError(f"no MCP server named {server!r}")
+        config, _tools, secrets = bundle
+        return self._with_session(config, secrets, lambda client: client.read_resource(uri))
+
+    def _replace_tools(self, server_id: str, tools: tuple[McpToolDescriptor, ...]) -> None:
+        self._bundles = [(config, tools if config.server_id == server_id else old, secrets) for config, old, secrets in self._bundles]
+
+    def refresh_tools(self, server: str | None = None) -> list[dict[str, Any]]:
+        """List the servers' tools again. A file server's list is replaced; Orin's own servers keep the approved list."""
+        report: list[dict[str, Any]] = []
+        for config, tools, secrets in self._targets(server):
+            try:
+                fresh = self._with_session(config, secrets, lambda client: client.list_tools())
+            except Exception as error:  # noqa: BLE001
+                report.append({"server": config.slug, "error": str(error)[:300]})
+                continue
+            before, after = {item.name for item in tools}, {item.name for item in fresh}
+            entry: dict[str, Any] = {"server": config.slug, "added": sorted(after - before), "removed": sorted(before - after)}
+            if config.origin == "orin":
+                entry["applied"] = False
+                entry["note"] = "Orin's own servers keep the tools the person approved; a change needs a new approval in Settings > MCP."
+            else:
+                self._replace_tools(config.server_id, tuple(fresh))
+                entry["applied"] = True
+            report.append(entry)
+        return report
+
+    def _follow_changes(self, config: McpServerConfig, client: Any) -> None:
+        """A file server that announced new tools during a call gets its list replaced (Orin's own keep theirs)."""
+        changed = getattr(client, "changed", None)
+        if not changed or "tools" not in changed:
+            return
+        changed.discard("tools")
+        if config.origin == "orin":
+            return
+        try:
+            self._replace_tools(config.server_id, tuple(client.list_tools()))
+        except Exception:  # noqa: BLE001 - the old list stays; RefreshMcpTools can try again
+            pass
+```
+
+5. In `src/agentos/agentic/tools/mcp/admin.py`, replace
+
+```python
+from agentos.agentic.tools.spec import ToolSpec, ToolInput
+```
+
+   with
+
+```python
+from agentos.agentic.tools.mcp.resources import McpResourceTools
+from agentos.agentic.tools.spec import ToolSpec, ToolInput
+```
+
+6. In `src/agentos/agentic/tools/mcp/admin.py`, replace
+
+```python
+class McpTools:
+```
+
+   with
+
+```python
+class McpTools(McpResourceTools):
+```
+
+7. In `src/agentos/agentic/tools/registry.py`, replace
+
+```python
+from agentos.agentic.tools.mcp.admin import SPECS as _mcp_admin
+```
+
+   with
+
+```python
+from agentos.agentic.tools.mcp.admin import SPECS as _mcp_admin
+from agentos.agentic.tools.mcp.resources import SPECS as _mcp_resources
+```
+
+8. In `src/agentos/agentic/tools/registry.py`, replace
+
+```python
+        *_mcp_admin,
+```
+
+   with
+
+```python
+        *_mcp_admin,
+        *_mcp_resources,
+```
+
+9. In `src/agentos/agentic/tools/public_names.py`, replace
+
+```python
+    "send_message": "SendMessage",
+```
+
+   with
+
+```python
+    "send_message": "SendMessage",
+    "list_mcp_resources": "ListMcpResources",
+    "read_mcp_resource": "ReadMcpResource",
+    "read_mcp_resource_dir": "ReadMcpResourceDir",
+    "refresh_mcp_tools": "RefreshMcpTools",
+```
+
+10. In `src/agentos/agentic/runtime.py`, replace
+
+```python
+    "search_mcp_tools", "inspect_mcp_server", "call_mcp_tool",
+```
+
+   with
+
+```python
+    "search_mcp_tools", "inspect_mcp_server", "call_mcp_tool",
+    "list_mcp_resources", "read_mcp_resource", "read_mcp_resource_dir", "refresh_mcp_tools",
+```
+
+11. In `src/agentos/permissions/engine.py`, replace
+
+```python
+    "schedule_wakeup", "push_notification",
+})
+```
+
+   with
+
+```python
+    "schedule_wakeup", "push_notification",
+    "list_mcp_resources", "read_mcp_resource", "read_mcp_resource_dir", "refresh_mcp_tools",
+})
+```
+
+12. In `src/agentos/agentic/tools/ledger.py`, replace
+
+```python
+    "ListMcpResources": _later("W5"),
+    "RefreshMcpTools": _later("W5"),
+```
+
+   with
+
+```python
+    "ListMcpResources": _in("list_mcp_resources"),
+    "RefreshMcpTools": _in("refresh_mcp_tools"),
+```
+
+13. In `src/agentos/agentic/tools/ledger.py`, replace
+
+```python
+    "ReadMcpResourceDir": _later("W5"),
+    "ReadMcpResource": _later("W5"),
+```
+
+   with
+
+```python
+    "ReadMcpResourceDir": _in("read_mcp_resource_dir"),
+    "ReadMcpResource": _in("read_mcp_resource"),
+```
+
+14. In `tests/unit/agentic/tools/test_tool_ledger.py`, replace
+
+```python
+assert counts == {"included": 32, "deferred": 5, "excluded": 12}
+```
+
+   with
+
+```python
+assert counts == {"included": 36, "deferred": 1, "excluded": 12}
+```
+
+15. In `tests/unit/agentic/tools/test_public_contract.py`, replace
+
+```python
+    "search_mcp_tools": ({"query", "max_results"}, ["query"]),
+```
+
+   with
+
+```python
+    "search_mcp_tools": ({"query", "max_results"}, ["query"]),
+    "list_mcp_resources": ({"server"}, []),
+    "read_mcp_resource": ({"server", "uri"}, ["server", "uri"]),
+    "read_mcp_resource_dir": ({"server", "uri"}, ["server", "uri"]),
+    "refresh_mcp_tools": ({"server"}, []),
+```
+
+- [ ] **Step 4: Run the tests and see them pass**
+
+Run: `uv run pytest -q tests/unit/mcp/test_mcp_resources.py`
+Expected: PASS.
+
+Also run `uv run pytest -q tests/unit/agentic/tools tests/unit/permissions`: expected PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/agentos/agentic/tools/mcp/resources.py tests/unit/mcp/test_mcp_resources.py src/agentos/mcp/client.py src/agentos/mcp/toolset.py src/agentos/agentic/tools/mcp/admin.py src/agentos/agentic/tools/registry.py src/agentos/agentic/tools/public_names.py src/agentos/agentic/runtime.py src/agentos/permissions/engine.py src/agentos/agentic/tools/ledger.py tests/unit/agentic/tools/test_tool_ledger.py tests/unit/agentic/tools/test_public_contract.py
+git commit -m "feat(w5): MCP resources and RefreshMcpTools
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+### Task 24: MCP prompts as commands
+
+A person's `/mcp__server__prompt args` runs that prompt: the words (quotes group them) fill the prompt's arguments in order, the last taking the rest; a missing required argument, an unknown prompt or a failing server is reported to the model, which tells the person. The prompt's messages join the turn as a command reminder, like a disk command's instructions.
+
+**Files:**
+- Modify: `src/agentos/mcp/client.py`
+- Modify: `src/agentos/mcp/toolset.py`
+- Modify: `src/agentos/agentic/session.py`
+- Test: `tests/unit/mcp/test_mcp_prompts.py`
+
+**Interfaces:**
+- Produces: `McpClient.list_prompts()`, `.get_prompt(name, arguments)`; `McpToolProvider.get_prompt(server, prompt, words) -> str`; `TurnSession._apply_mcp_prompt(name, arguments)`.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `tests/unit/mcp/test_mcp_prompts.py`:
+
+```python
+"""W5: an MCP server's prompts run as /mcp__server__prompt commands."""
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from agentos.mcp.client import McpClient
+from agentos.mcp.models import McpServerConfig, McpServerState, McpTransport
+from agentos.mcp.toolset import McpToolProvider
+
+
+class _PromptServer:
+    kind = "fake"
+
+    def __init__(self) -> None:
+        self.on_message = None
+        self.asked: list[dict] = []
+
+    def open(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+    def send(self, frame):
+        if "id" not in frame:
+            return None
+        method, params = frame["method"], frame.get("params") or {}
+        if method == "initialize":
+            result = {"protocolVersion": "2025-06-18", "serverInfo": {"name": "s"}, "capabilities": {"prompts": {}}}
+        elif method == "prompts/list":
+            result = {"prompts": [{"name": "review", "description": "Review a PR", "arguments": [
+                {"name": "pr", "required": True}, {"name": "focus", "required": False},
+            ]}]}
+        elif method == "prompts/get":
+            self.asked.append(params)
+            args = params.get("arguments") or {}
+            result = {"messages": [
+                {"role": "user", "content": {"type": "text", "text": f"Review PR {args.get('pr')} focusing on {args.get('focus', 'anything')}."}},
+                {"role": "assistant", "content": {"type": "resource", "resource": {"uri": "x://guide", "text": "Use the checklist."}}},
+            ]}
+        else:
+            return {"jsonrpc": "2.0", "id": frame["id"], "error": {"code": -32601, "message": "no"}}
+        return {"jsonrpc": "2.0", "id": frame["id"], "result": result}
+
+
+def _provider(server: _PromptServer) -> McpToolProvider:
+    config = McpServerConfig(
+        server_id="user:docs", user_id="u1", slug="docs", display_name="Docs", transport=McpTransport.HTTP,
+        url="https://mcp.example.com/mcp", state=McpServerState.ACTIVE, origin="user",
+    )
+    return McpToolProvider([(config, (), {})], client_factory=lambda config, secrets, **_: McpClient(server))
+
+
+def test_words_fill_the_prompts_arguments_in_order() -> None:
+    server = _PromptServer()
+    text = _provider(server).get_prompt("docs", "review", ["42", "the", "parser"])
+    assert server.asked[-1]["arguments"] == {"pr": "42", "focus": "the parser"}
+    assert "Review PR 42 focusing on the parser." in text and "Use the checklist." in text
+
+
+def test_a_missing_required_argument_or_prompt_is_refused() -> None:
+    provider = _provider(_PromptServer())
+    with pytest.raises(ValueError, match="pr"):
+        provider.get_prompt("docs", "review", [])
+    with pytest.raises(LookupError):
+        provider.get_prompt("docs", "nothing", ["1"])
+    with pytest.raises(LookupError):
+        provider.get_prompt("elsewhere", "review", ["1"])
+
+
+def test_a_person_runs_an_mcp_prompt_as_a_command(tmp_path: Path) -> None:
+    from tests.unit.agentic.test_disk_skills_session import _session
+
+    session = _session(tmp_path, '/mcp__docs__review 7 "error handling"')
+    session.mcp_provider = _provider(_PromptServer())
+    session.build_runtime()
+    texts = [item.text for item in session._reminders.drain() if item.kind == "command"]
+    assert texts and "/mcp__docs__review" in texts[0] and "Review PR 7 focusing on error handling." in texts[0]
+
+
+def test_a_failing_prompt_tells_the_model_why(tmp_path: Path) -> None:
+    from tests.unit.agentic.test_disk_skills_session import _session
+
+    session = _session(tmp_path, "/mcp__docs__review")
+    session.mcp_provider = _provider(_PromptServer())
+    session.build_runtime()
+    texts = [item.text for item in session._reminders.drain() if item.kind == "command"]
+    assert texts and "could not run" in texts[0] and "pr" in texts[0]
+```
+
+- [ ] **Step 2: Run it to verify it fails**
+
+Run: `uv run pytest -q tests/unit/mcp/test_mcp_prompts.py`
+Expected: FAIL — `AttributeError: 'McpToolProvider' object has no attribute 'get_prompt'`, and the session tests find no command reminder.
+
+- [ ] **Step 3: Implement**
+
+Then make these edits, in order (each `replace` block occurs exactly once in its file; if one does not, stop and report — do not guess):
+
+1. In `src/agentos/mcp/client.py`, replace
+
+```python
+    def close(self) -> None:
+        self._negotiation = None
+```
+
+   with
+
+```python
+    def list_prompts(self) -> tuple[dict[str, Any], ...]:
+        """The server's prompts (W5): name, description and arguments (name, description, required)."""
+        self._require_session()
+        items: list[dict[str, Any]] = []
+        cursor: str | None = None
+        seen_cursors: set[str] = set()
+        for _ in range(MAX_RESOURCE_PAGES):
+            result = self._call("prompts/list", {"cursor": cursor} if cursor else {})
+            for raw in result.get("prompts") or []:
+                if not isinstance(raw, Mapping) or not isinstance(raw.get("name"), str):
+                    continue
+                arguments = [
+                    {"name": str(item["name"])[:100], "description": str(item.get("description") or "")[:500], "required": item.get("required") is True}
+                    for item in (raw.get("arguments") or []) if isinstance(item, Mapping) and isinstance(item.get("name"), str)
+                ][:20]
+                items.append({"name": raw["name"][:200], "description": str(raw.get("description") or "")[:1000], "arguments": arguments})
+            next_cursor = result.get("nextCursor")
+            cursor = next_cursor.strip() if isinstance(next_cursor, str) else None
+            if not cursor or cursor in seen_cursors:
+                break
+            seen_cursors.add(cursor)
+        return tuple(items)
+
+    def get_prompt(self, name: str, arguments: Mapping[str, str]) -> tuple[Mapping[str, Any], ...]:
+        self._require_session()
+        result = self._call("prompts/get", {"name": str(name), "arguments": {str(k): str(v) for k, v in arguments.items()}})
+        return tuple(item for item in (result.get("messages") or []) if isinstance(item, Mapping))
+
+    def close(self) -> None:
+        self._negotiation = None
+```
+
+2. In `src/agentos/mcp/toolset.py`, replace
+
+```python
+    def _replace_tools(self, server_id: str, tools: tuple[McpToolDescriptor, ...]) -> None:
+```
+
+   with
+
+```python
+    def get_prompt(self, server: str, prompt: str, words: Sequence[str]) -> str:
+        """Run one of a server's prompts: ``words`` fill its arguments in order (the last one takes the rest)."""
+        bundle = self.find_server(server)
+        if bundle is None:
+            raise LookupError(f"no MCP server named {server!r}")
+        config, _tools, secrets = bundle
+        known = self._with_session(config, secrets, lambda client: client.list_prompts())
+        spec = next((item for item in known if item["name"] == prompt), None)
+        if spec is None:
+            raise LookupError(f"{config.display_name} has no prompt named {prompt!r}")
+        names = [item["name"] for item in spec["arguments"]]
+        values = list(words)
+        if names and len(values) > len(names):
+            values = [*values[: len(names) - 1], " ".join(values[len(names) - 1:])]
+        arguments = dict(zip(names, values))
+        missing = [item["name"] for item in spec["arguments"] if item["required"] and not arguments.get(item["name"])]
+        if missing:
+            raise ValueError(f"missing argument(s): {', '.join(missing)} (expected: {' '.join(names)})")
+        messages = self._with_session(config, secrets, lambda client: client.get_prompt(prompt, arguments))
+        return _render_prompt(messages)
+
+    def _replace_tools(self, server_id: str, tools: tuple[McpToolDescriptor, ...]) -> None:
+```
+
+3. In `src/agentos/mcp/toolset.py`, replace
+
+```python
+def _render(content: Sequence[Mapping[str, Any]]) -> tuple[str, list[dict[str, str]]]:
+```
+
+   with
+
+```python
+def _render_prompt(messages: Sequence[Mapping[str, Any]]) -> str:
+    lines: list[str] = []
+    for message in messages:
+        content = message.get("content") if isinstance(message.get("content"), Mapping) else {}
+        kind = str(content.get("type") or "")
+        if kind == "text":
+            body = str(content.get("text") or "")
+        elif kind == "resource":
+            resource = content.get("resource") if isinstance(content.get("resource"), Mapping) else {}
+            body = str(resource.get("text") or resource.get("uri") or "")
+        else:
+            body = f"[{kind or 'unknown'} content]"
+        lines.append(f"[{str(message.get('role') or 'user')[:20]}] {body}")
+    text, _ = _bounded("\n\n".join(lines), 60_000)
+    return text
+
+
+def _render(content: Sequence[Mapping[str, Any]]) -> tuple[str, list[dict[str, str]]]:
+```
+
+4. In `src/agentos/agentic/session.py`, replace
+
+```python
+        name, _, arguments = text[1:].partition(" ")
+        skill = toolset.disk_skill(name)
+```
+
+   with
+
+```python
+        name, _, arguments = text[1:].partition(" ")
+        if name.startswith("mcp__"):
+            self._apply_mcp_prompt(name, arguments.strip())
+            return
+        skill = toolset.disk_skill(name)
+```
+
+5. In `src/agentos/agentic/session.py`, replace
+
+```python
+    def _auto_mode_classifier(self):
+```
+
+   with
+
+```python
+    def _apply_mcp_prompt(self, name: str, arguments: str) -> None:
+        """``/mcp__server__prompt args`` runs that MCP prompt; its messages join the turn as the person's command (W5)."""
+        import shlex
+
+        from agentos.agentic.reminders import COMMAND_KIND
+
+        server, _, prompt = name[len("mcp__"):].partition("__")
+        provider = self.mcp_provider
+        if provider is None or not server or not prompt or not callable(getattr(provider, "get_prompt", None)):
+            return  # no such prompt here: the message stays an ordinary message
+        try:
+            words = shlex.split(arguments, posix=True) if arguments else []
+        except ValueError:
+            words = arguments.split()
+        try:
+            text = provider.get_prompt(server, prompt, words)
+        except Exception as error:  # noqa: BLE001 - the model tells the person why
+            self._reminders.add(COMMAND_KIND, f"/{name} could not run: {str(error)[:500]}", key=f"command:{name}")
+            return
+        invocation = f"/{name}" + (f" {arguments}" if arguments else "")
+        self._reminders.add(COMMAND_KIND, f"The person ran the MCP prompt {invocation}. Its messages:\n{text}", key=f"command:{name}")
+
+    def _auto_mode_classifier(self):
+```
+
+- [ ] **Step 4: Run the tests and see them pass**
+
+Run: `uv run pytest -q tests/unit/mcp/test_mcp_prompts.py`
+Expected: PASS.
+
+Also run `uv run pytest -q tests/unit/agentic/test_disk_skills_session.py`: expected PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add tests/unit/mcp/test_mcp_prompts.py src/agentos/mcp/client.py src/agentos/mcp/toolset.py src/agentos/agentic/session.py
+git commit -m "feat(w5): MCP prompts run as /mcp__server__prompt commands
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+### Task 25: Elicitation: declined unless a hook answers
+
+When a server asks for input during a call, `Elicitation` hooks run (matcher: the server's name) and may answer through `hookSpecificOutput.action` (`accept` with `content`, `decline`, `cancel`); a blocking hook declines. `ElicitationResult` hooks then see the answer and may change it the same way. An accepted answer must be a flat object (strings, numbers, booleans, lists of strings), else it is declined; when hooks disagree the more cautious answer wins. Without an answering hook the request is declined and the model hears that the server asked. The session gives the provider its handler at turn start; the provider gives it to each client it opens.
+
+**Files:**
+- Create: `src/agentos/mcp/elicitation.py`
+- Modify: `src/agentos/agentic/lifecycle.py`
+- Modify: `src/agentos/hooks/protocol.py`
+- Modify: `src/agentos/mcp/client.py`
+- Modify: `src/agentos/mcp/toolset.py`
+- Modify: `src/agentos/agentic/session.py`
+- Test: `tests/unit/mcp/test_mcp_elicitation.py`
+
+**Interfaces:**
+- Consumes: Task 20 (`elicit`).
+- Produces: `agentos.mcp.elicitation.answer_elicitation(bus, server, params) -> (answer, answered)`, `checked_answer(raw)`; `LifecycleDecision.elicitation`; `McpClient.set_elicitation_handler(elicit)`; `McpToolProvider.elicitation_handler`; `TurnSession._mcp_elicitation(server, params)`.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `tests/unit/mcp/test_mcp_elicitation.py`:
+
+```python
+"""W5: an MCP server's request for input is declined unless an Elicitation hook answers it."""
+from __future__ import annotations
+
+from pathlib import Path
+
+from agentos.agentic.lifecycle import HookEvent, LifecycleBus, LifecycleDecision
+from agentos.hooks.protocol import HookRun, decision_from_command, decision_from_json
+from agentos.mcp.client import McpClient
+from agentos.mcp.elicitation import answer_elicitation, checked_answer
+from agentos.mcp.models import McpServerConfig, McpServerState, McpToolDescriptor, McpTransport
+from agentos.mcp.toolset import McpToolProvider
+
+
+def _bus(on_ask=None, on_result=None) -> tuple[LifecycleBus, list[dict]]:
+    bus, seen = LifecycleBus(), []
+
+    def subscriber(event):
+        seen.append({"event": event.name, **dict(event.payload)})
+        if event.name is HookEvent.ELICITATION and on_ask is not None:
+            return on_ask
+        if event.name is HookEvent.ELICITATION_RESULT and on_result is not None:
+            return on_result
+        return None
+
+    bus.subscribe(subscriber)
+    return bus, seen
+
+
+def test_without_an_answering_hook_the_request_is_declined() -> None:
+    assert answer_elicitation(None, "docs", {"message": "Name?"}) == ({"action": "decline"}, False)
+    bus, seen = _bus()
+    assert answer_elicitation(bus, "docs", {"message": "Name?", "requestedSchema": {"type": "object"}}) == ({"action": "decline"}, False)
+    assert [item["event"] for item in seen] == [HookEvent.ELICITATION, HookEvent.ELICITATION_RESULT]
+    assert seen[0]["mcp_server_name"] == "docs" and seen[0]["message"] == "Name?" and seen[1]["action"] == "decline"
+
+
+def test_a_hook_answers_and_the_result_hook_may_change_it() -> None:
+    accept = LifecycleDecision(elicitation={"action": "accept", "content": {"name": "Ada", "count": 2, "tags": ["a"]}})
+    bus, seen = _bus(on_ask=accept)
+    assert answer_elicitation(bus, "docs", {"message": "?"}) == ({"action": "accept", "content": {"name": "Ada", "count": 2, "tags": ["a"]}}, True)
+    assert seen[1]["action"] == "accept" and seen[1]["content"] == {"name": "Ada", "count": 2, "tags": ["a"]}
+    bus, _ = _bus(on_ask=accept, on_result=LifecycleDecision(blocked=True))
+    assert answer_elicitation(bus, "docs", {"message": "?"})[0] == {"action": "decline"}
+
+
+def test_an_answer_that_is_not_flat_is_declined() -> None:
+    assert checked_answer({"action": "accept", "content": {"nested": {"a": 1}}}) == {"action": "decline"}
+    assert checked_answer({"action": "accept"}) == {"action": "decline"}
+    assert checked_answer({"action": "cancel", "content": {"a": 1}}) == {"action": "cancel"}
+    assert checked_answer({"action": "maybe"}) == {"action": "decline"}
+
+
+def test_hook_output_carries_the_answer() -> None:
+    decision = decision_from_json(HookEvent.ELICITATION, {"hookSpecificOutput": {"hookEventName": "Elicitation", "action": "accept", "content": {"a": "1"}}})
+    assert decision.elicitation == {"action": "accept", "content": {"a": "1"}}
+    assert decision_from_json(HookEvent.ELICITATION_RESULT, {"hookSpecificOutput": {"action": "cancel"}}).elicitation == {"action": "cancel"}
+    assert decision_from_command(HookEvent.ELICITATION, HookRun(2, "", "no", error=None)).blocked is True
+    merged = LifecycleDecision(elicitation={"action": "accept", "content": {}})
+    merged.merge(LifecycleDecision(elicitation={"action": "decline"}))
+    assert merged.elicitation == {"action": "decline"}  # the more cautious answer wins
+
+
+class _AskingServer:
+    kind = "fake"
+
+    def __init__(self) -> None:
+        self.on_message = None
+        self.answers: list[dict] = []
+
+    def open(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+    def send(self, frame):
+        if "id" not in frame:
+            return None
+        if frame["method"] == "initialize":
+            result = {"protocolVersion": "2025-06-18", "serverInfo": {"name": "s"}, "capabilities": {}}
+        else:
+            self.answers.append(self.on_message({"jsonrpc": "2.0", "id": "e1", "method": "elicitation/create", "params": {"message": "Pick one"}}))
+            result = {"content": [{"type": "text", "text": "done"}]}
+        return {"jsonrpc": "2.0", "id": frame["id"], "result": result}
+
+
+def test_the_provider_sends_a_servers_request_to_the_handler() -> None:
+    server = _AskingServer()
+    config = McpServerConfig(server_id="user:docs", user_id="u1", slug="docs", display_name="Docs", transport=McpTransport.HTTP,
+                             url="https://mcp.example.com/mcp", state=McpServerState.ACTIVE, origin="user")
+    provider = McpToolProvider([(config, (McpToolDescriptor("run", "r", {"type": "object"}),), {})],
+                               client_factory=lambda config, secrets, **_: McpClient(server))
+    asked: list[tuple[str, dict]] = []
+    provider.elicitation_handler = lambda slug, params: asked.append((slug, dict(params))) or {"action": "cancel"}
+    assert provider.definitions()[0].handler().status == "succeeded"
+    assert asked == [("docs", {"message": "Pick one"})] and server.answers == [{"action": "cancel"}]
+
+
+def test_the_session_declines_and_tells_the_model(tmp_path: Path) -> None:
+    from agentos.agentic.reminders import ReminderQueue
+    from tests.unit.agentic.test_disk_skills_session import _session
+
+    session = _session(tmp_path, "hi")
+    session._reminders = ReminderQueue()
+    assert session._mcp_elicitation("docs", {"message": "Your API key?"}) == {"action": "decline"}
+    texts = [item.text for item in session._reminders.drain() if item.kind == "mcp"]
+    assert texts and "docs" in texts[0] and "Your API key?" in texts[0] and "declined" in texts[0]
+```
+
+- [ ] **Step 2: Run it to verify it fails**
+
+Run: `uv run pytest -q tests/unit/mcp/test_mcp_elicitation.py`
+Expected: FAIL — `ModuleNotFoundError: No module named 'agentos.mcp.elicitation'` (collection error).
+
+- [ ] **Step 3: Implement**
+
+Create `src/agentos/mcp/elicitation.py`:
+
+```python
+"""An MCP server asking the person for input during a call (elicitation, W5).
+
+Orin has no input card yet (W7), so a request nobody answers is declined. ``Elicitation`` hooks may answer it
+(``hookSpecificOutput.action`` ``accept`` with ``content``, ``decline`` or ``cancel``; a blocking hook declines);
+``ElicitationResult`` hooks see the answer and may change it the same way. An accepted answer must be a flat
+object of strings, numbers, booleans or lists of strings; anything else is declined.
+"""
+from __future__ import annotations
+
+import logging
+from collections.abc import Mapping
+from typing import Any
+
+from agentos.agentic.lifecycle import HookEvent
+
+logger = logging.getLogger(__name__)
+
+MAX_ANSWER_FIELDS = 50
+MAX_ANSWER_TEXT = 10_000
+_ACTIONS = ("accept", "decline", "cancel")
+
+
+def checked_answer(raw: Mapping[str, Any] | None) -> dict[str, Any]:
+    """A valid answer for the server, or a decline."""
+    if not isinstance(raw, Mapping) or raw.get("action") not in _ACTIONS:
+        return {"action": "decline"}
+    if raw["action"] != "accept":
+        return {"action": raw["action"]}
+    content = raw.get("content")
+    if not isinstance(content, Mapping) or len(content) > MAX_ANSWER_FIELDS:
+        return {"action": "decline"}
+    clean: dict[str, Any] = {}
+    for key, value in content.items():
+        if not isinstance(key, str):
+            return {"action": "decline"}
+        if isinstance(value, str):
+            clean[key] = value[:MAX_ANSWER_TEXT]
+        elif isinstance(value, (bool, int, float)):
+            clean[key] = value
+        elif isinstance(value, list) and all(isinstance(item, str) for item in value):
+            clean[key] = [item[:MAX_ANSWER_TEXT] for item in value[:100]]
+        else:
+            return {"action": "decline"}
+    return {"action": "accept", "content": clean}
+
+
+def answer_elicitation(bus: Any, server: str, params: Mapping[str, Any]) -> tuple[dict[str, Any], bool]:
+    """``(answer, answered_by_a_hook)`` for one elicitation request from ``server``."""
+    answer: dict[str, Any] = {"action": "decline"}
+    if bus is None:
+        return answer, False
+    message = str(params.get("message") or "")[:4000]
+    schema = params.get("requestedSchema") if isinstance(params.get("requestedSchema"), Mapping) else {}
+    answered = False
+    try:
+        decision = bus.emit(HookEvent.ELICITATION, mcp_server_name=server, message=message, requested_schema=dict(schema), mode="form")
+        if decision.blocked:
+            answered = True
+        elif decision.elicitation is not None:
+            answer, answered = checked_answer(decision.elicitation), True
+        result = bus.emit(
+            HookEvent.ELICITATION_RESULT, mcp_server_name=server, action=answer["action"], content=dict(answer.get("content") or {}),
+        )
+        if result.blocked:
+            answer, answered = {"action": "decline"}, True
+        elif result.elicitation is not None:
+            answer, answered = checked_answer(result.elicitation), True
+    except Exception:  # noqa: BLE001 - a failing hook declines, it never breaks the call
+        logger.exception("elicitation hooks failed for %s", server)
+        return {"action": "decline"}, False
+    return answer, answered
+
+
+__all__ = ["answer_elicitation", "checked_answer"]
+```
+
+Then make these edits, in order (each `replace` block occurs exactly once in its file; if one does not, stop and report — do not guess):
+
+1. In `src/agentos/agentic/lifecycle.py`, replace
+
+```python
+_DECISION_RANK = {"allow": 1, "ask": 2, "deny": 3}
+```
+
+   with
+
+```python
+_DECISION_RANK = {"allow": 1, "ask": 2, "deny": 3}
+# W5: an answer to an MCP elicitation; the more cautious one wins when hooks disagree.
+_ELICITATION_RANK = {"accept": 1, "decline": 2, "cancel": 3}
+```
+
+2. In `src/agentos/agentic/lifecycle.py`, replace
+
+```python
+    additional_context: list[str] = field(default_factory=list)
+    system_messages: list[str] = field(default_factory=list)
+
+    def merge(self, other: "LifecycleDecision") -> None:
+```
+
+   with
+
+```python
+    additional_context: list[str] = field(default_factory=list)
+    system_messages: list[str] = field(default_factory=list)
+    elicitation: dict[str, Any] | None = None  # W5: {"action": accept|decline|cancel, "content": {...}}
+
+    def merge(self, other: "LifecycleDecision") -> None:
+        if other.elicitation is not None and (
+            self.elicitation is None
+            or _ELICITATION_RANK.get(str(other.elicitation.get("action")), 0) > _ELICITATION_RANK.get(str(self.elicitation.get("action")), 0)
+        ):
+            self.elicitation = dict(other.elicitation)
+```
+
+3. In `src/agentos/hooks/protocol.py`, replace
+
+```python
+        elif event is HookEvent.POST_TOOL_USE and "updatedMCPToolOutput" in specific:
+            decision.updated_tool_output = specific["updatedMCPToolOutput"]
+```
+
+   with
+
+```python
+        elif event is HookEvent.POST_TOOL_USE and "updatedMCPToolOutput" in specific:
+            decision.updated_tool_output = specific["updatedMCPToolOutput"]
+        elif event in (HookEvent.ELICITATION, HookEvent.ELICITATION_RESULT) and specific.get("action") in {"accept", "decline", "cancel"}:
+            content = specific.get("content")
+            decision.elicitation = {"action": specific["action"]}
+            if specific["action"] == "accept" and isinstance(content, Mapping):
+                decision.elicitation["content"] = dict(content)
+```
+
+4. In `src/agentos/mcp/client.py`, replace
+
+```python
+    def _handle_server_message(self, message: Mapping[str, Any]) -> Mapping[str, Any] | None:
+```
+
+   with
+
+```python
+    def set_elicitation_handler(self, elicit: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None) -> None:
+        self._elicit = elicit
+
+    def _handle_server_message(self, message: Mapping[str, Any]) -> Mapping[str, Any] | None:
+```
+
+5. In `src/agentos/mcp/toolset.py`, replace
+
+```python
+        self._locks_guard = threading.Lock()
+```
+
+   with
+
+```python
+        self._locks_guard = threading.Lock()
+        # W5: answers a server's request for input during a call: (server slug, request params) -> answer.
+        self.elicitation_handler: Callable[[str, Mapping[str, Any]], Mapping[str, Any]] | None = None
+```
+
+6. In `src/agentos/mcp/toolset.py`, replace
+
+```python
+                client = self._client_factory(config, secrets)
+            try:
+                client.initialize()
+```
+
+   with
+
+```python
+                client = self._client_factory(config, secrets)
+            setter = getattr(client, "set_elicitation_handler", None)
+            if callable(setter) and self.elicitation_handler is not None:
+                handler = self.elicitation_handler
+                setter(lambda params, slug=config.slug: handler(slug, params))
+            try:
+                client.initialize()
+```
+
+7. In `src/agentos/agentic/session.py`, replace
+
+```python
+        if notes:
+            self._reminders.add("mcp", "MCP servers from configuration files:\n" + "\n".join(notes[:30]), key="file-mcp-servers")
+```
+
+   with
+
+```python
+        if notes:
+            self._reminders.add("mcp", "MCP servers from configuration files:\n" + "\n".join(notes[:30]), key="file-mcp-servers")
+        if self.mcp_provider is not None:
+            self.mcp_provider.elicitation_handler = self._mcp_elicitation
+
+    def _mcp_elicitation(self, server: str, params: Mapping[str, Any]) -> dict[str, Any]:
+        """An MCP server asks the person for input during a call (W5): hooks may answer; otherwise it is declined
+        and the model hears of it (the input card arrives with W7)."""
+        from agentos.mcp.elicitation import answer_elicitation
+
+        answer, answered = answer_elicitation(self.lifecycle, server, params)
+        if not answered:
+            question = " ".join(str(params.get("message") or "").split())[:300]
+            self._reminders.add(
+                "mcp", f"The MCP server {server} asked the person for input (\"{question}\"); Orin declined it because it cannot ask yet.",
+                key=f"elicitation:{server}:{uuid4().hex}",
+            )
+        return answer
+```
+
+- [ ] **Step 4: Run the tests and see them pass**
+
+Run: `uv run pytest -q tests/unit/mcp/test_mcp_elicitation.py`
+Expected: PASS.
+
+Also run `uv run pytest -q tests/unit/hooks tests/unit/mcp`: expected PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/agentos/mcp/elicitation.py tests/unit/mcp/test_mcp_elicitation.py src/agentos/agentic/lifecycle.py src/agentos/hooks/protocol.py src/agentos/mcp/client.py src/agentos/mcp/toolset.py src/agentos/agentic/session.py
+git commit -m "feat(w5): MCP elicitation is declined unless an Elicitation hook answers it
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+### Task 26: Batch E regression and ledger
+
+- [ ] **Step 1:** Run `uv run pytest -q tests/unit` (timeout 600000 ms) and `uv run pytest -q tests/integration`. Expected: all pass.
+- [ ] **Step 2:** Append a "## Batch E — The MCP protocol (Tasks 20–26)" section to `docs/superpowers/plans/2026-10-19-w5-extensibility-ledger.md`: commits, suite results, deviations 23–28, the deliberate expectation changes (Task 23: the tool ledger counts become 36 included and 1 deferred, and `test_public_contract.py` pins the four new tools), and anything done differently from this plan.
+- [ ] **Step 3:** Commit with `docs(w5): ledger, batch E` + blank line + the Co-Authored-By line.
 
