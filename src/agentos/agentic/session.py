@@ -952,6 +952,9 @@ class TurnSession:
         self._hook_agent_running = False
         self._hook_agent_guard = threading.Lock()
         self._hook_dispatcher = None
+        # W5: hooks of skills and agents, active for one agent each; removed with the settings hooks.
+        self._scoped_hook_removers: list[Callable[[], None]] = []
+        self._active_skill_hooks: set[tuple[str, str]] = set()
         # One reminder queue per runtime: the toolset fills it, the runtime drains it before each request.
         self._reminders = ReminderQueue()
         # PushNotification's per-turn budget, shared by the main agent and every subagent of this turn (W4-R14).
@@ -1862,6 +1865,11 @@ class TurnSession:
             context = [item for item in (start.additional_context if start is not None else []) if item]
             if context and isinstance(kwargs.get("task_text"), str):
                 kwargs["task_text"] = f"{kwargs['task_text']}\n\n{system_reminder(chr(10).join(context))}"
+        # W5: an agent's own hooks run while it runs, for its events only (a plugin's agent has none).
+        definition = (kwargs.get("builtin_spec") or {}).get("definition")
+        remove_hooks = None
+        if definition is not None and getattr(definition, "hooks", None):
+            remove_hooks = self._scoped_hooks(definition.hooks, source=f"agent:{definition.name}", agent_id=agent_id, origin=definition.origin)
         status = "failed"  # a crash inside the subagent still closes the start/stop pair
         try:
             outcome = self._execute_subagent_run_inner(**kwargs)
@@ -1877,6 +1885,8 @@ class TurnSession:
                     stop_hook_active=False,
                     status=status,
                 )
+            if remove_hooks is not None:
+                remove_hooks()
 
     def _execute_subagent_run_inner(
         self,
@@ -2916,6 +2926,7 @@ class TurnSession:
         )
         # W5: skills and commands read from disk, for the Skill tool of this toolset (subagents' too).
         toolset._disk_skills = getattr(self, "_disk_skills", None)
+        toolset._skill_hooks_sink = self._skill_hooks  # W5: a skill's own hooks
         if subagents:
             toolset._stop_subagent = self._stop_background_subagent  # W5: TaskStop stops a background agent
             toolset._team_sender = "lead"  # W5: the lead of any agent team this turn starts
@@ -3097,6 +3108,69 @@ class TurnSession:
             except Exception:  # noqa: BLE001 - removing hooks never stops a turn
                 logger.debug("previous settings hooks could not be removed", exc_info=True)
         self._close_hook_dispatcher()
+        removers, self._scoped_hook_removers = self._scoped_hook_removers, []
+        self._active_skill_hooks = set()
+        for remove in removers:
+            remove()
+
+    def _scoped_hooks(self, declared: Any, *, source: str, agent_id: str | None, origin: str) -> Callable[[], None] | None:
+        """Hooks a skill or an agent declares (W5), for one agent's events only (``agent_id``; the main agent's
+        when None). An agent's ``Stop`` hooks run at its ``SubagentStop``. Returns the function that removes them."""
+        from dataclasses import replace
+
+        from agentos.hooks.config import non_managed_hooks_allowed, parse_hook_mapping
+
+        bus = self.lifecycle
+        if bus is None or not isinstance(declared, Mapping) or not declared:
+            return None
+        if origin != "managed" and not non_managed_hooks_allowed(self.effective_settings):
+            return None
+        specs, errors = parse_hook_mapping(declared, source)
+        for error in errors:
+            logger.warning("hook configuration (%s): %s", error.source, error.message)
+        if agent_id is not None:
+            specs = tuple(replace(spec, event=HookEvent.SUBAGENT_STOP) if spec.event is HookEvent.STOP else spec for spec in specs)
+        if not specs:
+            return None
+        dispatcher = HookDispatcher(
+            specs,
+            command_runner=CommandHookRunner(self.workspace.root, env_file=self._hook_env_file()),
+            http_runner=HttpHookRunner(),
+            prompt_runner=PromptHookRunner(
+                self.provider_factory, provider_name=str(self.turn.get("provider") or ""), default_model=str(self.turn.get("model_id") or ""),
+            ),
+            agent_runner=AgentHookRunner(self._hook_agent),
+            recorder=self._record_hook,
+        )
+        wanted = str(agent_id or "")
+
+        def scoped(event):
+            if str(event.payload.get("agent_id") or "") != wanted:
+                return None
+            return dispatcher(event)
+
+        unsubscribe = bus.subscribe(scoped)
+
+        def remove() -> None:
+            try:
+                unsubscribe()
+                dispatcher.close()
+            except Exception:  # noqa: BLE001 - removing hooks never stops a turn
+                logger.debug("scoped hooks could not be removed", exc_info=True)
+
+        self._scoped_hook_removers.append(remove)
+        return remove
+
+    def _skill_hooks(self, skill: Any, agent_id: str | None) -> None:
+        """A disk skill's own hooks (W5): active from the skill's first use until the turn ends, once per agent."""
+        key = (str(getattr(skill, "name", "")), str(agent_id or ""))
+        with self._subagent_lock:
+            if key in self._active_skill_hooks:
+                return
+            self._active_skill_hooks.add(key)
+        if self._scoped_hooks(getattr(skill, "hooks", None), source=f"skill:{key[0]}", agent_id=agent_id, origin=str(getattr(skill, "origin", ""))) is None:
+            with self._subagent_lock:
+                self._active_skill_hooks.discard(key)
 
     def _hook_env_file(self) -> Path:
         """Where a SessionStart hook may write variables for this conversation's commands."""

@@ -93,6 +93,46 @@ def _entry(event: HookEvent, matcher: str, source: str, raw: Any) -> HookSpec | 
     return HookSpec(**common, prompt=prompt.strip(), model=model.strip()[:200])
 
 
+def parse_hook_mapping(declared: Mapping[str, Any], source: str) -> tuple[tuple[HookSpec, ...], tuple[HookConfigError, ...]]:
+    """One ``hooks`` object in the Claude Code schema: a settings layer's, or a skill's or agent's frontmatter (W5)."""
+    specs: list[HookSpec] = []
+    errors: list[HookConfigError] = []
+    for event_name, groups in declared.items():
+        try:
+            event = HookEvent(str(event_name))
+        except ValueError:
+            errors.append(HookConfigError(source, f"unknown hook event '{event_name}'"))
+            continue
+        if not isinstance(groups, list):
+            errors.append(HookConfigError(source, f"hooks.{event_name} must be a list"))
+            continue
+        for group in groups:
+            if not isinstance(group, Mapping):
+                errors.append(HookConfigError(source, f"hooks.{event_name} entries must be objects"))
+                continue
+            matcher = str(group.get("matcher") or "")
+            if len(matcher) > 500:
+                errors.append(HookConfigError(source, "matcher is longer than 500 characters"))
+                continue
+            if matcher and matcher != "*":
+                try:
+                    re.compile(matcher)
+                except re.error:
+                    errors.append(HookConfigError(source, f"invalid matcher '{matcher[:60]}'"))
+                    continue
+            entries = group.get("hooks")
+            if not isinstance(entries, list):
+                errors.append(HookConfigError(source, f"hooks.{event_name}[].hooks must be a list"))
+                continue
+            for raw in entries:
+                parsed = _entry(event, matcher, source, raw)
+                if isinstance(parsed, str):
+                    errors.append(HookConfigError(source, parsed))
+                else:
+                    specs.append(parsed)
+    return tuple(specs), tuple(errors)
+
+
 def non_managed_hooks_allowed(settings: EffectiveSettings) -> bool:
     """Whether hooks that are not managed (plugins', skills', agents', W5) may run: not when managed settings switch
     every hook off or allow only managed hooks, nor when a user or CLI (or trusted repository) switch turns them off."""
@@ -127,39 +167,9 @@ def load_hook_specs(settings: EffectiveSettings) -> tuple[tuple[HookSpec, ...], 
         if not isinstance(declared, Mapping):
             errors.append(HookConfigError(source, "'hooks' must be an object"))
             continue
-        for event_name, groups in declared.items():
-            try:
-                event = HookEvent(str(event_name))
-            except ValueError:
-                errors.append(HookConfigError(source, f"unknown hook event '{event_name}'"))
-                continue
-            if not isinstance(groups, list):
-                errors.append(HookConfigError(source, f"hooks.{event_name} must be a list"))
-                continue
-            for group in groups:
-                if not isinstance(group, Mapping):
-                    errors.append(HookConfigError(source, f"hooks.{event_name} entries must be objects"))
-                    continue
-                matcher = str(group.get("matcher") or "")
-                if len(matcher) > 500:
-                    errors.append(HookConfigError(source, "matcher is longer than 500 characters"))
-                    continue
-                if matcher and matcher != "*":
-                    try:
-                        re.compile(matcher)
-                    except re.error:
-                        errors.append(HookConfigError(source, f"invalid matcher '{matcher[:60]}'"))
-                        continue
-                entries = group.get("hooks")
-                if not isinstance(entries, list):
-                    errors.append(HookConfigError(source, f"hooks.{event_name}[].hooks must be a list"))
-                    continue
-                for raw in entries:
-                    parsed = _entry(event, matcher, source, raw)
-                    if isinstance(parsed, str):
-                        errors.append(HookConfigError(source, parsed))
-                    else:
-                        specs.append(parsed)
+        found, problems = parse_hook_mapping(declared, source)
+        specs.extend(found)
+        errors.extend(problems)
     if len(specs) > MAX_HOOKS:
         errors.append(HookConfigError("settings", f"more than {MAX_HOOKS} hooks are declared; the rest are ignored"))
         specs = specs[:MAX_HOOKS]

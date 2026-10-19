@@ -90,6 +90,10 @@ class DiskSkillTools:
         text, used = substitute(skill.body, arguments=clean, session_id=str(self.conversation_id or ""), skill_dir=skill.directory)
         text = neutral_skill_text(self._run_inline_commands(text, skill))
         granted = self._grant_skill_tools(skill)
+        # W5: a skill's own hooks run from its first use until the turn ends, for the agent that used it.
+        sink = getattr(self, "_skill_hooks_sink", None)
+        if skill.hooks and callable(sink):
+            sink(skill, (getattr(self, "_lifecycle_context", None) or {}).get("agent_id"))
         arguments_block = f"\n<skill-arguments>\n{clean}\n</skill-arguments>" if clean and not used else ""
         body = (
             f"{SKILL_WRAPPER_OPEN}\n"
