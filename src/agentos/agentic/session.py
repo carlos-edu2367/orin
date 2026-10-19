@@ -840,6 +840,10 @@ class _TurnPricing:
 class TurnSession:
     """Builds the runtime for a turn and owns its subagent lifecycle."""
 
+    # The conversation's /add-dir store, built once on first use (W4-R19). Class defaults cover a session made without __init__.
+    _directories: object | None = None
+    _directories_built: bool = False
+
     def __init__(
         self,
         *,
@@ -2470,12 +2474,18 @@ class TurnSession:
         return [*settings_directories(self.effective_settings), *self._conversation_directory_paths()]
 
     def _directory_store(self) -> object | None:
-        engine = getattr(self.chat_store, "_engine", None)
-        if engine is None:
-            return None
-        from agentos.conversations.directories import ConversationDirectoryStore
+        """The conversation's added-folder store, built once per session; None when the database cannot provide it (W4-R19)."""
+        if not self._directories_built:
+            self._directories_built = True
+            engine = getattr(self.chat_store, "_engine", None)
+            try:
+                if engine is not None:
+                    from agentos.conversations.directories import ConversationDirectoryStore
 
-        return ConversationDirectoryStore(engine)
+                    self._directories = ConversationDirectoryStore(engine)
+            except Exception:  # noqa: BLE001 - unavailable folders mean none added, never a failed turn
+                logger.exception("conversation directories are unavailable for this turn")
+        return self._directories
 
     def _conversation_directory_paths(self) -> list[str]:
         """The folders a person added to this conversation with /add-dir (W4)."""

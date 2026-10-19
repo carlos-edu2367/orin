@@ -77,3 +77,25 @@ def test_a_desktop_turn_applies_the_trusted_settings_directories(repo_listing_ho
     session.effective_settings = load_effective_settings(workspace, trusted=True)
     session._apply_working_directories()
     assert session.workspace.additional_roots == (host.resolve(),)
+
+
+def test_an_unavailable_directory_store_keeps_the_settings_folders_and_the_turn(repo_listing_host_folder, tmp_path: Path, monkeypatch) -> None:
+    from agentos.conversations import directories as directory_module
+    from sqlalchemy.exc import OperationalError
+
+    workspace, host = repo_listing_host_folder
+    builds: list[object] = []
+
+    class Unavailable:
+        def __init__(self, engine) -> None:
+            builds.append(engine)
+            raise OperationalError("CREATE TABLE", {}, Exception("attempt to write a readonly database"))
+
+    monkeypatch.setattr(directory_module, "ConversationDirectoryStore", Unavailable)
+    session = _session(tmp_path, chat_store=type("Store", (), {"_engine": object()})())
+    session.effective_settings = load_effective_settings(workspace, trusted=True)
+    session._apply_working_directories()
+    session._apply_working_directories()  # the next call in the same turn does not try the database again
+    assert session.workspace.additional_roots == (host.resolve(),)
+    assert session._conversation_directory_paths() == []
+    assert len(builds) == 1
