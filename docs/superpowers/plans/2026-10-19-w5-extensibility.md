@@ -45,7 +45,7 @@
 | C | 12–15 | Hardening of B; agent team mailbox; teams with SendMessage and TeammateIdle |
 | D | 16–19 | Hardening of C; MCP servers from the managed, user, local and project files (approval, trust, `${VAR}`, allow/deny lists) |
 | E | 20–26 | MCP protocol: server requests and notifications, SSE and WebSocket transports, stdio shutdown, `MAX_MCP_OUTPUT_TOKENS`, resources and RefreshMcpTools, prompts as commands, elicitation |
-| F | | Plugins: manifests, layout, `userConfig` vault, marketplaces |
+| F | 27–32 | Hardening of D; plugin packages (manifest locations, paths, lenient skills, plugin variables); plugin agents and output styles; `enabledPlugins`; `userConfig` encrypted; marketplaces fetched |
 | G | | One hook system: plugin, skill and agent hooks in the dispatcher |
 | H | | LSP diagnostics after edits |
 | I | | Tool ledger, final regression |
@@ -9137,4 +9137,2440 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - [ ] **Step 1:** Run `uv run pytest -q tests/unit` (timeout 600000 ms) and `uv run pytest -q tests/integration`. Expected: all pass.
 - [ ] **Step 2:** Append a "## Batch E — The MCP protocol (Tasks 20–26)" section to `docs/superpowers/plans/2026-10-19-w5-extensibility-ledger.md`: commits, suite results, deviations 23–28, the deliberate expectation changes (Task 23: the tool ledger counts become 36 included and 1 deferred, and `test_public_contract.py` pins the four new tools), and anything done differently from this plan.
 - [ ] **Step 3:** Commit with `docs(w5): ledger, batch E` + blank line + the Co-Authored-By line.
+
+## Batch F — Plugins
+
+Orin installs Claude Code plugins, but only in Claude Code's layout and only partly: the manifest had to sit in `.claude-plugin/`, a version was required, a skill with Claude Code's own frontmatter (`allowed-tools`, a folded `description`) was rejected, plugin agents were recorded but never runnable, output styles and options (`userConfig`) were ignored, and a marketplace was stored by name without ever being fetched. This batch first closes two findings from executing Batch D (Task 27), then fixes the package layout (Task 28), brings plugin agents and output styles into the turn (Task 29), adds plugin options (Task 30) and fetches marketplaces (Task 31).
+
+New deviations (also in the ledger):
+
+29. **Plugin skills stay in Orin's skill library** (installed when the plugin is approved), read leniently: Claude Code frontmatter no longer rejects a skill, but `allowed-tools`, `argument-hint` and the other Claude Code keys of a *plugin* skill are not applied (a skill on disk, Batch A, applies them).
+30. **A plugin's agents are named `plugin:agent`** and, as in Claude Code, ignore `hooks`, `mcpServers` and `permissionMode`; its output styles are named `plugin:style`. A plugin's `settings.json` (its default agent) and `.lsp.json` (Batch H) are not read here.
+31. **`enabledPlugins` turns an installed plugin's agents and styles off for a workspace** (`false`); a plugin it turns on that is not installed is reported to the model, not fetched. Its skills, MCP servers and commands follow the plugin's own on/off switch.
+32. **Plugin options: every value is stored encrypted; a sensitive one is never shown again and may not be written into an MCP server's command line or URL** (it would be stored in the clear with the server). `${user_config.KEY}` is filled in when the plugin is turned on; a changed value reaches its MCP servers when the plugin is turned off and on again. Options are set through the API (`GET`/`PUT /v1/plugins/{id}/config`); the screen arrives with W7. Hooks receive options in Batch G.
+33. **A marketplace is a GitHub repository or, on a computer, a local folder**; `extraKnownMarketplaces` is not added automatically, and a shared Orin installs only GitHub plugins (a marketplace's relative plugin is a local path there). The plugin library page still lists every person's marketplace entries (a cached, shared list; it shows public repository names only).
+34. **Only the first `commands` path of a manifest is read**, and a manifest's inline `hooks` object is not (Batch G reads hooks).
+
+### Task 27: Hardening found while executing Batch D
+
+Two fixes, one commit:
+
+1. **A teammate is never left marked busy by a start that raised.** `_send_team_message` and `_run_subagent` claim a teammate before starting it; if taking its mail or starting it raises (a database error, say), the claim is released and the taken messages are put back before the error goes on.
+2. **A file server's failure text masks more.** Values of its environment and headers from 3 characters (was 4), the path segments of its URL (from 4 characters) and the URL's query and credentials are replaced by `***`; the host stays readable.
+
+**Files:**
+- Modify: `src/agentos/agentic/session.py`
+- Modify: `src/agentos/mcp/file_servers.py`
+- Modify: `tests/unit/agentic/test_agent_teams.py`
+- Modify: `tests/unit/mcp/test_file_mcp_servers.py`
+
+**Interfaces:**
+- Consumes: Batch D (`_claim_teammate`, `_release_teammate`, `AgentMailbox.release`, `file_servers._redacted`).
+
+- [ ] **Step 1: Write the failing test**
+
+Append to the end of `tests/unit/agentic/test_agent_teams.py` (after its last line, separated by one blank line):
+
+```python
+def test_a_teammate_is_released_when_starting_it_raises(team) -> None:
+    session = team(_Child())
+    started = session._run_subagent(subagent_type="general-purpose", task="x", teammate_name="jack", team_name="core")
+    _wait(session, started.payload["agent_id"])
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("database unavailable")
+
+    session._ask_agent = broken
+    with pytest.raises(RuntimeError):
+        session._send_team_message(sender="lead", to="jack", message="Keep this")
+    assert session._team_roster()["jack"]["busy"] is False and _pending(session, "jack") == 1
+    session._start_subagent = broken
+    with pytest.raises(RuntimeError):
+        session._run_subagent(subagent_type="general-purpose", task="y", teammate_name="jack")
+    assert session._team_roster()["jack"]["busy"] is False
+```
+
+Append to the end of `tests/unit/mcp/test_file_mcp_servers.py` (after its last line, separated by one blank line):
+
+```python
+def test_a_failure_masks_short_secrets_and_the_url_path() -> None:
+    server = parse_server(
+        "api", {"type": "http", "url": "https://mcp.example.com/t0k3n-in-path/mcp", "headers": {"X-Key": "abc"}},
+        scope="user", source="t", environ={},
+    )
+
+    def connect(config, secrets):
+        raise RuntimeError("refused key abc at https://mcp.example.com/t0k3n-in-path/mcp")
+
+    _, failures = connect_file_servers([server], user_id="u1", connect=connect)
+    assert "abc" not in failures[0][1] and "t0k3n-in-path" not in failures[0][1] and "mcp.example.com" in failures[0][1]
+```
+
+- [ ] **Step 2: Run it to verify it fails**
+
+Run: `uv run pytest -q tests/unit/agentic/test_agent_teams.py tests/unit/mcp/test_file_mcp_servers.py`
+Expected: FAIL — `test_a_teammate_is_released_when_starting_it_raises` (the teammate stays busy) and `test_a_failure_masks_short_secrets_and_the_url_path` (`abc` and the path segment appear).
+
+- [ ] **Step 3: Implement**
+
+Then make these edits, in order (each `replace` block occurs exactly once in its file; if one does not, stop and report — do not guess):
+
+1. In `src/agentos/agentic/session.py`, replace
+
+```python
+        clean_name = str(teammate_name).strip().lower()
+        outcome = self._start_subagent(
+            subagent_type, task, description=description, model_id=model_id, agent_id=agent_id,
+            run_in_background=True, hook_cancel=hook_cancel, teammate_name=clean_name, team_name=team_name,
+        )
+        if outcome.status != "succeeded":
+```
+
+   with
+
+```python
+        clean_name = str(teammate_name).strip().lower()
+        try:
+            outcome = self._start_subagent(
+                subagent_type, task, description=description, model_id=model_id, agent_id=agent_id,
+                run_in_background=True, hook_cancel=hook_cancel, teammate_name=clean_name, team_name=team_name,
+            )
+        except BaseException:
+            self._release_teammate(clean_name)  # a start that raised never began
+            raise
+        if outcome.status != "succeeded":
+```
+
+2. In `src/agentos/agentic/session.py`, replace
+
+```python
+        if not self._claim_teammate(target):
+            return ToolOutcome("succeeded", f"Mensagem na fila de {target}", f"Queued: {target} reads it when it finishes its current task.", {"to": target, "status": "queued", "tool_kind": "agent"})
+        task, taken = self._take_team_mail(target)
+        if not task:
+            self._release_teammate(target)
+            return ToolOutcome("succeeded", f"Mensagem entregue a {target}", f"Delivered to {target}.", {"to": target, "tool_kind": "agent"})
+        started = self._ask_agent(
+            mate["type"], task, resumed_agent_id=mate["agent_id"], run_in_background=True,
+            teammate_name=target, team_name=mate["team_name"],
+        )
+```
+
+   with
+
+```python
+        if not self._claim_teammate(target):
+            return ToolOutcome("succeeded", f"Mensagem na fila de {target}", f"Queued: {target} reads it when it finishes its current task.", {"to": target, "status": "queued", "tool_kind": "agent"})
+        taken: list[str] = []
+        try:
+            task, taken = self._take_team_mail(target)
+            if not task:
+                self._release_teammate(target)
+                return ToolOutcome("succeeded", f"Mensagem entregue a {target}", f"Delivered to {target}.", {"to": target, "tool_kind": "agent"})
+            started = self._ask_agent(
+                mate["type"], task, resumed_agent_id=mate["agent_id"], run_in_background=True,
+                teammate_name=target, team_name=mate["team_name"],
+            )
+        except BaseException:
+            # Whatever broke, the messages stay unread and the teammate is not left marked busy.
+            if taken:
+                try:
+                    mailbox.release(user_id=user_id, conversation_id=conversation_id, message_ids=taken)
+                except Exception:  # noqa: BLE001 - the original error is the one to report
+                    logger.warning("could not put a teammate's messages back", exc_info=True)
+            self._release_teammate(target)
+            raise
+```
+
+3. In `src/agentos/mcp/file_servers.py`, replace
+
+```python
+from concurrent.futures import ThreadPoolExecutor, wait
+```
+
+   with
+
+```python
+from concurrent.futures import ThreadPoolExecutor, wait
+from urllib.parse import urlsplit
+```
+
+4. In `src/agentos/mcp/file_servers.py`, replace
+
+```python
+def _redacted(text: str, server: FileServer) -> str:
+    values = [value for _, value in (*server.env, *server.headers)]
+    if "?" in server.url:
+        values.append(server.url.split("?", 1)[1])
+    for value in sorted(values, key=len, reverse=True):
+        if len(value) >= 4:
+            text = text.replace(value, "***")
+    return text
+```
+
+   with
+
+```python
+def _redacted(text: str, server: FileServer) -> str:
+    """The text without the server's environment and header values (3+ characters), nor its URL's path, query
+    and credentials: a token is often kept in any of them."""
+    secrets = [value for _, value in (*server.env, *server.headers) if len(value) >= 3]
+    if server.url:
+        parts = urlsplit(server.url)
+        secrets.extend(segment for segment in parts.path.split("/") if len(segment) >= 4)
+        secrets.extend(item for item in (parts.query, parts.username, parts.password) if item and len(item) >= 3)
+    for value in sorted(set(secrets), key=len, reverse=True):
+        text = text.replace(value, "***")
+    return text
+```
+
+- [ ] **Step 4: Run the tests and see them pass**
+
+Run: `uv run pytest -q tests/unit/agentic/test_agent_teams.py tests/unit/mcp/test_file_mcp_servers.py`
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/agentos/agentic/session.py src/agentos/mcp/file_servers.py tests/unit/agentic/test_agent_teams.py tests/unit/mcp/test_file_mcp_servers.py
+git commit -m "fix(w5): a teammate is released when its start raises; file-server failures mask short values and URL paths
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+### Task 28: Plugin packages as Claude Code (and Orin) lay them out
+
+The manifest may sit in `.orin-plugin/plugin.json` (first), `.claude-plugin/plugin.json` or `plugin.json`, and its `version` is optional (`0.0.0`). `agents`, `skills` and `outputStyles` may name one folder or a list (each kept inside the package); `mcpServers` may name a JSON file. A plugin skill is read leniently (YAML frontmatter, only the fields Orin's library stores), so a Claude Code skill with `allowed-tools` or a folded description installs; the registry reads it the same way when it loads the body. Plugin agents are parsed with the agent-file parser of Batch B. MCP commands and arguments may name `${ORIN_PLUGIN_ROOT}` and the plugin's data folder (`${CLAUDE_PLUGIN_DATA}` / `${ORIN_PLUGIN_DATA}`, one per person and plugin under `~/.orin/plugin-data`, created on activation). A hook command may name `${ORIN_PLUGIN_ROOT}`, and the plugin folder is substituted with forward slashes, which fixes an unquoted `${CLAUDE_PLUGIN_ROOT}/x` on Windows (the POSIX split ate the backslashes).
+
+**Files:**
+- Create: `src/agentos/plugins/variables.py`
+- Modify: `src/agentos/plugins/manifest.py`
+- Modify: `src/agentos/skills/parser.py`
+- Modify: `src/agentos/skills/registry.py`
+- Modify: `src/agentos/plugins/inspector.py`
+- Modify: `src/agentos/plugins/fetcher.py`
+- Modify: `src/agentos/plugins/manifest_probe.py`
+- Modify: `src/agentos/plugins/activator.py`
+- Modify: `src/agentos/plugins/hook_executor.py`
+- Test: `tests/unit/plugins/test_plugin_packages.py`
+
+**Interfaces:**
+- Produces: `manifest.MANIFEST_LOCATIONS`, `manifest_file(root) -> Path | None`, `DEFAULT_VERSION`; `PluginManifest.agents_paths`, `.skills_paths`, `.output_styles_paths`, `.mcp_config_path`; `parse_skill_markdown(..., lenient=False)` / `parse_skill_file(..., lenient=False)`; `agentos.plugins.variables`: `plugin_data_dir(user_id, plugin_id)`, `plugin_variables(*, install_path, plugin_id, user_id)`, `substitute(value, variables)`.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `tests/unit/plugins/test_plugin_packages.py`:
+
+```python
+"""W5: plugin packages laid out as Claude Code (and Orin) write them."""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from agentos.plugins.activator import PluginActivator
+from agentos.plugins.hook_executor import resolve_argv
+from agentos.plugins.inspector import inspect_plugin_package
+from agentos.plugins.manifest import ManifestRejected, manifest_file, parse_plugin_manifest
+from agentos.plugins.models import McpServerContribution, PluginInspection, PluginRef
+from agentos.plugins.variables import plugin_data_dir
+from agentos.skills.parser import parse_skill_markdown
+from tests.unit.plugins.fakes import FakeMcpService, FakeSkillLibrary
+
+
+def _write(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def test_orins_manifest_folder_comes_first(tmp_path: Path) -> None:
+    assert manifest_file(tmp_path) is None
+    _write(tmp_path / "plugin.json", "{}")
+    assert manifest_file(tmp_path) == tmp_path / "plugin.json"
+    _write(tmp_path / ".claude-plugin" / "plugin.json", "{}")
+    assert manifest_file(tmp_path) == tmp_path / ".claude-plugin" / "plugin.json"
+    _write(tmp_path / ".orin-plugin" / "plugin.json", "{}")
+    assert manifest_file(tmp_path) == tmp_path / ".orin-plugin" / "plugin.json"
+
+
+def test_the_version_is_optional_and_component_paths_may_be_lists() -> None:
+    manifest = parse_plugin_manifest({"name": "demo", "agents": ["./team", "more/"], "skills": "./my-skills", "outputStyles": "./styles"})
+    assert manifest.version == "0.0.0"
+    assert manifest.agents_paths == ("team", "more") and manifest.skills_paths == ("my-skills",) and manifest.output_styles_paths == ("styles",)
+    defaults = parse_plugin_manifest({"name": "demo", "version": "1.2.3"})
+    assert (defaults.agents_paths, defaults.skills_paths, defaults.output_styles_paths) == (("agents",), ("skills",), ("output-styles",))
+    with pytest.raises(ManifestRejected):
+        parse_plugin_manifest({"name": "demo", "agents": ["../outside"]})
+    with pytest.raises(ManifestRejected):
+        parse_plugin_manifest({"name": "demo", "version": "latest"})
+
+
+CLAUDE_CODE_SKILL = """---
+name: release-notes
+description: >
+  Writes release notes from the commits
+  since the last tag.
+allowed-tools: Bash(git log:*), Read
+argument-hint: [tag]
+disable-model-invocation: false
+---
+Write the notes.
+"""
+
+
+def test_a_claude_code_skill_parses_leniently() -> None:
+    with pytest.raises(Exception):
+        parse_skill_markdown(CLAUDE_CODE_SKILL, required_fields=frozenset({"name", "description"}), default_version="1.0.0")
+    skill = parse_skill_markdown(CLAUDE_CODE_SKILL, required_fields=frozenset({"name", "description"}), default_version="1.0.0", lenient=True)
+    assert skill.name == "release-notes" and skill.description.startswith("Writes release notes") and skill.instructions == "Write the notes."
+
+
+def test_the_inspector_reads_orins_manifest_custom_paths_and_claude_code_skills(tmp_path: Path) -> None:
+    _write(tmp_path / ".orin-plugin" / "plugin.json", json.dumps({"name": "Kit", "agents": "./team", "skills": "./my-skills"}))
+    _write(tmp_path / "my-skills" / "release-notes" / "SKILL.md", CLAUDE_CODE_SKILL)
+    _write(tmp_path / "team" / "reviewer.md", "---\nname: reviewer\ndescription: Reviews changes\ntools: Read, Grep\n---\nReview carefully.")
+    result = inspect_plugin_package(tmp_path, package_digest="abc")
+    assert [item.skill_id for item in result.skills] == ["kit:release-notes"] and not result.warnings
+    assert [(item.agent_id, item.name, item.relative_path) for item in result.agents] == [("kit:reviewer", "reviewer", "team/reviewer.md")]
+    assert result.ref.version == "0.0.0"
+
+
+def test_activation_names_the_plugin_folder_and_its_data_folder(tmp_path: Path) -> None:
+    inspection = PluginInspection(
+        PluginRef("demo", "1.0.0"), "Demo", "", "", None, "abc",
+        mcp_servers=(McpServerContribution("demo-db", "db", "stdio", "node", ("${ORIN_PLUGIN_ROOT}/server.js", "--data", "${CLAUDE_PLUGIN_DATA}"), None, ()),),
+    )
+    mcp = FakeMcpService()
+    PluginActivator(skill_library=FakeSkillLibrary(), mcp_service=mcp).activate(user_id="u1", install_path=tmp_path, inspection=inspection)
+    args = mcp.proposed[0]["args"]
+    assert Path(args[0]).resolve() == (tmp_path / "server.js").resolve()
+    assert args[2] == str(plugin_data_dir("u1", "demo")) and plugin_data_dir("u1", "demo").is_dir()
+    assert plugin_data_dir("u1", "demo") != plugin_data_dir("u2", "demo")
+
+
+def test_a_hook_may_name_orins_plugin_root(tmp_path: Path) -> None:
+    _write(tmp_path / "hooks" / "run.py", "print('ok')")
+    argv = resolve_argv("python ${ORIN_PLUGIN_ROOT}/hooks/run.py --fast", install_path=tmp_path)
+    assert Path(argv[1]) == (tmp_path / "hooks" / "run.py").resolve() and argv[2] == "--fast"
+```
+
+- [ ] **Step 2: Run it to verify it fails**
+
+Run: `uv run pytest -q tests/unit/plugins/test_plugin_packages.py`
+Expected: FAIL — `ImportError: cannot import name 'manifest_file' from 'agentos.plugins.manifest'` (collection error).
+
+- [ ] **Step 3: Implement**
+
+Create `src/agentos/plugins/variables.py`:
+
+```python
+"""The variables a plugin's MCP servers and hooks may name (W5): its folder and its own data folder.
+
+``${CLAUDE_PLUGIN_ROOT}`` / ``${ORIN_PLUGIN_ROOT}`` is the installed package (replaced on every update);
+``${CLAUDE_PLUGIN_DATA}`` / ``${ORIN_PLUGIN_DATA}`` is a folder that survives updates, one per person and plugin.
+"""
+from __future__ import annotations
+
+import hashlib
+from collections.abc import Mapping
+from pathlib import Path
+
+
+def plugin_data_dir(user_id: str, plugin_id: str) -> Path:
+    from agentos.settings.paths import orin_user_dir
+
+    person = hashlib.sha256(str(user_id).encode("utf-8")).hexdigest()[:16]
+    return orin_user_dir() / "plugin-data" / person / str(plugin_id)
+
+
+def plugin_variables(*, install_path: Path, plugin_id: str, user_id: str) -> dict[str, str]:
+    root, data = str(Path(install_path)), str(plugin_data_dir(user_id, plugin_id))
+    return {"CLAUDE_PLUGIN_ROOT": root, "ORIN_PLUGIN_ROOT": root, "CLAUDE_PLUGIN_DATA": data, "ORIN_PLUGIN_DATA": data}
+
+
+def substitute(value: str, variables: Mapping[str, str]) -> str:
+    text = str(value)
+    for name, replacement in variables.items():
+        text = text.replace("${" + name + "}", replacement)
+    return text
+
+
+__all__ = ["plugin_data_dir", "plugin_variables", "substitute"]
+```
+
+Then make these edits, in order (each `replace` block occurs exactly once in its file; if one does not, stop and report — do not guess):
+
+1. In `src/agentos/plugins/manifest.py`, replace
+
+```python
+from pathlib import PurePosixPath
+```
+
+   with
+
+```python
+from pathlib import Path, PurePosixPath
+```
+
+2. In `src/agentos/plugins/manifest.py`, replace
+
+```python
+SEMVER = re.compile(r"\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?")
+```
+
+   with
+
+```python
+SEMVER = re.compile(r"\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?")
+# W5: where a package keeps its manifest, Orin's own folder first; a version is optional, as in Claude Code.
+MANIFEST_LOCATIONS = (".orin-plugin/plugin.json", ".claude-plugin/plugin.json", "plugin.json")
+DEFAULT_VERSION = "0.0.0"
+MAX_COMPONENT_PATHS = 10
+
+
+def manifest_file(root: Path) -> Path | None:
+    for relative in MANIFEST_LOCATIONS:
+        candidate = Path(root) / relative
+        if candidate.is_file() and not candidate.is_symlink():
+            return candidate
+    return None
+```
+
+3. In `src/agentos/plugins/manifest.py`, replace
+
+```python
+    commands_path: str = "commands"
+    hooks_path: str = "hooks"
+```
+
+   with
+
+```python
+    commands_path: str = "commands"
+    hooks_path: str = "hooks"
+    agents_paths: tuple[str, ...] = ("agents",)
+    skills_paths: tuple[str, ...] = ("skills",)
+    output_styles_paths: tuple[str, ...] = ("output-styles",)
+    mcp_config_path: str = ".mcp.json"
+```
+
+4. In `src/agentos/plugins/manifest.py`, replace
+
+```python
+def parse_plugin_manifest(payload: Mapping[str, Any]) -> PluginManifest:
+```
+
+   with
+
+```python
+def _package_paths(value: Any, default: str) -> tuple[str, ...]:
+    """One path or a list of them (Claude Code accepts both), each kept inside the package."""
+    if value is None:
+        return (default,)
+    items = value if isinstance(value, list) else [value]
+    paths = tuple(_package_relative_path(item, default) for item in items[:MAX_COMPONENT_PATHS] if isinstance(item, str))
+    return tuple(dict.fromkeys(paths)) or (default,)
+
+
+def _first_path(value: Any) -> Any:
+    return (value[0] if value else None) if isinstance(value, list) else value
+
+
+def parse_plugin_manifest(payload: Mapping[str, Any]) -> PluginManifest:
+```
+
+5. In `src/agentos/plugins/manifest.py`, replace
+
+```python
+    version = _text(payload.get("version"), 64).strip()
+    if not SEMVER.fullmatch(version):
+```
+
+   with
+
+```python
+    version = _text(payload.get("version"), 64).strip() or DEFAULT_VERSION
+    if not SEMVER.fullmatch(version):
+```
+
+6. In `src/agentos/plugins/manifest.py`, replace
+
+```python
+        _package_relative_path(payload.get("commands"), "commands"),
+        _package_relative_path(payload.get("hooks"), "hooks"),
+    )
+```
+
+   with
+
+```python
+        _package_relative_path(_first_path(payload.get("commands")), "commands"),
+        _package_relative_path(payload.get("hooks") if isinstance(payload.get("hooks"), str) else None, "hooks"),
+        agents_paths=_package_paths(payload.get("agents"), "agents"),
+        skills_paths=_package_paths(payload.get("skills"), "skills"),
+        output_styles_paths=_package_paths(payload.get("outputStyles"), "output-styles"),
+        mcp_config_path=_package_relative_path(payload.get("mcpServers") if isinstance(payload.get("mcpServers"), str) else None, ".mcp.json"),
+    )
+```
+
+7. In `src/agentos/skills/parser.py`, replace
+
+```python
+    required_fields: frozenset[str] = _DEFAULT_REQUIRED,
+    default_version: str | None = None,
+) -> Skill:
+    target = Path(path)
+```
+
+   with
+
+```python
+    required_fields: frozenset[str] = _DEFAULT_REQUIRED,
+    default_version: str | None = None,
+    lenient: bool = False,
+) -> Skill:
+    target = Path(path)
+```
+
+8. In `src/agentos/skills/parser.py`, replace
+
+```python
+        required_fields=required_fields,
+        default_version=default_version,
+    )
+    return replace(skill, package_path=target)
+```
+
+   with
+
+```python
+        required_fields=required_fields,
+        default_version=default_version,
+        lenient=lenient,
+    )
+    return replace(skill, package_path=target)
+```
+
+9. In `src/agentos/skills/parser.py`, replace
+
+```python
+    required_fields: frozenset[str] = _DEFAULT_REQUIRED,
+    default_version: str | None = None,
+) -> Skill:
+    """Parse a SKILL.md document.
+```
+
+   with
+
+```python
+    required_fields: frozenset[str] = _DEFAULT_REQUIRED,
+    default_version: str | None = None,
+    lenient: bool = False,
+) -> Skill:
+    """Parse a SKILL.md document.
+
+    ``lenient`` (W5, for plugin skills) reads the frontmatter as YAML and keeps only the fields Orin's skill
+    library stores, so a Claude Code skill's own keys (``allowed-tools``, ``argument-hint``, a folded
+    ``description``...) no longer reject it.
+```
+
+10. In `src/agentos/skills/parser.py`, replace
+
+```python
+    if not isinstance(document, str) or not document.startswith("---\n"):
+        raise SkillParseError("SKILL.md must begin with YAML frontmatter")
+    try:
+        header, body = document[4:].split("\n---\n", 1)
+    except ValueError as error:
+        raise SkillParseError("SKILL.md frontmatter is not closed") from error
+    values = _parse_frontmatter(header)
+    unknown = set(values) - _ALLOWED
+    if unknown:
+        raise SkillParseError(f"unsupported skill frontmatter field: {sorted(unknown)[0]}")
+```
+
+   with
+
+```python
+    if lenient:
+        values, body = _lenient_frontmatter(document)
+    else:
+        if not isinstance(document, str) or not document.startswith("---\n"):
+            raise SkillParseError("SKILL.md must begin with YAML frontmatter")
+        try:
+            header, body = document[4:].split("\n---\n", 1)
+        except ValueError as error:
+            raise SkillParseError("SKILL.md frontmatter is not closed") from error
+        values = _parse_frontmatter(header)
+        unknown = set(values) - _ALLOWED
+        if unknown:
+            raise SkillParseError(f"unsupported skill frontmatter field: {sorted(unknown)[0]}")
+```
+
+11. In `src/agentos/skills/parser.py`, replace
+
+```python
+def _parse_frontmatter(header: str) -> dict[str, Any]:
+```
+
+   with
+
+```python
+def _lenient_frontmatter(document: str) -> tuple[dict[str, Any], str]:
+    from .disk import split_frontmatter
+
+    try:
+        meta, body = split_frontmatter(str(document or ""))
+    except ValueError as error:
+        raise SkillParseError(str(error)) from error
+    if not meta:
+        raise SkillParseError("SKILL.md must begin with YAML frontmatter")
+    values: dict[str, Any] = {}
+    for key in _ALLOWED:
+        value = meta.get(key)
+        if value is None:
+            continue
+        if key == "dependencies":
+            if isinstance(value, dict):
+                values[key] = {name: [str(item) for item in items] if isinstance(items, list) else [str(items)]
+                               for name, items in value.items() if name in {"skills", "tools"} and items is not None}
+        elif key in {"tags", "capabilities", "when_to_use", "when_not_to_use", "requires_tools"}:
+            items = value if isinstance(value, list) else [value]
+            values[key] = [str(item) for item in items if str(item).strip()]
+        else:
+            values[key] = " ".join(str(value).split())
+    return values, body
+
+
+def _parse_frontmatter(header: str) -> dict[str, Any]:
+```
+
+12. In `src/agentos/skills/registry.py`, replace
+
+```python
+        from .parser import parse_skill_file
+
+        parsed = parse_skill_file(Path(skill.package_path), include_instructions=True, source=skill.source, scope=skill.scope)
+```
+
+   with
+
+```python
+        from .models import SkillSource
+        from .parser import parse_skill_file
+
+        plugin = skill.source is SkillSource.PLUGIN  # W5: a plugin skill is read leniently, as when it was installed
+        parsed = parse_skill_file(
+            Path(skill.package_path), include_instructions=True, source=skill.source, scope=skill.scope,
+            required_fields=frozenset({"name", "description"}) if plugin else frozenset({"name", "description", "version"}),
+            default_version=skill.version if plugin else None, lenient=plugin,
+        )
+```
+
+13. In `src/agentos/plugins/inspector.py`, replace
+
+```python
+from .manifest import parse_mcp_config, parse_plugin_manifest
+```
+
+   with
+
+```python
+from .manifest import ManifestRejected, manifest_file, parse_mcp_config, parse_plugin_manifest
+```
+
+14. In `src/agentos/plugins/inspector.py`, replace
+
+```python
+def _manifest(path: Path):
+    target = path / ".claude-plugin" / "plugin.json"
+    if not target.exists():
+        target = path / "plugin.json"
+    return parse_plugin_manifest(json.loads(target.read_text(encoding="utf-8")))
+```
+
+   with
+
+```python
+def _manifest(path: Path):
+    target = manifest_file(path)
+    if target is None:
+        raise ManifestRejected("the package has no plugin.json")
+    return parse_plugin_manifest(json.loads(target.read_text(encoding="utf-8")))
+```
+
+15. In `src/agentos/plugins/inspector.py`, replace
+
+```python
+    skill_root = path / "skills"
+    if skill_root.is_dir():
+        for skill_file in sorted(skill_root.glob("*/SKILL.md"))[:200]:
+            try:
+                skill = parse_skill_file(
+                    skill_file,
+                    include_instructions=False,
+                    source=SkillSource.PLUGIN,
+                    scope=SkillScope.USER,
+                    required_fields=frozenset({"name", "description"}),
+                    default_version=manifest.version,
+                )
+            except SkillParseError:
+                warnings.append(f"skill quebrada ignorada: {skill_file.parent.name}")
+                continue
+            # Plugin skill identities are namespaced by the plugin and use the
+            # skill's public name.  Do not let an optional local `id` field in
+            # SKILL.md change that cross-plugin reference.
+            skill_id = f"{manifest.plugin_id}:{plugin_id_from_name(skill.name)}"
+            skills.append(SkillContribution(skill_id, skill.name, skill.description, skill_file.relative_to(path).as_posix()))
+        if len(list(skill_root.glob("*/SKILL.md"))) > 200:
+            warnings.append("o plugin declara mais de 200 skills; o restante foi ignorado")
+```
+
+   with
+
+```python
+    skill_files: list[Path] = []
+    for folder in manifest.skills_paths:
+        if (path / folder).is_dir():
+            skill_files.extend(sorted((path / folder).glob("*/SKILL.md")))
+    if len(skill_files) > 200:
+        warnings.append("o plugin declara mais de 200 skills; o restante foi ignorado")
+    for skill_file in skill_files[:200]:
+        try:
+            # W5: read leniently, so a Claude Code skill's own frontmatter keys do not reject it.
+            skill = parse_skill_file(
+                skill_file,
+                include_instructions=False,
+                source=SkillSource.PLUGIN,
+                scope=SkillScope.USER,
+                required_fields=frozenset({"name", "description"}),
+                default_version=manifest.version,
+                lenient=True,
+            )
+        except SkillParseError:
+            warnings.append(f"skill quebrada ignorada: {skill_file.parent.name}")
+            continue
+        # Plugin skill identities are namespaced by the plugin and use the
+        # skill's public name.  Do not let an optional local `id` field in
+        # SKILL.md change that cross-plugin reference.
+        skill_id = f"{manifest.plugin_id}:{plugin_id_from_name(skill.name)}"
+        skills.append(SkillContribution(skill_id, skill.name, skill.description, skill_file.relative_to(path).as_posix()))
+```
+
+16. In `src/agentos/plugins/inspector.py`, replace
+
+```python
+    mcp_path = path / ".mcp.json"
+```
+
+   with
+
+```python
+    mcp_path = path / manifest.mcp_config_path
+```
+
+17. In `src/agentos/plugins/inspector.py`, replace
+
+```python
+    agents: list[AgentContribution] = []
+    agent_root = path / "agents"
+    for item in sorted(agent_root.glob("*.md"))[:64] if agent_root.is_dir() else ():
+        try:
+            document = item.read_text(encoding="utf-8")
+            if not document.startswith("---\n"):
+                raise ValueError
+            header, body = document[4:].split("\n---\n", 1)
+            values = dict(line.split(":", 1) for line in header.splitlines() if ":" in line)
+            name = values.get("name", item.stem).strip()
+            description = values.get("description", "").strip()
+            agents.append(AgentContribution(f"{manifest.plugin_id}:{plugin_id_from_name(name)}", name, body.strip() or description, item.relative_to(path).as_posix()))
+        except (OSError, ValueError):
+            warnings.append(f"subagente quebrado ignorado: {item.name}")
+```
+
+   with
+
+```python
+    from agentos.agentic.agent_definitions import parse_agent_file
+
+    agents: list[AgentContribution] = []
+    agent_files = [item for folder in manifest.agents_paths if (path / folder).is_dir() for item in sorted((path / folder).glob("*.md"))]
+    for item in agent_files[:64]:
+        try:
+            definition = parse_agent_file(item, origin="plugin")
+        except (OSError, ValueError, UnicodeDecodeError):
+            warnings.append(f"subagente quebrado ignorado: {item.name}")
+            continue
+        agents.append(AgentContribution(
+            f"{manifest.plugin_id}:{plugin_id_from_name(definition.name)}", definition.name,
+            definition.prompt or definition.description, item.relative_to(path).as_posix(),
+        ))
+```
+
+18. In `src/agentos/plugins/fetcher.py`, replace
+
+```python
+from .manifest import ManifestRejected, PluginManifest, parse_plugin_manifest
+```
+
+   with
+
+```python
+from .manifest import ManifestRejected, PluginManifest, manifest_file, parse_plugin_manifest
+```
+
+19. In `src/agentos/plugins/fetcher.py`, replace
+
+```python
+            manifest_path = staging / ".claude-plugin" / "plugin.json"
+            if not manifest_path.exists():
+                manifest_path = staging / "plugin.json"
+            try:
+                manifest = parse_plugin_manifest(json.loads(manifest_path.read_text(encoding="utf-8")))
+```
+
+   with
+
+```python
+            manifest_path = manifest_file(staging)
+            try:
+                if manifest_path is None:
+                    raise FetchRejected("plugin package has no valid manifest")
+                manifest = parse_plugin_manifest(json.loads(manifest_path.read_text(encoding="utf-8")))
+```
+
+20. In `src/agentos/plugins/manifest_probe.py`, replace
+
+```python
+            if item.get("name") == ".claude-plugin" and item.get("type") == "dir":
+```
+
+   with
+
+```python
+            if item.get("name") in {".claude-plugin", ".orin-plugin"} and item.get("type") == "dir":
+```
+
+21. In `src/agentos/plugins/activator.py`, replace
+
+```python
+from .models import PluginInspection
+```
+
+   with
+
+```python
+from .models import PluginInspection
+from .variables import plugin_variables, substitute
+```
+
+22. In `src/agentos/plugins/activator.py`, replace
+
+```python
+                    required_fields=frozenset({"name", "description"}),
+                    default_version=inspection.ref.version,
+                )
+                installed_skills.append
+```
+
+   with
+
+```python
+                    required_fields=frozenset({"name", "description"}),
+                    default_version=inspection.ref.version,
+                    lenient=True,
+                )
+                installed_skills.append
+```
+
+23. In `src/agentos/plugins/activator.py`, replace
+
+```python
+                root = str(Path(install_path))
+                command = item.command.replace("${CLAUDE_PLUGIN_ROOT}", root) if item.command else item.command
+                args = tuple(value.replace("${CLAUDE_PLUGIN_ROOT}", root) for value in item.args)
+```
+
+   with
+
+```python
+                # W5: also ${ORIN_PLUGIN_ROOT} and the plugin's data folder (${CLAUDE_PLUGIN_DATA} / ${ORIN_PLUGIN_DATA}).
+                variables = plugin_variables(install_path=Path(install_path), plugin_id=inspection.ref.plugin_id, user_id=user_id)
+                Path(variables["ORIN_PLUGIN_DATA"]).mkdir(parents=True, exist_ok=True)
+                command = substitute(item.command, variables) if item.command else item.command
+                args = tuple(substitute(value, variables) for value in item.args)
+```
+
+24. In `src/agentos/plugins/hook_executor.py`, replace
+
+```python
+    expanded = command.replace("${CLAUDE_PLUGIN_ROOT}", str(Path(install_path)))
+```
+
+   with
+
+```python
+    # W5: forward slashes, so an unquoted ${CLAUDE_PLUGIN_ROOT}/x survives the POSIX split below on Windows too.
+    root = Path(install_path).as_posix()
+    expanded = command.replace("${CLAUDE_PLUGIN_ROOT}", root).replace("${ORIN_PLUGIN_ROOT}", root)
+```
+
+- [ ] **Step 4: Run the tests and see them pass**
+
+Run: `uv run pytest -q tests/unit/plugins/test_plugin_packages.py`
+Expected: PASS.
+
+Also run `uv run pytest -q tests/unit/plugins tests/unit/skills`: expected PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/agentos/plugins/variables.py tests/unit/plugins/test_plugin_packages.py src/agentos/plugins/manifest.py src/agentos/skills/parser.py src/agentos/skills/registry.py src/agentos/plugins/inspector.py src/agentos/plugins/fetcher.py src/agentos/plugins/manifest_probe.py src/agentos/plugins/activator.py src/agentos/plugins/hook_executor.py
+git commit -m "feat(w5): plugin packages as Claude Code and Orin lay them out
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+### Task 29: Plugin agents and output styles join the turn
+
+At turn start the session lists the person's active plugins (`active_plugins`): their agent folders join the agent catalog after the managed, project and user ones (named `plugin:agent`, without `hooks`, `mcpServers` or `permissionMode`), and their output-style folders join the styles (named `plugin:style`, after the builtins and before the person's own). `enabledPlugins` set to `false` for a plugin leaves it out of the turn; one set to `true` that is not installed is reported in a `plugins` reminder.
+
+**Files:**
+- Create: `src/agentos/plugins/runtime.py`
+- Modify: `src/agentos/agentic/agent_definitions.py`
+- Modify: `src/agentos/agentic/output_styles.py`
+- Modify: `src/agentos/agentic/session.py`
+- Test: `tests/unit/plugins/test_plugin_runtime.py`
+
+**Interfaces:**
+- Consumes: Task 28 (`PluginManifest.agents_paths`, `.output_styles_paths`, `manifest_file`).
+- Produces: `agentos.plugins.runtime`: `ActivePlugin(plugin_id, install_path, manifest)` with `folders(paths)`, `active_plugins(plugin_service, user_id, settings) -> (plugins, missing)`; `load_agent_definitions(..., plugin_folders=())`; `load_output_styles(..., plugin_dirs=())`, `resolve_output_style(..., plugin_dirs=())`; `TurnSession._load_active_plugins()`, `._active_plugins`.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `tests/unit/plugins/test_plugin_runtime.py`:
+
+```python
+"""W5: an active plugin's agents and output styles join the turn; enabledPlugins can turn a plugin off."""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from agentos.agentic.agent_definitions import load_agent_definitions
+from agentos.agentic.output_styles import resolve_output_style
+from agentos.plugins.runtime import active_plugins
+from agentos.settings.loader import EffectiveSettings
+from agentos.settings.paths import orin_user_dir
+
+
+def _write(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def _package(root: Path) -> Path:
+    _write(root / ".claude-plugin" / "plugin.json", json.dumps({"name": "Kit", "version": "1.0.0", "agents": "./team"}))
+    _write(root / "team" / "reviewer.md", (
+        "---\nname: reviewer\ndescription: Reviews changes\npermissionMode: bypassPermissions\n"
+        "hooks:\n  PreToolUse: []\nmcpServers: [github]\n---\nReview carefully."
+    ))
+    _write(root / "output-styles" / "terse.md", "---\nname: terse\ndescription: Short answers\n---\nAnswer in one line.")
+    return root
+
+
+class _Plugins:
+    def __init__(self, rows: list[dict]) -> None:
+        self.rows = rows
+
+    def list(self, user_id: str) -> list[dict]:
+        return list(self.rows)
+
+
+def test_active_plugins_follow_their_state_and_enabled_plugins(tmp_path: Path) -> None:
+    kit = _package(tmp_path / "kit")
+    rows = [
+        {"plugin_id": "kit", "state": "active", "install_path": str(kit)},
+        {"plugin_id": "old", "state": "disabled", "install_path": str(kit)},
+    ]
+    plugins, missing = active_plugins(_Plugins(rows), "u1", {"enabledPlugins": {"Ghost@market": True, "kit@market": True}})
+    assert [item.plugin_id for item in plugins] == ["kit"] and missing == ["Ghost@market"]
+    plugins, _ = active_plugins(_Plugins(rows), "u1", {"enabledPlugins": {"kit@market": False}})
+    assert plugins == []
+    assert active_plugins(None, "u1", {}) == ([], [])
+
+
+def test_a_plugins_agents_are_namespaced_and_lose_hooks_servers_and_mode(tmp_path: Path) -> None:
+    kit = _package(tmp_path / "kit")
+    _write(orin_user_dir() / "agents" / "reviewer.md", "---\nname: reviewer\ndescription: Mine\n---\nMine.")
+    catalog = load_agent_definitions(workspace_root=None, trusted=False, plugin_folders=[("kit", kit / "team")])
+    plugin_agent = catalog.get("kit:reviewer")
+    assert plugin_agent is not None and plugin_agent.origin == "plugin" and plugin_agent.prompt == "Review carefully."
+    assert plugin_agent.permission_mode is None and plugin_agent.hooks is None and plugin_agent.mcp_servers is None
+    assert catalog.get("reviewer").origin == "user"
+
+
+def test_a_plugins_output_style_can_be_chosen(tmp_path: Path) -> None:
+    kit = _package(tmp_path / "kit")
+    settings = EffectiveSettings({"outputStyle": "kit:terse"}, {}, (), (), False)
+    style = resolve_output_style(settings, tmp_path / "w", plugin_dirs=[("kit", kit / "output-styles")])
+    assert style is not None and style.instructions == "Answer in one line." and style.source == "plugin"
+    assert resolve_output_style(settings, tmp_path / "w") is None
+
+
+def test_the_turn_reads_the_persons_plugins(tmp_path: Path) -> None:
+    from tests.unit.agentic.test_disk_skills_session import _session
+
+    kit = _package(tmp_path / "kit")
+    _write(orin_user_dir() / "settings.json", json.dumps({"enabledPlugins": {"ghost@market": True}}))
+    session = _session(tmp_path, "hi")
+    session.plugin_service = _Plugins([{"plugin_id": "kit", "state": "active", "install_path": str(kit)}])
+    session.build_runtime()
+    assert session._agent_definitions.get("kit:reviewer") is not None
+    texts = [item.text for item in session._reminders.drain() if item.kind == "plugins"]
+    assert texts and "ghost@market" in texts[0]
+```
+
+- [ ] **Step 2: Run it to verify it fails**
+
+Run: `uv run pytest -q tests/unit/plugins/test_plugin_runtime.py`
+Expected: FAIL — `ModuleNotFoundError: No module named 'agentos.plugins.runtime'` (collection error).
+
+- [ ] **Step 3: Implement**
+
+Create `src/agentos/plugins/runtime.py`:
+
+```python
+"""A person's active plugins for one turn (W5): the agents and output styles their packages add.
+
+Skills, MCP servers, commands and hooks are installed when a plugin is approved; agents and output styles are read
+from the package each turn. ``enabledPlugins`` in the settings can turn an installed plugin off for a workspace
+(``"name@marketplace": false``); one it turns on that is not installed is reported, not fetched.
+"""
+from __future__ import annotations
+
+import json
+import logging
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from .manifest import PluginManifest, manifest_file, parse_plugin_manifest
+from .models import plugin_id_from_name
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class ActivePlugin:
+    plugin_id: str
+    install_path: Path
+    manifest: PluginManifest
+
+    def folders(self, relative_paths: Sequence[str]) -> list[Path]:
+        return [self.install_path / item for item in relative_paths if (self.install_path / item).is_dir()]
+
+
+def _setting_ids(settings: Mapping[str, Any], wanted: bool) -> dict[str, str]:
+    raw = settings.get("enabledPlugins")
+    if not isinstance(raw, Mapping):
+        return {}
+    found: dict[str, str] = {}
+    for key, value in raw.items():
+        if value is wanted and isinstance(key, str) and key.strip():
+            try:
+                found[plugin_id_from_name(key.split("@", 1)[0])] = key
+            except ValueError:
+                continue
+    return found
+
+
+def active_plugins(plugin_service: Any, user_id: str, settings: Mapping[str, Any]) -> tuple[list[ActivePlugin], list[str]]:
+    """``(the active plugins this turn, the enabledPlugins entries that name a plugin not installed)``."""
+    if plugin_service is None or not user_id:
+        return [], []
+    try:
+        rows = list(plugin_service.list(user_id))
+    except Exception:  # noqa: BLE001 - plugins never stop a turn
+        logger.exception("the person's plugins could not be listed")
+        return [], []
+    turned_off = _setting_ids(settings, False)
+    installed = {str(row.get("plugin_id") or "") for row in rows}
+    missing = [key for plugin_id, key in _setting_ids(settings, True).items() if plugin_id not in installed]
+    active: list[ActivePlugin] = []
+    for row in rows:
+        plugin_id = str(row.get("plugin_id") or "")
+        if row.get("state") != "active" or plugin_id in turned_off:
+            continue
+        path = Path(str(row.get("install_path") or ""))
+        target = manifest_file(path)
+        if target is None:
+            continue
+        try:
+            manifest = parse_plugin_manifest(json.loads(target.read_text(encoding="utf-8")))
+        except (OSError, ValueError):
+            logger.warning("plugin %s has an unreadable manifest; its agents and styles are skipped", plugin_id)
+            continue
+        active.append(ActivePlugin(plugin_id, path, manifest))
+    return active, sorted(missing)
+
+
+__all__ = ["ActivePlugin", "active_plugins"]
+```
+
+Then make these edits, in order (each `replace` block occurs exactly once in its file; if one does not, stop and report — do not guess):
+
+1. In `src/agentos/agentic/agent_definitions.py`, replace
+
+```python
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Mapping
+```
+
+   with
+
+```python
+from dataclasses import dataclass, field, replace
+from pathlib import Path
+from typing import Any, Mapping, Sequence
+```
+
+2. In `src/agentos/agentic/agent_definitions.py`, replace
+
+```python
+def load_agent_definitions(*, workspace_root: Path | None, trusted: bool) -> AgentCatalog:
+    catalog = AgentCatalog()
+    for origin, folder in agent_roots(workspace_root=workspace_root, trusted=trusted):
+        if not folder.is_dir():
+```
+
+   with
+
+```python
+def load_agent_definitions(*, workspace_root: Path | None, trusted: bool,
+                           plugin_folders: Sequence[tuple[str, Path]] = ()) -> AgentCatalog:
+    """Managed, project (trusted), user, then active plugins' agents (W5). A plugin's agent is named
+    ``plugin:agent`` and loses ``hooks``, ``mcpServers`` and ``permissionMode``, as in Claude Code."""
+    catalog = AgentCatalog()
+    roots = [(origin, folder, "") for origin, folder in agent_roots(workspace_root=workspace_root, trusted=trusted)]
+    roots += [("plugin", Path(folder), f"{plugin_id}:") for plugin_id, folder in plugin_folders]
+    for origin, folder, prefix in roots:
+        if not folder.is_dir():
+```
+
+3. In `src/agentos/agentic/agent_definitions.py`, replace
+
+```python
+            except (OSError, ValueError, UnicodeDecodeError) as error:
+                catalog.errors.append((str(path), str(error)[:200]))
+                continue
+            if origin == "project" and definition.name in RESERVED_NAMES:
+```
+
+   with
+
+```python
+            except (OSError, ValueError, UnicodeDecodeError) as error:
+                catalog.errors.append((str(path), str(error)[:200]))
+                continue
+            if prefix:
+                definition = replace(definition, name=prefix + definition.name, hooks=None, mcp_servers=None, permission_mode=None)
+            if origin == "project" and definition.name in RESERVED_NAMES:
+```
+
+4. In `src/agentos/agentic/output_styles.py`, replace
+
+```python
+def load_output_styles(workspace_root: Path | str, *, trusted: bool = True) -> dict[str, OutputStyle]:
+    """Built-ins, then user files, then project files (trusted workspaces only); a later file with the same name wins."""
+    styles = dict(BUILTIN_STYLES)
+    for directory, source in _style_dirs(workspace_root, trusted):
+```
+
+   with
+
+```python
+def load_output_styles(workspace_root: Path | str, *, trusted: bool = True,
+                       plugin_dirs: tuple[tuple[str, Path], ...] | list[tuple[str, Path]] = ()) -> dict[str, OutputStyle]:
+    """Built-ins, then active plugins' styles (named ``plugin:style``, W5), then user files, then project files
+    (trusted workspaces only); a later file with the same name wins."""
+    styles = dict(BUILTIN_STYLES)
+    plugin_sources = [(Path(directory), "plugin", f"{plugin_id}:") for plugin_id, directory in plugin_dirs]
+    for directory, source, prefix in [*plugin_sources, *((directory, source, "") for directory, source in _style_dirs(workspace_root, trusted))]:
+```
+
+5. In `src/agentos/agentic/output_styles.py`, replace
+
+```python
+            name = str(meta.get("name") or path.stem).strip()[:80]
+```
+
+   with
+
+```python
+            name = prefix + str(meta.get("name") or path.stem).strip()[:80]
+```
+
+6. In `src/agentos/agentic/output_styles.py`, replace
+
+```python
+def resolve_output_style(settings: object, workspace_root: Path | str) -> OutputStyle | None:
+```
+
+   with
+
+```python
+def resolve_output_style(settings: object, workspace_root: Path | str,
+                         plugin_dirs: tuple[tuple[str, Path], ...] | list[tuple[str, Path]] = ()) -> OutputStyle | None:
+```
+
+7. In `src/agentos/agentic/output_styles.py`, replace
+
+```python
+    style = load_output_styles(workspace_root, trusted=bool(getattr(settings, "trusted", False))).get(key)
+```
+
+   with
+
+```python
+    style = load_output_styles(workspace_root, trusted=bool(getattr(settings, "trusted", False)), plugin_dirs=plugin_dirs).get(key)
+```
+
+8. In `src/agentos/agentic/session.py`, replace
+
+```python
+            catalog = load_agent_definitions(workspace_root=self.workspace.root, trusted=bool(trusted))
+```
+
+   with
+
+```python
+            plugin_folders = [
+                (plugin.plugin_id, folder)
+                for plugin in getattr(self, "_active_plugins", ()) for folder in plugin.folders(plugin.manifest.agents_paths)
+            ]
+            catalog = load_agent_definitions(workspace_root=self.workspace.root, trusted=bool(trusted), plugin_folders=plugin_folders)
+```
+
+9. In `src/agentos/agentic/session.py`, replace
+
+```python
+            style = resolve_output_style(self.effective_settings, self.workspace.root)
+```
+
+   with
+
+```python
+            style = resolve_output_style(self.effective_settings, self.workspace.root, plugin_dirs=[
+                (plugin.plugin_id, folder)
+                for plugin in getattr(self, "_active_plugins", ()) for folder in plugin.folders(plugin.manifest.output_styles_paths)
+            ])
+```
+
+10. In `src/agentos/agentic/session.py`, replace
+
+```python
+        self._disk_skills = self._load_disk_skills(trusted_workspace)
+        self._agent_definitions = self._load_agent_definitions(trusted_workspace)
+```
+
+   with
+
+```python
+        self._load_active_plugins()
+        self._disk_skills = self._load_disk_skills(trusted_workspace)
+        self._agent_definitions = self._load_agent_definitions(trusted_workspace)
+```
+
+11. In `src/agentos/agentic/session.py`, replace
+
+```python
+    def _load_agent_definitions(self, trusted: bool):
+```
+
+   with
+
+```python
+    def _load_active_plugins(self) -> None:
+        """The person's active plugins for this turn (W5): their agents and output styles are read from them."""
+        from agentos.plugins.runtime import active_plugins
+
+        settings = getattr(self.effective_settings, "data", None) or {}
+        self._active_plugins, missing = active_plugins(self.plugin_service, str(self.turn.get("user_id") or ""), settings)
+        if missing:
+            self._reminders.add(
+                "plugins", "The settings turn on plugin(s) that are not installed: " + ", ".join(missing[:20])
+                + ". The person can install them (install_plugin) if they want them.", key="plugins-missing",
+            )
+
+    def _load_agent_definitions(self, trusted: bool):
+```
+
+- [ ] **Step 4: Run the tests and see them pass**
+
+Run: `uv run pytest -q tests/unit/plugins/test_plugin_runtime.py`
+Expected: PASS.
+
+Also run `uv run pytest -q tests/unit/agentic/test_output_styles.py tests/unit/agentic/test_agent_definitions.py tests/unit/agentic/test_agent_definitions_session.py`: expected PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/agentos/plugins/runtime.py tests/unit/plugins/test_plugin_runtime.py src/agentos/agentic/agent_definitions.py src/agentos/agentic/output_styles.py src/agentos/agentic/session.py
+git commit -m "feat(w5): plugin agents and output styles join the turn; enabledPlugins can turn a plugin off
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+### Task 30: Plugin options (userConfig), encrypted per person
+
+A manifest's `userConfig` declares options (`title`, `description`, `sensitive`, `required`, `default`). The person's values are kept in a new `plugin_settings` table (migration `0051_w5_plugin_settings`; the store also creates the table), all encrypted together with Orin's provider-secret key; a sensitive value is shown only as set or not. Turning a plugin on (approve, or enable again) fills `${user_config.KEY}` into its MCP servers' command, arguments and URL — and refuses, with a clear message, a missing required option or a sensitive option written there. `GET`/`PUT /v1/plugins/{plugin_id}/config` read and change the options (`null` or `""` clears one); removing a plugin removes its options. Deliberate expectation changes: the schema test lists the new table, the migration head moves to `0051_w5_plugin_settings`, and the profile-isolation test classifies the two new routes as owned by a person.
+
+**Files:**
+- Create: `src/agentos/plugins/user_config.py`
+- Create: `src/agentos/persistence/postgres/migrations/versions/0051_w5_plugin_settings.py`
+- Modify: `src/agentos/persistence/postgres/schema.py`
+- Modify: `tests/unit/persistence/test_postgres_schema.py`
+- Modify: `tests/unit/persistence/test_w3_schema.py`
+- Modify: `tests/integration/api/test_profile_isolation.py`
+- Modify: `src/agentos/plugins/manifest.py`
+- Modify: `src/agentos/plugins/models.py`
+- Modify: `src/agentos/plugins/inspector.py`
+- Modify: `src/agentos/plugins/activator.py`
+- Modify: `src/agentos/plugins/service.py`
+- Modify: `src/agentos/api/gateway.py`
+- Test: `tests/unit/plugins/test_plugin_user_config.py`
+
+**Interfaces:**
+- Consumes: Task 28 (`manifest_file`, activation variables).
+- Produces: `manifest.UserConfigOption`, `parse_user_config(raw)`, `PluginManifest.user_config`; `PluginInspection.options`; `agentos.plugins.user_config`: `PluginConfigStore(engine)` (`values`, `update`, `remove`), `public_view`, `referenced_options`, `substitute_options`, `PluginConfigError`, `MASK`; `PluginService.user_config(*, user_id, plugin_id)`, `.set_user_config(*, user_id, plugin_id, values)`; `PluginActivator.activate(..., user_config=None)`; the `plugin_settings` table.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `tests/unit/plugins/test_plugin_user_config.py`:
+
+```python
+"""W5: a plugin's options (userConfig) — declared in its manifest, kept encrypted, filled into its MCP servers."""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine, select
+
+from agentos.persistence.postgres.schema import metadata, plugin_settings
+from agentos.plugins.manifest import parse_plugin_manifest
+from agentos.plugins.service import PluginService, PluginServiceError
+from tests.unit.plugins.fakes import FakeMcpService, FakeSkillLibrary
+
+KEY = "wYIYy1yzr2r_LRw2P0FE8zpO6zRQmYtP6cn0FdOtBOA="
+
+
+def _package(root: Path, *args: str) -> Path:
+    (root / ".claude-plugin").mkdir(parents=True)
+    (root / ".claude-plugin" / "plugin.json").write_text(json.dumps({
+        "name": "weather", "version": "1.0.0",
+        "userConfig": {
+            "region": {"description": "Region", "required": True},
+            "api_key": {"description": "Key", "sensitive": True},
+            "units": {"description": "Units", "default": "metric"},
+        },
+        "mcpServers": {"api": {"command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/srv.js", *args]}},
+    }), encoding="utf-8")
+    return root
+
+
+@pytest.fixture()
+def service(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("AGENTOS_PROVIDER_ENCRYPTION_KEY", KEY)
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    metadata.create_all(engine)
+    mcp = FakeMcpService()
+    plugins = PluginService(engine, plugin_root=tmp_path / "plugins", skill_library=FakeSkillLibrary(), mcp_service=mcp)
+    plugins.fake_mcp = mcp
+    return plugins
+
+
+def test_the_manifest_declares_options() -> None:
+    manifest = parse_plugin_manifest({"name": "w", "userConfig": {
+        "api_key": {"description": "Key", "sensitive": True}, "bad key": {}, "x": "not a mapping",
+    }})
+    assert [(item.key, item.sensitive, item.required) for item in manifest.user_config] == [("api_key", True, False)]
+
+
+def test_options_are_kept_encrypted_and_a_sensitive_one_is_never_shown(service, tmp_path: Path) -> None:
+    service.inspect(user_id="u1", reference=str(_package(tmp_path / "src", "--region", "${user_config.region}")))
+    service.set_user_config(user_id="u1", plugin_id="weather", values={"region": "europe-west", "api_key": "s3cr3t-value"})
+    with service.engine.connect() as connection:
+        stored = str(connection.execute(select(plugin_settings.c.values_ciphertext)).scalar())
+    assert "s3cr3t-value" not in stored and "europe-west" not in stored
+    view = {item["key"]: item for item in service.user_config(user_id="u1", plugin_id="weather")["options"]}
+    assert view["api_key"]["value"] == "********" and view["api_key"]["is_set"] is True
+    assert view["region"]["value"] == "europe-west" and view["units"]["is_set"] is False
+    with pytest.raises(PluginServiceError):
+        service.set_user_config(user_id="u1", plugin_id="weather", values={"nope": "x"})
+    service.set_user_config(user_id="u1", plugin_id="weather", values={"api_key": None})
+    assert {item["key"]: item for item in service.user_config(user_id="u1", plugin_id="weather")["options"]}["api_key"]["is_set"] is False
+
+
+def test_turning_a_plugin_on_needs_its_required_options_and_fills_them_in(service, tmp_path: Path) -> None:
+    service.inspect(user_id="u1", reference=str(_package(tmp_path / "src", "--region", "${user_config.region}", "--units", "${user_config.units}")))
+    with pytest.raises(PluginServiceError, match="region"):
+        service.approve(user_id="u1", plugin_id="weather")
+    service.set_user_config(user_id="u1", plugin_id="weather", values={"region": "europe-west"})
+    service.approve(user_id="u1", plugin_id="weather")
+    assert service.fake_mcp.proposed[0]["args"][1:] == ["--region", "europe-west", "--units", "metric"]
+
+
+def test_a_sensitive_option_never_reaches_a_command_line(service, tmp_path: Path) -> None:
+    service.inspect(user_id="u1", reference=str(_package(tmp_path / "src", "--key", "${user_config.api_key}")))
+    service.set_user_config(user_id="u1", plugin_id="weather", values={"region": "eu", "api_key": "s3cr3t-value"})
+    with pytest.raises(PluginServiceError, match="sensitive"):
+        service.approve(user_id="u1", plugin_id="weather")
+    assert service.fake_mcp.proposed == []
+
+
+def test_the_config_routes() -> None:
+    from agentos.api.gateway import ApiServices, create_app
+    from tests.unit.api.test_plugin_routes import Security
+
+    seen: dict = {}
+
+    class Plugins:
+        def user_config(self, *, user_id, plugin_id):
+            return {"plugin_id": plugin_id, "options": []}
+
+        def set_user_config(self, *, user_id, plugin_id, values):
+            seen.update(values)
+            return {"plugin_id": plugin_id, "options": []}
+
+    client = TestClient(create_app(ApiServices(security=Security(), plugins=Plugins())))
+    assert client.get("/v1/plugins/weather/config").json() == {"plugin_id": "weather", "options": []}
+    assert client.put("/v1/plugins/weather/config", json={"values": {"region": "eu", "api_key": None}}).status_code == 200
+    assert seen == {"region": "eu", "api_key": None}
+```
+
+- [ ] **Step 2: Run it to verify it fails**
+
+Run: `uv run pytest -q tests/unit/plugins/test_plugin_user_config.py`
+Expected: FAIL — `ImportError: cannot import name 'plugin_settings' from 'agentos.persistence.postgres.schema'` (collection error).
+
+- [ ] **Step 3: Implement**
+
+Create `src/agentos/plugins/user_config.py`:
+
+```python
+"""A plugin's options (``userConfig``, W5): the values a person gives a plugin, kept encrypted per person.
+
+Every value is stored encrypted (``plugin_settings.values_ciphertext``, Fernet, the key Orin already uses for
+provider secrets); a sensitive one is never returned, only whether it is set. ``${user_config.KEY}`` in a plugin's
+MCP server command, arguments or URL is replaced when the plugin is activated; a sensitive option may not be written
+into a command line (it would be stored in the clear with the server).
+"""
+from __future__ import annotations
+
+import json
+import re
+from collections.abc import Mapping
+from datetime import UTC, datetime
+from typing import Any
+
+from sqlalchemy import delete, insert, select
+from sqlalchemy.engine import Engine
+
+from agentos.persistence.postgres.schema import plugin_settings
+
+MAX_OPTION_CHARS = 4_000
+MASK = "********"
+_REFERENCE = re.compile(r"\$\{user_config\.([A-Za-z_][A-Za-z0-9_]{0,63})\}")
+
+
+class PluginConfigError(ValueError):
+    """Option values that do not fit the plugin's declared options."""
+
+
+def _cipher():
+    from agentos.persistence.provider_secrets import ProviderSecretCipher
+
+    return ProviderSecretCipher.from_environment(required=True)
+
+
+def referenced_options(value: str) -> list[str]:
+    return _REFERENCE.findall(str(value or ""))
+
+
+def substitute_options(value: str, values: Mapping[str, str], sensitive: frozenset[str]) -> str:
+    """``value`` with each ``${user_config.KEY}`` replaced; refuses a sensitive or unset option."""
+    def replace(match: re.Match[str]) -> str:
+        key = match.group(1)
+        if key in sensitive:
+            raise PluginConfigError(f"the sensitive option {key} cannot be written into a command line or URL")
+        if key not in values:
+            raise PluginConfigError(f"the plugin option {key} is not set")
+        return str(values[key])
+
+    return _REFERENCE.sub(replace, str(value))
+
+
+class PluginConfigStore:
+    def __init__(self, engine: Engine) -> None:
+        self._engine = engine
+        plugin_settings.create(engine, checkfirst=True)
+
+    def values(self, user_id: str, plugin_id: str) -> dict[str, str]:
+        with self._engine.connect() as connection:
+            row = connection.execute(select(plugin_settings.c.values_ciphertext).where(
+                plugin_settings.c.user_id == user_id, plugin_settings.c.plugin_id == plugin_id,
+            )).first()
+        if row is None or not row[0]:
+            return {}
+        loaded = json.loads(_cipher().decrypt(str(row[0])))
+        return {str(key): str(value) for key, value in loaded.items()} if isinstance(loaded, dict) else {}
+
+    def update(self, user_id: str, plugin_id: str, changes: Mapping[str, Any], options: Mapping[str, Any]) -> dict[str, str]:
+        """Apply ``changes`` (``None`` or ``""`` clears an option) and return all values. Unknown options are refused."""
+        unknown = sorted(set(changes) - set(options))
+        if unknown:
+            raise PluginConfigError(f"the plugin has no option named {unknown[0][:64]}")
+        current = self.values(user_id, plugin_id)
+        for key, value in changes.items():
+            if value is None or value == "":
+                current.pop(key, None)
+            elif isinstance(value, (str, int, float, bool)):
+                text = str(value).lower() if isinstance(value, bool) else str(value)
+                if len(text) > MAX_OPTION_CHARS:
+                    raise PluginConfigError(f"the value of {key} is longer than {MAX_OPTION_CHARS} characters")
+                current[key] = text
+            else:
+                raise PluginConfigError(f"the value of {key} must be text, a number or true/false")
+        ciphertext = _cipher().encrypt(json.dumps(current), allow_empty=True)
+        with self._engine.begin() as connection:
+            connection.execute(delete(plugin_settings).where(plugin_settings.c.user_id == user_id, plugin_settings.c.plugin_id == plugin_id))
+            connection.execute(insert(plugin_settings).values(
+                user_id=user_id, plugin_id=plugin_id, values_ciphertext=ciphertext, updated_at=datetime.now(UTC),
+            ))
+        return current
+
+    def remove(self, user_id: str, plugin_id: str) -> None:
+        with self._engine.begin() as connection:
+            connection.execute(delete(plugin_settings).where(plugin_settings.c.user_id == user_id, plugin_settings.c.plugin_id == plugin_id))
+
+
+def public_view(options: Mapping[str, Any], values: Mapping[str, str]) -> list[dict[str, Any]]:
+    """The options for a screen: a sensitive value is never shown, only whether it is set."""
+    shown: list[dict[str, Any]] = []
+    for key, option in options.items():
+        set_value = values.get(key)
+        shown.append({
+            "key": key, "title": option.title, "description": option.description, "sensitive": option.sensitive,
+            "required": option.required, "is_set": set_value is not None,
+            "value": (MASK if option.sensitive else set_value) if set_value is not None else None,
+        })
+    return shown
+
+
+__all__ = [
+    "MASK", "PluginConfigError", "PluginConfigStore", "public_view", "referenced_options", "substitute_options",
+]
+```
+
+Create `src/agentos/persistence/postgres/migrations/versions/0051_w5_plugin_settings.py`:
+
+```python
+"""W5: a plugin's options (userConfig), encrypted per person
+
+Revision ID: 0051_w5_plugin_settings
+Revises: 0050_w5_extensibility
+"""
+from alembic import op
+import sqlalchemy as sa
+
+
+revision = "0051_w5_plugin_settings"
+down_revision = "0050_w5_extensibility"
+branch_labels = None
+depends_on = None
+
+
+def upgrade() -> None:
+    # PluginConfigStore creates the table itself on a database that skipped migrations: create it only when missing.
+    bind = op.get_bind()
+    if "plugin_settings" not in set(sa.inspect(bind).get_table_names()):
+        op.create_table(
+            "plugin_settings",
+            sa.Column("user_id", sa.String(255), primary_key=True),
+            sa.Column("plugin_id", sa.String(64), primary_key=True),
+            sa.Column("values_ciphertext", sa.Text(), nullable=False),
+            sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        )
+
+
+def downgrade() -> None:
+    op.drop_table("plugin_settings")
+```
+
+Then make these edits, in order (each `replace` block occurs exactly once in its file; if one does not, stop and report — do not guess):
+
+1. In `src/agentos/persistence/postgres/schema.py`, replace
+
+```python
+Index("ix_agent_mailbox_pending", agent_mailbox.c.conversation_id, agent_mailbox.c.recipient, agent_mailbox.c.delivered_at)
+```
+
+   with
+
+```python
+Index("ix_agent_mailbox_pending", agent_mailbox.c.conversation_id, agent_mailbox.c.recipient, agent_mailbox.c.delivered_at)
+
+# W5: a plugin's options (userConfig) for one person, all values encrypted together.
+plugin_settings = Table(
+    "plugin_settings", metadata,
+    Column("user_id", String(255), primary_key=True), Column("plugin_id", String(64), primary_key=True),
+    Column("values_ciphertext", Text, nullable=False), Column("updated_at", DateTime(timezone=True), nullable=False),
+)
+```
+
+2. In `tests/unit/persistence/test_postgres_schema.py`, replace
+
+```python
+            "agent_mailbox",
+```
+
+   with
+
+```python
+            "agent_mailbox",
+            "plugin_settings",
+```
+
+3. In `tests/unit/persistence/test_w3_schema.py`, replace every occurrence of
+
+```python
+.scalar() == "0050_w5_extensibility"
+```
+
+   with
+
+```python
+.scalar() == "0051_w5_plugin_settings"
+```
+
+4. In `tests/integration/api/test_profile_isolation.py`, replace
+
+```python
+    ("PUT", "/v1/plugins/{plugin_id}/hooks-enabled"), ("DELETE", "/v1/plugins/{plugin_id}"),
+```
+
+   with
+
+```python
+    ("PUT", "/v1/plugins/{plugin_id}/hooks-enabled"), ("DELETE", "/v1/plugins/{plugin_id}"),
+    ("GET", "/v1/plugins/{plugin_id}/config"), ("PUT", "/v1/plugins/{plugin_id}/config"),
+```
+
+5. In `src/agentos/plugins/manifest.py`, replace
+
+```python
+class ManifestRejected(ValueError):
+    pass
+```
+
+   with
+
+```python
+class ManifestRejected(ValueError):
+    pass
+
+
+_OPTION_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
+MAX_OPTIONS = 32
+
+
+@dataclass(frozen=True, slots=True)
+class UserConfigOption:
+    """One option a plugin asks the person for (``userConfig``, W5)."""
+
+    key: str
+    title: str
+    description: str
+    sensitive: bool = False
+    required: bool = False
+    default: str | None = None
+
+
+def parse_user_config(raw: Any) -> tuple[UserConfigOption, ...]:
+    if not isinstance(raw, Mapping):
+        return ()
+    options: list[UserConfigOption] = []
+    for key, spec in list(raw.items())[:MAX_OPTIONS]:
+        if not isinstance(key, str) or not _OPTION_KEY.fullmatch(key) or not isinstance(spec, Mapping):
+            continue
+        default = spec.get("default")
+        options.append(UserConfigOption(
+            key, _text(spec.get("title") or key, 120), _text(spec.get("description"), 1000),
+            spec.get("sensitive") is True, spec.get("required") is True,
+            None if default is None or isinstance(default, (dict, list)) else _text(default, 4000),
+        ))
+    return tuple(options)
+```
+
+6. In `src/agentos/plugins/manifest.py`, replace
+
+```python
+    mcp_config_path: str = ".mcp.json"
+```
+
+   with
+
+```python
+    mcp_config_path: str = ".mcp.json"
+    user_config: tuple[UserConfigOption, ...] = ()
+```
+
+7. In `src/agentos/plugins/manifest.py`, replace
+
+```python
+        mcp_config_path=_package_relative_path(payload.get("mcpServers") if isinstance(payload.get("mcpServers"), str) else None, ".mcp.json"),
+    )
+```
+
+   with
+
+```python
+        mcp_config_path=_package_relative_path(payload.get("mcpServers") if isinstance(payload.get("mcpServers"), str) else None, ".mcp.json"),
+        user_config=parse_user_config(payload.get("userConfig")),
+    )
+```
+
+8. In `src/agentos/plugins/models.py`, replace
+
+```python
+    hooks: tuple[HookContribution, ...] = ()
+    warnings: tuple[str, ...] = ()
+```
+
+   with
+
+```python
+    hooks: tuple[HookContribution, ...] = ()
+    warnings: tuple[str, ...] = ()
+    options: tuple[Any, ...] = ()  # W5: the manifest's userConfig options (manifest.UserConfigOption)
+```
+
+9. In `src/agentos/plugins/models.py`, replace
+
+```python
+from dataclasses import dataclass
+```
+
+   with
+
+```python
+from dataclasses import dataclass
+from typing import Any
+```
+
+10. In `src/agentos/plugins/inspector.py`, replace
+
+```python
+        agents=tuple(agents), commands=commands, hooks=hooks, warnings=tuple(warnings),
+    )
+```
+
+   with
+
+```python
+        agents=tuple(agents), commands=commands, hooks=hooks, warnings=tuple(warnings), options=manifest.user_config,
+    )
+```
+
+11. In `src/agentos/plugins/activator.py`, replace
+
+```python
+from .variables import plugin_variables, substitute
+```
+
+   with
+
+```python
+from .user_config import substitute_options
+from .variables import plugin_variables, substitute
+```
+
+12. In `src/agentos/plugins/activator.py`, replace
+
+```python
+    def activate(self, *, user_id: str, install_path: Path, inspection: PluginInspection):
+```
+
+   with
+
+```python
+    def activate(self, *, user_id: str, install_path: Path, inspection: PluginInspection, user_config=None):
+        """``user_config``: the plugin's option values (W5), filled into its MCP servers' ``${user_config.KEY}``."""
+        options = dict(user_config or {})
+        sensitive = frozenset(item.key for item in inspection.options if item.sensitive)
+```
+
+13. In `src/agentos/plugins/activator.py`, replace
+
+```python
+                command = substitute(item.command, variables) if item.command else item.command
+                args = tuple(substitute(value, variables) for value in item.args)
+```
+
+   with
+
+```python
+                command = substitute_options(substitute(item.command, variables), options, sensitive) if item.command else item.command
+                args = tuple(substitute_options(substitute(value, variables), options, sensitive) for value in item.args)
+                url = substitute_options(item.url, options, sensitive) if item.url else item.url
+```
+
+14. In `src/agentos/plugins/activator.py`, replace
+
+```python
+                    "transport": item.transport, "command": command, "args": list(args), "url": item.url,
+```
+
+   with
+
+```python
+                    "transport": item.transport, "command": command, "args": list(args), "url": url,
+```
+
+15. In `src/agentos/plugins/service.py`, replace
+
+```python
+from typing import Any
+
+from sqlalchemy import delete, insert, select, update
+```
+
+   with
+
+```python
+from typing import Any, Mapping
+
+from sqlalchemy import delete, insert, select, update
+```
+
+16. In `src/agentos/plugins/service.py`, replace
+
+```python
+from .manifest import ManifestRejected
+```
+
+   with
+
+```python
+from .manifest import ManifestRejected, manifest_file, parse_plugin_manifest
+```
+
+17. In `src/agentos/plugins/service.py`, replace
+
+```python
+    def search(self, query: str) -> list[dict[str, Any]]:
+```
+
+   with
+
+```python
+    # -- options (userConfig, W5) ---------------------------------------------
+
+    @property
+    def _config_store(self):
+        store = getattr(self, "_config_store_instance", None)
+        if store is None:
+            from .user_config import PluginConfigStore
+
+            store = self._config_store_instance = PluginConfigStore(self.engine)
+        return store
+
+    def _declared_options(self, record: Mapping[str, Any]) -> dict[str, Any]:
+        target = manifest_file(Path(record["install_path"]))
+        if target is None:
+            return {}
+        manifest = parse_plugin_manifest(json.loads(target.read_text(encoding="utf-8")))
+        return {item.key: item for item in manifest.user_config}
+
+    def user_config(self, *, user_id: str, plugin_id: str) -> dict[str, Any]:
+        from .user_config import public_view
+
+        options = self._declared_options(self.get(user_id, plugin_id))
+        values = self._config_store.values(user_id, plugin_id) if options else {}
+        return {"plugin_id": plugin_id, "options": public_view(options, values)}
+
+    def set_user_config(self, *, user_id: str, plugin_id: str, values: Mapping[str, Any]) -> dict[str, Any]:
+        """Change a plugin's options. An active plugin's MCP servers take new values when it is turned off and on."""
+        from .user_config import PluginConfigError
+
+        options = self._declared_options(self.get(user_id, plugin_id))
+        try:
+            self._config_store.update(user_id, plugin_id, dict(values), options)
+        except PluginConfigError as error:
+            raise PluginServiceError(str(error), code="plugin_config_invalid") from error
+        return self.user_config(user_id=user_id, plugin_id=plugin_id)
+
+    def _option_values(self, user_id: str, plugin_id: str, inspection: Any) -> dict[str, str]:
+        """The values to activate with: defaults, then the person's; refuses a missing required or misplaced sensitive one."""
+        from .user_config import referenced_options
+
+        options = {item.key: item for item in inspection.options}
+        if not options:
+            return {}
+        values = {key: item.default for key, item in options.items() if item.default is not None}
+        values.update(self._config_store.values(user_id, plugin_id))
+        missing = [key for key, item in options.items() if item.required and key not in values]
+        if missing:
+            raise PluginServiceError(f"set the plugin option(s) {', '.join(missing)} before turning it on", code="plugin_config_required")
+        for server in inspection.mcp_servers:
+            for text in (server.command or "", *server.args, server.url or ""):
+                for key in referenced_options(text):
+                    if key in options and options[key].sensitive:
+                        raise PluginServiceError(
+                            f"the sensitive option {key} cannot be written into an MCP server's command line or URL",
+                            code="plugin_config_sensitive",
+                        )
+                    if key not in values:
+                        raise PluginServiceError(f"set the plugin option {key} before turning it on", code="plugin_config_required")
+        return values
+
+    def _activate(self, user_id: str, record: Mapping[str, Any], inspection: Any):
+        values = self._option_values(user_id, str(record["plugin_id"]), inspection)
+        extra = {"user_config": values} if inspection.options else {}
+        return self.activator.activate(user_id=user_id, install_path=Path(record["install_path"]), inspection=inspection, **extra)
+
+    def search(self, query: str) -> list[dict[str, Any]]:
+```
+
+18. In `src/agentos/plugins/service.py`, replace
+
+```python
+        inspection = inspect_plugin_package(Path(record["install_path"]), package_digest=record["package_digest"])
+        try:
+            result = self.activator.activate(user_id=user_id, install_path=Path(record["install_path"]), inspection=inspection)
+        except Exception as error:
+            raise PluginServiceError("plugin activation failed") from error
+```
+
+   with
+
+```python
+        inspection = inspect_plugin_package(Path(record["install_path"]), package_digest=record["package_digest"])
+        try:
+            result = self._activate(user_id, record, inspection)
+        except PluginServiceError:
+            raise
+        except Exception as error:
+            raise PluginServiceError("plugin activation failed") from error
+```
+
+19. In `src/agentos/plugins/service.py`, replace
+
+```python
+            activation = self.activator.activate(user_id=user_id, install_path=Path(record["install_path"]), inspection=inspection)
+```
+
+   with
+
+```python
+            activation = self._activate(user_id, record, inspection)
+```
+
+20. In `src/agentos/plugins/service.py`, replace
+
+```python
+        self._delete_record(user_id, plugin_id)
+        self._safe_remove(Path(record["install_path"]))
+        return {"plugin_id": plugin_id, "removed": True}
+```
+
+   with
+
+```python
+        self._delete_record(user_id, plugin_id)
+        self._safe_remove(Path(record["install_path"]))
+        try:
+            self._config_store.remove(user_id, plugin_id)  # W5: a removed plugin's options go with it
+        except Exception:  # noqa: BLE001 - the plugin is removed either way
+            pass
+        return {"plugin_id": plugin_id, "removed": True}
+```
+
+21. In `src/agentos/api/gateway.py`, replace
+
+```python
+class PluginEnabledRequest(_RequestModel):
+    enabled: bool
+```
+
+   with
+
+```python
+class PluginEnabledRequest(_RequestModel):
+    enabled: bool
+
+
+class PluginConfigRequest(_RequestModel):
+    values: dict[str, Any]
+```
+
+22. In `src/agentos/api/gateway.py`, replace
+
+```python
+    @app.delete("/v1/plugins/{plugin_id}", status_code=204)
+```
+
+   with
+
+```python
+    @app.get("/v1/plugins/{plugin_id}/config")
+    async def get_plugin_config(plugin_id: str, request: Request) -> JSONResponse:
+        principal = principal_for(request)
+        services.security.check_rate_limit(principal, action="plugins.config.read", origin=request.headers.get("origin"))
+        services.security.authorize(principal, action="plugins.config.read", resource_id=plugin_id, purpose="plugins.read")
+        return JSONResponse(_jsonable(_require_port(services.plugins).user_config(user_id=principal.user_id, plugin_id=plugin_id)))
+
+    @app.put("/v1/plugins/{plugin_id}/config")
+    async def set_plugin_config(plugin_id: str, payload: PluginConfigRequest, request: Request) -> JSONResponse:
+        principal = principal_for(request, mutable=True)
+        services.security.check_rate_limit(principal, action="plugins.config", origin=request.headers.get("origin"))
+        services.security.authorize(principal, action="plugins.config", resource_id=plugin_id, purpose="plugins.configure")
+        return JSONResponse(_jsonable(_require_port(services.plugins).set_user_config(
+            user_id=principal.user_id, plugin_id=plugin_id, values=payload.values,
+        )))
+
+    @app.delete("/v1/plugins/{plugin_id}", status_code=204)
+```
+
+- [ ] **Step 4: Run the tests and see them pass**
+
+Run: `uv run pytest -q tests/unit/plugins/test_plugin_user_config.py`
+Expected: PASS.
+
+Also run `uv run pytest -q tests/unit/plugins tests/unit/persistence tests/unit/api/test_plugin_routes.py`: expected PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/agentos/plugins/user_config.py src/agentos/persistence/postgres/migrations/versions/0051_w5_plugin_settings.py tests/unit/plugins/test_plugin_user_config.py src/agentos/persistence/postgres/schema.py tests/unit/persistence/test_postgres_schema.py tests/unit/persistence/test_w3_schema.py tests/integration/api/test_profile_isolation.py src/agentos/plugins/manifest.py src/agentos/plugins/models.py src/agentos/plugins/inspector.py src/agentos/plugins/activator.py src/agentos/plugins/service.py src/agentos/api/gateway.py
+git commit -m "feat(w5): plugin options (userConfig), encrypted per person
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+### Task 31: Marketplaces are fetched and read
+
+Adding a marketplace now fetches it (a GitHub repository, or a local folder on a computer), reads its index from `.orin-plugin/marketplace.json`, `.claude-plugin/marketplace.json` or `marketplace.json`, and keeps a copy under Orin's plugin folder (per person), replacing the previous copy. A plugin's `source` may be a relative path inside the marketplace (`./plugins/x`, which may not leave it), `owner/repo`, `{"source": "github", "repo", "ref"?, "path"?}`, `{"source": "url", "url"}` or `{"source": "git-subdir", "url", "path", "ref"?}`; a subfolder without a ref uses the default branch. Searching reads the copies (only the person's own marketplaces when the person is known), and `name@marketplace` installs that plugin from that marketplace.
+
+**Files:**
+- Modify: `src/agentos/plugins/marketplace.py`
+- Modify: `src/agentos/plugins/fetcher.py`
+- Modify: `src/agentos/plugins/service.py`
+- Modify: `src/agentos/agentic/tools/orin/plugins_admin.py`
+- Test: `tests/unit/plugins/test_marketplaces.py`
+
+**Interfaces:**
+- Produces: `marketplace.MARKETPLACE_LOCATIONS`, `marketplace_file(root)`, `parse_marketplace(payload, *, root=None)`; `PluginService.add_marketplace` (fetches, returns `plugins` count), `PluginService.search(query, *, user_id=None)`.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `tests/unit/plugins/test_marketplaces.py`:
+
+```python
+"""W5: plugin marketplaces are fetched and read, as Claude Code lays them out."""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+from sqlalchemy import create_engine
+
+from agentos.persistence.postgres.schema import metadata
+from agentos.plugins.marketplace import marketplace_file, parse_marketplace
+from agentos.plugins.service import PluginService, PluginServiceError
+from tests.unit.plugins.fakes import FakeMcpService, FakeSkillLibrary
+
+
+def _write(path: Path, data: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data) if not isinstance(data, str) else data, encoding="utf-8")
+
+
+def test_the_index_lives_in_orins_or_claude_codes_folder(tmp_path: Path) -> None:
+    assert marketplace_file(tmp_path) is None
+    _write(tmp_path / "marketplace.json", {})
+    _write(tmp_path / ".claude-plugin" / "marketplace.json", {})
+    assert marketplace_file(tmp_path) == tmp_path / ".claude-plugin" / "marketplace.json"
+    _write(tmp_path / ".orin-plugin" / "marketplace.json", {})
+    assert marketplace_file(tmp_path) == tmp_path / ".orin-plugin" / "marketplace.json"
+
+
+def test_every_kind_of_source_becomes_a_reference(tmp_path: Path) -> None:
+    (tmp_path / "plugins" / "fmt").mkdir(parents=True)
+    marketplace = parse_marketplace({"name": "Team Tools", "plugins": [
+        {"name": "fmt", "source": "./plugins/fmt"},
+        {"name": "escape", "source": "../outside"},
+        {"name": "gh", "source": {"source": "github", "repo": "acme/tools"}},
+        {"name": "gh-sub", "source": {"source": "github", "repo": "acme/mono", "path": "plugins/lint", "ref": "v2"}},
+        {"name": "url", "source": {"source": "url", "url": "https://github.com/acme/url-plugin.git"}},
+        {"name": "subdir", "source": {"source": "git-subdir", "url": "https://github.com/acme/mono.git", "path": "plugins/test"}},
+    ]}, root=tmp_path)
+    references = {item.name: item.reference for item in marketplace.plugins}
+    assert Path(references["fmt"]) == (tmp_path / "plugins" / "fmt").resolve()
+    assert "escape" not in references
+    assert references["gh"] == "acme/tools"
+    assert references["gh-sub"] == "https://github.com/acme/mono/tree/v2/plugins/lint"
+    assert references["url"] == "https://github.com/acme/url-plugin.git"
+    assert references["subdir"] == "https://github.com/acme/mono/tree/HEAD/plugins/test"
+
+
+@pytest.fixture()
+def service(tmp_path: Path) -> PluginService:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    metadata.create_all(engine)
+    return PluginService(engine, plugin_root=tmp_path / "plugins", skill_library=FakeSkillLibrary(), mcp_service=FakeMcpService())
+
+
+def _marketplace(root: Path) -> Path:
+    _write(root / ".claude-plugin" / "marketplace.json", {"name": "team-tools", "owner": {"name": "Acme"}, "plugins": [
+        {"name": "fmt", "description": "Formats code", "source": "./plugins/fmt"},
+    ]})
+    _write(root / "plugins" / "fmt" / ".claude-plugin" / "plugin.json", {"name": "fmt", "version": "1.0.0"})
+    _write(root / "plugins" / "fmt" / "skills" / "format" / "SKILL.md", "---\nname: format\ndescription: Formats\n---\nFormat it.")
+    return root
+
+
+def test_a_marketplace_is_fetched_searched_per_person_and_installs_by_name(service: PluginService, tmp_path: Path) -> None:
+    added = service.add_marketplace(user_id="u1", reference=str(_marketplace(tmp_path / "market")))
+    assert added["name"] == "team-tools" and Path(added["clone_path"]).is_dir()
+    found = service.search("fmt", user_id="u1")
+    assert [(item["name"], item["marketplace"]) for item in found if item["marketplace"] == "team-tools"] == [("fmt", "team-tools")]
+    assert not [item for item in service.search("fmt", user_id="u2") if item["marketplace"] == "team-tools"]
+    plugin = service.inspect(user_id="u1", reference="fmt@team-tools")
+    assert plugin["plugin_id"] == "fmt" and plugin["state"] == "pending_approval"
+    with pytest.raises(PluginServiceError):
+        service.inspect(user_id="u1", reference="fmt@another-market")
+
+
+def test_a_folder_without_an_index_is_not_a_marketplace(service: PluginService, tmp_path: Path) -> None:
+    (tmp_path / "empty").mkdir()
+    with pytest.raises(PluginServiceError, match="marketplace.json"):
+        service.add_marketplace(user_id="u1", reference=str(tmp_path / "empty"))
+```
+
+- [ ] **Step 2: Run it to verify it fails**
+
+Run: `uv run pytest -q tests/unit/plugins/test_marketplaces.py`
+Expected: FAIL — `ImportError: cannot import name 'marketplace_file' from 'agentos.plugins.marketplace'` (collection error).
+
+- [ ] **Step 3: Implement**
+
+Then make these edits, in order (each `replace` block occurs exactly once in its file; if one does not, stop and report — do not guess):
+
+1. In `src/agentos/plugins/marketplace.py`, replace
+
+```python
+from dataclasses import dataclass
+from typing import Any, Mapping
+```
+
+   with
+
+```python
+import re
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Mapping
+
+# W5: where a marketplace keeps its index, Orin's own folder first (Claude Code: .claude-plugin/marketplace.json).
+MARKETPLACE_LOCATIONS = (".orin-plugin/marketplace.json", ".claude-plugin/marketplace.json", "marketplace.json")
+_GITHUB_REPO = re.compile(r"[\w.-]+/[\w.-]+")
+
+
+def marketplace_file(root: Path) -> Path | None:
+    for relative in MARKETPLACE_LOCATIONS:
+        candidate = Path(root) / relative
+        if candidate.is_file() and not candidate.is_symlink():
+            return candidate
+    return None
+
+
+def _github(repository: str, ref: Any = None, path: Any = None) -> str | None:
+    """A GitHub source as a reference the plugin installer understands (``owner/repo`` or a ``/tree/`` URL)."""
+    text = str(repository or "").strip()
+    base = text.removeprefix("https://github.com/").removesuffix(".git").strip("/")
+    if not _GITHUB_REPO.fullmatch(base):
+        return None
+    folder = str(path or "").strip().strip("/")
+    if ".." in folder.split("/"):
+        return None
+    if not folder and not ref:
+        return text if text.startswith("https://") else base
+    return f"https://github.com/{base}/tree/{str(ref or 'HEAD').strip()}/{folder}".rstrip("/")
+
+
+def _reference(source: Any, root: Path | None) -> str | None:
+    if isinstance(source, str):
+        text = source.strip()
+        if text.startswith(("./", "../")):
+            if root is None:
+                return None
+            target = (Path(root) / text).resolve()
+            return str(target) if target.is_relative_to(Path(root).resolve()) and target.is_dir() else None
+        return text or None
+    if not isinstance(source, Mapping):
+        return None
+    kind = str(source.get("source") or "").strip().lower()
+    if kind == "github" or (not kind and source.get("repo")):
+        return _github(str(source.get("repo") or ""), source.get("ref"), source.get("path"))
+    if kind == "url":
+        url = str(source.get("url") or "").strip()
+        return _github(url, source.get("ref"), None) if source.get("ref") else (url or None)
+    if kind == "git-subdir":
+        return _github(str(source.get("url") or ""), source.get("ref"), source.get("path"))
+    return None
+```
+
+2. In `src/agentos/plugins/marketplace.py`, replace
+
+```python
+def parse_marketplace(payload: Mapping[str, Any]) -> Marketplace:
+    entries = payload.get("plugins") if isinstance(payload, Mapping) else None
+```
+
+   with
+
+```python
+def parse_marketplace(payload: Mapping[str, Any], *, root: Path | None = None) -> Marketplace:
+    """The marketplace's plugins with installable references. ``root`` is the marketplace's folder: a relative
+    source (``./plugins/x``) becomes a path inside it, and one that leaves it is dropped."""
+    entries = payload.get("plugins") if isinstance(payload, Mapping) else None
+```
+
+3. In `src/agentos/plugins/marketplace.py`, replace
+
+```python
+        source = item.get("source")
+        if isinstance(source, str):
+            reference = source
+        elif isinstance(source, Mapping) and source.get("repo"):
+            reference = str(source["repo"])
+        else:
+            continue
+```
+
+   with
+
+```python
+        reference = _reference(item.get("source"), root)
+        if reference is None:
+            continue
+```
+
+4. In `src/agentos/plugins/fetcher.py`, replace
+
+```python
+            if source.ref:
+```
+
+   with
+
+```python
+            if source.ref and source.ref != "HEAD":  # W5: HEAD is the repository's default branch
+```
+
+5. In `src/agentos/plugins/service.py`, replace
+
+```python
+from .marketplace import parse_marketplace
+```
+
+   with
+
+```python
+from .marketplace import marketplace_file, parse_marketplace
+```
+
+6. In `src/agentos/plugins/service.py`, replace
+
+```python
+from .sources import resolve_source
+```
+
+   with
+
+```python
+from .sources import SourceRejected, resolve_source
+```
+
+7. In `src/agentos/plugins/service.py`, replace
+
+```python
+    def search(self, query: str) -> list[dict[str, Any]]:
+        needle = str(query or "").casefold()
+```
+
+   with
+
+```python
+    def search(self, query: str, *, user_id: str | None = None) -> list[dict[str, Any]]:
+        """Plugins in the known marketplaces; with ``user_id``, only that person's marketplaces (W5)."""
+        needle = str(query or "").casefold()
+```
+
+8. In `src/agentos/plugins/service.py`, replace
+
+```python
+        with self.engine.connect() as connection:
+            rows = connection.execute(select(plugin_marketplaces)).mappings().all()
+        for row in rows:
+            if not row["clone_path"]:
+                continue
+            index = Path(str(row["clone_path"])) / "marketplace.json"
+            if not index.is_file():
+                continue
+            try:
+                marketplace = parse_marketplace(json.loads(index.read_text(encoding="utf-8")))
+```
+
+   with
+
+```python
+        statement = select(plugin_marketplaces)
+        if user_id is not None:
+            statement = statement.where(plugin_marketplaces.c.user_id == user_id)
+        with self.engine.connect() as connection:
+            rows = connection.execute(statement).mappings().all()
+        for row in rows:
+            if not row["clone_path"]:
+                continue
+            root = Path(str(row["clone_path"]))
+            index = marketplace_file(root)
+            if index is None:
+                continue
+            try:
+                marketplace = parse_marketplace(json.loads(index.read_text(encoding="utf-8")), root=root)
+```
+
+9. In `src/agentos/plugins/service.py`, replace
+
+```python
+    def add_marketplace(self, *, user_id: str, reference: str) -> dict[str, Any]:
+        if not reference.startswith("https://") and "://" in reference:
+            raise PluginServiceError("marketplace reference must use HTTPS")
+        name = Path(reference.rstrip("/")).name or "marketplace"
+        marketplace_id = plugin_id_from_name(name)
+        now = _now()
+        with self.engine.begin() as connection:
+            connection.execute(delete(plugin_marketplaces).where((plugin_marketplaces.c.marketplace_id == marketplace_id) & (plugin_marketplaces.c.user_id == user_id)))
+            connection.execute(insert(plugin_marketplaces).values(marketplace_id=marketplace_id, user_id=user_id, name=name, reference=reference[:1024], clone_path="", updated_at=now))
+        return {"marketplace_id": marketplace_id, "name": name, "reference": reference, "clone_path": "", "user_id": user_id}
+```
+
+   with
+
+```python
+    def add_marketplace(self, *, user_id: str, reference: str) -> dict[str, Any]:
+        """Fetch a marketplace (a GitHub repository or, on this computer, a folder), keep a copy and read its index (W5)."""
+        import hashlib
+
+        try:
+            source = resolve_source(reference)
+        except SourceRejected as error:
+            raise PluginServiceError(str(error), code="marketplace_invalid_source") from error
+        if source.kind not in ("git", "path"):
+            raise PluginServiceError("a marketplace is a GitHub repository or a local folder", code="marketplace_invalid_source")
+        person = hashlib.sha256(str(user_id).encode("utf-8")).hexdigest()[:16]
+        try:
+            with self.fetcher.fetch_raw(source) as staged:
+                index = marketplace_file(staged)
+                if index is None:
+                    raise PluginServiceError("the repository has no .claude-plugin/marketplace.json", code="marketplace_not_found")
+                try:
+                    marketplace = parse_marketplace(json.loads(index.read_text(encoding="utf-8")), root=staged)
+                except (OSError, ValueError) as error:
+                    raise PluginServiceError(f"the marketplace index is not valid: {str(error)[:200]}", code="marketplace_invalid") from error
+                marketplace_id = plugin_id_from_name(marketplace.name)
+                destination = self.plugin_root / "marketplaces" / person / marketplace_id
+                self._safe_remove(destination)  # the previous copy of this marketplace, inside Orin's plugin folder
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copytree(staged, destination, symlinks=False)
+        except FetchRejected as error:
+            raise PluginServiceError(str(error), code="marketplace_fetch_failed") from error
+        now = _now()
+        with self.engine.begin() as connection:
+            connection.execute(delete(plugin_marketplaces).where((plugin_marketplaces.c.marketplace_id == marketplace_id) & (plugin_marketplaces.c.user_id == user_id)))
+            connection.execute(insert(plugin_marketplaces).values(
+                marketplace_id=marketplace_id, user_id=user_id, name=marketplace.name, reference=reference[:1024],
+                clone_path=str(destination), updated_at=now,
+            ))
+        return {"marketplace_id": marketplace_id, "name": marketplace.name, "reference": reference, "clone_path": str(destination),
+                "user_id": user_id, "plugins": len(marketplace.plugins)}
+```
+
+10. In `src/agentos/plugins/service.py`, replace
+
+```python
+        source = resolve_source(reference)
+        if source.kind == "marketplace":
+            entries = self.search(source.plugin_name or "")
+            candidate = next((item for item in entries if str(item["name"]).casefold() == str(source.plugin_name).casefold()), None)
+```
+
+   with
+
+```python
+        source = resolve_source(reference)
+        if source.kind == "marketplace":
+            # W5: "name@marketplace" picks the plugin from that marketplace only (the person's own marketplaces).
+            wanted, _, market = str(source.plugin_name or "").partition("@")
+            entries = self.search(wanted, user_id=user_id)
+            candidate = next((
+                item for item in entries
+                if str(item["name"]).casefold() == wanted.casefold() and (not market or str(item["marketplace"]).casefold() == market.casefold())
+            ), None)
+```
+
+11. In `src/agentos/agentic/tools/orin/plugins_admin.py`, replace
+
+```python
+        results = self._plugin_service.search(str(query or ""))
+```
+
+   with
+
+```python
+        results = self._plugin_service.search(str(query or ""), user_id=self._plugin_user_id)
+```
+
+- [ ] **Step 4: Run the tests and see them pass**
+
+Run: `uv run pytest -q tests/unit/plugins/test_marketplaces.py`
+Expected: PASS.
+
+Also run `uv run pytest -q tests/unit/plugins tests/unit/agentic/test_plugin_agent_tools.py`: expected PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add tests/unit/plugins/test_marketplaces.py src/agentos/plugins/marketplace.py src/agentos/plugins/fetcher.py src/agentos/plugins/service.py src/agentos/agentic/tools/orin/plugins_admin.py
+git commit -m "feat(w5): plugin marketplaces are fetched and read
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+### Task 32: Batch F regression and ledger
+
+- [ ] **Step 1:** Run `uv run pytest -q tests/unit` (timeout 600000 ms) and `uv run pytest -q tests/integration`. Expected: all pass.
+- [ ] **Step 2:** Append a "## Batch F — Plugins (Tasks 27–32)" section to `docs/superpowers/plans/2026-10-19-w5-extensibility-ledger.md`: commits, suite results, deviations 29–34, the deliberate expectation changes (Task 30: `test_postgres_schema.py` lists `plugin_settings` and `test_w3_schema.py` expects the head revision `0051_w5_plugin_settings`, and `tests/integration/api/test_profile_isolation.py` classifies `GET`/`PUT /v1/plugins/{plugin_id}/config` as owned), and anything done differently from this plan.
+- [ ] **Step 3:** Commit with `docs(w5): ledger, batch F` + blank line + the Co-Authored-By line.
 
