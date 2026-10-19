@@ -2504,7 +2504,68 @@ class TurnSession:
             images=outcome.images,
         )
 
+    def _lsp_manager(self):
+        """This turn's language servers (W5), from the active plugins whose code the person allowed to run; None
+        when there are none or this Orin runs no plugin code."""
+        cached = getattr(self, "_lsp", None)
+        if cached is not None:
+            return cached or None
+        self._lsp = False
+        if not self.plugin_hooks:
+            return None
+        from agentos.lsp.config import lsp_servers
+        from agentos.lsp.manager import LspManager
+
+        try:
+            configs, problems = lsp_servers(getattr(self, "_active_plugins", ()), user_id=str(self.turn.get("user_id") or ""))
+        except Exception:  # noqa: BLE001 - language servers never stop a turn
+            logger.exception("plugin language servers could not be read")
+            return None
+        for problem in problems[:20]:
+            logger.warning("language server: %s", problem)
+        if configs:
+            self._lsp = LspManager(configs, workspace_root=self.workspace.root)
+        return self._lsp or None
+
+    def _lsp_after_write(self, path: str) -> None:
+        """After Write or Edit: the file's diagnostics, gathered in the background, join the next request (W5)."""
+        manager = self._lsp_manager()
+        if manager is None:
+            return
+        try:
+            target = self.workspace.resolve(path)
+        except Exception:  # noqa: BLE001 - an unresolvable path has no diagnostics
+            return
+        if manager.server_for(target) is None:
+            return
+        from agentos.lsp.manager import format_diagnostics
+
+        def work() -> None:
+            name, found, failure = manager.check(target)
+            if failure:
+                self._reminders.add("diagnostics", f"The language server {name} is off for this turn: {failure}", key=f"lsp-off:{name}")
+                return
+            text = format_diagnostics(str(path), name, found or [])
+            if text:
+                self._reminders.replace(f"lsp:{target}", "diagnostics", text) or self._reminders.add("diagnostics", text, key=f"lsp:{target}")
+
+        with self._subagent_lock:
+            pool = getattr(self, "_lsp_pool", None)
+            if pool is None:
+                pool = self._lsp_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="orin-lsp")
+        pool.submit(work)
+
+    def _close_lsp(self) -> None:
+        manager, self._lsp = getattr(self, "_lsp", None), None
+        pool, self._lsp_pool = getattr(self, "_lsp_pool", None), None
+        if pool is not None:
+            pool.shutdown(wait=False, cancel_futures=True)
+        if manager:
+            manager.close()
+
     def close_background_subagents(self) -> None:
+        # W5: the turn's language servers stop with its background work.
+        self._close_lsp()
         with self._subagent_lock:
             executor = self._bg_subagent_executor
             self._bg_subagent_executor = None
@@ -2927,6 +2988,7 @@ class TurnSession:
         # W5: skills and commands read from disk, for the Skill tool of this toolset (subagents' too).
         toolset._disk_skills = getattr(self, "_disk_skills", None)
         toolset._skill_hooks_sink = self._skill_hooks  # W5: a skill's own hooks
+        toolset._lsp_after_write = self._lsp_after_write  # W5: diagnostics after Write and Edit
         if subagents:
             toolset._stop_subagent = self._stop_background_subagent  # W5: TaskStop stops a background agent
             toolset._team_sender = "lead"  # W5: the lead of any agent team this turn starts

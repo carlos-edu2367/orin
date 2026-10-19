@@ -51,6 +51,9 @@ class WriteTools:
         artifact["updated_sha256"] = updated_sha
         artifacts = [artifact]
         self._queue_reindex(artifacts)
+        notify = getattr(self, "_lsp_after_write", None)
+        if callable(notify):
+            notify(path)  # W5: a language server's diagnostics reach the model as a reminder
         return {
             "summary": f"{'Acrescentou a' if mode == 'append' else 'Escreveu'} {path}",
             "content": body,
