@@ -156,8 +156,8 @@ function ScheduleRow({ item, onCancel }: { item: ScheduledChat; onCancel: (sched
     <div className="schedule-row__marker" aria-hidden="true" />
     <div className="schedule-row__content">
       <strong>{item.message}</strong>
-      <span>{label(item.recurrence)} · {formatNextFire(item.next_fire_at)}</span>
-      <small>{item.provider} · {item.model_id}</small>
+      <span>{item.recurrence === 'cron' && item.cron ? `cron ${item.cron}` : label(item.recurrence)} · {formatNextFire(item.next_fire_at)}</span>
+      <small>{item.byAgent && <span className="schedule-row__origin">pelo agente</span>}{item.provider} · {item.model_id}</small>
     </div>
     <div className="schedule-row__actions">
       <span className={`schedule-row__state schedule-row__state--${item.state.toLowerCase()}`}>{stateLabel(item.state)}</span>
@@ -174,9 +174,9 @@ function formatNextFire(value: string | null): string {
 }
 
 function stateLabel(value: string): string {
-  return ({ ACTIVE: 'Ativa', PAUSED: 'Pausada', COMPLETED: 'Concluída', CANCELLED: 'Cancelada' } as Record<string, string>)[value] ?? value
+  return ({ ACTIVE: 'Ativa', PAUSED: 'Pausada', COMPLETED: 'Concluída', EXPIRED: 'Concluída', CANCELLED: 'Cancelada' } as Record<string, string>)[value] ?? value
 }
 
 function label(kind: ScheduledChat['recurrence']): string {
-  return ({ once: 'uma vez', hourly: 'a cada hora', daily: 'diária', weekly: 'semanal' })[kind]
+  return ({ once: 'uma vez', hourly: 'a cada hora', daily: 'diária', weekly: 'semanal', cron: 'cron' })[kind]
 }

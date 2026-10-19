@@ -234,7 +234,19 @@ class ScheduledChatService:
             rows = connection.execute(select(schedules, scheduled_chat_tasks.c.project_id, scheduled_chat_tasks.c.message, scheduled_chat_tasks.c.provider, scheduled_chat_tasks.c.model_id, scheduled_chat_tasks.c.conversation_id)
                 .join(scheduled_chat_tasks, scheduled_chat_tasks.c.schedule_id == schedules.c.schedule_id)
                 .where(schedules.c.user_id == user_id).order_by(schedules.c.created_at.desc())).mappings().all()
-        return {"items": [{**self._public(row), "project_id": row["project_id"], "message": row["message"], "provider": row["provider"], "model_id": row["model_id"], "conversation_id": row["conversation_id"]} for row in rows]}
+        items: list[dict[str, object]] = []
+        for row in rows:
+            rule = dict(row["rule"] or {})
+            source = str(rule.get("source") or "user")
+            # A wakeup or monitor wake that already ran is an implementation detail; pending ones stay cancellable here.
+            if source in {"wakeup", "monitor"} and row["state"] != "ACTIVE":
+                continue
+            items.append({
+                **self._public(row), "project_id": row["project_id"], "message": row["message"], "provider": row["provider"],
+                "model_id": row["model_id"], "conversation_id": row["conversation_id"], "source": source,
+                "cron": rule.get("cron") if rule.get("kind") == "cron" else None,
+            })
+        return {"items": items}
 
     def list_for_conversation(self, user_id: str, conversation_id: str, *, sources: tuple[str, ...]) -> list[dict[str, object]]:
         """Active schedules a tool made for one of this person's conversations, oldest first."""

@@ -98,6 +98,7 @@ from agentos.persistence.postgres.schema import (
     provider_model_catalog,
     provider_model_favorites,
     runtime_heartbeats,
+    schedules,
     vision_model_selections,
 )
 from agentos.persistence.provider_secrets import ProviderSecretCipher
@@ -1410,6 +1411,15 @@ class ChatWorker:
                 history = self.store.history_for_turn(turn)
                 request_text = next((str(item.get("content") or "") for item in reversed(history) if item.get("role") == "user"), "")
                 push_authorized = explicitly_authorizes_git_push(request_text)
+                if push_authorized and turn.get("scheduled_by_schedule_id"):
+                    # A scheduled run's message is the person's words only when they wrote the schedule; one a tool
+                    # made (CronCreate, ScheduleWakeup, a Monitor wake) was written by the model and authorizes nothing.
+                    rule = connection.execute(select(schedules.c.rule).where(
+                        schedules.c.schedule_id == str(turn["scheduled_by_schedule_id"]),
+                        schedules.c.user_id == turn["user_id"],
+                    )).scalar_one_or_none()
+                    if not isinstance(rule, dict) or str(rule.get("source") or "user") != "user":
+                        push_authorized = False
                 existing_plan = str(turn.get("code_mode_plan_path") or run.get("plan_path") or "").strip() or None
                 if existing_plan is None and turn.get("conversation_id"):
                     prev_plan = connection.execute(

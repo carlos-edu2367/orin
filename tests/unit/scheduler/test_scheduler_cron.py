@@ -84,3 +84,19 @@ def test_a_bad_cron_expression_is_refused() -> None:
     service = ScheduledChatService(_engine(now), clock=lambda: now)
     with pytest.raises(ValueError):
         service.create("user-1", ScheduledChatInput("x", "openrouter", "model-1", "UTC", "cron", cron="61 * * * *"), idempotency_key="bad")
+
+def test_the_schedules_page_sees_tool_jobs_but_not_finished_wakeups() -> None:
+    now = datetime(2026, 10, 19, 12, 0, tzinfo=UTC)
+    engine = _engine(now)
+    conversation_id = _conversation(engine)
+    clock = {"now": now}
+    service = ScheduledChatService(engine, clock=lambda: clock["now"])
+    service.create("user-1", ScheduledChatInput("job", "openrouter", "model-1", "UTC", "cron", cron="0 9 * * 1-5", conversation_id=conversation_id, source="cron"), idempotency_key="k1")
+    service.create("user-1", ScheduledChatInput("wake", "openrouter", "model-1", "UTC", "once", fire_at=now + timedelta(minutes=1), conversation_id=conversation_id, source="wakeup"), idempotency_key="k2")
+    service.create("user-1", ScheduledChatInput("mine", "openrouter", "model-1", "UTC", "hourly"), idempotency_key="k3")
+    items = {item["message"]: item for item in service.list("user-1")["items"]}
+    assert items["job"]["source"] == "cron" and items["job"]["cron"] == "0 9 * * 1-5" and items["job"]["recurrence"] == "cron"
+    assert items["wake"]["source"] == "wakeup" and items["mine"]["source"] == "user" and items["mine"]["cron"] is None
+    clock["now"] = now + timedelta(minutes=2)
+    service.run_due(worker_id="w", due_before=clock["now"])
+    assert "wake" not in {item["message"] for item in service.list("user-1")["items"]}
