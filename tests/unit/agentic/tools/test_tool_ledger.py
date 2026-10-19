@@ -46,4 +46,4 @@ def test_deferred_tools_name_a_wave_and_excluded_ones_a_reason() -> None:
 
 def test_the_counts_are_what_the_w4_ledger_reports() -> None:
     counts = {status: sum(1 for entry in TOOL_LEDGER.values() if entry.status == status) for status in ("included", "deferred", "excluded")}
-    assert counts == {"included": 31, "deferred": 6, "excluded": 12}
+    assert counts == {"included": 32, "deferred": 5, "excluded": 12}

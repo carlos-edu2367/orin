@@ -30,7 +30,7 @@ READ_ONLY_TOOLS: frozenset[str] = frozenset({
     "list_plugins", "search_plugin", "list_projects", "read_project_conversation", "cron_list",
     "schedule_wakeup", "push_notification",
 })
-DELEGATION_TOOLS: frozenset[str] = frozenset({"run_subagent", "create_agent", "ask_agent", "ask_agents"})
+DELEGATION_TOOLS: frozenset[str] = frozenset({"run_subagent", "create_agent", "ask_agent", "ask_agents", "send_message"})
 SAFE_FILE_COMMANDS: frozenset[str] = frozenset({"mkdir", "touch", "cp", "mv"})
 _PLAN_SUBAGENTS = frozenset({"explore", "plan"})
 # cp/mv flags that cannot redirect a write elsewhere. Any other flag makes the call ask.

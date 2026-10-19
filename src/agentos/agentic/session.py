@@ -22,6 +22,7 @@ from pathlib import Path
 from threading import BoundedSemaphore, Lock
 from types import MappingProxyType
 from typing import Any, Callable, Mapping
+from uuid import uuid4
 
 from agentos.installation import orin_paths
 from agentos.agentic.tools.public_names import public_subagent_type
@@ -783,6 +784,9 @@ class _MainAgentStore:
             total_tokens=total_tokens,
         )
 
+
+# W5 agent teams: how many message batches a teammate works through before it goes idle within one run.
+MAX_TEAM_DELIVERIES = 10
 
 _BUILTIN_SUBAGENT_SPECS: Mapping[str, Mapping[str, object]] = {
     "explore": {
@@ -1563,7 +1567,13 @@ class TurnSession:
         agent_id: str | None = None,
         run_in_background: bool = False,
         hook_cancel: threading.Event | None = None,
+        teammate_name: str | None = None,
+        team_name: str | None = None,
     ) -> ToolOutcome:
+        if teammate_name:
+            refusal = self._teammate_refusal(teammate_name)
+            if refusal is not None:
+                return refusal
         raw_type = str(subagent_type or "").strip()
         clean_type = raw_type.lower()
         if clean_type == "general-purpose":
@@ -1593,6 +1603,8 @@ class TurnSession:
             resumed_agent_id=clean_agent_id,
             run_in_background=bool(run_in_background),
             hook_cancel=hook_cancel,
+            teammate_name=str(teammate_name).strip().lower() if teammate_name else None,
+            team_name=str(team_name or "").strip()[:64] or "team",
         )
 
     def _ask_agent(
@@ -1605,7 +1617,14 @@ class TurnSession:
         resumed_agent_id: str | None = None,
         run_in_background: bool = False,
         hook_cancel: threading.Event | None = None,
+        teammate_name: str | None = None,
+        team_name: str | None = None,
     ) -> ToolOutcome:
+        if teammate_name and resumed_agent_id is None:
+            # W5: naming an existing teammate gives it the new task (its history is kept for this turn).
+            known = self._team_roster().get(teammate_name)
+            if known is not None:
+                resumed_agent_id = known["agent_id"]
         clean = " ".join(str(name).split())[:60]
         builtin_key = clean.lower()
         if builtin_key == "general-purpose":
@@ -1655,7 +1674,7 @@ class TurnSession:
             with self._subagent_lock:
                 count = self._builtin_type_counts.get(builtin_key, 0) + 1
                 self._builtin_type_counts[builtin_key] = count
-            instance_name = builtin_key if count == 1 else f"{builtin_key}-{count}"
+            instance_name = teammate_name or (builtin_key if count == 1 else f"{builtin_key}-{count}")
             clean = instance_name
             record = self._ensure_builtin_subagent_record(
                 builtin_key,
@@ -1666,6 +1685,13 @@ class TurnSession:
             record = self.agents_store.find(clean) if self.agents_store is not None else None
         if record is None:
             return ToolOutcome("failed", f"Agente {clean} não existe", f"No subagent named '{clean}'. Create it first with create_agent.", {"tool_kind": "agent"}, "AGENT_NOT_FOUND")
+        if teammate_name:
+            record = {**record, "teammate_name": teammate_name, "team_name": team_name or "team"}
+            with self._subagent_lock:
+                self._team_roster()[teammate_name] = {
+                    "agent_id": str(record["agent_id"]), "team_name": team_name or "team", "type": builtin_key,
+                }
+            run_in_background = True  # a teammate always works in the background
 
         # Legacy conversation-agent rows predate provider/model snapshots.
         # Treat their absent values exactly as an omitted model_id: use the
@@ -1974,6 +2000,10 @@ class TurnSession:
         )
         # W4-R9 still holds: a monitor the subagent starts sinks into the running parent turn, not into a wake.
         subagent_tools._monitor_sink = self._reminders
+        if record.get("teammate_name"):
+            # W5: a teammate writes to the lead and to its peers.
+            subagent_tools._team_sender = str(record["teammate_name"])
+            subagent_tools._send_team_message = self._send_team_message
         # W3-R26: its own instruction-file tracker, so a subdirectory's CLAUDE.md and path rules load for its reads.
         if getattr(self, "_memory", None) is not None:
             subagent_tools.memory_tracker = self._memory_files(self._workspace_trusted())
@@ -2123,13 +2153,136 @@ class TurnSession:
         return f".orin/agent-outputs/{safe}.md"
 
     def _run_background_agent(self, output_file: str, **kwargs: Any) -> ToolOutcome:
-        """Run a background agent and write its report (or why it stopped) to ``output_file``."""
+        """Run a background agent and write its report (or why it stopped) to ``output_file``.
+
+        A teammate then reads the messages that arrived while it worked (one run per batch, at most
+        ``MAX_TEAM_DELIVERIES``), and goes idle: ``TeammateIdle`` fires and the lead gets its last report.
+        """
         outcome = self._execute_subagent_run(**kwargs)
+        self._save_agent_report(output_file, outcome)
+        record = kwargs.get("record") or {}
+        name = str(record.get("teammate_name") or "")
+        if not name:
+            return outcome
+        for _ in range(MAX_TEAM_DELIVERIES):
+            task = self._take_team_mail(name)
+            if not task:
+                break
+            outcome = self._execute_subagent_run(**{**kwargs, "task_text": task, "resumed_agent_id": kwargs.get("agent_id")})
+            self._save_agent_report(output_file, outcome)
+        self._teammate_idle(name, str(record.get("team_name") or "team"), outcome)
+        return outcome
+
+    def _save_agent_report(self, output_file: str, outcome: ToolOutcome) -> None:
         try:
             self.workspace.write_text(output_file, str(outcome.content or outcome.summary or ""))
         except Exception:  # noqa: BLE001 - a report that cannot be saved is still returned by check_subagent
             logger.warning("background agent report could not be written to %s", output_file, exc_info=True)
-        return outcome
+
+    # -- agent teams (W5) ------------------------------------------------------
+
+    def _team_roster(self) -> dict[str, dict[str, str]]:
+        roster = getattr(self, "_teammates", None)
+        if roster is None:
+            roster = self._teammates = {}
+        return roster
+
+    def _team_mailbox(self):
+        """The conversation's team mailbox: in the database when the session has one, else in memory."""
+        mailbox = getattr(self, "_mailbox_store", None)
+        if mailbox is not None:
+            return mailbox
+        from agentos.conversations.mailbox import AgentMailbox, InMemoryMailbox
+
+        engine = getattr(self.chat_store, "_engine", None)
+        try:
+            mailbox = AgentMailbox(engine) if engine is not None else InMemoryMailbox()
+        except Exception:  # noqa: BLE001 - a database that cannot hold the mailbox still lets the team talk
+            logger.warning("team mailbox unavailable; keeping messages in memory", exc_info=True)
+            mailbox = InMemoryMailbox()
+        self._mailbox_store = mailbox
+        return mailbox
+
+    def _teammate_refusal(self, name: str) -> ToolOutcome | None:
+        clean = str(name or "").strip().lower()
+        if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,31}", clean) or clean in {"lead", "main", "team-lead"}:
+            return ToolOutcome(
+                "failed", "Nome de colega inválido",
+                "A teammate's name is 1-32 lowercase letters, digits, '-' or '_' and cannot be 'lead' or 'main'.",
+                {"tool_kind": "agent"}, "INVALID_ARGUMENTS",
+            )
+        known = self._team_roster().get(clean)
+        if known is not None:
+            with self._subagent_lock:
+                entry = self._background_subagents.get(known["agent_id"])
+            if entry is not None and not entry["future"].done():
+                return ToolOutcome(
+                    "failed", f"{clean} ainda trabalhando",
+                    f"Teammate '{clean}' is still working. Send it a message with SendMessage; it reads it when it finishes.",
+                    {"agent_id": known["agent_id"], "tool_kind": "agent"}, "SUBAGENT_STILL_RUNNING",
+                )
+        return None
+
+    def _send_team_message(self, *, sender: str, to: str, message: str, summary: str = "") -> ToolOutcome:
+        text = str(message or "").strip()
+        target = str(to or "").strip().lower()
+        roster = self._team_roster()
+        user_id, conversation_id = str(self.turn.get("user_id") or ""), str(self.turn.get("conversation_id") or "")
+        if not text:
+            return ToolOutcome("failed", "Mensagem vazia", "message must be a non-blank string.", {"tool_kind": "agent"}, "INVALID_ARGUMENTS")
+        if target == sender:
+            return ToolOutcome("failed", "Mensagem para si mesmo", "An agent cannot send a message to itself.", {"tool_kind": "agent"}, "INVALID_ARGUMENTS")
+        if target in {"lead", "main", "team-lead"}:
+            if sender == "lead":
+                return ToolOutcome("failed", "Você é o líder", "You are the lead; send messages to a teammate by name.", {"tool_kind": "agent"}, "INVALID_ARGUMENTS")
+            team = roster.get(sender, {}).get("team_name", "team")
+            self._team_mailbox().post(user_id=user_id, conversation_id=conversation_id, team_name=team, sender=sender, recipient="lead", content=text, summary=summary)
+            heading = f"Message from teammate {sender}" + (f" ({summary.strip()[:200]})" if summary.strip() else "")
+            self._reminders.add("teammate", f"{heading}:\n{text[:8000]}", key=f"teammate:{sender}:{uuid4().hex}")
+            return ToolOutcome("succeeded", "Mensagem enviada ao líder", "Delivered to the lead.", {"to": "lead", "tool_kind": "agent"})
+        mate = roster.get(target)
+        if mate is None:
+            names = ", ".join(sorted(roster)) or "none yet"
+            return ToolOutcome(
+                "failed", f"Colega {target[:40]} não existe",
+                f"No teammate named '{target[:40]}'. Teammates: {names}. Start one with the Agent tool (name and team_name).",
+                {"tool_kind": "agent"}, "AGENT_NOT_FOUND",
+            )
+        self._team_mailbox().post(user_id=user_id, conversation_id=conversation_id, team_name=mate["team_name"], sender=sender, recipient=target, content=text, summary=summary)
+        with self._subagent_lock:
+            entry = self._background_subagents.get(mate["agent_id"])
+        if entry is not None and not entry["future"].done():
+            return ToolOutcome("succeeded", f"Mensagem na fila de {target}", f"Queued: {target} reads it when it finishes its current task.", {"to": target, "status": "queued", "tool_kind": "agent"})
+        task = self._take_team_mail(target)
+        if not task:
+            return ToolOutcome("succeeded", f"Mensagem entregue a {target}", f"Delivered to {target}.", {"to": target, "tool_kind": "agent"})
+        started = self._ask_agent(
+            mate["type"], task, resumed_agent_id=mate["agent_id"], run_in_background=True,
+            teammate_name=target, team_name=mate["team_name"],
+        )
+        if started.status != "succeeded":
+            return started
+        return ToolOutcome("succeeded", f"{target} começou a trabalhar", f"Delivered; {target} is working on it.", {"to": target, "status": "running", "agent_id": mate["agent_id"], "tool_kind": "agent"})
+
+    def _take_team_mail(self, name: str) -> str:
+        """The teammate's pending messages as one task, or "" when there are none."""
+        messages = self._team_mailbox().take(
+            user_id=str(self.turn.get("user_id") or ""), conversation_id=str(self.turn.get("conversation_id") or ""), recipient=name,
+        )
+        if not messages:
+            return ""
+        lines = [
+            f"From {item['sender']}" + (f" ({item['summary']})" if item.get("summary") else "") + f":\n{item['content']}"
+            for item in messages
+        ]
+        return "Messages from your team:\n\n" + "\n\n".join(lines)
+
+    def _teammate_idle(self, name: str, team: str, outcome: ToolOutcome) -> None:
+        bus = self.lifecycle
+        if bus is not None:
+            _emit_lifecycle_safely(bus, HookEvent.TEAMMATE_IDLE, teammate_name=name, team_name=team)
+        report = str(outcome.content or outcome.summary or "")[:2000]
+        self._reminders.add("teammate", f"Teammate {name} is idle. Its last report:\n{report}", key=f"teammate-idle:{name}:{uuid4().hex}")
 
     def _stop_background_subagent(self, agent_id: str) -> ToolOutcome:
         """TaskStop for a background agent: it stops at its next step (W5)."""
@@ -2319,6 +2472,12 @@ class TurnSession:
             header_lines.extend((
                 "You are a 'fork' subagent inside Orin inheriting the full parent conversation context.",
                 "Do not re-ask the user questions; execute the delegated fork directive and return a concise report.",
+                "",
+            ))
+        if record.get("teammate_name"):
+            header_lines.extend((
+                f"You are teammate '{record['teammate_name']}' of the agent team '{record.get('team_name') or 'team'}'. "
+                "Report or ask with SendMessage(to=\"lead\"); write to another teammate by name. Your final reply also reaches the lead.",
                 "",
             ))
         definition = record.get("definition")
@@ -2634,6 +2793,8 @@ class TurnSession:
         toolset._disk_skills = getattr(self, "_disk_skills", None)
         if subagents:
             toolset._stop_subagent = self._stop_background_subagent  # W5: TaskStop stops a background agent
+            toolset._team_sender = "lead"  # W5: the lead of any agent team this turn starts
+            toolset._send_team_message = self._send_team_message
         if permission_broker is not None:
             toolset._permission_broker = permission_broker
             toolset._interactive_permissions = bool(interactive_permissions)

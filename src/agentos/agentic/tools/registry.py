@@ -24,6 +24,7 @@ from agentos.agentic.tools.git.worktree import SPECS as _git_worktree
 from agentos.agentic.tools.orin.preview import SPECS as _orin_preview
 from agentos.agentic.tools.orin.memory import SPECS as _orin_memory
 from agentos.agentic.tools.agents.agent import SPECS as _agents_agent
+from agentos.agentic.tools.agents.team import SPECS as _agents_team
 from agentos.agentic.tools.orin.skills_admin import SPECS as _orin_skills_admin
 from agentos.agentic.tools.mcp.admin import SPECS as _mcp_admin
 from agentos.agentic.tools.orin.plugins_admin import SPECS as _orin_plugins_admin
@@ -60,6 +61,7 @@ def default_registry() -> ToolRegistry:
         *_orin_preview,
         *_orin_memory,
         *_agents_agent,
+        *_agents_team,
         *_orin_skills_admin,
         *_mcp_admin,
         *_orin_plugins_admin,

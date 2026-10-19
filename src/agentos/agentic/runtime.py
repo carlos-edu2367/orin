@@ -88,7 +88,7 @@ CODE_MODE_CORE_TOOLS = frozenset({
     "search_plugin", "inspect_plugin", "install_plugin", "list_plugins", "uninstall_plugin",
     "list_projects", "create_project_from_session", "move_session_to_project", "read_project_conversation",
     "generate_image", "generate_audio", "generate_video",
-    "cron_create", "cron_delete", "cron_list", "schedule_wakeup", "monitor", "push_notification",
+    "cron_create", "cron_delete", "cron_list", "schedule_wakeup", "monitor", "push_notification", "send_message",
 })
 
 # Sentinel distinguishing "no pin resolved yet" from "resolved, and there is

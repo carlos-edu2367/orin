@@ -78,7 +78,7 @@ TOOL_LEDGER: dict[str, LedgerEntry] = {
     "TaskOutput": _in("read_process_output"),
     "ToolSearch": _in("search_mcp_tools"),
     "Skill": _in("use_skill"),
-    "SendMessage": _later("W5"),
+    "SendMessage": _in("send_message"),
 }
 
 __all__ = ["LedgerEntry", "TOOL_LEDGER"]

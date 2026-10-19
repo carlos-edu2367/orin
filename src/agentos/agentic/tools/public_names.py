@@ -50,6 +50,7 @@ PUBLIC_NAMES: dict[str, str] = {
     "schedule_wakeup": "ScheduleWakeup",
     "monitor": "Monitor",
     "push_notification": "PushNotification",
+    "send_message": "SendMessage",
     # Orin extras
     "list_files": "ListFiles",
     "view_file": "ViewFile",
@@ -111,7 +112,7 @@ _RENAMES: dict[str, dict[str, str]] = {
     },
     "run_command": {"run_in_background": "background"},
     "powershell": {"run_in_background": "background"},
-    "run_subagent": {"prompt": "task", "resume": "agent_id", "model": "model_id"},
+    "run_subagent": {"prompt": "task", "resume": "agent_id", "model": "model_id", "name": "teammate_name"},
     "use_skill": {"skill": "skill_id"},
     "search_mcp_tools": {"max_results": "limit"},
     "exit_plan_mode": {"plan": "summary", "allowedPrompts": "allowed_prompts"},

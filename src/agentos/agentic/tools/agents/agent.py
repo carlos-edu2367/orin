@@ -35,6 +35,8 @@ class AgentTools:
         model_id: str | None = None,
         agent_id: str | None = None,
         run_in_background: bool = False,
+        teammate_name: str | None = None,
+        team_name: str | None = None,
     ) -> ToolOutcome:
         raw_type = str(subagent_type or "").strip()
         clean_type = raw_type.lower()
@@ -56,6 +58,8 @@ class AgentTools:
         clean_agent_id = str(agent_id).strip() if agent_id is not None and str(agent_id).strip() else None
         clean_model_id = str(model_id).strip() if model_id is not None and str(model_id).strip() else None
         if self._run_subagent is not None:
+            # W5: a named teammate of an agent team (only passed when asked, so older callables keep working).
+            team = {"teammate_name": str(teammate_name).strip(), "team_name": str(team_name or "").strip()} if teammate_name and str(teammate_name).strip() else {}
             try:
                 return self._run_subagent(
                     clean_type,
@@ -64,6 +68,7 @@ class AgentTools:
                     model_id=clean_model_id,
                     agent_id=clean_agent_id,
                     run_in_background=bool(run_in_background),
+                    **team,
                 )
             except TypeError:
                 return self._run_subagent(
@@ -100,6 +105,8 @@ class AgentInput(ToolInput):
     model: str | None = Field(None, description="Optional model alias.")
     run_in_background: bool | None = Field(None, description="Return immediately and notify on completion.")
     resume: str | None = Field(None, description="Id of a previous subagent to continue.")
+    name: str | None = Field(None, description="Name a teammate of an agent team, so the team can message it with SendMessage.")
+    team_name: str | None = Field(None, description="The team the named teammate belongs to.")
 
 
 # Tool specs, moved from AgentToolset._build_definitions (W4).
@@ -157,6 +164,8 @@ SPECS: tuple[ToolSpec, ...] = (
             "model_id": {**_TEXT, "description": "Optional favorite model ID from the current provider."},
             "agent_id": {**_TEXT, "description": "Optional agent_id from a previous run_subagent call to resume that subagent with its full prior context preserved."},
             "run_in_background": {"type": "boolean", "description": "When true, launch the subagent asynchronously in the background and return its agent_id immediately. Use check_subagent to inspect or await its output."},
+            "teammate_name": {**_TEXT, "description": "Optional name of a teammate (agent teams); a teammate always runs in the background and can be messaged with send_message."},
+            "team_name": {**_TEXT, "description": "Optional team of the named teammate."},
         }, ("subagent_type", "task")),
         handler="run_subagent",
         kind="agent",

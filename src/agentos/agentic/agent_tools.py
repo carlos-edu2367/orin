@@ -85,6 +85,7 @@ from agentos.agentic.tools.planning.tasks import TaskTools
 from agentos.agentic.tools.planning.plan_mode import PlanModeTools
 from agentos.agentic.tools.interaction.ask_user import AskUserTools
 from agentos.agentic.tools.agents.agent import AgentTools
+from agentos.agentic.tools.agents.team import TeamTools
 from agentos.agentic.tools.git.worktree import WorktreeTools
 from agentos.agentic.tools.orin.preview import PreviewTools
 from agentos.agentic.tools.orin.media import MediaTools
@@ -213,6 +214,7 @@ class AgentToolset(
     PlanModeTools,
     AskUserTools,
     AgentTools,
+    TeamTools,
     WorktreeTools,
     PreviewTools,
     MediaTools,

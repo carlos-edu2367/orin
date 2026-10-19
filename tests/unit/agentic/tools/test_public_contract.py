@@ -33,7 +33,11 @@ EXPECTED = {
     "exit_worktree": ({"action", "discard_changes"}, ["action"]),
     "fetch_url": ({"url", "prompt", "offset"}, ["url", "prompt"]),
     "web_search": ({"query", "allowed_domains", "blocked_domains"}, ["query"]),
-    "run_subagent": ({"description", "prompt", "subagent_type", "model", "run_in_background", "resume"}, ["description", "prompt"]),
+    "run_subagent": (
+        {"description", "prompt", "subagent_type", "model", "run_in_background", "resume", "name", "team_name"},
+        ["description", "prompt"],
+    ),
+    "send_message": ({"to", "message", "summary"}, ["to", "message"]),
     "use_skill": ({"skill", "args"}, ["skill"]),
     "search_mcp_tools": ({"query", "max_results"}, ["query"]),
 }
