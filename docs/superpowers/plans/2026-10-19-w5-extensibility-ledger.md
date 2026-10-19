@@ -427,3 +427,199 @@ Found by reading the code while implementing the batch. Where a check was run, i
 - **Postgres:** Batch G adds no migration, but the 65 integration skips were not run here.
 - **POSIX:** the 43 shell-script hook tests were skipped on this machine, so the POSIX runner path is covered only by the test code, not by a run.
 - **Frontend:** only `npm --prefix frontend test` was run; no frontend file changed.
+
+## Batch H — Diagnostics after edits (Tasks 37–38)
+
+### Commits
+
+Branch `feat/orin-code-parity-w0-w3`, on top of `909b430` (the Batch H plan):
+
+| Task | Commit | Subject |
+|---|---|---|
+| 37 | `aa0b7f3` | feat(w5): a plugin's language server reports diagnostics after Write and Edit (includes the reader fix, deviation 42) |
+| 38 | this commit | docs(w5): ledger, batch H and W5 summary |
+
+### Tests added (6 test functions, all in `tests/unit/lsp/test_lsp.py`)
+
+- The five functions of the plan: `test_the_client_sends_a_change_and_returns_its_diagnostics`, `test_diagnostics_become_reminder_text`, `test_a_server_that_cannot_start_is_turned_off`, `test_a_plugins_lsp_json_is_read_once_its_code_may_run`, `test_writing_a_file_brings_its_diagnostics_to_the_model`.
+- One added by the executor, for deviation 42: `test_a_malformed_message_does_not_stop_the_reader`.
+
+Red states: Task 37 Step 2 gave the predicted collection error, `ModuleNotFoundError: No module named 'agentos.lsp'`. The added test failed before its fix: the reader thread ended with `TypeError: 'int' object is not iterable`, and `diagnostics` returned `None` where the good message's diagnostics were expected.
+
+### Suite results
+
+- Task 37, `uv run pytest -q tests/unit/lsp`: **6 passed**.
+- Task 37 Step 4: `uv run pytest -q tests/unit/agentic`: 1256 passed, 7 skipped. `uv run pytest -q tests/unit/agentic/tools`: 378 passed, 5 skipped. Run separately, as the plan says.
+- Task 38 Step 1, `uv run pytest -q tests/unit` (foreground, timeout 600000 ms): **3857 passed, 60 skipped, 0 failed** (288 s). Batch G ended at 3851; the difference is the six new test functions.
+- `uv run pytest -q tests/integration`: **78 passed, 65 skipped, 0 failed** (63 s). The 65 skips are the same Postgres and Redis tests as in every batch (`AGENTOS_TEST_POSTGRES_DSN`, `AGENTOS_POSTGRES_URL`, `AGENTOS_REDIS_URL` not set here).
+- Task 38 Step 2: `npm --prefix frontend test`: **103 files, 609 tests passed**. `npm --prefix frontend run lint` (`eslint . --max-warnings=0`): exit 0. `npm --prefix frontend run build`: exit 0, with the bundler's advisory that some chunks exceed 500 kB. The advisory is a warning, not an error. Batch H changes no file under `frontend/`.
+- Python linting: `pyproject.toml` configures no linter and ruff is not in the virtual environment, so no Python linter was run on Batch H's code (the same as Batch D).
+
+### Deviations from the plan
+
+- **Plan deviations 40–41, as implemented:**
+  40. A plugin's language server runs only once the person allowed the plugin to run code (`ActivePlugin.enabled_hook_ids`) and only on an Orin that runs plugin hooks (`_lsp_manager` returns None otherwise). Its environment is the worker's without `ORIN_*` and `AGENTOS_*` variables or names containing `API_KEY`, `SECRET`, `TOKEN` or `PASSWORD`, plus its `env` (`_environment` in `lsp/client.py`).
+  41. Diagnostics are gathered in the background after Write and Edit and join the next request as a `diagnostics` reminder (errors and warnings, at most 30 per file). A server that fails is turned off for the turn and the model is told once. Orin has no `LSP` code-navigation tool. `restartOnCrash`, `maxRestarts`, `transport: socket` and `workspaceFolder` are not read.
+  This batch also reads the plugin's `.lsp.json` (or the manifest's `lspServers`), so Batch F's deviation 30 is updated: `.lsp.json` is now read. `settings.json` still is not.
+- **Deviation 42 (found by the executor; not in the plan).** The plan's `LspClient._read_loop` called `_dispatch` without a guard. One malformed server message (for example a `publishDiagnostics` whose `diagnostics` is a number, or an `id` or `method` that is not hashable) raised `TypeError` inside the reader thread, which then ended. Every later reply was never read, so each later call waited its full timeout and returned nothing for that file, with no reminder. A probe with a malformed publish followed by a valid one returned `None` after the timeout, and the thread's traceback was printed. Fix: each message is dispatched inside `try` / `except Exception` with a debug log, so one malformed message is skipped (`lsp/client.py`; `logger` added). Test: `test_a_malformed_message_does_not_stop_the_reader`, red before the fix and green after. The fix is inside commit `aa0b7f3` (made before that commit), not a separate commit. The probe script is outside the repository, in the scratchpad (`malformed_probe.py`), and was not deleted.
+- **Other differences from the plan:**
+  a. Task 37 Step 3 edits 1 to 4 matched their old text exactly once each and were applied as written. Step 2's red state and Step 4's runs are as the plan describes.
+  b. Commit trailer: `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`, as the brief and the owner's standing instruction for this branch require. The session's attribution note named Haiku 5.5. This is the same choice as Batches A to C and E to G; Batch D's commits used the Haiku line, as its ledger records.
+  c. Git printed "LF will be replaced by CRLF" for the new and edited files. The content is unchanged; the warning comes from the environment's line-ending setting.
+  d. Nothing was deleted, nothing was pushed, and the branch was not switched.
+
+### Expectation changes
+
+None. Batch H changes no existing test; the only test file it adds or edits is `tests/unit/lsp/test_lsp.py`, which is new.
+
+### Observations not fixed (found while implementing Batch H; found by reading unless noted)
+
+1. A malformed `publishDiagnostics` (for example `diagnostics` that is not a list) is now skipped by the reader guard, so the call waits the full timeout (5 s on each Write or Edit) and reports nothing for that file, with no reminder and no notice. Reproduced with the probe (`None` after the 3 s timeout).
+2. A malformed item inside an otherwise valid list (for example a `range` that is not an object) makes `format_diagnostics` raise in the background worker. The executor keeps the exception and nothing logs it, so that file's diagnostics silently do not reach the model. Not reproduced.
+3. A late answer can be taken for the current one. A publish that arrives after its call timed out is stored; the next call for the same file sees the event set and may return the previous text's diagnostics. Not reproduced.
+4. The server's stderr is discarded (`stderr=DEVNULL`, as in the plan's code). A server that fails to start or crashes gives the model only "could not start …", "did not answer …" or "the language server stopped", never its own message.
+5. Diagnostics run only after Write and Edit, as the plan specifies. A file changed by a shell command is not checked.
+
+### Closed by this batch
+
+None of the earlier observations. Batch H adds no fix to an earlier batch's observation.
+
+## W5 summary
+
+Branch `feat/orin-code-parity-w0-w3`. Plan `docs/superpowers/plans/2026-10-19-w5-extensibility.md`. Batches A to H are done. Batch I was folded into Task 38, and its tool-ledger part happened in Batch E (the four MCP resource and refresh tools).
+
+### Batches and commits
+
+- **A, skills and slash commands on disk (Tasks 1–5):** plan `b7b2235`; `9264570`, `ccefc6d`, `f290581`, `511e11a`; ledger `fb48436`.
+- **B, agents in files (Tasks 6–11):** plan `2930b85`; `6de7d23`, `dbeae63`, `0432591`, `11540f6`, `98212eb`; extra `9d19390` (not a plan task); ledger `82850d1`.
+- **C, agent teams (Tasks 12–15):** plan `b433a14`; `0205a20`, `39034d6`, `bd70874`; ledger `1e63ca5`.
+- **D, MCP servers in configuration files (Tasks 16–19):** plan `0f59a6f`; `80edda2`, `3073c81`, `93fa1f0`; ledger `d7946b0`.
+- **E, the MCP protocol (Tasks 20–26):** plan `a9cccce`; `31fd601`, `210f865`, `63a6f8b`, `0fbc3e5`, `7d2b345`, `84ad5a6`; ledger `1d1ef86`.
+- **F, plugins (Tasks 27–32):** plan `1b67f75`; `46c65a2` (Task 27), `8332c04`, `b14ebfe`, `5f8976d`, `66a0f74`; ledger `03264c0`.
+- **G, one hook system (Tasks 33–36):** plan `d504407`; `8446e98`, `722fe60`, `79c4fd7`, `6aaba17` (deviation 39, separate commit); ledger `ab62a0c`.
+- **H, diagnostics after edits and the W5 close (Tasks 37–38):** plan `909b430`; `aa0b7f3` (Task 37); this commit (Task 38: ledger and summary).
+
+### Deviations 1–41 (plus 42, from Batch H)
+
+Plan header:
+1. User skills and commands are read from `~/.orin/{skills,commands}` and `~/.claude/{skills,commands}`, not `ORIN_CONFIG_DIR/skills`.
+2. No file watcher: each turn reads the skill and command folders afresh.
+3. A skill's `allowed-tools` lasts until the end of the turn, decided after deny rules, ask rules, plan mode and protected paths.
+4. A skill's `model` and `effort` are read and not applied (W6).
+5. A person's `/name` for a disk skill or command reaches the model as a command reminder with the full instructions; the picker is W7.
+6. `$ARGUMENTS[N]` and `$N` are 0-based and are substituted only when arguments were given.
+7. Plugin skills stay in the skill library until Batch F.
+8. CLI flags (`--mcp-config`, `--strict-mcp-config`, `--agents`, `orin code mcp serve`) are W6; the `/agents` editor, `@server:uri` mentions, the elicitation card, the MCP prompt picker and the command picker's new entries are W7.
+
+Batch B:
+9. An agent's `isolation`, `mcpServers`, `memory`, `effort`, `color` and `hooks` are read (`AgentDefinition`) and not applied.
+10. A `model` alias maps through `modelAliases`; an alias with no mapping, or a model not allowed for subagents, runs on the parent's model.
+11. A background agent's report is read with `check_subagent` (or `TaskOutput`) or from its output file; its completion does not resume the turn.
+12. The `verifier` builtin is Orin's own wording and has no editing tools.
+
+Batch C:
+13. The team roster lives on the turn's session and is gone at the next turn; the mailbox is stored through the chat store's engine, or in memory (`InMemoryMailbox`) where the store has none.
+14. `TeammateIdle` is emitted on the lifecycle bus and its hook answers are not read; the lead receives the teammate's last report (up to 2,000 characters) as a `teammate` reminder.
+15. A message to a busy teammate waits until its run ends; a teammate reads at most `MAX_TEAM_DELIVERIES = 10` batches per run, then goes idle. `ask_agents` is unchanged.
+
+Batch D:
+16. A preloaded skill's `allowed-tools` and `` !`cmd` `` blocks stay out of a subagent; its text stays inside the subordinate wrapper.
+17. `~/.orin/mcp.json`, `~/.orin/workspaces/<key>/mcp.json` and `.orin/mcp.json` are read; Orin's entry replaces Claude Code's entry of the same name within a scope.
+18. A file server whose slug an Orin server already uses is skipped, and the model is told.
+19. `personal` is `mcp_service.allow_stdio`; a session without a service, and a shared Orin, read only the managed file.
+20. `expand` raises for `ORIN_*` and `AGENTOS_*` names, which stops only the server that uses them.
+21. No approval prompt; pending project servers are listed in the `mcp` reminder with the settings keys that approve them.
+22. File servers list their tools in parallel within `MCP_TIMEOUT` and cache each answer for 600 s (60 s for a failure); they cannot sign in with OAuth; `sse` and `ws` file servers are not supported yet.
+
+Batch E:
+23. Elicitation is declined unless an `Elicitation` hook answers it, and the model hears of the request in an `mcp` reminder; sampling requests are refused; `roots/list` returns an empty list.
+24. `ReadMcpResourceDir` lists the resources whose address starts with the given uri; images come back as images; other binary content is described by its size and type, not saved.
+25. `RefreshMcpTools` replaces a configuration-file server's tools; Orin's own servers keep their approved tools (`applied: false` with a note); a `list_changed` notice during a call is followed after that call.
+26. No warning at 10,000 tokens; the cut at `MAX_MCP_OUTPUT_TOKENS` applies (default 25,000 tokens, clamped to 1,000–250,000).
+27. MCP prompts do not appear in a `/` menu; `/mcp__server__prompt args` is handled in `_apply_user_command`. Its arguments were first split with `shlex`, which Batch G's Task 33 replaced with a quote-aware split.
+28. SSE and WebSocket serve configuration-file servers only (`McpServerService.propose` refuses them); a stdio server gets 0.3 s to exit after its input closes before its process tree is killed; there is no Windows Job Object.
+
+Batch F:
+29. A plugin skill is read leniently (YAML frontmatter, only the fields the library stores); `allowed-tools`, `argument-hint` and other Claude Code keys are dropped.
+30. A plugin's agents are named `plugin:agent` and lose `hooks`, `mcpServers` and `permissionMode`; its output styles are named `plugin:style`; its `settings.json` is not read. (Batch H now reads its `.lsp.json`; see deviation 40.)
+31. `enabledPlugins: false` turns an installed plugin's agents and styles off for the turn; `true` for a plugin that is not installed is reported in a `plugins` reminder and not fetched.
+32. Option values are encrypted with the provider-secret cipher; a sensitive value is never returned, only `is_set`; a missing required option blocks turning the plugin on; a sensitive option is refused in a command line or URL; changed values reach the MCP servers when the plugin is turned off and on again; options are set through `GET`/`PUT /v1/plugins/{id}/config`. (Batch G gives option values to hooks as well.)
+33. A marketplace is a GitHub repository or a local folder; `extraKnownMarketplaces` is not read; a shared Orin refuses a local folder.
+34. Only the first `commands` path of a manifest is read, and an inline `hooks` object is ignored.
+
+Batch G:
+35. A plugin hook runs only if its id is in the person's consent (`ActivePlugin.enabled_hook_ids`); it runs `command` handlers only, through `resolve_argv` with no shell, in the project folder, with the allowlisted environment, `plugin_variables` and the option values.
+36. The worker no longer calls `rehydrate_hooks`, and the turn-local `HookEngine` stays empty; `plugins/hook_engine.py` and `plugins/rehydrate.py` remain and their tests still pass.
+37. A skill's hooks are registered at its first use, once per (skill, agent), and removed with the settings hooks at turn start or on a refused configuration change; an agent's hooks are removed in the `finally` of `_execute_subagent_run`, and its `Stop` becomes `SubagentStop`.
+38. Recorded in the plan: the stdio exit behaviour is Batch E code and was not changed in Batch G.
+39. (Batch G's executor.) A managed `disableAllHooks` also switches off a managed skill's or agent's hooks; `_scoped_hooks` had skipped that check for managed origins (commit `6aaba17`).
+
+Batch H:
+40. A plugin's language server runs only once the person allowed the plugin to run code, and only on an Orin that runs plugin hooks; its environment is the worker's without Orin's variables or credential-named variables, plus its `env`.
+41. Diagnostics are gathered in the background after Write and Edit and reach the model with its next request (errors and warnings, at most 30); a failing server is turned off for the turn and the model is told once; Orin has no `LSP` navigation tool; `restartOnCrash`, `maxRestarts`, `transport: socket` and `workspaceFolder` are not read.
+42. (Batch H's executor; not in the plan, and numbered after the plan's last deviation.) A malformed message from a language server no longer stops its reader thread (Batch H, deviation 42).
+
+### Deliberate expectation changes, by batch
+
+- **A:** none recorded.
+- **B:** `tests/unit/agentic/tools/test_monitor_review_fixes.py::test_a_subagent_is_built_with_the_turn_reminder_queue` (Task 9: it now checks that the monitor sink is the turn's queue and that the subagent's own `reminders` is not the turn queue; the recording wrapper also returns the toolset, as the plan prescribes).
+- **C:** `tests/unit/persistence/test_postgres_schema.py` (lists `agent_mailbox`); `tests/unit/persistence/test_w3_schema.py` (head revision `0050_w5_extensibility`); `tests/unit/agentic/tools/test_tool_ledger.py` (32 included, 5 deferred, 12 excluded); `tests/unit/agentic/tools/test_public_contract.py` (the Agent tool lists `name` and `team_name`; a `send_message` entry).
+- **D:** none. The diff of `tests/` adds tests and two lines in `tests/conftest.py`, and removes no line.
+- **E:** `test_tool_ledger.py` changed from 32 / 5 / 12 to 36 / 1 / 12; `test_public_contract.py` gained four entries (`list_mcp_resources`, `read_mcp_resource`, `read_mcp_resource_dir`, `refresh_mcp_tools`).
+- **F:** `test_postgres_schema.py` (`plugin_settings` added); `test_w3_schema.py` (both assertions changed from `0050_w5_extensibility` to `0051_w5_plugin_settings`); `tests/integration/api/test_profile_isolation.py` (`GET` and `PUT /v1/plugins/{plugin_id}/config` added to the owned routes).
+- **G:** `tests/unit/plugins/test_hooks_manifest.py`, three cases (the reference hooks file's first hook now asserts `run_async is True` with no warning; an unknown-event test is renamed and uses `NotAnEvent`; the timeout clamp expects 600 instead of 30); `tests/unit/workers/test_multi_session_concurrency.py` (one stub line removed).
+- **H:** none.
+
+No other existing test was changed, weakened or skipped.
+
+### Open observations, by batch (status as the ledgers and commits record it)
+
+- **Batch A** (its review findings):
+  - 1, unscoped shell grants from a skill: closed by Batch B, Task 6.
+  - 2, whole file read before the size check: closed by Task 6.
+  - 3, full enumeration before the cap: partly closed. Bounded per folder at 2,000 entries (`MAX_FOLDER_ENTRIES`); the 200-skill cap still applies after the listing.
+  - 4, symlinked `SKILL.md`: closed in code by Task 6, not verified on Windows (the test skips here, since symbolic links cannot be created).
+  - 5, double substitution: closed by Task 6 (cosmetic).
+  - 6, arguments inside `` !`cmd` `` blocks: **open**. No later ledger records it closed.
+  - Also open: `Skill` is offered whenever the session carries a disk catalog, even an empty one. Tightening the test to "the catalog has skills" is a one-line change, left for the owner.
+- **Batch B:**
+  - Preloaded skills: the wrapper part is closed by Batch C, Task 12. **Still open:** a preloaded skill's `allowed-tools` are not granted to the subagent and its `` !`cmd` `` blocks are not run (Batch D, deviation 16).
+  - Replacing a builtin: closed for repositories by Batch C, Task 12 (they cannot replace `explore`, `plan`, `general-purpose`, `general`, `fork` or `verifier`). A person's or a managed definition still may; the owner may want a warning.
+  - Not verified: the Task 6 symbolic-link test skips on this Windows account.
+- **Batch C** (all four closed by Batch D, Task 16): messages lost when a start is refused (item 1 of Task 16); idle with mail still pending (item 3); cancelled teammates (item 5, with a test); a teammate's name is turn-wide (item 4). Also, `agent_tools.py` is 1698 lines and the guard in `test_split.py` requires fewer than 1700, so two lines of room remain.
+- **Batch D:**
+  - A teammate can stay busy for the rest of the turn when its start raises: closed by Batch F, Task 27 (commit `46c65a2`, "a teammate is released when its start raises").
+  - Failure texts mask only values of four or more characters and never the URL path: closed by Batch F, Task 27 (commit `46c65a2`).
+  - **Open:** approval is by settings keys only (deviation 21), so approved file servers may run any command line. The approval prompt arrives with W7.
+- **Batch E:**
+  - NaN or infinite numbers in an elicitation answer are accepted: closed by Batch G, Task 33, item 1.
+  - Backslashes in `/mcp__…` arguments are lost: closed by Batch G, Task 33, item 2.
+  - A `/mcp__…` message is silently ordinary text when no MCP server is connected: closed by Batch G, Task 33, item 3.
+  - SSE and WebSocket check the address only when the transport is built: closed by Batch G, Task 33, item 4 (commit `8446e98`, "address re-checks").
+  - **Open:** a graceful stdio close does not kill what the server started (Batch G, deviation 38).
+- **Batch F** (not verified, or left for later):
+  - Postgres: migration `0051_w5_plugin_settings` and the `plugin_settings` table were verified on SQLite only; the integration suite skips the Postgres tests here.
+  - The config routes were tested with a fake plugin service; the authentication path (`principal_for`, rate limit, authorize) was not exercised with a real security object.
+  - Windows hook paths: a hook command substitutes `${CLAUDE_PLUGIN_ROOT}` unquoted and then splits it with `shlex`, so a plugin installed under a folder with a space in its path splits into two arguments. This existed before Batch F; not fixed.
+  - `"agents": "."` maps to the default `agents` folder, not to the package root; not fixed.
+  - Marketplace `search` returns the server-side absolute path of a relative plugin as its `reference`; a bare relative source without `./` is read as a GitHub `owner/repo`; not fixed (the plan specifies the `./` form).
+  - The lenient frontmatter reader does not cap the size of the frontmatter before YAML parsing; Batch A's loader has the same property; not changed.
+- **Batch G** (not verified, or left for later):
+  - **Decision needed:** plugin hook consent is tied to the hook id, not to its content. Hook ids are `{plugin}:{Event}:{index}`, and the command is read from the installed package at every turn; the recorded `package_digest` is never compared with the files. (a) A changed command under a consented id, or a hook inserted earlier in the same event (which shifts the indexes), runs under the old consent. (b) `set_enabled(enabled=True)` in `plugins/service.py` gives every hook row of a re-activated package the previous "all hooks were enabled" flag, so a hook that a later version adds is enabled without a new consent, which contradicts deviation 35 (Batch F code). Not fixed: the full fix needs a schema change and a migration. The ledger's suggested fix: store a digest of the event, matcher and command with each consent row, run a hook only when its current digest matches, and carry consent into a re-activation only per (id, digest).
+  - Windows hook paths and symlinks inside a plugin folder: not tested.
+  - Postgres: Batch G adds no migration, but the 65 integration skips were not run here.
+  - POSIX: the 43 shell-script hook tests were skipped on this machine, so the POSIX runner path is covered by test code only.
+  - Frontend: only `npm --prefix frontend test` was run in Batch G (no frontend file changed).
+- **Batch H:** the five observations listed in its section above (malformed publish waits the full timeout; malformed diagnostic item silently dropped; late answer may be taken for the current one; stderr discarded; diagnostics only after Write and Edit).
+
+### Suites at the W5 close (Task 38)
+
+- `uv run pytest -q tests/unit`: 3857 passed, 60 skipped, 0 failed.
+- `uv run pytest -q tests/integration`: 78 passed, 65 skipped (Postgres and Redis not configured), 0 failed.
+- `npm --prefix frontend test`: 103 files, 609 tests passed. Lint and build: exit 0.
+- Platform: Windows only. The POSIX branches of the shell-script hook tests and the symbolic-link tests did not run here.
+
+### Standing caveats for the owner
+
+- The commit trailer is `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>` on the W5 commits of Batches A to C and E to H, as the owner's standing instruction for this branch requires. Batch D's three commits used the Haiku line, as its ledger records. The session's attribution note named Haiku 5.5. The owner should decide which line stays.
+- No commit was pushed, and no file was deleted.
