@@ -41,7 +41,7 @@
 | Batch | Tasks | Theme |
 |---|---|---|
 | A | 1–5 | Skills and slash commands on disk; plugin commands survive a restart |
-| B | 6– | Agent definitions in files; per-agent memory (W3-R26); background agents |
+| B | 6–11 | Hardening of A; agent definitions in files; per-agent reminders and memory (W3-R26); background agents |
 | C | | Agent teams: mailbox, SendMessage, TeammateIdle |
 | D | | MCP scopes: project `.mcp.json` with approval and trust, `~/.claude.json`, managed; `${VAR}` expansion |
 | E | | MCP protocol: SSE and WebSocket transports, stdio shutdown, output limits, resources, prompts, elicitation |
@@ -1561,4 +1561,1788 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - [ ] **Step 1:** Run `uv run pytest -q tests/unit` (timeout 600000 ms) and `uv run pytest -q tests/integration`. Expected: all pass (integration: the skips that need external services stay skipped).
 - [ ] **Step 2:** Create `docs/superpowers/plans/2026-10-19-w5-extensibility-ledger.md` with a title `# W5 — Extensibility — Ledger` and a "## Batch A — Skills and slash commands on disk (Tasks 1–5)" section: commits, suite results (unit, integration), deviations 1–8, W4-R25 closed by Task 2, the restart bug closed by Task 4, and anything done differently from this plan.
 - [ ] **Step 3:** Commit with `docs(w5): ledger, batch A` + blank line + the Co-Authored-By line.
+
+## Batch B — Agents in files
+
+Orin has four hardcoded subagent types (`Explore`, `Plan`, `general-purpose`, `fork`) and per-conversation agents made with `create_agent`; a Claude Code agent in `.claude/agents` is invisible. This batch first hardens Batch A (Task 6), then reads agent definitions from disk (Task 7) and lets the Agent tool start them with their own instructions, a tool list that only narrows the parent's, a permission mode that never escalates, `maxTurns`, preloaded skills and `omitClaudeMd` (Task 8). It gives each subagent its own reminders and instruction-file tracker — W3-R26 — while its monitors still reach the running turn (Task 9), and lets a background agent write its report to a file and be stopped with TaskStop (Task 10).
+
+New deviations (also in the ledger):
+
+9. **An agent's `isolation`, `mcpServers`, `memory`, `effort`, `color` and `hooks` are read but not applied yet.** Worktree isolation for subagents and per-agent memory folders come with W6; per-agent MCP servers with Batch D; `hooks` with Batch G; `color` with the W7 interface.
+10. **A model alias in an agent definition maps through the `modelAliases` setting** (user, CLI or managed layer); an alias with no mapping, or a model the person has not allowed for subagents, runs on the parent's model. There is no automatic "fast model" default yet.
+11. **A background agent's report is read with `TaskOutput`/`check_subagent` or from its output file.** When a background agent finishes after the main agent has answered, the turn does not resume to report it (Claude Code sends a task notification); that comes with W6's streaming protocol.
+12. **The `verifier` builtin** is Orin's own wording: it reads, runs the project's checks and reports, with no editing tools.
+
+### Task 6: Hardening found while executing Batch A
+
+Five fixes, one commit:
+
+1. **A repository's skill cannot pre-approve every command.** An unscoped `allowed-tools: Bash` (or `PowerShell`, `Monitor`, `*`) from a project skill is ignored; a scoped grant (`Bash(git status:*)`) and other tools still apply. User and managed skills keep unscoped grants.
+2. **An oversized `SKILL.md` is refused before it is read** (its size is checked with `stat`).
+3. **A folder is listed at most 2,000 entries deep before sorting**, so a huge folder cannot stall a turn.
+4. **A `SKILL.md` that is a link is not read** (a linked skill folder already was not).
+5. **Substitution is one pass**: text an argument brings in (`$1`, `${ORIN_SESSION_ID}`) is never substituted again.
+
+**Files:**
+- Modify: `src/agentos/skills/disk.py`
+- Modify: `src/agentos/agentic/tools/orin/disk_skills.py`
+- Modify: `tests/unit/skills/test_disk_skills.py`
+- Modify: `tests/unit/agentic/tools/test_disk_skill_tool.py`
+
+**Interfaces:**
+- Produces: `agentos.skills.disk.MAX_FOLDER_ENTRIES`; `substitute` keeps its signature.
+
+- [ ] **Step 1: Write the failing test**
+
+Append to the end of `tests/unit/skills/test_disk_skills.py` (after its last line, separated by one blank line):
+
+```python
+def test_arguments_are_never_substituted_twice(tmp_path: Path) -> None:
+    text, _ = substitute("a=$0 b=$1 all=$ARGUMENTS", arguments="$1 x", session_id="", skill_dir=tmp_path)
+    assert text == "a=$1 b=x all=$1 x"
+
+
+def test_a_linked_skill_file_is_not_read(tmp_path: Path) -> None:
+    import os
+
+    outside = tmp_path / "outside.md"
+    outside.write_bytes(b"---\ndescription: elsewhere\n---\nx")
+    folder = orin_user_dir() / "skills" / "linked"
+    folder.mkdir(parents=True)
+    try:
+        os.symlink(outside, folder / "SKILL.md")
+    except (OSError, NotImplementedError):
+        pytest.skip("this machine cannot create symbolic links")
+    assert load_disk_skills(workspace_root=None, trusted=False).get("linked") is None
+
+
+def test_an_oversized_file_is_refused_before_it_is_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = _skill(tmp_path, "huge", "---\ndescription: d\n---\n" + "x" * 300_000)
+    read: list[Path] = []
+    original = Path.read_bytes
+
+    def tracking(self):
+        read.append(self)
+        return original(self)
+
+    monkeypatch.setattr(Path, "read_bytes", tracking)
+    with pytest.raises(ValueError):
+        parse_disk_skill(path, name="huge", origin="user", kind="skill")
+    assert path not in read
+```
+
+Append to the end of `tests/unit/agentic/tools/test_disk_skill_tool.py` (after its last line, separated by one blank line):
+
+```python
+def test_a_project_skill_cannot_preapprove_every_command(tmp_path: Path) -> None:
+    root = tmp_path / "w"
+    folder = root / ".claude" / "skills" / "wide"
+    folder.mkdir(parents=True)
+    (folder / "SKILL.md").write_bytes(b"---\ndescription: Wide\nallowed-tools: Bash, PowerShell, Bash(git status:*), Read\n---\nx")
+    from agentos.agentic.workspace import ConversationWorkspace as _Workspace
+
+    toolset = AgentToolset(_Workspace.at_root(root), public_tool_names=True)
+    toolset._disk_skills = load_disk_skills(workspace_root=root, trusted=True)
+    assert toolset.invoke("Skill", {"skill": "wide"}).status == "succeeded"
+    assert {rule.raw for rule in toolset.skill_grants()} == {"Bash(git status:*)", "Read"}
+
+
+def test_a_user_skill_may_still_grant_a_whole_tool(tmp_path: Path) -> None:
+    _skill("broad", "---\ndescription: Broad\nallowed-tools: Bash\n---\nx")
+    toolset = _toolset(tmp_path)
+    toolset.invoke("Skill", {"skill": "broad"})
+    assert {rule.raw for rule in toolset.skill_grants()} == {"Bash"}
+```
+
+- [ ] **Step 2: Run it to verify it fails**
+
+Run: `uv run pytest -q tests/unit/skills/test_disk_skills.py tests/unit/agentic/tools/test_disk_skill_tool.py`
+Expected: FAIL — `test_arguments_are_never_substituted_twice` (the second pass replaces `$1` inside the argument), `test_an_oversized_file_is_refused_before_it_is_read` (the file is read first) and `test_a_project_skill_cannot_preapprove_every_command` (the unscoped grants are kept). `test_a_linked_skill_file_is_not_read` is skipped on a machine that cannot create links.
+
+- [ ] **Step 3: Implement**
+
+Then make these edits, in order (each `replace` block occurs exactly once in its file; if one does not, stop and report — do not guess):
+
+1. In `src/agentos/skills/disk.py`, replace
+
+```python
+import hashlib
+import logging
+import re
+import shlex
+```
+
+   with
+
+```python
+import hashlib
+import itertools
+import logging
+import re
+import shlex
+```
+
+2. In `src/agentos/skills/disk.py`, replace
+
+```python
+MAX_DISK_SKILLS = 200
+```
+
+   with
+
+```python
+MAX_DISK_SKILLS = 200
+# A folder is listed at most this far before sorting, so a huge folder cannot stall a turn.
+MAX_FOLDER_ENTRIES = 2_000
+```
+
+3. In `src/agentos/skills/disk.py`, replace
+
+```python
+def parse_disk_skill(path: Path, *, name: str, origin: str, kind: str) -> DiskSkill:
+    data = path.read_bytes()
+    if len(data) > MAX_SKILL_FILE_BYTES:
+        raise ValueError(f"larger than {MAX_SKILL_FILE_BYTES} bytes")
+```
+
+   with
+
+```python
+def parse_disk_skill(path: Path, *, name: str, origin: str, kind: str) -> DiskSkill:
+    if path.stat().st_size > MAX_SKILL_FILE_BYTES:
+        raise ValueError(f"larger than {MAX_SKILL_FILE_BYTES} bytes")
+    data = path.read_bytes()
+```
+
+4. In `src/agentos/skills/disk.py`, replace
+
+```python
+    if kind == "skill":
+        for child in sorted(folder.iterdir(), key=lambda item: item.name):
+            target = child / "SKILL.md"
+            if child.is_dir() and not child.is_symlink() and target.is_file():
+                yield child.name, target
+        return
+    for path in sorted(folder.rglob("*.md")):
+```
+
+   with
+
+```python
+    if kind == "skill":
+        for child in sorted(itertools.islice(folder.iterdir(), MAX_FOLDER_ENTRIES), key=lambda item: item.name):
+            target = child / "SKILL.md"
+            # A link (the folder or its SKILL.md) could point anywhere: only real files are read.
+            if child.is_dir() and not child.is_symlink() and target.is_file() and not target.is_symlink():
+                yield child.name, target
+        return
+    for path in sorted(itertools.islice(folder.rglob("*.md"), MAX_FOLDER_ENTRIES)):
+```
+
+5. In `src/agentos/skills/disk.py`, replace
+
+```python
+    words = split_arguments(arguments)
+    used = False
+
+    def indexed(match: re.Match[str]) -> str:
+        nonlocal used
+        used = True
+        index = int(match.group(1))
+        return words[index] if index < len(words) else ""
+
+    text = body
+    if words:
+        text = re.sub(r"\$ARGUMENTS\[(\d+)\]", indexed, text)
+    if "$ARGUMENTS" in text:
+        used = True
+        text = text.replace("$ARGUMENTS", arguments)
+    if words:
+        text = re.sub(r"(?<![\w$])\$(\d{1,2})(?![\w])", indexed, text)
+    for key in ("ORIN_SESSION_ID", "CLAUDE_SESSION_ID"):
+        text = text.replace("${" + key + "}", session_id)
+    for key in ("ORIN_SKILL_DIR", "CLAUDE_SKILL_DIR"):
+        text = text.replace("${" + key + "}", skill_dir.as_posix())
+    return text, used
+```
+
+   with
+
+```python
+    words = split_arguments(arguments)
+    used = False
+
+    def one(match: re.Match[str]) -> str:
+        nonlocal used
+        token = match.group(0)
+        if token == "$ARGUMENTS":
+            used = True
+            return arguments
+        if match.group(3) is not None:
+            return session_id if match.group(3) == "SESSION_ID" else skill_dir.as_posix()
+        if not words:
+            return token  # without arguments, $N and $ARGUMENTS[N] stay as written
+        used = True
+        index = int(match.group(1) if match.group(1) is not None else match.group(2))
+        return words[index] if index < len(words) else ""
+
+    # One pass over the body: text an argument brings in is never substituted again.
+    pattern = r"\$ARGUMENTS\[(\d+)\]|\$ARGUMENTS|(?<![\w$])\$(\d{1,2})(?![\w])|\$\{(?:ORIN|CLAUDE)_(SESSION_ID|SKILL_DIR)\}"
+    return re.sub(pattern, one, body), used
+```
+
+6. In `src/agentos/agentic/tools/orin/disk_skills.py`, replace
+
+```python
+    def _grant_skill_tools(self, skill) -> list[str]:
+        from agentos.permissions.rules import parse_rule
+```
+
+   with
+
+```python
+    def _grant_skill_tools(self, skill) -> list[str]:
+        from agentos.permissions.rules import SHELL_TOOLS, parse_rule
+```
+
+7. In `src/agentos/agentic/tools/orin/disk_skills.py`, replace
+
+```python
+            if rule is None or len(rules) >= MAX_SKILL_GRANTS:
+                continue
+```
+
+   with
+
+```python
+            if rule is None or len(rules) >= MAX_SKILL_GRANTS:
+                continue
+            # A repository's skill may pre-approve scoped commands (Bash(git status:*)) but never every command.
+            if skill.origin == "project" and rule.specifier is None and (rule.tool in SHELL_TOOLS or rule.tool == "*"):
+                logger.info("skill %s: unscoped %s grant ignored for a project skill", skill.name, rule.raw)
+                continue
+```
+
+- [ ] **Step 4: Run the tests and see them pass**
+
+Run: `uv run pytest -q tests/unit/skills/test_disk_skills.py tests/unit/agentic/tools/test_disk_skill_tool.py`
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/agentos/skills/disk.py src/agentos/agentic/tools/orin/disk_skills.py tests/unit/skills/test_disk_skills.py tests/unit/agentic/tools/test_disk_skill_tool.py
+git commit -m "fix(w5): skills from a repository cannot pre-approve every command; disk reads are bounded
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+### Task 7: Agent definitions read from disk
+
+`agentos/agentic/agent_definitions.py` reads agents (`agents/*.md`, YAML frontmatter with `name` and `description` required, the body being the agent's instructions) from the managed, project (only when trusted) and user folders, in that precedence, and adds the `verifier` builtin; a definition named like a builtin replaces it. The Claude Code keys are kept on `AgentDefinition`. `child_permission_mode` never lets a definition's mode be more permissive than the parent's (unless the parent bypasses permissions). `resolve_agent_model` maps a model alias through `modelAliases`. `AgentToolPolicy` narrows the parent's tool policy to the definition's `tools` minus `disallowedTools` (MCP names by server prefix). Nothing here runs anything.
+
+**Files:**
+- Create: `src/agentos/agentic/agent_definitions.py`
+- Test: `tests/unit/agentic/test_agent_definitions.py`
+
+**Interfaces:**
+- Produces: `AgentDefinition`, `AgentCatalog` (`get`, `custom`, `agents`, `shadowed`, `errors`), `AgentToolPolicy(base, definition)`, `VERIFIER`, `BUILTIN_DEFINITIONS`, `MAX_AGENT_DEFINITIONS`, `agent_roots`, `load_agent_definitions(*, workspace_root, trusted)`, `parse_agent_file(path, *, origin)`, `child_permission_mode(parent, requested)`, `resolve_agent_model(requested, aliases)` in `agentos.agentic.agent_definitions`.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `tests/unit/agentic/test_agent_definitions.py`:
+
+```python
+"""W5: subagent definitions read from disk in Claude Code's format."""
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from agentos.agentic.agent_definitions import (
+    MAX_AGENT_DEFINITIONS, AgentDefinition, AgentToolPolicy, child_permission_mode, load_agent_definitions, parse_agent_file,
+    resolve_agent_model,
+)
+from agentos.settings.paths import claude_user_dir, orin_managed_dir, orin_user_dir
+
+
+def _agent(root: Path, file: str, text: str) -> Path:
+    folder = root / "agents"
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / file
+    path.write_bytes(text.encode("utf-8"))
+    return path
+
+
+REVIEWER = """---
+name: code-reviewer
+description: Reviews a diff for bugs and risky changes
+tools: Read, Grep, Glob, Bash
+disallowedTools: [Bash]
+model: haiku
+permissionMode: acceptEdits
+maxTurns: 12
+skills: [checklist]
+background: true
+omitClaudeMd: true
+isolation: worktree
+effort: high
+color: blue
+memory: project
+hooks:
+  Stop:
+    - hooks:
+        - type: command
+          command: echo done
+---
+You review code. Report findings as path:line.
+"""
+
+
+def test_claude_code_frontmatter_is_understood(tmp_path: Path) -> None:
+    definition = parse_agent_file(_agent(tmp_path, "reviewer.md", REVIEWER), origin="user")
+    assert definition.name == "code-reviewer" and definition.description.startswith("Reviews a diff")
+    assert definition.tools == ("Read", "Grep", "Glob", "Bash") and definition.disallowed_tools == ("Bash",)
+    assert definition.model == "haiku" and definition.permission_mode == "acceptEdits" and definition.max_turns == 12
+    assert definition.skills == ("checklist",) and definition.background and definition.omit_claude_md
+    assert definition.isolation == "worktree" and definition.effort == "high" and definition.memory == "project"
+    assert isinstance(definition.hooks, dict) and definition.prompt == "You review code. Report findings as path:line."
+
+
+@pytest.mark.parametrize("text", [
+    "---\ndescription: no name\n---\nx",
+    "---\nname: Has Spaces\ndescription: d\n---\nx",
+    "---\nname: no-description\n---\nx",
+    "no frontmatter",
+])
+def test_invalid_definitions_are_reported(tmp_path: Path, text: str) -> None:
+    _agent(orin_user_dir(), "bad.md", text)
+    catalog = load_agent_definitions(workspace_root=None, trusted=False)
+    assert catalog.custom() == [] and catalog.errors
+
+
+def test_precedence_trust_and_the_verifier_builtin(tmp_path: Path) -> None:
+    workspace = tmp_path / "repo"
+    _agent(orin_managed_dir(), "a.md", "---\nname: shared\ndescription: managed\n---\nm")
+    _agent(workspace / ".claude", "a.md", "---\nname: shared\ndescription: project\n---\np")
+    _agent(workspace / ".claude", "b.md", "---\nname: helper\ndescription: project helper\n---\np")
+    _agent(claude_user_dir(), "b.md", "---\nname: helper\ndescription: user helper\n---\nu")
+    untrusted = load_agent_definitions(workspace_root=workspace, trusted=False)
+    assert untrusted.get("helper").description == "user helper"
+    trusted = load_agent_definitions(workspace_root=workspace, trusted=True)
+    assert trusted.get("shared").origin == "managed" and trusted.get("helper").description == "project helper"
+    assert trusted.get("verifier").origin == "builtin" and "Edit" not in (trusted.get("verifier").tools or ())
+
+
+def test_a_definition_may_replace_a_builtin_name(tmp_path: Path) -> None:
+    _agent(orin_user_dir(), "explore.md", "---\nname: explore\ndescription: my explorer\n---\nx")
+    _agent(orin_user_dir(), "gp.md", "---\nname: general-purpose\ndescription: my general\n---\nx")
+    catalog = load_agent_definitions(workspace_root=None, trusted=False)
+    assert catalog.get("Explore").description == "my explorer"
+    assert catalog.get("general").description == "my general"
+
+
+def test_at_most_the_cap_is_loaded(tmp_path: Path) -> None:
+    for index in range(MAX_AGENT_DEFINITIONS + 3):
+        _agent(orin_user_dir(), f"a{index:03d}.md", f"---\nname: a{index:03d}\ndescription: d\n---\nx")
+    catalog = load_agent_definitions(workspace_root=None, trusted=False)
+    assert len(catalog.agents) == MAX_AGENT_DEFINITIONS + 1  # the cap of files, plus the verifier builtin
+    assert catalog.errors
+
+
+@pytest.mark.parametrize(("parent", "requested", "expected"), [
+    ("ask_permissions", "acceptEdits", "ask_permissions"),   # never more permissive than the parent
+    ("accept_edits", "plan", "plan_mode"),                     # narrower is fine
+    ("accept_edits", "default", "ask_permissions"),
+    ("plan_mode", "bypassPermissions", "plan_mode"),
+    ("full_autonomy", "acceptEdits", "accept_edits"),          # a bypassing parent may run any child mode
+    ("accept_edits", None, "accept_edits"),
+    ("ask_permissions", "dontAsk", "dont_ask"),
+])
+def test_permission_modes_never_escalate(parent: str, requested: str | None, expected: str) -> None:
+    assert child_permission_mode(parent, requested) == expected
+
+
+def test_model_aliases() -> None:
+    aliases = {"haiku": "anthropic/claude-haiku-5-5", "Sonnet": "anthropic/claude-sonnet-5-5"}
+    assert resolve_agent_model("haiku", aliases) == "anthropic/claude-haiku-5-5"
+    assert resolve_agent_model("sonnet", aliases) == "anthropic/claude-sonnet-5-5"
+    assert resolve_agent_model("opus", aliases) is None  # an alias with no mapping inherits
+    assert resolve_agent_model("inherit", aliases) is None and resolve_agent_model(None, aliases) is None
+    assert resolve_agent_model("openrouter/some-model", {}) == "openrouter/some-model"
+
+
+def test_the_tool_policy_narrows_and_never_widens() -> None:
+    class _Base:
+        def allows(self, name, tags):
+            return name != "write_file"
+
+    definition = AgentDefinition(
+        name="x", description="d", prompt="", origin="user", tools=("Read", "Write", "Bash", "mcp__github"),
+        disallowed_tools=("Bash",),
+    )
+    policy = AgentToolPolicy(_Base(), definition)
+    assert policy.allows("read_file", ()) and not policy.allows("write_file", ())  # the base policy still decides
+    assert not policy.allows("run_command", ()) and not policy.allows("edit_file", ())
+    assert policy.allows("mcp__github__create_issue", ()) and not policy.allows("mcp__slack__post", ())
+    everything = AgentToolPolicy(None, AgentDefinition(name="y", description="d", prompt="", origin="user"))
+    assert everything.allows("edit_file", ())
+```
+
+- [ ] **Step 2: Run it to verify it fails**
+
+Run: `uv run pytest -q tests/unit/agentic/test_agent_definitions.py`
+Expected: FAIL — `ModuleNotFoundError: No module named 'agentos.agentic.agent_definitions'`.
+
+- [ ] **Step 3: Implement**
+
+Create `src/agentos/agentic/agent_definitions.py`:
+
+```python
+"""Subagent definitions read from disk, in Claude Code's format (W5).
+
+An agent is a ``.md`` file under ``agents/``: YAML frontmatter (``name`` and ``description`` required) and a body
+that becomes the subagent's own instructions. Sources, highest precedence first: managed, the project (only once
+the workspace is trusted), the user (``~/.orin/agents``, ``~/.claude/agents``), then Orin's builtins. A definition
+named like a builtin (``Explore``, ``Plan``, ``general-purpose``) replaces it.
+
+Nothing here runs anything. What a definition may change is bounded by the session: its tools only narrow the
+parent's tools, its permission mode can never be more permissive than the parent's (unless the parent bypasses
+permissions), and an unknown model alias falls back to the parent's model.
+"""
+from __future__ import annotations
+
+import hashlib
+import logging
+import re
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Mapping
+
+from agentos.skills.disk import split_frontmatter
+
+logger = logging.getLogger(__name__)
+
+MAX_AGENT_DEFINITIONS = 100
+MAX_AGENT_FILE_BYTES = 100_000
+MAX_AGENT_PROMPT_CHARS = 40_000
+_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+_TOOL = re.compile(r"[A-Za-z_][\w.:-]*")
+MODEL_ALIASES = ("sonnet", "opus", "haiku", "fable")
+# Least to most permissive. dontAsk refuses whatever would prompt, so it ranks with plan mode below the default.
+_PERMISSIVENESS = {"plan_mode": 0, "dont_ask": 0, "ask_permissions": 1, "accept_edits": 2, "auto": 3, "full_autonomy": 4}
+
+
+@dataclass(frozen=True, slots=True)
+class AgentDefinition:
+    name: str
+    description: str
+    prompt: str
+    origin: str  # builtin | managed | project | user | plugin
+    path: Path | None = None
+    tools: tuple[str, ...] | None = None  # None: every tool the parent may publish
+    disallowed_tools: tuple[str, ...] = ()
+    model: str | None = None  # None or "inherit": the parent's model
+    permission_mode: str | None = None
+    max_turns: int | None = None
+    skills: tuple[str, ...] = ()
+    background: bool = False
+    omit_claude_md: bool = False
+    isolation: str | None = None
+    effort: str | None = None
+    color: str | None = None
+    hooks: Mapping[str, Any] | None = None
+    mcp_servers: Any = None
+    memory: str | None = None
+    digest: str = ""
+
+
+@dataclass(slots=True)
+class AgentCatalog:
+    agents: dict[str, AgentDefinition] = field(default_factory=dict)
+    shadowed: list[tuple[str, str, str]] = field(default_factory=list)
+    errors: list[tuple[str, str]] = field(default_factory=list)
+
+    def get(self, name: str) -> AgentDefinition | None:
+        key = str(name or "").strip().lower()
+        if key == "general":
+            key = "general-purpose"
+        return self.agents.get(key)
+
+    def custom(self) -> list[AgentDefinition]:
+        return [item for item in self.agents.values() if item.origin != "builtin"]
+
+
+def _list(value: object) -> tuple[str, ...]:
+    if isinstance(value, (list, tuple)):
+        raw = [str(item) for item in value]
+    elif isinstance(value, str):
+        raw = _TOOL.findall(value)
+    else:
+        return ()
+    names = []
+    for item in raw:
+        match = _TOOL.match(item.strip())
+        if match:
+            names.append(match.group(0))
+    return tuple(dict.fromkeys(names))[:128]
+
+
+def _flag(value: object) -> bool:
+    return value is True or (isinstance(value, str) and value.strip().lower() in {"true", "yes", "1"})
+
+
+def _text(value: object, maximum: int = 200) -> str | None:
+    if isinstance(value, (str, int, float)) and str(value).strip():
+        return str(value).strip()[:maximum]
+    return None
+
+
+def parse_agent_file(path: Path, *, origin: str) -> AgentDefinition:
+    data = path.read_bytes() if path.stat().st_size <= MAX_AGENT_FILE_BYTES else None
+    if data is None:
+        raise ValueError(f"larger than {MAX_AGENT_FILE_BYTES} bytes")
+    meta, body = split_frontmatter(data.decode("utf-8-sig"))
+    name = (_text(meta.get("name"), 64) or "").lower()
+    if not _NAME.fullmatch(name):
+        raise ValueError("an agent needs a name of lowercase letters, digits and hyphens")
+    description = _text(meta.get("description"), 1_024)
+    if not description:
+        raise ValueError("an agent needs a description")
+    tools = _list(meta.get("tools")) if meta.get("tools") not in (None, "", "*") else None
+    turns = meta.get("maxTurns")
+    max_turns = int(turns) if isinstance(turns, int) and not isinstance(turns, bool) and 0 < turns <= 500 else None
+    return AgentDefinition(
+        name=name, description=description, prompt=body.strip()[:MAX_AGENT_PROMPT_CHARS], origin=origin, path=path,
+        tools=tools, disallowed_tools=_list(meta.get("disallowedTools")),
+        model=_text(meta.get("model"), 120), permission_mode=_text(meta.get("permissionMode"), 40),
+        max_turns=max_turns, skills=_list(meta.get("skills")), background=_flag(meta.get("background")),
+        omit_claude_md=_flag(meta.get("omitClaudeMd")), isolation=_text(meta.get("isolation"), 20),
+        effort=_text(meta.get("effort"), 20), color=_text(meta.get("color"), 20),
+        hooks=meta.get("hooks") if isinstance(meta.get("hooks"), dict) else None,
+        mcp_servers=meta.get("mcpServers"), memory=_text(meta.get("memory"), 20),
+        digest=hashlib.sha256(data).hexdigest(),
+    )
+
+
+VERIFIER = AgentDefinition(
+    name="verifier",
+    description=(
+        "Checks finished work independently: reads what changed, runs the project's tests and checks, and reports "
+        "whether the goal is met, with evidence. It never edits files."
+    ),
+    prompt=(
+        "You verify work another agent says is done. Read the relevant changes, run the project's own tests, linters "
+        "and builds when they exist, and try the behaviour that was asked for. Report plainly: what you checked, what "
+        "passed, what failed (with the exact command and output), and anything you could not check. Do not fix "
+        "anything and do not change files."
+    ),
+    origin="builtin",
+    tools=("Read", "Glob", "Grep", "Bash", "PowerShell", "TaskOutput", "WebFetch"),
+)
+BUILTIN_DEFINITIONS = (VERIFIER,)
+
+
+def agent_roots(*, workspace_root: Path | None, trusted: bool) -> list[tuple[str, Path]]:
+    from agentos.settings.paths import claude_managed_dir, claude_user_dir, orin_managed_dir, orin_user_dir
+
+    roots = [("managed", orin_managed_dir() / "agents"), ("managed", claude_managed_dir() / "agents")]
+    if workspace_root is not None and trusted:
+        roots += [("project", workspace_root / ".orin" / "agents"), ("project", workspace_root / ".claude" / "agents")]
+    roots += [("user", orin_user_dir() / "agents"), ("user", claude_user_dir() / "agents")]
+    return roots
+
+
+def load_agent_definitions(*, workspace_root: Path | None, trusted: bool) -> AgentCatalog:
+    catalog = AgentCatalog()
+    for origin, folder in agent_roots(workspace_root=workspace_root, trusted=trusted):
+        if not folder.is_dir():
+            continue
+        try:
+            files = sorted(path for path in folder.glob("*.md") if path.is_file() and not path.is_symlink())
+        except OSError as error:
+            catalog.errors.append((str(folder), f"unreadable: {type(error).__name__}"))
+            continue
+        for path in files:
+            if len(catalog.agents) >= MAX_AGENT_DEFINITIONS:
+                catalog.errors.append((str(path), f"more than {MAX_AGENT_DEFINITIONS} agents; the rest are ignored"))
+                break
+            try:
+                definition = parse_agent_file(path, origin=origin)
+            except (OSError, ValueError, UnicodeDecodeError) as error:
+                catalog.errors.append((str(path), str(error)[:200]))
+                continue
+            kept = catalog.agents.get(definition.name)
+            if kept is not None:
+                catalog.shadowed.append((definition.name, str(kept.path), str(path)))
+                continue
+            catalog.agents[definition.name] = definition
+    for builtin in BUILTIN_DEFINITIONS:
+        catalog.agents.setdefault(builtin.name, builtin)
+    return catalog
+
+
+def child_permission_mode(parent: str, requested: str | None) -> str:
+    """A subagent's mode: the definition's when it is not more permissive than the parent's (W5: no escalation).
+
+    A parent that bypasses permissions may run a child in any mode. An unknown requested mode keeps the parent's.
+    """
+    from agentos.code_mode.models import normalize_permission_mode
+
+    parent_mode = normalize_permission_mode(parent).value
+    if not requested:
+        return parent_mode
+    try:
+        wanted = normalize_permission_mode(str(requested)).value
+    except Exception:  # noqa: BLE001 - an unknown mode never widens anything
+        return parent_mode
+    if parent_mode == "full_autonomy":
+        return wanted
+    if _PERMISSIVENESS.get(wanted, 99) <= _PERMISSIVENESS.get(parent_mode, -1):
+        return wanted
+    return parent_mode
+
+
+def resolve_agent_model(requested: str | None, aliases: Mapping[str, str] | None) -> str | None:
+    """The model id a definition asks for: ``inherit`` or nothing is None (the parent's); an alias maps through
+    ``modelAliases``, and an alias with no mapping is None too (deviation: no automatic fast model)."""
+    value = str(requested or "").strip()
+    if not value or value.lower() == "inherit":
+        return None
+    mapping = {str(key).lower(): str(item) for key, item in dict(aliases or {}).items() if isinstance(item, str) and item.strip()}
+    if value.lower() in mapping:
+        return mapping[value.lower()].strip()
+    if value.lower() in MODEL_ALIASES:
+        return None
+    return value
+
+
+class AgentToolPolicy:
+    """Narrows the tools a subagent may publish to its definition's ``tools`` minus ``disallowedTools``."""
+
+    def __init__(self, base: object | None, definition: AgentDefinition) -> None:
+        from agentos.agentic.tools.public_names import internal_name
+
+        self._base = base
+        self._allowed = None if definition.tools is None else {internal_name(item) for item in definition.tools} | set(definition.tools)
+        self._denied = {internal_name(item) for item in definition.disallowed_tools} | set(definition.disallowed_tools)
+
+    def _matches(self, name: str, names: set[str]) -> bool:
+        return name in names or any(item.startswith("mcp__") and (name == item or name.startswith(item.rstrip("*") if item.endswith("*") else item + "__")) for item in names)
+
+    def allows(self, name: str, tags: tuple[str, ...]) -> bool:
+        if self._base is not None and not self._base.allows(name, tags):
+            return False
+        if self._matches(name, self._denied):
+            return False
+        return self._allowed is None or self._matches(name, self._allowed)
+
+
+__all__ = [
+    "AgentCatalog", "AgentDefinition", "AgentToolPolicy", "BUILTIN_DEFINITIONS", "MAX_AGENT_DEFINITIONS", "VERIFIER",
+    "agent_roots", "child_permission_mode", "load_agent_definitions", "parse_agent_file", "resolve_agent_model",
+]
+```
+
+
+- [ ] **Step 4: Run the tests and see them pass**
+
+Run: `uv run pytest -q tests/unit/agentic/test_agent_definitions.py`
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/agentos/agentic/agent_definitions.py tests/unit/agentic/test_agent_definitions.py
+git commit -m "feat(w5): agent definitions read from disk in Claude Code's format
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+### Task 8: The Agent tool starts agents defined on disk
+
+The turn loads the agent catalog (`_load_agent_definitions`, trust-gated like skills) and names the agents in an `agents` reminder. The Agent tool hands an unknown `subagent_type` to the session instead of turning it into a model id; the session resolves a definition first (`_agent_definition`, `_subagent_spec`), then Orin's builtins, then the old model-id fallback, and its error now lists the agents that exist. A defined agent runs through the existing subagent path with: its instructions at the top of its prompt; its tools as an `AgentToolPolicy` over the parent's policy; `child_permission_mode` (a plugin agent's mode is ignored); `maxTurns` capping its iterations; its model through `modelAliases` when allowed (`_definition_model`); `background: true` making it a background run; `skills` preloaded into its prompt within 20,000 characters; and `omitClaudeMd` leaving out the workspace instructions.
+
+**Files:**
+- Modify: `src/agentos/agentic/tools/agents/agent.py`
+- Modify: `src/agentos/agentic/session.py`
+- Test: `tests/unit/agentic/test_agent_definitions_session.py`
+
+**Interfaces:**
+- Consumes: Task 7; Batch A's disk skills (`toolset.disk_skill`).
+- Produces: `TurnSession._agent_definition(key)`, `_subagent_spec(key)`, `_definition_model(spec)`, `_defined_agents_hint()`, `_preloaded_skills(definition, toolset)`, `_load_agent_definitions(trusted)`, `_announce_defined_agents()`; the Agent tool passes unknown types to the session.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `tests/unit/agentic/test_agent_definitions_session.py`:
+
+```python
+"""W5: the Agent tool starts agents defined on disk — their tools, mode, turns, model and instructions apply."""
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from agentos.agentic.agent_definitions import AgentToolPolicy, load_agent_definitions
+from agentos.agentic.agent_tools import AgentToolset
+from agentos.agentic.session import TurnSession
+from agentos.agentic.tools._shared import ToolOutcome
+from agentos.agentic.workspace import ConversationWorkspace
+from agentos.persistence.postgres.conversation_agents import ConversationAgentStore
+from agentos.persistence.postgres.schema import metadata
+from agentos.persistence.sqlite import create_local_engine
+from agentos.settings.paths import orin_user_dir
+from agentos.skills.disk import load_disk_skills
+from tests.unit.agentic.test_parallel_and_background_subagents import TURN, _RecordingStore, _text_batch
+
+
+def _agent(text: str, file: str = "agent.md") -> None:
+    folder = orin_user_dir() / "agents"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / file).write_bytes(text.encode("utf-8"))
+
+
+class _ChildProvider:
+    def stream(self, _request):
+        return iter(_text_batch("Reviewed: no issues."))
+
+
+@pytest.fixture()
+def session_and_builds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    engine = create_local_engine(f"sqlite:///{(tmp_path / 'agents.db').as_posix()}")
+    metadata.create_all(engine)
+    agents_store = ConversationAgentStore(engine, conversation_id=TURN["conversation_id"], user_id=TURN["user_id"])
+    session = TurnSession(
+        turn=dict(TURN), store=_RecordingStore(), agents_store=agents_store, memory_store=None,
+        provider_factory=_ChildProvider, workspace_root=tmp_path, child_provider_factory=lambda _model: _ChildProvider(),
+    )
+    builds: list[dict] = []
+    prompts: list[str] = []
+    limits: list[dict] = []
+    original_toolset, original_prompt, original_limits = TurnSession._toolset, TurnSession._subagent_prompt, TurnSession._subagent_limits
+
+    def recording_toolset(self, **kwargs):
+        toolset = original_toolset(self, **kwargs)
+        builds.append({**kwargs, "toolset": toolset})
+        return toolset
+
+    def recording_prompt(self, record, task, toolset):
+        prompt = original_prompt(self, record, task, toolset)
+        prompts.append(prompt)
+        return prompt
+
+    def recording_limits(self, **kwargs):
+        limits.append(kwargs)
+        return original_limits(self, **kwargs)
+
+    monkeypatch.setattr(TurnSession, "_toolset", recording_toolset)
+    monkeypatch.setattr(TurnSession, "_subagent_prompt", recording_prompt)
+    monkeypatch.setattr(TurnSession, "_subagent_limits", recording_limits)
+    yield session, builds, prompts, limits
+    engine.dispose()
+
+
+REVIEWER = """---
+name: code-reviewer
+description: Reviews a change for bugs
+tools: Read, Grep, Glob, Edit
+disallowedTools: Edit
+permissionMode: bypassPermissions
+maxTurns: 3
+skills: [checklist]
+omitClaudeMd: true
+---
+REVIEWER-INSTRUCTIONS: report findings as path:line.
+"""
+
+
+def test_a_custom_agent_runs_with_its_own_tools_mode_turns_and_instructions(session_and_builds) -> None:
+    session, builds, prompts, limits = session_and_builds
+    _agent(REVIEWER)
+    skill = orin_user_dir() / "skills" / "checklist"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_bytes(b"---\ndescription: Review checklist\n---\nCHECKLIST-BODY: look for missing tests.")
+    session._agent_definitions = load_agent_definitions(workspace_root=None, trusted=False)
+    session._disk_skills = load_disk_skills(workspace_root=None, trusted=False)
+    outcome = session._run_subagent(subagent_type="code-reviewer", task="Review the change", description="review")
+    assert outcome.status == "succeeded", outcome.content
+    child = [build for build in builds if build.get("subagents") is False][-1]
+    published = {item.name for item in child["toolset"].definitions()}
+    assert "read_file" in published and "search_files" in published and "glob_files" in published
+    assert "edit_file" not in published and "write_file" not in published and "run_command" not in published
+    assert isinstance(child["toolset"]._policy, AgentToolPolicy)
+    assert session.permission_mode == "accept_edits" and child["permission_mode"] == "accept_edits"  # bypass never escalates
+    assert limits[-1]["max_iterations"] == 3
+    assert "REVIEWER-INSTRUCTIONS" in prompts[-1] and "CHECKLIST-BODY" in prompts[-1]
+    assert "## Workspace instructions" not in prompts[-1]
+
+
+def test_the_verifier_builtin_cannot_edit(session_and_builds) -> None:
+    session, builds, _prompts, _limits = session_and_builds
+    session._agent_definitions = load_agent_definitions(workspace_root=None, trusted=False)
+    outcome = session._run_subagent(subagent_type="verifier", task="Check the tests pass")
+    assert outcome.status == "succeeded", outcome.content
+    published = {item.name for item in [b for b in builds if b.get("subagents") is False][-1]["toolset"].definitions()}
+    assert "read_file" in published and not {"edit_file", "write_file", "notebook_edit"} & published
+
+
+def test_an_unknown_type_lists_the_agents_that_exist(session_and_builds) -> None:
+    session, _builds, _prompts, _limits = session_and_builds
+    _agent(REVIEWER)
+    session._agent_definitions = load_agent_definitions(workspace_root=None, trusted=False)
+    outcome = session._run_subagent(subagent_type="nobody", task="x")
+    assert outcome.status == "failed" and "code-reviewer" in outcome.content and "verifier" in outcome.content
+
+
+def test_a_definition_model_resolves_through_model_aliases(session_and_builds, monkeypatch: pytest.MonkeyPatch) -> None:
+    session, _builds, _prompts, _limits = session_and_builds
+    _agent("---\nname: quick\ndescription: Quick\nmodel: haiku\n---\nx")
+    session._agent_definitions = load_agent_definitions(workspace_root=None, trusted=False)
+    session.effective_settings = type("S", (), {"layers": (type("L", (), {"name": "user", "data": {"modelAliases": {"haiku": "fast-model"}}})(),)})()
+    monkeypatch.setattr(session, "_resolve_child_model", lambda requested: requested if requested == "fast-model" else None)
+    monkeypatch.setattr(session, "_child_model_allowed", lambda model, allow_current=False: True)
+    assert session._definition_model(session._subagent_spec("quick")) == "fast-model"
+    monkeypatch.setattr(session, "_child_model_allowed", lambda model, allow_current=False: False)
+    assert session._definition_model(session._subagent_spec("quick")) is None  # not a model this person allows
+
+
+def test_the_agent_tool_hands_a_custom_name_to_the_session(tmp_path: Path) -> None:
+    seen: list[str] = []
+
+    def run_subagent(subagent_type, task, **kwargs):
+        seen.append(subagent_type)
+        return ToolOutcome("succeeded", "ok", "done", {})
+
+    toolset = AgentToolset(ConversationWorkspace(tmp_path / "w", "c1"), run_subagent=run_subagent, public_tool_names=True)
+    assert toolset.invoke("Agent", {"subagent_type": "code-reviewer", "prompt": "Review", "description": "r"}).status == "succeeded"
+    assert seen == ["code-reviewer"]
+
+
+def test_custom_agents_are_listed_for_the_model(tmp_path: Path) -> None:
+    from tests.unit.agentic.test_disk_skills_session import _session
+
+    _agent(REVIEWER)
+    session = _session(tmp_path, "hi")
+    session.build_runtime()
+    texts = [item.text for item in session._reminders.drain() if item.kind == "agents"]
+    assert texts and "code-reviewer" in texts[0] and "verifier" in texts[0]
+```
+
+- [ ] **Step 2: Run it to verify it fails**
+
+Run: `uv run pytest -q tests/unit/agentic/test_agent_definitions_session.py`
+Expected: FAIL — `test_a_custom_agent_runs_with_its_own_tools_mode_turns_and_instructions` (`Tipo de subagente inválido: code-reviewer`), the verifier, model-alias and listing tests (`AttributeError` on the new methods), and `test_the_agent_tool_hands_a_custom_name_to_the_session` (`seen == ['general']`).
+
+- [ ] **Step 3: Implement**
+
+Then make these edits, in order (each `replace` block occurs exactly once in its file; if one does not, stop and report — do not guess):
+
+1. In `src/agentos/agentic/tools/agents/agent.py`, replace
+
+```python
+        if clean_type not in {"explore", "plan", "general", "fork"}:
+            if raw_type and (model_id is None or not str(model_id).strip()):
+```
+
+   with
+
+```python
+        if clean_type not in {"explore", "plan", "general", "fork"}:
+            if raw_type and self._run_subagent is not None:
+                clean_type = raw_type  # W5: an agent defined on disk (or a model id); the session decides
+            elif raw_type and (model_id is None or not str(model_id).strip()):
+```
+
+2. In `src/agentos/agentic/session.py`, replace
+
+```python
+        key = subagent_type.strip().lower()
+        if key == "general-purpose":
+            key = "general"
+        spec = _BUILTIN_SUBAGENT_SPECS.get(key)
+        if spec is None:
+            return None
+```
+
+   with
+
+```python
+        key = subagent_type.strip().lower()
+        if key == "general-purpose":
+            key = "general"
+        spec = self._subagent_spec(key)
+        if spec is None:
+            return None
+```
+
+3. In `src/agentos/agentic/session.py`, replace
+
+```python
+        raw_type = str(subagent_type or "").strip()
+        clean_type = raw_type.lower()
+        if clean_type == "general-purpose":
+            clean_type = "general"
+        if clean_type not in _BUILTIN_SUBAGENT_SPECS:
+            if raw_type and (model_id is None or not str(model_id).strip()) and self._resolve_child_model(raw_type) is not None:
+```
+
+   with
+
+```python
+        raw_type = str(subagent_type or "").strip()
+        clean_type = raw_type.lower()
+        if clean_type == "general-purpose":
+            clean_type = "general"
+        definition = self._agent_definition(clean_type)
+        if definition is not None:
+            clean_type = definition.name  # W5: an agent defined on disk (it may replace a builtin of the same name)
+        elif clean_type not in _BUILTIN_SUBAGENT_SPECS:
+            if raw_type and (model_id is None or not str(model_id).strip()) and self._resolve_child_model(raw_type) is not None:
+```
+
+4. In `src/agentos/agentic/session.py`, replace
+
+```python
+                    "subagent_type must be one of 'explore', 'plan', 'general', or 'fork' "
+                    "(public names: Explore, Plan, general-purpose, fork).",
+                    {"tool_kind": "agent"},
+                    "INVALID_ARGUMENTS",
+                )
+        clean_agent_id
+```
+
+   with
+
+```python
+                    "subagent_type must be one of 'explore', 'plan', 'general', or 'fork' "
+                    "(public names: Explore, Plan, general-purpose, fork)" + self._defined_agents_hint() + ".",
+                    {"tool_kind": "agent"},
+                    "INVALID_ARGUMENTS",
+                )
+        clean_agent_id
+```
+
+5. In `src/agentos/agentic/session.py`, replace
+
+```python
+        builtin_spec = _BUILTIN_SUBAGENT_SPECS.get(builtin_key)
+```
+
+   with
+
+```python
+        builtin_spec = self._subagent_spec(builtin_key)
+```
+
+6. In `src/agentos/agentic/session.py`, replace
+
+```python
+                if raw_bt in _BUILTIN_SUBAGENT_SPECS:
+                    builtin_key = raw_bt
+                    builtin_spec = _BUILTIN_SUBAGENT_SPECS[builtin_key]
+```
+
+   with
+
+```python
+                if self._subagent_spec(raw_bt) is not None:
+                    builtin_key = raw_bt
+                    builtin_spec = self._subagent_spec(builtin_key)
+```
+
+7. In `src/agentos/agentic/session.py`, replace
+
+```python
+            child_model_id = resolved_explicit or current_model_id
+```
+
+   with
+
+```python
+            child_model_id = resolved_explicit or self._definition_model(builtin_spec) or current_model_id
+```
+
+8. In `src/agentos/agentic/session.py`, replace
+
+```python
+        if run_in_background:
+```
+
+   with
+
+```python
+        definition = builtin_spec.get("definition") if builtin_spec is not None else None
+        if run_in_background or (definition is not None and definition.background):
+```
+
+9. In `src/agentos/agentic/session.py`, replace
+
+```python
+        read_only_subagent = bool(builtin_spec and builtin_spec.get("read_only"))
+```
+
+   with
+
+```python
+        read_only_subagent = bool(builtin_spec and builtin_spec.get("read_only"))
+        definition = builtin_spec.get("definition") if builtin_spec is not None else None
+```
+
+10. In `src/agentos/agentic/session.py`, replace
+
+```python
+        enriched_record = {**record, "builtin_type": builtin_key if builtin_spec is not None else None}
+```
+
+   with
+
+```python
+        enriched_record = {**record, "builtin_type": builtin_key if builtin_spec is not None else None, "definition": definition}
+```
+
+11. In `src/agentos/agentic/session.py`, replace
+
+```python
+        sub_permission_mode = "plan_mode" if read_only_subagent else self.permission_mode
+```
+
+   with
+
+```python
+        from .agent_definitions import AgentToolPolicy, child_permission_mode
+
+        # W5: a definition's mode applies only when it is not more permissive than the parent's; a plugin's never does.
+        requested_mode = definition.permission_mode if definition is not None and definition.origin != "plugin" else None
+        sub_permission_mode = "plan_mode" if read_only_subagent else child_permission_mode(self.permission_mode, requested_mode)
+```
+
+12. In `src/agentos/agentic/session.py`, replace
+
+```python
+        sub_max_iterations = (
+            self.limits.subagent_max_iterations
+            if self.limits.subagent_max_iterations is not None
+            else self.limits.max_iterations
+        )
+```
+
+   with
+
+```python
+        if definition is not None:
+            # Its tools only narrow what the parent may publish.
+            subagent_tools._policy = AgentToolPolicy(subagent_tools._policy, definition)
+        sub_max_iterations = (
+            self.limits.subagent_max_iterations
+            if self.limits.subagent_max_iterations is not None
+            else self.limits.max_iterations
+        )
+        if definition is not None and definition.max_turns:
+            sub_max_iterations = min(sub_max_iterations or definition.max_turns, definition.max_turns)
+```
+
+13. In `src/agentos/agentic/session.py`, replace
+
+```python
+        elif builtin_type == "fork":
+            header_lines.extend((
+                "You are a 'fork' subagent inside Orin inheriting the full parent conversation context.",
+                "Do not re-ask the user questions; execute the delegated fork directive and return a concise report.",
+                "",
+            ))
+```
+
+   with
+
+```python
+        elif builtin_type == "fork":
+            header_lines.extend((
+                "You are a 'fork' subagent inside Orin inheriting the full parent conversation context.",
+                "Do not re-ask the user questions; execute the delegated fork directive and return a concise report.",
+                "",
+            ))
+        definition = record.get("definition")
+        if definition is not None and definition.prompt:
+            # W5: an agent defined on disk brings its own instructions.
+            header_lines.extend((f"You are the '{definition.name}' agent. Your instructions:", "", definition.prompt, ""))
+```
+
+14. In `src/agentos/agentic/session.py`, replace
+
+```python
+        memory = getattr(self, "_memory", None)
+        workspace_guidance = memory.render() if memory is not None else _workspace_guidance(self.workspace.root)
+        if workspace_guidance:
+            prompt += f"\n\n## Workspace instructions\n{workspace_guidance}"
+```
+
+   with
+
+```python
+        memory = getattr(self, "_memory", None)
+        workspace_guidance = memory.render() if memory is not None else _workspace_guidance(self.workspace.root)
+        if workspace_guidance and not (definition is not None and definition.omit_claude_md):
+            prompt += f"\n\n## Workspace instructions\n{workspace_guidance}"
+        if definition is not None and definition.skills:
+            prompt += self._preloaded_skills(definition, toolset)
+```
+
+15. In `src/agentos/agentic/session.py`, replace
+
+```python
+    def _find_subagent_record_by_id(self, agent_id: str) -> dict[str, object] | None:
+```
+
+   with
+
+```python
+    def _agent_definition(self, key: str):
+        """An agent defined on disk for ``key`` (W5), or None for an Orin builtin that no file replaces."""
+        catalog = getattr(self, "_agent_definitions", None)
+        definition = catalog.get(key) if catalog is not None else None
+        if definition is None:
+            return None
+        if definition.origin == "builtin" and str(key or "").strip().lower() in _BUILTIN_SUBAGENT_SPECS:
+            return None
+        return definition
+
+    def _subagent_spec(self, key: str) -> Mapping[str, object] | None:
+        """The spec a run uses: an agent defined on disk first, then Orin's builtins."""
+        definition = self._agent_definition(key)
+        if definition is not None:
+            return {
+                "display_name": definition.name, "role": definition.description[:500],
+                "read_only": False, "inherit_context": False, "definition": definition,
+            }
+        return _BUILTIN_SUBAGENT_SPECS.get(str(key or "").strip().lower())
+
+    def _definition_model(self, spec: Mapping[str, object] | None) -> str | None:
+        """The model a definition asks for, when it is one this person allows; otherwise None (the parent's model)."""
+        definition = spec.get("definition") if isinstance(spec, Mapping) else None
+        if definition is None or not definition.model:
+            return None
+        from .agent_definitions import resolve_agent_model
+        from .loop_settings import operator_value
+
+        aliases = operator_value(getattr(self, "effective_settings", None), "modelAliases")
+        wanted = resolve_agent_model(definition.model, aliases if isinstance(aliases, Mapping) else None)
+        if not wanted:
+            return None
+        resolved = self._resolve_child_model(wanted)
+        if resolved and self._child_model_allowed(resolved, allow_current=True):
+            return resolved
+        logger.info("agent %s asks for model %s, which is not allowed here; it runs on the parent's model", definition.name, wanted)
+        return None
+
+    def _defined_agents_hint(self) -> str:
+        catalog = getattr(self, "_agent_definitions", None)
+        names = sorted(catalog.agents) if catalog is not None else []
+        return f"; agents defined here: {', '.join(names[:40])}" if names else ""
+
+    def _preloaded_skills(self, definition, toolset: AgentToolset) -> str:
+        """The bodies of the skills a definition preloads, within a budget (W5)."""
+        from agentos.skills.disk import substitute
+
+        text, used = "", 0
+        for name in definition.skills:
+            skill = toolset.disk_skill(name)
+            if skill is None:
+                continue
+            body, _ = substitute(skill.body, arguments="", session_id=str(self.turn.get("conversation_id") or ""), skill_dir=skill.directory)
+            block = f"\n\n## Preloaded skill: {skill.name}\n{body}"
+            if used + len(block) > 20_000:
+                break
+            text += block
+            used += len(block)
+        return text
+
+    def _load_agent_definitions(self, trusted: bool):
+        from .agent_definitions import AgentCatalog, load_agent_definitions
+
+        try:
+            catalog = load_agent_definitions(workspace_root=self.workspace.root, trusted=bool(trusted))
+        except Exception:  # noqa: BLE001 - a broken agents folder never stops a turn
+            logger.exception("agent definitions could not be read")
+            return AgentCatalog()
+        for path, reason in catalog.errors[:20]:
+            logger.warning("agent definition %s ignored: %s", path, reason)
+        return catalog
+
+    def _announce_defined_agents(self) -> None:
+        """A reminder naming the agents the Agent tool can start besides Orin's builtins (W5)."""
+        catalog = getattr(self, "_agent_definitions", None)
+        if catalog is None:
+            return
+        lines, used = [], 0
+        for definition in sorted(catalog.agents.values(), key=lambda item: item.name):
+            line = f"- {definition.name}: {' '.join(definition.description.split())[:200]}"
+            if used + len(line) > 4_000:
+                break
+            lines.append(line)
+            used += len(line)
+        if lines:
+            self._reminders.add(
+                "agents", "Besides Explore, Plan and general-purpose, the Agent tool can start these agents (subagent_type = name):\n" + "\n".join(lines),
+                key="defined-agents",
+            )
+
+    def _find_subagent_record_by_id(self, agent_id: str) -> dict[str, object] | None:
+```
+
+16. In `src/agentos/agentic/session.py`, replace
+
+```python
+        self._disk_skills = self._load_disk_skills(trusted_workspace)
+```
+
+   with
+
+```python
+        self._disk_skills = self._load_disk_skills(trusted_workspace)
+        self._agent_definitions = self._load_agent_definitions(trusted_workspace)
+        self._announce_defined_agents()
+```
+
+- [ ] **Step 4: Run the tests and see them pass**
+
+Run: `uv run pytest -q tests/unit/agentic/test_agent_definitions_session.py`
+Expected: PASS.
+
+Also run `uv run pytest -q tests/unit/agentic`: expected PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add tests/unit/agentic/test_agent_definitions_session.py src/agentos/agentic/tools/agents/agent.py src/agentos/agentic/session.py
+git commit -m "feat(w5): the Agent tool starts agents defined on disk
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+### Task 9: A subagent's own reminders and instruction files (W3-R26)
+
+W4-R9 gave subagent toolsets the parent turn's reminder queue so that a subagent's monitor would reach the running turn. A side effect: every other reminder a subagent's reads raise (a directory's `CLAUDE.md`, a path rule, a file changed on disk) went to the parent, and the subagent never saw them. A subagent now gets its own queue, which its runtime drains each request, and its own instruction-file tracker (W3-R26); only its monitor keeps sinking into the parent turn (`_monitor_sink`). The W4-R9 test is updated to that property (a deliberate expectation change).
+
+**Files:**
+- Modify: `src/agentos/agentic/session.py`
+- Modify: `src/agentos/agentic/tools/scheduling/monitor.py`
+- Modify: `tests/unit/agentic/tools/test_monitor_review_fixes.py`
+- Test: `tests/unit/agentic/test_subagent_reminders_and_memory.py`
+
+**Interfaces:**
+- Consumes: Task 8.
+- Produces: `toolset._monitor_sink` (Monitor prefers it over `toolset.reminders`); each subagent toolset's own `ReminderQueue` and `memory_tracker`.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `tests/unit/agentic/test_subagent_reminders_and_memory.py`:
+
+```python
+"""W5 (W3-R26): a subagent has its own reminders and instruction-file tracker; its monitor still reaches the turn."""
+from __future__ import annotations
+
+from pathlib import Path
+
+from agentos.agentic.session import TurnSession
+from agentos.persistence.postgres.conversation_agents import ConversationAgentStore
+from agentos.persistence.postgres.schema import metadata
+from agentos.persistence.sqlite import create_local_engine
+from agentos.settings import load_effective_settings
+from tests.unit.agentic.test_parallel_and_background_subagents import (
+    TURN, _RecordingStore, _parallel_tool_calls_batch, _text_batch,
+)
+
+
+class _ReadingChild:
+    """First request: read a file in a subdirectory. Then answer. Every request is kept."""
+
+    def __init__(self) -> None:
+        self.requests: list[str] = []
+
+    def stream(self, request):
+        self.requests.append(repr(request))
+        if len(self.requests) == 1:
+            return iter(_parallel_tool_calls_batch([("call-1", "read_file", {"path": "pkg/mod.py"})]))
+        return iter(_text_batch("pkg/mod.py defines VALUE."))
+
+
+def test_a_subagents_reads_load_instructions_for_the_subagent_not_the_parent(tmp_path: Path) -> None:
+    engine = create_local_engine(f"sqlite:///{(tmp_path / 'mem.db').as_posix()}")
+    metadata.create_all(engine)
+    child = _ReadingChild()
+    session = TurnSession(
+        turn=dict(TURN), store=_RecordingStore(),
+        agents_store=ConversationAgentStore(engine, conversation_id=TURN["conversation_id"], user_id=TURN["user_id"]),
+        memory_store=None, provider_factory=lambda: child, workspace_root=tmp_path, child_provider_factory=lambda _model: child,
+    )
+    root = session.workspace.root  # the conversation's own folder below tmp_path
+    (root / "pkg").mkdir()
+    (root / "pkg" / "mod.py").write_bytes(b"VALUE = 1\n")
+    (root / "pkg" / "CLAUDE.md").write_bytes(b"PKG-RULES: keep VALUE positive.\n")
+    session.effective_settings = load_effective_settings(root, trusted=False)
+    session._memory = session._memory_files(False)
+    try:
+        outcome = session._run_subagent(subagent_type="explore", task="Read pkg/mod.py and report VALUE")
+    finally:
+        engine.dispose()
+    assert outcome.status == "succeeded", outcome.content
+    assert len(child.requests) >= 2
+    assert "PKG-RULES" in child.requests[1]  # the subagent saw its directory's instructions
+    assert not [item for item in session._reminders.drain() if "PKG-RULES" in item.text]  # the parent did not
+```
+
+- [ ] **Step 2: Run it to verify it fails**
+
+Run: `uv run pytest -q tests/unit/agentic/test_subagent_reminders_and_memory.py`
+Expected: FAIL — `assert 'PKG-RULES' in ...` (the subagent's second request does not carry its directory's instructions).
+
+- [ ] **Step 3: Implement**
+
+Then make these edits, in order (each `replace` block occurs exactly once in its file; if one does not, stop and report — do not guess):
+
+1. In `src/agentos/agentic/session.py`, replace
+
+```python
+        sub_permission_mode = "plan_mode" if read_only_subagent else child_permission_mode(self.permission_mode, requested_mode)
+```
+
+   with
+
+```python
+        sub_permission_mode = "plan_mode" if read_only_subagent else child_permission_mode(self.permission_mode, requested_mode)
+        sub_reminders = ReminderQueue()
+```
+
+2. In `src/agentos/agentic/session.py`, replace
+
+```python
+            # The running turn's queue (W4-R9): a subagent's monitor sinks into the parent turn, not into a wake.
+            reminders=self._reminders,
+        )
+        if definition is not None:
+```
+
+   with
+
+```python
+            # Its own queue (W5): the notices its reads raise (instructions, changed files) reach the subagent itself.
+            reminders=sub_reminders,
+        )
+        # W4-R9 still holds: a monitor the subagent starts sinks into the running parent turn, not into a wake.
+        subagent_tools._monitor_sink = self._reminders
+        # W3-R26: its own instruction-file tracker, so a subdirectory's CLAUDE.md and path rules load for its reads.
+        if getattr(self, "_memory", None) is not None:
+            subagent_tools.memory_tracker = self._memory_files(self._workspace_trusted())
+        if definition is not None:
+```
+
+3. In `src/agentos/agentic/session.py`, replace
+
+```python
+            tool_kinds={item.name: item.kind for item in sub_definitions},
+            hook_engine=self.hook_engine,
+            phase_controller=None,
+```
+
+   with
+
+```python
+            tool_kinds={item.name: item.kind for item in sub_definitions},
+            hook_engine=self.hook_engine,
+            phase_controller=None,
+            reminders=sub_reminders,
+```
+
+4. In `src/agentos/agentic/session.py`, replace
+
+```python
+                tool_kinds={item.name: item.kind for item in sub_definitions},
+                hook_engine=self.hook_engine,
+                phase_controller=None,
+```
+
+   with
+
+```python
+                tool_kinds={item.name: item.kind for item in sub_definitions},
+                hook_engine=self.hook_engine,
+                phase_controller=None,
+                reminders=sub_reminders,
+```
+
+5. In `src/agentos/agentic/tools/scheduling/monitor.py`, replace
+
+```python
+            sink=self.reminders,
+```
+
+   with
+
+```python
+            sink=getattr(self, "_monitor_sink", None) or self.reminders,
+```
+
+6. In `tests/unit/agentic/tools/test_monitor_review_fixes.py`, replace
+
+```python
+    def recording_toolset(self, **kwargs):
+        built.append(kwargs)
+        return original_toolset(self, **kwargs)
+```
+
+   with
+
+```python
+    def recording_toolset(self, **kwargs):
+        toolset = original_toolset(self, **kwargs)
+        built.append({**kwargs, "toolset": toolset})
+        return toolset
+```
+
+7. In `tests/unit/agentic/tools/test_monitor_review_fixes.py`, replace
+
+```python
+    # A monitor the subagent starts sinks into the running turn's queue, not into a queue nobody drains.
+    assert all(kwargs.get("reminders") is session._reminders for kwargs in subagent_builds)
+```
+
+   with
+
+```python
+    # A monitor the subagent starts sinks into the running turn's queue, not into a queue nobody drains (W4-R9).
+    # The subagent's other reminders go to its own queue, which its runtime drains (W5, W3-R26).
+    assert all(kwargs["toolset"]._monitor_sink is session._reminders for kwargs in subagent_builds)
+    assert all(kwargs.get("reminders") is not session._reminders for kwargs in subagent_builds)
+```
+
+- [ ] **Step 4: Run the tests and see them pass**
+
+Run: `uv run pytest -q tests/unit/agentic/test_subagent_reminders_and_memory.py`
+Expected: PASS.
+
+Also run `uv run pytest -q tests/unit/agentic/tools/test_monitor_review_fixes.py tests/unit/agentic`: expected PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add tests/unit/agentic/test_subagent_reminders_and_memory.py src/agentos/agentic/session.py src/agentos/agentic/tools/scheduling/monitor.py tests/unit/agentic/tools/test_monitor_review_fixes.py
+git commit -m "fix(w5): a subagent gets its own reminders and instruction files (W3-R26)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+### Task 10: Background agents: an output file and TaskStop
+
+A background agent writes its report (or why it stopped) to `.orin/agent-outputs/<agent_id>.md`, named in the start result (`output_file`). TaskStop with an agent's id asks it to stop: the background run carries a cancel event the subagent's runtime checks at every step. Only the main toolset can stop agents (`_stop_subagent` is set when the toolset may start subagents); without it, a non-numeric id is refused as before.
+
+**Files:**
+- Modify: `src/agentos/agentic/tools/shell/tasks.py`
+- Modify: `src/agentos/agentic/session.py`
+- Test: `tests/unit/agentic/test_background_agents.py`
+
+**Interfaces:**
+- Consumes: Tasks 8–9.
+- Produces: `TurnSession._agent_output_file(agent_id)`, `_run_background_agent(output_file, **kwargs)`, `_stop_background_subagent(agent_id)`; `toolset._stop_subagent`.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `tests/unit/agentic/test_background_agents.py`:
+
+```python
+"""W5: a background agent writes its report to an output file, and TaskStop can stop it."""
+from __future__ import annotations
+
+import threading
+import time
+from pathlib import Path
+
+import pytest
+
+from agentos.agentic.agent_tools import AgentToolset
+from agentos.agentic.session import TurnSession
+from agentos.agentic.workspace import ConversationWorkspace
+from agentos.persistence.postgres.conversation_agents import ConversationAgentStore
+from agentos.persistence.postgres.schema import metadata
+from agentos.persistence.sqlite import create_local_engine
+from tests.unit.agentic.test_parallel_and_background_subagents import (
+    TURN, _RecordingStore, _parallel_tool_calls_batch, _text_batch,
+)
+
+
+class _QuickChild:
+    def stream(self, _request):
+        return iter(_text_batch("Background report: all good."))
+
+
+class _EndlessChild:
+    """Keeps asking for another listing until the run is cancelled."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.started = threading.Event()
+
+    def stream(self, _request):
+        self.calls += 1
+        self.started.set()
+        time.sleep(0.05)
+        return iter(_parallel_tool_calls_batch([(f"call-{self.calls}", "list_files", {"path": "."})]))
+
+
+def _session(tmp_path: Path, child) -> tuple[TurnSession, object]:
+    engine = create_local_engine(f"sqlite:///{(tmp_path / 'bg.db').as_posix()}")
+    metadata.create_all(engine)
+    session = TurnSession(
+        turn=dict(TURN), store=_RecordingStore(),
+        agents_store=ConversationAgentStore(engine, conversation_id=TURN["conversation_id"], user_id=TURN["user_id"]),
+        memory_store=None, provider_factory=lambda: child, workspace_root=tmp_path, child_provider_factory=lambda _model: child,
+    )
+    return session, engine
+
+
+def test_a_background_agent_writes_its_report_to_an_output_file(tmp_path: Path) -> None:
+    session, engine = _session(tmp_path, _QuickChild())
+    try:
+        started = session._run_subagent(subagent_type="general-purpose", task="Summarise", run_in_background=True)
+        assert started.status == "succeeded", started.content
+        agent_id, output_file = started.payload["agent_id"], started.payload["output_file"]
+        assert output_file.startswith(".orin/agent-outputs/") and output_file in started.content
+        done = session._check_subagent(agent_id, wait_seconds=20)
+        assert done.status == "succeeded", done.content
+        assert "Background report: all good." in (session.workspace.root / output_file).read_text(encoding="utf-8")
+    finally:
+        session.close_background_subagents()
+        engine.dispose()
+
+
+def test_taskstop_stops_a_running_background_agent(tmp_path: Path) -> None:
+    child = _EndlessChild()
+    session, engine = _session(tmp_path, child)
+    try:
+        started = session._run_subagent(subagent_type="general-purpose", task="Loop", run_in_background=True)
+        agent_id = started.payload["agent_id"]
+        assert child.started.wait(10)
+        toolset = AgentToolset(ConversationWorkspace(tmp_path / "other", "c1"), public_tool_names=True)
+        toolset._stop_subagent = session._stop_background_subagent
+        stopped = toolset.invoke("TaskStop", {"task_id": agent_id})
+        assert stopped.status == "succeeded", stopped.content
+        assert stopped.data["tool_output"]["task_type"] == "local_agent"
+        result = session._check_subagent(agent_id, wait_seconds=20)
+        assert result.payload["status"] != "running"
+        calls = child.calls
+        time.sleep(0.5)
+        assert child.calls == calls  # nothing runs after the stop
+    finally:
+        session.close_background_subagents()
+        engine.dispose()
+
+
+def test_stopping_an_unknown_or_finished_agent_says_so(tmp_path: Path) -> None:
+    session, engine = _session(tmp_path, _QuickChild())
+    try:
+        assert session._stop_background_subagent("agent:nope").status == "failed"
+        started = session._run_subagent(subagent_type="general-purpose", task="Quick", run_in_background=True)
+        session._check_subagent(started.payload["agent_id"], wait_seconds=20)
+        finished = session._stop_background_subagent(started.payload["agent_id"])
+        assert finished.status == "succeeded" and "already finished" in finished.content
+    finally:
+        session.close_background_subagents()
+        engine.dispose()
+
+
+def test_without_agent_support_a_name_is_still_refused(tmp_path: Path) -> None:
+    toolset = AgentToolset(ConversationWorkspace(tmp_path / "w", "c1"), public_tool_names=True)
+    assert toolset.invoke("TaskStop", {"task_id": "agent:x"}).status == "failed"
+```
+
+- [ ] **Step 2: Run it to verify it fails**
+
+Run: `uv run pytest -q tests/unit/agentic/test_background_agents.py`
+Expected: FAIL — `KeyError: 'output_file'` and `AttributeError: ... '_stop_background_subagent'`.
+
+- [ ] **Step 3: Implement**
+
+Then make these edits, in order (each `replace` block occurs exactly once in its file; if one does not, stop and report — do not guess):
+
+1. In `src/agentos/agentic/tools/shell/tasks.py`, replace
+
+```python
+        if isinstance(pid, str) and not pid.strip().isdigit():
+            raise AgentToolError(
+                f"'{pid}' is not a background command. Stopping a subagent arrives with agent teams; let it finish instead.",
+            )
+```
+
+   with
+
+```python
+        if isinstance(pid, str) and not pid.strip().isdigit():
+            # W5: a background agent's id; the session stops it (set on the main toolset only).
+            stop_subagent = getattr(self, "_stop_subagent", None)
+            if stop_subagent is not None:
+                return stop_subagent(pid.strip())
+            raise AgentToolError(f"'{pid}' is not a background command or agent of this conversation.")
+```
+
+2. In `src/agentos/agentic/session.py`, replace
+
+```python
+        # W5: skills and commands read from disk, for the Skill tool of this toolset (subagents' too).
+        toolset._disk_skills = getattr(self, "_disk_skills", None)
+```
+
+   with
+
+```python
+        # W5: skills and commands read from disk, for the Skill tool of this toolset (subagents' too).
+        toolset._disk_skills = getattr(self, "_disk_skills", None)
+        if subagents:
+            toolset._stop_subagent = self._stop_background_subagent  # W5: TaskStop stops a background agent
+```
+
+3. In `src/agentos/agentic/session.py`, replace
+
+```python
+                future = self._bg_subagent_executor.submit(
+                    self._execute_subagent_run,
+                    record=dict(record),
+```
+
+   with
+
+```python
+                cancel = threading.Event()
+                output_file = self._agent_output_file(agent_id)
+                future = self._bg_subagent_executor.submit(
+                    self._run_background_agent,
+                    output_file,
+                    hook_cancel=cancel,
+                    record=dict(record),
+```
+
+4. In `src/agentos/agentic/session.py`, replace
+
+```python
+                self._background_subagents[agent_id] = {
+                    "future": future,
+                    "agent_id": agent_id,
+                    "agent_name": clean,
+                    "subagent_type": builtin_key if builtin_spec is not None else clean,
+                }
+```
+
+   with
+
+```python
+                self._background_subagents[agent_id] = {
+                    "future": future,
+                    "agent_id": agent_id,
+                    "agent_name": clean,
+                    "subagent_type": builtin_key if builtin_spec is not None else clean,
+                    "cancel": cancel,
+                    "output_file": output_file,
+                }
+```
+
+5. In `src/agentos/agentic/session.py`, replace
+
+```python
+                    f"Continue with independent work or call check_subagent(agent_id=\"{agent_id}\", wait_seconds=...) to inspect or await its report."
+                ),
+```
+
+   with
+
+```python
+                    f"Continue with independent work or call check_subagent(agent_id=\"{agent_id}\", wait_seconds=...) to inspect or await its report. "
+                    f"When it finishes, its report is also written to {output_file}."
+                ),
+```
+
+6. In `src/agentos/agentic/session.py`, replace
+
+```python
+                    "subagent_type": builtin_key if builtin_spec is not None else clean,
+                    "status": "running",
+                    "background": True,
+```
+
+   with
+
+```python
+                    "subagent_type": builtin_key if builtin_spec is not None else clean,
+                    "status": "running",
+                    "output_file": output_file,
+                    "background": True,
+```
+
+7. In `src/agentos/agentic/session.py`, replace
+
+```python
+    def _check_subagent(self, agent_id: str, *, wait_seconds: int = 0) -> ToolOutcome:
+```
+
+   with
+
+```python
+    @staticmethod
+    def _agent_output_file(agent_id: str) -> str:
+        """Where a background agent's report is written, relative to the workspace (W5)."""
+        safe = re.sub(r"[^A-Za-z0-9_.-]", "_", str(agent_id))[:120] or "agent"
+        return f".orin/agent-outputs/{safe}.md"
+
+    def _run_background_agent(self, output_file: str, **kwargs: Any) -> ToolOutcome:
+        """Run a background agent and write its report (or why it stopped) to ``output_file``."""
+        outcome = self._execute_subagent_run(**kwargs)
+        try:
+            self.workspace.write_text(output_file, str(outcome.content or outcome.summary or ""))
+        except Exception:  # noqa: BLE001 - a report that cannot be saved is still returned by check_subagent
+            logger.warning("background agent report could not be written to %s", output_file, exc_info=True)
+        return outcome
+
+    def _stop_background_subagent(self, agent_id: str) -> ToolOutcome:
+        """TaskStop for a background agent: it stops at its next step (W5)."""
+        with self._subagent_lock:
+            entry = self._background_subagents.get(str(agent_id))
+        if entry is None:
+            return ToolOutcome(
+                "failed", "Agente não encontrado", f"No background agent '{str(agent_id)[:80]}' in this turn.",
+                {"agent_id": str(agent_id), "tool_kind": "agent"}, "AGENT_NOT_FOUND",
+            )
+        name = str(entry.get("agent_name") or agent_id)
+        output = {"message": "", "task_id": str(agent_id), "task_type": "local_agent"}
+        if entry["future"].done():
+            output["message"] = f"{name} had already finished."
+            return ToolOutcome("succeeded", f"{name} já tinha terminado", output["message"], {"agent_id": agent_id, "tool_kind": "agent"}, data={"tool_output": output})
+        cancel = entry.get("cancel")
+        if cancel is not None:
+            cancel.set()
+        output["message"] = f"Asked {name} to stop; it stops at its next step."
+        return ToolOutcome("succeeded", f"Parou {name}", output["message"], {"agent_id": agent_id, "status": "stopping", "tool_kind": "agent"}, data={"tool_output": output})
+
+    def _check_subagent(self, agent_id: str, *, wait_seconds: int = 0) -> ToolOutcome:
+```
+
+- [ ] **Step 4: Run the tests and see them pass**
+
+Run: `uv run pytest -q tests/unit/agentic/test_background_agents.py`
+Expected: PASS.
+
+Also run `uv run pytest -q tests/unit/agentic tests/unit/agentic/tools`: expected PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add tests/unit/agentic/test_background_agents.py src/agentos/agentic/tools/shell/tasks.py src/agentos/agentic/session.py
+git commit -m "feat(w5): background agents write an output file and stop with TaskStop
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+### Task 11: Batch B regression and ledger
+
+- [ ] **Step 1:** Run `uv run pytest -q tests/unit` (timeout 600000 ms) and `uv run pytest -q tests/integration`. Expected: all pass.
+- [ ] **Step 2:** Append a "## Batch B — Agents in files (Tasks 6–11)" section to `docs/superpowers/plans/2026-10-19-w5-extensibility-ledger.md`: commits, suite results, deviations 9–12, W3-R26 closed by Task 9, the deliberate expectation change of Task 9 (`test_monitor_review_fixes.py::test_a_subagent_is_built_with_the_turn_reminder_queue` now checks the monitor sink and that the subagent's own queue is separate), the Batch A hardening of Task 6, and anything done differently from this plan.
+- [ ] **Step 3:** Commit with `docs(w5): ledger, batch B` + blank line + the Co-Authored-By line.
 
