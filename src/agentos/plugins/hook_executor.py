@@ -45,13 +45,14 @@ def _inside(candidate: Path, root: Path) -> Path:
 def resolve_argv(command: str, *, install_path: Path) -> list[str]:
     if any(token in command for token in DENIED_TOKENS):
         raise HookRejected("hook commands may not use shell operators")
-    # W5: forward slashes, so an unquoted ${CLAUDE_PLUGIN_ROOT}/x survives the POSIX split below on Windows too.
-    root = Path(install_path).as_posix()
-    expanded = command.replace("${CLAUDE_PLUGIN_ROOT}", root).replace("${ORIN_PLUGIN_ROOT}", root)
+    # W5-R14: the declared command is split first and the folder goes into each word afterwards, so a folder with a
+    # space (a Windows profile such as C:\Users\Ana Souza) stays one word, as an unquoted ${CLAUDE_PLUGIN_ROOT} needs.
     try:
-        argv = shlex.split(expanded, posix=True)
+        words = shlex.split(command, posix=True)
     except ValueError as error:
         raise HookRejected("hook command could not be parsed") from error
+    root = str(Path(install_path))
+    argv = [word.replace("${CLAUDE_PLUGIN_ROOT}", root).replace("${ORIN_PLUGIN_ROOT}", root) for word in words]
     if not argv:
         raise HookRejected("hook command is empty")
     head = os.path.basename(argv[0]).lower()
