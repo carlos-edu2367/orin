@@ -108,3 +108,23 @@ def test_managed_settings_can_switch_skill_hooks_off(tmp_path: Path, monkeypatch
     session = _session(tmp_path)
     session._skill_hooks(load_disk_skills(workspace_root=None, trusted=False).get("careful"), None)
     assert session.lifecycle.emit(HookEvent.PRE_TOOL_USE, tool_name="Bash").permission_decision is None and runner.ran == []
+
+
+def test_managed_disable_all_hooks_switches_off_a_managed_skills_hooks(tmp_path: Path, monkeypatch) -> None:
+    """Deviation 39 (review of Task 35): managed settings' disableAllHooks reaches a managed skill's hooks too."""
+    import agentos.agentic.session as session_module
+
+    runner = _Runner()
+    monkeypatch.setattr(session_module, "CommandHookRunner", lambda *args, **kwargs: runner)
+    orin_managed_dir().mkdir(parents=True, exist_ok=True)
+    (orin_managed_dir() / "managed-settings.json").write_text(json.dumps({"disableAllHooks": True}), encoding="utf-8")
+    folder = orin_managed_dir() / "skills" / "careful"
+    folder.mkdir(parents=True)
+    (folder / "SKILL.md").write_text(
+        "---\ndescription: Be careful\nhooks:\n  PreToolUse:\n    - hooks:\n        - {type: command, command: guard}\n---\nx", encoding="utf-8",
+    )
+    session = _session(tmp_path)
+    skill = load_disk_skills(workspace_root=None, trusted=False).get("careful")
+    assert skill.origin == "managed"
+    session._skill_hooks(skill, None)
+    assert session.lifecycle.emit(HookEvent.PRE_TOOL_USE, tool_name="Bash").permission_decision is None and runner.ran == []

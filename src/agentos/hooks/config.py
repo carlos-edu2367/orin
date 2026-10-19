@@ -93,6 +93,12 @@ def _entry(event: HookEvent, matcher: str, source: str, raw: Any) -> HookSpec | 
     return HookSpec(**common, prompt=prompt.strip(), model=model.strip()[:200])
 
 
+def managed_hooks_allowed(settings: EffectiveSettings) -> bool:
+    """Whether a managed skill's or agent's hooks may run (W5): not when managed settings switch every hook off.
+    A user or CLI switch never reaches managed hooks, as for the settings hooks."""
+    return not any(layer.name == "managed" and layer.data.get("disableAllHooks") is True for layer in getattr(settings, "layers", ()))
+
+
 def parse_hook_mapping(declared: Mapping[str, Any], source: str) -> tuple[tuple[HookSpec, ...], tuple[HookConfigError, ...]]:
     """One ``hooks`` object in the Claude Code schema: a settings layer's, or a skill's or agent's frontmatter (W5)."""
     specs: list[HookSpec] = []

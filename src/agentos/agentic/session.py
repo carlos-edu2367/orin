@@ -3118,12 +3118,13 @@ class TurnSession:
         when None). An agent's ``Stop`` hooks run at its ``SubagentStop``. Returns the function that removes them."""
         from dataclasses import replace
 
-        from agentos.hooks.config import non_managed_hooks_allowed, parse_hook_mapping
+        from agentos.hooks.config import managed_hooks_allowed, non_managed_hooks_allowed, parse_hook_mapping
 
         bus = self.lifecycle
         if bus is None or not isinstance(declared, Mapping) or not declared:
             return None
-        if origin != "managed" and not non_managed_hooks_allowed(self.effective_settings):
+        allowed = managed_hooks_allowed(self.effective_settings) if origin == "managed" else non_managed_hooks_allowed(self.effective_settings)
+        if not allowed:
             return None
         specs, errors = parse_hook_mapping(declared, source)
         for error in errors:
