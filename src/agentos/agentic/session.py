@@ -3118,6 +3118,8 @@ class TurnSession:
             interactive_permissions=bool(self.turn.get("interactive_permissions")),
             reminders=self._reminders,
         )
+        # This turn's reminders now receive the conversation's running monitors' output (W4).
+        toolset._attach_monitors()
         agents = self.agents_store.list() if self.agents_store is not None else []
         reader = getattr(self.store, "tool_ledger", None)
         if callable(reader):

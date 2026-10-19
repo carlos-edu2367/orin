@@ -89,6 +89,8 @@ class ShellTaskTools:
                 "content": body,
                 "payload": {"count": len(rows), "processes": rows},
             }
+        if isinstance(pid, str) and pid.strip().startswith("monitor_"):
+            return self._monitor_output(pid.strip(), block=bool(block), wait_seconds=wait_seconds)
         if isinstance(pid, str) and not pid.strip().isdigit():
             return self._agent_task_output(pid.strip(), block=bool(block), wait_seconds=wait_seconds)
         pid = int(pid)
@@ -165,6 +167,8 @@ class ShellTaskTools:
         return outcome
 
     def stop_process(self, pid: int | str) -> dict[str, Any]:
+        if isinstance(pid, str) and pid.strip().startswith("monitor_"):
+            return self._stop_monitor(pid.strip())
         if isinstance(pid, str) and not pid.strip().isdigit():
             raise AgentToolError(
                 f"'{pid}' is not a background command. Stopping a subagent arrives with agent teams; let it finish instead.",
@@ -240,7 +244,7 @@ class TaskStopInput(ToolInput):
 class TaskOutputOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     task_id: str
-    task_type: Literal["local_bash", "local_agent"]
+    task_type: Literal["local_bash", "local_agent", "monitor"]
     status: str
     output: str
     command: str | None = None
@@ -250,7 +254,7 @@ class TaskStopOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     message: str
     task_id: str
-    task_type: Literal["local_bash", "local_agent"]
+    task_type: Literal["local_bash", "local_agent", "monitor"]
     command: str | None = None
 
 

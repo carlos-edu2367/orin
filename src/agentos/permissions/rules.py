@@ -22,7 +22,7 @@ _LEGACY = {"shell": "run_command", "bash": "run_command", "grep": "search_files"
 
 EDIT_FAMILY: frozenset[str] = frozenset({"edit_file", "write_file", "notebook_edit"})
 READ_FAMILY: frozenset[str] = frozenset({"read_file", "view_file", "transcribe_pdf", "list_files", "glob_files", "search_files"})
-SHELL_TOOLS: frozenset[str] = frozenset({"run_command", "powershell"})
+SHELL_TOOLS: frozenset[str] = frozenset({"run_command", "powershell", "monitor"})
 _SUBAGENT_TYPES = {"explore": "explore", "plan": "plan", "general-purpose": "general", "general": "general", "fork": "fork"}
 _COMPOUND_PREFIXES = frozenset({
     "git", "npm", "pnpm", "yarn", "npx", "bun", "cargo", "poetry", "uv", "pip", "python", "python3",
@@ -78,9 +78,9 @@ def rule_applies_to_tool(rule: PermissionRule, internal: str) -> bool:
         return internal in EDIT_FAMILY
     if rule.tool == "read_file":
         return internal in READ_FAMILY
-    # A Bash rule also governs the same command run through PowerShell. Only deny and ask rules reach this
-    # check for shell tools (allow rules go through the engine's per-tool `_bash_allowed`), so it never widens.
-    if rule.tool == "run_command" and internal == "powershell":
+    # A Bash rule also governs the same command run through PowerShell or Monitor. Only deny and ask rules reach
+    # this check for shell tools (allow rules go through the engine's per-tool `_bash_allowed`), so it never widens.
+    if rule.tool == "run_command" and internal in {"powershell", "monitor"}:
         return True
     return rule.tool == internal
 

@@ -86,6 +86,7 @@ from agentos.agentic.tools.orin.preview import PreviewTools
 from agentos.agentic.tools.orin.media import MediaTools
 from agentos.agentic.tools.scheduling.cron import CronTools
 from agentos.agentic.tools.scheduling.wakeup import WakeupTools
+from agentos.agentic.tools.scheduling.monitor import MonitorTools
 from agentos.agentic.tools._shared import (  # noqa: F401 - re-exported for callers and tests
     _SENSITIVE_NAME,
     _PRIVATE_KEY_BLOCK,
@@ -211,6 +212,7 @@ class AgentToolset(
     MediaTools,
     CronTools,
     WakeupTools,
+    MonitorTools,
 ):
     """Builds the tool schemas and executes the model's calls.
 
@@ -811,7 +813,7 @@ class AgentToolset(
         # A model can hallucinate a tool name, so an unknown tool is a result the
         # model reads and corrects, never an exception that kills the turn.
         if self._read_only_mode and name in {
-            "write_file", "edit_file", "notebook_edit", "run_command", "powershell", "stop_process", "verify_project",
+            "write_file", "edit_file", "notebook_edit", "run_command", "powershell", "monitor", "stop_process", "verify_project",
             "generate_image", "generate_audio", "generate_video",
         }:
             return ToolOutcome(
@@ -979,7 +981,7 @@ class AgentToolset(
                         {"tool_kind": definition.kind, "code_mode": True},
                         "CODE_PERMISSION_DENIED",
                     )
-                elif self._code_mode_requires_approval and name in {"write_file", "edit_file", "notebook_edit", "run_command", "powershell", "verify_project"}:
+                elif self._code_mode_requires_approval and name in {"write_file", "edit_file", "notebook_edit", "run_command", "powershell", "monitor", "verify_project"}:
                     path = str(arguments.get("path") or arguments.get("notebook_path") or "")
                     if not (name in {"write_file", "edit_file", "notebook_edit"} and path.replace("\\", "/").lstrip("./").startswith(".orin/plans/")):
                         return ToolOutcome(
@@ -989,7 +991,7 @@ class AgentToolset(
                             {"tool_kind": definition.kind, "code_mode": True},
                             "CODE_PLAN_APPROVAL_REQUIRED",
                         )
-        if self._code_mode_active and name in {"run_command", "powershell"}:
+        if self._code_mode_active and name in {"run_command", "powershell", "monitor"}:
             command = str(arguments.get("command") or "")
             if re.search(r"\b(deploy|release|publish)\b", command, re.IGNORECASE):
                 return ToolOutcome(
@@ -1011,7 +1013,7 @@ class AgentToolset(
                 )
         limit = definition.max_result_size_chars
         err_payload: dict[str, Any] = {"tool_kind": definition.kind}
-        if name in {"run_command", "powershell"}:
+        if name in {"run_command", "powershell", "monitor"}:
             cmd_arg = str(arguments.get("command") or "")[:400]
             if cmd_arg:
                 err_payload["command"] = cmd_arg
@@ -1290,6 +1292,7 @@ class AgentToolset(
 
 
     def close(self) -> None:
+        self._detach_monitors()
         if callable(self._on_close):
             try:
                 self._on_close()
