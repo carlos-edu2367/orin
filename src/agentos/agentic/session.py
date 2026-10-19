@@ -2442,6 +2442,8 @@ class TurnSession:
             project_user_id=str(self.turn.get("user_id") or "").strip() or None,
             media_policy=self.media_policy,
             media_client=self.media_client,
+            scheduler=self._turn_scheduler() if code_mode_active and not read_only_mode else None,
+            schedule_context=self._schedule_context(),
         )
         if permission_broker is not None:
             toolset._permission_broker = permission_broker
@@ -2452,6 +2454,33 @@ class TurnSession:
         if effective_perm_mode == "plan_mode" or self._in_plan_mode:
             toolset._plan_mode_active = True
         return toolset
+
+    def _turn_scheduler(self) -> object | None:
+        """Orin's scheduler over this session's database, for the Code-mode tools that run work later (W4)."""
+        cached = getattr(self, "_scheduler_service", None)
+        if cached is not None:
+            return cached
+        engine = getattr(self.chat_store, "_engine", None)
+        if engine is None:
+            return None
+        from agentos.scheduler.scheduled_chats import ScheduledChatService
+
+        self._scheduler_service = ScheduledChatService(engine)
+        return self._scheduler_service
+
+    def _schedule_context(self) -> dict[str, str]:
+        """Who a job made in this turn runs as, on which model, and in which timezone (W4)."""
+        from agentos.scheduler.cron import local_timezone_name
+
+        from .loop_settings import operator_value
+
+        configured = operator_value(self.effective_settings, "timezone")
+        return {
+            "user_id": str(self.turn.get("user_id") or "").strip(),
+            "provider": str(self.turn.get("provider") or "").strip(),
+            "model_id": str(self.turn.get("model_id") or "").strip(),
+            "timezone": local_timezone_name(configured if isinstance(configured, str) else None),
+        }
 
     def _install_hooks(self) -> None:
         """Subscribe the hooks declared in settings to this session's bus.

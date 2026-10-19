@@ -84,6 +84,7 @@ from agentos.agentic.tools.agents.agent import AgentTools
 from agentos.agentic.tools.git.worktree import WorktreeTools
 from agentos.agentic.tools.orin.preview import PreviewTools
 from agentos.agentic.tools.orin.media import MediaTools
+from agentos.agentic.tools.scheduling.cron import CronTools
 from agentos.agentic.tools._shared import (  # noqa: F401 - re-exported for callers and tests
     _SENSITIVE_NAME,
     _PRIVATE_KEY_BLOCK,
@@ -207,6 +208,7 @@ class AgentToolset(
     WorktreeTools,
     PreviewTools,
     MediaTools,
+    CronTools,
 ):
     """Builds the tool schemas and executes the model's calls.
 
@@ -286,6 +288,8 @@ class AgentToolset(
         file_history: object | None = None,
         user_message_id: str | None = None,
         web_answerer: Callable[[str, str], str | None] | None = None,
+        scheduler: object | None = None,
+        schedule_context: Mapping[str, str] | None = None,
     ) -> None:
         from agentos.code_mode.checkpoints import FileCheckpointStore
         from agentos.code_mode.models import CodePermissionMode, normalize_permission_mode
@@ -300,6 +304,10 @@ class AgentToolset(
         self._history_message_id = str(user_message_id or turn_id or "") or None
         # WebFetch's prompt is answered by the turn's own model through this callable (W4); None answers nothing.
         self._web_answerer = web_answerer
+        # Orin's scheduler and who/what a job made here runs as (W4: CronCreate, ScheduleWakeup, Monitor).
+        # Bound by the trusted turn, never by a tool argument; None publishes none of those tools.
+        self._scheduler = scheduler
+        self._schedule_context: dict[str, str] = {str(k): str(v) for k, v in dict(schedule_context or {}).items() if v}
         self._read_file_lock = threading.Lock()
         self._reported_changes: set[tuple[str, str, str]] = set()
         # (mtime_ns, size) of each path at its last external-change examination; an unchanged stamp is not re-hashed.

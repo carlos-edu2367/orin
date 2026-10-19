@@ -44,6 +44,9 @@ PUBLIC_NAMES: dict[str, str] = {
     "run_subagent": "Agent",
     "use_skill": "Skill",
     "search_mcp_tools": "ToolSearch",
+    "cron_create": "CronCreate",
+    "cron_delete": "CronDelete",
+    "cron_list": "CronList",
     # Orin extras
     "list_files": "ListFiles",
     "view_file": "ViewFile",
