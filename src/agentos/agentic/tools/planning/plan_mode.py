@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping, Literal
 
-from pydantic import Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from agentos.agentic.tools._shared import (
     ContractError,
@@ -157,7 +157,18 @@ class PlanModeTools:
             f"Plano pronto{f': {clean_summary[:140]}' if clean_summary else ''}",
             "\n".join(body_parts),
             payload,
+            data={"tool_output": {
+                "plan": (plan_content or clean_summary or None), "isAgent": False,
+                **({"filePath": str(self.workspace.root / clean_path)} if clean_path else {}),
+            }},
         )
+
+
+class ExitPlanModeOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    plan: str | None
+    isAgent: bool
+    filePath: str | None = None
 
 
 class EnterPlanModeInput(ToolInput):
@@ -244,6 +255,7 @@ SPECS: tuple[ToolSpec, ...] = (
         handler="exit_plan_mode",
         kind="planning",
         input_model=ExitPlanModeInput,
+        output_model=ExitPlanModeOutput,
         public_description='Present the finished plan to the user for approval and leave plan mode.',
         read_only=True,
         order=130,

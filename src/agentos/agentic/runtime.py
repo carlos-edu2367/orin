@@ -66,6 +66,12 @@ AUTOCOMPACT_MARGIN_TOKENS = 13_000
 PREFIX_CACHING_PROVIDERS = frozenset({"anthropic"})
 CONTEXT_COMPACTION_THRESHOLD = 0.82
 CONTEXT_COMPACTION_KEEP_UNITS = 6
+PLAN_MODE_REMINDER_EVERY = 5
+TODO_REMINDER_EVERY = 8
+PLAN_MODE_REMINDER = (
+    "Plan mode is on: explore and read only, change nothing, and finish by presenting the plan with ExitPlanMode "
+    "(exit_plan_mode) when it is ready."
+)
 BROWSER_TOOL_NAMES: frozenset[str] = frozenset()
 CODE_MODE_CORE_TOOLS = frozenset({
     "read_file", "view_file", "transcribe_pdf", "write_file", "edit_file", "notebook_edit",
@@ -304,6 +310,7 @@ class AgenticTurnRuntime:
         self._stop_hook_active = False
         self._stop_continuations = 0
         self._max_tokens_recoveries = 0
+        self._reminder_requests = 0
         # Raised for the rest of the turn after a tool call was cut by the output limit.
         self._output_cap: int | None = None
         self._queued_turn_count = 0
@@ -372,8 +379,25 @@ class AgenticTurnRuntime:
             except Exception:
                 pass
 
+    def _add_periodic_reminders(self) -> None:
+        """Plan mode and an open todo list are restated every few model requests, as Claude Code does."""
+        queue = self.reminders
+        if queue is None or self.toolset is None:
+            return
+        self._reminder_requests += 1
+        count = self._reminder_requests
+        if getattr(self.toolset, "_plan_mode_active", False) and count % PLAN_MODE_REMINDER_EVERY == 1:
+            queue.add("plan_mode", PLAN_MODE_REMINDER, key=f"plan_mode:{count}")
+        todos = getattr(self.toolset, "_todos", None)
+        if isinstance(todos, list) and count % TODO_REMINDER_EVERY == 0:
+            open_items = [item for item in todos if isinstance(item, dict) and str(item.get("status") or "") != "completed"]
+            if open_items:
+                lines = "\n".join(f"- [{item.get('status')}] {str(item.get('content') or item.get('subject') or '')[:200]}" for item in open_items[:20])
+                queue.add("todo", f"Your todo list still has open items; keep it current with TodoWrite:\n{lines}", key=f"todo:{count}")
+
     def _inject_reminders(self, messages: list[dict[str, object]]) -> None:
         """Pending reminders become one user message at the end of the history (append-only, cache-safe)."""
+        self._add_periodic_reminders()
         try:
             pending = self.reminders.drain()
         except Exception:  # noqa: BLE001 - a reminder never breaks a turn
