@@ -67,6 +67,7 @@ def test_a_turn_uses_the_folders_and_fires_directory_added_once(store_and_conver
     bus.subscribe(events.append)
     session = TurnSession.__new__(TurnSession)
     session.turn = {"user_id": "user-1", "conversation_id": conversation_id}
+    session.host_folders = True  # set by __init__ in production; this test builds the object without it (W4-R1)
     session.chat_store = type("Store", (), {"_engine": store._engine})()
     session.effective_settings = type("Settings", (), {"get": lambda self, key, default=None: None})()
     session.lifecycle = bus

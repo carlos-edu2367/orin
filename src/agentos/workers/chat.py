@@ -1340,6 +1340,7 @@ class ChatWorker:
             provider_factory=lambda: self._provider_transport(turn),
             workspace_root=self._workspace_root,
             enable_terminal=self._capabilities.shell,
+            host_folders=self._capabilities.host_folders,
             cancelled=self._is_turn_cancelled,
             file_history_root=orin_paths().data / "file-history",
             reconciliation_required=self._reconciliation_required,

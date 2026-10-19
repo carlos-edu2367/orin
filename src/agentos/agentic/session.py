@@ -871,6 +871,7 @@ class TurnSession:
         plugin_service=None,
         hook_engine=None,
         enable_terminal: bool = True,
+        host_folders: bool = True,
         project_store=None,
         chat_store=None,
         local_workspaces=None,
@@ -909,6 +910,8 @@ class TurnSession:
                 self.file_history = None
         self.effective_settings: EffectiveSettings = empty_settings()
         self.enable_terminal = bool(enable_terminal)
+        # A server profile controls its own workspace, so it never reaches host folders (W4-R1).
+        self.host_folders = bool(host_folders)
         self.store = store
         self.agents_store = agents_store
         self.memory = memory_store
@@ -2506,6 +2509,10 @@ class TurnSession:
         """Give the workspace its checked additional directories and tell the model about them (W4)."""
         from .directories import working_directories
 
+        if not self.host_folders:
+            # Closed host folders: the settings and the stored list are not read at all (W4-R1).
+            self.workspace.additional_roots = ()
+            return
         try:
             found = working_directories(self._additional_directory_sources(), workspace_root=self.workspace.root)
         except Exception:  # noqa: BLE001 - a broken list means no additional directories, never a failed turn
