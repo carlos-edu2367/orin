@@ -240,3 +240,73 @@ Found by reading the code; no test reproduces them.
 - **A teammate can stay busy for the rest of the turn.** `_send_team_message` claims the teammate before `_take_team_mail` and `_ask_agent`, and `_run_subagent` claims it before `_start_subagent`. If one of those raises (for example a database error), nothing releases the claim, so later messages to that teammate return `SUBAGENT_STILL_RUNNING` until the turn ends. The background run releases on an exception; the sender side does not. Suggested fix: wrap the section from the claim to the start in `try` / `except BaseException:` with `self._release_teammate(name)`, then re-raise.
 - **Failure texts mask only values of 4 or more characters, and never the URL path.** `_redacted` replaces environment and header values of at least four characters, and the query string. A shorter header value, or a token in the path, could reach the model in a failure reason. Suggested fix: mask every non-empty value and the path too.
 - **Approval is by settings keys only** (deviation 21). Approved file servers may run any command line (`allow_any_command` for file servers, as the plan specifies), so the approval step is the only guard for project servers. The approval prompt arrives with W7.
+
+## Batch E — The MCP protocol (Tasks 20–26)
+
+### Commits
+
+- `31fd601` feat(w5): the MCP client answers the server's requests and notes its notifications (Task 20)
+- `210f865` feat(w5): legacy SSE and WebSocket transports for MCP servers in configuration files (Task 21)
+- `63a6f8b` feat(w5): stdio MCP servers stop gracefully; MAX_MCP_OUTPUT_TOKENS sets the output limit (Task 22)
+- `0fbc3e5` feat(w5): MCP resources and RefreshMcpTools (Task 23)
+- `7d2b345` feat(w5): MCP prompts run as /mcp__server__prompt commands (Task 24)
+- `84ad5a6` feat(w5): MCP elicitation is declined unless an Elicitation hook answers it (Task 25)
+- the commit that adds this section: docs(w5): ledger, batch E (Task 26)
+
+### Tests added (33 cases: 29 test functions, and 4 parametrized cases from the public contract)
+
+- Task 20: `tests/unit/mcp/test_server_messages.py` (new), 6 tests. Before the implementation: collection error, `ImportError: cannot import name 'METHOD_NOT_FOUND'`.
+- Task 21: `tests/unit/mcp/test_sse_ws_transports.py` (new), 6 tests. Before the implementation: collection error, `ModuleNotFoundError: agentos.mcp.transport_sse`.
+- Task 22: `tests/unit/mcp/test_transport_stdio.py` +2 and `tests/unit/mcp/test_file_mcp_servers.py` +1. Before the implementation: those three failed at run time, as the plan predicted.
+- Task 23: `tests/unit/mcp/test_mcp_resources.py` (new), 4 tests. Before the implementation: 3 failed and `test_the_resource_tools_need_a_connected_server` passed, as the plan predicted. `tests/unit/agentic/tools/test_public_contract.py` gains four entries, which run as four parametrized cases.
+- Task 24: `tests/unit/mcp/test_mcp_prompts.py` (new), 4 tests. Before the implementation: all four failed (`AttributeError: 'McpToolProvider' object has no attribute 'get_prompt'`, and no command reminder).
+- Task 25: `tests/unit/mcp/test_mcp_elicitation.py` (new), 6 tests. Before the implementation: collection error, `ModuleNotFoundError: agentos.mcp.elicitation`.
+
+### Suite results
+
+- Task 20: `tests/unit/mcp/test_server_messages.py`: 6 passed. `tests/unit/mcp`: 153 passed.
+- Task 21: `tests/unit/mcp/test_sse_ws_transports.py`: 6 passed. `tests/unit/mcp`: 159 passed.
+- Task 22: `tests/unit/mcp/test_transport_stdio.py` and `tests/unit/mcp/test_file_mcp_servers.py`: 21 passed. `tests/unit/mcp`: 162 passed.
+- Task 23: `tests/unit/mcp/test_mcp_resources.py`: 4 passed. `tests/unit/agentic/tools tests/unit/permissions`: 743 passed, 6 skipped. `tests/unit/mcp`: 166 passed.
+- Task 24: `tests/unit/mcp/test_mcp_prompts.py`: 4 passed. `tests/unit/agentic/test_disk_skills_session.py`: 5 passed. `tests/unit/mcp`: 170 passed.
+- Task 25: `tests/unit/mcp/test_mcp_elicitation.py`: 6 passed. `tests/unit/hooks tests/unit/mcp`: 267 passed.
+- Task 26, full backend, foreground: `uv run pytest -q tests/unit` (timeout 600000 ms): **3811 passed, 60 skipped, 0 failed** (317 s). Batch D ended at 3778 passed; the difference is the 33 new cases.
+- `uv run pytest -q tests/integration`: **78 passed, 65 skipped, 0 failed** (68 s). All 65 skips need `AGENTOS_TEST_POSTGRES_DSN`, `AGENTOS_POSTGRES_URL` or `AGENTOS_REDIS_URL`, which are not configured on this machine. The same count appeared in Batch D.
+- In the areas this batch touched (`tests/unit/mcp`, `tests/unit/agentic/tools`, `tests/unit/permissions`, `tests/unit/hooks`), the skips are environmental: no ripgrep on this machine, and POSIX-only names. The other unit-suite skips were not audited one by one.
+- `npm --prefix frontend test`: **103 files, 609 tests passed**. Batch E touches no file under `frontend/`, so lint and build were not run.
+- `tests/eval` was not run: it holds the manual model-evaluation matrix (`software_quality_cases.json`), not a pytest suite.
+
+### Deviations from the plan
+
+- **Plan deviations 23–28, as implemented:**
+  23. Elicitation is declined unless an `Elicitation` hook answers it, and the model hears of the request through an `mcp` reminder. Sampling requests are refused. `roots/list` returns an empty list, because `build_client` passes no roots.
+  24. `ReadMcpResourceDir` lists the resources whose address starts with the given uri. Images come back as images; other binary content is described by its size and type, not saved.
+  25. `RefreshMcpTools` replaces a configuration-file server's tools. Orin's own servers keep the approved tools, and the report says `applied: false` with the note. A `list_changed` notice during a call is followed after that call (`_follow_changes`), not during `initialize` or a list call.
+  26. No warning at 10,000 tokens. The cut at `MAX_MCP_OUTPUT_TOKENS` applies: default 25,000 tokens, 4 characters each, clamped to 1,000–250,000 tokens.
+  27. MCP prompts do not appear in a `/` menu. `/mcp__server__prompt args` is handled in `_apply_user_command` through `_apply_mcp_prompt`, and the arguments are split with `shlex` (see observation 2 below).
+  28. SSE and WebSocket serve configuration-file servers only; `McpServerService.propose` refuses them (tested). A stdio server gets `GRACEFUL_EXIT_SECONDS` = 0.3 s to exit after its input closes before its process tree is killed. No Windows Job Object.
+- **Other differences from the plan:**
+  a. Task 20, edit 14: the plan's old block for `_first_sse_payload` also covered the blank lines after it. The function was replaced and the file's existing blank lines before `__all__` were kept. No code effect.
+  b. The commit trailer is `Co-Authored-By: Claude Opus 5.5`, as the owner asked for this branch. The session's attribution note asked for Haiku 5.5, and Batch D's commits use the Haiku line. The owner should decide which one stays, as in Batch D's note (a).
+  c. Git printed "LF will be replaced by CRLF" warnings on some commits. The working copies are CRLF and git normalises them; no content differs from the plan.
+  d. Nothing was deleted and nothing was pushed.
+
+### Expectation changes
+
+- `tests/unit/agentic/tools/test_tool_ledger.py`: `{"included": 32, "deferred": 5, "excluded": 12}` became `{"included": 36, "deferred": 1, "excluded": 12}`.
+- `tests/unit/agentic/tools/test_public_contract.py`: four entries added (`list_mcp_resources`, `read_mcp_resource`, `read_mcp_resource_dir`, `refresh_mcp_tools`).
+- Nothing else in `tests/` was removed or changed: `git diff a9cccce HEAD -- tests` removes only the ledger count line.
+
+### Closed by this batch
+
+- None. The Batch D observations are not about the MCP protocol, so they still stand.
+
+### Observations not fixed (for the owner)
+
+Found by reading the code while implementing the batch. Where a check was run, it is noted.
+
+- **A NaN or infinite number in an elicitation answer is accepted.** `checked_answer` takes any `float`. Checked: `checked_answer({"action": "accept", "content": {"n": float("nan")}})` returns the NaN unchanged, and `json.dumps` writes it as `NaN`, which is not valid JSON, so the server may reject the reply. Suggested fix: decline when `math.isfinite(value)` is false.
+- **Backslashes in `/mcp__…` arguments are lost.** `_apply_mcp_prompt` splits with `shlex.split(arguments, posix=True)`, which treats `\` as an escape. Checked: `C:\work\pr 7` becomes `['C:workpr', '7']`, so a Windows path argument is corrupted on this platform. Suggested fix: split with a regex that honours only quotes, for example `re.findall(r'"([^"]*)"|\'([^\']*)\'|(\S+)', arguments)`, taking the first non-empty group of each match.
+- **A `/mcp__…` message is silently ordinary text when no MCP provider exists.** With a provider but an unknown server, the message is reported ("could not run"); with no provider at all, `_apply_mcp_prompt` returns without a reminder. Suggested fix: add the "could not run: no MCP server is connected" reminder in that branch.
+- **SSE and WebSocket check the address only when the transport is built.** The HTTP transport checks again before every request. `SseTransport` checks the endpoint of each POST but not the stream it opens in `open()`, and `WebSocketTransport.open()` does not check at all. The window is short (build, then initialize). Not tested. Suggested fix: run `checked_url` again at the start of each `open()`.
+- **A graceful stdio close does not kill what the server started.** When the server exits within 0.3 s, `close()` returns without `_terminate_process_tree`, so a child process that outlives its launcher is not killed. This follows the plan (a server that exits on its own is never killed). Not tested.
