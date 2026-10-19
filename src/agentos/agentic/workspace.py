@@ -15,7 +15,7 @@ import shutil
 import subprocess
 
 from agentos.ignore import PathIgnorePolicy
-from agentos.pathsafety import resolve_contained
+from agentos.pathsafety import absolute_inside, is_drive_path, resolve_contained
 
 
 MAX_READ_BYTES = 200_000
@@ -69,7 +69,15 @@ class ConversationWorkspace:
     def resolve(self, path: str) -> Path:
         if not isinstance(path, str) or not path.strip():
             raise WorkspaceError("path must be a non-blank string")
-        candidate = path.strip().replace("\\", "/").lstrip("/")
+        inside = absolute_inside(path, self.root)
+        if inside == "":
+            return self.root
+        if inside is not None:
+            candidate = inside
+        elif is_drive_path(path):
+            raise WorkspaceError("path must stay inside the workspace")
+        else:
+            candidate = path.strip().replace("\\", "/").lstrip("/")
         if not candidate or len(candidate) > 512:
             raise WorkspaceError("path must be a bounded workspace-relative value")
         segments = [segment for segment in candidate.split("/") if segment not in ("", ".")]

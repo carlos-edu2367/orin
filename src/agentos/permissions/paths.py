@@ -12,6 +12,8 @@ import os
 import re
 from pathlib import Path, PurePosixPath
 
+from agentos.pathsafety import absolute_inside
+
 PROTECTED_FILE_NAMES: frozenset[str] = frozenset({
     ".bashrc", ".bash_profile", ".bash_login", ".bash_aliases", ".bash_logout", ".zshrc", ".zprofile",
     ".profile", ".envrc", ".ripgreprc", ".mcp.json", ".claude.json", ".npmrc", ".yarnrc", ".yarnrc.yml",
@@ -85,8 +87,13 @@ def workspace_path(raw: str, root: Path) -> Path:
     Separators are normalized and leading separators dropped, so ``/.env``,
     ``\\.env`` and ``//.env`` name the workspace file the tool will open.
     Drive-qualified paths keep their plain meaning.
+    An absolute path under ``root`` (a drive path, or ``/…`` on POSIX) is that file.
     """
     text = str(raw).strip()
+    inside = absolute_inside(text, root)
+    if inside is not None:
+        segments = [segment for segment in inside.split("/") if segment]
+        return root.joinpath(*segments) if segments else root
     if _DRIVE_PREFIX.match(text):
         candidate = Path(text)
         return candidate if candidate.is_absolute() else root / candidate
