@@ -30,6 +30,7 @@ from agentos.agentic.tools.orin.plugins_admin import SPECS as _orin_plugins_admi
 from agentos.agentic.tools.orin.projects import SPECS as _orin_projects
 from agentos.agentic.tools.orin.media import SPECS as _orin_media
 from agentos.agentic.tools.scheduling.cron import SPECS as _scheduling_cron
+from agentos.agentic.tools.scheduling.wakeup import SPECS as _scheduling_wakeup
 from agentos.agentic.tools.spec import ToolRegistry
 
 
@@ -63,4 +64,5 @@ def default_registry() -> ToolRegistry:
         *_orin_projects,
         *_orin_media,
         *_scheduling_cron,
+        *_scheduling_wakeup,
     ))

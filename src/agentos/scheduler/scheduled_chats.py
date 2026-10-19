@@ -256,6 +256,17 @@ class ScheduledChatService:
             })
         return out
 
+    def count_created_since(self, user_id: str, conversation_id: str, *, source: str, since: datetime) -> int:
+        """How many schedules a tool made for this conversation since ``since``, in any state (W4 wakeup cap)."""
+        with self._engine.connect() as connection:
+            rules = connection.execute(select(schedules.c.rule).join(
+                scheduled_chat_tasks, scheduled_chat_tasks.c.schedule_id == schedules.c.schedule_id,
+            ).where(
+                schedules.c.user_id == user_id, scheduled_chat_tasks.c.conversation_id == conversation_id,
+                schedules.c.created_at >= _utc(since),
+            )).scalars().all()
+        return sum(1 for rule in rules if str(dict(rule or {}).get("source") or "user") == source)
+
     def cancel(self, user_id: str, schedule_id: str) -> bool:
         now = self._clock()
         with self._engine.begin() as connection:

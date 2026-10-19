@@ -85,6 +85,7 @@ from agentos.agentic.tools.git.worktree import WorktreeTools
 from agentos.agentic.tools.orin.preview import PreviewTools
 from agentos.agentic.tools.orin.media import MediaTools
 from agentos.agentic.tools.scheduling.cron import CronTools
+from agentos.agentic.tools.scheduling.wakeup import WakeupTools
 from agentos.agentic.tools._shared import (  # noqa: F401 - re-exported for callers and tests
     _SENSITIVE_NAME,
     _PRIVATE_KEY_BLOCK,
@@ -209,6 +210,7 @@ class AgentToolset(
     PreviewTools,
     MediaTools,
     CronTools,
+    WakeupTools,
 ):
     """Builds the tool schemas and executes the model's calls.
 

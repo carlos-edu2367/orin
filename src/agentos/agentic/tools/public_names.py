@@ -47,6 +47,7 @@ PUBLIC_NAMES: dict[str, str] = {
     "cron_create": "CronCreate",
     "cron_delete": "CronDelete",
     "cron_list": "CronList",
+    "schedule_wakeup": "ScheduleWakeup",
     # Orin extras
     "list_files": "ListFiles",
     "view_file": "ViewFile",
@@ -115,6 +116,7 @@ _RENAMES: dict[str, dict[str, str]] = {
     "read_process_output": {"task_id": "pid"},
     "stop_process": {"task_id": "pid", "shell_id": "pid"},
     "exit_worktree": {"discard_changes": "force"},
+    "schedule_wakeup": {"delaySeconds": "delay_seconds"},
 }
 
 # public keys Orin cannot honour yet (W4 implements them); dropped on the way in
