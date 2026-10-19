@@ -81,19 +81,22 @@ def _resolved(path: Path) -> Path:
 _DRIVE_PREFIX = re.compile(r"^[A-Za-z]:")
 
 
-def workspace_path(raw: str, root: Path) -> Path:
+def workspace_path(raw: str, root: Path, extra_roots: tuple[Path, ...] | list[Path] = ()) -> Path:
     """Target of a tool path, resolved the way ``ConversationWorkspace.resolve`` does.
 
     Separators are normalized and leading separators dropped, so ``/.env``,
     ``\\.env`` and ``//.env`` name the workspace file the tool will open.
     Drive-qualified paths keep their plain meaning.
-    An absolute path under ``root`` (a drive path, or ``/…`` on POSIX) is that file.
+    An absolute path under ``root`` or under one of ``extra_roots`` (the additional working directories; a drive
+    path, or ``/…`` on POSIX) is that file, as the workspace resolves it — so on POSIX too an additional
+    directory's protected paths are checked where they really are.
     """
     text = str(raw).strip()
-    inside = absolute_inside(text, root)
-    if inside is not None:
-        segments = [segment for segment in inside.split("/") if segment]
-        return root.joinpath(*segments) if segments else root
+    for base in (root, *extra_roots):
+        inside = absolute_inside(text, base)
+        if inside is not None:
+            segments = [segment for segment in inside.split("/") if segment]
+            return base.joinpath(*segments) if segments else base
     if _DRIVE_PREFIX.match(text):
         candidate = Path(text)
         return candidate if candidate.is_absolute() else root / candidate

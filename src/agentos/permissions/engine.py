@@ -135,7 +135,7 @@ class PermissionEngine:
         raw = args.get("path") or args.get("file_path") or args.get("notebook_path")
         if not raw:
             return None
-        return workspace_path(str(raw), self.workspace_root)
+        return workspace_path(str(raw), self.workspace_root, self.additional_roots)
 
     def _inside(self, path: Path) -> bool:
         try:
@@ -215,8 +215,8 @@ class PermissionEngine:
         if token.startswith("~"):
             return [Path(token).expanduser()]
         if token.startswith(("/", "\\")):
-            return [Path(token), workspace_path(token, self.workspace_root)]
-        return [workspace_path(token, self.workspace_root)]
+            return [Path(token), workspace_path(token, self.workspace_root, self.additional_roots)]
+        return [workspace_path(token, self.workspace_root, self.additional_roots)]
 
     def _names_protected(self, word: str) -> bool:
         """A shell word that is a protected path, or a wildcard that could select one (W4-R2)."""

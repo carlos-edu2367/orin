@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -79,8 +80,11 @@ def test_the_workspace_resolves_inside_additional_directories_only(dirs, tmp_pat
     workspace_root, other = dirs
     workspace = ConversationWorkspace.at_root(workspace_root)
     target = str(other / "src" / "lib.py")
-    with pytest.raises(WorkspaceError):
-        workspace.resolve(target)  # not a working directory yet
+    if os.name == "nt":
+        with pytest.raises(WorkspaceError):
+            workspace.resolve(target)  # not a working directory yet
+    else:  # W1-R3: on POSIX a leading "/" outside every working directory is read as workspace-relative
+        assert workspace.resolve(target).is_relative_to(workspace_root.resolve())
     workspace.additional_roots = (other.resolve(),)
     assert workspace.resolve(target) == (other / "src" / "lib.py").resolve()
     assert workspace.key(workspace.resolve(target)) == (other / "src" / "lib.py").resolve().as_posix()
@@ -88,8 +92,11 @@ def test_the_workspace_resolves_inside_additional_directories_only(dirs, tmp_pat
     with pytest.raises(WorkspaceError):
         workspace.resolve(str(other / ".." / "workspace2" / "x"))
     (tmp_path / "elsewhere").mkdir()
-    with pytest.raises(WorkspaceError):
-        workspace.resolve(str(tmp_path / "elsewhere" / "x.txt"))
+    if os.name == "nt":
+        with pytest.raises(WorkspaceError):
+            workspace.resolve(str(tmp_path / "elsewhere" / "x.txt"))
+    else:  # W1-R3, as above: never the real outside folder
+        assert workspace.resolve(str(tmp_path / "elsewhere" / "x.txt")).is_relative_to(workspace_root.resolve())
     with pytest.raises(WorkspaceError):
         workspace.key(tmp_path / "elsewhere" / "x.txt")
 
@@ -127,8 +134,9 @@ def test_accept_edits_covers_additional_directories_but_their_protected_paths_st
     assert inside.behavior == "allow"
     hook = engine.decide("write_file", {"path": str(other / ".git" / "hooks" / "pre-commit")}, "accept_edits")
     assert hook.behavior == "ask" and hook.requires_human
-    outside = _engine(workspace, ()).decide("edit_file", {"path": str(other / "src" / "lib.py")}, "accept_edits")
-    assert outside.behavior == "ask"
+    if os.name == "nt":  # on POSIX the same text names a workspace file when no directory is added (W1-R3)
+        outside = _engine(workspace, ()).decide("edit_file", {"path": str(other / "src" / "lib.py")}, "accept_edits")
+        assert outside.behavior == "ask"
 
 
 def test_a_repository_adds_directories_only_once_trusted(dirs) -> None:
