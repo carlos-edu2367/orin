@@ -354,3 +354,64 @@ Execution notes:
 (e) **Closed from Batch E:** the Schedules page now shows tool-made jobs, labelled `pelo agente`, shows `cron <expression>` for cron jobs, and hides finished wakeups and monitor wakes (Task 33).
 
 (f) Still open from Batch E, not touched in this batch: whether a monitor or schedule run that arrives mid-turn queues or is refused was not checked.
+
+## Review fixes
+
+This section covers both passes over `docs/superpowers/reviews/2026-10-18-w4-review.md`. Part 1 is the first pass (commits `fbf4a71`..`eae7cc2`). Part 2 is the second pass, one commit per finding, from `92a143d` to `e6861e2`, with the test-module rename `c0bc57f` between them.
+
+### Part 1: first pass (R1–R6, R14, R17–R19)
+
+- **fbf4a71 R1.** A closed host folder (`host_folders=False`) applies no `permissions.additionalDirectories`: the settings and the directory store are not read, and nothing is announced.
+- **38ea3a6 R2.** Protected paths behind `-Name:value` parameters and wildcard paths ask a person (`requires_human`), in Bash and in PowerShell.
+- **92ee97d R3.** Monitor and PowerShell get the Bash host guard and the auto-mode hard-deny list.
+- **ce8101b R4.** Escaped and nested spellings cannot bypass a deny rule (PowerShell backtick, Bash backslash, `sh -c`, `powershell -Command`, `cmd /c`).
+- **73e8c80 R5.** The Code-mode `git push` and `gh pr` guards decide from the shell analysis. The helper lives in `tools/shell/publish.py`, because `agent_tools.py` hit its 1700-line guard.
+- **17a0be7 R6.** A Bash `cwd` inside an added folder is recorded through `workspace.key()` and restored through `workspace.resolve()`.
+- **4611033 R14.** PushNotification counts per turn in the session, one counter for the main agent and its subagents, and cuts at 180 UTF-16 units. Expectation change: `test_push_notification` cut 200 → 180; the frontend parser limit is 180.
+- **8d58ddd R17.** The Python Grep and Glob walks skip junctions. Helper `linked_or_outside` in `tools/_shared.py`. The ripgrep variant of the test is skipped when no `rg` is configured.
+- **8f8fef2 R18.** ToolSearch indexes every MCP tool (`McpToolSearchEngine.listing()` in `src/agentos/mcp/search.py`). `select:` and `+term` no longer stop at 200.
+- **eae7cc2 R19.** The directory store is built once per session, inside the `try`. An unavailable store is logged and the turn continues. Setup change: `test_conversation_directories` sets `session.host_folders = True`.
+
+### Part 2: second pass (R7–R12, R15, R16, R20)
+
+Tests are named per finding. Each finding was run red first (the failing test was seen to fail for the reason given) unless noted under "Test-first notes".
+
+- **92a143d R7.** A due run whose conversation has a `waiting_user` or `running` turn is deferred: nothing is claimed, `next_fire_at` is kept, and no occurrence row is written. A scheduled `create` no longer closes a waiting turn. Tests: `tests/unit/scheduler/test_scheduler_review_fixes.py`.
+  - Deviation: `queued` does not defer. Existing expectations rely on a scheduled run firing beside a queued first turn, and a queued turn holds no prompt. Deviation: a deferred run is retried at every poll (the schedule is only read and not advanced), not at most once a minute.
+- **196180b R8.** The next run is the first one strictly after `max(logical_at, now)`. Hourly keeps its grid anchored to the logical time. Cron, daily and weekly are computed from the same base. A missed run coalesces into one. Tests: 3-hour gaps for `*/5` cron and for hourly. No expectation changed.
+- **a03da9b R9.** A monitor keeps one pending reminder, rewritten in place with its newest lines, bounded by `MAX_EVENT_CHARS`, with the omitted count. Monitor reminders take at most half the queue (16) and 12,000 characters together; a refused line stays pending. `ReminderQueue.replace()` is new. The subagent toolset receives the turn's reminder queue (`session.py`). Tests: `tests/unit/agentic/tools/test_monitor_review_fixes.py`. No expectation changed.
+- **dc5fcf8 R10.** The rewind is two-phase. Phase 1 checks every file (backup present and matching, directory identity, not too large to copy) and copies each current file into the undo snapshot; if any check fails nothing is written. Phase 2 applies. A blocked rewind returns `blocked: true`, `undo_id: null`, nothing applied, and each blocker in `skipped`. The message route answers `409 rewind_blocked` with `error.details.files` (`_error()` gained `details`). A Write or Edit over a file too large to keep a copy says "this file cannot be rewound". Tests: `tests/unit/code_mode/test_file_history_review_fixes.py`, `tests/unit/api/test_rewind_review_fixes.py`. No existing expectation changed: the old skip reasons are now reported as blockers.
+  - Not done: NotebookEdit does not add the note (the finding names Write and Edit). An I/O error in phase 2 still skips that one file; there is no rollback.
+- **30bfa22 R12.** A working directory that is a link, or that resolves to a path other than the one it was given, refuses its files with `its working directory was replaced after the snapshot`. A link between the directory and the file refuses that file. Tests: Windows junctions through `_winapi.CreateJunction`, skipped elsewhere. The link-inside-the-root case is refused by the directory-identity check first, so its test does not isolate the new chain check.
+- **68b5fb6 R11.** `src/agentos/code_mode/workspace_lock.py` keeps, per normalized folder, a count of running turns and an exclusive rewind. Both rewind routes take the folder exclusively around the busy check and the rewind, so a turn of any chat on that folder answers `409 turn_running`. The chat worker counts a turn for its whole run (`run` → `_run_claimed`) and waits while a rewind holds the folder. Tests: `tests/unit/code_mode/test_workspace_lock.py`, `tests/unit/api/test_rewind_review_fixes.py`.
+  - Deviation: sibling chats are found by folder key, not by listing conversations in the store (the store lists only non-project chats). The lock is process-local. Another Orin process on the same folder is seen only through the database turn state, which the routes still check.
+- **3a97b4a R20.** The snapshot is taken after validation and immediately before the write (`_recorded_write`). A write that then fails drops the entry it added and keeps the entries the message already had. NotebookEdit snapshots at its write. A sharing violation is retried for up to one second. A manifest that exists but cannot be parsed is never overwritten: a snapshot goes to `<message>.recovered-<hash>.json`, which `messages()` and `rewind` merge. A write whose copy cannot be kept is refused with "nothing was changed". Tests: `tests/unit/code_mode/test_file_history_review_fixes.py`.
+  - Deviation: the review's reproduction holds the manifest open for the whole edit. Such an edit is now refused, not recorded. `agent_tools.py` is at 1694 lines against the 1700-line guard.
+- **016070d R15.** `_pinned_public_hop` (`tools/_shared.py`): the name is normalized with UTS 46 once, looked up once, and every answer must be global. `.localhost`, `.local`, `.internal`, `.lan` and single-label names are refused without a lookup. Literal addresses must be global, so 100.64/10 is refused. WebFetch connects to the checked address with `Host` and `sni_hostname` when it uses the production client. An injected transport keeps its URLs, and every hop is still validated. Each redirect hop is checked against the WebFetch deny rules. Tests: `tests/unit/agentic/tools/test_web_fetch_review_fixes.py`.
+  - Not done: `_public_url` keeps its check-then-connect shape for MCP HTTP transport, OAuth netpolicy, web search endpoints and plugin sources. The same DNS gap stays open there. Redirect hops refuse only on a deny rule; an `ask` on a hop is not re-asked. `idna` is imported directly; it is installed as an `httpx` dependency and is not declared in `pyproject.toml`.
+- **e6861e2 R16.** The page cache keeps at most 512 KB per page and 32 MB in total, evicting least recently used by bytes. The body is read in chunks, with a 60-second total deadline and a cancel check between chunks. Added beyond the finding: the body is capped at 8 MB. The page sits in a delimiter drawn for each call (`frame_page`), and the question names that tag. An unanswered page carries the untrusted-content notice. Expectation change: `test_the_session_answers_with_the_turn_model_and_bills_the_turn` asserted the fixed `<page>` tag; it now asserts the per-call tag named in the question. Tests: `tests/unit/agentic/tools/test_web_fetch_review_fixes.py`.
+
+Test module rename, `c0bc57f`: `tests/unit/scheduler/test_w4_review_fixes.py` became `test_scheduler_review_fixes.py`. Its basename collided with `tests/unit/agentic/test_w4_review_fixes.py`, and pytest could not collect the tree.
+
+Test-first notes. R11's lock module was written before its unit tests, so those tests were not seen red; the route test (200 instead of 409) and the worker test (the turn ran at once) were seen red. R10's API test was checked red against the pre-fix routes. R15's tests and R16's tests were red in the first run, and their failures matched the findings.
+
+Verification at the end of this pass: `uv run pytest -q tests/unit` 3665 passed, 59 skipped; `uv run pytest -q tests/integration` 78 passed, 65 skipped; `npm --prefix frontend test` 609 passed; `npm --prefix frontend run lint` clean; `npm --prefix frontend run build` succeeds.
+
+### Can defer
+
+The review's "Can defer" table, with the timing the review gives. Where the review names no wave, the entry says so.
+
+| Id | Severity | Timing from the review |
+|---|---|---|
+| W4-R13 | low | Media tools write files without snapshots. W7: the rewind UI should list "not rewindable" writers. |
+| W4-R21 | low | ripgrep reads parent `.gitignore`/`.ignore` files (`--no-ignore-parent`). Do it with the next Grep change. |
+| W4-R22 | low | Grep parity (CRLF, type mapping, binary detection, timed-out ripgrep). Correctness polish; mark a timed-out search `truncated=True` first. No wave given. |
+| W4-R23 | low | Grep passes `type` and `glob` as separate argv words; hardening. No wave given. |
+| W4-R24 | low | WebSearch host parsing and an unclamped `max_results` (clamp to 20). No wave given. |
+| W4-R25 | low | Skill arguments can contain the wrapper's closing tag. W5 reworks skills on disk. |
+| W4-R26 | low | `READ_ONLY_TOOLS` mixes read-only and never-prompts tools. W6 (permissions UI). |
+| W4-R27 | low | A rewind drops a restored file's hidden attribute and alternate data streams. Cosmetic; no wave given. |
+| W4-R28 | low | File-history storage path is derived from the message id. Fix with the next history change; no wave given. |
+| W4-R29 | low | A NUL character in a path raises `ValueError`. Make `workspace.resolve` reject NUL with `WorkspaceError`; no wave given. |
+
+Of the review's "known limits" rows, these are closed by the fixes above: the check-then-act rewind guard (R11), a scheduled run that closes a pending question (R7), and the WebFetch page cache without a cap (R16). The other rows are unchanged.
