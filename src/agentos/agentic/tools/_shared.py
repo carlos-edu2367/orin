@@ -8,6 +8,7 @@ import difflib
 import hashlib
 from html.parser import HTMLParser
 import itertools
+import idna
 from ipaddress import ip_address
 import json
 import logging
@@ -576,6 +577,54 @@ def _public_url(url: str, *, resolve_dns: bool = False, allow_loopback: bool = F
     if address.is_private or address.is_loopback or address.is_link_local or address.is_reserved:
         raise AgentToolError("Private network addresses cannot be fetched.")
     return url.strip()
+
+
+# W4-R15: names WebFetch never connects to, whatever they resolve to.
+_REFUSED_NAME_SUFFIXES = (".localhost", ".local", ".internal", ".lan")
+
+
+@dataclass(frozen=True, slots=True)
+class PinnedHop:
+    """One validated WebFetch hop: the URL as named, its ASCII host, and the one address it may connect to."""
+
+    url: str
+    host: str
+    address: str
+
+
+def _pinned_public_hop(url: str) -> PinnedHop:
+    """Validate one WebFetch hop and pin it to an address (W4-R15).
+
+    The name is resolved once, and every answer must be a global address. The connection goes to the address
+    returned here, so a second lookup in the transport cannot answer differently. Literal addresses must be global.
+    """
+    parsed = urlparse(url.strip())
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise AgentToolError("Only absolute http(s) URLs can be fetched.")
+    try:
+        # UTS 46 as httpx and the browsers encode it, so one name is one spelling on the wire (W4-R15).
+        host = idna.encode(parsed.hostname, uts46=True).decode("ascii").lower().rstrip(".")
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    except (idna.IDNAError, UnicodeError, ValueError) as error:
+        raise AgentToolError("The URL host is not a valid name.") from error
+    try:
+        literal = ip_address(host)
+    except ValueError:
+        literal = None
+    if literal is not None:
+        if not literal.is_global:
+            raise AgentToolError("Private network addresses cannot be fetched.")
+        return PinnedHop(url.strip(), host, str(literal))
+    if "." not in host or host.endswith(_REFUSED_NAME_SUFFIXES):
+        raise AgentToolError("Local network addresses cannot be fetched.")
+    try:
+        records = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except OSError as error:
+        raise AgentToolError("The URL host could not be resolved safely.") from error
+    addresses = tuple(dict.fromkeys(str(record[4][0]) for record in records if record[4]))
+    if not addresses or any(not ip_address(item).is_global for item in addresses):
+        raise AgentToolError("Private network addresses cannot be fetched.")
+    return PinnedHop(url.strip(), host, addresses[0])
 
 
 def _terminate_pid(pid: int) -> None:

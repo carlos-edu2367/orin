@@ -15,8 +15,9 @@ from agentos.agentic.tools._shared import (
     AgentToolError,
     FETCH_TIMEOUT_SECONDS,
     MAX_FETCH_REDIRECTS,
+    PinnedHop,
     _TextExtractor,
-    _public_url,
+    _pinned_public_hop,
     _safe_display_url,
     sanitize_page_text,
     logger,
@@ -57,6 +58,20 @@ def _remember_page(key: tuple[str, str], page: dict[str, Any]) -> None:
         _FETCH_CACHE.move_to_end(key)
         while len(_FETCH_CACHE) > MAX_FETCH_CACHE_ENTRIES:
             _FETCH_CACHE.popitem(last=False)
+
+
+def _connection_for(hop: PinnedHop, pinned: bool) -> tuple[str, dict[str, str], dict[str, Any]]:
+    """The request URL, headers and extensions for one hop. A pinned hop dials its checked address and keeps the name
+    for the Host header and the TLS server name (W4-R15)."""
+    headers = {"User-Agent": "Orin/1.0 (+local)", "Accept": "text/html,application/json,text/plain;q=0.9"}
+    if not pinned:
+        return hop.url, headers, {}
+    parsed = urlparse(hop.url)
+    port = f":{parsed.port}" if parsed.port else ""
+    address = f"[{hop.address}]" if ":" in hop.address else hop.address
+    headers["Host"] = f"{hop.host}{port}"
+    extensions: dict[str, Any] = {"sni_hostname": hop.host} if parsed.scheme == "https" else {}
+    return parsed._replace(netloc=f"{address}{port}").geturl(), headers, extensions
 
 
 class FetchTools:
@@ -106,52 +121,64 @@ class FetchTools:
         }
 
     def _fetch_page(self, url: str) -> dict[str, Any]:
-        target = _public_url(url, resolve_dns=True)
+        # Production connects to the address each hop was checked at; a test that injects a transport keeps its own
+        # URLs, and every hop is still checked (W4-R15).
+        pinned = self._http_client is None
         client = self._http_client or httpx.Client(timeout=FETCH_TIMEOUT_SECONDS, follow_redirects=False)
         try:
-            current = target
+            current = url
             for redirect_count in range(MAX_FETCH_REDIRECTS + 1):
-                response = client.get(
-                    current,
-                    headers={"User-Agent": "Orin/1.0 (+local)", "Accept": "text/html,application/json,text/plain;q=0.9"},
-                    follow_redirects=False,
-                )
-                if not response.is_redirect:
-                    break
-                location = response.headers.get("location")
-                if not location:
-                    break
-                if redirect_count >= MAX_FETCH_REDIRECTS:
-                    raise AgentToolError("Too many redirects.")
-                current = _public_url(urljoin(current, location), resolve_dns=True)
+                hop = _pinned_public_hop(current)
+                self._refuse_denied_hop(hop.url)
+                request_url, headers, extensions = _connection_for(hop, pinned)
+                with client.stream("GET", request_url, headers=headers, extensions=extensions, follow_redirects=False) as response:
+                    location = response.headers.get("location")
+                    if not response.is_redirect or not location:
+                        data = response.read()
+                        break
+                    if redirect_count >= MAX_FETCH_REDIRECTS:
+                        raise AgentToolError("Too many redirects.")
+                current = urljoin(hop.url, location)
         except httpx.HTTPError as error:
             raise AgentToolError(f"Could not fetch the URL: {type(error).__name__}") from error
         finally:
             if self._http_client is None:
                 client.close()
+        raw = data.decode(response.encoding or "utf-8", errors="replace")
         media = response.headers.get("content-type", "").split(";")[0].strip().lower()
-        raw = response.text
         if media == "application/json":
             try:
-                body = json.dumps(response.json(), ensure_ascii=False, indent=2)
+                body = json.dumps(json.loads(raw), ensure_ascii=False, indent=2)
             except ValueError:
                 body = raw
-            title = current
+            title = hop.url
         elif media in {"text/html", "application/xhtml+xml"} or raw.lstrip()[:1] == "<":
             parser = _TextExtractor()
             parser.feed(raw)
             body = parser.text()
-            title = parser.title or current
+            title = parser.title or hop.url
         else:
             body = raw
-            title = current
-        safe_target = _safe_display_url(current)
+            title = hop.url
+        safe_target = _safe_display_url(hop.url)
         body = sanitize_page_text(body)
         safe_title = sanitize_page_text(title)
         return {
             "url": safe_target, "status": int(response.status_code), "reason": str(response.reason_phrase or ""),
-            "bytes": len(response.content or b""), "title": safe_title, "text": body,
+            "bytes": len(data), "title": safe_title, "text": body,
         }
+
+    def _refuse_denied_hop(self, url: str) -> None:
+        """A redirect target is checked against the WebFetch deny rules too, not only the first URL (W4-R15)."""
+        broker = getattr(self, "_permission_broker", None)
+        if broker is None:
+            return
+        try:
+            behavior = broker.evaluate("fetch_url", {"url": url}, self._permission_mode)
+        except Exception as error:  # noqa: BLE001 - rules that cannot be read refuse the hop
+            raise AgentToolError("This redirect could not be checked against the permission rules.") from error
+        if behavior == "deny":
+            raise AgentToolError("A permission rule denies fetching this redirect target.")
 
 
 class WebFetchInput(ToolInput):
