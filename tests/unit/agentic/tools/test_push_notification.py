@@ -25,7 +25,7 @@ def test_the_message_is_shown_and_reported(tmp_path: Path) -> None:
 def test_long_messages_are_cut_and_turns_are_capped(tmp_path: Path) -> None:
     shown: list[str] = []
     toolset = _toolset(tmp_path, shown)
-    assert len(toolset.invoke("PushNotification", {"message": "x" * 500}).data["tool_output"]["message"]) == 200
+    assert len(toolset.invoke("PushNotification", {"message": "x" * 500}).data["tool_output"]["message"]) == 180  # W4-R14: 180 UTF-16 units
     assert toolset.invoke("PushNotification", {"message": "two"}).status == "succeeded"
     assert toolset.invoke("PushNotification", {"message": "three"}).status == "succeeded"
     refused = toolset.invoke("PushNotification", {"message": "four"})

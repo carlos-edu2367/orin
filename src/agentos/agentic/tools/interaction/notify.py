@@ -7,6 +7,7 @@ Notification hook is fired with it. There is no phone push in Orin, so ``pushSen
 from __future__ import annotations
 
 import logging
+import threading
 from datetime import UTC, datetime
 from typing import Any
 
@@ -18,8 +19,29 @@ from agentos.agentic.tools.spec import ToolInput, ToolSpec
 
 logger = logging.getLogger("agentos.agentic.agent_tools")
 
-MAX_NOTIFICATION_CHARS = 200
+# UTF-16 code units, the unit the web client and the desktop notifier count in: 180 is the smallest limit a renderer applies (W4-R14).
+MAX_NOTIFICATION_UNITS = 180
 MAX_NOTIFICATIONS_PER_TURN = 3
+
+
+def _utf16_units(text: str) -> int:
+    return len(text.encode("utf-16-le")) // 2
+
+
+class NotificationBudget:
+    """The notifications one turn may still show: one counter for the main agent and every subagent (W4-R14)."""
+
+    def __init__(self, limit: int = MAX_NOTIFICATIONS_PER_TURN) -> None:
+        self._limit = limit
+        self._used = 0
+        self._lock = threading.Lock()
+
+    def take(self) -> bool:
+        with self._lock:
+            if self._used >= self._limit:
+                return False
+            self._used += 1
+            return True
 
 
 class NotifyTools:
@@ -29,12 +51,18 @@ class NotifyTools:
         text = " ".join(str(message or "").split())
         if not text:
             raise AgentToolError("message must be a non-blank string")
-        if len(text) > MAX_NOTIFICATION_CHARS:
-            text = text[: MAX_NOTIFICATION_CHARS - 1].rstrip() + "…"
-        sent = int(getattr(self, "_notifications_sent", 0))
-        if sent >= MAX_NOTIFICATIONS_PER_TURN:
+        if _utf16_units(text) > MAX_NOTIFICATION_UNITS:
+            kept: list[str] = []
+            units = 0
+            for character in text:
+                width = _utf16_units(character)
+                if units + width > MAX_NOTIFICATION_UNITS - 1:  # the ellipsis takes one unit
+                    break
+                kept.append(character)
+                units += width
+            text = "".join(kept).rstrip() + "…"
+        if not self._notification_budget.take():
             raise AgentToolError(f"At most {MAX_NOTIFICATIONS_PER_TURN} notifications per turn; put the rest in your answer.")
-        self._notifications_sent = sent + 1
         sent_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
         local_sent = False
         if self._on_notification is not None:
@@ -57,7 +85,7 @@ class NotifyTools:
 
 
 class PushNotificationInput(ToolInput):
-    message: str = Field(description="What to tell the person, in one short sentence (at most 200 characters).")
+    message: str = Field(description="What to tell the person, in one short sentence (at most 180 characters).")
     status: str | None = Field(None, description="Always \"proactive\".")
 
 
@@ -73,7 +101,7 @@ class PushNotificationOutput(BaseModel):
 SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
         key="push_notification",
-        description="Show the person a short notification (at most 200 characters), e.g. when a long task finishes or needs their attention. At most 3 per turn.",
+        description="Show the person a short notification (at most 180 characters), e.g. when a long task finishes or needs their attention. At most 3 per turn.",
         legacy_schema=_schema({"message": _TEXT, "status": _TEXT}, ("message",)),
         handler="push_notification", kind="user_input",
         input_model=PushNotificationInput, output_model=PushNotificationOutput,

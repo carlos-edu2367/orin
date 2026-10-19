@@ -15,6 +15,20 @@ describe('notification.pushed events', () => {
     expect(event.notificationMessage).toBe('Build finished')
   })
 
+  it('keep a message up to the 180-unit limit and drop a longer one', () => {
+    const atLimit = 'a'.repeat(179) + '…'
+    const kept = parseConversationActivityEvent({
+      event_id: 'evt-notice-2', event_type: 'notification.pushed', turn_id: 'turn-1', agent_id: 'agent:main',
+      summary: '', occurred_at: '2026-10-19T12:00:00Z', payload: { message: atLimit },
+    }, '9')
+    expect(kept.notificationMessage).toBe(atLimit)
+    const tooLong = parseConversationActivityEvent({
+      event_id: 'evt-notice-3', event_type: 'notification.pushed', turn_id: 'turn-1', agent_id: 'agent:main',
+      summary: '', occurred_at: '2026-10-19T12:00:00Z', payload: { message: 'a'.repeat(181) },
+    }, '10')
+    expect(tooLong.notificationMessage).toBeUndefined()
+  })
+
   it('ignore a message on any other event', () => {
     const event = parseConversationActivityEvent({
       event_id: 'evt-other-1', event_type: 'turn.completed', agent_id: 'agent:main', summary: '', payload: { message: 'x' },

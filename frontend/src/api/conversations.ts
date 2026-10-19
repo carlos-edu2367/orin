@@ -589,7 +589,8 @@ export function parseConversationActivityEvent(value: unknown, cursor: string): 
     if (trustPath) event.workspaceTrust = { path: trustPath, items }
   }
   assign('occurredAt', optionalText(item.occurred_at, 64))
-  if (type === 'notification.pushed') assign('notificationMessage', optionalText(payload.message, 200))
+  // The backend cuts a notification to 180 UTF-16 units, the limit the desktop notifier applies (W4-R14).
+  if (type === 'notification.pushed') assign('notificationMessage', optionalText(payload.message, 180))
   const contextUsage = parseContextUsage(payload)
   if (contextUsage) event.contextUsage = contextUsage
   const questions = parseUserQuestions(payload.questions)

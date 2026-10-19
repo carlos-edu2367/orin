@@ -50,6 +50,7 @@ from .events import AgentActivityEventType
 from .lifecycle import HookEvent, LifecycleBus
 from .loop_settings import BudgetMeter
 from .reminders import ReminderQueue, system_reminder
+from .tools.interaction.notify import NotificationBudget
 from .phases import PhaseController
 from .runtime import AgenticLimits, AgenticTurnRuntime
 from .workspace import resolve_workspace
@@ -941,6 +942,8 @@ class TurnSession:
         self._hook_dispatcher = None
         # One reminder queue per runtime: the toolset fills it, the runtime drains it before each request.
         self._reminders = ReminderQueue()
+        # PushNotification's per-turn budget, shared by the main agent and every subagent of this turn (W4-R14).
+        self._notification_budget = NotificationBudget()
         self._memory = None
         self.project_store = project_store
         self.chat_store = chat_store
@@ -2448,6 +2451,7 @@ class TurnSession:
             scheduler=self._turn_scheduler() if code_mode_active and not read_only_mode else None,
             schedule_context=self._schedule_context(),
             on_notification=self._push_notification if code_mode_active and not read_only_mode else None,
+            notification_budget=self._notification_budget,
         )
         if permission_broker is not None:
             toolset._permission_broker = permission_broker

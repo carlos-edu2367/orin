@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from agentos.agentic.agent_tools import AgentToolset, AgentToolError
+from agentos.agentic.tools.interaction.notify import NotificationBudget
 from agentos.agentic.tools.shell.publish import publish_actions
 from agentos.agentic.workspace import ConversationWorkspace
 from agentos.settings.paths import orin_user_dir
@@ -181,3 +182,35 @@ def test_a_cd_outside_every_working_directory_is_still_refused(added_folder, tmp
     outcome = toolset.invoke("Bash", {"command": f"cd {outside}"})
     assert outcome.status != "succeeded"
     assert "outside workspace" in outcome.content
+
+
+# -- W4-R14: PushNotification counts per turn and cuts to the renderer limit ------------------------------
+
+def _units(text: str) -> int:
+    return len(text.encode("utf-16-le")) // 2
+
+
+def test_the_per_turn_notification_budget_is_shared_by_every_toolset_of_the_turn(tmp_path: Path) -> None:
+    shown: list[str] = []
+    budget = NotificationBudget()
+    toolsets = [
+        AgentToolset(ConversationWorkspace.at_root(tmp_path), on_notification=shown.append, notification_budget=budget, public_tool_names=True)
+        for _ in range(3)  # the main agent and two subagents of one turn
+    ]
+    for toolset in toolsets:
+        for index in range(4):
+            toolset.invoke("PushNotification", {"message": f"update {index}"})
+    assert len(shown) == 3
+
+
+@pytest.mark.parametrize("message", ["a" * 190, "b" * 150 + "\U0001F680" * 30])
+def test_a_long_notification_is_cut_to_180_utf16_units_and_is_shown(tmp_path: Path, message: str) -> None:
+    shown: list[str] = []
+    toolset = AgentToolset(ConversationWorkspace.at_root(tmp_path), on_notification=shown.append, public_tool_names=True)
+    outcome = toolset.invoke("PushNotification", {"message": message})
+    assert outcome.status == "succeeded", outcome.content
+    output = outcome.data["tool_output"]
+    assert output["localSent"] is True
+    assert _units(output["message"]) <= 180
+    assert output["message"].endswith("…")
+    assert shown == [output["message"]]

@@ -88,7 +88,7 @@ from agentos.agentic.tools.orin.media import MediaTools
 from agentos.agentic.tools.scheduling.cron import CronTools
 from agentos.agentic.tools.scheduling.wakeup import WakeupTools
 from agentos.agentic.tools.scheduling.monitor import MonitorTools
-from agentos.agentic.tools.interaction.notify import NotifyTools
+from agentos.agentic.tools.interaction.notify import NotificationBudget, NotifyTools
 from agentos.agentic.tools._shared import (  # noqa: F401 - re-exported for callers and tests
     _SENSITIVE_NAME,
     _PRIVATE_KEY_BLOCK,
@@ -298,6 +298,7 @@ class AgentToolset(
         scheduler: object | None = None,
         schedule_context: Mapping[str, str] | None = None,
         on_notification: Callable[[str], None] | None = None,
+        notification_budget: NotificationBudget | None = None,
     ) -> None:
         from agentos.code_mode.checkpoints import FileCheckpointStore
         from agentos.code_mode.models import CodePermissionMode, normalize_permission_mode
@@ -317,7 +318,8 @@ class AgentToolset(
         self._scheduler = scheduler
         # PushNotification's transport (W4): records a notification.pushed activity event. None hides the tool.
         self._on_notification = on_notification
-        self._notifications_sent = 0
+        # One budget per turn, shared by every toolset the turn builds (W4-R14).
+        self._notification_budget = NotificationBudget() if notification_budget is None else notification_budget
         self._schedule_context: dict[str, str] = {str(k): str(v) for k, v in dict(schedule_context or {}).items() if v}
         self._read_file_lock = threading.Lock()
         self._reported_changes: set[tuple[str, str, str]] = set()
