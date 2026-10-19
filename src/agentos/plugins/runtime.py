@@ -24,7 +24,7 @@ class ActivePlugin:
     plugin_id: str
     install_path: Path
     manifest: PluginManifest
-    enabled_hook_ids: frozenset[str] = frozenset()  # the hooks the person allowed to run (W5)
+    enabled_hook_ids: frozenset[str] = frozenset()  # consent references ("{hook_id}#{digest}") the person allowed (W5)
 
     def folders(self, relative_paths: Sequence[str]) -> list[Path]:
         return [self.install_path / item for item in relative_paths if (self.install_path / item).is_dir()]

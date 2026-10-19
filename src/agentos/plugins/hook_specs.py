@@ -2,10 +2,11 @@
 
 A plugin's ``hooks/hooks.json`` (or the folder its manifest names) uses the Claude Code schema; every event Orin
 knows may be hooked. A hook runs only if the person allowed it: the plugins screen's consent enables the hooks it
-listed, by id, so a hook added by a later version of the package waits for a new consent. Only ``command`` hooks
-run; each runs without a shell, confined to the plugin's folder (``plugins.hook_executor.resolve_argv``), in the
-project folder, with a minimal environment plus ``CLAUDE_PLUGIN_ROOT``/``ORIN_PLUGIN_ROOT``, the plugin's data folder
-and its options as ``CLAUDE_PLUGIN_OPTION_<KEY>``/``ORIN_PLUGIN_OPTION_<KEY>``. A hook may name a non-sensitive option
+listed, by id and a digest of what each runs, so a hook added or changed by a later version waits for a new consent.
+Only ``command`` hooks run; each runs without a shell, confined to the plugin's folder
+(``plugins.hook_executor.resolve_argv``), in the project folder, with a minimal environment plus
+``CLAUDE_PLUGIN_ROOT``/``ORIN_PLUGIN_ROOT``, the plugin's data folder and its options as
+``CLAUDE_PLUGIN_OPTION_<KEY>``/``ORIN_PLUGIN_OPTION_<KEY>``. A hook may name a non-sensitive option
 in its command (``${user_config.KEY}``); a sensitive one only reaches it through the environment.
 """
 from __future__ import annotations
@@ -46,7 +47,7 @@ def plugin_hook_specs(
             environment[f"CLAUDE_PLUGIN_OPTION_{key.upper()}"] = value
             environment[f"ORIN_PLUGIN_OPTION_{key.upper()}"] = value
         for item in contributions:
-            if item.hook_id not in plugin.enabled_hook_ids:
+            if item.consent_reference not in plugin.enabled_hook_ids:
                 errors.append(HookConfigError(source, f"hook {item.hook_id} waits for the person's consent"))
                 continue
             try:

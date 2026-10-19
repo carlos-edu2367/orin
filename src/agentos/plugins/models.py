@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 from enum import StrEnum
+import hashlib
+import json
 import re
 
 MAX_PLUGIN_ID_LENGTH = 64
@@ -88,6 +90,15 @@ class HookContribution:
     command: str               # raw declared string, ${CLAUDE_PLUGIN_ROOT} unresolved
     timeout_seconds: int
     run_async: bool = False   # W5: "async": true runs it in the background, like a settings hook
+
+    @property
+    def consent_reference(self) -> str:
+        """The consent row's reference: the hook id plus a digest of what it runs (event, matcher, command, timeout).
+
+        A hook runs only while a row with this exact reference is enabled, so a changed hook needs a new consent.
+        """
+        content = json.dumps([self.event, self.matcher, self.command, self.timeout_seconds])
+        return f"{self.hook_id}#{hashlib.sha256(content.encode('utf-8')).hexdigest()[:16]}"
 
 
 @dataclass(frozen=True, slots=True)

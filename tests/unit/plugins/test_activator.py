@@ -118,7 +118,9 @@ def test_hooks_are_installed_without_consent_to_execute(tmp_path):
     )
 
     hook = next(item for item in result.contributions if item["kind"] == "hook")
-    assert hook["reference"] == "demo:SessionStart:0"
+    # W5 review fix: the reference is the hook id plus a digest of what it runs (HookContribution.consent_reference).
+    assert hook["reference"] == inspection.hooks[0].consent_reference
+    assert hook["reference"].startswith("demo:SessionStart:0#")
     assert hook["enabled"] is False
     assert hook["display_name"] == "SessionStart"
 

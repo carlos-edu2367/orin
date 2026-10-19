@@ -54,9 +54,11 @@ class _Plugins:
 
 
 def _row(root: Path, enabled_ids: list[str]) -> dict:
+    # W5 review fix: a consent row's reference is the hook id plus a digest of what it runs; the ids are mapped to it.
+    references = {item.hook_id: item.consent_reference for item in parse_hooks(root / "hooks", plugin_id="kit")[0]}
     return {
         "plugin_id": "kit", "state": "active", "install_path": str(root),
-        "contributions": [{"kind": "hook", "reference": hook_id, "enabled": True} for hook_id in enabled_ids],
+        "contributions": [{"kind": "hook", "reference": references.get(hook_id, hook_id), "enabled": True} for hook_id in enabled_ids],
     }
 
 

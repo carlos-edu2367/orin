@@ -90,7 +90,7 @@ class PluginActivator:
                 # Installing is not authorizing execution: hook rows start
                 # disabled and only the explicit consent action turns them on.
                 contributions.extend(
-                    {"kind": "hook", "reference": item.hook_id, "display_name": item.event, "enabled": False}
+                    {"kind": "hook", "reference": item.consent_reference, "display_name": item.event, "enabled": False}
                     for item in inspection.hooks
                 )
                 if self.hook_engine is not None:

@@ -3,7 +3,13 @@ from pathlib import Path
 
 from agentos.plugins.command_library import CommandLibrary
 from agentos.plugins.hook_engine import HookEngine
+from agentos.plugins.hooks_manifest import parse_hooks
 from agentos.plugins.rehydrate import rehydrate_commands, rehydrate_hooks
+
+
+def _consent_reference(package, index=0):
+    """The consent reference of a package's hook: its id plus a digest of what it runs (W5 review fix)."""
+    return parse_hooks(package / "hooks", plugin_id="demo")[0][index].consent_reference
 
 
 class FakePluginService:
@@ -80,7 +86,7 @@ def test_rehydrate_hooks_registers_active_plugins_with_their_stored_consent(tmp_
     package = _hooks_package(tmp_path / "pkg")
     service = FakePluginService(
         [{"plugin_id": "demo", "state": "active", "install_path": str(package), "package_digest": "abc"}],
-        contributions={"demo": [{"kind": "hook", "reference": "demo:SessionStart:0", "enabled": True}]},
+        contributions={"demo": [{"kind": "hook", "reference": _consent_reference(package), "enabled": True}]},
     )
     engine = HookEngine()
 
@@ -105,16 +111,13 @@ def test_rehydrate_hooks_respects_disabled_consent(tmp_path):
 
 
 def test_rehydrate_hooks_fails_closed_on_partially_consented_rows(tmp_path):
-    """Consent is granted or revoked for every hook row of a plugin at once
-    (see PluginService.set_hooks_enabled), so heterogeneous rows should never
-    occur in practice — but if they somehow did (a partial write, a manual
-    edit), rehydration must not treat that as consent. Mirrors the `all(...)`
-    PluginService.set_enabled already uses for the same question."""
+    """W5 review fix: consent is per hook. A hook runs only while its own row (its id and digest) is enabled; a row
+    for a hook the package does not declare never registers anything, and a plain-id row never counts as consent."""
     package = _hooks_package(tmp_path / "pkg")
     service = FakePluginService(
         [{"plugin_id": "demo", "state": "active", "install_path": str(package), "package_digest": "abc"}],
         contributions={"demo": [
-            {"kind": "hook", "reference": "demo:SessionStart:0", "enabled": True},
+            {"kind": "hook", "reference": _consent_reference(package), "enabled": True},
             {"kind": "hook", "reference": "demo:SessionStart:1", "enabled": False},
         ]},
     )
@@ -122,7 +125,8 @@ def test_rehydrate_hooks_fails_closed_on_partially_consented_rows(tmp_path):
 
     rehydrate_hooks(service, engine, user_id="u1")
 
-    assert engine.dispatch(user_id="u1", event="SessionStart", payload={}) == ()
+    outcomes = engine.dispatch(user_id="u1", event="SessionStart", payload={})
+    assert len(outcomes) == 1 and outcomes[0].hook_id == "demo:SessionStart:0"
 
 
 def test_rehydrate_hooks_ignores_inactive_plugins(tmp_path):

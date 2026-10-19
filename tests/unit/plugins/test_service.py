@@ -202,7 +202,8 @@ def test_get_and_list_expose_the_contribution_rows(tmp_path):
 
     record = service.get("u1", "demo")
     kinds = {item["kind"]: item for item in record["contributions"]}
-    assert kinds["hook"]["reference"] == "demo:SessionStart:0"
+    # W5 review fix: a hook's reference is its id plus a digest of what it runs (see HookContribution.consent_reference).
+    assert kinds["hook"]["reference"].startswith("demo:SessionStart:0#")
     assert kinds["hook"]["enabled"] is False
     assert kinds["skill"]["enabled"] is True
 

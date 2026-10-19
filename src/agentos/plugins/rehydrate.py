@@ -10,6 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .command_library import CommandLibrary
+from .hooks_manifest import consented_hooks
 from .inspector import inspect_plugin_package
 from .models import PluginState
 
@@ -44,14 +45,10 @@ def rehydrate_hooks(plugin_service, hook_engine, *, user_id: str) -> None:
         if not inspection.hooks:
             continue
         contributions = plugin_service._contributions(user_id, plugin_id)
-        # Consent is granted or revoked for every hook row of a plugin at once
-        # (see PluginService.set_hooks_enabled); require all rather than any
-        # so a partially-consented state (a partial write, a manual edit) is
-        # never mistaken for consent. Matches the same all(...) PluginService
-        # already uses for this question.
-        hook_rows = [item for item in contributions if item.get("kind") == "hook"]
-        hooks_enabled = bool(hook_rows) and all(bool(item.get("enabled")) for item in hook_rows)
+        # W5: a hook runs only while its own row (its id and digest) is enabled; a row written before the digest
+        # was part of the reference matches nothing, so it never counts as consent.
+        allowed = [str(item.get("reference") or "") for item in contributions if item.get("kind") == "hook" and item.get("enabled")]
         hook_engine.register(
             user_id=user_id, plugin_id=plugin_id, install_path=Path(str(record["install_path"])),
-            hooks=inspection.hooks, enabled=hooks_enabled,
+            hooks=consented_hooks(inspection.hooks, allowed), enabled=True,
         )

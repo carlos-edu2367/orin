@@ -70,3 +70,9 @@ def parse_hooks(root: Path, *, plugin_id: str) -> tuple[tuple[HookContribution, 
     if len(hooks) > MAX_HOOKS:
         warnings.append(f"o plugin declara mais de {MAX_HOOKS} hooks; o restante foi ignorado")
     return tuple(hooks[:MAX_HOOKS]), tuple(warnings)
+
+
+def consented_hooks(hooks, references) -> tuple[HookContribution, ...]:
+    """The hooks whose exact consent reference (id and digest, see ``HookContribution.consent_reference``) was allowed."""
+    allowed = {str(reference) for reference in references}
+    return tuple(item for item in hooks if item.consent_reference in allowed)

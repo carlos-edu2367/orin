@@ -16,6 +16,7 @@ from agentos.persistence.postgres.schema import plugin_contributions, plugin_mar
 from .activator import PluginActivator
 from .discovery import PluginDiscoveryService
 from .fetcher import FetchRejected, PluginFetcher
+from .hooks_manifest import consented_hooks
 from .inspector import inspect_plugin_package
 from .manifest import ManifestRejected, manifest_file, parse_plugin_manifest
 from .mcp_inference import infer_mcp_launch as _infer_mcp_launch
@@ -234,6 +235,9 @@ class PluginService:
         if not inspection.is_installable:
             raise PluginServiceError("this package contributes nothing Orin can use")
         prior = self.get(user_id, inspection.ref.plugin_id, missing_ok=True)
+        if prior is not None and getattr(self.activator, "hook_engine", None) is not None:
+            # W5: until the new package is approved, the hooks of the previous one stop running.
+            self.activator.hook_engine.unregister(user_id=user_id, plugin_id=inspection.ref.plugin_id)
         if prior is not None and prior["version"] != inspection.ref.version:
             self._delete_record(user_id, inspection.ref.plugin_id)
             self._safe_remove(Path(prior["install_path"]))
@@ -267,28 +271,35 @@ class PluginService:
         record = self.get(user_id, plugin_id)
         target = PluginState.ACTIVE if enabled else PluginState.DISABLED
         current = PluginState(record["state"])
+        if current not in {PluginState.ACTIVE, PluginState.DISABLED}:
+            # W5: an update that waits for approval is approved first; switching it on would skip the person's review.
+            raise PluginServiceError("plugin awaits approval: approve it before turning it on or off", code="plugin_not_approved")
         if current != target and not current.can_transition_to(target):
             raise PluginServiceError(f"plugin cannot transition from {current.value} to {target.value}")
         contributions = self._contributions(user_id, plugin_id)
         inspection = inspect_plugin_package(Path(record["install_path"]), package_digest=record["package_digest"])
         if enabled:
             # A hook's execution consent is a separate, explicitly revocable
-            # decision (see set_hooks_enabled) and is always granted or revoked
-            # for the whole plugin at once; re-activating after a disable must
-            # not silently reset a prior "yes" back to "not authorized".
-            prior_hook_rows = [item for item in contributions if item.get("kind") == "hook"]
-            hooks_were_enabled = bool(prior_hook_rows) and all(bool(item["enabled"]) for item in prior_hook_rows)
+            # decision (see set_hooks_enabled). Re-activating after a disable
+            # keeps it only for a hook whose exact reference (id and digest of
+            # what it runs) was allowed before; a hook changed while the plugin
+            # was off waits for a new consent.
+            allowed_before = {str(item["reference"]) for item in contributions if item.get("kind") == "hook" and item.get("enabled")}
             activation = self._activate(user_id, record, inspection)
             now = _now()
+            allowed_now = [str(item["reference"]) for item in activation.contributions if item["kind"] == "hook" and str(item["reference"]) in allowed_before]
             with self.engine.begin() as connection:
                 connection.execute(delete(plugin_contributions).where((plugin_contributions.c.plugin_id == plugin_id) & (plugin_contributions.c.user_id == user_id)))
                 for item in activation.contributions:
-                    row_enabled = hooks_were_enabled if item["kind"] == "hook" else bool(item.get("enabled", True))
+                    if item["kind"] == "hook":
+                        row_enabled = str(item["reference"]) in allowed_before
+                    else:
+                        row_enabled = bool(item.get("enabled", True))
                     connection.execute(insert(plugin_contributions).values(plugin_id=plugin_id, user_id=user_id, kind=item["kind"], reference=item["reference"], display_name=item["display_name"], enabled=row_enabled, created_at=now))
-            if self.activator.hook_engine is not None and hooks_were_enabled:
+            if self.activator.hook_engine is not None:
                 self.activator.hook_engine.register(
                     user_id=user_id, plugin_id=plugin_id, install_path=Path(record["install_path"]),
-                    hooks=inspection.hooks, enabled=True,
+                    hooks=consented_hooks(inspection.hooks, allowed_now), enabled=True,
                 )
         else:
             self.activator.deactivate(user_id=user_id, plugin_id=plugin_id, contributions=contributions)
@@ -353,6 +364,10 @@ class PluginService:
         allowing third-party code to run are two decisions, revocable apart.
         """
         record = self.get(user_id, plugin_id)
+        state = PluginState(record["state"])
+        if state not in {PluginState.ACTIVE, PluginState.DISABLED}:
+            # W5: an update that waits for approval is approved first; its hooks are code the person has not seen.
+            raise PluginServiceError("plugin awaits approval: approve it before allowing its hooks", code="plugin_not_approved")
         with self.engine.begin() as connection:
             connection.execute(update(plugin_contributions).where(
                 (plugin_contributions.c.plugin_id == plugin_id)
@@ -362,9 +377,12 @@ class PluginService:
         hook_engine = getattr(self.activator, "hook_engine", None)
         if hook_engine is not None:
             inspection = inspect_plugin_package(Path(record["install_path"]), package_digest=record["package_digest"])
+            allowed = [str(item["reference"]) for item in self._contributions(user_id, plugin_id) if item.get("kind") == "hook" and item.get("enabled")]
+            # A disabled plugin's hooks do not run; set_enabled registers them again when the plugin is turned on.
+            running = consented_hooks(inspection.hooks, allowed) if state is PluginState.ACTIVE else ()
             hook_engine.register(
                 user_id=user_id, plugin_id=plugin_id, install_path=Path(record["install_path"]),
-                hooks=inspection.hooks, enabled=enabled,
+                hooks=running, enabled=enabled,
             )
         return self.get(user_id, plugin_id)
 
