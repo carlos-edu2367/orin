@@ -72,6 +72,8 @@ NON_BLOCKING_EVENTS: frozenset[HookEvent] = frozenset({
 # Non-blocking events that may still inject context into the conversation.
 _CONTEXT_EVENTS = frozenset({HookEvent.SESSION_START, HookEvent.SUBAGENT_START, HookEvent.POST_TOOL_USE_FAILURE})
 _DECISION_RANK = {"allow": 1, "ask": 2, "deny": 3}
+# W5: an answer to an MCP elicitation; the more cautious one wins when hooks disagree.
+_ELICITATION_RANK = {"accept": 1, "decline": 2, "cancel": 3}
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,8 +93,14 @@ class LifecycleDecision:
     stop_reason: str | None = None
     additional_context: list[str] = field(default_factory=list)
     system_messages: list[str] = field(default_factory=list)
+    elicitation: dict[str, Any] | None = None  # W5: {"action": accept|decline|cancel, "content": {...}}
 
     def merge(self, other: "LifecycleDecision") -> None:
+        if other.elicitation is not None and (
+            self.elicitation is None
+            or _ELICITATION_RANK.get(str(other.elicitation.get("action")), 0) > _ELICITATION_RANK.get(str(self.elicitation.get("action")), 0)
+        ):
+            self.elicitation = dict(other.elicitation)
         incoming = other.permission_decision if other.permission_decision in _DECISION_RANK else None
         if incoming is not None and _DECISION_RANK[incoming] > _DECISION_RANK.get(self.permission_decision or "", 0):
             self.permission_decision = incoming

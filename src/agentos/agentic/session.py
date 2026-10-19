@@ -3270,6 +3270,22 @@ class TurnSession:
                 notes.append("- this workspace is not trusted yet, so its .mcp.json servers are off")
         if notes:
             self._reminders.add("mcp", "MCP servers from configuration files:\n" + "\n".join(notes[:30]), key="file-mcp-servers")
+        if self.mcp_provider is not None:
+            self.mcp_provider.elicitation_handler = self._mcp_elicitation
+
+    def _mcp_elicitation(self, server: str, params: Mapping[str, Any]) -> dict[str, Any]:
+        """An MCP server asks the person for input during a call (W5): hooks may answer; otherwise it is declined
+        and the model hears of it (the input card arrives with W7)."""
+        from agentos.mcp.elicitation import answer_elicitation
+
+        answer, answered = answer_elicitation(self.lifecycle, server, params)
+        if not answered:
+            question = " ".join(str(params.get("message") or "").split())[:300]
+            self._reminders.add(
+                "mcp", f"The MCP server {server} asked the person for input (\"{question}\"); Orin declined it because it cannot ask yet.",
+                key=f"elicitation:{server}:{uuid4().hex}",
+            )
+        return answer
 
     def _apply_user_command(self, task: str, toolset: AgentToolset) -> None:
         """``/name args`` typed by the person runs that disk skill or command: its instructions join the turn (W5)."""

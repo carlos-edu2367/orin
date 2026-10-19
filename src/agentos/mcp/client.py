@@ -70,6 +70,9 @@ class McpClient:
         except AttributeError:  # a transport that cannot take it simply never delivers server messages
             pass
 
+    def set_elicitation_handler(self, elicit: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None) -> None:
+        self._elicit = elicit
+
     def _handle_server_message(self, message: Mapping[str, Any]) -> Mapping[str, Any] | None:
         method = str(message.get("method") or "")
         params = message.get("params") if isinstance(message.get("params"), Mapping) else {}

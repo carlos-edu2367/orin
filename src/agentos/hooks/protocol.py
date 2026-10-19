@@ -74,6 +74,11 @@ def decision_from_json(event: HookEvent, data: Mapping[str, Any]) -> LifecycleDe
                     decision.stop_reason = decision.reason or "interrupted by hook"
         elif event is HookEvent.POST_TOOL_USE and "updatedMCPToolOutput" in specific:
             decision.updated_tool_output = specific["updatedMCPToolOutput"]
+        elif event in (HookEvent.ELICITATION, HookEvent.ELICITATION_RESULT) and specific.get("action") in {"accept", "decline", "cancel"}:
+            content = specific.get("content")
+            decision.elicitation = {"action": specific["action"]}
+            if specific["action"] == "accept" and isinstance(content, Mapping):
+                decision.elicitation["content"] = dict(content)
     return decision
 
 

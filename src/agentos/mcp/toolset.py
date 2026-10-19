@@ -109,6 +109,8 @@ class McpToolProvider:
         # not safe to drive from two threads, and a refresh must not race itself.
         self._locks: dict[str, threading.Lock] = {}
         self._locks_guard = threading.Lock()
+        # W5: answers a server's request for input during a call: (server slug, request params) -> answer.
+        self.elicitation_handler: Callable[[str, Mapping[str, Any]], Mapping[str, Any]] | None = None
 
     @property
     def open_session_count(self) -> int:
@@ -242,6 +244,10 @@ class McpToolProvider:
                 client = self._client_factory(config, secrets, token_source=self._oauth.token_source(config))
             else:
                 client = self._client_factory(config, secrets)
+            setter = getattr(client, "set_elicitation_handler", None)
+            if callable(setter) and self.elicitation_handler is not None:
+                handler = self.elicitation_handler
+                setter(lambda params, slug=config.slug: handler(slug, params))
             try:
                 client.initialize()
             except Exception:
