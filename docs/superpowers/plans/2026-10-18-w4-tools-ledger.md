@@ -303,3 +303,54 @@ Execution notes (not in the plan):
 (c) If a turn dies before its runtime closes, the reminder queue stays attached to the conversation's monitors until the next turn attaches; lines delivered to that queue are then readable only through TaskOutput. Not exercised.
 (d) Monitors live in the backend process: a restart ends them (their commands are killed at exit). By design.
 (e) Anything done differently from the plan: see the execution notes above.
+
+## Batch F — Working directories and hardening (Tasks 33–39)
+
+Commits (on top of `6515ba1`): `e4290aa` (Task 33, tool-made schedules never authorize git push; the Schedules page lists agent jobs), `0628945` (Task 34, additional working directories in the workspace, the tools and the permission engine), `2b74edd` (Task 35, `/add-dir` folders per conversation, their API and the DirectoryAdded hook), `7e3e3f2` (Task 36, a rewind never races a running turn and restores in added folders), `cf99c02` (Task 37, remove the legacy first-token rule matcher), `e829e3a` (Task 38, the Claude Code tool ledger). Task 39 is this section.
+
+### Suites
+
+- Unit, `uv run pytest -q tests/unit` (timeout 600000 ms): **3385 passed, 58 skipped, 0 failed** (266 s). Before Batch F: 3348 passed, 58 skipped. The 37 new backend tests are the whole difference: Task 33 (6), Task 34 (16), Task 35 (6), Task 36 (5), Task 38 (4).
+- Integration, `uv run pytest -q tests/integration`: **78 passed, 65 skipped, 0 failed** (64 s). Unchanged from Batch E.
+- Frontend, after the last frontend change: `npm --prefix frontend test` **608 passed (103 files)**, one file and one test more than Batch E (`frontend/tests/unit/SchedulesPageAgentJobs.test.tsx`); `npm --prefix frontend run lint` clean with `--max-warnings=0`; `npm --prefix frontend run build` ok (the existing chunk-size warning remains).
+- New backend tests: `tests/unit/code_mode/test_scheduled_push_authorization.py` 5 (three parametrized), `tests/unit/scheduler/test_scheduler_cron.py` +1, `tests/unit/agentic/test_additional_directories.py` 16, `tests/unit/conversations/test_conversation_directories.py` 6, `tests/unit/api/test_rewind_while_running.py` 5, `tests/unit/agentic/tools/test_tool_ledger.py` 4. New frontend test: `SchedulesPageAgentJobs.test.tsx` 1.
+- Targeted runs, each green before its commit: `tests/unit/code_mode/test_scheduled_push_authorization.py tests/unit/scheduler` 39 passed; `tests/unit/agentic tests/unit/permissions tests/unit/code_mode` 1345 passed, 8 skipped; `tests/unit/conversations tests/unit/agentic/test_additional_directories.py tests/unit/persistence` 259 passed and `tests/integration/api/test_profile_isolation.py` 4 passed; `tests/unit/api/test_rewind_while_running.py` 5 passed, `tests/unit/test_orin_code_phase_b.py` 13 passed, `tests/unit/agentic/tools/test_file_history_wiring.py tests/unit/api` 116 passed; `tests/unit/test_orin_code_phase_b.py tests/unit/code_mode tests/unit/permissions` 308 passed, 2 skipped.
+- Red before green: Task 33, the three push cases failed with `True is False`, the scheduler test with `KeyError: 'source'`, the frontend test on the page's load error. Task 34, `ModuleNotFoundError: agentos.agentic.directories`. Task 35, `ModuleNotFoundError: agentos.conversations.directories`. Task 36, the four busy cases failed with `200 == 409` and the message-rewind test did not restore the file. Task 37, no red step: the plan's Step 1 is the removal together with its test rewrite, so the new engine assertions were not seen failing first. Task 38, `ModuleNotFoundError: agentos.agentic.tools.ledger`.
+- Visual check of Task 33 (the `pelo agente` badge, the `cron …` label, `Concluída`): a static Playwright page reproducing the schedule-row markup, loading the real `theme.css`, `index.css` and `agentos.css`. Light and dark at 900 px, dark at 390 px: no horizontal overflow, the badge sits inside the row and stays legible. This is not the live SchedulesPage with backend data.
+
+### Deliberate expectation changes
+
+- Task 33: none. One test was appended to `tests/unit/scheduler/test_scheduler_cron.py`; no existing assertion changed.
+- Task 35: `tests/unit/persistence/test_postgres_schema.py` — the expected table set gains `conversation_directories`. `tests/unit/persistence/test_w3_schema.py` — both head-revision assertions now expect `0049_w4_tools` (replace-all, 2 occurrences). `tests/integration/api/test_profile_isolation.py` — the three `/directories` routes are added to `OWNED` (classification of new routes; no assertion changed).
+- Task 36: `tests/unit/test_orin_code_phase_b.py::test_gateway_tool_permission_rewind_and_four_mode_settings_endpoints` — the stub's conversation state is now a class attribute. The test first asserts the 409 `turn_running` and that the file is untouched, then sets the state to `completed` and asserts the 200 rewind as before.
+- Task 37: the same file's `test_permission_rules_parsing_and_matching` — the three `matches_permission_rule` assertions became four `PermissionEngine.decide` checks, including the compound `npm test && rm -rf build`, which must ask.
+- Tool ledger counts: 31 included, 6 deferred, 12 excluded (`tests/unit/agentic/tools/test_tool_ledger.py`).
+
+### Deviations from the plan
+
+18. **`DirectoryAdded` fires at the start of the next turn**, once per folder added with `/add-dir` since the last turn (as planned). See open item (c).
+19. **Unsafe additional directories are refused**, at most 20 per conversation; `/add-dir` is closed on a server (404) and has no composer command until W7 (as planned).
+
+Execution deviations (not in the plan):
+
+- Task 34: after the plan's edits 12–13, `root = self.workspace.root.resolve()` in `search/grep.py` had no use left (its only use was the replaced `relative_to(root)`). The dead assignment was removed.
+- Task 37: the plan's "replace with an empty block" edits were applied as whole-line removals, including each line's newline, so no blank line is left in the import and export lists (`code_mode/permissions.py`, `code_mode/__init__.py`, the phase-B test import).
+
+Execution notes:
+
+- Commit trailer: the batch brief asked for `Co-Authored-By: Claude Opus 5.5`, and that line is used on every Batch F commit, as on Batch E. The environment's attribution reminder named Haiku 5.5; the brief is the owner's instruction and was followed.
+- Python lint was not run: `ruff` is not installed in this environment and `pyproject.toml` has no ruff or flake8 config. The one dead variable was found by reading the diff.
+
+### Behaviour notes and open items after Batch F
+
+(a) **The rewind guard is check-then-act.** `_turn_in_flight` reads the conversation state and the restore runs afterwards. A turn that starts between the read and the restore is not blocked. Closing that gap needs the turn start and the rewind to share a lock, or a conditional state transition. Not done.
+
+(b) **The per-turn rewind does not reach added folders.** `POST …/turns/{turn_id}/rewind` (`FileCheckpointStore`) restores only the workspace. Files a turn edited in a folder added with `/add-dir` can be restored only through the message rewind. The plan's deviation 19 describes the message rewind; the per-turn endpoint was left as it was.
+
+(c) **A refused folder is never announced.** `ConversationDirectoryStore.take_unannounced` marks each new folder announced before the turn checks that it is usable. A folder that is refused in that turn (for example one that was deleted meanwhile) is never announced. Accepted for now.
+
+(d) **A store is built per call.** `TurnSession._directory_store()` constructs a `ConversationDirectoryStore` each time it is called, and each construction runs `create(checkfirst=True)`. It is called a few times per turn. Correct but wasteful; not changed.
+
+(e) **Closed from Batch E:** the Schedules page now shows tool-made jobs, labelled `pelo agente`, shows `cron <expression>` for cron jobs, and hides finished wakeups and monitor wakes (Task 33).
+
+(f) Still open from Batch E, not touched in this batch: whether a monitor or schedule run that arrives mid-turn queues or is refused was not checked.
