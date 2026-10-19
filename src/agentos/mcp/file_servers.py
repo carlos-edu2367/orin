@@ -43,13 +43,14 @@ def discovery_timeout(environ: Mapping[str, str] | None = None) -> float:
 
 def file_bundle(server: FileServer, *, user_id: str) -> ServerBundle:
     """The server as a tool bundle (no tools yet). Its environment or headers travel as its secrets."""
-    if server.transport not in ("stdio", "http"):
-        raise McpConfigError(f"the {server.transport} transport is not supported yet")
     slug = slugify(server.name)
     stdio = server.transport == "stdio"
+    transport = {"stdio": McpTransport.STDIO, "http": McpTransport.HTTP, "sse": McpTransport.SSE, "ws": McpTransport.WEBSOCKET}.get(server.transport)
+    if transport is None:
+        raise McpConfigError(f"the {server.transport} transport is not supported")
     config = McpServerConfig(
         server_id=f"file:{server.scope}:{slug}", user_id=user_id, slug=slug, display_name=server.name,
-        transport=McpTransport.STDIO if stdio else McpTransport.HTTP, command=server.command or None, args=server.args,
+        transport=transport, command=server.command or None, args=server.args,
         url=server.url or None, state=McpServerState.ACTIVE, origin=server.scope, cwd=server.cwd,
     )
     secrets = dict(server.env) if stdio else {f"header:{name}": value for name, value in server.headers}

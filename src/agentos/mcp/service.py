@@ -182,6 +182,8 @@ class McpServerService:
             transport = McpTransport(str(command.get("transport") or ""))
         except ValueError as error:
             raise McpServiceError("transport must be 'stdio' or 'http'") from error
+        if transport not in (McpTransport.STDIO, McpTransport.HTTP):
+            raise McpServiceError("transport must be 'stdio' or 'http'")  # SSE and WebSocket come only from configuration files
         self._require_transport(transport)
         try:
             slug = slugify(str(command.get("slug") or display_name))

@@ -19,6 +19,9 @@ TOOL_NAME_PREFIX = "mcp"
 class McpTransport(StrEnum):
     STDIO = "stdio"
     HTTP = "http"
+    # W5: only servers in configuration files use these two (the model can propose stdio or http only).
+    SSE = "sse"
+    WEBSOCKET = "ws"
 
 
 class McpServerState(StrEnum):
@@ -87,8 +90,8 @@ class McpServerConfig:
     def __post_init__(self) -> None:
         if self.transport is McpTransport.STDIO and not self.command:
             raise ValueError("a stdio mcp server requires a command")
-        if self.transport is McpTransport.HTTP and not self.url:
-            raise ValueError("an http mcp server requires a url")
+        if self.transport is not McpTransport.STDIO and not self.url:
+            raise ValueError(f"an {self.transport.value} mcp server requires a url")
         if self.slug != slugify(self.slug):
             raise ValueError("mcp server slug is not normalized")
 
