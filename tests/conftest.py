@@ -25,3 +25,7 @@ def _isolated_settings_dirs(tmp_path_factory: pytest.TempPathFactory, monkeypatc
         monkeypatch.setenv(name, str(target))
     # Grep must not depend on a ripgrep the developer configured; the ripgrep tests set it themselves.
     monkeypatch.delenv("ORIN_RIPGREP_PATH", raising=False)
+    # WebFetch's page cache is process-wide: a page cached by one test must not answer another.
+    from agentos.agentic.tools.web.fetch import clear_fetch_cache
+
+    clear_fetch_cache()

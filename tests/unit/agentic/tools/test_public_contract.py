@@ -31,7 +31,7 @@ EXPECTED = {
     "exit_plan_mode": ({"plan", "allowedPrompts"}, []),
     "enter_worktree": ({"name", "base_branch"}, []),
     "exit_worktree": ({"action", "discard_changes"}, ["action"]),
-    "fetch_url": ({"url", "prompt"}, ["url"]),
+    "fetch_url": ({"url", "prompt", "offset"}, ["url", "prompt"]),
     "web_search": ({"query", "allowed_domains", "blocked_domains"}, ["query"]),
     "run_subagent": ({"description", "prompt", "subagent_type", "model", "run_in_background", "resume"}, ["description", "prompt"]),
     "use_skill": ({"skill", "args"}, ["skill"]),

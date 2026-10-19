@@ -117,7 +117,6 @@ _RENAMES: dict[str, dict[str, str]] = {
 # public keys Orin cannot honour yet (W4 implements them); dropped on the way in
 _DROPPED: dict[str, frozenset[str]] = {
     "run_command": frozenset({"dangerouslyDisableSandbox"}),
-    "fetch_url": frozenset({"prompt"}),
     "web_search": frozenset({"allowed_domains", "blocked_domains"}),
     "use_skill": frozenset({"args"}),
 }

@@ -285,6 +285,7 @@ class AgentToolset(
         cancel_check: Callable[[], bool] | None = None,
         file_history: object | None = None,
         user_message_id: str | None = None,
+        web_answerer: Callable[[str, str], str | None] | None = None,
     ) -> None:
         from agentos.code_mode.checkpoints import FileCheckpointStore
         from agentos.code_mode.models import CodePermissionMode, normalize_permission_mode
@@ -297,6 +298,8 @@ class AgentToolset(
         # Per-message file history (W4): what each file held before this user message's turn first changed it.
         self._file_history = file_history
         self._history_message_id = str(user_message_id or turn_id or "") or None
+        # WebFetch's prompt is answered by the turn's own model through this callable (W4); None answers nothing.
+        self._web_answerer = web_answerer
         self._read_file_lock = threading.Lock()
         self._reported_changes: set[tuple[str, str, str]] = set()
         # (mtime_ns, size) of each path at its last external-change examination; an unchanged stamp is not re-hashed.
