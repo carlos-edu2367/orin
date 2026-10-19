@@ -747,6 +747,18 @@ conversation_directories = Table(
 )
 Index("ux_conversation_directories_path", conversation_directories.c.conversation_id, conversation_directories.c.path_key, unique=True)
 
+# W5: messages between the lead agent and its teammates (an agent team), per conversation.
+agent_mailbox = Table(
+    "agent_mailbox", metadata,
+    Column("id", Integer, primary_key=True), Column("message_id", String(255), nullable=False, unique=True),
+    Column("conversation_id", String(255), nullable=False), Column("user_id", String(255), nullable=False),
+    Column("team_name", String(64), nullable=False), Column("sender", String(64), nullable=False),
+    Column("recipient", String(64), nullable=False), Column("content", Text, nullable=False),
+    Column("summary", String(200), nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False), Column("delivered_at", DateTime(timezone=True), nullable=True),
+)
+Index("ix_agent_mailbox_pending", agent_mailbox.c.conversation_id, agent_mailbox.c.recipient, agent_mailbox.c.delivered_at)
+
 # The chat transcript is a projection of an execution, not its recovery
 # authority.  These records are deliberately narrow: they hold the durable
 # decision boundary around an external effect and references to the private
