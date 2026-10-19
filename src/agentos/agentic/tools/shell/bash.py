@@ -89,10 +89,9 @@ class BashTools:
             if not raw_target:
                 continue
             candidate = (current / raw_target).resolve()
-            try:
-                candidate.relative_to(root_resolved)
-            except ValueError as error:
-                raise AgentToolError("Directory outside workspace is not allowed.") from error
+            # The workspace and every additional working directory are roots: a cd may stay in any of them (W4-R6).
+            if not any(candidate.is_relative_to(root) for root in (root_resolved, *self.workspace.additional_roots)):
+                raise AgentToolError("Directory outside workspace is not allowed.")
             if precheck and re.match(r"(?i)^cd(?:\s+/d)?\s+(.+)$", command.strip()):
                 if not candidate.is_dir():
                     raise AgentToolError(f"'{raw_target}' is not a directory in this workspace")
@@ -114,7 +113,8 @@ class BashTools:
 
     def _remember_session_cwd(self) -> None:
         try:
-            relative = self._current_cwd.resolve().relative_to(self.workspace.root.resolve()).as_posix() or "."
+            # workspace.key: relative under the root, absolute under an added folder, so it restores through resolve (W4-R6).
+            relative = self.workspace.key(self._current_cwd.resolve())
             path = self.workspace.root / SESSION_CWD_PATH
             path.parent.mkdir(parents=True, exist_ok=True)
             temporary = path.with_name(f"cwd.{uuid4().hex}.tmp")
@@ -560,7 +560,7 @@ class BashTools:
             if artifact_path and (change_baseline is None or artifact_path not in change_baseline or artifact_path not in self._read_file_state):
                 self._record_file_read(artifact_path, explicit_read=False)
         self._queue_reindex(artifacts)
-        rel_cwd = self._current_cwd.resolve().relative_to(self.workspace.root.resolve()).as_posix() or "."
+        rel_cwd = self.workspace.key(self._current_cwd.resolve())
         cwd_prefix = f"[cwd: {rel_cwd}]\n" if rel_cwd != "." else ""
         if re.search(r"\boperation\s+cancel+ed\b", body, re.IGNORECASE) and not artifacts:
             raise AgentToolError(

@@ -137,3 +137,47 @@ def test_a_push_spelling_is_allowed_with_push_permission(code_mode_toolset, comm
     outcome = make(permits_push=True).invoke("Bash", {"command": command, "description": "push"})
     assert outcome.error_code != "CODE_PUSH_CONFIRMATION_REQUIRED", outcome.content
     assert started, "the permitted push should reach the process layer (and is stopped there)"
+
+
+# -- W4-R6: Bash cwd inside an additional working directory ----------------------------------------------
+
+@pytest.fixture()
+def added_folder(tmp_path: Path):
+    root, other = tmp_path / "workspace", tmp_path / "other"
+    root.mkdir()
+    (other / "sub").mkdir(parents=True)
+    workspace = ConversationWorkspace.at_root(root)
+    workspace.additional_roots = (other.resolve(),)
+    return workspace, other.resolve()
+
+
+def test_a_bash_cwd_in_an_added_folder_runs_once_and_is_recorded(added_folder) -> None:
+    workspace, other = added_folder
+    toolset = AgentToolset(workspace, public_tool_names=True, enable_terminal=True)
+    first = toolset.invoke("Bash", {"command": "echo run-1 >> counter.txt", "cwd": str(other)})
+    assert first.status == "succeeded", first.content
+    assert (other / "counter.txt").read_text().split() == ["run-1"]
+    second = toolset.invoke("Bash", {"command": "echo run-2 >> counter.txt"})
+    assert second.status == "succeeded", second.content
+    assert (other / "counter.txt").read_text().split() == ["run-1", "run-2"]
+    # The next turn's toolset restores the directory through workspace.resolve.
+    later = AgentToolset(workspace, public_tool_names=True, enable_terminal=True)
+    assert later._current_cwd == other
+
+
+def test_a_cd_inside_an_added_folder_is_accepted(added_folder) -> None:
+    workspace, other = added_folder
+    toolset = AgentToolset(workspace, public_tool_names=True, enable_terminal=True)
+    outcome = toolset.invoke("Bash", {"command": "cd sub", "cwd": str(other)})
+    assert outcome.status == "succeeded", outcome.content
+    assert toolset._current_cwd == (other / "sub").resolve()
+
+
+def test_a_cd_outside_every_working_directory_is_still_refused(added_folder, tmp_path: Path) -> None:
+    workspace, _ = added_folder
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    toolset = AgentToolset(workspace, public_tool_names=True, enable_terminal=True)
+    outcome = toolset.invoke("Bash", {"command": f"cd {outside}"})
+    assert outcome.status != "succeeded"
+    assert "outside workspace" in outcome.content
