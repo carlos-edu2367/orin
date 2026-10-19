@@ -1,11 +1,16 @@
-"""W5 review fixes, part 2 (docs/superpowers/reviews/2026-10-19-w5-review.md): plugin hook commands (W5-R14)."""
+"""W5 review fixes, part 2 (docs/superpowers/reviews/2026-10-19-w5-review.md): plugin hook commands (W5-R14) and the
+plugin fetcher's links (W5-R15)."""
 from __future__ import annotations
 
+import json
+import sys
 from pathlib import Path
 
 import pytest
 
+from agentos.plugins.fetcher import FetchRejected, PluginFetcher
 from agentos.plugins.hook_executor import HookRejected, resolve_argv
+from agentos.plugins.sources import resolve_source
 
 
 def _package_in(tmp_path: Path) -> Path:
@@ -35,3 +40,23 @@ def test_the_folder_substitution_keeps_the_confinement(tmp_path: Path) -> None:
     for command in ("python ${CLAUDE_PLUGIN_ROOT}/../outside.py", '"${CLAUDE_PLUGIN_ROOT}/../outside.py"'):
         with pytest.raises(HookRejected):
             resolve_argv(command, install_path=root)
+
+
+# W5-R15: a junction in a local plugin folder ----------------------------------------------------------------------
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="a junction is a Windows link (no admin rights needed)")
+def test_a_junction_in_a_local_package_refuses_the_package(tmp_path: Path) -> None:
+    import _winapi
+
+    outside = tmp_path / "outside-secrets"
+    outside.mkdir()
+    (outside / "id_rsa").write_text("PRIVATE KEY (stand-in)", encoding="utf-8")
+    package = tmp_path / "pkg"
+    (package / ".claude-plugin").mkdir(parents=True)
+    (package / ".claude-plugin" / "plugin.json").write_text(json.dumps({"name": "kit", "version": "1.0.0"}), encoding="utf-8")
+    _winapi.CreateJunction(str(outside), str(package / "linked"))
+    with pytest.raises(FetchRejected, match="unsafe path or symlink"):
+        PluginFetcher(tmp_path / "plugins").fetch(resolve_source(str(package)))
+    plugins = tmp_path / "plugins"
+    assert not plugins.exists() or not list(plugins.rglob("id_rsa"))  # nothing was installed

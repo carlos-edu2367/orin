@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 import tempfile
 
@@ -18,6 +19,13 @@ from .sources import PluginSource
 
 class FetchRejected(ValueError):
     pass
+
+
+def _is_link(item: Path) -> bool:
+    """A symlink, a junction, or another reparse point (Windows)."""
+    if item.is_symlink() or item.is_junction():
+        return True
+    return bool(getattr(item.lstat(), "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT)
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,7 +138,8 @@ class PluginFetcher:
         total, files = 0, 0
         for item in path.rglob("*"):
             relative = item.relative_to(path)
-            if item.is_symlink() or any(part in {"", ".."} for part in relative.parts) or relative.is_absolute():
+            # W5-R15: a junction (or another reparse point) is copied with what it points at, so it is refused like a symlink.
+            if _is_link(item) or any(part in {"", ".."} for part in relative.parts) or relative.is_absolute():
                 raise FetchRejected("plugin package contains an unsafe path or symlink")
             if item.is_file():
                 files += 1
