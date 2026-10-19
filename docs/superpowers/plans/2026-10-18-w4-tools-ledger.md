@@ -416,3 +416,29 @@ The review's "Can defer" table, with the timing the review gives. Where the revi
 | W4-R29 | low | A NUL character in a path raises `ValueError`. Make `workspace.resolve` reject NUL with `WorkspaceError`; no wave given. |
 
 Of the review's "known limits" rows, these are closed by the fixes above: the check-then-act rewind guard (R11), a scheduled run that closes a pending question (R7), and the WebFetch page cache without a cap (R16). The other rows are unchanged.
+
+## Coordinator verification (W4 close)
+
+- Each batch's plan was prototyped on a scratch worktree and re-applied to a clean tree from the plan text before execution (Batches E and F byte-identical to their prototypes). Each batch's commits were diffed against that application. The only differences were the ones the executors reported: a removed dead line in `grep.py` and blank lines.
+- Two defects were found while verifying Batch E and fixed in Batch F Task 33:
+  - a tool-made schedule's model-written message counted as the person's `git push` authorization;
+  - the Schedules page parser threw on the `cron` recurrence.
+- Review: the first reviewer and its web/search helper were both stopped part-way by an automated content filter. The coordinator re-ran every reproduction script on the branch and finished the review (`6028a4a`): 19 must-fix findings and 10 deferred.
+- R11 was first fixed with an in-process lock. The desktop app runs the API and the chat worker as separate processes, so it was sent back and finished with marker files (`bb713b2`).
+- Final suites at `2fd3c4e`:
+  - `uv run pytest -q tests/unit` gave **3670 passed, 59 skipped, 0 failed**.
+  - `uv run pytest -q tests/integration` gave **78 passed, 65 skipped**.
+  - `npm --prefix frontend test` gave **609 passed** in 5 of 6 runs. One run had one failure that did not reproduce in 5 re-runs; the failing test could not be identified. This is recorded as a flaky frontend test to watch.
+  - Lint and build were clean.
+- Visual check on the branch code (worktree at `bc9305a`, temporary harness outside the repository, Playwright), in desktop dark and 375 px light. No horizontal overflow and no page errors in any state:
+  - AskUserQuestion card: initial, preview and error states;
+  - PushNotification toast: short and long messages, keyboard focus, dismissed;
+  - Schedules page: list, empty and error states, with the agent-made badge.
+- Residuals carried forward:
+  - R15's single-resolution check covers WebFetch only. MCP HTTP, OAuth, web-search endpoints and plugin sources keep check-then-connect; their URLs are configured by the person, not chosen by the model.
+  - The R11 markers rely on both processes sharing `ORIN_RUN_DIR`.
+  - A failure during phase 2 of a rewind is not rolled back.
+  - NotebookEdit has no "cannot be rewound" note.
+  - R7 defers scheduled runs only while a turn waits or runs, not while one is queued.
+  - The deferred items (R13, R21–R29) and the known limits listed in the review.
+- Not verified here: PostgreSQL, Linux/POSIX paths, a live provider, the Electron runtime.
