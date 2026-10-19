@@ -371,3 +371,59 @@ Found by reading the code while implementing the batch. Where a check was run, i
 - **Marketplace references:** `search` returns the server-side absolute path of a relative plugin as its `reference`, so a person sees the server's path. A bare relative source without `./` (`plugins/fmt`) is read as GitHub `owner/repo`. Not fixed; the plan specifies the `./` form.
 - **Frontmatter size:** the lenient reader does not cap the size of the frontmatter before YAML parsing. The disk loader from Batch A has the same property; not changed here.
 - **Batch G:** plugin hooks, and options for hooks, are not in this batch.
+
+## Batch G — One hook system (Tasks 33–36)
+
+### Commits
+
+- `8446e98` fix(w5): MCP hardening — finite elicitation numbers, Windows paths in prompt arguments, address re-checks (Task 33)
+- `722fe60` feat(w5): plugin hooks run in the settings hooks' dispatcher (Task 34)
+- `79c4fd7` feat(w5): a skill's or agent's own hooks run for the agent that uses it (Task 35)
+- `6aaba17` fix(w5): managed disableAllHooks also switches off a managed skill's or agent's hooks (executor deviation 39, separate commit)
+- the commit that adds this section: docs(w5): ledger, batch G (Task 36)
+
+### Tests added (15 test functions, all passing)
+
+- Task 33: 4 functions, one in each of the three planned files (elicitation: 1, prompts: 2, transports: 1). Red before the fix: all four failed, as the plan predicted. Green after: `tests/unit/mcp` 182 passed.
+- Task 34: `tests/unit/plugins/test_plugin_hooks_unified.py` (new), 6 tests. Red: collection error. The import that fails first is `non_managed_hooks_allowed` (the test file imports it before `hook_specs`), not the `ModuleNotFoundError` for `hook_specs` that the plan quoted; both are collection errors. Green after.
+- Task 35: `tests/unit/hooks/test_scoped_hooks.py` (new), 4 tests from the plan, and 1 added by the executor (deviation 39). Red: collection error (`parse_hook_mapping`) for the four plan tests. The added test was red with the decision `deny` still returned for a managed skill's hook. Green after the fix.
+
+### Suite results
+
+- `uv run pytest -q tests/unit` (foreground, timeout 600000 ms): **3851 passed, 60 skipped, 0 failed** (283 s). Batch F ended at 3836; the difference is the 15 new test functions above.
+- `uv run pytest -q tests/integration`: **78 passed, 65 skipped, 0 failed** (63 s). The 65 skips are the Postgres-optional tests: `AGENTOS_TEST_POSTGRES_DSN`, `AGENTOS_POSTGRES_URL` and `AGENTOS_REDIS_URL` are not set on this machine.
+- `npm --prefix frontend test`: **103 files, 609 tests passed**. No file under `frontend/` changed in this batch, so lint and build were not run.
+- The 60 unit skips, from the 29 files that carry skip markers: 43 "the fake runtimes are POSIX shell scripts", 5 "no ripgrep on this machine", and the rest are symlink and POSIX file-mode checks. Shell-script hook tests therefore did not run on this Windows machine; the Batch G tests use the running Python interpreter instead.
+
+### Deviations from the plan
+
+- **Plan deviations 35–38, as implemented:**
+  35. A plugin hook runs only if its id is in the person's consent (`ActivePlugin.enabled_hook_ids`, read from the contribution rows). It runs `command` handlers only, through `resolve_argv` with no shell, in the project folder, with the allowlisted environment, `plugin_variables` and the option values. A hook naming a sensitive option in its command is skipped with an error.
+  36. The worker no longer calls `rehydrate_hooks`, and the turn-local `HookEngine` stays empty. `plugins/hook_engine.py` and `plugins/rehydrate.py` remain in the code and their tests still pass; nothing was deleted.
+  37. A skill's hooks are registered at its first use, once per (skill, agent), and removed with the settings hooks at turn start or on a refused configuration change. An agent's hooks are removed in the `finally` of `_execute_subagent_run`, after its `SubagentStop`, and an agent's `Stop` becomes `SubagentStop` for it. The worker calls `build_runtime` once per turn (`workers/chat.py`), so the removal does not run mid-turn.
+  38. Recorded in the plan. The stdio exit behaviour is Batch E code and was not changed here.
+- **Deviations found by the executor (not in the plan):**
+  a. Task 34, plan items 4 and 22: the stub line and the import line are removed together with their line endings, not replaced by an empty line. No behaviour change.
+  b. Task 34, Step 2: the first missing name reported is `non_managed_hooks_allowed` (see the test note above).
+  c. Task 35, deviation 39: `_scoped_hooks` skipped the managed-settings check for managed skills and agents (origin `managed`), so a managed `disableAllHooks` did not switch their hooks off, contrary to deviation 37. Fixed: a `managed_hooks_allowed` helper in `hooks/config.py` is used for managed origins; user and CLI switches still never reach managed hooks, as for the settings hooks. Test: `test_managed_disable_all_hooks_switches_off_a_managed_skills_hooks`. Committed separately as `6aaba17`.
+  d. Task 33: while appending the prompt test, the backslashes were typed single where the plan has double. Caught by a `SyntaxWarning` and by a check of the file against the plan; corrected to the plan's text before the tests ran.
+  e. Every "replace … with" block of Tasks 33–35 was checked against the plan text with a script. It caught one mistyped line (the `MIN_TIMEOUT, DEFAULT_TIMEOUT, MAX_TIMEOUT` line in `hooks_manifest.py`), which was corrected before the tests ran.
+  f. The commit trailer is `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`, as the owner requires for this branch.
+  g. Git printed "LF will be replaced by CRLF" warnings. The files edited with the Edit tool keep the line endings they had: the CRLF files stayed entirely CRLF and the LF files stayed LF.
+  h. Nothing was deleted, nothing was pushed, and the branch was not switched.
+
+### Expectation changes (the only existing tests changed)
+
+- `tests/unit/plugins/test_hooks_manifest.py`, three cases: (1) `test_the_reference_hooks_file_yields_three_hooks` now asserts `hooks[0].run_async is True and warnings == ()` instead of the "async" warning; (2) `test_an_unsupported_event_is_warned_not_dropped_silently` is renamed `test_an_unknown_event_is_warned_not_dropped_silently` and uses `NotAnEvent`, because `PreToolUse` is now a supported event; (3) `test_timeout_is_clamped` expects 600 instead of 30.
+- `tests/unit/workers/test_multi_session_concurrency.py`: one stub line removed (`monkeypatch.setattr(chat_module, "rehydrate_hooks", ...)`), because `workers/chat.py` no longer imports `rehydrate_hooks` and `monkeypatch.setattr` would fail on the missing attribute.
+
+### Not verified, or left for later (for the owner)
+
+- **Plugin hook consent is tied to the hook id, not to its content (decision needed).** Hook ids are `{plugin}:{Event}:{index}`, and `plugin_hook_specs` reads each command from the installed package at every turn. The recorded `package_digest` is stored but never compared with the files (`inspector.py`), so nothing notices a change on disk. Two consequences:
+  (a) If a package changes the command of an id the person already consented to, or inserts a hook earlier in the same event (which shifts the indexes), the new command runs under the old consent.
+  (b) `set_enabled(enabled=True)` in `plugins/service.py` (around lines 279–287) gives every hook row of the re-activated package the previous "all hooks were enabled" flag. A hook a later version adds is therefore enabled without a new consent, which contradicts deviation 35. This is Batch F code.
+  Not fixed here: the full fix needs a schema change. Suggested fix: store a digest of event, matcher and command with each hook consent row (a new column and a migration), run a hook only when its current digest matches the consented one, return any other hook as "waits for consent", and carry consent into a re-activation only per (id, digest).
+- **Windows hook paths and symlinks:** not tested. Whether a symlink inside a plugin folder can point outside it was not checked.
+- **Postgres:** Batch G adds no migration, but the 65 integration skips were not run here.
+- **POSIX:** the 43 shell-script hook tests were skipped on this machine, so the POSIX runner path is covered only by the test code, not by a run.
+- **Frontend:** only `npm --prefix frontend test` was run; no frontend file changed.
