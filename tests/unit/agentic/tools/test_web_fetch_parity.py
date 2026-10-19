@@ -120,7 +120,11 @@ def test_the_session_answers_with_the_turn_model_and_bills_the_turn(tmp_path: Pa
     assert session._web_answer("price?", "The basic plan costs 12 dollars.") == "12 dollars"
     request = provider.requests[0]
     assert request["model"] == "some-model" and request["tools"] == []
-    assert "untrusted" in request["messages"][0]["content"] and "<page>" in request["messages"][1]["content"]
+    # W4-R16: the page sits in a block with a tag drawn for this call, and the question names that tag.
+    user = request["messages"][1]["content"]
+    tag = user.split("tagged ", 1)[1].split(".", 1)[0]
+    assert "untrusted" in request["messages"][0]["content"]
+    assert f"<{tag}>" in user and f"</{tag}>" in user
     assert session._budget_meter.total == Decimal("0.01")
     assert session.build_runtime().toolset._web_answerer == session._web_answer
 
