@@ -170,9 +170,11 @@ class ShellTaskTools:
         if isinstance(pid, str) and pid.strip().startswith("monitor_"):
             return self._stop_monitor(pid.strip())
         if isinstance(pid, str) and not pid.strip().isdigit():
-            raise AgentToolError(
-                f"'{pid}' is not a background command. Stopping a subagent arrives with agent teams; let it finish instead.",
-            )
+            # W5: a background agent's id; the session stops it (set on the main toolset only).
+            stop_subagent = getattr(self, "_stop_subagent", None)
+            if stop_subagent is not None:
+                return stop_subagent(pid.strip())
+            raise AgentToolError(f"'{pid}' is not a background command or agent of this conversation.")
         pid = int(pid)
         manifest = self._load_process_manifest()
         info = manifest.get(str(pid))

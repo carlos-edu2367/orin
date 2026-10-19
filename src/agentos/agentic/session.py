@@ -1702,8 +1702,12 @@ class TurnSession:
                         max_workers=self._max_concurrent_subagents,
                         thread_name_prefix="orin-bg-subagent",
                     )
+                cancel = threading.Event()
+                output_file = self._agent_output_file(agent_id)
                 future = self._bg_subagent_executor.submit(
-                    self._execute_subagent_run,
+                    self._run_background_agent,
+                    output_file,
+                    hook_cancel=cancel,
                     record=dict(record),
                     agent_id=agent_id,
                     clean=clean,
@@ -1720,19 +1724,23 @@ class TurnSession:
                     "agent_id": agent_id,
                     "agent_name": clean,
                     "subagent_type": builtin_key if builtin_spec is not None else clean,
+                    "cancel": cancel,
+                    "output_file": output_file,
                 }
             return ToolOutcome(
                 "succeeded",
                 f"Iniciou {clean} em segundo plano",
                 (
                     f"Subagent '{clean}' started in the background (agent_id=\"{agent_id}\"). "
-                    f"Continue with independent work or call check_subagent(agent_id=\"{agent_id}\", wait_seconds=...) to inspect or await its report."
+                    f"Continue with independent work or call check_subagent(agent_id=\"{agent_id}\", wait_seconds=...) to inspect or await its report. "
+                    f"When it finishes, its report is also written to {output_file}."
                 ),
                 {
                     "agent_id": agent_id,
                     "agent_name": clean,
                     "subagent_type": builtin_key if builtin_spec is not None else clean,
                     "status": "running",
+                    "output_file": output_file,
                     "background": True,
                     "resumed": bool(resumed_agent_id),
                     "label": clean,
@@ -2101,6 +2109,41 @@ class TurnSession:
         else:
             content = f"{clean} reported:\n\n{answer}"
         return ToolOutcome("succeeded", f"Recebeu a resposta de {clean}", content, payload)
+
+    @staticmethod
+    def _agent_output_file(agent_id: str) -> str:
+        """Where a background agent's report is written, relative to the workspace (W5)."""
+        safe = re.sub(r"[^A-Za-z0-9_.-]", "_", str(agent_id))[:120] or "agent"
+        return f".orin/agent-outputs/{safe}.md"
+
+    def _run_background_agent(self, output_file: str, **kwargs: Any) -> ToolOutcome:
+        """Run a background agent and write its report (or why it stopped) to ``output_file``."""
+        outcome = self._execute_subagent_run(**kwargs)
+        try:
+            self.workspace.write_text(output_file, str(outcome.content or outcome.summary or ""))
+        except Exception:  # noqa: BLE001 - a report that cannot be saved is still returned by check_subagent
+            logger.warning("background agent report could not be written to %s", output_file, exc_info=True)
+        return outcome
+
+    def _stop_background_subagent(self, agent_id: str) -> ToolOutcome:
+        """TaskStop for a background agent: it stops at its next step (W5)."""
+        with self._subagent_lock:
+            entry = self._background_subagents.get(str(agent_id))
+        if entry is None:
+            return ToolOutcome(
+                "failed", "Agente não encontrado", f"No background agent '{str(agent_id)[:80]}' in this turn.",
+                {"agent_id": str(agent_id), "tool_kind": "agent"}, "AGENT_NOT_FOUND",
+            )
+        name = str(entry.get("agent_name") or agent_id)
+        output = {"message": "", "task_id": str(agent_id), "task_type": "local_agent"}
+        if entry["future"].done():
+            output["message"] = f"{name} had already finished."
+            return ToolOutcome("succeeded", f"{name} já tinha terminado", output["message"], {"agent_id": agent_id, "tool_kind": "agent"}, data={"tool_output": output})
+        cancel = entry.get("cancel")
+        if cancel is not None:
+            cancel.set()
+        output["message"] = f"Asked {name} to stop; it stops at its next step."
+        return ToolOutcome("succeeded", f"Parou {name}", output["message"], {"agent_id": agent_id, "status": "stopping", "tool_kind": "agent"}, data={"tool_output": output})
 
     def _check_subagent(self, agent_id: str, *, wait_seconds: int = 0) -> ToolOutcome:
         with self._subagent_lock:
@@ -2583,6 +2626,8 @@ class TurnSession:
         )
         # W5: skills and commands read from disk, for the Skill tool of this toolset (subagents' too).
         toolset._disk_skills = getattr(self, "_disk_skills", None)
+        if subagents:
+            toolset._stop_subagent = self._stop_background_subagent  # W5: TaskStop stops a background agent
         if permission_broker is not None:
             toolset._permission_broker = permission_broker
             toolset._interactive_permissions = bool(interactive_permissions)
