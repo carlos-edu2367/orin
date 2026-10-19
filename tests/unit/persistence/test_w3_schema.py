@@ -51,7 +51,7 @@ def test_the_migration_reaches_head_after_the_store_patched_the_database(tmp_pat
     PostgresChatStore(engine)
     upgrade(engine)
     with engine.connect() as connection:
-        assert connection.execute(text("select version_num from alembic_version")).scalar() == "0048_w3_loop_and_context"
+        assert connection.execute(text("select version_num from alembic_version")).scalar() == "0049_w4_tools"
     inspector = inspect(engine)
     assert {table.name for table in W3_TABLES} <= set(inspector.get_table_names())
     assert "turn_kind" in {column["name"] for column in inspector.get_columns("conversation_turns")}
@@ -81,4 +81,4 @@ def test_the_store_adds_the_idempotency_key_to_an_older_queue_table(tmp_path: Pa
     assert "ux_conversation_input_queue_idempotency" in {index["name"] for index in inspector.get_indexes("conversation_input_queue")}
     upgrade(engine)
     with engine.connect() as connection:
-        assert connection.execute(text("select version_num from alembic_version")).scalar() == "0048_w3_loop_and_context"
+        assert connection.execute(text("select version_num from alembic_version")).scalar() == "0049_w4_tools"

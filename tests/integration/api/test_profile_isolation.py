@@ -50,6 +50,8 @@ OWNED = {
     ("POST", "/v1/conversations/{conversation_id}/turns/{turn_id}/rewind"),
     ("POST", "/v1/conversations/{conversation_id}/messages/{message_id}/rewind"),
     ("GET", "/v1/conversations/{conversation_id}/file-history"),
+    ("GET", "/v1/conversations/{conversation_id}/directories"), ("POST", "/v1/conversations/{conversation_id}/directories"),
+    ("DELETE", "/v1/conversations/{conversation_id}/directories/{directory_id}"),
     ("POST", "/v1/conversations/{conversation_id}/queue"), ("GET", "/v1/conversations/{conversation_id}/queue"),
     ("DELETE", "/v1/conversations/{conversation_id}/queue/{queue_id}"),
     ("GET", "/v1/conversations/{conversation_id}/context"), ("POST", "/v1/conversations/{conversation_id}/compact"),

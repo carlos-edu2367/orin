@@ -737,6 +737,16 @@ conversation_sessions = Table(
     Column("updated_at", DateTime(timezone=True), nullable=False),
 )
 
+# W4: folders a person added to a conversation with /add-dir (checked again by every turn that uses them).
+conversation_directories = Table(
+    "conversation_directories", metadata,
+    Column("id", Integer, primary_key=True), Column("directory_id", String(255), nullable=False, unique=True),
+    Column("conversation_id", String(255), nullable=False), Column("user_id", String(255), nullable=False),
+    Column("path", String(1024), nullable=False), Column("path_key", String(1024), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False), Column("announced_at", DateTime(timezone=True), nullable=True),
+)
+Index("ux_conversation_directories_path", conversation_directories.c.conversation_id, conversation_directories.c.path_key, unique=True)
+
 # The chat transcript is a projection of an execution, not its recovery
 # authority.  These records are deliberately narrow: they hold the durable
 # decision boundary around an external effect and references to the private

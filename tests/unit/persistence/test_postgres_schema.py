@@ -70,6 +70,7 @@ def test_persistence_schema_contains_only_the_durable_boundary_tables():
             "conversation_prompt_snapshots",
             "conversation_compact_boundaries",
             "conversation_sessions",
+            "conversation_directories",
         }
 
 

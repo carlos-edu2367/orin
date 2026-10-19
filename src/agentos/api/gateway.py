@@ -67,6 +67,7 @@ from agentos.code_mode import (
     list_workspace_files,
 )
 from agentos.code_mode.file_history import FileHistory
+from agentos.agentic.directories import DirectoryError
 from agentos.code_mode.models import CodeAutonomy, normalize_permission_mode
 
 
@@ -200,6 +201,10 @@ class CreateScheduledChatRequest(_RequestModel):
 
 class RewindMessageRequest(_RequestModel):
     mode: str = "code"
+
+
+class AddDirectoryRequest(_RequestModel):
+    path: str = Field(min_length=1, max_length=1024)
 
 
 class InspectWorkspaceFolderRequest(_RequestModel):
@@ -388,6 +393,7 @@ class ApiServices:
         capabilities: InstanceCapabilities | None = None,
         public_origin: str | None = None,
         file_history_root: str | Path | None = None,
+        conversation_directories: object | None = None,
     ) -> None:
         self.security = security or InMemorySecurityService()
         self.accounts = accounts
@@ -414,6 +420,8 @@ class ApiServices:
         self.vision_model_settings = vision_model_settings
         self.scheduled_chats = scheduled_chats
         self.file_history_root = Path(file_history_root) if file_history_root is not None else None
+        # W4 /add-dir: ConversationDirectoryStore (host folders only: closed with capabilities.host_folders).
+        self.conversation_directories = conversation_directories
 
     def managed_root_for(self, user_id: str) -> Path:
         """Where a profile's managed workspaces live; an explicit root (tests) wins."""
@@ -1521,6 +1529,48 @@ def create_app(services: ApiServices) -> FastAPI:
         except LookupError as error:
             raise ApplicationNotFoundError(message_id) from error
         return JSONResponse(_jsonable(result))
+
+    @app.get("/v1/conversations/{conversation_id}/directories", dependencies=[capability("host_folders")])
+    async def list_conversation_directories(conversation_id: str, request: Request) -> JSONResponse:
+        principal = principal_for(request)
+        services.security.authorize(principal, action="conversation.read", resource_id=conversation_id, purpose="conversation.directories")
+        conversation_record(conversation_id, principal)
+        store = require_port(services.conversation_directories)
+        try:
+            items = await run_in_threadpool(store.list, principal.user_id, conversation_id)  # type: ignore[union-attr]
+        except LookupError as error:
+            raise ApplicationNotFoundError(conversation_id) from error
+        return JSONResponse(_jsonable({"items": items}))
+
+    @app.post("/v1/conversations/{conversation_id}/directories", dependencies=[capability("host_folders")])
+    async def add_conversation_directory(conversation_id: str, payload: AddDirectoryRequest, request: Request) -> JSONResponse:
+        principal = principal_for(request, mutable=True)
+        services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.directories")
+        workspace = conversation_workspace(conversation_id, principal)
+        store = require_port(services.conversation_directories)
+        try:
+            directory, created = await run_in_threadpool(
+                lambda: store.add(principal.user_id, conversation_id, payload.path, workspace_root=Path(workspace.root)),  # type: ignore[union-attr]
+            )
+        except LookupError as error:
+            raise ApplicationNotFoundError(conversation_id) from error
+        except DirectoryError as error:
+            raise ApplicationValidationError(str(error)) from error
+        return JSONResponse(_jsonable(directory), status_code=201 if created else 200)
+
+    @app.delete("/v1/conversations/{conversation_id}/directories/{directory_id}", status_code=204, dependencies=[capability("host_folders")])
+    async def remove_conversation_directory(conversation_id: str, directory_id: str, request: Request) -> JSONResponse:
+        principal = principal_for(request, mutable=True)
+        services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.directories")
+        conversation_record(conversation_id, principal)
+        store = require_port(services.conversation_directories)
+        try:
+            removed = await run_in_threadpool(store.remove, principal.user_id, conversation_id, directory_id)  # type: ignore[union-attr]
+        except LookupError as error:
+            raise ApplicationNotFoundError(conversation_id) from error
+        if not removed:
+            raise ApplicationNotFoundError(directory_id)
+        return JSONResponse(status_code=204, content=None)
 
     @app.get("/v1/conversations/{conversation_id}/file-history")
     async def conversation_file_history(conversation_id: str, request: Request) -> JSONResponse:

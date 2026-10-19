@@ -2460,7 +2460,47 @@ class TurnSession:
         """Folders this turn may also work in: ``permissions.additionalDirectories`` from the effective settings (W4)."""
         from .directories import settings_directories
 
-        return settings_directories(self.effective_settings)
+        return [*settings_directories(self.effective_settings), *self._conversation_directory_paths()]
+
+    def _directory_store(self) -> object | None:
+        engine = getattr(self.chat_store, "_engine", None)
+        if engine is None:
+            return None
+        from agentos.conversations.directories import ConversationDirectoryStore
+
+        return ConversationDirectoryStore(engine)
+
+    def _conversation_directory_paths(self) -> list[str]:
+        """The folders a person added to this conversation with /add-dir (W4)."""
+        user_id, conversation_id = str(self.turn.get("user_id") or ""), str(self.turn.get("conversation_id") or "")
+        store = self._directory_store() if user_id and conversation_id else None
+        if store is None:
+            return []
+        try:
+            return store.paths(user_id, conversation_id)
+        except Exception:  # noqa: BLE001 - an unreadable list means no added folders, never a failed turn
+            logger.exception("conversation directories could not be read")
+            return []
+
+    def _announce_added_directories(self, found: tuple[Path, ...]) -> None:
+        """DirectoryAdded, once per folder added since the last turn, for the folders this turn really uses (W4)."""
+        user_id, conversation_id = str(self.turn.get("user_id") or ""), str(self.turn.get("conversation_id") or "")
+        store = self._directory_store() if user_id and conversation_id else None
+        if store is None:
+            return
+        try:
+            added = store.take_unannounced(user_id, conversation_id)
+        except Exception:  # noqa: BLE001 - announcing never fails a turn
+            logger.exception("added directories could not be announced")
+            return
+        usable = {os.path.normcase(str(item)) for item in found}
+        bus = getattr(self, "lifecycle", None)
+        for path in added:
+            if bus is not None and os.path.normcase(str(Path(path).resolve())) in usable:
+                try:
+                    bus.emit(HookEvent.DIRECTORY_ADDED, directory=str(path))
+                except Exception:  # noqa: BLE001 - a hook never fails a turn
+                    logger.exception("DirectoryAdded could not be emitted")
 
     def _apply_working_directories(self) -> None:
         """Give the workspace its checked additional directories and tell the model about them (W4)."""
@@ -2472,6 +2512,7 @@ class TurnSession:
             logger.exception("additional directories could not be read")
             found = ()
         self.workspace.additional_roots = found
+        self._announce_added_directories(found)
         if found:
             listed = "\n".join(f"- {item.as_posix()}" for item in found)
             self._reminders.add(
