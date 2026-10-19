@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from typing import Any, Mapping, Literal
 
-from pydantic import Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from agentos.agentic.tools._shared import AgentToolError, ToolDefinition, ToolOutcome, _TEXT, _schema
 from agentos.agentic.tools.spec import ToolSpec, ToolInput
@@ -124,7 +124,31 @@ class McpTools:
             raise AgentToolError("No active MCP servers are connected in this conversation.")
         safe_limit = max(1, min(int(limit or 10), 50))
         engine = McpToolSearchEngine(self._mcp_search_documents())
-        matches = engine.search(str(query or ""), server=server, limit=safe_limit)
+        text = str(query or "").strip()
+        already_available: list[str] = []
+        not_found: list[str] = []
+        if text.lower().startswith("select:"):
+            wanted = [name.strip() for name in text[len("select:"):].split(",") if name.strip()][:50]
+            index: dict[str, Any] = {}
+            for item in engine.search("", server=server, limit=200):
+                index.setdefault(item.qualified_name.lower(), item)
+                index.setdefault(item.tool_name.lower(), item)
+            matches = []
+            for name in wanted:
+                item = index.get(name.lower())
+                if item is not None:
+                    if item not in matches:
+                        matches.append(item)
+                elif self.key_for(name) in self._by_name:
+                    already_available.append(name)  # built-in tools are never deferred
+                else:
+                    not_found.append(name)
+        else:
+            required = [word[1:].lower() for word in text.split() if word.startswith("+") and len(word) > 1]
+            keywords = " ".join(word for word in text.split() if not word.startswith("+")) or " ".join(required)
+            matches = engine.search(keywords, server=server, limit=200 if required else safe_limit)
+            if required:
+                matches = [item for item in matches if all(term in item.qualified_name.lower() for term in required)][:safe_limit]
         tools_payload = [item.to_dict(include_schema=True) for item in matches]
         activated: list[str] = []
         if activate and not self._read_only_mode:
@@ -145,6 +169,10 @@ class McpTools:
             "summary": f"{len(tools_payload)} ferramenta(s) MCP encontrada(s)",
             "content": json.dumps(payload, ensure_ascii=False),
             "payload": payload,
+            "tool_output": {
+                "query": text, "matches": [item.qualified_name for item in matches],
+                "already_available": already_available, "not_found": not_found,
+            },
         }
 
     def inspect_mcp_server(
@@ -302,6 +330,14 @@ class ToolSearchInput(ToolInput):
     max_results: int | None = Field(None, ge=1, le=50)
 
 
+class ToolSearchOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    query: str
+    matches: list[str]
+    already_available: list[str]
+    not_found: list[str]
+
+
 # Tool specs, moved from AgentToolset._build_definitions (W4).
 SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
@@ -380,6 +416,7 @@ SPECS: tuple[ToolSpec, ...] = (
         handler="search_mcp_tools",
         kind="mcp",
         input_model=ToolSearchInput,
+        output_model=ToolSearchOutput,
         public_description='Find deferred MCP tools by keyword and load their schemas so they can be called.',
         read_only=True,
         policy_tags=("mcp",),
