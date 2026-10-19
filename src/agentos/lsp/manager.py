@@ -45,6 +45,7 @@ class LspManager:
         self._locks: dict[str, threading.Lock] = {}
         self._failed: dict[str, str] = {}
         self._guard = threading.Lock()
+        self._closed = False  # set by close(): no server starts afterwards, and one starting meanwhile is stopped
 
     def server_for(self, path: Path) -> tuple[LspServerConfig, str] | None:
         for config in self._configs:
@@ -60,7 +61,7 @@ class LspManager:
             return "", None, ""
         config, language = found
         with self._guard:
-            if config.name in self._failed:
+            if self._closed or config.name in self._failed:
                 return config.name, None, ""
             lock = self._locks.setdefault(config.name, threading.Lock())
         with lock:
@@ -72,8 +73,17 @@ class LspManager:
                 client = self._clients.get(config.name)
                 if client is None:
                     client = self._client_factory(config, workspace_root=self._root)
-                    self._clients[config.name] = client
+                    with self._guard:
+                        if self._closed:
+                            return config.name, None, ""
+                        self._clients[config.name] = client
                     client.start()
+                    with self._guard:
+                        closed_meanwhile = self._closed
+                    if closed_meanwhile:  # the turn ended while the server was starting: stop it now
+                        self._clients.pop(config.name, None)
+                        client.close()
+                        return config.name, None, ""
                 return config.name, client.diagnostics(target, text, language, timeout=self._timeout), ""
             except (LspError, OSError) as error:
                 reason = str(error)[:300] or type(error).__name__
@@ -88,7 +98,9 @@ class LspManager:
                 return config.name, None, reason
 
     def close(self) -> None:
-        clients, self._clients = list(self._clients.values()), {}
+        with self._guard:
+            self._closed = True
+            clients, self._clients = list(self._clients.values()), {}
         for client in clients:
             try:
                 client.close()

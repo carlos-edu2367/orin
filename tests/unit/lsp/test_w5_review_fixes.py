@@ -96,3 +96,41 @@ def test_w5_r6_an_unchanged_language_server_keeps_its_consent_across_a_disable(t
     service.set_enabled(user_id="u1", plugin_id="helper", enabled=False)
     service.set_enabled(user_id="u1", plugin_id="helper", enabled=True)
     assert len(_started(service)[0]) == 1
+
+
+def test_w5_r13_a_closed_manager_starts_no_language_server(tmp_path: Path) -> None:
+    """A check still running when the turn closes must not leave a server behind (the review's R13 leftover)."""
+    import threading
+
+    from agentos.lsp.config import LspServerConfig
+    from agentos.lsp.manager import LspManager
+
+    started: list["_Client"] = []
+    entered, release = threading.Event(), threading.Event()
+
+    class _Client:
+        def __init__(self, config, *, workspace_root):
+            self.closed = False
+            started.append(self)
+
+        def start(self):
+            entered.set()
+            release.wait(5)
+
+        def diagnostics(self, path, text, language, *, timeout):
+            return []
+
+        def close(self):
+            self.closed = True
+
+    config = LspServerConfig(name="kit:fake", plugin_id="kit", command="fake", extensions=((".txt", "plaintext"),))
+    manager = LspManager([config], workspace_root=tmp_path, client_factory=_Client)
+    (tmp_path / "a.txt").write_text("x", encoding="utf-8")
+    worker = threading.Thread(target=manager.check, args=(tmp_path / "a.txt",))
+    worker.start()
+    assert entered.wait(5)
+    manager.close()  # the turn ends while the server is still starting
+    release.set()
+    worker.join(5)
+    assert [client.closed for client in started] == [True]
+    assert manager.check(tmp_path / "a.txt") == ("kit:fake", None, "") and len(started) == 1  # nothing new after close
