@@ -117,6 +117,8 @@ class DiskSkillTools:
         if invoked_by == "user" and not skill.user_invocable:
             raise AgentToolError(f"/{skill.name} is not a command the person can run.")
         clean = neutral_skill_text(skill_argument_text(arguments))
+        # W5-R8: the grants come before the skill's own inline commands run, so its first use is allowed as its second.
+        granted = self._grant_skill_tools(skill)
         # W5-R7: the inline commands are found in the skill's own text first. An argument fills a command as one shell
         # word and fills plain text as escaped text, so it can never add a command.
         session_id = str(self.conversation_id or "")
@@ -134,7 +136,6 @@ class DiskSkillTools:
             used = used or did
             pieces.append((is_command, text))
         text = neutral_skill_text(self._run_inline_commands(pieces, skill))
-        granted = self._grant_skill_tools(skill)
         # W5: a skill's own hooks run from its first use until the turn ends, for the agent that used it.
         sink = getattr(self, "_skill_hooks_sink", None)
         if skill.hooks and callable(sink):

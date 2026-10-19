@@ -291,3 +291,32 @@ def test_w5_r7_a_shell_word_keeps_its_argument_as_one_word() -> None:
     else:
         assert shlex.split(shell_word(value)) == [value]
 
+
+# W5-R8: a skill's allowed-tools cover its own inline commands from the first use, and still never beat a deny.
+
+
+def test_w5_r8_a_skills_own_inline_command_runs_without_asking_on_its_first_use(tmp_path: Path) -> None:
+    folder = orin_user_dir() / "skills" / "ctx"
+    folder.mkdir(parents=True)
+    (folder / "SKILL.md").write_text(
+        "---\ndescription: Context\nallowed-tools: Bash(git --version:*)\n---\nThe answer is !`git --version`.", encoding="utf-8",
+    )
+    asked: list = []
+    toolset = _asking_toolset(tmp_path, asked)
+    first = toolset.invoke("Skill", {"skill": "ctx"})
+    assert first.status == "succeeded" and asked == []
+    assert [rule.raw for rule in toolset.skill_grants()] == ["Bash(git --version:*)"]
+
+
+def test_w5_r8_a_deny_still_wins_over_the_skills_grant_on_its_first_use(tmp_path: Path) -> None:
+    folder = orin_user_dir() / "skills" / "ctx"
+    folder.mkdir(parents=True)
+    (folder / "SKILL.md").write_text(
+        "---\ndescription: Context\nallowed-tools: Bash(git --version:*)\n---\nThe answer is !`git --version`.", encoding="utf-8",
+    )
+    (orin_user_dir() / "settings.json").write_text(json.dumps({"permissions": {"deny": ["Bash(git --version:*)"]}}), encoding="utf-8")
+    asked: list = []
+    content = _asking_toolset(tmp_path, asked).invoke("Skill", {"skill": "ctx"}).content
+    assert asked == [] and "[command not run:" in content
+
+
