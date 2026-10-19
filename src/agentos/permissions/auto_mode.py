@@ -14,7 +14,7 @@ from agentos.agentic.tools.public_names import arguments_out, public_name
 from agentos.settings import EffectiveSettings
 
 from .engine import PermissionDecision
-from .rules import MatchContext, parse_rule, rule_matches
+from .rules import SHELL_TOOLS, MatchContext, parse_rule, rule_matches
 from .shell import default_shell
 
 # Commands longer than this are not matched or sent to the model: they ask a person.
@@ -28,6 +28,11 @@ DEFAULT_HARD_DENY_PATTERNS: tuple[str, ...] = (
     r"\bdd\s+if=.{0,10000}\bof=/dev/",
     r"\bformat\s+[a-zA-Z]:",
     r"\bdel\s+/[sq].{0,10000}[a-zA-Z]:\\\s*$",
+    # PowerShell idioms for the same host-destructive actions, and download-and-run (W4-R3).
+    r"\b(Stop-Computer|Restart-Computer|Format-Volume|Clear-Disk)\b",
+    r"\b(iwr|irm|Invoke-WebRequest|Invoke-RestMethod)\b[^|]{0,10000}\|\s*(iex|Invoke-Expression|powershell|pwsh|sh|bash)\b",
+    r"\b(iex|Invoke-Expression)\s*\(\s*(iwr|irm|Invoke-WebRequest|Invoke-RestMethod)\b",
+    r"\b(Remove-Item|ri|rm|rmdir|rd|del|erase)\b(?=.*\s-r\w*\b)(?=.*[\s'\"][a-zA-Z]:[\\/]*['\"]?(\s|$))",
 )
 MAX_CONSECUTIVE_DENIALS = 3
 MAX_TOTAL_DENIALS = 20
@@ -100,7 +105,7 @@ class AutoModeClassifier:
         self._total = 0
 
     def _hard_denied(self, internal: str, arguments: Mapping[str, Any]) -> str | None:
-        if internal in {"run_command", "powershell"}:
+        if internal in SHELL_TOOLS:
             command = str(arguments.get("command") or "")
             if len(command) > MAX_CLASSIFIED_COMMAND_CHARS:
                 return None  # handled by __call__: asks a person without matching or calling the model
@@ -144,7 +149,7 @@ class AutoModeClassifier:
         return "".join(text)
 
     def __call__(self, internal: str, arguments: Mapping[str, Any]) -> PermissionDecision:
-        if internal in {"run_command", "powershell"} and len(str(arguments.get("command") or "")) > MAX_CLASSIFIED_COMMAND_CHARS:
+        if internal in SHELL_TOOLS and len(str(arguments.get("command") or "")) > MAX_CLASSIFIED_COMMAND_CHARS:
             return PermissionDecision("ask", "command too long for auto mode")
         reason = self._hard_denied(internal, arguments)
         if reason is not None:

@@ -172,6 +172,10 @@ _BLOCKED_COMMAND = re.compile(
     r"|(\brd\b\s+/s\b)"
     r"|(:\(\)\s*\{.*\};\s*:)"                                     # fork bomb
     r"|(\bReg(istry)?\s*(delete|Remove-Item\s+HK))"
+    r"|(\b(Stop-Computer|Restart-Computer|Format-Volume|Clear-Disk)\b)"            # PowerShell host cmdlets
+    r"|(\b(remove-item|ri|rm|rmdir|rd|del|erase)\b(?=.*\s-r\w*\b)(?=.*[\s'\"][a-z]:[\\/]*['\"]?(\s|$)))"  # recursive delete of a drive root
+    r"|(\b(iwr|irm|invoke-webrequest|invoke-restmethod)\b[^|]{0,10000}\|\s*(iex|invoke-expression)\b)"  # download and run
+    r"|(\b(iex|invoke-expression)\s*\(\s*(iwr|irm|invoke-webrequest|invoke-restmethod)\b)"
 )
 
 _VERIFICATION_CMD_RE = re.compile(
