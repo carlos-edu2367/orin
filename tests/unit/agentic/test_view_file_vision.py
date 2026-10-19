@@ -21,7 +21,7 @@ def _toolset(tmp_path, **kwargs):
 
 
 def test_an_image_is_transcribed_when_the_model_cannot_see(tmp_path, monkeypatch):
-    monkeypatch.setattr("agentos.agentic.agent_tools.normalize_image", lambda path, **_: ("QUJD", "image/jpeg"))
+    monkeypatch.setattr("agentos.agentic.tools.files.read.normalize_image", lambda path, **_: ("QUJD", "image/jpeg"))
     reader = _Reader()
     toolset = _toolset(tmp_path, visual_reader=reader)
     (toolset.workspace.root / "foto.png").write_bytes(PNG)
@@ -32,7 +32,7 @@ def test_an_image_is_transcribed_when_the_model_cannot_see(tmp_path, monkeypatch
 
 
 def test_the_model_that_sees_gets_the_image_instead_of_a_transcription(tmp_path, monkeypatch):
-    monkeypatch.setattr("agentos.agentic.agent_tools.normalize_image", lambda path, **_: ("QUJD", "image/jpeg"))
+    monkeypatch.setattr("agentos.agentic.tools.files.read.normalize_image", lambda path, **_: ("QUJD", "image/jpeg"))
     reader = _Reader()
     toolset = _toolset(tmp_path, visual_reader=reader, model_sees_images=True)
     (toolset.workspace.root / "foto.png").write_bytes(PNG)
@@ -42,7 +42,7 @@ def test_the_model_that_sees_gets_the_image_instead_of_a_transcription(tmp_path,
 
 
 def test_a_scanned_pdf_page_goes_through_the_reader(tmp_path, monkeypatch):
-    monkeypatch.setattr("agentos.agentic.agent_tools.render_pdf_pages", lambda path, pages, **_: [("QUJD", "image/jpeg")])
+    monkeypatch.setattr("agentos.agentic.tools.files.read.render_pdf_pages", lambda path, pages, **_: [("QUJD", "image/jpeg")])
     reader = _Reader("Contrato assinado")
     toolset = _toolset(tmp_path, visual_reader=reader)
     pypdf = pytest.importorskip("pypdf")
@@ -57,7 +57,7 @@ def test_a_scanned_pdf_page_goes_through_the_reader(tmp_path, monkeypatch):
 def test_a_failed_read_is_explained_rather_than_crashing(tmp_path, monkeypatch):
     from agentos.reading.vision import VisionUnavailable
 
-    monkeypatch.setattr("agentos.agentic.agent_tools.normalize_image", lambda path, **_: ("QUJD", "image/jpeg"))
+    monkeypatch.setattr("agentos.agentic.tools.files.read.normalize_image", lambda path, **_: ("QUJD", "image/jpeg"))
 
     class _Broken:
         def transcribe(self, images, *, instruction=""):

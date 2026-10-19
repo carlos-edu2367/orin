@@ -19,7 +19,7 @@ def test_transcribe_pdf_is_declared_and_never_uses_visual_reading(tmp_path, monk
     (toolset.workspace.root / "uploads").mkdir()
     (toolset.workspace.root / "uploads" / "vistoria.pdf").write_bytes(b"%PDF")
     monkeypatch.setattr(
-        "agentos.agentic.agent_tools.extract_text",
+        "agentos.agentic.tools.files.read.extract_text",
         lambda path, media_type: ExtractedText("[página 1]\\nItem pendente", pages_without_text=(2,)),
     )
 

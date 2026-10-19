@@ -9,6 +9,7 @@ import httpx
 import pytest
 
 from agentos.agentic import agent_tools
+from agentos.agentic.tools.shell import bash as bash_tools, tasks as task_tools
 from agentos.agentic.agent_tools import AgentToolError, AgentToolset, ToolOutcome, parse_arguments
 from agentos.agentic.workspace import ConversationWorkspace, WorkspaceError
 from agentos.skills.service import SkillLibraryService
@@ -621,7 +622,7 @@ def test_run_command_refuses_an_out_of_range_timeout(toolset: AgentToolset) -> N
 
 
 def test_run_command_preserves_the_tail_of_long_output(toolset: AgentToolset, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(agent_tools, "MAX_COMMAND_OUTPUT_CHARS", 300)
+    monkeypatch.setattr(bash_tools, "MAX_COMMAND_OUTPUT_CHARS", 300)
     outcome = toolset.invoke("run_command", {
         "command": "python -c \"print('A' * 5000); print('THE_REAL_ERROR_IS_HERE')\"",
     })
@@ -713,7 +714,7 @@ def test_run_command_terminates_its_process_tree_when_it_times_out(toolset: Agen
     process = TimedOutProcess()
     terminated: list[int] = []
     monkeypatch.setattr(agent_tools.subprocess, "Popen", lambda *args, **kwargs: process)
-    monkeypatch.setattr(agent_tools, "_terminate_process_tree", lambda item: terminated.append(item.pid))
+    monkeypatch.setattr(bash_tools, "_terminate_process_tree", lambda item: terminated.append(item.pid))
 
     outcome = toolset.invoke("run_command", {"command": "slow command", "timeout_seconds": 45})
 
@@ -1213,8 +1214,8 @@ def test_read_process_output_and_stop_process_integrate_with_preview_servers(tmp
         ),
         encoding="utf-8",
     )
-    monkeypatch.setattr(agent_tools, "_process_is_running", lambda pid: True)
-    monkeypatch.setattr(agent_tools, "_terminate_pid", lambda pid: True)
+    monkeypatch.setattr(task_tools, "_process_is_running", lambda pid: True)
+    monkeypatch.setattr(task_tools, "_terminate_pid", lambda pid: True)
 
     read_out = tools.invoke("read_process_output", {"pid": 999999})
     assert read_out.status == "succeeded"

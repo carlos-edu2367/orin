@@ -1,0 +1,152 @@
+"""Plan mode tools: methods of AgentToolset that live in their own module (W4 split)."""
+from __future__ import annotations
+
+from typing import Any, Mapping
+from agentos.agentic.tools._shared import (
+    ContractError,
+    ToolOutcome,
+    parse_contract,
+)
+
+
+class PlanModeTools:
+    """Mixed into ``AgentToolset``; ``self`` is the toolset."""
+
+    def write_contract(self, **values: Any) -> ToolOutcome:
+        """Record the task contract, or explain precisely what is missing.
+
+        A rejection is a result the model reads and corrects, never an
+        exception: a weak model that cannot fill the schema on the first try
+        has to be able to try again with the field name in front of it. The
+        parsed contract rides back on the payload; the runtime is what pins
+        it into the request, so this tool stays free of runtime state.
+        """
+        try:
+            contract = parse_contract(values)
+        except ContractError as error:
+            return ToolOutcome("failed", "Contrato incompleto", str(error), {"tool_kind": "planning"}, "INVALID_CONTRACT")
+        rendered = contract.render()
+        payload: dict[str, Any] = {"tool_kind": "planning", "contract": contract.as_payload()}
+        if self._code_mode_requires_approval:
+            payload.update({
+                "wait_for_user": True,
+                "code_approval": True,
+                "questions": [{
+                    "id": "code_plan", "question": "Aprovar este plano do Modo Code para iniciar a implementação?",
+                    "mode": "single_choice",
+                    "options": [
+                        {"id": "approve", "label": "Aprovar plano"},
+                        {"id": "adjust", "label": "Pedir ajustes"},
+                        {"id": "cancel", "label": "Cancelar"},
+                    ],
+                }],
+            })
+        return ToolOutcome(
+            "succeeded", f"Contrato definido: {contract.objective[:180]}",
+            f"Contrato registrado. Ele permanece visível durante toda a tarefa.\n\n{rendered}",
+            payload,
+        )
+
+    def enter_plan_mode(self, reason: str = "") -> ToolOutcome:
+        """Switch the current turn into read-only Plan Mode."""
+        from agentos.code_mode.models import CodePermissionMode
+
+        if self._permission_mode is not CodePermissionMode.PLAN_MODE:
+            self._previous_permission_mode = self._permission_mode
+        self._plan_mode_active = True
+        self._permission_mode = CodePermissionMode.PLAN_MODE
+        clean_reason = str(reason or "").strip()
+        summary = f"Modo Plano ativado{f': {clean_reason[:120]}' if clean_reason else ''}"
+        return ToolOutcome(
+            "succeeded",
+            summary,
+            (
+                "Plan Mode is now active. Mutating tools are blocked except writing or editing "
+                "plan files inside `.orin/plans/`. Inspect the codebase, write your plan to "
+                "`.orin/plans/<name>.md`, and call `exit_plan_mode(plan_path=..., summary=...)` when ready."
+            ),
+            {
+                "ok": True,
+                "tool_kind": "planning",
+                "plan_mode": True,
+                "permission_mode": "plan_mode",
+                "reason": clean_reason,
+            },
+        )
+
+    def exit_plan_mode(
+        self,
+        plan_path: str = "",
+        summary: str = "",
+        allowed_prompts: list[dict[str, Any]] | None = None,
+    ) -> ToolOutcome:
+        """Exit Plan Mode and present the plan for review or implementation."""
+        from agentos.code_mode.models import CodePermissionMode
+
+        clean_path = str(plan_path or "").strip().replace("\\", "/")
+        clean_summary = str(summary or "").strip()
+        plan_content = ""
+        if clean_path:
+            try:
+                target = self.workspace.resolve(clean_path)
+                if target.exists() and target.is_file():
+                    plan_content = target.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                plan_content = ""
+        elif (self.workspace.root / ".orin" / "plans").is_dir():
+            plans = sorted((self.workspace.root / ".orin" / "plans").glob("*.md"), key=lambda item: item.stat().st_mtime)
+            if plans:
+                latest = plans[-1]
+                clean_path = latest.relative_to(self.workspace.root).as_posix()
+                try:
+                    plan_content = latest.read_text(encoding="utf-8", errors="replace")
+                except Exception:
+                    plan_content = ""
+
+        restored_mode = getattr(self, "_previous_permission_mode", CodePermissionMode.ACCEPT_EDITS)
+        if restored_mode is CodePermissionMode.PLAN_MODE:
+            restored_mode = CodePermissionMode.ACCEPT_EDITS
+        self._plan_mode_active = False
+        self._permission_mode = restored_mode
+
+        payload: dict[str, Any] = {
+            "ok": True,
+            "tool_kind": "planning",
+            "plan_mode": False,
+            "plan_ready": True,
+            "plan_approval": True,
+            "permission_mode": restored_mode.value,
+            "plan_path": clean_path,
+            "plan_summary": clean_summary,
+            "plan_content": plan_content[:2000],
+        }
+        if isinstance(allowed_prompts, list):
+            payload["allowed_prompts"] = [dict(item) for item in allowed_prompts[:12] if isinstance(item, Mapping)]
+        if self._code_mode_requires_approval:
+            payload.update({
+                "wait_for_user": True,
+                "code_approval": True,
+                "questions": [{
+                    "id": "code_plan",
+                    "question": "Aprovar este plano do Modo Code para iniciar a implementação?",
+                    "mode": "single_choice",
+                    "options": [
+                        {"id": "approve", "label": "Aprovar plano"},
+                        {"id": "adjust", "label": "Pedir ajustes"},
+                        {"id": "cancel", "label": "Cancelar"},
+                    ],
+                }],
+            })
+        body_parts = ["Exited Plan Mode."]
+        if clean_path:
+            body_parts.append(f"Plan file: {clean_path}")
+        if clean_summary:
+            body_parts.append(f"Summary: {clean_summary}")
+        if plan_content:
+            body_parts.append(f"\n{plan_content[:4000]}")
+        return ToolOutcome(
+            "succeeded",
+            f"Plano pronto{f': {clean_summary[:140]}' if clean_summary else ''}",
+            "\n".join(body_parts),
+            payload,
+        )
