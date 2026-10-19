@@ -674,3 +674,45 @@ Items 6 to 9 change the test sessions, not the code under test: `TurnSession.plu
 - `uv run pytest -q tests/integration`: 78 passed, 65 skipped (PostgreSQL DSN not configured), 0 failed.
 - `npm --prefix frontend test`: 103 files, 609 tests passed. `npm --prefix frontend run lint`: exit 0. `npm --prefix frontend run build`: exit 0 (the existing chunk-size warning).
 - `src/agentos/agentic/agent_tools.py`: 1698 lines (the limit is below 1700).
+
+## Review fixes (part 2)
+
+Scope: the "Must fix before W6" findings W5-R9 to W5-R16 of `docs/superpowers/reviews/2026-10-19-w5-review.md`, and the UI follow-up of W5-R3 (the hooks switch). Each was test-first: its tests were written, run and seen to fail for the reason the finding gives, then the fix was made, then the tests passed. One commit per finding, on this branch. The deferred items (W5-D1 to W5-D5) were not touched.
+
+Per finding (commit, change, tests in `tests/unit/...` or `frontend/...`):
+- **W5-R9** (`c73c85b`): every call has an absolute ceiling, `call_ceiling_seconds(timeout)` = min(10 x timeout, `MAX_CALL_SECONDS` = 600 s), and at most `MAX_SERVER_REQUESTS_PER_CALL` = 100 answered server requests (`mcp/protocol.py`); the stdio, SSE and WebSocket waits check both. Tests: `mcp/test_w5_review_fixes.py` (7: a polite server is still answered; a server pinging forever is cut at the ceiling; a server sending too many requests is refused; for each transport).
+- **W5-R10** (`7aa9505`): `_policy_url` normalises a URL and a pattern (lower-case scheme and host, default port dropped, one trailing host dot dropped, dot segments and `%2e` resolved); a host `*` matches host characters only; a URL that cannot be read (user information, a backslash, whitespace or a control character, an unknown scheme, a bad port, an odd host) is refused when an allow list or a deny list exists (`mcp/file_config.py`). Tests: `mcp/test_w5_review_fixes.py` (22).
+- **W5-R11** (`a0189c6`): `split_frontmatter` uses a `yaml.SafeLoader` subclass that refuses anchors and aliases (`_frontmatter_loader`), and refuses a block over 64 KB (UTF-8 bytes) before it is parsed (`skills/disk.py`). The lenient plugin-skill reader inherits both. Tests: `skills/test_w5_review_fixes.py` (7: an alias in a skill, an agent file, a plugin skill and a plugin agent; an anchor without an alias; the 64 KB cap; a control).
+- **W5-R12** (`8aeb4bb`): `_teammate_refusal` claims a new name under `_team_lock` with a placeholder (busy, no agent id yet); `_ask_agent` does not resume a placeholder; `_release_teammate` removes a placeholder whose start never began; a message to a busy name is queued by the existing path (`agentic/session.py`). Tests: `agentic/test_w5_review_fixes_part2.py` (3: two starts run one; a failed start frees the name; a message to a name being started is queued).
+- **W5-R13** (`06f8dc4`): `_lsp_closed` (set by `_close_lsp`, reset by `build_runtime`) and `_lsp_lock` guard the manager factory (`_lsp_manager`, now a wrapper of `_make_lsp_manager`) and the pool submission; `_close_lsp` waits up to `LSP_CLOSE_WAIT_SECONDS` = 2 s for submitted checks before it closes the manager. Tests: `agentic/test_w5_review_fixes_part2.py` (2: a write after close starts nothing; closing waits for a check in flight).
+- **W5-R14** (`bbe5439`): `resolve_argv` splits the declared command first and puts the native folder into each word afterwards; every confinement check is unchanged (`plugins/hook_executor.py`). Tests: `plugins/test_w5_review_fixes_part2.py` (5: the four spellings with a space in the folder; the confinement still refuses a script beside the package).
+- **W5-R15** (`9d6828f`): `_validate` refuses an entry that is a symlink, a junction (`Path.is_junction()`) or another reparse point (`_is_link`, `plugins/fetcher.py`). Tests: `plugins/test_w5_review_fixes_part2.py` (1: a junction in a local package; Windows only, skipped elsewhere).
+- **W5-R16** (`6588bc7`): for a configuration-file server (`allow_any_command=True`), the operator check runs only when `shutil.which(command)` resolves to a `.cmd` or `.bat` file, and then against the cmd operators (see the deviations); Orin's own servers keep the old rule (`mcp/transport_stdio.py`). Tests: `mcp/test_w5_review_fixes.py` (3: the three ordinary values start; Orin's own servers keep the POSIX rule; a `.cmd` launcher refuses `%`, `^`, `&` and `|`; Windows only).
+- **UI-R3** (`53f2fcc`): the hooks switch is `disabled={busy || plugin.state === 'pending_approval'}`; it covers the consent rows of kind `hook` and `lsp` (the coordinator's addition): it is shown when any exists and is on only when every one is allowed (`frontend/src/features/plugins/PluginCard.tsx`). Tests: `frontend/src/features/plugins/PluginCard.test.tsx` (4: a language-server-only plugin shows the switch; the switch is on only when every row is allowed; a pending plugin's switch is disabled; an active plugin's switch is enabled).
+
+### Existing expectations changed (recorded)
+None. No existing test file changed in part 2: every test added is in a new file (`tests/unit/mcp/test_w5_review_fixes.py`, `tests/unit/skills/test_w5_review_fixes.py`, `tests/unit/agentic/test_w5_review_fixes_part2.py`, `tests/unit/plugins/test_w5_review_fixes_part2.py`, `frontend/src/features/plugins/PluginCard.test.tsx`), and every existing test passed unchanged.
+
+### Deviations from the finding text
+- R9: the ceiling is a function of each transport's timeout (`call_ceiling_seconds`), not a single module constant, because the timeout is per transport. The stdio transport also terminates the server when the request cap is hit (the finding names the ceiling). The ceiling is checked on every loop pass, so a flood of notifications is cut too. SSE and WebSocket leave the connection open after the limit, as their existing timeout does.
+- R10: a pattern that names no port matches any port of its host; a pattern that names no path matches any path (so the existing `https://*` deny still works); the schemes are http, https, ws and wss. An IPv6 literal host is unreadable, so it is refused when a list exists. A malformed URL is refused by any allow list, even for a server the allow list names (fail closed).
+- R11: the 64 KB cap counts the UTF-8 bytes of the frontmatter block.
+- R13: the grace period (the finding says "briefly") is 2 s.
+- R14: the native folder (backslashes on Windows) is substituted, where the previous code substituted forward slashes; `_inside` resolves the result as before.
+- R16: for a `.cmd` or `.bat` launcher the refused set is `&|<>^%` plus CR and LF, not only the `><^%` the finding names. cmd.exe reads `&` and `|` as operators, and the old rule refused them, so the narrower set would let `&` through a `.cmd` launcher. For configuration-file servers `$`, `;` and the backtick are no longer refused. Credential values are checked against the same set when the launcher is a `.cmd` or `.bat`.
+- UI-R3: the switch also covers the language-server rows (the coordinator's message; the finding names only the hook rows). The label is unchanged.
+
+### Not fixed, or residual (honest)
+- **R13, residual:** `LspManager.check` has no closed flag of its own. A check still running after the 2 s grace can start a language server after `manager.close()`. The session-level fix narrows that window and does not close it. Closing it needs a closed flag in `lsp/manager.py`, outside the finding's files; not done.
+- **R12, residual (pre-existing):** a start that fails after `_ask_agent` has written the roster record (a model that is not allowed, or the turn's subagent budget is used up) leaves a real, idle roster entry, because `_release_teammate` only clears `busy`. Not changed.
+- **R9:** an SSE or WebSocket connection that hit its ceiling stays open, so a later call on it can read messages left from the earlier one (the same holds for the existing timeout).
+- **R15, R16:** the junction and `.cmd` tests are Windows-only and were not run on POSIX. The POSIX symlink refusal is the existing code path.
+- **UI-R3, visual:** no browser check was run. The change disables an existing switch; it is verified by the component tests, lint and build only.
+- **Integration:** the 65 integration tests that need PostgreSQL were skipped (no DSN configured), so the Postgres-backed paths were not run.
+
+### Suites after part 2
+- `uv run pytest -q tests/unit`: 3944 passed, 60 skipped, 0 failed (after part 1: 3894 passed, 60 skipped); 50 tests added.
+- `uv run pytest -q tests/integration`: 78 passed, 65 skipped (no PostgreSQL DSN), 0 failed.
+- `npm --prefix frontend test`: 104 files, 613 tests passed (after part 1: 609); 4 added.
+- `npm --prefix frontend run lint`: exit 0. `npm --prefix frontend run build` (`tsc -b` and `vite build`): exit 0 (the existing chunk-size warning).
+- `src/agentos/agentic/agent_tools.py`: 1698 lines (the limit is 1700).
