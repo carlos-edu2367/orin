@@ -13,8 +13,9 @@ export function PluginCard({ plugin, client, onChanged }: { plugin: PluginSummar
   const [open, setOpen] = useState(false)
   const [confirm, setConfirm] = useState(false)
   const [busy, setBusy] = useState(false)
-  const hooks = plugin.contributions.filter((item) => item.kind === 'hook')
-  const hooksEnabled = hooks.length > 0 && hooks.every((item) => item.enabled === true)
+  // W5-R6: a plugin's hooks and language servers are allowed together, so both kinds of consent row are switched here.
+  const consentRows = plugin.contributions.filter((item) => item.kind === 'hook' || item.kind === 'lsp')
+  const hooksEnabled = consentRows.length > 0 && consentRows.every((item) => item.enabled === true)
   async function toggle() { setBusy(true); try { await setPluginEnabled(client, plugin.plugin_id, plugin.state !== 'active'); onChanged() } finally { setBusy(false) } }
   async function toggleHooks() { setBusy(true); try { await setPluginHooksEnabled(client, plugin.plugin_id, !hooksEnabled); onChanged() } finally { setBusy(false) } }
   async function remove() { if (!confirm) { setConfirm(true); return }; setBusy(true); try { await removePlugin(client, plugin.plugin_id); onChanged() } finally { setBusy(false) } }
@@ -29,7 +30,7 @@ export function PluginCard({ plugin, client, onChanged }: { plugin: PluginSummar
     </header>
     <div className="plugin-card__summary"><span>{plugin.contribution_count} {plugin.contribution_count === 1 ? 'contribuição' : 'contribuições'}</span>{plugin.homepage && <a href={plugin.homepage} target="_blank" rel="noreferrer">Abrir página <span aria-hidden="true">↗</span></a>}</div>
     {plugin.warnings.map((warning) => <p className="plugin-card__warning" role="alert" key={warning}><span aria-hidden="true">!</span>{warning}</p>)}
-    {hooks.length > 0 && (
+    {consentRows.length > 0 && (
       <button
         type="button"
         role="switch"
@@ -37,7 +38,7 @@ export function PluginCard({ plugin, client, onChanged }: { plugin: PluginSummar
         aria-label="Permitir execução de hooks"
         className="plugin-card__hooks-toggle"
         onClick={() => void toggleHooks()}
-        disabled={busy}
+        disabled={busy || plugin.state === 'pending_approval'}
       >
         Permitir execução de hooks
       </button>
