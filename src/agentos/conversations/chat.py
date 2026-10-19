@@ -882,7 +882,8 @@ class PostgresChatStore:
                 # A normal follow-up message is also a valid answer to the
                 # last structured prompt. Close it before queuing the next
                 # turn so reloading the chat never presents stale forms again.
-                waiting = c.execute(select(conversation_turns.c.assistant_message_id).where(
+                # A scheduled run is not such an answer (W4-R7): it leaves the prompt open.
+                waiting = () if scheduled_by_schedule_id else c.execute(select(conversation_turns.c.assistant_message_id).where(
                     conversation_turns.c.conversation_id == conversation_id,
                     conversation_turns.c.user_id == user_id,
                     conversation_turns.c.state == "waiting_user",

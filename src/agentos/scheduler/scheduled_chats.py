@@ -16,12 +16,19 @@ from sqlalchemy.engine import Engine
 from agentos.conversations.chat import PostgresChatStore
 from agentos.scheduler.cron import next_after, parse_cron
 from agentos.persistence.postgres.schema import (
-    conversations, provider_configurations, provider_model_catalog,
+    conversation_turns, conversations, provider_configurations, provider_model_catalog,
     projects, schedule_occurrences, scheduled_chat_tasks, schedules, users,
 )
 
 
 RULES = frozenset({"once", "hourly", "daily", "weekly", "cron"})
+# W4-R7: a run bound to a conversation with one of these turns waits. A queued turn holds no pending prompt and
+# the run queues behind it as before, so "queued" does not defer.
+BUSY_TURN_STATES = ("waiting_user", "running")
+
+
+class _DeferredRun(Exception):
+    """The conversation a run is bound to is busy; the claimed occurrence is retried at a later poll."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -315,6 +322,9 @@ class ScheduledChatService:
                 )).scalar_one_or_none()
                 if active is not None:
                     continue
+                # W4-R7: a busy conversation defers the run. Nothing is claimed and next_fire_at stays, so a later poll retries it.
+                if self._conversation_busy(connection, str(schedule["schedule_id"])):
+                    continue
                 logical_at = _stored_utc(schedule["next_fire_at"])
                 occurrence_id = f"{schedule['schedule_id']}:{schedule['version']}:{logical_at.isoformat()}"
                 existing = connection.execute(select(schedule_occurrences.c.occurrence_id).where(schedule_occurrences.c.occurrence_id == occurrence_id)).scalar_one_or_none()
@@ -341,6 +351,9 @@ class ScheduledChatService:
             try:
                 self._materialize(schedule_id, occurrence_id)
                 completed.append(occurrence_id)
+            except _DeferredRun:
+                # W4-R7: the claim stays durable and is retried at a later poll; no turn is created.
+                continue
             except Exception:
                 # The claimed occurrence remains durable and will be recovered
                 # after its lease. Do not create a second turn here.
@@ -360,12 +373,27 @@ class ScheduledChatService:
         request = ScheduledChatInput("x", "x", "x", timezone, kind, time_of_day=str(rule.get("time_of_day") or ""), weekday=rule.get("weekday") if isinstance(rule.get("weekday"), int) else None)
         return self.next_fire(request, after=local.astimezone(UTC) + timedelta(seconds=1))
 
+    @staticmethod
+    def _conversation_busy(connection, schedule_id: str) -> bool:
+        """W4-R7: whether the conversation a schedule is bound to has a turn that waits on the person, queued or running."""
+        conversation_id = connection.execute(select(scheduled_chat_tasks.c.conversation_id).where(
+            scheduled_chat_tasks.c.schedule_id == schedule_id,
+        )).scalar_one_or_none()
+        if conversation_id is None:
+            return False
+        return connection.execute(select(conversation_turns.c.turn_id).where(
+            conversation_turns.c.conversation_id == conversation_id,
+            conversation_turns.c.state.in_(BUSY_TURN_STATES),
+        ).limit(1)).first() is not None
+
     def _materialize(self, schedule_id: str, occurrence_id: str) -> None:
         with self._engine.connect() as connection:
             row = connection.execute(select(scheduled_chat_tasks).where(scheduled_chat_tasks.c.schedule_id == schedule_id)).mappings().one()
             occurrence = connection.execute(select(schedule_occurrences).where(schedule_occurrences.c.occurrence_id == occurrence_id)).mappings().one()
             if occurrence["execution_id"]:
                 return
+            if self._conversation_busy(connection, schedule_id):
+                raise _DeferredRun(occurrence_id)
             model_ok = connection.execute(select(provider_model_catalog.c.id).where(
                 provider_model_catalog.c.user_id == row["user_id"], provider_model_catalog.c.provider == row["provider"], provider_model_catalog.c.model_id == row["model_id"],
             )).scalar_one_or_none()
