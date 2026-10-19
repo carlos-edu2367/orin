@@ -183,3 +183,58 @@ def test_w5_r4_the_desktop_still_runs_a_repository_skill_hook(tmp_path: Path) ->
     runtime.toolset.invoke("Skill", {"skill": "helper"})
     session.lifecycle.emit(HookEvent.PRE_TOOL_USE, tool_name="Read", tool_input={"file_path": "x"})
     assert marker.exists()
+
+
+# W5-R5: an instance that may not start host processes reads only the managed and trusted-project skills, commands,
+# agents and output styles; the server account's own folders (and its plugins' folders) are not read.
+
+
+def _write_skill(folder: Path, name: str) -> None:
+    (folder / name).mkdir(parents=True, exist_ok=True)
+    (folder / name / "SKILL.md").write_text(f"---\ndescription: {name}\n---\nx", encoding="utf-8")
+
+
+def test_w5_r5_a_server_profile_sees_neither_the_server_accounts_skill_nor_its_agent(tmp_path: Path) -> None:
+    _write_skill(orin_user_dir() / "skills", "admin-notes")
+    (orin_user_dir() / "agents").mkdir(parents=True)
+    (orin_user_dir() / "agents" / "admin-helper.md").write_text("---\nname: admin-helper\ndescription: d\n---\nx", encoding="utf-8")
+    session = _session_for(tmp_path, RuntimeMode.SERVER)
+    runtime = session.build_runtime()
+    assert runtime.toolset.disk_skill("admin-notes") is None
+    assert session._agent_definitions.get("admin-helper") is None
+
+
+def test_w5_r5_a_server_profile_still_sees_managed_and_trusted_project_skills_and_agents(tmp_path: Path) -> None:
+    _write_skill(orin_managed_dir() / "skills", "corp-notes")
+    session = _session_for(tmp_path, RuntimeMode.SERVER)
+    _write_skill(session.workspace.root / ".claude" / "skills", "repo-notes")
+    (session.workspace.root / ".claude" / "agents").mkdir(parents=True)
+    (session.workspace.root / ".claude" / "agents" / "repo-helper.md").write_text("---\nname: repo-helper\ndescription: d\n---\nx", encoding="utf-8")
+    WorkspaceTrustStore().trust("profile-b", session.workspace.root)
+    runtime = session.build_runtime()
+    assert runtime.toolset.disk_skill("corp-notes") is not None
+    assert runtime.toolset.disk_skill("repo-notes") is not None
+    assert session._agent_definitions.get("repo-helper") is not None
+
+
+def test_w5_r5_the_desktop_still_reads_the_persons_skills_and_agents(tmp_path: Path) -> None:
+    _write_skill(orin_user_dir() / "skills", "my-notes")
+    (orin_user_dir() / "agents").mkdir(parents=True)
+    (orin_user_dir() / "agents" / "my-helper.md").write_text("---\nname: my-helper\ndescription: d\n---\nx", encoding="utf-8")
+    session = _session_for(tmp_path, RuntimeMode.LOCAL)
+    runtime = session.build_runtime()
+    assert runtime.toolset.disk_skill("my-notes") is not None
+    assert session._agent_definitions.get("my-helper") is not None
+
+
+def test_w5_r5_output_styles_of_the_person_are_not_read_on_a_server(tmp_path: Path) -> None:
+    from agentos.agentic.output_styles import load_output_styles
+
+    (orin_user_dir() / "output-styles").mkdir(parents=True)
+    (orin_user_dir() / "output-styles" / "mine.md").write_text("---\ndescription: mine\n---\nBe brief.", encoding="utf-8")
+    (tmp_path / "w" / ".claude" / "output-styles").mkdir(parents=True)
+    (tmp_path / "w" / ".claude" / "output-styles" / "repo.md").write_text("---\ndescription: repo\n---\nBe formal.", encoding="utf-8")
+    assert "mine" not in load_output_styles(tmp_path / "w", trusted=True, personal=False)
+    assert "repo" in load_output_styles(tmp_path / "w", trusted=True, personal=False)
+    assert "mine" in load_output_styles(tmp_path / "w", trusted=True)
+

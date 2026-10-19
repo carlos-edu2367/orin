@@ -71,6 +71,7 @@ def test_the_turn_reads_the_persons_plugins(tmp_path: Path) -> None:
     kit = _package(tmp_path / "kit")
     _write(orin_user_dir() / "settings.json", json.dumps({"enabledPlugins": {"ghost@market": True}}))
     session = _session(tmp_path, "hi")
+    session.plugin_hooks = True  # W5-R5 review fix: a plugin's agents are read only where plugin hooks may run (a desktop)
     session.plugin_service = _Plugins([{"plugin_id": "kit", "state": "active", "install_path": str(kit)}])
     session.build_runtime()
     assert session._agent_definitions.get("kit:reviewer") is not None

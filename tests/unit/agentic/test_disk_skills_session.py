@@ -48,6 +48,7 @@ def test_the_turn_lists_disk_skills_and_hands_them_to_the_toolset(tmp_path: Path
     _skill(orin_user_dir(), "greet", "---\ndescription: Greets people warmly\n---\nSay hello to $ARGUMENTS.")
     _skill(orin_user_dir(), "secret", "---\ndescription: People only\ndisable-model-invocation: true\n---\nx")
     session = _session(tmp_path, "please greet the team")
+    session.plugin_hooks = True  # W5-R5 review fix: the person's own skills are read only where plugin hooks may run (a desktop)
     runtime = session.build_runtime()
     assert runtime.toolset.disk_skill("greet") is not None
     names = {item.name for item in session._skill_catalog("greet", runtime.toolset)}
@@ -64,6 +65,7 @@ def test_project_skills_wait_for_trust(tmp_path: Path) -> None:
 def test_a_person_runs_a_skill_with_a_slash_command(tmp_path: Path) -> None:
     _skill(orin_user_dir(), "greet", "---\ndescription: Greets\ndisable-model-invocation: true\n---\nSay hello to $ARGUMENTS.")
     session = _session(tmp_path, "/greet Ana")
+    session.plugin_hooks = True  # W5-R5 review fix: the person's own commands are read only where plugin hooks may run (a desktop)
     session.build_runtime()
     texts = [item.text for item in session._reminders.drain() if item.kind == "command"]
     assert len(texts) == 1 and "/greet Ana" in texts[0] and "Say hello to Ana." in texts[0]

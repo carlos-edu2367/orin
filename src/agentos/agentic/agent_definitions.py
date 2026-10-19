@@ -145,22 +145,24 @@ VERIFIER = AgentDefinition(
 BUILTIN_DEFINITIONS = (VERIFIER,)
 
 
-def agent_roots(*, workspace_root: Path | None, trusted: bool) -> list[tuple[str, Path]]:
+def agent_roots(*, workspace_root: Path | None, trusted: bool, personal: bool = True) -> list[tuple[str, Path]]:
+    """``personal=False`` leaves out the person's own folders (W5-R5)."""
     from agentos.settings.paths import claude_managed_dir, claude_user_dir, orin_managed_dir, orin_user_dir
 
     roots = [("managed", orin_managed_dir() / "agents"), ("managed", claude_managed_dir() / "agents")]
     if workspace_root is not None and trusted:
         roots += [("project", workspace_root / ".orin" / "agents"), ("project", workspace_root / ".claude" / "agents")]
-    roots += [("user", orin_user_dir() / "agents"), ("user", claude_user_dir() / "agents")]
+    if personal:
+        roots += [("user", orin_user_dir() / "agents"), ("user", claude_user_dir() / "agents")]
     return roots
 
 
 def load_agent_definitions(*, workspace_root: Path | None, trusted: bool,
-                           plugin_folders: Sequence[tuple[str, Path]] = ()) -> AgentCatalog:
+                           plugin_folders: Sequence[tuple[str, Path]] = (), personal: bool = True) -> AgentCatalog:
     """Managed, project (trusted), user, then active plugins' agents (W5). A plugin's agent is named
     ``plugin:agent`` and loses ``hooks``, ``mcpServers`` and ``permissionMode``, as in Claude Code."""
     catalog = AgentCatalog()
-    roots = [(origin, folder, "") for origin, folder in agent_roots(workspace_root=workspace_root, trusted=trusted)]
+    roots = [(origin, folder, "") for origin, folder in agent_roots(workspace_root=workspace_root, trusted=trusted, personal=personal)]
     roots += [("plugin", Path(folder), f"{plugin_id}:") for plugin_id, folder in plugin_folders]
     for origin, folder, prefix in roots:
         if not folder.is_dir():

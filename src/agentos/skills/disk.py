@@ -181,15 +181,15 @@ def parse_disk_skill(path: Path, *, name: str, origin: str, kind: str) -> DiskSk
     )
 
 
-def skill_roots(*, workspace_root: Path | None, trusted: bool) -> list[tuple[str, str, Path]]:
-    """``(origin, kind, folder)`` in precedence order."""
+def skill_roots(*, workspace_root: Path | None, trusted: bool, personal: bool = True) -> list[tuple[str, str, Path]]:
+    """``(origin, kind, folder)`` in precedence order. ``personal=False`` leaves out the person's own folders (W5-R5)."""
     from agentos.settings.paths import claude_managed_dir, claude_user_dir, orin_managed_dir, orin_user_dir
 
     managed = [orin_managed_dir(), claude_managed_dir()]
     roots: list[tuple[str, str, Path]] = []
     for origin, bases in (
         ("managed", managed),
-        ("user", [orin_user_dir(), claude_user_dir()]),
+        ("user", [orin_user_dir(), claude_user_dir()] if personal else []),
         ("project", [workspace_root / ".orin", workspace_root / ".claude"] if (workspace_root is not None and trusted) else []),
     ):
         for base in bases:
@@ -218,9 +218,9 @@ def _candidates(kind: str, folder: Path) -> Iterable[tuple[str, Path]]:
         yield ":".join(part.lower() for part in relative.parts), path
 
 
-def load_disk_skills(*, workspace_root: Path | None, trusted: bool) -> DiskSkillCatalog:
+def load_disk_skills(*, workspace_root: Path | None, trusted: bool, personal: bool = True) -> DiskSkillCatalog:
     catalog = DiskSkillCatalog()
-    for origin, kind, folder in skill_roots(workspace_root=workspace_root, trusted=trusted):
+    for origin, kind, folder in skill_roots(workspace_root=workspace_root, trusted=trusted, personal=personal):
         try:
             candidates = list(_candidates(kind, folder))
         except OSError as error:

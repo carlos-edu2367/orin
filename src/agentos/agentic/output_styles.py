@@ -46,12 +46,12 @@ BUILTIN_STYLES: dict[str, OutputStyle] = {
 }
 
 
-def _style_dirs(workspace_root: Path | str, trusted: bool) -> tuple[tuple[Path, str], ...]:
+def _style_dirs(workspace_root: Path | str, trusted: bool, personal: bool = True) -> tuple[tuple[Path, str], ...]:
     root = Path(workspace_root)
     dirs: list[tuple[Path, str]] = [
         (claude_user_dir() / "output-styles", "user"),
         (orin_user_dir() / "output-styles", "user"),
-    ]
+    ] if personal else []  # W5-R5: a server profile does not read the server account's own styles
     # A repository's own style files replace prompt text, so they count only for a trusted workspace.
     if trusted:
         dirs += [
@@ -62,12 +62,12 @@ def _style_dirs(workspace_root: Path | str, trusted: bool) -> tuple[tuple[Path, 
 
 
 def load_output_styles(workspace_root: Path | str, *, trusted: bool = True,
-                       plugin_dirs: tuple[tuple[str, Path], ...] | list[tuple[str, Path]] = ()) -> dict[str, OutputStyle]:
+                       plugin_dirs: tuple[tuple[str, Path], ...] | list[tuple[str, Path]] = (), personal: bool = True) -> dict[str, OutputStyle]:
     """Built-ins, then active plugins' styles (named ``plugin:style``, W5), then user files, then project files
-    (trusted workspaces only); a later file with the same name wins."""
+    (trusted workspaces only); a later file with the same name wins. ``personal=False`` reads no user files (W5-R5)."""
     styles = dict(BUILTIN_STYLES)
     plugin_sources = [(Path(directory), "plugin", f"{plugin_id}:") for plugin_id, directory in plugin_dirs]
-    for directory, source, prefix in [*plugin_sources, *((directory, source, "") for directory, source in _style_dirs(workspace_root, trusted))]:
+    for directory, source, prefix in [*plugin_sources, *((directory, source, "") for directory, source in _style_dirs(workspace_root, trusted, personal))]:
         try:
             if not directory.is_dir():
                 continue
@@ -94,7 +94,7 @@ def load_output_styles(workspace_root: Path | str, *, trusted: bool = True,
 
 
 def resolve_output_style(settings: object, workspace_root: Path | str,
-                         plugin_dirs: tuple[tuple[str, Path], ...] | list[tuple[str, Path]] = ()) -> OutputStyle | None:
+                         plugin_dirs: tuple[tuple[str, Path], ...] | list[tuple[str, Path]] = (), *, personal: bool = True) -> OutputStyle | None:
     """The ``outputStyle`` in force, or None for the default (or an unknown name)."""
     getter = getattr(settings, "get", None)
     raw = getter("outputStyle") if callable(getter) else None
@@ -103,7 +103,9 @@ def resolve_output_style(settings: object, workspace_root: Path | str,
     key = raw.strip().lower()
     if key == "default":
         return None
-    style = load_output_styles(workspace_root, trusted=bool(getattr(settings, "trusted", False)), plugin_dirs=plugin_dirs).get(key)
+    style = load_output_styles(
+        workspace_root, trusted=bool(getattr(settings, "trusted", False)), plugin_dirs=plugin_dirs, personal=personal,
+    ).get(key)
     return style if style is not None and style.instructions else None
 
 

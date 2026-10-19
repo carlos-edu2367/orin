@@ -1547,11 +1547,15 @@ class TurnSession:
         from .agent_definitions import AgentCatalog, load_agent_definitions
 
         try:
+            # W5-R5: a plugin's agents and the person's own folders are read only where plugin hooks may run (a desktop).
             plugin_folders = [
                 (plugin.plugin_id, folder)
-                for plugin in getattr(self, "_active_plugins", ()) for folder in plugin.folders(plugin.manifest.agents_paths)
+                for plugin in getattr(self, "_active_plugins", ()) if self.plugin_hooks
+                for folder in plugin.folders(plugin.manifest.agents_paths)
             ]
-            catalog = load_agent_definitions(workspace_root=self.workspace.root, trusted=bool(trusted), plugin_folders=plugin_folders)
+            catalog = load_agent_definitions(
+                workspace_root=self.workspace.root, trusted=bool(trusted), plugin_folders=plugin_folders, personal=self.plugin_hooks,
+            )
         except Exception:  # noqa: BLE001 - a broken agents folder never stops a turn
             logger.exception("agent definitions could not be read")
             return AgentCatalog()
@@ -3401,11 +3405,12 @@ class TurnSession:
         return disk + tuple(item for item in library if item.id not in seen)
 
     def _load_disk_skills(self, trusted: bool):
-        """Skills and commands on disk (W5): managed and user ones always, the repository's once it is trusted."""
+        """Skills and commands on disk (W5): managed and user ones always, the repository's once it is trusted.
+        W5-R5: the person's own ones only where plugin hooks may run (a desktop); a shared Orin reads managed ones only."""
         from agentos.skills.disk import DiskSkillCatalog, load_disk_skills
 
         try:
-            catalog = load_disk_skills(workspace_root=self.workspace.root, trusted=bool(trusted))
+            catalog = load_disk_skills(workspace_root=self.workspace.root, trusted=bool(trusted), personal=self.plugin_hooks)
         except Exception:  # noqa: BLE001 - a broken skill folder never stops a turn
             logger.exception("skills on disk could not be read")
             return DiskSkillCatalog()
@@ -3701,10 +3706,12 @@ class TurnSession:
         from .output_styles import resolve_output_style
 
         try:
+            # W5-R5: plugins' styles and the person's own styles are read only where plugin hooks may run (a desktop).
             style = resolve_output_style(self.effective_settings, self.workspace.root, plugin_dirs=[
                 (plugin.plugin_id, folder)
-                for plugin in getattr(self, "_active_plugins", ()) for folder in plugin.folders(plugin.manifest.output_styles_paths)
-            ])
+                for plugin in getattr(self, "_active_plugins", ()) if self.plugin_hooks
+                for folder in plugin.folders(plugin.manifest.output_styles_paths)
+            ], personal=self.plugin_hooks)
         except Exception:  # noqa: BLE001 - a broken style file means the default style
             style = None
         options = CodePromptOptions(

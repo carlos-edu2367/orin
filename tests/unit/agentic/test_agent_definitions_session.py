@@ -145,6 +145,7 @@ def test_custom_agents_are_listed_for_the_model(tmp_path: Path) -> None:
 
     _agent(REVIEWER)
     session = _session(tmp_path, "hi")
+    session.plugin_hooks = True  # W5-R5 review fix: the person's own agents are read only where plugin hooks may run (a desktop)
     session.build_runtime()
     texts = [item.text for item in session._reminders.drain() if item.kind == "agents"]
     assert texts and "code-reviewer" in texts[0] and "verifier" in texts[0]
