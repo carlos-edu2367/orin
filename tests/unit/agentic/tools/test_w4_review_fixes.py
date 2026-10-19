@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -214,3 +216,49 @@ def test_a_long_notification_is_cut_to_180_utf16_units_and_is_shown(tmp_path: Pa
     assert _units(output["message"]) <= 180
     assert output["message"].endswith("…")
     assert shown == [output["message"]]
+
+
+# -- W4-R17: Grep and Glob do not walk into junctions ---------------------------------------------------
+
+RG = shutil.which("rg")  # only the tests look on PATH; Orin itself never does
+
+
+@pytest.fixture()
+def junction_workspace(tmp_path: Path):
+    if sys.platform != "win32":
+        pytest.skip("a junction is a Windows reparse point")
+    import _winapi
+
+    root, outside = tmp_path / "workspace", tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir()
+    (outside / "secret.txt").write_text("OUTSIDE-SECRET\n", encoding="utf-8")
+    (root / "notes.txt").write_text("inside SECRET-OK\n", encoding="utf-8")
+    _winapi.CreateJunction(str(outside), str(root / "linked"))
+    return ConversationWorkspace.at_root(root)
+
+
+def test_the_python_grep_does_not_read_through_a_junction(junction_workspace, monkeypatch: pytest.MonkeyPatch) -> None:
+    from agentos.agentic.tools.search import grep as grep_module
+
+    monkeypatch.setattr(grep_module, "ripgrep_binary", lambda *args, **kwargs: None)  # the Python scan
+    toolset = AgentToolset(junction_workspace, public_tool_names=True)
+    outcome = toolset.invoke("Grep", {"pattern": "OUTSIDE-SECRET", "output_mode": "content"})
+    assert outcome.status == "succeeded", outcome.content
+    assert "OUTSIDE-SECRET" not in outcome.content
+    assert "SECRET-OK" in toolset.invoke("Grep", {"pattern": "SECRET-OK", "output_mode": "content"}).content
+
+
+@pytest.mark.skipif(RG is None, reason="no ripgrep on this machine")
+def test_ripgrep_does_not_read_through_a_junction(junction_workspace, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ORIN_RIPGREP_PATH", str(RG))
+    outcome = AgentToolset(junction_workspace, public_tool_names=True).invoke("Grep", {"pattern": "OUTSIDE-SECRET", "output_mode": "content"})
+    assert outcome.status == "succeeded", outcome.content
+    assert "OUTSIDE-SECRET" not in outcome.content
+
+
+def test_glob_does_not_list_a_junction_target(junction_workspace) -> None:
+    outcome = AgentToolset(junction_workspace, public_tool_names=True).invoke("Glob", {"pattern": "**/*.txt"})
+    assert outcome.status == "succeeded", outcome.content
+    assert "notes.txt" in outcome.content
+    assert "secret.txt" not in outcome.content and "linked" not in outcome.content

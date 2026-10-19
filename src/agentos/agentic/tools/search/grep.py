@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from agentos.agentic.ripgrep import event_path, event_text, ripgrep_binary, run_ripgrep
 from agentos.agentic.workspace import MAX_SEARCH_RESULTS
-from agentos.agentic.tools._shared import AgentToolError, _GLOB_IGNORED_DIRS, _TEXT, _schema
+from agentos.agentic.tools._shared import AgentToolError, _GLOB_IGNORED_DIRS, _TEXT, _schema, linked_or_outside
 from agentos.agentic.tools.spec import ToolSpec, ToolInput
 from agentos.ignore import DENIED_SEGMENTS
 
@@ -97,10 +97,11 @@ class GrepTools:
                 pre_ctx=pre_ctx, post_ctx=post_ctx, only_matching=bool(only_matching),
             )
         candidate_files: list[Path] = []
+        roots = (self.workspace.root, *self.workspace.additional_roots)
         if rg_found is not None:
             pass  # ripgrep already searched; the Python scan below sees no candidates
         elif search_target.is_file():
-            candidate_files = [search_target]
+            candidate_files = [] if linked_or_outside(search_target, roots) else [search_target]
         else:
             ignore_policy = getattr(self.workspace, "_ignore_policy", lambda: None)()
             for cur_root, dirs, files in os.walk(search_target):
@@ -110,6 +111,8 @@ class GrepTools:
                     if d in _GLOB_IGNORED_DIRS or d.startswith(".git"):
                         continue
                     d_full = cur_path / d
+                    if linked_or_outside(d_full, roots):  # a junction is not a symlink: os.walk would enter it (W4-R17)
+                        continue
                     try:
                         d_rel_ws = self.workspace.key(d_full)
                     except ValueError:
@@ -120,6 +123,8 @@ class GrepTools:
                 dirs[:] = sorted(kept_dirs)
                 for fname in sorted(files):
                     full_file = cur_path / fname
+                    if linked_or_outside(full_file, roots):
+                        continue
                     try:
                         rel_ws = self.workspace.key(full_file)
                         rel_target = full_file.relative_to(search_target).as_posix()

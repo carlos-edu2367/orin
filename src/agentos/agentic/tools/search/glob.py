@@ -10,7 +10,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from agentos.agentic.workspace import MAX_SEARCH_RESULTS, MAX_LIST_DEPTH
-from agentos.agentic.tools._shared import AgentToolError, _GLOB_IGNORED_DIRS, _TEXT, _schema
+from agentos.agentic.tools._shared import AgentToolError, _GLOB_IGNORED_DIRS, _TEXT, _schema, linked_or_outside
 from agentos.agentic.tools.spec import ToolSpec, ToolInput
 
 
@@ -95,6 +95,7 @@ class GlobTools:
             raise AgentToolError(f"Directory not found: '{path}'.")
         ignore_policy = getattr(self.workspace, "_ignore_policy", lambda: None)()
         matched: list[tuple[int, str]] = []
+        roots = (self.workspace.root, *self.workspace.additional_roots)
         for cur_root, dirs, files in os.walk(base_root):
             cur_path = Path(cur_root)
             kept_dirs: list[str] = []
@@ -102,6 +103,8 @@ class GlobTools:
                 if d in _GLOB_IGNORED_DIRS or d.startswith(".git"):
                     continue
                 d_full = cur_path / d
+                if linked_or_outside(d_full, roots):  # a junction is not a symlink: os.walk would enter it (W4-R17)
+                    continue
                 try:
                     d_rel_ws = self.workspace.key(d_full)
                 except ValueError:
@@ -112,6 +115,8 @@ class GlobTools:
             dirs[:] = kept_dirs
             for fname in files:
                 full_file = cur_path / fname
+                if linked_or_outside(full_file, roots):
+                    continue
                 try:
                     rel_ws = self.workspace.key(full_file)
                     rel_base = full_file.relative_to(base_root).as_posix()

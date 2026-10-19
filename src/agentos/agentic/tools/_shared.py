@@ -26,6 +26,7 @@ from typing import Any, Callable, Collection, Mapping
 from urllib.parse import urljoin, urlparse, urlsplit, urlunsplit
 from uuid import uuid4
 import httpx
+from agentos.pathsafety import resolve_contained
 from agentos.reading.extract import extract_text
 from agentos.reading.render import ImageTooLarge, normalize_image, render_pdf_pages
 from agentos.reading.vision import VisionUnavailable
@@ -207,6 +208,17 @@ _SERVER_READY_RE = re.compile(
 )
 _URL_EXTRACT_RE = re.compile(r"https?://[^\s)\"'>]+", re.IGNORECASE)
 _GLOB_IGNORED_DIRS = frozenset({".git", "node_modules", ".venv", "venv", "__pycache__", "dist", "build", ".orin"})
+
+
+def linked_or_outside(path: Path, roots: Collection[Path]) -> bool:
+    """True for a link or junction, or an entry whose real location is in none of ``roots`` (W4-R17).
+
+    ``os.walk`` descends into a junction on Windows, and a junction is not a symlink, so a search that
+    walks the tree needs this check on every directory and file it visits. ``roots`` are resolved paths.
+    """
+    if os.path.islink(path) or os.path.isjunction(path):
+        return True
+    return not any(resolve_contained(path, root) is not None for root in roots)
 
 
 class AgentToolError(RuntimeError):
