@@ -12995,3 +12995,820 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - [ ] **Step 2:** Append a "## Batch G — One hook system (Tasks 33–36)" section to `docs/superpowers/plans/2026-10-19-w5-extensibility-ledger.md`: commits, suite results, deviations 35–38, the deliberate expectation changes (Task 34: three cases of `tests/unit/plugins/test_hooks_manifest.py` — every event is listed, `async` is kept, a timeout is capped at 600 s — and one line removed from `tests/unit/workers/test_multi_session_concurrency.py`, which stubbed the plugin-hook refresh the worker no longer does), and anything done differently from this plan.
 - [ ] **Step 3:** Commit with `docs(w5): ledger, batch G` + blank line + the Co-Authored-By line.
 
+## Batch H — Diagnostics after edits (LSP), and the close of W5
+
+Claude Code's plugins can declare language servers (`.lsp.json`); after an edit, the server's diagnostics reach the model. Orin had nothing of it. This batch adds a small LSP client and runs a plugin's language servers for the files they handle (Task 37), then closes W5 (Task 38): the last regression and the ledger summary. The tool-ledger part of the old Batch I already happened in Batch E (the four MCP tools); Batch I is folded into Task 38.
+
+New deviations (also in the ledger):
+
+40. **A plugin's language server runs only once the person allowed the plugin to run code** (its hooks' consent) and only on an Orin that runs plugin hooks; Claude Code starts it with the plugin. Its environment is the worker's without Orin's own variables or anything named like a credential, plus its `env`.
+41. **Diagnostics are gathered in the background after Write and Edit and reach the model with its next request** (errors and warnings, at most 30); a server that fails is turned off for the turn and the model is told once. Orin has no `LSP` code-navigation tool; only diagnostics. `restartOnCrash`, `maxRestarts`, `transport: socket` and `workspaceFolder` are not read.
+
+### Task 37: A plugin's language server reports diagnostics after Write and Edit
+
+A plugin declares language servers in `.lsp.json` at its root or in its manifest's `lspServers` (an object, or a file inside the package): `command`, `args`, `extensionToLanguage` (required), `env`, `initializationOptions`, `settings`, `startupTimeout` (ms). `lsp_servers` reads them for the active plugins whose code the person allowed. `LspClient` speaks the LSP base protocol over stdio (`Content-Length` framing): `initialize` (waiting at most `startupTimeout`), `initialized`, the plugin's settings, then for each change `didOpen` or `didChange` with the whole text plus `didSave`; it waits for that file's `publishDiagnostics` (at most 5 s, then 0.3 s for a second, fuller report) and answers the server's own requests (`workspace/configuration` with the settings, capability registration, progress, workspace folders). `LspManager` starts a server on the first file it handles and turns it off for the turn if it fails. After `write_file` and `edit_file` the session gathers the file's diagnostics in the background; errors and warnings join the next request as a `diagnostics` reminder (one per file, replaced by a newer one). The servers stop with the turn's background work.
+
+**Files:**
+- Create: `src/agentos/lsp/__init__.py`
+- Create: `src/agentos/lsp/config.py`
+- Create: `src/agentos/lsp/client.py`
+- Create: `src/agentos/lsp/manager.py`
+- Modify: `src/agentos/agentic/tools/files/write.py`
+- Modify: `src/agentos/agentic/tools/files/edit.py`
+- Modify: `src/agentos/agentic/session.py`
+- Test: `tests/unit/lsp/__init__.py`
+- Test: `tests/unit/lsp/test_lsp.py`
+
+**Interfaces:**
+- Consumes: Batch F (`ActivePlugin`, `manifest_file`, `plugin_variables`), Batch G (`ActivePlugin.enabled_hook_ids`, `TurnSession.plugin_hooks`).
+- Produces: `agentos.lsp.config`: `LspServerConfig` (`language_for(path)`), `lsp_servers(plugins, *, user_id) -> (configs, problems)`; `agentos.lsp.client`: `LspClient(config, *, workspace_root)` (`start`, `diagnostics(path, text, language, *, timeout)`, `close`), `LspError`; `agentos.lsp.manager`: `LspManager(configs, *, workspace_root, timeout=5.0, client_factory=LspClient)` (`server_for`, `check`, `close`), `format_diagnostics(label, server, diagnostics)`; `toolset._lsp_after_write`; `TurnSession._lsp_manager()`, `._lsp_after_write(path)`, `._close_lsp()`.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `tests/unit/lsp/__init__.py`:
+
+```python
+
+```
+
+Create `tests/unit/lsp/test_lsp.py`:
+
+```python
+"""W5: a plugin's language server reports diagnostics after Write and Edit."""
+from __future__ import annotations
+
+import json
+import sys
+import time
+from pathlib import Path
+
+from agentos.lsp.client import LspClient
+from agentos.lsp.config import LspServerConfig, lsp_servers
+from agentos.lsp.manager import LspManager, format_diagnostics
+from agentos.plugins.runtime import active_plugins
+
+# A tiny language server: every line containing TODO is a warning, every line containing FIXME an error. On the
+# first document it asks the client for its configuration and reports the answer as a hint on line 1.
+FAKE_SERVER = r'''
+import json, sys
+
+def read():
+    length = None
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            sys.exit(0)
+        line = line.decode().strip()
+        if not line:
+            break
+        if line.lower().startswith("content-length:"):
+            length = int(line.split(":", 1)[1])
+    return json.loads(sys.stdin.buffer.read(length))
+
+def send(message):
+    body = json.dumps(message).encode()
+    sys.stdout.buffer.write(b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body)
+    sys.stdout.buffer.flush()
+
+asked = False
+while True:
+    message = read()
+    method = message.get("method")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": message["id"], "result": {"capabilities": {"textDocumentSync": 1}}})
+    elif method == "shutdown":
+        send({"jsonrpc": "2.0", "id": message["id"], "result": None})
+    elif method == "exit":
+        sys.exit(0)
+    elif method in ("textDocument/didOpen", "textDocument/didChange"):
+        document = message["params"]["textDocument"]
+        text = document.get("text") if method == "textDocument/didOpen" else message["params"]["contentChanges"][0]["text"]
+        if not asked:
+            asked = True
+            send({"jsonrpc": "2.0", "id": "cfg-1", "method": "workspace/configuration", "params": {"items": [{"section": "fake"}]}})
+            reply = read()
+        diagnostics = []
+        for number, line in enumerate(text.splitlines()):
+            if "TODO" in line:
+                diagnostics.append({"range": {"start": {"line": number, "character": line.index("TODO")}, "end": {"line": number, "character": 0}}, "severity": 2, "message": "a TODO is left"})
+            if "FIXME" in line:
+                diagnostics.append({"range": {"start": {"line": number, "character": 0}, "end": {"line": number, "character": 0}}, "severity": 1, "message": "a FIXME is left", "code": "F1"})
+        send({"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics", "params": {"uri": document["uri"], "diagnostics": diagnostics}})
+'''
+
+
+def _config(tmp_path: Path) -> LspServerConfig:
+    script = tmp_path / "fake_lsp.py"
+    script.write_text(FAKE_SERVER, encoding="utf-8")
+    return LspServerConfig(name="kit:fake", plugin_id="kit", command=sys.executable, args=(str(script),),
+                           extensions=((".txt", "plaintext"),), settings={"fake": True}, startup_timeout=20)
+
+
+def test_the_client_sends_a_change_and_returns_its_diagnostics(tmp_path: Path) -> None:
+    client = LspClient(_config(tmp_path), workspace_root=tmp_path)
+    client.start()
+    try:
+        target = tmp_path / "notes.txt"
+        found = client.diagnostics(target, "fine\nTODO: later\n", "plaintext", timeout=20)
+        assert [(item["severity"], item["range"]["start"]["line"]) for item in found] == [(2, 1)]
+        found = client.diagnostics(target, "FIXME now\n", "plaintext", timeout=20)
+        assert [item["message"] for item in found] == ["a FIXME is left"]
+    finally:
+        client.close()
+
+
+def test_diagnostics_become_reminder_text() -> None:
+    text = format_diagnostics("src/a.py", "kit:pyright", [
+        {"range": {"start": {"line": 2, "character": 4}}, "severity": 1, "message": "Undefined  name 'x'", "code": "reportUndefinedVariable"},
+        {"range": {"start": {"line": 0, "character": 0}}, "severity": 4, "message": "a hint"},
+    ])
+    assert text == ("Diagnostics from the language server kit:pyright for src/a.py after your change:\n"
+                    "- line 3, column 5 · error · Undefined name 'x' [reportUndefinedVariable]")
+    assert format_diagnostics("a", "s", [{"severity": 3, "message": "info"}]) is None
+
+
+def test_a_server_that_cannot_start_is_turned_off(tmp_path: Path) -> None:
+    broken = LspServerConfig(name="kit:none", plugin_id="kit", command=str(tmp_path / "no-such-server"), extensions=((".txt", "plaintext"),))
+    manager = LspManager([broken], workspace_root=tmp_path)
+    (tmp_path / "a.txt").write_text("x", encoding="utf-8")
+    name, found, failure = manager.check(tmp_path / "a.txt")
+    assert name == "kit:none" and found is None and "could not start" in failure
+    assert manager.check(tmp_path / "a.txt") == ("kit:none", None, "")  # reported once, then off
+    assert manager.check(tmp_path / "b.md") == ("", None, "")
+
+
+class _Plugins:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def list(self, user_id):
+        return list(self.rows)
+
+
+def _plugin(root: Path, lsp: dict) -> Path:
+    (root / ".claude-plugin").mkdir(parents=True)
+    (root / ".claude-plugin" / "plugin.json").write_text(json.dumps({"name": "kit", "version": "1.0.0"}), encoding="utf-8")
+    (root / ".lsp.json").write_text(json.dumps(lsp), encoding="utf-8")
+    return root
+
+
+def _row(root: Path, consented: bool) -> dict:
+    hooks = [{"kind": "hook", "reference": "kit:PreToolUse:0", "enabled": True}] if consented else []
+    return {"plugin_id": "kit", "state": "active", "install_path": str(root), "contributions": hooks}
+
+
+def test_a_plugins_lsp_json_is_read_once_its_code_may_run(tmp_path: Path) -> None:
+    root = _plugin(tmp_path / "kit", {
+        "fake": {"command": "${CLAUDE_PLUGIN_ROOT}/bin/fake", "args": ["--stdio"], "extensionToLanguage": {".TXT": "plaintext"}, "startupTimeout": 3000},
+        "broken": {"command": "x", "extensionToLanguage": {"txt": "plaintext"}},
+    })
+    servers, problems = lsp_servers(active_plugins(_Plugins([_row(root, True)]), "u1", {})[0], user_id="u1")
+    assert [(item.name, item.extensions, item.startup_timeout) for item in servers] == [("kit:fake", ((".txt", "plaintext"),), 3.0)]
+    assert servers[0].command == f"{root}/bin/fake" and any("broken" in problem for problem in problems)
+    waiting, problems = lsp_servers(active_plugins(_Plugins([_row(root, False)]), "u1", {})[0], user_id="u1")
+    assert waiting == [] and any("allow" in problem for problem in problems)
+
+
+def test_writing_a_file_brings_its_diagnostics_to_the_model(tmp_path: Path) -> None:
+    from tests.unit.agentic.test_disk_skills_session import _session
+
+    script = tmp_path / "fake_lsp.py"
+    script.write_text(FAKE_SERVER, encoding="utf-8")
+    root = _plugin(tmp_path / "kit", {"fake": {"command": sys.executable, "args": [str(script)], "extensionToLanguage": {".txt": "plaintext"}}})
+    session = _session(tmp_path, "hi")
+    session.plugin_service = _Plugins([_row(root, True)])
+    session.plugin_hooks = True
+    runtime = session.build_runtime()
+    try:
+        assert runtime.toolset.invoke("write_file", {"path": "notes.txt", "content": "ok\nFIXME soon\n"}).status == "succeeded"
+        deadline = time.monotonic() + 30
+        texts: list[str] = []
+        while time.monotonic() < deadline and not texts:
+            texts = [item.text for item in session._reminders.drain() if item.kind == "diagnostics"]
+            time.sleep(0.1)
+        assert texts and "notes.txt" in texts[0] and "line 2, column 1 · error · a FIXME is left [F1]" in texts[0]
+    finally:
+        session.close_background_subagents()
+```
+
+- [ ] **Step 2: Run it to verify it fails**
+
+Run: `uv run pytest -q tests/unit/lsp`
+Expected: FAIL — `ModuleNotFoundError: No module named 'agentos.lsp'` (collection error).
+
+- [ ] **Step 3: Implement**
+
+Create `src/agentos/lsp/__init__.py`:
+
+```python
+"""Language servers for diagnostics after edits (W5)."""
+```
+
+Create `src/agentos/lsp/config.py`:
+
+```python
+"""Language servers a plugin declares (W5): ``.lsp.json`` at the plugin's root, or ``lspServers`` in its manifest.
+
+The Claude Code shape: ``{"name": {"command", "args", "extensionToLanguage": {".py": "python"}, "env",
+"initializationOptions", "settings", "startupTimeout"}}``. A plugin's language server is a program it runs, so it
+starts only for a plugin whose hooks the person allowed (the same consent as running its code) and only on an Orin
+that runs plugin hooks. ``${CLAUDE_PLUGIN_ROOT}``/``${ORIN_PLUGIN_ROOT}`` and the data folder may be named.
+"""
+from __future__ import annotations
+
+import json
+import re
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from agentos.plugins.manifest import manifest_file
+from agentos.plugins.runtime import ActivePlugin
+from agentos.plugins.variables import plugin_variables, substitute
+
+MAX_SERVERS = 16
+DEFAULT_STARTUP_SECONDS = 10.0
+_EXTENSION = re.compile(r"\.[A-Za-z0-9_+-]{1,16}")
+
+
+@dataclass(frozen=True, slots=True)
+class LspServerConfig:
+    name: str
+    plugin_id: str
+    command: str
+    args: tuple[str, ...] = ()
+    env: tuple[tuple[str, str], ...] = ()
+    extensions: tuple[tuple[str, str], ...] = ()  # (".py", "python")
+    initialization_options: Any = None
+    settings: Any = None
+    startup_timeout: float = DEFAULT_STARTUP_SECONDS
+
+    def language_for(self, path: Path) -> str | None:
+        suffix = Path(path).suffix.lower()
+        return next((language for extension, language in self.extensions if extension == suffix), None)
+
+
+def _declared(plugin: ActivePlugin) -> tuple[Mapping[str, Any] | None, str]:
+    """The plugin's language servers: ``lspServers`` in the manifest (an object, or a file inside the package),
+    else ``.lsp.json`` at its root."""
+    target = manifest_file(plugin.install_path)
+    raw: Any = None
+    if target is not None:
+        try:
+            raw = json.loads(target.read_text(encoding="utf-8")).get("lspServers")
+        except (OSError, ValueError, AttributeError):
+            raw = None
+    if isinstance(raw, str):
+        candidate = (plugin.install_path / raw).resolve()
+        if not candidate.is_relative_to(plugin.install_path.resolve()):
+            return None, "lspServers names a file outside the plugin"
+        try:
+            raw = json.loads(candidate.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None, "the lspServers file could not be read"
+    if raw is None:
+        file = plugin.install_path / ".lsp.json"
+        if not file.is_file():
+            return None, ""
+        try:
+            raw = json.loads(file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None, ".lsp.json could not be read"
+    return (raw, "") if isinstance(raw, Mapping) else (None, "the language servers must be an object")
+
+
+def lsp_servers(plugins: Sequence[ActivePlugin], *, user_id: str) -> tuple[list[LspServerConfig], list[str]]:
+    """``(the language servers to offer, what was skipped and why)``."""
+    servers: list[LspServerConfig] = []
+    problems: list[str] = []
+    for plugin in plugins:
+        declared, problem = _declared(plugin)
+        if problem:
+            problems.append(f"{plugin.plugin_id}: {problem}")
+        if not declared:
+            continue
+        if not plugin.enabled_hook_ids:
+            problems.append(f"{plugin.plugin_id}: its language servers wait for the person to allow the plugin to run code")
+            continue
+        variables = plugin_variables(install_path=plugin.install_path, plugin_id=plugin.plugin_id, user_id=user_id)
+        for name, spec in declared.items():
+            label = f"{plugin.plugin_id}:{str(name)[:64]}"
+            if not isinstance(spec, Mapping) or not isinstance(spec.get("command"), str) or not spec["command"].strip():
+                problems.append(f"{label}: a language server needs a command")
+                continue
+            mapping = spec.get("extensionToLanguage")
+            extensions = tuple(
+                (str(extension).lower(), str(language)) for extension, language in (mapping.items() if isinstance(mapping, Mapping) else ())
+                if isinstance(extension, str) and _EXTENSION.fullmatch(extension) and isinstance(language, str) and language.strip()
+            )
+            if not extensions:
+                problems.append(f"{label}: extensionToLanguage must map file extensions (\".py\") to languages")
+                continue
+            args = spec.get("args") if isinstance(spec.get("args"), list) else []
+            env = spec.get("env") if isinstance(spec.get("env"), Mapping) else {}
+            timeout = spec.get("startupTimeout")
+            servers.append(LspServerConfig(
+                name=label, plugin_id=plugin.plugin_id, command=substitute(spec["command"].strip(), variables),
+                args=tuple(substitute(str(item), variables) for item in args if isinstance(item, (str, int, float))),
+                env=tuple(sorted((str(key), substitute(str(value), variables)) for key, value in env.items() if isinstance(value, (str, int, float)))),
+                extensions=extensions, initialization_options=spec.get("initializationOptions"), settings=spec.get("settings"),
+                startup_timeout=max(1.0, min(float(timeout) / 1000.0, 120.0)) if isinstance(timeout, (int, float)) and not isinstance(timeout, bool) else DEFAULT_STARTUP_SECONDS,
+            ))
+            if len(servers) >= MAX_SERVERS:
+                return servers, problems
+    return servers, problems
+
+
+__all__ = ["LspServerConfig", "lsp_servers"]
+```
+
+Create `src/agentos/lsp/client.py`:
+
+```python
+"""A small Language Server Protocol client (W5): open or change a file, wait for its diagnostics.
+
+Speaks JSON-RPC over the server's stdin/stdout with ``Content-Length`` framing. The server's own requests are
+answered (``workspace/configuration`` with the plugin's ``settings``, capability registration and progress with
+an empty result; anything else "method not found"). A server that does not answer in time is stopped; the caller
+then turns it off for the rest of the turn.
+"""
+from __future__ import annotations
+
+import itertools
+import json
+import os
+import subprocess
+import threading
+from collections.abc import Mapping
+from concurrent.futures import Future
+from pathlib import Path
+from typing import Any
+
+from agentos.agentic.agent_tools import _terminate_process_tree
+
+from .config import LspServerConfig
+
+MAX_MESSAGE_BYTES = 8_000_000
+SETTLE_SECONDS = 0.3
+
+
+class LspError(RuntimeError):
+    """The language server failed to start, answer or stay alive."""
+
+
+def _environment(config: LspServerConfig) -> dict[str, str]:
+    """The worker's environment without Orin's own variables or anything that looks like a credential, plus the
+    server's own ``env``."""
+    hidden = ("ORIN_", "AGENTOS_")
+    secret_words = ("API_KEY", "SECRET", "TOKEN", "PASSWORD")
+    environment = {
+        name: value for name, value in os.environ.items()
+        if not name.upper().startswith(hidden) and not any(word in name.upper() for word in secret_words)
+    }
+    environment.update(dict(config.env))
+    return environment
+
+
+class LspClient:
+    def __init__(self, config: LspServerConfig, *, workspace_root: Path) -> None:
+        self.config = config
+        self.root = Path(workspace_root)
+        self._process: subprocess.Popen[bytes] | None = None
+        self._ids = itertools.count(1)
+        self._pending: dict[int, Future] = {}
+        self._diagnostics: dict[str, list[dict[str, Any]]] = {}
+        self._published: dict[str, threading.Event] = {}
+        self._versions: dict[str, int] = {}
+        self._write_lock = threading.Lock()
+        self._state_lock = threading.Lock()
+        self._closed = False
+
+    # -- process and framing ----------------------------------------------------
+
+    def start(self) -> None:
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+        try:
+            self._process = subprocess.Popen(
+                [self.config.command, *self.config.args], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL, cwd=str(self.root), env=_environment(self.config), shell=False,
+                creationflags=creationflags,
+            )
+        except OSError as error:
+            raise LspError(f"could not start {self.config.command}: {error}") from error
+        threading.Thread(target=self._read_loop, name=f"orin-lsp-{self.config.name}", daemon=True).start()
+        result = self._request("initialize", {
+            "processId": os.getpid(), "rootUri": self.root.as_uri(), "rootPath": str(self.root),
+            "workspaceFolders": [{"uri": self.root.as_uri(), "name": self.root.name or "workspace"}],
+            "capabilities": {
+                "textDocument": {"publishDiagnostics": {"relatedInformation": False}, "synchronization": {"didSave": True}},
+                "workspace": {"configuration": True, "workspaceFolders": True},
+            },
+            "initializationOptions": self.config.initialization_options,
+        }, timeout=self.config.startup_timeout)
+        if not isinstance(result, Mapping):
+            raise LspError("the language server did not initialize")
+        self._notify("initialized", {})
+        if self.config.settings is not None:
+            self._notify("workspace/didChangeConfiguration", {"settings": self.config.settings})
+
+    def _send(self, message: Mapping[str, Any]) -> None:
+        process = self._process
+        if process is None or process.stdin is None or process.poll() is not None:
+            raise LspError("the language server is not running")
+        body = json.dumps(message).encode("utf-8")
+        with self._write_lock:
+            try:
+                process.stdin.write(f"Content-Length: {len(body)}\r\n\r\n".encode("ascii") + body)
+                process.stdin.flush()
+            except OSError as error:
+                raise LspError(f"the language server closed its input: {error}") from error
+
+    def _notify(self, method: str, params: Mapping[str, Any]) -> None:
+        self._send({"jsonrpc": "2.0", "method": method, "params": dict(params)})
+
+    def _request(self, method: str, params: Mapping[str, Any], *, timeout: float) -> Any:
+        request_id = next(self._ids)
+        future: Future = Future()
+        with self._state_lock:
+            self._pending[request_id] = future
+        self._send({"jsonrpc": "2.0", "id": request_id, "method": method, "params": dict(params)})
+        try:
+            return future.result(timeout=timeout)
+        except TimeoutError:
+            raise LspError(f"the language server did not answer {method} within {timeout:g}s") from None
+        finally:
+            with self._state_lock:
+                self._pending.pop(request_id, None)
+
+    def _read_loop(self) -> None:
+        process = self._process
+        assert process is not None and process.stdout is not None
+        stream = process.stdout
+        try:
+            while True:
+                length = None
+                while True:
+                    line = stream.readline(4096)
+                    if not line:
+                        return
+                    text = line.decode("ascii", errors="replace").strip()
+                    if not text:
+                        break
+                    name, _, value = text.partition(":")
+                    if name.strip().lower() == "content-length":
+                        length = int(value.strip())
+                if length is None or length < 0 or length > MAX_MESSAGE_BYTES:
+                    return
+                body = stream.read(length)
+                try:
+                    message = json.loads(body.decode("utf-8"))
+                except ValueError:
+                    continue
+                if isinstance(message, dict):
+                    self._dispatch(message)
+        except (OSError, ValueError):
+            return
+        finally:
+            with self._state_lock:
+                pending = list(self._pending.values())
+            for future in pending:
+                if not future.done():
+                    future.set_exception(LspError("the language server stopped"))
+
+    def _dispatch(self, message: dict[str, Any]) -> None:
+        method = message.get("method")
+        if method is None:
+            with self._state_lock:
+                future = self._pending.get(message.get("id"))  # type: ignore[arg-type]
+            if future is not None and not future.done():
+                if "error" in message:
+                    future.set_exception(LspError(str((message.get("error") or {}).get("message") or "error")[:300]))
+                else:
+                    future.set_result(message.get("result"))
+            return
+        params = message.get("params") if isinstance(message.get("params"), Mapping) else {}
+        if method == "textDocument/publishDiagnostics":
+            uri = str(params.get("uri") or "")
+            items = [item for item in params.get("diagnostics") or [] if isinstance(item, Mapping)]
+            with self._state_lock:
+                self._diagnostics[uri] = [dict(item) for item in items]
+                event = self._published.setdefault(uri, threading.Event())
+            event.set()
+            return
+        if message.get("id") is None:
+            return  # other notifications (logs, progress) are not needed
+        if method == "workspace/configuration":
+            count = len(params.get("items") or []) if isinstance(params.get("items"), list) else 1
+            result: Any = [self.config.settings] * count
+        elif method in {"client/registerCapability", "client/unregisterCapability", "window/workDoneProgress/create"}:
+            result = None
+        elif method == "workspace/workspaceFolders":
+            result = [{"uri": self.root.as_uri(), "name": self.root.name or "workspace"}]
+        else:
+            try:
+                self._send({"jsonrpc": "2.0", "id": message["id"], "error": {"code": -32601, "message": f"not supported: {str(method)[:80]}"}})
+            except LspError:
+                pass
+            return
+        try:
+            self._send({"jsonrpc": "2.0", "id": message["id"], "result": result})
+        except LspError:
+            pass
+
+    # -- documents --------------------------------------------------------------
+
+    def diagnostics(self, path: Path, text: str, language: str, *, timeout: float) -> list[dict[str, Any]] | None:
+        """Send the file's new text and wait for its diagnostics; None when the server sent none in time."""
+        uri = Path(path).resolve().as_uri()
+        with self._state_lock:
+            event = self._published.setdefault(uri, threading.Event())
+            event.clear()
+            version = self._versions.get(uri)
+            self._versions[uri] = (version or 0) + 1
+        if version is None:
+            self._notify("textDocument/didOpen", {"textDocument": {"uri": uri, "languageId": language, "version": 1, "text": text}})
+        else:
+            self._notify("textDocument/didChange", {"textDocument": {"uri": uri, "version": version + 1}, "contentChanges": [{"text": text}]})
+        self._notify("textDocument/didSave", {"textDocument": {"uri": uri}, "text": text})
+        if not event.wait(timeout):
+            return None
+        event.clear()
+        event.wait(SETTLE_SECONDS)  # a server may publish twice (a quick pass, then a full one): keep the last
+        with self._state_lock:
+            return list(self._diagnostics.get(uri, []))
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        process, self._process = self._process, None
+        if process is None:
+            return
+        self._process = process
+        try:
+            self._request("shutdown", {}, timeout=1.0)
+            self._notify("exit", {})
+        except LspError:
+            pass
+        self._process = None
+        try:
+            process.wait(timeout=1.0)
+        except subprocess.TimeoutExpired:
+            _terminate_process_tree(process)
+
+
+__all__ = ["LspClient", "LspError"]
+```
+
+Create `src/agentos/lsp/manager.py`:
+
+```python
+"""The language servers of one turn (W5): each starts on the first file it handles and is turned off if it fails."""
+from __future__ import annotations
+
+import logging
+import threading
+from collections.abc import Callable, Mapping, Sequence
+from pathlib import Path
+from typing import Any
+
+from .client import LspClient, LspError
+from .config import LspServerConfig
+
+logger = logging.getLogger(__name__)
+
+MAX_FILE_BYTES = 1_000_000
+MAX_SHOWN = 30
+_SEVERITY = {1: "error", 2: "warning", 3: "info", 4: "hint"}
+
+
+def format_diagnostics(label: str, server: str, diagnostics: Sequence[Mapping[str, Any]]) -> str | None:
+    """The errors and warnings as reminder text, or None when there are none."""
+    shown: list[str] = []
+    for item in diagnostics:
+        severity = item.get("severity", 1)
+        if severity not in (1, 2):
+            continue
+        start = (item.get("range") or {}).get("start") or {}
+        code = f" [{item['code']}]" if item.get("code") not in (None, "") else ""
+        message = " ".join(str(item.get("message") or "").split())[:300]
+        shown.append(f"- line {int(start.get('line', 0)) + 1}, column {int(start.get('character', 0)) + 1} · {_SEVERITY[severity]} · {message}{code}")
+    if not shown:
+        return None
+    more = f"\n- ... and {len(shown) - MAX_SHOWN} more" if len(shown) > MAX_SHOWN else ""
+    return f"Diagnostics from the language server {server} for {label} after your change:\n" + "\n".join(shown[:MAX_SHOWN]) + more
+
+
+class LspManager:
+    def __init__(self, configs: Sequence[LspServerConfig], *, workspace_root: Path, timeout: float = 5.0,
+                 client_factory: Callable[..., Any] = LspClient) -> None:
+        self._configs = list(configs)
+        self._root = Path(workspace_root)
+        self._timeout = timeout
+        self._client_factory = client_factory
+        self._clients: dict[str, Any] = {}
+        self._locks: dict[str, threading.Lock] = {}
+        self._failed: dict[str, str] = {}
+        self._guard = threading.Lock()
+
+    def server_for(self, path: Path) -> tuple[LspServerConfig, str] | None:
+        for config in self._configs:
+            language = config.language_for(path)
+            if language is not None:
+                return config, language
+        return None
+
+    def check(self, path: Path) -> tuple[str, list[dict[str, Any]] | None, str]:
+        """``(server name, diagnostics or None, why the server failed)``; a failed server is not tried again."""
+        found = self.server_for(path)
+        if found is None:
+            return "", None, ""
+        config, language = found
+        with self._guard:
+            if config.name in self._failed:
+                return config.name, None, ""
+            lock = self._locks.setdefault(config.name, threading.Lock())
+        with lock:
+            try:
+                target = Path(path)
+                if target.stat().st_size > MAX_FILE_BYTES:
+                    return config.name, None, ""
+                text = target.read_text(encoding="utf-8", errors="replace")
+                client = self._clients.get(config.name)
+                if client is None:
+                    client = self._client_factory(config, workspace_root=self._root)
+                    self._clients[config.name] = client
+                    client.start()
+                return config.name, client.diagnostics(target, text, language, timeout=self._timeout), ""
+            except (LspError, OSError) as error:
+                reason = str(error)[:300] or type(error).__name__
+                with self._guard:
+                    self._failed[config.name] = reason
+                broken = self._clients.pop(config.name, None)
+                if broken is not None:
+                    try:
+                        broken.close()
+                    except Exception:  # noqa: BLE001 - closing never fails a turn
+                        pass
+                return config.name, None, reason
+
+    def close(self) -> None:
+        clients, self._clients = list(self._clients.values()), {}
+        for client in clients:
+            try:
+                client.close()
+            except Exception:  # noqa: BLE001 - closing never fails a turn
+                logger.debug("a language server did not stop cleanly", exc_info=True)
+
+
+__all__ = ["LspManager", "format_diagnostics"]
+```
+
+Then make these edits, in order (each `replace` block occurs exactly once in its file; if one does not, stop and report — do not guess):
+
+1. In `src/agentos/agentic/tools/files/write.py`, replace
+
+```python
+        self._queue_reindex(artifacts)
+        return {
+```
+
+   with
+
+```python
+        self._queue_reindex(artifacts)
+        notify = getattr(self, "_lsp_after_write", None)
+        if callable(notify):
+            notify(path)  # W5: a language server's diagnostics reach the model as a reminder
+        return {
+```
+
+2. In `src/agentos/agentic/tools/files/edit.py`, replace
+
+```python
+        self._queue_reindex(artifacts)
+        return {
+```
+
+   with
+
+```python
+        self._queue_reindex(artifacts)
+        notify = getattr(self, "_lsp_after_write", None)
+        if callable(notify):
+            notify(path)  # W5: a language server's diagnostics reach the model as a reminder
+        return {
+```
+
+3. In `src/agentos/agentic/session.py`, replace
+
+```python
+        toolset._skill_hooks_sink = self._skill_hooks  # W5: a skill's own hooks
+```
+
+   with
+
+```python
+        toolset._skill_hooks_sink = self._skill_hooks  # W5: a skill's own hooks
+        toolset._lsp_after_write = self._lsp_after_write  # W5: diagnostics after Write and Edit
+```
+
+4. In `src/agentos/agentic/session.py`, replace
+
+```python
+    def close_background_subagents(self) -> None:
+        with self._subagent_lock:
+```
+
+   with
+
+```python
+    def _lsp_manager(self):
+        """This turn's language servers (W5), from the active plugins whose code the person allowed to run; None
+        when there are none or this Orin runs no plugin code."""
+        cached = getattr(self, "_lsp", None)
+        if cached is not None:
+            return cached or None
+        self._lsp = False
+        if not self.plugin_hooks:
+            return None
+        from agentos.lsp.config import lsp_servers
+        from agentos.lsp.manager import LspManager
+
+        try:
+            configs, problems = lsp_servers(getattr(self, "_active_plugins", ()), user_id=str(self.turn.get("user_id") or ""))
+        except Exception:  # noqa: BLE001 - language servers never stop a turn
+            logger.exception("plugin language servers could not be read")
+            return None
+        for problem in problems[:20]:
+            logger.warning("language server: %s", problem)
+        if configs:
+            self._lsp = LspManager(configs, workspace_root=self.workspace.root)
+        return self._lsp or None
+
+    def _lsp_after_write(self, path: str) -> None:
+        """After Write or Edit: the file's diagnostics, gathered in the background, join the next request (W5)."""
+        manager = self._lsp_manager()
+        if manager is None:
+            return
+        try:
+            target = self.workspace.resolve(path)
+        except Exception:  # noqa: BLE001 - an unresolvable path has no diagnostics
+            return
+        if manager.server_for(target) is None:
+            return
+        from agentos.lsp.manager import format_diagnostics
+
+        def work() -> None:
+            name, found, failure = manager.check(target)
+            if failure:
+                self._reminders.add("diagnostics", f"The language server {name} is off for this turn: {failure}", key=f"lsp-off:{name}")
+                return
+            text = format_diagnostics(str(path), name, found or [])
+            if text:
+                self._reminders.replace(f"lsp:{target}", "diagnostics", text) or self._reminders.add("diagnostics", text, key=f"lsp:{target}")
+
+        with self._subagent_lock:
+            pool = getattr(self, "_lsp_pool", None)
+            if pool is None:
+                pool = self._lsp_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="orin-lsp")
+        pool.submit(work)
+
+    def _close_lsp(self) -> None:
+        manager, self._lsp = getattr(self, "_lsp", None), None
+        pool, self._lsp_pool = getattr(self, "_lsp_pool", None), None
+        if pool is not None:
+            pool.shutdown(wait=False, cancel_futures=True)
+        if manager:
+            manager.close()
+
+    def close_background_subagents(self) -> None:
+        # W5: the turn's language servers stop with its background work.
+        self._close_lsp()
+        with self._subagent_lock:
+```
+
+- [ ] **Step 4: Run the tests and see them pass**
+
+Run: `uv run pytest -q tests/unit/lsp`
+Expected: PASS.
+
+Also run `uv run pytest -q tests/unit/agentic tests/unit/agentic/tools`: expected PASS — run the two separately (`tests/unit/agentic` and then `tests/unit/agentic/tools`), never a folder together with its own subfolder.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/agentos/lsp/__init__.py src/agentos/lsp/config.py src/agentos/lsp/client.py src/agentos/lsp/manager.py tests/unit/lsp/__init__.py tests/unit/lsp/test_lsp.py src/agentos/agentic/tools/files/write.py src/agentos/agentic/tools/files/edit.py src/agentos/agentic/session.py
+git commit -m "feat(w5): a plugin's language server reports diagnostics after Write and Edit
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+### Task 38: W5 close — final regression and ledger summary
+
+- [ ] **Step 1:** Run `uv run pytest -q tests/unit` (timeout 600000 ms) and `uv run pytest -q tests/integration`. Expected: all pass.
+- [ ] **Step 2:** Run `npm --prefix frontend test`, `npm --prefix frontend run lint` and `npm --prefix frontend run build`. Expected: all pass (W5 changes no frontend file).
+- [ ] **Step 3:** Append a "## Batch H — Diagnostics after edits (Tasks 37–38)" section to `docs/superpowers/plans/2026-10-19-w5-extensibility-ledger.md` (commits, suite results, deviations 40–41, anything done differently), then a "## W5 summary" section: one line per batch A–H with its commits, the full list of deviations 1–41 (one line each, as in this plan's batch headers and the ledger; 39 is the one Batch G's executor added), the deliberate expectation changes of every batch, and the open observations each batch's ledger section left.
+- [ ] **Step 4:** Commit with `docs(w5): ledger, batch H and W5 summary` + blank line + the Co-Authored-By line.
+
