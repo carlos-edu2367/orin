@@ -1854,6 +1854,8 @@ class TurnSession:
             inherit_context=inherit_context,
             lifecycle_context={"agent_id": agent_id, "agent_type": public_subagent_type(builtin_key or clean)},
             non_interactive_ask=self._non_interactive_ask(),
+            # The running turn's queue (W4-R9): a subagent's monitor sinks into the parent turn, not into a wake.
+            reminders=self._reminders,
         )
         sub_max_iterations = (
             self.limits.subagent_max_iterations
