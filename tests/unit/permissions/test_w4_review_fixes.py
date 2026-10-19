@@ -107,3 +107,36 @@ def test_auto_mode_hard_denies_host_commands_for_every_shell_tool(tool: str, com
     classifier = AutoModeClassifier(_NeverCalledProvider(), provider_name="openrouter", model_id="fast")
     decision = classifier(tool, {"command": command, "description": "x"})
     assert decision.behavior == "deny", decision
+
+
+# -- W4-R4: a deny rule holds against escaped and nested spellings, in every mode ---------------------------
+
+DENIED_BY_SPELLING = [
+    # (tool, command, the spelling the rule matcher cannot read): the decision must ask a person
+    ("powershell", "r`m victim.txt"),
+    ("powershell", "Remove-It`em victim.txt"),
+    ("run_command", "r\m victim.txt"),
+    ("run_command", "sh -c 'rm victim.txt'"),
+    ("run_command", "bash -c \"rm victim.txt\""),
+]
+ALL_MODES = [M.FULL_AUTONOMY, M.ACCEPT_EDITS, M.ASK_PERMISSIONS, M.AUTO, M.DONT_ASK]
+
+
+@pytest.mark.parametrize("mode", ALL_MODES)
+@pytest.mark.parametrize("tool,command", DENIED_BY_SPELLING)
+def test_a_deny_rule_is_not_bypassed_by_an_escaped_or_nested_spelling(root: Path, tool: str, command: str, mode: M) -> None:
+    engine = _engine(root, [], deny=["Bash(rm:*)", "PowerShell(Remove-Item:*)"], shell="posix")
+    decision = engine.decide(tool, {"command": command}, mode)
+    assert decision.behavior == "ask", decision
+    assert decision.requires_human, decision
+
+
+@pytest.mark.parametrize("mode", ALL_MODES)
+@pytest.mark.parametrize("tool,command", [
+    ("run_command", "rm victim.txt"),
+    ("powershell", "Remove-Item victim.txt"),
+    ("run_command", "'r'm victim.txt"),
+])
+def test_a_deny_rule_still_denies_the_plain_and_quoted_spellings(root: Path, tool: str, command: str, mode: M) -> None:
+    engine = _engine(root, [], deny=["Bash(rm:*)", "PowerShell(Remove-Item:*)"], shell="posix")
+    assert engine.decide(tool, {"command": command}, mode).behavior == "deny"

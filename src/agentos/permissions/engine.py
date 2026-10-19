@@ -14,7 +14,9 @@ from agentos.settings import EffectiveSettings
 
 from .paths import PROTECTED_FILE_NAMES, glob_to_regex, is_protected_path, workspace_path
 from .powershell import analyze_for
-from .rules import EDIT_FAMILY, SHELL_TOOLS, MatchContext, PermissionRule, command_allowed, parse_rule, rule_matches
+from .rules import (
+    EDIT_FAMILY, SHELL_TOOLS, MatchContext, PermissionRule, command_allowed, parse_rule, rule_applies_to_tool, rule_matches,
+)
 from .shell import default_shell
 
 logger = logging.getLogger(__name__)
@@ -314,6 +316,9 @@ class PermissionEngine:
             if resolved is CodePermissionMode.DONT_ASK:
                 return PermissionDecision("deny", f"rule {asked.raw} requires a prompt and dontAsk denies prompts", asked.raw, asked.source)
             return PermissionDecision("ask", f"rule {asked.raw} requires confirmation", asked.raw, asked.source, requires_human=True)
+        # A deny or ask rule for this tool must hold even for a command the analysis cannot read: a person decides (W4-R4).
+        if analysis is not None and analysis.complex and any(rule_applies_to_tool(rule, internal) for rule in (*self._deny, *self._ask)):
+            return PermissionDecision("ask", "a deny rule applies and the command is too complex to check", requires_human=True)
 
         protected = False
         if internal in EDIT_FAMILY:

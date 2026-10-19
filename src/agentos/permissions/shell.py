@@ -18,6 +18,8 @@ _SAFE_REDIRECTS = {
     "cmd": {"2>&1", "1>&2", ">nul", "1>nul", "2>nul", ">NUL", "1>NUL", "2>NUL"},
 }
 _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+# Programs that run a command string of their own; that inner command is not analysed, so it is complex (W4-R4).
+_NESTED_SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "fish", "cmd", "powershell", "pwsh"})
 _WORD_END = " \t;&|<>\r\n"
 
 
@@ -156,6 +158,9 @@ def analyze_command(command: str, *, shell: str | None = None) -> ShellAnalysis:
             elif ch == "\\":
                 if i + 1 < n and command[i + 1] in ";&|<>()$`\n\r'\"{} \t":
                     reasons.append("escaped operator")
+                elif not re.search(r"\s", "".join(current).lstrip()):
+                    # r\m names rm to the shell but not to the rule matcher: the program name is not simple (W4-R4).
+                    reasons.append("escape in the command name")
                 current.append(ch)
                 if i + 1 < n:
                     current.append(command[i + 1])
@@ -177,5 +182,8 @@ def analyze_command(command: str, *, shell: str | None = None) -> ShellAnalysis:
         first = sub.split(" ", 1)[0]
         if _ASSIGNMENT.match(first):
             reasons.append("environment assignment")
+        program = first.replace('"', "").replace("'", "").lower().removesuffix(".exe").rsplit("/", 1)[-1]
+        if program in _NESTED_SHELLS:
+            reasons.append(f"nested shell ({program})")
     unique = tuple(dict.fromkeys(reasons))
     return ShellAnalysis(tuple(subs), bool(unique), unique, tuple(redirect_targets))
