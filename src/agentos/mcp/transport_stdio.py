@@ -58,6 +58,9 @@ CMD_SHIM_PRONE_COMMANDS = frozenset({"npx"})
 
 POSIX_FORBIDDEN_CHARACTERS = frozenset(";&|`$\n\r")
 CMD_SHIM_FORBIDDEN_CHARACTERS = frozenset("><^%")
+# W5-R16: for a configuration-file server launched through a .cmd or .bat shim, cmd.exe re-reads the arguments, so its
+# operators (and the redirections and escapes above) are refused. $, ; and the backtick are inert for cmd.exe.
+CMD_OPERATOR_CHARACTERS = CMD_SHIM_FORBIDDEN_CHARACTERS | frozenset("&|\n\r")
 DEFAULT_TIMEOUT_SECONDS = 45.0
 MAX_LINE_BYTES = 4_000_000
 # Lines that are not JSON (a server printing a banner on stdout) are skipped, up to this many per call.
@@ -85,9 +88,15 @@ class StdioTransport:
             raise StdioTransportRefused(
                 f"'{command}' is not an allowed MCP launcher. Allowed: {', '.join(sorted(ALLOWED_COMMANDS))}."
             )
-        forbidden = POSIX_FORBIDDEN_CHARACTERS
-        if base in CMD_SHIM_PRONE_COMMANDS:
-            forbidden = forbidden | CMD_SHIM_FORBIDDEN_CHARACTERS
+        if allow_any_command:
+            # W5-R16: a server the person wrote in a configuration file starts without a shell, so the POSIX characters
+            # are inert; only a .cmd or .bat launcher is re-parsed by cmd.exe.
+            resolved = shutil.which(command) or ""
+            forbidden = CMD_OPERATOR_CHARACTERS if resolved.lower().endswith((".cmd", ".bat")) else frozenset()
+        else:
+            forbidden = POSIX_FORBIDDEN_CHARACTERS
+            if base in CMD_SHIM_PRONE_COMMANDS:
+                forbidden = forbidden | CMD_SHIM_FORBIDDEN_CHARACTERS
         for value in (command, *args):
             if forbidden & set(value):
                 raise StdioTransportRefused("the command line carries shell metacharacters")

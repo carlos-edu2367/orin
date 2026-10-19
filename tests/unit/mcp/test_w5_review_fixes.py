@@ -17,7 +17,7 @@ import pytest
 
 from agentos.mcp.file_config import policy_refusal
 from agentos.mcp.transport_sse import SseTransport, SseTransportError
-from agentos.mcp.transport_stdio import StdioTransport, StdioTransportError
+from agentos.mcp.transport_stdio import StdioTransport, StdioTransportError, StdioTransportRefused
 from agentos.mcp.transport_ws import WebSocketTransport, WebSocketTransportError
 
 CALL = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {}}
@@ -301,3 +301,30 @@ def test_dot_segments_are_resolved_before_the_path_is_compared() -> None:
     allow = {"allowedMcpServers": [{"serverUrl": "https://mcp.company.example/mcp/*"}]}
     assert _refused("https://mcp.company.example/mcp/../admin", allow)
     assert not _refused("https://mcp.company.example/mcp/./v1", allow)
+
+
+# W5-R16: ordinary values of a configuration-file server --------------------------------------------------------------
+
+
+def test_a_configuration_file_server_keeps_ordinary_values_without_a_shell(tmp_path: Path) -> None:
+    # shell=False: $, ; and | are inert for a native launcher, so these values start (the finding's three cases)
+    StdioTransport(command=sys.executable, args=("server.py",), env={"DB_PASSWORD": "pa$$word"}, allow_any_command=True)
+    StdioTransport(command=sys.executable, args=("server.py", "--include", "src/(a|b)/.*"), env={}, allow_any_command=True)
+    StdioTransport(command="docker", args=("run", "-i", "-e", "OPTS=a;b", "img"), env={}, allow_any_command=True)
+
+
+def test_orin_own_servers_keep_the_posix_rule(tmp_path: Path) -> None:
+    with pytest.raises(StdioTransportRefused):
+        StdioTransport(command="npx", args=("-y", "srv", "a;b"), env={}, allow_any_command=False)
+    with pytest.raises(StdioTransportRefused):
+        StdioTransport(command="python", args=("server.py", "a$b"), env={}, allow_any_command=False)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="a .cmd launcher is a Windows shim")
+def test_a_cmd_launcher_still_refuses_the_cmd_shim_characters(tmp_path: Path) -> None:
+    launcher = tmp_path / "shimserver.cmd"
+    launcher.write_text("@echo off\r\n", encoding="utf-8")
+    for args, env in ((("100%",), {}), (("a^b",), {}), (("ok",), {"TOKEN": "x%PATH%"}), (("a&b",), {}), (("a|b",), {})):
+        with pytest.raises(StdioTransportRefused):
+            StdioTransport(command=str(launcher), args=args, env=env, allow_any_command=True)
+    StdioTransport(command=str(launcher), args=("ok",), env={"PASSWORD": "pa$$word"}, allow_any_command=True)
