@@ -33,6 +33,9 @@ ALWAYS_IGNORED_FROM_PROJECT = (
     "effortLevel",
     "autoDreamEnabled",  # background consolidation spends the user's tokens
     "permissions.nonInteractiveAsk",  # whether an unattended run may skip a confirmation
+    # Approving a repository's own .mcp.json servers is the person's decision, never the repository's (trust is not consent).
+    "enableAllProjectMcpServers",
+    "enabledMcpjsonServers",
 )
 # Ignored until the user trusts the workspace: they run code or widen permissions.
 UNTRUSTED_IGNORED_FROM_PROJECT = (
@@ -44,8 +47,6 @@ UNTRUSTED_IGNORED_FROM_PROJECT = (
     "awsAuthRefresh",
     "awsCredentialExport",
     "otelHeadersHelper",
-    "enableAllProjectMcpServers",
-    "enabledMcpjsonServers",
     "extraKnownMarketplaces",
     "enabledPlugins",
     "permissions.allow",
