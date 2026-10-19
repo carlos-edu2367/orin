@@ -163,3 +163,44 @@ def test_send_times_out_and_kills_a_server_that_never_answers(tmp_path):
         transport.close()
     elapsed = time.monotonic() - started
     assert elapsed < 5, "send() should raise around the configured timeout, not wait for the 10s reply"
+
+POLITE_SERVER = """
+import sys
+print("ready", flush=True)
+for line in sys.stdin:
+    pass
+"""
+
+STUBBORN_SERVER = """
+import time
+print("ready", flush=True)
+while True:
+    time.sleep(1)
+"""
+
+
+def _closing(tmp_path, monkeypatch, source):
+    import agentos.mcp.transport_stdio as module
+
+    killed: list[int] = []
+    original = module._terminate_process_tree
+    monkeypatch.setattr(module, "_terminate_process_tree", lambda process: killed.append(process.pid) or original(process))
+    script = tmp_path / "server.py"
+    script.write_text(source, encoding="utf-8")
+    transport = StdioTransport(command=sys.executable, args=(str(script),), env={}, allow_any_command=True)
+    transport.open()
+    assert transport._replies.get(timeout=20).strip() == b"ready"  # the server is running before it is closed
+    process = transport._process
+    started = time.monotonic()
+    transport.close()
+    return killed, process, time.monotonic() - started
+
+
+def test_a_server_that_exits_when_its_input_closes_is_not_killed(tmp_path, monkeypatch):
+    killed, process, _ = _closing(tmp_path, monkeypatch, POLITE_SERVER)
+    assert killed == [] and process.poll() is not None
+
+
+def test_a_server_that_ignores_its_closed_input_is_killed_after_a_short_wait(tmp_path, monkeypatch):
+    killed, process, elapsed = _closing(tmp_path, monkeypatch, STUBBORN_SERVER)
+    assert killed == [process.pid] and 0.25 <= elapsed < 5

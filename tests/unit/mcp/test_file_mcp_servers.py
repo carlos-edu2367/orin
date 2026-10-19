@@ -157,3 +157,12 @@ def test_the_model_hears_of_pending_and_failed_servers_and_denied_ones_leave(tmp
     assert "repo-tools" in text and "not approved" in text
     assert "legacy" in text and "deniedMcpServers" in text
     assert "broken" in text and "NOT_SET_ANYWHERE_42 is not set" in text
+
+def test_the_output_limit_follows_max_mcp_output_tokens(monkeypatch) -> None:
+    config, _, secrets = file_bundle(_server(), user_id="u1")
+    provider = McpToolProvider([(config, (TOOL,), secrets)])
+    assert provider.definitions()[0].max_result_size_chars == 100_000  # 25,000 tokens by default
+    monkeypatch.setenv("MAX_MCP_OUTPUT_TOKENS", "1000")
+    assert provider.definitions()[0].max_result_size_chars == 4_000
+    monkeypatch.setenv("MAX_MCP_OUTPUT_TOKENS", "not a number")
+    assert provider.definitions()[0].max_result_size_chars == 100_000

@@ -62,6 +62,8 @@ DEFAULT_TIMEOUT_SECONDS = 45.0
 MAX_LINE_BYTES = 4_000_000
 # Lines that are not JSON (a server printing a banner on stdout) are skipped, up to this many per call.
 MAX_SKIPPED_LINES = 1000
+# W5: closing a server closes its input first and gives it this long to exit on its own before its tree is killed.
+GRACEFUL_EXIT_SECONDS = 0.3
 
 
 class StdioTransportRefused(RuntimeError):
@@ -204,6 +206,11 @@ class StdioTransport:
             if process.stdin is not None:
                 process.stdin.close()
         except OSError:
+            pass
+        try:
+            process.wait(timeout=GRACEFUL_EXIT_SECONDS)
+            return
+        except subprocess.TimeoutExpired:
             pass
         _terminate_process_tree(process)
 

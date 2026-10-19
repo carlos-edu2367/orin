@@ -6,6 +6,7 @@ with the turn, so a configured-but-unused server costs nothing.
 """
 from __future__ import annotations
 
+import os
 import threading
 from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping, Sequence
 
@@ -21,6 +22,17 @@ if TYPE_CHECKING:
 MAX_MCP_RESULT_CHARS = 100_000
 MAX_MCP_RAW_RESULT_CHARS = 500_000
 MAX_IMAGES_PER_CALL = 4
+DEFAULT_MCP_OUTPUT_TOKENS = 25_000
+
+
+def mcp_output_limit_chars() -> int:
+    """How much of an MCP tool's answer reaches the model before the rest goes to a file: ``MAX_MCP_OUTPUT_TOKENS``
+    (default 25,000 tokens, counted as 4 characters each; at least 1,000 and at most 250,000 tokens)."""
+    try:
+        tokens = int(str(os.environ.get("MAX_MCP_OUTPUT_TOKENS") or DEFAULT_MCP_OUTPUT_TOKENS).strip())
+    except ValueError:
+        tokens = DEFAULT_MCP_OUTPUT_TOKENS
+    return max(1_000, min(tokens, 250_000)) * 4
 
 ServerBundle = tuple[McpServerConfig, tuple[McpToolDescriptor, ...], Mapping[str, str]]
 Connector = Callable[[McpServerConfig, Mapping[str, str]], tuple[str, tuple[McpToolDescriptor, ...]]]
@@ -193,7 +205,7 @@ class McpToolProvider:
                     "mcp",
                     read_only=False,
                     policy_tags=("mcp", "mutates", f"mcp:{config.slug}"),
-                    max_result_size_chars=MAX_MCP_RESULT_CHARS,
+                    max_result_size_chars=mcp_output_limit_chars(),
                 ))
         return tuple(built)
 
