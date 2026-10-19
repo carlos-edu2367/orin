@@ -52,3 +52,23 @@ def test_code_mode_asks_before_running_it(tmp_path: Path) -> None:
 def test_the_model_cannot_pass_a_raw_argv(tmp_path: Path) -> None:
     outcome = _toolset(tmp_path).invoke("Bash", {"command": "echo hi", "argv": ["cmd", "/c", "echo pwned"]})
     assert outcome.status == "failed" and outcome.error_code == "INVALID_ARGUMENTS"
+
+
+from agentos.agentic.tools.shell.powershell import decode_clixml
+
+
+def test_clixml_error_records_are_decoded() -> None:
+    raw = (
+        '#< CLIXML\r\n<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04">'
+        '<S S="Error">boom_x000D__x000A_</S><S S="Error">second &amp; last_x000D__x000A_</S></Objs>'
+    )
+    assert decode_clixml(raw) == "boom\r\nsecond & last"
+    assert decode_clixml("plain error") == "plain error"
+    assert decode_clixml('#< CLIXML\r\n<Objs><Obj S="progress" RefId="0"></Obj></Objs>') == ""
+
+
+@windows_only
+def test_errors_reach_the_model_as_text(tmp_path: Path) -> None:
+    outcome = _toolset(tmp_path).invoke("PowerShell", {"command": "Write-Error 'boom'"})
+    stderr = outcome.data["tool_output"]["stderr"]
+    assert "boom" in stderr and "CLIXML" not in stderr and "<Objs" not in stderr

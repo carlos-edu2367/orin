@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 import threading
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Mapping, Literal
@@ -142,6 +143,7 @@ class BashTools:
         *,
         argv: list[str] | None = None,
         tool_name: str = "run_command",
+        stderr_filter: Callable[[str], str] | None = None,
     ) -> dict[str, Any]:
         if not isinstance(command, str) or not command.strip():
             raise AgentToolError("command must be a non-blank string")
@@ -531,7 +533,12 @@ class BashTools:
             _restore_stashed_orin()
         stdout = stdout_bytes.decode("utf-8", "replace").strip()
         stderr = stderr_bytes.decode("utf-8", "replace").strip()
-        body = "\n".join(part for part in (stdout, f"[stderr]\n{stderr}" if stderr else "") if part) or "[no output]"
+        if stderr_filter is not None:
+            try:
+                stderr = stderr_filter(stderr).strip()
+            except Exception:  # noqa: BLE001 - a filter must never lose the real error text
+                pass
+        body ="\n".join(part for part in (stdout, f"[stderr]\n{stderr}" if stderr else "") if part) or "[no output]"
         full_body = body
         body, output_truncated = _bounded_output(body, MAX_COMMAND_OUTPUT_CHARS)
         persisted_path = self._persist_truncated_output(tool_name, full_body) if output_truncated else None

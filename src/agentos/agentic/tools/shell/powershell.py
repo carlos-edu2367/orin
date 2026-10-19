@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import base64
+import html
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -13,8 +15,11 @@ from agentos.agentic.tools.shell.bash import BashOutput
 from agentos.agentic.tools.spec import ToolInput, ToolSpec
 
 # PowerShell 5.1 writes redirected output in the console code page; this makes it UTF-8 (Orin's own prefix,
-# never analysed as part of the person's command).
-_UTF8_PREFIX = "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; $OutputEncoding = [System.Text.Encoding]::UTF8; "
+# never analysed as part of the person's command). Progress records are off: they arrive as CLIXML noise.
+_UTF8_PREFIX = (
+    "$ProgressPreference = 'SilentlyContinue'; [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
+    "$OutputEncoding = [System.Text.Encoding]::UTF8; "
+)
 
 
 def powershell_executable() -> Path | None:
@@ -34,6 +39,23 @@ def powershell_argv(command: str) -> list[str]:
     return [str(executable), "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded]
 
 
+_CLIXML_STRING = re.compile(r'<S S="(?:Error|Warning|Verbose|Debug|Information)">(.*?)</S>', re.DOTALL)
+_CLIXML_ESCAPE = re.compile(r"_x([0-9A-Fa-f]{4})_")
+
+
+def decode_clixml(text: str) -> str:
+    """Windows PowerShell's serialized error stream (``#< CLIXML``) as plain text; other text unchanged."""
+    if "#< CLIXML" not in text:
+        return text
+    head, _, xml = text.partition("#< CLIXML")
+    pieces = [
+        html.unescape(_CLIXML_ESCAPE.sub(lambda match: chr(int(match.group(1), 16)), item))
+        for item in _CLIXML_STRING.findall(xml)
+    ]
+    decoded = "".join(pieces).strip()
+    return f"{head.strip()}\n{decoded}".strip() if head.strip() else decoded
+
+
 class PowerShellTools:
     """Mixed into ``AgentToolset``; ``self`` is the toolset."""
 
@@ -48,6 +70,7 @@ class PowerShellTools:
             command, background, timeout_seconds, "", description,
             argv=powershell_argv(command) if isinstance(command, str) and command.strip() else None,
             tool_name="powershell",
+            stderr_filter=decode_clixml,
         )
 
 
