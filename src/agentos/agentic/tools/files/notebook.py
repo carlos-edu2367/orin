@@ -5,9 +5,10 @@ import json
 from typing import Any, Mapping, Literal
 from uuid import uuid4
 
-from pydantic import Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from agentos.agentic.tools._shared import AgentToolError, _TEXT, _schema
+from agentos.agentic.tools.files import ORIGINAL_FILE_LIMIT
 from agentos.agentic.tools.spec import ToolSpec, ToolInput
 
 
@@ -61,17 +62,21 @@ class NotebookTools:
             return src.splitlines(keepends=True)
 
         self._checkpoint_store.snapshot_before_write(self.turn_id or "turn-default", notebook_path)
+        old_source: str | None = None
+        kind = "code"
         target_cell_id = ""
         if mode == "replace":
             idx = _resolve_cell_idx(cell_id)
             cell = cells[idx]
             if not isinstance(cell, dict):
                 raise AgentToolError(f"Cell at index {idx} is invalid.")
+            old_source = _source_text(cell)
             if cell_type is not None:
                 clean_type = str(cell_type).strip().lower()
                 if clean_type not in {"code", "markdown"}:
                     raise AgentToolError("cell_type must be 'code' or 'markdown'.")
                 cell["cell_type"] = clean_type
+            kind = str(cell.get("cell_type") or "code")
             cell["source"] = _format_source_lines(new_source)
             if cell.get("cell_type") == "code":
                 cell["outputs"] = []
@@ -81,6 +86,7 @@ class NotebookTools:
             eff_type = str(cell_type or "code").strip().lower()
             if eff_type not in {"code", "markdown"}:
                 raise AgentToolError("cell_type must be 'code' or 'markdown'.")
+            kind = eff_type
             new_id = f"cell-{uuid4().hex[:8]}"
             new_cell: dict[str, Any] = {
                 "cell_type": eff_type,
@@ -100,6 +106,8 @@ class NotebookTools:
         else:  # delete
             idx = _resolve_cell_idx(cell_id)
             removed = cells.pop(idx)
+            old_source = _source_text(removed)
+            kind = str(removed.get("cell_type") or "code") if isinstance(removed, Mapping) else "code"
             target_cell_id = str(removed.get("id") if isinstance(removed, Mapping) else idx) or str(idx)
 
         new_text = json.dumps(nb, ensure_ascii=False, indent=1) + "\n"
@@ -129,6 +137,17 @@ class NotebookTools:
             "summary": f"Notebook {mode} em {rel} (célula {target_cell_id})",
             "content": f"Notebook '{rel}' updated ({mode} cell '{target_cell_id}', total cells={len(cells)}).",
             "payload": payload,
+            "tool_output": {
+                "new_source": new_source,
+                "old_source": old_source,
+                "cell_id": target_cell_id or None,
+                "cell_type": kind if kind in {"code", "markdown"} else "code",
+                "language": _notebook_language(nb),
+                "edit_mode": mode,
+                "notebook_path": str(target),
+                "original_file": raw_text if len(raw_text) <= ORIGINAL_FILE_LIMIT else None,
+                "updated_file": new_text if len(new_text) <= ORIGINAL_FILE_LIMIT else None,
+            },
         }
 
 
@@ -138,6 +157,37 @@ class NotebookEditInput(ToolInput):
     cell_id: str | None = Field(None, description="Cell id, or 0-based index as a string.")
     cell_type: Literal["code", "markdown"] | None = None
     edit_mode: Literal["replace", "insert", "delete"] | None = None
+
+
+class NotebookEditOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    new_source: str
+    old_source: str | None = None
+    cell_id: str | None = None
+    cell_type: Literal["code", "markdown"]
+    language: str
+    edit_mode: Literal["replace", "insert", "delete"]
+    notebook_path: str
+    original_file: str | None
+    updated_file: str | None
+
+
+def _source_text(cell: Any) -> str:
+    raw = cell.get("source") if isinstance(cell, Mapping) else None
+    return "".join(str(part) for part in raw) if isinstance(raw, list) else str(raw or "")
+
+
+def _notebook_language(nb: Mapping[str, Any]) -> str:
+    """The notebook's language from its metadata; malformed metadata falls back to Python instead of failing a saved edit."""
+    metadata = nb.get("metadata")
+    metadata = metadata if isinstance(metadata, Mapping) else {}
+    info = metadata.get("language_info")
+    kernel = metadata.get("kernelspec")
+    candidates = (
+        info.get("name") if isinstance(info, Mapping) else None,
+        kernel.get("language") if isinstance(kernel, Mapping) else None,
+    )
+    return next((str(item) for item in candidates if item), "python")
 
 
 # Tool specs, moved from AgentToolset._build_definitions (W4).
@@ -163,6 +213,7 @@ SPECS: tuple[ToolSpec, ...] = (
         handler="notebook_edit",
         kind="filesystem",
         input_model=NotebookEditInput,
+        output_model=NotebookEditOutput,
         public_description='Replace, insert or delete one cell of a Jupyter notebook.',
         policy_tags=("mutates",),
         order=60,

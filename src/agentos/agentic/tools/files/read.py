@@ -5,9 +5,9 @@ import hashlib
 import json
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal, Union
 
-from pydantic import Field
+from pydantic import BaseModel, ConfigDict, Field, RootModel
 
 from agentos.reading.extract import extract_text
 from agentos.reading.render import ImageTooLarge, normalize_image, render_pdf_pages
@@ -594,6 +594,61 @@ class ReadInput(ToolInput):
     )
 
 
+class _ReadFile(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    filePath: str
+
+
+class ReadTextFile(_ReadFile):
+    content: str
+    numLines: int
+    startLine: int
+    totalLines: int
+    truncatedByTokenCap: bool | None = None
+
+
+class ReadImageFile(_ReadFile):
+    type: str
+    originalSize: int
+
+
+class ReadNotebookFile(_ReadFile):
+    cells: list[dict[str, Any]]
+
+
+class ReadPdfFile(_ReadFile):
+    originalSize: int
+
+
+class ReadText(BaseModel):
+    type: Literal["text"]
+    file: ReadTextFile
+
+
+class ReadImage(BaseModel):
+    type: Literal["image"]
+    file: ReadImageFile
+
+
+class ReadNotebook(BaseModel):
+    type: Literal["notebook"]
+    file: ReadNotebookFile
+
+
+class ReadPdf(BaseModel):
+    type: Literal["pdf"]
+    file: ReadPdfFile
+
+
+class ReadUnchanged(BaseModel):
+    type: Literal["file_unchanged"]
+    file: _ReadFile
+
+
+class ReadOutput(RootModel[Annotated[Union[ReadText, ReadImage, ReadNotebook, ReadPdf, ReadUnchanged], Field(discriminator="type")]]):
+    """One of Claude Code's Read result shapes, chosen by ``type``."""
+
+
 # Tool specs, moved from AgentToolset._build_definitions (W4).
 SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
@@ -609,6 +664,7 @@ SPECS: tuple[ToolSpec, ...] = (
         handler="read_file",
         kind="filesystem",
         input_model=ReadInput,
+        output_model=ReadOutput,
         public_description="Read a file from the workspace. Text comes back line-numbered; use offset and limit to page through a long file, and pages (e.g. '1-5') for a PDF. Read a file before you edit or overwrite it.",
         read_only=True,
         order=10,

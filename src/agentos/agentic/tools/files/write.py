@@ -4,9 +4,11 @@ from __future__ import annotations
 import hashlib
 from typing import Any, Literal
 
-from pydantic import Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from agentos.agentic.tools._shared import AgentToolError, compute_structured_patch, _TEXT, _schema
+from agentos.agentic.tools.files import ORIGINAL_FILE_LIMIT
+from agentos.agentic.tools.files.edit import PatchHunk
 from agentos.agentic.tools.spec import ToolSpec, ToolInput
 
 
@@ -67,6 +69,15 @@ class WriteTools:
                 "original_sha256": original_sha,
                 "updated_sha256": updated_sha,
             },
+            "tool_output": {
+                "type": "create" if old_content is None else "update",
+                "filePath": str(self.workspace.resolve(path)),
+                "content": content if len(content) <= ORIGINAL_FILE_LIMIT else None,
+                "structuredPatch": hunks,
+                "originalFile": old_content if old_content is not None and len(old_content) <= ORIGINAL_FILE_LIMIT else None,
+                "userModified": False,
+                **({"mode": "append"} if mode == "append" else {}),
+            },
         }
 
 
@@ -76,6 +87,16 @@ class WriteInput(ToolInput):
     mode: Literal["overwrite", "append"] | None = Field(
         None, description="Orin: 'append' adds to the end, for a file longer than one reply; default 'overwrite'.",
     )
+
+
+class WriteOutput(BaseModel):
+    model_config = ConfigDict(extra="allow")  # Orin adds `mode: "append"`
+    type: Literal["create", "update"]
+    filePath: str
+    content: str | None
+    structuredPatch: list[PatchHunk]
+    originalFile: str | None
+    userModified: bool
 
 
 # Tool specs, moved from AgentToolset._build_definitions (W4).
@@ -95,6 +116,7 @@ SPECS: tuple[ToolSpec, ...] = (
         handler="write_file",
         kind="filesystem",
         input_model=WriteInput,
+        output_model=WriteOutput,
         public_description='Create a file, or replace an existing one you have already read in this session.',
         policy_tags=("mutates",),
         order=40,

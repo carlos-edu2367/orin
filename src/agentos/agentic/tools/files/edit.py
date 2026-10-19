@@ -3,9 +3,10 @@ from __future__ import annotations
 
 from typing import Any, Mapping, Literal
 
-from pydantic import Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from agentos.agentic.tools._shared import AgentToolError, compute_structured_patch, _TEXT, _schema
+from agentos.agentic.tools.files import ORIGINAL_FILE_LIMIT
 from agentos.agentic.tools.spec import ToolSpec, ToolInput
 
 
@@ -55,6 +56,9 @@ class EditTools:
 
     def edit_file(self, path: str, old_text: str | None = None, new_text: str | None = None, edits: list[Mapping[str, Any]] | None = None, replace_all: bool = False) -> dict[str, Any]:
         operations = self._normalized_edits(old_text, new_text, edits)
+        for index, (current, replacement) in enumerate(operations):
+            if current == replacement:
+                raise AgentToolError(f"edit {index + 1}: old and new text are identical; nothing would change.")
         _, original_sha = self._check_read_file_guard(path)
         content, truncated = self.workspace.read_text(path)
         if truncated:
@@ -108,6 +112,16 @@ class EditTools:
                 "original_sha256": original_sha,
                 "updated_sha256": updated_sha,
             },
+            "tool_output": {
+                "filePath": str(self.workspace.resolve(path)),
+                "oldString": operations[0][0],
+                "newString": operations[0][1],
+                "originalFile": content if len(content) <= ORIGINAL_FILE_LIMIT else None,
+                "structuredPatch": hunks,
+                "userModified": False,
+                "replaceAll": bool(replace_all),
+                **({"edits": [{"oldString": old, "newString": new} for old, new in operations]} if len(operations) > 1 else {}),
+            },
         }
 
 
@@ -125,6 +139,26 @@ class EditInput(ToolInput):
         None,
         description="Orin: several replacements applied in order as one change; send empty old_string and new_string with it.",
     )
+
+
+class PatchHunk(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    oldStart: int
+    oldLines: int
+    newStart: int
+    newLines: int
+    lines: list[str]
+
+
+class EditOutput(BaseModel):
+    model_config = ConfigDict(extra="allow")  # Orin adds `edits` for a batch
+    filePath: str
+    oldString: str
+    newString: str
+    originalFile: str | None
+    structuredPatch: list[PatchHunk]
+    userModified: bool
+    replaceAll: bool
 
 
 # Tool specs, moved from AgentToolset._build_definitions (W4).
@@ -146,6 +180,7 @@ SPECS: tuple[ToolSpec, ...] = (
         handler="edit_file",
         kind="filesystem",
         input_model=EditInput,
+        output_model=EditOutput,
         public_description='Replace an exact string in a file you have read. old_string must occur exactly once unless replace_all is true.',
         policy_tags=("mutates",),
         order=50,

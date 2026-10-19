@@ -154,6 +154,29 @@ from agentos.agentic.tools._shared import (  # noqa: F401 - re-exported for call
 
 # The most any single tool result may return when its handler asks for more (Read with allow_large).
 LARGE_RESULT_CHARS = 100_000
+MAX_HOOK_FIELD_CHARS = 50_000
+
+
+def _bounded_value(value: Any, depth: int = 0) -> Any:
+    """A JSON-like value with long strings cut and lists capped, so one tool result cannot flood a hook."""
+    if depth > 6:
+        return None
+    if isinstance(value, str):
+        return value if len(value) <= MAX_HOOK_FIELD_CHARS else value[:MAX_HOOK_FIELD_CHARS] + "\n[truncated]"
+    if isinstance(value, Mapping):
+        return {str(key): _bounded_value(item, depth + 1) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_bounded_value(item, depth + 1) for item in list(value)[:500]]
+    return value
+
+
+def _tool_response(outcome: ToolOutcome) -> dict[str, Any]:
+    """What PostToolUse hooks receive: Orin's summary plus the tool's Claude Code output when it has one."""
+    response: dict[str, Any] = {"status": outcome.status, "summary": outcome.summary, "content": outcome.content[:4000]}
+    structured = outcome.data.get("tool_output") if isinstance(outcome.data, Mapping) else None
+    if isinstance(structured, Mapping):
+        response.update(_bounded_value(structured))
+    return response
 
 
 class AgentToolset(
@@ -683,7 +706,7 @@ class AgentToolset(
                 bus,
                 HookEvent.POST_TOOL_USE,
                 **common,
-                tool_response={"status": outcome.status, "summary": outcome.summary, "content": outcome.content[:4000]},
+                tool_response=_tool_response(outcome),
             )
             if post is not None:
                 if post.stop:
