@@ -105,3 +105,8 @@ def test_the_session_declines_and_tells_the_model(tmp_path: Path) -> None:
     assert session._mcp_elicitation("docs", {"message": "Your API key?"}) == {"action": "decline"}
     texts = [item.text for item in session._reminders.drain() if item.kind == "mcp"]
     assert texts and "docs" in texts[0] and "Your API key?" in texts[0] and "declined" in texts[0]
+
+def test_an_answer_with_a_number_that_is_not_finite_is_declined() -> None:
+    for value in (float("nan"), float("inf"), float("-inf")):
+        assert checked_answer({"action": "accept", "content": {"n": value}}) == {"action": "decline"}
+    assert checked_answer({"action": "accept", "content": {"n": 1.5}}) == {"action": "accept", "content": {"n": 1.5}}

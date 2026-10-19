@@ -88,3 +88,21 @@ def test_a_failing_prompt_tells_the_model_why(tmp_path: Path) -> None:
     session.build_runtime()
     texts = [item.text for item in session._reminders.drain() if item.kind == "command"]
     assert texts and "could not run" in texts[0] and "pr" in texts[0]
+
+def test_a_windows_path_and_quoted_words_reach_the_prompt_intact(tmp_path: Path) -> None:
+    from tests.unit.agentic.test_disk_skills_session import _session
+
+    server = _PromptServer()
+    session = _session(tmp_path, '/mcp__docs__review C:\\work\\pr-7 "the parser"')
+    session.mcp_provider = _provider(server)
+    session.build_runtime()
+    assert server.asked[-1]["arguments"] == {"pr": "C:\\work\\pr-7", "focus": "the parser"}
+
+
+def test_without_any_mcp_server_the_model_hears_why_nothing_ran(tmp_path: Path) -> None:
+    from tests.unit.agentic.test_disk_skills_session import _session
+
+    session = _session(tmp_path, "/mcp__docs__review 7")
+    session.build_runtime()
+    texts = [item.text for item in session._reminders.drain() if item.kind == "command"]
+    assert texts and "no MCP server is connected" in texts[0]

@@ -124,3 +124,29 @@ def test_the_model_cannot_propose_an_sse_or_websocket_server(monkeypatch) -> Non
     for transport, url in (("sse", "https://mcp.example.com/sse"), ("ws", "wss://mcp.example.com/mcp")):
         with pytest.raises(McpServiceError):
             service.propose({"user_id": "u1", "display_name": f"x-{transport}", "transport": transport, "url": url})
+
+def test_the_address_is_checked_again_when_the_connection_opens(monkeypatch) -> None:
+    calls: list[str] = []
+
+    def rebinding(url, resolve_dns=False):
+        calls.append(url)
+        if len(calls) > 1:
+            raise RuntimeError("Private network addresses cannot be fetched.")
+        return url
+
+    monkeypatch.setattr("agentos.mcp.transport_sse._public_url", rebinding)
+    requested: list[object] = []
+    client = httpx.Client(transport=httpx.MockTransport(lambda request: requested.append(request) or httpx.Response(500)))
+    with pytest.raises(SseTransportError, match="Private network"):
+        SseTransport(url="https://mcp.example.com/sse", client=client).open()
+    assert requested == []  # refused before any request
+    calls.clear()
+    attempts: list[object] = []
+
+    def connect(*args, **kwargs):
+        attempts.append(args)
+        raise OSError("unreachable")
+
+    with pytest.raises(WebSocketTransportError, match="Private network"):
+        WebSocketTransport(url="wss://mcp.example.com/mcp", connect=connect).open()
+    assert attempts == []

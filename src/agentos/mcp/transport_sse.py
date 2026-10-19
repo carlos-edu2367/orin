@@ -68,6 +68,8 @@ class SseTransport:
     def open(self) -> None:
         if self._reader is not None:
             return
+        if not self._allow_local:
+            checked_url(self._url, allow_local=False)  # the address is checked again when the stream opens
         if self._client is None:
             self._client = httpx.Client(timeout=httpx.Timeout(self._timeout, read=None), follow_redirects=False)
         self._reader = threading.Thread(target=self._read_stream, name="orin-mcp-sse", daemon=True)

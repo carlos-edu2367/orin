@@ -38,6 +38,7 @@ class WebSocketTransport:
         except RuntimeError as error:
             raise WebSocketTransportError(str(error)) from error
         self._headers = dict(headers or {})
+        self._allow_local = allow_local
         self._timeout = timeout
         self._connect = connect or _default_connect
         self._socket: Any = None
@@ -47,6 +48,10 @@ class WebSocketTransport:
     def open(self) -> None:
         if self._socket is not None:
             return
+        try:
+            checked_url(self._url, allow_local=self._allow_local, secure="wss://", plain="ws://")  # checked again on opening
+        except RuntimeError as error:
+            raise WebSocketTransportError(str(error)) from error
         try:
             self._socket = self._connect(
                 self._url, subprotocols=["mcp"], additional_headers=self._headers or None,

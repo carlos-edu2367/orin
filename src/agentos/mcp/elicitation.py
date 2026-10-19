@@ -8,6 +8,7 @@ object of strings, numbers, booleans or lists of strings; anything else is decli
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Mapping
 from typing import Any
 
@@ -36,6 +37,8 @@ def checked_answer(raw: Mapping[str, Any] | None) -> dict[str, Any]:
         if isinstance(value, str):
             clean[key] = value[:MAX_ANSWER_TEXT]
         elif isinstance(value, (bool, int, float)):
+            if isinstance(value, float) and not math.isfinite(value):
+                return {"action": "decline"}  # NaN and infinity are not JSON
             clean[key] = value
         elif isinstance(value, list) and all(isinstance(item, str) for item in value):
             clean[key] = [item[:MAX_ANSWER_TEXT] for item in value[:100]]

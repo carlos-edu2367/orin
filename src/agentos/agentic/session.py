@@ -3346,19 +3346,22 @@ class TurnSession:
         )
 
     def _apply_mcp_prompt(self, name: str, arguments: str) -> None:
-        """``/mcp__server__prompt args`` runs that MCP prompt; its messages join the turn as the person's command (W5)."""
-        import shlex
+        """``/mcp__server__prompt args`` runs that MCP prompt; its messages join the turn as the person's command (W5).
 
+        Words are split on spaces; double or single quotes group words. Backslashes are kept (Windows paths)."""
         from agentos.agentic.reminders import COMMAND_KIND
 
         server, _, prompt = name[len("mcp__"):].partition("__")
+        if not server or not prompt:
+            return  # not an MCP prompt: the message stays an ordinary message
         provider = self.mcp_provider
-        if provider is None or not server or not prompt or not callable(getattr(provider, "get_prompt", None)):
-            return  # no such prompt here: the message stays an ordinary message
-        try:
-            words = shlex.split(arguments, posix=True) if arguments else []
-        except ValueError:
-            words = arguments.split()
+        if provider is None or not callable(getattr(provider, "get_prompt", None)):
+            self._reminders.add(COMMAND_KIND, f"/{name} could not run: no MCP server is connected in this turn.", key=f"command:{name}")
+            return
+        words = [
+            next(group for group in match.groups() if group is not None)
+            for match in re.finditer(r'"([^"]*)"|\'([^\']*)\'|(\S+)', arguments or "")
+        ]
         try:
             text = provider.get_prompt(server, prompt, words)
         except Exception as error:  # noqa: BLE001 - the model tells the person why
