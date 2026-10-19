@@ -623,3 +623,53 @@ No other existing test was changed, weakened or skipped.
 
 - The commit trailer is `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>` on the W5 commits of Batches A to C and E to H, as the owner's standing instruction for this branch requires. Batch D's three commits used the Haiku line, as its ledger records. The session's attribution note named Haiku 5.5. The owner should decide which line stays.
 - No commit was pushed, and no file was deleted.
+
+## Review fixes (part 1)
+
+Scope: the eight "Must fix before W6" findings W5-R1 to W5-R8 of `docs/superpowers/reviews/2026-10-19-w5-review.md`. Each was test-first: its tests were written, run and seen to fail for the reason the finding gives, then the fix was made, then the tests passed. One commit per finding, on this branch. W5-R9 to W5-R16 and the deferred items were not touched.
+
+Per finding (commit, change, tests in `tests/unit/...`):
+- **W5-R1** (`5fe8a70`): `enableAllProjectMcpServers` and `enabledMcpjsonServers` are always ignored from a repository's settings (`settings/loader.py`). A repository can still disable its servers. Tests: `settings/test_w5_review_fixes.py` (5): the repository's own and `settings.local.json` files cannot approve; the person's user layer and grants file still approve.
+- **W5-R2** (`2cff188`): a project skill's shell grant must start with one program's literal name; wildcard spellings are dropped and logged (`_is_scoped_grant`, `agentic/tools/orin/disk_skills.py`). `Bash(git status:*)` still works. Tests: `agentic/test_w5_review_fixes.py` (2).
+- **W5-R3** (`8c8881c`): `HookContribution.consent_reference` = `{hook_id}#{first 16 hex of sha256(event, matcher, command, timeout)}`; the activator, `hook_specs`, `rehydrate_hooks` and `set_enabled`'s carry-over use it; `set_enabled` refuses a pending plugin (`plugin_not_approved`, which the API answers 409). Tests: `plugins/test_w5_review_fixes.py` (8).
+- **W5-R4** (`61a03ca`): with `plugin_hooks` off, settings hooks come only from the managed and user layers; no skill, agent or plugin hook is installed (`_scoped_hooks` returns None); a user http hook must pass `_public_url(url, resolve_dns=True)`. Tests: `agentic/test_w5_review_fixes.py` (7, server and desktop cases).
+- **W5-R5** (`547fa10`): `personal` flag on `skill_roots`/`load_disk_skills`, `agent_roots`/`load_agent_definitions`, `_style_dirs`/`load_output_styles`/`resolve_output_style`; the session passes `personal=self.plugin_hooks`. Tests: `agentic/test_w5_review_fixes.py` (4).
+- **W5-R6** (`424a7a3`): `lsp.config.declared_servers(install_path)` is the one parser for `.lsp.json`; `LspServerContribution` (`{name}#{digest}`); `PluginInspection.lsp_servers` is counted and shown on the card (name, command, args, extensions); activation records disabled `lsp` rows; `set_hooks_enabled`, `set_enabled` (carry-over and the blanket toggle) treat `CONSENT_KINDS = ("hook", "lsp")`; `lsp_servers` starts only a server whose exact row is enabled. Tests: `lsp/test_w5_review_fixes.py` (6).
+- **W5-R7** (`8a70763`): inline spans are found in the raw body (`split_inline_commands`); an argument fills a span as one shell word (`shell_word`) and fills plain text with its backticks escaped (`escape_backticks`); the rendered text is never re-scanned. Tests: `agentic/test_w5_review_fixes.py` (3).
+- **W5-R8** (`18c1321`): a skill's grants are added before its inline commands run. Tests: `agentic/test_w5_review_fixes.py` (2: the first use asks nothing; a deny still wins on the first use).
+
+### Existing expectations changed (recorded)
+1. `plugins/test_service.py::test_get_and_list_expose_the_contribution_rows` (R3): the hook reference is `demo:SessionStart:0#<digest>`; the assertion checks the prefix.
+2. `plugins/test_activator.py::test_hooks_are_installed_without_consent_to_execute` (R3): the reference equals `inspection.hooks[0].consent_reference`.
+3. `plugins/test_plugin_hooks_unified.py::_row` (R3): the hook ids are mapped to their consent references.
+4. `plugins/test_command_rehydration.py::test_rehydrate_hooks_registers_active_plugins_with_their_stored_consent` (R3): the stored reference is the consent reference (helper `_consent_reference`).
+5. `plugins/test_command_rehydration.py::test_rehydrate_hooks_fails_closed_on_partially_consented_rows` (R3): the expectation changed from "no hook runs" to "exactly the consented hook runs", because consent is now per hook and the all-rows rule is gone; the disabled row is for a hook the package does not declare. The test name is unchanged.
+6. `hooks/test_scoped_hooks.py`, the skill test and the agent test (R4): `session.plugin_hooks = True`, because on a shared Orin a skill's or an agent's hooks no longer run.
+7. `agentic/test_agent_definitions_session.py::test_custom_agents_are_listed_for_the_model` (R5): `session.plugin_hooks = True`.
+8. `agentic/test_disk_skills_session.py`, two tests (R5): `session.plugin_hooks = True`.
+9. `plugins/test_plugin_runtime.py::test_the_turn_reads_the_persons_plugins` (R5): `session.plugin_hooks = True`.
+10. `lsp/test_lsp.py::_row` (R6): consent is an `lsp` row keyed by the server's reference, not a hook row.
+
+Items 6 to 9 change the test sessions, not the code under test: `TurnSession.plugin_hooks` defaults to False, the shared-Orin behaviour, so these desktop expectations now opt in explicitly. No other existing test changed.
+
+### Deviations from the finding text
+- R2: also dropped, for a project skill: a grant whose program is a shell or a command wrapper (`env`, `sh`, `bash`, `cmd`, `powershell`, `sudo`, `xargs`, ...), because `Bash(env:*)` approves every command. Not in the finding's text.
+- R3: `set_hooks_enabled` also refuses a pending plugin, and registers hooks only while the plugin is active (the legacy `HookEngine` path ran SessionStart hooks that the person had not seen); `inspect()` stops the previous package's registered hooks; the legacy registration is filtered by the same references. The digest is over event, matcher, command and timeout as specified, so changing only `async` keeps consent.
+- R3, **upgrade**: rows written before this change have plain ids and count as no consent. **The person must allow the plugins' hooks once more after this change.** The same holds for the new language-server rows (R6).
+- R4: the desktop is unchanged as the finding says, so a repository's skill http hook can still reach loopback there. On a shared Orin the public check runs at install time with a DNS lookup and is not pinned to the connection (WebFetch pins its address), so a DNS rebinding window remains for user http hooks.
+- R5: a plugin's agent and output-style folders are also not read on a shared Orin (the finding names only the managed and trusted-project folders).
+- R6: `declared_servers` takes the install path only and reads the manifest itself; the digest covers the whole declared entry; the card shows the declared command and args with `${CLAUDE_PLUGIN_ROOT}` unresolved.
+- R7: on Windows the inline command runs through `cmd.exe` (the Bash tool uses `shell=True`), where `\"` is not an escape. A value with a double quote, a percent sign, a line break or a NUL is therefore refused and that command is not run, instead of escaped as the finding's text suggests.
+
+### Not fixed, or residual (honest)
+- **The consent covers the declared command, not the script it runs** (R3, R6): a hook `python ${CLAUDE_PLUGIN_ROOT}/hooks/a.py` keeps its consent if `hooks/a.py` is edited in place, and the same holds for a language server's script. Closing it needs a digest of the package's files; not done.
+- **Program-wide grants remain for a project skill** (R2): `Bash(git:*)` passes the finding's rule (a literal word before `:`), so a repository skill can still pre-approve every `git` subcommand, including `git push --force`. Broad non-shell grants (`Edit`, `WebFetch`) also pass. Refusing a bare program with `:*` would be a policy choice for the owner.
+- R6: "allow hooks" also starts the language servers the card lists (the finding's design); the card now shows them.
+- R3: the review's own reproduction `test_r03_plugin_consent_carry_over.py` now stops at `set_enabled(True)` on the pending record with the intended `PluginServiceError`.
+- Not verified here: the 65 integration skips need a PostgreSQL DSN (none configured), so the Postgres-backed tests did not run; the POSIX branch of the shell-word test, and the POSIX shell-quoting path in general, did not run on this Windows machine.
+
+### Suites after part 1
+- `uv run pytest -q tests/unit`: 3894 passed, 60 skipped, 0 failed (before the fixes: 3857 passed, 60 skipped).
+- `uv run pytest -q tests/integration`: 78 passed, 65 skipped (PostgreSQL DSN not configured), 0 failed.
+- `npm --prefix frontend test`: 103 files, 609 tests passed. `npm --prefix frontend run lint`: exit 0. `npm --prefix frontend run build`: exit 0 (the existing chunk-size warning).
+- `src/agentos/agentic/agent_tools.py`: 1698 lines (the limit is below 1700).
