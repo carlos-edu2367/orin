@@ -225,17 +225,25 @@ def _ask_user_in(arguments: dict[str, Any]) -> dict[str, Any]:
         for option_index, option in enumerate(_options_list(raw), start=1):
             if not isinstance(option, Mapping):
                 continue
-            label = str(option.get("label") or "").strip()
+            entry = {"id": f"o{option_index}", "label": str(option.get("label") or "").strip()[:240]}
             detail = str(option.get("description") or "").strip()
-            text = f"{label} — {detail}" if label and detail else label
-            options.append({"id": f"o{option_index}", "label": text[:240]})
+            if detail:
+                entry["description"] = detail[:240]
+            preview = str(option.get("preview") or "")
+            if preview.strip():
+                entry["preview"] = preview
+            options.append(entry)
         if not options:
             mode = "text"
         elif bool(raw.get("multiSelect")) or len(options) < 2:
             mode = "checkbox"
         else:
             mode = "single_choice"
-        converted.append({"id": f"q{index}", "question": str(raw.get("question") or ""), "mode": mode, "options": options})
+        question = {"id": f"q{index}", "question": str(raw.get("question") or ""), "mode": mode, "options": options}
+        header = str(raw.get("header") or "").strip()
+        if header:
+            question["header"] = header
+        converted.append(question)
     return {**{k: v for k, v in arguments.items() if k != "questions"}, "questions": converted}
 
 
@@ -250,10 +258,14 @@ def _ask_user_out(arguments: dict[str, Any]) -> dict[str, Any]:
             continue
         out.append({
             "question": raw.get("question", ""),
-            "header": str(raw.get("id", ""))[:12],
+            "header": str(raw.get("header") or raw.get("id", ""))[:12],
             "multiSelect": raw.get("mode") == "checkbox",
             "options": [
-                {"label": option.get("label", "")}
+                {
+                    "label": option.get("label", ""),
+                    **({"description": option["description"]} if option.get("description") else {}),
+                    **({"preview": option["preview"]} if option.get("preview") else {}),
+                }
                 for option in _options_list(raw)
                 if isinstance(option, Mapping)
             ],

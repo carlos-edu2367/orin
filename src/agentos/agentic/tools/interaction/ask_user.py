@@ -10,6 +10,9 @@ from agentos.agentic.tools._shared import AgentToolError, ToolOutcome, _QUESTION
 from agentos.agentic.tools.spec import ToolSpec, ToolInput
 
 
+MAX_OPTION_PREVIEW_CHARS = 480
+
+
 class AskUserTools:
     """Mixed into ``AgentToolset``; ``self`` is the toolset."""
 
@@ -49,7 +52,14 @@ class AskUserTools:
                 if not _QUESTION_ID.fullmatch(option_id) or option_id in option_ids or not label or len(label) > 240:
                     raise AgentToolError(f"questions[{index}].options[{option_index}] is invalid.")
                 option_ids.add(option_id)
-                options.append({"id": option_id, "label": label})
+                option = {"id": option_id, "label": label}
+                description = str(raw_option.get("description") or "").strip()
+                if description:
+                    option["description"] = description[:240]
+                preview = str(raw_option.get("preview") or "")
+                if preview.strip():
+                    option["preview"] = preview if len(preview) <= MAX_OPTION_PREVIEW_CHARS else preview[: MAX_OPTION_PREVIEW_CHARS - 1] + "…"
+                options.append(option)
             if mode == "text" and options:
                 raise AgentToolError(f"questions[{index}] in text mode cannot have options.")
             if mode == "checkbox" and not options:
@@ -59,16 +69,23 @@ class AskUserTools:
             placeholder = str(raw.get("placeholder") or "").strip()
             if len(placeholder) > 240:
                 raise AgentToolError(f"questions[{index}].placeholder must contain at most 240 characters.")
-            normalized.append({
+            question = {
                 "id": question_id, "question": prompt, "mode": mode,
                 "options": options, "placeholder": placeholder,
-            })
+            }
+            header = str(raw.get("header") or "").strip()[:12]
+            if header:
+                question["header"] = header
+            normalized.append(question)
             question_ids.add(question_id)
         # The public activity event gives this validated form its own bounded
         # budget. Account for every question/option entry so a valid tool call
-        # can never vanish from the UI later.
-        option_count = sum(len(item["options"]) for item in normalized)
-        if 6 * len(normalized) + 3 * option_count > MAX_USER_QUESTION_ITEMS:
+        # can never vanish from the UI later. The budget counts only the optional
+        # fields actually present, so the documented maximum batch of 8 x 12 plain options still fits.
+        entries = sum(6 + ("header" in item) for item in normalized) + sum(
+            3 + ("description" in option) + ("preview" in option) for item in normalized for option in item["options"]
+        )
+        if entries > MAX_USER_QUESTION_ITEMS:
             raise AgentToolError("This question batch is too large to display safely; split it into smaller batches.")
         names = ", ".join(item["id"] for item in normalized)
         return ToolOutcome(

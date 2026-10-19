@@ -237,8 +237,8 @@ export type ContextUsage = {
 }
 
 export type UserQuestionMode = 'checkbox' | 'single_choice' | 'text'
-export type UserQuestionOption = { id: string; label: string }
-export type UserQuestion = { id: string; question: string; mode: UserQuestionMode; options: UserQuestionOption[]; placeholder?: string }
+export type UserQuestionOption = { id: string; label: string; description?: string; preview?: string }
+export type UserQuestion = { id: string; question: string; mode: UserQuestionMode; options: UserQuestionOption[]; placeholder?: string; header?: string }
 
 export type McpApprovalRequest = {
   server_id: string

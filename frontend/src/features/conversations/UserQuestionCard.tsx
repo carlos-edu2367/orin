@@ -89,7 +89,7 @@ export function UserQuestionCard({ questions, active, submitting = false, onSubm
 
           <form className="user-question-card__step" onSubmit={(event) => void advance(event)}>
             <fieldset disabled={submitting}>
-              <legend><span>{String(currentIndex + 1).padStart(2, '0')}</span>{current.question}</legend>
+              <legend><span>{String(currentIndex + 1).padStart(2, '0')}</span>{current.question}{current.header && <em className="user-question-card__chip">{current.header}</em>}</legend>
               {current.mode === 'text' ? (
                 <textarea
                   aria-label={current.question}
@@ -105,11 +105,22 @@ export function UserQuestionCard({ questions, active, submitting = false, onSubm
                     const chosen = currentAnswer.selected.includes(option.id)
                     return <label key={option.id} className={chosen ? 'is-selected' : ''}>
                       <input type={current.mode === 'checkbox' ? 'checkbox' : 'radio'} name={current.id} checked={chosen} onChange={(event) => choose(current, option.id, event.target.checked)} />
-                      <span>{option.label}</span>
+                      <span className="user-question-card__option-text">
+                        <span>{option.label}</span>
+                        {option.description && <small>{option.description}</small>}
+                      </span>
                     </label>
                   })}
                 </div>
               )}
+              {current.mode !== 'text' && (() => {
+                const previews = current.options.filter((option) => option.preview && currentAnswer.selected.includes(option.id))
+                return previews.length > 0 ? (
+                  <pre className="user-question-card__preview" data-testid="user-question-preview">
+                    {previews.map((option) => option.preview).join('\n\n')}
+                  </pre>
+                ) : null
+              })()}
               {current.mode !== 'text' && (
                 showOptionalNote ? (
                   <textarea

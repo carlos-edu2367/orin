@@ -109,9 +109,9 @@ def test_ask_user_question_converts_to_orin_questions() -> None:
          "options": [{"label": "Auth"}, {"label": "Billing"}]},
     ]})
     assert converted == {"questions": [
-        {"id": "q1", "question": "Which DB?", "mode": "single_choice",
-         "options": [{"id": "o1", "label": "SQLite — local"}, {"id": "o2", "label": "Postgres"}]},
-        {"id": "q2", "question": "Features?", "mode": "checkbox",
+        {"id": "q1", "question": "Which DB?", "mode": "single_choice", "header": "Database",
+         "options": [{"id": "o1", "label": "SQLite", "description": "local"}, {"id": "o2", "label": "Postgres"}]},
+        {"id": "q2", "question": "Features?", "mode": "checkbox", "header": "Features",
          "options": [{"id": "o1", "label": "Auth"}, {"id": "o2", "label": "Billing"}]},
     ]}
     # a single option cannot be single_choice in Orin; it becomes a checkbox
@@ -124,8 +124,8 @@ def test_ask_user_question_converts_to_orin_questions() -> None:
     internal = {"questions": [{"id": "x", "question": "Q", "mode": "text", "options": []}]}
     assert arguments_in("ask_user", internal) == internal
     out = arguments_out("ask_user", converted)
-    assert out["questions"][0] == {"question": "Which DB?", "header": "q1", "multiSelect": False,
-                                   "options": [{"label": "SQLite — local"}, {"label": "Postgres"}]}
+    assert out["questions"][0] == {"question": "Which DB?", "header": "Database", "multiSelect": False,
+                                   "options": [{"label": "SQLite", "description": "local"}, {"label": "Postgres"}]}
     assert out["questions"][1]["multiSelect"] is True
 
 

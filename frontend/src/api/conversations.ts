@@ -1143,11 +1143,18 @@ function parseUserQuestions(value: unknown): ConversationActivityEvent['question
       const label = optionalText(candidate.label, 240)
       if (!optionId || !label || optionIds.has(optionId)) return null
       optionIds.add(optionId)
-      return { id: optionId, label }
+      const description = optionalText(candidate.description, 240)
+      const preview = optionalText(candidate.preview, 480)
+      return { id: optionId, label, ...(description ? { description } : {}), ...(preview ? { preview } : {}) }
     })
     if (options.some((option) => option === null) || (mode === 'text' && options.length > 0) || (mode === 'checkbox' && options.length < 1) || (mode === 'single_choice' && options.length < 2)) return null
     ids.add(id)
-    return { id, question, mode, options: options as Array<{ id: string; label: string }>, placeholder: optionalText(item.placeholder, 240) }
+    const header = optionalText(item.header, 12)
+    return {
+      id, question, mode,
+      options: options as Array<{ id: string; label: string; description?: string; preview?: string }>,
+      placeholder: optionalText(item.placeholder, 240), ...(header ? { header } : {}),
+    }
   })
   return parsed.some((item) => item === null) ? undefined : parsed as NonNullable<ConversationActivityEvent['questions']>
 }
