@@ -43,7 +43,7 @@
 | A | 1–5 | Skills and slash commands on disk; plugin commands survive a restart |
 | B | 6–11 | Hardening of A; agent definitions in files; per-agent reminders and memory (W3-R26); background agents |
 | C | 12–15 | Hardening of B; agent team mailbox; teams with SendMessage and TeammateIdle |
-| D | | MCP scopes: project `.mcp.json` with approval and trust, `~/.claude.json`, managed; `${VAR}` expansion |
+| D | 16–19 | Hardening of C; MCP servers from the managed, user, local and project files (approval, trust, `${VAR}`, allow/deny lists) |
 | E | | MCP protocol: SSE and WebSocket transports, stdio shutdown, output limits, resources, prompts, elicitation |
 | F | | Plugins: manifests, layout, `userConfig` vault, marketplaces |
 | G | | One hook system: plugin, skill and agent hooks in the dispatcher |
@@ -4603,4 +4603,1711 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - [ ] **Step 1:** Run `uv run pytest -q tests/unit` (timeout 600000 ms) and `uv run pytest -q tests/integration`. Expected: all pass.
 - [ ] **Step 2:** Append a "## Batch C — Agent teams (Tasks 12–15)" section to `docs/superpowers/plans/2026-10-19-w5-extensibility-ledger.md`: commits, suite results, deviations 13–15, the deliberate expectation changes (Task 13: `test_postgres_schema.py` lists `agent_mailbox` and `test_w3_schema.py` expects the head revision `0050_w5_extensibility`; Task 14: the tool ledger counts become 32 included and 5 deferred, and `test_public_contract.py` lists `name`/`team_name` for the Agent tool and a `send_message` entry), and anything done differently from this plan.
 - [ ] **Step 3:** Commit with `docs(w5): ledger, batch C` + blank line + the Co-Authored-By line.
+
+## Batch D — MCP servers in configuration files
+
+Claude Code reads MCP servers from files in four scopes — managed (`managed-mcp.json`), user (`~/.claude.json`), local (the same file, per folder) and project (the repository's `.mcp.json`, approved server by server) — and applies `allowedMcpServers` / `deniedMcpServers`. Orin only had servers added through its own screen or the model's `configure_mcp` (database rows). This batch first closes the open findings of Batch C (Task 16), then reads the files (Task 17) and connects their servers to the turn (Task 18).
+
+New deviations (also in the ledger):
+
+16. **A preloaded skill's `allowed-tools` and `` !`cmd` `` blocks do not apply in a subagent**: its text joins the subagent's prompt inside the subordinate wrapper (Task 12), as written.
+17. **Orin reads its own files besides Claude Code's**: user scope also from `~/.orin/mcp.json`, local scope also from `~/.orin/workspaces/<key>/mcp.json` (with its own `enabledMcpjsonServers`/`disabledMcpjsonServers`), project scope also from `.orin/mcp.json`. Orin's file wins over Claude Code's on a shared name within a scope.
+18. **Orin's own servers (its screen, `configure_mcp`) keep their name**: a file server with the same tool prefix is skipped and the model is told. The allow/deny lists apply to Orin's own servers as well.
+19. **Only an Orin installed on the person's computer reads user, local and project files** (one that may start local processes); a shared server reads only `managed-mcp.json`, so one person's servers never reach everyone.
+20. **`${ORIN_*}` and `${AGENTOS_*}` are never expanded** in a server's configuration (Orin's own secrets).
+21. **No approval prompt or `reset-project-choices` yet**: a project server is approved through the settings keys (or Claude Code's own choices for that folder); the model is told which servers wait for approval. The prompt and the reset command arrive with W7 (screen) and W6 (CLI).
+22. **A file server's tools are listed when the turn starts** (in parallel, at most `MCP_TIMEOUT` ms, default 30 s) and cached for 10 minutes per exact configuration (a failure for 1 minute); a server that answers late is ready for the next turn. A file server cannot sign in with OAuth (Orin's sign-in flow belongs to its own servers); legacy SSE and WebSocket servers are reported as not supported until Batch E.
+
+### Task 16: Hardening of the agent teams
+
+Five findings from executing Batch C, one commit:
+
+1. **A message is never lost when its teammate cannot start.** `_send_team_message` took the pending messages before starting the run; a refused start (subagent budget, model) marked them read. They are now put back (`release`) and the refusal says the message is kept.
+2. **A message sent while a teammate goes idle starts it again.** Each roster entry has a `busy` flag. The teammate takes its mail and clears `busy` under one lock (`_team_lock`); a sender claims an idle teammate under the same lock. So a message either joins the teammate's next batch or finds it idle and starts it — never neither. A claimed teammate may start while its previous run is still announcing that it is idle.
+3. **After `MAX_TEAM_DELIVERIES` batches the lead hears of the unread messages** (their count is in the idle reminder).
+4. **A teammate keeps its team**: naming an existing teammate with another `team_name` is refused; leaving `team_name` out keeps its team.
+5. **A stopped teammate (TaskStop) takes no more mail**: what arrived stays unread.
+
+**Files:**
+- Modify: `src/agentos/conversations/mailbox.py`
+- Modify: `src/agentos/agentic/session.py`
+- Modify: `tests/unit/conversations/test_mailbox.py`
+- Modify: `tests/unit/agentic/test_agent_teams.py`
+
+**Interfaces:**
+- Consumes: Batch C (`TeamTools`, `AgentMailbox`, `_run_background_agent`).
+- Produces: `AgentMailbox.release(*, user_id, conversation_id, message_ids)`, `.pending_count(*, user_id, conversation_id, recipient) -> int` (and the same on `InMemoryMailbox`); `take` items gain `message_id`. `TurnSession._team_lock`, `_teammates` (initialised in `__init__`), `_start_subagent(...)` (the former body of `_run_subagent`), `_teammate_refusal(name, team_name=None)` (claims a known idle teammate), `_claim_teammate(name) -> bool`, `_release_teammate(name)`, `_team_pending(name) -> int`; `_take_team_mail(name) -> tuple[str, list[str]]`; `_teammate_idle(name, team, outcome, *, unread=0)`.
+
+- [ ] **Step 1: Write the failing test**
+
+Append to the end of `tests/unit/conversations/test_mailbox.py` (after its last line, separated by one blank line):
+
+```python
+def test_released_messages_are_pending_again_and_counted(mailbox) -> None:
+    common = {"user_id": "u1", "conversation_id": "c1", "team_name": "t"}
+    mailbox.post(**common, sender="lead", recipient="alice", content="first")
+    mailbox.post(**common, sender="lead", recipient="alice", content="second")
+    taken = mailbox.take(user_id="u1", conversation_id="c1", recipient="alice")
+    assert all(item["message_id"].startswith("mail_") for item in taken)
+    assert mailbox.pending_count(user_id="u1", conversation_id="c1", recipient="alice") == 0
+    mailbox.release(user_id="u2", conversation_id="c1", message_ids=[item["message_id"] for item in taken])
+    assert mailbox.pending_count(user_id="u1", conversation_id="c1", recipient="alice") == 0  # another person cannot release them
+    mailbox.release(user_id="u1", conversation_id="c1", message_ids=[item["message_id"] for item in taken])
+    assert mailbox.pending_count(user_id="u1", conversation_id="c1", recipient="alice") == 2
+    assert [item["content"] for item in mailbox.take(user_id="u1", conversation_id="c1", recipient="alice")] == ["first", "second"]
+```
+
+Append to the end of `tests/unit/agentic/test_agent_teams.py` (after its last line, separated by one blank line):
+
+```python
+def _pending(session: TurnSession, name: str) -> int:
+    return session._team_mailbox().pending_count(user_id=TURN["user_id"], conversation_id=TURN["conversation_id"], recipient=name)
+
+
+def test_a_message_survives_a_teammate_that_cannot_start(team) -> None:
+    child = _Child()
+    session = team(child)
+    started = session._run_subagent(subagent_type="general-purpose", task="First task", teammate_name="erin", team_name="core")
+    _wait(session, started.payload["agent_id"])
+    session._max_subagents_per_turn = session._subagent_runs  # the turn's subagent budget is used up
+    refused = session._send_team_message(sender="lead", to="erin", message="Check the cache too")
+    assert refused.status == "failed" and refused.error_code == "SUBAGENT_LIMIT"
+    assert "kept" in refused.content and _pending(session, "erin") == 1
+    session._max_subagents_per_turn = None
+    resumed = session._send_team_message(sender="lead", to="erin", message="And the logs")
+    assert resumed.payload["status"] == "running"
+    _wait(session, started.payload["agent_id"])
+    assert "Check the cache too" in child.requests[-1] and "And the logs" in child.requests[-1]
+
+
+def test_a_message_sent_while_a_teammate_goes_idle_starts_it_again(team) -> None:
+    child = _Child()
+    session = team(child)
+    entered, release = threading.Event(), threading.Event()
+    original = session._teammate_idle
+
+    def slow_idle(*args, **kwargs):
+        entered.set()
+        release.wait(10)
+        return original(*args, **kwargs)
+
+    session._teammate_idle = slow_idle
+    started = session._run_subagent(subagent_type="general-purpose", task="First task", teammate_name="frank", team_name="core")
+    assert entered.wait(10)  # its run ended and it is announcing that it is idle
+    sent = session._send_team_message(sender="lead", to="frank", message="One more thing")
+    assert sent.status == "succeeded" and sent.payload["status"] == "running", sent.content
+    release.set()
+    _wait(session, started.payload["agent_id"])
+    assert "One more thing" in child.requests[-1]
+
+
+def test_after_the_delivery_cap_the_lead_hears_of_unread_messages(team, monkeypatch) -> None:
+    import agentos.agentic.session as session_module
+
+    monkeypatch.setattr(session_module, "MAX_TEAM_DELIVERIES", 0)
+    child = _Child(hold=True)
+    session = team(child)
+    started = session._run_subagent(subagent_type="general-purpose", task="Long task", teammate_name="gina", team_name="core")
+    assert child.started.wait(10)
+    assert session._send_team_message(sender="lead", to="gina", message="Later").payload["status"] == "queued"
+    child.release.set()
+    _wait(session, started.payload["agent_id"])
+    texts = [item.text for item in session._reminders.drain() if item.kind == "teammate"]
+    assert any("Teammate gina is idle" in text and "1 unread message" in text for text in texts)
+    assert _pending(session, "gina") == 1
+
+
+def test_a_teammate_keeps_its_team(team) -> None:
+    session = team(_Child())
+    started = session._run_subagent(subagent_type="general-purpose", task="x", teammate_name="hank", team_name="core")
+    _wait(session, started.payload["agent_id"])
+    moved = session._run_subagent(subagent_type="general-purpose", task="y", teammate_name="hank", team_name="other")
+    assert moved.status == "failed" and moved.error_code == "INVALID_ARGUMENTS" and "core" in moved.content
+    again = session._run_subagent(subagent_type="general-purpose", task="y", teammate_name="hank")
+    assert again.status == "succeeded", again.content
+    _wait(session, started.payload["agent_id"])
+    assert session._team_roster()["hank"]["team_name"] == "core"
+
+
+def test_a_stopped_teammate_leaves_its_mail_unread(team) -> None:
+    child = _Child(hold=True)
+    session = team(child)
+    started = session._run_subagent(subagent_type="general-purpose", task="Long task", teammate_name="iris", team_name="core")
+    assert child.started.wait(10)
+    session._send_team_message(sender="lead", to="iris", message="Also this")
+    session._stop_background_subagent(started.payload["agent_id"])
+    child.release.set()
+    _wait(session, started.payload["agent_id"])
+    assert len(child.requests) == 1 and _pending(session, "iris") == 1
+```
+
+- [ ] **Step 2: Run it to verify it fails**
+
+Run: `uv run pytest -q tests/unit/agentic/test_agent_teams.py tests/unit/conversations/test_mailbox.py`
+Expected: FAIL — `test_released_messages_are_pending_again_and_counted` (both mailboxes: no `message_id`/`release`), and `test_a_message_survives_a_teammate_that_cannot_start`, `test_a_message_sent_while_a_teammate_goes_idle_starts_it_again`, `test_after_the_delivery_cap_the_lead_hears_of_unread_messages`, `test_a_teammate_keeps_its_team`, `test_a_stopped_teammate_leaves_its_mail_unread`.
+
+- [ ] **Step 3: Implement**
+
+Then make these edits, in order (each `replace` block occurs exactly once in its file; if one does not, stop and report — do not guess):
+
+1. In `src/agentos/conversations/mailbox.py`, replace
+
+```python
+from sqlalchemy import insert, select, update
+```
+
+   with
+
+```python
+from sqlalchemy import func, insert, select, update
+```
+
+2. In `src/agentos/conversations/mailbox.py`, replace
+
+```python
+A message is ``pending`` until the recipient's next run takes it (``take``).
+```
+
+   with
+
+```python
+A message is ``pending`` until the recipient's next run takes it (``take``); ``release`` puts taken messages back
+when the run they were taken for could not start.
+```
+
+3. In `src/agentos/conversations/mailbox.py`, replace
+
+```python
+        return [{"sender": str(row["sender"]), "content": str(row["content"]), "summary": str(row["summary"] or "")} for row in rows]
+
+    def history(self, *, user_id: str, conversation_id: str, limit: int = 200) -> list[dict[str, str]]:
+        with self._engine.connect() as connection:
+```
+
+   with
+
+```python
+        return [
+            {"message_id": str(row["message_id"]), "sender": str(row["sender"]), "content": str(row["content"]), "summary": str(row["summary"] or "")}
+            for row in rows
+        ]
+
+    def release(self, *, user_id: str, conversation_id: str, message_ids: list[str]) -> None:
+        """Mark taken messages pending again: the run they were taken for never started."""
+        ids = [str(item) for item in message_ids][:MAX_TAKEN]
+        if not ids:
+            return
+        with self._engine.begin() as connection:
+            connection.execute(update(agent_mailbox).where(
+                agent_mailbox.c.user_id == user_id, agent_mailbox.c.conversation_id == conversation_id,
+                agent_mailbox.c.message_id.in_(ids),
+            ).values(delivered_at=None))
+
+    def pending_count(self, *, user_id: str, conversation_id: str, recipient: str) -> int:
+        with self._engine.connect() as connection:
+            return int(connection.execute(select(func.count()).select_from(agent_mailbox).where(
+                agent_mailbox.c.user_id == user_id, agent_mailbox.c.conversation_id == conversation_id,
+                agent_mailbox.c.recipient == recipient, agent_mailbox.c.delivered_at.is_(None),
+            )).scalar() or 0)
+
+    def history(self, *, user_id: str, conversation_id: str, limit: int = 200) -> list[dict[str, str]]:
+        with self._engine.connect() as connection:
+```
+
+4. In `src/agentos/conversations/mailbox.py`, replace
+
+```python
+        return [{"sender": str(row["sender"]), "content": str(row["content"]), "summary": str(row["summary"])} for row in pending]
+```
+
+   with
+
+```python
+        return [
+            {"message_id": str(row["message_id"]), "sender": str(row["sender"]), "content": str(row["content"]), "summary": str(row["summary"])}
+            for row in pending
+        ]
+
+    def release(self, *, user_id: str, conversation_id: str, message_ids: list[str]) -> None:
+        wanted = {str(item) for item in message_ids}
+        with self._lock:
+            for row in self._rows:
+                if row["message_id"] in wanted and row["user_id"] == user_id and row["conversation_id"] == conversation_id:
+                    row["delivered"] = False
+
+    def pending_count(self, *, user_id: str, conversation_id: str, recipient: str) -> int:
+        with self._lock:
+            return sum(1 for row in self._rows if not row["delivered"] and row["user_id"] == user_id
+                       and row["conversation_id"] == conversation_id and row["recipient"] == recipient)
+```
+
+5. In `src/agentos/agentic/session.py`, replace
+
+```python
+        self._builtin_type_counts: dict[str, int] = {}
+```
+
+   with
+
+```python
+        self._builtin_type_counts: dict[str, int] = {}
+        # W5 agent teams: the roster (name -> agent_id, team_name, type, busy), guarded by its own lock.
+        self._team_lock = Lock()
+        self._teammates: dict[str, dict[str, Any]] = {}
+```
+
+6. In `src/agentos/agentic/session.py`, replace
+
+```python
+        teammate_name: str | None = None,
+        team_name: str | None = None,
+    ) -> ToolOutcome:
+        if teammate_name:
+            refusal = self._teammate_refusal(teammate_name)
+            if refusal is not None:
+                return refusal
+        raw_type = str(subagent_type or "").strip()
+```
+
+   with
+
+```python
+        teammate_name: str | None = None,
+        team_name: str | None = None,
+    ) -> ToolOutcome:
+        if not teammate_name:
+            return self._start_subagent(
+                subagent_type, task, description=description, model_id=model_id, agent_id=agent_id,
+                run_in_background=run_in_background, hook_cancel=hook_cancel,
+            )
+        refusal = self._teammate_refusal(teammate_name, team_name)
+        if refusal is not None:
+            return refusal
+        clean_name = str(teammate_name).strip().lower()
+        outcome = self._start_subagent(
+            subagent_type, task, description=description, model_id=model_id, agent_id=agent_id,
+            run_in_background=True, hook_cancel=hook_cancel, teammate_name=clean_name, team_name=team_name,
+        )
+        if outcome.status != "succeeded":
+            self._release_teammate(clean_name)  # it never started, so it is not busy
+        return outcome
+
+    def _start_subagent(
+        self,
+        subagent_type: str,
+        task: str,
+        *,
+        description: str = "",
+        model_id: str | None = None,
+        agent_id: str | None = None,
+        run_in_background: bool = False,
+        hook_cancel: threading.Event | None = None,
+        teammate_name: str | None = None,
+        team_name: str | None = None,
+    ) -> ToolOutcome:
+        raw_type = str(subagent_type or "").strip()
+```
+
+7. In `src/agentos/agentic/session.py`, replace
+
+```python
+            team_name=str(team_name or "").strip()[:64] or "team",
+        )
+```
+
+   with
+
+```python
+            team_name=str(team_name or "").strip()[:64] or None,
+        )
+```
+
+8. In `src/agentos/agentic/session.py`, replace
+
+```python
+            if bg_entry is not None and not bg_entry["future"].done():
+                bg_name = str(bg_entry.get("agent_name") or resumed_agent_id)
+```
+
+   with
+
+```python
+            # A teammate reaching here was claimed while not busy: its previous run is only announcing that it is idle.
+            if bg_entry is not None and not bg_entry["future"].done() and not teammate_name:
+                bg_name = str(bg_entry.get("agent_name") or resumed_agent_id)
+```
+
+9. In `src/agentos/agentic/session.py`, replace
+
+```python
+        if teammate_name:
+            record = {**record, "teammate_name": teammate_name, "team_name": team_name or "team"}
+            with self._subagent_lock:
+                self._team_roster()[teammate_name] = {
+                    "agent_id": str(record["agent_id"]), "team_name": team_name or "team", "type": builtin_key,
+                }
+            run_in_background = True  # a teammate always works in the background
+```
+
+   with
+
+```python
+        if teammate_name:
+            with self._team_lock:
+                known = self._team_roster().get(teammate_name) or {}
+                team = team_name or str(known.get("team_name") or "") or "team"  # a teammate keeps its team when none is named
+                self._team_roster()[teammate_name] = {
+                    "agent_id": str(record["agent_id"]), "team_name": team, "type": builtin_key, "busy": True,
+                }
+            record = {**record, "teammate_name": teammate_name, "team_name": team}
+            run_in_background = True  # a teammate always works in the background
+```
+
+10. In `src/agentos/agentic/session.py`, replace
+
+```python
+        A teammate then reads the messages that arrived while it worked (one run per batch, at most
+        ``MAX_TEAM_DELIVERIES``), and goes idle: ``TeammateIdle`` fires and the lead gets its last report.
+        """
+        outcome = self._execute_subagent_run(**kwargs)
+        self._save_agent_report(output_file, outcome)
+        record = kwargs.get("record") or {}
+        name = str(record.get("teammate_name") or "")
+        if not name:
+            return outcome
+        for _ in range(MAX_TEAM_DELIVERIES):
+            task = self._take_team_mail(name)
+            if not task:
+                break
+            outcome = self._execute_subagent_run(**{**kwargs, "task_text": task, "resumed_agent_id": kwargs.get("agent_id")})
+            self._save_agent_report(output_file, outcome)
+        self._teammate_idle(name, str(record.get("team_name") or "team"), outcome)
+        return outcome
+```
+
+   with
+
+```python
+        A teammate then reads the messages that arrived while it worked (one run per batch, at most
+        ``MAX_TEAM_DELIVERIES``), and goes idle: ``TeammateIdle`` fires and the lead gets its last report.
+        Taking the mail and going idle happen under the team lock, so a message sent meanwhile either
+        joins the next batch or finds the teammate idle and starts it again. A stopped teammate takes no more mail.
+        """
+        record = kwargs.get("record") or {}
+        name = str(record.get("teammate_name") or "")
+        try:
+            outcome = self._execute_subagent_run(**kwargs)
+            self._save_agent_report(output_file, outcome)
+            if not name:
+                return outcome
+            cancel = kwargs.get("hook_cancel")
+            unread = 0
+            for delivery in range(MAX_TEAM_DELIVERIES + 1):
+                with self._team_lock:
+                    stopping = delivery >= MAX_TEAM_DELIVERIES or (cancel is not None and cancel.is_set())
+                    task, _taken = ("", []) if stopping else self._take_team_mail(name)
+                    if not task:
+                        unread = self._team_pending(name) if stopping else 0
+                        mate = self._team_roster().get(name)
+                        if mate is not None:
+                            mate["busy"] = False
+                        break
+                outcome = self._execute_subagent_run(**{**kwargs, "task_text": task, "resumed_agent_id": kwargs.get("agent_id")})
+                self._save_agent_report(output_file, outcome)
+        except BaseException:
+            if name:
+                self._release_teammate(name)
+            raise
+        self._teammate_idle(name, str(record.get("team_name") or "team"), outcome, unread=unread)
+        return outcome
+```
+
+11. In `src/agentos/agentic/session.py`, replace
+
+```python
+    def _teammate_refusal(self, name: str) -> ToolOutcome | None:
+        clean = str(name or "").strip().lower()
+```
+
+   with
+
+```python
+    def _teammate_refusal(self, name: str, team_name: str | None = None) -> ToolOutcome | None:
+        """Why this teammate cannot take a task now, or None — and then a known teammate is claimed (busy) for the caller."""
+        clean = str(name or "").strip().lower()
+```
+
+12. In `src/agentos/agentic/session.py`, replace
+
+```python
+        known = self._team_roster().get(clean)
+        if known is not None:
+            with self._subagent_lock:
+                entry = self._background_subagents.get(known["agent_id"])
+            if entry is not None and not entry["future"].done():
+                return ToolOutcome(
+                    "failed", f"{clean} ainda trabalhando",
+                    f"Teammate '{clean}' is still working. Send it a message with SendMessage; it reads it when it finishes.",
+                    {"agent_id": known["agent_id"], "tool_kind": "agent"}, "SUBAGENT_STILL_RUNNING",
+                )
+        return None
+```
+
+   with
+
+```python
+        wanted_team = str(team_name or "").strip()[:64]
+        with self._team_lock:
+            known = self._team_roster().get(clean)
+            if known is None:
+                return None
+            if wanted_team and wanted_team != known.get("team_name"):
+                return ToolOutcome(
+                    "failed", f"{clean} já está em outra equipe",
+                    f"Teammate '{clean}' is in team '{known.get('team_name')}'. Use another name, or leave team_name out to give it a new task.",
+                    {"agent_id": known["agent_id"], "tool_kind": "agent"}, "INVALID_ARGUMENTS",
+                )
+            if known.get("busy"):
+                return ToolOutcome(
+                    "failed", f"{clean} ainda trabalhando",
+                    f"Teammate '{clean}' is still working. Send it a message with SendMessage; it reads it when it finishes.",
+                    {"agent_id": known["agent_id"], "tool_kind": "agent"}, "SUBAGENT_STILL_RUNNING",
+                )
+            known["busy"] = True
+        return None
+
+    def _claim_teammate(self, name: str) -> bool:
+        """Mark an idle teammate busy for the caller; False when it is already working."""
+        with self._team_lock:
+            mate = self._team_roster().get(name)
+            if mate is None or mate.get("busy"):
+                return False
+            mate["busy"] = True
+            return True
+
+    def _release_teammate(self, name: str) -> None:
+        with self._team_lock:
+            mate = self._team_roster().get(name)
+            if mate is not None:
+                mate["busy"] = False
+
+    def _team_pending(self, name: str) -> int:
+        try:
+            return int(self._team_mailbox().pending_count(
+                user_id=str(self.turn.get("user_id") or ""), conversation_id=str(self.turn.get("conversation_id") or ""), recipient=name,
+            ))
+        except Exception:  # noqa: BLE001 - an unreadable count only drops the notice
+            logger.warning("could not count a teammate's unread messages", exc_info=True)
+            return 0
+```
+
+13. In `src/agentos/agentic/session.py`, replace
+
+```python
+        self._team_mailbox().post(user_id=user_id, conversation_id=conversation_id, team_name=mate["team_name"], sender=sender, recipient=target, content=text, summary=summary)
+        with self._subagent_lock:
+            entry = self._background_subagents.get(mate["agent_id"])
+        if entry is not None and not entry["future"].done():
+            return ToolOutcome("succeeded", f"Mensagem na fila de {target}", f"Queued: {target} reads it when it finishes its current task.", {"to": target, "status": "queued", "tool_kind": "agent"})
+        task = self._take_team_mail(target)
+        if not task:
+            return ToolOutcome("succeeded", f"Mensagem entregue a {target}", f"Delivered to {target}.", {"to": target, "tool_kind": "agent"})
+        started = self._ask_agent(
+            mate["type"], task, resumed_agent_id=mate["agent_id"], run_in_background=True,
+            teammate_name=target, team_name=mate["team_name"],
+        )
+        if started.status != "succeeded":
+            return started
+        return ToolOutcome
+```
+
+   with
+
+```python
+        mailbox = self._team_mailbox()
+        mailbox.post(user_id=user_id, conversation_id=conversation_id, team_name=mate["team_name"], sender=sender, recipient=target, content=text, summary=summary)
+        if not self._claim_teammate(target):
+            return ToolOutcome("succeeded", f"Mensagem na fila de {target}", f"Queued: {target} reads it when it finishes its current task.", {"to": target, "status": "queued", "tool_kind": "agent"})
+        task, taken = self._take_team_mail(target)
+        if not task:
+            self._release_teammate(target)
+            return ToolOutcome("succeeded", f"Mensagem entregue a {target}", f"Delivered to {target}.", {"to": target, "tool_kind": "agent"})
+        started = self._ask_agent(
+            mate["type"], task, resumed_agent_id=mate["agent_id"], run_in_background=True,
+            teammate_name=target, team_name=mate["team_name"],
+        )
+        if started.status != "succeeded":
+            # The run never started: the messages stay unread for its next start.
+            mailbox.release(user_id=user_id, conversation_id=conversation_id, message_ids=taken)
+            self._release_teammate(target)
+            return ToolOutcome(
+                "failed", started.summary,
+                f"{started.content}\nThe message is kept; {target} reads it when it next starts.",
+                {**dict(started.payload or {}), "to": target}, started.error_code,
+            )
+        return ToolOutcome
+```
+
+14. In `src/agentos/agentic/session.py`, replace
+
+```python
+    def _take_team_mail(self, name: str) -> str:
+        """The teammate's pending messages as one task, or "" when there are none."""
+        messages = self._team_mailbox().take(
+            user_id=str(self.turn.get("user_id") or ""), conversation_id=str(self.turn.get("conversation_id") or ""), recipient=name,
+        )
+        if not messages:
+            return ""
+```
+
+   with
+
+```python
+    def _take_team_mail(self, name: str) -> tuple[str, list[str]]:
+        """The teammate's pending messages as one task and their ids, or ("", []) when there are none."""
+        messages = self._team_mailbox().take(
+            user_id=str(self.turn.get("user_id") or ""), conversation_id=str(self.turn.get("conversation_id") or ""), recipient=name,
+        )
+        if not messages:
+            return "", []
+```
+
+15. In `src/agentos/agentic/session.py`, replace
+
+```python
+        return "Messages from your team:\n\n" + "\n\n".join(lines)
+
+    def _teammate_idle(self, name: str, team: str, outcome: ToolOutcome) -> None:
+        bus = self.lifecycle
+        if bus is not None:
+            _emit_lifecycle_safely(bus, HookEvent.TEAMMATE_IDLE, teammate_name=name, team_name=team)
+        report = str(outcome.content or outcome.summary or "")[:2000]
+        self._reminders.add("teammate", f"Teammate {name} is idle. Its last report:\n{report}", key=f"teammate-idle:{name}:{uuid4().hex}")
+```
+
+   with
+
+```python
+        return "Messages from your team:\n\n" + "\n\n".join(lines), [str(item.get("message_id") or "") for item in messages]
+
+    def _teammate_idle(self, name: str, team: str, outcome: ToolOutcome, *, unread: int = 0) -> None:
+        bus = self.lifecycle
+        if bus is not None:
+            _emit_lifecycle_safely(bus, HookEvent.TEAMMATE_IDLE, teammate_name=name, team_name=team)
+        report = str(outcome.content or outcome.summary or "")[:2000]
+        waiting = (
+            f" It has {unread} unread message{'s' if unread != 1 else ''}; a SendMessage to it starts it again with them."
+            if unread else ""
+        )
+        self._reminders.add("teammate", f"Teammate {name} is idle.{waiting} Its last report:\n{report}", key=f"teammate-idle:{name}:{uuid4().hex}")
+```
+
+- [ ] **Step 4: Run the tests and see them pass**
+
+Run: `uv run pytest -q tests/unit/agentic/test_agent_teams.py tests/unit/conversations/test_mailbox.py`
+Expected: PASS.
+
+Also run `uv run pytest -q tests/unit/agentic`: expected PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/agentos/conversations/mailbox.py src/agentos/agentic/session.py tests/unit/conversations/test_mailbox.py tests/unit/agentic/test_agent_teams.py
+git commit -m "fix(w5): team messages survive a refused start, an idle race and a stop; a teammate keeps its team
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+### Task 17: MCP servers in configuration files: the scopes
+
+A new module reads every file scope into `FileServer` values without touching the network: managed (`managed-mcp.json`, exclusive when present), user (`~/.claude.json` and `~/.orin/mcp.json`), local (`projects[<workspace>]` in `~/.claude.json` and `~/.orin/workspaces/<key>/mcp.json`) and project (`.mcp.json` and `.orin/mcp.json`, only when the workspace is trusted, each server only once approved). Names resolve local > project > user. `${VAR}` and `${VAR:-default}` are expanded; an unset variable without a default, or one of Orin's own (`ORIN_*`, `AGENTOS_*`), stops that server only. `policy_refusal` applies `allowedMcpServers`/`deniedMcpServers` by name, exact command line or URL pattern. `claude_user_config_file()` finds Claude Code's `~/.claude.json` next to `ORIN_CLAUDE_HOME` (so the tests' temporary home isolates it too) unless `ORIN_CLAUDE_CONFIG` names it; the test setup clears `ORIN_CLAUDE_CONFIG`.
+
+**Files:**
+- Create: `src/agentos/mcp/file_config.py`
+- Modify: `tests/conftest.py`
+- Modify: `src/agentos/settings/paths.py`
+- Test: `tests/unit/mcp/test_file_config.py`
+
+**Interfaces:**
+- Produces: `agentos.mcp.file_config`: `FileServer` (name, scope, source, transport, command, args, env, url, headers, cwd; `command_line`, `fingerprint()`), `FileServerSet` (servers, pending, errors, managed_only, project_awaiting_trust), `McpConfigError`, `expand(value, environ)`, `parse_server(name, raw, *, scope, source, environ, cwd=None)`, `policy_refusal(name, *, aliases=(), command_line, url, settings) -> str | None`, `load_file_servers(*, workspace_root, trusted, settings, environ=None, personal=True) -> FileServerSet`, `MAX_FILE_SERVERS = 50`. `agentos.settings.paths.claude_user_config_file()`.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `tests/unit/mcp/test_file_config.py`:
+
+```python
+"""W5: MCP servers written in files — scopes, approval, trust, variables and the allow/deny lists."""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from agentos.mcp.file_config import FileServer, expand, load_file_servers, parse_server, policy_refusal
+from agentos.settings.paths import claude_user_config_file, orin_managed_dir, orin_user_dir, workspace_grants_file
+
+
+def _write(path: Path, data: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+
+def _stdio(arg: str) -> dict:
+    return {"command": "node", "args": [arg]}
+
+
+def _load(root: Path, *, trusted: bool = True, settings: dict | None = None, environ: dict | None = None, personal: bool = True):
+    return load_file_servers(workspace_root=root, trusted=trusted, settings=settings or {}, environ=environ or {}, personal=personal)
+
+
+def _names(servers) -> list[str]:
+    return sorted(server.name for server in servers)
+
+
+def test_project_servers_need_trust_and_approval(tmp_path: Path) -> None:
+    _write(tmp_path / ".mcp.json", {"mcpServers": {"docs": _stdio("docs.js"), "web": {"type": "http", "url": "https://mcp.example.com/mcp"}}})
+    untrusted = _load(tmp_path, trusted=False)
+    assert untrusted.servers == [] and untrusted.pending == [] and untrusted.project_awaiting_trust is True
+    waiting = _load(tmp_path)
+    assert waiting.servers == [] and _names(waiting.pending) == ["docs", "web"]
+    one = _load(tmp_path, settings={"enabledMcpjsonServers": ["docs"]})
+    assert _names(one.servers) == ["docs"] and _names(one.pending) == ["web"]
+    assert one.servers[0].scope == "project" and one.servers[0].cwd == str(tmp_path)
+    everything = _load(tmp_path, settings={"enableAllProjectMcpServers": True, "disabledMcpjsonServers": ["web"]})
+    assert _names(everything.servers) == ["docs"] and everything.pending == []
+
+
+def test_claude_codes_per_folder_choices_count(tmp_path: Path) -> None:
+    _write(tmp_path / ".mcp.json", {"mcpServers": {"web": {"type": "http", "url": "https://mcp.example.com/mcp"}}})
+    _write(claude_user_config_file(), {"projects": {str(tmp_path).replace("\\", "/"): {"enabledMcpjsonServers": ["web"]}}})
+    assert _names(_load(tmp_path).servers) == ["web"]
+
+
+def test_scopes_resolve_local_over_project_over_user(tmp_path: Path) -> None:
+    _write(claude_user_config_file(), {"mcpServers": {"tools": _stdio("claude-user"), "only-claude": _stdio("x")}})
+    _write(orin_user_dir() / "mcp.json", {"mcpServers": {"tools": _stdio("orin-user")}})
+    found = _load(tmp_path)
+    assert {server.name: server.args for server in found.servers} == {"tools": ("orin-user",), "only-claude": ("x",)}
+    _write(tmp_path / ".mcp.json", {"mcpServers": {"tools": _stdio("project")}})
+    found = _load(tmp_path, settings={"enabledMcpjsonServers": ["tools"]})
+    assert [server.args for server in found.servers if server.name == "tools"] == [("project",)]
+    _write(workspace_grants_file(tmp_path).parent / "mcp.json", {"mcpServers": {"tools": _stdio("local")}})
+    found = _load(tmp_path, settings={"enabledMcpjsonServers": ["tools"]})
+    assert [(server.args, server.scope) for server in found.servers if server.name == "tools"] == [(("local",), "local")]
+
+
+def test_a_managed_file_is_the_only_source(tmp_path: Path) -> None:
+    _write(orin_user_dir() / "mcp.json", {"mcpServers": {"mine": _stdio("x")}})
+    _write(orin_managed_dir() / "managed-mcp.json", {"mcpServers": {"corp": {"type": "http", "url": "https://corp.example.com/mcp"}}})
+    found = _load(tmp_path)
+    assert found.managed_only is True and _names(found.servers) == ["corp"] and found.servers[0].scope == "managed"
+
+
+def test_a_shared_orin_reads_only_the_managed_file(tmp_path: Path) -> None:
+    _write(orin_user_dir() / "mcp.json", {"mcpServers": {"mine": _stdio("x")}})
+    _write(tmp_path / ".mcp.json", {"mcpServers": {"repo": _stdio("y")}})
+    found = _load(tmp_path, settings={"enableAllProjectMcpServers": True}, personal=False)
+    assert found.servers == [] and found.pending == []
+
+
+def test_variables_are_expanded(tmp_path: Path) -> None:
+    assert expand("Bearer ${TOKEN}", {"TOKEN": "abc"}) == "Bearer abc"
+    assert expand("${PORT:-8080}", {}) == "8080" and expand("${PORT:-8080}", {"PORT": ""}) == "8080"
+    _write(orin_user_dir() / "mcp.json", {"mcpServers": {
+        "api": {"type": "http", "url": "https://${HOST}/mcp", "headers": {"Authorization": "Bearer ${TOKEN}"}},
+        "broken": {"type": "http", "url": "https://${MISSING}/mcp"},
+        "sneaky": {"command": "node", "args": ["${ORIN_SECRET_KEY:-x}"]},
+    }})
+    found = _load(tmp_path, environ={"HOST": "mcp.example.com", "TOKEN": "abc", "ORIN_SECRET_KEY": "k"})
+    assert _names(found.servers) == ["api"]
+    assert found.servers[0].url == "https://mcp.example.com/mcp" and dict(found.servers[0].headers) == {"Authorization": "Bearer abc"}
+    reasons = " ".join(why for _, why in found.errors)
+    assert "MISSING is not set" in reasons and "Orin's own variables" in reasons and "abc" not in reasons
+
+
+def test_the_allow_and_deny_lists(tmp_path: Path) -> None:
+    common = {"command_line": ("npx", "-y", "srv"), "url": None}
+    assert policy_refusal("a", settings={"deniedMcpServers": [{"serverName": "a"}]}, **common) is not None
+    assert policy_refusal("a", settings={"allowedMcpServers": []}, **common) is not None
+    assert policy_refusal("a", settings={"allowedMcpServers": [{"serverName": "a"}]}, **common) is None
+    # a command entry in the allow list means a stdio server must match a command, not just its name
+    assert policy_refusal("a", settings={"allowedMcpServers": [{"serverName": "a"}, {"serverCommand": ["npx", "other"]}]}, **common) is not None
+    assert policy_refusal("a", settings={"allowedMcpServers": [{"serverCommand": ["npx", "-y", "srv"]}]}, **common) is None
+    remote = {"command_line": None, "url": "https://api.corp.example.com/mcp"}
+    assert policy_refusal("r", settings={"allowedMcpServers": [{"serverUrl": "https://*.corp.example.com/*"}]}, **remote) is None
+    assert policy_refusal("r", settings={"allowedMcpServers": [{"serverUrl": "https://other.example.com/*"}]}, **remote) is not None
+    assert policy_refusal("r", settings={"deniedMcpServers": [{"serverUrl": "https://*"}], "allowedMcpServers": [{"serverName": "r"}]}, **remote) is not None
+    assert policy_refusal("Display", aliases=("slug",), settings={"deniedMcpServers": [{"serverName": "slug"}]}, **remote) is not None
+    _write(orin_user_dir() / "mcp.json", {"mcpServers": {"keep": _stdio("k"), "drop": _stdio("d")}})
+    found = _load(tmp_path, settings={"deniedMcpServers": [{"serverName": "drop"}]})
+    assert _names(found.servers) == ["keep"] and any("deniedMcpServers" in why for _, why in found.errors)
+
+
+def test_bad_entries_are_reported_and_the_rest_load(tmp_path: Path) -> None:
+    (orin_user_dir()).mkdir(parents=True, exist_ok=True)
+    (orin_user_dir() / "mcp.json").write_text("{not json", encoding="utf-8")
+    _write(claude_user_config_file(), {"mcpServers": {
+        "good": _stdio("g"), "list": [], "kind": {"type": "carrier-pigeon", "url": "https://x"},
+        "ws": {"type": "ws", "url": "https://wrong.example.com"}, "nocmd": {"type": "stdio"},
+    }})
+    found = _load(tmp_path)
+    assert _names(found.servers) == ["good"]
+    assert len(found.errors) == 5
+
+
+def test_two_names_with_one_tool_prefix_keep_the_first(tmp_path: Path) -> None:
+    _write(orin_user_dir() / "mcp.json", {"mcpServers": {"My Server": _stdio("a"), "my-server": _stdio("b")}})
+    found = _load(tmp_path)
+    assert len(found.servers) == 1 and any("tool prefix" in why for _, why in found.errors)
+
+
+def test_the_fingerprint_follows_the_values() -> None:
+    first = parse_server("s", {"command": "node", "env": {"K": "1"}}, scope="user", source="x", environ={})
+    second = parse_server("s", {"command": "node", "env": {"K": "2"}}, scope="user", source="x", environ={})
+    assert isinstance(first, FileServer) and first.fingerprint() != second.fingerprint()
+    assert first.fingerprint() == parse_server("s", {"command": "node", "env": {"K": "1"}}, scope="local", source="y", environ={}).fingerprint()
+```
+
+- [ ] **Step 2: Run it to verify it fails**
+
+Run: `uv run pytest -q tests/unit/mcp/test_file_config.py`
+Expected: FAIL — `ModuleNotFoundError: No module named 'agentos.mcp.file_config'`.
+
+- [ ] **Step 3: Implement**
+
+Create `src/agentos/mcp/file_config.py`:
+
+```python
+"""MCP servers written in files (W5): the managed, user, local and project scopes, read as Claude Code reads them.
+
+Where each scope lives:
+
+- **managed**: ``managed-mcp.json`` in Orin's and Claude Code's managed folders. When one exists it is the only
+  source: no user, local or project server loads (an organisation's exclusive list).
+- **user**: ``mcpServers`` in ``~/.orin/mcp.json`` and in Claude Code's ``~/.claude.json``.
+- **local**: this workspace's private servers: ``projects[<workspace>].mcpServers`` in ``~/.claude.json`` and Orin's
+  ``~/.orin/workspaces/<key>/mcp.json``.
+- **project**: the repository's ``.mcp.json`` and ``.orin/mcp.json``. They are read only once the workspace is trusted,
+  and a server loads only once the person approved it: ``enableAllProjectMcpServers`` or its name in
+  ``enabledMcpjsonServers``, never a name in ``disabledMcpjsonServers``. The approvals come from the effective settings
+  and from the same per-workspace entries (Claude Code keeps them in ``projects[<workspace>]``).
+
+A name defined in more than one scope resolves local > project > user (Orin's file wins over Claude Code's within a
+scope). ``${VAR}`` and ``${VAR:-default}`` are expanded in the command, arguments, environment, URL and headers; an
+unset variable without a default stops that server (it is reported, not loaded). Orin's own variables (``ORIN_*``,
+``AGENTOS_*``) are never expanded. ``allowedMcpServers`` / ``deniedMcpServers`` (by name, command or URL pattern) are
+checked by ``policy_refusal``, for these servers and for Orin's own.
+
+Nothing here touches the network or starts a process: it only reads files.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from .models import slugify
+
+MAX_CONFIG_BYTES = 1_000_000
+MAX_FILE_SERVERS = 50
+MAX_NAME_CHARS = 64
+TRANSPORTS = ("stdio", "http", "sse", "ws")
+_VARIABLE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
+_PRIVATE_PREFIXES = ("ORIN_", "AGENTOS_")
+
+
+class McpConfigError(ValueError):
+    """A server entry that cannot be used as written."""
+
+
+@dataclass(frozen=True, slots=True)
+class FileServer:
+    name: str
+    scope: str  # managed | local | project | user
+    source: str
+    transport: str  # stdio | http | sse | ws
+    command: str = ""
+    args: tuple[str, ...] = ()
+    env: tuple[tuple[str, str], ...] = ()
+    url: str = ""
+    headers: tuple[tuple[str, str], ...] = ()
+    cwd: str | None = None
+
+    @property
+    def command_line(self) -> tuple[str, ...] | None:
+        return (self.command, *self.args) if self.transport == "stdio" else None
+
+    def fingerprint(self) -> str:
+        """Identifies this exact configuration (values included) for the discovery cache; never shown."""
+        payload = [self.transport, self.command, list(self.args), sorted(self.env), self.url, sorted(self.headers), self.cwd]
+        return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+@dataclass(slots=True)
+class FileServerSet:
+    servers: list[FileServer] = field(default_factory=list)  # approved and allowed: ready to connect
+    pending: list[FileServer] = field(default_factory=list)  # project servers awaiting the person's approval
+    errors: list[tuple[str, str]] = field(default_factory=list)  # (where, why)
+    managed_only: bool = False
+    project_awaiting_trust: bool = False
+
+
+def expand(value: str, environ: Mapping[str, str]) -> str:
+    def replace(match: re.Match[str]) -> str:
+        name, default = match.group(1), match.group(2)
+        if name.upper().startswith(_PRIVATE_PREFIXES):
+            raise McpConfigError(f"${{{name}}} is one of Orin's own variables and is never expanded")
+        found = environ.get(name)
+        if found:
+            return found
+        if default is not None:
+            return default
+        if found is None:
+            raise McpConfigError(f"the environment variable {name} is not set")
+        return found
+
+    return _VARIABLE.sub(replace, str(value))
+
+
+def _strings(raw: Any, what: str) -> list[str]:
+    if raw is None:
+        return []
+    if not isinstance(raw, list) or not all(isinstance(item, str) for item in raw):
+        raise McpConfigError(f"{what} must be a list of strings")
+    return list(raw)
+
+
+def _string_map(raw: Any, what: str) -> dict[str, str]:
+    if raw is None:
+        return {}
+    if not isinstance(raw, Mapping) or not all(isinstance(k, str) and isinstance(v, str) for k, v in raw.items()):
+        raise McpConfigError(f"{what} must map names to strings")
+    return dict(raw)
+
+
+def parse_server(name: str, raw: Any, *, scope: str, source: str, environ: Mapping[str, str], cwd: str | None = None) -> FileServer:
+    clean = str(name or "").strip()
+    if not clean or len(clean) > MAX_NAME_CHARS:
+        raise McpConfigError(f"a server name must be 1-{MAX_NAME_CHARS} characters")
+    try:
+        slugify(clean)
+    except ValueError as error:
+        raise McpConfigError(str(error)) from error
+    if not isinstance(raw, Mapping):
+        raise McpConfigError("a server entry must be an object")
+    kind = str(raw.get("type") or ("stdio" if "command" in raw else "http" if "url" in raw else "")).strip().lower()
+    kind = {"streamable-http": "http", "streamable_http": "http", "websocket": "ws"}.get(kind, kind)
+    if kind not in TRANSPORTS:
+        raise McpConfigError(f"unknown server type '{kind[:20]}' (expected one of {', '.join(TRANSPORTS)})")
+    if kind == "stdio":
+        command = raw.get("command")
+        if not isinstance(command, str) or not command.strip():
+            raise McpConfigError("a stdio server needs a command")
+        args = tuple(expand(item, environ) for item in _strings(raw.get("args"), "args"))
+        env = tuple(sorted((key, expand(value, environ)) for key, value in _string_map(raw.get("env"), "env").items()))
+        return FileServer(clean, scope, source, kind, command=expand(command.strip(), environ), args=args, env=env, cwd=cwd)
+    url = raw.get("url")
+    if not isinstance(url, str) or not url.strip():
+        raise McpConfigError(f"a {kind} server needs a url")
+    expanded = expand(url.strip(), environ)
+    schemes = ("ws://", "wss://") if kind == "ws" else ("http://", "https://")
+    if not expanded.lower().startswith(schemes):
+        raise McpConfigError(f"a {kind} server's url must start with {' or '.join(schemes)}")
+    headers = tuple(sorted((key, expand(value, environ)) for key, value in _string_map(raw.get("headers"), "headers").items()))
+    return FileServer(clean, scope, source, kind, url=expanded, headers=headers)
+
+
+def _read_json(path: Path, errors: list[tuple[str, str]]) -> Mapping[str, Any] | None:
+    try:
+        if not path.is_file():
+            return None
+        if path.stat().st_size > MAX_CONFIG_BYTES:
+            errors.append((str(path), "the file is larger than 1 MB"))
+            return None
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError) as error:
+        errors.append((str(path), f"unreadable: {str(error)[:200]}"))
+        return None
+    if not isinstance(data, Mapping):
+        errors.append((str(path), "the file is not a JSON object"))
+        return None
+    return data
+
+
+def _same_folder(key: str, root: Path) -> bool:
+    try:
+        return os.path.normcase(os.path.normpath(key)) == os.path.normcase(os.path.normpath(str(root)))
+    except (TypeError, ValueError):
+        return False
+
+
+def _workspace_entries(claude_config: Mapping[str, Any] | None, root: Path | None) -> list[Mapping[str, Any]]:
+    """Claude Code's per-folder entries for this workspace (it may keep the same folder under two spellings)."""
+    projects = claude_config.get("projects") if claude_config else None
+    if root is None or not isinstance(projects, Mapping):
+        return []
+    return [entry for key, entry in projects.items() if isinstance(entry, Mapping) and isinstance(key, str) and _same_folder(key, root)]
+
+
+def _names(raw: Any) -> set[str]:
+    return {item for item in raw if isinstance(item, str)} if isinstance(raw, list) else set()
+
+
+def _collect(data: Mapping[str, Any] | None, *, scope: str, source: str, environ: Mapping[str, str], cwd: str | None,
+             into: dict[str, FileServer], errors: list[tuple[str, str]]) -> None:
+    servers = data.get("mcpServers") if data else None
+    if servers is None:
+        return
+    if not isinstance(servers, Mapping):
+        errors.append((source, "mcpServers must be an object"))
+        return
+    for name, raw in servers.items():
+        try:
+            into[str(name).strip()] = parse_server(str(name), raw, scope=scope, source=source, environ=environ, cwd=cwd)
+        except McpConfigError as error:
+            errors.append((f"{source}: {str(name)[:MAX_NAME_CHARS]}", str(error)))
+
+
+def _wildcard(pattern: str, value: str) -> bool:
+    regex = ".*".join(re.escape(part) for part in str(pattern).split("*"))
+    return re.fullmatch(regex, value) is not None
+
+
+def policy_refusal(name: str, *, aliases: tuple[str, ...] = (), command_line: tuple[str, ...] | None, url: str | None,
+                   settings: Mapping[str, Any]) -> str | None:
+    """Why ``allowedMcpServers`` / ``deniedMcpServers`` keep this server off, or None.
+
+    An entry names a server (``serverName``), an exact command line (``serverCommand``) or a URL pattern with ``*``
+    (``serverUrl``); ``aliases`` are other names the server answers to (an Orin server's slug). The deny list wins. With an allow list, a stdio server must match one of its commands when it has
+    any, and a remote server one of its URLs when it has any; otherwise its name must be listed. An empty allow list
+    allows nothing.
+    """
+    def matches(entry: Any) -> bool:
+        if not isinstance(entry, Mapping):
+            return False
+        if "serverName" in entry:
+            return entry["serverName"] in (name, *aliases)
+        if "serverCommand" in entry:
+            return command_line is not None and isinstance(entry["serverCommand"], list) and tuple(entry["serverCommand"]) == command_line
+        if "serverUrl" in entry:
+            return url is not None and isinstance(entry["serverUrl"], str) and _wildcard(entry["serverUrl"], url)
+        return False
+
+    denied, allowed = settings.get("deniedMcpServers"), settings.get("allowedMcpServers")
+    if isinstance(denied, list) and any(matches(entry) for entry in denied):
+        return "it is listed in deniedMcpServers"
+    if not isinstance(allowed, list):
+        return None
+    by_command = [entry for entry in allowed if isinstance(entry, Mapping) and "serverCommand" in entry]
+    by_url = [entry for entry in allowed if isinstance(entry, Mapping) and "serverUrl" in entry]
+    if command_line is not None and by_command:
+        candidates = by_command
+    elif url is not None and by_url:
+        candidates = by_url
+    else:
+        candidates = [entry for entry in allowed if isinstance(entry, Mapping) and "serverName" in entry]
+    return None if any(matches(entry) for entry in candidates) else "it is not in allowedMcpServers"
+
+
+def load_file_servers(*, workspace_root: Path | None, trusted: bool, settings: Mapping[str, Any],
+                      environ: Mapping[str, str] | None = None, personal: bool = True) -> FileServerSet:
+    """The servers to connect, the project servers awaiting approval, and what could not be read.
+
+    ``personal=False`` reads only the managed file: an Orin shared by several people never loads one person's
+    (or one repository's) servers for everyone.
+    """
+    from agentos.settings.paths import (
+        claude_managed_dir, claude_user_config_file, orin_managed_dir, orin_user_dir, workspace_grants_file,
+    )
+
+    env = dict(os.environ if environ is None else environ)
+    found = FileServerSet()
+    root = Path(workspace_root) if workspace_root is not None else None
+    cwd = str(root) if root is not None else None
+
+    managed: dict[str, FileServer] = {}
+    for folder in (claude_managed_dir(), orin_managed_dir()):  # Orin's wins on a shared name
+        path = folder / "managed-mcp.json"
+        data = _read_json(path, found.errors)
+        if data is not None:
+            found.managed_only = True
+            _collect(data, scope="managed", source=str(path), environ=env, cwd=cwd, into=managed, errors=found.errors)
+    if found.managed_only or not personal:
+        merged = managed
+    else:
+        claude_config = _read_json(claude_user_config_file(), found.errors)
+        user: dict[str, FileServer] = {}
+        _collect(claude_config, scope="user", source=str(claude_user_config_file()), environ=env, cwd=cwd, into=user, errors=found.errors)
+        _collect(_read_json(orin_user_dir() / "mcp.json", found.errors), scope="user", source=str(orin_user_dir() / "mcp.json"),
+                 environ=env, cwd=cwd, into=user, errors=found.errors)
+        local: dict[str, FileServer] = {}
+        entries = list(_workspace_entries(claude_config, root))
+        for entry in entries:
+            _collect(entry, scope="local", source=f"{claude_user_config_file()} (this workspace)", environ=env, cwd=cwd, into=local, errors=found.errors)
+        if root is not None:
+            local_file = workspace_grants_file(root).parent / "mcp.json"
+            local_data = _read_json(local_file, found.errors)
+            if local_data is not None:
+                entries.append(local_data)
+                _collect(local_data, scope="local", source=str(local_file), environ=env, cwd=cwd, into=local, errors=found.errors)
+        project: dict[str, FileServer] = {}
+        if root is not None:
+            files = [root / ".mcp.json", root / ".orin" / "mcp.json"]
+            if not trusted:
+                found.project_awaiting_trust = any(path.is_file() for path in files)
+            else:
+                for path in files:
+                    _collect(_read_json(path, found.errors), scope="project", source=str(path), environ=env, cwd=cwd, into=project, errors=found.errors)
+        enable_all = settings.get("enableAllProjectMcpServers") is True or any(entry.get("enableAllProjectMcpServers") is True for entry in entries)
+        enabled = _names(settings.get("enabledMcpjsonServers")).union(*(_names(entry.get("enabledMcpjsonServers")) for entry in entries))
+        disabled = _names(settings.get("disabledMcpjsonServers")).union(*(_names(entry.get("disabledMcpjsonServers")) for entry in entries))
+        approved: dict[str, FileServer] = {}
+        for name, server in project.items():
+            if name in disabled:
+                continue
+            if enable_all or name in enabled:
+                approved[name] = server
+            else:
+                found.pending.append(server)
+        merged = {**user, **approved, **local}  # local > project > user
+    slugs: dict[str, str] = {}
+    for name, server in merged.items():
+        if len(found.servers) >= MAX_FILE_SERVERS:
+            found.errors.append((server.source, f"more than {MAX_FILE_SERVERS} servers: the rest are ignored"))
+            break
+        refusal = policy_refusal(name, command_line=server.command_line, url=server.url or None, settings=settings)
+        if refusal is not None:
+            found.errors.append((f"{server.source}: {name}", f"not loaded: {refusal}"))
+            continue
+        slug = slugify(name)
+        if slug in slugs:
+            found.errors.append((f"{server.source}: {name}", f"its tool prefix is the same as server '{slugs[slug]}'"))
+            continue
+        slugs[slug] = name
+        found.servers.append(server)
+    return found
+
+
+__all__ = [
+    "FileServer", "FileServerSet", "MAX_FILE_SERVERS", "McpConfigError", "expand", "load_file_servers", "parse_server",
+    "policy_refusal",
+]
+```
+
+Then make these edits, in order (each `replace` block occurs exactly once in its file; if one does not, stop and report — do not guess):
+
+1. In `tests/conftest.py`, replace
+
+```python
+    monkeypatch.setenv("ORIN_RUN_DIR", str(root / "orin-run"))
+```
+
+   with
+
+```python
+    monkeypatch.setenv("ORIN_RUN_DIR", str(root / "orin-run"))
+    # Claude Code's ~/.claude.json is found next to ORIN_CLAUDE_HOME (inside this temporary folder) unless overridden.
+    monkeypatch.delenv("ORIN_CLAUDE_CONFIG", raising=False)
+```
+
+2. In `src/agentos/settings/paths.py`, replace
+
+```python
+def orin_managed_dir() -> Path:
+```
+
+   with
+
+```python
+def claude_user_config_file() -> Path:
+    """Claude Code's ``~/.claude.json`` (its MCP servers and per-folder choices), next to its ``~/.claude`` folder."""
+    return _env_path("ORIN_CLAUDE_CONFIG") or claude_user_dir().parent / ".claude.json"
+
+
+def orin_managed_dir() -> Path:
+```
+
+- [ ] **Step 4: Run the tests and see them pass**
+
+Run: `uv run pytest -q tests/unit/mcp/test_file_config.py`
+Expected: PASS.
+
+Also run `uv run pytest -q tests/unit/settings`: expected PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/agentos/mcp/file_config.py tests/unit/mcp/test_file_config.py tests/conftest.py src/agentos/settings/paths.py
+git commit -m "feat(w5): read MCP servers from the managed, user, local and project files
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+### Task 18: Servers from files join the turn
+
+`connect_file_servers` turns each `FileServer` into a tool bundle (`server_id` `file:<scope>:<slug>`, `origin` = its scope, environment or headers as its secrets) and lists its tools in parallel, waiting at most `MCP_TIMEOUT` ms; answers are cached per exact configuration (10 minutes, a failure 1 minute), and a failure's text never carries the values of the server's environment, headers or URL query. `build_client` lets a file server use any launcher, start in the workspace folder and reach a local or plain-http address (`HttpTransport(allow_local=True)`); Orin's own servers keep the launcher list and public HTTPS. `McpToolProvider` gains `add_bundles`, `retain` and `server_slugs`. At turn start the session drops servers the allow/deny lists refuse (Orin's own too), reads the files (`personal` only when this Orin may start local processes), skips a name Orin's own servers already use, connects the rest and tells the model in one `mcp` reminder what is off and why (pending approval, untrusted workspace, refused, failed).
+
+**Files:**
+- Create: `src/agentos/mcp/file_servers.py`
+- Modify: `src/agentos/mcp/models.py`
+- Modify: `src/agentos/mcp/transport_http.py`
+- Modify: `src/agentos/mcp/toolset.py`
+- Modify: `src/agentos/agentic/session.py`
+- Test: `tests/unit/mcp/test_file_mcp_servers.py`
+
+**Interfaces:**
+- Consumes: Task 17.
+- Produces: `agentos.mcp.file_servers`: `connect_file_servers(servers, *, user_id, connect=discover, timeout=None) -> (bundles, failures)`, `file_bundle(server, *, user_id)`, `clear_discovery_cache()`, `discovery_timeout(environ=None)`; `McpServerConfig.origin` (default `"orin"`) and `.cwd`; `HttpTransport(..., allow_local=False)`; `McpToolProvider.add_bundles(bundles)`, `.retain(keep) -> list[McpServerConfig]`, `.server_slugs()`; `TurnSession._load_file_mcp_servers(trusted)` (called by `build_runtime` before the main toolset; tests may set `session._mcp_file_connect`).
+
+- [ ] **Step 1: Write the failing test**
+
+Create `tests/unit/mcp/test_file_mcp_servers.py`:
+
+```python
+"""W5: MCP servers from files are connected once, cached, and join the turn's tools."""
+from __future__ import annotations
+
+import json
+import threading
+import time
+from dataclasses import replace
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+import agentos.mcp.file_servers as file_servers
+from agentos.agentic.reminders import ReminderQueue
+from agentos.mcp.file_config import parse_server
+from agentos.mcp.file_servers import clear_discovery_cache, connect_file_servers, file_bundle
+from agentos.mcp.models import McpToolDescriptor
+from agentos.mcp.toolset import McpToolProvider, build_client
+from agentos.settings.loader import EffectiveSettings
+from agentos.settings.paths import orin_user_dir
+
+TOOL = McpToolDescriptor("lookup", "Looks things up", {"type": "object", "properties": {}})
+
+
+@pytest.fixture(autouse=True)
+def _fresh_cache():
+    clear_discovery_cache()
+    yield
+    clear_discovery_cache()
+
+
+def _server(name: str = "docs", **raw):
+    return parse_server(name, raw or {"command": "node", "args": ["srv.js"]}, scope="user", source="test", environ={}, cwd="C:/work")
+
+
+def _connect(calls: list[str]):
+    def connect(config, secrets):
+        calls.append(config.slug)
+        return "2025-06-18", (TOOL,)
+    return connect
+
+
+def test_servers_are_listed_once_and_cached() -> None:
+    calls: list[str] = []
+    bundles, failures = connect_file_servers([_server()], user_id="u1", connect=_connect(calls))
+    assert failures == [] and [bundle[0].slug for bundle in bundles] == ["docs"] and bundles[0][1] == (TOOL,)
+    config = bundles[0][0]
+    assert config.origin == "user" and config.cwd == "C:/work" and config.server_id == "file:user:docs"
+    again, _ = connect_file_servers([_server()], user_id="u1", connect=_connect(calls))
+    assert calls == ["docs"] and again[0][1] == (TOOL,)
+
+
+def test_a_failure_is_reported_without_its_secrets() -> None:
+    server = parse_server(
+        "api", {"type": "http", "url": "https://mcp.example.com/mcp?key=s3cret-key", "headers": {"Authorization": "Bearer tok-12345"}},
+        scope="user", source="t", environ={},
+    )
+
+    def connect(config, secrets):
+        assert secrets == {"header:Authorization": "Bearer tok-12345"}
+        raise RuntimeError("401 for Bearer tok-12345 at https://mcp.example.com/mcp?key=s3cret-key")
+
+    bundles, failures = connect_file_servers([server], user_id="u1", connect=connect)
+    assert bundles == [] and failures[0][0] == "api"
+    assert "tok-12345" not in failures[0][1] and "s3cret-key" not in failures[0][1] and "401" in failures[0][1]
+
+
+def test_a_slow_server_does_not_hold_the_turn() -> None:
+    gate = threading.Event()
+
+    def connect(config, secrets):
+        gate.wait(5)
+        return "v", (TOOL,)
+
+    started = time.monotonic()
+    bundles, failures = connect_file_servers([_server()], user_id="u1", connect=connect, timeout=0.2)
+    assert time.monotonic() - started < 3 and bundles == [] and "did not answer" in failures[0][1]
+    gate.set()
+    deadline = time.monotonic() + 5
+    while not file_servers._cache and time.monotonic() < deadline:
+        time.sleep(0.02)
+
+    def not_called(config, secrets):
+        raise AssertionError("the late answer should have been cached")
+
+    later, _ = connect_file_servers([_server()], user_id="u1", connect=not_called, timeout=1)
+    assert later and later[0][1] == (TOOL,)
+
+
+def test_a_file_server_may_use_any_launcher_and_a_local_url() -> None:
+    from agentos.mcp.transport_stdio import StdioTransportRefused
+
+    config, _, secrets = file_bundle(_server("tool", command="my-tool", args=["--serve"]), user_id="u1")
+    assert build_client(config, secrets)._transport._cwd == "C:/work"
+    with pytest.raises(StdioTransportRefused):
+        build_client(replace(config, origin="orin"), secrets)  # Orin's own servers keep the launcher list
+    remote = parse_server("dev", {"type": "http", "url": "http://127.0.0.1:3000/mcp", "headers": {"X-Key": "abc"}}, scope="local", source="t", environ={})
+    config, _, secrets = file_bundle(remote, user_id="u1")
+    assert build_client(config, secrets)._transport._headers == {"X-Key": "abc"}
+    with pytest.raises(Exception):
+        build_client(replace(config, origin="orin"), secrets)  # a model-proposed server stays public-HTTPS only
+
+
+def test_the_provider_takes_file_servers_and_drops_refused_ones() -> None:
+    config, _, secrets = file_bundle(_server(), user_id="u1")
+    provider = McpToolProvider([])
+    provider.add_bundles([(config, (TOOL,), secrets)])
+    assert [item.name for item in provider.definitions()] == ["mcp__docs__lookup"] and provider.server_slugs() == frozenset({"docs"})
+    dropped = provider.retain(lambda item: item.slug != "docs")
+    assert [item.slug for item in dropped] == ["docs"] and provider.definitions() == ()
+
+
+def _turn_session(tmp_path: Path, *, local: bool = True):
+    from tests.unit.agentic.test_disk_skills_session import _session
+
+    session = _session(tmp_path, "hi")
+    session.mcp_service = SimpleNamespace(allow_stdio=True) if local else None
+    session._mcp_file_connect = _connect([])
+    return session
+
+
+def _user_servers(servers: dict) -> None:
+    path = orin_user_dir() / "mcp.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"mcpServers": servers}), encoding="utf-8")
+
+
+def test_a_turn_gets_the_tools_of_the_persons_servers(tmp_path: Path) -> None:
+    _user_servers({"docs": {"command": "node", "args": ["srv.js"]}})
+    session = _turn_session(tmp_path)
+    runtime = session.build_runtime()
+    assert session.mcp_provider is not None and session.mcp_provider.server_slugs() == frozenset({"docs"})
+    assert "mcp__docs__lookup" in {item.name for item in session.mcp_provider.definitions()}
+    assert runtime.toolset._mcp_provider is session.mcp_provider
+
+
+def test_a_shared_orin_does_not_load_the_persons_servers(tmp_path: Path) -> None:
+    _user_servers({"docs": {"command": "node", "args": ["srv.js"]}})
+    session = _turn_session(tmp_path, local=False)
+    session.build_runtime()
+    assert session.mcp_provider is None
+
+
+def test_the_model_hears_of_pending_and_failed_servers_and_denied_ones_leave(tmp_path: Path) -> None:
+    _user_servers({"broken": {"type": "http", "url": "https://${NOT_SET_ANYWHERE_42}/mcp"}, "docs": {"command": "node"}})
+    session = _turn_session(tmp_path)
+    root = session.workspace.root
+    root.mkdir(parents=True, exist_ok=True)
+    (root / ".mcp.json").write_text(json.dumps({"mcpServers": {"repo-tools": {"command": "node"}}}), encoding="utf-8")
+    db_config, _, db_secrets = file_bundle(_server("legacy"), user_id="u1")
+    session.mcp_provider = McpToolProvider([(replace(db_config, origin="orin", server_id="db-1"), (TOOL,), db_secrets)])
+    session.effective_settings = EffectiveSettings({"deniedMcpServers": [{"serverName": "legacy"}]}, {}, (), (), True)
+    session._reminders = ReminderQueue()
+    session._load_file_mcp_servers(True)
+    assert session.mcp_provider.server_slugs() == frozenset({"docs"})
+    text = "\n".join(item.text for item in session._reminders.drain() if item.kind == "mcp")
+    assert "repo-tools" in text and "not approved" in text
+    assert "legacy" in text and "deniedMcpServers" in text
+    assert "broken" in text and "NOT_SET_ANYWHERE_42 is not set" in text
+```
+
+- [ ] **Step 2: Run it to verify it fails**
+
+Run: `uv run pytest -q tests/unit/mcp/test_file_mcp_servers.py`
+Expected: FAIL — `ModuleNotFoundError: No module named 'agentos.mcp.file_servers'` (collection error).
+
+- [ ] **Step 3: Implement**
+
+Create `src/agentos/mcp/file_servers.py`:
+
+```python
+"""Connect the MCP servers written in files (W5): tool bundles for the turn, with their tools listed once and cached.
+
+Listing a server's tools means starting it (or calling it) once; the answer is kept per exact configuration for
+``DISCOVERY_TTL_SECONDS`` (a failure for ``FAILURE_TTL_SECONDS``), so a turn after the first one starts at once.
+Servers are listed in parallel and the turn waits at most ``MCP_TIMEOUT`` milliseconds (default 30 s) for them; one
+that answers later is ready for the next turn. A failure's text never carries the values of the server's
+environment, headers or URL query (they are often credentials).
+"""
+from __future__ import annotations
+
+import os
+import threading
+import time
+from collections.abc import Callable, Iterable, Mapping
+from concurrent.futures import ThreadPoolExecutor, wait
+
+from .file_config import FileServer, McpConfigError
+from .models import McpServerConfig, McpServerState, McpToolDescriptor, McpTransport, slugify
+from .toolset import ServerBundle, discover
+
+DISCOVERY_TTL_SECONDS = 600.0
+FAILURE_TTL_SECONDS = 60.0
+DEFAULT_TIMEOUT_SECONDS = 30.0
+MAX_CACHE_ENTRIES = 256
+MAX_PARALLEL_DISCOVERY = 8
+
+_cache: dict[str, tuple[float, tuple[McpToolDescriptor, ...], str]] = {}
+_cache_lock = threading.Lock()
+
+
+def clear_discovery_cache() -> None:
+    with _cache_lock:
+        _cache.clear()
+
+
+def discovery_timeout(environ: Mapping[str, str] | None = None) -> float:
+    raw = (os.environ if environ is None else environ).get("MCP_TIMEOUT", "")
+    try:
+        return max(1.0, min(float(raw) / 1000.0, 120.0)) if str(raw).strip() else DEFAULT_TIMEOUT_SECONDS
+    except ValueError:
+        return DEFAULT_TIMEOUT_SECONDS
+
+
+def file_bundle(server: FileServer, *, user_id: str) -> ServerBundle:
+    """The server as a tool bundle (no tools yet). Its environment or headers travel as its secrets."""
+    if server.transport not in ("stdio", "http"):
+        raise McpConfigError(f"the {server.transport} transport is not supported yet")
+    slug = slugify(server.name)
+    stdio = server.transport == "stdio"
+    config = McpServerConfig(
+        server_id=f"file:{server.scope}:{slug}", user_id=user_id, slug=slug, display_name=server.name,
+        transport=McpTransport.STDIO if stdio else McpTransport.HTTP, command=server.command or None, args=server.args,
+        url=server.url or None, state=McpServerState.ACTIVE, origin=server.scope, cwd=server.cwd,
+    )
+    secrets = dict(server.env) if stdio else {f"header:{name}": value for name, value in server.headers}
+    return config, (), secrets
+
+
+def _redacted(text: str, server: FileServer) -> str:
+    values = [value for _, value in (*server.env, *server.headers)]
+    if "?" in server.url:
+        values.append(server.url.split("?", 1)[1])
+    for value in sorted(values, key=len, reverse=True):
+        if len(value) >= 4:
+            text = text.replace(value, "***")
+    return text
+
+
+def _cached(key: str, now: float) -> tuple[tuple[McpToolDescriptor, ...], str] | None:
+    with _cache_lock:
+        entry = _cache.get(key)
+        if entry is None:
+            return None
+        stored_at, tools, error = entry
+        if now - stored_at > (FAILURE_TTL_SECONDS if error else DISCOVERY_TTL_SECONDS):
+            _cache.pop(key, None)
+            return None
+        return tools, error
+
+
+def _store(key: str, tools: tuple[McpToolDescriptor, ...], error: str) -> None:
+    with _cache_lock:
+        if len(_cache) >= MAX_CACHE_ENTRIES:
+            _cache.pop(next(iter(_cache)))
+        _cache[key] = (time.monotonic(), tools, error)
+
+
+def _discover_one(server: FileServer, config: McpServerConfig, secrets: Mapping[str, str], connect: Callable) -> tuple[tuple[McpToolDescriptor, ...], str]:
+    try:
+        _version, tools = connect(config, secrets)
+        result: tuple[tuple[McpToolDescriptor, ...], str] = (tuple(tools), "")
+    except Exception as error:  # noqa: BLE001 - any failure is reported for this server only
+        result = ((), _redacted(f"could not connect: {str(error) or type(error).__name__}", server)[:300])
+    _store(server.fingerprint(), *result)
+    return result
+
+
+def connect_file_servers(servers: Iterable[FileServer], *, user_id: str, connect: Callable = discover,
+                         timeout: float | None = None) -> tuple[list[ServerBundle], list[tuple[str, str]]]:
+    """``(bundles with their tools, [(server name, why it is not available)])``, in the servers' order."""
+    ready: dict[str, ServerBundle] = {}
+    failures: list[tuple[str, str]] = []
+    todo: list[tuple[FileServer, McpServerConfig, Mapping[str, str]]] = []
+    order: list[str] = []
+    now = time.monotonic()
+    for server in servers:
+        try:
+            config, _, secrets = file_bundle(server, user_id=user_id)
+        except (McpConfigError, ValueError) as error:
+            failures.append((server.name, str(error)[:300]))
+            continue
+        order.append(server.name)
+        cached = _cached(server.fingerprint(), now)
+        if cached is None:
+            todo.append((server, config, secrets))
+        elif cached[1]:
+            failures.append((server.name, cached[1]))
+        else:
+            ready[server.name] = (config, cached[0], secrets)
+    if todo:
+        limit = discovery_timeout() if timeout is None else timeout
+        pool = ThreadPoolExecutor(max_workers=min(MAX_PARALLEL_DISCOVERY, len(todo)), thread_name_prefix="orin-mcp-discovery")
+        try:
+            futures = {pool.submit(_discover_one, server, config, secrets, connect): (server, config, secrets) for server, config, secrets in todo}
+            done, _late = wait(futures, timeout=limit)
+        finally:
+            pool.shutdown(wait=False)  # a late server keeps starting in the background and is cached for the next turn
+        for future, (server, config, secrets) in futures.items():
+            if future not in done:
+                failures.append((server.name, f"did not answer within {limit:g} s; it is tried again next turn"))
+                continue
+            tools, error = future.result()
+            if error:
+                failures.append((server.name, error))
+            else:
+                ready[server.name] = (config, tools, secrets)
+    return [ready[name] for name in order if name in ready], failures
+
+
+__all__ = [
+    "DISCOVERY_TTL_SECONDS", "FAILURE_TTL_SECONDS", "clear_discovery_cache", "connect_file_servers", "discovery_timeout",
+    "file_bundle",
+]
+```
+
+Then make these edits, in order (each `replace` block occurs exactly once in its file; if one does not, stop and report — do not guess):
+
+1. In `src/agentos/mcp/models.py`, replace
+
+```python
+    auth_kind: McpAuthKind = McpAuthKind.NONE
+
+    def __post_init__(self) -> None:
+```
+
+   with
+
+```python
+    auth_kind: McpAuthKind = McpAuthKind.NONE
+    # W5: where the server was configured — "orin" (Orin's own list) or the file scope (managed, user, local,
+    # project) — and, for a file's stdio server, the folder it starts in.
+    origin: str = "orin"
+    cwd: str | None = None
+
+    def __post_init__(self) -> None:
+```
+
+2. In `src/agentos/mcp/transport_http.py`, replace
+
+```python
+                 client: httpx.Client | None = None, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> None:
+        self._url = self._checked(url)
+```
+
+   with
+
+```python
+                 client: httpx.Client | None = None, timeout: float = DEFAULT_TIMEOUT_SECONDS, allow_local: bool = False) -> None:
+        self._allow_local = allow_local
+        self._url = self._checked(url)
+```
+
+3. In `src/agentos/mcp/transport_http.py`, replace
+
+```python
+    @staticmethod
+    def _checked(url: str) -> str:
+        try:
+```
+
+   with
+
+```python
+    def _checked(self, url: str) -> str:
+        if self._allow_local:
+            # W5: a server the person wrote in a configuration file may be local or plain http (a development server).
+            if not str(url).lower().startswith(("http://", "https://")):
+                raise HttpTransportRefused("an MCP endpoint must use http or https")
+            return str(url)
+        try:
+```
+
+4. In `src/agentos/mcp/toolset.py`, replace
+
+```python
+    if config.transport is McpTransport.STDIO:
+        transport = StdioTransport(command=str(config.command), args=config.args, env=dict(secrets))
+    else:
+        headers = {"authorization": f"Bearer {secrets['token']}"} if "token" in secrets and token_source is None else {}
+        transport = HttpTransport(url=str(config.url), headers=headers, token_source=token_source)
+```
+
+   with
+
+```python
+    # W5: a server from a configuration file was written by the person (or approved from the repository), not
+    # proposed by the model: it may use any launcher, start in its folder, and reach a local or plain-http address.
+    from_file = config.origin != "orin"
+    if config.transport is McpTransport.STDIO:
+        transport = StdioTransport(command=str(config.command), args=config.args, env=dict(secrets), cwd=config.cwd,
+                                   allow_any_command=from_file)
+    else:
+        headers = {"authorization": f"Bearer {secrets['token']}"} if "token" in secrets and token_source is None else {}
+        if from_file:
+            headers.update({name[len("header:"):]: value for name, value in secrets.items() if name.startswith("header:")})
+        transport = HttpTransport(url=str(config.url), headers=headers, token_source=token_source, allow_local=from_file)
+```
+
+5. In `src/agentos/mcp/toolset.py`, replace
+
+```python
+    @property
+    def open_session_count(self) -> int:
+        return len(self._sessions)
+```
+
+   with
+
+```python
+    @property
+    def open_session_count(self) -> int:
+        return len(self._sessions)
+
+    def add_bundles(self, bundles: Iterable[ServerBundle]) -> None:
+        """Servers read from configuration files join this turn's servers (W5)."""
+        self._bundles.extend(bundles)
+
+    def retain(self, keep: Callable[[McpServerConfig], bool]) -> list[McpServerConfig]:
+        """Drop the servers ``keep`` refuses (``allowedMcpServers``/``deniedMcpServers``); returns the dropped ones."""
+        dropped = [config for config, _, _ in self._bundles if not keep(config)]
+        gone = {config.server_id for config in dropped}
+        self._bundles = [bundle for bundle in self._bundles if bundle[0].server_id not in gone]
+        return dropped
+
+    def server_slugs(self) -> frozenset[str]:
+        return frozenset(config.slug for config, _, _ in self._bundles)
+```
+
+6. In `src/agentos/agentic/session.py`, replace
+
+```python
+        self._announce_defined_agents()
+        toolset = self._toolset(
+```
+
+   with
+
+```python
+        self._announce_defined_agents()
+        self._load_file_mcp_servers(trusted_workspace)
+        toolset = self._toolset(
+```
+
+7. In `src/agentos/agentic/session.py`, replace
+
+```python
+    def _apply_user_command(self, task: str, toolset: AgentToolset) -> None:
+```
+
+   with
+
+```python
+    def _load_file_mcp_servers(self, trusted: bool) -> None:
+        """MCP servers written in files join this turn's tools; the allow/deny lists apply to every server (W5).
+
+        Only an Orin installed on this computer (one that may start local processes) reads the person's and the
+        repository's files: a shared server would hand one person's servers to everyone. ``managed-mcp.json`` applies
+        to both. The model hears which servers are off and why (never their secrets).
+        """
+        from agentos.mcp.file_config import load_file_servers, policy_refusal
+        from agentos.mcp.file_servers import connect_file_servers
+        from agentos.mcp.models import slugify
+        from agentos.mcp.toolset import McpToolProvider
+
+        settings = getattr(self.effective_settings, "data", None) or {}
+        notes: list[str] = []
+        provider = self.mcp_provider
+        if provider is not None and callable(getattr(provider, "retain", None)):
+            refusals: dict[str, str] = {}
+
+            def keep(config) -> bool:
+                why = policy_refusal(
+                    config.display_name, aliases=(config.slug,), url=config.url, settings=settings,
+                    command_line=(str(config.command), *config.args) if config.command else None,
+                )
+                if why is not None:
+                    refusals[config.server_id] = why
+                return why is None
+
+            notes.extend(f"- {config.display_name}: not loaded: {refusals.get(config.server_id, '')}" for config in provider.retain(keep))
+        local_install = bool(getattr(self.mcp_service, "allow_stdio", False))
+        try:
+            found = load_file_servers(workspace_root=self.workspace.root, trusted=trusted, settings=settings, personal=local_install)
+        except Exception:  # noqa: BLE001 - a broken configuration never stops a turn
+            logger.exception("MCP servers in configuration files could not be read")
+            found = None
+        if found is not None:
+            notes.extend(f"- {where}: {why}" for where, why in found.errors[:10])
+            taken = provider.server_slugs() if provider is not None and callable(getattr(provider, "server_slugs", None)) else frozenset()
+            servers = []
+            for server in found.servers:
+                if server.transport == "stdio" and not local_install:
+                    notes.append(f"- {server.name}: this Orin does not start local processes")
+                elif slugify(server.name) in taken:
+                    notes.append(f"- {server.name}: Orin already has a server with this name; the file's entry is ignored")
+                else:
+                    servers.append(server)
+            connect = getattr(self, "_mcp_file_connect", None)
+            ready, failures = connect_file_servers(
+                servers, user_id=str(self.turn.get("user_id") or ""), **({"connect": connect} if connect is not None else {}),
+            )
+            notes.extend(f"- {name}: {why}" for name, why in failures)
+            if ready:
+                if provider is None:
+                    self.mcp_provider = McpToolProvider(ready)
+                else:
+                    provider.add_bundles(ready)
+            if found.pending:
+                notes.append(
+                    "- not approved yet (they stay off until the person approves them with enabledMcpjsonServers or "
+                    "enableAllProjectMcpServers): " + ", ".join(sorted(server.name for server in found.pending))
+                )
+            if found.project_awaiting_trust:
+                notes.append("- this workspace is not trusted yet, so its .mcp.json servers are off")
+        if notes:
+            self._reminders.add("mcp", "MCP servers from configuration files:\n" + "\n".join(notes[:30]), key="file-mcp-servers")
+
+    def _apply_user_command(self, task: str, toolset: AgentToolset) -> None:
+```
+
+- [ ] **Step 4: Run the tests and see them pass**
+
+Run: `uv run pytest -q tests/unit/mcp/test_file_mcp_servers.py`
+Expected: PASS.
+
+Also run `uv run pytest -q tests/unit/mcp tests/unit/agentic`: expected PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/agentos/mcp/file_servers.py tests/unit/mcp/test_file_mcp_servers.py src/agentos/mcp/models.py src/agentos/mcp/transport_http.py src/agentos/mcp/toolset.py src/agentos/agentic/session.py
+git commit -m "feat(w5): MCP servers from configuration files join the turn
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+### Task 19: Batch D regression and ledger
+
+- [ ] **Step 1:** Run `uv run pytest -q tests/unit` (timeout 600000 ms) and `uv run pytest -q tests/integration`. Expected: all pass.
+- [ ] **Step 2:** Append a "## Batch D — MCP servers in configuration files (Tasks 16–19)" section to `docs/superpowers/plans/2026-10-19-w5-extensibility-ledger.md`: commits, suite results, deviations 16–22, and anything done differently from this plan.
+- [ ] **Step 3:** Commit with `docs(w5): ledger, batch D` + blank line + the Co-Authored-By line.
 
