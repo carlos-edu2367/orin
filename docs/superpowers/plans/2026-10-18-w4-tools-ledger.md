@@ -77,3 +77,67 @@ Execution differences (none changes a behaviour the plan asks for):
 - Batches B to F are not written yet; this run stopped after Task 7, as instructed.
 - No Output models exist yet (deviation 5 applies from Batch B).
 - `frontend/` is untouched in this batch.
+
+## Batch B — Files (Tasks 8–12)
+
+### Commits
+
+Branch `feat/orin-code-parity-w0-w3`, on top of `38ce461` (the Batch B plan):
+
+| Task | Commit | Subject |
+|---|---|---|
+| 8 | `6d2b737` | fix(w4): an absolute path inside the workspace is that file |
+| 9 | `935b845` | feat(w4): Read covers images, notebooks and Office files with a typed output |
+| 10 | `4635caf` | feat(w4): file tools report Claude Code outputs; hooks receive them |
+| 11 | `6af25d0` | feat(w4): per-message file history with a safe rewind |
+| 12 | this commit | docs(w4): ledger, batch B |
+
+### Tests added (37)
+
+- `tests/unit/agentic/test_workspace_absolute_paths.py`: 7 (Task 8).
+- `tests/unit/agentic/tools/test_read_parity.py`: 6 (Task 9).
+- `tests/unit/agentic/tools/test_file_outputs.py`: 8 (Task 10).
+- `tests/unit/code_mode/test_file_history.py`: 12 (Task 11; `test_a_file_replaced_by_a_link_is_refused` skips on this host).
+- `tests/unit/agentic/tools/test_file_history_wiring.py`: 4 (Task 11).
+
+### Suite results
+
+- Start of Batch B (end of Batch A): 3173 passed, 53 skipped.
+- Full backend suite, `uv run pytest -q -p no:cacheprovider tests/unit` (timeout 600000 ms, run after Task 11): **3209 passed, 54 skipped, 0 failed** (235 s). 3173 + 37 = 3210 tests; the one extra skip is the symlink test above ("this account cannot create symlinks").
+- Batch-level runs, each command separate: `test_workspace_absolute_paths.py` 7 passed; `tests/unit/agentic tests/unit/permissions` 1147 passed, 3 skipped (Task 8). `tests/unit/agentic/tools` with `test_agent_tools.py`, `test_view_file_tool.py`, `test_view_file_vision.py` 247 passed, 1 skipped; `tests/unit/agentic` 940 passed, 2 skipped (Task 9). `test_file_outputs.py` 8 passed; `tests/unit/agentic tests/unit/hooks tests/unit/test_orin_code_phase_a.py tests/unit/test_orin_code_phase_b.py` 1061 passed, 2 skipped (Task 10). `test_file_history.py` 11 passed, 1 skipped; `test_file_history_wiring.py` 4 passed; `tests/unit/agentic tests/unit/code_mode tests/unit/api tests/unit/workers tests/unit/test_orin_code_phase_b.py` 1178 passed, 3 skipped (Task 11).
+- Frontend: Batch B does not touch `frontend/`; the frontend checks were not run.
+
+### Deliberate expectation changes (every one)
+
+1. **Task 9 Step 6**, `tests/unit/agentic/tools/test_public_contract.py` (the `read_file` entry) and `tests/unit/agentic/tools/test_public_names.py` (`public_argument_names("read_file")`): the field set gains `allow_large`, the new Read input. No other existing assertion changed.
+
+### Deviations from the plan
+
+Plan deviations 5–7, as corrected in this plan revision:
+
+5. **Output models**: applied from Task 9 on. Each `tool_output` is in `ToolOutcome.data`, and `payload` never carries it (asserted in `test_read_parity.py` and `test_file_outputs.py`). PostToolUse receives it merged into `{status, summary, content}` (`agent_tools._tool_response`). The Output models are checked by the tests, not at runtime.
+   - Correction (plan text): the plan's Architecture paragraph (line 7 of `2026-10-18-w4-tools.md`) still says `payload["tool_output"]`; the location is `ToolOutcome.data`, as deviation 5 says. The Batch A section above does not repeat the old wording, so it was not edited.
+6. **Read's `tool_output` carries no image or PDF bytes**: applied. The image output has `type` and `originalSize`; the PDF output has page numbers and sizes.
+7. **Per-message rewind, code only**: applied. The per-turn `FileCheckpointStore` and `POST /v1/conversations/{id}/turns/{turn}/rewind` are unchanged. The new `POST /v1/conversations/{id}/messages/{message_id}/rewind` accepts only `mode: "code"` (422 otherwise, tested), and `GET /v1/conversations/{id}/file-history` lists the recorded messages.
+
+Changes made where the plan text differs:
+
+- **a. Task 10 Step 6, notebook language**: the plan's inline chained `.get` is replaced by `_notebook_language(nb)` in `files/notebook.py`. Valid metadata gives the same result. Malformed metadata (for example a `language_info` that is not an object) used to raise after the notebook was already written, so a saved edit was reported as `TOOL_FAILED`; the helper falls back to `python`.
+- **b. Task 11 Step 6, request model**: `RewindMessageRequest` subclasses `_RequestModel` (`extra="forbid"`) instead of the `BaseModel` shown in the plan, to match the other request models in `gateway.py`. Unknown body fields now get a 422.
+- **c. Test commands**: a file and its own directory were never passed together. Task 8's new file ran alone, then `tests/unit/agentic tests/unit/permissions`; the Task 9 command passes the `tools` directory with sibling files only. Runs used `-p no:cacheprovider`, as in Batch A.
+
+### Behaviour notes found while checking (not in the plan)
+
+- `Edit` now refuses old and new text that are identical (Task 10). Inside a batch (`edits`), one no-op item fails the whole batch; the error names the item.
+- PostToolUse for `Write`: `tool_response.content` is the written file body (the Task 10 test asserts it), so it replaces Orin's summary text under `content` for that hook.
+- A toolset built without `user_message_id` records under its turn id (`_history_message_id` falls back to `turn_id`).
+- Blobs under `<ORIN_DATA_DIR>/file-history/` have no retention: every distinct pre-edit content (up to 10 MB) is kept.
+- The per-message rewind does not check whether a turn is running in that conversation, so a rewind during a turn can race with its writes. The per-turn endpoint has the same gap.
+- On this host the link branch of `_restore` ("it is now a link") is not exercised by any run, because the symlink test skips. The junction test runs and covers the directory-replacement branch.
+- `_read_notebook` reads the whole file. `_record_file_read` already reads the whole file for its hash on every read, so this adds no new exposure.
+
+### Open after Batch B
+
+- Batches C–F were not started (out of scope for this run).
+- The per-message rewind has no UI yet (W7); the UI still uses the per-turn store.
+- `frontend/` is untouched in this batch.
