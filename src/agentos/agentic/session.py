@@ -997,6 +997,9 @@ class TurnSession:
         self._max_concurrent_subagents: int = max(1, int(max_concurrent_subagents))
         self._subagent_semaphore = BoundedSemaphore(self._max_concurrent_subagents)
         self._builtin_type_counts: dict[str, int] = {}
+        # W5 agent teams: the roster (name -> agent_id, team_name, type, busy), guarded by its own lock.
+        self._team_lock = Lock()
+        self._teammates: dict[str, dict[str, Any]] = {}
         self._subagent_histories: dict[str, list[dict[str, Any]]] = {}
         self._subagent_records: dict[str, dict[str, object]] = {}
         self._background_subagents: dict[str, dict[str, Any]] = {}
@@ -1570,10 +1573,36 @@ class TurnSession:
         teammate_name: str | None = None,
         team_name: str | None = None,
     ) -> ToolOutcome:
-        if teammate_name:
-            refusal = self._teammate_refusal(teammate_name)
-            if refusal is not None:
-                return refusal
+        if not teammate_name:
+            return self._start_subagent(
+                subagent_type, task, description=description, model_id=model_id, agent_id=agent_id,
+                run_in_background=run_in_background, hook_cancel=hook_cancel,
+            )
+        refusal = self._teammate_refusal(teammate_name, team_name)
+        if refusal is not None:
+            return refusal
+        clean_name = str(teammate_name).strip().lower()
+        outcome = self._start_subagent(
+            subagent_type, task, description=description, model_id=model_id, agent_id=agent_id,
+            run_in_background=True, hook_cancel=hook_cancel, teammate_name=clean_name, team_name=team_name,
+        )
+        if outcome.status != "succeeded":
+            self._release_teammate(clean_name)  # it never started, so it is not busy
+        return outcome
+
+    def _start_subagent(
+        self,
+        subagent_type: str,
+        task: str,
+        *,
+        description: str = "",
+        model_id: str | None = None,
+        agent_id: str | None = None,
+        run_in_background: bool = False,
+        hook_cancel: threading.Event | None = None,
+        teammate_name: str | None = None,
+        team_name: str | None = None,
+    ) -> ToolOutcome:
         raw_type = str(subagent_type or "").strip()
         clean_type = raw_type.lower()
         if clean_type == "general-purpose":
@@ -1604,7 +1633,7 @@ class TurnSession:
             run_in_background=bool(run_in_background),
             hook_cancel=hook_cancel,
             teammate_name=str(teammate_name).strip().lower() if teammate_name else None,
-            team_name=str(team_name or "").strip()[:64] or "team",
+            team_name=str(team_name or "").strip()[:64] or None,
         )
 
     def _ask_agent(
@@ -1646,7 +1675,8 @@ class TurnSession:
         if resumed_agent_id:
             with self._subagent_lock:
                 bg_entry = self._background_subagents.get(resumed_agent_id)
-            if bg_entry is not None and not bg_entry["future"].done():
+            # A teammate reaching here was claimed while not busy: its previous run is only announcing that it is idle.
+            if bg_entry is not None and not bg_entry["future"].done() and not teammate_name:
                 bg_name = str(bg_entry.get("agent_name") or resumed_agent_id)
                 return ToolOutcome(
                     "failed",
@@ -1686,11 +1716,13 @@ class TurnSession:
         if record is None:
             return ToolOutcome("failed", f"Agente {clean} não existe", f"No subagent named '{clean}'. Create it first with create_agent.", {"tool_kind": "agent"}, "AGENT_NOT_FOUND")
         if teammate_name:
-            record = {**record, "teammate_name": teammate_name, "team_name": team_name or "team"}
-            with self._subagent_lock:
+            with self._team_lock:
+                known = self._team_roster().get(teammate_name) or {}
+                team = team_name or str(known.get("team_name") or "") or "team"  # a teammate keeps its team when none is named
                 self._team_roster()[teammate_name] = {
-                    "agent_id": str(record["agent_id"]), "team_name": team_name or "team", "type": builtin_key,
+                    "agent_id": str(record["agent_id"]), "team_name": team, "type": builtin_key, "busy": True,
                 }
+            record = {**record, "teammate_name": teammate_name, "team_name": team}
             run_in_background = True  # a teammate always works in the background
 
         # Legacy conversation-agent rows predate provider/model snapshots.
@@ -2157,20 +2189,35 @@ class TurnSession:
 
         A teammate then reads the messages that arrived while it worked (one run per batch, at most
         ``MAX_TEAM_DELIVERIES``), and goes idle: ``TeammateIdle`` fires and the lead gets its last report.
+        Taking the mail and going idle happen under the team lock, so a message sent meanwhile either
+        joins the next batch or finds the teammate idle and starts it again. A stopped teammate takes no more mail.
         """
-        outcome = self._execute_subagent_run(**kwargs)
-        self._save_agent_report(output_file, outcome)
         record = kwargs.get("record") or {}
         name = str(record.get("teammate_name") or "")
-        if not name:
-            return outcome
-        for _ in range(MAX_TEAM_DELIVERIES):
-            task = self._take_team_mail(name)
-            if not task:
-                break
-            outcome = self._execute_subagent_run(**{**kwargs, "task_text": task, "resumed_agent_id": kwargs.get("agent_id")})
+        try:
+            outcome = self._execute_subagent_run(**kwargs)
             self._save_agent_report(output_file, outcome)
-        self._teammate_idle(name, str(record.get("team_name") or "team"), outcome)
+            if not name:
+                return outcome
+            cancel = kwargs.get("hook_cancel")
+            unread = 0
+            for delivery in range(MAX_TEAM_DELIVERIES + 1):
+                with self._team_lock:
+                    stopping = delivery >= MAX_TEAM_DELIVERIES or (cancel is not None and cancel.is_set())
+                    task, _taken = ("", []) if stopping else self._take_team_mail(name)
+                    if not task:
+                        unread = self._team_pending(name) if stopping else 0
+                        mate = self._team_roster().get(name)
+                        if mate is not None:
+                            mate["busy"] = False
+                        break
+                outcome = self._execute_subagent_run(**{**kwargs, "task_text": task, "resumed_agent_id": kwargs.get("agent_id")})
+                self._save_agent_report(output_file, outcome)
+        except BaseException:
+            if name:
+                self._release_teammate(name)
+            raise
+        self._teammate_idle(name, str(record.get("team_name") or "team"), outcome, unread=unread)
         return outcome
 
     def _save_agent_report(self, output_file: str, outcome: ToolOutcome) -> None:
@@ -2203,7 +2250,8 @@ class TurnSession:
         self._mailbox_store = mailbox
         return mailbox
 
-    def _teammate_refusal(self, name: str) -> ToolOutcome | None:
+    def _teammate_refusal(self, name: str, team_name: str | None = None) -> ToolOutcome | None:
+        """Why this teammate cannot take a task now, or None — and then a known teammate is claimed (busy) for the caller."""
         clean = str(name or "").strip().lower()
         if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,31}", clean) or clean in {"lead", "main", "team-lead"}:
             return ToolOutcome(
@@ -2211,17 +2259,49 @@ class TurnSession:
                 "A teammate's name is 1-32 lowercase letters, digits, '-' or '_' and cannot be 'lead' or 'main'.",
                 {"tool_kind": "agent"}, "INVALID_ARGUMENTS",
             )
-        known = self._team_roster().get(clean)
-        if known is not None:
-            with self._subagent_lock:
-                entry = self._background_subagents.get(known["agent_id"])
-            if entry is not None and not entry["future"].done():
+        wanted_team = str(team_name or "").strip()[:64]
+        with self._team_lock:
+            known = self._team_roster().get(clean)
+            if known is None:
+                return None
+            if wanted_team and wanted_team != known.get("team_name"):
+                return ToolOutcome(
+                    "failed", f"{clean} já está em outra equipe",
+                    f"Teammate '{clean}' is in team '{known.get('team_name')}'. Use another name, or leave team_name out to give it a new task.",
+                    {"agent_id": known["agent_id"], "tool_kind": "agent"}, "INVALID_ARGUMENTS",
+                )
+            if known.get("busy"):
                 return ToolOutcome(
                     "failed", f"{clean} ainda trabalhando",
                     f"Teammate '{clean}' is still working. Send it a message with SendMessage; it reads it when it finishes.",
                     {"agent_id": known["agent_id"], "tool_kind": "agent"}, "SUBAGENT_STILL_RUNNING",
                 )
+            known["busy"] = True
         return None
+
+    def _claim_teammate(self, name: str) -> bool:
+        """Mark an idle teammate busy for the caller; False when it is already working."""
+        with self._team_lock:
+            mate = self._team_roster().get(name)
+            if mate is None or mate.get("busy"):
+                return False
+            mate["busy"] = True
+            return True
+
+    def _release_teammate(self, name: str) -> None:
+        with self._team_lock:
+            mate = self._team_roster().get(name)
+            if mate is not None:
+                mate["busy"] = False
+
+    def _team_pending(self, name: str) -> int:
+        try:
+            return int(self._team_mailbox().pending_count(
+                user_id=str(self.turn.get("user_id") or ""), conversation_id=str(self.turn.get("conversation_id") or ""), recipient=name,
+            ))
+        except Exception:  # noqa: BLE001 - an unreadable count only drops the notice
+            logger.warning("could not count a teammate's unread messages", exc_info=True)
+            return 0
 
     def _send_team_message(self, *, sender: str, to: str, message: str, summary: str = "") -> ToolOutcome:
         text = str(message or "").strip()
@@ -2248,41 +2328,52 @@ class TurnSession:
                 f"No teammate named '{target[:40]}'. Teammates: {names}. Start one with the Agent tool (name and team_name).",
                 {"tool_kind": "agent"}, "AGENT_NOT_FOUND",
             )
-        self._team_mailbox().post(user_id=user_id, conversation_id=conversation_id, team_name=mate["team_name"], sender=sender, recipient=target, content=text, summary=summary)
-        with self._subagent_lock:
-            entry = self._background_subagents.get(mate["agent_id"])
-        if entry is not None and not entry["future"].done():
+        mailbox = self._team_mailbox()
+        mailbox.post(user_id=user_id, conversation_id=conversation_id, team_name=mate["team_name"], sender=sender, recipient=target, content=text, summary=summary)
+        if not self._claim_teammate(target):
             return ToolOutcome("succeeded", f"Mensagem na fila de {target}", f"Queued: {target} reads it when it finishes its current task.", {"to": target, "status": "queued", "tool_kind": "agent"})
-        task = self._take_team_mail(target)
+        task, taken = self._take_team_mail(target)
         if not task:
+            self._release_teammate(target)
             return ToolOutcome("succeeded", f"Mensagem entregue a {target}", f"Delivered to {target}.", {"to": target, "tool_kind": "agent"})
         started = self._ask_agent(
             mate["type"], task, resumed_agent_id=mate["agent_id"], run_in_background=True,
             teammate_name=target, team_name=mate["team_name"],
         )
         if started.status != "succeeded":
-            return started
+            # The run never started: the messages stay unread for its next start.
+            mailbox.release(user_id=user_id, conversation_id=conversation_id, message_ids=taken)
+            self._release_teammate(target)
+            return ToolOutcome(
+                "failed", started.summary,
+                f"{started.content}\nThe message is kept; {target} reads it when it next starts.",
+                {**dict(started.payload or {}), "to": target}, started.error_code,
+            )
         return ToolOutcome("succeeded", f"{target} começou a trabalhar", f"Delivered; {target} is working on it.", {"to": target, "status": "running", "agent_id": mate["agent_id"], "tool_kind": "agent"})
 
-    def _take_team_mail(self, name: str) -> str:
-        """The teammate's pending messages as one task, or "" when there are none."""
+    def _take_team_mail(self, name: str) -> tuple[str, list[str]]:
+        """The teammate's pending messages as one task and their ids, or ("", []) when there are none."""
         messages = self._team_mailbox().take(
             user_id=str(self.turn.get("user_id") or ""), conversation_id=str(self.turn.get("conversation_id") or ""), recipient=name,
         )
         if not messages:
-            return ""
+            return "", []
         lines = [
             f"From {item['sender']}" + (f" ({item['summary']})" if item.get("summary") else "") + f":\n{item['content']}"
             for item in messages
         ]
-        return "Messages from your team:\n\n" + "\n\n".join(lines)
+        return "Messages from your team:\n\n" + "\n\n".join(lines), [str(item.get("message_id") or "") for item in messages]
 
-    def _teammate_idle(self, name: str, team: str, outcome: ToolOutcome) -> None:
+    def _teammate_idle(self, name: str, team: str, outcome: ToolOutcome, *, unread: int = 0) -> None:
         bus = self.lifecycle
         if bus is not None:
             _emit_lifecycle_safely(bus, HookEvent.TEAMMATE_IDLE, teammate_name=name, team_name=team)
         report = str(outcome.content or outcome.summary or "")[:2000]
-        self._reminders.add("teammate", f"Teammate {name} is idle. Its last report:\n{report}", key=f"teammate-idle:{name}:{uuid4().hex}")
+        waiting = (
+            f" It has {unread} unread message{'s' if unread != 1 else ''}; a SendMessage to it starts it again with them."
+            if unread else ""
+        )
+        self._reminders.add("teammate", f"Teammate {name} is idle.{waiting} Its last report:\n{report}", key=f"teammate-idle:{name}:{uuid4().hex}")
 
     def _stop_background_subagent(self, agent_id: str) -> ToolOutcome:
         """TaskStop for a background agent: it stops at its next step (W5)."""

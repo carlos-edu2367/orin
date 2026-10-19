@@ -49,3 +49,16 @@ def test_the_history_keeps_what_was_said(mailbox) -> None:
     mailbox.take(user_id="u1", conversation_id="c1", recipient="alice")
     history = mailbox.history(user_id="u1", conversation_id="c1")
     assert len(history) == 1 and history[0]["delivered"] is True
+
+def test_released_messages_are_pending_again_and_counted(mailbox) -> None:
+    common = {"user_id": "u1", "conversation_id": "c1", "team_name": "t"}
+    mailbox.post(**common, sender="lead", recipient="alice", content="first")
+    mailbox.post(**common, sender="lead", recipient="alice", content="second")
+    taken = mailbox.take(user_id="u1", conversation_id="c1", recipient="alice")
+    assert all(item["message_id"].startswith("mail_") for item in taken)
+    assert mailbox.pending_count(user_id="u1", conversation_id="c1", recipient="alice") == 0
+    mailbox.release(user_id="u2", conversation_id="c1", message_ids=[item["message_id"] for item in taken])
+    assert mailbox.pending_count(user_id="u1", conversation_id="c1", recipient="alice") == 0  # another person cannot release them
+    mailbox.release(user_id="u1", conversation_id="c1", message_ids=[item["message_id"] for item in taken])
+    assert mailbox.pending_count(user_id="u1", conversation_id="c1", recipient="alice") == 2
+    assert [item["content"] for item in mailbox.take(user_id="u1", conversation_id="c1", recipient="alice")] == ["first", "second"]

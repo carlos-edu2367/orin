@@ -157,3 +157,83 @@ def test_the_agent_tool_passes_a_teammate_name_through(tmp_path: Path) -> None:
     toolset = AgentToolset(ConversationWorkspace(tmp_path / "w", "c1"), run_subagent=run_subagent, public_tool_names=True)
     toolset.invoke("Agent", {"subagent_type": "general-purpose", "prompt": "x", "description": "d", "name": "alice", "team_name": "core"})
     assert calls[-1]["teammate_name"] == "alice" and calls[-1]["team_name"] == "core"
+
+def _pending(session: TurnSession, name: str) -> int:
+    return session._team_mailbox().pending_count(user_id=TURN["user_id"], conversation_id=TURN["conversation_id"], recipient=name)
+
+
+def test_a_message_survives_a_teammate_that_cannot_start(team) -> None:
+    child = _Child()
+    session = team(child)
+    started = session._run_subagent(subagent_type="general-purpose", task="First task", teammate_name="erin", team_name="core")
+    _wait(session, started.payload["agent_id"])
+    session._max_subagents_per_turn = session._subagent_runs  # the turn's subagent budget is used up
+    refused = session._send_team_message(sender="lead", to="erin", message="Check the cache too")
+    assert refused.status == "failed" and refused.error_code == "SUBAGENT_LIMIT"
+    assert "kept" in refused.content and _pending(session, "erin") == 1
+    session._max_subagents_per_turn = None
+    resumed = session._send_team_message(sender="lead", to="erin", message="And the logs")
+    assert resumed.payload["status"] == "running"
+    _wait(session, started.payload["agent_id"])
+    assert "Check the cache too" in child.requests[-1] and "And the logs" in child.requests[-1]
+
+
+def test_a_message_sent_while_a_teammate_goes_idle_starts_it_again(team) -> None:
+    child = _Child()
+    session = team(child)
+    entered, release = threading.Event(), threading.Event()
+    original = session._teammate_idle
+
+    def slow_idle(*args, **kwargs):
+        entered.set()
+        release.wait(10)
+        return original(*args, **kwargs)
+
+    session._teammate_idle = slow_idle
+    started = session._run_subagent(subagent_type="general-purpose", task="First task", teammate_name="frank", team_name="core")
+    assert entered.wait(10)  # its run ended and it is announcing that it is idle
+    sent = session._send_team_message(sender="lead", to="frank", message="One more thing")
+    assert sent.status == "succeeded" and sent.payload["status"] == "running", sent.content
+    release.set()
+    _wait(session, started.payload["agent_id"])
+    assert "One more thing" in child.requests[-1]
+
+
+def test_after_the_delivery_cap_the_lead_hears_of_unread_messages(team, monkeypatch) -> None:
+    import agentos.agentic.session as session_module
+
+    monkeypatch.setattr(session_module, "MAX_TEAM_DELIVERIES", 0)
+    child = _Child(hold=True)
+    session = team(child)
+    started = session._run_subagent(subagent_type="general-purpose", task="Long task", teammate_name="gina", team_name="core")
+    assert child.started.wait(10)
+    assert session._send_team_message(sender="lead", to="gina", message="Later").payload["status"] == "queued"
+    child.release.set()
+    _wait(session, started.payload["agent_id"])
+    texts = [item.text for item in session._reminders.drain() if item.kind == "teammate"]
+    assert any("Teammate gina is idle" in text and "1 unread message" in text for text in texts)
+    assert _pending(session, "gina") == 1
+
+
+def test_a_teammate_keeps_its_team(team) -> None:
+    session = team(_Child())
+    started = session._run_subagent(subagent_type="general-purpose", task="x", teammate_name="hank", team_name="core")
+    _wait(session, started.payload["agent_id"])
+    moved = session._run_subagent(subagent_type="general-purpose", task="y", teammate_name="hank", team_name="other")
+    assert moved.status == "failed" and moved.error_code == "INVALID_ARGUMENTS" and "core" in moved.content
+    again = session._run_subagent(subagent_type="general-purpose", task="y", teammate_name="hank")
+    assert again.status == "succeeded", again.content
+    _wait(session, started.payload["agent_id"])
+    assert session._team_roster()["hank"]["team_name"] == "core"
+
+
+def test_a_stopped_teammate_leaves_its_mail_unread(team) -> None:
+    child = _Child(hold=True)
+    session = team(child)
+    started = session._run_subagent(subagent_type="general-purpose", task="Long task", teammate_name="iris", team_name="core")
+    assert child.started.wait(10)
+    session._send_team_message(sender="lead", to="iris", message="Also this")
+    session._stop_background_subagent(started.payload["agent_id"])
+    child.release.set()
+    _wait(session, started.payload["agent_id"])
+    assert len(child.requests) == 1 and _pending(session, "iris") == 1

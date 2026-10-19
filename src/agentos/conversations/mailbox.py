@@ -2,7 +2,8 @@
 
 ``AgentMailbox`` stores them in the database (``agent_mailbox``), so a conversation keeps the record of what its
 team said; ``InMemoryMailbox`` is the same interface for a session without a database (tests, embedded use).
-A message is ``pending`` until the recipient's next run takes it (``take``).
+A message is ``pending`` until the recipient's next run takes it (``take``); ``release`` puts taken messages back
+when the run they were taken for could not start.
 """
 from __future__ import annotations
 
@@ -10,7 +11,7 @@ import threading
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from sqlalchemy import insert, select, update
+from sqlalchemy import func, insert, select, update
 from sqlalchemy.engine import Engine
 
 from agentos.persistence.postgres.schema import agent_mailbox
@@ -48,7 +49,28 @@ class AgentMailbox:
             ).order_by(agent_mailbox.c.id).limit(MAX_TAKEN)).mappings().all()
             if rows:
                 connection.execute(update(agent_mailbox).where(agent_mailbox.c.id.in_([row["id"] for row in rows])).values(delivered_at=datetime.now(UTC)))
-        return [{"sender": str(row["sender"]), "content": str(row["content"]), "summary": str(row["summary"] or "")} for row in rows]
+        return [
+            {"message_id": str(row["message_id"]), "sender": str(row["sender"]), "content": str(row["content"]), "summary": str(row["summary"] or "")}
+            for row in rows
+        ]
+
+    def release(self, *, user_id: str, conversation_id: str, message_ids: list[str]) -> None:
+        """Mark taken messages pending again: the run they were taken for never started."""
+        ids = [str(item) for item in message_ids][:MAX_TAKEN]
+        if not ids:
+            return
+        with self._engine.begin() as connection:
+            connection.execute(update(agent_mailbox).where(
+                agent_mailbox.c.user_id == user_id, agent_mailbox.c.conversation_id == conversation_id,
+                agent_mailbox.c.message_id.in_(ids),
+            ).values(delivered_at=None))
+
+    def pending_count(self, *, user_id: str, conversation_id: str, recipient: str) -> int:
+        with self._engine.connect() as connection:
+            return int(connection.execute(select(func.count()).select_from(agent_mailbox).where(
+                agent_mailbox.c.user_id == user_id, agent_mailbox.c.conversation_id == conversation_id,
+                agent_mailbox.c.recipient == recipient, agent_mailbox.c.delivered_at.is_(None),
+            )).scalar() or 0)
 
     def history(self, *, user_id: str, conversation_id: str, limit: int = 200) -> list[dict[str, str]]:
         with self._engine.connect() as connection:
@@ -82,7 +104,22 @@ class InMemoryMailbox:
                        and row["conversation_id"] == conversation_id and row["recipient"] == recipient][:MAX_TAKEN]
             for row in pending:
                 row["delivered"] = True
-        return [{"sender": str(row["sender"]), "content": str(row["content"]), "summary": str(row["summary"])} for row in pending]
+        return [
+            {"message_id": str(row["message_id"]), "sender": str(row["sender"]), "content": str(row["content"]), "summary": str(row["summary"])}
+            for row in pending
+        ]
+
+    def release(self, *, user_id: str, conversation_id: str, message_ids: list[str]) -> None:
+        wanted = {str(item) for item in message_ids}
+        with self._lock:
+            for row in self._rows:
+                if row["message_id"] in wanted and row["user_id"] == user_id and row["conversation_id"] == conversation_id:
+                    row["delivered"] = False
+
+    def pending_count(self, *, user_id: str, conversation_id: str, recipient: str) -> int:
+        with self._lock:
+            return sum(1 for row in self._rows if not row["delivered"] and row["user_id"] == user_id
+                       and row["conversation_id"] == conversation_id and row["recipient"] == recipient)
 
     def history(self, *, user_id: str, conversation_id: str, limit: int = 200) -> list[dict[str, str]]:
         with self._lock:
