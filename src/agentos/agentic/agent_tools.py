@@ -66,6 +66,7 @@ from agentos.agentic.tools.search.glob import GlobTools
 from agentos.agentic.tools.search.grep import GrepTools
 from agentos.agentic.tools.orin.search_code import CodeSearchTools
 from agentos.agentic.tools.shell.bash import BashTools
+from agentos.agentic.tools.shell.publish import publish_actions
 from agentos.agentic.tools.shell.powershell import PowerShellTools
 from agentos.agentic.tools.shell.tasks import ShellTaskTools
 from agentos.agentic.tools.orin.verify import VerifyTools
@@ -999,19 +1000,21 @@ class AgentToolset(
                         )
         if self._code_mode_active and name in {"run_command", "powershell", "monitor"}:
             command = str(arguments.get("command") or "")
-            if re.search(r"\b(deploy|release|publish)\b", command, re.IGNORECASE):
+            # Quotes, escapes and git's global options do not change what the shell runs, so the guards read the analysis (W4-R5).
+            actions = publish_actions(command, name)
+            if re.search(r"\b(deploy|release|publish)\b", re.sub(r"[\"'`\\]", "", command), re.IGNORECASE):
                 return ToolOutcome(
                     "failed", "Confirmação necessária para produção",
                     "Deploy, publicação e release em produção sempre exigem confirmação explícita da pessoa.",
                     {"tool_kind": definition.kind, "code_mode": True}, "CODE_DEPLOY_CONFIRMATION_REQUIRED",
                 )
-            if re.search(r"\bgit\s+push\b", command, re.IGNORECASE) and not self._code_mode_permits_push:
+            if "push" in actions and not self._code_mode_permits_push:
                 return ToolOutcome(
                     "failed", "Confirmação necessária para publicar",
                     "Commits locais são permitidos; git push precisa de confirmação explícita ou da preferência Autonomia total.",
                     {"tool_kind": definition.kind, "code_mode": True}, "CODE_PUSH_CONFIRMATION_REQUIRED",
                 )
-            if re.search(r"\bgh\s+(?:pr|repo)\b", command, re.IGNORECASE) and not self._code_mode_permits_pr:
+            if actions & {"pr", "repo"} and not self._code_mode_permits_pr:
                 return ToolOutcome(
                     "failed", "Confirmação necessária para publicar",
                     "Commits locais são permitidos; pull request precisa de confirmação ou da preferência Autonomia total.",
