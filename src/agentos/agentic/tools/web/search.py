@@ -2,11 +2,11 @@
 from __future__ import annotations
 
 from typing import Any
+
 import httpx
-from agentos.agentic.tools._shared import (
-    AgentToolError,
-    _public_url,
-)
+
+from agentos.agentic.tools._shared import AgentToolError, _public_url, _TEXT, _schema
+from agentos.agentic.tools.spec import ToolSpec
 
 
 class WebSearchTools:
@@ -44,3 +44,19 @@ class WebSearchTools:
             raise AgentToolError(f"The search provider could not be reached: {type(error).__name__}") from error
         except Exception:  # noqa: BLE001 - provider failures must not reach the model
             raise AgentToolError("The search provider returned an invalid response.") from None
+
+
+# Tool specs, moved from AgentToolset._build_definitions (W4).
+SPECS: tuple[ToolSpec, ...] = (
+    ToolSpec(
+        key="web_search",
+        description="Search the public web and return titles, URLs and snippets. Use this to find an address, then fetch_url to read it.",
+        legacy_schema=_schema({"query": _TEXT, "limit": {"type": "integer", "minimum": 1, "maximum": 10}}, ("query",)),
+        handler="web_search",
+        kind="web",
+        read_only=True,
+        policy_tags=("network",),
+        available=lambda self: (self._search_client is not None),
+        order=210,
+    ),
+)

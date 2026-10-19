@@ -2,14 +2,13 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 import re
+from pathlib import Path
 from typing import Any
-from agentos.agentic.workspace import MAX_SEARCH_RESULTS
-from agentos.agentic.tools._shared import (
-    AgentToolError,
-    _GLOB_IGNORED_DIRS,
-)
+
+from agentos.agentic.workspace import MAX_SEARCH_RESULTS, MAX_LIST_DEPTH
+from agentos.agentic.tools._shared import AgentToolError, _GLOB_IGNORED_DIRS, _TEXT, _schema
+from agentos.agentic.tools.spec import ToolSpec
 
 
 class GlobTools:
@@ -166,3 +165,35 @@ class GlobTools:
             "content": listing,
             "payload": {"path": path or "/", "count": len(entries), "depth": int(depth), "label": path or "/"},
         }
+
+
+# Tool specs, moved from AgentToolset._build_definitions (W4).
+SPECS: tuple[ToolSpec, ...] = (
+    ToolSpec(
+        key="list_files",
+        description="List files and directories in the conversation workspace. Use depth to see a whole subtree in one call, or "
+        "pattern for a glob match (e.g. '**/*.tsx') when you need every file of one kind regardless of depth or directory shape — path and depth are ignored when pattern is set.",
+        legacy_schema=_schema({
+            "path": {**_TEXT, "description": "Workspace-relative directory; omit for the root. Ignored when pattern is set."},
+            "depth": {"type": "integer", "minimum": 1, "maximum": MAX_LIST_DEPTH, "description": "How many directory levels to descend. Defaults to 1. Ignored when pattern is set."},
+            "pattern": {**_TEXT, "description": "Glob pattern relative to the workspace, e.g. '**/*.py' or 'src/**/*.tsx'. When set, lists matching paths instead of one directory."},
+        }),
+        handler="list_files",
+        kind="filesystem",
+        read_only=True,
+        order=70,
+    ),
+    ToolSpec(
+        key="glob_files",
+        description="Fast file pattern matching across the workspace (e.g. '**/*.py', 'src/**/*.tsx'), sorted by modification time (newest first).",
+        legacy_schema=_schema({
+            "pattern": {**_TEXT, "description": "Glob pattern to match files against (e.g. '**/*.py', 'src/**/*.ts')."},
+            "path": {**_TEXT, "description": "Optional workspace-relative subdirectory to search within."},
+            "max_results": {"type": "integer", "minimum": 1, "maximum": 1000, "description": "Maximum number of file paths to return (default 200)."},
+        }, ("pattern",)),
+        handler="glob_files",
+        kind="filesystem",
+        read_only=True,
+        order=80,
+    ),
+)

@@ -71,4 +71,4 @@ def test_each_family_lives_in_its_module(module: str, mixin: str, methods: tuple
 
 def test_agent_tools_keeps_only_the_pipeline() -> None:
     lines = Path(agent_tools.__file__).read_text(encoding="utf-8").count("\n")
-    assert lines < 2600, lines
+    assert lines < 1700, lines

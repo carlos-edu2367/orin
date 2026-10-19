@@ -4,9 +4,9 @@ from __future__ import annotations
 import json
 from typing import Any, Mapping
 from uuid import uuid4
-from agentos.agentic.tools._shared import (
-    AgentToolError,
-)
+
+from agentos.agentic.tools._shared import AgentToolError, _TEXT, _schema
+from agentos.agentic.tools.spec import ToolSpec
 
 
 class NotebookTools:
@@ -128,3 +128,31 @@ class NotebookTools:
             "content": f"Notebook '{rel}' updated ({mode} cell '{target_cell_id}', total cells={len(cells)}).",
             "payload": payload,
         }
+
+
+# Tool specs, moved from AgentToolset._build_definitions (W4).
+SPECS: tuple[ToolSpec, ...] = (
+    ToolSpec(
+        key="notebook_edit",
+        description="Edit a Jupyter notebook (.ipynb) cell by cell_id or 0-based index (replace, insert, or delete).",
+        legacy_schema=_schema({
+            "notebook_path": {**_TEXT, "description": "Workspace-relative path to the .ipynb file."},
+            "new_source": {**_TEXT, "description": "New source code or markdown for the cell (required for replace and insert)."},
+            "cell_id": {**_TEXT, "description": "Target cell id or 0-based cell index string (e.g. '0')."},
+            "cell_type": {
+                "type": "string",
+                "enum": ["code", "markdown"],
+                "description": "Cell type ('code' or 'markdown'). Required when inserting a new cell.",
+            },
+            "edit_mode": {
+                "type": "string",
+                "enum": ["replace", "insert", "delete"],
+                "description": "Operation mode: 'replace' (default), 'insert', or 'delete'.",
+            },
+        }, ("notebook_path",)),
+        handler="notebook_edit",
+        kind="filesystem",
+        policy_tags=("mutates",),
+        order=60,
+    ),
+)

@@ -1,11 +1,11 @@
 """Search code tools: methods of AgentToolset that live in their own module (W4 split)."""
 from __future__ import annotations
 
+import os
 from typing import Any, Mapping
-from agentos.agentic.tools._shared import (
-    AgentToolError,
-    logger,
-)
+
+from agentos.agentic.tools._shared import AgentToolError, logger, _TEXT, _schema
+from agentos.agentic.tools.spec import ToolSpec
 
 
 class CodeSearchTools:
@@ -75,3 +75,32 @@ class CodeSearchTools:
             # would mean the index stops updating for the rest of the session
             # with zero trace anywhere — same risk IndexWorker._run logs for.
             logger.exception("could not queue a reindex for %s", paths)
+
+
+# Tool specs, moved from AgentToolset._build_definitions (W4).
+SPECS: tuple[ToolSpec, ...] = (
+    ToolSpec(
+        key="search_code",
+        description="Search the project by meaning, not by text. Use this when you do not know where something lives, or when you want to understand how a flow works. Returns whole definitions with path:line so you can open and confirm them.",
+        legacy_schema=_schema({
+            "query": {**_TEXT, "description": "What you are looking for, in plain language."},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 20, "description": "How many results to return. Defaults to 8."},
+        }, ("query",)),
+        handler="search_code",
+        kind="filesystem",
+        read_only=True,
+        policy_tags=lambda self: (("network",) if (os.getenv("ORIN_RETRIEVAL_EMBEDDER", "").strip().lower() == "remote") else ()),
+        available=lambda self: (self._retrieval is not None),
+        order=220,
+    ),
+    ToolSpec(
+        key="project_map",
+        description="List the files the project depends on most, with their top-level symbols. Use this once to orient yourself in an unfamiliar codebase.",
+        legacy_schema=_schema({"limit": {"type": "integer", "minimum": 1, "maximum": 50}}),
+        handler="project_map",
+        kind="filesystem",
+        read_only=True,
+        available=lambda self: (self._retrieval is not None),
+        order=230,
+    ),
+)

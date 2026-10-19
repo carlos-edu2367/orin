@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 from typing import Any, Mapping
-from agentos.agentic.tools._shared import (
-    AgentToolError,
-)
+
+from agentos.agentic.tools._shared import AgentToolError, _TEXT, _schema
+from agentos.agentic.tools.spec import ToolSpec
 
 
 class TodoTools:
@@ -87,3 +87,30 @@ class TodoTools:
         if callable(self._on_todo_update):
             self._on_todo_update(list(self._todos))
         return [dict(item) for item in self._todos]
+
+
+# Tool specs, moved from AgentToolset._build_definitions (W4).
+SPECS: tuple[ToolSpec, ...] = (
+    ToolSpec(
+        key="todo_write",
+        description="Create or update the structured task checklist for the current session. Use this to track progress on multi-step implementations (pending, in_progress, completed). Keep at most one task in_progress at a time.",
+        legacy_schema=_schema({
+            "todos": {
+                "type": "array",
+                "minItems": 0,
+                "maxItems": 40,
+                "items": _schema({
+                    "id": {**_TEXT, "description": "Optional short identifier, e.g. '1' or 'auth-middleware' (auto-generated when omitted)."},
+                    "content": {**_TEXT, "description": "Task description in imperative form."},
+                    "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]},
+                    "active_form": {**_TEXT, "description": "Optional present-continuous label shown while in_progress."},
+                    "activeForm": {**_TEXT, "description": "Alias for active_form."},
+                }, ("content", "status")),
+            },
+        }, ("todos",)),
+        handler="todo_write",
+        kind="planning",
+        read_only=True,
+        order=140,
+    ),
+)

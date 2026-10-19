@@ -3,10 +3,9 @@ from __future__ import annotations
 
 import hashlib
 from typing import Any
-from agentos.agentic.tools._shared import (
-    AgentToolError,
-    compute_structured_patch,
-)
+
+from agentos.agentic.tools._shared import AgentToolError, compute_structured_patch, _TEXT, _schema
+from agentos.agentic.tools.spec import ToolSpec
 
 
 class WriteTools:
@@ -67,3 +66,25 @@ class WriteTools:
                 "updated_sha256": updated_sha,
             },
         }
+
+
+# Tool specs, moved from AgentToolset._build_definitions (W4).
+SPECS: tuple[ToolSpec, ...] = (
+    ToolSpec(
+        key="write_file",
+        description="Create or overwrite a UTF-8 text file in the conversation workspace. Always provide 'path' first before 'content'. A file longer than one reply must be written in parts: the first call with the default mode, each following call with mode=\"append\".",
+        legacy_schema=_schema({
+            "path": _TEXT,
+            "content": _TEXT,
+            "mode": {
+                "type": "string",
+                "enum": ["overwrite", "append"],
+                "description": "'overwrite' (default) replaces the file; 'append' adds to the end, creating the file if needed.",
+            },
+        }, ("path", "content")),
+        handler="write_file",
+        kind="filesystem",
+        policy_tags=("mutates",),
+        order=40,
+    ),
+)

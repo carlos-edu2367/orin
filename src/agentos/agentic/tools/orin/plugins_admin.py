@@ -3,10 +3,9 @@ from __future__ import annotations
 
 import json
 from typing import Any
-from agentos.agentic.tools._shared import (
-    AgentToolError,
-    ToolOutcome,
-)
+
+from agentos.agentic.tools._shared import AgentToolError, ToolOutcome, _TEXT, _schema
+from agentos.agentic.tools.spec import ToolSpec
 
 
 class PluginTools:
@@ -39,3 +38,57 @@ class PluginTools:
         except Exception as error:
             raise AgentToolError(str(error)) from error
         return ToolOutcome("succeeded", f"Removeu o plugin {plugin_id}", json.dumps(result), {**result, "tool_kind": "plugin"})
+
+
+# Tool specs, moved from AgentToolset._build_definitions (W4).
+SPECS: tuple[ToolSpec, ...] = (
+    ToolSpec(
+        key="search_plugin",
+        description="Search the plugin marketplaces Orin knows for a plugin by name or subject.",
+        legacy_schema=_schema({"query": _TEXT}, ("query",)),
+        handler="search_plugin",
+        kind="plugin",
+        read_only=True,
+        available=lambda self: (self._plugin_service is not None and self._plugin_user_id),
+        order=500,
+    ),
+    ToolSpec(
+        key="inspect_plugin",
+        description="Download a plugin and report its skills, MCP servers and subagents without activating anything. Nothing in the package is executed.",
+        legacy_schema=_schema({"reference": _TEXT}, ("reference",)),
+        handler="inspect_plugin",
+        kind="plugin",
+        available=lambda self: (self._plugin_service is not None and self._plugin_user_id),
+        order=510,
+    ),
+    ToolSpec(
+        key="install_plugin",
+        description="Propose installing a plugin; the user must approve the contribution card before activation.",
+        legacy_schema=_schema({"reference": _TEXT}, ("reference",)),
+        handler="install_plugin",
+        kind="plugin",
+        policy_tags=("mutates",),
+        available=lambda self: (self._plugin_service is not None and self._plugin_user_id),
+        order=520,
+    ),
+    ToolSpec(
+        key="list_plugins",
+        description="List this user's installed plugins and their states.",
+        legacy_schema=_schema({}),
+        handler="list_plugins",
+        kind="plugin",
+        read_only=True,
+        available=lambda self: (self._plugin_service is not None and self._plugin_user_id),
+        order=530,
+    ),
+    ToolSpec(
+        key="uninstall_plugin",
+        description="Remove an installed plugin after the user explicitly confirmed the removal.",
+        legacy_schema=_schema({"plugin_id": _TEXT, "confirmed": {"type": "boolean"}}, ("plugin_id",)),
+        handler="uninstall_plugin",
+        kind="plugin",
+        policy_tags=("mutates",),
+        available=lambda self: (self._plugin_service is not None and self._plugin_user_id),
+        order=540,
+    ),
+)

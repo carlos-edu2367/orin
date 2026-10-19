@@ -4,7 +4,9 @@ from __future__ import annotations
 import json
 from typing import Any
 from urllib.parse import urljoin, urlparse
+
 import httpx
+
 from agentos.agentic.tools._shared import (
     AgentToolError,
     FETCH_TIMEOUT_SECONDS,
@@ -13,7 +15,10 @@ from agentos.agentic.tools._shared import (
     _public_url,
     _safe_display_url,
     sanitize_page_text,
+    _TEXT,
+    _schema,
 )
+from agentos.agentic.tools.spec import ToolSpec
 
 
 class FetchTools:
@@ -67,3 +72,18 @@ class FetchTools:
             "content": f"{safe_target}\nHTTP {response.status_code}\n\n{body}",
             "payload": {"url": safe_target, "status": response.status_code, "label": safe_title[:120] or safe_target},
         }
+
+
+# Tool specs, moved from AgentToolset._build_definitions (W4).
+SPECS: tuple[ToolSpec, ...] = (
+    ToolSpec(
+        key="fetch_url",
+        description="Fetch a public web page or API response and return its readable text.",
+        legacy_schema=_schema({"url": _TEXT}, ("url",)),
+        handler="fetch_url",
+        kind="web",
+        read_only=True,
+        policy_tags=("network",),
+        order=190,
+    ),
+)

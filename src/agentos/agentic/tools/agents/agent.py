@@ -2,10 +2,9 @@
 from __future__ import annotations
 
 from typing import Any, Mapping
-from agentos.agentic.tools._shared import (
-    AgentToolError,
-    ToolOutcome,
-)
+
+from agentos.agentic.tools._shared import AgentToolError, ToolOutcome, _TEXT, _schema
+from agentos.agentic.tools.spec import ToolSpec
 
 
 class AgentTools:
@@ -88,3 +87,86 @@ class AgentTools:
             raise AgentToolError("wait_seconds must be an integer between 0 and 60.") from exc
         wait = max(0, min(raw_wait, 60))
         return self._check_subagent(agent_id.strip(), wait_seconds=wait)
+
+
+# Tool specs, moved from AgentToolset._build_definitions (W4).
+SPECS: tuple[ToolSpec, ...] = (
+    ToolSpec(
+        key="create_agent",
+        description="Create a specialist subagent. An optional model_id must be a favorite model of the current provider; omit it to use the current model.",
+        legacy_schema=_schema({
+            "name": {**_TEXT, "description": "Short name, e.g. Researcher"},
+            "role": {**_TEXT, "description": "One line describing what this agent is responsible for."},
+            "model_id": {**_TEXT, "description": "Optional exact ID of a favorite model from the current provider. Defaults to the current model."},
+        }, ("name", "role")),
+        handler="create_agent",
+        kind="agent",
+        policy_tags=("mutates",),
+        available=lambda self: (self._create_agent is not None),
+        order=350,
+    ),
+    ToolSpec(
+        key="ask_agent",
+        description="Send a task to a subagent you created (or a builtin specialist: 'explore', 'plan', 'general', 'fork') and wait for its answer.",
+        legacy_schema=_schema({"name": _TEXT, "task": {**_TEXT, "description": "The complete instruction; the subagent cannot see this conversation unless name is 'fork'."}}, ("name", "task")),
+        handler="ask_agent",
+        kind="agent",
+        policy_tags=("mutates",),
+        available=lambda self: (self._delegate is not None),
+        order=360,
+    ),
+    ToolSpec(
+        key="ask_agents",
+        description="Send tasks to several subagents at once and wait for all of them. Use this instead of calling ask_agent repeatedly when the tasks do not depend on each other.",
+        legacy_schema=_schema({
+            "tasks": {
+                "type": "array",
+                "items": _schema({"name": _TEXT, "task": {**_TEXT, "description": "The complete instruction; the subagent cannot see this conversation."}}, ("name", "task")),
+            },
+        }, ("tasks",)),
+        handler="ask_agents",
+        kind="agent",
+        policy_tags=("mutates",),
+        available=lambda self: (self._delegate_batch is not None),
+        order=370,
+    ),
+    ToolSpec(
+        key="run_subagent",
+        description="Launch or resume a specialized builtin subagent ('explore' for read-only codebase search, 'plan' for read-only architecture planning, 'general' for multi-step implementation/research, or 'fork' to inherit the full conversation context) and return its report or background handle.",
+        legacy_schema=_schema({
+            "subagent_type": {
+                "type": "string",
+                "enum": ["explore", "plan", "general", "fork"],
+                "description": "Builtin specialist type: 'explore' (read-only search), 'plan' (read-only architect), 'general' (full toolset), or 'fork' (inherits parent conversation context).",
+            },
+            "task": {**_TEXT, "description": "Complete task instructions for the subagent."},
+            "description": {**_TEXT, "description": "Short 3-5 word summary of what the subagent will do."},
+            "model_id": {**_TEXT, "description": "Optional favorite model ID from the current provider."},
+            "agent_id": {**_TEXT, "description": "Optional agent_id from a previous run_subagent call to resume that subagent with its full prior context preserved."},
+            "run_in_background": {"type": "boolean", "description": "When true, launch the subagent asynchronously in the background and return its agent_id immediately. Use check_subagent to inspect or await its output."},
+        }, ("subagent_type", "task")),
+        handler="run_subagent",
+        kind="agent",
+        policy_tags=("mutates",),
+        available=lambda self: (self._run_subagent is not None or self._delegate is not None),
+        order=380,
+    ),
+    ToolSpec(
+        key="check_subagent",
+        description="Inspect or await a background subagent started with run_subagent(run_in_background=true).",
+        legacy_schema=_schema({
+            "agent_id": {**_TEXT, "description": "The agent_id returned by run_subagent."},
+            "wait_seconds": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 60,
+                "description": "Optional seconds to wait for completion (0 polls immediately).",
+            },
+        }, ("agent_id",)),
+        handler="check_subagent",
+        kind="agent",
+        read_only=True,
+        available=lambda self: (self._check_subagent is not None or self._run_subagent is not None),
+        order=390,
+    ),
+)

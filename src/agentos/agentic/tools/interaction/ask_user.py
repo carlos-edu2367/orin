@@ -2,12 +2,10 @@
 from __future__ import annotations
 
 from typing import Any, Mapping
+
 from agentos.agentic.models import MAX_USER_QUESTION_ITEMS
-from agentos.agentic.tools._shared import (
-    AgentToolError,
-    ToolOutcome,
-    _QUESTION_ID,
-)
+from agentos.agentic.tools._shared import AgentToolError, ToolOutcome, _QUESTION_ID, _TEXT, _schema
+from agentos.agentic.tools.spec import ToolSpec
 
 
 class AskUserTools:
@@ -77,3 +75,31 @@ class AskUserTools:
             "The structured questions are now visible to the user. Stop here and wait for their next message; do not guess an answer or continue the task yet.",
             {"questions": normalized, "wait_for_user": True, "tool_kind": "user_input", "label": names[:200]},
         )
+
+
+# Tool specs, moved from AgentToolset._build_definitions (W4).
+SPECS: tuple[ToolSpec, ...] = (
+    ToolSpec(
+        key="ask_user",
+        description="Ask the person one or more structured questions, then wait for their next message. Each question uses mode 'checkbox' (zero or more options plus an optional note), 'single_choice' (one option or an optional note), or 'text' (free text). Put independent questions together in the questions array. Do not use this when you can safely proceed without clarification.",
+        legacy_schema=_schema({
+            "questions": {
+                "type": "array", "minItems": 1, "maxItems": 8,
+                "items": _schema({
+                    "id": {**_TEXT, "description": "Stable short identifier, e.g. deployment_target."},
+                    "question": {**_TEXT, "description": "The question shown to the person."},
+                    "mode": {"type": "string", "enum": ["checkbox", "single_choice", "text"]},
+                    "options": {
+                        "type": "array", "maxItems": 12,
+                        "items": _schema({"id": _TEXT, "label": _TEXT}, ("id", "label")),
+                    },
+                    "placeholder": _TEXT,
+                }, ("id", "question", "mode")),
+            },
+        }, ("questions",)),
+        handler="ask_user",
+        kind="user_input",
+        policy_tags=("user_input",),
+        order=200,
+    ),
+)

@@ -5,10 +5,9 @@ import json
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
-from agentos.agentic.tools._shared import (
-    AgentToolError,
-    ToolOutcome,
-)
+
+from agentos.agentic.tools._shared import AgentToolError, ToolOutcome, _TEXT, _schema
+from agentos.agentic.tools.spec import ToolSpec
 
 
 class ProjectTools:
@@ -244,3 +243,116 @@ class ProjectTools:
                 "project_action": "read_conversation",
             },
         }
+
+
+# Tool specs, moved from AgentToolset._build_definitions (W4).
+SPECS: tuple[ToolSpec, ...] = (
+    ToolSpec(
+        key="propose_code_session",
+        description="Suggest starting a dedicated Orin Code session for a multi-file coding task, refactoring, or test execution, or when the user asks to open/continue work in Orin Code. Presents an interactive card where the user can review and edit the folder, model/provider, permission mode, and prompt before launching.",
+        legacy_schema=_schema(
+            {
+                "title": {**_TEXT, "description": "Short title for the new Code session."},
+                "prompt": {
+                    **_TEXT,
+                    "description": "Self-contained task specification for the Orin Code session's first message (objective, relevant context from this chat, target files, acceptance criteria).",
+                },
+                "workspace_path": {
+                    **_TEXT,
+                    "description": "Suggested local folder path. Defaults to the conversation/project's current local folder if any.",
+                },
+                "provider": {
+                    **_TEXT,
+                    "description": "Suggested provider name. Defaults to the current conversation's provider.",
+                },
+                "model_id": {
+                    **_TEXT,
+                    "description": "Suggested model ID. Defaults to the current conversation's model.",
+                },
+                "permission_mode": {
+                    "type": "string",
+                    "enum": ["accept_edits", "plan_mode", "ask_permissions"],
+                    "description": "Suggested permission mode (default 'accept_edits').",
+                },
+            },
+            ("title", "prompt"),
+        ),
+        handler="propose_code_session",
+        kind="code_handoff",
+        policy_tags=("user_input",),
+        available=lambda self: (not self._code_mode_active),
+        order=550,
+    ),
+    ToolSpec(
+        key="list_projects",
+        description="List this user's active projects with their attached local folders and conversations.",
+        legacy_schema=_schema({}),
+        handler="list_projects",
+        kind="project",
+        read_only=True,
+        available=lambda self: (self._project_store is not None and self._project_user_id),
+        order=560,
+    ),
+    ToolSpec(
+        key="create_project_from_session",
+        description="Create a new project from the current session, attach the current workspace folder (or a specified workspace_path), and move this conversation into the new project.",
+        legacy_schema=_schema(
+            {
+                "name": {**_TEXT, "description": "Project name (1..120 characters)."},
+                "description": {**_TEXT, "description": "Optional project description."},
+                "workspace_path": {
+                    **_TEXT,
+                    "description": "Optional local directory path to attach to the project. Defaults to the current conversation's local folder if any.",
+                },
+            },
+            ("name",),
+        ),
+        handler="create_project_from_session",
+        kind="project",
+        policy_tags=("mutates",),
+        available=lambda self: (self._project_store is not None and self._project_user_id),
+        order=570,
+    ),
+    ToolSpec(
+        key="move_session_to_project",
+        description="Move the current conversation into an existing project, sharing its workspace and project memory across sessions.",
+        legacy_schema=_schema(
+            {
+                "project_id": {**_TEXT, "description": "Target project ID (from list_projects)."},
+            },
+            ("project_id",),
+        ),
+        handler="move_session_to_project",
+        kind="project",
+        policy_tags=("mutates",),
+        available=lambda self: (self._project_store is not None and self._project_user_id),
+        order=580,
+    ),
+    ToolSpec(
+        key="read_project_conversation",
+        description="Read recent messages from another conversation belonging to this user or project so you can continue context across Chat and Code sessions.",
+        legacy_schema=_schema(
+            {
+                "conversation_id": {**_TEXT, "description": "ID of the sibling conversation to read."},
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 50,
+                    "description": "Maximum number of recent messages to read (default 20).",
+                },
+                "max_messages": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 50,
+                    "description": "Alias for limit.",
+                },
+            },
+            ("conversation_id",),
+        ),
+        handler="read_project_conversation",
+        kind="project",
+        read_only=True,
+        available=lambda self: (self._chat_store is not None and self._project_user_id),
+        order=590,
+    ),
+)

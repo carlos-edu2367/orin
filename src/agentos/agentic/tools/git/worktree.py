@@ -3,10 +3,9 @@ from __future__ import annotations
 
 import json
 from typing import Any
-from agentos.agentic.tools._shared import (
-    AgentToolError,
-    ToolOutcome,
-)
+
+from agentos.agentic.tools._shared import AgentToolError, ToolOutcome, _TEXT, _schema
+from agentos.agentic.tools.spec import ToolSpec
 
 
 class WorktreeTools:
@@ -94,3 +93,38 @@ class WorktreeTools:
             content,
             {"tool_kind": "terminal", "action": clean_action, "worktree_name": wt_name},
         )
+
+
+# Tool specs, moved from AgentToolset._build_definitions (W4).
+SPECS: tuple[ToolSpec, ...] = (
+    ToolSpec(
+        key="enter_worktree",
+        description="Create or switch to an isolated Git worktree inside .orin/worktrees/<name> on branch worktree-<name>, and copy .worktreeinclude files.",
+        legacy_schema=_schema({
+            "name": {**_TEXT, "description": "Optional slug for the worktree name. Generated automatically when omitted."},
+            "base_branch": {**_TEXT, "description": "Optional base Git ref/branch to branch from. Defaults to HEAD."},
+        }),
+        handler="enter_worktree",
+        kind="terminal",
+        policy_tags=("mutates",),
+        available=lambda self: (self._enable_terminal),
+        order=280,
+    ),
+    ToolSpec(
+        key="exit_worktree",
+        description="Exit the current Git worktree and return the workspace root to the main repository checkout.",
+        legacy_schema=_schema({
+            "action": {
+                "type": "string",
+                "enum": ["keep", "remove"],
+                "description": "Whether to keep the worktree on disk or remove it ('keep' or 'remove'). Defaults to 'keep'.",
+            },
+            "force": {"type": "boolean", "description": "Force removal even when uncommitted changes exist."},
+        }),
+        handler="exit_worktree",
+        kind="terminal",
+        policy_tags=("mutates",),
+        available=lambda self: (self._enable_terminal),
+        order=290,
+    ),
+)

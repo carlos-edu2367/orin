@@ -2,14 +2,13 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 import re
+from pathlib import Path
 from typing import Any
+
 from agentos.agentic.workspace import MAX_SEARCH_RESULTS
-from agentos.agentic.tools._shared import (
-    AgentToolError,
-    _GLOB_IGNORED_DIRS,
-)
+from agentos.agentic.tools._shared import AgentToolError, _GLOB_IGNORED_DIRS, _TEXT, _schema
+from agentos.agentic.tools.spec import ToolSpec
 
 
 class GrepTools:
@@ -270,3 +269,39 @@ class GrepTools:
             "content": body,
             "payload": payload,
         }
+
+
+# Tool specs, moved from AgentToolset._build_definitions (W4).
+SPECS: tuple[ToolSpec, ...] = (
+    ToolSpec(
+        key="search_files",
+        description="Search file contents in the conversation workspace with a regular expression (Grep parity). Supports output_mode ('content', 'files_with_matches', 'count'), context lines (before_context, after_context, context_lines), multiline matching, and head_limit.",
+        legacy_schema=_schema({
+            "pattern": {**_TEXT, "description": "Python regular expression."},
+            "query": {**_TEXT, "description": "Alias for pattern."},
+            "path": {**_TEXT, "description": "Optional workspace-relative directory or file to search within."},
+            "glob": {**_TEXT, "description": "Relative glob filter, e.g. '**/*.py'. Defaults to every file."},
+            "file_pattern": {**_TEXT, "description": "Alias for glob filter, e.g. '*.py'."},
+            "type": {**_TEXT, "description": "Optional file type/extension filter, e.g. 'py', 'ts'."},
+            "output_mode": {
+                "type": "string",
+                "enum": ["content", "files_with_matches", "count"],
+                "description": "Output mode: 'content' (matching lines), 'files_with_matches' (file paths only), or 'count' (match counts per file).",
+            },
+            "before_context": {"type": "integer", "minimum": 0, "maximum": 50, "description": "Number of lines to show before each match (-B)."},
+            "after_context": {"type": "integer", "minimum": 0, "maximum": 50, "description": "Number of lines to show after each match (-A)."},
+            "context_lines": {"type": "integer", "minimum": 0, "maximum": 50, "description": "Number of lines to show before and after each match (-C)."},
+            "multiline": {"type": "boolean", "description": "Allow patterns to span across multiple lines (. matches newline)."},
+            "head_limit": {"type": "integer", "minimum": 1, "maximum": 500, "description": "Limit output to the first N entries/matches."},
+            "offset": {"type": "integer", "minimum": 0, "description": "Skip the first N matches before applying head_limit/max_results."},
+            "max_results": {"type": "integer", "minimum": 1, "maximum": 200},
+            "ignore_case": {"type": "boolean"},
+            "case_sensitive": {"type": "boolean"},
+            "is_regex": {"type": "boolean"},
+        }),
+        handler="search_files",
+        kind="filesystem",
+        read_only=True,
+        order=90,
+    ),
+)

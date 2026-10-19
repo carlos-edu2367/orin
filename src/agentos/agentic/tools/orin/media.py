@@ -4,10 +4,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from uuid import uuid4
-from agentos.agentic.tools._shared import (
-    AgentToolError,
-    ToolOutcome,
-)
+
+from agentos.agentic.tools._shared import AgentToolError, ToolOutcome, _TEXT, _schema
+from agentos.agentic.tools.spec import ToolSpec
 
 
 class MediaTools:
@@ -203,3 +202,96 @@ class MediaTools:
             json.dumps(payload, ensure_ascii=False, indent=2),
             payload,
         )
+
+
+# Tool specs, moved from AgentToolset._build_definitions (W4).
+SPECS: tuple[ToolSpec, ...] = (
+    ToolSpec(
+        key="generate_image",
+        description="Generate an image using a favorited image model from the active provider and save it into the conversation workspace. Link the returned workspace:// URI in your final response so the user can view it inline.",
+        legacy_schema=lambda self: (
+            _schema(
+                {
+                    "prompt": {**_TEXT, "description": "Detailed prompt describing the image to generate."},
+                    "model": {
+                        **_TEXT,
+                        "description": f"Optional model ID from active provider favorites ({', '.join((self._media_policy.models_for("image")))}). Defaults to '{(self._media_policy.default_model_for("image") or "")}'.",
+                    },
+                    "size": {
+                        **_TEXT,
+                        "description": "Optional image dimensions (e.g. '1024x1024', '1536x1024', '1024x1536'). Defaults to '1024x1024'.",
+                    },
+                    "output_path": {
+                        **_TEXT,
+                        "description": "Optional workspace-relative path to save the generated image (e.g. 'generated/banner.png').",
+                    },
+                },
+                ("prompt",),
+            )
+        ),
+        handler="generate_image",
+        kind="media",
+        policy_tags=("mutates",),
+        available=lambda self: (self._media_policy is not None and not self._read_only_mode) and (self._media_policy.has_modality("image")),
+        order=600,
+    ),
+    ToolSpec(
+        key="generate_audio",
+        description="Generate audio or speech using a favorited audio model from the active provider and save it into the conversation workspace. Link the returned workspace:// URI in your final response so the user can listen inline.",
+        legacy_schema=lambda self: (
+            _schema(
+                {
+                    "text": {**_TEXT, "description": "Text to synthesize into speech or audio prompt to generate."},
+                    "model": {
+                        **_TEXT,
+                        "description": f"Optional model ID from active provider favorites ({', '.join((self._media_policy.models_for("audio")))}). Defaults to '{(self._media_policy.default_model_for("audio") or "")}'.",
+                    },
+                    "voice": {
+                        **_TEXT,
+                        "description": "Optional voice identifier (e.g. 'alloy', 'nova', 'echo', 'onyx', 'fable', 'shimmer'). Defaults to 'alloy'.",
+                    },
+                    "response_format": {
+                        "type": "string",
+                        "enum": ["mp3", "wav", "opus", "aac", "flac"],
+                        "description": "Optional output audio format (default 'mp3').",
+                    },
+                    "output_path": {
+                        **_TEXT,
+                        "description": "Optional workspace-relative path to save the generated audio (e.g. 'generated/audio.mp3').",
+                    },
+                },
+                ("text",),
+            )
+        ),
+        handler="generate_audio",
+        kind="media",
+        policy_tags=("mutates",),
+        available=lambda self: (self._media_policy is not None and not self._read_only_mode) and (self._media_policy.has_modality("audio")),
+        order=610,
+    ),
+    ToolSpec(
+        key="generate_video",
+        description="Generate a video clip using a favorited video model from the active provider and save it into the conversation workspace. Link the returned workspace:// URI in your final response so the user can watch inline.",
+        legacy_schema=lambda self: (
+            _schema(
+                {
+                    "prompt": {**_TEXT, "description": "Detailed prompt describing the video to generate."},
+                    "model": {
+                        **_TEXT,
+                        "description": f"Optional model ID from active provider favorites ({', '.join((self._media_policy.models_for("video")))}). Defaults to '{(self._media_policy.default_model_for("video") or "")}'.",
+                    },
+                    "output_path": {
+                        **_TEXT,
+                        "description": "Optional workspace-relative path to save the generated video (e.g. 'generated/clip.mp4').",
+                    },
+                },
+                ("prompt",),
+            )
+        ),
+        handler="generate_video",
+        kind="media",
+        policy_tags=("mutates",),
+        available=lambda self: (self._media_policy is not None and not self._read_only_mode) and (self._media_policy.has_modality("video")),
+        order=620,
+    ),
+)

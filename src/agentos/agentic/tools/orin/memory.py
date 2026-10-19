@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 from typing import Any
-from agentos.agentic.tools._shared import (
-    AgentToolError,
-)
+
+from agentos.agentic.tools._shared import AgentToolError, _TEXT, _schema
+from agentos.agentic.tools.spec import ToolSpec
 
 
 class MemoryTools:
@@ -34,3 +34,28 @@ class MemoryTools:
             "content": body,
             "payload": {"count": len(matches), "label": str(query)[:80]},
         }
+
+
+# Tool specs, moved from AgentToolset._build_definitions (W4).
+SPECS: tuple[ToolSpec, ...] = (
+    ToolSpec(
+        key="remember",
+        description="Save a durable fact about the user or the project for future conversations.",
+        legacy_schema=_schema({"fact": _TEXT, "tags": {"type": "array", "items": _TEXT}}, ("fact",)),
+        handler="remember",
+        kind="memory",
+        policy_tags=("mutates",),
+        available=lambda self: (self.memory is not None),
+        order=330,
+    ),
+    ToolSpec(
+        key="recall",
+        description="Search previously saved facts.",
+        legacy_schema=_schema({"query": _TEXT}, ("query",)),
+        handler="recall",
+        kind="memory",
+        read_only=True,
+        available=lambda self: (self.memory is not None),
+        order=340,
+    ),
+)

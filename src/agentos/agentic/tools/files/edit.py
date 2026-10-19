@@ -2,10 +2,9 @@
 from __future__ import annotations
 
 from typing import Any, Mapping
-from agentos.agentic.tools._shared import (
-    AgentToolError,
-    compute_structured_patch,
-)
+
+from agentos.agentic.tools._shared import AgentToolError, compute_structured_patch, _TEXT, _schema
+from agentos.agentic.tools.spec import ToolSpec
 
 
 class EditTools:
@@ -108,3 +107,27 @@ class EditTools:
                 "updated_sha256": updated_sha,
             },
         }
+
+
+# Tool specs, moved from AgentToolset._build_definitions (W4).
+SPECS: tuple[ToolSpec, ...] = (
+    ToolSpec(
+        key="edit_file",
+        description="Replace text fragments in a UTF-8 workspace file. Read the file first. Use either old_text/new_text for one replacement or edits for several; the whole batch is rejected if any fragment is missing or ambiguous.",
+        legacy_schema=_schema({
+            "path": _TEXT,
+            "old_text": {**_TEXT, "description": "Single-replacement form. Use together with new_text and omit edits."},
+            "new_text": {**_TEXT, "description": "Replacement for old_text in the single-replacement form. Omit when using edits."},
+            "edits": {
+                "type": "array",
+                "description": "Batch form. Each item replaces one fragment; they are applied in order.",
+                "items": _schema({"old_text": _TEXT, "new_text": _TEXT}, ("old_text", "new_text")),
+            },
+            "replace_all": {"type": "boolean", "description": "Replace every occurrence instead of requiring a unique one."},
+        }, ("path",)),
+        handler="edit_file",
+        kind="filesystem",
+        policy_tags=("mutates",),
+        order=50,
+    ),
+)

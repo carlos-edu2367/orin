@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import subprocess
 from typing import Any, Mapping
+
 from agentos.agentic.diagnostics import STEP_ORDER, detect_recipe
 from agentos.agentic.tools._shared import (
     AgentToolError,
@@ -12,7 +13,10 @@ from agentos.agentic.tools._shared import (
     SCAFFOLD_RECIPES,
     VERIFY_STEP_TIMEOUT_SECONDS,
     _bounded_output,
+    _TEXT,
+    _schema,
 )
+from agentos.agentic.tools.spec import ToolSpec
 
 
 class VerifyTools:
@@ -121,3 +125,45 @@ class VerifyTools:
             ),
             "payload": {"passed": passed, "findings": findings},
         }
+
+
+# Tool specs, moved from AgentToolset._build_definitions (W4).
+SPECS: tuple[ToolSpec, ...] = (
+    ToolSpec(
+        key="report_verification",
+        description="Conclude verification: state whether every acceptance criterion actually holds, based on what you just "
+        "checked with tools — not a guess. If something does not hold, describe concretely what is broken (the "
+        "actual error, not a hypothesis); you will be sent back to fix it, up to a few rounds. Calling this tool, "
+        "not a plain text reply, is how you leave the verification stage.",
+        legacy_schema=_schema({
+            "passed": {"type": "boolean", "description": "True only if every acceptance criterion was checked with a tool and holds."},
+            "findings": {**_TEXT, "description": "What you checked and, when passed=false, exactly what is broken and where."},
+        }, ("passed",)),
+        handler="report_verification",
+        kind="planning",
+        order=110,
+    ),
+    ToolSpec(
+        key="verify_project",
+        description="Detect the project's stack from its manifest (package.json, pyproject.toml, requirements.txt, go.mod, "
+        "Cargo.toml) and run its install, typecheck, lint, build and test steps in that order, reporting exactly "
+        "what passed and what failed with each step's real output. Use this instead of guessing which command to "
+        "run for a stack you did not write yourself. Omit steps to run everything detected; pass steps to skip a "
+        "slow one you already know is satisfied (e.g. skip 'install' once dependencies are installed).",
+        legacy_schema=_schema({
+            "steps": {
+                "type": "array", "items": {"type": "string", "enum": list(STEP_ORDER)},
+                "description": "Subset of steps to run (always executed in the canonical order regardless of the order given here). Omit to run every step the project has.",
+            },
+            "scaffold": {
+                "type": "string", "enum": sorted(SCAFFOLD_RECIPES),
+                "description": "Create a new project from the official stack generator. Use only in a new workspace; this runs the curated generator and dependency install sequence.",
+            },
+        }),
+        handler="verify_project",
+        kind="terminal",
+        policy_tags=("mutates",),
+        available=lambda self: (self._enable_terminal),
+        order=270,
+    ),
+)

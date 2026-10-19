@@ -2,11 +2,17 @@
 from __future__ import annotations
 
 from typing import Any, Mapping
+
 from agentos.agentic.tools._shared import (
     ContractError,
     ToolOutcome,
     parse_contract,
+    TOOLKITS,
+    VERIFICATION_MODES,
+    _TEXT,
+    _schema,
 )
+from agentos.agentic.tools.spec import ToolSpec
 
 
 class PlanModeTools:
@@ -150,3 +156,81 @@ class PlanModeTools:
             "\n".join(body_parts),
             payload,
         )
+
+
+# Tool specs, moved from AgentToolset._build_definitions (W4).
+SPECS: tuple[ToolSpec, ...] = (
+    ToolSpec(
+        key="write_contract",
+        description="Declare what this task is and how it will be judged done, before doing it. "
+        "State the objective, the files you will produce, the constraints you must respect, "
+        "the acceptance criteria that must all hold before you may claim completion, and the "
+        "tool families you need. Call it again to revise the contract when the task turns out "
+        "to be different from what you assumed.",
+        legacy_schema=_schema({
+            "objective": {**_TEXT, "description": "One sentence: what the person actually wants."},
+            "deliverables": {
+                "type": "array", "maxItems": 12,
+                "description": "Files this task must produce or change.",
+                "items": _schema({"path": _TEXT, "description": _TEXT}, ("path", "description")),
+            },
+            "constraints": {
+                "type": "array", "maxItems": 12, "items": _TEXT,
+                "description": "What you must not do, or must preserve.",
+            },
+            "acceptance": {
+                "type": "array", "minItems": 1, "maxItems": 12,
+                "description": "Checks that must all pass before you report success.",
+                "items": _schema({
+                    "id": {**_TEXT, "description": "Short identifier, e.g. total_correto."},
+                    "check": {**_TEXT, "description": "The condition, stated so it can be confirmed."},
+                    "how": {"type": "string", "enum": sorted(VERIFICATION_MODES), "description": "'tool' to run something, 'inspection' to look at something."},
+                }, ("id", "check", "how")),
+            },
+            "toolkits": {
+                "type": "array", "minItems": 1, "maxItems": 7,
+                "items": {"type": "string", "enum": sorted(TOOLKITS)},
+                "description": "Only the families you actually need; unlisted tools stay unavailable.",
+            },
+            "steps": {
+                "type": "array", "maxItems": 12, "items": _TEXT,
+                "description": "Your intended plan. Guidance, not a commitment.",
+            },
+        }, ("objective", "acceptance", "toolkits")),
+        handler="write_contract",
+        kind="planning",
+        order=100,
+    ),
+    ToolSpec(
+        key="enter_plan_mode",
+        description="Enter read-only Plan Mode for the current turn. In Plan Mode, mutating tools are blocked except writing or editing plan files inside .orin/plans/. Use this to explore the codebase and draft a plan before implementation.",
+        legacy_schema=_schema({
+            "reason": {**_TEXT, "description": "Why planning is needed before modifying project files."},
+        }),
+        handler="enter_plan_mode",
+        kind="planning",
+        read_only=True,
+        order=120,
+    ),
+    ToolSpec(
+        key="exit_plan_mode",
+        description="Exit Plan Mode after writing the plan in .orin/plans/ and present it for review or transition back to implementation.",
+        legacy_schema=_schema({
+            "plan_path": {**_TEXT, "description": "Workspace-relative path to the plan file inside .orin/plans/."},
+            "summary": {**_TEXT, "description": "Concise summary of the proposed plan."},
+            "allowed_prompts": {
+                "type": "array",
+                "items": {"type": "object", "additionalProperties": True},
+                "description": "Optional prompt-based permissions needed to implement the plan.",
+            },
+            "allowedPrompts": {
+                "type": "array",
+                "items": {"type": "object", "additionalProperties": True},
+            },
+        }),
+        handler="exit_plan_mode",
+        kind="planning",
+        read_only=True,
+        order=130,
+    ),
+)

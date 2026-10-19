@@ -3,9 +3,9 @@ from __future__ import annotations
 
 import json
 from typing import Any, Mapping
-from agentos.agentic.tools._shared import (
-    AgentToolError,
-)
+
+from agentos.agentic.tools._shared import AgentToolError, _TEXT, _schema
+from agentos.agentic.tools.spec import ToolSpec
 
 
 class TaskTools:
@@ -198,3 +198,78 @@ class TaskTools:
                 "tool_kind": "planning",
             },
         }
+
+
+# Tool specs, moved from AgentToolset._build_definitions (W4).
+SPECS: tuple[ToolSpec, ...] = (
+    ToolSpec(
+        key="task_create",
+        description="Create a structured task in the session task list.",
+        legacy_schema=_schema({
+            "subject": {**_TEXT, "description": "Brief imperative title for the task."},
+            "content": {**_TEXT, "description": "Alias for subject."},
+            "description": {**_TEXT, "description": "Detailed description of what the task entails."},
+            "activeForm": {**_TEXT, "description": "Present continuous label shown while in_progress."},
+            "active_form": {**_TEXT, "description": "Alias for activeForm."},
+            "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]},
+            "owner": {**_TEXT, "description": "Optional owner/agent name."},
+            "metadata": {"type": "object", "additionalProperties": True},
+        }, ("subject",)),
+        handler="task_create",
+        kind="planning",
+        read_only=True,
+        order=150,
+    ),
+    ToolSpec(
+        key="task_update",
+        description="Update an existing task in the session task list by ID (status, subject, description, dependencies, or delete).",
+        legacy_schema=_schema({
+            "taskId": {**_TEXT, "description": "ID of the task to update."},
+            "task_id": {**_TEXT, "description": "Alias for taskId."},
+            "id": {**_TEXT, "description": "Alias for taskId."},
+            "status": {"type": "string", "enum": ["pending", "in_progress", "completed", "deleted"]},
+            "subject": {**_TEXT, "description": "Updated task subject."},
+            "description": {**_TEXT, "description": "Updated task description."},
+            "activeForm": {**_TEXT, "description": "Updated present-continuous activeForm."},
+            "active_form": {**_TEXT, "description": "Alias for activeForm."},
+            "owner": {**_TEXT, "description": "Optional owner/agent name."},
+            "addBlocks": {"type": "array", "items": _TEXT},
+            "add_blocks": {"type": "array", "items": _TEXT},
+            "addBlockedBy": {"type": "array", "items": _TEXT},
+            "add_blocked_by": {"type": "array", "items": _TEXT},
+            "metadata": {"type": "object", "additionalProperties": True},
+        }),
+        handler="task_update",
+        kind="planning",
+        read_only=True,
+        order=160,
+    ),
+    ToolSpec(
+        key="task_get",
+        description="Retrieve full details of a task by ID from the session task list.",
+        legacy_schema=_schema({
+            "taskId": {**_TEXT, "description": "ID of the task to retrieve."},
+            "task_id": {**_TEXT, "description": "Alias for taskId."},
+            "id": {**_TEXT, "description": "Alias for taskId."},
+        }),
+        handler="task_get",
+        kind="planning",
+        read_only=True,
+        order=170,
+    ),
+    ToolSpec(
+        key="task_list",
+        description="List all tasks in the session task list.",
+        legacy_schema=_schema({
+            "status": {
+                "type": "string",
+                "enum": ["pending", "in_progress", "completed"],
+                "description": "Optional status filter.",
+            },
+        }),
+        handler="task_list",
+        kind="planning",
+        read_only=True,
+        order=180,
+    ),
+)

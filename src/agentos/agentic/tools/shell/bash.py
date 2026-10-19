@@ -1,18 +1,19 @@
 """Bash tools: methods of AgentToolset that live in their own module (W4 split)."""
 from __future__ import annotations
 
-from datetime import UTC, datetime
 import json
 import os
-from pathlib import Path
 import re
 import shutil
 import subprocess
 import tempfile
 import threading
 import time
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Mapping
 from uuid import uuid4
+
 from agentos.agentic.workspace import WorkspaceError
 from agentos.agentic.reminders import system_reminder
 from agentos.agentic.tools._shared import (
@@ -31,7 +32,10 @@ from agentos.agentic.tools._shared import (
     _bounded_output,
     _process_is_running,
     _terminate_process_tree,
+    _TEXT,
+    _schema,
 )
+from agentos.agentic.tools.spec import ToolSpec
 
 
 class BashTools:
@@ -569,3 +573,29 @@ class BashTools:
         # the oldest tracked processes (by insertion order) fall off first.
         trimmed = dict(list(manifest.items())[-MAX_TRACKED_PROCESSES:])
         self.workspace.write_text(_PROCESS_MANIFEST_PATH, json.dumps(trimmed))
+
+
+# Tool specs, moved from AgentToolset._build_definitions (W4).
+SPECS: tuple[ToolSpec, ...] = (
+    ToolSpec(
+        key="run_command",
+        description="Run one shell command inside the conversation workspace and return its output. Set background=true only for a "
+        "long-lived process (e.g. a dev server); it returns immediately and you read its output later with read_process_output. "
+        "Raise timeout_seconds for a slow install or build instead of splitting it into smaller commands.",
+        legacy_schema=_schema({
+            "command": {**_TEXT, "description": "A single command line, executed non-interactively (stdin is closed)."},
+            "description": {**_TEXT, "description": "Short 5-10 word description of what this command does."},
+            "background": {"type": "boolean", "description": "Start without waiting; use only for persistent servers."},
+            "timeout_seconds": {
+                "type": "integer", "minimum": 1, "maximum": MAX_COMMAND_TIMEOUT_SECONDS,
+                "description": f"How long to wait for the command to finish. Defaults to {DEFAULT_COMMAND_TIMEOUT_SECONDS}s. Ignored when background=true.",
+            },
+            "cwd": {**_TEXT, "description": "Workspace-relative directory to run the command from. Defaults to the workspace root."},
+        }, ("command",)),
+        handler="run_command",
+        kind="terminal",
+        policy_tags=("mutates",),
+        available=lambda self: (self._enable_terminal),
+        order=240,
+    ),
+)

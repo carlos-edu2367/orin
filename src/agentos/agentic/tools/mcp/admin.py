@@ -3,11 +3,9 @@ from __future__ import annotations
 
 import json
 from typing import Any, Mapping
-from agentos.agentic.tools._shared import (
-    AgentToolError,
-    ToolDefinition,
-    ToolOutcome,
-)
+
+from agentos.agentic.tools._shared import AgentToolError, ToolDefinition, ToolOutcome, _TEXT, _schema
+from agentos.agentic.tools.spec import ToolSpec
 
 
 class McpTools:
@@ -295,3 +293,156 @@ class McpTools:
             str(raw_result.get("content") or ""),
             dict(raw_result.get("payload") or {"tool_kind": "mcp"}),
         )
+
+
+# Tool specs, moved from AgentToolset._build_definitions (W4).
+SPECS: tuple[ToolSpec, ...] = (
+    ToolSpec(
+        key="list_mcp_catalog",
+        description="List the MCP servers Orin knows how to connect. Use this first when the user asks to connect a tool: each entry explains what the server does and exactly which credential the user has to fetch.",
+        legacy_schema=_schema({"query": {**_TEXT, "description": "Filter by name or subject, e.g. 'github'. Omit for the whole catalog."}}),
+        handler="list_mcp_catalog",
+        kind="mcp",
+        read_only=True,
+        available=lambda self: (self._mcp_service is not None and self._mcp_user_id),
+        order=460,
+    ),
+    ToolSpec(
+        key="list_mcp_servers",
+        description="List the MCP servers this user already configured, with their state and tool count.",
+        legacy_schema=_schema({}),
+        handler="list_mcp_servers",
+        kind="mcp",
+        read_only=True,
+        available=lambda self: (self._mcp_service is not None and self._mcp_user_id),
+        order=470,
+    ),
+    ToolSpec(
+        key="configure_mcp",
+        description="Propose an MCP server connection. This never activates the server and never accepts a credential value: it creates a pending configuration and shows the user an approval card where they type any secret themselves. Explain to the user what the server does and which credential they will need before calling this.",
+        legacy_schema=_schema({
+            "display_name": {**_TEXT, "description": "How the connection appears in Settings, e.g. 'GitHub'."},
+            "catalog_id": {**_TEXT, "description": "Id from list_mcp_catalog. Fills transport, command and required secrets."},
+            "transport": {"type": "string", "enum": ["stdio", "http"], "description": "Only for a server outside the catalog."},
+            "command": {**_TEXT, "description": "stdio launcher, e.g. 'npx'. Only for a server outside the catalog."},
+            "args": {"type": "array", "items": _TEXT},
+            "url": {**_TEXT, "description": "https endpoint. Only for a server outside the catalog."},
+            "secret_names": {"type": "array", "items": _TEXT, "description": "Names of the credentials the server needs. Names only — never values."},
+        }, ("display_name",)),
+        handler="configure_mcp",
+        kind="mcp",
+        policy_tags=("mutates",),
+        available=lambda self: (self._mcp_service is not None and self._mcp_user_id),
+        order=480,
+    ),
+    ToolSpec(
+        key="test_mcp_server",
+        description="Re-run discovery against an already approved MCP server and report whether it answers and which tools it publishes.",
+        legacy_schema=_schema({"slug": _TEXT}, ("slug",)),
+        handler="test_mcp_server",
+        kind="mcp",
+        available=lambda self: (self._mcp_service is not None and self._mcp_user_id),
+        order=490,
+    ),
+    ToolSpec(
+        key="search_mcp_tools",
+        description="Search tools across connected MCP servers by tool name, description, or JSON schema (parameter names, descriptions, enum values). Returns the full input_schema of matching tools and activates them in the current turn so they can also be called directly.",
+        legacy_schema=_schema(
+            {
+                "query": {
+                    **_TEXT,
+                    "description": "Keywords, tool name, parameter name, or concept to search for (supports Portuguese and English). Leave empty to list tools alphabetically.",
+                },
+                "server": {
+                    **_TEXT,
+                    "description": "Optional MCP server slug or display name to filter results.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 50,
+                    "description": "Maximum number of matching tools to return (default 10).",
+                },
+                "activate": {
+                    "type": "boolean",
+                    "description": "Whether to activate the matched tools in the current turn's tool schemas (default true).",
+                },
+            },
+            (),
+        ),
+        handler="search_mcp_tools",
+        kind="mcp",
+        read_only=True,
+        policy_tags=("mcp",),
+        max_result_chars=100_000,
+        available=lambda self: (self._mcp_provider is not None),
+        order=630,
+    ),
+    ToolSpec(
+        key="inspect_mcp_server",
+        description="Pull complete metadata and the full list of tools from a connected MCP server. Optionally include full JSON input_schemas or activate all returned tools in the current turn.",
+        legacy_schema=_schema(
+            {
+                "server": {
+                    **_TEXT,
+                    "description": "MCP server slug or display name to inspect.",
+                },
+                "include_schemas": {
+                    "type": "boolean",
+                    "description": "If true, include the full JSON input_schema for every returned tool (default false).",
+                },
+                "activate_all": {
+                    "type": "boolean",
+                    "description": "If true, activate all returned tools in the current turn's tool schemas (default false).",
+                },
+                "offset": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Pagination offset (default 0).",
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 500,
+                    "description": "Maximum number of tools to return in this page (default 200).",
+                },
+            },
+            ("server",),
+        ),
+        handler="inspect_mcp_server",
+        kind="mcp",
+        read_only=True,
+        policy_tags=("mcp",),
+        max_result_chars=100_000,
+        available=lambda self: (self._mcp_provider is not None),
+        order=640,
+    ),
+    ToolSpec(
+        key="call_mcp_tool",
+        description="Invoke a tool on a connected MCP server directly by server slug/name and tool name without waiting for a new turn iteration.",
+        legacy_schema=_schema(
+            {
+                "server": {
+                    **_TEXT,
+                    "description": "MCP server slug or display name (e.g. 'auryly').",
+                },
+                "tool": {
+                    **_TEXT,
+                    "description": "Tool name on the server (e.g. 'get_funnel_metrics') or qualified name ('mcp__auryly__get_funnel_metrics').",
+                },
+                "arguments": {
+                    "type": "object",
+                    "description": "Arguments object matching the tool's input_schema.",
+                },
+            },
+            ("server", "tool"),
+        ),
+        handler="call_mcp_tool",
+        kind="mcp",
+        read_only=False,
+        policy_tags=("mcp", "mutates"),
+        max_result_chars=100_000,
+        available=lambda self: (self._mcp_provider is not None),
+        order=650,
+    ),
+)

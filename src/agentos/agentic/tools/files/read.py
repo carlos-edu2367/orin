@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 from typing import Any
+
 from agentos.reading.extract import extract_text
 from agentos.reading.render import ImageTooLarge, normalize_image, render_pdf_pages
 from agentos.reading.vision import VisionUnavailable
@@ -17,7 +18,10 @@ from agentos.agentic.tools._shared import (
     _READ_ORDER,
     _bounded,
     image_block,
+    _TEXT,
+    _schema,
 )
+from agentos.agentic.tools.spec import ToolSpec
 
 
 class ReadTools:
@@ -476,3 +480,46 @@ class ReadTools:
             "payload": {"path": path, "media_type": "application/pdf", "label": path, "visual_read": True, "pages": list(pages)},
             "images": [],
         }
+
+
+# Tool specs, moved from AgentToolset._build_definitions (W4).
+SPECS: tuple[ToolSpec, ...] = (
+    ToolSpec(
+        key="read_file",
+        description="Read a UTF-8 text file or PDF page range from the conversation workspace. Output is line-numbered. Use offset/limit to read a long file in windows instead of guessing, or pages (e.g. '1-5') for PDFs.",
+        legacy_schema=_schema({
+            "path": {**_TEXT, "description": "Workspace-relative path, e.g. notes/plan.md"},
+            "offset": {"type": "integer", "minimum": 1, "description": "First line to return (1-based). Defaults to 1."},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 800, "description": "How many lines to return. Defaults to 400."},
+            "pages": {**_TEXT, "description": "Optional page range for PDF files (e.g. '1-5' or '3', max 20 pages)."},
+            "force_reload": {"type": "boolean", "description": "Force re-reading full content even if unchanged since last read."},
+        }, ("path",)),
+        handler="read_file",
+        kind="filesystem",
+        read_only=True,
+        order=10,
+    ),
+    ToolSpec(
+        key="view_file",
+        description="Read a document or an image from the conversation workspace: PDF, Word, Excel, PowerPoint, plain text, or a picture. Use this instead of read_file whenever the file is not plain text.",
+        legacy_schema=_schema({
+            "path": {**_TEXT, "description": "Workspace-relative path, e.g. uploads/nota.pdf"},
+            "question": {**_TEXT, "description": "What you need from the file. Guides the visual reading of an image or a scanned page."},
+        }, ("path",)),
+        handler="view_file",
+        kind="filesystem",
+        read_only=True,
+        order=20,
+    ),
+    ToolSpec(
+        key="transcribe_pdf",
+        description="Extract the native text layer from a PDF without visual reading. Prefer this for PDFs when ordinary text is enough; use view_file only when layout, images, tables, diagrams, or pages without a text layer matter.",
+        legacy_schema=_schema({
+            "path": {**_TEXT, "description": "Workspace-relative PDF path, e.g. uploads/relatorio.pdf"},
+        }, ("path",)),
+        handler="transcribe_pdf",
+        kind="filesystem",
+        read_only=True,
+        order=30,
+    ),
+)

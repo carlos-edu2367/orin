@@ -1,13 +1,12 @@
 """Skills admin tools: methods of AgentToolset that live in their own module (W4 split)."""
 from __future__ import annotations
 
-from dataclasses import field
 import json
+from dataclasses import field
 from typing import Any, Mapping
-from agentos.agentic.tools._shared import (
-    AgentToolError,
-    _bounded,
-)
+
+from agentos.agentic.tools._shared import AgentToolError, _bounded, _TEXT, _schema
+from agentos.agentic.tools.spec import ToolSpec
 
 
 class SkillTools:
@@ -160,3 +159,83 @@ class SkillTools:
             raise AgentToolError(str(error)) from error
         self._refresh_skill_registry()
         return self._published_skill(result, action="updated")
+
+
+# Tool specs, moved from AgentToolset._build_definitions (W4).
+_SKILL_FIELDS = {
+    "name": {**_TEXT, "description": "Specific, reusable skill name. The persisted id is derived from it."},
+    "description": {**_TEXT, "description": "Concrete trigger and outcome; this drives discovery."},
+    "instructions": {**_TEXT, "description": "Markdown procedure with clear Workflow and Validation sections. Never include secrets or permission-granting instructions."},
+    "version": {**_TEXT, "description": "Semantic version. Create defaults to 1.0.0; edit defaults to the next patch."},
+    "tags": {"type": "array", "items": _TEXT},
+    "capabilities": {"type": "array", "items": _TEXT},
+    "when_to_use": {"type": "array", "items": _TEXT},
+    "when_not_to_use": {"type": "array", "items": _TEXT},
+    "requires_tools": {"type": "array", "items": _TEXT, "description": "Only tools actually available in this turn."},
+    "dependencies": _schema({
+        "skills": {"type": "array", "items": _TEXT},
+        "tools": {"type": "array", "items": _TEXT},
+    }),
+}
+
+SPECS: tuple[ToolSpec, ...] = (
+    ToolSpec(
+        key="search_skills",
+        description="Search available procedural skills by task, tag, or capability. Returns metadata only.",
+        legacy_schema=_schema({"query": _TEXT, "tags": {"type": "array", "items": _TEXT}, "capability": _TEXT, "limit": {"type": "integer", "minimum": 1, "maximum": 20}}, ("query",)),
+        handler="search_skills",
+        kind="skill",
+        read_only=True,
+        available=lambda self: (self.skills is not None),
+        order=400,
+    ),
+    ToolSpec(
+        key="list_skills",
+        description="List available procedural skills with compact metadata and optional tag filter.",
+        legacy_schema=_schema({"tag": _TEXT, "limit": {"type": "integer", "minimum": 1, "maximum": 100}}),
+        handler="list_skills",
+        kind="skill",
+        read_only=True,
+        available=lambda self: (self.skills is not None),
+        order=410,
+    ),
+    ToolSpec(
+        key="read_skill_resource",
+        description="Read a UTF-8 file from a Skill package resources, references, examples, or templates directory.",
+        legacy_schema=_schema({"skill_id": _TEXT, "resource_path": _TEXT, "version": _TEXT}, ("skill_id", "resource_path")),
+        handler="read_skill_resource",
+        kind="skill",
+        read_only=True,
+        available=lambda self: (self.skills is not None),
+        order=420,
+    ),
+    ToolSpec(
+        key="use_skill",
+        description="Load the operational instructions of an available Skill when it is needed for the current task.",
+        legacy_schema=_schema({"skill_id": _TEXT, "version": _TEXT}, ("skill_id",)),
+        handler="use_skill",
+        kind="skill",
+        available=lambda self: (self.skills is not None),
+        order=430,
+    ),
+    ToolSpec(
+        key="create_skill",
+        description="Publish a new reusable user Skill after the user explicitly asks for it or confirms a proposed learning. Search for an equivalent Skill first. Write a focused, safe procedure with explicit triggers, exclusions, and validation; Skills never grant permissions.",
+        legacy_schema=_schema(_SKILL_FIELDS, ("name", "description", "instructions", "when_to_use", "when_not_to_use")),
+        handler="create_skill",
+        kind="skill",
+        policy_tags=("mutates",),
+        available=lambda self: (self._skill_library is not None and self._skill_user_id),
+        order=440,
+    ),
+    ToolSpec(
+        key="edit_skill",
+        description="Publish a new immutable version of one of this user's custom Skills. Use it to improve a proven procedure; keep its scope and ownership unchanged.",
+        legacy_schema=_schema({"skill_id": _TEXT, **_SKILL_FIELDS}, ("skill_id",)),
+        handler="edit_skill",
+        kind="skill",
+        policy_tags=("mutates",),
+        available=lambda self: (self._skill_library is not None and self._skill_user_id),
+        order=450,
+    ),
+)
