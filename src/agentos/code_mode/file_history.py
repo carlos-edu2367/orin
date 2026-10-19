@@ -103,6 +103,44 @@ def _inside(target: Path, roots: Sequence[Path]) -> bool:
     return False
 
 
+def _working_root(target: Path, roots: Sequence[Path]) -> Path | None:
+    """The root that holds ``target`` by its spelling, or None."""
+    absolute = Path(os.path.abspath(target))
+    for root in roots:
+        candidate = Path(os.path.abspath(root))
+        try:
+            absolute.relative_to(candidate)
+        except ValueError:
+            continue
+        return candidate
+    return None
+
+
+def _intact_root(root: Path) -> bool:
+    """A working directory is intact when it is not a link and resolves to the path it was given (W4-R12)."""
+    if _is_link(root):
+        return False
+    try:
+        resolved = os.path.realpath(root)
+    except OSError:
+        return False
+    return os.path.normcase(resolved) == os.path.normcase(os.path.abspath(root))
+
+
+def _link_below(root: Path, directory: Path) -> bool:
+    """Whether a link or junction stands between ``root`` and ``directory``, both included (W4-R12)."""
+    try:
+        parts = directory.relative_to(root).parts
+    except ValueError:
+        return True
+    current = root
+    for part in parts:
+        current = current / part
+        if _is_link(current):
+            return True
+    return False
+
+
 class FileHistory:
     def __init__(self, root: Path | str, conversation_id: str) -> None:
         self.base = Path(root) / _safe_name(conversation_id)
@@ -280,8 +318,15 @@ class FileHistory:
             return "it was not a regular file when it was recorded"
         if entry.get("too_large"):
             return "it was too large to keep a copy"
-        if not _inside(target, roots):
+        container = _working_root(target, roots)
+        if container is None or not _inside(target, roots):
             return "it is outside the working directories"
+        # A working directory that is a junction resolves into another folder, so every path below it passes the
+        # resolved check: the root itself, and each folder between it and the file, must be plain (W4-R12).
+        if not _intact_root(container):
+            return "its working directory was replaced after the snapshot"
+        if _link_below(container, target.parent):
+            return "its directory was replaced after the snapshot"
         parent = target.parent
         recorded_parent = entry.get("parent_identity")
         current_parent = _identity(parent)

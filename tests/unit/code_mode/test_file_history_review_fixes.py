@@ -3,6 +3,8 @@ over a file too large to back up says so (R10). Recording is done after validati
 reads (R20)."""
 from __future__ import annotations
 
+import os
+import shutil
 from pathlib import Path
 
 import pytest
@@ -137,3 +139,100 @@ def test_a_write_over_a_file_too_large_to_back_up_says_it_cannot_be_rewound(tmp_
 
     assert outcome.status == "succeeded", outcome.content
     assert "this file cannot be rewound" in str(outcome.content)
+
+
+# -- R12: a working directory or a folder under it replaced by a junction ---------------
+
+windows_only = pytest.mark.skipif(os.name != "nt", reason="junctions are a Windows feature")
+REPLACED = "its directory was replaced after the snapshot"
+ROOT_REPLACED = "its working directory was replaced after the snapshot"
+
+
+@windows_only
+def test_an_added_folder_replaced_by_a_junction_is_not_written_through(tmp_path: Path) -> None:
+    import _winapi
+
+    history = FileHistory(tmp_path / "history", "chat_r12")
+    extra = tmp_path / "extra"
+    kept, created = extra / "deep" / "f.txt", extra / "sub" / "important.docx"
+    _write(kept, b"before\n")
+    history.snapshot_before_write("m1", kept, turn_id="t1")
+    history.snapshot_before_write("m1", created, turn_id="t1")
+    _write(created, b"turn draft")
+    _write(kept, b"after\n")
+    shutil.rmtree(extra)
+    victim = tmp_path / "victim"
+    _write(victim / "sub" / "important.docx", b"VICTIM DATA")
+    _winapi.CreateJunction(str(victim), str(extra))
+
+    result = history.rewind("m1", roots=[extra])
+
+    assert result["blocked"] is True and result["restored"] == [] and result["deleted"] == []
+    assert {item["reason"] for item in result["skipped"]} == {ROOT_REPLACED}
+    assert (victim / "sub" / "important.docx").read_bytes() == b"VICTIM DATA"
+    assert not (victim / "deep").exists()
+
+
+@windows_only
+def test_a_workspace_root_replaced_by_a_junction_is_not_written_through(tmp_path: Path) -> None:
+    import _winapi
+
+    history = FileHistory(tmp_path / "history", "chat_r12b")
+    work = tmp_path / "work"
+    edited = work / "src" / "a.py"
+    _write(edited, b"v0\n")
+    history.snapshot_before_write("m1", edited, turn_id="t1")
+    _write(edited, b"v1\n")
+    shutil.rmtree(work)
+    victim = tmp_path / "victim"
+    _write(victim / "src" / "a.py", b"VICTIM\n")
+    _winapi.CreateJunction(str(victim), str(work))
+
+    result = history.rewind("m1", roots=[work])
+
+    assert result["blocked"] is True and result["restored"] == []
+    assert result["skipped"][0]["reason"] == ROOT_REPLACED
+    assert (victim / "src" / "a.py").read_bytes() == b"VICTIM\n"
+
+
+@windows_only
+def test_a_folder_under_the_root_replaced_by_a_junction_inside_the_root_is_refused(tmp_path: Path) -> None:
+    import _winapi
+
+    history = FileHistory(tmp_path / "history", "chat_r12c")
+    work = tmp_path / "work"
+    edited = work / "a" / "b" / "f.txt"
+    _write(edited, b"v0\n")
+    history.snapshot_before_write("m1", edited, turn_id="t1")
+    _write(edited, b"v1\n")
+    shutil.rmtree(work / "a")
+    other = work / "other" / "b"
+    _write(other / "f.txt", b"OTHER\n")
+    _winapi.CreateJunction(str(work / "other"), str(work / "a"))  # a link that stays inside the root
+
+    result = history.rewind("m1", roots=[work])
+
+    assert result["blocked"] is True and result["restored"] == []
+    assert result["skipped"][0]["reason"] == REPLACED
+    assert (other / "f.txt").read_bytes() == b"OTHER\n"
+
+
+@windows_only
+def test_a_working_directory_reached_through_a_junction_above_it_is_refused(tmp_path: Path) -> None:
+    import _winapi
+
+    history = FileHistory(tmp_path / "history", "chat_r12d")
+    real = tmp_path / "elsewhere" / "work"
+    edited = real / "a.py"
+    _write(edited, b"v0\n")
+    link = tmp_path / "link"  # the recorded path goes through this link
+    _winapi.CreateJunction(str(tmp_path / "elsewhere"), str(link))
+    recorded = link / "work" / "a.py"
+    history.snapshot_before_write("m1", recorded, turn_id="t1")
+    _write(recorded, b"v1\n")
+
+    result = history.rewind("m1", roots=[link / "work"])
+
+    assert result["blocked"] is True and result["restored"] == []
+    assert result["skipped"][0]["reason"] == ROOT_REPLACED
+    assert edited.read_bytes() == b"v1\n"
