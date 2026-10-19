@@ -89,6 +89,7 @@ def test_a_supervised_stop_runs_session_end(tmp_path: Path, monkeypatch: pytest.
         proc.stop(grace=8.0)
 
         assert proc.process is not None and proc.process.returncode == 0, proc.tail()
+        assert marker.exists(), f"SessionEnd did not run on a supervised stop; the worker's log ends with:\n{proc.tail()}"
         assert marker.read_text(encoding="utf-8") == "other", "SessionEnd did not run on a supervised stop"
     finally:
         group.close()

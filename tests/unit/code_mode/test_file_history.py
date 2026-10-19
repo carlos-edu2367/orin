@@ -102,6 +102,7 @@ def test_a_path_outside_the_working_directories_is_not_touched(tmp_path: Path) -
     assert outside.read_bytes() == b"edited" and result["skipped"][0]["reason"] == "it is outside the working directories"
 
 
+@pytest.mark.skipif(os.name != "nt", reason="POSIX file systems reuse a removed folder's inode, so a folder recreated at the same path is indistinguishable; a folder swapped for a link is still refused (next test)")
 def test_a_replaced_directory_is_refused(tmp_path: Path) -> None:
     history, work = _setup(tmp_path)
     a = work / "src" / "a.py"
@@ -112,6 +113,23 @@ def test_a_replaced_directory_is_refused(tmp_path: Path) -> None:
     result = history.rewind("m1", roots=[work])
     assert a.read_bytes() == b"planted"
     assert result["skipped"][0]["reason"] == "its directory was replaced after the snapshot"
+
+
+def test_a_directory_swapped_for_a_link_is_refused(tmp_path: Path) -> None:
+    history, work = _setup(tmp_path)
+    a = work / "src" / "a.py"
+    _write(a, b"v0")
+    history.snapshot_before_write("m1", a)
+    target = tmp_path / "victim"
+    target.mkdir()
+    shutil.rmtree(work / "src")
+    try:
+        os.symlink(target, work / "src", target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("this account cannot create symlinks")
+    result = history.rewind("m1", roots=[work])
+    assert not (target / "a.py").exists()
+    assert result["restored"] == [] and len(result["skipped"]) == 1
 
 
 @pytest.mark.skipif(os.name != "nt", reason="junctions are a Windows feature")

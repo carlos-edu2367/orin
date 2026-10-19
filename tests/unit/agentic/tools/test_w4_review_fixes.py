@@ -11,9 +11,13 @@ import pytest
 
 from agentos.agentic.agent_tools import AgentToolset, AgentToolError, ToolDefinition
 from agentos.agentic.tools.interaction.notify import NotificationBudget
+from agentos.agentic.tools.shell.powershell import powershell_executable
 from agentos.agentic.tools.shell.publish import publish_actions
 from agentos.agentic.workspace import ConversationWorkspace
 from agentos.settings.paths import orin_user_dir
+
+# The PowerShell tool exists only where Windows PowerShell does (it is not offered elsewhere).
+POWERSHELL = pytest.param("PowerShell", marks=pytest.mark.skipif(powershell_executable() is None, reason="Windows PowerShell is a Windows tool"))
 
 HOST_COMMANDS = [
     "Stop-Computer -Force",
@@ -39,7 +43,7 @@ def no_process(monkeypatch: pytest.MonkeyPatch):
 # -- W4-R3: the host guard refuses the PowerShell idioms for every shell tool, before anything runs ------
 
 @pytest.mark.parametrize("command", HOST_COMMANDS)
-@pytest.mark.parametrize("tool", ["Bash", "PowerShell"])
+@pytest.mark.parametrize("tool", ["Bash", POWERSHELL])
 def test_the_host_guard_refuses_powershell_host_commands_before_anything_runs(tmp_path: Path, no_process, tool: str, command: str) -> None:
     toolset = AgentToolset(ConversationWorkspace.at_root(tmp_path), public_tool_names=True)
     outcome = toolset.invoke(tool, {"command": command})
@@ -116,7 +120,7 @@ def code_mode_toolset(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     return make, started
 
 
-@pytest.mark.parametrize("tool", ["Bash", "PowerShell", "Monitor"])
+@pytest.mark.parametrize("tool", ["Bash", POWERSHELL, "Monitor"])
 @pytest.mark.parametrize("command", PUSH_SPELLINGS)
 def test_a_push_spelling_is_refused_without_push_permission(code_mode_toolset, tool: str, command: str) -> None:
     make, started = code_mode_toolset
@@ -125,7 +129,7 @@ def test_a_push_spelling_is_refused_without_push_permission(code_mode_toolset, t
     assert started == []
 
 
-@pytest.mark.parametrize("tool", ["Bash", "PowerShell"])
+@pytest.mark.parametrize("tool", ["Bash", POWERSHELL])
 @pytest.mark.parametrize("command", PR_SPELLINGS)
 def test_a_pull_request_spelling_is_refused_without_pr_permission(code_mode_toolset, tool: str, command: str) -> None:
     make, started = code_mode_toolset
