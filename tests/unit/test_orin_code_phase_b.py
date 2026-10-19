@@ -310,11 +310,13 @@ def test_gateway_tool_permission_rewind_and_four_mode_settings_endpoints(tmp_pat
     runtime_settings = AgentRuntimeSettingsStore(tmp_path / "runtime.json")
 
     class StubConversationApp:
+        state = "running"
+
         def get(self, conversation_id: str, user_id: str) -> dict[str, object]:
             return {
                 "conversation_id": conversation_id,
                 "title": "Test",
-                "state": "running",
+                "state": self.state,
                 "provider": "openai",
                 "model_id": "gpt-4o",
                 "messages": [],
@@ -372,6 +374,10 @@ def test_gateway_tool_permission_rewind_and_four_mode_settings_endpoints(tmp_pat
     store.snapshot_before_write("turn-api-1", "app.py")
     target_file.write_text("modified = True\n", encoding="utf-8")
 
+    busy_resp = client.post("/v1/conversations/conv-api/turns/turn-api-1/rewind", headers=auth_headers)
+    assert busy_resp.status_code == 409  # W4: never while a turn may still be writing
+    assert target_file.read_text(encoding="utf-8") == "modified = True\n"
+    StubConversationApp.state = "completed"
     rewind_resp = client.post(
         "/v1/conversations/conv-api/turns/turn-api-1/rewind",
         headers=auth_headers,

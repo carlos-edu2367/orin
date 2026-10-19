@@ -207,6 +207,17 @@ class AddDirectoryRequest(_RequestModel):
     path: str = Field(min_length=1, max_length=1024)
 
 
+# A turn in one of these states may still be writing files: a rewind now would race it (W4).
+_TURN_BUSY_STATES = frozenset({"queued", "running", "cancelling"})
+
+
+def _turn_in_flight(conversation: Mapping[str, object]) -> bool:
+    if str(conversation.get("state") or "") in _TURN_BUSY_STATES:
+        return True
+    turns = conversation.get("turns")
+    return isinstance(turns, list) and any(isinstance(turn, Mapping) and str(turn.get("state") or "") in _TURN_BUSY_STATES for turn in turns)
+
+
 class InspectWorkspaceFolderRequest(_RequestModel):
     path: str | None = Field(default=None, max_length=4096)
 
@@ -1509,6 +1520,8 @@ def create_app(services: ApiServices) -> FastAPI:
             resource_id=conversation_id,
             purpose="conversation.rewind",
         )
+        if _turn_in_flight(conversation_record(conversation_id, principal)):
+            return _error(409, "CONFLICT", "turn_running", retryable=True)
         workspace = conversation_workspace(conversation_id, principal)
         store = FileCheckpointStore(workspace)
         result = await run_in_threadpool(store.rewind_turn, turn_id)
@@ -1522,10 +1535,17 @@ def create_app(services: ApiServices) -> FastAPI:
         services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.rewind")
         if payload.mode != "code":
             raise ApplicationValidationError("only mode 'code' is available; conversation rewind arrives with the W7 interface")
+        if _turn_in_flight(conversation_record(conversation_id, principal)):
+            return _error(409, "CONFLICT", "turn_running", retryable=True)
         workspace = conversation_workspace(conversation_id, principal)
         history = FileHistory(services.history_root(), conversation_id)
+        roots = [Path(workspace.root)]
+        directories = services.conversation_directories
+        if directories is not None and services.capabilities.host_folders:
+            # Folders added with /add-dir are working directories too: their files are restored, nothing else is.
+            roots += [Path(path) for path in await run_in_threadpool(directories.paths, principal.user_id, conversation_id)]  # type: ignore[union-attr]
         try:
-            result = await run_in_threadpool(history.rewind, message_id, roots=[Path(workspace.root)])
+            result = await run_in_threadpool(history.rewind, message_id, roots=roots)
         except LookupError as error:
             raise ApplicationNotFoundError(message_id) from error
         return JSONResponse(_jsonable(result))
