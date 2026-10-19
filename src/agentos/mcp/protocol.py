@@ -58,6 +58,15 @@ def parse_response(frame: Mapping[str, Any], *, expected_id: int) -> dict[str, A
 METHOD_NOT_FOUND = -32601
 INTERNAL_ERROR = -32603
 
+# W5-R9: a server's own requests restart a call's wait for its answer; these bound the whole call.
+MAX_CALL_SECONDS = 600.0
+MAX_SERVER_REQUESTS_PER_CALL = 100
+
+
+def call_ceiling_seconds(timeout: float) -> float:
+    """The longest one call may wait for its answer in all: ten timeouts, at most ``MAX_CALL_SECONDS``."""
+    return min(10.0 * float(timeout), MAX_CALL_SECONDS)
+
 
 def response(request_id: Any, result: Mapping[str, Any]) -> dict[str, Any]:
     return {"jsonrpc": "2.0", "id": request_id, "result": dict(result)}

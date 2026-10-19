@@ -18,7 +18,7 @@ import httpx
 
 from agentos.agentic.agent_tools import _public_url
 
-from .protocol import dispatch_server_message
+from .protocol import MAX_SERVER_REQUESTS_PER_CALL, call_ceiling_seconds, dispatch_server_message
 
 DEFAULT_TIMEOUT_SECONDS = 45.0
 MAX_EVENT_BYTES = 4_000_000
@@ -146,11 +146,18 @@ class SseTransport:
             self._post(frame)
             if "id" not in frame:
                 return None
+            ceiling_seconds = call_ceiling_seconds(self._timeout)
+            ceiling = time.monotonic() + ceiling_seconds
             deadline = time.monotonic() + self._timeout
+            answered = 0
             while True:
+                if time.monotonic() >= ceiling:
+                    raise SseTransportError(f"the MCP server kept one call open for longer than {ceiling_seconds:g}s")
                 try:
-                    message = self._messages.get(timeout=max(0.0, deadline - time.monotonic()))
+                    message = self._messages.get(timeout=max(0.0, min(deadline, ceiling) - time.monotonic()))
                 except queue.Empty:
+                    if time.monotonic() < deadline:
+                        continue  # woke at the call ceiling, which the check above reports
                     raise SseTransportError(f"the MCP server did not answer within {self._timeout:g}s") from None
                 if message is None:
                     self._messages.put(None)  # every later send sees the end too
@@ -160,6 +167,11 @@ class SseTransport:
                 if "method" in message:
                     reply = dispatch_server_message(message, self.on_message)
                     if reply is not None:
+                        answered += 1
+                        if answered > MAX_SERVER_REQUESTS_PER_CALL:
+                            raise SseTransportError(
+                                f"the MCP server sent more than {MAX_SERVER_REQUESTS_PER_CALL} requests while answering one call"
+                            )
                         self._post(reply)
                         deadline = time.monotonic() + self._timeout
 

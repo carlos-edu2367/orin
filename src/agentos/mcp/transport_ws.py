@@ -11,7 +11,7 @@ import threading
 import time
 from typing import Any, Callable, Mapping
 
-from .protocol import dispatch_server_message
+from .protocol import MAX_SERVER_REQUESTS_PER_CALL, call_ceiling_seconds, dispatch_server_message
 from .transport_sse import checked_url
 
 DEFAULT_TIMEOUT_SECONDS = 45.0
@@ -73,11 +73,18 @@ class WebSocketTransport:
             self._write(frame)
             if "id" not in frame:
                 return None
+            ceiling_seconds = call_ceiling_seconds(self._timeout)
+            ceiling = time.monotonic() + ceiling_seconds
             deadline = time.monotonic() + self._timeout
+            answered = 0
             while True:
+                if time.monotonic() >= ceiling:
+                    raise WebSocketTransportError(f"the MCP server kept one call open for longer than {ceiling_seconds:g}s")
                 try:
-                    raw = self._socket.recv(timeout=max(0.0, deadline - time.monotonic()))
+                    raw = self._socket.recv(timeout=max(0.0, min(deadline, ceiling) - time.monotonic()))
                 except TimeoutError:
+                    if time.monotonic() < deadline:
+                        continue  # woke at the call ceiling, which the check above reports
                     raise WebSocketTransportError(f"the MCP server did not answer within {self._timeout:g}s") from None
                 except Exception as error:  # noqa: BLE001 - a closed connection
                     raise WebSocketTransportError(f"the connection closed: {str(error)[:200]}") from error
@@ -92,6 +99,11 @@ class WebSocketTransport:
                 if "method" in message:
                     reply = dispatch_server_message(message, self.on_message)
                     if reply is not None:
+                        answered += 1
+                        if answered > MAX_SERVER_REQUESTS_PER_CALL:
+                            raise WebSocketTransportError(
+                                f"the MCP server sent more than {MAX_SERVER_REQUESTS_PER_CALL} requests while answering one call"
+                            )
                         self._write(reply)
                         deadline = time.monotonic() + self._timeout
 

@@ -35,7 +35,7 @@ from typing import Any, Mapping
 
 from agentos.agentic.agent_tools import _terminate_process_tree
 
-from .protocol import dispatch_server_message
+from .protocol import MAX_SERVER_REQUESTS_PER_CALL, call_ceiling_seconds, dispatch_server_message
 
 # Real launchers need a writable temp directory and a resolvable user
 # profile, not just PATH: uv/npm/node use these to locate their cache and
@@ -159,17 +159,25 @@ class StdioTransport:
             self._write(process, frame)
             if "id" not in frame:
                 return None
+            ceiling_seconds = call_ceiling_seconds(self._timeout)
+            ceiling = time.monotonic() + ceiling_seconds
             deadline = time.monotonic() + self._timeout
             skipped = 0
+            answered = 0
             while True:
-                try:
-                    line = self._replies.get(timeout=max(0.0, deadline - time.monotonic()))
-                except queue.Empty:
-                    _terminate_process_tree(process)
-                    self._process = None
-                    raise StdioTransportError(
-                        f"the MCP server did not answer within {self._timeout}s and was terminated"
+                if time.monotonic() >= ceiling:
+                    raise self._give_up(
+                        process,
+                        f"the MCP server kept one call open for longer than {ceiling_seconds:g}s and was terminated",
                     )
+                try:
+                    line = self._replies.get(timeout=max(0.0, min(deadline, ceiling) - time.monotonic()))
+                except queue.Empty:
+                    if time.monotonic() < deadline:
+                        continue  # woke at the call ceiling, which the check above reports
+                    raise self._give_up(
+                        process, f"the MCP server did not answer within {self._timeout}s and was terminated"
+                    ) from None
                 if not line:
                     raise StdioTransportError("the MCP server closed before answering")
                 try:
@@ -186,8 +194,20 @@ class StdioTransport:
                 if "method" in message:
                     reply = dispatch_server_message(message, self.on_message)
                     if reply is not None:
+                        answered += 1
+                        if answered > MAX_SERVER_REQUESTS_PER_CALL:
+                            raise self._give_up(
+                                process,
+                                f"the MCP server sent more than {MAX_SERVER_REQUESTS_PER_CALL} requests while "
+                                "answering one call and was terminated",
+                            )
                         self._write(process, reply)
                         deadline = time.monotonic() + self._timeout  # the server waited on us: its clock starts again
+
+    def _give_up(self, process: subprocess.Popen[bytes], reason: str) -> StdioTransportError:
+        _terminate_process_tree(process)
+        self._process = None
+        return StdioTransportError(reason)
 
     @staticmethod
     def _write(process: subprocess.Popen[bytes], frame: Mapping[str, Any]) -> None:
