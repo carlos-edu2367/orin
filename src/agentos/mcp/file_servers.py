@@ -13,6 +13,7 @@ import threading
 import time
 from collections.abc import Callable, Iterable, Mapping
 from concurrent.futures import ThreadPoolExecutor, wait
+from urllib.parse import urlsplit
 
 from .file_config import FileServer, McpConfigError
 from .models import McpServerConfig, McpServerState, McpToolDescriptor, McpTransport, slugify
@@ -58,12 +59,19 @@ def file_bundle(server: FileServer, *, user_id: str) -> ServerBundle:
 
 
 def _redacted(text: str, server: FileServer) -> str:
-    values = [value for _, value in (*server.env, *server.headers)]
-    if "?" in server.url:
-        values.append(server.url.split("?", 1)[1])
-    for value in sorted(values, key=len, reverse=True):
-        if len(value) >= 4:
-            text = text.replace(value, "***")
+    """The text without the server's environment and header values (3+ characters), nor its URL's path, query
+    and credentials: a token is often kept in any of them."""
+    secrets = [value for _, value in (*server.env, *server.headers) if len(value) >= 3]
+    if server.url:
+        try:
+            parts = urlsplit(server.url)
+        except ValueError:  # a malformed URL has no readable parts, so the whole of it is masked
+            secrets.append(server.url)
+        else:
+            secrets.extend(segment for segment in parts.path.split("/") if len(segment) >= 4)
+            secrets.extend(item for item in (parts.query, parts.username, parts.password) if item and len(item) >= 3)
+    for value in sorted(set(secrets), key=len, reverse=True):
+        text = text.replace(value, "***")
     return text
 
 

@@ -237,3 +237,20 @@ def test_a_stopped_teammate_leaves_its_mail_unread(team) -> None:
     child.release.set()
     _wait(session, started.payload["agent_id"])
     assert len(child.requests) == 1 and _pending(session, "iris") == 1
+
+def test_a_teammate_is_released_when_starting_it_raises(team) -> None:
+    session = team(_Child())
+    started = session._run_subagent(subagent_type="general-purpose", task="x", teammate_name="jack", team_name="core")
+    _wait(session, started.payload["agent_id"])
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("database unavailable")
+
+    session._ask_agent = broken
+    with pytest.raises(RuntimeError):
+        session._send_team_message(sender="lead", to="jack", message="Keep this")
+    assert session._team_roster()["jack"]["busy"] is False and _pending(session, "jack") == 1
+    session._start_subagent = broken
+    with pytest.raises(RuntimeError):
+        session._run_subagent(subagent_type="general-purpose", task="y", teammate_name="jack")
+    assert session._team_roster()["jack"]["busy"] is False

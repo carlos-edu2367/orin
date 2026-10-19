@@ -1582,10 +1582,14 @@ class TurnSession:
         if refusal is not None:
             return refusal
         clean_name = str(teammate_name).strip().lower()
-        outcome = self._start_subagent(
-            subagent_type, task, description=description, model_id=model_id, agent_id=agent_id,
-            run_in_background=True, hook_cancel=hook_cancel, teammate_name=clean_name, team_name=team_name,
-        )
+        try:
+            outcome = self._start_subagent(
+                subagent_type, task, description=description, model_id=model_id, agent_id=agent_id,
+                run_in_background=True, hook_cancel=hook_cancel, teammate_name=clean_name, team_name=team_name,
+            )
+        except BaseException:
+            self._release_teammate(clean_name)  # a start that raised never began
+            raise
         if outcome.status != "succeeded":
             self._release_teammate(clean_name)  # it never started, so it is not busy
         return outcome
@@ -2332,14 +2336,25 @@ class TurnSession:
         mailbox.post(user_id=user_id, conversation_id=conversation_id, team_name=mate["team_name"], sender=sender, recipient=target, content=text, summary=summary)
         if not self._claim_teammate(target):
             return ToolOutcome("succeeded", f"Mensagem na fila de {target}", f"Queued: {target} reads it when it finishes its current task.", {"to": target, "status": "queued", "tool_kind": "agent"})
-        task, taken = self._take_team_mail(target)
-        if not task:
+        taken: list[str] = []
+        try:
+            task, taken = self._take_team_mail(target)
+            if not task:
+                self._release_teammate(target)
+                return ToolOutcome("succeeded", f"Mensagem entregue a {target}", f"Delivered to {target}.", {"to": target, "tool_kind": "agent"})
+            started = self._ask_agent(
+                mate["type"], task, resumed_agent_id=mate["agent_id"], run_in_background=True,
+                teammate_name=target, team_name=mate["team_name"],
+            )
+        except BaseException:
+            # Whatever broke, the messages stay unread and the teammate is not left marked busy.
+            if taken:
+                try:
+                    mailbox.release(user_id=user_id, conversation_id=conversation_id, message_ids=taken)
+                except Exception:  # noqa: BLE001 - the original error is the one to report
+                    logger.warning("could not put a teammate's messages back", exc_info=True)
             self._release_teammate(target)
-            return ToolOutcome("succeeded", f"Mensagem entregue a {target}", f"Delivered to {target}.", {"to": target, "tool_kind": "agent"})
-        started = self._ask_agent(
-            mate["type"], task, resumed_agent_id=mate["agent_id"], run_in_background=True,
-            teammate_name=target, team_name=mate["team_name"],
-        )
+            raise
         if started.status != "succeeded":
             # The run never started: the messages stay unread for its next start.
             mailbox.release(user_id=user_id, conversation_id=conversation_id, message_ids=taken)

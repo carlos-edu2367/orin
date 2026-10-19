@@ -166,3 +166,25 @@ def test_the_output_limit_follows_max_mcp_output_tokens(monkeypatch) -> None:
     assert provider.definitions()[0].max_result_size_chars == 4_000
     monkeypatch.setenv("MAX_MCP_OUTPUT_TOKENS", "not a number")
     assert provider.definitions()[0].max_result_size_chars == 100_000
+
+def test_a_failure_masks_short_secrets_and_the_url_path() -> None:
+    server = parse_server(
+        "api", {"type": "http", "url": "https://mcp.example.com/t0k3n-in-path/mcp", "headers": {"X-Key": "abc"}},
+        scope="user", source="t", environ={},
+    )
+
+    def connect(config, secrets):
+        raise RuntimeError("refused key abc at https://mcp.example.com/t0k3n-in-path/mcp")
+
+    _, failures = connect_file_servers([server], user_id="u1", connect=connect)
+    assert "abc" not in failures[0][1] and "t0k3n-in-path" not in failures[0][1] and "mcp.example.com" in failures[0][1]
+
+
+def test_a_malformed_url_is_reported_and_masked_whole() -> None:
+    server = parse_server("api", {"type": "http", "url": "http://[bad/x"}, scope="user", source="t", environ={})
+
+    def connect(config, secrets):
+        raise RuntimeError("boom at http://[bad/x")
+
+    _, failures = connect_file_servers([server], user_id="u1", connect=connect)
+    assert failures[0][0] == "api" and "[bad" not in failures[0][1] and "could not connect" in failures[0][1]
