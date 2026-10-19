@@ -332,7 +332,8 @@ class MonitorTools:
             persistent=keep, timeout_ms=timeout,
             deadline=time.monotonic() + (PERSISTENT_MAX_SECONDS if keep else timeout / 1000),
             waker=self._monitor_waker(context, conversation_id, monitor_id),
-            sink=getattr(self, "_monitor_sink", None) or self.reminders,
+            # None test, not truthiness: an empty ReminderQueue is falsy and must still receive the monitor (W4-R9).
+            sink=self.reminders if getattr(self, "_monitor_sink", None) is None else self._monitor_sink,
         )
         MONITORS.add(task)
         return {
