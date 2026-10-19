@@ -47,7 +47,7 @@ class GithubManifestProbe:
         for item in body:
             if not isinstance(item, Mapping):
                 continue
-            if item.get("name") == ".claude-plugin" and item.get("type") == "dir":
+            if item.get("name") in {".claude-plugin", ".orin-plugin"} and item.get("type") == "dir":
                 return True
             if item.get("name") == "plugin.json" and item.get("type") == "file":
                 return True

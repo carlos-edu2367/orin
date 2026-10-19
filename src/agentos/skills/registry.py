@@ -180,9 +180,15 @@ class SkillRegistry:
             return skill
         if skill.package_path is None:
             raise SkillUnavailable(f"skill '{skill.id}' has no instructions")
+        from .models import SkillSource
         from .parser import parse_skill_file
 
-        parsed = parse_skill_file(Path(skill.package_path), include_instructions=True, source=skill.source, scope=skill.scope)
+        plugin = skill.source == SkillSource.PLUGIN  # W5: a plugin skill is read leniently, as when it was installed
+        parsed = parse_skill_file(
+            Path(skill.package_path), include_instructions=True, source=skill.source, scope=skill.scope,
+            required_fields=frozenset({"name", "description"}) if plugin else frozenset({"name", "description", "version"}),
+            default_version=skill.version if plugin else None, lenient=plugin,
+        )
         if parsed.id != skill.id or parsed.version != skill.version:
             raise SkillUnavailable(f"skill package metadata does not match '{skill.id}@{skill.version}'")
         if parsed.digest != skill.digest or parsed.package_digest != skill.package_digest:

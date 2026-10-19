@@ -45,7 +45,9 @@ def _inside(candidate: Path, root: Path) -> Path:
 def resolve_argv(command: str, *, install_path: Path) -> list[str]:
     if any(token in command for token in DENIED_TOKENS):
         raise HookRejected("hook commands may not use shell operators")
-    expanded = command.replace("${CLAUDE_PLUGIN_ROOT}", str(Path(install_path)))
+    # W5: forward slashes, so an unquoted ${CLAUDE_PLUGIN_ROOT}/x survives the POSIX split below on Windows too.
+    root = Path(install_path).as_posix()
+    expanded = command.replace("${CLAUDE_PLUGIN_ROOT}", root).replace("${ORIN_PLUGIN_ROOT}", root)
     try:
         argv = shlex.split(expanded, posix=True)
     except ValueError as error:

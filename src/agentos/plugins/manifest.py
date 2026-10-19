@@ -1,13 +1,25 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 import re
 from typing import Any, Mapping
 
 from .models import McpServerContribution, plugin_id_from_name
 
 SEMVER = re.compile(r"\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?")
+# W5: where a package keeps its manifest, Orin's own folder first; a version is optional, as in Claude Code.
+MANIFEST_LOCATIONS = (".orin-plugin/plugin.json", ".claude-plugin/plugin.json", "plugin.json")
+DEFAULT_VERSION = "0.0.0"
+MAX_COMPONENT_PATHS = 10
+
+
+def manifest_file(root: Path) -> Path | None:
+    for relative in MANIFEST_LOCATIONS:
+        candidate = Path(root) / relative
+        if candidate.is_file() and not candidate.is_symlink():
+            return candidate
+    return None
 
 
 class ManifestRejected(ValueError):
@@ -25,6 +37,10 @@ class PluginManifest:
     mcp_servers: tuple[McpServerContribution, ...] = ()
     commands_path: str = "commands"
     hooks_path: str = "hooks"
+    agents_paths: tuple[str, ...] = ("agents",)
+    skills_paths: tuple[str, ...] = ("skills",)
+    output_styles_paths: tuple[str, ...] = ("output-styles",)
+    mcp_config_path: str = ".mcp.json"
 
 
 def _text(value: Any, limit: int = 1024) -> str:
@@ -50,13 +66,26 @@ def _package_relative_path(value: Any, default: str) -> str:
     return "/".join(parts) or default
 
 
+def _package_paths(value: Any, default: str) -> tuple[str, ...]:
+    """One path or a list of them (Claude Code accepts both), each kept inside the package."""
+    if value is None:
+        return (default,)
+    items = value if isinstance(value, list) else [value]
+    paths = tuple(_package_relative_path(item, default) for item in items[:MAX_COMPONENT_PATHS] if isinstance(item, str))
+    return tuple(dict.fromkeys(paths)) or (default,)
+
+
+def _first_path(value: Any) -> Any:
+    return (value[0] if value else None) if isinstance(value, list) else value
+
+
 def parse_plugin_manifest(payload: Mapping[str, Any]) -> PluginManifest:
     if not isinstance(payload, Mapping):
         raise ManifestRejected("plugin.json must be an object")
     name = _text(payload.get("name"), 120).strip()
     if not name:
         raise ManifestRejected("plugin.json must declare a name")
-    version = _text(payload.get("version"), 64).strip()
+    version = _text(payload.get("version"), 64).strip() or DEFAULT_VERSION
     if not SEMVER.fullmatch(version):
         raise ManifestRejected(f"plugin version '{version}' is not semantic versioning")
     author = payload.get("author")
@@ -68,8 +97,12 @@ def parse_plugin_manifest(payload: Mapping[str, Any]) -> PluginManifest:
     return PluginManifest(
         plugin_id_from_name(name), name, version, _text(payload.get("description")),
         _text(author, 120), homepage, parse_mcp_config(payload),
-        _package_relative_path(payload.get("commands"), "commands"),
-        _package_relative_path(payload.get("hooks"), "hooks"),
+        _package_relative_path(_first_path(payload.get("commands")), "commands"),
+        _package_relative_path(payload.get("hooks") if isinstance(payload.get("hooks"), str) else None, "hooks"),
+        agents_paths=_package_paths(payload.get("agents"), "agents"),
+        skills_paths=_package_paths(payload.get("skills"), "skills"),
+        output_styles_paths=_package_paths(payload.get("outputStyles"), "output-styles"),
+        mcp_config_path=_package_relative_path(payload.get("mcpServers") if isinstance(payload.get("mcpServers"), str) else None, ".mcp.json"),
     )
 
 

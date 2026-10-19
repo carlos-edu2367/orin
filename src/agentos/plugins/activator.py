@@ -8,6 +8,7 @@ from agentos.skills.models import SkillScope, SkillSource
 from agentos.skills.parser import parse_skill_file
 
 from .models import PluginInspection
+from .variables import plugin_variables, substitute
 
 
 class ActivationFailed(RuntimeError):
@@ -40,6 +41,7 @@ class PluginActivator:
                     scope=SkillScope.USER,
                     required_fields=frozenset({"name", "description"}),
                     default_version=inspection.ref.version,
+                    lenient=True,
                 )
                 installed_skills.append(replace(skill, id=item.skill_id, package_path=Path(install_path) / item.relative_path))
             self.skill_library.install_plugin_skills(user_id=user_id, plugin_id=inspection.ref.plugin_id, skills=tuple(installed_skills))
@@ -51,9 +53,11 @@ class PluginActivator:
                 # literal "$" is indistinguishable from a shell metacharacter
                 # to StdioTransport's launch-safety check and the connection
                 # is refused outright.
-                root = str(Path(install_path))
-                command = item.command.replace("${CLAUDE_PLUGIN_ROOT}", root) if item.command else item.command
-                args = tuple(value.replace("${CLAUDE_PLUGIN_ROOT}", root) for value in item.args)
+                # W5: also ${ORIN_PLUGIN_ROOT} and the plugin's data folder (${CLAUDE_PLUGIN_DATA} / ${ORIN_PLUGIN_DATA}).
+                variables = plugin_variables(install_path=Path(install_path), plugin_id=inspection.ref.plugin_id, user_id=user_id)
+                Path(variables["ORIN_PLUGIN_DATA"]).mkdir(parents=True, exist_ok=True)
+                command = substitute(item.command, variables) if item.command else item.command
+                args = tuple(substitute(value, variables) for value in item.args)
                 proposed = self.mcp_service.propose({
                     "user_id": user_id, "slug": item.slug, "display_name": item.display_name,
                     "transport": item.transport, "command": command, "args": list(args), "url": item.url,

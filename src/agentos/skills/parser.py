@@ -7,6 +7,7 @@ directory convention and can be expanded explicitly when needed.
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import date
 from pathlib import Path
 import re
 from typing import Any
@@ -32,6 +33,7 @@ def parse_skill_file(
     scope: SkillScope = SkillScope.SYSTEM,
     required_fields: frozenset[str] = _DEFAULT_REQUIRED,
     default_version: str | None = None,
+    lenient: bool = False,
 ) -> Skill:
     target = Path(path)
     if target.is_dir():
@@ -47,6 +49,7 @@ def parse_skill_file(
         scope=scope,
         required_fields=required_fields,
         default_version=default_version,
+        lenient=lenient,
     )
     return replace(skill, package_path=target)
 
@@ -59,8 +62,13 @@ def parse_skill_markdown(
     scope: SkillScope = SkillScope.SYSTEM,
     required_fields: frozenset[str] = _DEFAULT_REQUIRED,
     default_version: str | None = None,
+    lenient: bool = False,
 ) -> Skill:
     """Parse a SKILL.md document.
+
+    ``lenient`` (W5, for plugin skills) reads the frontmatter as YAML and keeps only the fields Orin's skill
+    library stores, so a Claude Code skill's own keys (``allowed-tools``, ``argument-hint``, a folded
+    ``description``...) no longer reject it.
 
     ``required_fields``/``default_version`` exist for the plugin inspector: real-world
     plugin skills (e.g. the ecosystem's own `superpowers`) declare only name/description
@@ -68,16 +76,19 @@ def parse_skill_markdown(
     service keeps the strict default (version required, no substitute) because its
     skills are versioned individually via `skill_versions`.
     """
-    if not isinstance(document, str) or not document.startswith("---\n"):
-        raise SkillParseError("SKILL.md must begin with YAML frontmatter")
-    try:
-        header, body = document[4:].split("\n---\n", 1)
-    except ValueError as error:
-        raise SkillParseError("SKILL.md frontmatter is not closed") from error
-    values = _parse_frontmatter(header)
-    unknown = set(values) - _ALLOWED
-    if unknown:
-        raise SkillParseError(f"unsupported skill frontmatter field: {sorted(unknown)[0]}")
+    if lenient:
+        values, body = _lenient_frontmatter(document)
+    else:
+        if not isinstance(document, str) or not document.startswith("---\n"):
+            raise SkillParseError("SKILL.md must begin with YAML frontmatter")
+        try:
+            header, body = document[4:].split("\n---\n", 1)
+        except ValueError as error:
+            raise SkillParseError("SKILL.md frontmatter is not closed") from error
+        values = _parse_frontmatter(header)
+        unknown = set(values) - _ALLOWED
+        if unknown:
+            raise SkillParseError(f"unsupported skill frontmatter field: {sorted(unknown)[0]}")
     missing = required_fields - set(values)
     if missing:
         raise SkillParseError(f"missing required skill frontmatter field: {sorted(missing)[0]}")
@@ -110,6 +121,39 @@ def parse_skill_markdown(
         content_digest=_digest(body),
         package_digest=_digest_document(document),
     )
+
+
+_SCALAR_TYPES = (str, int, float, bool, date)
+
+
+def _lenient_frontmatter(document: str) -> tuple[dict[str, Any], str]:
+    from .disk import split_frontmatter
+
+    try:
+        meta, body = split_frontmatter(str(document or ""))
+    except ValueError as error:
+        raise SkillParseError(str(error)) from error
+    if not meta:
+        raise SkillParseError("SKILL.md must begin with YAML frontmatter")
+    values: dict[str, Any] = {}
+    for key in _ALLOWED:
+        value = meta.get(key)
+        if value is None:
+            continue
+        # Only plain scalars become text: a YAML alias can share a huge structure, and str() would expand it.
+        if key == "dependencies":
+            if isinstance(value, dict):
+                values[key] = {name: _scalars(items) for name, items in value.items() if name in {"skills", "tools"} and items is not None}
+        elif key in {"tags", "capabilities", "when_to_use", "when_not_to_use", "requires_tools"}:
+            values[key] = _scalars(value)
+        elif isinstance(value, _SCALAR_TYPES):
+            values[key] = " ".join(str(value).split())
+    return values, body
+
+
+def _scalars(value: Any) -> list[str]:
+    items = value if isinstance(value, list) else [value]
+    return [str(item) for item in items if isinstance(item, _SCALAR_TYPES) and str(item).strip()]
 
 
 def _parse_frontmatter(header: str) -> dict[str, Any]:

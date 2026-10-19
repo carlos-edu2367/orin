@@ -12,7 +12,7 @@ import tempfile
 
 from agentos.oauth.netpolicy import OAuthUrlRefused, public_https
 
-from .manifest import ManifestRejected, PluginManifest, parse_plugin_manifest
+from .manifest import ManifestRejected, PluginManifest, manifest_file, parse_plugin_manifest
 from .sources import PluginSource
 
 
@@ -36,10 +36,10 @@ class PluginFetcher:
     def fetch(self, source: PluginSource) -> FetchedPlugin:
         with tempfile.TemporaryDirectory(prefix="orin-plugin-") as temporary:
             staging = self._clone_into(source, temporary)
-            manifest_path = staging / ".claude-plugin" / "plugin.json"
-            if not manifest_path.exists():
-                manifest_path = staging / "plugin.json"
+            manifest_path = manifest_file(staging)
             try:
+                if manifest_path is None:
+                    raise FetchRejected("plugin package has no valid manifest")
                 manifest = parse_plugin_manifest(json.loads(manifest_path.read_text(encoding="utf-8")))
             except ManifestRejected as error:
                 # A path escaping the package is a distinct, more actionable
