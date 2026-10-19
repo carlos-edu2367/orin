@@ -13,11 +13,16 @@ export function PluginCard({ plugin, client, onChanged }: { plugin: PluginSummar
   const [open, setOpen] = useState(false)
   const [confirm, setConfirm] = useState(false)
   const [busy, setBusy] = useState(false)
+  const [failure, setFailure] = useState<string | null>(null)
   // W5-R6: a plugin's hooks and language servers are allowed together, so both kinds of consent row are switched here.
   const consentRows = plugin.contributions.filter((item) => item.kind === 'hook' || item.kind === 'lsp')
   const hooksEnabled = consentRows.length > 0 && consentRows.every((item) => item.enabled === true)
   async function toggle() { setBusy(true); try { await setPluginEnabled(client, plugin.plugin_id, plugin.state !== 'active'); onChanged() } finally { setBusy(false) } }
-  async function toggleHooks() { setBusy(true); try { await setPluginHooksEnabled(client, plugin.plugin_id, !hooksEnabled); onChanged() } finally { setBusy(false) } }
+  async function toggleHooks() {
+    setBusy(true)
+    setFailure(null)
+    try { await setPluginHooksEnabled(client, plugin.plugin_id, !hooksEnabled); onChanged() } catch { setFailure('Não foi possível alterar a permissão de hooks.') } finally { setBusy(false) }
+  }
   async function remove() { if (!confirm) { setConfirm(true); return }; setBusy(true); try { await removePlugin(client, plugin.plugin_id); onChanged() } finally { setBusy(false) } }
   return <article className="plugin-card" aria-label={plugin.display_name}>
     <header className="plugin-card__head">
@@ -36,13 +41,15 @@ export function PluginCard({ plugin, client, onChanged }: { plugin: PluginSummar
         role="switch"
         aria-checked={hooksEnabled}
         aria-label="Permitir execução de hooks"
-        className="plugin-card__hooks-toggle"
+        className={`plugin-card__hooks-toggle${hooksEnabled ? ' is-active' : ''}`}
         onClick={() => void toggleHooks()}
         disabled={busy || plugin.state === 'pending_approval'}
       >
-        Permitir execução de hooks
+        <span className="plugin-card__hooks-copy">Permitir execução de hooks</span>
+        <span className="plugin-card__hooks-pill" aria-hidden="true"><span className="plugin-card__hooks-thumb" /></span>
       </button>
     )}
+    {failure && <p className="plugin-card__warning" role="alert"><span aria-hidden="true">!</span>{failure}</p>}
     {open && <div className="plugin-card__body" id={`plugin-${plugin.plugin_id}-details`}><p className="plugin-card__description">{plugin.description || 'Sem descrição disponível para este plugin.'}</p><dl className="plugin-card__facts"><div><dt>Identificador</dt><dd><code>{plugin.plugin_id}</code></dd></div><div><dt>Contribuições</dt><dd>{plugin.contribution_count}</dd></div></dl><div className="plugin-card__actions"><button type="button" className="button button--secondary" onClick={() => void toggle()} disabled={busy || plugin.state === 'pending_approval'}>{busy ? 'Atualizando…' : plugin.state === 'active' ? 'Desligar plugin' : 'Ativar plugin'}</button><button type="button" className="button button--quiet plugin-card__remove" onClick={() => void remove()} disabled={busy}>{confirm ? 'Confirmar remoção' : 'Remover plugin'}</button></div></div>}
   </article>
 }

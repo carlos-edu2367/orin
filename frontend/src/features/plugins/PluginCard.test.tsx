@@ -1,5 +1,5 @@
-import { render, screen } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
+import { fireEvent, render, screen } from '@testing-library/react'
+import { describe, expect, it, vi } from 'vitest'
 import type { ApiClient } from '../../api/client'
 import type { PluginContribution, PluginSummary } from '../../api/plugins'
 import { PluginCard } from './PluginCard'
@@ -55,6 +55,34 @@ describe('PluginCard hooks switch', () => {
       { kind: 'hook', reference: 'kit:SessionStart:0#1', display_name: 'SessionStart', enabled: false },
     ] })} client={client} onChanged={() => {}} />)
 
+    expect(hooksSwitch()).toBeEnabled()
+  })
+})
+
+describe('PluginCard hooks switch, appearance and failures', () => {
+  it('draws a pill that follows the allowed state', () => {
+    render(<PluginCard plugin={plugin({ contributions: [
+      { kind: 'hook', reference: 'kit:SessionStart:0#1', display_name: 'SessionStart', enabled: true },
+    ] })} client={client} onChanged={() => {}} />)
+
+    expect(hooksSwitch()).toHaveClass('is-active')
+    expect(hooksSwitch()?.querySelector('.plugin-card__hooks-pill')).not.toBeNull()
+  })
+
+  it('tells the person when the change is refused', async () => {
+    const refusing = {
+      createMutationIntent: () => ({}),
+      request: () => Promise.reject(new Error('409')),
+    } as unknown as ApiClient
+    const changed = vi.fn()
+    render(<PluginCard plugin={plugin({ contributions: [
+      { kind: 'hook', reference: 'kit:SessionStart:0#1', display_name: 'SessionStart', enabled: false },
+    ] })} client={refusing} onChanged={changed} />)
+
+    fireEvent.click(hooksSwitch()!)
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Não foi possível alterar a permissão de hooks.')
+    expect(changed).not.toHaveBeenCalled()
     expect(hooksSwitch()).toBeEnabled()
   })
 })
