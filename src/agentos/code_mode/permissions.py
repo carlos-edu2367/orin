@@ -54,6 +54,7 @@ FILE_EDIT_TOOLS: frozenset[str] = frozenset({
 
 EXECUTION_TOOLS: frozenset[str] = frozenset({
     "run_command",
+    "powershell",
     "verify_project",
     "git_commit",
 })
@@ -514,7 +515,7 @@ class ToolPermissionBroker:
         suggested_rule = suggest_permission_rule(tool_name, args, workspace=self.workspace_root)
         preview = _compute_preview_structured_patch(self.workspace_root, canonical, args)
 
-        command_preview = str(args.get("command") or "") if canonical == "run_command" else ""
+        command_preview = str(args.get("command") or "") if canonical in {"run_command", "powershell"} else ""
         path_preview = _normalize_rel_path(str(args.get("path") or ""), self.workspace_root)
 
         record: dict[str, Any] = {
@@ -547,7 +548,7 @@ class ToolPermissionBroker:
         if callable(self.event_emitter):
             summary = (
                 f"Permissão necessária para executar `{command_preview[:80]}`"
-                if canonical == "run_command" and command_preview
+                if canonical in {"run_command", "powershell"} and command_preview
                 else f"Permissão necessária para editar `{path_preview}`"
                 if path_preview
                 else f"Permissão necessária para `{canonical}`"

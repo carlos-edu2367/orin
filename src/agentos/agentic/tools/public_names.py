@@ -26,6 +26,7 @@ PUBLIC_NAMES: dict[str, str] = {
     "glob_files": "Glob",
     "search_files": "Grep",
     "run_command": "Bash",
+    "powershell": "PowerShell",
     "read_process_output": "TaskOutput",
     "stop_process": "TaskStop",
     "todo_write": "TodoWrite",
@@ -102,6 +103,7 @@ _RENAMES: dict[str, dict[str, str]] = {
         "-i": "ignore_case", "-n": "line_numbers", "-o": "only_matching",
     },
     "run_command": {"run_in_background": "background"},
+    "powershell": {"run_in_background": "background"},
     "run_subagent": {"prompt": "task", "resume": "agent_id", "model": "model_id"},
     "use_skill": {"skill": "skill_id"},
     "search_mcp_tools": {"max_results": "limit"},
@@ -270,7 +272,7 @@ def arguments_in(internal: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
             result.setdefault(internal_key, value)
     for key in _DROPPED.get(internal, ()):
         result.pop(key, None)
-    if internal == "run_command" and "timeout" in result:
+    if internal in {"run_command", "powershell"} and "timeout" in result:
         milliseconds = _as_int(result.pop("timeout"))
         if milliseconds is not None and milliseconds > 0 and "timeout_seconds" not in result:
             seconds = -(-milliseconds // 1000)  # integer ceiling: no float division, no OverflowError
@@ -313,7 +315,7 @@ def arguments_out(internal: str, arguments: Mapping[str, Any]) -> dict[str, Any]
         if internal_key in result:
             value = result.pop(internal_key)
             result.setdefault(public_key, value)
-    if internal == "run_command" and "timeout_seconds" in result:
+    if internal in {"run_command", "powershell"} and "timeout_seconds" in result:
         seconds = _as_int(result["timeout_seconds"])
         if seconds is not None:  # an unparseable value is left exactly as it was
             result.pop("timeout_seconds")

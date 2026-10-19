@@ -298,6 +298,10 @@ _PARAM_ALIASES: Mapping[str, Mapping[str, str]] = {
         "run_in_background": "background",
         "timeout": "timeout_seconds",
     },
+    "powershell": {
+        "run_in_background": "background",
+        "timeout": "timeout_seconds",
+    },
     "exit_plan_mode": {
         "allowedPrompts": "allowed_prompts",
         "path": "plan_path",

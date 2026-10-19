@@ -18,6 +18,7 @@ from agentos.agentic.tools.interaction.ask_user import SPECS as _interaction_ask
 from agentos.agentic.tools.web.search import SPECS as _web_search
 from agentos.agentic.tools.orin.search_code import SPECS as _orin_search_code
 from agentos.agentic.tools.shell.bash import SPECS as _shell_bash
+from agentos.agentic.tools.shell.powershell import SPECS as _shell_powershell
 from agentos.agentic.tools.shell.tasks import SPECS as _shell_tasks
 from agentos.agentic.tools.git.worktree import SPECS as _git_worktree
 from agentos.agentic.tools.orin.preview import SPECS as _orin_preview
@@ -49,6 +50,7 @@ def default_registry() -> ToolRegistry:
         *_web_search,
         *_orin_search_code,
         *_shell_bash,
+        *_shell_powershell,
         *_shell_tasks,
         *_git_worktree,
         *_orin_preview,

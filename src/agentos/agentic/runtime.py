@@ -70,7 +70,7 @@ BROWSER_TOOL_NAMES: frozenset[str] = frozenset()
 CODE_MODE_CORE_TOOLS = frozenset({
     "read_file", "view_file", "transcribe_pdf", "write_file", "edit_file", "notebook_edit",
     "glob_files", "list_files", "search_files", "search_code", "project_map",
-    "run_command", "read_process_output", "stop_process", "verify_project",
+    "run_command", "powershell", "read_process_output", "stop_process", "verify_project",
     "enter_worktree", "exit_worktree", "preview_start", "preview_stop", "preview_logs",
     "enter_plan_mode", "exit_plan_mode",
     "todo_write", "task_create", "task_update", "task_get", "task_list",
@@ -2233,6 +2233,7 @@ class AgenticTurnRuntime:
                     "notebook_edit",
                     "delete_file",
                     "run_command",
+                    "powershell",
                     "preview_start",
                     "preview_stop",
                     "stop_process",

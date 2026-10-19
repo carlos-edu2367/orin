@@ -1109,7 +1109,7 @@ class TurnSession:
                         self._code_mode_stage = "implementing"
                         self._record(AgentActivityEventType.CODE_MODE_STAGE_CHANGED, "Implementando alteração", {"stage": "implementing"}, agent_id=actor)
                 elif name == "verify_project" or (
-                    name == "run_command" and is_verification_command(str(payload.get("command") or ""))
+                    name in {"run_command", "powershell"} and is_verification_command(str(payload.get("command") or ""))
                 ):
                     if self._code_mode_stage != "validating":
                         self._code_mode_stage = "validating"
@@ -1228,7 +1228,7 @@ class TurnSession:
                         agent_id=actor,
                     )
                 elif name == "verify_project" or (
-                    name == "run_command"
+                    name in {"run_command", "powershell"}
                     and is_verification_command(str(extra.get("command") or tool_arguments.get("command") or ""))
                 ):
                     cmd_failed = (

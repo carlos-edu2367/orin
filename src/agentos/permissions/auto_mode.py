@@ -100,7 +100,7 @@ class AutoModeClassifier:
         self._total = 0
 
     def _hard_denied(self, internal: str, arguments: Mapping[str, Any]) -> str | None:
-        if internal == "run_command":
+        if internal in {"run_command", "powershell"}:
             command = str(arguments.get("command") or "")
             if len(command) > MAX_CLASSIFIED_COMMAND_CHARS:
                 return None  # handled by __call__: asks a person without matching or calling the model
@@ -144,7 +144,7 @@ class AutoModeClassifier:
         return "".join(text)
 
     def __call__(self, internal: str, arguments: Mapping[str, Any]) -> PermissionDecision:
-        if internal == "run_command" and len(str(arguments.get("command") or "")) > MAX_CLASSIFIED_COMMAND_CHARS:
+        if internal in {"run_command", "powershell"} and len(str(arguments.get("command") or "")) > MAX_CLASSIFIED_COMMAND_CHARS:
             return PermissionDecision("ask", "command too long for auto mode")
         reason = self._hard_denied(internal, arguments)
         if reason is not None:

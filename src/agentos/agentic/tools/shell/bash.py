@@ -130,6 +130,19 @@ class BashTools:
         cwd: str = "",
         description: str = "",
     ) -> dict[str, Any]:
+        return self._run_shell(command, background, timeout_seconds, cwd, description)
+
+    def _run_shell(
+        self,
+        command: str,
+        background: bool = False,
+        timeout_seconds: int | None = None,
+        cwd: str = "",
+        description: str = "",
+        *,
+        argv: list[str] | None = None,
+        tool_name: str = "run_command",
+    ) -> dict[str, Any]:
         if not isinstance(command, str) or not command.strip():
             raise AgentToolError("command must be a non-blank string")
         if len(command) > 4096:
@@ -165,7 +178,7 @@ class BashTools:
             "DEBIAN_FRONTEND": "noninteractive",
         }
         process_options: dict[str, Any] = {
-            "shell": True,
+            "shell": argv is None,
             "cwd": str(working_directory),
             "stdin": subprocess.DEVNULL,
             "stdout": subprocess.DEVNULL if background else subprocess.PIPE,
@@ -216,7 +229,7 @@ class BashTools:
 
         try:
             try:
-                process = subprocess.Popen(command, **process_options)  # noqa: S602 - a local agent shell is the feature
+                process = subprocess.Popen(argv if argv is not None else command, **process_options)  # noqa: S602 - a local agent shell is the feature
             finally:
                 if log_handle is not None:
                     log_handle.close()
@@ -459,7 +472,7 @@ class BashTools:
                             last_emitted_count = current_count
                             last_emit_at = now
                             progress_payload = {
-                                "tool_name": "run_command",
+                                "tool_name": tool_name,
                                 "tool_kind": "terminal",
                                 "invocation_id": getattr(self, "_active_invocation_id", None) or "",
                                 "command": command[:240],
@@ -469,9 +482,9 @@ class BashTools:
                             }
                             try:
                                 try:
-                                    self._on_tool_progress("run_command", f"Executando: {(clean_description or command)[:60]}", progress_payload)
+                                    self._on_tool_progress(tool_name,f"Executando: {(clean_description or command)[:60]}", progress_payload)
                                 except TypeError:
-                                    self._on_tool_progress("run_command", progress_payload)  # type: ignore[call-arg]
+                                    self._on_tool_progress(tool_name,progress_payload)  # type: ignore[call-arg]
                             except Exception:
                                 pass
                     time.sleep(0.02)
@@ -490,7 +503,7 @@ class BashTools:
                     if current_count > last_emitted_count and tail_snapshot:
                         elapsed = time.monotonic() - started_at
                         progress_payload = {
-                            "tool_name": "run_command",
+                            "tool_name": tool_name,
                             "tool_kind": "terminal",
                             "invocation_id": getattr(self, "_active_invocation_id", None) or "",
                             "command": command[:240],
@@ -500,9 +513,9 @@ class BashTools:
                         }
                         try:
                             try:
-                                self._on_tool_progress("run_command", f"Executando: {(clean_description or command)[:60]}", progress_payload)
+                                self._on_tool_progress(tool_name,f"Executando: {(clean_description or command)[:60]}", progress_payload)
                             except TypeError:
-                                self._on_tool_progress("run_command", progress_payload)  # type: ignore[call-arg]
+                                self._on_tool_progress(tool_name,progress_payload)  # type: ignore[call-arg]
                         except Exception:
                             pass
                 stdout_bytes = b"".join(stdout_chunks)
@@ -521,7 +534,7 @@ class BashTools:
         body = "\n".join(part for part in (stdout, f"[stderr]\n{stderr}" if stderr else "") if part) or "[no output]"
         full_body = body
         body, output_truncated = _bounded_output(body, MAX_COMMAND_OUTPUT_CHARS)
-        persisted_path = self._persist_truncated_output("run_command", full_body) if output_truncated else None
+        persisted_path = self._persist_truncated_output(tool_name, full_body) if output_truncated else None
         if persisted_path:
             body += (
                 f"\n\n[the full output ({len(full_body)} characters) is saved at {persisted_path}; "

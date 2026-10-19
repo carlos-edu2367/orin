@@ -12,8 +12,9 @@ from agentos.code_mode.models import CodePermissionMode, normalize_permission_mo
 from agentos.settings import EffectiveSettings
 
 from .paths import is_protected_path, workspace_path
-from .rules import EDIT_FAMILY, MatchContext, PermissionRule, command_allowed, parse_rule, rule_matches
-from .shell import analyze_command, default_shell
+from .powershell import analyze_for
+from .rules import EDIT_FAMILY, SHELL_TOOLS, MatchContext, PermissionRule, command_allowed, parse_rule, rule_matches
+from .shell import default_shell
 
 logger = logging.getLogger(__name__)
 
@@ -216,8 +217,9 @@ class PermissionEngine:
                     return False
         return True
 
-    def _bash_allowed(self, analysis, args: Mapping[str, Any]) -> PermissionRule | None:
-        bash_rules = [rule for rule in self._allow if rule.tool in {"run_command", "*"}]
+    def _bash_allowed(self, analysis, args: Mapping[str, Any], internal: str = "run_command", dialect: str | None = None) -> PermissionRule | None:
+        shell = dialect or self.ctx.shell
+        bash_rules = [rule for rule in self._allow if rule.tool in {internal, "*"}]
         unconditional = next((rule for rule in bash_rules if rule.specifier is None), None)
         if unconditional is not None:
             return unconditional
@@ -225,7 +227,7 @@ class PermissionEngine:
             return None
         matched: PermissionRule | None = None
         for sub in analysis.subcommands:
-            rule = next((r for r in bash_rules if command_allowed(r.specifier, sub, shell=self.ctx.shell)), None)
+            rule = next((r for r in bash_rules if command_allowed(r.specifier, sub, shell=shell)), None)
             if rule is None:
                 return None
             matched = matched or rule
@@ -243,7 +245,8 @@ class PermissionEngine:
     ) -> PermissionDecision:
         args = dict(arguments or {})
         resolved = normalize_permission_mode(mode)
-        analysis = analyze_command(str(args.get("command") or ""), shell=self.ctx.shell) if internal == "run_command" else None
+        dialect = "powershell" if internal == "powershell" else self.ctx.shell
+        analysis = analyze_for(str(args.get("command") or ""), dialect) if internal in SHELL_TOOLS else None
 
         denied = self._first(self._deny, internal, args, analysis)
         if denied is not None:
@@ -279,8 +282,8 @@ class PermissionEngine:
                 return PermissionDecision("deny", "protected path and dontAsk denies prompts")
             return PermissionDecision("ask", "protected configuration path", requires_human=True)
 
-        if internal == "run_command" and analysis is not None:
-            allowed = self._bash_allowed(analysis, args)
+        if internal in SHELL_TOOLS and analysis is not None:
+            allowed = self._bash_allowed(analysis, args, internal, dialect)
         else:
             allowed = self._first(self._allow, internal, args, analysis)
         if allowed is not None:

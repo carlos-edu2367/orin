@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 from agentos.agentic.tools.public_names import internal_name
 
 from .paths import path_rule_matches, workspace_path
+from .powershell import analyze_for, canonical_cmdlet
 from .shell import ShellAnalysis, analyze_command
 
 _ASSIGNMENT_WORD = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
@@ -21,6 +22,7 @@ _LEGACY = {"shell": "run_command", "bash": "run_command", "grep": "search_files"
 
 EDIT_FAMILY: frozenset[str] = frozenset({"edit_file", "write_file", "notebook_edit"})
 READ_FAMILY: frozenset[str] = frozenset({"read_file", "view_file", "transcribe_pdf", "list_files", "glob_files", "search_files"})
+SHELL_TOOLS: frozenset[str] = frozenset({"run_command", "powershell"})
 _SUBAGENT_TYPES = {"explore": "explore", "plan": "plan", "general-purpose": "general", "general": "general", "fork": "fork"}
 _COMPOUND_PREFIXES = frozenset({
     "git", "npm", "pnpm", "yarn", "npx", "bun", "cargo", "poetry", "uv", "pip", "python", "python3",
@@ -101,7 +103,7 @@ def _program(word: str, shell: str) -> str:
         if lowered.endswith(suffix) and len(name) > len(suffix):
             name = name[: -len(suffix)]
             break
-    return name.lower() if shell == "cmd" else name
+    return name.lower() if shell in {"cmd", "powershell"} else name
 
 
 def _deny_forms(subcommand: str, shell: str) -> list[str]:
@@ -131,6 +133,16 @@ def _deny_forms(subcommand: str, shell: str) -> list[str]:
             break
         after_option = token.startswith("-") and not after_option
         index += 1
+    if shell == "powershell":
+        # A deny written for a cmdlet also stops its aliases, compared case-insensitively.
+        expanded = []
+        for form in forms:
+            head, _, rest = form.partition(" ")
+            expanded.append(form)
+            canonical = canonical_cmdlet(head)
+            if canonical != head.lower():
+                expanded.append(f"{canonical} {rest}".strip())
+        forms = [form.lower() for form in expanded]
     return list(dict.fromkeys(forms))
 
 
@@ -155,12 +167,12 @@ def _allow_forms(subcommand: str, shell: str) -> list[str]:
     head = _unquote(tokens[index])
     if not head or "/" in head or "\\" in head:
         return [text]
-    if shell == "cmd":
+    if shell in {"cmd", "powershell"}:
         head = head.lower()
     candidate = " ".join([head, *tokens[index + 1:]])
     if candidate == text:
         return [text]
-    analysis = analyze_command(candidate, shell=shell)
+    analysis = analyze_for(candidate, shell)
     if analysis.complex or analysis.subcommands != (candidate,):
         return [text]
     return [text, candidate]
@@ -182,6 +194,8 @@ def command_matches(specifier: str | None, subcommand: str, *, shell: str = "pos
     if specifier is None:
         return True
     spec = " ".join(specifier.split())
+    if shell == "powershell":
+        spec = spec.lower()
     if not spec or spec == "*":
         return True
     return any(_spec_matches(spec, form) for form in _deny_forms(subcommand, shell))
@@ -192,9 +206,14 @@ def command_allowed(specifier: str | None, subcommand: str, *, shell: str = "pos
     if specifier is None:
         return True
     spec = " ".join(specifier.split())
+    if shell == "powershell":
+        spec = spec.lower()
     if not spec or spec == "*":
         return True
-    return any(_spec_matches(spec, form) for form in _allow_forms(subcommand, shell))
+    forms = _allow_forms(subcommand, shell)
+    if shell == "powershell":
+        forms = [form.lower() for form in forms]
+    return any(_spec_matches(spec, form) for form in forms)
 
 
 def _target(internal: str, arguments: Mapping[str, Any], ctx: MatchContext) -> Path | None:
@@ -220,12 +239,13 @@ def rule_matches(
         return True
     spec = rule.specifier
     args = dict(arguments or {})
-    if internal == "run_command":
+    if internal in SHELL_TOOLS:
+        dialect = "powershell" if internal == "powershell" else ctx.shell
         command = str(args.get("command") or "")
-        parsed = analysis or analyze_command(command, shell=ctx.shell)
-        if command_matches(spec, command, shell=ctx.shell):
+        parsed = analysis or analyze_for(command, dialect)
+        if command_matches(spec, command, shell=dialect):
             return True
-        return any(command_matches(spec, sub, shell=ctx.shell) for sub in parsed.subcommands)
+        return any(command_matches(spec, sub, shell=dialect) for sub in parsed.subcommands)
     if internal in EDIT_FAMILY or internal in READ_FAMILY:
         target = _target(internal, args, ctx)
         return target is not None and path_rule_matches(spec, target, workspace_root=ctx.workspace_root, home=ctx.home)
@@ -262,6 +282,10 @@ def suggest_rule(internal: str, arguments: Mapping[str, Any], ctx: MatchContext)
         if tokens[0] in _COMPOUND_PREFIXES and len(tokens) >= 2 and not tokens[1].startswith("-"):
             return f"Bash({tokens[0]} {tokens[1]}:*)"
         return f"Bash({tokens[0]}:*)"
+    if internal == "powershell":
+        analysis = analyze_for(str(args.get("command") or ""), "powershell")
+        first = analysis.subcommands[0].split(" ", 1)[0] if analysis.subcommands else ""
+        return f"PowerShell({first}:*)" if first else "PowerShell"
     if internal in EDIT_FAMILY:
         target = _target(internal, args, ctx)
         if target is None:

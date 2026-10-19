@@ -66,6 +66,7 @@ from agentos.agentic.tools.search.glob import GlobTools
 from agentos.agentic.tools.search.grep import GrepTools
 from agentos.agentic.tools.orin.search_code import CodeSearchTools
 from agentos.agentic.tools.shell.bash import BashTools
+from agentos.agentic.tools.shell.powershell import PowerShellTools
 from agentos.agentic.tools.shell.tasks import ShellTaskTools
 from agentos.agentic.tools.orin.verify import VerifyTools
 from agentos.agentic.tools.web.fetch import FetchTools
@@ -188,6 +189,7 @@ class AgentToolset(
     GrepTools,
     CodeSearchTools,
     BashTools,
+    PowerShellTools,
     ShellTaskTools,
     VerifyTools,
     FetchTools,
@@ -485,7 +487,7 @@ class AgentToolset(
                 built = tuple(
                     item for item in built
                     if item.read_only and item.name not in {
-                        "write_file", "edit_file", "notebook_edit", "run_command", "stop_process",
+                        "write_file", "edit_file", "notebook_edit", "run_command", "powershell", "stop_process",
                         "verify_project", "create_agent", "ask_agent", "ask_agents", "run_subagent", "check_subagent",
                         "generate_image", "generate_audio", "generate_video",
                     }
@@ -796,7 +798,7 @@ class AgentToolset(
         # A model can hallucinate a tool name, so an unknown tool is a result the
         # model reads and corrects, never an exception that kills the turn.
         if self._read_only_mode and name in {
-            "write_file", "edit_file", "notebook_edit", "run_command", "stop_process", "verify_project",
+            "write_file", "edit_file", "notebook_edit", "run_command", "powershell", "stop_process", "verify_project",
             "generate_image", "generate_audio", "generate_video",
         }:
             return ToolOutcome(
@@ -964,7 +966,7 @@ class AgentToolset(
                         {"tool_kind": definition.kind, "code_mode": True},
                         "CODE_PERMISSION_DENIED",
                     )
-                elif self._code_mode_requires_approval and name in {"write_file", "edit_file", "notebook_edit", "run_command", "verify_project"}:
+                elif self._code_mode_requires_approval and name in {"write_file", "edit_file", "notebook_edit", "run_command", "powershell", "verify_project"}:
                     path = str(arguments.get("path") or arguments.get("notebook_path") or "")
                     if not (name in {"write_file", "edit_file", "notebook_edit"} and path.replace("\\", "/").lstrip("./").startswith(".orin/plans/")):
                         return ToolOutcome(
@@ -974,7 +976,7 @@ class AgentToolset(
                             {"tool_kind": definition.kind, "code_mode": True},
                             "CODE_PLAN_APPROVAL_REQUIRED",
                         )
-        if self._code_mode_active and name == "run_command":
+        if self._code_mode_active and name in {"run_command", "powershell"}:
             command = str(arguments.get("command") or "")
             if re.search(r"\b(deploy|release|publish)\b", command, re.IGNORECASE):
                 return ToolOutcome(
@@ -996,7 +998,7 @@ class AgentToolset(
                 )
         limit = definition.max_result_size_chars
         err_payload: dict[str, Any] = {"tool_kind": definition.kind}
-        if name == "run_command":
+        if name in {"run_command", "powershell"}:
             cmd_arg = str(arguments.get("command") or "")[:400]
             if cmd_arg:
                 err_payload["command"] = cmd_arg
@@ -1059,7 +1061,7 @@ class AgentToolset(
                 outcome.content += coercion_note
         if name in {"write_file", "edit_file"} and outcome.status == "succeeded":
             outcome = self._with_file_diagnostic(outcome, arguments)
-        if not (name == "run_command" and bool(arguments.get("background"))) and name not in {"read_process_output", "stop_process", "list_files"}:
+        if not (name in {"run_command", "powershell"} and bool(arguments.get("background"))) and name not in {"read_process_output", "stop_process", "list_files"}:
             bg_notice = self._check_exited_background_processes()
             if bg_notice and len(outcome.content) + len(bg_notice) <= limit:
                 outcome.content += bg_notice
@@ -1167,7 +1169,7 @@ class AgentToolset(
                 self._change_events += 1
                 self._code_mode_verified = False
             return
-        if name != "run_command" or bool(payload.get("failed")):
+        if name not in {"run_command", "powershell"} or bool(payload.get("failed")):
             return
         command_str = str(arguments.get("command") or payload.get("command") or "").strip()
         is_verif = self._is_verification_command(command_str)
