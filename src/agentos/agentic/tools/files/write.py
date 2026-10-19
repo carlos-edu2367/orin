@@ -27,13 +27,13 @@ class WriteTools:
             else:
                 original_sha = ""
                 old_content = None
-            self._checkpoint_store.snapshot_before_write(self.turn_id or "turn-default", path)
+            self._snapshot_before_write(path)
             written, total = self.workspace.append_text(path, content)
             new_content = (old_content or "") + content
             body = f"Appended {written} bytes to {path}; it now holds {total} bytes."
         else:
             old_content, original_sha = self._check_read_file_guard(path)
-            self._checkpoint_store.snapshot_before_write(self.turn_id or "turn-default", path)
+            self._snapshot_before_write(path)
             written = total = self.workspace.write_text(path, content)
             new_content = content
             body = f"Wrote {written} bytes to {path}."

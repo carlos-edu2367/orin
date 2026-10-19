@@ -281,6 +281,8 @@ class AgentToolset(
         memory_tracker: object | None = None,
         non_interactive_ask: str = "allow",
         cancel_check: Callable[[], bool] | None = None,
+        file_history: object | None = None,
+        user_message_id: str | None = None,
     ) -> None:
         from agentos.code_mode.checkpoints import FileCheckpointStore
         from agentos.code_mode.models import CodePermissionMode, normalize_permission_mode
@@ -290,6 +292,9 @@ class AgentToolset(
         self._tls = threading.local()
         # Asked while a foreground command runs: True stops the command (the turn was interrupted).
         self._cancel_check = cancel_check
+        # Per-message file history (W4): what each file held before this user message's turn first changed it.
+        self._file_history = file_history
+        self._history_message_id = str(user_message_id or turn_id or "") or None
         self._read_file_lock = threading.Lock()
         self._reported_changes: set[tuple[str, str, str]] = set()
         # (mtime_ns, size) of each path at its last external-change examination; an unchanged stamp is not re-hashed.
@@ -1250,6 +1255,18 @@ class AgentToolset(
         )
 
     # -- handlers -------------------------------------------------------
+
+    def _snapshot_before_write(self, path: str) -> None:
+        """Keep the file as it is now: in the per-turn checkpoint (today's UI rewind) and the per-message history."""
+        self._checkpoint_store.snapshot_before_write(self.turn_id or "turn-default", path)
+        history = self._file_history
+        if history is None or not self._history_message_id:
+            return
+        try:
+            target = self.workspace.resolve(path)
+        except Exception:  # noqa: BLE001 - the edit itself reports a bad path
+            return
+        history.snapshot_before_write(self._history_message_id, target, turn_id=self.turn_id or "")
 
     def rewind_turn(self, turn_id: str | None = None) -> dict[str, Any]:
         """Restore workspace files modified during ``turn_id`` back to their pre-turn state."""

@@ -1340,6 +1340,7 @@ class ChatWorker:
             workspace_root=self._workspace_root,
             enable_terminal=self._capabilities.shell,
             cancelled=self._is_turn_cancelled,
+            file_history_root=orin_paths().data / "file-history",
             reconciliation_required=self._reconciliation_required,
             limits=AgenticLimits(
                 deadline=TURN_DEADLINE,

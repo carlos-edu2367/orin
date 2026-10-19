@@ -66,6 +66,7 @@ from agentos.code_mode import (
     WorktreeManager,
     list_workspace_files,
 )
+from agentos.code_mode.file_history import FileHistory
 from agentos.code_mode.models import CodeAutonomy, normalize_permission_mode
 
 
@@ -195,6 +196,10 @@ class CreateScheduledChatRequest(_RequestModel):
     timezone: str = Field(min_length=1, max_length=128)
     recurrence: ScheduleRecurrenceRequest
     project_id: str | None = Field(default=None, min_length=1, max_length=255)
+
+
+class RewindMessageRequest(_RequestModel):
+    mode: str = "code"
 
 
 class InspectWorkspaceFolderRequest(_RequestModel):
@@ -382,6 +387,7 @@ class ApiServices:
         accounts: object | None = None,
         capabilities: InstanceCapabilities | None = None,
         public_origin: str | None = None,
+        file_history_root: str | Path | None = None,
     ) -> None:
         self.security = security or InMemorySecurityService()
         self.accounts = accounts
@@ -407,10 +413,15 @@ class ApiServices:
         self.uploads = uploads
         self.vision_model_settings = vision_model_settings
         self.scheduled_chats = scheduled_chats
+        self.file_history_root = Path(file_history_root) if file_history_root is not None else None
 
     def managed_root_for(self, user_id: str) -> Path:
         """Where a profile's managed workspaces live; an explicit root (tests) wins."""
         return self.workspace_root if self.workspace_root is not None else orin_paths().user_workspaces(user_id)
+
+    def history_root(self) -> Path:
+        """Where per-message file history lives; an explicit root (tests) wins."""
+        return self.file_history_root if self.file_history_root is not None else orin_paths().data / "file-history"
 
 
 def create_app(services: ApiServices) -> FastAPI:
@@ -1494,6 +1505,30 @@ def create_app(services: ApiServices) -> FastAPI:
         store = FileCheckpointStore(workspace)
         result = await run_in_threadpool(store.rewind_turn, turn_id)
         return JSONResponse(_jsonable(result))
+
+    @app.post("/v1/conversations/{conversation_id}/messages/{message_id}/rewind")
+    async def rewind_conversation_message(
+        conversation_id: str, message_id: str, payload: RewindMessageRequest, request: Request,
+    ) -> JSONResponse:
+        principal = principal_for(request, mutable=True)
+        services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.rewind")
+        if payload.mode != "code":
+            raise ApplicationValidationError("only mode 'code' is available; conversation rewind arrives with the W7 interface")
+        workspace = conversation_workspace(conversation_id, principal)
+        history = FileHistory(services.history_root(), conversation_id)
+        try:
+            result = await run_in_threadpool(history.rewind, message_id, roots=[Path(workspace.root)])
+        except LookupError as error:
+            raise ApplicationNotFoundError(message_id) from error
+        return JSONResponse(_jsonable(result))
+
+    @app.get("/v1/conversations/{conversation_id}/file-history")
+    async def conversation_file_history(conversation_id: str, request: Request) -> JSONResponse:
+        principal = principal_for(request)
+        services.security.authorize(principal, action="conversation.read", resource_id=conversation_id, purpose="conversation.file_history")
+        conversation_record(conversation_id, principal)  # the conversation must be this person's
+        history = FileHistory(services.history_root(), conversation_id)
+        return JSONResponse(_jsonable({"items": await run_in_threadpool(history.messages)}))
 
     @app.get("/v1/conversations/{conversation_id}/overview")
     async def conversation_overview(conversation_id: str, request: Request) -> JSONResponse:

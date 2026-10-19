@@ -74,7 +74,7 @@ class EditTools:
             if matches > 1 and not replace_all:
                 raise AgentToolError(f"edit {index + 1}: old_text occurs {matches} times; add surrounding text or set replace_all=true.")
             draft = draft.replace(current, replacement) if replace_all else draft.replace(current, replacement, 1)
-        self._checkpoint_store.snapshot_before_write(self.turn_id or "turn-default", path)
+        self._snapshot_before_write(path)
         written = self.workspace.write_text(path, draft)
         if not self._dedup_after_non_code_edit:
             try:

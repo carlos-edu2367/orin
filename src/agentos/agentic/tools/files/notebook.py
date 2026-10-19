@@ -61,7 +61,7 @@ class NotebookTools:
                 return []
             return src.splitlines(keepends=True)
 
-        self._checkpoint_store.snapshot_before_write(self.turn_id or "turn-default", notebook_path)
+        self._snapshot_before_write(notebook_path)
         old_source: str | None = None
         kind = "code"
         target_cell_id = ""

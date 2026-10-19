@@ -25,6 +25,7 @@ from typing import Any, Callable, Mapping
 
 from agentos.installation import orin_paths
 from agentos.agentic.tools.public_names import public_subagent_type
+from agentos.code_mode.file_history import FileHistory
 from agentos.code_mode.models import INTERNAL_PERMISSION_MODES, known_permission_mode, public_permission_mode
 from agentos.settings import EffectiveSettings, detect_changes, empty_settings, load_effective_settings
 from agentos.settings.paths import claude_user_dir, orin_user_dir, workspace_grants_file
@@ -878,6 +879,7 @@ class TurnSession:
         model_capabilities: tuple[str, ...] = (),
         consolidation_state=None,
         background_runner: Callable[[Callable[[], None]], object] | None = None,
+        file_history_root: Path | str | None = None,
     ) -> None:
         self.turn = turn
         self.lifecycle: LifecycleBus | None = lifecycle
@@ -893,6 +895,13 @@ class TurnSession:
         self._background_runner = background_runner or (
             lambda job: threading.Thread(target=job, name="orin-auto-dream", daemon=True).start()
         )
+        # Where per-message file history lives; None (tests, ad-hoc sessions) records nothing.
+        self.file_history = None
+        if file_history_root is not None and turn.get("conversation_id"):
+            try:
+                self.file_history = FileHistory(Path(file_history_root), str(turn["conversation_id"]))
+            except ValueError:
+                self.file_history = None
         self.effective_settings: EffectiveSettings = empty_settings()
         self.enable_terminal = bool(enable_terminal)
         self.store = store
@@ -2366,6 +2375,8 @@ class TurnSession:
             permission_mode=effective_perm_mode,
             interactive_permissions=interactive_permissions,
             turn_id=str(self.turn.get("turn_id") or "") or None,
+            file_history=self.file_history,
+            user_message_id=str(self.turn.get("user_message_id") or "") or None,
             conversation_id=str(self.turn.get("conversation_id") or "") or None,
             read_file_state=self._read_file_state if (subagents or inherit_context) else {},
             todos_state=self._todos_state,
