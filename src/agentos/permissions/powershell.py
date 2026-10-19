@@ -39,6 +39,8 @@ _WORD_END = frozenset(" \t;|&<>\r\n")
 _SEPARATORS = frozenset("\r\n;")
 _GROUPING = frozenset("(){}[]")
 _TYPOGRAPHIC_QUOTES = frozenset("‘’‚‛“”„")
+# -Name:value binds a value without a space; anything but a plain word (a path, a pattern) is not simple (W4-R2).
+_BOUND_VALUE = re.compile(r"(?:^|\s)-[A-Za-z]\w*:(?![A-Za-z0-9_-]+(?:\s|$))")
 
 
 def canonical_cmdlet(word: str) -> str:
@@ -159,6 +161,8 @@ def analyze_powershell(command: str) -> ShellAnalysis:
             reasons.append("dot-sourcing")
         if canonical_cmdlet(first) in _DYNAMIC:
             reasons.append(f"runs dynamic code ({first})")
+        if _BOUND_VALUE.search(sub):
+            reasons.append("parameter bound to a path or pattern")
     unique = tuple(dict.fromkeys(reasons))
     return ShellAnalysis(tuple(subs), bool(unique), unique, tuple(redirect_targets))
 

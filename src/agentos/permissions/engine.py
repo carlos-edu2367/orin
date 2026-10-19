@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,7 +12,7 @@ from typing import Any
 from agentos.code_mode.models import CodePermissionMode, normalize_permission_mode
 from agentos.settings import EffectiveSettings
 
-from .paths import is_protected_path, workspace_path
+from .paths import PROTECTED_FILE_NAMES, glob_to_regex, is_protected_path, workspace_path
 from .powershell import analyze_for
 from .rules import EDIT_FAMILY, SHELL_TOOLS, MatchContext, PermissionRule, command_allowed, parse_rule, rule_matches
 from .shell import default_shell
@@ -45,6 +46,28 @@ def _canonical_variants(word: str) -> list[str]:
 
 def _has_glob(word: str) -> bool:
     return any(char in word for char in "*?[")
+
+
+# Names whose writes are protected: the git and Claude/Orin folders and the protected dotfiles.
+_GUARDED_NAMES: frozenset[str] = frozenset({".git", ".claude", ".orin"}) | PROTECTED_FILE_NAMES
+
+
+def _glob_may_name_protected(word: str) -> bool:
+    """A wildcard component that could select a protected name (``.gi?``, ``.gi*``, ``.[g]it``) (W4-R2).
+
+    The shell expands the pattern when it runs, so the engine cannot know the name. Any pattern that
+    matches a guarded name, or that it cannot read, counts as protected: fail closed.
+    """
+    for part in word.split("/"):
+        if not _has_glob(part):
+            continue
+        try:
+            pattern = glob_to_regex(part, case_insensitive=True)
+        except re.error:
+            return True
+        if any(pattern.match(name) for name in _GUARDED_NAMES):
+            return True
+    return False
 
 Classifier = Callable[[str, Mapping[str, Any]], "PermissionDecision"]
 
@@ -148,6 +171,8 @@ class PermissionEngine:
                 words.extend([body, token[2:]])
                 if "=" in body:
                     words.append(body.split("=", 1)[1])
+                if not token.startswith("--") and ":" in body:  # PowerShell's -Name:value binds the value (W4-R2)
+                    words.append(body.split(":", 1)[1])
             else:
                 words.append(token)
         return [variant for word in words for variant in _canonical_variants(word)]
@@ -190,14 +215,18 @@ class PermissionEngine:
             return [Path(token), workspace_path(token, self.workspace_root)]
         return [workspace_path(token, self.workspace_root)]
 
+    def _names_protected(self, word: str) -> bool:
+        """A shell word that is a protected path, or a wildcard that could select one (W4-R2)."""
+        return _glob_may_name_protected(word) or any(self._protected(path) for path in self._token_paths(word))
+
     def _mentions_protected(self, analysis) -> bool:
         for sub in analysis.subcommands:
             for token in self._command_tokens(sub):
-                if any(self._protected(path) for path in self._token_paths(token)):
+                if self._names_protected(token):
                     return True
         for target in analysis.redirect_targets:
             for variant in _canonical_variants(target):
-                if any(self._protected(path) for path in self._token_paths(variant)):
+                if self._names_protected(variant):
                     return True
         return False
 
