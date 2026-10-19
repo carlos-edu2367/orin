@@ -389,7 +389,6 @@ def test_chat_worker_isolates_hook_engine_per_turn(monkeypatch) -> None:
     monkeypatch.setattr(chat_module, "ConversationAgentStore", lambda *args, **kwargs: object())
     monkeypatch.setattr(chat_module, "PostgresAgentMemoryStore", lambda *args, **kwargs: None)
     monkeypatch.setattr(chat_module, "search_client_from_environment", lambda: None)
-    monkeypatch.setattr(chat_module, "rehydrate_hooks", lambda *args, **kwargs: None)
     monkeypatch.setattr(chat_module, "TurnSession", FakeSession)
 
     worker = ChatWorker(StubStore(), runtime_settings=Settings())

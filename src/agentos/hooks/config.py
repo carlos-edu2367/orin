@@ -34,9 +34,12 @@ class HookSpec:
     run_async: bool = False
     on_failure: str = "ignore"
     status_message: str = ""
+    # W5: a plugin's hook runs confined to its folder, without a shell, with this environment added.
+    plugin_root: str = ""
+    plugin_env: tuple[tuple[str, str], ...] = ()
 
     def identity(self) -> tuple[Any, ...]:
-        return (self.event, self.type, self.command, self.url, self.prompt, self.matcher)
+        return (self.event, self.type, self.command, self.url, self.prompt, self.matcher, self.plugin_root)
 
     def label(self) -> str:
         if self.type == "command":
@@ -88,6 +91,17 @@ def _entry(event: HookEvent, matcher: str, source: str, raw: Any) -> HookSpec | 
         return f"{kind} hook needs a non-empty 'prompt'"
     model = raw.get("model") if isinstance(raw.get("model"), str) else ""
     return HookSpec(**common, prompt=prompt.strip(), model=model.strip()[:200])
+
+
+def non_managed_hooks_allowed(settings: EffectiveSettings) -> bool:
+    """Whether hooks that are not managed (plugins', skills', agents', W5) may run: not when managed settings switch
+    every hook off or allow only managed hooks, nor when a user or CLI (or trusted repository) switch turns them off."""
+    layers = list(getattr(settings, "layers", ()))
+    if any(layer.name == "managed" and (layer.data.get("disableAllHooks") is True or layer.data.get("allowManagedHooksOnly") is True)
+           for layer in layers):
+        return False
+    switchable = {"user", "cli"} | ({"project", "local"} if getattr(settings, "trusted", False) else set())
+    return not any(layer.name in switchable and layer.data.get("disableAllHooks") is True for layer in layers)
 
 
 def load_hook_specs(settings: EffectiveSettings) -> tuple[tuple[HookSpec, ...], tuple[HookConfigError, ...]]:

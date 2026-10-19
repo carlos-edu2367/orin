@@ -29,17 +29,17 @@ def test_the_reference_hooks_file_yields_three_hooks(tmp_path):
     assert [item.event for item in hooks] == ["PostCompact", "PostToolUse", "SessionStart"]
     assert hooks[1].matcher == "Write|Edit|MultiEdit|NotebookEdit|create_file"
     assert hooks[2].hook_id == "obsidian:SessionStart:0"
-    assert any("async" in warning for warning in warnings)
+    assert hooks[0].run_async is True and warnings == ()
 
 
-def test_an_unsupported_event_is_warned_not_dropped_silently(tmp_path):
+def test_an_unknown_event_is_warned_not_dropped_silently(tmp_path):
     hooks, warnings = parse_hooks(
-        _write(tmp_path, {"hooks": {"PreToolUse": [{"matcher": "", "hooks": [{"type": "command", "command": "x"}]}]}}),
+        _write(tmp_path, {"hooks": {"NotAnEvent": [{"matcher": "", "hooks": [{"type": "command", "command": "x"}]}]}}),
         plugin_id="demo",
     )
 
     assert hooks == ()
-    assert any("PreToolUse" in warning for warning in warnings)
+    assert any("NotAnEvent" in warning for warning in warnings)
 
 
 def test_an_uncompilable_matcher_skips_the_hook(tmp_path):
@@ -60,7 +60,7 @@ def test_timeout_is_clamped(tmp_path):
         plugin_id="demo",
     )
 
-    assert hooks[0].timeout_seconds == 30
+    assert hooks[0].timeout_seconds == 600
 
 
 def test_a_missing_or_malformed_file_contributes_nothing(tmp_path):

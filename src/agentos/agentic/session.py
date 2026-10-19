@@ -880,6 +880,7 @@ class TurnSession:
         mcp_service=None,
         plugin_service=None,
         hook_engine=None,
+        plugin_hooks: bool = False,
         enable_terminal: bool = True,
         host_folders: bool = True,
         project_store=None,
@@ -940,6 +941,8 @@ class TurnSession:
         self.mcp_service = mcp_service
         self.plugin_service = plugin_service
         self.hook_engine = hook_engine
+        # W5: whether this Orin runs the plugins' hooks (they run in the settings hooks' dispatcher).
+        self.plugin_hooks = bool(plugin_hooks)
         # SessionStart output from settings hooks, carried into the first system prompt of the conversation.
         self._settings_session_context: list[str] = []
         # Removes this session's settings hooks from its bus (set when they are installed).
@@ -3047,6 +3050,8 @@ class TurnSession:
         self._remove_settings_hooks()
         try:
             specs, errors = load_hook_specs(self.effective_settings)
+            plugin_specs, plugin_errors = self._plugin_hook_specs()
+            specs, errors = (*specs, *plugin_specs), (*errors, *plugin_errors)
             for error in errors:
                 logger.warning("hook configuration (%s): %s", error.source, error.message)
             if not specs:
@@ -3067,6 +3072,21 @@ class TurnSession:
             self._hook_unsubscribe = bus.subscribe(dispatcher)
         except Exception:  # noqa: BLE001 - hook setup never stops a turn
             logger.exception("settings hooks could not be installed")
+
+    def _plugin_hook_specs(self):
+        """The hooks of the person's active plugins that they allowed to run (W5); none when this Orin runs no
+        plugin hooks or the settings switch non-managed hooks off."""
+        from agentos.hooks.config import non_managed_hooks_allowed
+        from agentos.plugins.hook_specs import plugin_hook_specs
+        from agentos.plugins.runtime import active_plugins
+
+        if not self.plugin_hooks or self.plugin_service is None or not non_managed_hooks_allowed(self.effective_settings):
+            return (), ()
+        user_id = str(self.turn.get("user_id") or "")
+        plugins, _missing = active_plugins(self.plugin_service, user_id, getattr(self.effective_settings, "data", None) or {})
+        reader = getattr(self.plugin_service, "option_values", None)
+        options = (lambda plugin_id: reader(user_id=user_id, plugin_id=plugin_id)) if callable(reader) else None
+        return plugin_hook_specs(plugins, user_id=user_id, option_values=options)
 
     def _remove_settings_hooks(self) -> None:
         """Unsubscribe the settings hooks of this session from the bus. Never stops a turn."""

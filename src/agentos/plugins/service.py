@@ -79,6 +79,15 @@ class PluginService:
             raise PluginServiceError(str(error), code="plugin_config_invalid") from error
         return self.user_config(user_id=user_id, plugin_id=plugin_id)
 
+    def option_values(self, *, user_id: str, plugin_id: str) -> dict[str, str]:
+        """A plugin's option values for its hooks (W5): defaults, then the person's."""
+        options = self._declared_options(self.get(user_id, plugin_id))
+        if not options:
+            return {}
+        values = {key: item.default for key, item in options.items() if item.default is not None}
+        values.update(self._config_store.values(user_id, plugin_id))
+        return values
+
     def _option_values(self, user_id: str, plugin_id: str, inspection: Any) -> dict[str, str]:
         """The values to activate with: defaults, then the person's; refuses a missing required or misplaced sensitive one."""
         from .user_config import referenced_options

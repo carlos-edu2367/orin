@@ -1,9 +1,8 @@
 """Read a plugin's ``hooks.json`` in the Claude Code shape.
 
-Only the three events Orin dispatches are recognized. Everything else — a
-different event, a non-command hook type, ``async: true`` — is warned rather
-than silently dropped, so the author's declared intent stays visible to the
-person deciding whether to authorize execution.
+Every hook event Orin knows is recognized (W5: plugin hooks run in the same dispatcher as settings hooks). An
+unknown event or a non-command hook type is warned rather than silently dropped, so the author's declared intent
+stays visible to the person deciding whether to authorize execution.
 """
 from __future__ import annotations
 
@@ -12,11 +11,13 @@ from pathlib import Path
 import re
 from typing import Any, Mapping
 
+from agentos.agentic.lifecycle import HookEvent
+
 from .models import HookContribution
 
-SUPPORTED_EVENTS = ("PostCompact", "PostToolUse", "SessionStart")
+SUPPORTED_EVENTS = tuple(event.value for event in HookEvent)
 MAX_HOOKS = 32
-MIN_TIMEOUT, DEFAULT_TIMEOUT, MAX_TIMEOUT = 1, 10, 30
+MIN_TIMEOUT, DEFAULT_TIMEOUT, MAX_TIMEOUT = 1, 60, 600
 
 
 def parse_hooks(root: Path, *, plugin_id: str) -> tuple[tuple[HookContribution, ...], tuple[str, ...]]:
@@ -43,6 +44,8 @@ def parse_hooks(root: Path, *, plugin_id: str) -> tuple[tuple[HookContribution, 
             if not isinstance(group, Mapping):
                 continue
             matcher = str(group.get("matcher") or "")
+            if matcher == "*":
+                matcher = ""  # every tool, as in settings hooks
             try:
                 re.compile(matcher)
             except re.error:
@@ -57,13 +60,11 @@ def parse_hooks(root: Path, *, plugin_id: str) -> tuple[tuple[HookContribution, 
                 command = str(entry.get("command") or "").strip()
                 if not command:
                     continue
-                if entry.get("async") is True:
-                    warnings.append(f"hook com \"async\" em '{event}' será executado de forma síncrona, não assíncrona")
                 raw_timeout = entry.get("timeout")
                 timeout = int(raw_timeout) if isinstance(raw_timeout, (int, float)) else DEFAULT_TIMEOUT
                 hooks.append(HookContribution(
                     f"{plugin_id}:{event}:{index}", event, matcher, command[:2048],
-                    max(MIN_TIMEOUT, min(MAX_TIMEOUT, timeout)),
+                    max(MIN_TIMEOUT, min(MAX_TIMEOUT, timeout)), entry.get("async") is True,
                 ))
                 index += 1
     if len(hooks) > MAX_HOOKS:

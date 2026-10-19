@@ -58,7 +58,6 @@ from agentos.projects.store import PostgresProjectStore
 from agentos.mcp.service import McpServerService
 from agentos.mcp.toolset import McpToolProvider
 from agentos.plugins.hook_engine import HookEngine
-from agentos.plugins.rehydrate import rehydrate_hooks
 from agentos.plugins.fetcher import PluginFetcher
 from agentos.plugins.service import PluginService
 from agentos.profile_files.binding import relative_display
@@ -1342,12 +1341,8 @@ class ChatWorker:
             mcp_service=mcp_service,
             hook_engine=turn_hook_engine,
         )
-        # Refresh this user's active, consented hooks into a turn-local
-        # HookEngine so concurrent turns never overwrite each other's index.
-        try:
-            rehydrate_hooks(plugin_service, turn_hook_engine, user_id=str(turn["user_id"]))
-        except Exception:
-            _LOGGER.exception("could not rehydrate plugin hooks for %s", turn["user_id"])
+        # W5: plugin hooks run in the session's hook dispatcher (plugin_hooks below); the turn-local HookEngine
+        # stays empty, so the older plugin-hook path never runs a hook twice.
         # A broken MCP configuration must never stop a turn from running.
         try:
             mcp_bundles = mcp_service.active_servers(str(turn["user_id"]))
@@ -1405,6 +1400,7 @@ class ChatWorker:
             mcp_service=mcp_service,
             plugin_service=plugin_service,
             hook_engine=turn_hook_engine,
+            plugin_hooks=self._capabilities.plugin_hooks,
             project_store=PostgresProjectStore(engine),
             chat_store=self.store,
             local_workspaces=PostgresLocalWorkspaceStore(engine),

@@ -83,10 +83,11 @@ class CommandContribution:
 @dataclass(frozen=True, slots=True)
 class HookContribution:
     hook_id: str            # "{plugin_id}:{event}:{index}" in declaration order
-    event: str               # SessionStart | PostToolUse | PostCompact
-    matcher: str              # regex over the tool name; "" matches everything
+    event: str               # any hook event (W5), e.g. PreToolUse, SessionStart
+    matcher: str              # the event's matcher, as in settings hooks; "" matches everything
     command: str               # raw declared string, ${CLAUDE_PLUGIN_ROOT} unresolved
     timeout_seconds: int
+    run_async: bool = False   # W5: "async": true runs it in the background, like a settings hook
 
 
 @dataclass(frozen=True, slots=True)

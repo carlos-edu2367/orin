@@ -378,15 +378,17 @@ def _feed(stream, data: bytes) -> None:  # noqa: ANN001 - a binary pipe
 
 
 def run_shell_command(
-    command: str,
+    command: str | list[str],
     *,
     cwd: str | None,
     env: Mapping[str, str],
     stdin_text: str,
     timeout_seconds: float,
+    shell: bool = True,
 ) -> ProcessResult:
+    """Run a hook's command (a shell line, or with ``shell=False`` an argument list, W5) and collect its output."""
     options: dict[str, object] = {
-        "shell": True,
+        "shell": shell,
         "cwd": cwd,
         "env": {str(key): str(value) for key, value in env.items()},
         "stdin": subprocess.PIPE,

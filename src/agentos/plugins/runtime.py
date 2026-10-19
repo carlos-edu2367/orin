@@ -24,6 +24,7 @@ class ActivePlugin:
     plugin_id: str
     install_path: Path
     manifest: PluginManifest
+    enabled_hook_ids: frozenset[str] = frozenset()  # the hooks the person allowed to run (W5)
 
     def folders(self, relative_paths: Sequence[str]) -> list[Path]:
         return [self.install_path / item for item in relative_paths if (self.install_path / item).is_dir()]
@@ -69,7 +70,11 @@ def active_plugins(plugin_service: Any, user_id: str, settings: Mapping[str, Any
         except (OSError, ValueError):
             logger.warning("plugin %s has an unreadable manifest; its agents and styles are skipped", plugin_id)
             continue
-        active.append(ActivePlugin(plugin_id, path, manifest))
+        allowed = frozenset(
+            str(item.get("reference") or "") for item in row.get("contributions") or ()
+            if isinstance(item, Mapping) and item.get("kind") == "hook" and item.get("enabled")
+        )
+        active.append(ActivePlugin(plugin_id, path, manifest, allowed))
     return active, sorted(missing)
 
 

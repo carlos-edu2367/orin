@@ -43,6 +43,8 @@ class CommandHookRunner:
         self.env_file = Path(env_file) if env_file is not None else None
 
     def run(self, spec: HookSpec, payload: Mapping[str, Any]) -> HookRun:
+        if spec.plugin_root:
+            return self._run_plugin_hook(spec, payload)
         env = dict(os.environ)
         env["ORIN_PROJECT_DIR"] = str(self.project_dir)
         env["CLAUDE_PROJECT_DIR"] = str(self.project_dir)
@@ -58,6 +60,23 @@ class CommandHookRunner:
             env.pop("CLAUDE_ENV_FILE", None)
         result = run_shell_command(
             spec.command, cwd=str(self.project_dir), env=env,
+            stdin_text=_payload_text(payload), timeout_seconds=spec.timeout,
+        )
+        return HookRun(result.exit_code, result.stdout, result.stderr, result.timed_out, result.error)
+
+    def _run_plugin_hook(self, spec: HookSpec, payload: Mapping[str, Any]) -> HookRun:
+        """A plugin's hook (W5): no shell, the program inside the plugin's folder, a minimal environment."""
+        from agentos.plugins.hook_executor import ENVIRONMENT_ALLOWLIST, HookRejected, resolve_argv
+
+        try:
+            argv = resolve_argv(spec.command, install_path=Path(spec.plugin_root))
+        except HookRejected as error:
+            return HookRun(None, "", "", error=f"plugin hook refused: {error}"[:500])
+        env = {name: os.environ[name] for name in ENVIRONMENT_ALLOWLIST if name in os.environ}
+        env.update(dict(spec.plugin_env))
+        env["ORIN_PROJECT_DIR"] = env["CLAUDE_PROJECT_DIR"] = str(self.project_dir)
+        result = run_shell_command(
+            argv, shell=False, cwd=str(self.project_dir), env=env,
             stdin_text=_payload_text(payload), timeout_seconds=spec.timeout,
         )
         return HookRun(result.exit_code, result.stdout, result.stderr, result.timed_out, result.error)
