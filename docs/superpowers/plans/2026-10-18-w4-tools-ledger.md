@@ -216,3 +216,44 @@ Execution differences (none changes a behaviour the plan asks for):
 - The integration failure above (`test_every_route_is_classified`, from Batch B).
 - The two open items above (PowerShell deny matching; PowerShell CLIXML output).
 - `frontend/` is untouched in this batch.
+
+## Batch D — Hardening, web and meta tools (Tasks 19–26)
+
+Commits (on top of `edbacb0`): `17062f6` (Task 19 fix 1, route classification), `50a3ca8` (Task 19 fix 2, Bash deny/ask rules over PowerShell), `4c75fe8` (Task 19 fix 3, CLIXML), `0966bf2` (Task 20, WebFetch), `10697c3` (Task 21, WebSearch), `d5b0e07` (Task 22, ToolSearch), `ac38ca4` (Task 23, Skill), `87a7894` (Task 24, AskUserQuestion backend and frontend), `9adf0bb` (Task 25, ExitPlanMode output and periodic reminders). Task 26 (this section) was finished by the coordinator: the executor handed back before the final suites and the ledger.
+
+### Suites
+
+- Unit, `uv run pytest -q tests/unit -p no:cacheprovider`: **3292 passed, 58 skipped, 0 failed** (226 s). Before Batch D: 3262 passed, 58 skipped. Same as the plan's scratch validation.
+- Integration, `uv run pytest -q tests/integration -p no:cacheprovider`: **78 passed, 65 skipped, 0 failed**. Before Batch D: 1 failed (`test_every_route_is_classified`), fixed by Task 19 fix 1.
+- Frontend (run by the executor after Task 24; no frontend file changed afterwards): `npm --prefix frontend test` 599 passed (101 files), `lint` clean with `--max-warnings=0`, `build` ok.
+
+### Closed from Batch C's open list
+
+- Bash deny/ask rules now also govern PowerShell (Task 19 fix 2): `Bash(rm:*)` stops `rm x`, `del x`, `Remove-Item x` and `Get-Date; ri x` through PowerShell; allow rules still never cross over.
+- PowerShell errors arrive as text (Task 19 fix 3): progress records are off and CLIXML error/warning/verbose/information strings are decoded.
+- The profile-isolation route test passes (Task 19 fix 1): the nine W3/W4 conversation routes are `OWNED`, and profile B gets 404 on each.
+
+### Deliberate expectation changes
+
+1. Task 20: `test_public_contract.py` — `fetch_url` becomes `({"url", "prompt", "offset"}, ["url", "prompt"])`; `test_public_names.py::test_exit_plan_mode_skill_toolsearch_and_web_tools` — `arguments_in("fetch_url", {..., "prompt": "summary"})` now keeps `prompt`.
+2. Task 21: same test — `arguments_in("web_search", {..., "allowed_domains": ["a.com"]})` now keeps `allowed_domains`.
+3. Task 23: same test — `arguments_in("use_skill", {"skill": "pdf", "args": "x"})` now keeps `args`.
+4. Task 24: `test_public_names.py::test_ask_user_question_converts_to_orin_questions` — the converted questions now carry `header` and options keep `description` separately (before: `"label": "SQLite — local"`, `header` lost); `arguments_out` returns `"header": "Database"` and the separate `description` (before: `"header": "q1"`, merged label).
+5. Task 25: none.
+
+### Deviations
+
+Plan deviations 11–13, applied as written: WebFetch answers with the turn's own model (11); ToolSearch defers only MCP tools and keeps a default of 10 (12); AskUserQuestion previews are cut at 480 characters to stay under the 512-character public-event limit (13).
+
+Execution notes from the executor:
+
+- Task 19 fix 3: the `stderr_filter` change was first written before its test; it was reverted and redone test-first. Red was confirmed for every task.
+- Task 24: the executor checked a static replica of the card in a browser; the coordinator checked the real component with the real CSS on the scratch copy (desktop 1280 dark and mobile 375 light; initial, chosen-with-preview and send-error states; no horizontal overflow). A final visual check on the branch is part of the W4 verification.
+- Task 24 budget: a batch of 8 questions × 12 options that all carry a description and a preview exceeds the 384-entry public budget and is refused with the existing "split it" message; a plain 8 × 12 batch still fits (344).
+
+### Open observations (for the W4 review)
+
+- WebFetch's page cache keeps up to 64 pages for 15 minutes with no per-page size cap (the text is the bounded page text, but a cap on stored text would bound memory).
+- ExitPlanMode's `filePath` joins the model's `plan_path` to the workspace root without `workspace.resolve`; it is only reported, never read.
+- A Bash deny rule without a specifier (`Bash`) now also denies every PowerShell command (intended by Task 19 fix 2; noted for its reach).
+- The plan's header carried a stale copy of the old batch table; fixed in the plan source for the next revision.
