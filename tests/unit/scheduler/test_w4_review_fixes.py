@@ -139,3 +139,42 @@ def test_a_user_create_still_closes_the_waiting_turn() -> None:
     with engine.connect() as connection:
         state = connection.execute(select(conversation_turns.c.state).where(conversation_turns.c.turn_id == question_turn)).scalar_one()
     assert state == "completed"
+
+
+# R8: a recurring schedule that missed fires while Orin was down fires once, then continues from now.
+
+def test_a_three_hour_gap_fires_a_cron_schedule_once() -> None:
+    now = datetime(2026, 10, 19, 12, 0, tzinfo=UTC)
+    engine = _engine(now)
+    conversation_id = PostgresChatStore(engine).create(user_id="user-1", message="hi", provider="openrouter", model_id="model-1", idempotency_key="c1").conversation_id
+    clock = {"now": now}
+    service = ScheduledChatService(engine, clock=lambda: clock["now"])
+    receipt = service.create("user-1", ScheduledChatInput(
+        "check the deploy", "openrouter", "model-1", "UTC", "cron", cron="*/5 * * * *",
+        conversation_id=conversation_id, ends_at=now + timedelta(days=7), source="cron",
+    ), idempotency_key="cron-gap")
+
+    clock["now"] = now + timedelta(hours=3)
+    fired = sum(len(service.run_due(worker_id="w")) for _ in range(50))
+
+    assert fired == 1
+    assert _occurrences(engine, receipt["schedule_id"]) == 1
+    assert _turn_count(engine, conversation_id) == 2
+    next_fire = _schedule_row(engine, receipt["schedule_id"])["next_fire_at"]
+    assert next_fire.replace(tzinfo=UTC) > clock["now"]
+
+
+def test_a_three_hour_gap_fires_an_hourly_schedule_once_and_stays_on_its_grid() -> None:
+    now = datetime(2026, 10, 19, 12, 0, tzinfo=UTC)
+    engine = _engine(now)
+    clock = {"now": now}
+    service = ScheduledChatService(engine, clock=lambda: clock["now"])
+    receipt = service.create("user-1", ScheduledChatInput("hourly check", "openrouter", "model-1", "UTC", "hourly"), idempotency_key="hourly-gap")
+
+    clock["now"] = now + timedelta(hours=3, seconds=20)
+    fired = sum(len(service.run_due(worker_id="w")) for _ in range(50))
+
+    assert fired == 1
+    next_fire = _schedule_row(engine, receipt["schedule_id"])["next_fire_at"].replace(tzinfo=UTC)
+    assert next_fire > clock["now"]
+    assert next_fire == datetime(2026, 10, 19, 16, 0, tzinfo=UTC)  # the hourly grid anchored at 13:00, not at the poll time

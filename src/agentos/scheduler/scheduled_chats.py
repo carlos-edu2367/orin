@@ -337,7 +337,7 @@ class ScheduledChatService:
                     claim_expires_at=now + timedelta(minutes=5), execution_id=None, dispatch_id=None, dispatch_attempt_count=0, reason_code=None, created_at=now, updated_at=now,
                 ))
                 rule = dict(schedule["rule"] or {})
-                next_at = self._next_after_rule(rule, str(schedule["timezone"]), logical_at)
+                next_at = self._next_after_rule(rule, str(schedule["timezone"]), logical_at, now)
                 ends_at = schedule.get("ends_at")
                 if next_at is not None and ends_at is not None and next_at > _stored_utc(ends_at):
                     next_at = None  # past its end: this was the last run
@@ -360,18 +360,20 @@ class ScheduledChatService:
                 continue
         return tuple(completed)
 
-    def _next_after_rule(self, rule: dict[str, object], timezone: str, logical_at: datetime) -> datetime | None:
+    def _next_after_rule(self, rule: dict[str, object], timezone: str, logical_at: datetime, now: datetime) -> datetime | None:
+        """The first run strictly after the later of the logical time and now (W4-R8): missed runs coalesce into one."""
         kind = str(rule.get("kind") or "once")
         if kind == "once":
             return None
+        base = max(logical_at, now)
         if kind == "hourly":
-            return logical_at + timedelta(hours=1)
+            # The grid stays anchored to the logical time, so a late poll does not drift the schedule.
+            return logical_at + (((base - logical_at) // timedelta(hours=1)) + 1) * timedelta(hours=1)
         zone = self._zone(timezone)
         if kind == "cron":
-            return next_after(parse_cron(str(rule.get("cron") or "")), logical_at.astimezone(zone)).astimezone(UTC)
-        local = logical_at.astimezone(zone)
+            return next_after(parse_cron(str(rule.get("cron") or "")), base.astimezone(zone)).astimezone(UTC)
         request = ScheduledChatInput("x", "x", "x", timezone, kind, time_of_day=str(rule.get("time_of_day") or ""), weekday=rule.get("weekday") if isinstance(rule.get("weekday"), int) else None)
-        return self.next_fire(request, after=local.astimezone(UTC) + timedelta(seconds=1))
+        return self.next_fire(request, after=base + timedelta(seconds=1))
 
     @staticmethod
     def _conversation_busy(connection, schedule_id: str) -> bool:
