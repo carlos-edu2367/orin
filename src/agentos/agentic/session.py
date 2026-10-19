@@ -3206,6 +3206,71 @@ class TurnSession:
             logger.warning("skill %s ignored: %s", path, reason)
         return catalog
 
+    def _load_file_mcp_servers(self, trusted: bool) -> None:
+        """MCP servers written in files join this turn's tools; the allow/deny lists apply to every server (W5).
+
+        Only an Orin installed on this computer (one that may start local processes) reads the person's and the
+        repository's files: a shared server would hand one person's servers to everyone. ``managed-mcp.json`` applies
+        to both. The model hears which servers are off and why (never their secrets).
+        """
+        from agentos.mcp.file_config import load_file_servers, policy_refusal
+        from agentos.mcp.file_servers import connect_file_servers
+        from agentos.mcp.models import slugify
+        from agentos.mcp.toolset import McpToolProvider
+
+        settings = getattr(self.effective_settings, "data", None) or {}
+        notes: list[str] = []
+        provider = self.mcp_provider
+        if provider is not None and callable(getattr(provider, "retain", None)):
+            refusals: dict[str, str] = {}
+
+            def keep(config) -> bool:
+                why = policy_refusal(
+                    config.display_name, aliases=(config.slug,), url=config.url, settings=settings,
+                    command_line=(str(config.command), *config.args) if config.command else None,
+                )
+                if why is not None:
+                    refusals[config.server_id] = why
+                return why is None
+
+            notes.extend(f"- {config.display_name}: not loaded: {refusals.get(config.server_id, '')}" for config in provider.retain(keep))
+        local_install = bool(getattr(self.mcp_service, "allow_stdio", False))
+        try:
+            found = load_file_servers(workspace_root=self.workspace.root, trusted=trusted, settings=settings, personal=local_install)
+        except Exception:  # noqa: BLE001 - a broken configuration never stops a turn
+            logger.exception("MCP servers in configuration files could not be read")
+            found = None
+        if found is not None:
+            notes.extend(f"- {where}: {why}" for where, why in found.errors[:10])
+            taken = provider.server_slugs() if provider is not None and callable(getattr(provider, "server_slugs", None)) else frozenset()
+            servers = []
+            for server in found.servers:
+                if server.transport == "stdio" and not local_install:
+                    notes.append(f"- {server.name}: this Orin does not start local processes")
+                elif slugify(server.name) in taken:
+                    notes.append(f"- {server.name}: Orin already has a server with this name; the file's entry is ignored")
+                else:
+                    servers.append(server)
+            connect = getattr(self, "_mcp_file_connect", None)
+            ready, failures = connect_file_servers(
+                servers, user_id=str(self.turn.get("user_id") or ""), **({"connect": connect} if connect is not None else {}),
+            )
+            notes.extend(f"- {name}: {why}" for name, why in failures)
+            if ready:
+                if provider is None:
+                    self.mcp_provider = McpToolProvider(ready)
+                else:
+                    provider.add_bundles(ready)
+            if found.pending:
+                notes.append(
+                    "- not approved yet (they stay off until the person approves them with enabledMcpjsonServers or "
+                    "enableAllProjectMcpServers): " + ", ".join(sorted(server.name for server in found.pending))
+                )
+            if found.project_awaiting_trust:
+                notes.append("- this workspace is not trusted yet, so its .mcp.json servers are off")
+        if notes:
+            self._reminders.add("mcp", "MCP servers from configuration files:\n" + "\n".join(notes[:30]), key="file-mcp-servers")
+
     def _apply_user_command(self, task: str, toolset: AgentToolset) -> None:
         """``/name args`` typed by the person runs that disk skill or command: its instructions join the turn (W5)."""
         from agentos.agentic.reminders import COMMAND_KIND
@@ -3667,6 +3732,7 @@ class TurnSession:
         self._disk_skills = self._load_disk_skills(trusted_workspace)
         self._agent_definitions = self._load_agent_definitions(trusted_workspace)
         self._announce_defined_agents()
+        self._load_file_mcp_servers(trusted_workspace)
         toolset = self._toolset(
             subagents=self.enable_subagents,
             non_interactive_ask=self._non_interactive_ask(),

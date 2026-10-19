@@ -79,6 +79,10 @@ class McpServerConfig:
     protocol_version: str = ""
     tools_digest: str = ""
     auth_kind: McpAuthKind = McpAuthKind.NONE
+    # W5: where the server was configured — "orin" (Orin's own list) or the file scope (managed, user, local,
+    # project) — and, for a file's stdio server, the folder it starts in.
+    origin: str = "orin"
+    cwd: str | None = None
 
     def __post_init__(self) -> None:
         if self.transport is McpTransport.STDIO and not self.command:

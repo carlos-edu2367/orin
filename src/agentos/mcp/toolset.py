@@ -34,11 +34,17 @@ def build_client(config: McpServerConfig, secrets: Mapping[str, str], *,
     from .transport_http import HttpTransport
     from .transport_stdio import StdioTransport
 
+    # W5: a server from a configuration file was written by the person (or approved from the repository), not
+    # proposed by the model: it may use any launcher, start in its folder, and reach a local or plain-http address.
+    from_file = config.origin != "orin"
     if config.transport is McpTransport.STDIO:
-        transport = StdioTransport(command=str(config.command), args=config.args, env=dict(secrets))
+        transport = StdioTransport(command=str(config.command), args=config.args, env=dict(secrets), cwd=config.cwd,
+                                   allow_any_command=from_file)
     else:
         headers = {"authorization": f"Bearer {secrets['token']}"} if "token" in secrets and token_source is None else {}
-        transport = HttpTransport(url=str(config.url), headers=headers, token_source=token_source)
+        if from_file:
+            headers.update({name[len("header:"):]: value for name, value in secrets.items() if name.startswith("header:")})
+        transport = HttpTransport(url=str(config.url), headers=headers, token_source=token_source, allow_local=from_file)
     return McpClient(transport)
 
 
@@ -88,6 +94,20 @@ class McpToolProvider:
     @property
     def open_session_count(self) -> int:
         return len(self._sessions)
+
+    def add_bundles(self, bundles: Iterable[ServerBundle]) -> None:
+        """Servers read from configuration files join this turn's servers (W5)."""
+        self._bundles.extend(bundles)
+
+    def retain(self, keep: Callable[[McpServerConfig], bool]) -> list[McpServerConfig]:
+        """Drop the servers ``keep`` refuses (``allowedMcpServers``/``deniedMcpServers``); returns the dropped ones."""
+        dropped = [config for config, _, _ in self._bundles if not keep(config)]
+        gone = {config.server_id for config in dropped}
+        self._bundles = [bundle for bundle in self._bundles if bundle[0].server_id not in gone]
+        return dropped
+
+    def server_slugs(self) -> frozenset[str]:
+        return frozenset(config.slug for config, _, _ in self._bundles)
 
     def _lock(self, server_id: str) -> threading.Lock:
         with self._locks_guard:

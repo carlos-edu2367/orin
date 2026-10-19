@@ -48,7 +48,8 @@ class HttpTransport:
     kind = "http"
 
     def __init__(self, *, url: str, headers: Mapping[str, str] | None = None, token_source: "TokenSource | None" = None,
-                 client: httpx.Client | None = None, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> None:
+                 client: httpx.Client | None = None, timeout: float = DEFAULT_TIMEOUT_SECONDS, allow_local: bool = False) -> None:
+        self._allow_local = allow_local
         self._url = self._checked(url)
         self._headers = dict(headers or {})
         self._token_source = token_source
@@ -57,8 +58,12 @@ class HttpTransport:
         self._owns_client = client is None
         self.session_id: str | None = None
 
-    @staticmethod
-    def _checked(url: str) -> str:
+    def _checked(self, url: str) -> str:
+        if self._allow_local:
+            # W5: a server the person wrote in a configuration file may be local or plain http (a development server).
+            if not str(url).lower().startswith(("http://", "https://")):
+                raise HttpTransportRefused("an MCP endpoint must use http or https")
+            return str(url)
         try:
             normalized = _public_url(url, resolve_dns=True)
         except Exception as error:  # the policy raises its own refusal type
