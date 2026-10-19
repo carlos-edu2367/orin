@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import hashlib
+import json
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal
 
@@ -12,6 +14,7 @@ from agentos.reading.render import ImageTooLarge, normalize_image, render_pdf_pa
 from agentos.reading.vision import VisionUnavailable
 from agentos.agentic.file_preview import media_type_for
 from agentos.agentic.lifecycle import HookEvent
+from agentos.agentic.workspace import MAX_READ_BYTES
 from agentos.agentic.tools.public_names import public_text
 from agentos.agentic.tools._shared import (
     AgentToolError,
@@ -24,6 +27,36 @@ from agentos.agentic.tools._shared import (
     _schema,
 )
 from agentos.agentic.tools.spec import ToolSpec, ToolInput
+
+
+OFFICE_SUFFIXES = frozenset({".docx", ".xlsx", ".pptx"})
+NOTEBOOK_SUFFIX = ".ipynb"
+MAX_NOTEBOOK_CELL_CHARS = 4_000
+MAX_NOTEBOOK_OUTPUT_CHARS = 2_000
+LARGE_READ_LINES = 2_000
+LARGE_READ_BYTES = 2_000_000
+LARGE_READ_RESULT_CHARS = 100_000
+
+
+def _notebook_output_text(outputs: Any) -> str:
+    """The readable part of a code cell's outputs: stream text and text/plain results, bounded."""
+    if not isinstance(outputs, list):
+        return ""
+    chunks: list[str] = []
+    for item in outputs:
+        if not isinstance(item, Mapping):
+            continue
+        text: Any = item.get("text")
+        if text is None and isinstance(item.get("data"), Mapping):
+            text = item["data"].get("text/plain")
+        if text is None and item.get("output_type") == "error":
+            text = f"{item.get('ename', 'Error')}: {item.get('evalue', '')}"
+        if isinstance(text, list):
+            text = "".join(str(part) for part in text)
+        if text:
+            chunks.append(str(text))
+    joined = "".join(chunks).strip()
+    return joined if len(joined) <= MAX_NOTEBOOK_OUTPUT_CHARS else joined[:MAX_NOTEBOOK_OUTPUT_CHARS] + "\n[output truncated]"
 
 
 class ReadTools:
@@ -239,6 +272,37 @@ class ReadTools:
             "payload": payload,
         }
 
+    def _read_notebook(self, path: str, target: Path) -> dict[str, Any]:
+        try:
+            notebook = json.loads(target.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as error:
+            raise AgentToolError(f"'{path}' is not a readable notebook: {error}") from error
+        cells = notebook.get("cells") if isinstance(notebook, Mapping) else None
+        if not isinstance(cells, list):
+            raise AgentToolError(f"'{path}' is not a readable notebook: it has no cells array.")
+        self._record_file_read(path, explicit_read=True)
+        parts: list[str] = []
+        described: list[dict[str, Any]] = []
+        for index, cell in enumerate(cells):
+            if not isinstance(cell, Mapping):
+                continue
+            kind = str(cell.get("cell_type") or "code")
+            cell_id = str(cell.get("id") or index)
+            raw = cell.get("source")
+            source = "".join(str(part) for part in raw) if isinstance(raw, list) else str(raw or "")
+            shown, cut = _bounded(source, MAX_NOTEBOOK_CELL_CHARS)
+            parts.append(f'<cell id="{cell_id}" index="{index}" type="{kind}">\n{shown}' + ("\n[cell truncated]" if cut else "") + "\n</cell>")
+            output = _notebook_output_text(cell.get("outputs")) if kind == "code" else ""
+            if output:
+                parts.append(f'<cell-output id="{cell_id}">\n{output}\n</cell-output>')
+            described.append({"cell_id": cell_id, "cell_type": kind, "source": shown, "output": output})
+        return {
+            "summary": f"Leu notebook {path}",
+            "content": "\n".join(parts) or "[notebook without cells]",
+            "payload": {"path": path, "label": path, "cell_count": len(cells), "media_type": "application/x-ipynb+json"},
+            "tool_output": {"type": "notebook", "file": {"filePath": str(target), "cells": described}},
+        }
+
     def read_file(
         self,
         path: str,
@@ -246,12 +310,35 @@ class ReadTools:
         limit: int = 400,
         pages: str | None = None,
         force_reload: bool = False,
+        allow_large: bool = False,
     ) -> dict[str, Any]:
         target = self.workspace.resolve(path)
-        if target.is_file() and target.suffix.lower() == ".pdf":
-            return self._read_pdf_pages(path, target, pages=pages)
+        if target.is_file():
+            suffix = target.suffix.lower()
+            if suffix == ".pdf":
+                result = self._read_pdf_pages(path, target, pages=pages)
+                result["tool_output"] = {"type": "pdf", "file": {
+                    "filePath": str(target), "originalSize": target.stat().st_size,
+                    "pages": list(result.get("pages") or []), "totalPages": result.get("total_pages"),
+                }}
+                return result
+            if suffix == NOTEBOOK_SUFFIX:
+                return self._read_notebook(path, target)
+            media_type = media_type_for(target)
+            if media_type.startswith("image/") or suffix in OFFICE_SUFFIXES:
+                result = self.view_file(path)
+                info = {"filePath": str(target), "originalSize": target.stat().st_size}
+                if media_type.startswith("image/"):
+                    result["tool_output"] = {"type": "image", "file": {**info, "type": media_type.split("/", 1)[1]}}
+                else:
+                    text = str(result.get("content") or "")
+                    count = len(text.splitlines())
+                    result["tool_output"] = {"type": "text", "file": {
+                        **info, "content": text, "numLines": count, "startLine": 1, "totalLines": count,
+                    }}
+                return result
         norm_offset = max(1, int(offset or 1))
-        norm_limit = max(1, min(int(limit or 400), 800))
+        norm_limit = max(1, min(int(limit or 400), LARGE_READ_LINES if allow_large else 800))
         if target.is_file() and not force_reload:
             norm = target.relative_to(self.workspace.root).as_posix()
             with self._read_file_lock:
@@ -302,8 +389,13 @@ class ReadTools:
                         "summary": f"Arquivo inalterado: {path}",
                         "content": stub,
                         "payload": payload,
+                        "tool_output": {"type": "file_unchanged", "file": {"filePath": str(target)}},
                     }
-        lines, first, total, truncated = self.workspace.read_lines(path, offset=norm_offset, limit=norm_limit)
+        lines, first, total, truncated = self.workspace.read_lines(
+            path, offset=norm_offset, limit=norm_limit,
+            max_lines=LARGE_READ_LINES if allow_large else 800,
+            max_bytes=LARGE_READ_BYTES if allow_large else MAX_READ_BYTES,
+        )
         sha = self._record_file_read(
             path,
             offset=norm_offset,
@@ -351,6 +443,11 @@ class ReadTools:
             "summary": f"Leu {path}",
             "content": body,
             "payload": payload,
+            "tool_output": {"type": "text", "file": {
+                "filePath": str(target), "content": "\n".join(lines), "numLines": len(lines), "startLine": first,
+                "totalLines": total, **({"truncatedByTokenCap": True} if truncated else {}),
+            }},
+            **({"max_result_chars": LARGE_READ_RESULT_CHARS} if allow_large else {}),
         }
 
     def view_file(self, path: str, question: str = "") -> dict[str, Any]:
@@ -487,7 +584,10 @@ class ReadTools:
 class ReadInput(ToolInput):
     file_path: str = Field(description="Path of the file, relative to the workspace or absolute inside it.")
     offset: int | None = Field(None, ge=1, description="First line to read (1-based).")
-    limit: int | None = Field(None, ge=1, le=800, description="How many lines to read.")
+    limit: int | None = Field(None, ge=1, le=2000, description="How many lines to read (above 800 needs allow_large).")
+    allow_large: bool | None = Field(
+        None, description="Read past the usual size limits (up to 2,000 lines and 2 MB) when you need the whole thing.",
+    )
     pages: str | None = Field(None, description="PDF page range such as '1-5' or '3'.")
     force_reload: bool | None = Field(
         None, description="Orin: read the full content again even if it is unchanged since the last read.",

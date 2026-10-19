@@ -6,7 +6,7 @@ import pytest
 from agentos.agentic.tools.public_names import arguments_in, public_argument_names, public_schema
 
 EXPECTED = {
-    "read_file": ({"file_path", "offset", "limit", "pages", "force_reload"}, ["file_path"]),
+    "read_file": ({"file_path", "offset", "limit", "pages", "force_reload", "allow_large"}, ["file_path"]),
     "write_file": ({"file_path", "content", "mode"}, ["file_path", "content"]),
     "edit_file": ({"file_path", "old_string", "new_string", "replace_all", "edits"}, ["file_path", "old_string", "new_string"]),
     "notebook_edit": ({"notebook_path", "new_source", "cell_id", "cell_type", "edit_mode"}, ["notebook_path", "new_source"]),

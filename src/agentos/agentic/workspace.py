@@ -101,25 +101,30 @@ class ConversationWorkspace:
         except ValueError:
             return path.name
 
-    def read_text(self, path: str) -> tuple[str, bool]:
+    def read_text(self, path: str, *, max_bytes: int = MAX_READ_BYTES) -> tuple[str, bool]:
         target = self.resolve(path)
         if not target.is_file():
             raise WorkspaceError(f"'{path}' is not a file in this workspace")
-        data = target.read_bytes()[: MAX_READ_BYTES + 1]
-        truncated = len(data) > MAX_READ_BYTES
-        return data[:MAX_READ_BYTES].decode("utf-8", "replace"), truncated
+        # Read at most one byte past the cap: a huge file is never loaded whole to learn that it is huge.
+        with target.open("rb") as handle:
+            data = handle.read(max_bytes + 1)
+        truncated = len(data) > max_bytes
+        return data[:max_bytes].decode("utf-8", "replace"), truncated
 
-    def read_lines(self, path: str, *, offset: int = 1, limit: int = 400) -> tuple[list[str], int, int, bool]:
+    def read_lines(
+        self, path: str, *, offset: int = 1, limit: int = 400,
+        max_lines: int = MAX_READ_LINES, max_bytes: int = MAX_READ_BYTES,
+    ) -> tuple[list[str], int, int, bool]:
         """Return a bounded line window plus the total, so the model can page.
 
         ``read_text`` stays as the whole-file accessor used by ``edit_file``;
         this is the accessor used by the model, which must be able to ask for
         the part of a file it has not seen yet.
         """
-        content, truncated = self.read_text(path)
+        content, truncated = self.read_text(path, max_bytes=max_bytes)
         lines = content.splitlines()
         start = max(1, int(offset))
-        window = max(1, min(int(limit), MAX_READ_LINES))
+        window = max(1, min(int(limit), max_lines))
         return lines[start - 1: start - 1 + window], start, len(lines), truncated
 
     def write_text(self, path: str, content: str) -> int:

@@ -152,6 +152,9 @@ from agentos.agentic.tools._shared import (  # noqa: F401 - re-exported for call
     _append_reminder,
 )
 
+# The most any single tool result may return when its handler asks for more (Read with allow_large).
+LARGE_RESULT_CHARS = 100_000
+
 
 class AgentToolset(
     ReadTools,
@@ -988,6 +991,9 @@ class AgentToolset(
         if isinstance(result, ToolOutcome):
             outcome = self._finalize_outcome(result, definition.kind, limit=limit, tool_name=name)
         else:
+            requested = result.pop("max_result_chars", None) if isinstance(result, dict) else None
+            if isinstance(requested, int) and not isinstance(requested, bool) and requested > limit:
+                limit = min(requested, LARGE_RESULT_CHARS)
             raw_content = str(result.get("content", ""))
             content, truncated = _bounded(raw_content, limit)
             payload = dict(result.get("payload") or {})
