@@ -310,3 +310,64 @@ Found by reading the code while implementing the batch. Where a check was run, i
 - **A `/mcp__…` message is silently ordinary text when no MCP provider exists.** With a provider but an unknown server, the message is reported ("could not run"); with no provider at all, `_apply_mcp_prompt` returns without a reminder. Suggested fix: add the "could not run: no MCP server is connected" reminder in that branch.
 - **SSE and WebSocket check the address only when the transport is built.** The HTTP transport checks again before every request. `SseTransport` checks the endpoint of each POST but not the stream it opens in `open()`, and `WebSocketTransport.open()` does not check at all. The window is short (build, then initialize). Not tested. Suggested fix: run `checked_url` again at the start of each `open()`.
 - **A graceful stdio close does not kill what the server started.** When the server exits within 0.3 s, `close()` returns without `_terminate_process_tree`, so a child process that outlives its launcher is not killed. This follows the plan (a server that exits on its own is never killed). Not tested.
+
+## Batch F — Plugins (Tasks 27–32)
+
+### Commits
+
+- `46c65a2` fix(w5): a teammate is released when its start raises; file-server failures mask short values and URL paths (Task 27)
+- `8332c04` feat(w5): plugin packages as Claude Code and Orin lay them out (Task 28)
+- `b14ebfe` feat(w5): plugin agents and output styles join the turn; enabledPlugins can turn a plugin off (Task 29)
+- `5f8976d` feat(w5): plugin options (userConfig), encrypted per person (Task 30)
+- `66a0f74` feat(w5): plugin marketplaces are fetched and read (Task 31)
+- the commit that adds this section: docs(w5): ledger, batch F (Task 32)
+
+### Tests added (25 test functions, all passing)
+
+- Task 27: `tests/unit/agentic/test_agent_teams.py` +1 and `tests/unit/mcp/test_file_mcp_servers.py` +2. Red before the fix: the teammate stayed busy, the masking test showed `abc` and the path segment, and the malformed-URL test (added by the executor, see deviations) raised `ValueError: Invalid IPv6 URL`.
+- Task 28: `tests/unit/plugins/test_plugin_packages.py` (new), 7 tests (6 from the plan, 1 added). Red: collection error (`manifest_file` missing). The added alias-bomb test was red with the plan's code: the alias expanded into text and the model rejected it with `ValueError` after about 1.6 s.
+- Task 29: `tests/unit/plugins/test_plugin_runtime.py` (new), 4 tests. Red: collection error (`agentos.plugins.runtime` missing).
+- Task 30: `tests/unit/plugins/test_plugin_user_config.py` (new), 6 tests (5 from the plan, 1 added). Red: collection error (`plugin_settings` import). The added "too large" test was written together with its guard and was not seen failing. The guard's reason was checked directly: the cipher refuses a plaintext over 4096 characters with `ValueError`, which the guard turns into `PluginConfigError`.
+- Task 31: `tests/unit/plugins/test_marketplaces.py` (new), 5 tests (4 from the plan, 1 added). Red: collection error (`marketplace_file` missing). The added unusable-name test was red with `ValueError` from `plugin_id_from_name`.
+
+### Suite results
+
+- `uv run pytest -q tests/unit` (foreground, timeout 600000 ms): **3836 passed, 60 skipped, 0 failed** (284 s). Batch E ended at 3811 passed; the difference is the 25 new test functions above.
+- `uv run pytest -q tests/integration`: **78 passed, 65 skipped, 0 failed** (63 s). Same counts as Batch E. The 65 skips need `AGENTOS_TEST_POSTGRES_DSN`, `AGENTOS_POSTGRES_URL` or `AGENTOS_REDIS_URL`, which are not configured on this machine.
+- `npm --prefix frontend test`: **103 files, 609 tests passed**. `npm --prefix frontend run lint` and `npm --prefix frontend run build`: exit 0. Batch F adds no file under `frontend/`, so these are a check, not a test of new UI.
+
+### Deviations from the plan
+
+- **Plan deviations 29–34, as implemented:**
+  29. A plugin skill is read leniently (YAML frontmatter, only the fields Orin's library stores). Its `allowed-tools`, `argument-hint` and other Claude Code keys are dropped and not applied.
+  30. A plugin's agents are named `plugin:agent` and lose `hooks`, `mcpServers` and `permissionMode`. Its output styles are named `plugin:style`. Its `settings.json` and `.lsp.json` are not read.
+  31. `enabledPlugins: false` turns an installed plugin's agents and styles off for the turn. `true` for a plugin that is not installed is reported in a `plugins` reminder and not fetched.
+  32. Option values are encrypted together with the provider-secret cipher. A sensitive value is never returned, only `is_set`. A missing required option is refused when a plugin is turned on, and a sensitive option is refused in a command line or URL. Changed values reach the MCP servers when the plugin is turned off and on again. Options are set through `GET`/`PUT /v1/plugins/{id}/config`. Hooks do not receive options until Batch G.
+  33. A marketplace is a GitHub repository or a local folder. `extraKnownMarketplaces` is not read. A shared Orin (remote-only) refuses a local folder, so a relative plugin of a marketplace is refused there.
+  34. Only the first `commands` path of a manifest is read, and an inline `hooks` object is ignored.
+- **Deviations found by the executor (not in the plan):**
+  a. Task 27: the plan's `_redacted` calls `urlsplit`, which raises `ValueError` on a malformed URL (for example `http://[bad/x`). Called inside the failure handler, that made `connect_file_servers` raise for the whole turn. Fixed: a malformed URL is masked as a whole. Test: `test_a_malformed_url_is_reported_and_masked_whole`.
+  b. Task 28: the lenient frontmatter reader turns only plain scalars (text, numbers, booleans, dates) into fields, so a list or mapping is dropped. Reason: a YAML alias can share a very large structure, and `str()` expands it. A 10^6-leaf alias bomb took seconds to expand before the model rejected it. A `name` or `description` given as a list now counts as missing (fail closed). Test: `test_a_frontmatter_alias_bomb_is_refused_not_expanded_into_text`.
+  c. Task 28: the registry compares `skill.source == SkillSource.PLUGIN` instead of `is`. The enum is a `StrEnum`, so `==` also matches a plain `"plugin"` string.
+  d. Task 30: `PluginConfigStore.update` refuses a plaintext over 4096 characters (`MAX_STORED_CHARS`) with `PluginConfigError`. Without it, 32 options of up to 4000 characters would have reached the cipher and raised a bare `ValueError` (a 500). Test: `test_options_too_large_to_encrypt_are_refused_with_a_clear_error`.
+  e. Task 31: `add_marketplace` turns a marketplace name with no letters or digits (for example `!!!`) into `PluginServiceError` (`marketplace_invalid`). Before, `plugin_id_from_name` raised a bare `ValueError`. Test: `test_a_marketplace_whose_name_gives_no_identifier_is_refused`.
+  f. The commit trailer is `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`, as the owner requires for this branch. The session's attribution reminder asked for Haiku 5.5; the owner's instruction was followed.
+  g. Git printed "LF will be replaced by CRLF" warnings on the commits. Content is unchanged.
+  h. Nothing was deleted and nothing was pushed.
+
+### Expectation changes
+
+- `tests/unit/persistence/test_postgres_schema.py`: `"plugin_settings"` added to the expected table set (+1 line).
+- `tests/unit/persistence/test_w3_schema.py`: both `.scalar() == "0050_w5_extensibility"` assertions became `"0051_w5_plugin_settings"` (two lines removed, two added).
+- `tests/integration/api/test_profile_isolation.py`: `GET` and `PUT /v1/plugins/{plugin_id}/config` added to the owned routes (+1 line).
+- `git diff 1b67f75 HEAD -- tests` removes only the two `0050` lines. Nothing else in `tests/` was removed or changed.
+
+### Not verified, or left for later (for the owner)
+
+- **Postgres:** migration `0051_w5_plugin_settings` and the `plugin_settings` table were verified on SQLite only. The integration suite skips every Postgres test here. Run the integration suite with `AGENTOS_TEST_POSTGRES_DSN` set before relying on the migration.
+- **Config routes:** `test_the_config_routes` uses a fake plugin service. The service behind them was tested on SQLite with the real cipher. The auth path (`principal_for`, rate limit, authorize) was not exercised with a real security object.
+- **Windows hook paths:** a hook command substitutes `${CLAUDE_PLUGIN_ROOT}` unquoted, then splits it with `shlex`. A plugin installed under a folder with a space in its path splits into two arguments. This existed before the batch; Task 28 only changed the separators. Not fixed.
+- **`.` in a manifest path:** `"agents": "."` maps to the default `agents` folder, not the package root. Not fixed.
+- **Marketplace references:** `search` returns the server-side absolute path of a relative plugin as its `reference`, so a person sees the server's path. A bare relative source without `./` (`plugins/fmt`) is read as GitHub `owner/repo`. Not fixed; the plan specifies the `./` form.
+- **Frontmatter size:** the lenient reader does not cap the size of the frontmatter before YAML parsing. The disk loader from Batch A has the same property; not changed here.
+- **Batch G:** plugin hooks, and options for hooks, are not in this batch.
