@@ -135,7 +135,7 @@ def test_exit_plan_mode_skill_toolsearch_and_web_tools() -> None:
     assert arguments_in("use_skill", {"skill": "pdf", "args": "x"}) == {"skill_id": "pdf"}
     assert arguments_in("search_mcp_tools", {"query": "issues", "max_results": 5}) == {"query": "issues", "limit": 5}
     assert arguments_in("fetch_url", {"url": "https://example.com", "prompt": "summary"}) == {"url": "https://example.com", "prompt": "summary"}
-    assert arguments_in("web_search", {"query": "q", "allowed_domains": ["a.com"]}) == {"query": "q"}
+    assert arguments_in("web_search", {"query": "q", "allowed_domains": ["a.com"]}) == {"query": "q", "allowed_domains": ["a.com"]}
     # tools without a mapping pass arguments through unchanged
     assert arguments_in("remember", {"fact": "f"}) == {"fact": "f"}
 
