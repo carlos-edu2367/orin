@@ -22,6 +22,11 @@ def claude_user_dir() -> Path:
     return _env_path("ORIN_CLAUDE_HOME") or Path.home() / ".claude"
 
 
+def claude_user_config_file() -> Path:
+    """Claude Code's ``~/.claude.json`` (its MCP servers and per-folder choices), next to its ``~/.claude`` folder."""
+    return _env_path("ORIN_CLAUDE_CONFIG") or claude_user_dir().parent / ".claude.json"
+
+
 def orin_managed_dir() -> Path:
     override = _env_path("ORIN_MANAGED_DIR")
     if override is not None:

@@ -27,6 +27,8 @@ def _isolated_settings_dirs(tmp_path_factory: pytest.TempPathFactory, monkeypatc
     from agentos.installation.paths import reset_cached_paths
 
     monkeypatch.setenv("ORIN_RUN_DIR", str(root / "orin-run"))
+    # Claude Code's ~/.claude.json is found next to ORIN_CLAUDE_HOME (inside this temporary folder) unless overridden.
+    monkeypatch.delenv("ORIN_CLAUDE_CONFIG", raising=False)
     reset_cached_paths()
     # Grep must not depend on a ripgrep the developer configured; the ripgrep tests set it themselves.
     monkeypatch.delenv("ORIN_RIPGREP_PATH", raising=False)
