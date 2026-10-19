@@ -1512,11 +1512,27 @@ class TurnSession:
             used += len(block)
         return text
 
+    def _load_active_plugins(self) -> None:
+        """The person's active plugins for this turn (W5): their agents and output styles are read from them."""
+        from agentos.plugins.runtime import active_plugins
+
+        settings = getattr(self.effective_settings, "data", None) or {}
+        self._active_plugins, missing = active_plugins(self.plugin_service, str(self.turn.get("user_id") or ""), settings)
+        if missing:
+            self._reminders.add(
+                "plugins", "The settings turn on plugin(s) that are not installed: " + ", ".join(missing[:20])
+                + ". The person can install them (install_plugin) if they want them.", key="plugins-missing",
+            )
+
     def _load_agent_definitions(self, trusted: bool):
         from .agent_definitions import AgentCatalog, load_agent_definitions
 
         try:
-            catalog = load_agent_definitions(workspace_root=self.workspace.root, trusted=bool(trusted))
+            plugin_folders = [
+                (plugin.plugin_id, folder)
+                for plugin in getattr(self, "_active_plugins", ()) for folder in plugin.folders(plugin.manifest.agents_paths)
+            ]
+            catalog = load_agent_definitions(workspace_root=self.workspace.root, trusted=bool(trusted), plugin_folders=plugin_folders)
         except Exception:  # noqa: BLE001 - a broken agents folder never stops a turn
             logger.exception("agent definitions could not be read")
             return AgentCatalog()
@@ -3506,7 +3522,10 @@ class TurnSession:
         from .output_styles import resolve_output_style
 
         try:
-            style = resolve_output_style(self.effective_settings, self.workspace.root)
+            style = resolve_output_style(self.effective_settings, self.workspace.root, plugin_dirs=[
+                (plugin.plugin_id, folder)
+                for plugin in getattr(self, "_active_plugins", ()) for folder in plugin.folders(plugin.manifest.output_styles_paths)
+            ])
         except Exception:  # noqa: BLE001 - a broken style file means the default style
             style = None
         options = CodePromptOptions(
@@ -3785,6 +3804,7 @@ class TurnSession:
         self._active_permission_broker = permission_broker
         self._reminders = ReminderQueue()
         self._apply_working_directories()
+        self._load_active_plugins()
         self._disk_skills = self._load_disk_skills(trusted_workspace)
         self._agent_definitions = self._load_agent_definitions(trusted_workspace)
         self._announce_defined_agents()

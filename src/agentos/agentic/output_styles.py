@@ -61,10 +61,13 @@ def _style_dirs(workspace_root: Path | str, trusted: bool) -> tuple[tuple[Path, 
     return tuple(dirs)
 
 
-def load_output_styles(workspace_root: Path | str, *, trusted: bool = True) -> dict[str, OutputStyle]:
-    """Built-ins, then user files, then project files (trusted workspaces only); a later file with the same name wins."""
+def load_output_styles(workspace_root: Path | str, *, trusted: bool = True,
+                       plugin_dirs: tuple[tuple[str, Path], ...] | list[tuple[str, Path]] = ()) -> dict[str, OutputStyle]:
+    """Built-ins, then active plugins' styles (named ``plugin:style``, W5), then user files, then project files
+    (trusted workspaces only); a later file with the same name wins."""
     styles = dict(BUILTIN_STYLES)
-    for directory, source in _style_dirs(workspace_root, trusted):
+    plugin_sources = [(Path(directory), "plugin", f"{plugin_id}:") for plugin_id, directory in plugin_dirs]
+    for directory, source, prefix in [*plugin_sources, *((directory, source, "") for directory, source in _style_dirs(workspace_root, trusted))]:
         try:
             if not directory.is_dir():
                 continue
@@ -80,7 +83,7 @@ def load_output_styles(workspace_root: Path | str, *, trusted: bool = True) -> d
             if b"\x00" in data:
                 continue
             meta, body = split_frontmatter(data.decode("utf-8", errors="replace"))
-            name = str(meta.get("name") or path.stem).strip()[:80]
+            name = prefix + str(meta.get("name") or path.stem).strip()[:80]
             if not name or not body.strip():
                 continue
             styles[name.lower()] = OutputStyle(
@@ -90,7 +93,8 @@ def load_output_styles(workspace_root: Path | str, *, trusted: bool = True) -> d
     return styles
 
 
-def resolve_output_style(settings: object, workspace_root: Path | str) -> OutputStyle | None:
+def resolve_output_style(settings: object, workspace_root: Path | str,
+                         plugin_dirs: tuple[tuple[str, Path], ...] | list[tuple[str, Path]] = ()) -> OutputStyle | None:
     """The ``outputStyle`` in force, or None for the default (or an unknown name)."""
     getter = getattr(settings, "get", None)
     raw = getter("outputStyle") if callable(getter) else None
@@ -99,7 +103,7 @@ def resolve_output_style(settings: object, workspace_root: Path | str) -> Output
     key = raw.strip().lower()
     if key == "default":
         return None
-    style = load_output_styles(workspace_root, trusted=bool(getattr(settings, "trusted", False))).get(key)
+    style = load_output_styles(workspace_root, trusted=bool(getattr(settings, "trusted", False)), plugin_dirs=plugin_dirs).get(key)
     return style if style is not None and style.instructions else None
 
 

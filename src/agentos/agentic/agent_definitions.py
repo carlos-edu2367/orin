@@ -14,9 +14,9 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from agentos.skills.disk import split_frontmatter
 
@@ -155,9 +155,14 @@ def agent_roots(*, workspace_root: Path | None, trusted: bool) -> list[tuple[str
     return roots
 
 
-def load_agent_definitions(*, workspace_root: Path | None, trusted: bool) -> AgentCatalog:
+def load_agent_definitions(*, workspace_root: Path | None, trusted: bool,
+                           plugin_folders: Sequence[tuple[str, Path]] = ()) -> AgentCatalog:
+    """Managed, project (trusted), user, then active plugins' agents (W5). A plugin's agent is named
+    ``plugin:agent`` and loses ``hooks``, ``mcpServers`` and ``permissionMode``, as in Claude Code."""
     catalog = AgentCatalog()
-    for origin, folder in agent_roots(workspace_root=workspace_root, trusted=trusted):
+    roots = [(origin, folder, "") for origin, folder in agent_roots(workspace_root=workspace_root, trusted=trusted)]
+    roots += [("plugin", Path(folder), f"{plugin_id}:") for plugin_id, folder in plugin_folders]
+    for origin, folder, prefix in roots:
         if not folder.is_dir():
             continue
         try:
@@ -174,6 +179,8 @@ def load_agent_definitions(*, workspace_root: Path | None, trusted: bool) -> Age
             except (OSError, ValueError, UnicodeDecodeError) as error:
                 catalog.errors.append((str(path), str(error)[:200]))
                 continue
+            if prefix:
+                definition = replace(definition, name=prefix + definition.name, hooks=None, mcp_servers=None, permission_mode=None)
             if origin == "project" and definition.name in RESERVED_NAMES:
                 catalog.errors.append((str(path), f"a repository cannot replace Orin's builtin agent '{definition.name}'"))
                 continue
