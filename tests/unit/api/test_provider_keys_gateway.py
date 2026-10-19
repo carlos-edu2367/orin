@@ -112,3 +112,27 @@ def test_a_request_without_a_bearer_token_is_rejected() -> None:
     response = client.get("/v1/providers/openai/keys")
 
     assert response.status_code == 401
+
+
+def test_opencode_supports_multiple_keys_and_reordering() -> None:
+    client = _client(_FakeProviderApiKeys())
+
+    k1 = client.post(
+        "/v1/providers/opencode/keys", json={"api_key": "oc-key-alpha", "label": "opencode-1"},
+        headers={**AUTH, "Idempotency-Key": "oc-add-1"},
+    )
+    k2 = client.post(
+        "/v1/providers/opencode/keys", json={"api_key": "oc-key-beta", "label": "opencode-2"},
+        headers={**AUTH, "Idempotency-Key": "oc-add-2"},
+    )
+    assert k1.status_code == 201 and k2.status_code == 201
+    id1, id2 = k1.json()["id"], k2.json()["id"]
+
+    reordered = client.put(
+        "/v1/providers/opencode/keys:reorder", json={"ordered_ids": [id2, id1]},
+        headers={**AUTH, "Idempotency-Key": "oc-reorder-1"},
+    )
+    assert reordered.status_code == 200
+    assert [item["label"] for item in reordered.json()] == ["opencode-2", "opencode-1"]
+    assert "oc-key-alpha" not in reordered.text and "oc-key-beta" not in reordered.text
+

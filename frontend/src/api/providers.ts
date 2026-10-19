@@ -1,7 +1,7 @@
 import type { ApiClient } from './client'
 import { invalidResponseError } from './errors'
 
-export const PROVIDER_NAMES = ['openai', 'anthropic', 'openrouter', 'omniroute', 'ollama'] as const
+export const PROVIDER_NAMES = ['openai', 'anthropic', 'openrouter', 'opencode', 'omniroute', 'ollama'] as const
 export type ProviderName = (typeof PROVIDER_NAMES)[number]
 
 /**

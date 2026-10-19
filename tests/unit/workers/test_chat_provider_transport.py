@@ -65,3 +65,41 @@ def test_an_optional_key_provider_with_no_keys_gets_a_plain_transport() -> None:
     transport = worker._provider_transport({"provider": "omniroute", "user_id": "user-1", "model_id": "auto"})
 
     assert isinstance(transport, HTTPProviderStreamTransport)
+
+
+def test_opencode_provider_transport_uses_zen_base_url_and_rotates_keys_on_rejection(monkeypatch: pytest.MonkeyPatch) -> None:
+    from agentos.agentic.provider_stream import HTTPProviderStreamTransport, NormalizedStreamItem, ProviderKeyRejected, StreamKind
+    from agentos.workers.chat import ChatWorker
+
+    engine = _engine_with_provider("opencode", base_url=None, with_key=True)
+    cipher = ProviderSecretCipher(_TEST_ENCRYPTION_KEY)
+    now = datetime.now(UTC)
+    with engine.begin() as connection:
+        connection.execute(insert(provider_api_keys).values(
+            user_id="user-1", provider="opencode", label="backup",
+            api_key_ciphertext=cipher.encrypt("oc-second-key"), secret_ref="key-ref-2",
+            position=1, status="active", cooldown_until=None, created_at=now, updated_at=now,
+        ))
+
+    seen: list[tuple[str, str]] = []
+
+    def fake_stream(self, request):
+        seen.append((self.base_url, self._api_key))
+        if self._api_key == "sk-configured":
+            raise ProviderKeyRejected("rate limited")
+        yield NormalizedStreamItem(StreamKind.TEXT, 1, text="ok from opencode")
+
+    monkeypatch.setattr(HTTPProviderStreamTransport, "stream", fake_stream)
+    worker = ChatWorker.__new__(ChatWorker)
+    worker.store = type("S", (), {"_engine": engine})()
+
+    transport = worker._provider_transport({"provider": "opencode", "user_id": "user-1", "model_id": "big-pickle"})
+    items = list(transport.stream({}))
+
+    assert isinstance(transport, MultiKeyProviderStreamTransport)
+    assert seen == [
+        ("https://opencode.ai/zen/v1", "sk-configured"),
+        ("https://opencode.ai/zen/v1", "oc-second-key"),
+    ]
+    assert [item.text for item in items] == ["ok from opencode"]
+

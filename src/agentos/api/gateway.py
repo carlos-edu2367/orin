@@ -2519,7 +2519,7 @@ def _is_loopback_client(host: str | None) -> bool:
 
 def _provider_name(value: str) -> str:
     normalized = value.strip().lower()
-    if normalized not in {"openai", "anthropic", "openrouter", "omniroute", "ollama"}:
+    if normalized not in {"openai", "anthropic", "openrouter", "opencode", "omniroute", "ollama"}:
         raise ValueError("unsupported provider")
     return normalized
 

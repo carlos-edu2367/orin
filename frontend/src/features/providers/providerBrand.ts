@@ -2,6 +2,7 @@ import anthropicMark from '../../assets/providers/anthropic.svg?raw'
 import ollamaMark from '../../assets/providers/ollama.svg?raw'
 import omnirouteMark from '../../assets/providers/omniroute.svg?raw'
 import openaiMark from '../../assets/providers/openai.svg?raw'
+import opencodeMark from '../../assets/providers/opencode.svg?raw'
 import openrouterMark from '../../assets/providers/openrouter.svg?raw'
 import type { ProviderName } from '../../api/providers'
 
@@ -13,6 +14,7 @@ const BRANDS: Record<ProviderName, ProviderBrand> = {
   openai: { label: 'OpenAI', accent: '#74d3b0', mark: openaiMark },
   anthropic: { label: 'Anthropic', accent: '#e8a06a', mark: anthropicMark },
   openrouter: { label: 'OpenRouter', accent: '#8fb8f0', mark: openrouterMark },
+  opencode: { label: 'OpenCode', accent: '#62d8f3', mark: opencodeMark },
   omniroute: { label: 'OmniRoute', accent: '#c79cf5', mark: omnirouteMark },
   ollama: { label: 'Ollama', accent: '#e6e2f0', mark: ollamaMark },
 }

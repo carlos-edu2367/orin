@@ -41,6 +41,7 @@ const PROVIDER_DISPLAY_LABELS: Record<ProviderName, string> = {
   openai: 'OpenAI',
   anthropic: 'Anthropic',
   openrouter: 'OpenRouter',
+  opencode: 'OpenCode',
   omniroute: 'OmniRoute',
   ollama: 'Ollama',
 }
@@ -49,6 +50,7 @@ const FALLBACK_MODELS_BY_PROVIDER: Record<ProviderName, string[]> = {
   openai: ['gpt-5', 'gpt-4.1', 'o4-mini'],
   anthropic: ['claude-sonnet-4-5', 'claude-opus-4-1', 'claude-haiku-3-5'],
   openrouter: ['anthropic/claude-sonnet-4.5', 'openai/gpt-5', 'deepseek/deepseek-r1'],
+  opencode: ['claude-sonnet-4-5', 'gpt-5', 'big-pickle'],
   omniroute: ['auto', 'gpt-5', 'claude-sonnet-4-5'],
   ollama: ['qwen2.5-coder:32b', 'llama3.3:70b', 'deepseek-r1:14b'],
 }

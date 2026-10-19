@@ -74,6 +74,31 @@ describe('ProviderDetail', () => {
     expect(screen.getByText('Principal')).toBeInTheDocument()
     await waitFor(() => expect(screen.getByLabelText('Tempo de cooldown (s)')).toHaveValue(90))
   })
+
+  it('supports OpenCode and refreshes the fallback key list after saving the primary key', async () => {
+    let savedPrimary = false
+    const fetchImpl = vi.fn<typeof fetch>((input, init) => {
+      const url = String(input)
+      if (url.endsWith('/v1/providers/opencode/keys') && (!init?.method || init.method === 'GET')) {
+        return Promise.resolve(json(savedPrimary ? [{ id: 1, label: null, position: 0, status: 'active', cooldown_until: null }] : []))
+      }
+      if (url.endsWith('/v1/providers/opencode') && init?.method === 'PUT') {
+        savedPrimary = true
+        return Promise.resolve(json({ provider: 'opencode', enabled: true, key_cooldown_seconds: 60 }))
+      }
+      return Promise.resolve(json({ provider: 'opencode', enabled: savedPrimary, key_cooldown_seconds: 60 }))
+    })
+    const client = new ApiClient({ fetchImpl, csrfToken: 'csrf', maxAttempts: 1, createIdempotencyKey: () => 'intent-opencode' })
+    const user = userEvent.setup()
+    render(<MemoryRouter><ProviderDetail provider="opencode" client={client} bootstrap={{ status: 'ready', csrfToken: 'csrf' }} onClose={() => {}} /></MemoryRouter>)
+
+    const region = await screen.findByRole('region', { name: 'OpenCode' })
+    await user.type(within(region).getByLabelText('Chave de API'), 'oc-primary-key')
+    await user.click(within(region).getByRole('button', { name: 'Salvar' }))
+
+    expect(await within(region).findByText('Chave 1')).toBeInTheDocument()
+    expect(within(region).getByText('Principal')).toBeInTheDocument()
+  })
 })
 
 function json(body: unknown): Response {

@@ -292,3 +292,72 @@ def test_refresh_deduplicates_upstream_models_sharing_the_same_id() -> None:
 
     assert receipt.count == 2
     assert sorted(item.model_id for item in items) == ["auto/coding", "veo-free/seedance"]
+
+
+def test_refresh_normalizes_opencode_models_and_fetches_zen_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    import httpx
+    from agentos.provider_catalog.http import OpenCodeModelCatalogClient
+
+    captured: dict[str, object] = {}
+
+    class _Response:
+        def raise_for_status(self) -> None:
+            pass
+
+        def json(self) -> dict[str, object]:
+            return {
+                "object": "list",
+                "data": [
+                    {"id": "big-pickle", "object": "model", "created": 1765489578, "owned_by": "opencode"},
+                    {"id": "claude-sonnet-4-5", "name": "Claude Sonnet 4.5", "context_length": 200000, "supported_parameters": ["tools", "reasoning"]},
+                ],
+            }
+
+    def fake_get(url: str, *, headers: dict[str, str], timeout: float) -> _Response:
+        captured["url"] = url
+        captured["headers"] = headers
+        return _Response()
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+    repository = FakeRepository()
+    repository.configured[("user-a", "opencode")] = {"enabled": True, "api_key": "oc-key-1"}
+    service = ProviderModelCatalogService(repository, {"opencode": OpenCodeModelCatalogClient()}, now=lambda: datetime(2026, 8, 10, tzinfo=UTC))
+
+    receipt = service.refresh(context("user-a"), "opencode")
+    items = {item.model_id: item for item in service.list(context("user-a"), "opencode")}
+
+    assert captured["url"] == "https://opencode.ai/zen/v1/models"
+    assert captured["headers"] == {"Authorization": "Bearer oc-key-1"}
+    assert receipt.count == 2
+    assert items["big-pickle"].provider == "opencode"
+    assert items["big-pickle"].display_name == "big-pickle"
+    assert items["claude-sonnet-4-5"].display_name == "Claude Sonnet 4.5"
+    assert items["claude-sonnet-4-5"].context_window == 200000
+    assert items["claude-sonnet-4-5"].capabilities == ("reasoning", "tools")
+
+
+@pytest.mark.parametrize("bad_payload", [
+    [],
+    {"data": "not-a-list"},
+    {"data": ["not-a-dict"]},
+    {"data": [{"id": "   "}]},
+])
+def test_opencode_catalog_rejects_malformed_upstream_payloads(monkeypatch: pytest.MonkeyPatch, bad_payload: object) -> None:
+    import httpx
+    from agentos.provider_catalog.http import OpenCodeModelCatalogClient
+
+    class _Response:
+        def raise_for_status(self) -> None:
+            pass
+
+        def json(self) -> object:
+            return bad_payload
+
+    monkeypatch.setattr(httpx, "get", lambda *args, **kwargs: _Response())
+    repository = FakeRepository()
+    repository.configured[("user-a", "opencode")] = {"enabled": True, "api_key": "oc-key-1"}
+    service = ProviderModelCatalogService(repository, {"opencode": OpenCodeModelCatalogClient()})
+
+    with pytest.raises(ProviderCatalogUnavailable):
+        service.refresh(context("user-a"), "opencode")
+

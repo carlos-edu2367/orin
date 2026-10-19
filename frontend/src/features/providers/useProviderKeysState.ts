@@ -16,6 +16,7 @@ export type ProviderKeysState = {
   load: ProviderKeysLoadState
   keys: ProviderApiKeyState[]
   action: ProviderKeysActionState
+  reload: () => Promise<void>
   add: (apiKey: string, label?: string) => Promise<boolean>
   rename: (keyId: number, label: string | null) => Promise<boolean>
   remove: (keyId: number) => Promise<void>
@@ -29,16 +30,21 @@ export function useProviderKeysState(client: ApiClient, provider: ProviderName, 
   const [action, setAction] = useState<ProviderKeysActionState>({ pending: false, error: null, kind: null })
   const intents = useRef(new Map<string, MutationIntent>())
 
-  useEffect(() => {
-    const controller = new AbortController()
-    listProviderKeys(client, provider, controller.signal).then((loaded) => {
-      if (controller.signal.aborted) return
+  async function reload(signal?: AbortSignal) {
+    try {
+      const loaded = await listProviderKeys(client, provider, signal)
+      if (signal?.aborted) return
       setKeys(loaded)
       setLoad({ status: 'loaded' })
-    }).catch((error: unknown) => {
-      if (controller.signal.aborted) return
+    } catch (error: unknown) {
+      if (signal?.aborted) return
       setLoad({ status: 'unavailable', error: toApiError(error) })
-    })
+    }
+  }
+
+  useEffect(() => {
+    const controller = new AbortController()
+    void reload(controller.signal)
     return () => controller.abort()
   }, [client, provider])
 
@@ -113,6 +119,7 @@ export function useProviderKeysState(client: ApiClient, provider: ProviderName, 
 
   return {
     load, keys, action,
+    reload: () => reload(),
     add, rename, remove,
     moveUp: (keyId: number) => move(keyId, -1),
     moveDown: (keyId: number) => move(keyId, 1),

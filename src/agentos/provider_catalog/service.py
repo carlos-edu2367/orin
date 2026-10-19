@@ -102,7 +102,7 @@ class ProviderModelCatalogService:
 
 def _provider(value: str) -> str:
     normalized = value.strip().lower()
-    if normalized not in {"openai", "anthropic", "openrouter", "omniroute", "ollama"}:
+    if normalized not in {"openai", "anthropic", "openrouter", "opencode", "omniroute", "ollama"}:
         raise ProviderCatalogUnavailable("unsupported provider")
     return normalized
 
@@ -125,6 +125,31 @@ def _normalize_openrouter(raw: dict[str, object], refreshed_at: datetime) -> Pro
         capabilities=tuple(sorted({_text(value) for value in _list(raw.get("supported_parameters")) if _text(value)})),
         input_modalities=_modalities(architecture.get("input_modalities")),
         output_modalities=infer_output_modalities(model_id, _modalities(architecture.get("output_modalities"))),
+        pricing=_pricing(pricing),
+        refreshed_at=refreshed_at,
+    )
+
+
+def _normalize_opencode(raw: dict[str, object], refreshed_at: datetime) -> ProviderModelRecord:
+    model_id = _text(raw.get("id"))
+    if model_id is None:
+        raise ProviderCatalogUnavailable("provider returned an invalid model")
+    display_name = _text(raw.get("name")) or model_id
+    architecture = raw.get("architecture") if isinstance(raw.get("architecture"), dict) else {}
+    pricing = raw.get("pricing") if isinstance(raw.get("pricing"), dict) else {}
+    context_window = raw.get("context_length")
+    if isinstance(context_window, bool) or not isinstance(context_window, int) or context_window < 1:
+        context_window = None
+    input_modalities = _modalities(raw.get("input_modalities")) or _modalities(architecture.get("input_modalities")) or ("text",)
+    output_modalities = _modalities(raw.get("output_modalities")) or _modalities(architecture.get("output_modalities"))
+    return ProviderModelRecord(
+        provider="opencode",
+        model_id=model_id,
+        display_name=display_name,
+        context_window=context_window,
+        capabilities=tuple(sorted({_text(value) for value in _list(raw.get("supported_parameters")) if _text(value)})),
+        input_modalities=input_modalities,
+        output_modalities=infer_output_modalities(model_id, output_modalities),
         pricing=_pricing(pricing),
         refreshed_at=refreshed_at,
     )
@@ -262,6 +287,7 @@ def _per_million(value: object) -> str | None:
 _NORMALIZERS = {
     "anthropic": _normalize_anthropic,
     "openrouter": _normalize_openrouter,
+    "opencode": _normalize_opencode,
     "openai": _normalize_openai,
     "omniroute": _normalize_omniroute,
     "ollama": _normalize_ollama,

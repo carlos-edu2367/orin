@@ -30,6 +30,8 @@ def reasoning_supported(provider: str, model_id: str, capabilities: Iterable[str
     name = str(provider or "").lower()
     if name in {"openrouter", "omniroute"}:
         return "reasoning" in names
+    if name == "opencode":
+        return "reasoning" in names or bool(_OPENAI_REASONING_MODEL.match(model))
     if name == "anthropic":
         return any("thinking" in item for item in names) or bool(_ANTHROPIC_THINKING_MODEL.search(model))
     if name == "openai":
@@ -65,7 +67,7 @@ def apply_effort(
         payload["max_tokens"] = max(current if isinstance(current, int) and not isinstance(current, bool) else 0, budget + THINKING_HEADROOM)
     elif name == "openrouter":
         payload["reasoning"] = {"effort": OPENAI_EFFORT[level]}
-    elif name in {"openai", "omniroute"}:
+    elif name in {"openai", "omniroute", "opencode"}:
         payload["reasoning_effort"] = OPENAI_EFFORT[level]
     return payload
 

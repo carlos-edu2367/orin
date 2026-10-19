@@ -234,3 +234,26 @@ def test_clear_primary_key_renumbers_the_remaining_keys_so_position_zero_stays_t
 
 def test_clear_primary_key_on_a_provider_with_no_keys_is_a_no_op() -> None:
     _adapter().clear_primary_key(_query())
+
+
+def test_adding_first_key_ensures_provider_configuration_row_when_table_exists() -> None:
+    from sqlalchemy import select
+    from agentos.persistence.postgres.schema import provider_configurations
+
+    engine = create_engine("sqlite://")
+    metadata.create_all(engine, tables=[provider_configurations, provider_api_keys])
+    adapter = PostgresProviderApiKeyAdapter(engine, cipher=ProviderSecretCipher(b"0" * 32))
+
+    adapter.add_key({"provider": "opencode", "user_id": "user-1", "api_key": "oc-pool-only-key", "label": "Key 1"})
+
+    with engine.connect() as connection:
+        row = connection.execute(
+            select(provider_configurations).where(
+                provider_configurations.c.user_id == "user-1",
+                provider_configurations.c.provider == "opencode",
+            )
+        ).mappings().first()
+
+    assert row is not None
+    assert row["enabled"] is True
+    assert row["key_cooldown_seconds"] == 60

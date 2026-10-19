@@ -115,6 +115,7 @@ _LOGGER = logging.getLogger("agentos.workers.chat")
 PROVIDER_BASE_URLS = {
     "anthropic": "https://api.anthropic.com/v1",
     "openrouter": "https://openrouter.ai/api/v1",
+    "opencode": "https://opencode.ai/zen/v1",
     "openai": "https://api.openai.com/v1",
     "omniroute": DEFAULT_OMNIROUTE_BASE_URL,
     "ollama": DEFAULT_OLLAMA_BASE_URL,

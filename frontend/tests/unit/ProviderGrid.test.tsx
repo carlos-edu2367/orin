@@ -7,6 +7,7 @@ const states = {
   openai: { status: 'configured' as const, detail: '42 modelos' },
   anthropic: { status: 'configured' as const, detail: '9 modelos' },
   openrouter: { status: 'unconfigured' as const, detail: '' },
+  opencode: { status: 'configured' as const, detail: '12 modelos' },
   omniroute: { status: 'configured' as const, detail: 'gateway local' },
   ollama: { status: 'unavailable' as const, detail: 'não responde' },
 }
@@ -18,10 +19,12 @@ function renderGrid(pathname = '/settings/providers') {
 describe('ProviderGrid', () => {
   it('renders real providers, detail links, status words and animation indexes', () => {
     renderGrid()
-    expect(screen.getAllByRole('link')).toHaveLength(5)
+    expect(screen.getAllByRole('link')).toHaveLength(6)
     const openai = screen.getByRole('link', { name: /OpenAI/ })
     expect(within(openai).getByText('42 modelos')).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /Anthropic/ })).toHaveAttribute('href', '/settings/providers/anthropic')
+    expect(screen.getByRole('link', { name: /OpenCode/ })).toHaveAttribute('href', '/settings/providers/opencode')
+    expect(within(screen.getByRole('link', { name: /OpenCode/ })).getByText('12 modelos')).toBeInTheDocument()
     expect(within(screen.getByRole('link', { name: /OpenRouter/ })).getByText('Não configurado')).toBeInTheDocument()
     expect(openai).toHaveStyle({ '--card-index': '0' })
   })

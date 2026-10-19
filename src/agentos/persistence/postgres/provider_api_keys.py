@@ -19,12 +19,12 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
-from sqlalchemy import delete, func, insert, select, update
+from sqlalchemy import delete, func, inspect as sa_inspect, insert, select, update
 from sqlalchemy.engine import Connection, Engine
 
 from agentos.api.contracts import ApplicationNotFoundError
 
-from .schema import provider_api_keys
+from .schema import provider_api_keys, provider_configurations
 from agentos.persistence.provider_secrets import ProviderSecretCipher
 
 
@@ -81,6 +81,22 @@ class PostgresProviderApiKeyAdapter:
         label = command.get("label")
         now = datetime.now(UTC)
         with self._engine.begin() as connection:
+            if sa_inspect(connection).has_table("provider_configurations"):
+                existing_config = connection.execute(
+                    select(provider_configurations.c.id).where(
+                        provider_configurations.c.user_id == user_id,
+                        provider_configurations.c.provider == provider,
+                    )
+                ).first()
+                if existing_config is None:
+                    connection.execute(
+                        insert(provider_configurations).values(
+                            user_id=user_id, provider=provider, enabled=True,
+                            base_url=None, secret_ref=f"provider-secret:{uuid4().hex}",
+                            key_cooldown_seconds=60, catalog_refreshed_at=None,
+                            created_at=now, updated_at=now,
+                        )
+                    )
             next_position = connection.execute(
                 select(func.coalesce(func.max(provider_api_keys.c.position), -1) + 1).where(
                     provider_api_keys.c.user_id == user_id, provider_api_keys.c.provider == provider,

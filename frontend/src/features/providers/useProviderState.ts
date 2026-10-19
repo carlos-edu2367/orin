@@ -34,6 +34,7 @@ export type ProviderState = {
   catalogLoading: boolean
   canRevoke: boolean
   requiresApiKey: boolean
+  reload: () => Promise<void>
   configure: (event?: FormEvent<HTMLFormElement>) => Promise<void>
   revoke: () => Promise<void>
   refreshModels: () => Promise<void>
@@ -60,6 +61,24 @@ export function useProviderState(client: ApiClient = createBrowserApiClient(), p
   const [catalog, setCatalog] = useState<{ loaded: boolean; error: ApiError | null }>({ loaded: false, error: null })
   const intents = useRef(new Map<string, MutationIntent>())
   const mutationRevision = useRef(0)
+
+  async function reload(signal?: AbortSignal) {
+    try {
+      const state = await inspectProvider(client, provider, signal)
+      if (signal?.aborted) return
+      setLoad({ status: 'loaded', state })
+      if (state.enabled !== null) setEnabled(state.enabled)
+      if (provider === 'omniroute' && typeof state.extra.base_url === 'string') setBaseUrl(state.extra.base_url)
+      if (provider === 'ollama' && typeof state.extra.base_url === 'string') {
+        setBaseUrl(state.extra.base_url)
+        try { setOllamaMode(new URL(state.extra.base_url).hostname.toLowerCase().endsWith('ollama.com') ? 'cloud' : 'local') } catch { setOllamaMode('local') }
+      }
+    } catch (error: unknown) {
+      if (signal?.aborted || (error instanceof DOMException && error.name === 'AbortError')) return
+      const apiError = toApiError(error)
+      setLoad(apiError.status === 404 ? { status: 'loaded', state: { provider, enabled: null, extra: {} } } : { status: 'unavailable', error: apiError })
+    }
+  }
 
   useEffect(() => {
     const controller = new AbortController()
@@ -189,7 +208,7 @@ export function useProviderState(client: ApiClient = createBrowserApiClient(), p
     catch (error) { setAction({ pending: false, error: toApiError(error), kind: 'install' }) }
   }
 
-  return { load, action, apiKey, setApiKey, baseUrl, setBaseUrl, enabled, setEnabled, ollamaMode, setOllamaMode, connection, installed, models, catalog, catalogLoading, canRevoke, requiresApiKey, configure, revoke, refreshModels, loadModels, setFavorite, addCustomModel, removeCustomModel, testConnection, install }
+  return { load, action, apiKey, setApiKey, baseUrl, setBaseUrl, enabled, setEnabled, ollamaMode, setOllamaMode, connection, installed, models, catalog, catalogLoading, canRevoke, requiresApiKey, reload: () => reload(), configure, revoke, refreshModels, loadModels, setFavorite, addCustomModel, removeCustomModel, testConnection, install }
 }
 
 export function toApiError(error: unknown): ApiError {
