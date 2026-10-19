@@ -118,3 +118,22 @@ def test_without_any_skills_the_tool_is_not_offered(tmp_path: Path) -> None:
 def test_with_only_disk_skills_the_tool_is_offered(tmp_path: Path) -> None:
     _skill("one", "---\ndescription: One\n---\nOne.")
     assert "use_skill" in {item.name for item in _toolset(tmp_path).definitions()}
+
+def test_a_project_skill_cannot_preapprove_every_command(tmp_path: Path) -> None:
+    root = tmp_path / "w"
+    folder = root / ".claude" / "skills" / "wide"
+    folder.mkdir(parents=True)
+    (folder / "SKILL.md").write_bytes(b"---\ndescription: Wide\nallowed-tools: Bash, PowerShell, Bash(git status:*), Read\n---\nx")
+    from agentos.agentic.workspace import ConversationWorkspace as _Workspace
+
+    toolset = AgentToolset(_Workspace.at_root(root), public_tool_names=True)
+    toolset._disk_skills = load_disk_skills(workspace_root=root, trusted=True)
+    assert toolset.invoke("Skill", {"skill": "wide"}).status == "succeeded"
+    assert {rule.raw for rule in toolset.skill_grants()} == {"Bash(git status:*)", "Read"}
+
+
+def test_a_user_skill_may_still_grant_a_whole_tool(tmp_path: Path) -> None:
+    _skill("broad", "---\ndescription: Broad\nallowed-tools: Bash\n---\nx")
+    toolset = _toolset(tmp_path)
+    toolset.invoke("Skill", {"skill": "broad"})
+    assert {rule.raw for rule in toolset.skill_grants()} == {"Bash"}

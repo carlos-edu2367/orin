@@ -31,13 +31,17 @@ class DiskSkillTools:
         return tuple(getattr(self, "_skill_allow_rules", ()) or ())
 
     def _grant_skill_tools(self, skill) -> list[str]:
-        from agentos.permissions.rules import parse_rule
+        from agentos.permissions.rules import SHELL_TOOLS, parse_rule
 
         rules = list(getattr(self, "_skill_allow_rules", []) or [])
         granted: list[str] = []
         for raw in skill.allowed_tools:
             rule = parse_rule(raw, kind="allow", source=f"skill:{skill.name}")
             if rule is None or len(rules) >= MAX_SKILL_GRANTS:
+                continue
+            # A repository's skill may pre-approve scoped commands (Bash(git status:*)) but never every command.
+            if skill.origin == "project" and rule.specifier is None and (rule.tool in SHELL_TOOLS or rule.tool == "*"):
+                logger.info("skill %s: unscoped %s grant ignored for a project skill", skill.name, rule.raw)
                 continue
             if all(existing.raw != rule.raw for existing in rules):
                 rules.append(rule)

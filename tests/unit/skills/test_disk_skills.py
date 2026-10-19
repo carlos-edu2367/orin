@@ -122,3 +122,36 @@ def test_substitutions(tmp_path: Path) -> None:
 def test_frontmatter_may_be_absent_or_empty(text: str) -> None:
     meta, body = split_frontmatter(text)
     assert meta == {} and "body" in body or body == text
+
+def test_arguments_are_never_substituted_twice(tmp_path: Path) -> None:
+    text, _ = substitute("a=$0 b=$1 all=$ARGUMENTS", arguments="$1 x", session_id="", skill_dir=tmp_path)
+    assert text == "a=$1 b=x all=$1 x"
+
+
+def test_a_linked_skill_file_is_not_read(tmp_path: Path) -> None:
+    import os
+
+    outside = tmp_path / "outside.md"
+    outside.write_bytes(b"---\ndescription: elsewhere\n---\nx")
+    folder = orin_user_dir() / "skills" / "linked"
+    folder.mkdir(parents=True)
+    try:
+        os.symlink(outside, folder / "SKILL.md")
+    except (OSError, NotImplementedError):
+        pytest.skip("this machine cannot create symbolic links")
+    assert load_disk_skills(workspace_root=None, trusted=False).get("linked") is None
+
+
+def test_an_oversized_file_is_refused_before_it_is_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = _skill(tmp_path, "huge", "---\ndescription: d\n---\n" + "x" * 300_000)
+    read: list[Path] = []
+    original = Path.read_bytes
+
+    def tracking(self):
+        read.append(self)
+        return original(self)
+
+    monkeypatch.setattr(Path, "read_bytes", tracking)
+    with pytest.raises(ValueError):
+        parse_disk_skill(path, name="huge", origin="user", kind="skill")
+    assert path not in read

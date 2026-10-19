@@ -14,6 +14,7 @@ the Bash permission pipeline, when the skill is invoked.
 from __future__ import annotations
 
 import hashlib
+import itertools
 import logging
 import re
 import shlex
@@ -24,6 +25,8 @@ from typing import Any, Iterable, Mapping
 logger = logging.getLogger(__name__)
 
 MAX_DISK_SKILLS = 200
+# A folder is listed at most this far before sorting, so a huge folder cannot stall a turn.
+MAX_FOLDER_ENTRIES = 2_000
 MAX_SKILL_FILE_BYTES = 200_000
 MAX_DESCRIPTION_CHARS = 1_024
 CATALOG_DESCRIPTION_CHARS = 250
@@ -147,9 +150,9 @@ def _optional(value: object, maximum: int = 200) -> str | None:
 
 
 def parse_disk_skill(path: Path, *, name: str, origin: str, kind: str) -> DiskSkill:
-    data = path.read_bytes()
-    if len(data) > MAX_SKILL_FILE_BYTES:
+    if path.stat().st_size > MAX_SKILL_FILE_BYTES:
         raise ValueError(f"larger than {MAX_SKILL_FILE_BYTES} bytes")
+    data = path.read_bytes()
     text = data.decode("utf-8-sig")
     meta, body = split_frontmatter(text)
     declared = _optional(meta.get("name"), 64)
@@ -200,12 +203,13 @@ def _candidates(kind: str, folder: Path) -> Iterable[tuple[str, Path]]:
     if not folder.is_dir():
         return
     if kind == "skill":
-        for child in sorted(folder.iterdir(), key=lambda item: item.name):
+        for child in sorted(itertools.islice(folder.iterdir(), MAX_FOLDER_ENTRIES), key=lambda item: item.name):
             target = child / "SKILL.md"
-            if child.is_dir() and not child.is_symlink() and target.is_file():
+            # A link (the folder or its SKILL.md) could point anywhere: only real files are read.
+            if child.is_dir() and not child.is_symlink() and target.is_file() and not target.is_symlink():
                 yield child.name, target
         return
-    for path in sorted(folder.rglob("*.md")):
+    for path in sorted(itertools.islice(folder.rglob("*.md"), MAX_FOLDER_ENTRIES)):
         if path.is_symlink() or not path.is_file():
             continue
         relative = path.relative_to(folder).with_suffix("")
@@ -257,25 +261,23 @@ def substitute(body: str, *, arguments: str, session_id: str, skill_dir: Path) -
     words = split_arguments(arguments)
     used = False
 
-    def indexed(match: re.Match[str]) -> str:
+    def one(match: re.Match[str]) -> str:
         nonlocal used
+        token = match.group(0)
+        if token == "$ARGUMENTS":
+            used = True
+            return arguments
+        if match.group(3) is not None:
+            return session_id if match.group(3) == "SESSION_ID" else skill_dir.as_posix()
+        if not words:
+            return token  # without arguments, $N and $ARGUMENTS[N] stay as written
         used = True
-        index = int(match.group(1))
+        index = int(match.group(1) if match.group(1) is not None else match.group(2))
         return words[index] if index < len(words) else ""
 
-    text = body
-    if words:
-        text = re.sub(r"\$ARGUMENTS\[(\d+)\]", indexed, text)
-    if "$ARGUMENTS" in text:
-        used = True
-        text = text.replace("$ARGUMENTS", arguments)
-    if words:
-        text = re.sub(r"(?<![\w$])\$(\d{1,2})(?![\w])", indexed, text)
-    for key in ("ORIN_SESSION_ID", "CLAUDE_SESSION_ID"):
-        text = text.replace("${" + key + "}", session_id)
-    for key in ("ORIN_SKILL_DIR", "CLAUDE_SKILL_DIR"):
-        text = text.replace("${" + key + "}", skill_dir.as_posix())
-    return text, used
+    # One pass over the body: text an argument brings in is never substituted again.
+    pattern = r"\$ARGUMENTS\[(\d+)\]|\$ARGUMENTS|(?<![\w$])\$(\d{1,2})(?![\w])|\$\{(?:ORIN|CLAUDE)_(SESSION_ID|SKILL_DIR)\}"
+    return re.sub(pattern, one, body), used
 
 
 __all__ = [
