@@ -128,9 +128,11 @@ class McpTools:
         already_available: list[str] = []
         not_found: list[str] = []
         if text.lower().startswith("select:"):
-            wanted = [name.strip() for name in text[len("select:"):].split(",") if name.strip()][:50]
+            names = [name.strip() for name in text[len("select:"):].split(",") if name.strip()]
+            wanted = names[:50]
+            not_found.extend(f"{name} (select takes at most 50 names)" for name in names[50:])
             index: dict[str, Any] = {}
-            for item in engine.search("", server=server, limit=200):
+            for item in engine.listing(server=server):  # every tool, not only the first 200 (W4-R18)
                 index.setdefault(item.qualified_name.lower(), item)
                 index.setdefault(item.tool_name.lower(), item)
             matches = []
@@ -139,16 +141,23 @@ class McpTools:
                 if item is not None:
                     if item not in matches:
                         matches.append(item)
-                elif self.key_for(name) in self._by_name:
-                    already_available.append(name)  # built-in tools are never deferred
+                    continue
+                definition = self._by_name.get(self.key_for(name))
+                if definition is not None and definition.kind != "mcp":
+                    already_available.append(name)  # built-in tools are never deferred; an MCP tool is only reported found
                 else:
                     not_found.append(name)
         else:
             required = [word[1:].lower() for word in text.split() if word.startswith("+") and len(word) > 1]
             keywords = " ".join(word for word in text.split() if not word.startswith("+")) or " ".join(required)
-            matches = engine.search(keywords, server=server, limit=200 if required else safe_limit)
             if required:
-                matches = [item for item in matches if all(term in item.qualified_name.lower() for term in required)][:safe_limit]
+                # The +terms filter the whole catalogue before the limit, so a tool past the first 200 is found (W4-R18).
+                ranked = {item.qualified_name: rank for rank, item in enumerate(engine.search(keywords, server=server, limit=200))} if keywords else {}
+                found = [item for item in engine.listing(server=server) if all(term in item.qualified_name.lower() for term in required)]
+                found.sort(key=lambda item: (ranked.get(item.qualified_name, len(ranked)), item.qualified_name))
+                matches = found[:safe_limit]
+            else:
+                matches = engine.search(keywords, server=server, limit=safe_limit)
         tools_payload = [item.to_dict(include_schema=True) for item in matches]
         activated: list[str] = []
         if activate and not self._read_only_mode:

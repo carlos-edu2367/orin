@@ -292,6 +292,22 @@ class McpToolSearchEngine:
             or target in _fold_accents(doc.server_name)
         )
 
+    def listing(self, *, server: str | None = None) -> list[McpToolSearchResult]:
+        """Every tool that matches ``server``, in name order, with no limit (ToolSearch's select: index, W4-R18)."""
+        return [
+            McpToolSearchResult(
+                server_slug=doc.server_slug,
+                server_name=doc.server_name,
+                tool_name=doc.tool_name,
+                qualified_name=doc.qualified_name,
+                description=doc.description,
+                input_schema=doc.input_schema,
+                parameter_names=doc.parameter_names,
+                score=1.0,
+            )
+            for doc in sorted(self._filter_by_server(server), key=lambda d: (d.server_slug, d.tool_name))
+        ]
+
     def search(
         self,
         query: str = "",
@@ -306,19 +322,7 @@ class McpToolSearchEngine:
 
         clean_query = (query or "").strip()
         if not clean_query:
-            return [
-                McpToolSearchResult(
-                    server_slug=doc.server_slug,
-                    server_name=doc.server_name,
-                    tool_name=doc.tool_name,
-                    qualified_name=doc.qualified_name,
-                    description=doc.description,
-                    input_schema=doc.input_schema,
-                    parameter_names=doc.parameter_names,
-                    score=1.0,
-                )
-                for doc in sorted(candidates, key=lambda d: (d.server_slug, d.tool_name))[:bounded_limit]
-            ]
+            return self.listing(server=server)[:bounded_limit]
 
         folded_query = _fold_accents(clean_query)
         raw_tokens = _tokenize(clean_query)

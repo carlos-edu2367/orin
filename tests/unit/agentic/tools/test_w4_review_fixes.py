@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from agentos.agentic.agent_tools import AgentToolset, AgentToolError
+from agentos.agentic.agent_tools import AgentToolset, AgentToolError, ToolDefinition
 from agentos.agentic.tools.interaction.notify import NotificationBudget
 from agentos.agentic.tools.shell.publish import publish_actions
 from agentos.agentic.workspace import ConversationWorkspace
@@ -262,3 +262,40 @@ def test_glob_does_not_list_a_junction_target(junction_workspace) -> None:
     assert outcome.status == "succeeded", outcome.content
     assert "notes.txt" in outcome.content
     assert "secret.txt" not in outcome.content and "linked" not in outcome.content
+
+
+# -- W4-R18: ToolSearch indexes every MCP tool, not the first 200 --------------------------------------
+
+class _CatalogueProvider:
+    def definitions(self):
+        names = [f"mcp__{server}__tool_{index}" for server in ("alpha", "beta", "zeta") for index in range(120)]
+        return tuple(
+            ToolDefinition(name, f"{name} description", {"type": "object", "properties": {}}, lambda **_: {"content": "ok"}, "mcp")
+            for name in names
+        )
+
+
+def _catalogue_toolset(tmp_path: Path) -> AgentToolset:
+    return AgentToolset(ConversationWorkspace(tmp_path, "c1"), mcp_provider=_CatalogueProvider())
+
+
+def test_select_activates_a_tool_past_the_first_200(tmp_path: Path) -> None:
+    toolset = _catalogue_toolset(tmp_path)
+    output = toolset.invoke("ToolSearch", {"query": "select:mcp__zeta__tool_119"}).data["tool_output"]
+    assert output["matches"] == ["mcp__zeta__tool_119"]
+    assert output["already_available"] == [] and output["not_found"] == []
+    assert "mcp__zeta__tool_119" in toolset.active_mcp_tool_names
+    published = {schema.get("name") or (schema.get("function") or {}).get("name") for schema in toolset.schemas()}
+    assert "mcp__zeta__tool_119" in published  # the schema reaches the model
+
+
+def test_plus_terms_find_tools_past_the_first_200(tmp_path: Path) -> None:
+    output = _catalogue_toolset(tmp_path).invoke("ToolSearch", {"query": "+zeta tool"}).data["tool_output"]
+    assert output["matches"] and all(name.startswith("mcp__zeta__") for name in output["matches"])
+
+
+def test_select_names_beyond_fifty_are_reported_not_dropped(tmp_path: Path) -> None:
+    names = ",".join(f"mcp__alpha__tool_{index}" for index in range(55))
+    output = _catalogue_toolset(tmp_path).invoke("ToolSearch", {"query": f"select:{names}"}).data["tool_output"]
+    assert len(output["matches"]) == 50
+    assert [entry.split(" ")[0] for entry in output["not_found"]] == [f"mcp__alpha__tool_{index}" for index in range(50, 55)]
