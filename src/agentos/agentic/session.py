@@ -16,7 +16,7 @@ import re
 import shutil
 import threading
 from collections.abc import Sequence
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait as wait_futures
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import BoundedSemaphore, Lock
@@ -800,6 +800,8 @@ class _MainAgentStore:
 
 # W5 agent teams: how many message batches a teammate works through before it goes idle within one run.
 MAX_TEAM_DELIVERIES = 10
+# W5-R13: a language server check still running when the turn closes gets this long to finish first.
+LSP_CLOSE_WAIT_SECONDS = 2.0
 
 _BUILTIN_SUBAGENT_SPECS: Mapping[str, Mapping[str, object]] = {
     "explore": {
@@ -1018,6 +1020,9 @@ class TurnSession:
         self._builtin_type_counts: dict[str, int] = {}
         # W5 agent teams: the roster (name -> agent_id, team_name, type, busy), guarded by its own lock.
         self._team_lock = Lock()
+        self._lsp_lock = Lock()  # W5-R13: guards the turn's language servers and their closing
+        self._lsp_closed = False
+        self._lsp_pending: set[Any] = set()
         self._teammates: dict[str, dict[str, Any]] = {}
         self._subagent_histories: dict[str, list[dict[str, Any]]] = {}
         self._subagent_records: dict[str, dict[str, object]] = {}
@@ -2532,6 +2537,15 @@ class TurnSession:
         cached = getattr(self, "_lsp", None)
         if cached is not None:
             return cached or None
+        with self._lsp_lock:  # W5-R13: one maker at a time, and none once the turn closed
+            if self._lsp_closed:
+                return None
+            return self._make_lsp_manager()
+
+    def _make_lsp_manager(self):
+        cached = getattr(self, "_lsp", None)
+        if cached is not None:
+            return cached or None
         self._lsp = False
         if not self.plugin_hooks:
             return None
@@ -2571,17 +2585,26 @@ class TurnSession:
             if text:
                 self._reminders.replace(f"lsp:{target}", "diagnostics", text) or self._reminders.add("diagnostics", text, key=f"lsp:{target}")
 
-        with self._subagent_lock:
+        with self._lsp_lock:
+            if self._lsp_closed:  # the turn closed while this write was being checked
+                return
             pool = getattr(self, "_lsp_pool", None)
             if pool is None:
                 pool = self._lsp_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="orin-lsp")
-        pool.submit(work)
+            future = pool.submit(work)
+            self._lsp_pending.add(future)
+        future.add_done_callback(self._lsp_pending.discard)
 
     def _close_lsp(self) -> None:
-        manager, self._lsp = getattr(self, "_lsp", None), None
-        pool, self._lsp_pool = getattr(self, "_lsp_pool", None), None
+        with self._lsp_lock:
+            self._lsp_closed = True  # from now on this turn makes no manager and no pool
+            manager, self._lsp = getattr(self, "_lsp", None), None
+            pool, self._lsp_pool = getattr(self, "_lsp_pool", None), None
+            pending = list(self._lsp_pending)
         if pool is not None:
             pool.shutdown(wait=False, cancel_futures=True)
+        # A check already running may still start its server: it gets a moment to finish before the manager closes.
+        wait_futures(pending, timeout=LSP_CLOSE_WAIT_SECONDS)
         if manager:
             manager.close()
 
@@ -3890,6 +3913,8 @@ class TurnSession:
         return "allow" if opted_in else "deny"
 
     def build_runtime(self) -> AgenticTurnRuntime:
+        with self._lsp_lock:
+            self._lsp_closed = False  # W5-R13: a new turn may start its own language servers
         import inspect
         from agentos.agentic.runtime import CODE_MODE_CORE_TOOLS
         from agentos.code_mode.models import normalize_code_autonomy
