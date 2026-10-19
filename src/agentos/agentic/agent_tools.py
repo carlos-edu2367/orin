@@ -76,6 +76,7 @@ from agentos.agentic.tools.web.fetch import FetchTools
 from agentos.agentic.tools.web.search import WebSearchTools
 from agentos.agentic.tools.orin.memory import MemoryTools
 from agentos.agentic.tools.orin.skills_admin import SkillTools
+from agentos.agentic.tools.orin.disk_skills import DiskSkillTools
 from agentos.agentic.tools.mcp.admin import McpTools
 from agentos.agentic.tools.orin.plugins_admin import PluginTools
 from agentos.agentic.tools.orin.projects import ProjectTools
@@ -203,6 +204,7 @@ class AgentToolset(
     WebSearchTools,
     MemoryTools,
     SkillTools,
+    DiskSkillTools,
     McpTools,
     PluginTools,
     ProjectTools,
@@ -863,7 +865,7 @@ class AgentToolset(
                 broker_tool_name,
                 broker_args,
                 self._permission_mode,
-                plan_mode_active=self._plan_mode_active,
+                plan_mode_active=self._plan_mode_active, extra_allow=self.skill_grants(),
             )
             from agentos.permissions.engine import PermissionDecision
 
@@ -931,7 +933,7 @@ class AgentToolset(
                                 broker_tool_name,
                                 candidate_broker_args,
                                 self._permission_mode,
-                                plan_mode_active=self._plan_mode_active,
+                                plan_mode_active=self._plan_mode_active, extra_allow=self.skill_grants(),
                             )
                             if recheck.behavior == "deny":
                                 return ToolOutcome(

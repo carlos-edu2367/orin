@@ -13,6 +13,24 @@ from agentos.agentic.tools.spec import ToolSpec, ToolInput
 MAX_SKILL_ARGUMENT_CHARS = 4_000
 
 
+def skill_argument_text(args: object) -> str:
+    """The Skill tool's ``args`` as one string: a list is joined with spaces, a mapping becomes JSON (W4-R25)."""
+    if args is None:
+        return ""
+    if isinstance(args, (list, tuple)):
+        return " ".join(str(item) for item in args).strip()[:MAX_SKILL_ARGUMENT_CHARS]
+    if isinstance(args, Mapping):
+        return json.dumps(args, ensure_ascii=False)[:MAX_SKILL_ARGUMENT_CHARS]
+    return str(args).strip()[:MAX_SKILL_ARGUMENT_CHARS]
+
+
+def neutral_skill_text(text: str) -> str:
+    """Skill text and arguments can never close (or forge) the instructions wrapper (W4-R25)."""
+    return str(text).replace("</agentos-skill-instructions", "&lt;/agentos-skill-instructions").replace(
+        "<agentos-skill-instructions", "&lt;agentos-skill-instructions",
+    )
+
+
 class SkillTools:
     """Mixed into ``AgentToolset``; ``self`` is the toolset."""
 
@@ -58,13 +76,17 @@ class SkillTools:
         }
 
     def use_skill(self, skill_id: str, version: str | None = None, args: str | None = None) -> dict[str, Any]:
+        # W5: a skill or command read from disk (Claude Code's format) answers before the skill library.
+        disk = self.disk_skill(str(skill_id)) if not version else None
+        if disk is not None:
+            return self.run_disk_skill(disk, skill_argument_text(args), invoked_by="model")
         if self.skills is None:
             raise AgentToolError("Skills are not available.")
         try:
             loaded = self.skills.load(str(skill_id), version=version or None, available_tools=self._available_tool_names())
         except Exception as error:
             raise AgentToolError(str(error)) from error
-        arguments = str(args or "").strip()[:MAX_SKILL_ARGUMENT_CHARS]
+        arguments = neutral_skill_text(skill_argument_text(args))
         arguments_block = f"\n<skill-arguments>\n{arguments}\n</skill-arguments>" if arguments else ""
         key = (loaded.ref.id, loaded.ref.version)
         if key in self._loaded_skills:
@@ -76,7 +98,7 @@ class SkillTools:
         self._loaded_skills.add(key)
         if self._skill_load_recorder is not None:
             self._skill_load_recorder(loaded)
-        instructions = str(loaded.instructions)
+        instructions = neutral_skill_text(loaded.instructions)
         if arguments and "$ARGUMENTS" in instructions:
             instructions = instructions.replace("$ARGUMENTS", arguments)
             arguments_block = ""
@@ -232,7 +254,8 @@ SPECS: tuple[ToolSpec, ...] = (
         kind="skill",
         input_model=SkillInput,
         public_description="Load a skill's instructions when the task matches it.",
-        available=lambda self: (self.skills is not None),
+        # W5: also offered when only skills read from disk exist.
+        available=lambda self: (self.skills is not None or getattr(self, "_disk_skills", None) is not None),
         order=430,
     ),
     ToolSpec(

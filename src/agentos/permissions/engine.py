@@ -265,9 +265,12 @@ class PermissionEngine:
                     return False
         return True
 
-    def _bash_allowed(self, analysis, args: Mapping[str, Any], internal: str = "run_command", dialect: str | None = None) -> PermissionRule | None:
+    def _bash_allowed(
+        self, analysis, args: Mapping[str, Any], internal: str = "run_command", dialect: str | None = None,
+        extra: tuple[PermissionRule, ...] = (),
+    ) -> PermissionRule | None:
         shell = dialect or self.ctx.shell
-        bash_rules = [rule for rule in self._allow if rule.tool in {internal, "*"}]
+        bash_rules = [rule for rule in (*self._allow, *extra) if rule.tool in {internal, "*"}]
         unconditional = next((rule for rule in bash_rules if rule.specifier is None), None)
         if unconditional is not None:
             return unconditional
@@ -290,7 +293,10 @@ class PermissionEngine:
         mode: CodePermissionMode | str,
         *,
         plan_mode_active: bool = False,
+        extra_allow: tuple[PermissionRule, ...] = (),
     ) -> PermissionDecision:
+        """``extra_allow``: allow rules for this decision only (a loaded skill's ``allowed-tools``, W5). They join the
+        allow step, so deny rules, ask rules, plan mode and protected paths are decided before them, as for any allow."""
         args = dict(arguments or {})
         resolved = normalize_permission_mode(mode)
         dialect = "powershell" if internal == "powershell" else self.ctx.shell
@@ -334,9 +340,9 @@ class PermissionEngine:
             return PermissionDecision("ask", "protected configuration path", requires_human=True)
 
         if internal in SHELL_TOOLS and analysis is not None:
-            allowed = self._bash_allowed(analysis, args, internal, dialect)
+            allowed = self._bash_allowed(analysis, args, internal, dialect, tuple(extra_allow))
         else:
-            allowed = self._first(self._allow, internal, args, analysis)
+            allowed = self._first([*self._allow, *extra_allow], internal, args, analysis)
         if allowed is not None:
             return PermissionDecision("allow", f"allowed by rule {allowed.raw}", allowed.raw, allowed.source)
 

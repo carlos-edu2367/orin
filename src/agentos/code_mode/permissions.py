@@ -407,6 +407,7 @@ class ToolPermissionBroker:
         *,
         mode: str | CodePermissionMode | CodeAutonomy | None = None,
         plan_mode_active: bool = False,
+        extra_allow: tuple = (),
     ) -> PermissionDecision:
         effective = mode if mode is not None else permission_mode
         return self.engine().decide(
@@ -414,6 +415,7 @@ class ToolPermissionBroker:
             dict(arguments or {}),
             normalize_permission_mode(effective),
             plan_mode_active=plan_mode_active,
+            extra_allow=tuple(extra_allow or ()),
         )
 
     def evaluate(
