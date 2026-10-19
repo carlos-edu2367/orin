@@ -1395,7 +1395,7 @@ class TurnSession:
         key = subagent_type.strip().lower()
         if key == "general-purpose":
             key = "general"
-        spec = _BUILTIN_SUBAGENT_SPECS.get(key)
+        spec = self._subagent_spec(key)
         if spec is None:
             return None
         target_name = (instance_name or key).strip() or key
@@ -1439,6 +1439,96 @@ class TurnSession:
             "builtin_type": key,
         }
 
+    def _agent_definition(self, key: str):
+        """An agent defined on disk for ``key`` (W5), or None for an Orin builtin that no file replaces."""
+        catalog = getattr(self, "_agent_definitions", None)
+        definition = catalog.get(key) if catalog is not None else None
+        if definition is None:
+            return None
+        if definition.origin == "builtin" and str(key or "").strip().lower() in _BUILTIN_SUBAGENT_SPECS:
+            return None
+        return definition
+
+    def _subagent_spec(self, key: str) -> Mapping[str, object] | None:
+        """The spec a run uses: an agent defined on disk first, then Orin's builtins."""
+        definition = self._agent_definition(key)
+        if definition is not None:
+            return {
+                "display_name": definition.name, "role": definition.description[:500],
+                "read_only": False, "inherit_context": False, "definition": definition,
+            }
+        return _BUILTIN_SUBAGENT_SPECS.get(str(key or "").strip().lower())
+
+    def _definition_model(self, spec: Mapping[str, object] | None) -> str | None:
+        """The model a definition asks for, when it is one this person allows; otherwise None (the parent's model)."""
+        definition = spec.get("definition") if isinstance(spec, Mapping) else None
+        if definition is None or not definition.model:
+            return None
+        from .agent_definitions import resolve_agent_model
+        from .loop_settings import operator_value
+
+        aliases = operator_value(getattr(self, "effective_settings", None), "modelAliases")
+        wanted = resolve_agent_model(definition.model, aliases if isinstance(aliases, Mapping) else None)
+        if not wanted:
+            return None
+        resolved = self._resolve_child_model(wanted)
+        if resolved and self._child_model_allowed(resolved, allow_current=True):
+            return resolved
+        logger.info("agent %s asks for model %s, which is not allowed here; it runs on the parent's model", definition.name, wanted)
+        return None
+
+    def _defined_agents_hint(self) -> str:
+        catalog = getattr(self, "_agent_definitions", None)
+        names = sorted(catalog.agents) if catalog is not None else []
+        return f"; agents defined here: {', '.join(names[:40])}" if names else ""
+
+    def _preloaded_skills(self, definition, toolset: AgentToolset) -> str:
+        """The bodies of the skills a definition preloads, within a budget (W5)."""
+        from agentos.skills.disk import substitute
+
+        text, used = "", 0
+        for name in definition.skills:
+            skill = toolset.disk_skill(name)
+            if skill is None:
+                continue
+            body, _ = substitute(skill.body, arguments="", session_id=str(self.turn.get("conversation_id") or ""), skill_dir=skill.directory)
+            block = f"\n\n## Preloaded skill: {skill.name}\n{body}"
+            if used + len(block) > 20_000:
+                break
+            text += block
+            used += len(block)
+        return text
+
+    def _load_agent_definitions(self, trusted: bool):
+        from .agent_definitions import AgentCatalog, load_agent_definitions
+
+        try:
+            catalog = load_agent_definitions(workspace_root=self.workspace.root, trusted=bool(trusted))
+        except Exception:  # noqa: BLE001 - a broken agents folder never stops a turn
+            logger.exception("agent definitions could not be read")
+            return AgentCatalog()
+        for path, reason in catalog.errors[:20]:
+            logger.warning("agent definition %s ignored: %s", path, reason)
+        return catalog
+
+    def _announce_defined_agents(self) -> None:
+        """A reminder naming the agents the Agent tool can start besides Orin's builtins (W5)."""
+        catalog = getattr(self, "_agent_definitions", None)
+        if catalog is None:
+            return
+        lines, used = [], 0
+        for definition in sorted(catalog.agents.values(), key=lambda item: item.name):
+            line = f"- {definition.name}: {' '.join(definition.description.split())[:200]}"
+            if used + len(line) > 4_000:
+                break
+            lines.append(line)
+            used += len(line)
+        if lines:
+            self._reminders.add(
+                "agents", "Besides Explore, Plan and general-purpose, the Agent tool can start these agents (subagent_type = name):\n" + "\n".join(lines),
+                key="defined-agents",
+            )
+
     def _find_subagent_record_by_id(self, agent_id: str) -> dict[str, object] | None:
         with self._subagent_lock:
             cached = self._subagent_records.get(agent_id)
@@ -1472,7 +1562,10 @@ class TurnSession:
         clean_type = raw_type.lower()
         if clean_type == "general-purpose":
             clean_type = "general"
-        if clean_type not in _BUILTIN_SUBAGENT_SPECS:
+        definition = self._agent_definition(clean_type)
+        if definition is not None:
+            clean_type = definition.name  # W5: an agent defined on disk (it may replace a builtin of the same name)
+        elif clean_type not in _BUILTIN_SUBAGENT_SPECS:
             if raw_type and (model_id is None or not str(model_id).strip()) and self._resolve_child_model(raw_type) is not None:
                 model_id = raw_type
                 clean_type = "general"
@@ -1481,7 +1574,7 @@ class TurnSession:
                     "failed",
                     f"Tipo de subagente inválido: {clean_type}",
                     "subagent_type must be one of 'explore', 'plan', 'general', or 'fork' "
-                    "(public names: Explore, Plan, general-purpose, fork).",
+                    "(public names: Explore, Plan, general-purpose, fork)" + self._defined_agents_hint() + ".",
                     {"tool_kind": "agent"},
                     "INVALID_ARGUMENTS",
                 )
@@ -1512,7 +1605,7 @@ class TurnSession:
         if builtin_key == "general-purpose":
             builtin_key = "general"
             clean = "general"
-        builtin_spec = _BUILTIN_SUBAGENT_SPECS.get(builtin_key)
+        builtin_spec = self._subagent_spec(builtin_key)
         explicit_model = str(requested_model_id).strip() if requested_model_id else ""
         resolved_explicit: str | None = None
         if explicit_model:
@@ -1549,9 +1642,9 @@ class TurnSession:
             clean = str(record.get("name") or clean)
             if builtin_spec is None:
                 raw_bt = str(record.get("builtin_type") or clean).split("-", 1)[0].lower()
-                if raw_bt in _BUILTIN_SUBAGENT_SPECS:
+                if self._subagent_spec(raw_bt) is not None:
                     builtin_key = raw_bt
-                    builtin_spec = _BUILTIN_SUBAGENT_SPECS[builtin_key]
+                    builtin_spec = self._subagent_spec(builtin_key)
         elif builtin_spec is not None:
             with self._subagent_lock:
                 count = self._builtin_type_counts.get(builtin_key, 0) + 1
@@ -1574,7 +1667,7 @@ class TurnSession:
         child_provider = str(record.get("provider") or self.turn.get("provider") or "")
         current_model_id = self._current_model_id()
         if builtin_spec is not None:
-            child_model_id = resolved_explicit or current_model_id
+            child_model_id = resolved_explicit or self._definition_model(builtin_spec) or current_model_id
         else:
             raw_record_model = str(record.get("model_id") or "").strip()
             child_model_id = resolved_explicit or (self._resolve_child_model(raw_record_model) if raw_record_model else current_model_id) or raw_record_model
@@ -1601,7 +1694,8 @@ class TurnSession:
                 **record,
                 "builtin_type": builtin_key if builtin_spec is not None else record.get("builtin_type"),
             }
-        if run_in_background:
+        definition = builtin_spec.get("definition") if builtin_spec is not None else None
+        if run_in_background or (definition is not None and definition.background):
             with self._subagent_lock:
                 if self._bg_subagent_executor is None:
                     self._bg_subagent_executor = ThreadPoolExecutor(
@@ -1822,6 +1916,7 @@ class TurnSession:
         if self.agents_store is not None and hasattr(self.agents_store, "set_state"):
             self.agents_store.set_state(agent_id, "working")
         read_only_subagent = bool(builtin_spec and builtin_spec.get("read_only"))
+        definition = builtin_spec.get("definition") if builtin_spec is not None else None
         inherit_context = bool(builtin_spec and builtin_spec.get("inherit_context"))
         initial_history: list[dict[str, Any]] | None = None
         if resumed_agent_id:
@@ -1834,7 +1929,7 @@ class TurnSession:
                 initial_history = [dict(item) for item in self.store.history_for_turn(self.turn)]
             except Exception:
                 initial_history = None
-        enriched_record = {**record, "builtin_type": builtin_key if builtin_spec is not None else None}
+        enriched_record = {**record, "builtin_type": builtin_key if builtin_spec is not None else None, "definition": definition}
         sub_store = _SubagentStore(
             self,
             subagent_turn,
@@ -1843,7 +1938,11 @@ class TurnSession:
             self._subagent_task(enriched_record, task_text),
             initial_history=initial_history,
         )
-        sub_permission_mode = "plan_mode" if read_only_subagent else self.permission_mode
+        from .agent_definitions import AgentToolPolicy, child_permission_mode
+
+        # W5: a definition's mode applies only when it is not more permissive than the parent's; a plugin's never does.
+        requested_mode = definition.permission_mode if definition is not None and definition.origin != "plugin" else None
+        sub_permission_mode = "plan_mode" if read_only_subagent else child_permission_mode(self.permission_mode, requested_mode)
         subagent_tools = self._toolset(
             subagents=False,
             browser_agent_key=agent_id,
@@ -1858,11 +1957,16 @@ class TurnSession:
             # The running turn's queue (W4-R9): a subagent's monitor sinks into the parent turn, not into a wake.
             reminders=self._reminders,
         )
+        if definition is not None:
+            # Its tools only narrow what the parent may publish.
+            subagent_tools._policy = AgentToolPolicy(subagent_tools._policy, definition)
         sub_max_iterations = (
             self.limits.subagent_max_iterations
             if self.limits.subagent_max_iterations is not None
             else self.limits.max_iterations
         )
+        if definition is not None and definition.max_turns:
+            sub_max_iterations = min(sub_max_iterations or definition.max_turns, definition.max_turns)
         sub_max_actions = (
             self.limits.subagent_max_actions
             if self.limits.subagent_max_actions is not None
@@ -2160,6 +2264,10 @@ class TurnSession:
                 "Do not re-ask the user questions; execute the delegated fork directive and return a concise report.",
                 "",
             ))
+        definition = record.get("definition")
+        if definition is not None and definition.prompt:
+            # W5: an agent defined on disk brings its own instructions.
+            header_lines.extend((f"You are the '{definition.name}' agent. Your instructions:", "", definition.prompt, ""))
         prompt = "\n".join(header_lines) + (
             f"You are '{record['name']}', a specialist subagent inside Orin. Your role: {record['role']}.\n"
             + (
@@ -2206,8 +2314,10 @@ class TurnSession:
             prompt += "\n- It is currently empty."
         memory = getattr(self, "_memory", None)
         workspace_guidance = memory.render() if memory is not None else _workspace_guidance(self.workspace.root)
-        if workspace_guidance:
+        if workspace_guidance and not (definition is not None and definition.omit_claude_md):
             prompt += f"\n\n## Workspace instructions\n{workspace_guidance}"
+        if definition is not None and definition.skills:
+            prompt += self._preloaded_skills(definition, toolset)
         catalog = self._skill_catalog(task, toolset)
         if catalog:
             prompt += "\n\nRelevant procedural Skills are available as metadata only. Load one with use_skill only if it helps:"
@@ -3244,6 +3354,8 @@ class TurnSession:
         self._reminders = ReminderQueue()
         self._apply_working_directories()
         self._disk_skills = self._load_disk_skills(trusted_workspace)
+        self._agent_definitions = self._load_agent_definitions(trusted_workspace)
+        self._announce_defined_agents()
         toolset = self._toolset(
             subagents=self.enable_subagents,
             non_interactive_ask=self._non_interactive_ask(),

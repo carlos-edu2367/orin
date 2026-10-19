@@ -41,7 +41,9 @@ class AgentTools:
         if clean_type == "general-purpose":
             clean_type = "general"
         if clean_type not in {"explore", "plan", "general", "fork"}:
-            if raw_type and (model_id is None or not str(model_id).strip()):
+            if raw_type and self._run_subagent is not None:
+                clean_type = raw_type  # W5: an agent defined on disk (or a model id); the session decides
+            elif raw_type and (model_id is None or not str(model_id).strip()):
                 model_id = raw_type
                 clean_type = "general"
             else:
