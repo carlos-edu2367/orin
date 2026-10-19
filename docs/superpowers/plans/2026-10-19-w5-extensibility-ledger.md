@@ -181,3 +181,62 @@ No other existing test was changed, weakened or skipped.
 - **Idle with mail still pending.** After `MAX_TEAM_DELIVERIES` batches a teammate goes idle. Messages posted after that point stay pending; the lead is not told, and they are read only when the lead next sends to that teammate.
 - **Cancelled teammates.** `_run_background_agent` emits `TeammateIdle` and sends the last report whatever the outcome, and it keeps taking mail after a cancel. I did not test what the re-runs do after a cancel.
 - **A teammate name is turn-wide.** Naming an existing teammate with a different `team_name` silently moves it to the new team, because the roster entry is overwritten.
+
+## Batch D — MCP servers in configuration files (Tasks 16–19)
+
+### Commits
+
+- `80edda2` fix(w5): team messages survive a refused start, an idle race and a stop; a teammate keeps its team (Task 16)
+- `3073c81` feat(w5): read MCP servers from the managed, user, local and project files (Task 17)
+- `93fa1f0` feat(w5): MCP servers from configuration files join the turn (Task 18)
+- the commit that adds this section: docs(w5): ledger, batch D (Task 19)
+
+### Tests added (25 cases)
+
+- Task 16: `tests/unit/conversations/test_mailbox.py` +2 (one test, run against the database and in memory) and `tests/unit/agentic/test_agent_teams.py` +5 (a refused start keeps the message; an idle race starts the teammate again; the delivery cap reports unread messages; a teammate keeps its team; a stopped teammate leaves its mail unread). Before the implementation, all seven failed at run time (`KeyError: 'message_id'` for the mailbox; the five team tests also failed at run time; their messages were not inspected one by one).
+- Task 17: `tests/unit/mcp/test_file_config.py` +10 (new file). Before the implementation: collection error, `ModuleNotFoundError: agentos.mcp.file_config`.
+- Task 18: `tests/unit/mcp/test_file_mcp_servers.py` +8 (new file). Before the implementation: collection error, `ModuleNotFoundError: agentos.mcp.file_servers`.
+
+### Suite results
+
+- Task 16: `tests/unit/agentic/test_agent_teams.py` with `tests/unit/conversations/test_mailbox.py`: 22 passed. `tests/unit/agentic`: 1251 passed, 7 skipped.
+- Task 17: `tests/unit/mcp/test_file_config.py`: 10 passed. `tests/unit/settings`: 53 passed, 3 skipped.
+- Task 18: `tests/unit/mcp/test_file_mcp_servers.py`: 8 passed. `tests/unit/mcp tests/unit/agentic`: 1398 passed, 7 skipped.
+- Task 19, full backend, foreground: `uv run pytest -q tests/unit` (timeout 600000 ms): **3778 passed, 60 skipped, 0 failed** (309 s). Batch C ended at 3753 passed and 60 skipped; the difference is the 25 new cases.
+- `uv run pytest -q tests/integration`: **78 passed, 65 skipped, 0 failed** (70 s). The skip count is the same as in Batches B and C.
+- `npm --prefix frontend test`: **103 files, 609 tests passed**. Batch D touches no file under `frontend/`, so lint and build were not run.
+
+### Deviations from the plan
+
+- **Plan deviations 16–22, as implemented:**
+  16. Not changed in this batch: a preloaded skill's `allowed-tools` and `` !`cmd` `` blocks stay out of a subagent. Its text stays inside the subordinate wrapper from Batch C's Task 12.
+  17. `load_file_servers` reads `~/.orin/mcp.json`, `~/.orin/workspaces/<key>/mcp.json` (with its own enabled and disabled lists) and `.orin/mcp.json`. Orin's entry replaces Claude Code's entry of the same name within a scope.
+  18. `_load_file_mcp_servers` skips a file server whose slug an Orin server already uses, and tells the model. `policy_refusal` is called for Orin's own servers too, with the slug as an alias.
+  19. `personal` is `mcp_service.allow_stdio`, which production sets from the `mcp_stdio` capability. A session without a service, and a shared Orin, read only the managed file.
+  20. `expand` raises for `ORIN_*` and `AGENTOS_*` names, and that stops only the server that uses them.
+  21. No approval prompt. Pending project servers are listed in the `mcp` reminder with the settings keys that approve them.
+  22. `file_servers.py` lists tools in parallel within `MCP_TIMEOUT` and caches each configuration's answer for 600 s (60 s for a failure). File servers cannot sign in with OAuth, and an `sse` or `ws` file server is reported as not supported yet.
+- **Other differences from the plan:**
+  a. The commit trailer. The brief asked for `Co-Authored-By: Claude Opus 5.5`. The session's attribution note asks for `Claude Haiku 5.5`, and Batch D's commits use the Haiku line. Batch C used Opus. The owner should decide which one stays. The three commits are local and have not been pushed.
+  b. Task 16, step 3, edit 13: the plan's old text ends in the partial line `return ToolOutcome`. The edit matched it as a prefix, so the rest of that line is unchanged. The result is the plan's intended code.
+  c. Task 17's `tests/conftest.py` edit adds two lines (the plan's comment and the `delenv` call), not one.
+  d. The appended test blocks keep the plan's single blank line before the new code. No Python linter was run on Batch D's code.
+
+### Expectation changes
+
+None. The diff of `tests/` since `0f59a6f` removes no line. It only adds tests and two lines in `tests/conftest.py`.
+
+### Closed by this batch
+
+- Batch C observation **Messages lost when a start is refused**: closed by Task 16, item 1 (`release`).
+- **Idle with mail still pending**: closed by Task 16, item 3 (the lead's idle reminder states the unread count).
+- **Cancelled teammates**: closed by Task 16, item 5 (a stopped teammate takes no more mail). A test covers it.
+- **A teammate name is turn-wide**: closed by Task 16, item 4 (a teammate keeps its team, and naming another team is refused).
+
+### Observations not fixed (for the owner)
+
+Found by reading the code; no test reproduces them.
+
+- **A teammate can stay busy for the rest of the turn.** `_send_team_message` claims the teammate before `_take_team_mail` and `_ask_agent`, and `_run_subagent` claims it before `_start_subagent`. If one of those raises (for example a database error), nothing releases the claim, so later messages to that teammate return `SUBAGENT_STILL_RUNNING` until the turn ends. The background run releases on an exception; the sender side does not. Suggested fix: wrap the section from the claim to the start in `try` / `except BaseException:` with `self._release_teammate(name)`, then re-raise.
+- **Failure texts mask only values of 4 or more characters, and never the URL path.** `_redacted` replaces environment and header values of at least four characters, and the query string. A shorter header value, or a token in the path, could reach the model in a failure reason. Suggested fix: mask every non-empty value and the path too.
+- **Approval is by settings keys only** (deviation 21). Approved file servers may run any command line (`allow_any_command` for file servers, as the plan specifies), so the approval step is the only guard for project servers. The approval prompt arrives with W7.
