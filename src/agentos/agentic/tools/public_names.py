@@ -49,6 +49,7 @@ PUBLIC_NAMES: dict[str, str] = {
     "cron_list": "CronList",
     "schedule_wakeup": "ScheduleWakeup",
     "monitor": "Monitor",
+    "push_notification": "PushNotification",
     # Orin extras
     "list_files": "ListFiles",
     "view_file": "ViewFile",

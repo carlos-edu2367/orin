@@ -122,6 +122,7 @@ export type AgentActivityEventType =
   | 'code_mode.file_edited'
   | 'code_mode.command_batch'
   | 'code_mode.decision_required'
+  | 'notification.pushed'
   | (string & {})
 
 export type ConversationActivityEvent = {
@@ -162,6 +163,8 @@ export type ConversationActivityEvent = {
   content?: string
   errorCode?: string | null
   questions?: UserQuestion[]
+  /** What the agent said with PushNotification (notification.pushed only). */
+  notificationMessage?: string
   mcpApproval?: McpApprovalRequest
   pluginApproval?: PluginApprovalRequest
   codeSessionProposal?: CodeSessionProposalRequest

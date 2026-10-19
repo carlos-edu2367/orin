@@ -2444,6 +2444,7 @@ class TurnSession:
             media_client=self.media_client,
             scheduler=self._turn_scheduler() if code_mode_active and not read_only_mode else None,
             schedule_context=self._schedule_context(),
+            on_notification=self._push_notification if code_mode_active and not read_only_mode else None,
         )
         if permission_broker is not None:
             toolset._permission_broker = permission_broker
@@ -2454,6 +2455,13 @@ class TurnSession:
         if effective_perm_mode == "plan_mode" or self._in_plan_mode:
             toolset._plan_mode_active = True
         return toolset
+
+    def _push_notification(self, message: str) -> None:
+        """PushNotification's transport: an activity event the open window shows as a toast or system notification (W4)."""
+        self._record(
+            AgentActivityEventType.NOTIFICATION_PUSHED, f"Notificação: {message}"[:240],
+            {"message": message[:200], "label": message[:120]},
+        )
 
     def _turn_scheduler(self) -> object | None:
         """Orin's scheduler over this session's database, for the Code-mode tools that run work later (W4)."""

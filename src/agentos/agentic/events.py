@@ -54,6 +54,7 @@ class AgentActivityEventType(StrEnum):
     CODE_MODE_BLOCKED = "code_mode.blocked"
     TOOL_PERMISSION_REQUIRED = "tool.permission_required"
     PLUGIN_HOOK_EXECUTED = "plugin.hook_executed"
+    NOTIFICATION_PUSHED = "notification.pushed"
 
 
 class ActivityVisibility(StrEnum):

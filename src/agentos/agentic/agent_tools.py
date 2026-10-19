@@ -87,6 +87,7 @@ from agentos.agentic.tools.orin.media import MediaTools
 from agentos.agentic.tools.scheduling.cron import CronTools
 from agentos.agentic.tools.scheduling.wakeup import WakeupTools
 from agentos.agentic.tools.scheduling.monitor import MonitorTools
+from agentos.agentic.tools.interaction.notify import NotifyTools
 from agentos.agentic.tools._shared import (  # noqa: F401 - re-exported for callers and tests
     _SENSITIVE_NAME,
     _PRIVATE_KEY_BLOCK,
@@ -213,6 +214,7 @@ class AgentToolset(
     CronTools,
     WakeupTools,
     MonitorTools,
+    NotifyTools,
 ):
     """Builds the tool schemas and executes the model's calls.
 
@@ -294,6 +296,7 @@ class AgentToolset(
         web_answerer: Callable[[str, str], str | None] | None = None,
         scheduler: object | None = None,
         schedule_context: Mapping[str, str] | None = None,
+        on_notification: Callable[[str], None] | None = None,
     ) -> None:
         from agentos.code_mode.checkpoints import FileCheckpointStore
         from agentos.code_mode.models import CodePermissionMode, normalize_permission_mode
@@ -311,6 +314,9 @@ class AgentToolset(
         # Orin's scheduler and who/what a job made here runs as (W4: CronCreate, ScheduleWakeup, Monitor).
         # Bound by the trusted turn, never by a tool argument; None publishes none of those tools.
         self._scheduler = scheduler
+        # PushNotification's transport (W4): records a notification.pushed activity event. None hides the tool.
+        self._on_notification = on_notification
+        self._notifications_sent = 0
         self._schedule_context: dict[str, str] = {str(k): str(v) for k, v in dict(schedule_context or {}).items() if v}
         self._read_file_lock = threading.Lock()
         self._reported_changes: set[tuple[str, str, str]] = set()

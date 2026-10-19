@@ -3897,3 +3897,15 @@ progress.orin-progress::-moz-progress-bar,
 }
 
 
+/* PushNotification toast (W4): below dialogs (z-index 80+), above the conversation. */
+.push-toast { position: fixed; top: 64px; right: 20px; z-index: 70; display: flex; align-items: flex-start; gap: 10px; width: min(360px, calc(100vw - 32px)); padding: 12px 10px 12px 14px; border: 1px solid rgb(var(--orin-accent-rgb) / .38); border-radius: 12px; background: var(--orin-surface-3); color: var(--text); box-shadow: 0 14px 36px rgb(0 0 0 / .28); animation: push-toast-in .18s ease-out; }
+.push-toast__glyph { flex: 0 0 auto; color: var(--signal); font-size: 11px; line-height: 20px; }
+.push-toast__body { flex: 1 1 auto; min-width: 0; }
+.push-toast__body strong { display: block; color: var(--text); font-size: 12.5px; font-weight: 600; line-height: 20px; }
+.push-toast__body p { margin: 1px 0 0; color: var(--muted); font-size: 12.5px; line-height: 1.45; overflow-wrap: anywhere; }
+.push-toast__close { flex: 0 0 auto; display: grid; place-items: center; width: 26px; height: 26px; border: 0; border-radius: 7px; background: transparent; color: var(--muted); font-size: 17px; line-height: 1; cursor: pointer; }
+.push-toast__close:hover { background: var(--orin-surface-hover); color: var(--text); }
+.push-toast__close:focus-visible { outline: 2px solid var(--signal); outline-offset: 1px; }
+@keyframes push-toast-in { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
+@media (max-width: 640px) { .push-toast { top: auto; bottom: 96px; left: 16px; right: 16px; width: auto; } }
+@media (prefers-reduced-motion: reduce) { .push-toast { animation: none; } }

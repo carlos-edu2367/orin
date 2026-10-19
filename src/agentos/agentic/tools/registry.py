@@ -32,6 +32,7 @@ from agentos.agentic.tools.orin.media import SPECS as _orin_media
 from agentos.agentic.tools.scheduling.cron import SPECS as _scheduling_cron
 from agentos.agentic.tools.scheduling.wakeup import SPECS as _scheduling_wakeup
 from agentos.agentic.tools.scheduling.monitor import SPECS as _scheduling_monitor
+from agentos.agentic.tools.interaction.notify import SPECS as _interaction_notify
 from agentos.agentic.tools.spec import ToolRegistry
 
 
@@ -67,4 +68,5 @@ def default_registry() -> ToolRegistry:
         *_scheduling_cron,
         *_scheduling_wakeup,
         *_scheduling_monitor,
+        *_interaction_notify,
     ))

@@ -40,6 +40,7 @@ import { ContextIndicator } from './ContextIndicator'
 import { MarkdownMessage } from './MarkdownMessage'
 import { MessageCommandChip } from './MessageCommandChip'
 import { MessageAttachments } from './MessageAttachments'
+import { PushNotificationToast, isFreshNotice, type PushNotice } from './PushNotificationToast'
 import { TurnTimeline } from './TurnTimeline'
 import { WorkspaceFilePreview, type WorkspaceFileReference } from './WorkspaceFileCard'
 import { activityReducer, createActivityState } from './activityReducer'
@@ -112,6 +113,9 @@ export function ChatPage() {
   const [message, setMessage] = useState('')
   const [codePermissionMode, setCodePermissionMode] = useState<CodePermissionMode>('ask_permissions')
   const [codeSystemNotifications, setCodeSystemNotifications] = useState(false)
+  const [pushNotice, setPushNotice] = useState<PushNotice | null>(null)
+  const shownNoticesRef = useRef(new Set<string>())
+  const dismissPushNotice = useCallback(() => setPushNotice(null), [])
   const [workspaceDrawerOpen, setWorkspaceDrawerOpen] = useState(false)
   const [drawerFiles, setDrawerFiles] = useState<string[]>([])
   const [drawerSearchQuery, setDrawerSearchQuery] = useState('')
@@ -266,6 +270,18 @@ export function ChatPage() {
             if (codeSystemNotifications && document.visibilityState !== 'visible' && window.orinDesktop?.notifyCodeMode) {
               const notification = codeModeNotification(event.type)
               if (notification) void window.orinDesktop.notifyCodeMode(notification)
+            }
+            // PushNotification: a system notification while the window is hidden, otherwise a toast. Only a
+            // fresh event pops up, once; the timeline keeps the record either way.
+            if (event.type === 'notification.pushed' && event.notificationMessage && isFreshNotice(event.occurredAt)
+              && !shownNoticesRef.current.has(event.eventId)) {
+              shownNoticesRef.current.add(event.eventId)
+              const body = event.notificationMessage
+              if (codeSystemNotifications && document.visibilityState !== 'visible' && window.orinDesktop?.notifyCodeMode) {
+                void window.orinDesktop.notifyCodeMode({ title: 'Orin', body })
+              } else {
+                setPushNotice({ id: event.eventId, message: body })
+              }
             }
             const terminalState = !event.parentAgentId ? terminalConversationState(event) : null
             if (terminalState) {
@@ -1377,6 +1393,7 @@ export function ChatPage() {
 
   return (
     <main className="chat">
+      <PushNotificationToast notice={pushNotice} onDismiss={dismissPushNotice} />
       <header className="chat__bar canvas-header" data-testid="canvas-header">
         <div className="chat__bar-left canvas-header__left">
           {effectiveChatProvider && (
