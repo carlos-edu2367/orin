@@ -1492,7 +1492,13 @@ class TurnSession:
             if skill is None:
                 continue
             body, _ = substitute(skill.body, arguments="", session_id=str(self.turn.get("conversation_id") or ""), skill_dir=skill.directory)
-            block = f"\n\n## Preloaded skill: {skill.name}\n{body}"
+            # The same subordinate wrapper the Skill tool uses: a preloaded body cannot close it or pose as policy.
+            from agentos.agentic.tools.orin.disk_skills import SKILL_WRAPPER_CLOSE, SKILL_WRAPPER_OPEN
+            from agentos.agentic.tools.orin.skills_admin import neutral_skill_text
+
+            block = (
+                f"\n\n## Preloaded skill: {skill.name}\n{SKILL_WRAPPER_OPEN}\n{neutral_skill_text(body)}\n{SKILL_WRAPPER_CLOSE}"
+            )
             if used + len(block) > 20_000:
                 break
             text += block

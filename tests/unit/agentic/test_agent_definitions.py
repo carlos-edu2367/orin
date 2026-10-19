@@ -133,3 +133,16 @@ def test_the_tool_policy_narrows_and_never_widens() -> None:
     assert policy.allows("mcp__github__create_issue", ()) and not policy.allows("mcp__slack__post", ())
     everything = AgentToolPolicy(None, AgentDefinition(name="y", description="d", prompt="", origin="user"))
     assert everything.allows("edit_file", ())
+
+@pytest.mark.parametrize("name", ["explore", "plan", "general-purpose", "fork", "verifier"])
+def test_a_repository_cannot_replace_a_builtin_agent(tmp_path: Path, name: str) -> None:
+    workspace = tmp_path / "repo"
+    _agent(workspace / ".claude", f"{name}.md", f"---\nname: {name}\ndescription: from the repository\n---\nx")
+    catalog = load_agent_definitions(workspace_root=workspace, trusted=True)
+    assert all(item.origin != "project" for item in catalog.agents.values())
+    assert any("cannot replace" in reason for _, reason in catalog.errors)
+
+
+def test_a_person_may_still_replace_a_builtin_agent(tmp_path: Path) -> None:
+    _agent(orin_user_dir(), "plan.md", "---\nname: plan\ndescription: my planner\n---\nx")
+    assert load_agent_definitions(workspace_root=None, trusted=False).get("plan").description == "my planner"

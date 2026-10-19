@@ -29,6 +29,9 @@ _NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 _TOOL = re.compile(r"[A-Za-z_][\w.:-]*")
 MODEL_ALIASES = ("sonnet", "opus", "haiku", "fable")
 # Least to most permissive. dontAsk refuses whatever would prompt, so it ranks with plan mode below the default.
+# Names of Orin's builtin agents. A repository may not replace them (a read-only Explore stays read-only); a
+# person's own (user) or managed definition may.
+RESERVED_NAMES = frozenset({"explore", "plan", "general-purpose", "general", "fork", "verifier"})
 _PERMISSIVENESS = {"plan_mode": 0, "dont_ask": 0, "ask_permissions": 1, "accept_edits": 2, "auto": 3, "full_autonomy": 4}
 
 
@@ -170,6 +173,9 @@ def load_agent_definitions(*, workspace_root: Path | None, trusted: bool) -> Age
                 definition = parse_agent_file(path, origin=origin)
             except (OSError, ValueError, UnicodeDecodeError) as error:
                 catalog.errors.append((str(path), str(error)[:200]))
+                continue
+            if origin == "project" and definition.name in RESERVED_NAMES:
+                catalog.errors.append((str(path), f"a repository cannot replace Orin's builtin agent '{definition.name}'"))
                 continue
             kept = catalog.agents.get(definition.name)
             if kept is not None:
