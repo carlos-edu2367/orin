@@ -64,6 +64,7 @@ from agentos.persistence.postgres.skills import PostgresSkillLibraryService
 from agentos.mcp.auth import McpOAuth
 from agentos.mcp.service import McpServerService
 from agentos.plugins.command_library import CommandLibrary
+from agentos.plugins.rehydrate import rehydrate_commands
 from agentos.plugins.fetcher import PluginFetcher
 from agentos.plugins.hook_engine import HookEngine
 from agentos.plugins.github_search import GithubRepositorySearchClient
@@ -324,6 +325,9 @@ def compose_production_services(engine: Engine, *, localhost_trust_enabled: bool
         security = sessions
     else:
         security = LoopbackSecurityService() if localhost_trust_enabled else PostgresSecurityService(engine)
+    plugin_service = PluginService(engine, plugin_root=orin_paths().data / "plugins", fetcher=PluginFetcher(orin_paths().data / "plugins", remote_only=not capabilities.host_folders), skill_library=skill_library, mcp_service=mcp_service, search_client=GithubRepositorySearchClient(), manifest_probe=GithubManifestProbe(), command_library=command_library, hook_engine=hook_engine)
+    # W5: plugin commands survive a restart: each person's index is rebuilt from the installed plugins on first use.
+    command_library.set_rehydrator(lambda user_id: rehydrate_commands(plugin_service, command_library, user_id=user_id))
     return ApiServices(
         security=security,
         accounts=accounts,
@@ -335,7 +339,7 @@ def compose_production_services(engine: Engine, *, localhost_trust_enabled: bool
         skills=skill_library,
         mcp=mcp_service,
         mcp_oauth=mcp_oauth,
-        plugins=PluginService(engine, plugin_root=orin_paths().data / "plugins", fetcher=PluginFetcher(orin_paths().data / "plugins", remote_only=not capabilities.host_folders), skill_library=skill_library, mcp_service=mcp_service, search_client=GithubRepositorySearchClient(), manifest_probe=GithubManifestProbe(), command_library=command_library, hook_engine=hook_engine),
+        plugins=plugin_service,
         provider_configuration=PostgresProviderConfigurationAdapter(engine, cipher=provider_cipher),
         provider_api_keys=PostgresProviderApiKeyAdapter(engine, cipher=provider_cipher),
         provider_catalog=ProviderModelCatalogService(provider_repository, {

@@ -7,9 +7,13 @@ the ``plugin_contributions`` rows; this is a lookup index, not a store.
 """
 from __future__ import annotations
 
+import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from threading import RLock
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +37,27 @@ class CommandLibrary:
     def __init__(self) -> None:
         self._entries: dict[str, dict[str, _Entry]] = {}
         self._lock = RLock()
+        # W5: the API process starts empty; a person's index is rebuilt from the installed plugins on first use.
+        self._rehydrate: Callable[[str], None] | None = None
+        self._hydrated: set[str] = set()
+
+    def set_rehydrator(self, rehydrate: Callable[[str], None]) -> None:
+        self._rehydrate = rehydrate
+
+    def _ensure(self, user_id: str) -> None:
+        rehydrate = self._rehydrate
+        if rehydrate is None:
+            return
+        with self._lock:
+            if user_id in self._hydrated:
+                return
+            self._hydrated.add(user_id)
+        try:
+            rehydrate(user_id)
+        except Exception:  # noqa: BLE001 - an index that cannot be rebuilt now is retried at the next lookup
+            logger.warning("plugin commands could not be rebuilt for a profile", exc_info=True)
+            with self._lock:
+                self._hydrated.discard(user_id)
 
     def install_plugin_commands(self, *, user_id: str, plugin_id: str, install_path: Path, commands) -> None:
         with self._lock:
@@ -53,6 +78,7 @@ class CommandLibrary:
                 registry.pop(command_id, None)
 
     def list(self, user_id: str) -> tuple[dict[str, object], ...]:
+        self._ensure(user_id)
         with self._lock:
             registry = dict(self._entries.get(user_id, {}))
         ambiguous = self._ambiguous(registry)
@@ -66,6 +92,7 @@ class CommandLibrary:
         ))
 
     def resolve(self, user_id: str, token: str) -> ResolvedCommand | None:
+        self._ensure(user_id)
         with self._lock:
             registry = dict(self._entries.get(user_id, {}))
         token = token.strip()
