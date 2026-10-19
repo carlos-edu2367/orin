@@ -2,13 +2,23 @@
 from __future__ import annotations
 
 import json
+import sys
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 from agentos.agentic.agent_tools import AgentToolset
+from agentos.agentic.lifecycle import HookEvent, LifecycleBus
+from agentos.agentic.session import TurnSession
 from agentos.agentic.workspace import ConversationWorkspace
+from agentos.configuration.capabilities import InstanceCapabilities
+from agentos.configuration.mode import RuntimeMode
 from agentos.permissions.engine import PermissionEngine
+from agentos.permissions.trust import WorkspaceTrustStore
 from agentos.settings import load_effective_settings
+from agentos.settings.paths import orin_managed_dir, orin_user_dir
 from agentos.skills.disk import load_disk_skills
+from tests.unit.agentic.test_disk_skills_session import _Agents, _Store
 
 
 def _project_skill(tmp_path: Path, allowed: str) -> tuple[Path, AgentToolset]:
@@ -39,3 +49,137 @@ def test_w5_r2_a_project_skill_drops_wildcard_shell_grants(tmp_path: Path) -> No
 def test_w5_r2_a_project_skill_drops_a_shell_or_wrapper_grant_that_runs_any_command(tmp_path: Path) -> None:
     _, toolset = _project_skill(tmp_path, '["Bash(env:*)", "Bash(sh:*)", "Bash(/usr/bin/env:*)", "Bash(cmd.exe:*)", "Bash(git:*)"]')
     assert {rule.raw for rule in toolset.skill_grants()} == {"Bash(git:*)"}
+
+
+# W5-R4: an instance that may not start host processes runs only the operator's hooks (managed and user layers).
+
+
+def _session_for(tmp_path: Path, mode: RuntimeMode) -> TurnSession:
+    caps = InstanceCapabilities.for_mode(mode)
+    return TurnSession(
+        turn={
+            "turn_id": "turn-1", "conversation_id": "conv-s", "user_id": "profile-b", "execution_id": "exe-1",
+            "user_message_id": "um-1", "code_mode": "code", "provider": "openrouter", "model_id": "m",
+        },
+        store=_Store("hi"), agents_store=_Agents(), memory_store=None, provider_factory=lambda: None,
+        workspace_root=tmp_path / "w", cancelled=lambda _turn: False,
+        enable_terminal=caps.shell, host_folders=caps.host_folders, plugin_hooks=caps.plugin_hooks,
+    )
+
+
+def _marker_command(marker: Path) -> str:
+    return f'"{sys.executable}" -c "open(r\'{marker}\', \'w\').write(\'ran\')"'
+
+
+def _loopback_endpoint():
+    seen: list[str] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            seen.append(self.path)
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, seen, f"http://127.0.0.1:{server.server_address[1]}/hook"
+
+
+def _fire_pre_tool_use(session: TurnSession):
+    session.lifecycle = LifecycleBus()
+    runtime = session.build_runtime()
+    session.lifecycle.emit(HookEvent.PRE_TOOL_USE, tool_name="Read", tool_input={"file_path": "x"})
+    return runtime
+
+
+def _project_skill_with_hooks(root: Path, hooks: dict) -> None:
+    folder = root / ".claude" / "skills" / "helper"
+    folder.mkdir(parents=True)
+    (folder / "SKILL.md").write_text(f"---\ndescription: Helper\nhooks: {json.dumps(hooks)}\n---\nHelp.", encoding="utf-8")
+
+
+def test_w5_r4_a_repository_skill_hook_runs_nowhere_on_a_server(tmp_path: Path) -> None:
+    session = _session_for(tmp_path, RuntimeMode.SERVER)
+    marker = tmp_path / "skill-hook.txt"
+    _project_skill_with_hooks(session.workspace.root, {"PreToolUse": [{"hooks": [{"type": "command", "command": _marker_command(marker)}]}]})
+    WorkspaceTrustStore().trust("profile-b", session.workspace.root)
+    session.lifecycle = LifecycleBus()
+    runtime = session.build_runtime()
+    assert runtime.toolset.invoke("Skill", {"skill": "helper"}).status == "succeeded"
+    session.lifecycle.emit(HookEvent.PRE_TOOL_USE, tool_name="Read", tool_input={"file_path": "x"})
+    assert not marker.exists()
+
+
+def test_w5_r4_a_repository_settings_hook_runs_nowhere_on_a_server(tmp_path: Path) -> None:
+    session = _session_for(tmp_path, RuntimeMode.SERVER)
+    marker = tmp_path / "settings-hook.txt"
+    (session.workspace.root / ".claude").mkdir(parents=True)
+    (session.workspace.root / ".claude" / "settings.json").write_text(json.dumps({"hooks": {
+        "PreToolUse": [{"hooks": [{"type": "command", "command": _marker_command(marker)}]}],
+    }}), encoding="utf-8")
+    WorkspaceTrustStore().trust("profile-b", session.workspace.root)
+    _fire_pre_tool_use(session)
+    assert not marker.exists()
+
+
+def test_w5_r4_a_skill_http_hook_does_not_post_on_a_server(tmp_path: Path) -> None:
+    server, seen, url = _loopback_endpoint()
+    try:
+        session = _session_for(tmp_path, RuntimeMode.SERVER)
+        _project_skill_with_hooks(session.workspace.root, {"PreToolUse": [{"hooks": [{"type": "http", "url": url}]}]})
+        WorkspaceTrustStore().trust("profile-b", session.workspace.root)
+        session.lifecycle = LifecycleBus()
+        runtime = session.build_runtime()
+        runtime.toolset.invoke("Skill", {"skill": "helper"})
+        session.lifecycle.emit(HookEvent.PRE_TOOL_USE, tool_name="Read", tool_input={"file_path": "x"})
+    finally:
+        server.shutdown()
+    assert seen == []
+
+
+def test_w5_r4_an_operator_http_hook_to_loopback_is_refused_on_a_server(tmp_path: Path) -> None:
+    server, seen, url = _loopback_endpoint()
+    try:
+        orin_user_dir().mkdir(parents=True, exist_ok=True)
+        (orin_user_dir() / "settings.json").write_text(json.dumps({"hooks": {"PreToolUse": [{"hooks": [{"type": "http", "url": url}]}]}}), encoding="utf-8")
+        _fire_pre_tool_use(_session_for(tmp_path, RuntimeMode.SERVER))
+    finally:
+        server.shutdown()
+    assert seen == []
+
+
+def test_w5_r4_an_operator_command_hook_still_runs_on_a_server(tmp_path: Path) -> None:
+    marker = tmp_path / "operator-hook.txt"
+    orin_user_dir().mkdir(parents=True, exist_ok=True)
+    (orin_user_dir() / "settings.json").write_text(json.dumps({"hooks": {
+        "PreToolUse": [{"hooks": [{"type": "command", "command": _marker_command(marker)}]}],
+    }}), encoding="utf-8")
+    _fire_pre_tool_use(_session_for(tmp_path, RuntimeMode.SERVER))
+    assert marker.exists()
+
+
+def test_w5_r4_a_managed_http_hook_is_unchanged_on_a_server(tmp_path: Path) -> None:
+    server, seen, url = _loopback_endpoint()
+    try:
+        orin_managed_dir().mkdir(parents=True, exist_ok=True)
+        (orin_managed_dir() / "managed-settings.json").write_text(json.dumps({"hooks": {"PreToolUse": [{"hooks": [{"type": "http", "url": url}]}]}}), encoding="utf-8")
+        _fire_pre_tool_use(_session_for(tmp_path, RuntimeMode.SERVER))
+    finally:
+        server.shutdown()
+    assert len(seen) == 1
+
+
+def test_w5_r4_the_desktop_still_runs_a_repository_skill_hook(tmp_path: Path) -> None:
+    session = _session_for(tmp_path, RuntimeMode.LOCAL)
+    marker = tmp_path / "skill-hook.txt"
+    _project_skill_with_hooks(session.workspace.root, {"PreToolUse": [{"hooks": [{"type": "command", "command": _marker_command(marker)}]}]})
+    WorkspaceTrustStore().trust("profile-b", session.workspace.root)
+    session.lifecycle = LifecycleBus()
+    runtime = session.build_runtime()
+    runtime.toolset.invoke("Skill", {"skill": "helper"})
+    session.lifecycle.emit(HookEvent.PRE_TOOL_USE, tool_name="Read", tool_input={"file_path": "x"})
+    assert marker.exists()

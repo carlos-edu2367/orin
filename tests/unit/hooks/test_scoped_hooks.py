@@ -53,6 +53,7 @@ def test_a_skills_hooks_run_for_the_agent_that_used_it(tmp_path: Path, monkeypat
         encoding="utf-8",
     )
     session = _session(tmp_path)
+    session.plugin_hooks = True  # W5-R4 review fix: a skill's hooks run only where plugin hooks may run (a desktop)
     skill = load_disk_skills(workspace_root=None, trusted=False).get("careful")
     assert session.lifecycle.emit(HookEvent.PRE_TOOL_USE, tool_name="Bash").permission_decision is None  # not used yet
     session._skill_hooks(skill, None)
@@ -76,6 +77,7 @@ def test_an_agents_hooks_run_during_its_run_and_its_stop_becomes_subagent_stop(t
         encoding="utf-8",
     )
     session = _session(tmp_path)
+    session.plugin_hooks = True  # W5-R4 review fix: an agent's hooks run only where plugin hooks may run (a desktop)
     session._agent_definitions = load_agent_definitions(workspace_root=None, trusted=False)
     seen: list[str] = []
 

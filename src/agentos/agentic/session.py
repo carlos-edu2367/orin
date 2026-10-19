@@ -204,6 +204,19 @@ def _file_digest(path: Path) -> str | None:
         return hashlib.sha256(path.read_bytes()).hexdigest()
     except OSError:
         return None  # unreadable: it is reported every time rather than hidden
+
+
+def _is_public_hook_url(url: str) -> bool:
+    """W5-R4: an http hook may post only to a public address, checked the way WebFetch checks its hosts."""
+    from agentos.agentic.tools._shared import AgentToolError, _public_url
+
+    try:
+        _public_url(url, resolve_dns=True)
+    except (AgentToolError, ValueError):
+        return False
+    return True
+
+
 # Code mode stops on end_turn, interruption, maxTurns, maxBudgetUsd or the safety cap — not on a clock.
 CODE_TURN_DEADLINE = timedelta(hours=24)
 CODE_MAX_PROVIDER_RETRIES = 8
@@ -3123,6 +3136,10 @@ class TurnSession:
         self._remove_settings_hooks()
         try:
             specs, errors = load_hook_specs(self.effective_settings)
+            if not self.plugin_hooks:
+                # W5-R4: an instance that may not start host processes keeps only the operator's hooks (the managed and
+                # user layers); a repository's settings hooks wait for a desktop, and a non-managed http hook must name a public address.
+                specs = tuple(spec for spec in specs if spec.source == "managed" or (spec.source == "user" and (spec.type != "http" or _is_public_hook_url(spec.url))))
             plugin_specs, plugin_errors = self._plugin_hook_specs()
             specs, errors = (*specs, *plugin_specs), (*errors, *plugin_errors)
             for error in errors:
@@ -3185,6 +3202,8 @@ class TurnSession:
         bus = self.lifecycle
         if bus is None or not isinstance(declared, Mapping) or not declared:
             return None
+        if not self.plugin_hooks:
+            return None  # W5-R4: a skill's or an agent's hooks run only where a plugin's hooks may run (a desktop)
         allowed = managed_hooks_allowed(self.effective_settings) if origin == "managed" else non_managed_hooks_allowed(self.effective_settings)
         if not allowed:
             return None
