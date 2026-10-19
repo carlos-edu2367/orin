@@ -6,6 +6,7 @@ Mixed into ``AgentToolset`` (``self`` is the toolset). The session sets ``self._
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from agentos.agentic.tools._shared import AgentToolError, ToolOutcome
@@ -17,6 +18,29 @@ MAX_INLINE_OUTPUT_CHARS = 4_000
 MAX_SKILL_GRANTS = 64
 SKILL_WRAPPER_OPEN = "<agentos-skill-instructions authority=\"subordinate\">"
 SKILL_WRAPPER_CLOSE = "</agentos-skill-instructions>"
+# A shell grant from a repository's skill must start with the program's literal name (``Bash(git status:*)``).
+_GRANT_PROGRAM = re.compile(r"[A-Za-z0-9._/-]+")
+# Programs that run another command unchanged: a grant for one of them approves every command it runs.
+_RUNNER_PROGRAMS = frozenset({
+    "sh", "bash", "zsh", "dash", "cmd", "powershell", "pwsh", "env", "command", "builtin", "exec", "sudo", "nice",
+    "nohup", "xargs", "timeout",
+})
+
+
+def _is_scoped_grant(rule) -> bool:
+    """False for a grant that would approve every command: ``*``, or a shell tool whose specifier does not start
+    with one program's literal name (``Bash(:*)``, ``Bash(**)``, ``PowerShell(:*)``, ``Bash(env:*)``)."""
+    from agentos.permissions.rules import SHELL_TOOLS
+
+    if rule.tool == "*":
+        return False
+    if rule.tool not in SHELL_TOOLS:
+        return True
+    match = _GRANT_PROGRAM.match(rule.specifier or "")
+    if match is None:
+        return False
+    program = re.sub(r"\.(exe|cmd|bat|com)$", "", match.group(0).replace("\\", "/").rsplit("/", 1)[-1].lower())
+    return bool(program) and program not in _RUNNER_PROGRAMS
 
 
 class DiskSkillTools:
@@ -31,7 +55,7 @@ class DiskSkillTools:
         return tuple(getattr(self, "_skill_allow_rules", ()) or ())
 
     def _grant_skill_tools(self, skill) -> list[str]:
-        from agentos.permissions.rules import SHELL_TOOLS, parse_rule
+        from agentos.permissions.rules import parse_rule
 
         rules = list(getattr(self, "_skill_allow_rules", []) or [])
         granted: list[str] = []
@@ -40,7 +64,7 @@ class DiskSkillTools:
             if rule is None or len(rules) >= MAX_SKILL_GRANTS:
                 continue
             # A repository's skill may pre-approve scoped commands (Bash(git status:*)) but never every command.
-            if skill.origin == "project" and rule.specifier is None and (rule.tool in SHELL_TOOLS or rule.tool == "*"):
+            if skill.origin == "project" and not _is_scoped_grant(rule):
                 logger.info("skill %s: unscoped %s grant ignored for a project skill", skill.name, rule.raw)
                 continue
             if all(existing.raw != rule.raw for existing in rules):
