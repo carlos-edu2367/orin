@@ -16,7 +16,7 @@ EXPECTED = {
         ["pattern"],
     ),
     "run_command": ({"command", "description", "timeout", "run_in_background", "cwd"}, ["command"]),
-    "read_process_output": ({"task_id"}, ["task_id"]),
+    "read_process_output": ({"task_id", "block", "timeout"}, ["task_id"]),
     "stop_process": ({"task_id", "shell_id"}, []),
     "todo_write": ({"todos"}, ["todos"]),
     "task_create": ({"subject", "description", "activeForm", "metadata"}, ["subject", "description"]),

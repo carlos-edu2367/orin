@@ -79,7 +79,7 @@ def test_grep_flags_map_to_internal_names() -> None:
 
 
 def test_task_output_and_stop_take_string_ids() -> None:
-    assert arguments_in("read_process_output", {"task_id": "4242"}) == {"pid": 4242}
+    assert arguments_in("read_process_output", {"task_id": "4242"}) == {"pid": 4242, "block": True}
     assert arguments_in("stop_process", {"task_id": "17"}) == {"pid": 17}
     assert arguments_in("stop_process", {"shell_id": "18"}) == {"pid": 18}
     assert arguments_out("stop_process", {"pid": 17}) == {"task_id": "17"}

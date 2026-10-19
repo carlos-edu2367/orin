@@ -1,15 +1,17 @@
 """Tasks tools: methods of AgentToolset that live in their own module (W4 split)."""
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Any, Mapping, Literal
 
-from pydantic import Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from agentos.agentic.workspace import WorkspaceError
 from agentos.agentic.tools._shared import (
     AgentToolError,
     MAX_PROCESS_LOG_TAIL_CHARS,
+    ToolOutcome,
     _process_is_running,
     _terminate_pid,
     _schema,
@@ -20,7 +22,10 @@ from agentos.agentic.tools.spec import ToolSpec, ToolInput
 class ShellTaskTools:
     """Mixed into ``AgentToolset``; ``self`` is the toolset."""
 
-    def read_process_output(self, pid: int | None = None, tail_chars: int = MAX_PROCESS_LOG_TAIL_CHARS) -> dict[str, Any]:
+    def read_process_output(
+        self, pid: int | str | None = None, tail_chars: int = MAX_PROCESS_LOG_TAIL_CHARS,
+        block: bool = False, wait_seconds: int = 30,
+    ) -> dict[str, Any] | ToolOutcome:
         """List every tracked background process, or read one's output.
 
         Folded into a single tool (rather than a separate ``list_processes``)
@@ -84,6 +89,8 @@ class ShellTaskTools:
                 "content": body,
                 "payload": {"count": len(rows), "processes": rows},
             }
+        if isinstance(pid, str) and not pid.strip().isdigit():
+            return self._agent_task_output(pid.strip(), block=bool(block), wait_seconds=wait_seconds)
         pid = int(pid)
         info = manifest.get(str(pid))
         if not isinstance(info, Mapping):
@@ -123,6 +130,11 @@ class ShellTaskTools:
         # finishes a moment later is reported "still running" with output
         # that is already complete, which a follow-up call corrects.
         running = _process_is_running(pid)
+        if block and running:
+            deadline = time.monotonic() + max(0, min(int(wait_seconds or 0), 600))
+            while running and time.monotonic() < deadline and not self._cancel_requested():
+                time.sleep(0.25)
+                running = _process_is_running(pid)
         try:
             content, _ = self.workspace.read_text(log_path)
         except WorkspaceError:
@@ -134,9 +146,29 @@ class ShellTaskTools:
             "summary": f"Leu saída do processo {pid} ({'ainda rodando' if running else 'encerrado'})",
             "content": f"pid={pid} status={'running' if running else 'exited'}\n{body}",
             "payload": {"pid": pid, "running": running, "log_path": log_path},
+            "tool_output": {
+                "task_id": f"bash_{pid}", "task_type": "local_bash", "status": "running" if running else "exited",
+                "output": tail, "command": str(info.get("command") or ""),
+            },
         }
 
-    def stop_process(self, pid: int) -> dict[str, Any]:
+    def _agent_task_output(self, task_id: str, *, block: bool, wait_seconds: int) -> ToolOutcome:
+        """TaskOutput for a background subagent: its current answer, after waiting when asked."""
+        if self._check_subagent is None:
+            raise AgentToolError(f"No background task '{task_id}' is known in this conversation.")
+        outcome = self.check_subagent(agent_id=task_id, wait_seconds=min(60, max(0, int(wait_seconds or 0))) if block else 0)
+        if isinstance(outcome, ToolOutcome):
+            status = str(outcome.payload.get("status") or ("completed" if outcome.ok else "failed"))
+            outcome.data = {**(outcome.data or {}), "tool_output": {
+                "task_id": task_id, "task_type": "local_agent", "status": status, "output": outcome.content,
+            }}
+        return outcome
+
+    def stop_process(self, pid: int | str) -> dict[str, Any]:
+        if isinstance(pid, str) and not pid.strip().isdigit():
+            raise AgentToolError(
+                f"'{pid}' is not a background command. Stopping a subagent arrives with agent teams; let it finish instead.",
+            )
         pid = int(pid)
         manifest = self._load_process_manifest()
         info = manifest.get(str(pid))
@@ -187,16 +219,39 @@ class ShellTaskTools:
             "summary": f"Encerrou o processo {pid}",
             "content": f"pid={pid} stopped",
             "payload": payload,
+            "tool_output": {
+                "message": f"Stopped background command {pid}.", "task_id": f"bash_{pid}", "task_type": "local_bash",
+                **({"command": str(info.get("command") or "")} if isinstance(info, Mapping) else {}),
+            },
         }
 
 
 class TaskOutputInput(ToolInput):
-    task_id: str = Field(description="Id returned when the command started.")
+    task_id: str = Field(description="Id of the background task: a command's backgroundTaskId or a subagent's id.")
+    block: bool | None = Field(None, description="Wait for the task to finish (default true).")
+    timeout: int | None = Field(None, ge=0, le=600_000, description="How long to wait, in milliseconds (default 30000).")
 
 
 class TaskStopInput(ToolInput):
     task_id: str | None = Field(None, description="Id of the background command.")
     shell_id: str | None = Field(None, description="Older name of task_id.")
+
+
+class TaskOutputOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    task_id: str
+    task_type: Literal["local_bash", "local_agent"]
+    status: str
+    output: str
+    command: str | None = None
+
+
+class TaskStopOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    message: str
+    task_id: str
+    task_type: Literal["local_bash", "local_agent"]
+    command: str | None = None
 
 
 # Tool specs, moved from AgentToolset._build_definitions (W4).
@@ -216,6 +271,7 @@ SPECS: tuple[ToolSpec, ...] = (
         handler="read_process_output",
         kind="terminal",
         input_model=TaskOutputInput,
+        output_model=TaskOutputOutput,
         public_description='Read the output of a background command started with run_in_background.',
         read_only=True,
         available=lambda self: (self._enable_terminal),
@@ -228,6 +284,7 @@ SPECS: tuple[ToolSpec, ...] = (
         handler="stop_process",
         kind="terminal",
         input_model=TaskStopInput,
+        output_model=TaskStopOutput,
         public_description='Stop a background command.',
         policy_tags=("mutates",),
         available=lambda self: (self._enable_terminal),

@@ -92,6 +92,7 @@ _INTERNAL_BY_PUBLIC: dict[str, str] = {public: internal for internal, public in 
 _INTERNAL_BY_LOWER_PUBLIC: dict[str, str] = {public.lower(): internal for internal, public in PUBLIC_NAMES.items()}
 
 MAX_BASH_TIMEOUT_SECONDS = 600
+_BASH_TASK_ID = re.compile(r"bash_([0-9]{1,18})")
 
 # public key -> internal key, per internal tool
 _RENAMES: dict[str, dict[str, str]] = {
@@ -266,6 +267,7 @@ def _ask_user_out(arguments: dict[str, Any]) -> dict[str, Any]:
 def arguments_in(internal: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
     """Public (Claude Code) argument shape -> Orin's internal shape."""
     result: dict[str, Any] = dict(arguments or {})
+    public_task_call = internal == "read_process_output" and "task_id" in (arguments or {})
     for public_key, internal_key in _RENAMES.get(internal, {}).items():
         if public_key in result:
             value = result.pop(public_key)
@@ -284,8 +286,18 @@ def arguments_in(internal: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
         ]
     elif internal in {"read_process_output", "stop_process"} and "pid" in result:
         number = _as_int(result["pid"])
+        if number is None and isinstance(result["pid"], str):
+            match = _BASH_TASK_ID.fullmatch(result["pid"].strip())
+            number = int(match.group(1)) if match else None
         if number is not None:
             result["pid"] = number
+        if internal == "read_process_output":
+            if "timeout" in result:
+                milliseconds = _as_int(result.pop("timeout"))
+                if milliseconds is not None and milliseconds > 0:
+                    result["wait_seconds"] = max(1, min(MAX_BASH_TIMEOUT_SECONDS, -(-milliseconds // 1000)))
+            if public_task_call:
+                result.setdefault("block", True)  # Claude Code waits by default
     elif internal == "run_subagent":
         # Aliases the internal handler also accepts must be resolved before the default below,
         # or a call that names its type with `agent_type` silently becomes a `general` subagent.
