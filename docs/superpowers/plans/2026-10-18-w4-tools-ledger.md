@@ -257,3 +257,49 @@ Execution notes from the executor:
 - ExitPlanMode's `filePath` joins the model's `plan_path` to the workspace root without `workspace.resolve`; it is only reported, never read.
 - A Bash deny rule without a specifier (`Bash`) now also denies every PowerShell command (intended by Task 19 fix 2; noted for its reach).
 - The plan's header carried a stale copy of the old batch table; fixed in the plan source for the next revision.
+
+## Batch E — Scheduling and notifications (Tasks 27–31)
+
+Commits (on top of `a147839`): `2a80d64` (Task 27, five-field cron and conversation-bound schedules), `9780883` (Task 28, CronCreate, CronDelete, CronList), `a3827e0` (Task 29, ScheduleWakeup), `5ebe972` (Task 30, Monitor), `3d5f516` (Task 31, PushNotification with the in-app toast). Task 32 is this section.
+
+### Suites
+
+- Unit, `uv run pytest -q tests/unit` (timeout 600000 ms): **3348 passed, 58 skipped, 0 failed** (227 s). Before Batch E: 3292 passed, 58 skipped. The 56 new backend tests are the whole difference.
+- Integration, `uv run pytest -q tests/integration`: **78 passed, 65 skipped, 0 failed**. Unchanged from Batch D.
+- Frontend, after the last frontend change: `npm --prefix frontend test` **607 passed (102 files)**, 8 of them new; `npm --prefix frontend run lint` clean with `--max-warnings=0`; `npm --prefix frontend run build` ok (the existing chunk-size warning remains).
+- New backend tests: `tests/unit/scheduler/test_cron.py` 21, `tests/unit/scheduler/test_scheduler_cron.py` 4, `tests/unit/agentic/tools/test_cron_tools.py` 9, `test_wakeup_tools.py` 8, `test_monitor_tool.py` 8, `test_push_notification.py` 6. New frontend test: `frontend/src/features/conversations/__tests__/PushNotificationToast.test.tsx` 8.
+- Red before green, per task: Task 27 `test_cron.py` failed at collection (`agentos.scheduler.cron` missing); `test_scheduler_cron.py` was not run on its own in the red state, because the collection error stopped that run. Task 28: 8 failed, 1 passed (the no-scheduler case, which is meant to pass). Task 29: 7 failed, 1 passed. Task 30: collection error (`monitor` module missing). Task 31: backend 5 failed, 1 passed; the frontend file failed to resolve `../PushNotificationToast`.
+
+### Deliberate expectation changes
+
+None. No existing test was edited, skipped or removed in Batch E.
+
+### Deviations
+
+Plan deviations 14–17 are applied as written:
+
+14. Cron jobs are `ScheduledChatService` rows: always durable, read in the operator's `timezone` setting (else `TZ`, else the system zone, else UTC); at most 20 per conversation; the prompt is at most 16000 characters; recurring jobs expire 7 days after creation; CronList and CronDelete see only the jobs this conversation's tools made.
+15. Monitor runs commands only (no `ws`; `ws` is refused). Its stdout and stderr are one stream. Between turns, new output wakes the conversation through a one-shot schedule (`source="monitor"`) whose message only names the monitor. Wakes are at least 60 s apart and at most 10 per monitor; a persistent monitor stops after 24 hours; at most 5 per conversation; every monitor is stopped at process exit (`atexit`). Bash deny and ask rules govern Monitor; allow rules never cross over (`SHELL_TOOLS` plus the `rules.py` Bash-over-PowerShell branch, extended to `monitor`).
+16. ScheduleWakeup: one pending wakeup per conversation (a new one cancels the old); at most 200 created in any 24 hours (`count_created_since`); `reason` and `prompt` are required unless `stop` is true; `noop` is only recorded.
+17. PushNotification: `pushSent` is always false; `localSent` is true when the `notification.pushed` event was handed to the session's recorder; messages are cut at 200 characters; at most 3 per turn; the Notification hook fires with `notification_type: "push_notification"`.
+
+Execution notes (not in the plan):
+
+- Commit trailer: the batch brief asked for `Co-Authored-By: Claude Opus 5.5`, and that line is used on every Batch E commit. The environment's attribution reminder named Haiku 5.5; the brief is the owner's instruction and was followed.
+- Task 30: the `definitions()` read-only filter in `agent_tools.py` (the `item.name not in {...}` set) was not edited, because the plan does not list it. Monitor is not `read_only`, so that filter already excludes it. The `_invoke_unobserved` read-only check (which the plan does edit) is covered by `test_read_only_subagents_cannot_monitor`.
+- Task 31: the CSS block was appended after the file's existing two trailing blank lines, so there are two blank lines before it instead of one. The rules are the plan's, verbatim.
+- Task 31 visual check: a static Playwright render of the toast markup, loaded with the real `theme.css` and `agentos.css`, in light and dark themes at 900 px and 390 px widths. Both layouts fit (no horizontal overflow). The toast was not seen inside the running ChatPage, so its placement against the composer on a phone is not verified live.
+- Nothing else was deviated from; every commit used the plan's code blocks as written, and no plan line needed correcting.
+
+### Behaviour notes found while checking (not in the plan) — open
+
+- **Tool-made jobs appear on the Schedules page.** `ScheduledChatService.list(user_id)` returns every schedule of the user. CronList and CronDelete are restricted to the conversation's tool jobs, but the Schedules page is not: cron jobs, wakeups and monitor wakes all show there, and wakeups and monitor wakes are one-shot rows that clutter it. The plan does not address this. It needs a decision (filter by `rule.source`, or show them labelled).
+- Monitor wakes and wakeups fire in the conversation through `PostgresChatStore.create`; whether a run that arrives while the conversation is mid-turn queues or is refused was not checked.
+
+### Open after Batch E (carried from the plan's Task 32 list; not verified in this batch)
+
+(a) A scheduled run (cron, wakeup or monitor wake) that fires while the conversation waits on an AskUserQuestion closes that question, as the Schedules-page runs already do. Not exercised.
+(b) A monitor's command also appears in TaskOutput's process list and can get the "background process exited" notice, because it is started as a background Bash command. Not exercised.
+(c) If a turn dies before its runtime closes, the reminder queue stays attached to the conversation's monitors until the next turn attaches; lines delivered to that queue are then readable only through TaskOutput. Not exercised.
+(d) Monitors live in the backend process: a restart ends them (their commands are killed at exit). By design.
+(e) Anything done differently from the plan: see the execution notes above.
