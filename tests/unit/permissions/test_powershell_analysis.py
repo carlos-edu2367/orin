@@ -88,3 +88,20 @@ def test_bash_rules_do_not_apply_to_powershell(tmp_path: Path) -> None:
 def test_a_redirect_into_a_protected_path_needs_a_person(tmp_path: Path) -> None:
     decision = _engine(tmp_path, {}).decide("powershell", {"command": "Write-Output x > .git/hooks/pre-commit"}, "ask_permissions")
     assert decision.behavior == "ask" and decision.requires_human
+
+
+def test_bash_deny_rules_also_stop_powershell(tmp_path: Path) -> None:
+    engine = _engine(tmp_path, {"deny": ["Bash(rm:*)"]})
+    for command in ("rm x", "del x", "Remove-Item x", "Get-Date; ri x"):
+        assert engine.decide("powershell", {"command": command}, "full_autonomy").behavior == "deny", command
+    assert engine.decide("run_command", {"command": "rm x"}, "full_autonomy").behavior == "deny"
+
+
+def test_bash_ask_rules_also_ask_for_powershell(tmp_path: Path) -> None:
+    decision = _engine(tmp_path, {"ask": ["Bash(git push:*)"]}).decide("powershell", {"command": "git push origin"}, "full_autonomy")
+    assert decision.behavior == "ask" and decision.requires_human
+
+
+def test_bash_allow_rules_still_do_not_cross_over(tmp_path: Path) -> None:
+    engine = _engine(tmp_path, {"allow": ["Bash(git status:*)"]})
+    assert engine.decide("powershell", {"command": "git status"}, "ask_permissions").behavior == "ask"

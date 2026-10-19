@@ -78,6 +78,10 @@ def rule_applies_to_tool(rule: PermissionRule, internal: str) -> bool:
         return internal in EDIT_FAMILY
     if rule.tool == "read_file":
         return internal in READ_FAMILY
+    # A Bash rule also governs the same command run through PowerShell. Only deny and ask rules reach this
+    # check for shell tools (allow rules go through the engine's per-tool `_bash_allowed`), so it never widens.
+    if rule.tool == "run_command" and internal == "powershell":
+        return True
     return rule.tool == internal
 
 
@@ -198,7 +202,18 @@ def command_matches(specifier: str | None, subcommand: str, *, shell: str = "pos
         spec = spec.lower()
     if not spec or spec == "*":
         return True
-    return any(_spec_matches(spec, form) for form in _deny_forms(subcommand, shell))
+    forms = _deny_forms(subcommand, shell)
+    if any(_spec_matches(spec, form) for form in forms):
+        return True
+    if shell == "powershell":
+        # `rm:*` written for Bash also names the cmdlet `rm` stands for (Remove-Item).
+        head, _, rest = spec.partition(" ")
+        program, colon, tail = head.partition(":")
+        canonical = canonical_cmdlet(program)
+        if canonical != program:
+            alternative = f"{canonical}{colon}{tail}" + (f" {rest}" if rest else "")
+            return any(_spec_matches(alternative, form) for form in forms)
+    return False
 
 
 def command_allowed(specifier: str | None, subcommand: str, *, shell: str = "posix") -> bool:
