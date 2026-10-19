@@ -332,7 +332,7 @@ class MonitorTools:
             persistent=keep, timeout_ms=timeout,
             deadline=time.monotonic() + (PERSISTENT_MAX_SECONDS if keep else timeout / 1000),
             waker=self._monitor_waker(context, conversation_id, monitor_id),
-            sink=self.reminders,
+            sink=getattr(self, "_monitor_sink", None) or self.reminders,
         )
         MONITORS.add(task)
         return {

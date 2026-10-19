@@ -182,8 +182,9 @@ def test_a_subagent_is_built_with_the_turn_reminder_queue(tmp_path: Path, monkey
     original_toolset = TurnSession._toolset
 
     def recording_toolset(self, **kwargs):
-        built.append(kwargs)
-        return original_toolset(self, **kwargs)
+        toolset = original_toolset(self, **kwargs)
+        built.append({**kwargs, "toolset": toolset})
+        return toolset
 
     monkeypatch.setattr(TurnSession, "_toolset", recording_toolset)
     outcome = session._run_subagent(subagent_type="explore", task="Look at the build", description="build")
@@ -192,5 +193,7 @@ def test_a_subagent_is_built_with_the_turn_reminder_queue(tmp_path: Path, monkey
     assert outcome.status == "succeeded", outcome.content
     subagent_builds = [kwargs for kwargs in built if kwargs.get("subagents") is False]
     assert subagent_builds, "the subagent toolset was never built"
-    # A monitor the subagent starts sinks into the running turn's queue, not into a queue nobody drains.
-    assert all(kwargs.get("reminders") is session._reminders for kwargs in subagent_builds)
+    # A monitor the subagent starts sinks into the running turn's queue, not into a queue nobody drains (W4-R9).
+    # The subagent's other reminders go to its own queue, which its runtime drains (W5, W3-R26).
+    assert all(kwargs["toolset"]._monitor_sink is session._reminders for kwargs in subagent_builds)
+    assert all(kwargs.get("reminders") is not session._reminders for kwargs in subagent_builds)

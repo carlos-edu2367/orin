@@ -1943,6 +1943,7 @@ class TurnSession:
         # W5: a definition's mode applies only when it is not more permissive than the parent's; a plugin's never does.
         requested_mode = definition.permission_mode if definition is not None and definition.origin != "plugin" else None
         sub_permission_mode = "plan_mode" if read_only_subagent else child_permission_mode(self.permission_mode, requested_mode)
+        sub_reminders = ReminderQueue()
         subagent_tools = self._toolset(
             subagents=False,
             browser_agent_key=agent_id,
@@ -1954,9 +1955,14 @@ class TurnSession:
             inherit_context=inherit_context,
             lifecycle_context={"agent_id": agent_id, "agent_type": public_subagent_type(builtin_key or clean)},
             non_interactive_ask=self._non_interactive_ask(),
-            # The running turn's queue (W4-R9): a subagent's monitor sinks into the parent turn, not into a wake.
-            reminders=self._reminders,
+            # Its own queue (W5): the notices its reads raise (instructions, changed files) reach the subagent itself.
+            reminders=sub_reminders,
         )
+        # W4-R9 still holds: a monitor the subagent starts sinks into the running parent turn, not into a wake.
+        subagent_tools._monitor_sink = self._reminders
+        # W3-R26: its own instruction-file tracker, so a subdirectory's CLAUDE.md and path rules load for its reads.
+        if getattr(self, "_memory", None) is not None:
+            subagent_tools.memory_tracker = self._memory_files(self._workspace_trusted())
         if definition is not None:
             # Its tools only narrow what the parent may publish.
             subagent_tools._policy = AgentToolPolicy(subagent_tools._policy, definition)
@@ -1982,6 +1988,7 @@ class TurnSession:
             tool_kinds={item.name: item.kind for item in sub_definitions},
             hook_engine=self.hook_engine,
             phase_controller=None,
+            reminders=sub_reminders,
             cancelled=self._child_cancelled(hook_cancel),
             **self._subagent_accounting(active_model_id, code_mode=is_code_mode),
         )
@@ -2032,6 +2039,7 @@ class TurnSession:
                 tool_kinds={item.name: item.kind for item in sub_definitions},
                 hook_engine=self.hook_engine,
                 phase_controller=None,
+                reminders=sub_reminders,
                 cancelled=self._child_cancelled(hook_cancel),
                 **self._subagent_accounting(active_model_id, code_mode=is_code_mode),
             )
