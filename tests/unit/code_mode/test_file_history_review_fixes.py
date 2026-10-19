@@ -236,3 +236,126 @@ def test_a_working_directory_reached_through_a_junction_above_it_is_refused(tmp_
     assert result["blocked"] is True and result["restored"] == []
     assert result["skipped"][0]["reason"] == ROOT_REPLACED
     assert edited.read_bytes() == b"v1\n"
+
+
+# -- R20: a recorded change is one that happened, and a manifest is never lost ----------
+
+def _entries(history: FileHistory) -> list[str]:
+    return [path for item in history.messages() for path in item["files"]]
+
+
+def test_a_write_that_fails_leaves_no_history_entry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace = ConversationWorkspace(tmp_path, "c20")
+    target = workspace.root / "notes.md"
+    _write(target, b"the person's notes\n")
+    history = FileHistory(tmp_path / "history", "c20")
+    tools = AgentToolset(workspace, file_history=history, user_message_id="msg_1", turn_id="t1")
+    assert tools.invoke("Read", {"file_path": "notes.md"}).status == "succeeded"
+
+    def refuse(path: str, content: str):
+        raise OSError("the write was refused")
+
+    monkeypatch.setattr(workspace, "write_text", refuse)
+    outcome = tools.invoke("Write", {"file_path": "notes.md", "content": "turn draft\n"})
+
+    assert outcome.status != "succeeded"
+    assert _entries(history) == []  # the history does not say the file changed
+
+
+def test_a_failed_notebook_edit_leaves_no_history_entry(tmp_path: Path) -> None:
+    import json
+
+    workspace = ConversationWorkspace(tmp_path, "c20b")
+    notebook = workspace.root / "analysis.ipynb"
+    notebook_json = {"cells": [{"cell_type": "code", "id": "c1", "source": ["x = 1\n"], "metadata": {}, "outputs": [], "execution_count": None}],
+                     "metadata": {}, "nbformat": 4, "nbformat_minor": 5}
+    _write(notebook, json.dumps(notebook_json).encode("utf-8"))
+    history = FileHistory(tmp_path / "history", "c20b")
+    tools = AgentToolset(workspace, file_history=history, user_message_id="msg_2", turn_id="t2")
+    assert tools.invoke("Read", {"file_path": "analysis.ipynb"}).status == "succeeded"
+
+    outcome = tools.invoke("NotebookEdit", {"notebook_path": "analysis.ipynb", "cell_id": "missing", "new_source": "y = 2"})
+
+    assert outcome.status != "succeeded"
+    assert _entries(history) == []
+
+
+def test_an_entry_the_message_already_had_survives_a_later_failed_write(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace = ConversationWorkspace(tmp_path, "c20c")
+    target = workspace.root / "a.txt"
+    _write(target, b"before the message\n")
+    history = FileHistory(tmp_path / "history", "c20c")
+    tools = AgentToolset(workspace, file_history=history, user_message_id="msg_3", turn_id="t3")
+    assert tools.invoke("Read", {"file_path": "a.txt"}).status == "succeeded"
+    assert tools.invoke("Write", {"file_path": "a.txt", "content": "first write\n"}).status == "succeeded"
+    monkeypatch.setattr(workspace, "write_text", lambda path, content: (_ for _ in ()).throw(OSError("refused")))
+
+    tools.invoke("Write", {"file_path": "a.txt", "content": "second write\n"})
+
+    assert _entries(history) == [str(target)]
+    result = history.rewind("msg_3", roots=[workspace.root])
+    assert target.read_bytes() == b"before the message\n" and result["restored"] == [str(target)]
+
+
+def test_a_sharing_violation_while_saving_a_snapshot_is_retried(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    history = FileHistory(tmp_path / "history", "c20d")
+    work = tmp_path / "work"
+    a = work / "a.txt"
+    _write(a, b"v0\n")
+    real_write = file_history_module._atomic_write
+    calls = {"failed": 0}
+
+    def busy_then_free(path: Path, data: bytes) -> None:
+        if path.parent.name == "messages" and calls["failed"] < 2:
+            calls["failed"] += 1
+            raise PermissionError("another thread holds the manifest")
+        real_write(path, data)
+
+    monkeypatch.setattr(file_history_module, "_atomic_write", busy_then_free)
+
+    entry = history.snapshot_before_write("m4", a)
+
+    assert entry is not None and calls["failed"] == 2
+    assert [item["message_id"] for item in history.messages()] == ["m4"]
+    assert _entries(history) == [str(a)]
+
+
+def test_an_unreadable_manifest_is_never_overwritten(tmp_path: Path) -> None:
+    history = FileHistory(tmp_path / "history", "c20e")
+    work = tmp_path / "work"
+    earlier, a = work / "earlier.txt", work / "a.txt"
+    _write(earlier, b"e0\n")
+    history.snapshot_before_write("m2", earlier)
+    _write(a, b"v0\n")
+    damaged = history.base / "messages" / "m1.json"
+    damaged.parent.mkdir(parents=True, exist_ok=True)
+    damaged.write_bytes(b"{not a manifest")
+
+    entry = history.snapshot_before_write("m1", a)
+
+    assert entry is not None
+    assert damaged.read_bytes() == b"{not a manifest"  # the damaged file is kept for recovery
+    assert {item["message_id"] for item in history.messages()} == {"m1", "m2"}
+    assert str(a) in _entries(history)
+
+
+def test_a_write_is_refused_when_its_history_cannot_be_kept(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(file_history_module, "_RETRY_SECONDS", 0.05)
+    workspace = ConversationWorkspace(tmp_path, "c20f")
+    target = workspace.root / "b.txt"
+    _write(target, b"b0\n")
+    history = FileHistory(tmp_path / "history", "c20f")
+    tools = AgentToolset(workspace, file_history=history, user_message_id="msg_5", turn_id="t5")
+    assert tools.invoke("Read", {"file_path": "b.txt"}).status == "succeeded"
+    real_write = file_history_module._atomic_write
+
+    def manifest_is_held(path: Path, data: bytes) -> None:
+        if path.parent.name == "messages":
+            raise PermissionError("another handle holds the manifest")
+        real_write(path, data)
+
+    monkeypatch.setattr(file_history_module, "_atomic_write", manifest_is_held)
+    outcome = tools.invoke("Edit", {"file_path": "b.txt", "old_string": "b0", "new_string": "b1"})
+
+    assert outcome.status != "succeeded" and "could not be copied to its file history" in str(outcome.content)
+    assert target.read_bytes() == b"b0\n"  # nothing changed without its copy

@@ -33,7 +33,8 @@ import subprocess
 import tempfile
 import threading
 import time
-from typing import Any, Callable, Collection, Mapping
+from contextlib import contextmanager
+from typing import Any, Callable, Collection, Iterator, Mapping
 from urllib.parse import urljoin, urlparse, urlsplit, urlunsplit
 from uuid import uuid4
 
@@ -1300,9 +1301,32 @@ class AgentToolset(
         except Exception:  # noqa: BLE001 - the edit itself reports a bad path
             return ""
         entry = history.snapshot_before_write(self._history_message_id, target, turn_id=self.turn_id or "")
-        if entry is None or entry.get("too_large"):
+        if entry is None:
+            # No copy, no change: a write the history cannot record must not happen unrecorded (W4-R20).
+            raise AgentToolError("this file could not be copied to its file history, so nothing was changed; try again.")
+        if entry.get("too_large"):
             return UNREWINDABLE_NOTE
         return ""
+
+    @contextmanager
+    def _recorded_write(self, path: str) -> Iterator[str]:
+        """Snapshot ``path`` for the write inside the block. When the block raises, the entry this call added is dropped,
+        so the history never records a change that did not happen (W4-R20). Yields the note for the tool result."""
+        history = self._file_history
+        target: Path | None = None
+        if history is not None and self._history_message_id:
+            try:
+                target = self.workspace.resolve(path)
+            except Exception:  # noqa: BLE001 - the write reports a bad path itself
+                target = None
+        added = target is not None and history is not None and not history.has_snapshot(self._history_message_id, target)
+        note = self._snapshot_before_write(path)
+        try:
+            yield note
+        except BaseException:
+            if added and history is not None and target is not None:
+                history.forget_snapshot(self._history_message_id, target)
+            raise
 
     def rewind_turn(self, turn_id: str | None = None) -> dict[str, Any]:
         """Restore workspace files modified during ``turn_id`` back to their pre-turn state."""

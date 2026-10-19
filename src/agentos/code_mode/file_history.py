@@ -22,7 +22,8 @@ import re
 import stat
 import tempfile
 import threading
-from collections.abc import Iterable, Sequence
+import time
+from collections.abc import Callable, Iterable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,40 @@ _UNSAFE = re.compile(r"[^A-Za-z0-9_.-]")
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _REPARSE_POINT = 0x400  # FILE_ATTRIBUTE_REPARSE_POINT: symlinks and junctions on Windows
 _LOCK = threading.RLock()
+# A sharing violation (another thread or process holds a manifest) is retried this long before it is an error (W4-R20).
+_RETRY_SECONDS = 1.0
+
+
+class ManifestUnavailable(OSError):
+    """A manifest exists but cannot be read or parsed. It is never overwritten (W4-R20)."""
+
+
+def _retry_sharing(operation: Callable[[], Any]) -> Any:
+    deadline = time.monotonic() + _RETRY_SECONDS
+    while True:
+        try:
+            return operation()
+        except PermissionError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.05)
+
+
+def _read_json(path: Path) -> dict[str, Any] | None:
+    """A manifest as a dict, or None when the file does not exist. Raises ManifestUnavailable when it is damaged."""
+    try:
+        text = _retry_sharing(lambda: path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeError) as error:
+        raise ManifestUnavailable(str(path)) from error
+    try:
+        loaded = json.loads(text)
+    except ValueError as error:
+        raise ManifestUnavailable(str(path)) from error
+    if not isinstance(loaded, dict) or not isinstance(loaded.get("files"), dict):
+        raise ManifestUnavailable(str(path))
+    return loaded
 
 
 def _safe_name(value: str) -> str:
@@ -156,29 +191,72 @@ class FileHistory:
         return self.base / "blobs" / digest
 
     def _load(self, message_id: str) -> dict[str, Any] | None:
-        try:
-            loaded = json.loads(self._manifest_path(message_id).read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return None
-        return loaded if isinstance(loaded, dict) and isinstance(loaded.get("files"), dict) else None
+        """The message's manifest, or None when it has none. Raises ManifestUnavailable when the file is damaged."""
+        return _read_json(self._manifest_path(message_id))
 
     def _save(self, message_id: str, manifest: dict[str, Any]) -> None:
-        _atomic_write(self._manifest_path(message_id), json.dumps(manifest, ensure_ascii=False, indent=1).encode("utf-8"))
+        self._load(message_id)  # a damaged manifest raises here and is never overwritten (W4-R20)
+        data = json.dumps(manifest, ensure_ascii=False, indent=1).encode("utf-8")
+        _retry_sharing(lambda: _atomic_write(self._manifest_path(message_id), data))
+
+    def _record_sidecar(self, message_id: str, target: Path, *, turn_id: str, kind: str) -> dict[str, Any]:
+        """Record ``target`` in a sidecar manifest, because the message's own manifest is damaged (W4-R20)."""
+        key = os.path.normcase(str(Path(target)))
+        digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
+        path = self.base / "messages" / f"{_safe_name(message_id)}.recovered-{digest}.json"
+        sidecar = _read_json(path) or {
+            "message_id": str(message_id), "turn_id": str(turn_id or ""), "kind": kind,
+            "created_at": _now(), "rewound_at": None, "files": {},
+        }
+        if key in sidecar["files"]:
+            return dict(sidecar["files"][key])
+        entry = self._record(Path(target))
+        sidecar["files"][key] = entry
+        data = json.dumps(sidecar, ensure_ascii=False, indent=1).encode("utf-8")
+        _retry_sharing(lambda: _atomic_write(path, data))
+        return dict(entry)
 
     def _manifests(self) -> list[dict[str, Any]]:
+        """Every recorded message, oldest first. A message's sidecar manifests are merged into its own (W4-R20)."""
         folder = self.base / "messages"
         if not folder.is_dir():
             return []
-        out: list[dict[str, Any]] = []
-        for path in folder.glob("*.json"):
+        merged: dict[str, dict[str, Any]] = {}
+        for path in sorted(folder.glob("*.json")):  # "<id>.json" sorts before its "<id>.recovered-…" sidecars
             try:
-                loaded = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
+                loaded = _read_json(path)
+            except ManifestUnavailable:
                 continue
-            if isinstance(loaded, dict) and isinstance(loaded.get("files"), dict) and loaded.get("message_id"):
-                out.append(loaded)
+            if loaded is None or not loaded.get("message_id"):
+                continue
+            key = str(loaded["message_id"])
+            if key not in merged:
+                merged[key] = {**loaded, "files": dict(loaded["files"])}
+                continue
+            for file_key, entry in loaded["files"].items():
+                merged[key]["files"].setdefault(file_key, entry)
+        out = list(merged.values())
         out.sort(key=lambda item: (str(item.get("created_at") or ""), str(item.get("message_id"))))
         return out
+
+    def has_snapshot(self, message_id: str, target: Path) -> bool:
+        """Whether ``message_id`` already recorded ``target``. A damaged manifest answers True: its entries are kept."""
+        try:
+            with _LOCK:
+                manifest = self._load(message_id)
+        except ManifestUnavailable:
+            return True
+        return manifest is not None and os.path.normcase(str(Path(target))) in manifest["files"]
+
+    def forget_snapshot(self, message_id: str, target: Path) -> None:
+        """Drop the entry ``message_id`` recorded for ``target`` because that write never happened. Never raises."""
+        try:
+            with _LOCK:
+                manifest = self._load(message_id)
+                if manifest is not None and manifest["files"].pop(os.path.normcase(str(Path(target))), None) is not None:
+                    self._save(message_id, manifest)
+        except Exception:  # noqa: BLE001 - history is best-effort
+            logger.warning("file history could not drop the entry for %s", target, exc_info=True)
 
     # -- recording ---------------------------------------------------------
 
@@ -186,7 +264,11 @@ class FileHistory:
         """Record ``target`` as it is now, unless ``message_id`` already did. Never raises: history is best-effort."""
         try:
             with _LOCK:
-                manifest = self._load(message_id) or {
+                try:
+                    current = self._load(message_id)
+                except ManifestUnavailable:
+                    return self._record_sidecar(message_id, Path(target), turn_id=turn_id, kind=kind)
+                manifest = current or {
                     "message_id": str(message_id), "turn_id": str(turn_id or ""), "kind": kind,
                     "created_at": _now(), "rewound_at": None, "files": {},
                 }
@@ -306,7 +388,10 @@ class FileHistory:
             stamp = _now()
             for item in affected:
                 item["rewound_at"] = stamp
-                self._save(str(item["message_id"]), item)
+                try:
+                    self._save(str(item["message_id"]), item)
+                except ManifestUnavailable:
+                    logger.warning("the rewind of message %s was not recorded: its manifest is damaged", item.get("message_id"))
         return _rewind_result(message_id, restored=restored, deleted=deleted, unchanged=unchanged, skipped=skipped, undo_id=undo_id)
 
     def _blocker(self, entry: dict[str, Any], roots: Sequence[Path]) -> str | None:

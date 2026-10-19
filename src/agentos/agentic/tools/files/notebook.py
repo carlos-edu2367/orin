@@ -61,7 +61,6 @@ class NotebookTools:
                 return []
             return src.splitlines(keepends=True)
 
-        self._snapshot_before_write(notebook_path)
         old_source: str | None = None
         kind = "code"
         target_cell_id = ""
@@ -111,7 +110,8 @@ class NotebookTools:
             target_cell_id = str(removed.get("id") if isinstance(removed, Mapping) else idx) or str(idx)
 
         new_text = json.dumps(nb, ensure_ascii=False, indent=1) + "\n"
-        written = self.workspace.write_text(notebook_path, new_text)
+        with self._recorded_write(notebook_path):
+            written = self.workspace.write_text(notebook_path, new_text)
         self._record_file_read(
             notebook_path,
             offset=1,
