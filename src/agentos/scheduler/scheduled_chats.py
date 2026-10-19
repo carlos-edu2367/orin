@@ -14,13 +14,14 @@ from sqlalchemy import insert, select, update
 from sqlalchemy.engine import Engine
 
 from agentos.conversations.chat import PostgresChatStore
+from agentos.scheduler.cron import next_after, parse_cron
 from agentos.persistence.postgres.schema import (
-    provider_configurations, provider_model_catalog,
+    conversations, provider_configurations, provider_model_catalog,
     projects, schedule_occurrences, scheduled_chat_tasks, schedules, users,
 )
 
 
-RULES = frozenset({"once", "hourly", "daily", "weekly"})
+RULES = frozenset({"once", "hourly", "daily", "weekly", "cron"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +35,12 @@ class ScheduledChatInput:
     time_of_day: str | None = None
     weekday: int | None = None
     project_id: str | None = None
+    # W4: a five-field expression for recurrence="cron"; the conversation the runs belong to (a tool-made
+    # schedule); when it stops (recurring CronCreate jobs expire after 7 days); and who made it.
+    cron: str | None = None
+    conversation_id: str | None = None
+    ends_at: datetime | None = None
+    source: str = "user"
 
 
 def _utc(value: datetime) -> datetime:
@@ -109,6 +116,9 @@ class ScheduledChatService:
             if fire_at <= now:
                 raise ValueError("fire_at must be in the future")
             return fire_at
+        if request.recurrence == "cron":
+            spec = parse_cron(str(request.cron or ""))
+            return next_after(spec, now.astimezone(zone)).astimezone(UTC)
         if request.recurrence == "hourly":
             # The first occurrence is exactly one hour after creation; later
             # values are anchored to the previous logical occurrence.
@@ -149,6 +159,12 @@ class ScheduledChatService:
                 workspace_id = str(project)
             else:
                 workspace_id = None
+            if request.conversation_id:
+                owner = connection.execute(select(conversations.c.user_id).where(
+                    conversations.c.conversation_id == request.conversation_id,
+                )).scalar_one_or_none()
+                if owner != user_id:
+                    raise LookupError("conversation not found")
             # Do not allow a stale or forged UI model selection to persist.
             model = connection.execute(select(provider_model_catalog.c.id).join(
                 provider_configurations,
@@ -189,13 +205,14 @@ class ScheduledChatService:
                 target={"kind": "TASK", "immutable_ref": task_id, "destination_pool": "AGENT"},
                 rule=rule, timezone=request.timezone,
                 policies={"misfire": {"kind": "FIRE_ONCE_NOW", "grace_seconds": 0, "max_occurrences": 1}, "overlap": {"kind": "SERIALIZE", "max_active": 1}},
-                state="ACTIVE", version=1, next_fire_at=next_fire, starts_at=now, ends_at=None,
+                state="ACTIVE", version=1, next_fire_at=next_fire, starts_at=now,
+                ends_at=_utc(request.ends_at) if request.ends_at is not None else None,
                 idempotency_key=idempotency_key, created_at=now, updated_at=now,
             ))
             connection.execute(insert(scheduled_chat_tasks).values(
                 task_id=task_id, schedule_id=schedule_id, user_id=user_id, message=message,
                 provider=request.provider, model_id=request.model_id, project_id=request.project_id,
-                conversation_id=None, created_at=now, updated_at=now,
+                conversation_id=request.conversation_id, created_at=now, updated_at=now,
             ))
         return {"schedule_id": schedule_id, "state": "ACTIVE", "next_fire_at": _iso_utc(next_fire), "recurrence": request.recurrence}
 
@@ -204,7 +221,7 @@ class ScheduledChatService:
         return {
             "kind": request.recurrence, "fire_at": next_fire.isoformat() if request.fire_at else None,
             "time_of_day": request.time_of_day, "weekday": request.weekday,
-            "anchor_at": next_fire.isoformat(),
+            "anchor_at": next_fire.isoformat(), "cron": request.cron, "source": request.source,
         }
 
     @staticmethod
@@ -218,6 +235,26 @@ class ScheduledChatService:
                 .join(scheduled_chat_tasks, scheduled_chat_tasks.c.schedule_id == schedules.c.schedule_id)
                 .where(schedules.c.user_id == user_id).order_by(schedules.c.created_at.desc())).mappings().all()
         return {"items": [{**self._public(row), "project_id": row["project_id"], "message": row["message"], "provider": row["provider"], "model_id": row["model_id"], "conversation_id": row["conversation_id"]} for row in rows]}
+
+    def list_for_conversation(self, user_id: str, conversation_id: str, *, sources: tuple[str, ...]) -> list[dict[str, object]]:
+        """Active schedules a tool made for one of this person's conversations, oldest first."""
+        with self._engine.connect() as connection:
+            rows = connection.execute(select(schedules, scheduled_chat_tasks.c.message).join(
+                scheduled_chat_tasks, scheduled_chat_tasks.c.schedule_id == schedules.c.schedule_id,
+            ).where(
+                schedules.c.user_id == user_id, scheduled_chat_tasks.c.conversation_id == conversation_id,
+                schedules.c.state == "ACTIVE",
+            ).order_by(schedules.c.created_at)).mappings().all()
+        out: list[dict[str, object]] = []
+        for row in rows:
+            rule = dict(row["rule"] or {})
+            if str(rule.get("source") or "user") not in sources:
+                continue
+            out.append({
+                **self._public(row), "message": row["message"], "cron": rule.get("cron"),
+                "source": rule.get("source"), "ends_at": _iso_utc(row["ends_at"]), "timezone": str(row["timezone"]),
+            })
+        return out
 
     def cancel(self, user_id: str, schedule_id: str) -> bool:
         now = self._clock()
@@ -268,6 +305,9 @@ class ScheduledChatService:
                 ))
                 rule = dict(schedule["rule"] or {})
                 next_at = self._next_after_rule(rule, str(schedule["timezone"]), logical_at)
+                ends_at = schedule.get("ends_at")
+                if next_at is not None and ends_at is not None and next_at > _stored_utc(ends_at):
+                    next_at = None  # past its end: this was the last run
                 values = {"next_fire_at": next_at, "updated_at": now}
                 if next_at is None:
                     values["state"] = "EXPIRED"
@@ -291,6 +331,8 @@ class ScheduledChatService:
         if kind == "hourly":
             return logical_at + timedelta(hours=1)
         zone = self._zone(timezone)
+        if kind == "cron":
+            return next_after(parse_cron(str(rule.get("cron") or "")), logical_at.astimezone(zone)).astimezone(UTC)
         local = logical_at.astimezone(zone)
         request = ScheduledChatInput("x", "x", "x", timezone, kind, time_of_day=str(rule.get("time_of_day") or ""), weekday=rule.get("weekday") if isinstance(rule.get("weekday"), int) else None)
         return self.next_fire(request, after=local.astimezone(UTC) + timedelta(seconds=1))
