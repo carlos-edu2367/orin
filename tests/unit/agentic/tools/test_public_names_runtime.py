@@ -124,21 +124,22 @@ def test_flag_off_hostile_timeout_with_lifecycle_does_not_crash_turn(tmp_path: P
     assert result.state == "completed"
 
 
-def test_flag_off_public_names_are_unknown_tools(tmp_path: Path) -> None:
+def test_flag_off_public_names_resolve_too(tmp_path: Path) -> None:
+    # W4: canonical names and aliases resolve in every mode; the flag only changes what the model is shown.
     toolset = AgentToolset(_workspace(tmp_path))
     outcome = toolset.invoke("Read", {"file_path": "a.txt"})
-    assert outcome.status == "failed" and outcome.error_code == "UNKNOWN_TOOL"
-    assert toolset.is_read_only("Read") is False
-    assert toolset.is_read_only("TaskOutput") is False
-    assert toolset.invoke("bash", {"command": "echo hi"}).error_code == "UNKNOWN_TOOL"
+    assert outcome.status == "succeeded"
+    assert toolset.is_read_only("Read") is True
+    assert toolset.is_read_only("TaskOutput") is True
+    assert toolset.key_for("bash") == "run_command"
     # the internal name keeps working with the flag off
     assert toolset.invoke("read_file", {"path": "a.txt"}).status == "succeeded"
 
 
-def test_flag_off_public_names_with_lifecycle_are_unknown_tools(tmp_path: Path) -> None:
+def test_flag_off_public_names_with_lifecycle_resolve_too(tmp_path: Path) -> None:
     from agentos.agentic.lifecycle import LifecycleBus
 
     toolset = AgentToolset(_workspace(tmp_path), lifecycle=LifecycleBus())
     outcome = toolset.invoke("Read", {"file_path": "a.txt"})
-    assert outcome.error_code == "UNKNOWN_TOOL"
+    assert outcome.status == "succeeded"
 

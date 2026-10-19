@@ -885,6 +885,10 @@ class AgenticTurnRuntime:
                         incoming_name = event.tool_name or ""
                         if incoming_name and self._names is not None:
                             incoming_name = self._names.name_in(incoming_name)
+                        key_for = getattr(self.toolset, "key_for", None)
+                        if incoming_name and callable(key_for):
+                            # Every spelling the model may use becomes the stable key the rest of the loop compares.
+                            incoming_name = key_for(incoming_name)
                         current = calls.setdefault(call_id, {"id": call_id, "name": incoming_name, "arguments": ""})
                         if incoming_name:
                             current["name"] = incoming_name

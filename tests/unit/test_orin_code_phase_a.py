@@ -21,14 +21,14 @@ def test_coerce_tool_arguments_maps_common_aliases(tmp_path: Path) -> None:
     w_out = tools.invoke("write_file", {"file_path": "hello.py", "file_text": "x = 1\ny = 2\n"})
     assert w_out.status == "succeeded"
     assert "[Note: " in w_out.content
-    assert "parameter 'file_path' was read as 'path'" in w_out.content
+    assert "parameter 'file_path'" not in w_out.content  # canonical field since W4: no correction note
     assert "parameter 'file_text' was read as 'content'" in w_out.content
 
     # read_file with file_path
     r_out = tools.invoke("read_file", {"file_path": "hello.py"})
     assert r_out.status == "succeeded"
     assert "x = 1" in r_out.content
-    assert "parameter 'file_path' was read as 'path'" in r_out.content
+    assert "parameter 'file_path'" not in r_out.content
 
     # edit_file with filepath + old_string + new_string
     e_out = tools.invoke(
@@ -36,8 +36,8 @@ def test_coerce_tool_arguments_maps_common_aliases(tmp_path: Path) -> None:
         {"filepath": "hello.py", "old_string": "x = 1", "new_string": "x = 10"},
     )
     assert e_out.status == "succeeded"
-    assert "parameter 'old_string' was read as 'old_text'" in e_out.content
-    assert "parameter 'new_string' was read as 'new_text'" in e_out.content
+    assert "parameter 'old_string'" not in e_out.content
+    assert "parameter 'new_string'" not in e_out.content
     assert workspace.read_text("hello.py")[0] == "x = 10\ny = 2\n"
 
     # edit_file batch edits with old_string/new_string

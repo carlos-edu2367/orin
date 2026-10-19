@@ -373,6 +373,7 @@ class AgentToolset(
         self._diagnosed_at: dict[str, float] = {}
         self._definitions: tuple[ToolDefinition, ...] | None = None
         self._by_name: dict[str, ToolDefinition] = {}
+        self._spellings: dict[str, str] = {}
         self._active_mcp_tool_names: set[str] = set()
         # Claude Code-compatible names/arguments at the model boundary
         # (experimental.claudeToolNames). Internal ids stay snake_case.
@@ -461,7 +462,21 @@ class AgentToolset(
                 built = tuple(item for item in built if self._policy.allows(item.name, item.policy_tags))
             self._definitions = built
             self._by_name = {item.name: item for item in self._definitions}
+            # Canonical names and aliases, exact and lower-case, resolve to the stable key in every mode.
+            self._spellings = {}
+            for item in self._definitions:
+                for spelling in (item.public_name, *item.aliases):
+                    if spelling and spelling != item.name:
+                        self._spellings.setdefault(spelling, item.name)
+                        self._spellings.setdefault(spelling.lower(), item.name)
         return self._definitions
+
+    def key_for(self, name: str) -> str:
+        """The stable key of the tool ``name`` spells (key, canonical name or alias, any case); else ``name``."""
+        self.definitions()
+        if not isinstance(name, str) or not name or name in self._by_name or name.startswith("mcp__"):
+            return name
+        return self._spellings.get(name) or self._spellings.get(name.lower()) or _internal_tool_name(name)
 
     def _is_mcp_schema_published(self, item: ToolDefinition) -> bool:
         if item.kind == "mcp" and item.name.startswith("mcp__"):
@@ -485,11 +500,8 @@ class AgentToolset(
         ]
 
     def resolve(self, name: str) -> ToolDefinition:
-        self.definitions()
-        definition = self._by_name.get(name)
-        if definition is None and self.name_translator is not None:
-            # public names resolve only when the experimental translator is on
-            definition = self._by_name.get(_internal_tool_name(name))
+        key = self.key_for(name)  # builds the definitions first: `_by_name` is rebound there
+        definition = self._by_name.get(key)
         if definition is None:
             raise AgentToolError(f"Unknown tool '{name}'.")
         return definition
@@ -617,12 +629,12 @@ class AgentToolset(
         bus = self._lifecycle
         if bus is None:
             return self._speak_public(self._invoke_unobserved(name, arguments, call_id=call_id, invocation_id=invocation_id))
-        internal = _internal_tool_name(name) if self.name_translator is not None else name
-        if internal != name:
-            try:
-                arguments = _public_arguments_in(internal, dict(arguments or {}))
-            except Exception:  # noqa: BLE001 - a model-chosen value must never crash the turn
-                return ToolOutcome("failed", "Argumentos inválidos"[:240], f"Invalid arguments for {name}.", {}, "INVALID_ARGUMENTS")
+        internal = self.key_for(name)
+        try:
+            # Idempotent: an Orin-shaped call passes through, a Claude Code-shaped one is mapped, in every mode.
+            arguments = _public_arguments_in(internal, dict(arguments or {}))
+        except Exception:  # noqa: BLE001 - a model-chosen value must never crash the turn
+            return ToolOutcome("failed", "Argumentos inválidos"[:240], f"Invalid arguments for {name}.", {}, "INVALID_ARGUMENTS")
         tool_name = _public_tool_name(internal)
         tool_input = _safe_public_input(internal, arguments)
         tool_use_id = str(call_id or invocation_id or getattr(self, "_active_invocation_id", None) or "")
@@ -743,12 +755,11 @@ class AgentToolset(
         hook_permission: str | None = None,
     ) -> ToolOutcome:
         requested_name = name
-        name = _internal_tool_name(name) if self.name_translator is not None else name
-        if requested_name != name:
-            try:
-                arguments = _public_arguments_in(name, dict(arguments or {}))
-            except Exception:  # noqa: BLE001 - a model-chosen value must never crash the turn
-                return ToolOutcome("failed", "Argumentos inválidos"[:240], f"Invalid arguments for {requested_name}.", {}, "INVALID_ARGUMENTS")
+        name = self.key_for(name)
+        try:
+            arguments = _public_arguments_in(name, dict(arguments or {}))
+        except Exception:  # noqa: BLE001 - a model-chosen value must never crash the turn
+            return ToolOutcome("failed", "Argumentos inválidos"[:240], f"Invalid arguments for {requested_name}.", {}, "INVALID_ARGUMENTS")
         self._active_invocation_id = call_id or invocation_id or getattr(self, "_active_invocation_id", None)
         # A model can hallucinate a tool name, so an unknown tool is a result the
         # model reads and corrects, never an exception that kills the turn.
