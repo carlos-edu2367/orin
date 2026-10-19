@@ -25,6 +25,7 @@ class ActivePlugin:
     install_path: Path
     manifest: PluginManifest
     enabled_hook_ids: frozenset[str] = frozenset()  # consent references ("{hook_id}#{digest}") the person allowed (W5)
+    enabled_lsp_ids: frozenset[str] = frozenset()  # consent references ("{name}#{digest}") of its language servers (W5-R6)
 
     def folders(self, relative_paths: Sequence[str]) -> list[Path]:
         return [self.install_path / item for item in relative_paths if (self.install_path / item).is_dir()]
@@ -74,7 +75,11 @@ def active_plugins(plugin_service: Any, user_id: str, settings: Mapping[str, Any
             str(item.get("reference") or "") for item in row.get("contributions") or ()
             if isinstance(item, Mapping) and item.get("kind") == "hook" and item.get("enabled")
         )
-        active.append(ActivePlugin(plugin_id, path, manifest, allowed))
+        allowed_lsp = frozenset(
+            str(item.get("reference") or "") for item in row.get("contributions") or ()
+            if isinstance(item, Mapping) and item.get("kind") == "lsp" and item.get("enabled")
+        )
+        active.append(ActivePlugin(plugin_id, path, manifest, allowed, enabled_lsp_ids=allowed_lsp))
     return active, sorted(missing)
 
 

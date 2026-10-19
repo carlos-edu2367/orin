@@ -36,6 +36,11 @@ def _now():
     return datetime.now(UTC)
 
 
+# Contribution kinds whose enabled flag is the person's own consent to run code (W5): a plugin's hooks and its
+# language servers. Switched apart from the blanket toggle of the other kinds, so pausing never grants them.
+CONSENT_KINDS = ("hook", "lsp")
+
+
 class PluginService:
     def __init__(self, engine: Engine, *, plugin_root: Path, skill_library, mcp_service, fetcher=None, activator=None, search_client=None, manifest_probe=None, command_library=None, hook_engine=None) -> None:
         self.engine, self.plugin_root = engine, Path(plugin_root).resolve()
@@ -284,14 +289,14 @@ class PluginService:
             # keeps it only for a hook whose exact reference (id and digest of
             # what it runs) was allowed before; a hook changed while the plugin
             # was off waits for a new consent.
-            allowed_before = {str(item["reference"]) for item in contributions if item.get("kind") == "hook" and item.get("enabled")}
+            allowed_before = {str(item["reference"]) for item in contributions if item.get("kind") in CONSENT_KINDS and item.get("enabled")}
             activation = self._activate(user_id, record, inspection)
             now = _now()
             allowed_now = [str(item["reference"]) for item in activation.contributions if item["kind"] == "hook" and str(item["reference"]) in allowed_before]
             with self.engine.begin() as connection:
                 connection.execute(delete(plugin_contributions).where((plugin_contributions.c.plugin_id == plugin_id) & (plugin_contributions.c.user_id == user_id)))
                 for item in activation.contributions:
-                    if item["kind"] == "hook":
+                    if item["kind"] in CONSENT_KINDS:
                         row_enabled = str(item["reference"]) in allowed_before
                     else:
                         row_enabled = bool(item.get("enabled", True))
@@ -310,7 +315,7 @@ class PluginService:
             # for the other contribution kinds only, so pausing/resuming a
             # plugin can never grant hook-execution consent that was never
             # explicitly given.
-            connection.execute(update(plugin_contributions).where((plugin_contributions.c.plugin_id == plugin_id) & (plugin_contributions.c.user_id == user_id) & (plugin_contributions.c.kind != "hook")).values(enabled=enabled))
+            connection.execute(update(plugin_contributions).where((plugin_contributions.c.plugin_id == plugin_id) & (plugin_contributions.c.user_id == user_id) & (plugin_contributions.c.kind.not_in(CONSENT_KINDS))).values(enabled=enabled))
         return self.get(user_id, plugin_id)
 
     def remove(self, *, user_id: str, plugin_id: str) -> dict[str, Any]:
@@ -372,7 +377,7 @@ class PluginService:
             connection.execute(update(plugin_contributions).where(
                 (plugin_contributions.c.plugin_id == plugin_id)
                 & (plugin_contributions.c.user_id == user_id)
-                & (plugin_contributions.c.kind == "hook")
+                & (plugin_contributions.c.kind.in_(CONSENT_KINDS))
             ).values(enabled=enabled))
         hook_engine = getattr(self.activator, "hook_engine", None)
         if hook_engine is not None:
@@ -402,4 +407,4 @@ class PluginService:
 
     @staticmethod
     def _inspection_result(inspection, values):
-        return {"plugin_id": inspection.ref.plugin_id, "version": inspection.ref.version, "display_name": inspection.display_name, "description": inspection.description, "author": inspection.author, "homepage": inspection.homepage, "state": PluginState.PENDING_APPROVAL.value, "install_path": values["install_path"], "package_digest": inspection.package_digest, "warnings": list(inspection.warnings), "skills": [item.__dict__ if hasattr(item, "__dict__") else {"skill_id": item.skill_id, "name": item.name, "description": item.description, "relative_path": item.relative_path} for item in inspection.skills], "mcp_servers": [{"slug": item.slug, "display_name": item.display_name, "transport": item.transport, "secret_names": list(item.secret_names)} for item in inspection.mcp_servers], "agents": [{"agent_id": item.agent_id, "name": item.name, "role": item.role} for item in inspection.agents], "commands": [{"command_id": item.command_id, "slug": item.slug, "description": item.description, "argument_hint": item.argument_hint} for item in inspection.commands], "hooks": [{"hook_id": item.hook_id, "event": item.event, "matcher": item.matcher, "command": item.command, "timeout_seconds": item.timeout_seconds} for item in inspection.hooks], "contribution_count": inspection.contribution_count}
+        return {"plugin_id": inspection.ref.plugin_id, "version": inspection.ref.version, "display_name": inspection.display_name, "description": inspection.description, "author": inspection.author, "homepage": inspection.homepage, "state": PluginState.PENDING_APPROVAL.value, "install_path": values["install_path"], "package_digest": inspection.package_digest, "warnings": list(inspection.warnings), "skills": [item.__dict__ if hasattr(item, "__dict__") else {"skill_id": item.skill_id, "name": item.name, "description": item.description, "relative_path": item.relative_path} for item in inspection.skills], "mcp_servers": [{"slug": item.slug, "display_name": item.display_name, "transport": item.transport, "secret_names": list(item.secret_names)} for item in inspection.mcp_servers], "agents": [{"agent_id": item.agent_id, "name": item.name, "role": item.role} for item in inspection.agents], "commands": [{"command_id": item.command_id, "slug": item.slug, "description": item.description, "argument_hint": item.argument_hint} for item in inspection.commands], "hooks": [{"hook_id": item.hook_id, "event": item.event, "matcher": item.matcher, "command": item.command, "timeout_seconds": item.timeout_seconds} for item in inspection.hooks], "lsp_servers": [{"name": item.name, "command": item.command, "args": list(item.args), "extensions": [extension for extension, _language in item.extensions]} for item in inspection.lsp_servers], "contribution_count": inspection.contribution_count}

@@ -102,6 +102,25 @@ class HookContribution:
 
 
 @dataclass(frozen=True, slots=True)
+class LspServerContribution:
+    """A language server a plugin declares in ``.lsp.json`` (W5-R6). It is run by the plugin, so it needs its own consent."""
+
+    name: str                 # the key it is declared under
+    command: str              # as declared, ${CLAUDE_PLUGIN_ROOT} unresolved
+    args: tuple[str, ...]
+    extensions: tuple[tuple[str, str], ...]  # (".py", "python")
+    env: tuple[tuple[str, str], ...]
+    initialization_options: Any
+    settings: Any
+    startup_timeout: float
+    digest: str               # first 16 hex of sha256 over the declared entry: a changed entry needs a new consent
+
+    @property
+    def consent_reference(self) -> str:
+        return f"{self.name}#{self.digest}"
+
+
+@dataclass(frozen=True, slots=True)
 class PluginInspection:
     ref: PluginRef
     display_name: str
@@ -116,10 +135,11 @@ class PluginInspection:
     hooks: tuple[HookContribution, ...] = ()
     warnings: tuple[str, ...] = ()
     options: tuple[Any, ...] = ()  # W5: the manifest's userConfig options (manifest.UserConfigOption)
+    lsp_servers: tuple[LspServerContribution, ...] = ()  # W5-R6: the language servers in .lsp.json
 
     @property
     def contribution_count(self) -> int:
-        return len(self.skills) + len(self.mcp_servers) + len(self.agents) + len(self.commands) + len(self.hooks)
+        return len(self.skills) + len(self.mcp_servers) + len(self.agents) + len(self.commands) + len(self.hooks) + len(self.lsp_servers)
 
     @property
     def is_installable(self) -> bool:

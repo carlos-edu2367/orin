@@ -98,6 +98,12 @@ class PluginActivator:
                         user_id=user_id, plugin_id=inspection.ref.plugin_id,
                         install_path=Path(install_path), hooks=inspection.hooks, enabled=False,
                     )
+            if inspection.lsp_servers:
+                # W5-R6: a language server is a program the plugin runs; it starts only once the person allows its entry.
+                contributions.extend(
+                    {"kind": "lsp", "reference": item.consent_reference, "display_name": item.name, "enabled": False}
+                    for item in inspection.lsp_servers
+                )
             return type("ActivationResult", (), {"contributions": contributions})()
         except Exception as error:
             for server_id in reversed(server_ids):

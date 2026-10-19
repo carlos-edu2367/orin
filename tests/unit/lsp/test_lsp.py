@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 
 from agentos.lsp.client import LspClient
-from agentos.lsp.config import LspServerConfig, lsp_servers
+from agentos.lsp.config import LspServerConfig, declared_servers, lsp_servers
 from agentos.lsp.manager import LspManager, format_diagnostics
 from agentos.plugins.runtime import active_plugins
 
@@ -167,8 +167,10 @@ def _plugin(root: Path, lsp: dict) -> Path:
 
 
 def _row(root: Path, consented: bool) -> dict:
-    hooks = [{"kind": "hook", "reference": "kit:PreToolUse:0", "enabled": True}] if consented else []
-    return {"plugin_id": "kit", "state": "active", "install_path": str(root), "contributions": hooks}
+    # W5-R6 review fix: a language server is allowed by its own row (its name and digest), not by a hook's row.
+    servers = declared_servers(root)[0] if consented else ()
+    rows = [{"kind": "lsp", "reference": item.consent_reference, "enabled": True} for item in servers]
+    return {"plugin_id": "kit", "state": "active", "install_path": str(root), "contributions": rows}
 
 
 def test_a_plugins_lsp_json_is_read_once_its_code_may_run(tmp_path: Path) -> None:

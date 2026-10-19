@@ -7,6 +7,8 @@ from pathlib import Path
 from agentos.skills.models import SkillScope, SkillSource
 from agentos.skills.parser import SkillParseError, parse_skill_file
 
+from agentos.lsp.config import declared_servers
+
 from .commands import parse_commands
 from .hooks_manifest import parse_hooks
 from .manifest import ManifestRejected, manifest_file, parse_mcp_config, parse_plugin_manifest
@@ -93,8 +95,12 @@ def inspect_plugin_package(path: Path, *, package_digest: str) -> PluginInspecti
     )
     hooks, hook_warnings = parse_hooks(path / manifest.hooks_path, plugin_id=manifest.plugin_id)
     warnings.extend(hook_warnings)
+    # W5-R6: language servers are read exactly as the LSP runtime reads them, so the card shows what would start.
+    lsp, lsp_warnings = declared_servers(path)
+    warnings.extend(lsp_warnings)
     return PluginInspection(
         PluginRef(manifest.plugin_id, manifest.version), manifest.display_name, manifest.description,
         manifest.author, manifest.homepage, package_digest, skills=tuple(skills), mcp_servers=mcp_servers,
         agents=tuple(agents), commands=commands, hooks=hooks, warnings=tuple(warnings), options=manifest.user_config,
+        lsp_servers=lsp,
     )
