@@ -132,7 +132,7 @@ def test_ask_user_question_converts_to_orin_questions() -> None:
 def test_exit_plan_mode_skill_toolsearch_and_web_tools() -> None:
     assert arguments_in("exit_plan_mode", {"plan": "# Plan"}) == {"summary": "# Plan"}
     assert arguments_in("exit_plan_mode", {"allowedPrompts": [{"tool": "Bash"}]}) == {"allowed_prompts": [{"tool": "Bash"}]}
-    assert arguments_in("use_skill", {"skill": "pdf", "args": "x"}) == {"skill_id": "pdf"}
+    assert arguments_in("use_skill", {"skill": "pdf", "args": "x"}) == {"skill_id": "pdf", "args": "x"}
     assert arguments_in("search_mcp_tools", {"query": "issues", "max_results": 5}) == {"query": "issues", "limit": 5}
     assert arguments_in("fetch_url", {"url": "https://example.com", "prompt": "summary"}) == {"url": "https://example.com", "prompt": "summary"}
     assert arguments_in("web_search", {"query": "q", "allowed_domains": ["a.com"]}) == {"query": "q", "allowed_domains": ["a.com"]}

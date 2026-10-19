@@ -117,7 +117,6 @@ _RENAMES: dict[str, dict[str, str]] = {
 # public keys Orin cannot honour yet (W4 implements them); dropped on the way in
 _DROPPED: dict[str, frozenset[str]] = {
     "run_command": frozenset({"dangerouslyDisableSandbox"}),
-    "use_skill": frozenset({"args"}),
 }
 
 _SUBAGENT_TYPES_IN = {
