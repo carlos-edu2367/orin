@@ -1,10 +1,16 @@
-"""The MCP client: negotiate once, discover tools, call one tool at a time."""
+"""The MCP client: negotiate once, discover tools, call one tool at a time.
+
+While a call is in flight the server may send its own requests and notifications (W5). The transport hands
+them to ``on_message`` (set on the transport by the client): ``ping`` and ``roots/list`` are answered,
+``elicitation/create`` goes to the ``elicit`` callback (declined without one), anything else is refused, and a
+``list_changed`` notification is noted in ``changed`` so the caller can list again.
+"""
 from __future__ import annotations
 
 import itertools
 import json
 from dataclasses import dataclass
-from typing import Any, Mapping, Protocol
+from typing import Any, Callable, Mapping, Protocol
 
 
 from .models import McpToolDescriptor
@@ -35,11 +41,53 @@ class McpCallResult:
     is_error: bool
 
 
+_CHANGED = {
+    "notifications/tools/list_changed": "tools",
+    "notifications/resources/list_changed": "resources",
+    "notifications/prompts/list_changed": "prompts",
+}
+
+
 class McpClient:
-    def __init__(self, transport: McpTransportPort) -> None:
+    def __init__(
+        self,
+        transport: McpTransportPort,
+        *,
+        roots: tuple[tuple[str, str], ...] = (),
+        elicit: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
+        on_notification: Callable[[str, Mapping[str, Any]], None] | None = None,
+    ) -> None:
         self._transport = transport
         self._ids = itertools.count(1)
         self._negotiation: McpNegotiation | None = None
+        self._roots = tuple(roots)
+        self._elicit = elicit
+        self._on_notification = on_notification
+        self.changed: set[str] = set()  # "tools", "resources", "prompts" the server said have changed
+        try:
+            transport.on_message = self._handle_server_message  # type: ignore[attr-defined]
+        except AttributeError:  # a transport that cannot take it simply never delivers server messages
+            pass
+
+    def _handle_server_message(self, message: Mapping[str, Any]) -> Mapping[str, Any] | None:
+        method = str(message.get("method") or "")
+        params = message.get("params") if isinstance(message.get("params"), Mapping) else {}
+        if message.get("id") is None:
+            kind = _CHANGED.get(method)
+            if kind is not None:
+                self.changed.add(kind)
+            if self._on_notification is not None:
+                self._on_notification(method, params)
+            return None
+        if method == "ping":
+            return {}
+        if method == "roots/list":
+            return {"roots": [{"uri": uri, "name": name} for uri, name in self._roots]}
+        if method == "elicitation/create":
+            if self._elicit is None:
+                return {"action": "decline"}
+            return dict(self._elicit(params))
+        return None  # sampling and anything else: not supported
 
     @property
     def negotiation(self) -> McpNegotiation | None:
@@ -57,7 +105,7 @@ class McpClient:
         result = self._call("initialize", {
             "protocolVersion": PROTOCOL_VERSION,
             "clientInfo": CLIENT_INFO,
-            "capabilities": {},
+            "capabilities": {"roots": {"listChanged": False}, "elicitation": {}},
         })
         server_info = result.get("serverInfo") if isinstance(result.get("serverInfo"), Mapping) else {}
         self._negotiation = McpNegotiation(

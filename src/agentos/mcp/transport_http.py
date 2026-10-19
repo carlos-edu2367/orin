@@ -21,6 +21,8 @@ import httpx
 
 from agentos.agentic.agent_tools import _public_url
 
+from .protocol import dispatch_server_message
+
 if TYPE_CHECKING:
     from .token_source import TokenSource
 
@@ -57,6 +59,8 @@ class HttpTransport:
         self._client = client
         self._owns_client = client is None
         self.session_id: str | None = None
+        # Set by the client: receives the server's own requests and notifications (W5).
+        self.on_message: Any = None
 
     def _checked(self, url: str) -> str:
         if self._allow_local:
@@ -83,27 +87,68 @@ class HttpTransport:
         self.open()
         token = self._token_source.current() if self._token_source is not None else None
         response = self._post(frame, token)
-        if response.status_code == 401:
-            if self._token_source is None or token is None:
-                raise HttpUnauthorized(response.headers.get("www-authenticate"))
-            # One renewal and one retry: a token the server rejects right after
-            # renewing means the grant itself is gone.
-            token = self._token_source.force_refresh(token)
-            response = self._post(frame, token)
+        try:
             if response.status_code == 401:
-                self._token_source.invalidate("Reconexão necessária: o servidor recusou o acesso renovado")
-        self.session_id = response.headers.get("mcp-session-id") or self.session_id
-        if response.status_code >= 400:
-            raise HttpTransportError(f"the MCP endpoint answered {response.status_code}")
-        if "id" not in frame:
-            return None
-        body = response.content[:MAX_RESPONSE_BYTES].decode("utf-8", "replace")
-        if "text/event-stream" in response.headers.get("content-type", ""):
-            body = _first_sse_payload(body, expected_id=frame.get("id"))
+                if self._token_source is None or token is None:
+                    raise HttpUnauthorized(response.headers.get("www-authenticate"))
+                # One renewal and one retry: a token the server rejects right after
+                # renewing means the grant itself is gone.
+                response.close()
+                token = self._token_source.force_refresh(token)
+                response = self._post(frame, token)
+                if response.status_code == 401:
+                    self._token_source.invalidate("Reconexão necessária: o servidor recusou o acesso renovado")
+            self.session_id = response.headers.get("mcp-session-id") or self.session_id
+            if response.status_code >= 400:
+                raise HttpTransportError(f"the MCP endpoint answered {response.status_code}")
+            if "id" not in frame:
+                return None
+            if "text/event-stream" in response.headers.get("content-type", ""):
+                return self._answer_from_events(response, frame.get("id"), token)
+            body = _bounded_body(response)
+        finally:
+            response.close()
         try:
             return json.loads(body)
         except json.JSONDecodeError as error:
             raise HttpTransportError("the MCP endpoint answered with invalid JSON") from error
+
+    def _answer_from_events(self, response: httpx.Response, request_id: Any, token: str | None) -> dict[str, Any]:
+        """Read the event stream until the answer to ``request_id``, answering the server's own requests on the way."""
+        fallback: dict[str, Any] | None = None
+        size = 0
+        try:
+            for data in _events(response):
+                size += len(data)
+                if size > MAX_RESPONSE_BYTES:
+                    raise HttpTransportError("the event stream is larger than 4 MB")
+                try:
+                    message = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(message, Mapping):
+                    continue
+                if message.get("id") == request_id and ("result" in message or "error" in message):
+                    return dict(message)
+                if "method" in message:
+                    reply = dispatch_server_message(message, self.on_message)
+                    if reply is not None:
+                        self._post_reply(reply, token)
+                elif fallback is None and ("result" in message or "error" in message):
+                    fallback = dict(message)
+        except httpx.HTTPError as error:
+            raise HttpTransportError(f"the event stream broke: {error}") from error
+        if fallback is not None:
+            return fallback
+        raise HttpTransportError("the event stream carried no answer")
+
+    def _post_reply(self, reply: Mapping[str, Any], token: str | None) -> None:
+        response = self._post(reply, token)
+        try:
+            if response.status_code >= 400:
+                raise HttpTransportError(f"the MCP endpoint refused our answer ({response.status_code})")
+        finally:
+            response.close()
 
     def _post(self, frame: Mapping[str, Any], token: str | None) -> httpx.Response:
         assert self._client is not None
@@ -117,7 +162,8 @@ class HttpTransport:
         if self.session_id:
             headers["mcp-session-id"] = self.session_id
         try:
-            return self._client.post(self._url, json=dict(frame), headers=headers, timeout=self._timeout)
+            request = self._client.build_request("POST", self._url, json=dict(frame), headers=headers, timeout=self._timeout)
+            return self._client.send(request, stream=True)
         except httpx.HTTPError as error:
             raise HttpTransportError(f"the MCP endpoint did not answer: {error}") from error
 
@@ -127,46 +173,31 @@ class HttpTransport:
         self._client = None
 
 
-def _first_sse_payload(body: str, *, expected_id: Any = None) -> str:
-    candidates: list[str] = []
-    event_lines: list[str] = []
-    for line in body.splitlines():
+def _bounded_body(response: httpx.Response) -> str:
+    chunks: list[bytes] = []
+    size = 0
+    for chunk in response.iter_bytes():
+        chunks.append(chunk)
+        size += len(chunk)
+        if size >= MAX_RESPONSE_BYTES:
+            break
+    return b"".join(chunks)[:MAX_RESPONSE_BYTES].decode("utf-8", "replace")
+
+
+def _events(response: httpx.Response):
+    """Each server-sent event's data (its ``data:`` lines joined), as it arrives."""
+    lines: list[str] = []
+    for line in response.iter_lines():
         if not line.strip():
-            if len(event_lines) > 1:
-                candidates.append("\n".join(event_lines))
-            event_lines = []
+            if lines:
+                yield "\n".join(lines)
+                lines = []
             continue
         if line.startswith("data:"):
-            chunk = line[5:].strip()
-            if chunk:
-                candidates.append(chunk)
-                event_lines.append(chunk)
-    if len(event_lines) > 1:
-        candidates.append("\n".join(event_lines))
-    if not candidates:
-        raise HttpTransportError("the event stream carried no data frame")
-    if expected_id is not None:
-        for chunk in candidates:
-            try:
-                parsed = json.loads(chunk)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(parsed, Mapping) and parsed.get("id") == expected_id:
-                return chunk
-        for chunk in candidates:
-            try:
-                parsed = json.loads(chunk)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(parsed, Mapping) and ("result" in parsed or "error" in parsed):
-                return chunk
-    for chunk in candidates:
-        try:
-            json.loads(chunk)
-            return chunk
-        except json.JSONDecodeError:
-            continue
-    return candidates[0]
+            chunk = line[5:]
+            lines.append(chunk[1:] if chunk.startswith(" ") else chunk)
+    if lines:
+        yield "\n".join(lines)
 
 
 

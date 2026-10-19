@@ -30,9 +30,12 @@ import queue
 import shutil
 import subprocess
 import threading
+import time
 from typing import Any, Mapping
 
 from agentos.agentic.agent_tools import _terminate_process_tree
+
+from .protocol import dispatch_server_message
 
 # Real launchers need a writable temp directory and a resolvable user
 # profile, not just PATH: uv/npm/node use these to locate their cache and
@@ -57,6 +60,8 @@ POSIX_FORBIDDEN_CHARACTERS = frozenset(";&|`$\n\r")
 CMD_SHIM_FORBIDDEN_CHARACTERS = frozenset("><^%")
 DEFAULT_TIMEOUT_SECONDS = 45.0
 MAX_LINE_BYTES = 4_000_000
+# Lines that are not JSON (a server printing a banner on stdout) are skipped, up to this many per call.
+MAX_SKIPPED_LINES = 1000
 
 
 class StdioTransportRefused(RuntimeError):
@@ -99,6 +104,8 @@ class StdioTransport:
         self._lock = threading.Lock()
         self._replies: queue.Queue[bytes] = queue.Queue()
         self._reader_thread: threading.Thread | None = None
+        # Set by the client: receives the server's own requests and notifications (W5).
+        self.on_message: Any = None
 
     def open(self) -> None:
         if self._process is not None:
@@ -146,29 +153,48 @@ class StdioTransport:
         process = self._process
         if process is None or process.stdin is None or process.stdout is None:
             raise StdioTransportError("the MCP server process is not running")
-        payload = (json.dumps(frame) + "\n").encode()
         with self._lock:
-            try:
-                process.stdin.write(payload)
-                process.stdin.flush()
-            except OSError as error:
-                raise StdioTransportError(f"the MCP server closed its input: {error}") from error
+            self._write(process, frame)
             if "id" not in frame:
                 return None
-            try:
-                line = self._replies.get(timeout=self._timeout)
-            except queue.Empty:
-                _terminate_process_tree(process)
-                self._process = None
-                raise StdioTransportError(
-                    f"the MCP server did not answer within {self._timeout}s and was terminated"
-                )
-        if not line:
-            raise StdioTransportError("the MCP server closed before answering")
+            deadline = time.monotonic() + self._timeout
+            skipped = 0
+            while True:
+                try:
+                    line = self._replies.get(timeout=max(0.0, deadline - time.monotonic()))
+                except queue.Empty:
+                    _terminate_process_tree(process)
+                    self._process = None
+                    raise StdioTransportError(
+                        f"the MCP server did not answer within {self._timeout}s and was terminated"
+                    )
+                if not line:
+                    raise StdioTransportError("the MCP server closed before answering")
+                try:
+                    message = json.loads(line)
+                except json.JSONDecodeError as error:
+                    skipped += 1
+                    if skipped > MAX_SKIPPED_LINES:
+                        raise StdioTransportError("the MCP server answered with invalid JSON") from error
+                    continue
+                if not isinstance(message, dict):
+                    continue
+                if message.get("id") == frame["id"] and ("result" in message or "error" in message):
+                    return message
+                if "method" in message:
+                    reply = dispatch_server_message(message, self.on_message)
+                    if reply is not None:
+                        self._write(process, reply)
+                        deadline = time.monotonic() + self._timeout  # the server waited on us: its clock starts again
+
+    @staticmethod
+    def _write(process: subprocess.Popen[bytes], frame: Mapping[str, Any]) -> None:
+        assert process.stdin is not None
         try:
-            return json.loads(line)
-        except json.JSONDecodeError as error:
-            raise StdioTransportError("the MCP server answered with invalid JSON") from error
+            process.stdin.write((json.dumps(frame) + "\n").encode())
+            process.stdin.flush()
+        except OSError as error:
+            raise StdioTransportError(f"the MCP server closed its input: {error}") from error
 
     def close(self) -> None:
         process, self._process = self._process, None

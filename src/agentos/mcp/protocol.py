@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 
 PROTOCOL_VERSION = "2025-06-18"
@@ -55,4 +55,40 @@ def parse_response(frame: Mapping[str, Any], *, expected_id: int) -> dict[str, A
     return dict(result)
 
 
-__all__ = ["CLIENT_INFO", "PROTOCOL_VERSION", "McpProtocolError", "notification", "parse_response", "request"]
+METHOD_NOT_FOUND = -32601
+INTERNAL_ERROR = -32603
+
+
+def response(request_id: Any, result: Mapping[str, Any]) -> dict[str, Any]:
+    return {"jsonrpc": "2.0", "id": request_id, "result": dict(result)}
+
+
+def error_response(request_id: Any, code: int, message: str) -> dict[str, Any]:
+    return {"jsonrpc": "2.0", "id": request_id, "error": {"code": int(code), "message": str(message)[:500]}}
+
+
+def dispatch_server_message(message: Mapping[str, Any], handler: Callable[[Mapping[str, Any]], Any] | None) -> dict[str, Any] | None:
+    """A request or notification the server sent us: the frame to send back (requests only), or None.
+
+    ``handler`` returns the result object for a request it supports and None otherwise (answered "method not
+    found"); for a notification its return value is ignored. A handler that raises answers with an internal error.
+    """
+    method = message.get("method")
+    if not isinstance(method, str):
+        return None  # a stray response: nothing to answer
+    is_request = message.get("id") is not None
+    try:
+        result = handler(message) if handler is not None else None
+    except Exception:  # noqa: BLE001 - the server gets an error answer, the call goes on
+        return error_response(message["id"], INTERNAL_ERROR, f"the client could not handle {method[:80]}") if is_request else None
+    if not is_request:
+        return None
+    if not isinstance(result, Mapping):
+        return error_response(message["id"], METHOD_NOT_FOUND, f"method not supported: {method[:80]}")
+    return response(message["id"], result)
+
+
+__all__ = [
+    "CLIENT_INFO", "INTERNAL_ERROR", "METHOD_NOT_FOUND", "PROTOCOL_VERSION", "McpProtocolError", "dispatch_server_message",
+    "error_response", "notification", "parse_response", "request", "response",
+]
