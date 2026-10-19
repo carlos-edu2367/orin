@@ -40,6 +40,10 @@ EXPECTED = {
     "send_message": ({"to", "message", "summary"}, ["to", "message"]),
     "use_skill": ({"skill", "args"}, ["skill"]),
     "search_mcp_tools": ({"query", "max_results"}, ["query"]),
+    "list_mcp_resources": ({"server"}, []),
+    "read_mcp_resource": ({"server", "uri"}, ["server", "uri"]),
+    "read_mcp_resource_dir": ({"server", "uri"}, ["server", "uri"]),
+    "refresh_mcp_tools": ({"server"}, []),
 }
 
 

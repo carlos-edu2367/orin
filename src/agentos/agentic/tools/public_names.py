@@ -51,6 +51,10 @@ PUBLIC_NAMES: dict[str, str] = {
     "monitor": "Monitor",
     "push_notification": "PushNotification",
     "send_message": "SendMessage",
+    "list_mcp_resources": "ListMcpResources",
+    "read_mcp_resource": "ReadMcpResource",
+    "read_mcp_resource_dir": "ReadMcpResourceDir",
+    "refresh_mcp_tools": "RefreshMcpTools",
     # Orin extras
     "list_files": "ListFiles",
     "view_file": "ViewFile",

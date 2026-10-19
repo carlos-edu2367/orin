@@ -29,6 +29,7 @@ READ_ONLY_TOOLS: frozenset[str] = frozenset({
     "preview_logs", "search_mcp_tools", "inspect_mcp_server", "list_mcp_servers", "list_mcp_catalog",
     "list_plugins", "search_plugin", "list_projects", "read_project_conversation", "cron_list",
     "schedule_wakeup", "push_notification",
+    "list_mcp_resources", "read_mcp_resource", "read_mcp_resource_dir", "refresh_mcp_tools",
 })
 DELEGATION_TOOLS: frozenset[str] = frozenset({"run_subagent", "create_agent", "ask_agent", "ask_agents", "send_message"})
 SAFE_FILE_COMMANDS: frozenset[str] = frozenset({"mkdir", "touch", "cp", "mv"})

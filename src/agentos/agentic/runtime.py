@@ -85,6 +85,7 @@ CODE_MODE_CORE_TOOLS = frozenset({
     "search_skills", "list_skills", "read_skill_resource", "use_skill", "create_skill", "edit_skill",
     "list_mcp_catalog", "list_mcp_servers", "configure_mcp", "test_mcp_server",
     "search_mcp_tools", "inspect_mcp_server", "call_mcp_tool",
+    "list_mcp_resources", "read_mcp_resource", "read_mcp_resource_dir", "refresh_mcp_tools",
     "search_plugin", "inspect_plugin", "install_plugin", "list_plugins", "uninstall_plugin",
     "list_projects", "create_project_from_session", "move_session_to_project", "read_project_conversation",
     "generate_image", "generate_audio", "generate_video",

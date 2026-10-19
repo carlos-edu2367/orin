@@ -18,6 +18,7 @@ from .protocol import CLIENT_INFO, PROTOCOL_VERSION, McpProtocolError, notificat
 from .sanitize import sanitize_tool_descriptors
 
 MAX_TOOL_PAGES = 1000
+MAX_RESOURCE_PAGES = 100
 
 
 class McpTransportPort(Protocol):
@@ -149,6 +150,32 @@ class McpClient:
             content = ({"type": "text", "text": text},)
         return McpCallResult(content=content, is_error=bool(result.get("isError")))
 
+
+    def list_resources(self) -> tuple[dict[str, str], ...]:
+        """The server's resources (W5): address, name, description and type, bounded."""
+        self._require_session()
+        items: list[dict[str, str]] = []
+        cursor: str | None = None
+        seen_cursors: set[str] = set()
+        for _ in range(MAX_RESOURCE_PAGES):
+            result = self._call("resources/list", {"cursor": cursor} if cursor else {})
+            for raw in result.get("resources") or []:
+                if isinstance(raw, Mapping) and isinstance(raw.get("uri"), str):
+                    items.append({
+                        "uri": raw["uri"][:2000], "name": str(raw.get("name") or "")[:200],
+                        "description": str(raw.get("description") or "")[:1000], "mimeType": str(raw.get("mimeType") or "")[:100],
+                    })
+            next_cursor = result.get("nextCursor")
+            cursor = next_cursor.strip() if isinstance(next_cursor, str) else None
+            if not cursor or cursor in seen_cursors:
+                break
+            seen_cursors.add(cursor)
+        return tuple(items)
+
+    def read_resource(self, uri: str) -> tuple[Mapping[str, Any], ...]:
+        self._require_session()
+        result = self._call("resources/read", {"uri": str(uri)})
+        return tuple(item for item in (result.get("contents") or []) if isinstance(item, Mapping))
 
     def close(self) -> None:
         self._negotiation = None

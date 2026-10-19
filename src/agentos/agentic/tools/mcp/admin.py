@@ -7,10 +7,11 @@ from typing import Any, Mapping, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from agentos.agentic.tools._shared import AgentToolError, ToolDefinition, ToolOutcome, _TEXT, _schema
+from agentos.agentic.tools.mcp.resources import McpResourceTools
 from agentos.agentic.tools.spec import ToolSpec, ToolInput
 
 
-class McpTools:
+class McpTools(McpResourceTools):
     """Mixed into ``AgentToolset``; ``self`` is the toolset."""
 
     def list_mcp_catalog(self, query: str = "") -> dict[str, Any]:

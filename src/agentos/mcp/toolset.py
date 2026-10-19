@@ -128,6 +128,88 @@ class McpToolProvider:
     def server_slugs(self) -> frozenset[str]:
         return frozenset(config.slug for config, _, _ in self._bundles)
 
+    # -- resources and tool refresh (W5) ------------------------------------
+
+    def find_server(self, server: str) -> ServerBundle | None:
+        target = str(server or "").strip().lower()
+        for bundle in self._bundles:
+            if target in (bundle[0].slug.lower(), bundle[0].display_name.lower()):
+                return bundle
+        return None
+
+    def _targets(self, server: str | None) -> list[ServerBundle]:
+        if not server:
+            return list(self._bundles)
+        found = self.find_server(server)
+        return [found] if found is not None else []
+
+    def _with_session(self, config: McpServerConfig, secrets: Mapping[str, str], action: Callable[[Any], Any]) -> Any:
+        from .protocol import McpProtocolError
+
+        with self._lock(config.server_id):
+            try:
+                client = self._session(config, secrets)
+                return action(client)
+            except RuntimeError as error:
+                if not isinstance(error, McpProtocolError):
+                    self._evict_session(config.server_id)
+                raise
+
+    def list_resources(self, server: str | None = None) -> list[dict[str, Any]]:
+        """Every resource of the servers (or of one), each tagged with its server; a server that fails says why."""
+        found: list[dict[str, Any]] = []
+        for config, _tools, secrets in self._targets(server):
+            try:
+                items = self._with_session(config, secrets, lambda client: client.list_resources())
+            except Exception as error:  # noqa: BLE001 - one server's failure is reported, the rest are listed
+                found.append({"server": config.slug, "error": str(error)[:300]})
+                continue
+            found.extend({"server": config.slug, **item} for item in items)
+        return found
+
+    def read_resource(self, server: str, uri: str) -> tuple[Mapping[str, Any], ...]:
+        bundle = self.find_server(server)
+        if bundle is None:
+            raise LookupError(f"no MCP server named {server!r}")
+        config, _tools, secrets = bundle
+        return self._with_session(config, secrets, lambda client: client.read_resource(uri))
+
+    def _replace_tools(self, server_id: str, tools: tuple[McpToolDescriptor, ...]) -> None:
+        self._bundles = [(config, tools if config.server_id == server_id else old, secrets) for config, old, secrets in self._bundles]
+
+    def refresh_tools(self, server: str | None = None) -> list[dict[str, Any]]:
+        """List the servers' tools again. A file server's list is replaced; Orin's own servers keep the approved list."""
+        report: list[dict[str, Any]] = []
+        for config, tools, secrets in self._targets(server):
+            try:
+                fresh = self._with_session(config, secrets, lambda client: client.list_tools())
+            except Exception as error:  # noqa: BLE001
+                report.append({"server": config.slug, "error": str(error)[:300]})
+                continue
+            before, after = {item.name for item in tools}, {item.name for item in fresh}
+            entry: dict[str, Any] = {"server": config.slug, "added": sorted(after - before), "removed": sorted(before - after)}
+            if config.origin == "orin":
+                entry["applied"] = False
+                entry["note"] = "Orin's own servers keep the tools the person approved; a change needs a new approval in Settings > MCP."
+            else:
+                self._replace_tools(config.server_id, tuple(fresh))
+                entry["applied"] = True
+            report.append(entry)
+        return report
+
+    def _follow_changes(self, config: McpServerConfig, client: Any) -> None:
+        """A file server that announced new tools during a call gets its list replaced (Orin's own keep theirs)."""
+        changed = getattr(client, "changed", None)
+        if not changed or "tools" not in changed:
+            return
+        changed.discard("tools")
+        if config.origin == "orin":
+            return
+        try:
+            self._replace_tools(config.server_id, tuple(client.list_tools()))
+        except Exception:  # noqa: BLE001 - the old list stays; RefreshMcpTools can try again
+            pass
+
     def _lock(self, server_id: str) -> threading.Lock:
         with self._locks_guard:
             return self._locks.setdefault(server_id, threading.Lock())
@@ -167,7 +249,9 @@ class McpToolProvider:
             try:
                 with self._lock(config.server_id):
                     try:
-                        result = self._session(config, secrets).call_tool(tool.name, arguments)
+                        client = self._session(config, secrets)
+                        result = client.call_tool(tool.name, arguments)
+                        self._follow_changes(config, client)
                     except McpReauthRequired:
                         self._evict_session(config.server_id)
                         raise

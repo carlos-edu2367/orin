@@ -27,6 +27,7 @@ from agentos.agentic.tools.agents.agent import SPECS as _agents_agent
 from agentos.agentic.tools.agents.team import SPECS as _agents_team
 from agentos.agentic.tools.orin.skills_admin import SPECS as _orin_skills_admin
 from agentos.agentic.tools.mcp.admin import SPECS as _mcp_admin
+from agentos.agentic.tools.mcp.resources import SPECS as _mcp_resources
 from agentos.agentic.tools.orin.plugins_admin import SPECS as _orin_plugins_admin
 from agentos.agentic.tools.orin.projects import SPECS as _orin_projects
 from agentos.agentic.tools.orin.media import SPECS as _orin_media
@@ -64,6 +65,7 @@ def default_registry() -> ToolRegistry:
         *_agents_team,
         *_orin_skills_admin,
         *_mcp_admin,
+        *_mcp_resources,
         *_orin_plugins_admin,
         *_orin_projects,
         *_orin_media,
