@@ -99,7 +99,7 @@ class PluginFetcher:
                     raise FetchRejected("plugin repository must be a public https URL") from error
                 command = ["git", "-c", "protocol.file.allow=never", *command[1:]]
                 environment = {**os.environ, "GIT_ALLOW_PROTOCOL": "https", "GIT_TERMINAL_PROMPT": "0"}
-            if source.ref:
+            if source.ref and source.ref != "HEAD":  # W5: HEAD is the repository's default branch
                 command += ["--branch", source.ref]
             command += [source.url or "", str(staging)]
             try:

@@ -12,7 +12,7 @@ class PluginTools:
     """Mixed into ``AgentToolset``; ``self`` is the toolset."""
 
     def search_plugin(self, query: str = "") -> dict[str, Any]:
-        results = self._plugin_service.search(str(query or ""))
+        results = self._plugin_service.search(str(query or ""), user_id=self._plugin_user_id)
         return {"summary": f"{len(results)} plugin(s) encontrado(s)", "content": json.dumps(results, ensure_ascii=False), "payload": {"results": results, "tool_kind": "plugin"}}
 
     def inspect_plugin(self, reference: str) -> dict[str, Any]:

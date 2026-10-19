@@ -20,9 +20,9 @@ from .inspector import inspect_plugin_package
 from .manifest import ManifestRejected, manifest_file, parse_plugin_manifest
 from .mcp_inference import infer_mcp_launch as _infer_mcp_launch
 from .models import PluginState
-from .marketplace import parse_marketplace
+from .marketplace import marketplace_file, parse_marketplace
 from .models import plugin_id_from_name
-from .sources import resolve_source
+from .sources import SourceRejected, resolve_source
 
 
 class PluginServiceError(RuntimeError):
@@ -108,21 +108,26 @@ class PluginService:
         extra = {"user_config": values} if inspection.options else {}
         return self.activator.activate(user_id=user_id, install_path=Path(record["install_path"]), inspection=inspection, **extra)
 
-    def search(self, query: str) -> list[dict[str, Any]]:
+    def search(self, query: str, *, user_id: str | None = None) -> list[dict[str, Any]]:
+        """Plugins in the known marketplaces; with ``user_id``, only that person's marketplaces (W5)."""
         needle = str(query or "").casefold()
         results: list[dict[str, Any]] = []
         if not needle or "superpowers" in needle:
             results.append({"name": "superpowers", "reference": "obra/superpowers", "description": "Skills de processo", "marketplace": "default"})
+        statement = select(plugin_marketplaces)
+        if user_id is not None:
+            statement = statement.where(plugin_marketplaces.c.user_id == user_id)
         with self.engine.connect() as connection:
-            rows = connection.execute(select(plugin_marketplaces)).mappings().all()
+            rows = connection.execute(statement).mappings().all()
         for row in rows:
             if not row["clone_path"]:
                 continue
-            index = Path(str(row["clone_path"])) / "marketplace.json"
-            if not index.is_file():
+            root = Path(str(row["clone_path"]))
+            index = marketplace_file(root)
+            if index is None:
                 continue
             try:
-                marketplace = parse_marketplace(json.loads(index.read_text(encoding="utf-8")))
+                marketplace = parse_marketplace(json.loads(index.read_text(encoding="utf-8")), root=root)
             except (OSError, ValueError, json.JSONDecodeError):
                 continue
             for item in marketplace.plugins:
@@ -154,21 +159,55 @@ class PluginService:
         return [{"marketplace_id": str(row["marketplace_id"]), "name": str(row["name"]), "reference": str(row["reference"]), "clone_path": str(row["clone_path"])} for row in rows]
 
     def add_marketplace(self, *, user_id: str, reference: str) -> dict[str, Any]:
-        if not reference.startswith("https://") and "://" in reference:
-            raise PluginServiceError("marketplace reference must use HTTPS")
-        name = Path(reference.rstrip("/")).name or "marketplace"
-        marketplace_id = plugin_id_from_name(name)
+        """Fetch a marketplace (a GitHub repository or, on this computer, a folder), keep a copy and read its index (W5)."""
+        import hashlib
+
+        try:
+            source = resolve_source(reference)
+        except SourceRejected as error:
+            raise PluginServiceError(str(error), code="marketplace_invalid_source") from error
+        if source.kind not in ("git", "path"):
+            raise PluginServiceError("a marketplace is a GitHub repository or a local folder", code="marketplace_invalid_source")
+        person = hashlib.sha256(str(user_id).encode("utf-8")).hexdigest()[:16]
+        try:
+            with self.fetcher.fetch_raw(source) as staged:
+                index = marketplace_file(staged)
+                if index is None:
+                    raise PluginServiceError("the repository has no .claude-plugin/marketplace.json", code="marketplace_not_found")
+                try:
+                    marketplace = parse_marketplace(json.loads(index.read_text(encoding="utf-8")), root=staged)
+                except (OSError, ValueError) as error:
+                    raise PluginServiceError(f"the marketplace index is not valid: {str(error)[:200]}", code="marketplace_invalid") from error
+                try:
+                    marketplace_id = plugin_id_from_name(marketplace.name)
+                except ValueError as error:
+                    raise PluginServiceError("the marketplace has no usable name", code="marketplace_invalid") from error
+                destination = self.plugin_root / "marketplaces" / person / marketplace_id
+                self._safe_remove(destination)  # the previous copy of this marketplace, inside Orin's plugin folder
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copytree(staged, destination, symlinks=False)
+        except FetchRejected as error:
+            raise PluginServiceError(str(error), code="marketplace_fetch_failed") from error
         now = _now()
         with self.engine.begin() as connection:
             connection.execute(delete(plugin_marketplaces).where((plugin_marketplaces.c.marketplace_id == marketplace_id) & (plugin_marketplaces.c.user_id == user_id)))
-            connection.execute(insert(plugin_marketplaces).values(marketplace_id=marketplace_id, user_id=user_id, name=name, reference=reference[:1024], clone_path="", updated_at=now))
-        return {"marketplace_id": marketplace_id, "name": name, "reference": reference, "clone_path": "", "user_id": user_id}
+            connection.execute(insert(plugin_marketplaces).values(
+                marketplace_id=marketplace_id, user_id=user_id, name=marketplace.name, reference=reference[:1024],
+                clone_path=str(destination), updated_at=now,
+            ))
+        return {"marketplace_id": marketplace_id, "name": marketplace.name, "reference": reference, "clone_path": str(destination),
+                "user_id": user_id, "plugins": len(marketplace.plugins)}
 
     def inspect(self, *, user_id: str, reference: str) -> dict[str, Any]:
         source = resolve_source(reference)
         if source.kind == "marketplace":
-            entries = self.search(source.plugin_name or "")
-            candidate = next((item for item in entries if str(item["name"]).casefold() == str(source.plugin_name).casefold()), None)
+            # W5: "name@marketplace" picks the plugin from that marketplace only (the person's own marketplaces).
+            wanted, _, market = str(source.plugin_name or "").partition("@")
+            entries = self.search(wanted, user_id=user_id)
+            candidate = next((
+                item for item in entries
+                if str(item["name"]).casefold() == wanted.casefold() and (not market or str(item["marketplace"]).casefold() == market.casefold())
+            ), None)
             if candidate is None:
                 raise PluginServiceError("plugin name was not found in a configured marketplace")
             source = resolve_source(str(candidate["reference"]))
