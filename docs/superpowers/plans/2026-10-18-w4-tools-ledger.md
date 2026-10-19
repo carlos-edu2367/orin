@@ -141,3 +141,78 @@ Changes made where the plan text differs:
 - Batches C–F were not started (out of scope for this run).
 - The per-message rewind has no UI yet (W7); the UI still uses the per-turn store.
 - `frontend/` is untouched in this batch.
+
+## Batch C — Search and shell (Tasks 13–17)
+
+### Commits
+
+Branch `feat/orin-code-parity-w0-w3`, on top of `334f05f` (the Batch B ledger):
+
+| Task | Commit | Subject |
+|---|---|---|
+| 13 | `a773052` | feat(w4): Grep uses a provided ripgrep, falls back to Python, speaks Claude Code |
+| 14 | `e874c4f` | feat(w4): Glob reports a Claude Code output |
+| 15 | `18459fd` | feat(w4): Bash keeps its directory, saves long output, reports Claude Code's output |
+| 16 | `7056d35` | feat(w4): PowerShell tool with conservative analysis in the permission engine |
+| 17 | `2f1f132` | feat(w4): TaskOutput and TaskStop take any background task id |
+| 18 | this commit | docs(w4): ledger, batch C |
+
+### Tests added (57)
+
+- `tests/unit/agentic/tools/test_grep_parity.py`: 10 (Task 13). Four of them are the `TestWithRipgrep` class, which skips when `rg` is not on `PATH`.
+- `tests/unit/agentic/tools/test_glob_output.py`: 2 (Task 14).
+- `tests/unit/agentic/tools/test_bash_parity.py`: 6 (Task 15).
+- `tests/unit/permissions/test_powershell_analysis.py`: 29 (Task 16).
+- `tests/unit/agentic/tools/test_powershell_tool.py`: 5 (Task 16). They run on this Windows host (not skipped).
+- `tests/unit/agentic/tools/test_task_output_stop.py`: 5 (Task 17).
+
+### Suite results
+
+- Start of Batch C (end of Batch B): 3209 passed, 54 skipped.
+- Full unit suite, `uv run pytest -q -p no:cacheprovider tests/unit` (timeout 600000 ms, run for Task 18 Step 1): **3262 passed, 58 skipped, 0 failed** (269 s). This matches the scratch validation of the plan. The 57 new tests account for the difference: 53 pass here and 4 skip (the `TestWithRipgrep` class, without `rg` on `PATH`).
+- Grep parity, two runs:
+  - Without ripgrep on `PATH`: 6 passed, 4 skipped (`TestWithRipgrep`).
+  - With `export PATH="/c/Users/carlos/AppData/Local/OpenAI/Codex/bin/9a7ba4b9ea0c44a3:$PATH"` in the same call: 10 passed (ripgrep 14.1.1).
+- Per-task runs, all green: `test_grep_parity.py` with `tests/unit/agentic` (Task 13); `test_glob_output.py` with `tests/unit/agentic` (Task 14); `test_bash_parity.py` with `tests/unit/agentic tests/unit/test_orin_code_phase_a.py tests/unit/test_orin_code_phase_b.py` (Task 15: 988 passed, 6 skipped); the two PowerShell files with `tests/unit/permissions tests/unit/agentic tests/unit/code_mode tests/unit/test_orin_code_phase_a.py tests/unit/test_orin_code_phase_b.py` (Task 16: 1280 passed, 8 skipped); `test_task_output_stop.py` with `tests/unit/agentic` (Task 17: 976 passed, 6 skipped).
+- Integration and eval, run as part of the full backend check (not part of the plan's gate): `uv run pytest -q tests/integration tests/eval` gives 77 passed, 65 skipped, **1 failed**. The failure is `tests/integration/api/test_profile_isolation.py::test_every_route_is_classified`. It is pre-existing: the same test fails on `334f05f`, run from a `git archive` extract of that commit with the project venv. The unclassified routes are `file-history` and `messages/{message_id}/rewind` (added in Batch B, `6af25d0`, with no classification entry), and `queue`, `context`, `compact` and `workspace-trust`. Batch C changed no file under `src/agentos/api` or `tests/integration`. Not fixed here: how each route is classified for profile isolation is the owner's decision and outside Batch C.
+- Frontend: Batch C does not touch `frontend/` (`git diff 334f05f HEAD -- frontend` is empty), so the frontend checks were not run.
+
+### Deliberate expectation changes (every one)
+
+1. **Task 13 Step 8**, `tests/unit/agentic/tools/test_public_contract.py` (the `search_files` field set): gains `-o` and `context`.
+2. **Task 13 Step 8**, `tests/unit/agentic/tools/test_public_names.py::test_grep_flags_map_to_internal_names`: the expected dict gains `"line_numbers": True`. `-n` used to be dropped; it is now honoured.
+3. **Task 17 Step 5**, `tests/unit/agentic/tools/test_public_contract.py` (the `read_process_output` field set): becomes `{"task_id", "block", "timeout"}`.
+4. **Task 17 Step 5**, `tests/unit/agentic/tools/test_public_names.py::test_task_output_and_stop_take_string_ids`: the first assertion becomes `{"pid": 4242, "block": True}`. A public TaskOutput call now waits by default, as Claude Code's does. The other three assertions are unchanged.
+
+No other existing expectation changed. Tasks 15 and 16 needed none, and no test pins the exact tool names of a default toolset (the full suite passed without any such change).
+
+### Deviations from the plan
+
+Plan deviations 8–10, applied as written in the plan:
+
+- **8. Grep keeps Orin's defaults.** Case-insensitive unless `-i` is false, at most 200 entries. ripgrep is used only from `ORIN_RIPGREP_PATH` or the bundled copy, never from `PATH` and never from inside the workspace (tested).
+- **9. An interrupted or timed-out command is a failed call.** No `tool_output` then, and a foreground timeout is not moved to the background.
+- **10. TaskStop refuses a subagent id** (`agent-…`). TaskOutput reports a background command's `status` but not its exit code.
+
+Execution differences (none changes a behaviour the plan asks for):
+
+- **a.** Task 16 Step 5: `engine.py` no longer imports `analyze_command` from `.shell`. After the plan's edits the import was unused; a grep confirmed no other module imports it from `engine`.
+- **b.** Task 16 Step 8.8: `EXECUTION_TOOLS` in `code_mode/permissions.py` also gains `"powershell"`. The plan's global rule is that every safety list naming `run_command` gains it, and the plan's step names only two sites. The constant is exported and not used inside the module; no test references it.
+- **c.** Task 16 Step 8.6 kept: `phases.py` is unchanged and PowerShell is not in the Chat-mode phase lists (the 36-tool cap is pinned by `test_phase_controller.py`). Verified with `git diff 334f05f HEAD -- src/agentos/agentic/phases.py`, which is empty.
+- **d.** Task 13 Steps 8 and Task 17 Step 5 were applied as exact-text edits. Task 15 used the existing `AgentToolset._persist_truncated_output` (a method of `AgentToolset`, reached from the mixin), so no helper was added.
+- **e.** Line endings: as in Batches A and B (index LF, working copy CRLF; git normalizes on commit).
+- **f.** Tests were run with `-p no:cacheprovider`, as in Batch B.
+
+### Behaviour notes found while checking (not in the plan) — open
+
+- **A Bash deny rule does not cover PowerShell (fail-open for deny and ask).** `rule_applies_to_tool` matches the tool name exactly, so a `Bash(...)` deny does not stop the same command through `powershell`. Checked with settings containing `deny: ["Bash(rm:*)", "Bash(Remove-Item:*)"]`: `run_command "rm x"` → deny; `powershell "rm x"` → allow, and `powershell "Remove-Item x"` → allow, both under `full_autonomy`. The allow side is guarded (`test_bash_rules_do_not_apply_to_powershell`). Suggested fix: for deny and ask matching only, let `run_command` rules also apply to `powershell`, matching the specifier through `analyze_powershell` (which already resolves aliases), with a regression test. Not changed here, because the plan does not define it.
+- **PowerShell error output arrives as CLIXML.** With redirected stderr, Windows PowerShell 5.1 writes progress and error records as `#< CLIXML <Objs …>`, so `Write-Error 'boom'` reaches the model as escaped XML, and a first run also shows a module-preparation progress record. Suggested fix: add `$ProgressPreference = 'SilentlyContinue'` to the UTF-8 prefix and decode the `<S S="Error">` records in `stderr`. Not changed: the prefix is the plan's text.
+- **A non-zero exit is a successful call.** Bash `exit 3` and PowerShell `exit 3` both return `status="succeeded"` with `exitCode: 3`. This is existing Bash behaviour (checked), not introduced by Batch C; deviation 9 covers only interrupted and timed-out commands.
+- **PowerShell in the background** was checked ad hoc, outside the repository: it starts, returns a `backgroundTaskId`, and TaskOutput reads it.
+
+### Open after Batch C
+
+- Batches D–F were not started (out of scope for this run).
+- The integration failure above (`test_every_route_is_classified`, from Batch B).
+- The two open items above (PowerShell deny matching; PowerShell CLIXML output).
+- `frontend/` is untouched in this batch.
