@@ -13,6 +13,7 @@ the Bash permission pipeline, when the skill is invoked.
 """
 from __future__ import annotations
 
+import functools
 import hashlib
 import itertools
 import logging
@@ -34,6 +35,8 @@ CATALOG_DESCRIPTION_CHARS = 250
 CATALOG_BUDGET_CHARS = 6_000
 _NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}(?::[a-z0-9][a-z0-9._-]{0,63})*$")
 _FRONTMATTER = re.compile(r"\A---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n|\Z)", re.DOTALL)
+# W5-R11: frontmatter is capped before it is parsed, and an anchor or an alias in it is refused (see _frontmatter_loader).
+MAX_FRONTMATTER_BYTES = 64 * 1024
 _ORIGINS = ("managed", "user", "project")
 # ``!`cmd``` in a skill body: the command runs when the skill is invoked and its output replaces the block.
 INLINE_COMMAND = re.compile(r"!`([^`\n]{1,2000})`")
@@ -107,15 +110,32 @@ def _one_line(text: str) -> str:
     return " ".join(str(text or "").split())
 
 
+@functools.lru_cache(maxsize=1)
+def _frontmatter_loader() -> type:
+    """A YAML safe loader that refuses anchors and aliases: an alias shares one structure among many references, and
+    a reader that walks it expands it (a few hundred bytes became thousands of tool entries)."""
+    import yaml
+
+    class FrontmatterLoader(yaml.SafeLoader):
+        def compose_node(self, parent, index):  # type: ignore[override]
+            if getattr(self.peek_event(), "anchor", None):  # an AliasEvent, or a node with an anchor
+                raise yaml.YAMLError("anchors and aliases are not allowed in frontmatter")
+            return super().compose_node(parent, index)
+
+    return FrontmatterLoader
+
+
 def split_frontmatter(text: str) -> tuple[dict[str, Any], str]:
     """YAML frontmatter (a mapping, or empty when absent or malformed) and the body after it."""
     match = _FRONTMATTER.match(text)
     if not match:
         return {}, text
+    if len(match.group(1).encode("utf-8")) > MAX_FRONTMATTER_BYTES:
+        raise ValueError("the frontmatter is larger than 64 KB")
     try:
         import yaml
 
-        loaded = yaml.safe_load(match.group(1))
+        loaded = yaml.load(match.group(1), Loader=_frontmatter_loader())
     except Exception:  # noqa: BLE001 - malformed frontmatter is reported by the caller as an error
         raise ValueError("the frontmatter is not valid YAML") from None
     if loaded is None:
