@@ -74,6 +74,7 @@ def test_bash_timeout_is_milliseconds_publicly_and_seconds_internally() -> None:
 def test_grep_flags_map_to_internal_names() -> None:
     assert arguments_in("search_files", {"pattern": "x", "-A": 2, "-B": 1, "-C": 3, "-i": True, "-n": True}) == {
         "pattern": "x", "after_context": 2, "before_context": 1, "context_lines": 3, "ignore_case": True,
+        "line_numbers": True,
     }
 
 

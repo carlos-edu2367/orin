@@ -12,7 +12,7 @@ EXPECTED = {
     "notebook_edit": ({"notebook_path", "new_source", "cell_id", "cell_type", "edit_mode"}, ["notebook_path", "new_source"]),
     "glob_files": ({"pattern", "path"}, ["pattern"]),
     "search_files": (
-        {"pattern", "path", "glob", "type", "output_mode", "-A", "-B", "-C", "-i", "-n", "multiline", "head_limit", "offset"},
+        {"pattern", "path", "glob", "type", "output_mode", "-A", "-B", "-C", "-i", "-n", "-o", "context", "multiline", "head_limit", "offset"},
         ["pattern"],
     ),
     "run_command": ({"command", "description", "timeout", "run_in_background", "cwd"}, ["command"]),

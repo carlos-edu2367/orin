@@ -37,3 +37,4 @@ data/run/
 data/plugins/
 data/retrieval/
 .cache/
+packaging/vendor/ripgrep/

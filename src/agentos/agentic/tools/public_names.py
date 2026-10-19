@@ -97,7 +97,10 @@ _RENAMES: dict[str, dict[str, str]] = {
     "read_file": {"file_path": "path"},
     "write_file": {"file_path": "path"},
     "edit_file": {"file_path": "path", "old_string": "old_text", "new_string": "new_text"},
-    "search_files": {"-A": "after_context", "-B": "before_context", "-C": "context_lines", "-i": "ignore_case"},
+    "search_files": {
+        "-A": "after_context", "-B": "before_context", "-C": "context_lines", "context": "context_lines",
+        "-i": "ignore_case", "-n": "line_numbers", "-o": "only_matching",
+    },
     "run_command": {"run_in_background": "background"},
     "run_subagent": {"prompt": "task", "resume": "agent_id", "model": "model_id"},
     "use_skill": {"skill": "skill_id"},
@@ -111,7 +114,6 @@ _RENAMES: dict[str, dict[str, str]] = {
 # public keys Orin cannot honour yet (W4 implements them); dropped on the way in
 _DROPPED: dict[str, frozenset[str]] = {
     "run_command": frozenset({"dangerouslyDisableSandbox"}),
-    "search_files": frozenset({"-n"}),
     "fetch_url": frozenset({"prompt"}),
     "web_search": frozenset({"allowed_domains", "blocked_domains"}),
     "use_skill": frozenset({"args"}),

@@ -23,3 +23,5 @@ def _isolated_settings_dirs(tmp_path_factory: pytest.TempPathFactory, monkeypatc
         target = root / sub
         target.mkdir(parents=True, exist_ok=True)
         monkeypatch.setenv(name, str(target))
+    # Grep must not depend on a ripgrep the developer configured; the ripgrep tests set it themselves.
+    monkeypatch.delenv("ORIN_RIPGREP_PATH", raising=False)

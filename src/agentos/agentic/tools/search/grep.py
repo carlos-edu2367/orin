@@ -6,11 +6,30 @@ import re
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import Field
+from pydantic import BaseModel, ConfigDict, Field
 
+from agentos.agentic.ripgrep import event_path, event_text, ripgrep_binary, run_ripgrep
 from agentos.agentic.workspace import MAX_SEARCH_RESULTS
 from agentos.agentic.tools._shared import AgentToolError, _GLOB_IGNORED_DIRS, _TEXT, _schema
 from agentos.agentic.tools.spec import ToolSpec, ToolInput
+from agentos.ignore import DENIED_SEGMENTS
+
+
+def _grep_output(
+    mode: str, *, filenames: list[str], body: str, num_matches: int | None, limit: int, offset: int, truncated: bool,
+) -> dict[str, Any]:
+    """Claude Code's Grep result for one call."""
+    output: dict[str, Any] = {"mode": mode, "numFiles": len(filenames), "filenames": filenames}
+    if mode != "files_with_matches":
+        output["content"] = body
+        output["numLines"] = 0 if body == "[no match]" else len(body.splitlines())
+    if num_matches is not None:
+        output["numMatches"] = num_matches
+    if truncated:
+        output["appliedLimit"] = limit
+    if offset:
+        output["appliedOffset"] = offset
+    return output
 
 
 class GrepTools:
@@ -36,6 +55,8 @@ class GrepTools:
         head_limit: int | None = None,
         type: str | None = None,
         offset: int = 0,
+        line_numbers: bool = True,
+        only_matching: bool = False,
     ) -> dict[str, Any]:
         raw_pattern = pattern if (isinstance(pattern, str) and pattern.strip()) else (query if isinstance(query, str) else "")
         if not isinstance(raw_pattern, str) or not raw_pattern.strip() or len(raw_pattern) > 500:
@@ -67,8 +88,18 @@ class GrepTools:
         if not search_target.exists():
             raise AgentToolError(f"Path not found: '{path}'.")
 
+        ripgrep = ripgrep_binary(self.workspace.root)
+        rg_found = None
+        if ripgrep is not None:
+            rg_found = self._grep_with_ripgrep(
+                ripgrep, expr=expr if is_regex else raw_pattern, fixed=not is_regex, ignore_case=eff_ignore_case,
+                multiline=bool(multiline), search_target=search_target, glob=eff_glob, file_type=clean_type,
+                pre_ctx=pre_ctx, post_ctx=post_ctx, only_matching=bool(only_matching),
+            )
         candidate_files: list[Path] = []
-        if search_target.is_file():
+        if rg_found is not None:
+            pass  # ripgrep already searched; the Python scan below sees no candidates
+        elif search_target.is_file():
             candidate_files = [search_target]
         else:
             ignore_policy = getattr(self.workspace, "_ignore_policy", lambda: None)()
@@ -154,17 +185,22 @@ class GrepTools:
                         if mode == "content":
                             b_ctx = [l[:300] for l in file_lines[max(0, idx - pre_ctx) : idx]] if pre_ctx > 0 else []
                             a_ctx = [l[:300] for l in file_lines[idx + 1 : min(len(file_lines), idx + 1 + post_ctx)]] if post_ctx > 0 else []
-                            content_matches.append({
-                                "path": rel_posix,
-                                "file": rel_posix,
-                                "line": idx + 1,
-                                "text": line_text[:300],
-                                "before_context": b_ctx,
-                                "after_context": a_ctx,
-                            })
+                            pieces = [found.group(0) for found in regex.finditer(line_text)] if only_matching else [line_text]
+                            for piece in pieces:
+                                content_matches.append({
+                                    "path": rel_posix,
+                                    "file": rel_posix,
+                                    "line": idx + 1,
+                                    "text": piece[:300],
+                                    "before_context": b_ctx,
+                                    "after_context": a_ctx,
+                                })
                 if file_hits > 0:
                     files_with_matches.append(rel_posix)
                     counts_list.append({"path": rel_posix, "file": rel_posix, "count": file_hits})
+
+        if rg_found is not None:
+            files_with_matches, counts_list, content_matches = rg_found
 
         if mode == "files_with_matches":
             sliced_files = files_with_matches[eff_offset : eff_offset + eff_limit]
@@ -193,6 +229,7 @@ class GrepTools:
                 "summary": f"Buscou '{raw_pattern[:40]}': {len(sliced_files)} {'arquivo' if len(sliced_files) == 1 else 'arquivos'}",
                 "content": body,
                 "payload": payload,
+                "tool_output": _grep_output("files_with_matches", filenames=sliced_files, body=body, num_matches=None, limit=eff_limit, offset=eff_offset, truncated=truncated),
             }
 
         if mode == "count":
@@ -226,6 +263,7 @@ class GrepTools:
                 "summary": f"Buscou '{raw_pattern[:40]}': {total_occurrences} {'ocorrência' if total_occurrences == 1 else 'ocorrências'} em {len(sliced_counts)} {'arquivo' if len(sliced_counts) == 1 else 'arquivos'}",
                 "content": body,
                 "payload": payload,
+                "tool_output": _grep_output("count", filenames=[str(item["path"]) for item in sliced_counts], body=body, num_matches=total_occurrences, limit=eff_limit, offset=eff_offset, truncated=truncated),
             }
 
         sliced_matches = content_matches[eff_offset : eff_offset + eff_limit]
@@ -240,15 +278,18 @@ class GrepTools:
                 a_lines = item.get("after_context") or []
                 for idx_b, b_text in enumerate(b_lines):
                     b_line_no = item["line"] - len(b_lines) + idx_b
-                    block_lines.append(f"{item['path']}-{b_line_no}: {b_text}")
-                block_lines.append(f"{item['path']}:{item['line']}: {item['text']}")
+                    block_lines.append(f"{item['path']}-{b_line_no}: {b_text}" if line_numbers else f"{item['path']}- {b_text}")
+                block_lines.append(f"{item['path']}:{item['line']}: {item['text']}" if line_numbers else f"{item['path']}: {item['text']}")
                 for idx_a, a_text in enumerate(a_lines):
                     a_line_no = item.get("end_line", item["line"]) + 1 + idx_a
-                    block_lines.append(f"{item['path']}+{a_line_no}: {a_text}")
+                    block_lines.append(f"{item['path']}+{a_line_no}: {a_text}" if line_numbers else f"{item['path']}+ {a_text}")
                 blocks.append("\n".join(block_lines))
             body = "\n--\n".join(blocks)
         else:
-            body = "\n".join(f"{item['path']}:{item['line']}: {item['text']}" for item in sliced_matches)
+            body = "\n".join(
+                f"{item['path']}:{item['line']}: {item['text']}" if line_numbers else f"{item['path']}: {item['text']}"
+                for item in sliced_matches
+            )
         payload = {
             "ok": True,
             "output_mode": mode,
@@ -270,7 +311,91 @@ class GrepTools:
             "summary": f"Buscou '{raw_pattern[:40]}': {len(sliced_matches)} {'ocorrência' if len(sliced_matches) == 1 else 'ocorrências'}",
             "content": body,
             "payload": payload,
+            "tool_output": _grep_output("content", filenames=list(dict.fromkeys(str(item["path"]) for item in sliced_matches)), body=body, num_matches=len(sliced_matches), limit=eff_limit, offset=eff_offset, truncated=truncated),
         }
+
+    def _grep_with_ripgrep(
+        self,
+        binary: Path,
+        *,
+        expr: str,
+        fixed: bool,
+        ignore_case: bool,
+        multiline: bool,
+        search_target: Path,
+        glob: str,
+        file_type: str,
+        pre_ctx: int,
+        post_ctx: int,
+        only_matching: bool,
+    ) -> tuple[list[str], list[dict[str, Any]], list[dict[str, Any]]] | None:
+        """The same three lists the Python scan builds, from ripgrep; None makes the caller fall back."""
+        # --no-config: no RIPGREP_CONFIG_PATH; --no-require-git: .gitignore counts outside a git checkout too,
+        # as Orin's own ignore policy does; the globs exclude what the Python search never looks at.
+        arguments = [
+            str(binary), "--json", "--no-config", "--no-require-git", "--hidden", "--sort", "path",
+            "--max-filesize", "2M", "--max-columns", "2000", "-i" if ignore_case else "-s",
+        ]
+        if fixed:
+            arguments.append("-F")
+        for ignored in sorted(_GLOB_IGNORED_DIRS | DENIED_SEGMENTS | {".git"}):
+            arguments += ["--glob", f"!{ignored}"]
+        if multiline:
+            arguments += ["-U", "--multiline-dotall"]
+        if glob and glob not in {"**/*", "**", "*"}:
+            arguments += ["--glob", glob]
+        if file_type:
+            arguments += ["--type", file_type]
+        if pre_ctx:
+            arguments += ["-B", str(pre_ctx)]
+        if post_ctx:
+            arguments += ["-A", str(post_ctx)]
+        arguments += ["--", expr, str(search_target)]
+        events = run_ripgrep(arguments, cwd=self.workspace.root)
+        if events is None:
+            return None
+        root = self.workspace.root.resolve()
+        by_file: dict[str, list[dict[str, Any]]] = {}
+        for event in events:
+            raw = event_path(event)
+            if raw is None:
+                continue
+            try:
+                rel = Path(raw).resolve().relative_to(root).as_posix()
+            except (OSError, ValueError):
+                continue  # outside the workspace (a link ripgrep followed): never reported
+            by_file.setdefault(rel, []).append(event)
+        files_with_matches: list[str] = []
+        counts_list: list[dict[str, Any]] = []
+        content_matches: list[dict[str, Any]] = []
+        for rel, file_events in by_file.items():
+            lines: dict[int, str] = {}
+            for event in file_events:
+                number = int((event.get("data") or {}).get("line_number") or 0)
+                for offset, text in enumerate(event_text(event).splitlines()):
+                    lines.setdefault(number + offset, text)
+            matches = [event for event in file_events if event.get("type") == "match"]
+            if not matches:
+                continue
+            files_with_matches.append(rel)
+            hits = sum(len((event.get("data") or {}).get("submatches") or [1]) for event in matches) if multiline else len(matches)
+            counts_list.append({"path": rel, "file": rel, "count": hits})
+            for event in matches:
+                data = event.get("data") or {}
+                start = int(data.get("line_number") or 0)
+                text = event_text(event)
+                end = start + max(0, len(text.rstrip("\n").splitlines()) - 1)
+                submatches = [str((item.get("match") or {}).get("text") or "") for item in data.get("submatches") or []]
+                pieces = submatches if (only_matching or multiline) and submatches else [text.rstrip("\r\n")]
+                before = [lines[number][:300] for number in range(max(1, start - pre_ctx), start) if number in lines] if pre_ctx else []
+                after = [lines[number][:300] for number in range(end + 1, end + 1 + post_ctx) if number in lines] if post_ctx else []
+                for piece in pieces:
+                    item = {"path": rel, "file": rel, "line": start, "text": piece[:300],
+                            "before_context": before, "after_context": after}
+                    if end != start:
+                        item["end_line"] = end
+                    content_matches.append(item)
+        return files_with_matches, counts_list, content_matches
 
 
 class GrepInput(ToolInput):
@@ -283,10 +408,24 @@ class GrepInput(ToolInput):
     before: int | None = Field(None, alias="-B", ge=0, le=50, description="Lines before each match.")
     around: int | None = Field(None, alias="-C", ge=0, le=50, description="Lines around each match.")
     ignore_case: bool | None = Field(None, alias="-i", description="Case-insensitive search.")
-    line_numbers: bool | None = Field(None, alias="-n", description="Show line numbers (always on).")
+    line_numbers: bool | None = Field(None, alias="-n", description="Show line numbers (default true).")
+    only_matching: bool | None = Field(None, alias="-o", description="Show only the matched text.")
+    context: int | None = Field(None, ge=0, le=50, description="Lines around each match (same as -C).")
     multiline: bool | None = Field(None, description="Let patterns span lines.")
     head_limit: int | None = Field(None, ge=1, le=500, description="Return at most this many entries.")
     offset: int | None = Field(None, ge=0, description="Skip this many entries first.")
+
+
+class GrepOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    mode: Literal["content", "files_with_matches", "count"]
+    numFiles: int
+    filenames: list[str]
+    content: str | None = None
+    numLines: int | None = None
+    numMatches: int | None = None
+    appliedLimit: int | None = None
+    appliedOffset: int | None = None
 
 
 # Tool specs, moved from AgentToolset._build_definitions (W4).
@@ -320,6 +459,7 @@ SPECS: tuple[ToolSpec, ...] = (
         handler="search_files",
         kind="filesystem",
         input_model=GrepInput,
+        output_model=GrepOutput,
         public_description='Search file contents with a regular expression.',
         read_only=True,
         order=90,

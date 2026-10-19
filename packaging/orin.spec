@@ -33,6 +33,10 @@ datas += [
     (str(ROOT / "src" / "agentos" / "persistence" / "postgres" / "migrations"), "agentos/persistence/postgres/migrations"),
 ]
 binaries = collect_dynamic_libs("pypdfium2")
+# ripgrep for Grep: bundled when the release step placed it under packaging/vendor/ripgrep (see its README).
+RIPGREP = ROOT / "packaging" / "vendor" / "ripgrep" / ("rg.exe" if os.name == "nt" else "rg")
+if RIPGREP.is_file():
+    binaries += [(str(RIPGREP), "bin")]
 
 a = Analysis(
     [str(ROOT / "packaging" / "frozen_entry.py")],
