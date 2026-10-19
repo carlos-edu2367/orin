@@ -120,3 +120,64 @@ Each new test file or test was run before its implementation and failed for the 
 
 - **Preloaded skills.** `skills:` in an agent definition puts the skill body into the subagent's system prompt through `_preloaded_skills`. The body is not wrapped as subordinate instructions, its `allowed-tools` are not granted to the subagent, and its `!`cmd`` blocks are not run. A repository that is trusted can therefore put its own text into a subagent's prompt. This grants no tool.
 - **Replacing a builtin.** A definition named `explore` or `plan` in a trusted repository replaces the builtin. Without a `tools` line it publishes every tool the parent may publish, and it runs with the parent's permission mode and not with the read-only mode of the builtin. This is what the plan says and it never exceeds the parent's own grants. The owner may want a warning or a rule that a builtin name needs the user's folder.
+
+## Batch C — Agent teams (Tasks 12–15)
+
+### Commits
+
+Branch `feat/orin-code-parity-w0-w3`, on top of `b433a14` (the Batch C plan):
+
+| Task | Commit | Subject |
+|---|---|---|
+| 12 | `0205a20` | fix(w5): preloaded skills keep their wrapper; a repository cannot replace builtin agents |
+| 13 | `39034d6` | feat(w5): the agent team mailbox |
+| 14 | `bd70874` | feat(w5): agent teams with SendMessage, a mailbox and TeammateIdle |
+| 15 | this commit | docs(w5): ledger, batch C |
+
+### Tests added (22 cases, and 1 more from the public-contract parametrisation)
+
+- Task 12: `tests/unit/agentic/test_agent_definitions.py` (6 cases: five parametrised repository cases and the person case) and `tests/unit/agentic/test_agent_definitions_session.py` (1, the wrapper case). Before the implementation, the six repository and wrapper cases failed and the person case passed (the plan expects it to pass already, as a guard).
+- Task 13: `tests/unit/conversations/test_mailbox.py` (8 cases: four tests, each run against the database and in memory). Before the implementation: collection error, `ModuleNotFoundError: agentos.conversations.mailbox`.
+- Task 14: `tests/unit/agentic/test_agent_teams.py` (7). Before the implementation, all seven failed at run time: `TypeError` for `teammate_name` (four cases), `AttributeError` for `_send_team_message`, `SendMessage` unknown (`failed` instead of `succeeded`), and `IndexError` on the Agent passthrough. The plan predicted a collection error; the test module does not import `team.py`, so the failures came at run time.
+- `tests/unit/agentic/tools/test_public_contract.py` is parametrised over its table, so the new `send_message` entry adds one case.
+
+### Suite results
+
+- `uv run pytest -q tests/unit` (foreground, timeout 600000 ms): **3753 passed, 60 skipped, 0 failed** (274 s). Batch B ended at 3730 passed and 60 skipped; the 23 added passes are the 22 new cases and the contract entry.
+- `uv run pytest -q tests/integration`: **78 passed, 65 skipped, 0 failed** (63 s). The 65 skips need `AGENTOS_TEST_POSTGRES_DSN`, `AGENTOS_POSTGRES_URL` or `AGENTOS_REDIS_URL`, as in Batch B.
+- `npm --prefix frontend test`: **103 files, 609 tests passed**. Batch C touches no file under `frontend/`, so lint and build were not run.
+- Batch-level runs during the tasks: `tests/unit/agentic tests/unit/permissions` (without the nested `tools` argument, see Deviation 3): 1611 passed, 8 skipped. `tests/unit/conversations/test_mailbox.py` with `tests/unit/persistence`: 148 passed. `tests/unit/agentic/test_agent_teams.py`: 7 passed.
+
+### Deviations from the plan
+
+- **Plan deviations 13–15, as implemented:**
+  13. The team roster is kept on the turn's session and is gone at the next turn. The mailbox is stored in the database through the chat store's engine (`PostgresChatStore._engine`); a session whose chat store has no engine (the tests' recording store) uses `InMemoryMailbox`.
+  14. `TeammateIdle` is emitted on the lifecycle bus and its hook answers are not read. The lead receives the teammate's last report (up to 2,000 characters) as a `teammate` reminder.
+  15. A message to a busy teammate waits until its current run ends. A teammate reads up to `MAX_TEAM_DELIVERIES = 10` batches in one run, then goes idle. `ask_agents` is unchanged.
+- **Other differences from the plan:**
+  a. Task 12, step 3, edit 2: the old text `_PERMISSIVENESS = {` is a prefix of a one-line dict in `agent_definitions.py`. The new constant is inserted before that line and the dict is untouched.
+  b. Task 14, step 2: the expected collection error did not happen (see Tests above); the red state is still the missing feature.
+  c. Task 14, step 4: the command as written, `uv run pytest -q tests/unit/agentic tests/unit/agentic/tools tests/unit/permissions`, collected 745 tests where the three directories hold 1619. pytest drops tests when a directory and one of its subdirectories are both arguments (checked with `--co`). The run used `tests/unit/agentic tests/unit/permissions` instead: 1611 passed, 8 skipped, 1619 collected.
+  d. Commit trailer: every commit ends with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`, as the plan and the brief require. The session's attribution note names Haiku 5.5 for commits; the owner should decide, as the Batch B ledger already says.
+  e. `agent_tools.py` is 1698 lines after Task 14; the guard in `test_split.py` requires fewer than 1700. Two lines of room remain.
+  f. Git prints "LF will be replaced by CRLF" for the edited and new files. Their content is LF in the working copy and in HEAD, so the warning comes from the environment's `core.autocrlf` setting. No content changed.
+  g. A scratch copy of the contract test (used to count its cases) was written to `C:\Users\carlos\AppData\Local\Temp\old_contract.py`, outside the repository. It was not deleted, because of the no-deletion rule.
+
+### Expectation changes (the only existing tests changed)
+
+- Task 13: `tests/unit/persistence/test_postgres_schema.py` lists `agent_mailbox`; `tests/unit/persistence/test_w3_schema.py` expects the head revision `0050_w5_extensibility` (both assertions).
+- Task 14: `tests/unit/agentic/tools/test_tool_ledger.py` counts 32 included, 5 deferred, 12 excluded. `tests/unit/agentic/tools/test_public_contract.py`: the Agent tool lists `name` and `team_name`, and a `send_message` entry (fields `to`, `message`, `summary`; required `to` and `message`).
+
+No other existing test was changed, weakened or skipped.
+
+### Closed by this batch
+
+- Batch B observation **Preloaded skills**: the wrapper part is closed by Task 12. The body sits inside the subordinate wrapper, and a closing `</agentos-skill-instructions>` inside it is neutralised. The rest of that observation is still open: the skill's `allowed-tools` are not granted to the subagent, and its `!`cmd`` blocks are not run.
+- Batch B observation **Replacing a builtin**: a repository can no longer replace `explore`, `plan`, `general-purpose`, `general`, `fork` or `verifier`; such a definition is reported and skipped. A person's own or a managed definition may still replace them, as the plan says.
+
+### Observations not fixed (for the owner)
+
+- **Messages lost when a start is refused.** `_send_team_message` takes the pending messages (`_take_team_mail`) before `_ask_agent` runs. If that start is refused (the turn's subagent budget is used up, the model is not allowed, the teammate is still running), the messages are already marked delivered and nothing reads them. The lead does receive the refusal. Possible fix: take the messages only after a successful start, or post them back on failure.
+- **Idle with mail still pending.** After `MAX_TEAM_DELIVERIES` batches a teammate goes idle. Messages posted after that point stay pending; the lead is not told, and they are read only when the lead next sends to that teammate.
+- **Cancelled teammates.** `_run_background_agent` emits `TeammateIdle` and sends the last report whatever the outcome, and it keeps taking mail after a cancel. I did not test what the re-runs do after a cancel.
+- **A teammate name is turn-wide.** Naming an existing teammate with a different `team_name` silently moves it to the new team, because the roster entry is overwritten.
