@@ -2463,6 +2463,8 @@ class TurnSession:
             on_notification=self._push_notification if code_mode_active and not read_only_mode else None,
             notification_budget=self._notification_budget,
         )
+        # W5: skills and commands read from disk, for the Skill tool of this toolset (subagents' too).
+        toolset._disk_skills = getattr(self, "_disk_skills", None)
         if permission_broker is not None:
             toolset._permission_broker = permission_broker
             toolset._interactive_permissions = bool(interactive_permissions)
@@ -2753,16 +2755,59 @@ class TurnSession:
         return body
 
     def _skill_catalog(self, task: str, toolset: AgentToolset) -> tuple[object, ...]:
+        # W5: every skill read from disk that the model may invoke (name + description, within a budget), then the
+        # library's best matches for the task.
+        catalog = getattr(self, "_disk_skills", None)
+        disk = tuple(catalog.catalog_items()) if catalog is not None else ()
         if self.skills is None:
-            return ()
+            return disk
         try:
             from agentos.skills.retrieval import RetrievalQuery
 
             available = tuple(item.name for item in toolset.definitions() if item.kind != "skill")
-            return self.skills.retrieve(RetrievalQuery(text=task, available_tools=available, limit=5)).items
+            library = self.skills.retrieve(RetrievalQuery(text=task, available_tools=available, limit=5)).items
         except Exception:
             # Skills enhance the turn but never become a single point of failure.
-            return ()
+            library = ()
+        seen = {item.id for item in disk}
+        return disk + tuple(item for item in library if item.id not in seen)
+
+    def _load_disk_skills(self, trusted: bool):
+        """Skills and commands on disk (W5): managed and user ones always, the repository's once it is trusted."""
+        from agentos.skills.disk import DiskSkillCatalog, load_disk_skills
+
+        try:
+            catalog = load_disk_skills(workspace_root=self.workspace.root, trusted=bool(trusted))
+        except Exception:  # noqa: BLE001 - a broken skill folder never stops a turn
+            logger.exception("skills on disk could not be read")
+            return DiskSkillCatalog()
+        for path, reason in catalog.errors[:20]:
+            logger.warning("skill %s ignored: %s", path, reason)
+        return catalog
+
+    def _apply_user_command(self, task: str, toolset: AgentToolset) -> None:
+        """``/name args`` typed by the person runs that disk skill or command: its instructions join the turn (W5)."""
+        from agentos.agentic.reminders import COMMAND_KIND
+        from agentos.agentic.tools._shared import AgentToolError
+
+        text = str(task or "").strip()
+        if not text.startswith("/") or len(text) < 2:
+            return
+        name, _, arguments = text[1:].partition(" ")
+        skill = toolset.disk_skill(name)
+        if skill is None or not skill.user_invocable:
+            return  # not a command the person can run: the message stays an ordinary message
+        try:
+            result = toolset.run_disk_skill(skill, arguments.strip(), invoked_by="user")
+        except AgentToolError as error:
+            self._reminders.add(COMMAND_KIND, f"/{skill.name} could not run: {error}", key=f"command:{skill.name}")
+            return
+        content = str(getattr(result, "content", None) if not isinstance(result, dict) else result.get("content") or "")
+        fork = f" It asks to run in a subagent: start one with the Agent tool (subagent_type {skill.agent or 'general-purpose'}) and give it these instructions." if skill.context == "fork" else ""
+        invocation = f"/{skill.name}" + (f" {arguments.strip()}" if arguments.strip() else "")
+        self._reminders.add(
+            COMMAND_KIND, f"The person ran {invocation}. Carry out its instructions.{fork}\n{content}", key=f"command:{skill.name}",
+        )
 
     def _auto_mode_classifier(self):
         from agentos.permissions.auto_mode import AutoModeClassifier
@@ -3198,6 +3243,7 @@ class TurnSession:
         self._active_permission_broker = permission_broker
         self._reminders = ReminderQueue()
         self._apply_working_directories()
+        self._disk_skills = self._load_disk_skills(trusted_workspace)
         toolset = self._toolset(
             subagents=self.enable_subagents,
             non_interactive_ask=self._non_interactive_ask(),
@@ -3257,6 +3303,8 @@ class TurnSession:
         # reads, no memory ranking, no plan scaffold, no skill catalog. The runtime only reports the block.
         prompt_blocked = bool(turn_start["blocked"])
         self._settings_session_context = list(turn_start["session_context"])
+        if task and not prompt_blocked:
+            self._apply_user_command(task, toolset)
         try:
             toolset._extra_env.update(self._hook_extra_env())
         except Exception:  # noqa: BLE001 - hook env never stops a turn

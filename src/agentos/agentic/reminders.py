@@ -20,6 +20,10 @@ MAX_PENDING_REMINDERS = 32
 MONITOR_KIND = "monitor"
 MAX_MONITOR_REMINDERS = MAX_PENDING_REMINDERS // 2
 MONITOR_CHAR_BUDGET = 12_000
+# W5: a command the person ran (/name) carries its whole instructions, like Claude Code's command message.
+COMMAND_KIND = "command"
+COMMAND_REMINDER_CHARS = 60_000
+_KIND_LIMITS = {COMMAND_KIND: COMMAND_REMINDER_CHARS}
 # Any spelling of the reminder tag, opening or closing: case, inner spaces and a short attribute list. Text that
 # came from a hook or a file must never close the block early or open a new one.
 _REMINDER_TAG = re.compile(r"<([\s/]*)system\s*[-_]\s*reminder\b[^>]{0,200}>", re.IGNORECASE)
@@ -99,7 +103,9 @@ class ReminderQueue:
 
 def render_reminders(items: Iterable[Reminder]) -> str:
     """One user-message body: each reminder in its own block, in arrival order."""
-    return "\n".join(block for block in (system_reminder(item.text) for item in items) if block)
+    return "\n".join(
+        block for block in (system_reminder(item.text, limit=_KIND_LIMITS.get(item.kind, MAX_REMINDER_CHARS)) for item in items) if block
+    )
 
 
 __all__ = [
