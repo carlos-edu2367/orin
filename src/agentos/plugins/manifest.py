@@ -26,6 +26,38 @@ class ManifestRejected(ValueError):
     pass
 
 
+_OPTION_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
+MAX_OPTIONS = 32
+
+
+@dataclass(frozen=True, slots=True)
+class UserConfigOption:
+    """One option a plugin asks the person for (``userConfig``, W5)."""
+
+    key: str
+    title: str
+    description: str
+    sensitive: bool = False
+    required: bool = False
+    default: str | None = None
+
+
+def parse_user_config(raw: Any) -> tuple[UserConfigOption, ...]:
+    if not isinstance(raw, Mapping):
+        return ()
+    options: list[UserConfigOption] = []
+    for key, spec in list(raw.items())[:MAX_OPTIONS]:
+        if not isinstance(key, str) or not _OPTION_KEY.fullmatch(key) or not isinstance(spec, Mapping):
+            continue
+        default = spec.get("default")
+        options.append(UserConfigOption(
+            key, _text(spec.get("title") or key, 120), _text(spec.get("description"), 1000),
+            spec.get("sensitive") is True, spec.get("required") is True,
+            None if default is None or isinstance(default, (dict, list)) else _text(default, 4000),
+        ))
+    return tuple(options)
+
+
 @dataclass(frozen=True, slots=True)
 class PluginManifest:
     plugin_id: str
@@ -41,6 +73,7 @@ class PluginManifest:
     skills_paths: tuple[str, ...] = ("skills",)
     output_styles_paths: tuple[str, ...] = ("output-styles",)
     mcp_config_path: str = ".mcp.json"
+    user_config: tuple[UserConfigOption, ...] = ()
 
 
 def _text(value: Any, limit: int = 1024) -> str:
@@ -103,6 +136,7 @@ def parse_plugin_manifest(payload: Mapping[str, Any]) -> PluginManifest:
         skills_paths=_package_paths(payload.get("skills"), "skills"),
         output_styles_paths=_package_paths(payload.get("outputStyles"), "output-styles"),
         mcp_config_path=_package_relative_path(payload.get("mcpServers") if isinstance(payload.get("mcpServers"), str) else None, ".mcp.json"),
+        user_config=parse_user_config(payload.get("userConfig")),
     )
 
 

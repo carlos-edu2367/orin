@@ -759,6 +759,13 @@ agent_mailbox = Table(
 )
 Index("ix_agent_mailbox_pending", agent_mailbox.c.conversation_id, agent_mailbox.c.recipient, agent_mailbox.c.delivered_at)
 
+# W5: a plugin's options (userConfig) for one person, all values encrypted together.
+plugin_settings = Table(
+    "plugin_settings", metadata,
+    Column("user_id", String(255), primary_key=True), Column("plugin_id", String(64), primary_key=True),
+    Column("values_ciphertext", Text, nullable=False), Column("updated_at", DateTime(timezone=True), nullable=False),
+)
+
 # The chat transcript is a projection of an execution, not its recovery
 # authority.  These records are deliberately narrow: they hold the durable
 # decision boundary around an external effect and references to the private

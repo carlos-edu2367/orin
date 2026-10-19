@@ -328,6 +328,10 @@ class PluginEnabledRequest(_RequestModel):
     enabled: bool
 
 
+class PluginConfigRequest(_RequestModel):
+    values: dict[str, Any]
+
+
 class OmniRouteRuntimeRequest(_RequestModel):
     auto_start: bool
 
@@ -1836,6 +1840,22 @@ def create_app(services: ApiServices) -> FastAPI:
         services.security.authorize(principal, action="plugins.hooks_enabled", resource_id=plugin_id, purpose="plugins.configure")
         return JSONResponse(_jsonable(_require_port(services.plugins).set_hooks_enabled(
             user_id=principal.user_id, plugin_id=plugin_id, enabled=payload.enabled
+        )))
+
+    @app.get("/v1/plugins/{plugin_id}/config")
+    async def get_plugin_config(plugin_id: str, request: Request) -> JSONResponse:
+        principal = principal_for(request)
+        services.security.check_rate_limit(principal, action="plugins.config.read", origin=request.headers.get("origin"))
+        services.security.authorize(principal, action="plugins.config.read", resource_id=plugin_id, purpose="plugins.read")
+        return JSONResponse(_jsonable(_require_port(services.plugins).user_config(user_id=principal.user_id, plugin_id=plugin_id)))
+
+    @app.put("/v1/plugins/{plugin_id}/config")
+    async def set_plugin_config(plugin_id: str, payload: PluginConfigRequest, request: Request) -> JSONResponse:
+        principal = principal_for(request, mutable=True)
+        services.security.check_rate_limit(principal, action="plugins.config", origin=request.headers.get("origin"))
+        services.security.authorize(principal, action="plugins.config", resource_id=plugin_id, purpose="plugins.configure")
+        return JSONResponse(_jsonable(_require_port(services.plugins).set_user_config(
+            user_id=principal.user_id, plugin_id=plugin_id, values=payload.values,
         )))
 
     @app.delete("/v1/plugins/{plugin_id}", status_code=204)

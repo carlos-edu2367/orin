@@ -96,5 +96,5 @@ def inspect_plugin_package(path: Path, *, package_digest: str) -> PluginInspecti
     return PluginInspection(
         PluginRef(manifest.plugin_id, manifest.version), manifest.display_name, manifest.description,
         manifest.author, manifest.homepage, package_digest, skills=tuple(skills), mcp_servers=mcp_servers,
-        agents=tuple(agents), commands=commands, hooks=hooks, warnings=tuple(warnings),
+        agents=tuple(agents), commands=commands, hooks=hooks, warnings=tuple(warnings), options=manifest.user_config,
     )

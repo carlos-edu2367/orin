@@ -72,6 +72,7 @@ def test_persistence_schema_contains_only_the_durable_boundary_tables():
             "conversation_sessions",
             "conversation_directories",
             "agent_mailbox",
+            "plugin_settings",
         }
 
 

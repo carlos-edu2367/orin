@@ -8,6 +8,7 @@ from agentos.skills.models import SkillScope, SkillSource
 from agentos.skills.parser import parse_skill_file
 
 from .models import PluginInspection
+from .user_config import substitute_options
 from .variables import plugin_variables, substitute
 
 
@@ -23,7 +24,10 @@ class PluginActivator:
         self.command_library = command_library
         self.hook_engine = hook_engine
 
-    def activate(self, *, user_id: str, install_path: Path, inspection: PluginInspection):
+    def activate(self, *, user_id: str, install_path: Path, inspection: PluginInspection, user_config=None):
+        """``user_config``: the plugin's option values (W5), filled into its MCP servers' ``${user_config.KEY}``."""
+        options = dict(user_config or {})
+        sensitive = frozenset(item.key for item in inspection.options if item.sensitive)
         installed_skills = []
         server_ids: list[str] = []
         contributions: list[dict[str, Any]] = []
@@ -56,11 +60,12 @@ class PluginActivator:
                 # W5: also ${ORIN_PLUGIN_ROOT} and the plugin's data folder (${CLAUDE_PLUGIN_DATA} / ${ORIN_PLUGIN_DATA}).
                 variables = plugin_variables(install_path=Path(install_path), plugin_id=inspection.ref.plugin_id, user_id=user_id)
                 Path(variables["ORIN_PLUGIN_DATA"]).mkdir(parents=True, exist_ok=True)
-                command = substitute(item.command, variables) if item.command else item.command
-                args = tuple(substitute(value, variables) for value in item.args)
+                command = substitute_options(substitute(item.command, variables), options, sensitive) if item.command else item.command
+                args = tuple(substitute_options(substitute(value, variables), options, sensitive) for value in item.args)
+                url = substitute_options(item.url, options, sensitive) if item.url else item.url
                 proposed = self.mcp_service.propose({
                     "user_id": user_id, "slug": item.slug, "display_name": item.display_name,
-                    "transport": item.transport, "command": command, "args": list(args), "url": item.url,
+                    "transport": item.transport, "command": command, "args": list(args), "url": url,
                     "secret_names": list(item.secret_names), "catalog_id": None, "tool_allowlist": None,
                 })
                 server_id = str(proposed["server_id"])

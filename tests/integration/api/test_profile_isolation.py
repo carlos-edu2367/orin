@@ -69,6 +69,7 @@ OWNED = {
     ("GET", "/v1/executions/{execution_id}"),
     ("POST", "/v1/plugins/{plugin_id}/approve"), ("PUT", "/v1/plugins/{plugin_id}/enabled"),
     ("PUT", "/v1/plugins/{plugin_id}/hooks-enabled"), ("DELETE", "/v1/plugins/{plugin_id}"),
+    ("GET", "/v1/plugins/{plugin_id}/config"), ("PUT", "/v1/plugins/{plugin_id}/config"),
     ("PATCH", "/v1/providers/{provider}/keys/{key_id}"), ("DELETE", "/v1/providers/{provider}/keys/{key_id}"),
     ("POST", "/v1/events/streams/{stream_id}/read"), ("GET", "/v1/events/streams/{stream_id}"),
     *{("GET", f"/v1/{resource}/{{resource_id}}") for resource in ("agents", "capabilities", "tools", "workspaces", "artifacts")},

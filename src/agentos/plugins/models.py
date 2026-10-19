@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 from enum import StrEnum
 import re
 
@@ -102,6 +103,7 @@ class PluginInspection:
     commands: tuple[CommandContribution, ...] = ()
     hooks: tuple[HookContribution, ...] = ()
     warnings: tuple[str, ...] = ()
+    options: tuple[Any, ...] = ()  # W5: the manifest's userConfig options (manifest.UserConfigOption)
 
     @property
     def contribution_count(self) -> int:

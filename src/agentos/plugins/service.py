@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 import json
 import shutil
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from sqlalchemy import delete, insert, select, update
 from sqlalchemy.engine import Engine
@@ -17,7 +17,7 @@ from .activator import PluginActivator
 from .discovery import PluginDiscoveryService
 from .fetcher import FetchRejected, PluginFetcher
 from .inspector import inspect_plugin_package
-from .manifest import ManifestRejected
+from .manifest import ManifestRejected, manifest_file, parse_plugin_manifest
 from .mcp_inference import infer_mcp_launch as _infer_mcp_launch
 from .models import PluginState
 from .marketplace import parse_marketplace
@@ -42,6 +42,71 @@ class PluginService:
         self.fetcher = fetcher or PluginFetcher(self.plugin_root)
         self.activator = activator or PluginActivator(skill_library=skill_library, mcp_service=mcp_service, command_library=command_library, hook_engine=hook_engine)
         self.discovery = PluginDiscoveryService(self, search_client=search_client, manifest_probe=manifest_probe)
+
+    # -- options (userConfig, W5) ---------------------------------------------
+
+    @property
+    def _config_store(self):
+        store = getattr(self, "_config_store_instance", None)
+        if store is None:
+            from .user_config import PluginConfigStore
+
+            store = self._config_store_instance = PluginConfigStore(self.engine)
+        return store
+
+    def _declared_options(self, record: Mapping[str, Any]) -> dict[str, Any]:
+        target = manifest_file(Path(record["install_path"]))
+        if target is None:
+            return {}
+        manifest = parse_plugin_manifest(json.loads(target.read_text(encoding="utf-8")))
+        return {item.key: item for item in manifest.user_config}
+
+    def user_config(self, *, user_id: str, plugin_id: str) -> dict[str, Any]:
+        from .user_config import public_view
+
+        options = self._declared_options(self.get(user_id, plugin_id))
+        values = self._config_store.values(user_id, plugin_id) if options else {}
+        return {"plugin_id": plugin_id, "options": public_view(options, values)}
+
+    def set_user_config(self, *, user_id: str, plugin_id: str, values: Mapping[str, Any]) -> dict[str, Any]:
+        """Change a plugin's options. An active plugin's MCP servers take new values when it is turned off and on."""
+        from .user_config import PluginConfigError
+
+        options = self._declared_options(self.get(user_id, plugin_id))
+        try:
+            self._config_store.update(user_id, plugin_id, dict(values), options)
+        except PluginConfigError as error:
+            raise PluginServiceError(str(error), code="plugin_config_invalid") from error
+        return self.user_config(user_id=user_id, plugin_id=plugin_id)
+
+    def _option_values(self, user_id: str, plugin_id: str, inspection: Any) -> dict[str, str]:
+        """The values to activate with: defaults, then the person's; refuses a missing required or misplaced sensitive one."""
+        from .user_config import referenced_options
+
+        options = {item.key: item for item in inspection.options}
+        if not options:
+            return {}
+        values = {key: item.default for key, item in options.items() if item.default is not None}
+        values.update(self._config_store.values(user_id, plugin_id))
+        missing = [key for key, item in options.items() if item.required and key not in values]
+        if missing:
+            raise PluginServiceError(f"set the plugin option(s) {', '.join(missing)} before turning it on", code="plugin_config_required")
+        for server in inspection.mcp_servers:
+            for text in (server.command or "", *server.args, server.url or ""):
+                for key in referenced_options(text):
+                    if key in options and options[key].sensitive:
+                        raise PluginServiceError(
+                            f"the sensitive option {key} cannot be written into an MCP server's command line or URL",
+                            code="plugin_config_sensitive",
+                        )
+                    if key not in values:
+                        raise PluginServiceError(f"set the plugin option {key} before turning it on", code="plugin_config_required")
+        return values
+
+    def _activate(self, user_id: str, record: Mapping[str, Any], inspection: Any):
+        values = self._option_values(user_id, str(record["plugin_id"]), inspection)
+        extra = {"user_config": values} if inspection.options else {}
+        return self.activator.activate(user_id=user_id, install_path=Path(record["install_path"]), inspection=inspection, **extra)
 
     def search(self, query: str) -> list[dict[str, Any]]:
         needle = str(query or "").casefold()
@@ -137,7 +202,9 @@ class PluginService:
             raise PluginServiceError("plugin is not awaiting approval")
         inspection = inspect_plugin_package(Path(record["install_path"]), package_digest=record["package_digest"])
         try:
-            result = self.activator.activate(user_id=user_id, install_path=Path(record["install_path"]), inspection=inspection)
+            result = self._activate(user_id, record, inspection)
+        except PluginServiceError:
+            raise
         except Exception as error:
             raise PluginServiceError("plugin activation failed") from error
         now = _now()
@@ -163,7 +230,7 @@ class PluginService:
             # not silently reset a prior "yes" back to "not authorized".
             prior_hook_rows = [item for item in contributions if item.get("kind") == "hook"]
             hooks_were_enabled = bool(prior_hook_rows) and all(bool(item["enabled"]) for item in prior_hook_rows)
-            activation = self.activator.activate(user_id=user_id, install_path=Path(record["install_path"]), inspection=inspection)
+            activation = self._activate(user_id, record, inspection)
             now = _now()
             with self.engine.begin() as connection:
                 connection.execute(delete(plugin_contributions).where((plugin_contributions.c.plugin_id == plugin_id) & (plugin_contributions.c.user_id == user_id)))
@@ -193,6 +260,10 @@ class PluginService:
             self.activator.deactivate(user_id=user_id, plugin_id=plugin_id, contributions=self._contributions(user_id, plugin_id))
         self._delete_record(user_id, plugin_id)
         self._safe_remove(Path(record["install_path"]))
+        try:
+            self._config_store.remove(user_id, plugin_id)  # W5: a removed plugin's options go with it
+        except Exception:  # noqa: BLE001 - the plugin is removed either way
+            pass
         return {"plugin_id": plugin_id, "removed": True}
 
     def get(self, user_id: str, plugin_id: str, *, missing_ok: bool = False) -> dict[str, Any] | None:
