@@ -46,9 +46,9 @@
 | D | 16–19 | Hardening of C; MCP servers from the managed, user, local and project files (approval, trust, `${VAR}`, allow/deny lists) |
 | E | 20–26 | MCP protocol: server requests and notifications, SSE and WebSocket transports, stdio shutdown, `MAX_MCP_OUTPUT_TOKENS`, resources and RefreshMcpTools, prompts as commands, elicitation |
 | F | 27–32 | Hardening of D; plugin packages (manifest locations, paths, lenient skills, plugin variables); plugin agents and output styles; `enabledPlugins`; `userConfig` encrypted; marketplaces fetched |
-| G | | One hook system: plugin, skill and agent hooks in the dispatcher |
-| H | | LSP diagnostics after edits |
-| I | | Tool ledger, final regression |
+| G | 33–36 | Hardening of E; one hook system: plugin hooks in the dispatcher (per-hook consent, confined runner), skill and agent hooks |
+| H | 37–38 | LSP diagnostics after edits; W5 close (final regression, ledger summary) |
+| I | — | Folded into Task 38 (the tool ledger moved in Batch E) |
 
 Batches B to I are specified in this file after the previous batch has run and been verified; their numbering continues from the last task of the batch before.
 
@@ -11573,4 +11573,1425 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - [ ] **Step 1:** Run `uv run pytest -q tests/unit` (timeout 600000 ms) and `uv run pytest -q tests/integration`. Expected: all pass.
 - [ ] **Step 2:** Append a "## Batch F — Plugins (Tasks 27–32)" section to `docs/superpowers/plans/2026-10-19-w5-extensibility-ledger.md`: commits, suite results, deviations 29–34, the deliberate expectation changes (Task 30: `test_postgres_schema.py` lists `plugin_settings` and `test_w3_schema.py` expects the head revision `0051_w5_plugin_settings`, and `tests/integration/api/test_profile_isolation.py` classifies `GET`/`PUT /v1/plugins/{plugin_id}/config` as owned), and anything done differently from this plan.
 - [ ] **Step 3:** Commit with `docs(w5): ledger, batch F` + blank line + the Co-Authored-By line.
+
+## Batch G — One hook system
+
+Orin had two hook systems: the settings hooks (W2: every event, four handler types, decisions such as deny) and a separate plugin-hook engine that knew three events, could not block anything and ran outside the dispatcher. Skills and agents could declare hooks in their frontmatter, but nothing ran them. This batch first closes the findings of executing Batch E (Task 33), then runs a plugin's hooks in the settings hooks' dispatcher (Task 34) and runs a skill's or agent's own hooks for the agent that uses it (Task 35).
+
+New deviations (also in the ledger):
+
+35. **A plugin hook runs only once the person allowed that exact hook** (the plugins screen's consent, by hook id); a hook a later package version adds waits for a new consent. Plugin hooks run `command` handlers only, without a shell and confined to the plugin's folder (Orin's stricter rule; Claude Code runs them through a shell), in the project folder with a minimal environment.
+36. **The older plugin-hook engine stays in the code but receives no hooks**: the worker no longer fills it, so no hook runs twice. Removing its module and tests needs the owner's consent (files are not deleted without asking).
+37. **A skill's hooks are active from its first use until the turn ends, for the agent that used it**; an agent's hooks are active while it runs, for its events only, and its `Stop` hooks run at its `SubagentStop`. `allowManagedHooksOnly`, `disableAllHooks` and the capability that turns plugin hooks off on a shared Orin apply to plugin, skill and agent hooks alike (a managed skill or agent keeps its hooks under `allowManagedHooksOnly`).
+38. **A stdio MCP server that exits on its own within 0.3 s is not tree-killed**, so a child process it left behind may outlive it (Orin does not put MCP servers in a Windows Job Object).
+
+### Task 33: Hardening found while executing Batch E
+
+Four fixes, one commit:
+
+1. **An elicitation answer with a number that is not finite (NaN, infinity) is declined**: it is not valid JSON.
+2. **`/mcp__server__prompt` keeps backslashes**: words are split on spaces and grouped by double or single quotes, so `C:\work\pr` reaches the prompt intact (the POSIX split ate the backslashes).
+3. **`/mcp__server__prompt` with no MCP server connected tells the model why nothing ran**, instead of passing as ordinary text.
+4. **The SSE and WebSocket transports check the address again when the connection opens** (the HTTP transport already checks before every request).
+
+**Files:**
+- Modify: `src/agentos/mcp/elicitation.py`
+- Modify: `src/agentos/agentic/session.py`
+- Modify: `src/agentos/mcp/transport_sse.py`
+- Modify: `src/agentos/mcp/transport_ws.py`
+- Modify: `tests/unit/mcp/test_mcp_elicitation.py`
+- Modify: `tests/unit/mcp/test_mcp_prompts.py`
+- Modify: `tests/unit/mcp/test_sse_ws_transports.py`
+
+**Interfaces:**
+- Consumes: Batch E (`checked_answer`, `_apply_mcp_prompt`, `SseTransport`, `WebSocketTransport`, `transport_sse.checked_url`).
+
+- [ ] **Step 1: Write the failing test**
+
+Append to the end of `tests/unit/mcp/test_mcp_elicitation.py` (after its last line, separated by one blank line):
+
+```python
+def test_an_answer_with_a_number_that_is_not_finite_is_declined() -> None:
+    for value in (float("nan"), float("inf"), float("-inf")):
+        assert checked_answer({"action": "accept", "content": {"n": value}}) == {"action": "decline"}
+    assert checked_answer({"action": "accept", "content": {"n": 1.5}}) == {"action": "accept", "content": {"n": 1.5}}
+```
+
+Append to the end of `tests/unit/mcp/test_mcp_prompts.py` (after its last line, separated by one blank line):
+
+```python
+def test_a_windows_path_and_quoted_words_reach_the_prompt_intact(tmp_path: Path) -> None:
+    from tests.unit.agentic.test_disk_skills_session import _session
+
+    server = _PromptServer()
+    session = _session(tmp_path, '/mcp__docs__review C:\\work\\pr-7 "the parser"')
+    session.mcp_provider = _provider(server)
+    session.build_runtime()
+    assert server.asked[-1]["arguments"] == {"pr": "C:\\work\\pr-7", "focus": "the parser"}
+
+
+def test_without_any_mcp_server_the_model_hears_why_nothing_ran(tmp_path: Path) -> None:
+    from tests.unit.agentic.test_disk_skills_session import _session
+
+    session = _session(tmp_path, "/mcp__docs__review 7")
+    session.build_runtime()
+    texts = [item.text for item in session._reminders.drain() if item.kind == "command"]
+    assert texts and "no MCP server is connected" in texts[0]
+```
+
+Append to the end of `tests/unit/mcp/test_sse_ws_transports.py` (after its last line, separated by one blank line):
+
+```python
+def test_the_address_is_checked_again_when_the_connection_opens(monkeypatch) -> None:
+    calls: list[str] = []
+
+    def rebinding(url, resolve_dns=False):
+        calls.append(url)
+        if len(calls) > 1:
+            raise RuntimeError("Private network addresses cannot be fetched.")
+        return url
+
+    monkeypatch.setattr("agentos.mcp.transport_sse._public_url", rebinding)
+    requested: list[object] = []
+    client = httpx.Client(transport=httpx.MockTransport(lambda request: requested.append(request) or httpx.Response(500)))
+    with pytest.raises(SseTransportError, match="Private network"):
+        SseTransport(url="https://mcp.example.com/sse", client=client).open()
+    assert requested == []  # refused before any request
+    calls.clear()
+    attempts: list[object] = []
+
+    def connect(*args, **kwargs):
+        attempts.append(args)
+        raise OSError("unreachable")
+
+    with pytest.raises(WebSocketTransportError, match="Private network"):
+        WebSocketTransport(url="wss://mcp.example.com/mcp", connect=connect).open()
+    assert attempts == []
+```
+
+- [ ] **Step 2: Run it to verify it fails**
+
+Run: `uv run pytest -q tests/unit/mcp/test_mcp_elicitation.py tests/unit/mcp/test_mcp_prompts.py tests/unit/mcp/test_sse_ws_transports.py`
+Expected: FAIL — `test_an_answer_with_a_number_that_is_not_finite_is_declined`, `test_a_windows_path_and_quoted_words_reach_the_prompt_intact`, `test_without_any_mcp_server_the_model_hears_why_nothing_ran` and `test_the_address_is_checked_again_when_the_connection_opens`.
+
+- [ ] **Step 3: Implement**
+
+Then make these edits, in order (each `replace` block occurs exactly once in its file; if one does not, stop and report — do not guess):
+
+1. In `src/agentos/mcp/elicitation.py`, replace
+
+```python
+import logging
+from collections.abc import Mapping
+```
+
+   with
+
+```python
+import logging
+import math
+from collections.abc import Mapping
+```
+
+2. In `src/agentos/mcp/elicitation.py`, replace
+
+```python
+        elif isinstance(value, (bool, int, float)):
+            clean[key] = value
+```
+
+   with
+
+```python
+        elif isinstance(value, (bool, int, float)):
+            if isinstance(value, float) and not math.isfinite(value):
+                return {"action": "decline"}  # NaN and infinity are not JSON
+            clean[key] = value
+```
+
+3. In `src/agentos/agentic/session.py`, replace
+
+```python
+        """``/mcp__server__prompt args`` runs that MCP prompt; its messages join the turn as the person's command (W5)."""
+        import shlex
+
+        from agentos.agentic.reminders import COMMAND_KIND
+
+        server, _, prompt = name[len("mcp__"):].partition("__")
+        provider = self.mcp_provider
+        if provider is None or not server or not prompt or not callable(getattr(provider, "get_prompt", None)):
+            return  # no such prompt here: the message stays an ordinary message
+        try:
+            words = shlex.split(arguments, posix=True) if arguments else []
+        except ValueError:
+            words = arguments.split()
+```
+
+   with
+
+```python
+        """``/mcp__server__prompt args`` runs that MCP prompt; its messages join the turn as the person's command (W5).
+
+        Words are split on spaces; double or single quotes group words. Backslashes are kept (Windows paths)."""
+        from agentos.agentic.reminders import COMMAND_KIND
+
+        server, _, prompt = name[len("mcp__"):].partition("__")
+        if not server or not prompt:
+            return  # not an MCP prompt: the message stays an ordinary message
+        provider = self.mcp_provider
+        if provider is None or not callable(getattr(provider, "get_prompt", None)):
+            self._reminders.add(COMMAND_KIND, f"/{name} could not run: no MCP server is connected in this turn.", key=f"command:{name}")
+            return
+        words = [
+            next(group for group in match.groups() if group is not None)
+            for match in re.finditer(r'"([^"]*)"|\'([^\']*)\'|(\S+)', arguments or "")
+        ]
+```
+
+4. In `src/agentos/mcp/transport_sse.py`, replace
+
+```python
+        if self._reader is not None:
+            return
+        if self._client is None:
+            self._client = httpx.Client(timeout=httpx.Timeout(self._timeout, read=None), follow_redirects=False)
+```
+
+   with
+
+```python
+        if self._reader is not None:
+            return
+        if not self._allow_local:
+            checked_url(self._url, allow_local=False)  # the address is checked again when the stream opens
+        if self._client is None:
+            self._client = httpx.Client(timeout=httpx.Timeout(self._timeout, read=None), follow_redirects=False)
+```
+
+5. In `src/agentos/mcp/transport_ws.py`, replace
+
+```python
+        self._headers = dict(headers or {})
+```
+
+   with
+
+```python
+        self._headers = dict(headers or {})
+        self._allow_local = allow_local
+```
+
+6. In `src/agentos/mcp/transport_ws.py`, replace
+
+```python
+        if self._socket is not None:
+            return
+        try:
+            self._socket = self._connect(
+```
+
+   with
+
+```python
+        if self._socket is not None:
+            return
+        try:
+            checked_url(self._url, allow_local=self._allow_local, secure="wss://", plain="ws://")  # checked again on opening
+        except RuntimeError as error:
+            raise WebSocketTransportError(str(error)) from error
+        try:
+            self._socket = self._connect(
+```
+
+- [ ] **Step 4: Run the tests and see them pass**
+
+Run: `uv run pytest -q tests/unit/mcp/test_mcp_elicitation.py tests/unit/mcp/test_mcp_prompts.py tests/unit/mcp/test_sse_ws_transports.py`
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/agentos/mcp/elicitation.py src/agentos/agentic/session.py src/agentos/mcp/transport_sse.py src/agentos/mcp/transport_ws.py tests/unit/mcp/test_mcp_elicitation.py tests/unit/mcp/test_mcp_prompts.py tests/unit/mcp/test_sse_ws_transports.py
+git commit -m "fix(w5): MCP hardening — finite elicitation numbers, Windows paths in prompt arguments, address re-checks
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+### Task 34: A plugin's hooks run in the settings hooks' dispatcher
+
+A plugin's `hooks.json` now lists every event Orin knows (an unknown one is warned), keeps `async` and allows timeouts up to 600 s (default 60). At turn start the session adds, to the settings hooks, the hooks of the person's active plugins that the person allowed (by hook id), as `HookSpec`s with source `plugin:<id>`: they get every event and real decisions (a plugin's `PreToolUse` hook can deny). The command runner runs such a hook without a shell (`resolve_argv`, confined to the plugin's folder), in the project folder, with a minimal environment plus `CLAUDE_PLUGIN_ROOT`/`ORIN_PLUGIN_ROOT`, the plugin's data folder and its options (`CLAUDE_PLUGIN_OPTION_<KEY>`/`ORIN_PLUGIN_OPTION_<KEY>`); a hook may name a non-sensitive option in its command. `non_managed_hooks_allowed` applies the managed and user switches; the worker passes its `plugin_hooks` capability to the session and no longer fills the older plugin-hook engine. Deliberate expectation changes: three cases of `test_hooks_manifest.py` (every event is listed, `async` is kept, a timeout is capped at 600) and one stub line in `test_multi_session_concurrency.py`.
+
+**Files:**
+- Create: `src/agentos/plugins/hook_specs.py`
+- Modify: `tests/unit/plugins/test_hooks_manifest.py`
+- Modify: `tests/unit/workers/test_multi_session_concurrency.py`
+- Modify: `src/agentos/plugins/models.py`
+- Modify: `src/agentos/plugins/hooks_manifest.py`
+- Modify: `src/agentos/plugins/runtime.py`
+- Modify: `src/agentos/plugins/service.py`
+- Modify: `src/agentos/hooks/config.py`
+- Modify: `src/agentos/hooks/processes.py`
+- Modify: `src/agentos/hooks/runners.py`
+- Modify: `src/agentos/agentic/session.py`
+- Modify: `src/agentos/workers/chat.py`
+- Test: `tests/unit/plugins/test_plugin_hooks_unified.py`
+
+**Interfaces:**
+- Consumes: Batch F (`active_plugins`, `PluginService._declared_options`, `plugin_variables`, `substitute_options`).
+- Produces: `HookSpec.plugin_root`, `.plugin_env`; `hooks.config.non_managed_hooks_allowed(settings)`; `processes.run_shell_command(..., shell=True)` (accepts an argument list with `shell=False`); `HookContribution.run_async`; `ActivePlugin.enabled_hook_ids`; `PluginService.option_values(*, user_id, plugin_id)`; `agentos.plugins.hook_specs.plugin_hook_specs(plugins, *, user_id, option_values=None)`; `TurnSession(..., plugin_hooks=False)`, `TurnSession._plugin_hook_specs()`.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `tests/unit/plugins/test_plugin_hooks_unified.py`:
+
+```python
+"""W5: a plugin's hooks run in the settings hooks' dispatcher — every event, real decisions, the person's consent."""
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+from agentos.agentic.lifecycle import HookEvent, LifecycleBus
+from agentos.hooks.config import non_managed_hooks_allowed
+from agentos.hooks.dispatcher import HookDispatcher
+from agentos.hooks.runners import CommandHookRunner
+from agentos.plugins.hook_specs import plugin_hook_specs
+from agentos.plugins.hooks_manifest import parse_hooks
+from agentos.plugins.runtime import active_plugins
+from agentos.settings.loader import EffectiveSettings, SettingsLayer
+
+GUARD = """
+import json, os, sys
+event = json.load(sys.stdin)
+print(json.dumps({"hookSpecificOutput": {
+    "hookEventName": "PreToolUse", "permissionDecision": "deny",
+    "permissionDecisionReason": "guard says no to " + event.get("tool_name", "?") + " in " + os.environ.get("ORIN_PLUGIN_OPTION_REGION", "?")
+        + (" with a key" if os.environ.get("CLAUDE_PLUGIN_OPTION_API_KEY") else ""),
+}}))
+"""
+
+
+def _plugin(root: Path, hooks: dict) -> Path:
+    (root / ".claude-plugin").mkdir(parents=True)
+    (root / ".claude-plugin" / "plugin.json").write_text(json.dumps({
+        "name": "kit", "version": "1.0.0",
+        "userConfig": {"region": {"description": "r"}, "api_key": {"description": "k", "sensitive": True}},
+    }), encoding="utf-8")
+    (root / "hooks").mkdir()
+    (root / "hooks" / "hooks.json").write_text(json.dumps({"hooks": hooks}), encoding="utf-8")
+    (root / "hooks" / "guard.py").write_text(GUARD, encoding="utf-8")
+    return root
+
+
+def _guard_hooks() -> dict:
+    command = f'"{sys.executable}" ${{CLAUDE_PLUGIN_ROOT}}/hooks/guard.py'
+    return {
+        "PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": command, "timeout": 30}]}],
+        "Stop": [{"hooks": [{"type": "command", "command": command + " ${user_config.api_key}"}]}],
+    }
+
+
+class _Plugins:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def list(self, user_id):
+        return list(self.rows)
+
+
+def _row(root: Path, enabled_ids: list[str]) -> dict:
+    return {
+        "plugin_id": "kit", "state": "active", "install_path": str(root),
+        "contributions": [{"kind": "hook", "reference": hook_id, "enabled": True} for hook_id in enabled_ids],
+    }
+
+
+def test_every_event_is_listed_with_its_async_flag_and_timeout(tmp_path: Path) -> None:
+    (tmp_path / "hooks").mkdir()
+    (tmp_path / "hooks" / "hooks.json").write_text(json.dumps({"hooks": {
+        "PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "x", "async": True, "timeout": 900}]}],
+        "NotAnEvent": [{"hooks": [{"type": "command", "command": "x"}]}],
+    }}), encoding="utf-8")
+    hooks, warnings = parse_hooks(tmp_path / "hooks", plugin_id="kit")
+    assert [(item.hook_id, item.run_async, item.timeout_seconds) for item in hooks] == [("kit:PreToolUse:0", True, 600)]
+    assert any("NotAnEvent" in warning for warning in warnings)
+
+
+def test_only_the_hooks_the_person_allowed_become_specs(tmp_path: Path) -> None:
+    root = _plugin(tmp_path / "kit", _guard_hooks())
+    plugins, _ = active_plugins(_Plugins([_row(root, ["kit:PreToolUse:0", "kit:Stop:0"])]), "u1", {})
+    specs, errors = plugin_hook_specs(plugins, user_id="u1", option_values=lambda _pid: {"region": "eu", "api_key": "s3cret"})
+    assert [(spec.event, spec.source) for spec in specs] == [(HookEvent.PRE_TOOL_USE, "plugin:kit")]
+    assert any("sensitive" in error.message for error in errors)  # the Stop hook named the sensitive option
+    environment = dict(specs[0].plugin_env)
+    assert environment["ORIN_PLUGIN_OPTION_REGION"] == "eu" and environment["CLAUDE_PLUGIN_ROOT"] == str(root)
+    later, errors = plugin_hook_specs(active_plugins(_Plugins([_row(root, ["kit:Stop:0"])]), "u1", {})[0], user_id="u1")
+    assert later == () and any("consent" in error.message for error in errors)
+
+
+def test_a_plugin_hook_can_deny_a_tool_call(tmp_path: Path) -> None:
+    root = _plugin(tmp_path / "kit", _guard_hooks())
+    plugins, _ = active_plugins(_Plugins([_row(root, ["kit:PreToolUse:0"])]), "u1", {})
+    specs, _ = plugin_hook_specs(plugins, user_id="u1", option_values=lambda _pid: {"region": "eu", "api_key": "k"})
+    bus = LifecycleBus()
+    bus.subscribe(HookDispatcher(specs, command_runner=CommandHookRunner(tmp_path / "project")))
+    (tmp_path / "project").mkdir()
+    decision = bus.emit(HookEvent.PRE_TOOL_USE, tool_name="Bash", tool_input={"command": "ls"})
+    assert decision.permission_decision == "deny" and decision.reason == "guard says no to Bash in eu with a key"
+    assert bus.emit(HookEvent.PRE_TOOL_USE, tool_name="Read", tool_input={}).permission_decision is None
+
+
+def test_a_command_outside_the_plugin_is_refused(tmp_path: Path) -> None:
+    root = _plugin(tmp_path / "kit", {"PreToolUse": [{"hooks": [{"type": "command", "command": f'"{sys.executable}" -c "print(1)"'}]}]})
+    plugins, _ = active_plugins(_Plugins([_row(root, ["kit:PreToolUse:0"])]), "u1", {})
+    specs, _ = plugin_hook_specs(plugins, user_id="u1")
+    run = CommandHookRunner(tmp_path).run(specs[0], {"tool_name": "Bash"})
+    assert run.exit_code is None and "refused" in str(run.error)
+
+
+def test_managed_switches_turn_plugin_hooks_off() -> None:
+    def settings(managed: dict, user: dict | None = None) -> EffectiveSettings:
+        layers = (SettingsLayer("user", None, user or {}), SettingsLayer("managed", None, managed))
+        return EffectiveSettings({}, {}, layers, (), False)
+
+    assert non_managed_hooks_allowed(settings({})) is True
+    assert non_managed_hooks_allowed(settings({"allowManagedHooksOnly": True})) is False
+    assert non_managed_hooks_allowed(settings({"disableAllHooks": True})) is False
+    assert non_managed_hooks_allowed(settings({}, {"disableAllHooks": True})) is False
+
+
+def test_the_turn_installs_the_persons_plugin_hooks(tmp_path: Path) -> None:
+    from tests.unit.agentic.test_disk_skills_session import _session
+
+    root = _plugin(tmp_path / "kit", _guard_hooks())
+    session = _session(tmp_path, "hi")
+    session.plugin_service = _Plugins([_row(root, ["kit:PreToolUse:0"])])
+    session.build_runtime()
+    assert session._hook_dispatcher is None  # this Orin runs no plugin hooks unless its capabilities say so
+    session = _session(tmp_path, "hi")
+    session.plugin_service = _Plugins([_row(root, ["kit:PreToolUse:0"])])
+    session.plugin_hooks = True
+    session.build_runtime()
+    assert [spec.source for spec in session._hook_dispatcher.specs] == ["plugin:kit"]
+```
+
+- [ ] **Step 2: Run it to verify it fails**
+
+Run: `uv run pytest -q tests/unit/plugins/test_plugin_hooks_unified.py`
+Expected: FAIL — `ModuleNotFoundError: No module named 'agentos.plugins.hook_specs'` (collection error).
+
+- [ ] **Step 3: Implement**
+
+Create `src/agentos/plugins/hook_specs.py`:
+
+```python
+"""A plugin's hooks as hook specs (W5): they run in the same dispatcher as the settings hooks.
+
+A plugin's ``hooks/hooks.json`` (or the folder its manifest names) uses the Claude Code schema; every event Orin
+knows may be hooked. A hook runs only if the person allowed it: the plugins screen's consent enables the hooks it
+listed, by id, so a hook added by a later version of the package waits for a new consent. Only ``command`` hooks
+run; each runs without a shell, confined to the plugin's folder (``plugins.hook_executor.resolve_argv``), in the
+project folder, with a minimal environment plus ``CLAUDE_PLUGIN_ROOT``/``ORIN_PLUGIN_ROOT``, the plugin's data folder
+and its options as ``CLAUDE_PLUGIN_OPTION_<KEY>``/``ORIN_PLUGIN_OPTION_<KEY>``. A hook may name a non-sensitive option
+in its command (``${user_config.KEY}``); a sensitive one only reaches it through the environment.
+"""
+from __future__ import annotations
+
+from collections.abc import Callable, Mapping, Sequence
+
+from agentos.agentic.lifecycle import HookEvent
+from agentos.hooks.config import HookConfigError, HookSpec
+
+from .hooks_manifest import parse_hooks
+from .runtime import ActivePlugin
+from .user_config import PluginConfigError, substitute_options
+from .variables import plugin_variables
+
+MAX_PLUGIN_HOOKS = 64
+
+
+def plugin_hook_specs(
+    plugins: Sequence[ActivePlugin], *, user_id: str,
+    option_values: Callable[[str], Mapping[str, str]] | None = None,
+) -> tuple[tuple[HookSpec, ...], tuple[HookConfigError, ...]]:
+    specs: list[HookSpec] = []
+    errors: list[HookConfigError] = []
+    for plugin in plugins:
+        if not plugin.enabled_hook_ids:
+            continue
+        source = f"plugin:{plugin.plugin_id}"
+        contributions, warnings = parse_hooks(plugin.install_path / plugin.manifest.hooks_path, plugin_id=plugin.plugin_id)
+        errors.extend(HookConfigError(source, warning) for warning in warnings)
+        try:
+            options = dict(option_values(plugin.plugin_id)) if option_values is not None else {}
+        except Exception:  # noqa: BLE001 - unreadable options: the hooks run without them
+            errors.append(HookConfigError(source, "the plugin's options could not be read"))
+            options = {}
+        sensitive = frozenset(item.key for item in plugin.manifest.user_config if item.sensitive)
+        environment = dict(plugin_variables(install_path=plugin.install_path, plugin_id=plugin.plugin_id, user_id=user_id))
+        for key, value in options.items():
+            environment[f"CLAUDE_PLUGIN_OPTION_{key.upper()}"] = value
+            environment[f"ORIN_PLUGIN_OPTION_{key.upper()}"] = value
+        for item in contributions:
+            if item.hook_id not in plugin.enabled_hook_ids:
+                errors.append(HookConfigError(source, f"hook {item.hook_id} waits for the person's consent"))
+                continue
+            try:
+                event = HookEvent(item.event)
+                command = substitute_options(item.command, options, sensitive)
+            except (ValueError, PluginConfigError) as error:
+                errors.append(HookConfigError(source, f"hook {item.hook_id} skipped: {error}"))
+                continue
+            specs.append(HookSpec(
+                event=event, matcher=item.matcher, type="command", source=source, timeout=float(item.timeout_seconds),
+                command=command, run_async=item.run_async,
+                plugin_root=str(plugin.install_path), plugin_env=tuple(sorted(environment.items())),
+            ))
+    if len(specs) > MAX_PLUGIN_HOOKS:
+        errors.append(HookConfigError("plugins", f"more than {MAX_PLUGIN_HOOKS} plugin hooks; the rest are ignored"))
+    return tuple(specs[:MAX_PLUGIN_HOOKS]), tuple(errors)
+
+
+__all__ = ["plugin_hook_specs"]
+```
+
+Then make these edits, in order (each `replace` block occurs exactly once in its file; if one does not, stop and report — do not guess):
+
+1. In `tests/unit/plugins/test_hooks_manifest.py`, replace
+
+```python
+    assert hooks[2].hook_id == "obsidian:SessionStart:0"
+    assert any("async" in warning for warning in warnings)
+```
+
+   with
+
+```python
+    assert hooks[2].hook_id == "obsidian:SessionStart:0"
+    assert hooks[0].run_async is True and warnings == ()
+```
+
+2. In `tests/unit/plugins/test_hooks_manifest.py`, replace
+
+```python
+def test_an_unsupported_event_is_warned_not_dropped_silently(tmp_path):
+    hooks, warnings = parse_hooks(
+        _write(tmp_path, {"hooks": {"PreToolUse": [{"matcher": "", "hooks": [{"type": "command", "command": "x"}]}]}}),
+        plugin_id="demo",
+    )
+
+    assert hooks == ()
+    assert any("PreToolUse" in warning for warning in warnings)
+```
+
+   with
+
+```python
+def test_an_unknown_event_is_warned_not_dropped_silently(tmp_path):
+    hooks, warnings = parse_hooks(
+        _write(tmp_path, {"hooks": {"NotAnEvent": [{"matcher": "", "hooks": [{"type": "command", "command": "x"}]}]}}),
+        plugin_id="demo",
+    )
+
+    assert hooks == ()
+    assert any("NotAnEvent" in warning for warning in warnings)
+```
+
+3. In `tests/unit/plugins/test_hooks_manifest.py`, replace
+
+```python
+    assert hooks[0].timeout_seconds == 30
+```
+
+   with
+
+```python
+    assert hooks[0].timeout_seconds == 600
+```
+
+4. In `tests/unit/workers/test_multi_session_concurrency.py`, replace
+
+```python
+    monkeypatch.setattr(chat_module, "rehydrate_hooks", lambda *args, **kwargs: None)
+```
+
+   with
+
+```python
+
+```
+
+5. In `src/agentos/plugins/models.py`, replace
+
+```python
+    event: str               # SessionStart | PostToolUse | PostCompact
+    matcher: str              # regex over the tool name; "" matches everything
+    command: str               # raw declared string, ${CLAUDE_PLUGIN_ROOT} unresolved
+    timeout_seconds: int
+```
+
+   with
+
+```python
+    event: str               # any hook event (W5), e.g. PreToolUse, SessionStart
+    matcher: str              # the event's matcher, as in settings hooks; "" matches everything
+    command: str               # raw declared string, ${CLAUDE_PLUGIN_ROOT} unresolved
+    timeout_seconds: int
+    run_async: bool = False   # W5: "async": true runs it in the background, like a settings hook
+```
+
+6. In `src/agentos/plugins/hooks_manifest.py`, replace
+
+```python
+Only the three events Orin dispatches are recognized. Everything else — a
+different event, a non-command hook type, ``async: true`` — is warned rather
+than silently dropped, so the author's declared intent stays visible to the
+person deciding whether to authorize execution.
+```
+
+   with
+
+```python
+Every hook event Orin knows is recognized (W5: plugin hooks run in the same dispatcher as settings hooks). An
+unknown event or a non-command hook type is warned rather than silently dropped, so the author's declared intent
+stays visible to the person deciding whether to authorize execution.
+```
+
+7. In `src/agentos/plugins/hooks_manifest.py`, replace
+
+```python
+from .models import HookContribution
+
+SUPPORTED_EVENTS = ("PostCompact", "PostToolUse", "SessionStart")
+MAX_HOOKS = 32
+MIN_TIMEOUT, DEFAULT_TIMEOUT, MAX_TIMEOUT = 1, 10, 30
+```
+
+   with
+
+```python
+from agentos.agentic.lifecycle import HookEvent
+
+from .models import HookContribution
+
+SUPPORTED_EVENTS = tuple(event.value for event in HookEvent)
+MAX_HOOKS = 32
+MIN_TIMEOUT, DEFAULT_TIMEOUT, MAX_TIMEOUT = 1, 60, 600
+```
+
+8. In `src/agentos/plugins/hooks_manifest.py`, replace
+
+```python
+                if entry.get("async") is True:
+                    warnings.append(f"hook com \"async\" em '{event}' será executado de forma síncrona, não assíncrona")
+                raw_timeout = entry.get("timeout")
+                timeout = int(raw_timeout) if isinstance(raw_timeout, (int, float)) else DEFAULT_TIMEOUT
+                hooks.append(HookContribution(
+                    f"{plugin_id}:{event}:{index}", event, matcher, command[:2048],
+                    max(MIN_TIMEOUT, min(MAX_TIMEOUT, timeout)),
+                ))
+```
+
+   with
+
+```python
+                raw_timeout = entry.get("timeout")
+                timeout = int(raw_timeout) if isinstance(raw_timeout, (int, float)) else DEFAULT_TIMEOUT
+                hooks.append(HookContribution(
+                    f"{plugin_id}:{event}:{index}", event, matcher, command[:2048],
+                    max(MIN_TIMEOUT, min(MAX_TIMEOUT, timeout)), entry.get("async") is True,
+                ))
+```
+
+9. In `src/agentos/plugins/hooks_manifest.py`, replace
+
+```python
+            matcher = str(group.get("matcher") or "")
+            try:
+                re.compile(matcher)
+```
+
+   with
+
+```python
+            matcher = str(group.get("matcher") or "")
+            if matcher == "*":
+                matcher = ""  # every tool, as in settings hooks
+            try:
+                re.compile(matcher)
+```
+
+10. In `src/agentos/plugins/runtime.py`, replace
+
+```python
+    plugin_id: str
+    install_path: Path
+    manifest: PluginManifest
+```
+
+   with
+
+```python
+    plugin_id: str
+    install_path: Path
+    manifest: PluginManifest
+    enabled_hook_ids: frozenset[str] = frozenset()  # the hooks the person allowed to run (W5)
+```
+
+11. In `src/agentos/plugins/runtime.py`, replace
+
+```python
+        active.append(ActivePlugin(plugin_id, path, manifest))
+```
+
+   with
+
+```python
+        allowed = frozenset(
+            str(item.get("reference") or "") for item in row.get("contributions") or ()
+            if isinstance(item, Mapping) and item.get("kind") == "hook" and item.get("enabled")
+        )
+        active.append(ActivePlugin(plugin_id, path, manifest, allowed))
+```
+
+12. In `src/agentos/plugins/service.py`, replace
+
+```python
+    def _option_values(self, user_id: str, plugin_id: str, inspection: Any) -> dict[str, str]:
+```
+
+   with
+
+```python
+    def option_values(self, *, user_id: str, plugin_id: str) -> dict[str, str]:
+        """A plugin's option values for its hooks (W5): defaults, then the person's."""
+        options = self._declared_options(self.get(user_id, plugin_id))
+        if not options:
+            return {}
+        values = {key: item.default for key, item in options.items() if item.default is not None}
+        values.update(self._config_store.values(user_id, plugin_id))
+        return values
+
+    def _option_values(self, user_id: str, plugin_id: str, inspection: Any) -> dict[str, str]:
+```
+
+13. In `src/agentos/hooks/config.py`, replace
+
+```python
+    on_failure: str = "ignore"
+    status_message: str = ""
+
+    def identity(self) -> tuple[Any, ...]:
+        return (self.event, self.type, self.command, self.url, self.prompt, self.matcher)
+```
+
+   with
+
+```python
+    on_failure: str = "ignore"
+    status_message: str = ""
+    # W5: a plugin's hook runs confined to its folder, without a shell, with this environment added.
+    plugin_root: str = ""
+    plugin_env: tuple[tuple[str, str], ...] = ()
+
+    def identity(self) -> tuple[Any, ...]:
+        return (self.event, self.type, self.command, self.url, self.prompt, self.matcher, self.plugin_root)
+```
+
+14. In `src/agentos/hooks/config.py`, replace
+
+```python
+def load_hook_specs(settings: EffectiveSettings) -> tuple[tuple[HookSpec, ...], tuple[HookConfigError, ...]]:
+```
+
+   with
+
+```python
+def non_managed_hooks_allowed(settings: EffectiveSettings) -> bool:
+    """Whether hooks that are not managed (plugins', skills', agents', W5) may run: not when managed settings switch
+    every hook off or allow only managed hooks, nor when a user or CLI (or trusted repository) switch turns them off."""
+    layers = list(getattr(settings, "layers", ()))
+    if any(layer.name == "managed" and (layer.data.get("disableAllHooks") is True or layer.data.get("allowManagedHooksOnly") is True)
+           for layer in layers):
+        return False
+    switchable = {"user", "cli"} | ({"project", "local"} if getattr(settings, "trusted", False) else set())
+    return not any(layer.name in switchable and layer.data.get("disableAllHooks") is True for layer in layers)
+
+
+def load_hook_specs(settings: EffectiveSettings) -> tuple[tuple[HookSpec, ...], tuple[HookConfigError, ...]]:
+```
+
+15. In `src/agentos/hooks/processes.py`, replace
+
+```python
+def run_shell_command(
+    command: str,
+    *,
+    cwd: str | None,
+    env: Mapping[str, str],
+    stdin_text: str,
+    timeout_seconds: float,
+) -> ProcessResult:
+    options: dict[str, object] = {
+        "shell": True,
+```
+
+   with
+
+```python
+def run_shell_command(
+    command: str | list[str],
+    *,
+    cwd: str | None,
+    env: Mapping[str, str],
+    stdin_text: str,
+    timeout_seconds: float,
+    shell: bool = True,
+) -> ProcessResult:
+    """Run a hook's command (a shell line, or with ``shell=False`` an argument list, W5) and collect its output."""
+    options: dict[str, object] = {
+        "shell": shell,
+```
+
+16. In `src/agentos/hooks/runners.py`, replace
+
+```python
+    def run(self, spec: HookSpec, payload: Mapping[str, Any]) -> HookRun:
+        env = dict(os.environ)
+        env["ORIN_PROJECT_DIR"] = str(self.project_dir)
+```
+
+   with
+
+```python
+    def run(self, spec: HookSpec, payload: Mapping[str, Any]) -> HookRun:
+        if spec.plugin_root:
+            return self._run_plugin_hook(spec, payload)
+        env = dict(os.environ)
+        env["ORIN_PROJECT_DIR"] = str(self.project_dir)
+```
+
+17. In `src/agentos/hooks/runners.py`, replace
+
+```python
+        return HookRun(result.exit_code, result.stdout, result.stderr, result.timed_out, result.error)
+
+
+class HttpHookRunner:
+```
+
+   with
+
+```python
+        return HookRun(result.exit_code, result.stdout, result.stderr, result.timed_out, result.error)
+
+    def _run_plugin_hook(self, spec: HookSpec, payload: Mapping[str, Any]) -> HookRun:
+        """A plugin's hook (W5): no shell, the program inside the plugin's folder, a minimal environment."""
+        from agentos.plugins.hook_executor import ENVIRONMENT_ALLOWLIST, HookRejected, resolve_argv
+
+        try:
+            argv = resolve_argv(spec.command, install_path=Path(spec.plugin_root))
+        except HookRejected as error:
+            return HookRun(None, "", "", error=f"plugin hook refused: {error}"[:500])
+        env = {name: os.environ[name] for name in ENVIRONMENT_ALLOWLIST if name in os.environ}
+        env.update(dict(spec.plugin_env))
+        env["ORIN_PROJECT_DIR"] = env["CLAUDE_PROJECT_DIR"] = str(self.project_dir)
+        result = run_shell_command(
+            argv, shell=False, cwd=str(self.project_dir), env=env,
+            stdin_text=_payload_text(payload), timeout_seconds=spec.timeout,
+        )
+        return HookRun(result.exit_code, result.stdout, result.stderr, result.timed_out, result.error)
+
+
+class HttpHookRunner:
+```
+
+18. In `src/agentos/agentic/session.py`, replace
+
+```python
+        plugin_service=None,
+        hook_engine=None,
+        enable_terminal: bool = True,
+```
+
+   with
+
+```python
+        plugin_service=None,
+        hook_engine=None,
+        plugin_hooks: bool = False,
+        enable_terminal: bool = True,
+```
+
+19. In `src/agentos/agentic/session.py`, replace
+
+```python
+        self.plugin_service = plugin_service
+        self.hook_engine = hook_engine
+```
+
+   with
+
+```python
+        self.plugin_service = plugin_service
+        self.hook_engine = hook_engine
+        # W5: whether this Orin runs the plugins' hooks (they run in the settings hooks' dispatcher).
+        self.plugin_hooks = bool(plugin_hooks)
+```
+
+20. In `src/agentos/agentic/session.py`, replace
+
+```python
+            specs, errors = load_hook_specs(self.effective_settings)
+            for error in errors:
+                logger.warning("hook configuration (%s): %s", error.source, error.message)
+            if not specs:
+                return
+```
+
+   with
+
+```python
+            specs, errors = load_hook_specs(self.effective_settings)
+            plugin_specs, plugin_errors = self._plugin_hook_specs()
+            specs, errors = (*specs, *plugin_specs), (*errors, *plugin_errors)
+            for error in errors:
+                logger.warning("hook configuration (%s): %s", error.source, error.message)
+            if not specs:
+                return
+```
+
+21. In `src/agentos/agentic/session.py`, replace
+
+```python
+    def _remove_settings_hooks(self) -> None:
+```
+
+   with
+
+```python
+    def _plugin_hook_specs(self):
+        """The hooks of the person's active plugins that they allowed to run (W5); none when this Orin runs no
+        plugin hooks or the settings switch non-managed hooks off."""
+        from agentos.hooks.config import non_managed_hooks_allowed
+        from agentos.plugins.hook_specs import plugin_hook_specs
+        from agentos.plugins.runtime import active_plugins
+
+        if not self.plugin_hooks or self.plugin_service is None or not non_managed_hooks_allowed(self.effective_settings):
+            return (), ()
+        user_id = str(self.turn.get("user_id") or "")
+        plugins, _missing = active_plugins(self.plugin_service, user_id, getattr(self.effective_settings, "data", None) or {})
+        reader = getattr(self.plugin_service, "option_values", None)
+        options = (lambda plugin_id: reader(user_id=user_id, plugin_id=plugin_id)) if callable(reader) else None
+        return plugin_hook_specs(plugins, user_id=user_id, option_values=options)
+
+    def _remove_settings_hooks(self) -> None:
+```
+
+22. In `src/agentos/workers/chat.py`, replace
+
+```python
+from agentos.plugins.rehydrate import rehydrate_hooks
+```
+
+   with
+
+```python
+
+```
+
+23. In `src/agentos/workers/chat.py`, replace
+
+```python
+        # Refresh this user's active, consented hooks into a turn-local
+        # HookEngine so concurrent turns never overwrite each other's index.
+        try:
+            rehydrate_hooks(plugin_service, turn_hook_engine, user_id=str(turn["user_id"]))
+        except Exception:
+            _LOGGER.exception("could not rehydrate plugin hooks for %s", turn["user_id"])
+```
+
+   with
+
+```python
+        # W5: plugin hooks run in the session's hook dispatcher (plugin_hooks below); the turn-local HookEngine
+        # stays empty, so the older plugin-hook path never runs a hook twice.
+```
+
+24. In `src/agentos/workers/chat.py`, replace
+
+```python
+            hook_engine=turn_hook_engine,
+            project_store=PostgresProjectStore(engine),
+```
+
+   with
+
+```python
+            hook_engine=turn_hook_engine,
+            plugin_hooks=self._capabilities.plugin_hooks,
+            project_store=PostgresProjectStore(engine),
+```
+
+- [ ] **Step 4: Run the tests and see them pass**
+
+Run: `uv run pytest -q tests/unit/plugins/test_plugin_hooks_unified.py`
+Expected: PASS.
+
+Also run `uv run pytest -q tests/unit/plugins tests/unit/hooks tests/unit/workers/test_multi_session_concurrency.py tests/unit/agentic/test_session_hooks.py tests/unit/agentic/test_runtime_hooks.py`: expected PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/agentos/plugins/hook_specs.py tests/unit/plugins/test_plugin_hooks_unified.py tests/unit/plugins/test_hooks_manifest.py tests/unit/workers/test_multi_session_concurrency.py src/agentos/plugins/models.py src/agentos/plugins/hooks_manifest.py src/agentos/plugins/runtime.py src/agentos/plugins/service.py src/agentos/hooks/config.py src/agentos/hooks/processes.py src/agentos/hooks/runners.py src/agentos/agentic/session.py src/agentos/workers/chat.py
+git commit -m "feat(w5): plugin hooks run in the settings hooks' dispatcher
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+### Task 35: A skill's or agent's own hooks
+
+`parse_hook_mapping` reads one `hooks` object in the Claude Code schema (the settings loader now uses it per layer). A disk skill's `hooks` start at the skill's first use (the Skill tool or a person's command) and stay until the turn ends, for the agent that used it — once per skill and agent. A defined agent's `hooks` run while that agent runs, for its events only; its `Stop` hooks run at its `SubagentStop`. Both are filtered by the event's `agent_id` (none for the main agent), follow the same switches as plugin hooks (a managed skill or agent keeps them under `allowManagedHooksOnly`), and are removed with the settings hooks.
+
+**Files:**
+- Modify: `src/agentos/hooks/config.py`
+- Modify: `src/agentos/agentic/tools/orin/disk_skills.py`
+- Modify: `src/agentos/agentic/session.py`
+- Test: `tests/unit/hooks/test_scoped_hooks.py`
+
+**Interfaces:**
+- Consumes: Task 34 (`non_managed_hooks_allowed`); Batch A (`DiskSkill.hooks`); Batch B (`AgentDefinition.hooks`).
+- Produces: `hooks.config.parse_hook_mapping(declared, source) -> (specs, errors)`; `TurnSession._scoped_hooks(declared, *, source, agent_id, origin)`, `._skill_hooks(skill, agent_id)`; `toolset._skill_hooks_sink`.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `tests/unit/hooks/test_scoped_hooks.py`:
+
+```python
+"""W5: hooks declared by a skill or an agent run only for the agent that uses it."""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from agentos.agentic.lifecycle import HookEvent, LifecycleBus
+from agentos.hooks.config import parse_hook_mapping
+from agentos.settings.paths import orin_managed_dir, orin_user_dir
+from agentos.skills.disk import load_disk_skills
+
+
+def test_a_hooks_object_parses_on_its_own() -> None:
+    specs, errors = parse_hook_mapping({
+        "PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "echo hi"}]}],
+        "Nope": [],
+    }, "skill:x")
+    assert [(spec.event, spec.source, spec.command) for spec in specs] == [(HookEvent.PRE_TOOL_USE, "skill:x", "echo hi")]
+    assert any("Nope" in error.message for error in errors)
+
+
+def _session(tmp_path: Path):
+    from tests.unit.agentic.test_disk_skills_session import _session as make
+
+    session = make(tmp_path, "hi")
+    session.lifecycle = LifecycleBus()
+    session.build_runtime()
+    return session
+
+
+class _Runner:
+    """Stands in for the command runner: records what ran and denies."""
+
+    def __init__(self) -> None:
+        self.ran: list[dict] = []
+
+    def run(self, spec, payload):
+        from agentos.hooks.protocol import HookRun
+
+        self.ran.append({"source": spec.source, "event": spec.event, **dict(payload)})
+        return HookRun(0, json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny"}}), "")
+
+
+def test_a_skills_hooks_run_for_the_agent_that_used_it(tmp_path: Path, monkeypatch) -> None:
+    import agentos.agentic.session as session_module
+
+    runner = _Runner()
+    monkeypatch.setattr(session_module, "CommandHookRunner", lambda *args, **kwargs: runner)
+    folder = orin_user_dir() / "skills" / "careful"
+    folder.mkdir(parents=True)
+    (folder / "SKILL.md").write_text(
+        "---\ndescription: Be careful\nhooks:\n  PreToolUse:\n    - matcher: Bash\n      hooks:\n        - type: command\n          command: guard\n---\nBe careful.",
+        encoding="utf-8",
+    )
+    session = _session(tmp_path)
+    skill = load_disk_skills(workspace_root=None, trusted=False).get("careful")
+    assert session.lifecycle.emit(HookEvent.PRE_TOOL_USE, tool_name="Bash").permission_decision is None  # not used yet
+    session._skill_hooks(skill, None)
+    session._skill_hooks(skill, None)  # a second use does not add the hooks twice
+    assert session.lifecycle.emit(HookEvent.PRE_TOOL_USE, tool_name="Bash").permission_decision == "deny"
+    assert session.lifecycle.emit(HookEvent.PRE_TOOL_USE, tool_name="Bash", agent_id="sub-1").permission_decision is None
+    assert [item["source"] for item in runner.ran] == ["skill:careful"]
+
+
+def test_an_agents_hooks_run_during_its_run_and_its_stop_becomes_subagent_stop(tmp_path: Path, monkeypatch) -> None:
+    import agentos.agentic.session as session_module
+    from agentos.agentic.agent_definitions import load_agent_definitions
+
+    runner = _Runner()
+    monkeypatch.setattr(session_module, "CommandHookRunner", lambda *args, **kwargs: runner)
+    folder = orin_user_dir() / "agents"
+    folder.mkdir(parents=True)
+    (folder / "guarded.md").write_text(
+        "---\nname: guarded\ndescription: Guarded\nhooks:\n  PreToolUse:\n    - matcher: Bash\n      hooks:\n        - {type: command, command: guard}\n"
+        "  Stop:\n    - hooks:\n        - {type: command, command: done}\n---\nWork.",
+        encoding="utf-8",
+    )
+    session = _session(tmp_path)
+    session._agent_definitions = load_agent_definitions(workspace_root=None, trusted=False)
+    seen: list[str] = []
+
+    def fake_run(**kwargs):
+        from agentos.agentic.tools._shared import ToolOutcome
+
+        decision = session.lifecycle.emit(HookEvent.PRE_TOOL_USE, tool_name="Bash", agent_id=kwargs["agent_id"])
+        seen.append(str(decision.permission_decision))
+        return ToolOutcome("succeeded", "ok", "done", {})
+
+    monkeypatch.setattr(session, "_execute_subagent_run_inner", fake_run)
+    assert session._run_subagent(subagent_type="guarded", task="Go").status == "succeeded"
+    assert seen == ["deny"]
+    assert [item["event"] for item in runner.ran] == [HookEvent.PRE_TOOL_USE, HookEvent.SUBAGENT_STOP]
+    assert session.lifecycle.emit(HookEvent.PRE_TOOL_USE, tool_name="Bash", agent_id=runner.ran[0]["agent_id"]).permission_decision is None
+
+
+def test_managed_settings_can_switch_skill_hooks_off(tmp_path: Path, monkeypatch) -> None:
+    import agentos.agentic.session as session_module
+
+    runner = _Runner()
+    monkeypatch.setattr(session_module, "CommandHookRunner", lambda *args, **kwargs: runner)
+    orin_managed_dir().mkdir(parents=True, exist_ok=True)
+    (orin_managed_dir() / "managed-settings.json").write_text(json.dumps({"allowManagedHooksOnly": True}), encoding="utf-8")
+    folder = orin_user_dir() / "skills" / "careful"
+    folder.mkdir(parents=True)
+    (folder / "SKILL.md").write_text(
+        "---\ndescription: Be careful\nhooks:\n  PreToolUse:\n    - hooks:\n        - {type: command, command: guard}\n---\nx", encoding="utf-8",
+    )
+    session = _session(tmp_path)
+    session._skill_hooks(load_disk_skills(workspace_root=None, trusted=False).get("careful"), None)
+    assert session.lifecycle.emit(HookEvent.PRE_TOOL_USE, tool_name="Bash").permission_decision is None and runner.ran == []
+
+```
+
+- [ ] **Step 2: Run it to verify it fails**
+
+Run: `uv run pytest -q tests/unit/hooks/test_scoped_hooks.py`
+Expected: FAIL — `ImportError: cannot import name 'parse_hook_mapping' from 'agentos.hooks.config'` (collection error).
+
+- [ ] **Step 3: Implement**
+
+Then make these edits, in order (each `replace` block occurs exactly once in its file; if one does not, stop and report — do not guess):
+
+1. In `src/agentos/hooks/config.py`, replace
+
+```python
+        source = layer.name
+        if not isinstance(declared, Mapping):
+            errors.append(HookConfigError(source, "'hooks' must be an object"))
+            continue
+        for event_name, groups in declared.items():
+            try:
+                event = HookEvent(str(event_name))
+            except ValueError:
+                errors.append(HookConfigError(source, f"unknown hook event '{event_name}'"))
+                continue
+            if not isinstance(groups, list):
+                errors.append(HookConfigError(source, f"hooks.{event_name} must be a list"))
+                continue
+            for group in groups:
+                if not isinstance(group, Mapping):
+                    errors.append(HookConfigError(source, f"hooks.{event_name} entries must be objects"))
+                    continue
+                matcher = str(group.get("matcher") or "")
+                if len(matcher) > 500:
+                    errors.append(HookConfigError(source, "matcher is longer than 500 characters"))
+                    continue
+                if matcher and matcher != "*":
+                    try:
+                        re.compile(matcher)
+                    except re.error:
+                        errors.append(HookConfigError(source, f"invalid matcher '{matcher[:60]}'"))
+                        continue
+                entries = group.get("hooks")
+                if not isinstance(entries, list):
+                    errors.append(HookConfigError(source, f"hooks.{event_name}[].hooks must be a list"))
+                    continue
+                for raw in entries:
+                    parsed = _entry(event, matcher, source, raw)
+                    if isinstance(parsed, str):
+                        errors.append(HookConfigError(source, parsed))
+                    else:
+                        specs.append(parsed)
+```
+
+   with
+
+```python
+        source = layer.name
+        if not isinstance(declared, Mapping):
+            errors.append(HookConfigError(source, "'hooks' must be an object"))
+            continue
+        found, problems = parse_hook_mapping(declared, source)
+        specs.extend(found)
+        errors.extend(problems)
+```
+
+2. In `src/agentos/hooks/config.py`, replace
+
+```python
+def non_managed_hooks_allowed(settings: EffectiveSettings) -> bool:
+```
+
+   with
+
+```python
+def parse_hook_mapping(declared: Mapping[str, Any], source: str) -> tuple[tuple[HookSpec, ...], tuple[HookConfigError, ...]]:
+    """One ``hooks`` object in the Claude Code schema: a settings layer's, or a skill's or agent's frontmatter (W5)."""
+    specs: list[HookSpec] = []
+    errors: list[HookConfigError] = []
+    for event_name, groups in declared.items():
+        try:
+            event = HookEvent(str(event_name))
+        except ValueError:
+            errors.append(HookConfigError(source, f"unknown hook event '{event_name}'"))
+            continue
+        if not isinstance(groups, list):
+            errors.append(HookConfigError(source, f"hooks.{event_name} must be a list"))
+            continue
+        for group in groups:
+            if not isinstance(group, Mapping):
+                errors.append(HookConfigError(source, f"hooks.{event_name} entries must be objects"))
+                continue
+            matcher = str(group.get("matcher") or "")
+            if len(matcher) > 500:
+                errors.append(HookConfigError(source, "matcher is longer than 500 characters"))
+                continue
+            if matcher and matcher != "*":
+                try:
+                    re.compile(matcher)
+                except re.error:
+                    errors.append(HookConfigError(source, f"invalid matcher '{matcher[:60]}'"))
+                    continue
+            entries = group.get("hooks")
+            if not isinstance(entries, list):
+                errors.append(HookConfigError(source, f"hooks.{event_name}[].hooks must be a list"))
+                continue
+            for raw in entries:
+                parsed = _entry(event, matcher, source, raw)
+                if isinstance(parsed, str):
+                    errors.append(HookConfigError(source, parsed))
+                else:
+                    specs.append(parsed)
+    return tuple(specs), tuple(errors)
+
+
+def non_managed_hooks_allowed(settings: EffectiveSettings) -> bool:
+```
+
+3. In `src/agentos/agentic/tools/orin/disk_skills.py`, replace
+
+```python
+        granted = self._grant_skill_tools(skill)
+```
+
+   with
+
+```python
+        granted = self._grant_skill_tools(skill)
+        # W5: a skill's own hooks run from its first use until the turn ends, for the agent that used it.
+        sink = getattr(self, "_skill_hooks_sink", None)
+        if skill.hooks and callable(sink):
+            sink(skill, (getattr(self, "_lifecycle_context", None) or {}).get("agent_id"))
+```
+
+4. In `src/agentos/agentic/session.py`, replace
+
+```python
+        self._hook_dispatcher = None
+        # One reminder queue per runtime: the toolset fills it, the runtime drains it before each request.
+```
+
+   with
+
+```python
+        self._hook_dispatcher = None
+        # W5: hooks of skills and agents, active for one agent each; removed with the settings hooks.
+        self._scoped_hook_removers: list[Callable[[], None]] = []
+        self._active_skill_hooks: set[tuple[str, str]] = set()
+        # One reminder queue per runtime: the toolset fills it, the runtime drains it before each request.
+```
+
+5. In `src/agentos/agentic/session.py`, replace
+
+```python
+            except Exception:  # noqa: BLE001 - removing hooks never stops a turn
+                logger.debug("previous settings hooks could not be removed", exc_info=True)
+        self._close_hook_dispatcher()
+
+    def _hook_env_file(self) -> Path:
+```
+
+   with
+
+```python
+            except Exception:  # noqa: BLE001 - removing hooks never stops a turn
+                logger.debug("previous settings hooks could not be removed", exc_info=True)
+        self._close_hook_dispatcher()
+        removers, self._scoped_hook_removers = self._scoped_hook_removers, []
+        self._active_skill_hooks = set()
+        for remove in removers:
+            remove()
+
+    def _scoped_hooks(self, declared: Any, *, source: str, agent_id: str | None, origin: str) -> Callable[[], None] | None:
+        """Hooks a skill or an agent declares (W5), for one agent's events only (``agent_id``; the main agent's
+        when None). An agent's ``Stop`` hooks run at its ``SubagentStop``. Returns the function that removes them."""
+        from dataclasses import replace
+
+        from agentos.hooks.config import non_managed_hooks_allowed, parse_hook_mapping
+
+        bus = self.lifecycle
+        if bus is None or not isinstance(declared, Mapping) or not declared:
+            return None
+        if origin != "managed" and not non_managed_hooks_allowed(self.effective_settings):
+            return None
+        specs, errors = parse_hook_mapping(declared, source)
+        for error in errors:
+            logger.warning("hook configuration (%s): %s", error.source, error.message)
+        if agent_id is not None:
+            specs = tuple(replace(spec, event=HookEvent.SUBAGENT_STOP) if spec.event is HookEvent.STOP else spec for spec in specs)
+        if not specs:
+            return None
+        dispatcher = HookDispatcher(
+            specs,
+            command_runner=CommandHookRunner(self.workspace.root, env_file=self._hook_env_file()),
+            http_runner=HttpHookRunner(),
+            prompt_runner=PromptHookRunner(
+                self.provider_factory, provider_name=str(self.turn.get("provider") or ""), default_model=str(self.turn.get("model_id") or ""),
+            ),
+            agent_runner=AgentHookRunner(self._hook_agent),
+            recorder=self._record_hook,
+        )
+        wanted = str(agent_id or "")
+
+        def scoped(event):
+            if str(event.payload.get("agent_id") or "") != wanted:
+                return None
+            return dispatcher(event)
+
+        unsubscribe = bus.subscribe(scoped)
+
+        def remove() -> None:
+            try:
+                unsubscribe()
+                dispatcher.close()
+            except Exception:  # noqa: BLE001 - removing hooks never stops a turn
+                logger.debug("scoped hooks could not be removed", exc_info=True)
+
+        self._scoped_hook_removers.append(remove)
+        return remove
+
+    def _skill_hooks(self, skill: Any, agent_id: str | None) -> None:
+        """A disk skill's own hooks (W5): active from the skill's first use until the turn ends, once per agent."""
+        key = (str(getattr(skill, "name", "")), str(agent_id or ""))
+        with self._subagent_lock:
+            if key in self._active_skill_hooks:
+                return
+            self._active_skill_hooks.add(key)
+        if self._scoped_hooks(getattr(skill, "hooks", None), source=f"skill:{key[0]}", agent_id=agent_id, origin=str(getattr(skill, "origin", ""))) is None:
+            with self._subagent_lock:
+                self._active_skill_hooks.discard(key)
+
+    def _hook_env_file(self) -> Path:
+```
+
+6. In `src/agentos/agentic/session.py`, replace
+
+```python
+        toolset._disk_skills = getattr(self, "_disk_skills", None)
+```
+
+   with
+
+```python
+        toolset._disk_skills = getattr(self, "_disk_skills", None)
+        toolset._skill_hooks_sink = self._skill_hooks  # W5: a skill's own hooks
+```
+
+7. In `src/agentos/agentic/session.py`, replace
+
+```python
+        status = "failed"  # a crash inside the subagent still closes the start/stop pair
+        try:
+            outcome = self._execute_subagent_run_inner(**kwargs)
+            status = str(getattr(outcome, "status", "") or "failed")
+            return outcome
+        finally:
+            if bus is not None:
+                _emit_lifecycle_safely(
+                    bus,
+                    HookEvent.SUBAGENT_STOP,
+                    agent_id=agent_id,
+                    agent_type=agent_type,
+                    stop_hook_active=False,
+                    status=status,
+                )
+```
+
+   with
+
+```python
+        # W5: an agent's own hooks run while it runs, for its events only (a plugin's agent has none).
+        definition = (kwargs.get("builtin_spec") or {}).get("definition")
+        remove_hooks = None
+        if definition is not None and getattr(definition, "hooks", None):
+            remove_hooks = self._scoped_hooks(definition.hooks, source=f"agent:{definition.name}", agent_id=agent_id, origin=definition.origin)
+        status = "failed"  # a crash inside the subagent still closes the start/stop pair
+        try:
+            outcome = self._execute_subagent_run_inner(**kwargs)
+            status = str(getattr(outcome, "status", "") or "failed")
+            return outcome
+        finally:
+            if bus is not None:
+                _emit_lifecycle_safely(
+                    bus,
+                    HookEvent.SUBAGENT_STOP,
+                    agent_id=agent_id,
+                    agent_type=agent_type,
+                    stop_hook_active=False,
+                    status=status,
+                )
+            if remove_hooks is not None:
+                remove_hooks()
+```
+
+- [ ] **Step 4: Run the tests and see them pass**
+
+Run: `uv run pytest -q tests/unit/hooks/test_scoped_hooks.py`
+Expected: PASS.
+
+Also run `uv run pytest -q tests/unit/hooks tests/unit/agentic/test_session_hooks.py tests/unit/agentic/test_disk_skills_session.py`: expected PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add tests/unit/hooks/test_scoped_hooks.py src/agentos/hooks/config.py src/agentos/agentic/tools/orin/disk_skills.py src/agentos/agentic/session.py
+git commit -m "feat(w5): a skill's or agent's own hooks run for the agent that uses it
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+### Task 36: Batch G regression and ledger
+
+- [ ] **Step 1:** Run `uv run pytest -q tests/unit` (timeout 600000 ms) and `uv run pytest -q tests/integration`. Expected: all pass.
+- [ ] **Step 2:** Append a "## Batch G — One hook system (Tasks 33–36)" section to `docs/superpowers/plans/2026-10-19-w5-extensibility-ledger.md`: commits, suite results, deviations 35–38, the deliberate expectation changes (Task 34: three cases of `tests/unit/plugins/test_hooks_manifest.py` — every event is listed, `async` is kept, a timeout is capped at 600 s — and one line removed from `tests/unit/workers/test_multi_session_concurrency.py`, which stubbed the plugin-hook refresh the worker no longer does), and anything done differently from this plan.
+- [ ] **Step 3:** Commit with `docs(w5): ledger, batch G` + blank line + the Co-Authored-By line.
 
