@@ -30,6 +30,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from .models import slugify
 
@@ -193,9 +194,79 @@ def _collect(data: Mapping[str, Any] | None, *, scope: str, source: str, environ
             errors.append((f"{source}: {str(name)[:MAX_NAME_CHARS]}", str(error)))
 
 
-def _wildcard(pattern: str, value: str) -> bool:
-    regex = ".*".join(re.escape(part) for part in str(pattern).split("*"))
-    return re.fullmatch(regex, value) is not None
+# W5-R10: a URL and a URL pattern are both normalised before they are compared (see _policy_url).
+_DEFAULT_PORTS = {"https": 443, "wss": 443, "http": 80, "ws": 80}
+_HOST = re.compile(r"[a-z0-9._-]+")
+_PATTERN_HOST = re.compile(r"[a-z0-9._*-]+")
+
+
+def _resolve_dot_segments(path: str) -> str:
+    """RFC 3986 section 5.2.4 for an absolute path: the '.' and '..' segments are resolved."""
+    segments = path.split("/")[1:]
+    out: list[str] = []
+    for index, segment in enumerate(segments):
+        last = index == len(segments) - 1
+        if segment == "..":
+            if out:
+                out.pop()
+            if last:
+                out.append("")
+        elif segment == ".":
+            if last:
+                out.append("")
+        else:
+            out.append(segment)
+    return "/" + "/".join(out)
+
+
+def _policy_url(text: Any, *, pattern: bool) -> tuple[str, str, int | None, str] | None:
+    """A URL as the policy compares it: (scheme, host, port, path and query), or None when the policy cannot read it.
+
+    Lower-case scheme and host, the default port dropped, one trailing dot on the host dropped, dot segments resolved.
+    A pattern that names no port matches any port (port None), and a pattern that names no path matches any path.
+    Fail closed: whitespace, control characters, a backslash, user information, an unknown scheme or an odd host name
+    make a URL unreadable.
+    """
+    if not isinstance(text, str) or any(ord(ch) <= 32 or ord(ch) == 127 or ch == "\\" for ch in text):
+        return None
+    try:
+        parts = urlsplit(text)
+        port = parts.port
+    except ValueError:
+        return None
+    scheme = parts.scheme.lower()
+    host = parts.hostname or ""
+    if scheme not in _DEFAULT_PORTS or "@" in parts.netloc or not host:
+        return None
+    if host.endswith("."):
+        host = host[:-1]
+    if not (_PATTERN_HOST if pattern else _HOST).fullmatch(host) or ".." in host or host.startswith(".") or host.endswith("."):
+        return None
+    if pattern and port is None:
+        effective_port: int | None = None
+    else:
+        effective_port = port if port is not None else _DEFAULT_PORTS[scheme]
+    if pattern and not parts.path and not parts.query:
+        return scheme, host, effective_port, "*"
+    path = (parts.path or "/").replace("%2e", ".").replace("%2E", ".")
+    query = f"?{parts.query}" if parts.query else ""
+    return scheme, host, effective_port, _resolve_dot_segments(path) + query
+
+
+def _wildcard(pattern: str, value: str, *, host: bool = False) -> bool:
+    """A ``*`` stands for any text, or for host characters only in a host name (never a slash or an @)."""
+    filler = "[a-z0-9._-]*" if host else ".*"
+    return re.fullmatch(filler.join(re.escape(part) for part in pattern.split("*")), value, re.DOTALL) is not None
+
+
+def _url_matches(pattern: str, url: str) -> bool:
+    wanted = _policy_url(pattern, pattern=True)
+    actual = _policy_url(url, pattern=False)
+    if wanted is None or actual is None:
+        return False
+    (w_scheme, w_host, w_port, w_rest), (a_scheme, a_host, a_port, a_rest) = wanted, actual
+    return (w_scheme == a_scheme and (w_port is None or w_port == a_port)
+            and _wildcard(w_host, a_host, host=True) and _wildcard(w_rest, a_rest))
 
 
 def policy_refusal(name: str, *, aliases: tuple[str, ...] = (), command_line: tuple[str, ...] | None, url: str | None,
@@ -215,10 +286,16 @@ def policy_refusal(name: str, *, aliases: tuple[str, ...] = (), command_line: tu
         if "serverCommand" in entry:
             return command_line is not None and isinstance(entry["serverCommand"], list) and tuple(entry["serverCommand"]) == command_line
         if "serverUrl" in entry:
-            return url is not None and isinstance(entry["serverUrl"], str) and _wildcard(entry["serverUrl"], url)
+            return url is not None and isinstance(entry["serverUrl"], str) and _url_matches(entry["serverUrl"], url)
         return False
 
     denied, allowed = settings.get("deniedMcpServers"), settings.get("allowedMcpServers")
+    if url is not None and _policy_url(url, pattern=False) is None:
+        # A URL the policy cannot read is refused whenever a list it is checked against exists (fail closed).
+        if isinstance(denied, list) and denied:
+            return "its URL cannot be checked against deniedMcpServers"
+        if isinstance(allowed, list):
+            return "its URL cannot be checked against allowedMcpServers"
     if isinstance(denied, list) and any(matches(entry) for entry in denied):
         return "it is listed in deniedMcpServers"
     if not isinstance(allowed, list):

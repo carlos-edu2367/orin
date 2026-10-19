@@ -15,6 +15,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+from agentos.mcp.file_config import policy_refusal
 from agentos.mcp.transport_sse import SseTransport, SseTransportError
 from agentos.mcp.transport_stdio import StdioTransport, StdioTransportError
 from agentos.mcp.transport_ws import WebSocketTransport, WebSocketTransportError
@@ -235,3 +236,68 @@ def test_websocket_server_that_sends_too_many_requests_in_one_call_is_refused() 
         assert f"more than {MAX_SERVER_REQUESTS_PER_CALL} requests" in str(outcome[0])
     finally:
         transport.close()
+
+
+# W5-R10: the allowedMcpServers / deniedMcpServers URL patterns -------------------------------------------------------
+
+DENY_EVIL = {"deniedMcpServers": [{"serverUrl": "https://*.evil.example/*"}]}
+ALLOW_COMPANY = {"allowedMcpServers": [{"serverUrl": "https://*.company.example/*"}]}
+
+
+def _refused(url: str, settings: dict) -> bool:
+    return policy_refusal("remote", command_line=None, url=url, settings=settings) is not None
+
+
+@pytest.mark.parametrize("url", [
+    "https://api.evil.example/mcp",
+    "https://API.EVIL.EXAMPLE/mcp",
+    "https://api.evil.example:443/mcp",
+    "https://api.evil.example:8443/mcp",
+    "https://api.evil.example./mcp",
+    "HTTPS://api.evil.example/mcp",
+    "https://api.evil.example/a/../mcp",
+    "https://api.evil.example/mcp?x=1",
+])
+def test_a_denied_host_is_denied_however_it_is_spelled(url: str) -> None:
+    assert _refused(url, DENY_EVIL)
+
+
+@pytest.mark.parametrize("url", [
+    "https://user@api.evil.example/mcp",
+    "https://api.evil.example\\mcp",
+    "https://api.evil.example:notaport/mcp",
+    "https://api.evil.example/\tmcp",
+])
+def test_a_malformed_url_is_denied_when_any_deny_pattern_exists(url: str) -> None:
+    assert _refused(url, DENY_EVIL)
+
+
+def test_the_deny_pattern_itself_is_normalised() -> None:
+    deny = {"deniedMcpServers": [{"serverUrl": "HTTPS://*.Evil.Example./*"}]}
+    assert _refused("https://api.evil.example/mcp", deny)
+
+
+@pytest.mark.parametrize("url", [
+    "https://attacker.example/.company.example/mcp",
+    "https://attacker.example/x.company.example",
+    "https://mcp.company.example.attacker.example/mcp",
+    "https://mcp.company.example@attacker.example/v1",
+    "https://attacker.example\\.company.example/mcp",
+])
+def test_an_allowed_pattern_does_not_admit_another_host(url: str) -> None:
+    assert _refused(url, ALLOW_COMPANY)
+
+
+@pytest.mark.parametrize("url", [
+    "https://api.company.example/mcp",
+    "HTTPS://API.COMPANY.EXAMPLE:443/mcp",
+    "https://api.company.example./mcp",
+])
+def test_an_allowed_host_is_admitted_in_any_equivalent_spelling(url: str) -> None:
+    assert not _refused(url, ALLOW_COMPANY)
+
+
+def test_dot_segments_are_resolved_before_the_path_is_compared() -> None:
+    allow = {"allowedMcpServers": [{"serverUrl": "https://mcp.company.example/mcp/*"}]}
+    assert _refused("https://mcp.company.example/mcp/../admin", allow)
+    assert not _refused("https://mcp.company.example/mcp/./v1", allow)
