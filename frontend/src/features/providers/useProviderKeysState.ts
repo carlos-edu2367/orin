@@ -44,7 +44,14 @@ export function useProviderKeysState(client: ApiClient, provider: ProviderName, 
 
   useEffect(() => {
     const controller = new AbortController()
-    void reload(controller.signal)
+    listProviderKeys(client, provider, controller.signal).then((loaded) => {
+      if (controller.signal.aborted) return
+      setKeys(loaded)
+      setLoad({ status: 'loaded' })
+    }).catch((error: unknown) => {
+      if (controller.signal.aborted) return
+      setLoad({ status: 'unavailable', error: toApiError(error) })
+    })
     return () => controller.abort()
   }, [client, provider])
 
