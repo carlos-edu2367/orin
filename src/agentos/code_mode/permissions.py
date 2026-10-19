@@ -5,7 +5,6 @@ import difflib
 import hashlib
 import os
 from datetime import UTC, datetime
-from fnmatch import fnmatchcase
 import json
 from pathlib import Path, PurePosixPath
 import re
@@ -144,70 +143,6 @@ def is_plan_file_path(raw_path: str, workspace: Path | None = None) -> bool:
     if ".." in parts:
         return False
     return rel.startswith(".orin/plans/") and len(parts) >= 3
-
-
-def _match_command_specifier(command: str, specifier: str) -> bool:
-    cmd = " ".join(command.strip().split())
-    spec = " ".join(specifier.strip().split())
-    if not spec or spec == "*":
-        return True
-    if spec.endswith(":*"):
-        prefix = spec[:-2].strip()
-        if not prefix:
-            return True
-        return cmd == prefix or cmd.startswith(prefix + " ") or fnmatchcase(cmd, prefix + "*")
-    if spec.endswith(" *"):
-        prefix = spec[:-2].strip()
-        if cmd == prefix or cmd.startswith(prefix + " "):
-            return True
-    return cmd == spec or fnmatchcase(cmd, spec)
-
-
-def _match_path_specifier(rel_path: str, specifier: str) -> bool:
-    path = rel_path.strip("/")
-    spec = specifier.strip().replace("\\", "/").strip("/")
-    if not spec or spec == "*" or spec == "**":
-        return True
-    if not path:
-        return False
-    if fnmatchcase(path, spec):
-        return True
-    if spec.endswith("/**"):
-        prefix = spec[:-3].rstrip("/")
-        if path == prefix or path.startswith(prefix + "/"):
-            return True
-    if "/" not in spec and fnmatchcase(PurePosixPath(path).name, spec):
-        return True
-    return False
-
-
-def matches_permission_rule(
-    rule: str,
-    tool_name: str,
-    arguments: Mapping[str, Any] | None = None,
-    *,
-    workspace: Path | None = None,
-) -> bool:
-    """Return True if ``rule`` matches the given ``tool_name`` and ``arguments``."""
-    parsed = parse_permission_rule(rule)
-    if parsed is None:
-        return False
-    rule_tool, specifier = parsed
-    canonical_target = _canonical_tool_name(tool_name)
-    if rule_tool != "*" and rule_tool != canonical_target:
-        return False
-    if specifier is None:
-        return True
-    args = dict(arguments or {})
-    if canonical_target == "run_command":
-        command = str(args.get("command") or "")
-        return _match_command_specifier(command, specifier)
-    if canonical_target in {"write_file", "edit_file", "read_file", "view_file", "list_files", "search_files", "glob_files", "grep_files"}:
-        raw_path = str(args.get("path") or args.get("file_path") or args.get("pattern") or "")
-        rel_path = _normalize_rel_path(raw_path, workspace)
-        return _match_path_specifier(rel_path, specifier)
-    primary = str(next(iter(args.values()), "") if args else "")
-    return fnmatchcase(primary, specifier)
 
 
 def _canonical_internal(name: str) -> str:
@@ -721,7 +656,6 @@ __all__ = [
     "ToolPermissionBroker",
     "is_plan_file_path",
     "load_workspace_permission_rules",
-    "matches_permission_rule",
     "parse_permission_rule",
     "save_workspace_permission_rule",
     "suggest_permission_rule",

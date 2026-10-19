@@ -20,7 +20,6 @@ from agentos.code_mode import (
     FileCheckpointStore,
     ToolPermissionBroker,
     load_workspace_permission_rules,
-    matches_permission_rule,
     normalize_permission_mode,
     parse_permission_rule,
     suggest_permission_rule,
@@ -66,9 +65,17 @@ def test_permission_rules_parsing_and_matching(tmp_path: Path) -> None:
     assert suggest_permission_rule("run_command", {"command": "pytest tests/unit"}) == "Bash(pytest tests/unit:*)"
     assert suggest_permission_rule("edit_file", {"path": "src/app.py"}) == "Edit(src/**)"
 
-    assert matches_permission_rule("run_command(npm test:*)", "run_command", {"command": "npm test -- --watch"}) is True
-    assert matches_permission_rule("run_command(npm test:*)", "run_command", {"command": "rm -rf build"}) is False
-    assert matches_permission_rule("write_file(*)", "write_file", {"path": "src/main.py"}) is True
+    # Rules are matched by the permission engine only (W4 removed the legacy first-token matcher): an allow rule
+    # covers a command only when every subcommand matches it.
+    from agentos.permissions.engine import PermissionEngine
+    from agentos.settings import load_effective_settings
+
+    rules = load_effective_settings(tmp_path, cli={"permissions": {"allow": ["Bash(npm test:*)", "Write(*)"]}}, trusted=False)
+    rules_engine = PermissionEngine(tmp_path, rules, shell="bash", home=tmp_path / "home")
+    assert rules_engine.decide("run_command", {"command": "npm test -- --watch"}, "ask_permissions").behavior == "allow"
+    assert rules_engine.decide("run_command", {"command": "rm -rf build"}, "ask_permissions").behavior == "ask"
+    assert rules_engine.decide("run_command", {"command": "npm test && rm -rf build"}, "ask_permissions").behavior == "ask"
+    assert rules_engine.decide("write_file", {"path": "src/main.py"}, "ask_permissions").behavior == "allow"
 
     # Evaluate modes without saved rules
     assert broker.evaluate("write_file", {"path": "src/a.py"}, mode="ask_permissions") == "ask"
