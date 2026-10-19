@@ -23,6 +23,11 @@ def _isolated_settings_dirs(tmp_path_factory: pytest.TempPathFactory, monkeypatc
         target = root / sub
         target.mkdir(parents=True, exist_ok=True)
         monkeypatch.setenv(name, str(target))
+    # The run directory holds Orin's runtime markers (the workspace locks among them): never the developer's own.
+    from agentos.installation.paths import reset_cached_paths
+
+    monkeypatch.setenv("ORIN_RUN_DIR", str(root / "orin-run"))
+    reset_cached_paths()
     # Grep must not depend on a ripgrep the developer configured; the ripgrep tests set it themselves.
     monkeypatch.delenv("ORIN_RIPGREP_PATH", raising=False)
     # WebFetch's page cache is process-wide: a page cached by one test must not answer another.
