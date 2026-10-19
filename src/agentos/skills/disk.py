@@ -18,9 +18,10 @@ import itertools
 import logging
 import re
 import shlex
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 logger = logging.getLogger(__name__)
 
@@ -252,28 +253,68 @@ def split_arguments(arguments: str) -> list[str]:
         return arguments.split()
 
 
-def substitute(body: str, *, arguments: str, session_id: str, skill_dir: Path) -> tuple[str, bool]:
+class UnsafeCommandArgument(ValueError):
+    """An argument that cannot be passed to an inline command without changing what the command runs (W5-R7)."""
+
+
+def shell_word(value: str) -> str:
+    """``value`` as one word of an inline command (W5-R7).
+
+    POSIX: shell quoting. Windows: the command runs through ``cmd.exe`` (the Bash tool starts it with ``shell=True``), where
+    a double quote cannot be kept inside double quotes and a percent sign expands, so such a value is refused, not escaped.
+    """
+    if sys.platform == "win32":
+        if any(char in value for char in '"%\r\n\x00'):
+            raise UnsafeCommandArgument("an argument has a double quote, a percent sign or a line break")
+        return f'"{value}"'
+    return shlex.quote(value)
+
+
+def escape_backticks(value: str) -> str:
+    """``value`` as plain text in a skill body, where a backtick must never start an inline command (W5-R7)."""
+    return value.replace("`", "\\`")
+
+
+def split_inline_commands(body: str) -> list[tuple[bool, str]]:
+    """The body as ``(is_command, text)`` pieces, found in the skill's own text before any argument is inserted (W5-R7):
+    each ``!`cmd``` is a command piece, everything else is text."""
+    pieces: list[tuple[bool, str]] = []
+    last = 0
+    for match in INLINE_COMMAND.finditer(body):
+        pieces.append((False, body[last:match.start()]))
+        pieces.append((True, match.group(1)))
+        last = match.end()
+    pieces.append((False, body[last:]))
+    return pieces
+
+
+def substitute(body: str, *, arguments: str, session_id: str, skill_dir: Path,
+               quote: Callable[[str], str] | None = None) -> tuple[str, bool]:
     """Claude Code's substitutions; returns the text and whether ``$ARGUMENTS`` (in any form) was used.
 
     ``$ARGUMENTS[N]`` and its shorthand ``$N`` are 0-based. They are replaced only when arguments were given, so a
-    shell example such as ``awk '{print $1}'`` in a skill invoked without arguments is left intact.
+    shell example such as ``awk '{print $1}'`` in a skill invoked without arguments is left intact. ``quote`` shapes each
+    inserted argument (W5-R7: one shell word inside a command, escaped text elsewhere); an empty argument stays empty.
     """
     words = split_arguments(arguments)
     used = False
+
+    def shaped(value: str) -> str:
+        return quote(value) if quote is not None and value else value
 
     def one(match: re.Match[str]) -> str:
         nonlocal used
         token = match.group(0)
         if token == "$ARGUMENTS":
             used = True
-            return arguments
+            return shaped(arguments)
         if match.group(3) is not None:
             return session_id if match.group(3) == "SESSION_ID" else skill_dir.as_posix()
         if not words:
             return token  # without arguments, $N and $ARGUMENTS[N] stay as written
         used = True
         index = int(match.group(1) if match.group(1) is not None else match.group(2))
-        return words[index] if index < len(words) else ""
+        return shaped(words[index]) if index < len(words) else ""
 
     # One pass over the body: text an argument brings in is never substituted again.
     pattern = r"\$ARGUMENTS\[(\d+)\]|\$ARGUMENTS|(?<![\w$])\$(\d{1,2})(?![\w])|\$\{(?:ORIN|CLAUDE)_(SESSION_ID|SKILL_DIR)\}"
@@ -282,5 +323,6 @@ def substitute(body: str, *, arguments: str, session_id: str, skill_dir: Path) -
 
 __all__ = [
     "CATALOG_BUDGET_CHARS", "CatalogItem", "DiskSkill", "DiskSkillCatalog", "INLINE_COMMAND", "MAX_DISK_SKILLS",
-    "load_disk_skills", "parse_disk_skill", "skill_roots", "split_arguments", "split_frontmatter", "substitute",
+    "UnsafeCommandArgument", "escape_backticks", "load_disk_skills", "parse_disk_skill", "shell_word", "skill_roots",
+    "split_arguments", "split_frontmatter", "split_inline_commands", "substitute",
 ]

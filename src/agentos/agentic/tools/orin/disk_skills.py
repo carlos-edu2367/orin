@@ -73,30 +73,36 @@ class DiskSkillTools:
         self._skill_allow_rules = rules
         return granted
 
-    def _run_inline_commands(self, text: str, skill) -> str:
-        """Replace each ``!`cmd``` with the command's output, run through the Bash tool (permissions and hooks apply)."""
-        from agentos.skills.disk import INLINE_COMMAND
-
+    def _run_inline_commands(self, pieces, skill) -> str:
+        """Join a skill body's pieces: each command piece is replaced by its output, run through the Bash tool
+        (permissions and hooks apply). Text pieces stay as they are; a command piece of None was refused (W5-R7)."""
         count = 0
-
-        def run(match) -> str:
-            nonlocal count
+        parts: list[str] = []
+        for is_command, value in pieces:
+            if not is_command:
+                parts.append(value)
+                continue
             count += 1
-            if count > MAX_INLINE_COMMANDS:
-                return f"[command not run: a skill runs at most {MAX_INLINE_COMMANDS} commands]"
-            previous = getattr(self, "_active_invocation_id", None)
-            try:
-                outcome = self.invoke("run_command", {"command": match.group(1), "description": f"Skill {skill.name}: contexto"})
-            finally:
-                self._active_invocation_id = previous
-            if outcome.status != "succeeded":
-                return f"[command not run: {outcome.summary or outcome.error_code or 'failed'}]"
-            structured = (outcome.data or {}).get("tool_output") if isinstance(outcome.data, dict) else None
-            output = str(structured.get("stdout") if isinstance(structured, dict) and "stdout" in structured else outcome.content or "")
-            output = output.rstrip("\r\n")
-            return output if len(output) <= MAX_INLINE_OUTPUT_CHARS else output[:MAX_INLINE_OUTPUT_CHARS] + "\n[truncated]"
+            if value is None:
+                parts.append("[command not run: an argument has a character that cannot be passed to a command safely]")
+            elif count > MAX_INLINE_COMMANDS:
+                parts.append(f"[command not run: a skill runs at most {MAX_INLINE_COMMANDS} commands]")
+            else:
+                parts.append(self._run_inline_command(value, skill))
+        return "".join(parts)
 
-        return INLINE_COMMAND.sub(run, text)
+    def _run_inline_command(self, command: str, skill) -> str:
+        previous = getattr(self, "_active_invocation_id", None)
+        try:
+            outcome = self.invoke("run_command", {"command": command, "description": f"Skill {skill.name}: contexto"})
+        finally:
+            self._active_invocation_id = previous
+        if outcome.status != "succeeded":
+            return f"[command not run: {outcome.summary or outcome.error_code or 'failed'}]"
+        structured = (outcome.data or {}).get("tool_output") if isinstance(outcome.data, dict) else None
+        output = str(structured.get("stdout") if isinstance(structured, dict) and "stdout" in structured else outcome.content or "")
+        output = output.rstrip("\r\n")
+        return output if len(output) <= MAX_INLINE_OUTPUT_CHARS else output[:MAX_INLINE_OUTPUT_CHARS] + "\n[truncated]"
 
     def run_disk_skill(self, skill, arguments: str = "", *, invoked_by: str = "model") -> dict[str, Any] | ToolOutcome:
         """Render ``skill`` (substitutions, ``!`cmd```), grant its ``allowed-tools`` and return its instructions.
@@ -104,15 +110,30 @@ class DiskSkillTools:
         ``context: fork`` hands the rendered instructions to a subagent and returns its answer instead.
         """
         from agentos.agentic.tools.orin.skills_admin import neutral_skill_text, skill_argument_text
-        from agentos.skills.disk import substitute
+        from agentos.skills.disk import UnsafeCommandArgument, escape_backticks, shell_word, split_inline_commands, substitute
 
         if invoked_by == "model" and not skill.model_invocable:
             raise AgentToolError(f"The skill '{skill.name}' can only be started by the person, with /{skill.name}.")
         if invoked_by == "user" and not skill.user_invocable:
             raise AgentToolError(f"/{skill.name} is not a command the person can run.")
         clean = neutral_skill_text(skill_argument_text(arguments))
-        text, used = substitute(skill.body, arguments=clean, session_id=str(self.conversation_id or ""), skill_dir=skill.directory)
-        text = neutral_skill_text(self._run_inline_commands(text, skill))
+        # W5-R7: the inline commands are found in the skill's own text first. An argument fills a command as one shell
+        # word and fills plain text as escaped text, so it can never add a command.
+        session_id = str(self.conversation_id or "")
+        used = False
+        pieces: list[tuple[bool, str | None]] = []
+        for is_command, value in split_inline_commands(skill.body):
+            try:
+                text, did = substitute(
+                    value, arguments=clean, session_id=session_id, skill_dir=skill.directory,
+                    quote=shell_word if is_command else escape_backticks,
+                )
+            except UnsafeCommandArgument:
+                pieces.append((True, None))
+                continue
+            used = used or did
+            pieces.append((is_command, text))
+        text = neutral_skill_text(self._run_inline_commands(pieces, skill))
         granted = self._grant_skill_tools(skill)
         # W5: a skill's own hooks run from its first use until the turn ends, for the agent that used it.
         sink = getattr(self, "_skill_hooks_sink", None)
