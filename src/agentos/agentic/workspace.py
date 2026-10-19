@@ -46,6 +46,10 @@ def _directory_name(workspace_id: str) -> str:
 
 
 class ConversationWorkspace:
+    # Additional working directories (W4): resolved folders outside ``root`` the tools may also use, set by
+    # the turn from settings and ``/add-dir``; every entry was checked by ``agentic.directories``.
+    additional_roots: tuple[Path, ...] = ()
+
     def __init__(self, root: Path | str, conversation_id: str | None = None) -> None:
         if conversation_id is None:
             self.root = Path(root).resolve()
@@ -74,6 +78,8 @@ class ConversationWorkspace:
             return self.root
         if inside is not None:
             candidate = inside
+        elif (extra := self._resolve_additional(path)) is not None:
+            return extra
         elif is_drive_path(path):
             raise WorkspaceError("path must stay inside the workspace")
         else:
@@ -95,10 +101,43 @@ class ConversationWorkspace:
             raise WorkspaceError("path must stay inside the workspace") from error
         return resolved
 
+    def _resolve_additional(self, path: str) -> Path | None:
+        """An absolute path inside an additional directory, resolved and re-checked there; None when it names none."""
+        for extra in self.additional_roots:
+            inside = absolute_inside(path, extra)
+            if inside is None:
+                continue
+            segments = [segment for segment in inside.split("/") if segment not in ("", ".")]
+            if any(segment == ".." for segment in segments):
+                raise WorkspaceError("path must not traverse outside the working directory")
+            target = extra.joinpath(*segments)
+            resolved = target.resolve() if target.exists() else target.parent.resolve() / target.name
+            try:
+                resolved.relative_to(extra)
+            except ValueError as error:
+                raise WorkspaceError("path must stay inside the working directory") from error
+            return resolved
+        return None
+
+    def key(self, path: Path) -> str:
+        """How tools name a resolved path: workspace-relative under the root, absolute under an additional directory."""
+        candidate = Path(path)
+        try:
+            return candidate.relative_to(self.root).as_posix()
+        except ValueError:
+            pass
+        for extra in self.additional_roots:
+            try:
+                candidate.relative_to(extra)
+            except ValueError:
+                continue
+            return candidate.as_posix()
+        raise WorkspaceError("path is outside every working directory")
+
     def relative(self, path: Path) -> str:
         try:
-            return path.relative_to(self.root).as_posix()
-        except ValueError:
+            return self.key(path)
+        except WorkspaceError:
             return path.name
 
     def read_text(self, path: str, *, max_bytes: int = MAX_READ_BYTES) -> tuple[str, bool]:

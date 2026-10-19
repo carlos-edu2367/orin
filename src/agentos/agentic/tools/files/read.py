@@ -75,7 +75,7 @@ class ReadTools:
             target = self.workspace.resolve(path)
             if not target.is_file():
                 return ""
-            norm = target.relative_to(self.workspace.root).as_posix()
+            norm = self.workspace.key(target)
             raw_bytes = target.read_bytes()
             stat = target.stat()
             sha = hashlib.sha256(raw_bytes).hexdigest()
@@ -171,7 +171,7 @@ class ReadTools:
         target = self.workspace.resolve(path)
         if not target.exists() or not target.is_file():
             return None, ""
-        norm = target.relative_to(self.workspace.root).as_posix()
+        norm = self.workspace.key(target)
         raw_bytes = target.read_bytes()
         current_sha = hashlib.sha256(raw_bytes).hexdigest()
         old_content = raw_bytes.decode("utf-8", errors="replace")
@@ -241,7 +241,7 @@ class ReadTools:
             raise
         except Exception as error:
             raise AgentToolError(f"Failed to read PDF '{path}': {error}") from error
-        rel = target.relative_to(self.workspace.root).as_posix()
+        rel = self.workspace.key(target)
         sha = self._record_file_read(
             path,
             offset=selected_pages[0] if selected_pages else 1,
@@ -340,7 +340,7 @@ class ReadTools:
         norm_offset = max(1, int(offset or 1))
         norm_limit = max(1, min(int(limit or 400), LARGE_READ_LINES if allow_large else 800))
         if target.is_file() and not force_reload:
-            norm = target.relative_to(self.workspace.root).as_posix()
+            norm = self.workspace.key(target)
             with self._read_file_lock:
                 prev = self._read_file_state.get(norm)
                 is_non_code = norm in self._non_code_edited_paths
@@ -404,7 +404,7 @@ class ReadTools:
             explicit_read=True,
         )
         self._note_memory_for(target)
-        norm = target.relative_to(self.workspace.root).as_posix() if target.exists() else path
+        norm = self.workspace.key(target) if target.exists() else path
         if not lines:
             body = "[empty file]" if total == 0 else f"[no lines at offset {first}; the file has {total} lines]"
         else:

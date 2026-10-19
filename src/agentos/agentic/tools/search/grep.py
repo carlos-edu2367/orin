@@ -111,7 +111,7 @@ class GrepTools:
                         continue
                     d_full = cur_path / d
                     try:
-                        d_rel_ws = d_full.relative_to(self.workspace.root).as_posix()
+                        d_rel_ws = self.workspace.key(d_full)
                     except ValueError:
                         continue
                     if ignore_policy is not None and ignore_policy.ignores(d_rel_ws, is_dir=True):
@@ -121,7 +121,7 @@ class GrepTools:
                 for fname in sorted(files):
                     full_file = cur_path / fname
                     try:
-                        rel_ws = full_file.relative_to(self.workspace.root).as_posix()
+                        rel_ws = self.workspace.key(full_file)
                         rel_target = full_file.relative_to(search_target).as_posix()
                     except ValueError:
                         continue
@@ -152,7 +152,7 @@ class GrepTools:
             if b"\x00" in raw_bytes[:4096]:
                 continue
             text = raw_bytes.decode("utf-8", errors="replace")
-            rel_posix = file_path.relative_to(self.workspace.root).as_posix()
+            rel_posix = self.workspace.key(file_path)
 
             if multiline:
                 found = list(regex.finditer(text))
@@ -354,16 +354,15 @@ class GrepTools:
         events = run_ripgrep(arguments, cwd=self.workspace.root)
         if events is None:
             return None
-        root = self.workspace.root.resolve()
         by_file: dict[str, list[dict[str, Any]]] = {}
         for event in events:
             raw = event_path(event)
             if raw is None:
                 continue
             try:
-                rel = Path(raw).resolve().relative_to(root).as_posix()
+                rel = self.workspace.key(Path(raw).resolve())
             except (OSError, ValueError):
-                continue  # outside the workspace (a link ripgrep followed): never reported
+                continue  # outside every working directory (a link ripgrep followed): never reported
             by_file.setdefault(rel, []).append(event)
         files_with_matches: list[str] = []
         counts_list: list[dict[str, Any]] = []

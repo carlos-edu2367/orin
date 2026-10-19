@@ -78,7 +78,7 @@ class EditTools:
         written = self.workspace.write_text(path, draft)
         if not self._dedup_after_non_code_edit:
             try:
-                self._non_code_edited_paths.add(self.workspace.resolve(path).relative_to(self.workspace.root).as_posix())
+                self._non_code_edited_paths.add(self.workspace.key(self.workspace.resolve(path)))
             except Exception:
                 pass
         updated_sha = self._record_file_read(

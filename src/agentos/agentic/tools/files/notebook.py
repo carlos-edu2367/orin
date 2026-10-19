@@ -28,7 +28,7 @@ class NotebookTools:
             raise AgentToolError(f"'{notebook_path}' is not a Jupyter notebook (.ipynb).")
         if not target.exists() or not target.is_file():
             raise AgentToolError(f"Notebook not found: '{notebook_path}'.")
-        rel = target.relative_to(self.workspace.root).as_posix()
+        rel = self.workspace.key(target)
         try:
             raw_text = target.read_text(encoding="utf-8")
             nb = json.loads(raw_text)

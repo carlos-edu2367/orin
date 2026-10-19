@@ -406,6 +406,8 @@ class ToolPermissionBroker:
         timeout_seconds: float = 300.0,
     ) -> None:
         self.workspace_root = _workspace_root(workspace)
+        # Kept so the engine sees the workspace's additional working directories as the turn sets them (W4).
+        self._workspace = workspace
         self.trusted = bool(trusted)
         self.classifier = classifier
         self.cli_settings = dict(cli_settings) if cli_settings is not None else None
@@ -434,7 +436,8 @@ class ToolPermissionBroker:
 
         # Fresh settings on every call, so a new grant applies to the next call.
         settings = load_effective_settings(self.workspace_root, cli=self.cli_settings, trusted=self.trusted)
-        return PermissionEngine(self.workspace_root, settings, classifier=self.classifier)
+        extra = tuple(getattr(self._workspace, "additional_roots", ()) or ())
+        return PermissionEngine(self.workspace_root, settings, classifier=self.classifier, additional_roots=extra)
 
     def has_rules(self) -> bool:
         try:

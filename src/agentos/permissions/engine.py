@@ -78,8 +78,12 @@ class PermissionEngine:
         shell: str | None = None,
         home: Path | None = None,
         classifier: Classifier | None = None,
+        additional_roots: tuple[Path, ...] | list[Path] = (),
     ) -> None:
         self.workspace_root = Path(workspace_root)
+        # Additional working directories (W4): edits there are "inside" like the workspace's, and their
+        # protected paths (.git/, .claude/, dotfiles) are protected exactly as the workspace's are.
+        self.additional_roots: tuple[Path, ...] = tuple(Path(item) for item in additional_roots)
         self.settings = settings
         self.ctx = MatchContext(self.workspace_root, Path(home) if home is not None else Path.home(), shell or default_shell())
         self.classifier = classifier
@@ -109,16 +113,28 @@ class PermissionEngine:
 
     def _inside(self, path: Path) -> bool:
         try:
-            path.resolve().relative_to(self.workspace_root.resolve())
-            return True
-        except (OSError, ValueError):
+            resolved = path.resolve()
+        except OSError:
             return False
+        for root in (self.workspace_root, *self.additional_roots):
+            try:
+                resolved.relative_to(root.resolve())
+                return True
+            except (OSError, ValueError):
+                continue
+        return False
+
+    def _protected(self, path: Path) -> bool:
+        return any(is_protected_path(path, workspace_root=root) for root in (self.workspace_root, *self.additional_roots))
 
     def _is_plan_file(self, args: Mapping[str, Any]) -> bool:
         target = self._target(args)
-        if target is None or not self._inside(target):
+        if target is None:
             return False
-        relative = target.resolve().relative_to(self.workspace_root.resolve()).as_posix()
+        try:  # plan files live in the workspace itself, never in an additional directory
+            relative = target.resolve().relative_to(self.workspace_root.resolve()).as_posix()
+        except (OSError, ValueError):
+            return False
         return relative.lower().startswith(".orin/plans/") and len(relative.split("/")) >= 3
 
     def _command_tokens(self, subcommand: str) -> list[str]:
@@ -177,11 +193,11 @@ class PermissionEngine:
     def _mentions_protected(self, analysis) -> bool:
         for sub in analysis.subcommands:
             for token in self._command_tokens(sub):
-                if any(is_protected_path(path, workspace_root=self.workspace_root) for path in self._token_paths(token)):
+                if any(self._protected(path) for path in self._token_paths(token)):
                     return True
         for target in analysis.redirect_targets:
             for variant in _canonical_variants(target):
-                if any(is_protected_path(path, workspace_root=self.workspace_root) for path in self._token_paths(variant)):
+                if any(self._protected(path) for path in self._token_paths(variant)):
                     return True
         return False
 
@@ -190,7 +206,7 @@ class PermissionEngine:
             if _has_glob(variant):
                 return False
             for target in self._token_paths(variant):
-                if not self._inside(target) or is_protected_path(target, workspace_root=self.workspace_root):
+                if not self._inside(target) or self._protected(target):
                     return False
         return True
 
@@ -273,7 +289,7 @@ class PermissionEngine:
         protected = False
         if internal in EDIT_FAMILY:
             target = self._target(args)
-            protected = target is not None and is_protected_path(target, workspace_root=self.workspace_root)
+            protected = target is not None and self._protected(target)
         elif analysis is not None:
             protected = self._mentions_protected(analysis)
         if protected:

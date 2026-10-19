@@ -103,7 +103,7 @@ class GlobTools:
                     continue
                 d_full = cur_path / d
                 try:
-                    d_rel_ws = d_full.relative_to(self.workspace.root).as_posix()
+                    d_rel_ws = self.workspace.key(d_full)
                 except ValueError:
                     continue
                 if ignore_policy is not None and ignore_policy.ignores(d_rel_ws, is_dir=True):
@@ -113,7 +113,7 @@ class GlobTools:
             for fname in files:
                 full_file = cur_path / fname
                 try:
-                    rel_ws = full_file.relative_to(self.workspace.root).as_posix()
+                    rel_ws = self.workspace.key(full_file)
                     rel_base = full_file.relative_to(base_root).as_posix()
                 except ValueError:
                     continue

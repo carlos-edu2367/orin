@@ -2456,6 +2456,30 @@ class TurnSession:
             toolset._plan_mode_active = True
         return toolset
 
+    def _additional_directory_sources(self) -> list[str]:
+        """Folders this turn may also work in: ``permissions.additionalDirectories`` from the effective settings (W4)."""
+        from .directories import settings_directories
+
+        return settings_directories(self.effective_settings)
+
+    def _apply_working_directories(self) -> None:
+        """Give the workspace its checked additional directories and tell the model about them (W4)."""
+        from .directories import working_directories
+
+        try:
+            found = working_directories(self._additional_directory_sources(), workspace_root=self.workspace.root)
+        except Exception:  # noqa: BLE001 - a broken list means no additional directories, never a failed turn
+            logger.exception("additional directories could not be read")
+            found = ()
+        self.workspace.additional_roots = found
+        if found:
+            listed = "\n".join(f"- {item.as_posix()}" for item in found)
+            self._reminders.add(
+                "directories",
+                f"Besides the workspace, these folders are working directories in this conversation; reach them with absolute paths:\n{listed}",
+                key="working-directories",
+            )
+
     def _push_notification(self, message: str) -> None:
         """PushNotification's transport: an activity event the open window shows as a toast or system notification (W4)."""
         self._record(
@@ -3105,6 +3129,7 @@ class TurnSession:
         setattr(permission_broker, "mode", self.permission_mode)
         self._active_permission_broker = permission_broker
         self._reminders = ReminderQueue()
+        self._apply_working_directories()
         toolset = self._toolset(
             subagents=self.enable_subagents,
             non_interactive_ask=self._non_interactive_ask(),
