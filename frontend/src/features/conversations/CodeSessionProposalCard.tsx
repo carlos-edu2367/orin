@@ -16,7 +16,7 @@ export type CodeSessionProposalDecision = {
   workspace_path: string | null
   provider: ProviderName
   model_id: string
-  permission_mode: 'accept_edits' | 'plan_mode' | 'ask_permissions'
+  permission_mode: 'accept_edits' | 'plan_mode' | 'ask_permissions' | 'full_autonomy'
   project_id: string | null
 }
 
@@ -126,8 +126,10 @@ export function CodeSessionProposalCard({
   const [workspacePath, setWorkspacePath] = useState(proposal.workspace_path ?? '')
   const [provider, setProvider] = useState<ProviderName>(initialProvider)
   const [modelId, setModelId] = useState<string>(initialModelId)
-  const [permissionMode, setPermissionMode] = useState<'accept_edits' | 'plan_mode' | 'ask_permissions'>(
-    proposal.permission_mode === 'plan_mode' || proposal.permission_mode === 'ask_permissions'
+  const [permissionMode, setPermissionMode] = useState<'accept_edits' | 'plan_mode' | 'ask_permissions' | 'full_autonomy'>(
+    proposal.permission_mode === 'plan_mode' ||
+      proposal.permission_mode === 'ask_permissions' ||
+      proposal.permission_mode === 'full_autonomy'
       ? proposal.permission_mode
       : 'accept_edits',
   )
@@ -366,13 +368,14 @@ export function CodeSessionProposalCard({
                 value={permissionMode}
                 onChange={(event) =>
                   setPermissionMode(
-                    event.target.value as 'accept_edits' | 'plan_mode' | 'ask_permissions',
+                    event.target.value as 'accept_edits' | 'plan_mode' | 'ask_permissions' | 'full_autonomy',
                   )
                 }
               >
                 <option value="accept_edits">Aceitar edições automaticamente</option>
                 <option value="plan_mode">Modo Plano (aprovar plano antes)</option>
                 <option value="ask_permissions">Pedir permissão a cada ação</option>
+                <option value="full_autonomy">⚡ Sem restrições (autonomia total)</option>
               </select>
             </label>
           </div>

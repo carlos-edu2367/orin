@@ -294,8 +294,13 @@ function mergeAdjacentDelta(
     const olderText = String(older.payload?.delta ?? older.detail ?? older.delta ?? older.content ?? '')
     const newerText = String(newer.payload?.delta ?? newer.detail ?? newer.delta ?? newer.content ?? '')
     const mergedText = `${olderText}${newerText}`
+    const endedAt = newer.endedAt ?? newer.occurredAt ?? older.endedAt ?? older.occurredAt
     return {
       ...newer,
+      eventId: older.eventId,
+      originEventId: older.originEventId ?? older.eventId,
+      ...(older.occurredAt ? { occurredAt: older.occurredAt } : {}),
+      ...(endedAt ? { endedAt } : {}),
       detail: mergedText,
       ...(newer.payload ? { payload: { ...newer.payload, delta: mergedText } } : { payload: { delta: mergedText } }),
     }
@@ -304,8 +309,13 @@ function mergeAdjacentDelta(
   const newerIsAssistant = newer.type === 'assistant.delta' || newer.type === 'ASSISTANT_DELTA'
   if (olderIsAssistant && newerIsAssistant && older.messageId === newer.messageId) {
     const mergedContent = `${older.content ?? ''}${newer.content ?? ''}`
+    const endedAt = newer.endedAt ?? newer.occurredAt ?? older.endedAt ?? older.occurredAt
     return {
       ...newer,
+      eventId: older.eventId,
+      originEventId: older.originEventId ?? older.eventId,
+      ...(older.occurredAt ? { occurredAt: older.occurredAt } : {}),
+      ...(endedAt ? { endedAt } : {}),
       content: mergedContent,
       ...(older.summary && newer.summary ? { summary: `${older.summary}${newer.summary}` } : {}),
     }

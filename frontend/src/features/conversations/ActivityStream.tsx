@@ -84,7 +84,7 @@ export function ActivityStream({
     <ol className="activity-stream" aria-label="Atividade do agente">
       <AnimatePresence initial={false}>
         {groups.map((group) => (
-          <li key={group.id + group.events[0].eventId}>
+          <li key={group.id + (group.events[0].originEventId ?? group.events[0].eventId)}>
             {renderActivityGroup(
               group,
               openQuestionTurnIds,

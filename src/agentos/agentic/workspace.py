@@ -49,16 +49,18 @@ class ConversationWorkspace:
     # Additional working directories (W4): resolved folders outside ``root`` the tools may also use, set by
     # the turn from settings and ``/add-dir``; every entry was checked by ``agentic.directories``.
     additional_roots: tuple[Path, ...] = ()
+    unrestricted: bool = False
 
-    def __init__(self, root: Path | str, conversation_id: str | None = None) -> None:
+    def __init__(self, root: Path | str, conversation_id: str | None = None, *, unrestricted: bool = False) -> None:
         if conversation_id is None:
             self.root = Path(root).resolve()
         else:
             self.root = Path(root).resolve() / _directory_name(conversation_id)
+        self.unrestricted = bool(unrestricted)
         self.root.mkdir(parents=True, exist_ok=True)
 
     @classmethod
-    def at_root(cls, root: Path | str) -> "ConversationWorkspace":
+    def at_root(cls, root: Path | str, *, unrestricted: bool = False) -> "ConversationWorkspace":
         """Use ``root`` as the working root itself.
 
         A folder the person chose is already the root: appending a workspace id
@@ -68,11 +70,33 @@ class ConversationWorkspace:
         """
         workspace = cls.__new__(cls)
         workspace.root = Path(root).resolve()
+        workspace.unrestricted = bool(unrestricted)
         return workspace
 
     def resolve(self, path: str) -> Path:
         if not isinstance(path, str) or not path.strip():
             raise WorkspaceError("path must be a non-blank string")
+        if self.unrestricted:
+            raw = path.strip()
+            if len(raw) > 1024:
+                raise WorkspaceError("path must be a bounded workspace-relative value")
+            inside = absolute_inside(raw, self.root)
+            if inside == "":
+                return self.root
+            expanded = Path(raw).expanduser() if raw.startswith("~") else Path(raw)
+            if is_drive_path(raw) or expanded.is_absolute() or (os.name != "nt" and raw.startswith("/")):
+                target = expanded
+            else:
+                cleaned = raw.replace("\\", "/")
+                if cleaned.startswith("/") and not is_drive_path(raw):
+                    cleaned = cleaned.lstrip("/")
+                if not cleaned or cleaned == ".":
+                    return self.root
+                target = self.root / cleaned
+            try:
+                return target.resolve()
+            except OSError as error:
+                raise WorkspaceError(f"path could not be resolved: {error}") from error
         inside = absolute_inside(path, self.root)
         if inside == "":
             return self.root
@@ -132,6 +156,12 @@ class ConversationWorkspace:
             except ValueError:
                 continue
             return candidate.as_posix()
+        if self.unrestricted:
+            resolved_candidate = candidate.resolve()
+            try:
+                return resolved_candidate.relative_to(self.root.resolve()).as_posix()
+            except ValueError:
+                return resolved_candidate.as_posix()
         raise WorkspaceError("path is outside every working directory")
 
     def relative(self, path: Path) -> str:
@@ -228,10 +258,21 @@ class ConversationWorkspace:
             raise WorkspaceError(f"'{path}' is not a directory in this workspace")
         levels = max(1, min(int(depth), MAX_LIST_DEPTH))
         entries: list[dict[str, object]] = []
-        self._collect(target, levels, entries, self._ignore_policy())
+        base_root = self.root if target.is_relative_to(self.root) else target.resolve()
+        ignore = self._ignore_policy() if base_root == self.root else PathIgnorePolicy.for_root(base_root)
+        self._collect(target, levels, entries, ignore, base_root=base_root)
         return entries
 
-    def _collect(self, directory: Path, levels: int, entries: list[dict[str, object]], ignore: PathIgnorePolicy) -> None:
+    def _collect(
+        self,
+        directory: Path,
+        levels: int,
+        entries: list[dict[str, object]],
+        ignore: PathIgnorePolicy,
+        *,
+        base_root: Path | None = None,
+    ) -> None:
+        containment_root = base_root or self.root
         for item in sorted(directory.iterdir(), key=lambda value: (value.is_file(), value.name.lower())):
             if len(entries) >= MAX_LIST_ENTRIES:
                 return
@@ -239,12 +280,24 @@ class ConversationWorkspace:
             # outside ``root``; resolving and re-checking containment here (same
             # guard used by ``search``/``file_snapshot``) keeps the recursion
             # from walking out of the sandbox.
-            resolved = resolve_contained(item, self.root)
-            if resolved is None:
-                continue
+            if self.unrestricted:
+                try:
+                    resolved = item.resolve()
+                except OSError:
+                    continue
+                if not resolved.exists():
+                    continue
+            else:
+                resolved = resolve_contained(item, containment_root)
+                if resolved is None:
+                    continue
             relative = self.relative(item)
+            try:
+                ignore_rel = item.relative_to(containment_root).as_posix()
+            except ValueError:
+                ignore_rel = item.name
             is_file = resolved.is_file()
-            if ignore.ignores(relative, is_dir=not is_file):
+            if ignore.ignores(ignore_rel, is_dir=not is_file):
                 continue
             entries.append({
                 "path": relative,
@@ -252,7 +305,7 @@ class ConversationWorkspace:
                 "size_bytes": resolved.stat().st_size if is_file else None,
             })
             if not is_file and levels > 1:
-                self._collect(item, levels - 1, entries, ignore)
+                self._collect(item, levels - 1, entries, ignore, base_root=containment_root)
 
     @staticmethod
     def _validate_relative_glob(glob: str) -> str:

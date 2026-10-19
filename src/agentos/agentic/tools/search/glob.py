@@ -93,9 +93,20 @@ class GlobTools:
         base_root = self.workspace.resolve(path) if (isinstance(path, str) and path.strip()) else self.workspace.root
         if not base_root.exists() or not base_root.is_dir():
             raise AgentToolError(f"Directory not found: '{path}'.")
-        ignore_policy = getattr(self.workspace, "_ignore_policy", lambda: None)()
+        is_unrestricted = bool(getattr(self.workspace, "unrestricted", False))
+        outside_ws = not base_root.resolve().is_relative_to(self.workspace.root.resolve())
+        if outside_ws:
+            from agentos.ignore import PathIgnorePolicy
+
+            ignore_policy = PathIgnorePolicy.for_root(base_root.resolve())
+        else:
+            ignore_policy = getattr(self.workspace, "_ignore_policy", lambda: None)()
         matched: list[tuple[int, str]] = []
-        roots = (self.workspace.root, *self.workspace.additional_roots)
+        roots = (
+            (self.workspace.root, *self.workspace.additional_roots, base_root.resolve())
+            if is_unrestricted
+            else (self.workspace.root, *self.workspace.additional_roots)
+        )
         for cur_root, dirs, files in os.walk(base_root):
             cur_path = Path(cur_root)
             kept_dirs: list[str] = []
@@ -103,28 +114,30 @@ class GlobTools:
                 if d in _GLOB_IGNORED_DIRS or d.startswith(".git"):
                     continue
                 d_full = cur_path / d
-                if linked_or_outside(d_full, roots):  # a junction is not a symlink: os.walk would enter it (W4-R17)
+                if not is_unrestricted and linked_or_outside(d_full, roots):  # a junction is not a symlink: os.walk would enter it (W4-R17)
                     continue
                 try:
                     d_rel_ws = self.workspace.key(d_full)
+                    d_rel_check = d_full.relative_to(base_root).as_posix() if outside_ws else d_rel_ws
                 except ValueError:
                     continue
-                if ignore_policy is not None and ignore_policy.ignores(d_rel_ws, is_dir=True):
+                if ignore_policy is not None and ignore_policy.ignores(d_rel_check, is_dir=True):
                     continue
                 kept_dirs.append(d)
             dirs[:] = kept_dirs
             for fname in files:
                 full_file = cur_path / fname
-                if linked_or_outside(full_file, roots):
+                if not is_unrestricted and linked_or_outside(full_file, roots):
                     continue
                 try:
                     rel_ws = self.workspace.key(full_file)
                     rel_base = full_file.relative_to(base_root).as_posix()
                 except ValueError:
                     continue
-                if any(part in _GLOB_IGNORED_DIRS for part in Path(rel_ws).parts):
+                rel_check = rel_base if outside_ws else rel_ws
+                if any(part in _GLOB_IGNORED_DIRS for part in Path(rel_check).parts):
                     continue
-                if ignore_policy is not None and ignore_policy.ignores(rel_ws, is_dir=False):
+                if ignore_policy is not None and ignore_policy.ignores(rel_check, is_dir=False):
                     continue
                 if self._glob_matches_path(rel_base, clean_pattern, allow_basename=False):
                     try:
@@ -156,7 +169,7 @@ class GlobTools:
             "tool_output": {
                 "durationMs": int((time.monotonic() - started) * 1000),
                 "numFiles": len(matches),
-                "filenames": [str(self.workspace.root / rel) for rel in matches],
+                "filenames": [str(Path(rel) if Path(rel).is_absolute() else self.workspace.root / rel) for rel in matches],
                 "truncated": truncated,
                 "totalMatches": len(matched),
                 "countIsComplete": True,

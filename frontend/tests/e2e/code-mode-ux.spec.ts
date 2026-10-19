@@ -911,4 +911,359 @@ test('renders redesigned CodeSessionProposalCard, UserQuestionCard with collapsi
   await assertNoCriticalOrSeriousViolations(page)
 })
 
+test('Live SSE stream at EVENT_LIMIT (1500) keeps ThoughtBlock duration stable, avoids duplicate DOM nodes on tool transitions, and keeps scroll pinned', async ({
+  page,
+}) => {
+  await installCsrfMeta(page)
 
+  // Build 1500 initial events: 500 thought deltas spanning 25s (00:00 -> 00:25), a completed tool call,
+  // 500 assistant deltas, and 499 more thought deltas so the buffer is right at EVENT_LIMIT = 1500.
+  const initialActivities: Array<Record<string, unknown>> = []
+  for (let i = 0; i < 500; i += 1) {
+    const sec = Math.floor((i / 499) * 25)
+    const ms = Math.round(((i / 499) * 25 - sec) * 1000)
+    const iso = `2026-10-19T12:00:${String(sec).padStart(2, '0')}.${String(ms).padStart(3, '0')}Z`
+    initialActivities.push({
+      event_id: `ev-t1-${i}`,
+      cursor: String(initialActivities.length + 1),
+      turn_id: 'turn-stream-1',
+      agent_id: 'agent:main',
+      event_type: 'agent.thought_delta',
+      summary: 'Pensando',
+      occurred_at: iso,
+      payload: { delta: `raciocinio-${i} ` },
+    })
+  }
+
+  initialActivities.push({
+    event_id: 'ev-tool-1-done',
+    cursor: String(initialActivities.length + 1),
+    turn_id: 'turn-stream-1',
+    agent_id: 'agent:main',
+    event_type: 'tool.finished',
+    summary: 'index.html criado',
+    occurred_at: '2026-10-19T12:00:26.000Z',
+    payload: {
+      tool_name: 'write_file',
+      tool_kind: 'filesystem',
+      status: 'succeeded',
+      invocation_id: 'inv-1',
+      file_path: 'index.html',
+      added_lines: 45,
+      removed_lines: 0,
+    },
+  })
+
+  for (let i = 0; i < 500; i += 1) {
+    initialActivities.push({
+      event_id: `ev-msg-${i}`,
+      cursor: String(initialActivities.length + 1),
+      turn_id: 'turn-stream-1',
+      agent_id: 'agent:main',
+      event_type: 'assistant.delta',
+      summary: 'Respondendo',
+      occurred_at: '2026-10-19T12:00:27.000Z',
+      payload: {
+        message_id: 'msg-stream-1',
+        content: `Linha de progresso ${i} para preencher a altura do chat.\n`,
+      },
+    })
+  }
+
+  for (let i = 0; i < 499; i += 1) {
+    initialActivities.push({
+      event_id: `ev-t2-${i}`,
+      cursor: String(initialActivities.length + 1),
+      turn_id: 'turn-stream-1',
+      agent_id: 'agent:main',
+      event_type: 'agent.thought_delta',
+      summary: 'Pensando',
+      occurred_at: '2026-10-19T12:00:30.000Z',
+      payload: { delta: `analise-extra-${i} ` },
+    })
+  }
+
+  const sseBody = [
+    `id: 1501\nevent: tool.progressed\ndata: ${JSON.stringify({
+      event_id: 'ev-tool-2-prog',
+      cursor: '1501',
+      turn_id: 'turn-stream-1',
+      agent_id: 'agent:main',
+      event_type: 'tool.progressed',
+      summary: 'Preparando write_file (889 chars)...',
+      occurred_at: '2026-10-19T12:00:40.000Z',
+      payload: {
+        phase: 'generating_arguments',
+        tool_name: 'write_file',
+        tool_kind: 'filesystem',
+        invocation_id: 'inv-2',
+      },
+    })}\n\n`,
+    `id: 1502\nevent: tool.started\ndata: ${JSON.stringify({
+      event_id: 'ev-tool-2-start',
+      cursor: '1502',
+      turn_id: 'turn-stream-1',
+      agent_id: 'agent:main',
+      event_type: 'tool.started',
+      summary: 'Gravando game.js',
+      occurred_at: '2026-10-19T12:00:41.000Z',
+      payload: {
+        tool_name: 'write_file',
+        tool_kind: 'filesystem',
+        status: 'running',
+        invocation_id: 'inv-2',
+        file_path: 'game.js',
+      },
+    })}\n\n`,
+    `id: 1503\nevent: tool.finished\ndata: ${JSON.stringify({
+      event_id: 'ev-tool-2-fin',
+      cursor: '1503',
+      turn_id: 'turn-stream-1',
+      agent_id: 'agent:main',
+      event_type: 'tool.finished',
+      summary: 'game.js gravado',
+      occurred_at: '2026-10-19T12:00:42.000Z',
+      payload: {
+        tool_name: 'write_file',
+        tool_kind: 'filesystem',
+        status: 'succeeded',
+        invocation_id: 'inv-2',
+        file_path: 'game.js',
+        added_lines: 120,
+        removed_lines: 0,
+      },
+    })}\n\n`,
+    `id: 1504\nevent: assistant.delta\ndata: ${JSON.stringify({
+      event_id: 'ev-msg-final',
+      cursor: '1504',
+      turn_id: 'turn-stream-1',
+      agent_id: 'agent:main',
+      event_type: 'assistant.delta',
+      summary: 'Respondendo',
+      occurred_at: '2026-10-19T12:00:43.000Z',
+      payload: {
+        message_id: 'msg-stream-1',
+        content: '\nMotor pronto com física, partículas e áudio procedural!',
+      },
+    })}\n\n`,
+  ].join('')
+
+  await page.route('**/v1/**', async (route) => {
+    const request = route.request()
+    const url = new URL(request.url())
+    const { pathname } = url
+
+    if (request.method() === 'GET' && pathname === '/v1/conversations/conv-stream-stability') {
+      await fulfillJson(route, {
+        conversation_id: 'conv-stream-stability',
+        title: 'Void Breaker · Stream Stability',
+        state: 'running',
+        provider: 'openrouter',
+        model_id: 'qwen/qwen3.8-max-0902',
+        mode: 'code',
+        permission_mode: 'accept_edits',
+        project_id: null,
+        workspace: {
+          mode: 'local_folder',
+          path: 'C:/Projetos/void-breaker',
+          folder_name: 'void-breaker',
+          status: 'available',
+        },
+        messages: [
+          {
+            message_id: 'msg-user-stream-1',
+            turn_id: 'turn-stream-1',
+            role: 'user',
+            content: 'Crie o jogo Void Breaker completo.',
+            status: 'completed',
+            retryable: false,
+            attachments: [],
+            command: null,
+          },
+          {
+            message_id: 'msg-stream-1',
+            turn_id: 'turn-stream-1',
+            role: 'assistant',
+            content: '',
+            status: 'streaming',
+            retryable: false,
+            attachments: [],
+            command: null,
+          },
+        ],
+        turns: [
+          {
+            turn_id: 'turn-stream-1',
+            state: 'running',
+            created_at: '2026-10-19T12:00:00.000Z',
+            started_at: '2026-10-19T12:00:00.000Z',
+            finished_at: null,
+            scheduled_by_schedule_id: null,
+            code_mode: 'code',
+          },
+        ],
+        activities: initialActivities,
+        activity_cursor: '1500',
+      })
+      return
+    }
+    if (pathname.endsWith('/events')) {
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/event-stream',
+        body: sseBody,
+      })
+      return
+    }
+    if (pathname === '/v1/conversations' || pathname === '/v1/projects/sidebar' || pathname === '/v1/projects') {
+      await fulfillJson(route, { items: [] })
+      return
+    }
+    if (pathname === '/v1/providers/models') {
+      await fulfillJson(route, { items: [] })
+      return
+    }
+    if (pathname === '/v1/settings/runtime') {
+      await fulfillJson(route, { code_system_notifications: false })
+      return
+    }
+    await fulfillJson(route, {})
+  })
+
+  await page.setViewportSize({ width: 1280, height: 800 })
+  await page.goto('/chats/conv-stream-stability')
+
+  await expect(page.getByText('Motor pronto com física, partículas e áudio procedural!')).toBeVisible()
+
+  // 1. Verify the first completed ThoughtBlock still shows "Pensou por 25s" (did not count backwards after compaction)
+  const completedThoughts = page.getByTestId('thought-block-completed')
+  await expect(completedThoughts).toHaveCount(2)
+  await expect(completedThoughts.first()).toContainText('Pensou por 25s')
+
+  // 2. Verify there are exactly 2 tool call blocks (index.html and game.js), with zero duplicates
+  const toolBlocks = page.getByTestId('code-tool-call-block')
+  await expect(toolBlocks).toHaveCount(2)
+  await expect(toolBlocks.nth(0)).toContainText('index.html')
+  await expect(toolBlocks.nth(1)).toContainText('game.js')
+
+  // 3. Verify the scroll container is pinned right to the bottom so the latest text and AgentPulse are visible
+  const scrollMetrics = await page.locator('.chat__scroll').evaluate((el) => ({
+    scrollTop: el.scrollTop,
+    scrollHeight: el.scrollHeight,
+    clientHeight: el.clientHeight,
+    distanceFromBottom: el.scrollHeight - el.scrollTop - el.clientHeight,
+  }))
+  expect(scrollMetrics.distanceFromBottom).toBeLessThanOrEqual(4)
+  if (processEnv.ORIN_SHOT_STREAM) {
+    await page.screenshot({ path: processEnv.ORIN_SHOT_STREAM, fullPage: false })
+  }
+})
+
+test('Orin allows activating Sem restrições (full_autonomy) via pill, Shift+Tab, and popover in both Chat and Code modes', async ({
+  page,
+}) => {
+  await installCsrfMeta(page)
+  const patchedModes: string[] = []
+
+  await page.route('**/v1/**', async (route) => {
+    const request = route.request()
+    const url = new URL(request.url())
+    const { pathname } = url
+
+    if (request.method() === 'PATCH' && pathname === '/v1/conversations/conv-chat-perm/permission-mode') {
+      const body = JSON.parse(request.postData() || '{}') as { permission_mode?: string }
+      if (body.permission_mode) patchedModes.push(body.permission_mode)
+      await fulfillJson(route, {
+        conversation_id: 'conv-chat-perm',
+        permission_mode: body.permission_mode ?? 'ask_permissions',
+      })
+      return
+    }
+    if (request.method() === 'GET' && pathname === '/v1/conversations/conv-chat-perm') {
+      await fulfillJson(route, {
+        conversation_id: 'conv-chat-perm',
+        title: 'Chat com Permissão Direta',
+        state: 'completed',
+        provider: 'openrouter',
+        model_id: 'anthropic/claude-sonnet-4.5',
+        mode: 'chat',
+        permission_mode: 'ask_permissions',
+        project_id: null,
+        workspace: {
+          mode: 'managed',
+          path: null,
+          folder_name: null,
+          status: 'available',
+        },
+        messages: [
+          {
+            message_id: 'msg-u1',
+            turn_id: 'turn-1',
+            role: 'user',
+            content: 'Olá!',
+            status: 'completed',
+            retryable: false,
+            attachments: [],
+            command: null,
+          },
+        ],
+        turns: [],
+        activities: [],
+        activity_cursor: '1',
+      })
+      return
+    }
+    if (pathname.endsWith('/events')) {
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/event-stream',
+        body: ': keepalive\n\n',
+      })
+      return
+    }
+    if (pathname === '/v1/conversations' || pathname === '/v1/projects/sidebar' || pathname === '/v1/projects') {
+      await fulfillJson(route, { items: [] })
+      return
+    }
+    if (pathname === '/v1/providers/models') {
+      await fulfillJson(route, { items: [] })
+      return
+    }
+    if (pathname === '/v1/settings/runtime') {
+      await fulfillJson(route, { code_system_notifications: false })
+      return
+    }
+    await fulfillJson(route, {})
+  })
+
+  await page.setViewportSize({ width: 1280, height: 800 })
+  await page.goto('/chats/conv-chat-perm')
+
+  // In Chat mode, the permission mode pill is visible next to the workspace trigger
+  const pill = page.getByTestId('code-permission-mode-pill')
+  await expect(pill).toBeVisible()
+  await expect(pill).toHaveText('🔒 Pedir permissão')
+
+  // Clicking the pill cycles directly from ask_permissions -> full_autonomy (⚡ Sem restrições)
+  await pill.click()
+  await expect(pill).toHaveText('⚡ Sem restrições')
+  await expect.poll(() => patchedModes).toContain('full_autonomy')
+
+  // Pressing Shift+Tab inside the composer textarea cycles full_autonomy -> accept_edits -> plan_mode -> ask_permissions -> full_autonomy
+  const textarea = page.getByRole('textbox', { name: 'Mensagem' })
+  await textarea.focus()
+  await page.keyboard.press('Shift+Tab')
+  await expect(pill).toHaveText('⏵⏵ Aceitar edições')
+  await page.keyboard.press('Shift+Tab')
+  await expect(pill).toHaveText('⏸ Modo Plano')
+  await page.keyboard.press('Shift+Tab')
+  await expect(pill).toHaveText('🔒 Pedir permissão')
+  await page.keyboard.press('Shift+Tab')
+  await expect(pill).toHaveText('⚡ Sem restrições')
+
+  // Opening the SessionContextPopover shows the Modo de permissão grid with updated detail text
+  await page.getByTestId('session-context-trigger').click()
+  const dialog = page.getByTestId('session-context-dialog')
+  await expect(dialog).toBeVisible()
+  await expect(dialog).toContainText('Executa ferramentas sem confirmação e sem restrição ao workspace')
+})

@@ -83,14 +83,17 @@ describe('SessionContextPopover', () => {
     })
   })
 
-  it('shows active project badge and allows removing session from project', async () => {
+  it('shows active project badge, allows removing session from project, and renders permission mode selector in chat mode', async () => {
     const user = userEvent.setup()
     const onMoveToProject = vi.fn()
+    const onPermissionChange = vi.fn()
 
     render(
       <MemoryRouter>
         <SessionContextPopover
           mode="chat"
+          permissionMode="ask_permissions"
+          onPermissionModeChange={onPermissionChange}
           workspaceState={{
             kind: 'managed',
             path: null,
@@ -106,7 +109,17 @@ describe('SessionContextPopover', () => {
       </MemoryRouter>,
     )
 
+    // Permission mode pill is visible and clickable even in chat mode
+    const pill = screen.getByTestId('code-permission-mode-pill')
+    expect(pill).toHaveTextContent('🔒 Pedir permissão')
+    await user.click(pill)
+    expect(onPermissionChange).toHaveBeenCalledWith('full_autonomy')
+
     await user.click(screen.getByTestId('session-context-trigger'))
+    // Popover shows permission mode options including Sem restrições in chat mode
+    await user.click(screen.getByRole('button', { name: /Sem restrições/i }))
+    expect(onPermissionChange).toHaveBeenCalledWith('full_autonomy')
+
     const removeBtn = screen.getByTestId('remove-from-project-button')
     await user.click(removeBtn)
     expect(onMoveToProject).toHaveBeenCalledWith(null)

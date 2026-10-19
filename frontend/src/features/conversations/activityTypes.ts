@@ -169,6 +169,10 @@ export type ConversationActivityEvent = {
   pluginApproval?: PluginApprovalRequest
   codeSessionProposal?: CodeSessionProposalRequest
   occurredAt?: string
+  /** Preserved end timestamp when multiple streaming deltas are compacted into one event. */
+  endedAt?: string
+  /** Stable first eventId of a logical tool invocation or delta run across lifecycle transitions. */
+  originEventId?: string
   contextUsage?: ContextUsage
   codeStage?: string
   codeApproval?: boolean
@@ -272,7 +276,7 @@ export type CodeSessionProposalRequest = {
   workspace_path: string | null
   provider: string | null
   model_id: string | null
-  permission_mode: 'accept_edits' | 'plan_mode' | 'ask_permissions'
+  permission_mode: 'accept_edits' | 'plan_mode' | 'ask_permissions' | 'full_autonomy'
   project_id: string | null
 }
 

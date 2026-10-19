@@ -55,6 +55,18 @@ class PlanModeTools:
             payload,
         )
 
+    def _sync_workspace_restriction(self) -> None:
+        from agentos.code_mode.models import CodePermissionMode
+
+        is_full = self._permission_mode is CodePermissionMode.FULL_AUTONOMY
+        if getattr(self, "_read_only_mode", False) and not is_full:
+            return
+        self.workspace.unrestricted = is_full
+        if not is_full and hasattr(self, "_current_cwd"):
+            roots = (self.workspace.root.resolve(), *self.workspace.additional_roots)
+            if not any(self._current_cwd.resolve().is_relative_to(r) for r in roots):
+                self._current_cwd = self.workspace.root
+
     def enter_plan_mode(self, reason: str = "") -> ToolOutcome:
         """Switch the current turn into read-only Plan Mode."""
         from agentos.code_mode.models import CodePermissionMode
@@ -63,6 +75,7 @@ class PlanModeTools:
             self._previous_permission_mode = self._permission_mode
         self._plan_mode_active = True
         self._permission_mode = CodePermissionMode.PLAN_MODE
+        self._sync_workspace_restriction()
         clean_reason = str(reason or "").strip()
         summary = f"Modo Plano ativado{f': {clean_reason[:120]}' if clean_reason else ''}"
         return ToolOutcome(
@@ -116,6 +129,8 @@ class PlanModeTools:
             restored_mode = CodePermissionMode.ACCEPT_EDITS
         self._plan_mode_active = False
         self._permission_mode = restored_mode
+        if hasattr(self, "_sync_workspace_restriction"):
+            self._sync_workspace_restriction()
 
         payload: dict[str, Any] = {
             "ok": True,

@@ -97,13 +97,25 @@ class GrepTools:
                 pre_ctx=pre_ctx, post_ctx=post_ctx, only_matching=bool(only_matching),
             )
         candidate_files: list[Path] = []
-        roots = (self.workspace.root, *self.workspace.additional_roots)
+        is_unrestricted = bool(getattr(self.workspace, "unrestricted", False))
+        target_root = search_target.resolve() if search_target.is_dir() else search_target.parent.resolve()
+        outside_ws = not target_root.is_relative_to(self.workspace.root.resolve())
+        roots = (
+            (self.workspace.root, *self.workspace.additional_roots, target_root)
+            if is_unrestricted
+            else (self.workspace.root, *self.workspace.additional_roots)
+        )
         if rg_found is not None:
             pass  # ripgrep already searched; the Python scan below sees no candidates
         elif search_target.is_file():
-            candidate_files = [] if linked_or_outside(search_target, roots) else [search_target]
+            candidate_files = [] if (not is_unrestricted and linked_or_outside(search_target, roots)) else [search_target]
         else:
-            ignore_policy = getattr(self.workspace, "_ignore_policy", lambda: None)()
+            if outside_ws:
+                from agentos.ignore import PathIgnorePolicy
+
+                ignore_policy = PathIgnorePolicy.for_root(target_root)
+            else:
+                ignore_policy = getattr(self.workspace, "_ignore_policy", lambda: None)()
             for cur_root, dirs, files in os.walk(search_target):
                 cur_path = Path(cur_root)
                 kept_dirs: list[str] = []
@@ -111,28 +123,30 @@ class GrepTools:
                     if d in _GLOB_IGNORED_DIRS or d.startswith(".git"):
                         continue
                     d_full = cur_path / d
-                    if linked_or_outside(d_full, roots):  # a junction is not a symlink: os.walk would enter it (W4-R17)
+                    if not is_unrestricted and linked_or_outside(d_full, roots):  # a junction is not a symlink: os.walk would enter it (W4-R17)
                         continue
                     try:
                         d_rel_ws = self.workspace.key(d_full)
+                        d_rel_check = d_full.relative_to(search_target).as_posix() if outside_ws else d_rel_ws
                     except ValueError:
                         continue
-                    if ignore_policy is not None and ignore_policy.ignores(d_rel_ws, is_dir=True):
+                    if ignore_policy is not None and ignore_policy.ignores(d_rel_check, is_dir=True):
                         continue
                     kept_dirs.append(d)
                 dirs[:] = sorted(kept_dirs)
                 for fname in sorted(files):
                     full_file = cur_path / fname
-                    if linked_or_outside(full_file, roots):
+                    if not is_unrestricted and linked_or_outside(full_file, roots):
                         continue
                     try:
                         rel_ws = self.workspace.key(full_file)
                         rel_target = full_file.relative_to(search_target).as_posix()
                     except ValueError:
                         continue
-                    if any(part in _GLOB_IGNORED_DIRS for part in Path(rel_ws).parts):
+                    rel_check = rel_target if outside_ws else rel_ws
+                    if any(part in _GLOB_IGNORED_DIRS for part in Path(rel_check).parts):
                         continue
-                    if ignore_policy is not None and ignore_policy.ignores(rel_ws, is_dir=False):
+                    if ignore_policy is not None and ignore_policy.ignores(rel_check, is_dir=False):
                         continue
                     if clean_type and full_file.suffix.lstrip(".").lower() != clean_type:
                         continue

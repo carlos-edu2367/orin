@@ -92,8 +92,8 @@ export function permissionModeToAutonomy(mode: CodePermissionMode): CodeAutonomy
 }
 
 export function nextCodePermissionMode(current: CodePermissionMode): CodePermissionMode {
-  if (current === 'full_autonomy' || current === 'auto' || current === 'dont_ask') return 'ask_permissions'
-  const order: CodePermissionMode[] = ['accept_edits', 'plan_mode', 'ask_permissions']
+  if (current === 'auto' || current === 'dont_ask') return 'ask_permissions'
+  const order: CodePermissionMode[] = ['accept_edits', 'plan_mode', 'ask_permissions', 'full_autonomy']
   const idx = order.indexOf(current)
   return order[(idx === -1 ? 0 : idx + 1) % order.length]
 }

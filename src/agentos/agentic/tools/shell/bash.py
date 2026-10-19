@@ -90,7 +90,9 @@ class BashTools:
                 continue
             candidate = (current / raw_target).resolve()
             # The workspace and every additional working directory are roots: a cd may stay in any of them (W4-R6).
-            if not any(candidate.is_relative_to(root) for root in (root_resolved, *self.workspace.additional_roots)):
+            if not getattr(self.workspace, "unrestricted", False) and not any(
+                candidate.is_relative_to(root) for root in (root_resolved, *self.workspace.additional_roots)
+            ):
                 raise AgentToolError("Directory outside workspace is not allowed.")
             if precheck and re.match(r"(?i)^cd(?:\s+/d)?\s+(.+)$", command.strip()):
                 if not candidate.is_dir():

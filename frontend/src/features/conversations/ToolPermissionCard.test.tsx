@@ -44,7 +44,7 @@ describe('Fase B: ToolPermissionCard, 4 Permission Modes & Rewind UI', () => {
     })
   })
 
-  it('cycles through the 3 safe Code Mode permission modes on Shift+Tab in Composer without escalating to full_autonomy', () => {
+  it('cycles through all 4 permission modes including full_autonomy on Shift+Tab in Composer', () => {
     const onPermissionChange = vi.fn()
     render(
       <Composer
@@ -61,6 +61,10 @@ describe('Fase B: ToolPermissionCard, 4 Permission Modes & Rewind UI', () => {
     expect(select.value).toBe('ask_permissions')
 
     const textarea = screen.getByLabelText('Mensagem')
+    fireEvent.keyDown(textarea, { key: 'Tab', shiftKey: true })
+    expect(select.value).toBe('full_autonomy')
+    expect(onPermissionChange).toHaveBeenLastCalledWith('full_autonomy')
+
     fireEvent.keyDown(textarea, { key: 'Tab', shiftKey: true })
     expect(select.value).toBe('accept_edits')
     expect(onPermissionChange).toHaveBeenLastCalledWith('accept_edits')

@@ -478,4 +478,220 @@ describe('TurnTimeline Collapsible Batch & Text Retention (TDD)', () => {
     expect(subToggle).toHaveAttribute('aria-expanded', 'true')
     expect(screen.getByText('src/deep.ts')).toBeInTheDocument()
   })
+
+  it('preserves stable thought/text IDs, exact thought duration (Pensou por 25s), and expanded DOM node when trimActivityEvents merges deltas', () => {
+    const baseEvents: ConversationActivityEvent[] = []
+    let seq = 1
+    for (let sec = 0; sec <= 25; sec += 1) {
+      const padded = String(sec).padStart(2, '0')
+      baseEvents.push({
+        eventId: `thought-delta-${sec}`,
+        cursor: String(seq++),
+        turnId: 'turn-video',
+        type: 'agent.thought_delta',
+        kind: 'lifecycle',
+        state: 'working',
+        agentId: 'agent:main',
+        detail: `passo ${sec} `,
+        summary: 'Pensando',
+        occurredAt: `2026-10-19T18:50:${padded}.000Z`,
+      })
+    }
+    const textChunks = ['Começando ', 'pelo motor ', 'de execução.']
+    for (let i = 0; i < textChunks.length; i += 1) {
+      baseEvents.push({
+        eventId: `text-delta-${i}`,
+        cursor: String(seq++),
+        turnId: 'turn-video',
+        type: 'assistant.delta',
+        kind: 'message',
+        state: 'working',
+        agentId: 'agent:main',
+        messageId: 'msg-video',
+        content: textChunks[i],
+        summary: textChunks[i],
+        occurredAt: `2026-10-19T18:50:${String(26 + i).padStart(2, '0')}.000Z`,
+      })
+    }
+    baseEvents.push({
+      eventId: 'tool-write-1',
+      cursor: String(seq),
+      turnId: 'turn-video',
+      type: 'tool.finished',
+      kind: 'tool',
+      state: 'completed',
+      agentId: 'agent:main',
+      toolName: 'write_file',
+      path: 'engine.js',
+      summary: 'Escreveu engine.js',
+      occurredAt: '2026-10-19T18:50:30.000Z',
+    })
+
+    const timelineBefore = buildTurnTimeline(baseEvents, 'turn-video', 'msg-video')
+    expect(timelineBefore[0]).toMatchObject({
+      id: 'thought:thought-delta-0',
+      kind: 'thought',
+      thought: {
+        id: 'thought:thought-delta-0',
+        status: 'completed',
+        durationMs: 25000,
+      },
+    })
+    expect(timelineBefore[1]).toMatchObject({
+      id: 'text:text-delta-0',
+      kind: 'text',
+      content: 'Começando pelo motor de execução.',
+    })
+
+    const { rerender } = render(<TurnTimeline items={timelineBefore} mode="code" />)
+    const toggleBefore = screen.getByTestId('thought-block-toggle')
+    expect(toggleBefore).toHaveTextContent('Pensou por 25s')
+    fireEvent.click(toggleBefore)
+    expect(toggleBefore).toHaveAttribute('aria-expanded', 'true')
+
+    // Simulate incremental trimming one event at a time (like frames 26->29 and 128->130 in the video)
+    const trimmedStep1 = trimActivityEvents(baseEvents, baseEvents.length - 1)
+    const timelineStep1 = buildTurnTimeline(trimmedStep1, 'turn-video', 'msg-video')
+    expect(timelineStep1[0]).toMatchObject({
+      id: 'thought:thought-delta-0',
+      kind: 'thought',
+      thought: {
+        id: 'thought:thought-delta-0',
+        durationMs: 25000,
+      },
+    })
+
+    rerender(<TurnTimeline items={timelineStep1} mode="code" />)
+    const togglesAfterStep1 = screen.getAllByTestId('thought-block-toggle')
+    expect(togglesAfterStep1).toHaveLength(1)
+    expect(togglesAfterStep1[0]).toBe(toggleBefore)
+    expect(togglesAfterStep1[0]).toHaveTextContent('Pensou por 25s')
+    expect(togglesAfterStep1[0]).toHaveAttribute('aria-expanded', 'true')
+
+    // Now trim all the way down to 3 events (1 merged thought, 1 merged text, 1 tool)
+    const fullyTrimmed = trimActivityEvents(baseEvents, 3)
+    const timelineFullyTrimmed = buildTurnTimeline(fullyTrimmed, 'turn-video', 'msg-video')
+    expect(timelineFullyTrimmed[0]).toMatchObject({
+      id: 'thought:thought-delta-0',
+      kind: 'thought',
+      thought: {
+        id: 'thought:thought-delta-0',
+        durationMs: 25000,
+      },
+    })
+    expect(timelineFullyTrimmed[1]).toMatchObject({
+      id: 'text:text-delta-0',
+      kind: 'text',
+      content: 'Começando pelo motor de execução.',
+    })
+  })
+
+  it('preserves stable timeline item IDs and DOM nodes across tool.progressed -> tool.started -> tool.finished transitions', () => {
+    const prog1: ConversationActivityEvent = {
+      eventId: 'ev-prog-1',
+      cursor: '1',
+      turnId: 'turn-tool',
+      type: 'tool.progressed',
+      kind: 'lifecycle',
+      state: 'working',
+      agentId: 'agent:main',
+      invocationId: 'inv-write-1',
+      phase: 'generating_arguments',
+      payload: { phase: 'generating_arguments', tool_name: 'write_file' },
+      summary: 'Preparando write_file...',
+    }
+    const started1: ConversationActivityEvent = {
+      eventId: 'ev-start-1',
+      cursor: '2',
+      turnId: 'turn-tool',
+      type: 'tool.started',
+      kind: 'tool',
+      state: 'waiting_tool',
+      status: 'running',
+      agentId: 'agent:main',
+      invocationId: 'inv-write-1',
+      toolName: 'write_file',
+      path: 'engine.js',
+      summary: 'Escrevendo engine.js',
+    }
+    const finished1: ConversationActivityEvent = {
+      eventId: 'ev-fin-1',
+      cursor: '3',
+      turnId: 'turn-tool',
+      type: 'tool.finished',
+      kind: 'tool',
+      state: 'completed',
+      status: 'succeeded',
+      agentId: 'agent:main',
+      invocationId: 'inv-write-1',
+      toolName: 'write_file',
+      path: 'engine.js',
+      addedLines: 893,
+      removedLines: 962,
+      summary: 'Escreveu engine.js',
+    }
+
+    const tl1 = buildTurnTimeline([prog1], 'turn-tool', 'msg-tool')
+    const tl2 = buildTurnTimeline([prog1, started1], 'turn-tool', 'msg-tool')
+    const tl3 = buildTurnTimeline([prog1, started1, finished1], 'turn-tool', 'msg-tool')
+
+    expect(tl1).toHaveLength(1)
+    expect(tl2).toHaveLength(1)
+    expect(tl3).toHaveLength(1)
+    expect(tl2[0].id).toBe(tl1[0].id)
+    expect(tl3[0].id).toBe(tl1[0].id)
+
+    const { rerender } = render(<TurnTimeline items={tl1} mode="code" />)
+    const block1 = screen.getByTestId('code-tool-call-block')
+
+    rerender(<TurnTimeline items={tl2} mode="code" />)
+    const blocksAt2 = screen.getAllByTestId('code-tool-call-block')
+    expect(blocksAt2).toHaveLength(1)
+    expect(blocksAt2[0]).toBe(block1)
+
+    rerender(<TurnTimeline items={tl3} mode="code" />)
+    const blocksAt3 = screen.getAllByTestId('code-tool-call-block')
+    expect(blocksAt3).toHaveLength(1)
+    expect(blocksAt3[0]).toBe(block1)
+  })
+
+  it('reconcileCompleteText preserves evicted prefix even when visibleContent is ahead of completeContent by a newly arrived delta', () => {
+    const events: ConversationActivityEvent[] = [
+      {
+        eventId: 'surviving-delta-1',
+        cursor: '10',
+        turnId: 'turn-lag',
+        type: 'assistant.delta',
+        kind: 'message',
+        state: 'working',
+        agentId: 'agent:main',
+        messageId: 'msg-lag',
+        content: 'Meio da resposta.',
+        summary: 'Meio da resposta.',
+      },
+      {
+        eventId: 'new-delta-2',
+        cursor: '11',
+        turnId: 'turn-lag',
+        type: 'assistant.delta',
+        kind: 'message',
+        state: 'working',
+        agentId: 'agent:main',
+        messageId: 'msg-lag',
+        content: ' Começo pelo HTML:',
+        summary: ' Começo pelo HTML:',
+      },
+    ]
+
+    // completeContent has the evicted prefix + 'Meio da resposta.', but has not yet incorporated ' Começo pelo HTML:'
+    const staleCompleteContent = 'Início que foi evictado antes. Meio da resposta.'
+    const timeline = buildTurnTimeline(events, 'turn-lag', 'msg-lag', staleCompleteContent)
+
+    expect(timeline).toHaveLength(1)
+    expect(timeline[0]).toMatchObject({
+      kind: 'text',
+      content: 'Início que foi evictado antes. Meio da resposta. Começo pelo HTML:',
+    })
+  })
 })
+

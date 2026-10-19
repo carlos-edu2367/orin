@@ -113,7 +113,7 @@ export function Composer({
   }
 
   function stepPermissionMode() {
-    if (activePermissionMode === 'full_autonomy') {
+    if (activePermissionMode === 'auto' || activePermissionMode === 'dont_ask') {
       changePermissionMode('ask_permissions')
       return
     }
@@ -223,7 +223,7 @@ export function Composer({
   }
 
   function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
-    if (event.key === 'Tab' && event.shiftKey && effectiveCodeMode === 'code') {
+    if (event.key === 'Tab' && event.shiftKey && (effectiveCodeMode === 'code' || Boolean(sessionContext) || Boolean(onCodePermissionModeChange))) {
       event.preventDefault()
       event.stopPropagation()
       stepPermissionMode()

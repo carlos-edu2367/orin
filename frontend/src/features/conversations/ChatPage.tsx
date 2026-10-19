@@ -160,6 +160,7 @@ export function ChatPage() {
 
   const cursorRef = useRef('0')
   const scrollRef = useRef<HTMLDivElement>(null)
+  const threadRef = useRef<HTMLDivElement>(null)
   const pinnedRef = useRef(true)
   const loadingOlderRef = useRef(false)
   const observedContentRef = useRef(new Set<string>())
@@ -266,6 +267,27 @@ export function ChatPage() {
         await streamConversationEvents(client, conversationId, cursorRef.current, {
           onEvent: (event) => {
             cursorRef.current = event.cursor
+            if (!streamedDeltaIdsRef.current.has(event.eventId)) {
+              if (event.type === 'assistant.delta' && event.messageId && event.content) {
+                streamedDeltaIdsRef.current.add(event.eventId)
+                const msgId = event.messageId
+                const deltaContent = event.content
+                setStreamedByMessage((current) => {
+                  const next = new Map(current)
+                  next.set(msgId, (next.get(msgId) ?? '') + deltaContent)
+                  return next
+                })
+              } else if (event.type === 'message.reset' && event.messageId) {
+                streamedDeltaIdsRef.current.add(event.eventId)
+                const msgId = event.messageId
+                setStreamedByMessage((current) => {
+                  if (!current.has(msgId)) return current
+                  const next = new Map(current)
+                  next.delete(msgId)
+                  return next
+                })
+              }
+            }
             dispatch({ type: 'event', event })
             if (codeSystemNotifications && document.visibilityState !== 'visible' && window.orinDesktop?.notifyCodeMode) {
               const notification = codeModeNotification(event.type)
@@ -309,6 +331,8 @@ export function ChatPage() {
       } catch (caught) {
         if (cancelled || controller.signal.aborted) return
         if (isResyncError(caught)) {
+          streamedDeltaIdsRef.current = new Set()
+          setStreamedByMessage(new Map())
           dispatch({ type: 'resync' })
           cursorRef.current = '0'
           try { await loadSnapshot(true) } catch { setError('Não foi possível ressincronizar esta conversa.') }
@@ -898,7 +922,21 @@ export function ChatPage() {
     // are intentionally immediate; smooth scrolling is reserved for the
     // explicit "Ir para o fim" action below.
     element.scrollTop = element.scrollHeight
-  }, [messages, activity.events.length])
+  }, [messages, activity.events, activity.cursor, showAgentPulse])
+
+  useEffect(() => {
+    if (typeof ResizeObserver === 'undefined') return
+    const threadEl = threadRef.current
+    if (!threadEl) return
+    const observer = new ResizeObserver(() => {
+      if (!pinnedRef.current) return
+      const scrollEl = scrollRef.current
+      if (!scrollEl) return
+      scrollEl.scrollTop = scrollEl.scrollHeight
+    })
+    observer.observe(threadEl)
+    return () => observer.disconnect()
+  }, [conversationId])
 
   const scrollToLatest = useCallback(() => {
     const element = scrollRef.current
@@ -1599,7 +1637,7 @@ export function ChatPage() {
             void loadOlderActivities()
           }
         }}>
-          <div className="chat__thread" role="log" aria-live="polite" aria-relevant="additions text">
+          <div className="chat__thread" ref={threadRef} role="log" aria-live="polite" aria-relevant="additions text">
             {!loading && loadFailure && (
               <section className="chat__load-error" role="alert">
                 <h2>Não foi possível abrir esta conversa</h2>

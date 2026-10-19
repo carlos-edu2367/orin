@@ -160,11 +160,11 @@ describe('Code Flow Bug Fixes (Frontend)', () => {
     expect(state.events.some((e) => e.eventId === 'evt-tool-write')).toBe(true)
   })
 
-  it('nextCodePermissionMode cycles only user-facing modes and listWorkspaceFiles passes options.query', async () => {
+  it('nextCodePermissionMode cycles through all 4 user-facing modes and listWorkspaceFiles passes options.query', async () => {
     expect(nextCodePermissionMode('accept_edits')).toBe('plan_mode')
     expect(nextCodePermissionMode('plan_mode')).toBe('ask_permissions')
-    expect(nextCodePermissionMode('ask_permissions')).toBe('accept_edits')
-    expect(nextCodePermissionMode('full_autonomy')).toBe('ask_permissions')
+    expect(nextCodePermissionMode('ask_permissions')).toBe('full_autonomy')
+    expect(nextCodePermissionMode('full_autonomy')).toBe('accept_edits')
 
     const requestSpy = vi.fn().mockImplementation(async (options: { parse: (val: unknown) => unknown }) =>
       options.parse({ files: ['src/App.tsx'] }),

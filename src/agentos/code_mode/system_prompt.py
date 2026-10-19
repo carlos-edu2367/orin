@@ -139,7 +139,10 @@ def _mode_text(permission_mode: str, plan_path: str | None, exit_label: str) -> 
             f"and call {exit_label} for approval. Do not change any other file and do not run commands that change state."
         ),
         "ask_permissions": "Permission mode: default. File edits and shell commands may need the user's approval; the interface asks them when needed. Plan before large changes.",
-        "full_autonomy": "Permission mode: bypassPermissions. You have full autonomy inside the workspace; production deploys still need explicit confirmation.",
+        "full_autonomy": (
+            "Permission mode: bypassPermissions. You have full unrestricted autonomy inside and outside the workspace "
+            "(any path or directory on the machine); production deploys still need explicit confirmation."
+        ),
         "auto": "Permission mode: auto. A classifier approves safe actions; risky ones are refused or sent to the user.",
         "dont_ask": "Permission mode: dontAsk. Anything a rule does not already allow is refused instead of asked; work with the allowed tools.",
     }

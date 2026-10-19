@@ -101,7 +101,7 @@ describe('Composer command picker', () => {
     expect(todoBar.compareDocumentPosition(surface) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 
-  it('renders localized permission mode pill and cycles safely through 3 modes without escalating to full_autonomy', async () => {
+  it('renders localized permission mode pill in both code and chat modes and cycles through all 4 modes including full_autonomy', async () => {
     const onPermissionChange = vi.fn()
     const user = userEvent.setup()
     render(
@@ -131,9 +131,12 @@ describe('Composer command picker', () => {
     expect(onPermissionChange).toHaveBeenLastCalledWith('ask_permissions')
 
     await user.keyboard('{Shift>}{Tab}{/Shift}')
+    expect(pill).toHaveTextContent('⚡ Sem restrições')
+    expect(onPermissionChange).toHaveBeenLastCalledWith('full_autonomy')
+
+    await user.keyboard('{Shift>}{Tab}{/Shift}')
     expect(pill).toHaveTextContent('⏵⏵ Aceitar edições')
     expect(onPermissionChange).toHaveBeenLastCalledWith('accept_edits')
-    expect(onPermissionChange).not.toHaveBeenCalledWith('full_autonomy')
 
     await user.click(pill)
     expect(pill).toHaveTextContent('⏸ Modo Plano')

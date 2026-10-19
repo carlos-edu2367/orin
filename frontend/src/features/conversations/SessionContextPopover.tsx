@@ -11,6 +11,7 @@ export const SAFE_PERMISSION_CYCLE: readonly CodePermissionMode[] = [
   'accept_edits',
   'plan_mode',
   'ask_permissions',
+  'full_autonomy',
 ]
 
 export function formatPermissionModePill(mode: CodePermissionMode): string {
@@ -51,7 +52,7 @@ const PERMISSION_OPTIONS: ReadonlyArray<{ mode: CodePermissionMode; label: strin
   { mode: 'ask_permissions', label: '🔒 Pedir permissão', detail: 'Confirma comandos e edições sensíveis' },
   { mode: 'accept_edits', label: '⏵⏵ Aceitar edições', detail: 'Aplica edições em arquivos automaticamente' },
   { mode: 'plan_mode', label: '⏸ Modo Plano', detail: 'Apenas leitura e planejamento antes de agir' },
-  { mode: 'full_autonomy', label: '⚡ Sem restrições', detail: 'Executa ferramentas sem pausas de confirmação' },
+  { mode: 'full_autonomy', label: '⚡ Sem restrições', detail: 'Executa ferramentas sem confirmação e sem restrição ao workspace' },
 ]
 
 const RISK_SENTENCE: Record<Exclude<WorkspaceRisk, 'none'>, string> = {
@@ -194,7 +195,7 @@ export function SessionContextPopover({
   }
 
   function stepPermissionMode() {
-    if (activePermissionMode === 'full_autonomy') {
+    if (activePermissionMode === 'auto' || activePermissionMode === 'dont_ask') {
       changePermissionMode('ask_permissions')
       return
     }
@@ -349,35 +350,31 @@ export function SessionContextPopover({
           <span className="chip__caret" aria-hidden="true">⌄</span>
         </button>
 
-        {mode === 'code' && (
-          <>
-            <button
-              type="button"
-              className="composer__permission-pill composer__permission-mode session-context-popover__permission-pill"
-              data-testid="code-permission-mode-pill"
-              data-permission-mode={activePermissionMode}
-              aria-label="Modo de permissão do Code"
-              title={formatPermissionModeTitle(activePermissionMode)}
-              disabled={disabled}
-              onClick={() => stepPermissionMode()}
-            >
-              {formatPermissionModePill(activePermissionMode)}
-            </button>
-            <select
-              className="visually-hidden"
-              data-testid="code-permission-mode-select"
-              aria-label="Selecionar modo de permissão do Code"
-              tabIndex={-1}
-              value={activePermissionMode}
-              onChange={(event) => changePermissionMode(event.target.value as CodePermissionMode)}
-            >
-              <option value="ask_permissions">Pedir permissão</option>
-              <option value="accept_edits">Aceitar edições</option>
-              <option value="plan_mode">Modo Plano</option>
-              <option value="full_autonomy">Sem restrições</option>
-            </select>
-          </>
-        )}
+        <button
+          type="button"
+          className="composer__permission-pill composer__permission-mode session-context-popover__permission-pill"
+          data-testid="code-permission-mode-pill"
+          data-permission-mode={activePermissionMode}
+          aria-label="Modo de permissão do Code"
+          title={formatPermissionModeTitle(activePermissionMode)}
+          disabled={disabled}
+          onClick={() => stepPermissionMode()}
+        >
+          {formatPermissionModePill(activePermissionMode)}
+        </button>
+        <select
+          className="visually-hidden"
+          data-testid="code-permission-mode-select"
+          aria-label="Selecionar modo de permissão do Code"
+          tabIndex={-1}
+          value={activePermissionMode}
+          onChange={(event) => changePermissionMode(event.target.value as CodePermissionMode)}
+        >
+          <option value="ask_permissions">Pedir permissão</option>
+          <option value="accept_edits">Aceitar edições</option>
+          <option value="plan_mode">Modo Plano</option>
+          <option value="full_autonomy">Sem restrições</option>
+        </select>
       </div>
 
       {open && (
@@ -518,54 +515,52 @@ export function SessionContextPopover({
             )}
           </section>
 
-          {mode === 'code' && (
-            <>
-              <section className="session-context-popover__section">
-                <div className="session-context-popover__section-head session-context-popover__section-head--row">
-                  <h3>Modo de permissão</h3>
-                  <kbd>Shift+Tab</kbd>
-                </div>
-                <div className="session-context-popover__permission-grid">
-                  {PERMISSION_OPTIONS.map((item) => {
-                    const isSelected = activePermissionMode === item.mode
-                    return (
-                      <button
-                        key={item.mode}
-                        type="button"
-                        aria-pressed={isSelected}
-                        className={`session-context-popover__permission-option${isSelected ? ' is-selected' : ''}`}
-                        onClick={() => changePermissionMode(item.mode)}
-                      >
-                        <span className="session-context-popover__permission-label">{item.label}</span>
-                        <small className="session-context-popover__permission-detail">{item.detail}</small>
-                      </button>
-                    )
-                  })}
-                </div>
-              </section>
+          <section className="session-context-popover__section">
+            <div className="session-context-popover__section-head session-context-popover__section-head--row">
+              <h3>Modo de permissão</h3>
+              <kbd>Shift+Tab</kbd>
+            </div>
+            <div className="session-context-popover__permission-grid">
+              {PERMISSION_OPTIONS.map((item) => {
+                const isSelected = activePermissionMode === item.mode
+                return (
+                  <button
+                    key={item.mode}
+                    type="button"
+                    aria-pressed={isSelected}
+                    className={`session-context-popover__permission-option${isSelected ? ' is-selected' : ''}`}
+                    onClick={() => changePermissionMode(item.mode)}
+                  >
+                    <span className="session-context-popover__permission-label">{item.label}</span>
+                    <small className="session-context-popover__permission-detail">{item.detail}</small>
+                  </button>
+                )
+              })}
+            </div>
+          </section>
 
-              <section className="session-context-popover__section">
-                <div className="session-context-popover__section-head session-context-popover__section-head--row">
-                  <h3>Isolamento Git Worktree</h3>
-                </div>
-                <button
-                  type="button"
-                  className={`composer__worktree session-context-popover__worktree-btn${activeWorktreeIsolated ? ' is-active' : ''}`}
-                  data-testid="code-worktree-toggle"
-                  aria-pressed={activeWorktreeIsolated}
-                  aria-label={activeWorktreeIsolated ? 'Desativar Worktree isolado' : 'Ativar Worktree isolado'}
-                  title={
-                    activeWorktreeIsolated
-                      ? `Worktree isolado ativo${worktreeBranch ? ` (${worktreeBranch})` : ''}`
-                      : 'Isolar sessão em um Git Worktree (.orin/worktrees/)'
-                  }
-                  onClick={() => changeWorktreeIsolated(!activeWorktreeIsolated)}
-                >
-                  <span aria-hidden="true">⑂</span>
-                  <span>{activeWorktreeIsolated && worktreeBranch ? worktreeBranch : 'Worktree'}</span>
-                </button>
-              </section>
-            </>
+          {mode === 'code' && (
+            <section className="session-context-popover__section">
+              <div className="session-context-popover__section-head session-context-popover__section-head--row">
+                <h3>Isolamento Git Worktree</h3>
+              </div>
+              <button
+                type="button"
+                className={`composer__worktree session-context-popover__worktree-btn${activeWorktreeIsolated ? ' is-active' : ''}`}
+                data-testid="code-worktree-toggle"
+                aria-pressed={activeWorktreeIsolated}
+                aria-label={activeWorktreeIsolated ? 'Desativar Worktree isolado' : 'Ativar Worktree isolado'}
+                title={
+                  activeWorktreeIsolated
+                    ? `Worktree isolado ativo${worktreeBranch ? ` (${worktreeBranch})` : ''}`
+                    : 'Isolar sessão em um Git Worktree (.orin/worktrees/)'
+                }
+                onClick={() => changeWorktreeIsolated(!activeWorktreeIsolated)}
+              >
+                <span aria-hidden="true">⑂</span>
+                <span>{activeWorktreeIsolated && worktreeBranch ? worktreeBranch : 'Worktree'}</span>
+              </button>
+            </section>
           )}
 
           {showProjectSection && (

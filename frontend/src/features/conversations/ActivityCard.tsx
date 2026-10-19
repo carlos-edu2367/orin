@@ -94,7 +94,7 @@ export function ActivityCard({ group, conversationId, onPreview }: ActivityCardP
           >
             <ul className="activity-card__events">
               {(isTool ? toolCalls(group) : group.events).map((event) => (
-                <ActivityDetailRow key={event.eventId} event={event} conversationId={conversationId} onPreview={onPreview} folded={isTool ? artifactsFor(group, event) : []} />
+                <ActivityDetailRow key={event.originEventId ?? event.eventId} event={event} conversationId={conversationId} onPreview={onPreview} folded={isTool ? artifactsFor(group, event) : []} />
               ))}
             </ul>
           </motion.div>

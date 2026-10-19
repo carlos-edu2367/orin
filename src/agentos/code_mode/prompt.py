@@ -70,7 +70,7 @@ def permission_mode_section(
         "  - `accept_edits`: auto-aprova edições de arquivos no workspace (`write_file`, `edit_file`) e comandos locais seguros; execução direta sem burocracia.\n"
         "  - `plan_mode`: modo somente leitura e arquitetura; explora o repositório, escreve o plano em `.orin/plans/` e chama `exit_plan_mode` para aprovação.\n"
         "  - `ask_permissions`: solicita confirmação antes de edições de arquivos e comandos shell.\n"
-        "  - `full_autonomy`: autonomia completa dentro do workspace (mantendo confirmação para deploy em produção)."
+        "  - `full_autonomy`: autonomia completa sem restrições dentro e fora do workspace (qualquer caminho da máquina; mantendo confirmação apenas para deploy em produção)."
     )
     if permission_mode is CodePermissionMode.PLAN_MODE or level is CodeAutonomy.PLAN_MODE:
         target_plan = plan_path or ".orin/plans/<slug>.md"
@@ -80,7 +80,14 @@ def permission_mode_section(
             f"escreva o plano estruturado em `.orin/plans/` (`{target_plan}`) e chame `exit_plan_mode` para aprovação do usuário. "
             "Não edite arquivos de código de produção nem execute `run_command` mutável enquanto estiver em `plan_mode`."
         )
-    elif permission_mode in {CodePermissionMode.ACCEPT_EDITS, CodePermissionMode.FULL_AUTONOMY} or level is not CodeAutonomy.APPROVAL_REQUIRED:
+    elif permission_mode is CodePermissionMode.FULL_AUTONOMY:
+        behavior = (
+            "Você está em `full_autonomy` (modo sem restrições — unrestricted inside and outside the workspace). "
+            "Você pode ler, criar, editar, buscar arquivos e executar comandos shell tanto dentro quanto fora do workspace "
+            "(qualquer caminho ou diretório da máquina) diretamente sem bloqueio de diretório. "
+            "Para tarefas de múltiplos passos, use `todo_write`, `task_create` e `task_update` (mantendo no máximo uma tarefa `in_progress` por vez)."
+        )
+    elif permission_mode is CodePermissionMode.ACCEPT_EDITS or level is not CodeAutonomy.APPROVAL_REQUIRED:
         behavior = (
             "Você já tem autonomia de código (`accept_edits`) para este turno. Aja diretamente como no Claude Code "
             "(`Read` / `read_file`, `Grep` / `search_files`, `Glob` / `glob_files`, `Edit` / `edit_file`, `Write` / `write_file`, `Bash` / `run_command`, `TodoWrite` / `todo_write`) "

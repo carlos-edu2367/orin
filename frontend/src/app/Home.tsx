@@ -166,7 +166,7 @@ export function Home({ client, bootstrap }: HomeProps) {
     setSubmitting(true)
     setError(null)
     const resolvedMode: ConversationMode = codeMode === 'code' ? 'code' : 'chat'
-    const resolvedPermissionMode: CodePermissionMode = resolvedMode === 'code' ? (codePermissionMode || serverPermissionMode) : 'ask_permissions'
+    const resolvedPermissionMode: CodePermissionMode = codePermissionMode || (resolvedMode === 'code' ? serverPermissionMode : 'ask_permissions')
     try {
       if (resolvedMode === 'code') {
         await setCodeModeSettings(apiClient, {

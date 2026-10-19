@@ -1022,4 +1022,154 @@ describe('ChatPage', () => {
     })
     expect(cancelled).not.toHaveBeenCalled()
   })
+
+  it('keeps chat scroll pinned to scrollHeight when new tool/thought events arrive even after reaching EVENT_LIMIT (1500)', async () => {
+    let emitProgressEvent: () => void = () => {}
+    let closeStream: () => void = () => {}
+
+    const initialActivities = Array.from({ length: 1500 }, (_, idx) =>
+      activity(idx + 1, 'agent.thought_delta', 'Pensando', {
+        delta: `p${idx} `,
+        detail: `p${idx} `,
+      }),
+    )
+
+    globalThis.fetch = vi.fn<typeof fetch>().mockImplementation(async (input) => {
+      const url = typeof input === 'string' ? input : String(input)
+      if (url.includes('/events?')) {
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            closeStream = () => controller.close()
+            emitProgressEvent = () => {
+              controller.enqueue(
+                new TextEncoder().encode(
+                  `id: a.1501\nevent: tool.progressed\ndata: ${JSON.stringify(
+                    activity(1501, 'tool.progressed', 'Preparando write_file...', {
+                      phase: 'generating_arguments',
+                      tool_name: 'write_file',
+                      invocation_id: 'inv-scroll-1',
+                    }),
+                  )}\n\n`,
+                ),
+              )
+            }
+          },
+        })
+        return new Response(body, { headers: { 'Content-Type': 'text/event-stream' } })
+      }
+      if (url.endsWith('/v1/projects/sidebar') || url.endsWith('/v1/conversations')) {
+        return new Response(JSON.stringify({ items: [] }), { headers: { 'Content-Type': 'application/json' } })
+      }
+      if (url.includes(`/v1/conversations/${CONVERSATION_ID}`)) {
+        return new Response(
+          JSON.stringify({
+            ...snapshotBody({
+              state: 'running',
+              messages: [
+                {
+                  message_id: 'msg-scroll-1',
+                  role: 'assistant',
+                  content: 'Motor pronto.',
+                  status: 'streaming',
+                  retryable: false,
+                  turn_id: 'turn-1',
+                },
+              ],
+              activities: initialActivities,
+            }),
+            mode: 'code',
+          }),
+          { headers: { 'Content-Type': 'application/json' } },
+        )
+      }
+      return new Response('{}', { headers: { 'Content-Type': 'application/json' } })
+    })
+
+    const { container } = renderChat()
+    await screen.findByText('Motor pronto.')
+
+    const scrollEl = container.querySelector('.chat__scroll') as HTMLDivElement
+    expect(scrollEl).toBeTruthy()
+
+    let currentScrollHeight = 2000
+    Object.defineProperty(scrollEl, 'scrollHeight', {
+      configurable: true,
+      get: () => currentScrollHeight,
+    })
+    Object.defineProperty(scrollEl, 'clientHeight', {
+      configurable: true,
+      get: () => 500,
+    })
+    scrollEl.scrollTop = 2000
+
+    // Simulate layout growth when the new tool.progressed card is added at event 1501
+    currentScrollHeight = 2060
+    emitProgressEvent()
+
+    await waitFor(() => {
+      expect(screen.getByTestId('code-tool-call-block')).toHaveTextContent('Preparando write_file')
+    })
+
+    expect(scrollEl.scrollTop).toBe(2060)
+    closeStream()
+  })
+
+  it('pins scrollTop to scrollHeight when .chat__thread resizes asynchronously while pinned at bottom', async () => {
+    type ObserverCallback = (entries: ResizeObserverEntry[], observer: ResizeObserver) => void
+    let resizeCallback: ObserverCallback | null = null
+    const OrigResizeObserver = globalThis.ResizeObserver
+    class MockResizeObserver {
+      constructor(cb: ObserverCallback) {
+        resizeCallback = cb
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+    globalThis.ResizeObserver = MockResizeObserver as unknown as typeof ResizeObserver
+
+    try {
+      globalThis.fetch = stubFetch(() => ({
+        state: 'running',
+        messages: [
+          {
+            message_id: 'msg-resize-1',
+            role: 'assistant',
+            content: 'Renderizando bloco...',
+            status: 'streaming',
+            retryable: false,
+            turn_id: 'turn-1',
+          },
+        ],
+        activities: [],
+      }))
+
+      const { container } = renderChat()
+      await screen.findByText('Renderizando bloco...')
+
+      const scrollEl = container.querySelector('.chat__scroll') as HTMLDivElement
+      expect(scrollEl).toBeTruthy()
+      expect(resizeCallback).not.toBeNull()
+
+      let currentScrollHeight = 1200
+      Object.defineProperty(scrollEl, 'scrollHeight', {
+        configurable: true,
+        get: () => currentScrollHeight,
+      })
+      Object.defineProperty(scrollEl, 'clientHeight', {
+        configurable: true,
+        get: () => 400,
+      })
+      scrollEl.scrollTop = 1200
+
+      // Simulate an asynchronous height expansion inside .chat__thread (e.g. diff/code block/file preview render)
+      currentScrollHeight = 1480
+      resizeCallback!([], {} as ResizeObserver)
+
+      expect(scrollEl.scrollTop).toBe(1480)
+    } finally {
+      globalThis.ResizeObserver = OrigResizeObserver
+    }
+  })
 })
+

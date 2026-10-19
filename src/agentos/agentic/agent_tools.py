@@ -398,6 +398,7 @@ class AgentToolset(
             CodePermissionMode.ACCEPT_EDITS if resolved_mode is CodePermissionMode.PLAN_MODE else resolved_mode
         )
         self._plan_mode_active: bool = resolved_mode is CodePermissionMode.PLAN_MODE
+        self._sync_workspace_restriction()
         self._permission_broker: ToolPermissionBroker = (
             permission_broker if isinstance(permission_broker, ToolPermissionBroker) else ToolPermissionBroker(self.workspace)
         )
@@ -439,8 +440,7 @@ class AgentToolset(
         self._by_name: dict[str, ToolDefinition] = {}
         self._spellings: dict[str, str] = {}
         self._active_mcp_tool_names: set[str] = set()
-        # Claude Code-compatible names/arguments at the model boundary
-        # (experimental.claudeToolNames). Internal ids stay snake_case.
+        # Claude Code-compatible names/arguments at the model boundary (experimental.claudeToolNames).
         self.name_translator: PublicToolNames | None = PublicToolNames() if public_tool_names else None
         self._lifecycle: LifecycleBus | None = lifecycle
         # Fields merged into every lifecycle payload this toolset emits (e.g. the subagent's id).

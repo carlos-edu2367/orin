@@ -1,4 +1,3 @@
-import { AnimatePresence } from 'motion/react'
 import { useMemo, useState, type ReactNode } from 'react'
 import { MarkdownMessage } from './MarkdownMessage'
 import { renderActivityGroup } from './ActivityStream'
@@ -312,7 +311,7 @@ function RepeatedToolFailureGroup({
         <div className="mt-2 space-y-1 border-t border-rose-500/20 pt-2">
           {events.map((event) => (
             <CodeToolCallBlock
-              key={event.eventId}
+              key={event.originEventId ?? event.eventId}
               event={event}
               onOpenFile={onOpenFile}
             />
@@ -445,7 +444,7 @@ function CodeToolBatch({
         <div className="mt-2 space-y-1 border-t border-[var(--border-subtle)] pt-1.5">
           {events.map((event) => (
             <CodeToolCallBlock
-              key={event.eventId}
+              key={event.originEventId ?? event.eventId}
               event={event}
               onOpenFile={onOpenFile}
               defaultDiffOpen={defaultExpanded}
@@ -622,11 +621,14 @@ export function TurnTimeline({
     if (items) return items
     if (!events) return []
     const enriched = enrichEventsWithStartedMetadata(events)
-    return summarizeActivities(enriched).map((group) => ({
-      id: `activity:${group.id}:${group.events[0]?.eventId ?? '0'}`,
-      kind: 'activity' as const,
-      group,
-    }))
+    return summarizeActivities(enriched).map((group) => {
+      const firstEv = group.events[0]
+      return {
+        id: `activity:${group.id}:${firstEv?.originEventId ?? firstEv?.eventId ?? '0'}`,
+        kind: 'activity' as const,
+        group,
+      }
+    })
   }, [items, events])
 
   const primaryAgentId = useMemo(() => {
@@ -725,7 +727,7 @@ export function TurnTimeline({
 
     return (
       <PlanApprovalCard
-        key={event.eventId}
+        key={event.originEventId ?? event.eventId}
         planPath={planPath}
         planContent={planContent}
         disabled={isEventSettled}
@@ -758,7 +760,7 @@ export function TurnTimeline({
         const single = normalBatch[0]
         nodes.push(
           <CodeToolCallBlock
-            key={single.eventId}
+            key={single.originEventId ?? single.eventId}
             event={single}
             onOpenFile={openFileHandler}
             defaultDiffOpen={hasLegacyCodeModeStarted}
@@ -768,7 +770,7 @@ export function TurnTimeline({
         for (const item of normalBatch) {
           nodes.push(
             <CodeToolCallBlock
-              key={item.eventId}
+              key={item.originEventId ?? item.eventId}
               event={item}
               onOpenFile={openFileHandler}
               defaultDiffOpen={true}
@@ -776,9 +778,10 @@ export function TurnTimeline({
           )
         }
       } else {
+        const firstInBatch = normalBatch[0]
         nodes.push(
           <CodeToolBatch
-            key={`tool-batch:${normalBatch[0].eventId}`}
+            key={`tool-batch:${firstInBatch.originEventId ?? firstInBatch.eventId}`}
             events={normalBatch}
             onOpenFile={openFileHandler}
           />,
@@ -811,7 +814,7 @@ export function TurnTimeline({
           flushNormalBatch()
           nodes.push(
             <RepeatedToolFailureGroup
-              key={`fail-group:${failedRun[0].eventId}`}
+              key={`fail-group:${failedRun[0].originEventId ?? failedRun[0].eventId}`}
               events={failedRun}
               toolLabel={currentSig.verb}
               onOpenFile={openFileHandler}
@@ -895,7 +898,7 @@ export function TurnTimeline({
     if (permState === 'allowed') {
       return (
         <div
-          key={event.eventId}
+          key={event.originEventId ?? event.eventId}
           className="perm-receipt perm-receipt--allowed"
           data-testid="perm-receipt-allowed"
         >
@@ -907,7 +910,7 @@ export function TurnTimeline({
     if (permState === 'denied') {
       return (
         <div
-          key={event.eventId}
+          key={event.originEventId ?? event.eventId}
           className="perm-receipt perm-receipt--denied"
           data-testid="perm-receipt-denied"
         >
@@ -917,7 +920,7 @@ export function TurnTimeline({
     }
 
     return (
-      <div key={event.eventId}>
+      <div key={event.originEventId ?? event.eventId}>
         <div
           className="perm-receipt perm-receipt--pending"
           data-testid="perm-receipt-pending"
@@ -996,7 +999,7 @@ export function TurnTimeline({
         ) {
           flushCodeToolBatch()
           renderedNodes.push(
-            <div key={event.eventId}>
+            <div key={event.originEventId ?? event.eventId}>
               {renderActivityGroup(
                 { ...group, count: 1, events: [event] },
                 openQuestionTurnIds,
@@ -1047,7 +1050,7 @@ export function TurnTimeline({
         } else {
           flushCodeToolBatch()
           nodes.push(
-            <div key={event.eventId}>
+            <div key={event.originEventId ?? event.eventId}>
               {renderActivityGroup(
                 { ...group, count: 1, events: [event] },
                 openQuestionTurnIds,
@@ -1171,116 +1174,114 @@ export function TurnTimeline({
           )}
         </header>
       )}
-      <AnimatePresence initial={false}>
-        {(() => {
-          const timelineNodes: ReactNode[] = []
-          let idx = 0
-          while (idx < resolvedItems.length) {
-            const item = resolvedItems[idx]
-            if (item.kind === 'activity' && isSubagentActivityGroup(item.group)) {
-              const subagentWave: Array<{ id: string; group: ActivityGroup; node: ReactNode }> = []
-              const interstitialAgentNodes: ReactNode[] = []
-              let lookahead = idx
-              while (lookahead < resolvedItems.length) {
-                const candidate = resolvedItems[lookahead]
-                if (candidate.kind === 'activity' && isSubagentActivityGroup(candidate.group)) {
-                  const rendered = renderTimelineGroup(candidate.group)
-                  if (rendered !== null) {
-                    subagentWave.push({ id: candidate.id, group: candidate.group, node: rendered })
+      {(() => {
+        const timelineNodes: ReactNode[] = []
+        let idx = 0
+        while (idx < resolvedItems.length) {
+          const item = resolvedItems[idx]
+          if (item.kind === 'activity' && isSubagentActivityGroup(item.group)) {
+            const subagentWave: Array<{ id: string; group: ActivityGroup; node: ReactNode }> = []
+            const interstitialAgentNodes: ReactNode[] = []
+            let lookahead = idx
+            while (lookahead < resolvedItems.length) {
+              const candidate = resolvedItems[lookahead]
+              if (candidate.kind === 'activity' && isSubagentActivityGroup(candidate.group)) {
+                const rendered = renderTimelineGroup(candidate.group)
+                if (rendered !== null) {
+                  subagentWave.push({ id: candidate.id, group: candidate.group, node: rendered })
+                }
+                lookahead += 1
+                continue
+              }
+              if (
+                isInterstitialSubagentWaveItem(candidate) &&
+                lookahead + 1 < resolvedItems.length
+              ) {
+                const nextNonInterstitial = resolvedItems
+                  .slice(lookahead + 1)
+                  .find((nextItem) => !isInterstitialSubagentWaveItem(nextItem))
+                if (nextNonInterstitial && nextNonInterstitial.kind === 'activity' && isSubagentActivityGroup(nextNonInterstitial.group)) {
+                  if (candidate.kind === 'activity' && candidate.group.kind === 'agent') {
+                    const renderedAgent = renderTimelineGroup(candidate.group)
+                    if (renderedAgent !== null) {
+                      interstitialAgentNodes.push(
+                        <div key={candidate.id} className="turn-timeline__activity">
+                          {renderedAgent}
+                        </div>,
+                      )
+                    }
                   }
                   lookahead += 1
                   continue
                 }
-                if (
-                  isInterstitialSubagentWaveItem(candidate) &&
-                  lookahead + 1 < resolvedItems.length
-                ) {
-                  const nextNonInterstitial = resolvedItems
-                    .slice(lookahead + 1)
-                    .find((nextItem) => !isInterstitialSubagentWaveItem(nextItem))
-                  if (nextNonInterstitial && nextNonInterstitial.kind === 'activity' && isSubagentActivityGroup(nextNonInterstitial.group)) {
-                    if (candidate.kind === 'activity' && candidate.group.kind === 'agent') {
-                      const renderedAgent = renderTimelineGroup(candidate.group)
-                      if (renderedAgent !== null) {
-                        interstitialAgentNodes.push(
-                          <div key={candidate.id} className="turn-timeline__activity">
-                            {renderedAgent}
-                          </div>,
-                        )
-                      }
-                    }
-                    lookahead += 1
-                    continue
-                  }
-                }
-                break
               }
-              timelineNodes.push(...interstitialAgentNodes)
-              if (subagentWave.length >= 2) {
-                const anyRunning =
-                  !turnCompleted &&
-                  subagentWave.some((entry) =>
-                    entry.group.events.some((ev) => resolveVisualStatus(ev) === 'running'),
-                  )
-                timelineNodes.push(
-                  <ParallelSubagentsGroup
-                    key={`parallel-subagents:${subagentWave[0].id}`}
-                    count={subagentWave.length}
-                    running={anyRunning}
-                  >
-                    {subagentWave.map((entry) => (
-                      <div key={entry.id} className="turn-timeline__activity">
-                        {entry.node}
-                      </div>
-                    ))}
-                  </ParallelSubagentsGroup>,
+              break
+            }
+            timelineNodes.push(...interstitialAgentNodes)
+            if (subagentWave.length >= 2) {
+              const anyRunning =
+                !turnCompleted &&
+                subagentWave.some((entry) =>
+                  entry.group.events.some((ev) => resolveVisualStatus(ev) === 'running'),
                 )
-              } else if (subagentWave.length === 1) {
-                timelineNodes.push(
-                  <div key={subagentWave[0].id} className="turn-timeline__activity">
-                    {subagentWave[0].node}
-                  </div>,
-                )
-              }
-              idx = lookahead
-              continue
-            }
-            if (item.kind === 'thought') {
               timelineNodes.push(
-                <div key={item.id} className="turn-timeline__thought">
-                  <ThoughtBlock thought={item.thought} turnCompleted={turnCompleted} />
-                </div>,
+                <ParallelSubagentsGroup
+                  key={`parallel-subagents:${subagentWave[0].id}`}
+                  count={subagentWave.length}
+                  running={anyRunning}
+                >
+                  {subagentWave.map((entry) => (
+                    <div key={entry.id} className="turn-timeline__activity">
+                      {entry.node}
+                    </div>
+                  ))}
+                </ParallelSubagentsGroup>,
               )
-              idx += 1
-              continue
-            }
-            if (item.kind === 'text') {
+            } else if (subagentWave.length === 1) {
               timelineNodes.push(
-                <div key={item.id} className="turn-timeline__text">
-                  <MarkdownMessage
-                    content={item.content}
-                    conversationId={conversationId}
-                    client={client}
-                    onPreview={onPreview}
-                  />
-                </div>,
-              )
-              idx += 1
-              continue
-            }
-            const rendered = renderTimelineGroup(item.group)
-            if (rendered !== null) {
-              timelineNodes.push(
-                <div key={item.id} className="turn-timeline__activity">
-                  {rendered}
+                <div key={subagentWave[0].id} className="turn-timeline__activity">
+                  {subagentWave[0].node}
                 </div>,
               )
             }
-            idx += 1
+            idx = lookahead
+            continue
           }
-          return timelineNodes
-        })()}
-      </AnimatePresence>
+          if (item.kind === 'thought') {
+            timelineNodes.push(
+              <div key={item.id} className="turn-timeline__thought">
+                <ThoughtBlock thought={item.thought} turnCompleted={turnCompleted} />
+              </div>,
+            )
+            idx += 1
+            continue
+          }
+          if (item.kind === 'text') {
+            timelineNodes.push(
+              <div key={item.id} className="turn-timeline__text">
+                <MarkdownMessage
+                  content={item.content}
+                  conversationId={conversationId}
+                  client={client}
+                  onPreview={onPreview}
+                />
+              </div>,
+            )
+            idx += 1
+            continue
+          }
+          const rendered = renderTimelineGroup(item.group)
+          if (rendered !== null) {
+            timelineNodes.push(
+              <div key={item.id} className="turn-timeline__activity">
+                {rendered}
+              </div>,
+            )
+          }
+          idx += 1
+        }
+        return timelineNodes
+      })()}
       {workDurationLabel && (
         <div
           className="turn-timeline__work-duration font-mono text-[11px] text-[var(--text-secondary)] pt-1"

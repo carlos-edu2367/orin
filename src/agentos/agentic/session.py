@@ -4148,10 +4148,17 @@ class TurnSession:
             memories=memories,
             agents=agents,
             workspace_hint=(
-                "This directory is a folder on the user's own machine that they attached to this chat. "
-                "Files already in it are theirs: do not reorganise, move or delete anything you were not asked to change."
-                if self.workspace_is_local
-                else "Files you create there persist for the whole conversation."
+                (
+                    "This directory is a folder on the user's own machine that they attached to this chat. "
+                    "Files already in it are theirs: do not reorganise, move or delete anything you were not asked to change."
+                    if self.workspace_is_local
+                    else "Files you create there persist for the whole conversation."
+                )
+                + (
+                    " Permission mode is `full_autonomy` (unrestricted): you may also read, write, edit, search, and run commands in any path or directory outside the workspace on the host machine when needed."
+                    if self.permission_mode == "full_autonomy"
+                    else ""
+                )
             ),
             subagents_enabled=self.enable_subagents,
             child_model_ids=self.child_model_ids,

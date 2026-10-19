@@ -65,9 +65,68 @@ export function summarizeActivities(events: ConversationActivityEvent[]): Activi
   }
 
   const subagentWaveGroups = new Map<string, ActivityGroup>()
+  const openToolOriginsByScope = new Map<string, ConversationActivityEvent[]>()
 
   for (const rawEvent of events) {
-    const event = normalizeGeneratingArgumentsEvent(rawEvent)
+    let event = normalizeGeneratingArgumentsEvent(rawEvent)
+    const toolScope = `${event.agentId}:${event.turnId ?? ''}`
+    if (event.type === 'tool.started' || event.type === 'tool.progressed') {
+      const openList = openToolOriginsByScope.get(toolScope) ?? []
+      const prior =
+        openList.length > 0
+          ? (event.invocationId
+              ? openList.find((item) => item.invocationId === event.invocationId)
+              : undefined) ??
+            (event.type === 'tool.started'
+              ? [...openList]
+                  .reverse()
+                  .find(
+                    (item) =>
+                      item.type === 'tool.progressed' &&
+                      (!event.toolName || !item.toolName || item.toolName === event.toolName),
+                  )
+              : undefined)
+          : undefined
+      const originId = event.originEventId || prior?.originEventId || prior?.eventId
+      if (originId && originId !== event.originEventId) {
+        event = { ...event, originEventId: originId }
+      }
+      openList.push(event)
+      openToolOriginsByScope.set(toolScope, openList)
+    } else if (
+      event.type === 'tool.finished' ||
+      event.type === 'tool.completed' ||
+      event.type === 'tool.failed'
+    ) {
+      const openList = openToolOriginsByScope.get(toolScope)
+      const prior =
+        openList && openList.length > 0
+          ? (event.invocationId
+              ? openList.find((item) => item.invocationId === event.invocationId)
+              : undefined) ??
+            (event.toolName
+              ? [...openList].reverse().find((item) => item.toolName === event.toolName)
+              : undefined) ??
+            openList[openList.length - 1]
+          : undefined
+      const originId = event.originEventId || prior?.originEventId || prior?.eventId
+      if (originId && originId !== event.originEventId) {
+        event = { ...event, originEventId: originId }
+      }
+      if (openList && prior) {
+        const priorOrigin = prior.originEventId ?? prior.eventId
+        openToolOriginsByScope.set(
+          toolScope,
+          openList.filter(
+            (item) =>
+              item !== prior &&
+              (event.invocationId
+                ? item.invocationId !== event.invocationId
+                : (item.originEventId ?? item.eventId) !== priorOrigin),
+          ),
+        )
+      }
+    }
     if (!isRenderable(event, settled)) continue
     if (event.turnId && firstCodeEventByTurn.has(event.turnId)) {
       const anchor = firstCodeEventByTurn.get(event.turnId)!

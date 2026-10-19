@@ -87,9 +87,29 @@ export function enrichEventsWithStartedMetadata(
 
     if (event.type === 'tool.started' || event.type === 'tool.progressed') {
       const list = openByScope.get(scope) ?? []
-      list.push(event)
+      const priorMatch =
+        list.length > 0
+          ? (event.invocationId
+              ? list.find((item) => item.invocationId === event.invocationId)
+              : undefined) ??
+            (event.type === 'tool.started'
+              ? [...list]
+                  .reverse()
+                  .find(
+                    (item) =>
+                      item.type === 'tool.progressed' &&
+                      (!event.toolName || !item.toolName || item.toolName === event.toolName),
+                  )
+              : undefined)
+          : undefined
+      const nextOriginEventId = event.originEventId || priorMatch?.originEventId || priorMatch?.eventId
+      const enrichedEvent =
+        nextOriginEventId && nextOriginEventId !== event.originEventId
+          ? ((mutated = true), { ...event, originEventId: nextOriginEventId })
+          : event
+      list.push(enrichedEvent)
       openByScope.set(scope, list)
-      return event
+      return enrichedEvent
     }
     if (
       event.type === 'tool.finished' ||
@@ -108,6 +128,18 @@ export function enrichEventsWithStartedMetadata(
             list[list.length - 1]
           : undefined
 
+      if (list && match) {
+        const matchOrigin = match.originEventId ?? match.eventId
+        openByScope.set(
+          scope,
+          list.filter(
+            (item) =>
+              item !== match &&
+              (event.invocationId ? item.invocationId !== event.invocationId : (item.originEventId ?? item.eventId) !== matchOrigin),
+          ),
+        )
+      }
+
       const fallbackReadPath =
         event.toolName === 'read_file'
           ? explicitReadPath || lastReadPathByScope.get(scope) || ''
@@ -121,6 +153,7 @@ export function enrichEventsWithStartedMetadata(
       const nextToolKind = event.toolKind || match?.toolKind
       const nextAgentName = event.agentName || match?.agentName
       const nextParentAgentId = event.parentAgentId || match?.parentAgentId
+      const nextOriginEventId = event.originEventId || match?.originEventId || match?.eventId
 
       if (nextToolName === 'read_file' && (nextPath || nextFilePath)) {
         lastReadPathByScope.set(scope, (nextPath || nextFilePath) as string)
@@ -134,7 +167,8 @@ export function enrichEventsWithStartedMetadata(
         Boolean(nextToolName && nextToolName !== event.toolName) ||
         Boolean(nextToolKind && nextToolKind !== event.toolKind) ||
         Boolean(nextAgentName && nextAgentName !== event.agentName) ||
-        Boolean(nextParentAgentId && nextParentAgentId !== event.parentAgentId)
+        Boolean(nextParentAgentId && nextParentAgentId !== event.parentAgentId) ||
+        Boolean(nextOriginEventId && nextOriginEventId !== event.originEventId)
 
       if (!needsPatch) return event
       mutated = true
@@ -148,6 +182,7 @@ export function enrichEventsWithStartedMetadata(
         ...(nextToolKind ? { toolKind: nextToolKind } : {}),
         ...(nextAgentName ? { agentName: nextAgentName } : {}),
         ...(nextParentAgentId ? { parentAgentId: nextParentAgentId } : {}),
+        ...(nextOriginEventId ? { originEventId: nextOriginEventId } : {}),
       }
     }
     return event
@@ -273,9 +308,10 @@ export function buildTurnTimeline(
 
   const flushGroup = () => {
     if (!group) return
-    const latestTool = [...group.events].reverse().find((ev) => ev.kind === 'tool') ?? group.events[0]
+    const firstEvent = group.events[0]
+    const latestTool = [...group.events].reverse().find((ev) => ev.kind === 'tool') ?? firstEvent
     items.push({
-      id: `activity:${group.id}:${group.events[0].eventId}`,
+      id: `activity:${group.id}:${firstEvent.originEventId ?? firstEvent.eventId}`,
       kind: 'activity',
       group,
       ...(group.kind === 'tool' && latestTool ? { toolCall: latestTool } : {}),
@@ -338,11 +374,11 @@ export function buildTurnTimeline(
       const deltaText = extractThoughtDelta(event)
       if (!thoughtBuffer) {
         thoughtBuffer = {
-          id: `thought:${event.eventId}`,
+          id: `thought:${event.originEventId ?? event.eventId}`,
           turnId: event.turnId ?? turnId,
           content: deltaText,
           startedAt: event.occurredAt,
-          endedAt: event.occurredAt,
+          endedAt: event.endedAt ?? event.occurredAt,
           agentId: event.agentId,
           agentName: event.agentName,
         }
@@ -351,8 +387,9 @@ export function buildTurnTimeline(
         if (!thoughtBuffer.startedAt && event.occurredAt) {
           thoughtBuffer.startedAt = event.occurredAt
         }
-        if (event.occurredAt) {
-          thoughtBuffer.endedAt = event.occurredAt
+        const candidateEnd = event.endedAt ?? event.occurredAt
+        if (candidateEnd) {
+          thoughtBuffer.endedAt = candidateEnd
         }
       }
       continue
@@ -363,7 +400,7 @@ export function buildTurnTimeline(
       flushGroup()
       subagentWaveItems.clear()
       if (!event.content) continue
-      if (!textBuffer) textId = `text:${event.eventId}`
+      if (!textBuffer) textId = `text:${event.originEventId ?? event.eventId}`
       textBuffer += event.content
       continue
     }
@@ -439,7 +476,7 @@ export function buildTurnTimeline(
       }
       createdGroup.label = groupLabel(createdGroup)
       const waveItem: TimelineActivityItem = {
-        id: `activity:${createdGroup.id}:${event.eventId}`,
+        id: `activity:${createdGroup.id}:${event.originEventId ?? event.eventId}`,
         kind: 'activity',
         group: createdGroup,
         toolCall: event,
@@ -472,6 +509,26 @@ export function buildTurnTimeline(
   return reconcileCompleteText(items, completeContent, messageId)
 }
 
+function findMissingPrefix(completeContent: string, visibleContent: string): string {
+  if (!visibleContent) return completeContent
+  if (visibleContent === completeContent || visibleContent.startsWith(completeContent)) return ''
+  if (completeContent.endsWith(visibleContent)) {
+    return completeContent.slice(0, completeContent.length - visibleContent.length)
+  }
+  const minOverlap = Math.min(4, visibleContent.length)
+  const firstChar = visibleContent[0]
+  let pos = completeContent.indexOf(firstChar, 1)
+  while (pos > 0) {
+    const overlapLen = completeContent.length - pos
+    if (overlapLen < minOverlap) break
+    if (overlapLen <= visibleContent.length && visibleContent.startsWith(completeContent.slice(pos))) {
+      return completeContent.slice(0, pos)
+    }
+    pos = completeContent.indexOf(firstChar, pos + 1)
+  }
+  return ''
+}
+
 /**
  * Activity history is intentionally bounded, while the message projection is
  * durable. When the history window rolls over during a long stream, prepend the
@@ -483,8 +540,7 @@ function reconcileCompleteText(items: TurnTimelineItem[], completeContent: strin
   if (!completeContent) return items
   const visibleContent = items.filter((item): item is TimelineTextItem => item.kind === 'text').map((item) => item.content).join('')
   if (visibleContent === completeContent) return items
-  if (visibleContent && !completeContent.endsWith(visibleContent)) return items
-  const missingPrefix = completeContent.slice(0, completeContent.length - visibleContent.length)
+  const missingPrefix = findMissingPrefix(completeContent, visibleContent)
   if (!missingPrefix) return items
   const firstTextIndex = items.findIndex((item) => item.kind === 'text')
   if (firstTextIndex < 0) return [{ id: `text:complete:${messageId}`, kind: 'text', content: completeContent }, ...items]
