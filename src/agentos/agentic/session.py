@@ -1695,7 +1695,7 @@ class TurnSession:
         if teammate_name and resumed_agent_id is None:
             # W5: naming an existing teammate gives it the new task (its history is kept for this turn).
             known = self._team_roster().get(teammate_name)
-            if known is not None:
+            if known is not None and known.get("agent_id"):  # a placeholder (W5-R12) has no agent yet
                 resumed_agent_id = known["agent_id"]
         clean = " ".join(str(name).split())[:60]
         builtin_key = clean.lower()
@@ -2313,8 +2313,11 @@ class TurnSession:
         with self._team_lock:
             known = self._team_roster().get(clean)
             if known is None:
+                # W5-R12: the name is claimed now, under the lock, so a second start of it is refused as still working.
+                # _ask_agent fills the entry in; a start that fails before then releases it (_release_teammate).
+                self._team_roster()[clean] = {"agent_id": "", "team_name": wanted_team, "type": "", "busy": True}
                 return None
-            if wanted_team and wanted_team != known.get("team_name"):
+            if wanted_team and known.get("team_name") and wanted_team != known.get("team_name"):
                 return ToolOutcome(
                     "failed", f"{clean} já está em outra equipe",
                     f"Teammate '{clean}' is in team '{known.get('team_name')}'. Use another name, or leave team_name out to give it a new task.",
@@ -2341,7 +2344,9 @@ class TurnSession:
     def _release_teammate(self, name: str) -> None:
         with self._team_lock:
             mate = self._team_roster().get(name)
-            if mate is not None:
+            if mate is not None and not mate.get("agent_id"):
+                del self._team_roster()[name]  # W5-R12: a placeholder whose start never began
+            elif mate is not None:
                 mate["busy"] = False
 
     def _team_pending(self, name: str) -> int:
