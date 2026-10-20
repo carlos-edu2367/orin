@@ -8068,3 +8068,2125 @@ the SDK unmodified and the fake Ollama offline.
 
 - [ ] **Step 1:** `uv run pytest -q tests/integration` (timeout 900000 ms): green; report the counts.
 - [ ] **Step 2:** Append `## Batch D — Conformance (Task 17)` to the ledger (commit, the 6 scenarios and their result, anything incomplete). Commit `docs(w6): Batch D ledger`.
+
+---
+
+## Batch E — MCP from the CLI, subcommands and the interface
+
+**Every "Create" below is a new file: if a file of that name exists, stop and report — never overwrite it.**
+
+### Deviations decided while planning Batch E (the ledger repeats them)
+
+32. **`--mcp-config` servers are the `cli` scope**, above user, local and project; `--strict-mcp-config` makes them the only ones (Orin's own servers included); a `managed-mcp.json` still decides alone and the command line's servers are off under it.
+33. **`type: sdk` servers come only from the command line** and are reached through the turn's host channel; MCP OAuth `login`/`logout` is done in the interface.
+34. **`orin code mcp add` writes Orin's files** (default scope `local`); `reset-project-choices` clears Orin's local files only, never `~/.claude.json`.
+35. **`orin code mcp serve` runs Orin's file and shell tools in process** (not through the runtime), on the current folder, in `dontAsk`, with the folder untrusted.
+36. **`plugin install` = inspect + approve; hooks and language servers stay off until consent in the interface**; `plugin update` and `marketplace remove|update` are done in the interface.
+37. **`agents` lists definitions and background runs; `doctor` exits 1 when a check fails; `auto-mode critique` is a plan-mode turn without tools.**
+38. **`--bg` restarts the command detached with a log file; `attach` follows the log (no stdin); `stop` cancels the run's turn and kills its process tree.**
+39. **`purge` needs `--yes`** and removes only `orin code`'s own data.
+40. **`orin code [prompt]` creates the Code session and opens it; without a prompt it opens Orin's home; `--desktop` is refused.**
+41. **Still refused after Batch E** (Batch F decides): `import`, `review` (W8), `--fork-session`, `--worktree`, `--plugin-dir`, `--agent`, `--bare`, `--safe-mode`, `--restricted`, `--init`, `--maintenance`, `--desktop`, `--resume-session-at`, `--resume-drops-turn`, `--session-mirror`, `--task-budget`, `--prompt-suggestions`, `--exclude-dynamic-system-prompt-sections`, `--thinking-display`.
+
+### Task 18: MCP servers from the command line, and the SDK host's own servers
+
+`--mcp-config` (repeatable: JSON objects or JSON files with `mcpServers`) becomes `CliTurnOptions.mcp_servers` and joins the W5 loader as the `cli` scope, above user, local and project; `--strict-mcp-config` makes them the only servers (Orin's own servers from the interface are off too); a `managed-mcp.json` still decides alone, so the command line's servers are off under it (fail closed, and the model is told). A server of type `sdk` (an SDK host's in-process server, `create_sdk_mcp_server`) is accepted only from the command line: its JSON-RPC frames go through `SdkRelayTransport` (`mcp/transport_sdk.py`) to the turn's host channel (Task 13), keyed by the turn, and the CLI hands them to the host as `mcp_message` control requests. `McpServerConfig` stops asking an `sdk` server for a URL. The fake Ollama gains `[[tool:<name>:<json>]]`.
+
+**Files:**
+- Create: `src/agentos/mcp/transport_sdk.py`, `tests/unit/mcp/test_cli_mcp_servers.py`
+- Modify: `src/agentos/agentic/session.py`, `src/agentos/cli_code/headless.py`, `src/agentos/cli_code/host_bridge.py`, `src/agentos/cli_code/turn_options.py`, `src/agentos/code_mode/cli_options.py`, `src/agentos/mcp/file_config.py`, `src/agentos/mcp/file_servers.py`, `src/agentos/mcp/models.py`, `src/agentos/mcp/toolset.py`, `tests/fixtures/fake_ollama.py`, `tests/integration/cli_code/test_headless.py`, `tests/integration/cli_code/test_sdk_conformance.py`, `tests/unit/cli_code/test_turn_options_builder.py`
+
+**Interfaces:**
+- Produces: `McpTransport.SDK`; `load_file_servers(..., cli=None, strict=False)`; `parse_server` accepts `type: sdk` only for scope `cli`; `register_relay(key, ask)`, `unregister_relay`, `relay_for`, `SdkRelayTransport(*, server_name, relay_key, timeout=60)`, `SdkRelayError`; `CliTurnOptions.mcp_servers`, `.strict_mcp_config`; `mcp_config_flag(values, cwd)`; the bridge relays `mcp_message`.
+
+- [ ] **Step 1: Write the failing tests** (test files and their fixtures).
+
+In `tests/fixtures/fake_ollama.py` make these 3 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+- ``[[agent:<name>]]``: an ``Agent`` call for the subagent ``<name>`` and, once its result is back, ``Done.``;
+- ``[[slow]]``: forty words, one every 0.25 s, so a test can interrupt the turn while it streams;
+```
+
+with
+
+```python
+- ``[[agent:<name>]]``: an ``Agent`` call for the subagent ``<name>`` and, once its result is back, ``Done.``;
+- ``[[tool:<name>:<json arguments>]]``: a call of any tool and, once its result is back, ``Result: <the result>``;
+- ``[[slow]]``: forty words, one every 0.25 s, so a test can interrupt the turn while it streams;
+```
+
+2. Replace
+
+```python
+MODEL = "fake-coder:latest"
+_MARKER = re.compile(r"\[\[(write|read|agent|slow|think|say)(?::([^\]]*))?\]\]")
+```
+
+with
+
+```python
+MODEL = "fake-coder:latest"
+_MARKER = re.compile(r"\[\[(write|read|agent|tool|slow|think|say)(?::([^\]]*))?\]\]")
+```
+
+3. Replace
+
+```python
+        call = {"function": {"name": "Agent", "arguments": {"subagent_type": value, "description": "check", "prompt": "check the work"}}}
+        return [{"message": {"role": "assistant", "content": "", "tool_calls": [call]}, "done": False}, _done(10, 5)], 0.0
+```
+
+with
+
+```python
+        call = {"function": {"name": "Agent", "arguments": {"subagent_type": value, "description": "check", "prompt": "check the work"}}}
+        return [{"message": {"role": "assistant", "content": "", "tool_calls": [call]}, "done": False}, _done(10, 5)], 0.0
+    if kind == "tool":
+        if answered:
+            last = next((str(item.get("content") or "") for item in reversed(messages) if item.get("role") == "tool"), "")
+            return [*_text(f"Result: {last}"), _done(20, 4)], 0.0
+        name, _, arguments = value.partition(":")
+        call = {"function": {"name": name, "arguments": json.loads(arguments or "{}")}}
+        return [{"message": {"role": "assistant", "content": "", "tool_calls": [call]}, "done": False}, _done(10, 5)], 0.0
+```
+
+
+In `tests/integration/cli_code/test_headless.py` make these 1 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+    assert messages[-1]["result"] == "Done."
+```
+
+with
+
+```python
+    assert messages[-1]["result"] == "Done."
+
+
+def test_an_mcp_server_from_the_command_line(orin_runtime: LiveRuntime) -> None:
+    echo = Path(__file__).resolve().parents[2] / "fixtures" / "mcp_echo_server.py"
+    config = json.dumps({"mcpServers": {"echo": {"command": sys.executable, "args": [str(echo)]}}})
+    done = orin_code(orin_runtime, orin_runtime.workspace("mcp-cli"), "-p", '[[tool:mcp__echo__echo:{"text": "ping"}]]',
+                     "--mcp-config", config, "--strict-mcp-config", "--allowedTools", "mcp__echo__echo", "--output-format", "json", *MODEL)
+    assert done.returncode == 0, done.stderr
+    (result,) = _lines(done.stdout)
+    assert result["result"] == "Result: ping"
+```
+
+
+In `tests/integration/cli_code/test_sdk_conformance.py` make these 1 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+    assert sum(1 for item in listed.get("items", listed) if isinstance(item, dict) and item.get("title") == "say hello") >= 1
+```
+
+with
+
+```python
+    assert sum(1 for item in listed.get("items", listed) if isinstance(item, dict) and item.get("title") == "say hello") >= 1
+
+
+def test_an_sdk_mcp_server(orin_runtime: LiveRuntime) -> None:
+    from claude_agent_sdk import create_sdk_mcp_server, tool
+
+    @tool("add", "Adds two numbers", {"a": int, "b": int})
+    async def add(arguments):
+        return {"content": [{"type": "text", "text": str(arguments["a"] + arguments["b"])}]}
+
+    calc = create_sdk_mcp_server(name="calc", version="1.0.0", tools=[add])
+    options = _options(orin_runtime, orin_runtime.workspace("sdk-mcp"), mcp_servers={"calc": calc}, allowed_tools=["mcp__calc__add"])
+    messages = asyncio.run(_collect(_stream('[[tool:mcp__calc__add:{"a": 2, "b": 3}]]'), options))
+    assert _result(messages).result == "Result: 5"
+```
+
+
+In `tests/unit/cli_code/test_turn_options_builder.py` make these 1 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+
+@pytest.mark.parametrize("argv", [["--fork-session"], ["--mcp-config", "{}"], ["--agent", "reviewer"], ["--bg"], ["--permission-prompt-tool", "mcp__p__ask"], ["--thinking-display", "summarized"]])
+def test_flags_without_support_yet_are_refused(argv: list[str]) -> None:
+```
+
+with
+
+```python
+
+@pytest.mark.parametrize("argv", [["--fork-session"], ["--session-mirror"], ["--agent", "reviewer"], ["--bg"], ["--permission-prompt-tool", "mcp__p__ask"], ["--thinking-display", "summarized"]])
+def test_flags_without_support_yet_are_refused(argv: list[str]) -> None:
+```
+
+
+Create `tests/unit/mcp/test_cli_mcp_servers.py` (it must not exist yet):
+
+```python
+"""W6 Task 18: MCP servers from orin code's command line, and SDK servers relayed through the host."""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from agentos.mcp.file_config import McpConfigError, load_file_servers, parse_server
+from agentos.mcp.transport_sdk import SdkRelayError, SdkRelayTransport, register_relay, unregister_relay
+from agentos.settings.paths import orin_managed_dir, orin_user_dir
+
+CLI = {"echo": {"command": "python", "args": ["e.py"]}, "calc": {"type": "sdk", "name": "calc"}}
+
+
+def _user_servers(servers: dict) -> None:
+    orin_user_dir().mkdir(parents=True, exist_ok=True)
+    (orin_user_dir() / "mcp.json").write_text(json.dumps({"mcpServers": servers}), encoding="utf-8")
+
+
+def test_the_command_lines_servers_join_and_win(tmp_path: Path) -> None:
+    _user_servers({"echo": {"command": "node", "args": ["old.js"]}, "files": {"command": "node"}})
+    found = load_file_servers(workspace_root=tmp_path, trusted=False, settings={}, cli=CLI)
+    by_name = {server.name: server for server in found.servers}
+    assert by_name["echo"].scope == "cli" and by_name["echo"].args == ("e.py",)
+    assert by_name["calc"].transport == "sdk" and by_name["files"].scope == "user"
+
+
+def test_strict_uses_only_the_command_lines_servers(tmp_path: Path) -> None:
+    _user_servers({"files": {"command": "node"}})
+    found = load_file_servers(workspace_root=tmp_path, trusted=False, settings={}, cli=CLI, strict=True)
+    assert sorted(server.name for server in found.servers) == ["calc", "echo"]
+
+
+def test_a_managed_configuration_still_decides_alone(tmp_path: Path) -> None:
+    orin_managed_dir().mkdir(parents=True, exist_ok=True)
+    (orin_managed_dir() / "managed-mcp.json").write_text(json.dumps({"mcpServers": {"corp": {"url": "https://mcp.example.com"}}}), encoding="utf-8")
+    found = load_file_servers(workspace_root=tmp_path, trusted=False, settings={}, cli=CLI, strict=True)
+    assert [server.name for server in found.servers] == ["corp"]
+    assert any("command line" in why for _, why in found.errors)
+
+
+def test_only_the_command_line_may_declare_an_sdk_server() -> None:
+    for scope in ("user", "project", "local", "managed"):
+        with pytest.raises(McpConfigError):
+            parse_server("calc", {"type": "sdk"}, scope=scope, source="x", environ={})
+    assert parse_server("calc", {"type": "sdk"}, scope="cli", source="x", environ={}).transport == "sdk"
+
+
+def test_the_relay_carries_requests_and_notifications() -> None:
+    asked: list[tuple] = []
+
+    def ask(kind, request, timeout):
+        asked.append((kind, request))
+        return {"mcp_response": {"jsonrpc": "2.0", "id": request["message"].get("id"), "result": {"ok": True}}}
+
+    register_relay("turn-1", ask)
+    try:
+        transport = SdkRelayTransport(server_name="calc", relay_key="turn-1")
+        transport.open()
+        assert transport.send({"jsonrpc": "2.0", "id": 7, "method": "tools/list"})["result"] == {"ok": True}
+        assert transport.send({"jsonrpc": "2.0", "method": "notifications/initialized"}) is None
+        assert [item[0] for item in asked] == ["mcp_message", "mcp_message"] and asked[0][1]["server_name"] == "calc"
+    finally:
+        unregister_relay("turn-1")
+
+
+def test_a_missing_or_silent_host_is_an_error() -> None:
+    with pytest.raises(SdkRelayError):
+        SdkRelayTransport(server_name="calc", relay_key="nobody").open()
+    register_relay("turn-2", lambda *_: None)
+    try:
+        with pytest.raises(SdkRelayError):
+            SdkRelayTransport(server_name="calc", relay_key="turn-2").send({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    finally:
+        unregister_relay("turn-2")
+    register_relay("turn-3", lambda *_: {"_error": "host crashed"})
+    try:
+        with pytest.raises(SdkRelayError, match="host crashed"):
+            SdkRelayTransport(server_name="calc", relay_key="turn-3").send({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    finally:
+        unregister_relay("turn-3")
+```
+
+- [ ] **Step 2: Run them to see them fail.**
+
+Run: `uv run pytest -q tests/unit/mcp/test_cli_mcp_servers.py`
+Expected: `test_cli_mcp_servers.py` fails to collect (`No module named 'agentos.mcp.transport_sdk'`).
+
+- [ ] **Step 3: Implement.**
+
+In `src/agentos/agentic/session.py` make these 3 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+            def keep(config) -> bool:
+                why = policy_refusal(
+```
+
+with
+
+```python
+            def keep(config) -> bool:
+                if self.cli_options is not None and self.cli_options.strict_mcp_config:
+                    refusals[config.server_id] = "--strict-mcp-config uses only the command line's servers"
+                    return False
+                why = policy_refusal(
+```
+
+2. Replace
+
+```python
+        local_install = bool(getattr(self.mcp_service, "allow_stdio", False))
+        try:
+            found = load_file_servers(workspace_root=self.workspace.root, trusted=trusted, settings=settings, personal=local_install)
+        except Exception:  # noqa: BLE001 - a broken configuration never stops a turn
+```
+
+with
+
+```python
+        local_install = bool(getattr(self.mcp_service, "allow_stdio", False))
+        cli = self.cli_options
+        try:
+            found = load_file_servers(
+                workspace_root=self.workspace.root, trusted=trusted, settings=settings, personal=local_install,
+                cli=cli.mcp_servers if cli is not None else None, strict=bool(cli is not None and cli.strict_mcp_config),
+            )
+        except Exception:  # noqa: BLE001 - a broken configuration never stops a turn
+```
+
+3. Replace
+
+```python
+            servers = []
+            for server in found.servers:
+                if server.transport == "stdio" and not local_install:
+```
+
+with
+
+```python
+            servers = []
+            from dataclasses import replace
+
+            relay_key = str(self.turn.get("turn_id") or self.turn.get("conversation_id") or "")
+            if any(server.transport == "sdk" for server in found.servers):
+                from agentos.mcp.transport_sdk import register_relay
+
+                # W6: this turn's channel to the SDK host serves its in-process MCP servers.
+                register_relay(relay_key, lambda kind, request, timeout: self._host_requests().ask(kind, request, timeout=timeout))
+            for raw in found.servers:
+                server = replace(raw, env=(("relay", relay_key),)) if raw.transport == "sdk" else raw
+                if server.transport == "stdio" and not local_install:
+```
+
+
+In `src/agentos/cli_code/headless.py` make these 1 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+UNSUPPORTED: dict[str, str] = {
+    "mcp_configs": "--mcp-config", "strict_mcp_config": "--strict-mcp-config", "agent": "--agent",
+    "plugin_dirs": "--plugin-dir", "worktree": "--worktree", "background": "--bg", "fork_session": "--fork-session",
+```
+
+with
+
+```python
+UNSUPPORTED: dict[str, str] = {
+    "agent": "--agent",
+    "plugin_dirs": "--plugin-dir", "worktree": "--worktree", "background": "--bg", "fork_session": "--fork-session",
+```
+
+
+In `src/agentos/cli_code/host_bridge.py` make these 1 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+                      "tool_use_id": mapped or invocation or None}, hook_answer)
+        else:
+```
+
+with
+
+```python
+                      "tool_use_id": mapped or invocation or None}, hook_answer)
+        elif kind == "mcp_message":
+            def mcp_answer(response: dict[str, Any]) -> None:
+                body = response.get("response") if isinstance(response.get("response"), dict) else {}
+                if response.get("subtype") == "success" and isinstance(body.get("mcp_response"), dict):
+                    reply({"mcp_response": body["mcp_response"]})
+                else:
+                    reply({"_error": str(response.get("error") or "the host's MCP server did not answer")[:500]})
+
+            self.ask({"subtype": "mcp_message", "server_name": str(inner.get("server_name") or ""),
+                      "message": inner.get("message") if isinstance(inner.get("message"), dict) else {}}, mcp_answer)
+        else:
+```
+
+
+In `src/agentos/cli_code/turn_options.py` make these 2 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+
+def agents_flag(value: str | None, cwd: Path) -> dict[str, Any]:
+```
+
+with
+
+```python
+
+def mcp_config_flag(values: list[str], cwd: Path) -> dict[str, Any]:
+    """``--mcp-config`` (repeatable): JSON objects or JSON files, each ``{"mcpServers": {...}}``; later ones win."""
+    servers: dict[str, Any] = {}
+    for value in values:
+        text = value.strip()
+        if not text:
+            continue
+        if not text.startswith("{"):
+            text = _read_text_file(text, cwd, "--mcp-config")
+        try:
+            data = json.loads(text)
+        except ValueError as error:
+            raise CliUsageError("--mcp-config is neither a JSON object nor a JSON file") from error
+        found = data.get("mcpServers") if isinstance(data, dict) else None
+        if not isinstance(found, dict):
+            raise CliUsageError("--mcp-config needs an object with \"mcpServers\"")
+        servers.update(found)
+    return servers
+
+
+def agents_flag(value: str | None, cwd: Path) -> dict[str, Any]:
+```
+
+2. Replace
+
+```python
+            transcript=True, headless=True, trust_workspace=options.trust, agents=agents or None,
+        )
+```
+
+with
+
+```python
+            transcript=True, headless=True, trust_workspace=options.trust, agents=agents or None,
+            mcp_servers=mcp_config_flag(options.mcp_configs, cwd) or None, strict_mcp_config=options.strict_mcp_config,
+        )
+```
+
+
+In `src/agentos/code_mode/cli_options.py` make these 2 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+    agents: dict[str, Any] | None = None
+```
+
+with
+
+```python
+    agents: dict[str, Any] | None = None
+    # --mcp-config (every file or JSON merged): {name: server}, "sdk" ones served by the host; --strict-mcp-config.
+    mcp_servers: dict[str, Any] | None = None
+    strict_mcp_config: bool = False
+```
+
+2. Replace
+
+```python
+
+    @field_validator("agents")
+    @classmethod
+```
+
+with
+
+```python
+
+    @field_validator("agents", "mcp_servers")
+    @classmethod
+```
+
+
+In `src/agentos/mcp/file_config.py` make these 6 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+    kind = {"streamable-http": "http", "streamable_http": "http", "websocket": "ws"}.get(kind, kind)
+    if kind not in TRANSPORTS:
+```
+
+with
+
+```python
+    kind = {"streamable-http": "http", "streamable_http": "http", "websocket": "ws"}.get(kind, kind)
+    if kind == "sdk":
+        # W6: a server that lives inside the SDK host behind `orin code`; nothing on disk may name one.
+        if scope != "cli":
+            raise McpConfigError("an sdk server belongs to an SDK host; only orin code can declare one")
+        return FileServer(clean, scope, source, "sdk")
+    if kind not in TRANSPORTS:
+```
+
+2. Replace
+
+```python
+def load_file_servers(*, workspace_root: Path | None, trusted: bool, settings: Mapping[str, Any],
+                      environ: Mapping[str, str] | None = None, personal: bool = True) -> FileServerSet:
+    """The servers to connect, the project servers awaiting approval, and what could not be read.
+```
+
+with
+
+```python
+def load_file_servers(*, workspace_root: Path | None, trusted: bool, settings: Mapping[str, Any],
+                      environ: Mapping[str, str] | None = None, personal: bool = True,
+                      cli: Mapping[str, Any] | None = None, strict: bool = False) -> FileServerSet:
+    """The servers to connect, the project servers awaiting approval, and what could not be read.
+```
+
+3. Replace
+
+```python
+    ``personal=False`` reads only the managed file: an Orin shared by several people never loads one person's
+    (or one repository's) servers for everyone.
+    """
+```
+
+with
+
+```python
+    ``personal=False`` reads only the managed file: an Orin shared by several people never loads one person's
+    (or one repository's) servers for everyone. ``cli`` (W6) is ``--mcp-config``'s servers: above every file's, and
+    with ``strict`` (``--strict-mcp-config``) the only ones; a managed-mcp.json still decides alone.
+    """
+```
+
+4. Replace
+
+```python
+            _collect(data, scope="managed", source=str(path), environ=env, cwd=cwd, into=managed, errors=found.errors)
+    if found.managed_only or not personal:
+```
+
+with
+
+```python
+            _collect(data, scope="managed", source=str(path), environ=env, cwd=cwd, into=managed, errors=found.errors)
+    command_line: dict[str, FileServer] = {}
+    if cli:
+        _collect({"mcpServers": cli}, scope="cli", source="--mcp-config", environ=env, cwd=cwd, into=command_line, errors=found.errors)
+    if found.managed_only or not personal:
+```
+
+5. Replace
+
+```python
+        merged = managed
+    else:
+```
+
+with
+
+```python
+        merged = managed
+        if command_line:
+            found.errors.append(("--mcp-config", "managed MCP configuration is in effect: the command line's servers are off"))
+    elif strict:
+        merged = command_line
+    else:
+```
+
+6. Replace
+
+```python
+                found.pending.append(server)
+        merged = {**user, **approved, **local}  # local > project > user
+    slugs: dict[str, str] = {}
+```
+
+with
+
+```python
+                found.pending.append(server)
+        merged = {**user, **approved, **local, **command_line}  # cli > local > project > user
+    slugs: dict[str, str] = {}
+```
+
+
+In `src/agentos/mcp/file_servers.py` make these 2 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+    stdio = server.transport == "stdio"
+    transport = {"stdio": McpTransport.STDIO, "http": McpTransport.HTTP, "sse": McpTransport.SSE, "ws": McpTransport.WEBSOCKET}.get(server.transport)
+    if transport is None:
+```
+
+with
+
+```python
+    stdio = server.transport == "stdio"
+    transport = {"stdio": McpTransport.STDIO, "http": McpTransport.HTTP, "sse": McpTransport.SSE, "ws": McpTransport.WEBSOCKET,
+                 "sdk": McpTransport.SDK}.get(server.transport)
+    if transport is None:
+```
+
+2. Replace
+
+```python
+    )
+    secrets = dict(server.env) if stdio else {f"header:{name}": value for name, value in server.headers}
+    return config, (), secrets
+```
+
+with
+
+```python
+    )
+    # An SDK server's "environment" is its relay key (W6), set by the turn that can reach the host.
+    secrets = dict(server.env) if stdio or server.transport == "sdk" else {f"header:{name}": value for name, value in server.headers}
+    return config, (), secrets
+```
+
+
+In `src/agentos/mcp/models.py` make these 2 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+    WEBSOCKET = "ws"
+```
+
+with
+
+```python
+    WEBSOCKET = "ws"
+    # W6: an SDK host's in-process server, reached through `orin code` (only from --mcp-config).
+    SDK = "sdk"
+```
+
+2. Replace
+
+```python
+            raise ValueError("a stdio mcp server requires a command")
+        if self.transport is not McpTransport.STDIO and not self.url:
+            raise ValueError(f"an {self.transport.value} mcp server requires a url")
+```
+
+with
+
+```python
+            raise ValueError("a stdio mcp server requires a command")
+        if self.transport not in (McpTransport.STDIO, McpTransport.SDK) and not self.url:
+            raise ValueError(f"an {self.transport.value} mcp server requires a url")
+```
+
+
+In `src/agentos/mcp/toolset.py` make these 2 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+    from .transport_sse import SseTransport
+    from .transport_stdio import StdioTransport
+```
+
+with
+
+```python
+    from .transport_sse import SseTransport
+    from .transport_sdk import SdkRelayTransport
+    from .transport_stdio import StdioTransport
+```
+
+2. Replace
+
+```python
+    file_headers = {name[len("header:"):]: value for name, value in secrets.items() if name.startswith("header:")}
+    if config.transport is McpTransport.STDIO:
+```
+
+with
+
+```python
+    file_headers = {name[len("header:"):]: value for name, value in secrets.items() if name.startswith("header:")}
+    if config.transport is McpTransport.SDK:
+        return McpClient(SdkRelayTransport(server_name=config.display_name, relay_key=str(secrets.get("relay") or "")))
+    if config.transport is McpTransport.STDIO:
+```
+
+
+Create `src/agentos/mcp/transport_sdk.py` (it must not exist yet):
+
+```python
+"""An SDK host's in-process MCP server, reached through ``orin code`` (W6, ``mcp_message``).
+
+The server lives inside the host program behind the CLI, so every JSON-RPC frame travels as a question for the host
+(``agentic.host_requests``): the turn registers its channel under a relay key, the transport asks it, the CLI hands
+the frame to the host as an ``mcp_message`` control request and relays the host's ``mcp_response`` back. A frame
+with no ``id`` (a notification) is delivered and its answer ignored.
+"""
+
+from __future__ import annotations
+
+import threading
+from collections.abc import Callable, Mapping
+from typing import Any
+
+Ask = Callable[[str, dict[str, Any], float], "dict[str, Any] | None"]
+
+_RELAYS: dict[str, Ask] = {}
+_LOCK = threading.Lock()
+DEFAULT_TIMEOUT_SECONDS = 60.0
+
+
+class SdkRelayError(RuntimeError):
+    """The SDK host's server could not be reached or did not answer."""
+
+
+def register_relay(key: str, ask: Ask) -> None:
+    with _LOCK:
+        _RELAYS[key] = ask
+
+
+def unregister_relay(key: str, ask: Ask | None = None) -> None:
+    with _LOCK:
+        if ask is None or _RELAYS.get(key) is ask:
+            _RELAYS.pop(key, None)
+
+
+def relay_for(key: str) -> Ask | None:
+    with _LOCK:
+        return _RELAYS.get(key)
+
+
+class SdkRelayTransport:
+    kind = "sdk"
+
+    def __init__(self, *, server_name: str, relay_key: str, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> None:
+        self._server_name = server_name
+        self._relay_key = relay_key
+        self._timeout = timeout
+        self.on_message: Any = None  # the client's hook for a server's own requests (an SDK server sends none)
+
+    def open(self) -> None:
+        if relay_for(self._relay_key) is None:
+            raise SdkRelayError("the SDK host that serves this MCP server is not connected to this turn")
+
+    def send(self, frame: Mapping[str, Any]) -> dict[str, Any] | None:
+        ask = relay_for(self._relay_key)
+        if ask is None:
+            raise SdkRelayError("the SDK host that serves this MCP server is not connected to this turn")
+        answer = ask("mcp_message", {"server_name": self._server_name, "message": dict(frame)}, self._timeout)
+        if "id" not in frame:
+            return None
+        if answer is None:
+            raise SdkRelayError(f"the SDK host did not answer within {self._timeout:g}s")
+        if "_error" in answer:
+            raise SdkRelayError(str(answer["_error"])[:300])
+        response = answer.get("mcp_response")
+        if not isinstance(response, dict):
+            raise SdkRelayError("the SDK host's answer is not a JSON-RPC message")
+        return response
+
+    def close(self) -> None:
+        return None
+
+
+__all__ = ["SdkRelayError", "SdkRelayTransport", "register_relay", "relay_for", "unregister_relay"]
+```
+
+- [ ] **Step 4: Run the tests to see them pass.**
+
+Run: `uv run pytest -q tests/unit/mcp tests/unit/cli_code && uv run pytest -q tests/integration/cli_code (timeout 900000 ms)`
+Expected: all pass.
+
+Expectation change to record: `test_turn_options_builder.py::test_flags_without_support_yet_are_refused` checks `--session-mirror` instead of `--mcp-config`.
+
+- [ ] **Step 5: Commit.**
+
+```
+feat(w6): MCP servers from orin code's command line and the SDK host
+
+--mcp-config and --strict-mcp-config; an SDK host's in-process servers are
+reached through mcp_message.
+```
+
+### Task 19: `orin code mcp`
+
+`list` and `get` read every scope Orin loads; `add` (`-s local|project|user`, `-t`, `-e KEY=VALUE`, `-H "Name: value"`), `add-json` and `remove` write Orin's own files (decision D2: `user` → `~/.orin/mcp.json`, `local` → the per-folder file in `~/.orin/workspaces`, `project` → the folder's `.mcp.json`), each entry checked by the W5 parser first; `reset-project-choices` forgets this folder's approvals and refusals in Orin's local files (never in Claude Code's `~/.claude.json`); `login`/`logout` point to the interface (OAuth for Orin's servers lives there). `serve` runs an MCP server on stdio with Orin's file and shell tools on the current folder, in process and in `dontAsk` mode: nobody can be asked, so writing or running commands needs the person's own allow rules. The subcommand dispatcher (`cli_code/commands/__init__.py`) arrives here; its other entries are filled by Tasks 20 and 21.
+
+**Files:**
+- Create: `src/agentos/cli_code/commands/__init__.py`, `src/agentos/cli_code/commands/mcp.py`, `src/agentos/cli_code/commands/mcp_serve.py`, `tests/unit/cli_code/test_mcp_subcommands.py`
+- Modify: `src/agentos/cli_code/main.py`
+
+**Interfaces:**
+- Produces: `commands.run_subcommand(name, argv, *, stdout, stderr, cwd=None)`; `commands.mcp.run`, `scope_file(scope, cwd)`, `SCOPES`; `commands.mcp_serve.serve(*, cwd)`, `handle(toolset, frame)`, `SERVED_TOOLS`.
+
+- [ ] **Step 1: Write the failing tests** (test files and their fixtures).
+
+Create `tests/unit/cli_code/test_mcp_subcommands.py` (it must not exist yet):
+
+```python
+"""W6 Task 19: `orin code mcp` (configuration files and `serve`)."""
+from __future__ import annotations
+
+import io
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+from agentos.cli_code.commands.mcp import scope_file
+from agentos.cli_code.commands.mcp_serve import handle
+from agentos.cli_code.main import main
+from agentos.settings.paths import orin_user_dir, workspace_grants_file
+
+
+def _run(argv: list[str], cwd: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[int, str, str]:
+    monkeypatch.chdir(cwd)
+    out, err = io.StringIO(), io.StringIO()
+    code = main(argv, stdin=io.StringIO(""), stdout=out, stderr=err)
+    return code, out.getvalue(), err.getvalue()
+
+
+
+def test_mcp_add_list_get_and_remove(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    code, out, _ = _run(["mcp", "add", "-s", "user", "-e", "TOKEN=abc", "files", "node", "server.js", "--root", "."], tmp_path, monkeypatch)
+    assert code == 0 and "user" in out
+    stored = json.loads((orin_user_dir() / "mcp.json").read_text(encoding="utf-8"))
+    assert stored["mcpServers"]["files"] == {"command": "node", "args": ["server.js", "--root", "."], "env": {"TOKEN": "abc"}}
+    assert _run(["mcp", "add", "-H", "Authorization: Bearer x", "remote", "https://mcp.example.com/mcp"], tmp_path, monkeypatch)[0] == 0
+    local = json.loads(scope_file("local", tmp_path).read_text(encoding="utf-8"))
+    assert local["mcpServers"]["remote"] == {"type": "http", "url": "https://mcp.example.com/mcp", "headers": {"Authorization": "Bearer x"}}
+    code, out, _ = _run(["mcp", "add-json", "-s", "project", "ws", '{"type": "ws", "url": "wss://x.example.com"}'], tmp_path, monkeypatch)
+    assert code == 0 and (tmp_path / ".mcp.json").is_file()
+    code, out, _ = _run(["mcp", "list"], tmp_path, monkeypatch)
+    assert "files: node server.js --root . [user]" in out and "remote:" in out and "[local]" in out
+    code, out, _ = _run(["mcp", "get", "files"], tmp_path, monkeypatch)
+    assert json.loads(out)["scope"] == "user"
+    assert _run(["mcp", "remove", "files"], tmp_path, monkeypatch)[0] == 0
+    assert "files" not in json.loads((orin_user_dir() / "mcp.json").read_text(encoding="utf-8"))["mcpServers"]
+    assert _run(["mcp", "remove", "nothing"], tmp_path, monkeypatch)[0] == 1
+
+
+@pytest.mark.parametrize("argv", [
+    ["mcp", "add", "x" * 300, "node"], ["mcp", "add-json", "x", "[1]"], ["mcp", "add-json", "x", '{"type": "sdk"}'],
+    ["mcp", "login", "srv"], ["mcp", "add", "-e", "NOEQUALS", "x", "node"],
+])
+def test_mcp_refusals(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, argv: list[str]) -> None:
+    code, _, err = _run(argv, tmp_path, monkeypatch)
+    assert code == 1 and err.startswith("Error: ")
+
+
+def test_reset_project_choices_forgets_approvals(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    grants = workspace_grants_file(tmp_path)
+    grants.parent.mkdir(parents=True, exist_ok=True)
+    grants.write_text(json.dumps({"enabledMcpjsonServers": ["a"], "enableAllProjectMcpServers": True, "permissions": {"allow": ["Read"]}}), encoding="utf-8")
+    assert _run(["mcp", "reset-project-choices"], tmp_path, monkeypatch)[0] == 0
+    assert json.loads(grants.read_text(encoding="utf-8")) == {"permissions": {"allow": ["Read"]}}
+
+
+def test_mcp_serve_offers_orins_tools_without_asking(tmp_path: Path) -> None:
+    from agentos.cli_code.commands.mcp_serve import _toolset
+
+    (tmp_path / "notes.md").write_text("hello serve\n", encoding="utf-8")
+    toolset = _toolset(tmp_path)
+    assert handle(toolset, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})["result"]["serverInfo"]["name"] == "orin-code"
+    names = {tool["name"] for tool in handle(toolset, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})["result"]["tools"]}
+    assert {"Read", "Grep", "Glob", "Write", "Edit", "Bash"} <= names
+    read = handle(toolset, {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "Read", "arguments": {"file_path": "notes.md"}}})
+    assert read["result"]["isError"] is False and "hello serve" in read["result"]["content"][0]["text"]
+    write = handle(toolset, {"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "Write", "arguments": {"file_path": "x.txt", "content": "x"}}})
+    assert write["result"]["isError"] is True and not (tmp_path / "x.txt").exists()  # dontAsk: nobody to ask
+    assert handle(toolset, {"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {"name": "Agent"}})["error"]["code"] == -32602
+    assert handle(toolset, {"jsonrpc": "2.0", "method": "notifications/initialized"}) is None
+
+
+def test_mcp_serve_speaks_stdio(tmp_path: Path) -> None:
+    lines = [json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}),
+             json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+             json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})]
+    done = subprocess.run([sys.executable, "-m", "agentos.cli_code.main", "mcp", "serve"], cwd=tmp_path, input="\n".join(lines) + "\n",
+                          capture_output=True, text=True, encoding="utf-8", timeout=120, env=os.environ.copy())
+    answers = [json.loads(line) for line in done.stdout.splitlines() if line.strip()]
+    assert done.returncode == 0 and [item["id"] for item in answers] == [1, 2]
+```
+
+- [ ] **Step 2: Run them to see them fail.**
+
+Run: `uv run pytest -q tests/unit/cli_code/test_mcp_subcommands.py`
+Expected: collection error: `No module named 'agentos.cli_code.commands'`.
+
+- [ ] **Step 3: Implement.**
+
+Create `src/agentos/cli_code/commands/__init__.py` (it must not exist yet):
+
+```python
+"""The subcommands of ``orin code`` (spec §9.2)."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import TextIO
+
+from ..errors import CliRuntimeError
+
+
+def run_subcommand(name: str, argv: list[str], *, stdout: TextIO, stderr: TextIO, cwd: Path | None = None) -> int:
+    cwd = (cwd or Path.cwd()).resolve()
+    if name == "mcp":
+        from .mcp import run
+
+        return run(argv, cwd=cwd, stdout=stdout, stderr=stderr)
+    if name == "plugin":
+        from .plugin import run
+
+        return run(argv, cwd=cwd, stdout=stdout, stderr=stderr)
+    if name in {"agents", "doctor", "auto-mode"}:
+        from . import info
+
+        handler = {"agents": info.agents, "doctor": info.doctor, "auto-mode": info.auto_mode}[name]
+        return handler(argv, cwd=cwd, stdout=stdout, stderr=stderr)
+    if name in {"logs", "stop", "rm", "attach", "purge"}:
+        from .background import run
+
+        return run(name, argv, cwd=cwd, stdout=stdout, stderr=stderr)
+    if name == "review":
+        raise CliRuntimeError("`orin code review` arrives with W8 (multi-agent review)")
+    raise CliRuntimeError(f"`orin code {name}` is not supported yet (importing other tools' settings is planned, not built)")
+
+
+__all__ = ["run_subcommand"]
+```
+
+Create `src/agentos/cli_code/commands/mcp.py` (it must not exist yet):
+
+```python
+"""``orin code mcp``: the MCP servers in Orin's and Claude Code's configuration files, from a terminal.
+
+Reading covers every scope Orin loads (user, local, project, managed; see ``mcp.file_config``). Writing always goes to
+Orin's own files (decision D2): ``user`` -> ``~/.orin/mcp.json``, ``local`` -> the per-folder file in
+``~/.orin/workspaces``, ``project`` -> ``.mcp.json`` in the folder (shared with Claude Code by design). Servers set up in
+Orin's interface (and their OAuth sign-in) are managed there: ``login`` and ``logout`` say so instead of guessing.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+from typing import Any, TextIO
+
+from agentos.mcp.file_config import McpConfigError, load_file_servers, parse_server
+from agentos.settings.paths import orin_user_dir, workspace_grants_file
+from agentos.settings.writer import update_settings_file
+
+from ..args import CliUsageError
+from ..errors import CliRuntimeError
+
+SCOPES = ("local", "project", "user")
+_PROJECT_CHOICES = ("enabledMcpjsonServers", "disabledMcpjsonServers", "enableAllProjectMcpServers")
+
+
+class _Parser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        raise CliUsageError(message)
+
+
+def scope_file(scope: str, cwd: Path) -> Path:
+    if scope == "user":
+        return orin_user_dir() / "mcp.json"
+    if scope == "project":
+        return cwd / ".mcp.json"
+    return workspace_grants_file(cwd).parent / "mcp.json"
+
+
+def _describe(server) -> str:
+    if server.transport == "stdio":
+        return " ".join((server.command, *server.args))
+    return f"{server.url} ({server.transport})" if server.url else server.transport
+
+
+def _trusted(cwd: Path) -> bool:
+    from agentos.permissions.trust import WorkspaceTrustStore
+
+    try:
+        return WorkspaceTrustStore().is_trusted("local-user", cwd)
+    except Exception:  # noqa: BLE001 - unknown trust means untrusted
+        return False
+
+
+def _check(name: str, entry: dict[str, Any]) -> None:
+    try:
+        parse_server(name, entry, scope="user", source="orin code mcp", environ={})
+    except McpConfigError as error:
+        raise CliUsageError(f"{name}: {error}") from error
+
+
+def _write(scope: str, cwd: Path, name: str, entry: dict[str, Any] | None) -> Path:
+    path = scope_file(scope, cwd)
+
+    def mutate(data: dict[str, Any]) -> None:
+        servers = data.setdefault("mcpServers", {})
+        if not isinstance(servers, dict):
+            servers = data["mcpServers"] = {}
+        if entry is None:
+            if name not in servers:
+                raise CliRuntimeError(f"no MCP server named {name!r} in the {scope} scope ({path})")
+            del servers[name]
+        else:
+            servers[name] = entry
+
+    update_settings_file(path, mutate)
+    return path
+
+
+def _pairs(values: list[str], separator: str, flag: str) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for value in values:
+        key, found, rest = value.partition(separator)
+        if not found or not key.strip():
+            raise CliUsageError(f"{flag} takes NAME{separator}VALUE, not {value!r}")
+        out[key.strip()] = rest.strip()
+    return out
+
+
+def run(argv: list[str], *, cwd: Path, stdout: TextIO, stderr: TextIO) -> int:
+    parser = _Parser(prog="orin code mcp", allow_abbrev=False)
+    commands = parser.add_subparsers(dest="command", required=True)
+    commands.add_parser("list")
+    get = commands.add_parser("get")
+    get.add_argument("name")
+    add = commands.add_parser("add")
+    add.add_argument("-s", "--scope", choices=SCOPES, default="local")
+    add.add_argument("-t", "--transport", choices=("stdio", "http", "sse", "ws"), default=None)
+    add.add_argument("-e", "--env", action="append", default=[])
+    add.add_argument("-H", "--header", action="append", default=[])
+    add.add_argument("name")
+    add.add_argument("target")
+    add.add_argument("args", nargs=argparse.REMAINDER)
+    add_json = commands.add_parser("add-json")
+    add_json.add_argument("-s", "--scope", choices=SCOPES, default="local")
+    add_json.add_argument("name")
+    add_json.add_argument("json")
+    remove = commands.add_parser("remove")
+    remove.add_argument("-s", "--scope", choices=SCOPES, default=None)
+    remove.add_argument("name")
+    commands.add_parser("reset-project-choices")
+    commands.add_parser("serve")
+    for verb in ("login", "logout"):
+        commands.add_parser(verb).add_argument("name", nargs="?")
+    options = parser.parse_args(argv)
+
+    if options.command in {"login", "logout"}:
+        raise CliRuntimeError("MCP sign-in (OAuth) is done in Orin's interface: Settings > MCP")
+    if options.command == "serve":
+        from .mcp_serve import serve
+
+        return serve(cwd=cwd)
+    if options.command == "list":
+        found = load_file_servers(workspace_root=cwd, trusted=_trusted(cwd), settings={})
+        for server in found.servers:
+            stdout.write(f"{server.name}: {_describe(server)} [{server.scope}]\n")
+        for server in found.pending:
+            stdout.write(f"{server.name}: {_describe(server)} [project, not approved]\n")
+        for where, why in found.errors:
+            stderr.write(f"{where}: {why}\n")
+        if found.project_awaiting_trust:
+            stderr.write("this folder is not trusted yet, so its .mcp.json servers are not read\n")
+        if not found.servers and not found.pending:
+            stdout.write("No MCP servers in configuration files.\n")
+        return 0
+    if options.command == "get":
+        found = load_file_servers(workspace_root=cwd, trusted=_trusted(cwd), settings={})
+        match = next((server for server in [*found.servers, *found.pending] if server.name == options.name), None)
+        if match is None:
+            raise CliRuntimeError(f"no MCP server named {options.name!r}")
+        stdout.write(json.dumps({"name": match.name, "scope": match.scope, "source": match.source, "type": match.transport,
+                                 "command": match.command or None, "args": list(match.args), "url": match.url or None}, indent=2) + "\n")
+        return 0
+    if options.command in {"add", "add-json"}:
+        if options.command == "add":
+            target = options.target
+            kind = options.transport or ("http" if target.startswith(("http://", "https://")) else "ws" if target.startswith(("ws://", "wss://")) else "stdio")
+            if kind == "stdio":
+                entry: dict[str, Any] = {"command": target, "args": [item for item in options.args if item != "--"]}
+                if options.env:
+                    entry["env"] = _pairs(options.env, "=", "-e")
+            else:
+                entry = {"type": kind, "url": target}
+                if options.header:
+                    entry["headers"] = _pairs(options.header, ":", "-H")
+        else:
+            try:
+                entry = json.loads(options.json)
+            except ValueError as error:
+                raise CliUsageError("add-json needs a JSON object") from error
+            if not isinstance(entry, dict):
+                raise CliUsageError("add-json needs a JSON object")
+        _check(options.name, entry)
+        path = _write(options.scope, cwd, options.name, entry)
+        stdout.write(f"Added MCP server {options.name} to {path} ({options.scope})\n")
+        if options.scope == "project":
+            stdout.write("A project server runs only after the folder is trusted and the server approved.\n")
+        return 0
+    if options.command == "remove":
+        scopes = [options.scope] if options.scope else list(SCOPES)
+        removed = []
+        for scope in scopes:
+            try:
+                removed.append(_write(scope, cwd, options.name, None))
+            except CliRuntimeError:
+                continue
+        if not removed:
+            raise CliRuntimeError(f"no MCP server named {options.name!r} in {', '.join(scopes)}")
+        for path in removed:
+            stdout.write(f"Removed MCP server {options.name} from {path}\n")
+        return 0
+    # reset-project-choices: forget the approvals and refusals of this folder's .mcp.json servers (Orin's local file).
+    path = workspace_grants_file(cwd)
+
+    def forget(data: dict[str, Any]) -> None:
+        for key in _PROJECT_CHOICES:
+            data.pop(key, None)
+
+    update_settings_file(path, forget)
+    local_servers = scope_file("local", cwd)
+    if local_servers.is_file():
+        update_settings_file(local_servers, forget)
+    stdout.write(f"This folder's .mcp.json servers will be asked about again ({path})\n")
+    return 0
+
+
+__all__ = ["SCOPES", "run", "scope_file"]
+```
+
+Create `src/agentos/cli_code/commands/mcp_serve.py` (it must not exist yet):
+
+```python
+"""``orin code mcp serve``: Orin's file and shell tools as an MCP server on stdio, for another MCP client.
+
+The tools run in this process, on the current folder, in ``dontAsk`` mode: there is nobody to ask, so whatever would
+need a confirmation is refused, and writing or running commands needs an allow rule in the person's own settings
+(read with the folder untrusted: a repository cannot grant itself anything). Nothing reaches outside the folder.
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+from typing import Any, TextIO
+
+from agentos.agentic.tools.public_names import public_name
+
+PROTOCOL_VERSION = "2025-06-18"
+# Claude Code's names for the tools offered, as Orin's internal names.
+SERVED_TOOLS = ("read_file", "glob_files", "search_files", "list_files", "write_file", "edit_file", "run_command")
+
+
+def _toolset(cwd: Path):
+    from agentos.agentic.agent_tools import AgentToolset
+    from agentos.agentic.workspace import ConversationWorkspace
+
+    return AgentToolset(ConversationWorkspace.at_root(cwd), public_tool_names=True, code_mode_active=True,
+                        permission_mode="dont_ask", non_interactive_ask="deny")
+
+
+def _tools(toolset) -> list[dict[str, Any]]:
+    tools = []
+    for schema in toolset.schemas(set(SERVED_TOOLS)):
+        function = schema.get("function") if isinstance(schema.get("function"), dict) else schema
+        tools.append({"name": public_name(str(function.get("name") or "")), "description": str(function.get("description") or "")[:2000],
+                      "inputSchema": function.get("parameters") or {"type": "object"}})
+    return tools
+
+
+def handle(toolset, frame: dict[str, Any]) -> dict[str, Any] | None:
+    method = frame.get("method")
+    request_id = frame.get("id")
+    if request_id is None:
+        return None  # notifications/initialized and friends
+    if method == "initialize":
+        result: dict[str, Any] = {"protocolVersion": PROTOCOL_VERSION, "serverInfo": {"name": "orin-code"},
+                                  "capabilities": {"tools": {}}}
+    elif method == "tools/list":
+        result = {"tools": _tools(toolset)}
+    elif method == "tools/call":
+        params = frame.get("params") if isinstance(frame.get("params"), dict) else {}
+        name = str(params.get("name") or "")
+        allowed = {tool["name"] for tool in _tools(toolset)}
+        if name not in allowed:
+            return {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32602, "message": f"unknown tool {name}"}}
+        outcome = toolset.invoke(name, dict(params.get("arguments") or {}))
+        result = {"content": [{"type": "text", "text": str(outcome.content or outcome.summary or "")}],
+                  "isError": outcome.status != "succeeded"}
+    elif method == "ping":
+        result = {}
+    else:
+        return {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32601, "message": f"unknown method {method}"}}
+    return {"jsonrpc": "2.0", "id": request_id, "result": result}
+
+
+def serve(*, cwd: Path, stdin: TextIO | None = None, stdout: TextIO | None = None) -> int:
+    stdin = stdin or sys.stdin
+    stdout = stdout or sys.stdout
+    toolset = _toolset(cwd)
+    for line in stdin:
+        if not line.strip():
+            continue
+        try:
+            frame = json.loads(line)
+        except ValueError:
+            stdout.write(json.dumps({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "parse error"}}) + "\n")
+            stdout.flush()
+            continue
+        if not isinstance(frame, dict):
+            continue
+        answer = handle(toolset, frame)
+        if answer is not None:
+            stdout.write(json.dumps(answer, ensure_ascii=False) + "\n")
+            stdout.flush()
+    return 0
+
+
+__all__ = ["SERVED_TOOLS", "handle", "serve"]
+```
+
+In `src/agentos/cli_code/main.py` make these 1 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+def run_subcommand(name: str, argv: Sequence[str], *, stdout: TextIO, stderr: TextIO) -> int:
+    raise CliRuntimeError(f"`orin code {name}` is not available in this build yet")
+```
+
+with
+
+```python
+def run_subcommand(name: str, argv: Sequence[str], *, stdout: TextIO, stderr: TextIO) -> int:
+    from .commands import run_subcommand as dispatch
+
+    _utf8(stdout, stderr)
+    return dispatch(name, list(argv), stdout=stdout, stderr=stderr)
+```
+
+
+- [ ] **Step 4: Run the tests to see them pass.**
+
+Run: `uv run pytest -q tests/unit/cli_code`
+Expected: all pass.
+
+- [ ] **Step 5: Commit.**
+
+```
+feat(w6): orin code mcp (configuration files and serve)
+```
+
+### Task 20: `agents`, `doctor`, `auto-mode`, background runs and `purge`
+
+`agents [--json]` lists the agent definitions this folder would load and the background runs; `doctor` checks the profile, the runtime, the token, the providers, the settings, git and the folder's trust (exit 1 when a check fails); `auto-mode config|defaults|reset|critique` (critique runs a plan-mode turn with no tools). `-p ... --bg` starts the same command again detached (with a `--session-id` when none is given, so `stop` can cancel the run's turn in Orin, not only its process), logging to `<ORIN_DATA_DIR>/cli-background/<id>.log`; `logs [-f]`, `attach` (follows the log until the run ends: a background run has no stdin), `stop` and `rm`; `purge --yes` removes the CLI's own data and keeps the conversations.
+
+**Files:**
+- Create: `src/agentos/cli_code/commands/background.py`, `src/agentos/cli_code/commands/info.py`, `tests/integration/cli_code/test_info_live.py`, `tests/unit/cli_code/test_session_subcommands.py`
+- Modify: `src/agentos/cli_code/headless.py`, `src/agentos/cli_code/main.py`, `tests/unit/cli_code/test_turn_options_builder.py`
+
+**Interfaces:**
+- Produces: `commands.info.agents/doctor/auto_mode`; `commands.background.start_background(argv, *, cwd, stdout)`, `background_runs()`, `run(name, argv, ...)`; `main` starts `--bg` runs.
+
+- [ ] **Step 1: Write the failing tests** (test files and their fixtures).
+
+Create `tests/integration/cli_code/test_info_live.py` (it must not exist yet):
+
+```python
+"""W6 Task 20: `orin code doctor` and background runs, against the live runtime."""
+from __future__ import annotations
+
+import json
+import sys
+import time
+
+from .live_runtime import LiveRuntime
+from .test_headless import MODEL, orin_code
+
+
+def _no_browser(runtime: LiveRuntime) -> dict[str, str]:
+    # webbrowser runs $BROWSER with the URL: a Python that does nothing, so no window opens during the tests.
+    return {**runtime.env, "BROWSER": f'"{sys.executable.replace(chr(92), "/")}" -c "import sys" %s'}
+
+
+
+def test_doctor_reports_a_healthy_local_orin(orin_runtime: LiveRuntime) -> None:
+    done = orin_code(orin_runtime, orin_runtime.workspace("doctor"), "doctor")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "ok   runtime" in done.stdout and "ok   providers: ollama" in done.stdout
+
+
+def test_a_background_run_and_its_log(orin_runtime: LiveRuntime) -> None:
+    workspace = orin_runtime.workspace("background")
+    started = orin_code(orin_runtime, workspace, "-p", "[[say:background done]]", "--bg", *MODEL)
+    assert started.returncode == 0, started.stderr
+    run_id = started.stdout.strip()
+    assert run_id.startswith("bg_")
+    attached = orin_code(orin_runtime, workspace, "attach", run_id, timeout=180)
+    assert attached.returncode == 0 and "background done" in attached.stdout
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        listed = json.loads(orin_code(orin_runtime, workspace, "agents", "--json").stdout)
+        if all(item["state"] == "finished" for item in listed["background"] if item["id"] == run_id):
+            break
+        time.sleep(0.5)
+    assert orin_code(orin_runtime, workspace, "logs", run_id).stdout.strip() == "background done"
+    assert orin_code(orin_runtime, workspace, "rm", run_id).returncode == 0
+
+
+def test_stopping_a_background_run_cancels_its_turn(orin_runtime: LiveRuntime) -> None:
+    from agentos.cli_code.sessions import SessionIndex
+
+    workspace = orin_runtime.workspace("background-stop")
+    run_id = orin_code(orin_runtime, workspace, "-p", "[[slow]]", "--bg", *MODEL).stdout.strip()
+    record = json.loads((orin_runtime.paths.data / "cli-background" / f"{run_id}.json").read_text(encoding="utf-8"))
+    deadline = time.monotonic() + 60
+    session = None
+    while session is None and time.monotonic() < deadline:
+        session = SessionIndex(orin_runtime.paths.data).find(record["session_id"])
+        time.sleep(0.5)
+    assert session is not None
+    assert "stopped" in orin_code(orin_runtime, workspace, "stop", run_id).stdout
+    with orin_runtime.api() as api:
+        while time.monotonic() < deadline:
+            turns = api.get(f"/v1/conversations/{session.conversation_id}").json()["turns"]
+            if turns and turns[-1]["state"] in {"cancelled", "completed", "failed"}:
+                break
+            time.sleep(0.5)
+    assert turns[-1]["state"] == "cancelled"
+```
+
+Create `tests/unit/cli_code/test_session_subcommands.py` (it must not exist yet):
+
+```python
+"""W6 Task 20: `orin code agents`, `auto-mode`, background runs and `purge`."""
+from __future__ import annotations
+
+import io
+import json
+from pathlib import Path
+
+import pytest
+
+from agentos.cli_code.main import main
+from agentos.settings.paths import orin_user_dir
+
+
+def _run(argv: list[str], cwd: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[int, str, str]:
+    monkeypatch.chdir(cwd)
+    out, err = io.StringIO(), io.StringIO()
+    code = main(argv, stdin=io.StringIO(""), stdout=out, stderr=err)
+    return code, out.getvalue(), err.getvalue()
+
+
+
+def test_agents_lists_the_folders_agents(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    folder = orin_user_dir() / "agents"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "reviewer.md").write_text("---\nname: reviewer\ndescription: Reviews diffs\n---\nBe strict.\n", encoding="utf-8")
+    code, out, _ = _run(["agents", "--json"], tmp_path, monkeypatch)
+    listed = json.loads(out)
+    assert code == 0 and {"name": "reviewer", "origin": "user"}.items() <= next(item for item in listed["agents"] if item["name"] == "reviewer").items()
+    code, out, _ = _run(["agents"], tmp_path, monkeypatch)
+    assert "reviewer [user]: Reviews diffs" in out
+
+
+def test_auto_mode_defaults_config_and_reset(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    code, out, _ = _run(["auto-mode", "defaults"], tmp_path, monkeypatch)
+    assert code == 0 and json.loads(out)["hard_deny_patterns"]
+    settings = orin_user_dir() / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text(json.dumps({"autoMode": {"allow": ["tests"]}, "model": "ollama/x"}), encoding="utf-8")
+    assert json.loads(_run(["auto-mode", "config"], tmp_path, monkeypatch)[1])["autoMode"] == {"allow": ["tests"]}
+    assert _run(["auto-mode", "reset"], tmp_path, monkeypatch)[0] == 0
+    assert json.loads(settings.read_text(encoding="utf-8")) == {"model": "ollama/x"}
+
+
+def test_background_bookkeeping(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from agentos.cli_code.commands.background import background_root
+
+    root = background_root()
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "bg_done.log").write_bytes(b"all done\n")
+    (root / "bg_done.json").write_text(json.dumps({"id": "bg_done", "pid": 0, "cwd": str(tmp_path), "args": [], "log": str(root / "bg_done.log")}), encoding="utf-8")
+    assert _run(["logs", "bg_done"], tmp_path, monkeypatch)[1] == "all done\n"
+    assert "had already finished" in _run(["stop", "bg_done"], tmp_path, monkeypatch)[1]
+    assert json.loads(_run(["agents", "--json"], tmp_path, monkeypatch)[1])["background"][0]["state"] == "finished"
+    assert _run(["rm", "bg_done"], tmp_path, monkeypatch)[0] == 0 and not (root / "bg_done.json").exists()
+    assert _run(["logs", "bg_done"], tmp_path, monkeypatch)[0] == 1
+    assert _run(["logs", "../escape"], tmp_path, monkeypatch)[0] == 1
+
+
+def test_purge_needs_yes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from agentos.installation import orin_paths
+
+    index = orin_paths().data / "cli-sessions.json"
+    index.parent.mkdir(parents=True, exist_ok=True)
+    index.write_text("{}", encoding="utf-8")
+    assert _run(["purge"], tmp_path, monkeypatch)[0] == 1 and index.exists()
+    assert _run(["purge", "--yes"], tmp_path, monkeypatch)[0] == 0 and not index.exists()
+
+
+@pytest.mark.parametrize("name", ["import", "review"])
+def test_subcommands_without_support_say_so(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+    code, _, err = _run([name, "claude"], tmp_path, monkeypatch)
+    assert code == 1 and "not supported yet" in err or "W8" in err
+
+
+def test_bg_needs_a_print_prompt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    code, _, err = _run(["--bg", "--input-format", "stream-json", "--output-format", "stream-json"], tmp_path, monkeypatch)
+    assert code == 1 and "--bg" in err
+```
+
+In `tests/unit/cli_code/test_turn_options_builder.py` make these 1 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+
+@pytest.mark.parametrize("argv", [["--fork-session"], ["--session-mirror"], ["--agent", "reviewer"], ["--bg"], ["--permission-prompt-tool", "mcp__p__ask"], ["--thinking-display", "summarized"]])
+def test_flags_without_support_yet_are_refused(argv: list[str]) -> None:
+```
+
+with
+
+```python
+
+@pytest.mark.parametrize("argv", [["--fork-session"], ["--session-mirror"], ["--agent", "reviewer"], ["--resume-session-at", "x"], ["--permission-prompt-tool", "mcp__p__ask"], ["--thinking-display", "summarized"]])
+def test_flags_without_support_yet_are_refused(argv: list[str]) -> None:
+```
+
+
+- [ ] **Step 2: Run them to see them fail.**
+
+Run: `uv run pytest -q tests/unit/cli_code/test_session_subcommands.py`
+Expected: collection error: `No module named 'agentos.cli_code.commands.background'`.
+
+- [ ] **Step 3: Implement.**
+
+Create `src/agentos/cli_code/commands/background.py` (it must not exist yet):
+
+```python
+"""Background runs (``orin code -p ... --bg``), ``logs``, ``stop``, ``rm``, ``attach`` and ``purge``.
+
+``--bg`` starts the same command again, detached, without ``--bg``; its output goes to a log file and a small record
+(``<ORIN_DATA_DIR>/cli-background/<id>.json``: pid, folder, command) lets the other subcommands find it. ``attach``
+follows the log until the run ends (a background run has no stdin: it was started with ``-p``). ``purge`` removes the
+data ``orin code`` keeps (session index, transcripts, host requests, background runs) after ``--yes``.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+import uuid
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any, TextIO
+
+from ..args import CliUsageError
+from ..errors import CliRuntimeError
+
+
+class _Parser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        raise CliUsageError(message)
+
+
+def background_root() -> Path:
+    from agentos.installation import orin_paths
+
+    return orin_paths().data / "cli-background"
+
+
+def _alive(pid: int) -> bool:
+    from agentos.launcher.state import process_is_alive
+
+    return process_is_alive(pid)
+
+
+def _record(run_id: str) -> dict[str, Any]:
+    if not run_id or "/" in run_id or "\\" in run_id or ".." in run_id:
+        raise CliRuntimeError(f"no background run {run_id!r}")
+    try:
+        data = json.loads((background_root() / f"{run_id}.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise CliRuntimeError(f"no background run {run_id!r}") from error
+    return data
+
+
+def background_runs() -> list[dict[str, Any]]:
+    runs = []
+    root = background_root()
+    for path in sorted(root.glob("*.json")) if root.is_dir() else []:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        data["state"] = "running" if _alive(int(data.get("pid") or 0)) else "finished"
+        runs.append(data)
+    return runs
+
+
+def start_background(argv: list[str], *, cwd: Path, stdout: TextIO) -> int:
+    """Start ``orin code <argv without --bg>`` detached; print its id."""
+    run_id = f"bg_{uuid.uuid4().hex[:12]}"
+    root = background_root()
+    root.mkdir(parents=True, exist_ok=True)
+    log = root / f"{run_id}.log"
+    args = [item for item in argv if item != "--bg"]
+    # A known session id lets `stop` cancel the run's turn in Orin, not only the process that follows it.
+    session_id = next((item.split("=", 1)[1] for item in args if item.startswith("--session-id=")), None)
+    if session_id is None and "--session-id" in args and args.index("--session-id") + 1 < len(args):
+        session_id = args[args.index("--session-id") + 1]
+    if session_id is None and not any(item in args for item in ("-c", "--continue", "-r", "--resume")) and not any(
+        item.startswith("--resume=") for item in args
+    ):
+        session_id = str(uuid.uuid4())
+        args = [*args, f"--session-id={session_id}"]
+    executable = Path(sys.argv[0]) if Path(sys.argv[0]).stem.lower() == "orin-code" else None
+    command = [str(executable)] + args if executable is not None and executable.is_file() else [sys.executable, "-m", "agentos.cli_code.main", *args]
+    flags: dict[str, Any] = {}
+    if os.name == "nt":
+        flags["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    else:
+        flags["start_new_session"] = True
+    with open(log, "wb") as handle:
+        process = subprocess.Popen(command, cwd=str(cwd), stdin=subprocess.DEVNULL, stdout=handle, stderr=subprocess.STDOUT, close_fds=True, **flags)
+    record = {"id": run_id, "pid": process.pid, "cwd": str(cwd), "args": args, "log": str(log),
+              "session_id": session_id, "started_at": datetime.now(UTC).isoformat()}
+    (root / f"{run_id}.json").write_text(json.dumps(record, indent=1), encoding="utf-8")
+    stdout.write(f"{run_id}\n")
+    return 0
+
+
+def _stop(record: dict[str, Any]) -> bool:
+    pid = int(record.get("pid") or 0)
+    if not _alive(pid):
+        return False
+    _cancel_turn(record)
+    from agentos.launcher.state import kill_process_tree
+
+    kill_process_tree(pid)
+    return True
+
+
+def _cancel_turn(record: dict[str, Any]) -> None:
+    """Cancel the run's turn in Orin (best effort: the process is stopped either way)."""
+    from agentos.installation import orin_paths
+
+    from ..runtime import connect_local
+    from ..sessions import SessionIndex
+
+    session = SessionIndex(orin_paths().data).find(str(record.get("session_id") or ""))
+    if session is None:
+        return
+    try:
+        client = connect_local(orin_paths(), start=False)
+    except CliRuntimeError:
+        return
+    try:
+        client.post(f"/v1/conversations/{session.conversation_id}/cancel", {})
+    except CliRuntimeError:
+        pass
+    finally:
+        client.close()
+
+
+def run(name: str, argv: list[str], *, cwd: Path, stdout: TextIO, stderr: TextIO) -> int:
+    parser = _Parser(prog=f"orin code {name}", allow_abbrev=False)
+    if name == "purge":
+        parser.add_argument("--yes", action="store_true")
+        options = parser.parse_args(argv)
+        if not options.yes:
+            raise CliUsageError("purge removes orin code's sessions, transcripts and background runs; confirm with --yes")
+        from agentos.installation import orin_paths
+
+        data = orin_paths().data
+        for run_record in background_runs():
+            _stop(run_record)
+        for target in ("cli-transcripts", "cli-host-requests", "cli-background"):
+            shutil.rmtree(data / target, ignore_errors=True)
+        try:
+            (data / "cli-sessions.json").unlink()
+        except FileNotFoundError:
+            pass
+        stdout.write("orin code's local data was removed (the conversations stay in Orin).\n")
+        return 0
+    parser.add_argument("id")
+    if name == "logs":
+        parser.add_argument("-f", "--follow", action="store_true")
+    options = parser.parse_args(argv)
+    record = _record(options.id)
+    log = Path(record["log"])
+    if name == "stop":
+        stdout.write(f"{options.id}: {'stopped' if _stop(record) else 'had already finished'}\n")
+        return 0
+    if name == "rm":
+        _stop(record)
+        for path in (log, background_root() / f"{options.id}.json"):
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+        stdout.write(f"{options.id}: removed\n")
+        return 0
+    follow = name == "attach" or getattr(options, "follow", False)
+    position = 0
+    while True:
+        try:
+            with open(log, "rb") as handle:
+                handle.seek(position)
+                chunk = handle.read()
+        except OSError:
+            chunk = b""
+        if chunk:
+            position += len(chunk)
+            stdout.write(chunk.decode("utf-8", errors="replace"))
+            stdout.flush()
+        if not follow or not _alive(int(record.get("pid") or 0)):
+            if follow and chunk:
+                continue
+            return 0
+        time.sleep(0.5)
+
+
+__all__ = ["background_runs", "run", "start_background"]
+```
+
+Create `src/agentos/cli_code/commands/info.py` (it must not exist yet):
+
+```python
+"""``orin code agents``, ``doctor`` and ``auto-mode``."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+from pathlib import Path
+from typing import Any, TextIO
+
+from agentos.settings.paths import orin_user_dir
+from agentos.settings.writer import update_settings_file
+
+from ..args import CliUsageError
+from ..errors import CliRuntimeError
+
+
+class _Parser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        raise CliUsageError(message)
+
+
+def _trusted(cwd: Path) -> bool:
+    from agentos.permissions.trust import WorkspaceTrustStore
+
+    try:
+        return WorkspaceTrustStore().is_trusted("local-user", cwd)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def agents(argv: list[str], *, cwd: Path, stdout: TextIO, stderr: TextIO) -> int:
+    parser = _Parser(prog="orin code agents", allow_abbrev=False)
+    parser.add_argument("--json", action="store_true")
+    options = parser.parse_args(argv)
+    from agentos.agentic.agent_definitions import load_agent_definitions
+
+    from .background import background_runs
+
+    catalog = load_agent_definitions(workspace_root=cwd, trusted=_trusted(cwd), plugin_folders=(), personal=True)
+    definitions = [{"name": item.name, "origin": item.origin, "description": item.description,
+                    "model": item.model, "tools": list(item.tools) if item.tools is not None else None}
+                   for item in sorted(catalog.agents.values(), key=lambda value: value.name)]
+    runs = background_runs()
+    if options.json:
+        stdout.write(json.dumps({"agents": definitions, "background": runs}, indent=2) + "\n")
+        return 0
+    for item in definitions:
+        stdout.write(f"{item['name']} [{item['origin']}]: {item['description']}\n")
+    for path, reason in catalog.errors[:20]:
+        stderr.write(f"{path}: {reason}\n")
+    if runs:
+        stdout.write("\nBackground runs:\n")
+        for run in runs:
+            stdout.write(f"{run['id']}: {run['state']} ({run.get('cwd')})\n")
+    return 0
+
+
+def doctor(argv: list[str], *, cwd: Path, stdout: TextIO, stderr: TextIO) -> int:
+    _Parser(prog="orin code doctor", allow_abbrev=False).parse_args(argv)
+    from agentos.configuration.mode import RuntimeMode, current_mode
+    from agentos.installation import orin_paths
+    from agentos.installation.api_token import read_api_token
+    from agentos.settings import load_effective_settings
+    from agentos.version import __version__
+
+    from ..runtime import connect_local, find_or_start_runtime
+    from ..selection import ModelCatalog
+
+    checks: list[tuple[str, bool, str]] = [("orin code", True, __version__)]
+    checks.append(("local profile", current_mode() is not RuntimeMode.SERVER, f"ORIN_MODE={os.environ.get('ORIN_MODE') or 'local'}"))
+    paths = orin_paths()
+    try:
+        state = find_or_start_runtime(paths, start=False)
+        checks.append(("runtime", True, state.url))
+    except CliRuntimeError as error:
+        checks.append(("runtime", False, str(error)))
+        state = None
+    checks.append(("CLI token", read_api_token(paths.run) is not None, str(paths.run)))
+    if state is not None:
+        try:
+            client = connect_local(paths, start=False)
+        except CliRuntimeError as error:
+            checks.append(("API", False, str(error)))
+        else:
+            try:
+                enabled = ModelCatalog(client).enabled_providers()
+                checks.append(("providers", bool(enabled), ", ".join(enabled) or "no provider is set up (Settings > Providers)"))
+            finally:
+                client.close()
+    try:
+        settings = load_effective_settings(cwd, trusted=_trusted(cwd))
+        checks.append(("settings", not settings.errors, "; ".join(f"{error.path}: {error.message}" for error in settings.errors)[:300] or "readable"))
+        model = load_effective_settings(None, sources=("user",)).get("model")
+        checks.append(("default model", True, str(model) if model else "none (pass --model)"))
+    except Exception as error:  # noqa: BLE001
+        checks.append(("settings", False, str(error)[:200]))
+    checks.append(("git", shutil.which("git") is not None, shutil.which("git") or "not found"))
+    checks.append(("this folder", True, "trusted" if _trusted(cwd) else "not trusted (its settings, hooks and MCP servers are off)"))
+    failed = False
+    for name, ok, detail in checks:
+        failed = failed or not ok
+        stdout.write(f"{'ok  ' if ok else 'FAIL'} {name}: {detail}\n")
+    return 1 if failed else 0
+
+
+def auto_mode(argv: list[str], *, cwd: Path, stdout: TextIO, stderr: TextIO) -> int:
+    parser = _Parser(prog="orin code auto-mode", allow_abbrev=False)
+    commands = parser.add_subparsers(dest="command", required=True)
+    commands.add_parser("config")
+    commands.add_parser("defaults")
+    commands.add_parser("reset")
+    critique = commands.add_parser("critique")
+    critique.add_argument("--model")
+    options = parser.parse_args(argv)
+    from agentos.permissions.auto_mode import DEFAULT_HARD_DENY_PATTERNS, _SYSTEM
+    from agentos.settings import load_effective_settings
+
+    defaults: dict[str, Any] = {"hard_deny_patterns": list(DEFAULT_HARD_DENY_PATTERNS), "classifier_instructions": _SYSTEM}
+    if options.command == "defaults":
+        stdout.write(json.dumps(defaults, indent=2) + "\n")
+        return 0
+    configured = load_effective_settings(cwd, trusted=_trusted(cwd)).get("autoMode") or {}
+    if options.command == "config":
+        stdout.write(json.dumps({"autoMode": configured, "defaults": defaults}, indent=2) + "\n")
+        return 0
+    if options.command == "reset":
+        path = orin_user_dir() / "settings.json"
+
+        def forget(data: dict[str, Any]) -> None:
+            data.pop("autoMode", None)
+
+        update_settings_file(path, forget)
+        stdout.write(f"Your autoMode settings were removed from {path}; the defaults apply.\n")
+        return 0
+    from ..args import parse_code_arguments
+    from ..main import run_headless
+
+    prompt = ("Review these auto mode rules for an AI coding agent: say which risky actions they would let through without "
+              "asking, which safe actions they would block, and what you would change, concisely.\n\n"
+              + json.dumps({"configured": configured, "defaults": defaults}, indent=1)[:12000])
+    flags = ["-p", prompt, "--permission-mode", "plan", "--tools", ""] + (["--model", options.model] if options.model else [])
+    code_options, _ = parse_code_arguments(flags)
+    import sys
+
+    return run_headless(code_options, stdin=sys.stdin, stdout=stdout, stderr=stderr)
+
+
+__all__ = ["agents", "auto_mode", "doctor"]
+```
+
+In `src/agentos/cli_code/headless.py` make these 1 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+    "agent": "--agent",
+    "plugin_dirs": "--plugin-dir", "worktree": "--worktree", "background": "--bg", "fork_session": "--fork-session",
+    "bare": "--bare", "safe_mode": "--safe-mode", "restricted": "--restricted", "init": "--init",
+```
+
+with
+
+```python
+    "agent": "--agent",
+    "plugin_dirs": "--plugin-dir", "worktree": "--worktree", "fork_session": "--fork-session",
+    "bare": "--bare", "safe_mode": "--safe-mode", "restricted": "--restricted", "init": "--init",
+```
+
+
+In `src/agentos/cli_code/main.py` make these 1 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+            return EXIT_OK
+        if options.headless:
+```
+
+with
+
+```python
+            return EXIT_OK
+        if options.headless and options.background:
+            from pathlib import Path
+
+            from .commands.background import start_background
+            from .headless import refuse_unsupported
+
+            refuse_unsupported(options)
+            if not options.print_mode or not (options.prompt or "").strip():
+                raise CliUsageError("--bg runs a -p prompt in the background")
+            return start_background(args, cwd=Path.cwd().resolve(), stdout=stdout)
+        if options.headless:
+```
+
+
+- [ ] **Step 4: Run the tests to see them pass.**
+
+Run: `uv run pytest -q tests/unit/cli_code && uv run pytest -q tests/integration/cli_code/test_info_live.py`
+Expected: all pass.
+
+Expectation change to record: `test_flags_without_support_yet_are_refused` checks `--resume-session-at` instead of `--bg`.
+
+- [ ] **Step 5: Commit.**
+
+```
+feat(w6): orin code agents, doctor, auto-mode, background runs and purge
+```
+
+### Task 21: `orin code plugin` and `orin code [prompt]`
+
+`plugin list|details|install|uninstall|enable|disable|configure|validate` and `marketplace list|add` go through the local API (`install` inspects and approves the package; its hooks and language servers stay off until the person allows them in the interface, and the command says so); `update` and `marketplace remove|update` point to the interface, where new content is shown before approval; `validate` reads a folder locally. Without `-p`, `orin code "prompt"` creates the Code session in the current folder and opens it (`/chats/<id>`); with no prompt it opens Orin's home; `--desktop` stays refused.
+
+**Files:**
+- Create: `src/agentos/cli_code/commands/plugin.py`, `tests/integration/cli_code/test_interface_live.py`, `tests/unit/cli_code/test_plugin_subcommands.py`
+- Modify: `src/agentos/cli_code/main.py`
+
+**Interfaces:**
+- Produces: `commands.plugin.run`; `main.open_interface(options, *, stdout, stderr)`.
+
+- [ ] **Step 1: Write the failing tests** (test files and their fixtures).
+
+Create `tests/integration/cli_code/test_interface_live.py` (it must not exist yet):
+
+```python
+"""W6 Task 21: `orin code plugin` and `orin code <prompt>`, against the live runtime."""
+from __future__ import annotations
+
+import sys
+
+from .live_runtime import LiveRuntime
+from .test_headless import MODEL, orin_code
+
+
+def _no_browser(runtime: LiveRuntime) -> dict[str, str]:
+    # webbrowser runs $BROWSER with the URL: a Python that does nothing, so no window opens during the tests.
+    return {**runtime.env, "BROWSER": f'"{sys.executable.replace(chr(92), "/")}" -c "import sys" %s'}
+
+
+
+def test_plugin_list_answers(orin_runtime: LiveRuntime) -> None:
+    done = orin_code(orin_runtime, orin_runtime.workspace("plugins"), "plugin", "list")
+    assert done.returncode == 0, done.stderr
+
+
+def test_orin_code_with_a_prompt_opens_the_session(orin_runtime: LiveRuntime) -> None:
+    workspace = orin_runtime.workspace("open")
+    done = orin_code(orin_runtime, workspace, "say hello", *MODEL, env=_no_browser(orin_runtime))
+    assert done.returncode == 0, done.stderr
+    url = done.stdout.strip()
+    assert url.startswith(orin_runtime.url + "/chats/chat_")
+    with orin_runtime.api() as api:
+        conversation = api.get(f"/v1/conversations/{url.rsplit('/', 1)[1]}").json()
+    assert conversation["mode"] == "code" and conversation["permission_mode"] == "ask_permissions"
+```
+
+Create `tests/unit/cli_code/test_plugin_subcommands.py` (it must not exist yet):
+
+```python
+"""W6 Task 21: `orin code plugin validate` (no running Orin needed)."""
+from __future__ import annotations
+
+import io
+import json
+from pathlib import Path
+
+import pytest
+
+from agentos.cli_code.main import main
+
+
+def _run(argv: list[str], cwd: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[int, str, str]:
+    monkeypatch.chdir(cwd)
+    out, err = io.StringIO(), io.StringIO()
+    code = main(argv, stdin=io.StringIO(""), stdout=out, stderr=err)
+    return code, out.getvalue(), err.getvalue()
+
+
+
+def test_plugin_validate_reads_a_folder_without_installing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    plugin = tmp_path / "demo"
+    (plugin / ".claude-plugin").mkdir(parents=True)
+    (plugin / ".claude-plugin" / "plugin.json").write_text(json.dumps({"name": "demo", "version": "1.0.0", "description": "d"}), encoding="utf-8")
+    code, out, err = _run(["plugin", "validate", "demo"], tmp_path, monkeypatch)
+    assert code == 0, err
+    assert out.startswith("The plugin is valid.")
+    assert _run(["plugin", "validate", "missing"], tmp_path, monkeypatch)[0] == 1
+    assert _run(["plugin", "update", "x"], tmp_path, monkeypatch)[0] == 1
+```
+
+- [ ] **Step 2: Run them to see them fail.**
+
+Run: `uv run pytest -q tests/unit/cli_code/test_plugin_subcommands.py`
+Expected: the unit test fails (`No module named 'agentos.cli_code.commands.plugin'`); the live interface test fails (`not available in this build yet`).
+
+- [ ] **Step 3: Implement.**
+
+Create `src/agentos/cli_code/commands/plugin.py` (it must not exist yet):
+
+```python
+"""``orin code plugin``: Orin's plugin library from a terminal, through the local API.
+
+``install`` inspects the package and approves it, like the interface's install; a plugin's hooks and language servers
+stay off until the person allows them in the interface (consent is per content, W5-R3), and the command says so.
+``validate`` reads a plugin folder locally without installing anything.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+from typing import Any, TextIO
+
+from ..args import CliUsageError
+from ..errors import CliRuntimeError
+
+
+class _Parser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        raise CliUsageError(message)
+
+
+def _client():
+    from agentos.installation import orin_paths
+
+    from ..runtime import connect_local
+
+    return connect_local(orin_paths())
+
+
+def _items(listed: Any) -> list[dict[str, Any]]:
+    items = listed.get("items") if isinstance(listed, dict) else listed
+    return [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
+
+
+def _line(item: dict[str, Any]) -> str:
+    return (f"{item.get('plugin_id')}: {item.get('display_name') or item.get('name')} {item.get('version') or ''} "
+            f"[{item.get('state')}{', enabled' if item.get('enabled') else ''}]").replace("  ", " ")
+
+
+def _validate(path: Path, stdout: TextIO) -> int:
+    from agentos.plugins.inspector import inspect_plugin_package
+    from agentos.plugins.manifest import ManifestRejected
+
+    if not path.is_dir():
+        raise CliRuntimeError(f"{path} is not a folder")
+    try:
+        inspection = inspect_plugin_package(path, package_digest="local-validation")
+    except ManifestRejected as error:
+        raise CliRuntimeError(f"the plugin is not valid: {error}") from error
+    report = {key: value for key, value in vars(inspection).items() if not key.startswith("_")} if hasattr(inspection, "__dict__") else {}
+    if not report:
+        report = {name: getattr(inspection, name) for name in getattr(inspection, "__slots__", ())}
+    stdout.write("The plugin is valid.\n" + json.dumps(report, indent=2, default=str)[:20000] + "\n")
+    return 0
+
+
+def run(argv: list[str], *, cwd: Path, stdout: TextIO, stderr: TextIO) -> int:
+    parser = _Parser(prog="orin code plugin", allow_abbrev=False)
+    commands = parser.add_subparsers(dest="command", required=True)
+    commands.add_parser("list")
+    for verb in ("install", "uninstall", "enable", "disable", "details", "update"):
+        commands.add_parser(verb).add_argument("plugin")
+    commands.add_parser("validate").add_argument("path")
+    configure = commands.add_parser("configure")
+    configure.add_argument("plugin")
+    configure.add_argument("values", nargs="+")
+    market = commands.add_parser("marketplace")
+    market_commands = market.add_subparsers(dest="action", required=True)
+    market_commands.add_parser("list")
+    market_commands.add_parser("add").add_argument("reference")
+    for verb in ("remove", "update"):
+        market_commands.add_parser(verb).add_argument("name")
+    options = parser.parse_args(argv)
+
+    if options.command == "validate":
+        return _validate((cwd / options.path).resolve(), stdout)
+    if options.command == "update":
+        raise CliRuntimeError("plugin updates are reviewed in Orin's interface (Settings > Plugins), where the new content is shown before it is approved")
+    if options.command == "marketplace" and options.action in {"remove", "update"}:
+        raise CliRuntimeError(f"marketplace {options.action} is done in Orin's interface (Settings > Plugins)")
+    client = _client()
+    try:
+        if options.command == "list":
+            for item in _items(client.get("/v1/plugins")):
+                stdout.write(_line(item) + "\n")
+            return 0
+        if options.command == "details":
+            match = next((item for item in _items(client.get("/v1/plugins")) if options.plugin in {item.get("plugin_id"), item.get("name"), item.get("display_name")}), None)
+            if match is None:
+                raise CliRuntimeError(f"no installed plugin {options.plugin!r}")
+            stdout.write(json.dumps(match, indent=2, default=str) + "\n")
+            return 0
+        if options.command == "install":
+            inspected = client.post("/v1/plugins/inspect", {"reference": options.plugin})
+            plugin_id = str((inspected or {}).get("plugin_id") or "")
+            if not plugin_id:
+                raise CliRuntimeError("the plugin could not be inspected")
+            approved = client.post(f"/v1/plugins/{plugin_id}/approve", {})
+            stdout.write(f"Installed {_line(approved if isinstance(approved, dict) else inspected)}\n")
+            stdout.write("Its hooks and language servers stay off until you allow them in Orin's interface (Settings > Plugins).\n")
+            return 0
+        if options.command == "uninstall":
+            client.delete(f"/v1/plugins/{options.plugin}")
+            stdout.write(f"Removed {options.plugin}\n")
+            return 0
+        if options.command in {"enable", "disable"}:
+            changed = client.put(f"/v1/plugins/{options.plugin}/enabled", {"enabled": options.command == "enable"})
+            stdout.write(_line(changed if isinstance(changed, dict) else {"plugin_id": options.plugin}) + "\n")
+            return 0
+        if options.command == "configure":
+            values: dict[str, Any] = {}
+            for pair in options.values:
+                key, found, value = pair.partition("=")
+                if not found or not key:
+                    raise CliUsageError(f"configure takes KEY=VALUE, not {pair!r}")
+                values[key] = value
+            client.put(f"/v1/plugins/{options.plugin}/config", {"values": values})
+            stdout.write(f"Configured {options.plugin}: {', '.join(sorted(values))}\n")
+            return 0
+        if options.action == "list":
+            for item in _items(client.get("/v1/plugins/marketplaces")):
+                stdout.write(f"{item.get('name') or item.get('marketplace_id')}: {item.get('reference') or item.get('source') or ''}\n")
+            return 0
+        added = client.post("/v1/plugins/marketplaces", {"reference": options.reference})
+        stdout.write(f"Added marketplace {(added or {}).get('name') or options.reference}\n")
+        return 0
+    finally:
+        client.close()
+
+
+__all__ = ["run"]
+```
+
+In `src/agentos/cli_code/main.py` make these 1 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+def open_interface(options: CodeOptions, *, stdout: TextIO, stderr: TextIO) -> int:
+    raise CliRuntimeError("opening a Code session in the interface is not available in this build yet")
+```
+
+with
+
+```python
+def open_interface(options: CodeOptions, *, stdout: TextIO, stderr: TextIO) -> int:
+    """``orin code [prompt]`` without ``-p``: a Code session in this folder, opened in the interface (spec §9.2)."""
+    import webbrowser
+    from pathlib import Path
+
+    from agentos.installation import orin_paths
+
+    from .headless import refuse_unsupported
+    from .runtime import connect_local
+    from .selection import ModelCatalog, choose_selection
+    from .turn_options import permission_mode_for
+
+    if options.desktop:
+        raise CliRuntimeError("--desktop is not supported yet: open the Orin desktop app and pick this folder")
+    refuse_unsupported(options)
+    paths = orin_paths()
+    client = connect_local(paths)
+    try:
+        if not (options.prompt or "").strip():
+            url = client.base_url + "/"
+            stdout.write(f"Orin is open at {url} (start a Code session there; this folder is {Path.cwd().resolve()})\n")
+            webbrowser.open(url)
+            return EXIT_OK
+        selection = choose_selection(ModelCatalog(client), model=options.model, provider=options.provider, remembered=None,
+                                     configured=_configured_model())
+        created = client.post("/v1/conversations", {
+            "message": options.prompt, "selection": selection.as_request(), "code_mode": "code",
+            "workspace_path": str(Path.cwd().resolve()), "permission_mode": permission_mode_for(options),
+        })
+        url = f"{client.base_url}/chats/{created['conversation_id']}"
+        stdout.write(f"{url}\n")
+        webbrowser.open(url)
+        return EXIT_OK
+    finally:
+        client.close()
+```
+
+
+- [ ] **Step 4: Run the tests to see them pass.**
+
+Run: `uv run pytest -q tests/unit/cli_code && uv run pytest -q tests/integration/cli_code/test_interface_live.py`
+Expected: all pass.
+
+- [ ] **Step 5: Commit.**
+
+```
+feat(w6): orin code plugin, and orin code [prompt] opens the session
+```
+
+### Batch E close
+
+- [ ] **Step 1:** `uv run pytest -q tests/unit` and `uv run pytest -q tests/integration` (timeout 900000 ms each): green; report the counts.
+- [ ] **Step 2:** no `agentos.launcher` and no background `orin-code` process is left; `git status` shows nothing under `data/`.
+- [ ] **Step 3:** Append `## Batch E — MCP from the CLI, subcommands and the interface (Tasks 18–21)` to the ledger (commits, tests, suites, deviations from this plan, expectation changes, anything incomplete). Commit `docs(w6): Batch E ledger`.
