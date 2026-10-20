@@ -45,3 +45,35 @@ def test_a_setup_hook_adds_its_output_to_the_turn(tmp_path: Path) -> None:
     assert "prepared by init" in runtime.system_prompt + runtime.volatile_prompt
     plain = _session(tmp_path / "other", CliTurnOptions()).build_runtime()
     assert "prepared by" not in plain.system_prompt + plain.volatile_prompt
+
+
+def _printer(tmp_path: Path, name: str, text: str) -> str:
+    script = tmp_path / f"{name}.py"
+    script.write_text(f"import sys; sys.stdin.read(); print({text!r})", encoding="utf-8")
+    return f'"{sys.executable}" "{script}"'
+
+
+def test_setup_output_reaches_the_prompt_before_session_start(tmp_path: Path) -> None:
+    setup = _printer(tmp_path, "setup", "MARK-SETUP prepared by init")
+    start = _printer(tmp_path, "start", "MARK-START session started")
+    _user({"hooks": {
+        "Setup": [{"matcher": "init", "hooks": [{"type": "command", "command": setup}]}],
+        "SessionStart": [{"hooks": [{"type": "command", "command": start}]}],
+    }})
+    runtime = _session(tmp_path, CliTurnOptions(setup="init")).build_runtime()
+    prompt = runtime.system_prompt + runtime.volatile_prompt
+    assert "MARK-SETUP" in prompt and "MARK-START" in prompt
+    assert prompt.index("MARK-SETUP") < prompt.index("MARK-START")
+
+
+def test_maintenance_fires_the_maintenance_matcher_end_to_end(tmp_path: Path) -> None:
+    _user({"hooks": {"Setup": [
+        {"matcher": "init", "hooks": [{"type": "command", "command": _printer(tmp_path, "init", "MARK-INIT")}]},
+        {"matcher": "maintenance", "hooks": [{"type": "command", "command": _printer(tmp_path, "maint", "MARK-MAINT")}]},
+    ]}})
+    options = parse_code_args(["-p", "hi", "--maintenance"])
+    turn_options = build_turn_options(options, tmp_path, host_answers_prompts=False, first_turn=True)
+    assert turn_options.setup == "maintenance"
+    runtime = _session(tmp_path, turn_options).build_runtime()
+    prompt = runtime.system_prompt + runtime.volatile_prompt
+    assert "MARK-MAINT" in prompt and "MARK-INIT" not in prompt
