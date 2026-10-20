@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
+
 import pytest
 
 from agentos.agentic.agent_tools import AgentToolset
@@ -22,8 +24,16 @@ def test_workspace_unrestricted_flag_controls_external_paths(tmp_path: Path) -> 
     workspace = ConversationWorkspace.at_root(ws_root)
     assert workspace.unrestricted is False
 
-    with pytest.raises(WorkspaceError):
-        workspace.resolve(str(ext_file))
+    if os.name == "nt":
+        # A drive path outside every working directory is refused.
+        with pytest.raises(WorkspaceError):
+            workspace.resolve(str(ext_file))
+    else:
+        # POSIX (W1-R3): a confined workspace reads a leading "/" as workspace-relative, so the path names a file
+        # inside the workspace and never the external one.
+        inside = workspace.resolve(str(ext_file))
+        assert inside == ws_root.resolve().joinpath(*ext_file.parts[1:])
+        assert inside != ext_file.resolve()
     with pytest.raises(WorkspaceError):
         workspace.resolve("../target/external_proj/hello.txt")
     with pytest.raises(WorkspaceError):
@@ -60,7 +70,16 @@ def test_agent_toolset_full_autonomy_allows_files_search_and_shell_outside_works
 
     # Restricted mode blocks outside workspace
     denied_write = restricted_tools.invoke("write_file", {"path": ext_file_path, "content": "x = 1\n"})
-    assert denied_write.status == "failed"
+    if os.name == "nt":
+        assert denied_write.status == "failed"
+    else:
+        # POSIX (W1-R3): the absolute path is read inside the workspace; the write lands there, never outside.
+        assert denied_write.status == "succeeded", denied_write.content
+        assert ws_root.resolve().joinpath(*Path(ext_file_path).parts[1:]).is_file()
+    assert not Path(ext_file_path).exists()
+    denied_parent = restricted_tools.invoke("write_file", {"path": "../build/outside_app/notes.py", "content": "x = 1\n"})
+    assert denied_parent.status == "failed"
+    assert not Path(ext_file_path).exists()
 
     denied_cd = restricted_tools.invoke("run_command", {"command": f'cd "{ext_dir}"'})
     assert denied_cd.status == "failed"

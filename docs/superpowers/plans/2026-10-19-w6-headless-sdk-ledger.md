@@ -48,3 +48,18 @@ W6 review.
   deny rules — handed to the W6 review.
 - Tests: `tests/unit/permissions/test_path_meanings.py` (HOME and USERPROFILE monkeypatched to tmp; the POSIX `/…`
   case is `skipif(os.name == "nt")` and runs in Docker/CI).
+- Follow-up found by the Linux run: an absolute `//dir/**` rule did not cover the directory itself (the relative
+  `dir/**` form already did), so a Glob/Grep rooted at a denied absolute folder was allowed. Fixed in
+  `path_rule_matches`; test `test_paths.py::test_an_absolute_dir_rule_covers_the_directory_itself` (both OSes).
+- Follow-up: `test_full_autonomy_host_folders.py`'s SERVER case assumed Windows. On POSIX a confined workspace reads
+  `/tmp/...` inside itself (W1-R3), so a write there succeeds *inside the workspace*; the test now asserts, on every OS,
+  that no host content or host file name reaches the model and nothing is written to the host folder, and on POSIX
+  that the write landed inside the workspace. Observed UX wart (not changed): the success text echoes the absolute
+  path the model asked for, not the workspace file that was written.
+
+### L0-3 — `tests/unit/test_full_autonomy_unrestricted.py` on POSIX
+
+- The confined cases assumed Windows. Now: on Windows a drive path outside is refused (unchanged); on POSIX the test
+  asserts the W1-R3 meaning — the path resolves inside the workspace, the write lands there and the external file is
+  never created. Added, on every OS: a `../` write is refused and the external file still does not exist. The `../`
+  resolve case and `key()` refusal are unchanged. Green on Windows and in Docker (python:3.13, non-root).
