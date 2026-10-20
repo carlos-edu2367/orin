@@ -37,7 +37,9 @@ export async function setTheme(page: Page, mode: 'dark' | 'light') {
   await page.addInitScript((value) => { window.localStorage.setItem('orin.theme.mode', value) }, mode)
 }
 
-export async function mockChat(page: Page, extra: ExtraRoute = () => undefined): Promise<SentRequest[]> {
+/** `override` replaces fields of the conversation (a running turn, activities); `extra` answers routes first. */
+export async function mockChat(page: Page, extra: ExtraRoute = () => undefined, override: Record<string, unknown> = {}): Promise<SentRequest[]> {
+  const current = { ...conversation, ...override }
   const sent: SentRequest[] = []
   await page.route('**/chats/**', async (route) => {
     if (route.request().resourceType() !== 'document') { await route.fallback(); return }
@@ -58,7 +60,7 @@ export async function mockChat(page: Page, extra: ExtraRoute = () => undefined):
       await route.fulfill({ status: 200, contentType: 'text/event-stream', body: 'event: heartbeat\ndata: {"cursor":"1"}\n\n' })
       return
     }
-    if (method === 'GET' && path === `/v1/conversations/${CONVERSATION_ID}`) { await fulfill(route, conversation); return }
+    if (method === 'GET' && path === `/v1/conversations/${CONVERSATION_ID}`) { await fulfill(route, current); return }
     if (method === 'GET' && (path === '/v1/conversations' || path === '/v1/projects' || path === '/v1/projects/sidebar' || path === '/v1/skills' || path === '/v1/plugins/commands')) {
       await fulfill(route, { items: [] }); return
     }
