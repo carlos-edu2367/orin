@@ -256,6 +256,7 @@ export function Composer({
   }
 
   // W7-R12: a recalled history entry is sent once the composer shows it, through the same path as Enter.
+  const sendAfterEdit = useRef<string | null>(null)
   useEffect(() => {
     const pending = sendAfterEdit.current
     if (pending === null) return
@@ -267,7 +268,6 @@ export function Composer({
   const lastEscapeAt = useRef(0)
   // W7 history: where up/down is in `history`, and what was being typed before the first up.
   const historyAt = useRef<{ index: number; draft: string } | null>(null)
-  const sendAfterEdit = useRef<string | null>(null)
   const [historySearch, setHistorySearch] = useState<{ query: string; skip: number } | null>(null)
   const historyMatch = historySearch ? findInHistory(history, historySearch.query, historySearch.skip) : null
 
