@@ -1123,7 +1123,7 @@ export function TurnTimeline({
           className="turn-timeline__header turn-timeline__action-bar flex flex-wrap items-center justify-between gap-2 pb-1 text-[11px] text-[var(--text-muted)]"
           data-testid="turn-timeline-header"
         >
-          <span className="font-mono text-[11px] opacity-75">Checkpoint disponível</span>
+          <span className="font-mono text-[11px]">Checkpoint disponível</span>
           <div className="flex flex-wrap items-center gap-1.5">
             {confirmingRewind && !rewound ? (
               <div className="flex items-center gap-1.5" data-testid="rewind-confirm-bar">

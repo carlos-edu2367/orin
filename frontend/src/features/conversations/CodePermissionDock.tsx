@@ -13,6 +13,21 @@ export type CodePermissionDockDecision = {
   scope: 'once' | 'session' | 'project'
   updatedRule?: string
   reason?: string
+  /** W7: "allow edits for the rest of this session" — the chat switches to accept-edits instead of saving a rule. */
+  kind?: 'edits'
+}
+
+/** A file edit (no command): "don't ask again" means edits for this session, as in Claude Code. */
+export function isEditRequest(request: DockToolPermissionRequest): boolean {
+  const tool = (request.toolName || '').toLowerCase()
+  return Boolean(request.path) && !request.command && /(edit|write|notebook|patch)/.test(tool)
+}
+
+function allowAgain(request: DockToolPermissionRequest): CodePermissionDockDecision {
+  if (isEditRequest(request)) return { behavior: 'allow', scope: 'session', kind: 'edits' }
+  return request.ruleSuggestion
+    ? { behavior: 'allow', scope: 'project', updatedRule: request.ruleSuggestion }
+    : { behavior: 'allow', scope: 'session' }
 }
 
 export type CodePermissionDockProps = {
@@ -234,18 +249,7 @@ export function CodePermissionDock({
       if (event.key === '2') {
         event.preventDefault()
         event.stopPropagation()
-        if (current.ruleSuggestion) {
-          onResolve(current.requestId, {
-            behavior: 'allow',
-            scope: 'project',
-            updatedRule: current.ruleSuggestion,
-          })
-        } else {
-          onResolve(current.requestId, {
-            behavior: 'allow',
-            scope: 'session',
-          })
-        }
+        onResolve(current.requestId, allowAgain(current))
         return
       }
 
@@ -285,19 +289,9 @@ export function CodePermissionDock({
 
   const handleAllowAlways = () => {
     if (busy) return
-    if (current.ruleSuggestion) {
-      onResolve(current.requestId, {
-        behavior: 'allow',
-        scope: 'project',
-        updatedRule: current.ruleSuggestion,
-      })
-    } else {
-      onResolve(current.requestId, {
-        behavior: 'allow',
-        scope: 'session',
-      })
-    }
+    onResolve(current.requestId, allowAgain(current))
   }
+  const editRequest = isEditRequest(current)
 
   const handleDeny = () => {
     if (busy) return
@@ -441,7 +435,7 @@ export function CodePermissionDock({
               className="code-perm-dock__btn code-perm-dock__btn--primary"
             >
               <kbd className="code-perm-dock__kbd">1</kbd>
-              <span>Permitir uma vez</span>
+              <span>Sim</span>
             </button>
 
             <button
@@ -452,9 +446,16 @@ export function CodePermissionDock({
               className="code-perm-dock__btn code-perm-dock__btn--secondary"
             >
               <kbd className="code-perm-dock__kbd">2</kbd>
-              <span>Permitir sempre no projeto</span>
-              {current.ruleSuggestion && (
-                <code className="code-perm-dock__rule">({current.ruleSuggestion})</code>
+              {editRequest ? (
+                <span>Sim, e permitir edições nesta sessão</span>
+              ) : current.ruleSuggestion ? (
+                <>
+                  <span>Sim, e não perguntar de novo para:</span>
+                  <code className="code-perm-dock__rule">{current.ruleSuggestion}</code>
+                  <span className="code-perm-dock__scope">(nesta pasta)</span>
+                </>
+              ) : (
+                <span>Sim, e não perguntar de novo nesta sessão</span>
               )}
             </button>
 
@@ -466,7 +467,7 @@ export function CodePermissionDock({
               className="code-perm-dock__btn code-perm-dock__btn--danger"
             >
               <kbd className="code-perm-dock__kbd">3</kbd>
-              <span>Negar</span>
+              <span>Não</span>
             </button>
 
             <button
@@ -476,7 +477,7 @@ export function CodePermissionDock({
               data-testid="code-perm-deny-instruct-toggle"
               className="code-perm-dock__btn code-perm-dock__btn--ghost"
             >
-              <span>💬 Negar e orientar...</span>
+              <span>Não, e dizer o que fazer…</span>
             </button>
           </div>
 

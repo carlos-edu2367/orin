@@ -6,6 +6,7 @@ import { useMemo } from 'react'
 import type { ApiClient } from '../../api/client'
 import { ApiError } from '../../api/errors'
 import { CODE_PERMISSION_MODES } from '../../api/codeMode'
+import { getConversationOverview } from '../../api/conversations'
 import { addDirectory, compactConversation, getInstance } from '../../api/sessionTools'
 import { BUILTIN_COMMANDS, type BuiltinCommand, findBuiltin, isExcludedCommand, parseSlash } from './builtins'
 
@@ -35,6 +36,11 @@ export type ChatCommandDeps = {
   setPermissionMode: (mode: 'plan_mode') => Promise<void> | void
   copyText?: (text: string) => Promise<void>
   download?: (name: string, text: string) => void
+  /** W7 surfaces (Batch D): offered only when the chat provides them. */
+  openRewind?: () => void
+  rename?: (title: string) => Promise<void>
+  branch?: (title: string) => Promise<void>
+  fork?: (prompt: string) => Promise<void>
 }
 
 type Handler = (args: string) => Promise<void> | void
@@ -80,7 +86,32 @@ export function chatCommandHandlers(deps: ChatCommandDeps): Record<string, Handl
   const copy = deps.copyText ?? ((text: string) => navigator.clipboard.writeText(text))
   const download = deps.download ?? defaultDownload
   const home = () => deps.navigate('/')
+  const surfaces: Record<string, Handler> = {
+    ...(deps.openRewind ? { rewind: () => deps.openRewind?.() } : {}),
+    ...(deps.rename ? {
+      rename: async (args: string) => {
+        if (!args) { deps.notify('Diga o novo nome: /rename <nome>'); return }
+        await deps.rename?.(args)
+      },
+    } : {}),
+    ...(deps.branch ? { branch: (args: string) => deps.branch?.(args) } : {}),
+    ...(deps.fork ? { fork: (args: string) => deps.fork?.(args) } : {}),
+  }
   return {
+    ...surfaces,
+    usage: async () => {
+      const overview = await getConversationOverview(deps.client, deps.conversationId)
+      const usage = overview.token_usage
+      const tokens = (value: number | null) => (value === null ? '—' : value.toLocaleString('pt-BR'))
+      deps.openInfo({
+        kind: 'text', title: 'Uso da sessão',
+        lines: [
+          `Tokens de entrada: ${tokens(usage.input_tokens)} · saída: ${tokens(usage.output_tokens)}`,
+          typeof usage.estimated_cost_usd === 'number' ? `Custo estimado: US$ ${usage.estimated_cost_usd.toFixed(4)}` : 'Custo estimado: indisponível para este provedor',
+          usage.usage_reported ? 'Valores informados pelo provedor.' : 'O provedor não informou o uso de todas as chamadas.',
+        ],
+      })
+    },
     help: () => deps.openInfo({ kind: 'help' }),
     clear: home,
     exit: home,

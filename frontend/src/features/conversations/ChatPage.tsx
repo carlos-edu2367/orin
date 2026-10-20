@@ -23,7 +23,12 @@ import {
 import { attachWorkspaceFolder, detachWorkspaceFolder, inspectWorkspaceFolder, type WorkspaceState } from '../../api/workspace'
 import { CommandPalette } from '../../components/CommandPalette'
 import { ModelPicker } from '../../components/ModelPicker'
-import { listCommandCatalog, type CatalogCommand } from '../../api/sessionTools'
+import {
+  enqueueMessage, forkConversation, getFileHistory, listCommandCatalog, listQueue, removeQueued, renameConversation, rewindCode,
+  rewindMessage, runShell, type CatalogCommand, type FileHistoryItem, type QueuedInput,
+} from '../../api/sessionTools'
+import { QueuePanel } from './QueuePanel'
+import { RewindPicker, type RewindMode } from './RewindPicker'
 import { CommandInfoDialog } from '../commands/CommandInfoDialog'
 import { useChatCommands, type InfoPanel } from '../commands/useChatCommands'
 import { OverviewPanel } from '../overview/OverviewPanel'
@@ -153,6 +158,10 @@ export function ChatPage() {
   const [infoPanel, setInfoPanel] = useState<InfoPanel | null>(null)
   const [commandNotice, setCommandNotice] = useState<string | null>(null)
   const [modelPickerSignal, setModelPickerSignal] = useState(0)
+  // W7 Batch D: the message queue, and the rewind picker with the file history it shows.
+  const [queue, setQueue] = useState<QueuedInput[]>([])
+  const [queueBusy, setQueueBusy] = useState(false)
+  const [rewindState, setRewindState] = useState<{ history: FileHistoryItem[]; busy: boolean; error: string | null } | null>(null)
   const [preferencesOpen, setPreferencesOpen] = useState(false)
   const [visionSetting, setVisionSetting] = useState<VisionModelSetting | null>(null)
   const [chatProvider, setChatProvider] = useState<ProviderName | null>(null)
@@ -507,6 +516,23 @@ export function ChatPage() {
       .then((value) => { if (alive) setCatalogCommands(value.commands) })
       .catch(() => { if (alive) setCatalogCommands([]) })
     return () => { alive = false }
+  }, [client, conversationId])
+
+  // A conversation opened by a rewind or /branch starts with the chosen message in the composer.
+  const [prefillApplied, setPrefillApplied] = useState<string | null>(null)
+  const prefill = (location.state as { prefill?: unknown } | null)?.prefill
+  if (typeof prefill === 'string' && prefill && prefillApplied !== conversationId) {
+    setPrefillApplied(conversationId)
+    setMessage(prefill)
+  }
+
+  const refreshQueue = useCallback(async () => {
+    if (!conversationId) return
+    try {
+      setQueue(await listQueue(client, conversationId))
+    } catch {
+      // The queue is a convenience: a failed refresh keeps the last list.
+    }
   }, [client, conversationId])
 
   useEffect(() => {
@@ -898,6 +924,17 @@ export function ChatPage() {
     && !hasTerminalEventForActiveTurn
     && !isActivityTerminal
 
+  // The queue lives on the server: read it when the chat opens (a reload keeps it visible) and whenever the turn
+  // starts or ends (a turn that ends has read what was queued for it).
+  useEffect(() => {
+    if (!conversationId) return
+    let cancelled = false
+    listQueue(client, conversationId)
+      .then((items) => { if (!cancelled) setQueue(items) })
+      .catch(() => undefined) // the queue is a convenience: a failed read keeps the last list
+    return () => { cancelled = true }
+  }, [client, conversationId, running])
+
   const chatCommands = useChatCommands({
     client, conversationId, navigate, messages,
     title: conversation?.title ?? '', modelId: effectiveChatModelId, provider: effectiveChatProvider ?? '',
@@ -914,6 +951,24 @@ export function ChatPage() {
       }
     },
     reload: async () => { await loadSnapshot(false) },
+    openRewind: () => { void openRewind() },
+    rename: async (title) => {
+      const result = await renameConversation(client, conversationId, title)
+      setConversation((current) => (current ? { ...current, title: result.title } : current))
+      window.dispatchEvent(new Event('orin:conversations-updated'))
+      setCommandNotice(`Conversa renomeada: ${result.title}`)
+    },
+    branch: async (title) => {
+      const fork = await forkConversation(client, conversationId, title ? { title } : {})
+      window.dispatchEvent(new Event('orin:conversations-updated'))
+      navigate(`/chats/${fork.conversationId}`)
+    },
+    fork: async (prompt) => {
+      const fork = await forkConversation(client, conversationId)
+      window.dispatchEvent(new Event('orin:conversations-updated'))
+      if (prompt) await sendConversationMessage(client, fork.conversationId, prompt, [], chatSelection, 'code')
+      setCommandNotice(`Cópia criada: ${fork.title}${prompt ? ' (o pedido roda lá)' : ''}`)
+    },
     notify: setCommandNotice,
     openInfo: setInfoPanel,
     openPreferences: () => setPreferencesOpen(true),
@@ -1151,12 +1206,17 @@ export function ChatPage() {
     const targetReq = pendingToolPermissions.find((req) => req.requestId === requestId)
     const turnId = targetReq?.turnId ?? activeTurn?.turn_id
     if (!turnId) return
+    // W7: an edit's "don't ask again" switches this session to accept-edits and allows this call once.
+    const editsForSession = decisionPayload.behavior === 'allow' && decisionPayload.kind === 'edits'
     const apiDecision: ToolPermissionDecision =
       decisionPayload.behavior === 'deny'
         ? 'deny'
-        : decisionPayload.scope === 'project' || decisionPayload.scope === 'session'
-          ? 'allow_always'
-          : 'allow_once'
+        : editsForSession
+          ? 'allow_once'
+          : decisionPayload.scope === 'project' || decisionPayload.scope === 'session'
+            ? 'allow_always'
+            : 'allow_once'
+    if (editsForSession && codePermissionMode !== 'accept_edits') changeCodePermissionMode('accept_edits')
     const resolvedState: 'allowed' | 'denied' = apiDecision === 'deny' ? 'denied' : 'allowed'
     setError(null)
     setResolvedPermissionDecisions((current) => {
@@ -1181,7 +1241,7 @@ export function ChatPage() {
       })
       setError('Não foi possível enviar a decisão de permissão. Tente novamente.')
     }
-  }, [activeTurn?.turn_id, client, conversationId, pendingToolPermissions])
+  }, [activeTurn?.turn_id, changeCodePermissionMode, client, codePermissionMode, conversationId, pendingToolPermissions])
 
   const handleApprovePlanAcceptEdits = useCallback(async (event: ConversationActivityEvent) => {
     const request = event.toolPermission
@@ -1280,6 +1340,20 @@ export function ChatPage() {
   async function submit(override?: string) {
     const text = (override ?? message).trim()
     const readyUploads = readyUploadIds()
+    // W7 `!command`: a shell turn in the session's folder (Code conversations only).
+    if (conversationMode === 'code' && text.startsWith('!') && text.length > 1 && readyUploads.length === 0 && !override) {
+      if (running || stopping) { setCommandNotice('Espere o turno atual terminar para rodar um comando.'); return }
+      setMessage('')
+      setError(null)
+      try {
+        await runShell(client, conversationId, text.slice(1).trim())
+        await loadSnapshot(false)
+      } catch (caught) {
+        setMessage(text)
+        setError(caught instanceof ApiError && caught.status === 404 ? 'O modo shell não está disponível neste Orin.' : 'Não foi possível rodar o comando.')
+      }
+      return
+    }
     // W7: a built-in slash command runs here (even while a turn runs); a skill or plugin command is sent as before.
     if (text.startsWith('/') && readyUploads.length === 0 && !stopping) {
       let outcome: Awaited<ReturnType<typeof chatCommands.run>> | { kind: 'failed' }
@@ -1383,6 +1457,80 @@ export function ChatPage() {
       setStopping(false)
     }
   }, [client, conversation?.turns, conversationId, loadSnapshot, stopping])
+
+  /** W7: Enter while a turn runs queues the text for it. */
+  async function queueMessage() {
+    const text = message.trim()
+    if (!text || text.startsWith('/')) return
+    setMessage('')
+    try {
+      const receipt = await enqueueMessage(client, conversationId, text)
+      if (!receipt.queued) await loadSnapshot(false) // the turn had already ended: the text was sent as a new turn
+      await refreshQueue()
+    } catch {
+      setMessage(text)
+      setError('Não foi possível pôr a mensagem na fila.')
+    }
+  }
+
+  /** W7 "send now": stop the running turn, wait until it has stopped, then send the text. */
+  async function sendNow(text: string, queueId?: string) {
+    const clean = text.trim()
+    if (!clean || queueBusy) return
+    setQueueBusy(true)
+    try {
+      if (queueId) await removeQueued(client, conversationId, queueId).catch(() => undefined)
+      if (!queueId) setMessage('')
+      await stop()
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        const snapshot = await loadSnapshot(false).catch(() => null)
+        if (!snapshot || !snapshot.turns.some((turn) => RUNNING_STATES.has(turn.state))) break
+        await new Promise((resolve) => setTimeout(resolve, 500))
+      }
+      setPendingUserMessage({ message_id: `pending-${Date.now()}`, role: 'user', content: clean, status: 'completed', retryable: false, attachments: [], command: null })
+      await sendChatMessage(clean, [])
+      await loadSnapshot(false)
+      await refreshQueue()
+    } catch {
+      setPendingUserMessage(null)
+      setError('Não foi possível enviar agora. A mensagem continua com você.')
+      if (!queueId) setMessage(clean)
+    } finally {
+      setQueueBusy(false)
+    }
+  }
+
+  async function openRewind() {
+    setRewindState({ history: [], busy: true, error: null })
+    try {
+      setRewindState({ history: await getFileHistory(client, conversationId), busy: false, error: null })
+    } catch {
+      setRewindState({ history: [], busy: false, error: null })
+    }
+  }
+
+  async function rewindTo(messageId: string, mode: RewindMode) {
+    setRewindState((current) => (current ? { ...current, busy: true, error: null } : current))
+    try {
+      if (mode === 'code') {
+        const result = await rewindCode(client, conversationId, messageId)
+        setRewindState(null)
+        setCommandNotice(`Código restaurado: ${result.restored.length + result.deleted.length} arquivo(s).`)
+        await loadSnapshot(false)
+        return
+      }
+      const result = await rewindMessage(client, conversationId, messageId, mode)
+      setRewindState(null)
+      window.dispatchEvent(new Event('orin:conversations-updated'))
+      navigate(`/chats/${result.fork.conversationId}`, { state: { prefill: result.fork.prompt ?? '' } })
+    } catch (caught) {
+      const blocked = caught instanceof ApiError && caught.code === 'rewind_blocked'
+      setRewindState((current) => (current ? {
+        ...current, busy: false,
+        error: blocked ? 'Alguns arquivos não puderam ser restaurados (grandes demais ou fora da pasta); nada foi mudado.' : 'Não foi possível voltar a esta mensagem.',
+      } : current))
+    }
+  }
 
   useEffect(() => {
     if (!running || stopping) return
@@ -1492,6 +1640,16 @@ export function ChatPage() {
     <main className="chat">
       <PushNotificationToast notice={pushNotice} onDismiss={dismissPushNotice} />
       {infoPanel && <CommandInfoDialog panel={infoPanel} commands={chatCommands.offered} onClose={() => setInfoPanel(null)} />}
+      {rewindState && (
+        <RewindPicker
+          messages={messages.filter((item) => item.role === 'user' && !item.message_id.startsWith('pending-')).map((item) => ({ messageId: item.message_id, content: item.content }))}
+          history={rewindState.history}
+          busy={rewindState.busy}
+          error={rewindState.error}
+          onRewind={(messageId, mode) => { void rewindTo(messageId, mode) }}
+          onClose={() => setRewindState(null)}
+        />
+      )}
       <header className="chat__bar canvas-header" data-testid="canvas-header">
         <div className="chat__bar-left canvas-header__left">
           {effectiveChatProvider && (
@@ -2076,6 +2234,12 @@ export function ChatPage() {
           onResolve={(requestId, decision) => { void handleResolveDockPermission(requestId, decision) }}
         />
         {commandNotice && <p className="chat__command-notice" role="status">{commandNotice}</p>}
+        <QueuePanel
+          items={queue}
+          busy={queueBusy}
+          onRemove={(queueId) => { void removeQueued(client, conversationId, queueId).then(refreshQueue).catch(() => setError('Não foi possível tirar da fila.')) }}
+          onSendNow={(item) => { void sendNow(item.content, item.queueId) }}
+        />
         <Composer
           value={message}
           onChange={setMessage}
@@ -2097,6 +2261,9 @@ export function ChatPage() {
           catalogCommands={catalogCommands}
           onOpenModelPicker={() => setModelPickerSignal((value) => value + 1)}
           onRunCommand={(text) => void submit(text)}
+          onQueue={() => void queueMessage()}
+          onSendNow={() => void sendNow(message)}
+          onOpenRewind={() => void openRewind()}
           codeMode={conversationMode}
           conversationMode={conversationMode}
           hideCodeModeToggle={true}

@@ -201,3 +201,47 @@ export function addDirectory(client: ApiClient, conversationId: string, path: st
     parse: (value) => { const data = rec(value); return { directoryId: str(data.directory_id), path: str(data.path, path) } },
   })
 }
+
+/** `!command` (W7): a turn that runs the person's command in the Code session's folder, without the model. */
+export function runShell(client: ApiClient, conversationId: string, command: string, intent = client.createMutationIntent()): Promise<{ turnId: string | null }> {
+  return client.request({
+    path: `${base(conversationId)}/shell`, method: 'POST', intent, body: { command },
+    parse: (value) => ({ turnId: optStr(rec(value).turn_id) }),
+  })
+}
+
+export type ForkResult = { conversationId: string; title: string; prompt: string | null; messages: number }
+
+function forkResult(value: unknown): ForkResult {
+  const data = rec(value)
+  return { conversationId: str(data.conversation_id), title: str(data.title), prompt: optStr(data.prompt), messages: num(data.messages) }
+}
+
+/** /branch and /fork: a new conversation with this one's messages (or those before one of the person's messages). */
+export function forkConversation(client: ApiClient, conversationId: string, options: { beforeMessageId?: string; title?: string } = {}):
+  Promise<ForkResult> {
+  return client.request({
+    path: `${base(conversationId)}/fork`, method: 'POST',
+    body: { ...(options.beforeMessageId ? { before_message_id: options.beforeMessageId } : {}), ...(options.title ? { title: options.title } : {}) },
+    parse: forkResult,
+  })
+}
+
+export function renameConversation(client: ApiClient, conversationId: string, title: string): Promise<{ title: string }> {
+  return client.request({
+    path: `${base(conversationId)}/title`, method: 'PATCH', body: { title },
+    parse: (value) => ({ title: str(rec(value).title, title) }),
+  })
+}
+
+/** Per-message rewind of the conversation (a fork before the message) or of both the files and the conversation. */
+export function rewindMessage(client: ApiClient, conversationId: string, messageId: string, mode: 'conversation' | 'both', intent = client.createMutationIntent()):
+  Promise<{ fork: ForkResult; restored: string[]; deleted: string[] }> {
+  return client.request({
+    path: `${base(conversationId)}/messages/${encodeURIComponent(messageId)}/rewind`, method: 'POST', intent, body: { mode },
+    parse: (value) => {
+      const data = rec(value)
+      return { fork: forkResult(data.fork), restored: strings(data.restored), deleted: strings(data.deleted) }
+    },
+  })
+}

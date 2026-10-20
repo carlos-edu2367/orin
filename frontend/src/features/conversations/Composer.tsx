@@ -61,6 +61,10 @@ export type ComposerProps = {
   onOpenModelPicker?: () => void
   /** W7: picking a built-in that takes no arguments runs it at once (as Claude Code does). */
   onRunCommand?: (text: string) => void
+  /** W7: Enter while a turn runs puts the text in the queue (the turn reads it between steps). */
+  onQueue?: () => void
+  /** W7: Escape twice on an empty composer opens the rewind picker. */
+  onOpenRewind?: () => void
   codeMode?: CodeModeChoice
   onCodeModeChange?: (value: CodeModeChoice) => void
   /** Compact segmented mode switch (`[Chat | >_ Code]`) rendered in the composer bar on Home. */
@@ -99,7 +103,7 @@ export function Composer({
   value, onChange, onSubmit, onStop, running = false, disabled = false,
   placeholder = 'Descreva o que você precisa…', settings, hint, error, autoFocus, notice, focusSignal = 0, canSend = true,
   attachments = [], onAttach = () => {}, onRemoveAttachment = () => {}, commands = [], skills = [],
-  builtinCommands = [], catalogCommands = [], onSendNow, onOpenModelPicker, onRunCommand,
+  builtinCommands = [], catalogCommands = [], onSendNow, onOpenModelPicker, onRunCommand, onQueue, onOpenRewind,
   codeMode = 'auto', onCodeModeChange, modeSwitch, sessionContext, hideCodeModeToggle = false, conversationMode,
   codePermissionMode, onCodePermissionModeChange, todos,
   workspaceFiles = [], onSearchWorkspaceFiles,
@@ -230,6 +234,9 @@ export function Composer({
   }
 
   const { match } = useKeybindings()
+  const lastEscapeAt = useRef(0)
+  // W7: `!command` in a Code conversation runs the command in the session's folder (the `!` shell mode).
+  const shellMode = effectiveCodeMode === 'code' && value.startsWith('!')
 
   function insertAtCaret(text: string) {
     const element = textareaRef.current
@@ -253,12 +260,24 @@ export function Composer({
           if (!(effectiveCodeMode === 'code' || Boolean(sessionContext) || Boolean(onCodePermissionModeChange))) return false
           stepPermissionMode()
           return true
-        case 'chat:cancel':
-          if (!running || !onStop) return false
-          onStop()
-          return true
+        case 'chat:cancel': {
+          if (running && onStop) { onStop(); return true }
+          // Escape twice on an empty composer: the rewind picker (as in Claude Code).
+          const now = Date.now()
+          if (!value && onOpenRewind && now - lastEscapeAt.current < 800) {
+            lastEscapeAt.current = 0
+            onOpenRewind()
+            return true
+          }
+          lastEscapeAt.current = now
+          return false
+        }
         case 'chat:submit':
-          if (running || !canSend) return true
+          if (running) {
+            if (onQueue && value.trim() && !shellMode) onQueue()
+            return true
+          }
+          if (!canSend) return true
           if (value.trim() || attachments.length > 0) onSubmit()
           return true
         case 'chat:newline':
@@ -311,11 +330,16 @@ export function Composer({
   const sendDisabled = Boolean(disabled || !canSend || (!value.trim() && attachments.length === 0))
 
   return (
-    <form className={`composer${focused ? ' is-focused' : ''}${running ? ' is-running' : ''}`} onSubmit={submit} onDrop={onDrop} onDragOver={onDragOver}>
+    <form className={`composer${focused ? ' is-focused' : ''}${running ? ' is-running' : ''}${shellMode ? ' composer--shell' : ''}`} onSubmit={submit} onDrop={onDrop} onDragOver={onDragOver}>
       {todos && todos.length > 0 && <TodoBar todos={todos} isTurnRunning={Boolean(running)} className="mb-2" />}
       <div className="composer__surface">
         <label className="visually-hidden" htmlFor="composer-message">Mensagem</label>
         <AttachmentChips items={attachments} onRemove={onRemoveAttachment} />
+        {shellMode && (
+          <p className="composer__shell-badge" role="status">
+            <span className="composer__shell-mark">!</span> Modo shell: Enter roda o comando na pasta da sessão, sem o modelo.
+          </p>
+        )}
         {pickerOpen && (
           <CommandPicker
             commands={commands}

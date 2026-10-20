@@ -3953,3 +3953,85 @@ progress.orin-progress::-moz-progress-bar,
   .command-info__row { grid-template-columns: 1fr; gap: 2px; }
 }
 .chat__command-notice { margin: 0 0 8px; padding: 6px 12px; border-radius: 10px; font-size: 12.5px; color: var(--muted); background: var(--raised); border: 1px solid var(--line); }
+
+/* ---------------------------------------------------------------- W7: queue, shell mode, rewind picker */
+
+.queue-panel { margin: 0 0 8px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--raised); }
+.queue-panel__header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin-bottom: 6px; }
+.queue-panel__title { font-family: var(--mono); font-size: 10px; letter-spacing: .14em; text-transform: uppercase; color: var(--signal); }
+.queue-panel__hint { font-size: 12px; color: var(--muted); }
+.queue-panel__list { margin: 0; padding: 0; list-style: none; display: grid; gap: 6px; }
+.queue-panel__item { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 8px; border-radius: 8px; border: 1px solid var(--line); }
+.queue-panel__text { margin: 0; font-size: 13px; color: var(--text); overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow-wrap: anywhere; }
+.queue-panel__actions { display: flex; gap: 4px; flex-shrink: 0; }
+@media (max-width: 480px) { .queue-panel__item { flex-direction: column; align-items: stretch; } .queue-panel__actions { justify-content: flex-end; } }
+
+.composer--shell .composer__surface { border-color: var(--signal); }
+.composer__shell-badge { margin: 0 0 6px; padding: 4px 8px; border-radius: 8px; font-size: 12px; color: var(--text); background: color-mix(in srgb, var(--signal) 12%, transparent); }
+.composer__shell-mark { font-family: var(--mono); font-weight: 700; color: var(--signal); }
+
+.code-perm-dock__scope { font-size: 11px; color: var(--muted); }
+
+.rewind-picker { width: min(640px, 100%); }
+.rewind-picker__list { margin: 0; padding: 8px 12px; list-style: none; overflow: auto; max-height: 40vh; display: grid; gap: 4px; }
+.rewind-picker__list:focus-visible { outline: 2px solid var(--signal); outline-offset: -2px; }
+.rewind-picker__item { padding: 8px 10px; border-radius: 8px; border: 1px solid transparent; cursor: pointer; font-size: 13px; color: var(--text); }
+.rewind-picker__item.is-selected { border-color: var(--signal); background: color-mix(in srgb, var(--signal) 14%, transparent); }
+.rewind-picker__text { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+.rewind-picker__details { padding: 0 20px; font-size: 13px; color: var(--muted); }
+.rewind-picker__details p { margin: 6px 0; overflow-wrap: anywhere; }
+.rewind-picker__error { color: var(--danger, #f87171) !important; }
+.rewind-picker__actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; padding: 10px 20px 4px; }
+.rewind-picker__note, .rewind-picker__empty { margin: 0; padding: 6px 20px 18px; font-size: 12px; color: var(--muted); }
+.rewind-picker__main { border-color: var(--signal); color: var(--text); font-weight: 560; }
+
+/* W7: the permission dock and receipts were written for a dark background; in the light theme their text needs dark
+   tones to stay readable (WCAG AA). */
+[data-theme="light"] .code-perm-dock { box-shadow: 0 -6px 24px rgba(0, 0, 0, 0.08); }
+[data-theme="light"] .code-perm-dock__badge { color: var(--text); }
+[data-theme="light"] .code-perm-dock__badge--bash { color: #92400e; }
+[data-theme="light"] .code-perm-dock__badge--edit { color: #3730a3; }
+[data-theme="light"] .code-perm-dock__badge--git { color: #6b21a8; }
+[data-theme="light"] .code-perm-dock__badge--mcp { color: #155e75; }
+[data-theme="light"] .code-perm-dock__badge--plan { color: #854d0e; }
+[data-theme="light"] .code-perm-dock__cmd { background: rgba(0, 0, 0, 0.04); }
+[data-theme="light"] .code-perm-dock__diff { background: rgba(0, 0, 0, 0.03); }
+[data-theme="light"] .code-perm-dock__diff-line--add { color: #065f46; }
+[data-theme="light"] .code-perm-dock__diff-line--del { color: #9f1239; }
+[data-theme="light"] .code-perm-dock__btn { background: rgba(0, 0, 0, 0.03); }
+[data-theme="light"] .code-perm-dock__btn:hover:not(:disabled) { background: rgba(0, 0, 0, 0.07); }
+[data-theme="light"] .code-perm-dock__btn--primary { color: #065f46; background: rgba(16, 185, 129, 0.14); }
+[data-theme="light"] .code-perm-dock__btn--secondary { color: #92400e; background: rgba(251, 191, 36, 0.16); }
+[data-theme="light"] .code-perm-dock__btn--danger { color: #9f1239; background: rgba(244, 63, 94, 0.1); }
+[data-theme="light"] .code-perm-dock__btn--ghost { background: transparent; }
+[data-theme="light"] .code-perm-dock__kbd { border-color: rgba(0, 0, 0, 0.2); background: rgba(0, 0, 0, 0.06); color: var(--text); }
+[data-theme="light"] .perm-receipt--pending { color: #92400e; }
+[data-theme="light"] .perm-receipt--allowed { color: #065f46; }
+[data-theme="light"] .perm-receipt--denied { color: #9f1239; }
+[data-theme="light"] .code-perm-dock__diff-stats .text-emerald-300 { color: #047857; }
+[data-theme="light"] .code-perm-dock__diff-stats .text-rose-300 { color: #be123c; }
+@media (prefers-color-scheme: light) {
+  :root[data-theme="system"] .code-perm-dock { box-shadow: 0 -6px 24px rgba(0, 0, 0, 0.08); }
+  :root[data-theme="system"] .code-perm-dock__badge { color: var(--text); }
+  :root[data-theme="system"] .code-perm-dock__badge--bash { color: #92400e; }
+  :root[data-theme="system"] .code-perm-dock__badge--edit { color: #3730a3; }
+  :root[data-theme="system"] .code-perm-dock__badge--git { color: #6b21a8; }
+  :root[data-theme="system"] .code-perm-dock__badge--mcp { color: #155e75; }
+  :root[data-theme="system"] .code-perm-dock__badge--plan { color: #854d0e; }
+  :root[data-theme="system"] .code-perm-dock__cmd { background: rgba(0, 0, 0, 0.04); }
+  :root[data-theme="system"] .code-perm-dock__diff { background: rgba(0, 0, 0, 0.03); }
+  :root[data-theme="system"] .code-perm-dock__diff-line--add { color: #065f46; }
+  :root[data-theme="system"] .code-perm-dock__diff-line--del { color: #9f1239; }
+  :root[data-theme="system"] .code-perm-dock__btn { background: rgba(0, 0, 0, 0.03); }
+  :root[data-theme="system"] .code-perm-dock__btn:hover:not(:disabled) { background: rgba(0, 0, 0, 0.07); }
+  :root[data-theme="system"] .code-perm-dock__btn--primary { color: #065f46; background: rgba(16, 185, 129, 0.14); }
+  :root[data-theme="system"] .code-perm-dock__btn--secondary { color: #92400e; background: rgba(251, 191, 36, 0.16); }
+  :root[data-theme="system"] .code-perm-dock__btn--danger { color: #9f1239; background: rgba(244, 63, 94, 0.1); }
+  :root[data-theme="system"] .code-perm-dock__btn--ghost { background: transparent; }
+  :root[data-theme="system"] .code-perm-dock__kbd { border-color: rgba(0, 0, 0, 0.2); background: rgba(0, 0, 0, 0.06); color: var(--text); }
+  :root[data-theme="system"] .perm-receipt--pending { color: #92400e; }
+  :root[data-theme="system"] .perm-receipt--allowed { color: #065f46; }
+  :root[data-theme="system"] .perm-receipt--denied { color: #9f1239; }
+  :root[data-theme="system"] .code-perm-dock__diff-stats .text-emerald-300 { color: #047857; }
+  :root[data-theme="system"] .code-perm-dock__diff-stats .text-rose-300 { color: #be123c; }
+}
