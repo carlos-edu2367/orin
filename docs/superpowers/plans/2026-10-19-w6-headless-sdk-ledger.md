@@ -91,3 +91,55 @@ W6 review.
     and `test_orin_code_phase_a.py::test_runtime_recovers_from_thinking_only_turn_and_filters_code_mode_schemas`: the
     container has no Node/npm, so the verification step the tests run cannot succeed there.
 - Frontend: not run locally — Lote 0 changes no frontend file; the CI frontend job covers it.
+
+## Batch A — Foundation (Tasks 1–5)
+
+Commits on `main` after the plan commit `b77d146` (`git log --oneline b77d146..HEAD`):
+
+- `dda85a9` feat(w6): the orin code command line (Task 1)
+- `676f158` feat(w6): a per-run API token for orin code (Task 2)
+- `4bdcbb2` feat(w6): GET /v1/instance tells orin code which Orin it reached (Task 3)
+- `7d1329a` feat(w6): orin code finds or starts the local Orin and refuses a shared one (Task 4)
+- `6a2ccaf` test(w6): a live Orin runtime on a fake Ollama for orin code tests (Task 5)
+
+Tests added (Windows, 2026-10-19):
+
+- `tests/unit/cli_code/test_args.py`: 34 tests (the command line, refusals, the `orin-code` script and the frozen-copy dispatch)
+- `tests/unit/cli_code/test_api_token.py`: 10 collected, 1 skipped on Windows (the POSIX mode test)
+- `tests/unit/cli_code/test_instance_route.py`: 3
+- `tests/unit/cli_code/test_runtime_client.py`: 15
+- `tests/unit/cli_code/test_web_dist_override.py`: 2
+- `tests/integration/cli_code/test_live_runtime.py`: 3 (real launcher, API and worker on the fake Ollama, about 23 s)
+- Existing expectation changed: `tests/integration/api/test_profile_isolation.py` now classifies `GET /v1/instance` as an
+  instance-wide route (`INSTANCE` set). That is the only change to an existing test.
+
+Suite results (Windows, `uv run pytest -q ...`, after Task 5, before this ledger commit):
+
+- `tests/unit`: **4039 passed, 63 skipped, 0 failed** (314.9 s)
+- `tests/integration`: **81 passed, 65 skipped, 0 failed** (84.9 s)
+- `src/agentos/agentic/agent_tools.py`: 1699 lines (unchanged; this batch does not touch it)
+- After the live tests: no `agentos.launcher` python process left running.
+
+Deviations from the plan:
+
+1. **Test literal in Task 2.** The plan's `monkeypatch.setenv("SystemRoot", "C:\Windows")` was written as `"C:\\Windows"`
+   in the test file. The value is identical (`C:\Windows`); the plan's form has an invalid escape (`\W`) that Python warns
+   about. Test code only, same assertion.
+2. **Live tests have no RED run.** Task 5's `test_live_runtime.py` and the fixture are new scaffolding that exercises
+   behaviour already built in Tasks 1–4; they went straight to green (3 passed). The TDD RED for Task 5 was the
+   `ORIN_WEB_DIST` unit test (`test_orin_web_dist_is_used_as_is` failed before the change).
+3. **`uv sync --all-groups`** after Task 1 reinstalled the local `agentos` package into `.venv`. `uv.lock` did not change.
+4. **Launcher `main`** (Task 1) now parses the raw argument list in a local variable (`raw`) before the argparse call, as
+   the plan's replacement block does; the behaviour for every existing verb is unchanged (`tests/unit/launcher` green).
+
+Not verified in this batch (honest gaps):
+
+- **POSIX branches were not run.** On Windows, `test_the_token_file_is_owner_only_on_posix` skips and the `os.chmod` path
+  of `restrict_to_owner` is not exercised. The Linux/Docker run is the coordinator's step at release; the plan's
+  Global Constraints say POSIX branches run in CI and in that Docker run.
+- **Windows ACL test** (`test_the_token_file_is_owner_only_on_windows`) ran here and passed; it depends on the account
+  name in `USERNAME` and on `icacls`.
+- **Frontend**: no frontend file changed in this batch; not run.
+- **Installers**: a frozen `orin-code.exe` copy is handled in code (`launcher.cli` dispatch, `_launcher_command`) and
+  tested with a file named like it, but no installer ships it (the plan puts that outside W6).
+- Nothing else from Batch A is incomplete per the plan.
