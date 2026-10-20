@@ -403,6 +403,7 @@ def _ensure_conversation_mode_columns(engine: Engine) -> None:
     timestamp = "TIMESTAMP WITH TIME ZONE" if engine.dialect.name == "postgresql" else "DATETIME"
     for table, column, ddl in (
         ("conversation_turns", "turn_kind", "VARCHAR(16)"),
+        ("conversation_turns", "cli_options", "TEXT"),
         ("conversation_dispatches", "lease_renewed_at", timestamp),
         ("conversation_input_queue", "idempotency_key", "VARCHAR(255)"),
     ):
@@ -807,7 +808,7 @@ class PostgresChatStore:
         # Stable across turns so the conversation-level graph keeps one root node.
         return f"agent:{turn['conversation_id']}:main"
 
-    def create(self, *, user_id: str, message: str, provider: str, model_id: str, idempotency_key: str, conversation_id: str | None = None, project_id: str | None = None, workspace_id: str | None = None, attachments: Sequence[Mapping[str, object]] = (), new_conversation_id: str | None = None, scheduled_by_schedule_id: str | None = None, code_mode: str = "chat", permission_mode: str | None = None, turn_kind: str | None = None) -> ChatReceipt:
+    def create(self, *, user_id: str, message: str, provider: str, model_id: str, idempotency_key: str, conversation_id: str | None = None, project_id: str | None = None, workspace_id: str | None = None, attachments: Sequence[Mapping[str, object]] = (), new_conversation_id: str | None = None, scheduled_by_schedule_id: str | None = None, code_mode: str = "chat", permission_mode: str | None = None, turn_kind: str | None = None, cli_options: str | None = None) -> ChatReceipt:
         message = message.strip()
         attachments = list(attachments)
         if turn_kind not in (None, "compact"):
@@ -922,7 +923,7 @@ class PostgresChatStore:
                     "media_type": str(item["media_type"]), "kind": str(item["kind"]),
                     "bytes": int(item["bytes"]), "created_at": now,
                 } for item in attachments])
-            c.execute(insert(conversation_turns).values(turn_id=turn_id, conversation_id=conversation_id, user_id=user_id, execution_id=execution_id, user_message_id=user_message_id, assistant_message_id=assistant_message_id, provider=provider, model_id=model_id, state="queued", idempotency_key=idempotency_key, scheduled_by_schedule_id=scheduled_by_schedule_id, code_mode="code" if code_active else None, turn_kind=turn_kind, created_at=now, updated_at=now))
+            c.execute(insert(conversation_turns).values(turn_id=turn_id, conversation_id=conversation_id, user_id=user_id, execution_id=execution_id, user_message_id=user_message_id, assistant_message_id=assistant_message_id, provider=provider, model_id=model_id, state="queued", idempotency_key=idempotency_key, scheduled_by_schedule_id=scheduled_by_schedule_id, code_mode="code" if code_active else None, turn_kind=turn_kind, cli_options=cli_options, created_at=now, updated_at=now))
             if code_active:
                 work_kind = detect_code_request(message)
                 autonomy_map = {
@@ -2561,11 +2562,11 @@ class ChatApplication:
         self.store = store
     def allocate_conversation_id(self) -> str:
         return _id("chat")
-    def create(self, context, *, message: str, provider: str, model_id: str, workspace_id: str | None, idempotency_key: str, project_id: str | None = None, attachments=(), new_conversation_id: str | None = None, code_mode: str = "chat", permission_mode: str | None = None):
-        return self.store.create(user_id=context.user_id, message=message, provider=provider, model_id=model_id, idempotency_key=idempotency_key, project_id=project_id, workspace_id=workspace_id, attachments=attachments, new_conversation_id=new_conversation_id, code_mode=code_mode, permission_mode=permission_mode)
-    def send(self, user_id: str, conversation_id: str, message: str, idempotency_key: str, attachments=(), provider: str = "", model_id: str = "", code_mode: str = "chat", permission_mode: str | None = None, turn_kind: str | None = None):
+    def create(self, context, *, message: str, provider: str, model_id: str, workspace_id: str | None, idempotency_key: str, project_id: str | None = None, attachments=(), new_conversation_id: str | None = None, code_mode: str = "chat", permission_mode: str | None = None, cli_options: str | None = None):
+        return self.store.create(user_id=context.user_id, message=message, provider=provider, model_id=model_id, idempotency_key=idempotency_key, project_id=project_id, workspace_id=workspace_id, attachments=attachments, new_conversation_id=new_conversation_id, code_mode=code_mode, permission_mode=permission_mode, cli_options=cli_options)
+    def send(self, user_id: str, conversation_id: str, message: str, idempotency_key: str, attachments=(), provider: str = "", model_id: str = "", code_mode: str = "chat", permission_mode: str | None = None, turn_kind: str | None = None, cli_options: str | None = None):
         waiting = self.store.waiting_execution_ids(conversation_id, user_id)
-        receipt = self.store.create(user_id=user_id, message=message, provider=provider, model_id=model_id, idempotency_key=idempotency_key, conversation_id=conversation_id, attachments=attachments, code_mode=code_mode, permission_mode=permission_mode, turn_kind=turn_kind)
+        receipt = self.store.create(user_id=user_id, message=message, provider=provider, model_id=model_id, idempotency_key=idempotency_key, conversation_id=conversation_id, attachments=attachments, code_mode=code_mode, permission_mode=permission_mode, turn_kind=turn_kind, cli_options=cli_options)
         # A normal follow-up is the durable answer to an ask_user effect. The
         # old execution is resumed through its canonical input command before
         # the new turn is allowed to become the only visible continuation.

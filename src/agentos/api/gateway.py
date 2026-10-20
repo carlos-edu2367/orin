@@ -18,6 +18,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Streamin
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
 from agentos.accounts.errors import AccountError
+from agentos.code_mode.cli_options import CliTurnOptions
 from agentos.configuration.capabilities import CapabilityUnavailable, InstanceCapabilities
 from agentos.configuration.mode import RuntimeMode
 from agentos.local_workspace.paths import FolderInspection
@@ -83,6 +84,21 @@ _SSE_MAX_SECONDS = 900.0
 
 class _RequestModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+
+def _trust_workspace(user_id: str, root: Path) -> None:
+    from agentos.permissions.trust import WorkspaceTrustStore
+
+    WorkspaceTrustStore().trust(user_id, root)
+
+
+def _cli_options_for(principal: AuthenticatedPrincipal, options: CliTurnOptions | None) -> str | None:
+    """The turn's CLI options as stored JSON; only `orin code`, holding this run's token, may set them (W6)."""
+    if options is None:
+        return None
+    if principal.credential_kind != "cli_token":
+        raise AuthorizationError("cli options need the orin code token")
+    return options.dumps()
 
 
 class CreateExecutionRequest(_RequestModel):
@@ -170,6 +186,8 @@ class CreateConversationRequest(_RequestModel):
     attachments: list[str] = Field(default_factory=list, max_length=MAX_FILES_PER_MESSAGE)
     code_mode: str = Field(default="chat", pattern="^(auto|code|chat)$")
     permission_mode: str | None = Field(default=None, pattern="^(accept_edits|plan_mode|ask_permissions|full_autonomy|auto|dont_ask|default|acceptEdits|plan|bypassPermissions|dontAsk|manual)$")
+    # W6: what `orin code` attaches to the turn; accepted only with this run's CLI token.
+    cli: CliTurnOptions | None = None
 
 
 class UpdateConversationPermissionModeRequest(_RequestModel):
@@ -259,6 +277,8 @@ class SendConversationMessageRequest(_RequestModel):
     selection: ConversationSelectionRequest | None = None
     code_mode: str = Field(default="chat", pattern="^(auto|code|chat)$")
     permission_mode: str | None = Field(default=None, pattern="^(accept_edits|plan_mode|ask_permissions|full_autonomy|auto|dont_ask|default|acceptEdits|plan|bypassPermissions|dontAsk|manual)$")
+    # W6: what `orin code` attaches to the turn; accepted only with this run's CLI token.
+    cli: CliTurnOptions | None = None
 
 
 class SkillDependenciesRequest(_RequestModel):
@@ -706,6 +726,7 @@ def create_app(services: ApiServices) -> FastAPI:
     @app.post("/v1/conversations", status_code=201)
     async def create_conversation(payload: CreateConversationRequest, request: Request) -> JSONResponse:
         principal = principal_for(request, mutable=True)
+        cli_options = _cli_options_for(principal, payload.cli)
         provider = _provider_name(payload.selection.provider)
         services.security.check_rate_limit(principal, action="conversation.create", origin=request.headers.get("origin"))
         services.security.authorize(principal, action="conversation.create", resource_id=provider, purpose="conversation.create")
@@ -732,6 +753,9 @@ def create_app(services: ApiServices) -> FastAPI:
             if inspection.risk != "none" and not payload.workspace_acknowledged_risk:
                 return _error(409, "CONFLICT", "workspace_risk_acknowledgement_required", retryable=False)
             _require_port(services.local_workspaces).set_root(workspace_root_id, principal.user_id, bind_path_for(principal, inspection))
+            if payload.cli is not None and payload.cli.trust_workspace:
+                # `orin code --trust` (W6): before the turn is queued, so the worker already sees a trusted folder.
+                _trust_workspace(principal.user_id, Path(bind_path_for(principal, inspection)))
         attachments: list[dict[str, object]] = []
         try:
             attachments = promote(attachment_workspace_id, principal, payload.attachments)
@@ -748,6 +772,8 @@ def create_app(services: ApiServices) -> FastAPI:
             }
             if payload.permission_mode is not None:
                 create_kwargs["permission_mode"] = normalize_permission_mode(payload.permission_mode).value
+            if cli_options is not None:
+                create_kwargs["cli_options"] = cli_options
             result = application.create(  # type: ignore[union-attr]
                 ProviderCatalogContext(principal.user_id, "conversation.create"),
                 **create_kwargs,
@@ -1373,6 +1399,10 @@ def create_app(services: ApiServices) -> FastAPI:
     async def send_conversation_message(conversation_id: str, payload: SendConversationMessageRequest, request: Request) -> JSONResponse:
         principal = principal_for(request, mutable=True)
         services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.send")
+        cli_options = _cli_options_for(principal, payload.cli)
+        if payload.cli is not None and payload.cli.trust_workspace:
+            # `orin code --trust` (W6): before the turn is queued, so the worker already sees a trusted folder.
+            _trust_workspace(principal.user_id, Path(getattr(conversation_workspace(conversation_id, principal), "root")))
         require_content(payload.message, payload.attachments)
         provider = ""
         model_id = ""
@@ -1394,6 +1424,8 @@ def create_app(services: ApiServices) -> FastAPI:
             send_kwargs: dict[str, object] = {}
             if payload.permission_mode is not None:
                 send_kwargs["permission_mode"] = normalize_permission_mode(payload.permission_mode).value
+            if cli_options is not None:
+                send_kwargs["cli_options"] = cli_options
             result = require_port(services.conversation_application).send(
                 principal.user_id, conversation_id, payload.message, _idempotency(request),
                 attachments=attachments, provider=provider, model_id=model_id, code_mode=payload.code_mode,

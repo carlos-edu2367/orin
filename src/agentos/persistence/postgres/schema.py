@@ -617,6 +617,8 @@ conversation_turns = Table(
     Column("scheduled_by_schedule_id", String(255), nullable=True),
     Column("code_mode", String(16), nullable=True),
     Column("turn_kind", String(16), nullable=True),
+    # W6: the options `orin code` attached to the turn (agentos.code_mode.cli_options), as JSON; NULL otherwise.
+    Column("cli_options", Text(), nullable=True),
     Column("started_at", DateTime(timezone=True)), Column("finished_at", DateTime(timezone=True)), Column("updated_at", DateTime(timezone=True), nullable=False),
     UniqueConstraint("user_id", "idempotency_key", name="uq_conversation_turn_idempotency"),
 )
