@@ -88,3 +88,13 @@ def test_not_protected(relative: str, tmp_path: Path) -> None:
 def test_outside_workspace_is_not_reported_as_protected_here(tmp_path: Path) -> None:
     # confinement is the workspace layer's job; this function only classifies files inside
     assert not is_protected_path(tmp_path.parent / "x.txt", workspace_root=tmp_path)
+
+
+def test_an_absolute_dir_rule_covers_the_directory_itself(tmp_path: Path) -> None:
+    # A Grep or Glob rooted at the folder reads its contents, exactly as the relative "dir/**" form already says.
+    folder = tmp_path / "system"
+    folder.mkdir()
+    spec = "//" + folder.as_posix().lstrip("/") + "/**"
+    assert path_rule_matches(spec, folder, workspace_root=tmp_path / "ws", home=tmp_path / "home")
+    assert path_rule_matches(spec, folder / "a.txt", workspace_root=tmp_path / "ws", home=tmp_path / "home")
+    assert not path_rule_matches(spec, tmp_path / "systemd", workspace_root=tmp_path / "ws", home=tmp_path / "home")

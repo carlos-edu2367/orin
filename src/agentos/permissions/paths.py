@@ -162,8 +162,12 @@ def path_rule_matches(spec: str, target: Path, *, workspace_root: Path, home: Pa
         absolute = pattern[2:]
         if not re.match(r"^[A-Za-z]:/", absolute):
             absolute = "/" + absolute
-        rx = glob_to_regex(absolute.rstrip("/") + ("/**" if pattern.endswith("/") else ""), case_insensitive=_CASE_INSENSITIVE)
-        return bool(rx.match(_posix(_resolved(target))))
+        absolute = absolute.rstrip("/") + ("/**" if pattern.endswith("/") else "")
+        target_text = _posix(_resolved(target))
+        # "//dir/**" also covers the directory itself, as the relative form does: a search rooted at it reads it.
+        if absolute.endswith("/**") and glob_to_regex(absolute[:-3], case_insensitive=_CASE_INSENSITIVE).match(target_text):
+            return True
+        return bool(glob_to_regex(absolute, case_insensitive=_CASE_INSENSITIVE).match(target_text))
     if pattern.startswith("~/"):
         base, pattern = home, pattern[2:]
     elif pattern.startswith("/"):
