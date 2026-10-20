@@ -202,7 +202,7 @@ Batch C close (run by the planner; the executor ended without a report, and its 
 
 - Every file the batch changed is identical to the planner's validated replay (12 files).
 - Windows: `tests/unit` 4375 passed, 66 skipped; `tests/integration` 123 passed, 65 skipped.
-- Linux (Docker, `python:3.12` image): `tests/unit` 4393 passed, 48 skipped. An earlier run in that container failed
+- Linux (Docker container `orin-linux-init`, image `orin-linux-test:w6-snapshot`): `tests/unit` 4393 passed, 48 skipped. An earlier run in that container failed
   `test_verification_command_with_screenshots_preserves_code_mode_verified` and
   `test_runtime_recovers_from_thinking_only_turn_and_filters_code_mode_schemas` at `v0.9.4`, at `edc60f5` and after
   Batch C alike: the container had no `node`/`npm`, which both tests run. With Node installed both pass; the CI runners
