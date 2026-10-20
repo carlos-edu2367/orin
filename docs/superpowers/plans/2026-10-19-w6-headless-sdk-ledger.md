@@ -377,3 +377,119 @@ Incomplete or not verified (honest list):
 - `mcp login`/`logout` are refused by design (decision 33); the interface does OAuth.
 - No visual check: this batch has no frontend changes.
 - Windows only.
+
+## Batch F — Inherited fixes (Tasks 22–30)
+
+Commits on `main` after the plan commit `22d7694` (one per task, the plan's messages and trailer):
+
+- `baa5083` `fix(w6): bound the auto-mode classifier's threads and keep its breaker per conversation` (Task 22, W1-R10)
+- `737d7cd` `fix(w6): an SDK relay ends with its turn` (Task 23, Batch E's relay leak and weak test)
+- `1ca8531` `fix(w6): tools that never prompt are not read-only, and plan mode refuses a wakeup` (Task 24, W4-R26)
+- `4aa3b19` `fix(w6): an MCP resource blob that is not base64 is described as unreadable` (Task 25, W5-D4)
+- `30f1b40` `fix(w6): a stdio MCP server's children end with it` (Task 26, W5-D2)
+- `b61d1a9` `fix(w6): the LSP client matches versions, ends a malformed wait and keeps stderr's tail` (Task 27, W5-D3)
+- `b529be7` `fix(w6): consolidation counters survive concurrent processes` (Task 28, W3-R23)
+- `e8a6705` `feat(w6): orin code --init and --maintenance fire the Setup hooks` (Task 29)
+- `9312ee0` `feat(w6): an agent file's effort and a forked skill's model apply` (Task 30, W5 deviations 4 and 9)
+
+The executor's tree was compared file by file with the coordinator's validated replay of the plan: identical.
+
+Tests added: `tests/unit/permissions/test_w6_auto_mode.py` (3), `tests/unit/mcp/test_sdk_relay_lifetime.py` (1),
+`tests/unit/permissions/test_w6_no_prompt_tools.py` (4), `tests/unit/mcp/test_w6_resource_blobs.py` (3),
+`tests/unit/mcp/test_w6_stdio_children.py` (1), `tests/unit/lsp/test_w6_lsp_fixes.py` (4),
+`tests/unit/memory/test_w6_consolidation_state.py` (2, real concurrent processes), `tests/unit/hooks/test_w6_setup_hook.py` (3),
+`tests/unit/agentic/test_w6_agent_effort.py` (3), `tests/unit/agentic/tools/test_w6_skill_model.py` (4). Each new file was
+run red before its implementation.
+
+Expectation changes (named in the plan): `test_push_notification.py` and `test_wakeup_tools.py` check `NO_PROMPT_TOOLS`
+(the tool still never prompts); `test_session_subcommands.py` line 72 asserts the exact refusal text instead of
+`... and A or B`.
+
+Suites after Batch F (Windows, 2026-10-20, on `main` at `9312ee0`):
+
+- `uv run pytest -q tests/unit`: 4192 passed, 65 skipped (354 s).
+- `uv run pytest -q tests/integration`: 120 passed, 65 skipped (238 s).
+- Linux (Docker, the validated tree of this plan): `tests/unit/{mcp,lsp,memory,permissions,hooks,cli_code}`, the agentic
+  tool tests and the agent-effort test: 1315 passed, 37 skipped (the POSIX process-group and `fcntl` paths run there).
+- `src/agentos/agentic/agent_tools.py`: 1699 lines; nothing written under `data/`.
+- The batch close was finished by the coordinator: the executor handed back before the full suites ended and without
+  the ledger.
+
+Deviations from the plan (executor's report, checked by the coordinator):
+
+1. **Task 30 RED:** two of the four skill-model tests (a refused model runs on the parent's; no model asks nothing) already
+   passed before the implementation, because the tool passed `model_id=None` anyway; the plan said three would fail.
+   The allowed-model test and the session test failed as expected, and so did the agent-effort test.
+2. **Task 26:** the Job's `assign(pid)` result is not checked; when the assignment fails, the descendant snapshot taken
+   while the server runs is the only cover (as for a Store Python, which leaves the Job).
+3. **Task 23:** `_sdk_relay` is read with `getattr(..., None)` and is not initialised in `__init__` (as the plan writes it).
+4. The executor reported that Task 25's `_blob_size` was placed before `_listing` rather than at a different anchor; the
+   committed file is identical to the plan's result.
+
+Decisions recorded with this batch (the plan's 42–50): see the plan's "Deviations decided while planning Batch F".
+
+Not done or not verified (honest gaps):
+
+- **`code_mode/permissions.py` still has its own `READ_ONLY_TOOLS`** with `ask_user` and `use_skill`. Nothing reads it
+  (only `__all__` exports it); it should be removed or aligned with the engine's lists. Not changed.
+- **LSP `close()` never closes the server's stdin**; a failed start logs an unraisable `BrokenPipe`/`ResourceWarning`
+  in tests (pre-existing; the tests pass).
+- **W5-D2 on Windows:** the developer machine's Python is the Microsoft Store build, which leaves Job Objects, so the
+  Windows test passes through the descendant snapshot, not through the Job. The Job path is exercised only where Python
+  is a normal install (CI).
+- **W3-R31** (earlier turns replayed without their thinking blocks against the real Anthropic API): not verified; no
+  Anthropic key in this environment.
+- Frontend: not touched; not run.
+
+## W6 summary
+
+Against spec §9 (each point names the batch that delivered it; "gap" is what is not there):
+
+- **§9.1 architecture — delivered.** A thin client in `src/agentos/cli_code/` (Batch A): it starts the local runtime when
+  needed, authenticates with a per-run token in `ORIN_RUN_DIR` (owner-only: `icacls` with the user's SID on Windows,
+  mode 0600 on POSIX) and refuses the SERVER profile (remote is W8).
+- **§9.2 surface — mostly delivered.** `orin code -p` with the output and input formats, sessions (`-c`, `-r`,
+  `--session-id`, `-n`, `--no-session-persistence`, `--bg`), model, permission and configuration flags (`--mcp-config`,
+  `--strict-mcp-config`, `--settings`, `--setting-sources`, `--agents`, `--permission-prompt-tool stdio`,
+  `--permission-prompts host|none`), prompt flags, `--json-schema` with 3 retries, `--max-turns`, `--max-budget-usd`,
+  `--autocompact`, `--init`/`--maintenance` (Setup, Batch F), debug flags (Batches B, C, E, F); `orin code [prompt]`
+  opens the session in the interface (Batch E); the subcommands `mcp`, `plugin`, `agents`, `logs`, `stop`, `rm`,
+  `attach`, `doctor`, `auto-mode`, `purge` (Batch E); the excluded flags and subcommands are refused; exit codes 0/1.
+  **Gaps (refused, never ignored — plan decision 49):** `--fork-session`, `-w/--worktree`, `--agent`, `--plugin-dir`,
+  `--exclude-dynamic-system-prompt-sections`, `--prompt-suggestions`, `--bare`, `--safe-mode`, `--restricted`,
+  `--desktop`, `--resume-session-at`, `--resume-drops-turn`, `--session-mirror`, `--task-budget`, `--thinking-display`;
+  `import` and `review` (W8); `plugin eval` (W8); `plugin update` and `marketplace remove|update` point to the interface;
+  `mcp login|logout` point to the interface; `attach` follows the log and takes no stdin messages (decision 38).
+- **§9.3 stream-json — delivered with gaps.** Output: `system/init`, `assistant`, `user`, `stream_event` in Anthropic's
+  SSE shape for every provider, `system/compact_boundary`, hook events with `--include-hook-events`, `result` with
+  `success`, `error_max_turns`, `error_during_execution`, `error_max_budget_usd`, `error_max_structured_output_retries`
+  and the listed fields (Batches B, C). Host → harness: `initialize` (hooks, agents, SDK MCP servers), `interrupt`,
+  `set_permission_mode`, `set_model`, `set_max_thinking_tokens` (these three apply from the next turn, decision 25),
+  `rewind_files` (code only), `mcp_status`. Harness → host: `can_use_tool` (allow once; a changed `updatedInput` is
+  refused; `updatedPermissions` are not persisted), `hook_callback`, `mcp_message` (Batches C, E).
+  **Gaps:** `system/init` always reports empty `mcp_servers` and `slash_commands`; `system/microcompact_boundary`,
+  `task_started`, `task_progress` and `task_notification` are not emitted.
+- **§9.4 conformance — met.** The official `claude-agent-sdk==0.2.159` (dev dependency, unmodified) drives `orin-code`
+  through `cli_path` on the fake provider, offline: simple query, streaming, `can_use_tool`, SDK hooks, interrupt,
+  resume (Batch D), plus an SDK MCP server through `mcp_message` (Batch E).
+
+Inherited items:
+
+| Item | Where it was closed, or why it remains |
+| --- | --- |
+| W1-R10 classifier threads, per-turn breaker, `autoMode.model` | Batch F Task 22 |
+| W3-R24 `--permission-prompts none` → W1-R9 | Batch B (the session applies `permission_prompts: none`) |
+| W3-R23 consolidation state race | Batch F Task 28 |
+| W3-R25 `--json-schema` with retries | Batch B Task 11 |
+| W3-R31 thinking replay against the real API | **not verified** (no Anthropic key) |
+| W0 ledger: Setup hook event | Batch F Task 29 (`--init`, `--maintenance`) |
+| W2 ledger: SDK hook callbacks | Batch C Task 14 |
+| W5 deviation 4: skill `model`/`effort` | **partly**: a forked skill's `model` (Task 30); an inline skill's `model` and any skill's `effort` remain (W8) |
+| W5 deviation 9: agent fields | **partly**: `effort` (Task 30); `isolation`, `mcpServers`, `memory`, `color`, `hooks` remain (W8) |
+| W5-D2 MCP stdio children | Batch F Task 26 |
+| W5-D3 LSP version, malformed publish, stderr | Batch F Task 27 (a publish without `version` is still accepted) |
+| W5-D4 invalid base64 blob | Batch F Task 25 |
+| W4-R26 read-only vs never-prompt tools | Batch F Task 24 (the unused `code_mode/permissions.py` list is still wrong) |
+
+Platform coverage: every batch ran on Windows; the coordinator ran the changed areas on Linux (Docker) before each
+push. The 65 skipped tests need Postgres/Redis and were not run.
