@@ -243,10 +243,31 @@ export function Composer({
     onSubmit()
   }
 
+  /** The Enter path: while a turn runs a `!command` waits and other text is queued; otherwise it is sent. */
+  function sendTyped() {
+    if (running) {
+      // W7: a `!command` is not queued; the chat says why it waits (it runs between turns, not inside one).
+      if (shellMode) onSubmit()
+      else if (onQueue && value.trim()) onQueue()
+      return
+    }
+    if (!canSend) return
+    if (value.trim() || attachments.length > 0) onSubmit()
+  }
+
+  // W7-R12: a recalled history entry is sent once the composer shows it, through the same path as Enter.
+  useEffect(() => {
+    const pending = sendAfterEdit.current
+    if (pending === null) return
+    sendAfterEdit.current = null
+    if (value === pending) sendTyped()
+  })
+
   const { match } = useKeybindings()
   const lastEscapeAt = useRef(0)
   // W7 history: where up/down is in `history`, and what was being typed before the first up.
   const historyAt = useRef<{ index: number; draft: string } | null>(null)
+  const sendAfterEdit = useRef<string | null>(null)
   const [historySearch, setHistorySearch] = useState<{ query: string; skip: number } | null>(null)
   const historyMatch = historySearch ? findInHistory(history, historySearch.query, historySearch.skip) : null
 
@@ -282,8 +303,10 @@ export function Composer({
       const text = historyMatch
       setHistorySearch(null)
       if (!text) return
-      if (onRunCommand) onRunCommand(text)
-      else onChange(text)
+      // W7-R12: the recalled text is put in the composer and sent the way Enter sends it (a `!command`, a queue
+      // while a turn runs, the attachments), once the composer shows it.
+      sendAfterEdit.current = text
+      onChange(text)
     },
     'historySearch:cancel': () => setHistorySearch(null),
   }, historySearch !== null)
@@ -325,14 +348,7 @@ export function Composer({
           return false
         }
         case 'chat:submit':
-          if (running) {
-            // W7: a `!command` is not queued; the chat says why it waits (it runs between turns, not inside one).
-            if (shellMode) onSubmit()
-            else if (onQueue && value.trim()) onQueue()
-            return true
-          }
-          if (!canSend) return true
-          if (value.trim() || attachments.length > 0) onSubmit()
+          sendTyped()
           return true
         case 'chat:newline':
           // Shift+Enter already types a line break; any other key bound to it inserts one.
