@@ -57,7 +57,40 @@ def run_headless(options: CodeOptions, *, stdin: TextIO, stdout: TextIO, stderr:
 
 
 def open_interface(options: CodeOptions, *, stdout: TextIO, stderr: TextIO) -> int:
-    raise CliRuntimeError("opening a Code session in the interface is not available in this build yet")
+    """``orin code [prompt]`` without ``-p``: a Code session in this folder, opened in the interface (spec §9.2)."""
+    import webbrowser
+    from pathlib import Path
+
+    from agentos.installation import orin_paths
+
+    from .headless import refuse_unsupported
+    from .runtime import connect_local
+    from .selection import ModelCatalog, choose_selection
+    from .turn_options import permission_mode_for
+
+    if options.desktop:
+        raise CliRuntimeError("--desktop is not supported yet: open the Orin desktop app and pick this folder")
+    refuse_unsupported(options)
+    paths = orin_paths()
+    client = connect_local(paths)
+    try:
+        if not (options.prompt or "").strip():
+            url = client.base_url + "/"
+            stdout.write(f"Orin is open at {url} (start a Code session there; this folder is {Path.cwd().resolve()})\n")
+            webbrowser.open(url)
+            return EXIT_OK
+        selection = choose_selection(ModelCatalog(client), model=options.model, provider=options.provider, remembered=None,
+                                     configured=_configured_model())
+        created = client.post("/v1/conversations", {
+            "message": options.prompt, "selection": selection.as_request(), "code_mode": "code",
+            "workspace_path": str(Path.cwd().resolve()), "permission_mode": permission_mode_for(options),
+        })
+        url = f"{client.base_url}/chats/{created['conversation_id']}"
+        stdout.write(f"{url}\n")
+        webbrowser.open(url)
+        return EXIT_OK
+    finally:
+        client.close()
 
 
 def run_subcommand(name: str, argv: Sequence[str], *, stdout: TextIO, stderr: TextIO) -> int:
