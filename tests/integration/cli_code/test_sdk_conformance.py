@@ -123,3 +123,16 @@ def test_resume(orin_runtime: LiveRuntime) -> None:
     with orin_runtime.api() as api:
         listed = api.get("/v1/conversations").json()
     assert sum(1 for item in listed.get("items", listed) if isinstance(item, dict) and item.get("title") == "say hello") >= 1
+
+
+def test_an_sdk_mcp_server(orin_runtime: LiveRuntime) -> None:
+    from claude_agent_sdk import create_sdk_mcp_server, tool
+
+    @tool("add", "Adds two numbers", {"a": int, "b": int})
+    async def add(arguments):
+        return {"content": [{"type": "text", "text": str(arguments["a"] + arguments["b"])}]}
+
+    calc = create_sdk_mcp_server(name="calc", version="1.0.0", tools=[add])
+    options = _options(orin_runtime, orin_runtime.workspace("sdk-mcp"), mcp_servers={"calc": calc}, allowed_tools=["mcp__calc__add"])
+    messages = asyncio.run(_collect(_stream('[[tool:mcp__calc__add:{"a": 2, "b": 3}]]'), options))
+    assert _result(messages).result == "Result: 5"

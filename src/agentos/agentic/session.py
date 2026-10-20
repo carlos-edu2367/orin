@@ -3540,6 +3540,9 @@ class TurnSession:
             refusals: dict[str, str] = {}
 
             def keep(config) -> bool:
+                if self.cli_options is not None and self.cli_options.strict_mcp_config:
+                    refusals[config.server_id] = "--strict-mcp-config uses only the command line's servers"
+                    return False
                 why = policy_refusal(
                     config.display_name, aliases=(config.slug,), url=config.url, settings=settings,
                     command_line=(str(config.command), *config.args) if config.command else None,
@@ -3550,8 +3553,12 @@ class TurnSession:
 
             notes.extend(f"- {config.display_name}: not loaded: {refusals.get(config.server_id, '')}" for config in provider.retain(keep))
         local_install = bool(getattr(self.mcp_service, "allow_stdio", False))
+        cli = self.cli_options
         try:
-            found = load_file_servers(workspace_root=self.workspace.root, trusted=trusted, settings=settings, personal=local_install)
+            found = load_file_servers(
+                workspace_root=self.workspace.root, trusted=trusted, settings=settings, personal=local_install,
+                cli=cli.mcp_servers if cli is not None else None, strict=bool(cli is not None and cli.strict_mcp_config),
+            )
         except Exception:  # noqa: BLE001 - a broken configuration never stops a turn
             logger.exception("MCP servers in configuration files could not be read")
             found = None
@@ -3559,7 +3566,16 @@ class TurnSession:
             notes.extend(f"- {where}: {why}" for where, why in found.errors[:10])
             taken = provider.server_slugs() if provider is not None and callable(getattr(provider, "server_slugs", None)) else frozenset()
             servers = []
-            for server in found.servers:
+            from dataclasses import replace
+
+            relay_key = str(self.turn.get("turn_id") or self.turn.get("conversation_id") or "")
+            if any(server.transport == "sdk" for server in found.servers):
+                from agentos.mcp.transport_sdk import register_relay
+
+                # W6: this turn's channel to the SDK host serves its in-process MCP servers.
+                register_relay(relay_key, lambda kind, request, timeout: self._host_requests().ask(kind, request, timeout=timeout))
+            for raw in found.servers:
+                server = replace(raw, env=(("relay", relay_key),)) if raw.transport == "sdk" else raw
                 if server.transport == "stdio" and not local_install:
                     notes.append(f"- {server.name}: this Orin does not start local processes")
                 elif slugify(server.name) in taken:

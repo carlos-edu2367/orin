@@ -46,7 +46,8 @@ def file_bundle(server: FileServer, *, user_id: str) -> ServerBundle:
     """The server as a tool bundle (no tools yet). Its environment or headers travel as its secrets."""
     slug = slugify(server.name)
     stdio = server.transport == "stdio"
-    transport = {"stdio": McpTransport.STDIO, "http": McpTransport.HTTP, "sse": McpTransport.SSE, "ws": McpTransport.WEBSOCKET}.get(server.transport)
+    transport = {"stdio": McpTransport.STDIO, "http": McpTransport.HTTP, "sse": McpTransport.SSE, "ws": McpTransport.WEBSOCKET,
+                 "sdk": McpTransport.SDK}.get(server.transport)
     if transport is None:
         raise McpConfigError(f"the {server.transport} transport is not supported")
     config = McpServerConfig(
@@ -54,7 +55,8 @@ def file_bundle(server: FileServer, *, user_id: str) -> ServerBundle:
         transport=transport, command=server.command or None, args=server.args,
         url=server.url or None, state=McpServerState.ACTIVE, origin=server.scope, cwd=server.cwd,
     )
-    secrets = dict(server.env) if stdio else {f"header:{name}": value for name, value in server.headers}
+    # An SDK server's "environment" is its relay key (W6), set by the turn that can reach the host.
+    secrets = dict(server.env) if stdio or server.transport == "sdk" else {f"header:{name}": value for name, value in server.headers}
     return config, (), secrets
 
 

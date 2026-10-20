@@ -84,6 +84,26 @@ def _extend(layer: dict[str, Any], dotted: str, items: list[str]) -> None:
             current.append(item)
 
 
+def mcp_config_flag(values: list[str], cwd: Path) -> dict[str, Any]:
+    """``--mcp-config`` (repeatable): JSON objects or JSON files, each ``{"mcpServers": {...}}``; later ones win."""
+    servers: dict[str, Any] = {}
+    for value in values:
+        text = value.strip()
+        if not text:
+            continue
+        if not text.startswith("{"):
+            text = _read_text_file(text, cwd, "--mcp-config")
+        try:
+            data = json.loads(text)
+        except ValueError as error:
+            raise CliUsageError("--mcp-config is neither a JSON object nor a JSON file") from error
+        found = data.get("mcpServers") if isinstance(data, dict) else None
+        if not isinstance(found, dict):
+            raise CliUsageError("--mcp-config needs an object with \"mcpServers\"")
+        servers.update(found)
+    return servers
+
+
 def agents_flag(value: str | None, cwd: Path) -> dict[str, Any]:
     """``--agents``: a JSON object of agents, or the path of a JSON file holding one."""
     if value is None or not value.strip():
@@ -150,6 +170,7 @@ def build_turn_options(options: CodeOptions, cwd: Path, *, host_answers_prompts:
             settings=layer, setting_sources=options.setting_sources, system_prompt=system_prompt,
             append_system_prompt=append, tools=options.tools, permission_prompts="none" if none else "host",
             transcript=True, headless=True, trust_workspace=options.trust, agents=agents or None,
+            mcp_servers=mcp_config_flag(options.mcp_configs, cwd) or None, strict_mcp_config=options.strict_mcp_config,
         )
     except ValueError as error:
         raise CliUsageError(f"the run's options are not valid: {error}") from error

@@ -165,3 +165,13 @@ def test_a_long_tool_result_reaches_the_host_whole(orin_runtime: LiveRuntime) ->
     assert result["tool_use_id"] == use["id"]
     assert "line 0000" in result["content"] and "line 0039" in result["content"] and len(result["content"]) > 2000
     assert messages[-1]["result"] == "Done."
+
+
+def test_an_mcp_server_from_the_command_line(orin_runtime: LiveRuntime) -> None:
+    echo = Path(__file__).resolve().parents[2] / "fixtures" / "mcp_echo_server.py"
+    config = json.dumps({"mcpServers": {"echo": {"command": sys.executable, "args": [str(echo)]}}})
+    done = orin_code(orin_runtime, orin_runtime.workspace("mcp-cli"), "-p", '[[tool:mcp__echo__echo:{"text": "ping"}]]',
+                     "--mcp-config", config, "--strict-mcp-config", "--allowedTools", "mcp__echo__echo", "--output-format", "json", *MODEL)
+    assert done.returncode == 0, done.stderr
+    (result,) = _lines(done.stdout)
+    assert result["result"] == "Result: ping"

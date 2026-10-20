@@ -44,6 +44,9 @@ class CliTurnOptions(BaseModel):
     trust_workspace: bool = False
     # --agents and an SDK host's initialize.agents: {name: {description, prompt, tools, model, ...}}.
     agents: dict[str, Any] | None = None
+    # --mcp-config (every file or JSON merged): {name: server}, "sdk" ones served by the host; --strict-mcp-config.
+    mcp_servers: dict[str, Any] | None = None
+    strict_mcp_config: bool = False
 
     @field_validator("settings")
     @classmethod
@@ -56,7 +59,7 @@ class CliTurnOptions(BaseModel):
             raise ValueError("cli settings are too large")
         return value
 
-    @field_validator("agents")
+    @field_validator("agents", "mcp_servers")
     @classmethod
     def _agents_are_bounded_json(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
         if value is None:

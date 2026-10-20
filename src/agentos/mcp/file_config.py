@@ -123,6 +123,11 @@ def parse_server(name: str, raw: Any, *, scope: str, source: str, environ: Mappi
         raise McpConfigError("a server entry must be an object")
     kind = str(raw.get("type") or ("stdio" if "command" in raw else "http" if "url" in raw else "")).strip().lower()
     kind = {"streamable-http": "http", "streamable_http": "http", "websocket": "ws"}.get(kind, kind)
+    if kind == "sdk":
+        # W6: a server that lives inside the SDK host behind `orin code`; nothing on disk may name one.
+        if scope != "cli":
+            raise McpConfigError("an sdk server belongs to an SDK host; only orin code can declare one")
+        return FileServer(clean, scope, source, "sdk")
     if kind not in TRANSPORTS:
         raise McpConfigError(f"unknown server type '{kind[:20]}' (expected one of {', '.join(TRANSPORTS)})")
     if kind == "stdio":
@@ -312,11 +317,13 @@ def policy_refusal(name: str, *, aliases: tuple[str, ...] = (), command_line: tu
 
 
 def load_file_servers(*, workspace_root: Path | None, trusted: bool, settings: Mapping[str, Any],
-                      environ: Mapping[str, str] | None = None, personal: bool = True) -> FileServerSet:
+                      environ: Mapping[str, str] | None = None, personal: bool = True,
+                      cli: Mapping[str, Any] | None = None, strict: bool = False) -> FileServerSet:
     """The servers to connect, the project servers awaiting approval, and what could not be read.
 
     ``personal=False`` reads only the managed file: an Orin shared by several people never loads one person's
-    (or one repository's) servers for everyone.
+    (or one repository's) servers for everyone. ``cli`` (W6) is ``--mcp-config``'s servers: above every file's, and
+    with ``strict`` (``--strict-mcp-config``) the only ones; a managed-mcp.json still decides alone.
     """
     from agentos.settings.paths import (
         claude_managed_dir, claude_user_config_file, orin_managed_dir, orin_user_dir, workspace_grants_file,
@@ -334,8 +341,15 @@ def load_file_servers(*, workspace_root: Path | None, trusted: bool, settings: M
         if data is not None:
             found.managed_only = True
             _collect(data, scope="managed", source=str(path), environ=env, cwd=cwd, into=managed, errors=found.errors)
+    command_line: dict[str, FileServer] = {}
+    if cli:
+        _collect({"mcpServers": cli}, scope="cli", source="--mcp-config", environ=env, cwd=cwd, into=command_line, errors=found.errors)
     if found.managed_only or not personal:
         merged = managed
+        if command_line:
+            found.errors.append(("--mcp-config", "managed MCP configuration is in effect: the command line's servers are off"))
+    elif strict:
+        merged = command_line
     else:
         claude_config = _read_json(claude_user_config_file(), found.errors)
         user: dict[str, FileServer] = {}
@@ -371,7 +385,7 @@ def load_file_servers(*, workspace_root: Path | None, trusted: bool, settings: M
                 approved[name] = server
             else:
                 found.pending.append(server)
-        merged = {**user, **approved, **local}  # local > project > user
+        merged = {**user, **approved, **local, **command_line}  # cli > local > project > user
     slugs: dict[str, str] = {}
     for name, server in merged.items():
         if len(found.servers) >= MAX_FILE_SERVERS:

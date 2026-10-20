@@ -156,6 +156,16 @@ class HostBridge:
 
             self.ask({"subtype": "hook_callback", "callback_id": str(inner.get("callback_id") or ""), "input": hook_input,
                       "tool_use_id": mapped or invocation or None}, hook_answer)
+        elif kind == "mcp_message":
+            def mcp_answer(response: dict[str, Any]) -> None:
+                body = response.get("response") if isinstance(response.get("response"), dict) else {}
+                if response.get("subtype") == "success" and isinstance(body.get("mcp_response"), dict):
+                    reply({"mcp_response": body["mcp_response"]})
+                else:
+                    reply({"_error": str(response.get("error") or "the host's MCP server did not answer")[:500]})
+
+            self.ask({"subtype": "mcp_message", "server_name": str(inner.get("server_name") or ""),
+                      "message": inner.get("message") if isinstance(inner.get("message"), dict) else {}}, mcp_answer)
         else:
             reply({"_error": f"orin code does not relay {kind!r} requests"})
 

@@ -7,6 +7,7 @@ It speaks the part of Ollama's native API Orin uses: ``/api/tags`` and ``/api/sh
 - ``[[write:<path>]]``: a ``Write`` call creating ``<path>`` with ``hi`` and, once its result is back, ``Done.``;
 - ``[[read:<path>]]``: a ``Read`` call for ``<path>`` and, once its result is back, ``Done.``;
 - ``[[agent:<name>]]``: an ``Agent`` call for the subagent ``<name>`` and, once its result is back, ``Done.``;
+- ``[[tool:<name>:<json arguments>]]``: a call of any tool and, once its result is back, ``Result: <the result>``;
 - ``[[slow]]``: forty words, one every 0.25 s, so a test can interrupt the turn while it streams;
 - ``[[think]]``: a thinking chunk, then text;
 - ``[[say:<text>]]``: exactly ``<text>`` (used for structured output).
@@ -22,7 +23,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 MODEL = "fake-coder:latest"
-_MARKER = re.compile(r"\[\[(write|read|agent|slow|think|say)(?::([^\]]*))?\]\]")
+_MARKER = re.compile(r"\[\[(write|read|agent|tool|slow|think|say)(?::([^\]]*))?\]\]")
 
 
 def _done(prompt: int = 12, completion: int = 3) -> dict[str, Any]:
@@ -68,6 +69,13 @@ def script(messages: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], float]
         if answered:
             return [*_text("Done."), _done(20, 2)], 0.0
         call = {"function": {"name": "Agent", "arguments": {"subagent_type": value, "description": "check", "prompt": "check the work"}}}
+        return [{"message": {"role": "assistant", "content": "", "tool_calls": [call]}, "done": False}, _done(10, 5)], 0.0
+    if kind == "tool":
+        if answered:
+            last = next((str(item.get("content") or "") for item in reversed(messages) if item.get("role") == "tool"), "")
+            return [*_text(f"Result: {last}"), _done(20, 4)], 0.0
+        name, _, arguments = value.partition(":")
+        call = {"function": {"name": name, "arguments": json.loads(arguments or "{}")}}
         return [{"message": {"role": "assistant", "content": "", "tool_calls": [call]}, "done": False}, _done(10, 5)], 0.0
     if kind == "slow":
         return [*_text(*(f"word{number} " for number in range(40))), _done(10, 40)], 0.25
