@@ -264,3 +264,83 @@ Planner's verification of Batch D1:
   queue test waits for the count; 4 consecutive runs of both W7 visual specs passed (18/18).
 - Deviation 3 is a real UX gap for the review: in a Code conversation, Enter on a `!command` while a turn runs does
   nothing and says nothing.
+
+## Batch D2 — Chat surfaces (Tasks 18–19)
+
+Commits (on `main`, not pushed):
+
+- `3cf2f9d` feat(w7): status line, /context grid, tasks panel, detailed transcript and notifications in the chat (Task 18)
+- `c897045` test(w7): browser tests and visual baselines for the D2 chat surfaces (Task 19)
+
+Suites, as run at the close (Windows, `C:\Users\carlos\Documents\projetos\orin`):
+
+- `npm --prefix frontend test`: `Test Files  110 passed (110)`, `Tests  669 passed (669)`.
+- `npm --prefix frontend run lint`: exit 0, no output (`eslint . --max-warnings=0`).
+- `npm --prefix frontend run build`: exit 0 (`tsc -b && vite build`, `✓ built in 2.54s`).
+- `npm --prefix frontend run test:e2e`: `52 passed (2.1m)`.
+- `uv run pytest -q tests/unit/installation`: `35 passed, 33 skipped in 0.78s`.
+- Visual, run without `--update-snapshots` after the baselines were written: `w7-chat-d1`, `w7-chat-d2` and `w7-commands`: `30 passed`.
+
+Deviations and notes:
+
+1. Task 18, Step 1 holds no test code in the plan. The test file given in the "Create" block
+   (`tests/unit/w7ChatSurfacesD2.test.tsx`) was written first, as given, and run before any implementation: it failed
+   on the missing modules (`Failed to resolve import "../../src/features/conversations/ContextGrid"`). Then the
+   implementation was written and the file passed 15/15. Task 18's Step 3 lists the edits; they were applied as given.
+2. A flaky test was seen once. The first full `npm --prefix frontend test` run after Task 18 failed one test,
+   `tests/unit/ChatPage.test.tsx > keeps streamed text after the bounded activity window rolls over` (the text order
+   after the window rolled over was wrong). It passed on two isolated runs of `ChatPage.test.tsx`, on a second full run
+   (110/110, 669/669) and on the close run. Root cause not investigated. The code it covers (the activity window in
+   `ChatPage`) was not changed by D2, but the ChatPage notification branch was edited in the same file, so this is not
+   proven unrelated. Worth watching for a flake.
+3. Task 19, Step 2 expects the e2e tests to fail before Task 18. Task 18 was committed first (the plan's order), so the
+   failing run was not observed. The D2 e2e spec was run once after Task 18 and passed (6/6) before the baselines were
+   generated.
+4. Task 19 visual baselines: 12 new PNGs under `frontend/tests/visual/w7-chat-d2.spec.ts-snapshots/` (as the plan
+   names). The four `w7-commands` PNGs that changed are `w7-help-desktop-dark`, `w7-help-mobile-light`,
+   `w7-picker-desktop-dark` and `w7-picker-mobile-light`. No other PNG changed; no PNG under `w7-chat-d1` changed.
+   The D2 screenshots were opened and checked: the context grid, the tasks panel (phone), the transcript and the
+   status line under the composer all render as intended.
+5. The `--update-snapshots` run was limited to `w7-chat-d2` and `w7-commands`, as the brief says. The other visual
+   specs were not regenerated.
+6. Observation, not changed: a tool entry in the transcript can show the same path twice (the server's summary already
+   names the file, and the entry adds the path on its own line), for example `Leu billing/charge.py` followed by
+   `billing/charge.py`. The plan's code does this; it is cosmetic.
+7. Not tested against a real environment: the browser's Notifications API (only the unit tests with a fake
+   `Notification` class), `/tasks` stopping a real process (only mocked routes), and the status line running a real
+   user command (the e2e and visual specs use the mocked `STATUS_LINE`).
+
+Decisions 22–26 (as the plan records them):
+
+22. The `/` picker ranks its matches: exact name or alias, then name prefix, alias prefix, name contains, description.
+    `/context` followed by Enter ran `/compact` before this, because the description of `/compact` mentions "contexto"
+    (a Batch B bug, found while building `/context`).
+23. The status line is text only: SGR colours and styles are kept, backgrounds and every other escape are dropped; it is
+    blank when off, untrusted or failing, and runs at most once per 300 ms of state changes (the server caches it 1 s).
+24. Notifications keep the existing trigger (the window hidden, the setting on). In a browser they need the browser's
+    permission, asked only when the person turns the setting on; a denial is reported and never asked again by the page.
+25. The tasks panel lists shells and subagents; Orin has no teammates, and the panel says so. A detected URL opens only
+    when it is http or https.
+26. The detailed transcript is built from the activity log: hooks show their outcome but not their stdout/stderr for
+    settings hooks (the server does not record them; a plugin hook's summary is its output).
+
+Incomplete or open:
+
+- Nothing from the plan is skipped. The items in deviation 7 are the things the tests cannot show.
+- The `/tasks` panel polls the tasks route and the overview every 3 s while it is open (as the plan says); the overview
+  is a heavier call than the tasks list. Not measured.
+- The `ChatPage` notification gating was changed to the plan's form (`windowIsAway()` and `!event.parentAgentId`). Not
+  exercised in a real browser with a hidden tab.
+
+Planner's verification of Batch D2:
+
+- Every source and test file the batch changed is identical to the validated prototype (17 files); only the 16 PNGs
+  the plan names changed.
+- Deviation 2 (the flaky ChatPage test) was measured, not guessed: `tests/unit/ChatPage.test.tsx` alone, 10 runs at
+  `c897045`: 0 failures. The full frontend suite, 5 runs at `c897045`: 1 failure, in a different test
+  (`CodeSessionProposalCard.test.tsx`). The same 5-run loop on the frontend of `v0.9.4` (before W7): 1 failure
+  (`ChatPage.test.tsx > renders CodePermissionDock ... lets Escape deny permission`). These are load-dependent
+  failures of `waitFor` (1 s default) in heavy tests, present before W7 at about the same rate (1 in 5 full runs).
+  Not fixed in W7; listed for the W7 review.
+- Earlier, while validating the D2 plan, one full run on a fresh `npm ci` tree had one failure that did not repeat in
+  three further runs; the test's name was not captured. The D2 unit tests' waits were given 3 s (`SLOW`) as a precaution.
