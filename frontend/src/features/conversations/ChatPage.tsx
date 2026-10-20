@@ -1596,7 +1596,7 @@ export function ChatPage() {
       if (event.key !== 'Escape' || event.defaultPrevented) return
       if (pendingToolPermissions.length > 0) return
       if (oversizedInput || previewReference) return
-      if (document.querySelector('[role="dialog"], [role="listbox"]')) return
+      if (document.querySelector('[role="dialog"], [role="listbox"], [role="search"]')) return
       event.preventDefault()
       void stop()
     }

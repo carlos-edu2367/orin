@@ -220,7 +220,7 @@ export function CodePermissionDock({
       }
 
       if (event.key === 'Escape') {
-        if (document.querySelector('[role="dialog"], [role="listbox"]')) return
+        if (document.querySelector('[role="dialog"], [role="listbox"], [role="search"]')) return
         event.preventDefault()
         event.stopPropagation()
         onResolve(current.requestId, { behavior: 'deny', scope: 'once' })
