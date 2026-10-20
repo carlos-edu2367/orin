@@ -66,6 +66,11 @@ def operator_value(settings: object, dotted: str) -> Any:
     return value
 
 
+def bypass_disabled(settings: object) -> bool:
+    """True when any layer disables bypass mode (W6-R4). A lower layer cannot lift it: it is a restriction only."""
+    return any(value == "disable" for _name, value in layer_values(settings, "permissions.disableBypassPermissionsMode"))
+
+
 def positive_int(value: Any) -> int | None:
     if isinstance(value, bool):
         return None
@@ -122,5 +127,5 @@ def code_loop_settings(settings: object) -> CodeLoopSettings:
 
 __all__ = [
     "CodeLoopSettings", "DEFAULT_SAFETY_MAX_TOOL_ROUNDS", "MAX_SAFETY_MAX_TOOL_ROUNDS", "OPERATOR_LAYERS",
-    "code_loop_settings", "layer_values", "operator_value", "positive_decimal", "positive_int", "restricted_minimum",
+    "bypass_disabled", "code_loop_settings", "layer_values", "operator_value", "positive_decimal", "positive_int", "restricted_minimum",
 ]

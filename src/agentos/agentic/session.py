@@ -49,7 +49,7 @@ from .agent_tools import AgentToolset, ToolOutcome, is_verification_command
 from .contract import parse as parse_contract
 from .events import AgentActivityEventType
 from .lifecycle import HookEvent, LifecycleBus
-from .loop_settings import BudgetMeter
+from .loop_settings import BudgetMeter, bypass_disabled
 from .reminders import ReminderQueue, system_reminder
 from .tools.interaction.notify import NotificationBudget
 from .phases import PhaseController
@@ -4149,6 +4149,18 @@ class TurnSession:
                 self.permission_mode = "accept_edits"
         else:
             self.permission_mode = "ask_permissions"
+        if self.permission_mode == "full_autonomy" and bypass_disabled(self.effective_settings):
+            # W6-R4: a policy that disables bypass wins over every route that asks for it (the CLI flags, the SDK's
+            # set_permission_mode and the interface alike). Subagents cannot exceed the parent, so they follow.
+            self.permission_mode = "ask_permissions"
+            try:
+                self._record(
+                    AgentActivityEventType.TURN_STARTED,
+                    "bypass mode is disabled by policy",
+                    {"permission_mode": "ask_permissions", "policy": "permissions.disableBypassPermissionsMode"},
+                )
+            except Exception:  # noqa: BLE001 - the notice never blocks a turn
+                logger.debug("bypass policy notice could not be recorded", exc_info=True)
         self._in_plan_mode = self.permission_mode == "plan_mode"
         self.lifecycle.bind(permission_mode=public_permission_mode(self.permission_mode))
         if self._in_plan_mode:

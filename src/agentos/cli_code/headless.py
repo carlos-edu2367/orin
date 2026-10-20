@@ -16,10 +16,12 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, TextIO
 
+from agentos.agentic.loop_settings import bypass_disabled
 from agentos.code_mode.models import public_permission_mode
 from agentos.version import __version__
 
 from agentos.agentic.cli_lease import HEARTBEAT_SECONDS
+from agentos.settings import load_effective_settings
 
 from .args import EXIT_ERROR, EXIT_OK, CliUsageError, CodeOptions
 from .errors import CliRuntimeError
@@ -164,6 +166,10 @@ class HeadlessRun:
         self._cancelled_turn: str | None = None
         self.initial_selection: Selection | None = None
         self.prompt_turns: dict[str, str] = {}  # a user message's uuid (as the host saw it) -> its turn
+        # W6-R4: bypass is refused until run() has read the folder's policy (fail closed). Only the start flags allow a
+        # later set_permission_mode to bypass; a switch away and back needs no new flag.
+        self.bypass_policy = True
+        self.bypass_allowed = options.dangerously_skip_permissions or options.allow_dangerously_skip_permissions
 
     # -- plumbing -------------------------------------------------------------------------------------------------
 
@@ -435,8 +441,16 @@ class HeadlessRun:
 
     # -- entry ----------------------------------------------------------------------------------------------------
 
+    def _check_bypass_policy(self) -> None:
+        """Read the folder's policy before the first turn; a run that asks for bypass under it exits (W6-R4)."""
+        self.bypass_policy = bypass_disabled(load_effective_settings(self.cwd, trusted=self.options.trust))
+        asks = self.options.dangerously_skip_permissions or self.options.permission_mode in ("bypassPermissions", "full_autonomy")
+        if self.bypass_policy and asks:
+            raise CliUsageError("bypass mode is disabled by policy (permissions.disableBypassPermissionsMode)")
+
     def run(self) -> int:
         refuse_unsupported(self.options)
+        self._check_bypass_policy()
         self._resolve_session()
         with _ACTIVE_LOCK:
             _ACTIVE.add(self)

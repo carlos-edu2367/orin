@@ -234,6 +234,11 @@ class HostBridge:
         mode = str(body.get("mode") or "")
         if mode not in PERMISSION_MODES:
             raise ValueError(f"unknown permission mode {mode!r}")
+        if mode == "bypassPermissions":  # W6-R4: refused, not ignored, unless the run may bypass and policy allows it
+            if self.run.bypass_policy:
+                raise ValueError("bypass mode is disabled by policy (permissions.disableBypassPermissionsMode)")
+            if not self.run.bypass_allowed:
+                raise ValueError("bypass mode was not allowed for this run: start orin code with --allow-dangerously-skip-permissions")
         self.run.options.permission_mode = mode
         self.run.options.dangerously_skip_permissions = False
         return {}
