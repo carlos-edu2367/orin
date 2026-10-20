@@ -143,3 +143,73 @@ Not verified in this batch (honest gaps):
 - **Installers**: a frozen `orin-code.exe` copy is handled in code (`launcher.cli` dispatch, `_launcher_command`) and
   tested with a file named like it, but no installer ships it (the plan puts that outside W6).
 - Nothing else from Batch A is incomplete per the plan.
+
+## Batch B — Headless turns (Tasks 6–11)
+
+Commits on `main` after the plan commit `cdfc51b` (`git log --oneline cdfc51b..HEAD`):
+
+- `7167e94` feat(w6): a turn carries the options orin code gives it (Task 6)
+- `936b46a` feat(w6): an orin code turn runs with its CLI layer, tools and prompts (Task 7)
+- `f89f286` feat(w6): orin code sessions and model selection (Task 8)
+- `67c4fe4` feat(w6): Orin's activity events as Claude Code's headless messages (Task 9; `pyproject.toml`, `uv.lock`)
+- `10d8e76` feat(w6): orin code -p and stream-json runs on the local Orin (Task 10)
+- `b288c6b` feat(w6): --json-schema answers are validated and retried (Task 11; `pyproject.toml`, `uv.lock`)
+
+Tests added (Windows, 2026-10-19):
+
+- `tests/unit/cli_code/test_turn_options.py`: 15
+- `tests/unit/cli_code/test_cli_turn_session.py`: 11
+- `tests/unit/cli_code/test_sessions_and_selection.py`: 13 (1 skipped on Windows: the POSIX mode test)
+- `tests/unit/cli_code/test_protocol.py`: 14 (parsed with the official `claude-agent-sdk` 0.2.159 parser)
+- `tests/unit/cli_code/test_turn_options_builder.py`: 23
+- `tests/unit/cli_code/test_structured.py`: 8
+- `tests/integration/cli_code/test_headless.py`: 14 (live runtime on the fake Ollama; real `orin-code.exe`)
+- Existing expectation changed: `tests/unit/persistence/test_w3_schema.py` now expects head `0052_w6_cli_turn_options`
+  (the only change to an existing test).
+
+Suite results (Windows, end of Batch B, `uv run pytest -q ...`):
+
+- `tests/unit`: **4122 passed, 64 skipped, 0 failed** (322.4 s)
+- `tests/integration`: **95 passed, 65 skipped, 0 failed** (131.7 s)
+- `cli_code` unit and integration together: 153 passed, 2 skipped (before the Task 11 additions)
+- `src/agentos/agentic/agent_tools.py`: 1699 lines (untouched by this batch)
+- After the live tests: no `agentos.launcher` python process left running.
+
+Deviations from the plan:
+
+1. **Task 6, gateway snippet 7 was not unique.** The `create_kwargs["permission_mode"]` block occurs twice (the
+   conversation route and the project route, which also reads `result = application.create(`). The Edit used the
+   plan's snippet plus the following `ProviderCatalogContext(principal.user_id, "conversation.create")` line, which
+   selects the conversation route only. The project conversation route is unchanged, as the plan requires.
+2. **Task 7, `session.py` used `CODE_MODE_CORE_TOOLS` without importing it.** Added it to the existing
+   `from .runtime import AgenticLimits, AgenticTurnRuntime` line (no other change to the import block).
+3. **Task 8: no RED run.** The test file and `sessions.py` / `selection.py` were written in the same step and the first
+   run was already green (12 passed, 1 skipped). The plan's expected collection error was not seen. Behaviour was
+   checked by the tests; the TDD order was not followed for this task.
+4. **Task 10: no RED run for the live tests.** `test_headless.py` (12 live tests) went straight to green; the unit
+   builder tests did see their RED (`ModuleNotFoundError: agentos.cli_code.headless`). Same situation as Batch A's
+   Task 5 scaffolding.
+5. **`uv sync` after Task 11** uninstalled and reinstalled one package in `.venv` (the output did not name it; the local
+   `agentos` package is the likely one, as in Batch A's note 3). `uv.lock` changed only by the two added lines of
+   Task 11 (`jsonschema` in the `agentos` dependency list; the package was already locked through the SDK).
+6. Task 9: `uv lock` added 304 lines (the SDK's dependency closure) and removed none; `uv lock` reported only `Added`
+   entries. Nothing was downgraded.
+
+Not verified in this batch (honest gaps):
+
+- **POSIX branches were not run** (Windows only). The Linux/Docker run is the coordinator's release step.
+- **The send route's `cli.trust_workspace` path has no test.** `test_turn_options.py` covers trust only on
+  `POST /v1/conversations`. The send route calls `_trust_workspace(..., conversation_workspace(...).root)`, which would
+  trust a *managed* workspace folder when the conversation has no bound folder. Recommended follow-up: a test, and
+  trust only a bound folder on send.
+- **Batch C items still refused:** `can_use_tool` and every control request except `initialize` answer an error;
+  permission prompts never reach the host, so `--permission-prompts host` behaves as `none` in a headless run until Batch C
+  (as the plan's deviation 19 states).
+- **Pre-existing test pollution (not from this batch, not fixed):** the real `C:\Users\carlos\.orin\trusted-workspaces.json`
+  holds pytest temporary folders for user `profile-b` (written 2026-10-19 11:48, before this batch's runs; entries from
+  `test_skill_hooks_on_a_server` and `test_settings_hooks_on_a_serve`), and the real `C:\Users\carlos\.orin\settings.json`
+  (2026-10-18) holds a hook that points at a pytest temporary folder. This batch's tests use `local-user` and their own
+  temporary folders and do not appear in those files. Deleting or editing those files was not done (needs the owner's
+  decision).
+- **Frontend**: no frontend file changed in this batch; not run.
+- **Installers**: unchanged (`orin-code.exe` is still only the console script; Batch A note stands).
