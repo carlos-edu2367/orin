@@ -55,6 +55,8 @@ class AgentActivityEventType(StrEnum):
     TOOL_PERMISSION_REQUIRED = "tool.permission_required"
     PLUGIN_HOOK_EXECUTED = "plugin.hook_executed"
     NOTIFICATION_PUSHED = "notification.pushed"
+    # W6: a question for the SDK host behind `orin code` (its body is in the turn's CLI transcript).
+    HOST_REQUEST = "host.request"
 
 
 class ActivityVisibility(StrEnum):

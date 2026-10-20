@@ -1059,6 +1059,20 @@ class TurnSession:
 
     # -- activity -------------------------------------------------------
 
+    def _host_requests(self):
+        """W6: the channel to the SDK host behind `orin code` (hook callbacks, SDK MCP messages)."""
+        channel = getattr(self, "_host_channel", None)
+        if channel is None:
+            from .host_requests import HostRequests
+
+            channel = self._host_channel = HostRequests(
+                str(self.turn.get("conversation_id") or "unknown"),
+                emit=lambda payload: self._record(AgentActivityEventType.HOST_REQUEST, "Pergunta ao host do SDK", payload),
+                cancelled=lambda: bool(self.cancelled(self.turn)),
+                transcript=self._transcript(),
+            )
+        return channel
+
     def _transcript(self):
         """W6: where a CLI turn's tool inputs and results go (activity payloads are sanitized and bounded)."""
         store = getattr(self, "_transcript_store", None)

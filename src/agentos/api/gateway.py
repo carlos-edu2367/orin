@@ -190,6 +190,11 @@ class CreateConversationRequest(_RequestModel):
     cli: CliTurnOptions | None = None
 
 
+class HostRequestAnswer(_RequestModel):
+    """`orin code`'s answer to a question its turn asked the SDK host (W6)."""
+    response: dict[str, Any]
+
+
 class UpdateConversationPermissionModeRequest(_RequestModel):
     permission_mode: str = Field(pattern="^(accept_edits|plan_mode|ask_permissions|full_autonomy|auto|dont_ask|default|acceptEdits|plan|bypassPermissions|dontAsk|manual)$")
 
@@ -1525,6 +1530,21 @@ def create_app(services: ApiServices) -> FastAPI:
         if entry is None:
             raise ApplicationNotFoundError(entry_id)
         return JSONResponse(entry)
+
+    @app.post("/v1/conversations/{conversation_id}/host-requests/{request_id}")
+    async def answer_host_request(conversation_id: str, request_id: str, payload: HostRequestAnswer, request: Request) -> JSONResponse:
+        """The SDK host's answer, relayed by `orin code` (W6): only its token may write it."""
+        from agentos.agentic.host_requests import HostRequests
+
+        principal = principal_for(request, mutable=True)
+        services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.host_request")
+        conversation_record(conversation_id, principal)
+        if principal.credential_kind != "cli_token":
+            raise AuthorizationError("only orin code answers its host's requests")
+        answered = await run_in_threadpool(HostRequests(conversation_id).answer, request_id, payload.response)
+        if not answered:
+            raise ApplicationNotFoundError(request_id)
+        return JSONResponse({"request_id": request_id, "answered": True})
 
     @app.post("/v1/conversations/{conversation_id}/workspace-trust")
     async def trust_workspace(conversation_id: str, request: Request) -> JSONResponse:
