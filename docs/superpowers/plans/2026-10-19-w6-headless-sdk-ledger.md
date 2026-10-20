@@ -521,4 +521,4 @@ W6-R3 decisions and deviations:
 
 Suites at the end of part 1 (`uv run pytest -q`): unit `4243 passed, 65 skipped`; integration `121 passed, 65 skipped` (after `bbd17b3`; the first integration run had one failure, the new route missing from the isolation test's classification, fixed in `bbd17b3`). `src/agentos/agentic/agent_tools.py` is 1693 lines. No `agentos.launcher` or `orin-code` process was left running.
 
-Not in this part: W6-R4 to W6-R17 (see the review's "fix order").
+Not in this part: W6-R4 to W6-R17, listed in the review's findings table.
