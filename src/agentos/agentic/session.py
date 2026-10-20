@@ -3406,6 +3406,11 @@ class TurnSession:
         return lambda turn: bool(self.cancelled(turn)) or hook_cancel.is_set()
 
     def _close_hook_dispatcher(self) -> None:
+        relay, self._sdk_relay = getattr(self, "_sdk_relay", None), None
+        if relay is not None:
+            from agentos.mcp.transport_sdk import unregister_relay
+
+            unregister_relay(*relay)  # the registry must not keep this turn's session alive
         dispatcher, self._hook_dispatcher = self._hook_dispatcher, None
         if dispatcher is not None:
             try:
@@ -3572,8 +3577,12 @@ class TurnSession:
             if any(server.transport == "sdk" for server in found.servers):
                 from agentos.mcp.transport_sdk import register_relay
 
-                # W6: this turn's channel to the SDK host serves its in-process MCP servers.
-                register_relay(relay_key, lambda kind, request, timeout: self._host_requests().ask(kind, request, timeout=timeout))
+                # W6: this turn's channel to the SDK host serves its in-process MCP servers (removed when the turn closes).
+                def relay(kind, request, timeout):
+                    return self._host_requests().ask(kind, request, timeout=timeout)
+
+                register_relay(relay_key, relay)
+                self._sdk_relay = (relay_key, relay)
             for raw in found.servers:
                 server = replace(raw, env=(("relay", relay_key),)) if raw.transport == "sdk" else raw
                 if server.transport == "stdio" and not local_install:

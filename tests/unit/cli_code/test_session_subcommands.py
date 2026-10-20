@@ -69,7 +69,7 @@ def test_purge_needs_yes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
 @pytest.mark.parametrize("name", ["import", "review"])
 def test_subcommands_without_support_say_so(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str) -> None:
     code, _, err = _run([name, "claude"], tmp_path, monkeypatch)
-    assert code == 1 and "not supported yet" in err or "W8" in err
+    assert code == 1 and ("not supported yet" in err or "W8" in err)
 
 
 def test_bg_needs_a_print_prompt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
