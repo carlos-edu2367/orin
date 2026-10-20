@@ -344,3 +344,75 @@ Planner's verification of Batch D2:
   Not fixed in W7; listed for the W7 review.
 - Earlier, while validating the D2 plan, one full run on a fresh `npm ci` tree had one failure that did not repeat in
   three further runs; the test's name was not captured. The D2 unit tests' waits were given 3 s (`SLOW`) as a precaution.
+
+## Batch E — Settings editors (Tasks 20–21)
+
+Commits (not pushed; the ledger is not committed):
+
+- `f761ce7` feat(w7): settings editors for permissions, hooks, agents, output styles, keybindings and trusted folders
+- `c59f400` test(w7): browser tests and visual baselines for the settings editors
+
+Suites and checks (at `c59f400`):
+
+- Unit, new file `tests/unit/w7SettingsEditors.test.tsx`: 12 passed. It failed first, with "Failed to resolve import" for the missing
+  `codeSettings` modules, before Task 20 was implemented.
+- `npm --prefix frontend test`: `Test Files  111 passed (111)` / `Tests  681 passed (681)` (run after Task 20 and again at close).
+- `npm --prefix frontend run lint`: exit 0 (`eslint . --max-warnings=0`).
+- `npm --prefix frontend run build`: exit 0 (`tsc -b && vite build`).
+- `npm --prefix frontend run test:e2e`: the first full run had `1 failed` / `56 passed (2.3m)`; the failure is in
+  `tests/e2e/a11y.spec.ts:26` (see deviation 4). A second full run at close: `57 passed (2.1m)`.
+- New `tests/e2e/w7-settings.spec.ts`: 5 passed (before and after the full runs).
+- Visual, with `--update-snapshots` on `tests/visual/w7-settings.spec.ts` and `tests/visual/w7-commands.spec.ts`: `24 passed`.
+  Without update, `w7-chat-d1`, `w7-chat-d2`, `w7-commands` and `w7-settings`: `46 passed (52.7s)`.
+- `uv run pytest -q tests/unit/installation`: `35 passed, 33 skipped in 2.26s`.
+
+Baselines changed (only the allowed ones): 16 new PNGs under `frontend/tests/visual/w7-settings.spec.ts-snapshots/`, and
+`w7-help-desktop-dark-win32.png` and `w7-help-mobile-light-win32.png` under `w7-commands.spec.ts-snapshots/` (`/help` lists the
+editors' commands). No other PNG changed; `git status` was clean after the verification run.
+
+Deviations:
+
+1. The plan's Step 1 blocks for Tasks 20 and 21 are empty. The test files are in the Step 3 "Create" lists. For Task 20 I
+   created `tests/unit/w7SettingsEditors.test.tsx` from that content first and ran it to see it fail, then implemented. For
+   Task 21 the e2e and visual files were written after Task 20 was already in place, so their "fail before Task 20" step
+   could not be observed; the e2e file passed 5 of 5 on its first run.
+2. `frontend/src/features/commands/useChatCommands.ts`, replacement 2: the snippet `]` occurs many times in the file, so it
+   cannot be unique. I anchored it to the closing `]` of `SANDBOX_TEXT` (with its last line) and placed `folderPage` after it.
+3. The commit trailer is `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`, as you asked. My session's attribution
+   note names another model; I followed your instruction.
+4. The first full e2e run had one failure: `a11y.spec.ts:26` "Home has no critical or serious accessibility violations"
+   (colour contrast 2.4 to 3.55 on the dark theme). Batch E does not change the Home page. A second full run passed 57 of
+   57, and a run of `a11y.spec.ts` alone passed 7 of 7. It is not reproduced and not investigated further; it looks like a
+   timing flake (the first test of the run, with a cold Vite server).
+5. Git printed "LF will be replaced by CRLF" warnings on add. This is the repository's line-ending setting; the content is
+   unchanged.
+6. No unit-suite flakiness was seen in the two full unit runs (ChatPage and CodeSessionProposalCard both passed).
+
+Decisions 27–31 (as the plan records them):
+
+27. MCP per scope with the approval of a project's servers, and the plugin dialog's details (W5-D1, W5-D5), move to Batch F.
+28. An editor works on a folder only when opened from a conversation (`?conversation=<id>`); from the settings navigation it
+    shows the person's layer and the managed policy. The editors never take a folder path from the address bar.
+29. The managed policy and the command line are read-only in the editors; a rule is removed from the layer it came from.
+30. Deleting an agent's file and revoking a trusted folder ask for a second click; nothing in the editors writes without an
+    explicit save. (Removing a permission rule is one click, as the plan's code has it.)
+31. The settings pages scroll inside their own container, so the `fullPage` screenshots show the first screen only.
+
+Incomplete or open:
+
+- The editors are tested against mocked routes (unit, e2e, visual). Saving to real files on a running local Orin was not
+  exercised in this batch.
+- The mobile screenshot shows the settings navigation's tabs cut at the right edge; the shell is not part of this batch and
+  was not changed.
+- Deviation 4 (the Home a11y failure in the first full run) is unexplained; if it recurs, it needs a look.
+
+Planner's verification of Batch E:
+
+- Every source and test file the batch changed is identical to the validated prototype (15 files); only the 18 PNGs
+  the plan names changed. Deviation 2 (the executor's anchor choice) therefore changed nothing.
+- Deviation 4 (`a11y.spec.ts` "Home has no critical or serious accessibility violations" failing once): the spec alone,
+  8 runs at `c59f400`: 0 failures. The test scans right after `page.goto('/')` without waiting for the page to settle,
+  so a cold first run can catch Home's fade-in (contrast 2.4–3.55 is what a half-faded text measures). The test and Home
+  predate W7, but CI runs this spec: Batch F makes the scan wait for the page to settle.
+- Removing a permission rule is one click by design (decision 30 covers deleting a file and revoking trust); the rule
+  can be added back from the same page.
