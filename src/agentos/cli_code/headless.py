@@ -35,8 +35,8 @@ _END_EVENTS = {"turn.completed", "turn.failed", "turn.waiting_user"}
 UNSUPPORTED: dict[str, str] = {
     "agent": "--agent",
     "plugin_dirs": "--plugin-dir", "worktree": "--worktree", "fork_session": "--fork-session",
-    "bare": "--bare", "safe_mode": "--safe-mode", "restricted": "--restricted", "init": "--init",
-    "maintenance": "--maintenance", "desktop": "--desktop", "resume_session_at": "--resume-session-at",
+    "bare": "--bare", "safe_mode": "--safe-mode", "restricted": "--restricted",
+    "desktop": "--desktop", "resume_session_at": "--resume-session-at",
     "resume_drops_turn": "--resume-drops-turn", "session_mirror": "--session-mirror", "task_budget": "--task-budget",
     "prompt_suggestions": "--prompt-suggestions", "exclude_dynamic_system_prompt_sections": "--exclude-dynamic-system-prompt-sections",
     "thinking_display": "--thinking-display",
@@ -47,6 +47,8 @@ def refuse_unsupported(options: CodeOptions) -> None:
     flags = [flag for name, flag in UNSUPPORTED.items() if getattr(options, name) not in (None, False, [], "")]
     if flags:
         raise CliUsageError(f"not supported by orin code yet: {', '.join(flags)}")
+    if options.init and options.maintenance:
+        raise CliUsageError("--init and --maintenance cannot be combined")
     if options.permission_prompt_tool not in (None, "stdio"):
         raise CliUsageError("--permission-prompt-tool accepts only stdio (an SDK host's can_use_tool callback)")
     if options.permission_prompt_tool == "stdio" and options.input_format != "stream-json":
@@ -109,6 +111,7 @@ class HeadlessRun:
         self._stdin_closed = False
         self._pending_prompts: list[tuple[str, str | None]] = []
         self._init_sent = False
+        self._setup_sent = False  # --init / --maintenance fire Setup once per run
         self._cursor = "0"
         self._session_id = ""
         self._debug = self._debug_sink()
@@ -201,7 +204,9 @@ class HeadlessRun:
         # Only an SDK host with a can_use_tool callback (--permission-prompt-tool stdio) answers permission prompts.
         host = self.options.permission_prompt_tool == "stdio"
         turn_options = build_turn_options(self.options, self.cwd, host_answers_prompts=host,
-                                          sdk_hooks=self.bridge.sdk_hooks, sdk_agents=self.bridge.sdk_agents).model_dump()
+                                          sdk_hooks=self.bridge.sdk_hooks, sdk_agents=self.bridge.sdk_agents,
+                                          first_turn=not self._setup_sent).model_dump()
+        self._setup_sent = True
         mode = permission_mode_for(self.options)
         body: dict[str, Any] = {"message": prompt, "selection": self.selection.as_request(), "code_mode": "code",
                                 "cli": turn_options, "permission_mode": mode}

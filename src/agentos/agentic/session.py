@@ -2942,6 +2942,11 @@ class TurnSession:
                     reported = [str(path) for path in files if str(path) in changed]
                     if reported:
                         bus.emit(HookEvent.INSTRUCTIONS_LOADED, file_paths=reported, memory_type="Project")
+            setup = self.cli_options.setup if getattr(self, "cli_options", None) is not None else None
+            if setup is not None:  # `orin code --init` / `--maintenance`: Setup runs before SessionStart
+                prepared = bus.emit(HookEvent.SETUP, trigger=setup)
+                result["session_context"].extend(prepared.additional_context)
+                result["prompt_context"].extend(f"Hook: {message}" for message in prepared.system_messages)
             source = self._session_start_source(history)
             if source is not None:
                 start = bus.emit(HookEvent.SESSION_START, source=source)

@@ -122,7 +122,7 @@ def agents_flag(value: str | None, cwd: Path) -> dict[str, Any]:
 
 def build_turn_options(options: CodeOptions, cwd: Path, *, host_answers_prompts: bool,
                        sdk_hooks: dict[str, list[dict[str, Any]]] | None = None,
-                       sdk_agents: dict[str, Any] | None = None) -> CliTurnOptions:
+                       sdk_agents: dict[str, Any] | None = None, first_turn: bool = False) -> CliTurnOptions:
     """The "cli" settings layer (``--settings`` first, the explicit flags over it) and the headless switches."""
     layer = settings_flag(options.settings, cwd)
     if sdk_hooks:
@@ -165,12 +165,14 @@ def build_turn_options(options: CodeOptions, cwd: Path, *, host_answers_prompts:
         append = f"{append}\n\n{instructions}" if append else instructions
     agents = {**agents_flag(options.agents, cwd), **(sdk_agents or {})}  # the host's definition wins over the flag's
     none = options.permission_prompts == "none" or not host_answers_prompts
+    setup = ("init" if options.init else "maintenance" if options.maintenance else None) if first_turn else None
     try:
         return CliTurnOptions(
             settings=layer, setting_sources=options.setting_sources, system_prompt=system_prompt,
             append_system_prompt=append, tools=options.tools, permission_prompts="none" if none else "host",
             transcript=True, headless=True, trust_workspace=options.trust, agents=agents or None,
             mcp_servers=mcp_config_flag(options.mcp_configs, cwd) or None, strict_mcp_config=options.strict_mcp_config,
+            setup=setup,
         )
     except ValueError as error:
         raise CliUsageError(f"the run's options are not valid: {error}") from error

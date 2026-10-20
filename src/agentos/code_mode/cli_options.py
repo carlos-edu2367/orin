@@ -47,6 +47,8 @@ class CliTurnOptions(BaseModel):
     # --mcp-config (every file or JSON merged): {name: server}, "sdk" ones served by the host; --strict-mcp-config.
     mcp_servers: dict[str, Any] | None = None
     strict_mcp_config: bool = False
+    # --init / --maintenance: the run's first turn fires the Setup hooks with this trigger.
+    setup: Literal["init", "maintenance"] | None = None
 
     @field_validator("settings")
     @classmethod
