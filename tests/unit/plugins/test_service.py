@@ -59,7 +59,7 @@ def test_different_version_replaces_pending_record(tmp_path):
 
 def test_discover_library_returns_registry_entries(tmp_path):
     service = _service(tmp_path)
-    library = service.discover_library()
+    library = service.discover_library(user_id="u1")
     assert library["web_search_available"] is False
     assert library["entries"][0]["name"] == "superpowers"
     assert library["entries"][0]["origin"] == "registry"
@@ -78,7 +78,7 @@ def test_inspect_reports_a_distinct_code_when_the_repository_has_no_manifest(tmp
 
 def test_discover_library_passes_installable_kind_through(tmp_path):
     service = _service(tmp_path)
-    library = service.discover_library()
+    library = service.discover_library(user_id="u1")
     assert library["entries"][0]["installable_kind"] == "plugin"
 
 def test_inspect_reports_a_distinct_code_when_a_manifest_path_escapes_the_package(tmp_path):

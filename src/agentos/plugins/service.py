@@ -150,8 +150,9 @@ class PluginService:
                     results.append({"name": item.name, "reference": item.reference, "description": item.description, "marketplace": marketplace.name})
         return results
 
-    def discover_library(self, *, refresh: bool = False, query: str | None = None) -> dict[str, Any]:
-        entries, web_available = self.discovery.entries(refresh=refresh, query=query)
+    def discover_library(self, *, user_id: str, refresh: bool = False, query: str | None = None) -> dict[str, Any]:
+        """The plugin library for one person: their marketplaces' plugins and the web's (W7, W5-D1)."""
+        entries, web_available = self.discovery.entries(user_id=user_id, refresh=refresh, query=query)
         return {
             "entries": [{"name": e.name, "description": e.description, "source_url": e.source_url, "origin": e.origin, "installable_kind": e.installable_kind} for e in entries],
             "web_search_available": web_available,

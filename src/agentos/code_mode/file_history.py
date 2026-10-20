@@ -31,6 +31,8 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 MAX_BLOB_BYTES = 10 * 1024 * 1024
+# The one blocker the person may waive for a file (W7 force_unbacked): its current content cannot be backed up.
+TOO_LARGE_NOW = "its current content is too large to keep an undo copy"
 _UNSAFE = re.compile(r"[^A-Za-z0-9_.-]")
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _REPARSE_POINT = 0x400  # FILE_ATTRIBUTE_REPARSE_POINT: symlinks and junctions on Windows
@@ -318,14 +320,20 @@ class FileHistory:
 
     # -- rewind --------------------------------------------------------------
 
-    def rewind(self, message_id: str, *, roots: Iterable[Path]) -> dict[str, Any]:
+    def rewind(self, message_id: str, *, roots: Iterable[Path], force_unbacked: Iterable[str] = ()) -> dict[str, Any]:
         """Restore every file ``message_id`` or a later message changed to its state just before ``message_id``.
 
         Two phases (W4-R10). First every file is checked, and its current content is copied into a new undo
         snapshot. Only when every file passes is anything written. A blocked rewind writes nothing: ``blocked`` is
         true, and ``skipped`` names each file that blocked it.
+
+        ``force_unbacked`` (W7) names files whose current content is too large for an undo copy and that the person
+        chose to rewind anyway: only that one reason is waived, only for those paths; they are listed as
+        ``unbacked`` (the rewind cannot be undone for them). Every other reason still blocks.
         """
         allowed = [Path(root) for root in roots]
+        forced = {os.path.normcase(str(item)) for item in force_unbacked if str(item)}
+        unbacked: list[str] = []
         with _LOCK:
             manifests = self._manifests()
             index = next((i for i, item in enumerate(manifests) if item.get("message_id") == str(message_id)), None)
@@ -349,6 +357,12 @@ class FileHistory:
             for key, entry in plan.items():
                 path = str(entry.get("path") or "")
                 reason = self._blocker(entry, allowed)
+                if reason == TOO_LARGE_NOW and os.path.normcase(path) in forced:
+                    # Only the size is waived: every check after it (the backup, its checksum) still runs.
+                    reason = self._blocker(entry, allowed, waive_size=True)
+                    if reason is None:
+                        unbacked.append(path)  # the person accepted losing its current content: no undo copy
+                        continue
                 if reason is None and Path(path).exists():
                     try:
                         undo_files[key] = self._record(Path(path))
@@ -374,7 +388,7 @@ class FileHistory:
             for entry in plan.values():
                 path = str(entry.get("path") or "")
                 try:
-                    outcome = self._restore(entry, allowed)
+                    outcome = self._restore(entry, allowed, waive_size=path in unbacked)
                 except Exception as error:  # noqa: BLE001 - one file never stops the others
                     outcome = f"skip: {type(error).__name__}"
                 if outcome == "restored":
@@ -392,9 +406,10 @@ class FileHistory:
                     self._save(str(item["message_id"]), item)
                 except ManifestUnavailable:
                     logger.warning("the rewind of message %s was not recorded: its manifest is damaged", item.get("message_id"))
-        return _rewind_result(message_id, restored=restored, deleted=deleted, unchanged=unchanged, skipped=skipped, undo_id=undo_id)
+        return _rewind_result(message_id, restored=restored, deleted=deleted, unchanged=unchanged, skipped=skipped, undo_id=undo_id,
+                              unbacked=unbacked)
 
-    def _blocker(self, entry: dict[str, Any], roots: Sequence[Path]) -> str | None:
+    def _blocker(self, entry: dict[str, Any], roots: Sequence[Path], *, waive_size: bool = False) -> str | None:
         """Why ``entry`` cannot be rewound, or None. Reads the workspace and the history; writes nothing."""
         target = Path(str(entry.get("path") or ""))
         if not str(target) or not target.is_absolute():
@@ -421,9 +436,9 @@ class FileHistory:
             return "it is now a link"
         if target.exists() and not target.is_file():
             return "it is no longer a regular file"
-        if target.exists() and target.stat().st_size > MAX_BLOB_BYTES:
+        if target.exists() and target.stat().st_size > MAX_BLOB_BYTES and not waive_size:
             # Restoring or deleting it would destroy content that no undo snapshot can hold (W4-R10).
-            return "its current content is too large to keep an undo copy"
+            return TOO_LARGE_NOW
         if not entry.get("existed"):
             return None
         digest = str(entry.get("sha256") or "")
@@ -435,8 +450,8 @@ class FileHistory:
             return "its backup does not match its checksum"
         return None
 
-    def _restore(self, entry: dict[str, Any], roots: Sequence[Path]) -> str:
-        reason = self._blocker(entry, roots)
+    def _restore(self, entry: dict[str, Any], roots: Sequence[Path], *, waive_size: bool = False) -> str:
+        reason = self._blocker(entry, roots, waive_size=waive_size)
         if reason is not None:
             return f"skip: {reason}"
         target = Path(str(entry.get("path") or ""))
@@ -460,12 +475,13 @@ class FileHistory:
 
 def _rewind_result(
     message_id: str, *, restored: Sequence[str] = (), deleted: Sequence[str] = (), unchanged: Sequence[str] = (),
-    skipped: Sequence[dict[str, str]] = (), blocked: bool = False, undo_id: str | None = None,
+    skipped: Sequence[dict[str, str]] = (), blocked: bool = False, undo_id: str | None = None, unbacked: Sequence[str] = (),
 ) -> dict[str, Any]:
     return {
         "message_id": str(message_id), "restored": sorted(restored), "deleted": sorted(deleted),
         "unchanged": sorted(unchanged), "skipped": list(skipped), "blocked": blocked, "undo_id": undo_id,
+        "unbacked": sorted(unbacked),
     }
 
 
-__all__ = ["FileHistory", "MAX_BLOB_BYTES"]
+__all__ = ["FileHistory", "MAX_BLOB_BYTES", "TOO_LARGE_NOW"]

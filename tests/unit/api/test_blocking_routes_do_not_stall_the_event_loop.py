@@ -69,7 +69,7 @@ class SlowPlugins:
         time.sleep(SLOW_SECONDS)
         return {"plugin_id": plugin_id, "state": "active"}
 
-    def discover_library(self, *, refresh=False, query=None):
+    def discover_library(self, *, user_id, refresh=False, query=None):
         time.sleep(SLOW_SECONDS)
         return {"entries": [], "web_search_available": False}
 

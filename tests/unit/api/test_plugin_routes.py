@@ -18,7 +18,7 @@ class Plugins:
     def remove(self, **kwargs): return {"removed":True}
     def list_marketplaces(self, user_id): return []
     def add_marketplace(self, **kwargs): return {"name":"community"}
-    def discover_library(self, *, refresh=False, query=None): return {"entries": [], "web_search_available": refresh, "query_seen": query}
+    def discover_library(self, *, user_id, refresh=False, query=None): return {"entries": [], "web_search_available": refresh, "query_seen": query, "user_seen": user_id}
     def infer_mcp_launch(self, *, source_url): return {"display_name": "demo-mcp", "transport": "stdio", "command": "npx", "args": ["-y", "demo-mcp"], "url": None, "secret_names": [], "confidence": "structured", "source_url_seen": source_url}
     def list_commands(self, user_id): return [{"command_id": "demo:daily", "slug": "daily", "plugin_id": "demo", "description": "d", "argument_hint": "", "qualified": False}]
     def set_hooks_enabled(self, **kwargs): return {"plugin_id": "demo", "state": "active", "hooks_enabled_seen": kwargs.get("enabled")}
@@ -52,6 +52,11 @@ def test_plugin_library_route_forwards_the_refresh_flag():
     client = TestClient(create_app(ApiServices(security=Security(), plugins=Plugins())))
     assert client.get("/v1/plugins/library").json()["web_search_available"] is False
     assert client.get("/v1/plugins/library?refresh=true").json()["web_search_available"] is True
+
+def test_plugin_library_route_lists_the_signed_in_person_s_marketplaces():
+    # W7 (W5-D1): the library is per person; the route passes who is asking.
+    client = TestClient(create_app(ApiServices(security=Security(), plugins=Plugins())))
+    assert client.get("/v1/plugins/library").json()["user_seen"] == "u1"
 
 def test_plugin_library_route_forwards_the_query_and_trims_blanks():
     client = TestClient(create_app(ApiServices(security=Security(), plugins=Plugins())))

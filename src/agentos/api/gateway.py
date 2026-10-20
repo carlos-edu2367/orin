@@ -8,7 +8,7 @@ from hashlib import sha256
 from ipaddress import ip_address
 from pathlib import Path
 from time import monotonic
-from typing import Any, Mapping
+from typing import Annotated, Any, Mapping
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, File, Request, UploadFile
@@ -228,6 +228,8 @@ class CreateScheduledChatRequest(_RequestModel):
 class RewindMessageRequest(_RequestModel):
     # W7: "code" restores the files, "conversation" forks the conversation before the message, "both" does both.
     mode: str = Field(default="code", pattern="^(code|conversation|both)$")
+    # W7: files too large for an undo copy that the person chose to rewind anyway (the 409 named them).
+    force_unbacked: list[Annotated[str, Field(min_length=1, max_length=4096)]] = Field(default_factory=list, max_length=50)
 
 
 class AddDirectoryRequest(_RequestModel):
@@ -1655,7 +1657,7 @@ def create_app(services: ApiServices) -> FastAPI:
             with exclusive_folder(workspace.root):
                 if _turn_in_flight(conversation_record(conversation_id, principal)):
                     return _error(409, "CONFLICT", "turn_running", retryable=True)
-                result = await run_in_threadpool(history.rewind, message_id, roots=roots)
+                result = await run_in_threadpool(lambda: history.rewind(message_id, roots=roots, force_unbacked=payload.force_unbacked))
         except WorkspaceBusy:
             return _error(409, "CONFLICT", "turn_running", retryable=True)
         except LookupError as error:
@@ -1884,7 +1886,8 @@ def create_app(services: ApiServices) -> FastAPI:
         services.security.check_rate_limit(principal, action="plugins.library", origin=request.headers.get("origin"))
         services.security.authorize(principal, action="plugins.library", resource_id=None, purpose="plugins.read")
         # Web search is blocking I/O just like plugin inspection, so keep it off the event loop.
-        result = await run_in_threadpool(_require_port(services.plugins).discover_library, refresh=refresh, query=q.strip() or None)
+        result = await run_in_threadpool(
+            _require_port(services.plugins).discover_library, user_id=principal.user_id, refresh=refresh, query=q.strip() or None)
         return JSONResponse(_jsonable(result))
 
     @app.get("/v1/plugins/commands")

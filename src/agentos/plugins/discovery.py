@@ -36,29 +36,32 @@ class PluginDiscoveryService:
         self._plugin_service = plugin_service
         self._search_client = search_client
         self._manifest_probe = manifest_probe
-        self._cache: tuple[list[PluginLibraryEntry], bool] | None = None
-        self._cache_at: datetime | None = None
+        # Per person: the library lists the person's own marketplaces (W5-D1), so one cache would leak them.
+        self._cache: dict[str, tuple[tuple[list[PluginLibraryEntry], bool], datetime]] = {}
         self._manifest_cache: dict[str, tuple[bool | None, datetime]] = {}
 
-    def entries(self, *, refresh: bool = False, query: str | None = None) -> tuple[list[PluginLibraryEntry], bool]:
+    def entries(self, *, user_id: str, refresh: bool = False, query: str | None = None) -> tuple[list[PluginLibraryEntry], bool]:
         needle = (query or "").strip()
         if needle:
             # An explicit query always searches live — it's cheap (one registry
             # scan, one web call) and caching per free-text query isn't worth it.
-            registry = self._registry_entries(needle)
+            registry = self._registry_entries(needle, user_id)
             web, web_available = self._web_entries((needle,), limit=8)
             return self._merge(registry, web), web_available
-        if not refresh and self._cache is not None and self._cache_at is not None and _now() - self._cache_at < CACHE_TTL:
-            return self._cache
-        registry = self._registry_entries("")
+        cached = self._cache.get(user_id)
+        if not refresh and cached is not None and _now() - cached[1] < CACHE_TTL:
+            return cached[0]
+        registry = self._registry_entries("", user_id)
         web, web_available = self._web_entries(DISCOVERY_QUERIES, limit=5)
-        merged = self._merge(registry, web)
-        self._cache, self._cache_at = (merged, web_available), _now()
-        return self._cache
+        result = (self._merge(registry, web), web_available)
+        if len(self._cache) >= 256:  # bounded: drop the oldest person's entry
+            self._cache.pop(min(self._cache, key=lambda key: self._cache[key][1]))
+        self._cache[user_id] = (result, _now())
+        return result
 
-    def _registry_entries(self, needle: str) -> list[PluginLibraryEntry]:
+    def _registry_entries(self, needle: str, user_id: str) -> list[PluginLibraryEntry]:
         entries: list[PluginLibraryEntry] = []
-        for item in self._plugin_service.search(needle):
+        for item in self._plugin_service.search(needle, user_id=user_id):
             try:
                 source = resolve_source(str(item["reference"]))
             except SourceRejected:
