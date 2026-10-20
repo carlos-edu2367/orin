@@ -65,6 +65,9 @@ class ActivityVisibility(StrEnum):
     INTERNAL = "internal"
 
 
+_APPROVAL_EVENT_TYPES = frozenset({AgentActivityEventType.CODE_MODE_DECISION_REQUIRED, AgentActivityEventType.TOOL_PERMISSION_REQUIRED})
+
+
 @dataclass(frozen=True, slots=True)
 class AgentActivityEvent:
     event_id: str
@@ -114,7 +117,8 @@ class AgentActivityEvent:
         object.__setattr__(self, "event_type", event_type)
         object.__setattr__(self, "visibility", visibility)
         object.__setattr__(self, "summary", sanitize_summary(self.summary))
-        object.__setattr__(self, "payload", sanitize_public_mapping(self.payload))
+        approval = event_type in _APPROVAL_EVENT_TYPES  # W7-R1: the person approves what these payloads show
+        object.__setattr__(self, "payload", sanitize_public_mapping(self.payload, approval=approval))
 
     def __repr__(self) -> str:
         return (

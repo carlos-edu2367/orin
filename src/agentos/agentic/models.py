@@ -251,12 +251,28 @@ def freeze_action_input(value: Mapping[str, object]) -> Mapping[str, object]:
     return result
 
 
-def sanitize_public_mapping(value: Mapping[str, object]) -> Mapping[str, object]:
+_APPROVAL_RAW_KEYS = frozenset(
+    {"permission_request", "command", "path", "structured_patch", "suggested_rule", "rule_suggestion"}
+)
+
+
+def sanitize_public_mapping(value: Mapping[str, object], *, approval: bool = False) -> Mapping[str, object]:
+    """Redact an activity payload. W7-R1: when ``approval`` is true the payload is what the person approves, so
+    the approval subtree and the command/path/patch/rule fields are kept exactly as the tool will run them."""
     if not isinstance(value, Mapping):
         raise ValueError("payload must be a mapping")
-    result = _bounded(value, depth=0, count=[0], redact=True)
-    assert isinstance(result, Mapping)
-    return result
+    if not approval:
+        result = _bounded(value, depth=0, count=[0], redact=True)
+        assert isinstance(result, Mapping)
+        return result
+    count = [0]
+    approved = {key: item for key, item in value.items() if key in _APPROVAL_RAW_KEYS}
+    rest = {key: item for key, item in value.items() if key not in _APPROVAL_RAW_KEYS}
+    redacted_rest = _bounded(rest, depth=0, count=count, redact=True)
+    raw_approved = _bounded(approved, depth=0, count=count, redact=False)
+    assert isinstance(redacted_rest, Mapping) and isinstance(raw_approved, Mapping)
+    merged = {key: (raw_approved[key] if key in approved else redacted_rest[key]) for key in value}
+    return MappingProxyType(merged)
 
 
 @dataclass(frozen=True, slots=True)
