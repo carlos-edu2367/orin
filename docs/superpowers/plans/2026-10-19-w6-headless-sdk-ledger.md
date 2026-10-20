@@ -319,7 +319,7 @@ Tests (TDD: each new test file was run before its implementation; Task 18's unit
 `agentos.mcp.transport_sdk`, Task 19's on the missing `commands` package, Task 20's on the unimplemented subcommands,
 Task 21's plugin unit test on the missing `commands.plugin`):
 
-- Task 18: `tests/unit/mcp/test_cli_mcp_servers.py` (5); `tests/integration/cli_code/test_headless.py` and
+- Task 18: `tests/unit/mcp/test_cli_mcp_servers.py` (6); `tests/integration/cli_code/test_headless.py` and
   `test_sdk_conformance.py` gained one live test each (`--mcp-config` with the echo server; an SDK host's
   `create_sdk_mcp_server` relayed through `mcp_message`). Both pass.
 - Task 19: `tests/unit/cli_code/test_mcp_subcommands.py` (9 passed).
