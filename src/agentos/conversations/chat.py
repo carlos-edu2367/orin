@@ -1023,7 +1023,8 @@ class PostgresChatStore:
                 "project_id": row["project_id"], "source_conversation_id": conversation_id}
 
     def rename(self, conversation_id: str, user_id: str, title: str) -> dict[str, object]:
-        clean = " ".join(str(title or "").split())[:160]
+        # W7: control and format characters (escapes, bidi overrides) never reach a title.
+        clean = " ".join("".join(char for char in str(title or "") if char.isprintable() or char.isspace()).split())[:160]
         if not clean:
             raise ValueError("title must be non-blank")
         with self._engine.begin() as c:
@@ -2320,7 +2321,10 @@ class PostgresChatStore:
             if str(current) in ("completed", "failed", "cancelled", "waiting_user"):
                 return
             c.execute(update(conversation_dispatches).where(conversation_dispatches.c.turn_id == turn["turn_id"]).values(state=state, last_error=code, updated_at=now))
-            c.execute(update(conversation_turns).where(conversation_turns.c.turn_id == turn["turn_id"]).values(state=state, finished_at=now, updated_at=now))
+            # W7 (W6-R14): a finished turn's CLI options (which may hold --mcp-config headers or --settings env) are
+            # cleared; a turn waiting for the person keeps them, it runs again.
+            cleared = {"cli_options": None} if state in ("completed", "failed", "cancelled") else {}
+            c.execute(update(conversation_turns).where(conversation_turns.c.turn_id == turn["turn_id"]).values(state=state, finished_at=now, updated_at=now, **cleared))
             c.execute(update(conversation_messages).where(conversation_messages.c.message_id == turn["assistant_message_id"]).values(status=state, retryable=retryable, updated_at=now))
             remaining = c.execute(
                 select(conversation_turns.c.state).where(

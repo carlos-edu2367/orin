@@ -7,6 +7,7 @@ next turn once, which fires the ``DirectoryAdded`` hook for it.
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -83,14 +84,20 @@ class ConversationDirectoryStore:
             ))
         return bool(result.rowcount)
 
-    def take_unannounced(self, user_id: str, conversation_id: str) -> list[str]:
-        """Folders added since the last turn started, marked as announced (each is returned once)."""
+    def take_unannounced(self, user_id: str, conversation_id: str, usable: Callable[[str], bool] | None = None) -> list[str]:
+        """Folders added since the last turn started, marked as announced (each is returned once).
+
+        With ``usable`` (W7, W4), only the folders the turn can use are taken; the others stay unannounced, so they are
+        announced the first time a turn can use them instead of never.
+        """
         now = datetime.now(UTC)
         with self._engine.begin() as connection:
             rows = connection.execute(select(conversation_directories.c.id, conversation_directories.c.path).where(
                 conversation_directories.c.conversation_id == conversation_id, conversation_directories.c.user_id == user_id,
                 conversation_directories.c.announced_at.is_(None),
             ).order_by(conversation_directories.c.id)).all()
+            if usable is not None:
+                rows = [row for row in rows if usable(str(row.path))]
             if rows:
                 connection.execute(update(conversation_directories).where(
                     conversation_directories.c.id.in_([row.id for row in rows]),
