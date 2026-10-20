@@ -627,6 +627,22 @@ export function parseConversationActivityEvent(value: unknown, cursor: string): 
   if (typeof payload.iteration === 'number' && Number.isFinite(payload.iteration) && payload.iteration >= 0) {
     extraPayload.iteration = payload.iteration
   }
+  if (type === 'plugin.hook_executed') {
+    // W7 detailed transcript: what a hook was and how it ended (the server has already redacted these).
+    const hookEvent = optionalText(payload.hook_event, 64)
+    const source = optionalText(payload.source, 32)
+    const hookType = optionalText(payload.type, 16)
+    const reason = optionalText(payload.reason, 300)
+    if (hookEvent) extraPayload.hook_event = hookEvent
+    if (source) extraPayload.source = source
+    if (hookType) extraPayload.hook_type = hookType
+    if (reason) extraPayload.reason = reason
+    if (typeof payload.exit_code === 'number' && Number.isInteger(payload.exit_code)) extraPayload.exit_code = payload.exit_code
+    if (typeof payload.blocked === 'boolean') extraPayload.blocked = payload.blocked
+    if (typeof payload.duration_ms === 'number' && Number.isFinite(payload.duration_ms) && payload.duration_ms >= 0) {
+      extraPayload.duration_ms = Math.round(payload.duration_ms)
+    }
+  }
   if (Object.keys(extraPayload).length > 0) {
     event.payload = {
       ...(event.payload ?? {}),

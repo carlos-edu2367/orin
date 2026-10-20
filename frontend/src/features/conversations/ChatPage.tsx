@@ -49,6 +49,11 @@ import { MarkdownMessage } from './MarkdownMessage'
 import { MessageCommandChip } from './MessageCommandChip'
 import { MessageAttachments } from './MessageAttachments'
 import { PushNotificationToast, isFreshNotice, type PushNotice } from './PushNotificationToast'
+import { StatusLineBar } from './StatusLineBar'
+import { TasksPanel } from './TasksPanel'
+import { TranscriptView } from './TranscriptView'
+import { useKeybindingHandlers } from '../keybindings/engine'
+import { notifySystem, windowIsAway } from '../notifications/systemNotify'
 import { TurnTimeline } from './TurnTimeline'
 import { WorkspaceFilePreview, type WorkspaceFileReference } from './WorkspaceFileCard'
 import { activityReducer, createActivityState } from './activityReducer'
@@ -162,6 +167,10 @@ export function ChatPage() {
   const [queue, setQueue] = useState<QueuedInput[]>([])
   const [queueBusy, setQueueBusy] = useState(false)
   const [rewindState, setRewindState] = useState<{ history: FileHistoryItem[]; busy: boolean; error: string | null } | null>(null)
+  // W7 Batch D2: the background tasks panel and the detailed transcript (ctrl+o).
+  const [tasksOpen, setTasksOpen] = useState(false)
+  const [transcriptOpen, setTranscriptOpen] = useState(false)
+  useKeybindingHandlers('Global', { 'app:toggleTranscript': () => setTranscriptOpen((open) => !open) })
   const [preferencesOpen, setPreferencesOpen] = useState(false)
   const [visionSetting, setVisionSetting] = useState<VisionModelSetting | null>(null)
   const [chatProvider, setChatProvider] = useState<ProviderName | null>(null)
@@ -195,6 +204,9 @@ export function ChatPage() {
     if (conversation?.mode === 'chat') return 'chat'
     return conversation?.turns.some((turn) => turn.code_mode === 'code') ? 'code' : 'chat'
   }, [conversation?.mode, conversation?.turns])
+  // The event stream reads the mode through a ref, so a mode change does not reconnect it.
+  const conversationModeRef = useRef(conversationMode)
+  useEffect(() => { conversationModeRef.current = conversationMode }, [conversationMode])
 
   const showOverview = location.pathname.endsWith('/overview')
   const conversationPath = projectId === undefined
@@ -307,9 +319,12 @@ export function ChatPage() {
               }
             }
             dispatch({ type: 'event', event })
-            if (codeSystemNotifications && document.visibilityState !== 'visible' && window.orinDesktop?.notifyCodeMode) {
+            if (codeSystemNotifications && windowIsAway() && !event.parentAgentId) {
+              // W7: Code mode's own moments, a chat turn that finished, and a turn waiting for the person.
               const notification = codeModeNotification(event.type)
-              if (notification) void window.orinDesktop.notifyCodeMode(notification)
+                ?? (event.type === 'turn.completed' && conversationModeRef.current !== 'code' ? { title: 'Orin respondeu', body: 'A resposta está pronta.' } : null)
+                ?? (event.type === 'turn.waiting_user' ? { title: 'O Orin está esperando você', body: 'Há uma pergunta para você responder na conversa.' } : null)
+              if (notification) notifySystem(notification)
             }
             // PushNotification: a system notification while the window is hidden, otherwise a toast. Only a
             // fresh event pops up, once; the timeline keeps the record either way.
@@ -317,9 +332,7 @@ export function ChatPage() {
               && !shownNoticesRef.current.has(event.eventId)) {
               shownNoticesRef.current.add(event.eventId)
               const body = event.notificationMessage
-              if (codeSystemNotifications && document.visibilityState !== 'visible' && window.orinDesktop?.notifyCodeMode) {
-                void window.orinDesktop.notifyCodeMode({ title: 'Orin', body })
-              } else {
+              if (!(codeSystemNotifications && windowIsAway() && notifySystem({ title: 'Orin', body }))) {
                 setPushNotice({ id: event.eventId, message: body })
               }
             }
@@ -952,6 +965,7 @@ export function ChatPage() {
     },
     reload: async () => { await loadSnapshot(false) },
     openRewind: () => { void openRewind() },
+    openTasks: () => setTasksOpen(true),
     rename: async (title) => {
       const result = await renameConversation(client, conversationId, title)
       setConversation((current) => (current ? { ...current, title: result.title } : current))
@@ -1640,6 +1654,8 @@ export function ChatPage() {
     <main className="chat">
       <PushNotificationToast notice={pushNotice} onDismiss={dismissPushNotice} />
       {infoPanel && <CommandInfoDialog panel={infoPanel} commands={chatCommands.offered} onClose={() => setInfoPanel(null)} />}
+      {tasksOpen && <TasksPanel client={client} conversationId={conversationId} onClose={() => setTasksOpen(false)} />}
+      {transcriptOpen && <TranscriptView messages={messages} events={activity.events} onClose={() => setTranscriptOpen(false)} />}
       {rewindState && (
         <RewindPicker
           messages={messages.filter((item) => item.role === 'user' && !item.message_id.startsWith('pending-')).map((item) => ({ messageId: item.message_id, content: item.content }))}
@@ -2291,6 +2307,7 @@ export function ChatPage() {
             activeProjectName: activeConvProjectName,
           }}
         />
+        <StatusLineBar client={client} conversationId={conversationId} refreshKey={`${running ? 'running' : 'idle'}:${conversation?.turns.length ?? 0}`} />
       </footer>}
       {oversizedInput && (
         <div className="input-limit-dialog__backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !sendingOversizedInput) setOversizedInput(null) }}>

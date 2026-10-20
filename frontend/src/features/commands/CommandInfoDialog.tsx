@@ -4,6 +4,7 @@ import { ACTIONS } from '../keybindings/catalog'
 import { useKeybindingHandlers, useKeybindings } from '../keybindings/engine'
 import { displayKeys } from '../keybindings/keys'
 import type { BuiltinCommand } from './builtins'
+import { ContextGrid } from '../conversations/ContextGrid'
 import type { InfoPanel } from './useChatCommands'
 
 const SHORTCUTS = [
@@ -17,7 +18,7 @@ export function CommandInfoDialog({ panel, commands, onClose }: { panel: InfoPan
   const { keymap } = useKeybindings()
   useKeybindingHandlers('Help', { 'help:dismiss': () => onClose() })
   useEffect(() => { closeRef.current?.focus() }, [])
-  const title = panel.kind === 'help' ? 'Comandos e atalhos' : panel.title
+  const title = panel.kind === 'help' ? 'Comandos e atalhos' : panel.kind === 'context' ? 'Uso do contexto' : panel.title
   return (
     <div className="command-info__backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
       <section className="command-info" role="dialog" aria-modal="true" aria-labelledby="command-info-title">
@@ -25,7 +26,11 @@ export function CommandInfoDialog({ panel, commands, onClose }: { panel: InfoPan
           <h2 id="command-info-title">{title}</h2>
           <button ref={closeRef} type="button" className="ghost-button" onClick={onClose}>Fechar</button>
         </header>
-        {panel.kind === 'text' ? (
+        {panel.kind === 'context' ? (
+          <div className="command-info__body" role="region" aria-label={title} tabIndex={0}>
+            <ContextGrid report={panel.report} />
+          </div>
+        ) : panel.kind === 'text' ? (
           <div className="command-info__body" role="region" aria-label={title} tabIndex={0}>
             {panel.lines.map((line, index) => <p key={index}>{line}</p>)}
           </div>

@@ -7,12 +7,13 @@ import type { ApiClient } from '../../api/client'
 import { ApiError } from '../../api/errors'
 import { CODE_PERMISSION_MODES } from '../../api/codeMode'
 import { getConversationOverview } from '../../api/conversations'
-import { addDirectory, compactConversation, getInstance } from '../../api/sessionTools'
+import { addDirectory, compactConversation, getContext, getInstance, type ContextReport } from '../../api/sessionTools'
 import { BUILTIN_COMMANDS, type BuiltinCommand, findBuiltin, isExcludedCommand, parseSlash } from './builtins'
 
 export type InfoPanel =
   | { kind: 'help' }
   | { kind: 'text'; title: string; lines: string[] }
+  | { kind: 'context'; report: ContextReport }
 
 export type ChatCommandDeps = {
   client: ApiClient
@@ -41,6 +42,8 @@ export type ChatCommandDeps = {
   rename?: (title: string) => Promise<void>
   branch?: (title: string) => Promise<void>
   fork?: (prompt: string) => Promise<void>
+  /** W7 surfaces (Batch D2). */
+  openTasks?: () => void
 }
 
 type Handler = (args: string) => Promise<void> | void
@@ -53,6 +56,12 @@ export const INIT_PROMPT = [
 ].join(' ')
 export const REVIEW_PROMPT = 'Revise as mudanças atuais do repositório (git diff, incluindo arquivos novos): aponte bugs, riscos, testes que faltam e melhorias, em ordem de gravidade, com arquivo e linha.'
 export const SECURITY_REVIEW_PROMPT = 'Faça uma revisão de segurança das mudanças atuais do repositório: injeção, autenticação e autorização, segredos expostos, validação de entrada, dependências e dados sensíveis. Liste cada achado com gravidade, arquivo, linha e correção sugerida.'
+export const STATUSLINE_PROMPT = [
+  'Configure a linha de status do Orin (a configuração `statusLine`, no formato { "type": "command", "command": "..." }).',
+  'O comando recebe na entrada padrão um JSON com a sessão (modelo, pasta, custo, contexto) e imprime uma ou mais linhas curtas; cores ANSI são aceitas.',
+  'Use o settings.json do usuário do Orin (~/.orin/settings.json) a menos que eu peça o da pasta (.orin/settings.json).',
+  'Teste o comando com um JSON de exemplo antes de salvar e me mostre o resultado.',
+].join(' ')
 export const SANDBOX_TEXT = [
   'O Orin não isola os comandos numa sandbox do sistema operacional.',
   'No perfil local, os comandos de shell rodam com as permissões da sua conta, limitados pelas regras de permissão e pelo modo de permissão da sessão.',
@@ -96,6 +105,7 @@ export function chatCommandHandlers(deps: ChatCommandDeps): Record<string, Handl
     } : {}),
     ...(deps.branch ? { branch: (args: string) => deps.branch?.(args) } : {}),
     ...(deps.fork ? { fork: (args: string) => deps.fork?.(args) } : {}),
+    ...(deps.openTasks ? { tasks: () => deps.openTasks?.() } : {}),
   }
   return {
     ...surfaces,
@@ -112,6 +122,15 @@ export function chatCommandHandlers(deps: ChatCommandDeps): Record<string, Handl
         ],
       })
     },
+    context: async () => {
+      const report = await getContext(deps.client, deps.conversationId)
+      if (!report.available) {
+        deps.openInfo({ kind: 'text', title: 'Uso do contexto', lines: ['Ainda não há medição do contexto: ela aparece depois da primeira resposta.'] })
+        return
+      }
+      deps.openInfo({ kind: 'context', report })
+    },
+    statusline: (args) => deps.send(args ? `${STATUSLINE_PROMPT}\nO que mostrar: ${args}` : STATUSLINE_PROMPT),
     help: () => deps.openInfo({ kind: 'help' }),
     clear: home,
     exit: home,

@@ -69,9 +69,24 @@ export function slashItems(
       description: skill.description,
     })),
   ]
+  if (!needle) return items.slice(0, 50)
+  // W7: the best match first, as Claude Code does — so Enter on `/context` runs /context, not a command whose
+  // description mentions "contexto". Within a rank the order above (built-ins, folder, plugins, skills) holds.
+  const rank = (item: SlashItem): number => {
+    const token = item.token.toLowerCase()
+    const aliases = item.aliases ?? []
+    if (token === needle || aliases.includes(needle)) return 0
+    if (token.startsWith(needle)) return 1
+    if (aliases.some((alias) => alias.startsWith(needle))) return 2
+    if (token.includes(needle) || aliases.some((alias) => alias.includes(needle))) return 3
+    if (item.description.toLowerCase().includes(needle)) return 4
+    return -1
+  }
   return items
-    .filter((item) => !needle || item.token.toLowerCase().includes(needle) || item.description.toLowerCase().includes(needle)
-      || (item.aliases ?? []).some((alias) => alias.includes(needle)))
+    .map((item, index) => ({ item, index, rank: rank(item) }))
+    .filter((entry) => entry.rank >= 0)
+    .sort((left, right) => left.rank - right.rank || left.index - right.index)
+    .map((entry) => entry.item)
     .slice(0, 50)
 }
 

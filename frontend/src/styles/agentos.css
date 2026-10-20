@@ -4035,3 +4035,106 @@ progress.orin-progress::-moz-progress-bar,
   :root[data-theme="system"] .code-perm-dock__diff-stats .text-emerald-300 { color: #047857; }
   :root[data-theme="system"] .code-perm-dock__diff-stats .text-rose-300 { color: #be123c; }
 }
+
+/* ---------------------------------------------------------------- W7 Batch D2: status line, /context, /tasks, transcript */
+.status-line { max-width: 840px; margin: 6px auto 0; padding: 4px 12px; font: 12px/1.5 var(--mono, monospace); color: var(--muted); overflow-x: auto; }
+.status-line__row { white-space: pre; }
+.ansi-fg-0 { color: #3f3f46; }
+.ansi-fg-1 { color: #f87171; }
+.ansi-fg-2 { color: #4ade80; }
+.ansi-fg-3 { color: #facc15; }
+.ansi-fg-4 { color: #60a5fa; }
+.ansi-fg-5 { color: #e879f9; }
+.ansi-fg-6 { color: #22d3ee; }
+.ansi-fg-7 { color: #e4e4e7; }
+.ansi-fg-8 { color: #71717a; }
+.ansi-fg-9 { color: #fca5a5; }
+.ansi-fg-10 { color: #86efac; }
+.ansi-fg-11 { color: #fde047; }
+.ansi-fg-12 { color: #93c5fd; }
+.ansi-fg-13 { color: #f0abfc; }
+.ansi-fg-14 { color: #67e8f9; }
+.ansi-fg-15 { color: #fafafa; }
+.ansi-bold { font-weight: 700; }
+.ansi-dim { opacity: 0.7; }
+.ansi-italic { font-style: italic; }
+.ansi-underline { text-decoration: underline; }
+[data-theme="light"] .ansi-fg-0 { color: #27272a; }
+[data-theme="light"] .ansi-fg-1 { color: #b91c1c; }
+[data-theme="light"] .ansi-fg-2 { color: #15803d; }
+[data-theme="light"] .ansi-fg-3 { color: #a16207; }
+[data-theme="light"] .ansi-fg-4 { color: #1d4ed8; }
+[data-theme="light"] .ansi-fg-5 { color: #a21caf; }
+[data-theme="light"] .ansi-fg-6 { color: #0e7490; }
+[data-theme="light"] .ansi-fg-7 { color: #52525b; }
+[data-theme="light"] .ansi-fg-8 { color: #52525b; }
+[data-theme="light"] .ansi-fg-9 { color: #dc2626; }
+[data-theme="light"] .ansi-fg-10 { color: #16a34a; }
+[data-theme="light"] .ansi-fg-11 { color: #ca8a04; }
+[data-theme="light"] .ansi-fg-12 { color: #2563eb; }
+[data-theme="light"] .ansi-fg-13 { color: #c026d3; }
+[data-theme="light"] .ansi-fg-14 { color: #0891b2; }
+[data-theme="light"] .ansi-fg-15 { color: #18181b; }
+@media (prefers-color-scheme: light) {
+  :root[data-theme="system"] .ansi-fg-0 { color: #27272a; }
+  :root[data-theme="system"] .ansi-fg-1 { color: #b91c1c; }
+  :root[data-theme="system"] .ansi-fg-2 { color: #15803d; }
+  :root[data-theme="system"] .ansi-fg-3 { color: #a16207; }
+  :root[data-theme="system"] .ansi-fg-4 { color: #1d4ed8; }
+  :root[data-theme="system"] .ansi-fg-5 { color: #a21caf; }
+  :root[data-theme="system"] .ansi-fg-6 { color: #0e7490; }
+  :root[data-theme="system"] .ansi-fg-7 { color: #52525b; }
+  :root[data-theme="system"] .ansi-fg-8 { color: #52525b; }
+  :root[data-theme="system"] .ansi-fg-9 { color: #dc2626; }
+  :root[data-theme="system"] .ansi-fg-10 { color: #16a34a; }
+  :root[data-theme="system"] .ansi-fg-11 { color: #ca8a04; }
+  :root[data-theme="system"] .ansi-fg-12 { color: #2563eb; }
+  :root[data-theme="system"] .ansi-fg-13 { color: #c026d3; }
+  :root[data-theme="system"] .ansi-fg-14 { color: #0891b2; }
+  :root[data-theme="system"] .ansi-fg-15 { color: #18181b; }
+}
+
+.context-grid { display: grid; gap: 12px; }
+.context-grid__summary { margin: 0; font-weight: 600; }
+.context-grid__cells { display: grid; grid-template-columns: repeat(20, 1fr); gap: 3px; max-width: 420px; }
+.context-grid__cell { aspect-ratio: 1; border-radius: 3px; }
+.context-grid__cell--system_prompt { background: #8b5cf6; }
+.context-grid__cell--memory { background: #ec4899; }
+.context-grid__cell--tools { background: #3b82f6; }
+.context-grid__cell--mcp_tools { background: #06b6d4; }
+.context-grid__cell--skills { background: #f59e0b; }
+.context-grid__cell--messages { background: #10b981; }
+.context-grid__cell--free { background: transparent; box-shadow: inset 0 0 0 1px var(--line-strong, var(--line)); }
+.context-grid__legend { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.context-grid__legend li { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px; }
+.context-grid__swatch { width: 12px; height: 12px; border-radius: 3px; flex: none; }
+.context-grid__name { font-weight: 600; }
+.context-grid__tokens { color: var(--muted); }
+
+.tasks-panel__list { list-style: none; margin: 0 0 12px; padding: 0; display: grid; gap: 8px; }
+.tasks-panel__item { border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; display: grid; gap: 4px; }
+.tasks-panel__row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.tasks-panel__command { font: 12.5px/1.4 var(--mono, monospace); overflow-wrap: anywhere; flex: 1 1 200px; }
+.tasks-panel__state { font-size: 12px; color: var(--muted); }
+.tasks-panel__description, .tasks-panel__note { margin: 0; font-size: 12.5px; color: var(--muted); }
+.tasks-panel__error { margin: 0 0 8px; color: var(--danger, #e11d48); font-size: 13px; }
+.tasks-panel__url { font-size: 12.5px; color: var(--signal); overflow-wrap: anywhere; }
+.tasks-panel__log summary { cursor: pointer; font-size: 12.5px; color: var(--muted); }
+.tasks-panel__log pre { margin: 6px 0 0; max-height: 200px; overflow: auto; padding: 8px; border-radius: 8px; background: color-mix(in srgb, var(--text) 6%, transparent); font: 11.5px/1.45 var(--mono, monospace); white-space: pre-wrap; overflow-wrap: anywhere; }
+
+.transcript-view { width: min(960px, calc(100vw - 32px)); max-height: calc(100vh - 48px); }
+.transcript-view__actions { display: flex; gap: 8px; }
+.transcript-view__body { overflow: auto; }
+.transcript-view__list { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.transcript-view__entry { border-left: 3px solid var(--line); padding: 2px 0 2px 10px; }
+.transcript-view__entry--user { border-left-color: var(--signal); }
+.transcript-view__entry--assistant { border-left-color: var(--text); }
+.transcript-view__entry--thinking { border-left-color: #8b5cf6; }
+.transcript-view__entry--tool { border-left-color: #3b82f6; }
+.transcript-view__entry--hook { border-left-color: #f59e0b; }
+.transcript-view__entry--agent { border-left-color: #10b981; }
+.transcript-view__label { margin: 0 0 2px; font-size: 12px; font-weight: 700; }
+.transcript-view__meta { font-weight: 400; color: var(--muted); }
+.transcript-view__text { margin: 0; font: 12.5px/1.5 var(--mono, monospace); white-space: pre-wrap; overflow-wrap: anywhere; }
+.transcript-view__entry--thinking .transcript-view__text { font-style: italic; color: var(--muted); }
+.transcript-view__empty { color: var(--muted); }
