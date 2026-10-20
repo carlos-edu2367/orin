@@ -894,7 +894,7 @@ class PostgresChatStore:
                         conversation_turns.c.conversation_id == conversation_id,
                         conversation_turns.c.user_id == user_id,
                         conversation_turns.c.state == "waiting_user",
-                    ).values(state="completed", finished_at=now, updated_at=now))
+                    ).values(state="completed", finished_at=now, updated_at=now, cli_options=None))  # W7-R8: as finish() does
                     c.execute(update(conversation_messages).where(
                         conversation_messages.c.message_id.in_(waiting)
                     ).values(status="completed", updated_at=now))
