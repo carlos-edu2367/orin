@@ -65,6 +65,7 @@ CMD_SHIM_FORBIDDEN_CHARACTERS = frozenset("><^%")
 CMD_OPERATOR_CHARACTERS = CMD_SHIM_FORBIDDEN_CHARACTERS | frozenset("&|\n\r")
 DEFAULT_TIMEOUT_SECONDS = 45.0
 MAX_LINE_BYTES = 4_000_000
+CREATE_SUSPENDED = 0x00000004  # Windows process creation flag (W7, W6-R8)
 # Lines that are not JSON (a server printing a banner on stdout) are skipped, up to this many per call.
 MAX_SKIPPED_LINES = 1000
 # W5: closing a server closes its input first and gives it this long to exit on its own before its tree is killed.
@@ -140,7 +141,9 @@ class StdioTransport:
             if value:
                 environment[name] = value
         environment.update(self._env)
-        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+        # W7 (W6-R8): on Windows the server starts suspended, joins its Job Object, and only then runs, so no child it
+        # starts can escape the Job (before, it ran first and was assigned after Popen returned).
+        creationflags = (getattr(subprocess, "CREATE_NO_WINDOW", 0) | CREATE_SUSPENDED) if os.name == "nt" else 0
         try:
             # W5-D2: on POSIX the server leads its own process group, so its children can be ended with it.
             self._process = subprocess.Popen(
@@ -151,13 +154,33 @@ class StdioTransport:
         except OSError as error:
             raise StdioTransportError(f"the MCP server process could not start: {error}") from error
         if os.name == "nt":
-            try:
-                self._job = _WindowsJob()
-                self._job.assign(self._process.pid)
-            except OSError:
-                self._job = None
+            self._contain(self._process)
         self._reader_thread = threading.Thread(target=self._read_loop, args=(self._process,), daemon=True)
         self._reader_thread.start()
+
+    def _contain(self, process: subprocess.Popen[bytes]) -> None:
+        """Put the suspended server in its Job, then let it run; a server that cannot be contained never runs."""
+        reason = None
+        try:
+            self._job = _WindowsJob()
+            if not self._job.assign(process.pid):
+                reason = "it could not join its Job Object"
+        except OSError:
+            self._job, reason = None, "its Job Object could not be created"
+        if reason is None and not _resume(process):
+            reason = "it could not be resumed"
+        if reason is None:
+            return
+        try:
+            process.kill()  # still suspended: it has run no code
+            process.wait(timeout=5)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        if self._job is not None:
+            self._job.close()
+            self._job = None
+        self._process = None
+        raise StdioTransportError(f"the MCP server process was not started: {reason}")
 
     def _read_loop(self, process: subprocess.Popen[bytes]) -> None:
         assert process.stdout is not None
@@ -292,6 +315,19 @@ class StdioTransport:
         except subprocess.TimeoutExpired:
             _terminate_process_tree(process)
         self._end_children(process, tree)
+
+
+def _resume(process: subprocess.Popen[bytes]) -> bool:
+    """Resume a process started with CREATE_SUSPENDED (Popen keeps the process handle, not the thread's)."""
+    import ctypes
+
+    handle = getattr(process, "_handle", None)
+    if not handle:
+        return False
+    ntdll = ctypes.WinDLL("ntdll")
+    ntdll.NtResumeProcess.restype = ctypes.c_long
+    ntdll.NtResumeProcess.argtypes = [ctypes.c_void_p]
+    return ntdll.NtResumeProcess(ctypes.c_void_p(int(handle))) == 0
 
 
 __all__ = ["ALLOWED_COMMANDS", "StdioTransport", "StdioTransportError", "StdioTransportRefused"]

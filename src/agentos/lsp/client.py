@@ -272,9 +272,15 @@ class LspClient:
         try:
             self._request("shutdown", {}, timeout=1.0)
             self._notify("exit", {})
-        except LspError:
-            pass
+        except (LspError, OSError, ValueError):
+            pass  # W7 (W6-R17): a server that already died must not make close() raise
         self._process = None
+        try:
+            # W7 (W6-R17): end of input lets a server that waits for it exit on its own instead of being killed.
+            if process.stdin is not None:
+                process.stdin.close()
+        except (OSError, ValueError):
+            pass
         try:
             process.wait(timeout=1.0)
         except subprocess.TimeoutExpired:

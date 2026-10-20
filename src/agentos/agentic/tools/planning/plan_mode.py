@@ -108,9 +108,12 @@ class PlanModeTools:
         clean_path = str(plan_path or "").strip().replace("\\", "/")
         clean_summary = str(summary or "").strip()
         plan_content = ""
+        # W7 (W4): the output's filePath is only ever a path the workspace resolved, never a raw join.
+        resolved_path = None
         if clean_path:
             try:
                 target = self.workspace.resolve(clean_path)
+                resolved_path = target
                 if target.exists() and target.is_file():
                     plan_content = target.read_text(encoding="utf-8", errors="replace")
             except Exception:
@@ -119,6 +122,7 @@ class PlanModeTools:
             plans = sorted((self.workspace.root / ".orin" / "plans").glob("*.md"), key=lambda item: item.stat().st_mtime)
             if plans:
                 latest = plans[-1]
+                resolved_path = latest
                 clean_path = latest.relative_to(self.workspace.root).as_posix()
                 try:
                     plan_content = latest.read_text(encoding="utf-8", errors="replace")
@@ -175,7 +179,7 @@ class PlanModeTools:
             payload,
             data={"tool_output": {
                 "plan": (plan_content or clean_summary or None), "isAgent": False,
-                **({"filePath": str(self.workspace.root / clean_path)} if clean_path else {}),
+                **({"filePath": str(resolved_path)} if resolved_path is not None else {}),
             }},
         )
 

@@ -174,10 +174,12 @@ class Translator:
             }})
             return out
         if kind == "plugin.hook_executed" and self.hook_events:
+            # W7 (W6-R16): the hook records carry `label`/`hook_id` and `reason`; a plugin hook's output is its summary.
+            output = payload.get("output") or payload.get("reason") or (event.get("summary") if payload.get("hook_id") else "")
             out.append({**self._base("system"), "subtype": "hook_response",
-                        "hook_name": str(payload.get("hook_name") or payload.get("name") or ""),
+                        "hook_name": str(payload.get("hook_name") or payload.get("name") or payload.get("label") or payload.get("hook_id") or ""),
                         "hook_event": str(payload.get("hook_event") or payload.get("event") or ""),
-                        "output": str(payload.get("output") or ""), "exit_code": payload.get("exit_code")})
+                        "output": str(output or ""), "exit_code": payload.get("exit_code")})
             return out
         if not self.is_main_agent(event):
             return out

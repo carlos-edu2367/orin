@@ -5,12 +5,13 @@ worker remain the only code that executes a model turn.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from sqlalchemy import insert, select, update
+from sqlalchemy import delete, insert, select, update
 from sqlalchemy.engine import Engine
 
 from agentos.conversations.chat import PostgresChatStore
@@ -25,6 +26,12 @@ RULES = frozenset({"once", "hourly", "daily", "weekly", "cron"})
 # W4-R7: a run bound to a conversation with one of these turns waits. A queued turn holds no pending prompt and
 # the run queues behind it as before, so "queued" does not defer.
 BUSY_TURN_STATES = ("waiting_user", "running")
+# W7 (W4): the schedules a tool made (wakeups, monitor wakes) are deleted a week after they finish; the person's are kept.
+TOOL_SCHEDULE_SOURCES = frozenset({"wakeup", "monitor"})
+FINAL_SCHEDULE_STATES = ("EXPIRED", "CANCELLED")
+TOOL_SCHEDULE_RETENTION = timedelta(days=7)
+TOOL_SCHEDULE_PRUNE_EVERY = timedelta(hours=1)
+logger = logging.getLogger(__name__)
 
 
 class _DeferredRun(Exception):
@@ -79,6 +86,43 @@ class ScheduledChatService:
         self._engine = engine
         self._chat = PostgresChatStore(engine)
         self._clock = clock
+        self._pruned_at: datetime | None = None
+
+    def prune_finished(self, *, now: datetime | None = None) -> int:
+        """Delete the finished schedules a tool made (wakeups, monitor wakes) once they are a week old (W7, W4).
+
+        Only ``wakeup`` and ``monitor`` schedules in a final state, unchanged for ``TOOL_SCHEDULE_RETENTION``, with no
+        run still in flight; the person's own schedules are never deleted here. Returns how many were deleted.
+        """
+        cutoff = _utc(now or self._clock()) - TOOL_SCHEDULE_RETENTION
+        with self._engine.begin() as connection:
+            rows = connection.execute(select(schedules.c.schedule_id, schedules.c.rule, schedules.c.updated_at).where(
+                schedules.c.state.in_(FINAL_SCHEDULE_STATES),
+            )).all()
+            old = [str(row.schedule_id) for row in rows
+                   if str(dict(row.rule or {}).get("source") or "user") in TOOL_SCHEDULE_SOURCES and _stored_utc(row.updated_at) < cutoff]
+            if not old:
+                return 0
+            busy = {str(item) for item in connection.execute(select(schedule_occurrences.c.schedule_id).where(
+                schedule_occurrences.c.schedule_id.in_(old), schedule_occurrences.c.state.in_(("CLAIMED", "MATERIALIZED")),
+            )).scalars()}
+            prune = [schedule_id for schedule_id in old if schedule_id not in busy]
+            if prune:
+                # Everything that points at the schedule goes with it; a past turn keeps its schedule id (a plain column).
+                connection.execute(delete(schedule_occurrences).where(schedule_occurrences.c.schedule_id.in_(prune)))
+                connection.execute(delete(scheduled_chat_tasks).where(scheduled_chat_tasks.c.schedule_id.in_(prune)))
+                connection.execute(delete(schedules).where(schedules.c.schedule_id.in_(prune)))
+        return len(prune)
+
+    def _maybe_prune(self) -> None:
+        now = _utc(self._clock())
+        if self._pruned_at is not None and now - self._pruned_at < TOOL_SCHEDULE_PRUNE_EVERY:
+            return
+        self._pruned_at = now
+        try:
+            self.prune_finished(now=now)
+        except Exception:  # noqa: BLE001 - housekeeping never stops a run
+            logger.exception("finished tool schedules could not be pruned")
 
     def heartbeat(self, component: str) -> None:
         """Record that the poller has a usable durable-store connection."""
@@ -358,6 +402,7 @@ class ScheduledChatService:
                 # The claimed occurrence remains durable and will be recovered
                 # after its lease. Do not create a second turn here.
                 continue
+        self._maybe_prune()
         return tuple(completed)
 
     def _next_after_rule(self, rule: dict[str, object], timezone: str, logical_at: datetime, now: datetime) -> datetime | None:
