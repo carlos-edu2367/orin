@@ -7896,3 +7896,175 @@ feat(w6): agents from --agents and from the SDK host
 - [ ] **Step 1:** `uv run pytest -q tests/unit` and `uv run pytest -q tests/integration` (timeout 900000 ms each): green; report the counts.
 - [ ] **Step 2:** `wc -l src/agentos/agentic/agent_tools.py` is still 1699; `git status` shows no file under `data/`.
 - [ ] **Step 3:** Append `## Batch C — The control protocol (Tasks 12–16)` to the ledger (commits, tests, suites, deviations from this plan, the expectation changes, anything incomplete). Commit `docs(w6): Batch C ledger`.
+
+---
+
+## Batch D — Conformance: the official SDK drives `orin code` (moved up from F)
+
+With Batches A–C the protocol is complete enough for the W6 acceptance criterion (spec §2, §9.4), so the conformance
+test comes now instead of last: regressions in later batches then show up at once. It runs the official
+`claude-agent-sdk==0.2.159` (already a dev dependency since Batch B, built from its sdist, so it carries no bundled
+Claude Code binary), **unmodified**, with `cli_path` pointing at the `orin-code` executable, offline against the live
+runtime of Task 5 on the fake Ollama: a simple query, streaming (partial messages), `can_use_tool` (allow and deny), the
+SDK's own hooks, interrupt and resume.
+
+### Deviation decided while planning Batch D
+
+31. **The conformance batch moves from F to D.** The remaining batches become E (MCP from the CLI, subcommands, the interface) and F (inherited items, W6 close).
+
+### Task 17: The SDK conformance test
+
+**Files:**
+- Create: `tests/integration/cli_code/test_sdk_conformance.py` (it must not exist yet)
+
+**Interfaces:**
+- Consumes: everything from Batches A–C; `claude_agent_sdk` (`query`, `ClaudeSDKClient`, `ClaudeAgentOptions`, `HookMatcher`, `PermissionResultAllow`, `PermissionResultDeny`, the message types).
+
+- [ ] **Step 1: Write the test.** Create `tests/integration/cli_code/test_sdk_conformance.py`:
+
+```python
+"""W6 acceptance (spec §2, §9.4): the official claude-agent-sdk drives `orin code`, unmodified, through `cli_path`.
+
+Scenarios: a simple query, streaming (partial messages), can_use_tool (allow and deny), the SDK's own hooks,
+interrupt, and resume. Offline: the live runtime of Task 5 on the fake Ollama.
+"""
+from __future__ import annotations
+
+import asyncio
+import os
+import sys
+from pathlib import Path
+from typing import Any
+
+from claude_agent_sdk import (
+    AssistantMessage, ClaudeAgentOptions, ClaudeSDKClient, HookMatcher, PermissionResultAllow, PermissionResultDeny,
+    ResultMessage, TextBlock, ToolUseBlock, query,
+)
+from claude_agent_sdk.types import StreamEvent
+
+from .live_runtime import LiveRuntime
+
+MODEL = "ollama/fake-coder:latest"
+
+
+def _options(runtime: LiveRuntime, cwd: Path, **values: Any) -> ClaudeAgentOptions:
+    executable = Path(sys.executable).parent / ("orin-code.exe" if os.name == "nt" else "orin-code")
+    return ClaudeAgentOptions(cli_path=str(executable), cwd=str(cwd), env=dict(runtime.env), model=MODEL, **values)
+
+
+async def _collect(prompt: Any, options: ClaudeAgentOptions) -> list[Any]:
+    return [message async for message in query(prompt=prompt, options=options)]
+
+
+async def _stream(text: str):
+    yield {"type": "user", "message": {"role": "user", "content": text}, "parent_tool_use_id": None, "session_id": ""}
+
+
+def _result(messages: list[Any]) -> ResultMessage:
+    results = [message for message in messages if isinstance(message, ResultMessage)]
+    assert len(results) == 1, messages
+    return results[0]
+
+
+def test_a_simple_query(orin_runtime: LiveRuntime) -> None:
+    messages = asyncio.run(_collect("say hello", _options(orin_runtime, orin_runtime.workspace("sdk-simple"))))
+    texts = [block.text for message in messages if isinstance(message, AssistantMessage) for block in message.content if isinstance(block, TextBlock)]
+    assert texts == ["Hello from fake."]
+    result = _result(messages)
+    assert result.subtype == "success" and result.result == "Hello from fake." and not result.is_error
+
+
+def test_streaming_partial_messages(orin_runtime: LiveRuntime) -> None:
+    options = _options(orin_runtime, orin_runtime.workspace("sdk-stream"), include_partial_messages=True)
+    messages = asyncio.run(_collect("say hello", options))
+    kinds = [message.event["type"] for message in messages if isinstance(message, StreamEvent)]
+    assert kinds[0] == "message_start" and kinds[-1] == "message_stop" and kinds.count("content_block_delta") == 2
+    assert _result(messages).subtype == "success"
+
+
+def test_can_use_tool_allows_and_denies(orin_runtime: LiveRuntime) -> None:
+    asked: list[tuple[str, dict]] = []
+
+    async def allow(tool_name, tool_input, context):
+        asked.append((tool_name, tool_input))
+        return PermissionResultAllow()
+
+    async def deny(tool_name, tool_input, context):
+        return PermissionResultDeny(message="not here")
+
+    allowed = orin_runtime.workspace("sdk-cut-allow")
+    messages = asyncio.run(_collect(_stream("[[write:sdk.txt]]"), _options(orin_runtime, allowed, can_use_tool=allow)))
+    assert (allowed / "sdk.txt").read_text(encoding="utf-8") == "hi\n"
+    assert asked == [("Write", {"file_path": "sdk.txt", "content": "hi\n"})]
+    assert _result(messages).subtype == "success"
+    denied = orin_runtime.workspace("sdk-cut-deny")
+    messages = asyncio.run(_collect(_stream("[[write:sdk.txt]]"), _options(orin_runtime, denied, can_use_tool=deny)))
+    assert not (denied / "sdk.txt").exists()
+    assert _result(messages).permission_denials
+
+
+def test_the_sdks_hooks(orin_runtime: LiveRuntime) -> None:
+    calls: list[dict] = []
+
+    async def no_writes(input_data, tool_use_id, context):
+        calls.append({"input": input_data, "tool_use_id": tool_use_id})
+        return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                       "permissionDecisionReason": "the SDK says no"}}
+
+    workspace = orin_runtime.workspace("sdk-hooks")
+    options = _options(orin_runtime, workspace, permission_mode="acceptEdits",
+                       hooks={"PreToolUse": [HookMatcher(matcher="Write", hooks=[no_writes])]})
+    messages = asyncio.run(_collect(_stream("[[write:hooked.txt]]"), options))
+    assert not (workspace / "hooked.txt").exists()
+    assert len(calls) == 1 and calls[0]["input"]["tool_name"] == "Write" and calls[0]["tool_use_id"].startswith("toolu_")
+    uses = [block for message in messages if isinstance(message, AssistantMessage) for block in message.content if isinstance(block, ToolUseBlock)]
+    assert uses and uses[0].id == calls[0]["tool_use_id"]
+
+
+def test_interrupt(orin_runtime: LiveRuntime) -> None:
+    async def scenario() -> tuple[ResultMessage, int]:
+        options = _options(orin_runtime, orin_runtime.workspace("sdk-interrupt"), include_partial_messages=True)
+        deltas = 0
+        async with ClaudeSDKClient(options=options) as client:
+            await client.query("[[slow]]")
+            async for message in client.receive_response():
+                if isinstance(message, StreamEvent) and message.event["type"] == "content_block_delta":
+                    deltas += 1
+                    if deltas == 2:
+                        await client.interrupt()
+                if isinstance(message, ResultMessage):
+                    return message, deltas
+        raise AssertionError("no result")
+
+    result, deltas = asyncio.run(scenario())
+    assert result.is_error and result.subtype == "error_during_execution" and deltas < 40
+
+
+def test_resume(orin_runtime: LiveRuntime) -> None:
+    workspace = orin_runtime.workspace("sdk-resume")
+    first = _result(asyncio.run(_collect("say hello", _options(orin_runtime, workspace))))
+    second = _result(asyncio.run(_collect("again", _options(orin_runtime, workspace, resume=first.session_id))))
+    assert second.session_id == first.session_id and second.subtype == "success"
+    with orin_runtime.api() as api:
+        listed = api.get("/v1/conversations").json()
+    assert sum(1 for item in listed.get("items", listed) if isinstance(item, dict) and item.get("title") == "say hello") >= 1
+```
+
+- [ ] **Step 2: Run it.**
+
+Run: `uv run pytest -q tests/integration/cli_code/test_sdk_conformance.py` (timeout 900000 ms)
+Expected: 6 passed (about a minute: the live runtime starts once). This is a test of behaviour that already exists, so there is no RED step; to see that it can fail, temporarily point `cli_path` at a missing file in your head, not in the file — do not edit the test.
+
+- [ ] **Step 3: Commit.**
+
+```
+test(w6): the official claude-agent-sdk drives orin code (W6 acceptance)
+
+query, streaming, can_use_tool, the SDK's hooks, interrupt and resume, with
+the SDK unmodified and the fake Ollama offline.
+```
+
+### Batch D close
+
+- [ ] **Step 1:** `uv run pytest -q tests/integration` (timeout 900000 ms): green; report the counts.
+- [ ] **Step 2:** Append `## Batch D — Conformance (Task 17)` to the ledger (commit, the 6 scenarios and their result, anything incomplete). Commit `docs(w6): Batch D ledger`.
