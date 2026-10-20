@@ -9,6 +9,9 @@ const VIEWS = [
   { name: 'mobile-light', theme: 'light' as const, size: { width: 375, height: 812 } },
 ]
 
+// A running turn animates its pulse and counts its seconds on a timer of its own: mask both so the baselines hold still.
+const still = (page: Page) => ({ mask: [page.locator('.agent-pulse__elapsed'), page.locator('.agent-pulse__stage')] })
+
 async function open(page: Page, view: (typeof VIEWS)[number], extra?: ExtraRoute, override?: Record<string, unknown>) {
   await setTheme(page, view.theme)
   await page.setViewportSize(view.size)
@@ -29,14 +32,15 @@ for (const view of VIEWS) {
       const input = await open(page, view)
       await input.fill('!git status')
       await expect(page.getByRole('status').filter({ hasText: 'Modo shell' })).toBeVisible()
-      await expect(page).toHaveScreenshot(`w7-shell-${view.name}.png`)
+      await expect(page).toHaveScreenshot(`w7-shell-${view.name}.png`, still(page))
     })
 
     test('a queued message while the turn runs (active)', async ({ page }) => {
       const queued = [{ queue_id: 'q1', content: 'Depois rode os testes de cobrança.', created_at: '2026-10-20T12:01:05.000Z' }]
       await open(page, view, ({ method, path }) => (method === 'GET' && path.endsWith('/queue') ? { body: { items: queued } } : undefined), runningOverride())
       await expect(page.getByRole('region', { name: 'Mensagens na fila' })).toContainText('Na fila (1)')
-      await expect(page).toHaveScreenshot(`w7-queue-${view.name}.png`)
+      await expect(page.locator('.agent-pulse__elapsed')).toBeVisible() // the count shows after a second: capture it masked
+      await expect(page).toHaveScreenshot(`w7-queue-${view.name}.png`, still(page))
     })
 
     test('the permission card for an edit (active)', async ({ page }) => {
@@ -44,7 +48,7 @@ for (const view of VIEWS) {
       await expect(page.getByTestId('code-perm-allow-always')).toContainText('Sim, e permitir edições nesta sessão')
       // The card fades in with a JS animation, which the screenshot's animation freeze does not stop.
       await expect.poll(() => page.getByTestId('code-permission-dock').evaluate((node) => getComputedStyle(node).opacity)).toBe('1')
-      await expect(page).toHaveScreenshot(`w7-permission-${view.name}.png`)
+      await expect(page).toHaveScreenshot(`w7-permission-${view.name}.png`, still(page))
     })
 
     test('the rewind picker (active) and a blocked code rewind (error)', async ({ page }) => {
@@ -58,10 +62,10 @@ for (const view of VIEWS) {
       await input.press('Enter')
       const picker = page.getByRole('dialog', { name: 'Voltar a uma mensagem' })
       await expect(picker).toContainText('2 arquivos mudaram')
-      await expect(page).toHaveScreenshot(`w7-rewind-${view.name}.png`)
+      await expect(page).toHaveScreenshot(`w7-rewind-${view.name}.png`, still(page))
       await picker.getByRole('button', { name: 'Restaurar o código' }).click()
       await expect(picker.getByRole('alert')).toContainText('nada foi mudado')
-      await expect(page).toHaveScreenshot(`w7-rewind-blocked-${view.name}.png`)
+      await expect(page).toHaveScreenshot(`w7-rewind-blocked-${view.name}.png`, still(page))
     })
 
     test('the rewind picker with no messages (empty)', async ({ page }) => {
@@ -69,7 +73,7 @@ for (const view of VIEWS) {
       await input.fill('/rewind')
       await input.press('Enter')
       await expect(page.getByRole('dialog', { name: 'Voltar a uma mensagem' })).toContainText('Ainda não há mensagens para voltar.')
-      await expect(page).toHaveScreenshot(`w7-rewind-empty-${view.name}.png`)
+      await expect(page).toHaveScreenshot(`w7-rewind-empty-${view.name}.png`, still(page))
     })
   })
 }
