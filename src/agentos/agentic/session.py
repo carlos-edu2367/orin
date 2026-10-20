@@ -1551,22 +1551,37 @@ class TurnSession:
             }
         return _BUILTIN_SUBAGENT_SPECS.get(str(key or "").strip().lower())
 
+    def _definition_effort(self, definition: object, model_id: str) -> str | None:
+        """W5 deviation 9: an agent file's ``effort``, when its model takes a reasoning control (else nothing)."""
+        from .effort import normalize_effort, reasoning_supported
+
+        level = normalize_effort(getattr(definition, "effort", None)) if definition is not None else None
+        if level is None:
+            return None
+        provider = str(self.turn.get("provider") or "")
+        return level if reasoning_supported(provider, str(model_id or ""), self.model_capabilities) else None
+
     def _definition_model(self, spec: Mapping[str, object] | None) -> str | None:
         """The model a definition asks for, when it is one this person allows; otherwise None (the parent's model)."""
         definition = spec.get("definition") if isinstance(spec, Mapping) else None
         if definition is None or not definition.model:
             return None
+        return self._allowed_requested_model(definition.model, f"agent {definition.name}")
+
+    def _allowed_requested_model(self, requested: str | None, who: str) -> str | None:
+        """A model an agent file or a skill asks for (aliases through ``modelAliases``), when this person allows it;
+        otherwise None, and the parent's model runs."""
         from .agent_definitions import resolve_agent_model
         from .loop_settings import operator_value
 
         aliases = operator_value(getattr(self, "effective_settings", None), "modelAliases")
-        wanted = resolve_agent_model(definition.model, aliases if isinstance(aliases, Mapping) else None)
+        wanted = resolve_agent_model(requested, aliases if isinstance(aliases, Mapping) else None)
         if not wanted:
             return None
         resolved = self._resolve_child_model(wanted)
         if resolved and self._child_model_allowed(resolved, allow_current=True):
             return resolved
-        logger.info("agent %s asks for model %s, which is not allowed here; it runs on the parent's model", definition.name, wanted)
+        logger.info("%s asks for model %s, which is not allowed here; it runs on the parent's model", who, wanted)
         return None
 
     def _defined_agents_hint(self) -> str:
@@ -2193,6 +2208,7 @@ class TurnSession:
             phase_controller=None,
             reminders=sub_reminders,
             cancelled=self._child_cancelled(hook_cancel),
+            effort=self._definition_effort(definition, active_model_id),
             **self._subagent_accounting(active_model_id, code_mode=is_code_mode),
         )
         result = runtime.run(str(self.turn["turn_id"]), turn=subagent_turn)
@@ -3111,6 +3127,8 @@ class TurnSession:
         # W5: skills and commands read from disk, for the Skill tool of this toolset (subagents' too).
         toolset._disk_skills = getattr(self, "_disk_skills", None)
         toolset._skill_hooks_sink = self._skill_hooks  # W5: a skill's own hooks
+        # W5 deviation 4: a forked skill's `model`, resolved as an agent file's is.
+        toolset._skill_model_for = lambda requested: self._allowed_requested_model(requested, "a skill")
         toolset._lsp_after_write = self._lsp_after_write  # W5: diagnostics after Write and Edit
         if subagents:
             toolset._stop_subagent = self._stop_background_subagent  # W5: TaskStop stops a background agent

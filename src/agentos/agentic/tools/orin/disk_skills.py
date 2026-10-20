@@ -154,8 +154,13 @@ class DiskSkillTools:
         # Only a model invocation forks: a person's /command is expanded while the turn is being built, before any
         # subagent can run, so the session tells the model to start the subagent instead.
         if skill.context == "fork" and invoked_by == "model" and getattr(self, "_run_subagent", None) is not None:
+            # W5 deviation 4: the skill's `model` when this person allows it (else the parent's). An inline skill's
+            # `model` and any skill's `effort` are not applied: the turn keeps its own model and effort.
+            resolver = getattr(self, "_skill_model_for", None)
+            model = resolver(skill.model) if skill.model and callable(resolver) else None
+            extra = {"model_id": model} if model else {}
             outcome = self.run_subagent(
-                subagent_type=skill.agent or "general-purpose", task=body, description=f"Skill {skill.name}",
+                subagent_type=skill.agent or "general-purpose", task=body, description=f"Skill {skill.name}", **extra,
             )
             if isinstance(outcome, ToolOutcome):
                 outcome.payload = {**(outcome.payload or {}), **payload, "skill_action": "forked"}
