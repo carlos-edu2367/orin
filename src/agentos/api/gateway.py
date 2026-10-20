@@ -2252,6 +2252,21 @@ def create_app(services: ApiServices) -> FastAPI:
         summary = require_port(services.conversation_application).quality_summary(principal.user_id, days=days)  # type: ignore[union-attr]
         return JSONResponse(_jsonable(summary))
 
+    @app.get("/v1/instance")
+    async def get_instance(request: Request) -> JSONResponse:
+        """What `orin code` checks before it drives this Orin (W6): its version, mode and capabilities."""
+        from agentos.configuration.mode import current_mode
+        from agentos.version import __version__
+
+        principal = principal_for(request)
+        services.security.authorize(principal, action="instance.read", resource_id=None, purpose="instance.read")
+        return JSONResponse({
+            "version": __version__,
+            "mode": current_mode().value,
+            "capabilities": services.capabilities.as_dict(),
+            "credential": principal.credential_kind,
+        })
+
     @app.get("/v1/installation/status")
     async def get_installation_status(request: Request) -> JSONResponse:
         principal = principal_for(request)

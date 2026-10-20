@@ -104,7 +104,7 @@ CREATE = {
     ("POST", "/v1/events/streams"), ("POST", "/v1/files/folders"), ("POST", "/v1/files/import"),
 }
 INSTANCE = {
-    ("GET", "/v1/plugins/library"), ("GET", "/v1/mcp/catalog"), ("GET", "/v1/installation/status"),
+    ("GET", "/v1/plugins/library"), ("GET", "/v1/mcp/catalog"), ("GET", "/v1/installation/status"), ("GET", "/v1/instance"),
     ("DELETE", "/v1/installation/versions/{version}"), ("POST", "/v1/installation/update"),
     ("GET", "/v1/installation/update/status"), ("POST", "/v1/installation/update/prepare"),
     ("GET", "/v1/installation/autostart"), ("PUT", "/v1/installation/autostart"),
