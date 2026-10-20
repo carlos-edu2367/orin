@@ -71,8 +71,10 @@ def test_concurrent_processes_lose_no_count(tmp_path: Path) -> None:
 
 def test_only_one_process_claims_a_due_run(tmp_path: Path) -> None:
     # Negative control first: with the lock a no-op the same race lets several claimers through, so this test can fail.
-    unlocked = _race(tmp_path / "unlocked", lock_on=False)
-    assert unlocked.count("claimed") > 1, unlocked
+    # The race is real and so not certain on a busy machine (one CI run saw a single claim): one try in three that lets
+    # two claimers through is enough to show the race exists.
+    tries = [_race(tmp_path / f"unlocked-{attempt}", lock_on=False) for attempt in range(3)]
+    assert any(unlocked.count("claimed") > 1 for unlocked in tries), tries
     # The real run: the lock makes the claim one step, so exactly one claimer runs consolidation.
     answers = _race(tmp_path / "locked", lock_on=True)
     assert answers.count("claimed") == 1, answers
