@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import { parseConversationActivityEvent } from '../../../api/conversations'
 import { UserQuestionCard } from '../UserQuestionCard'
@@ -51,5 +51,30 @@ describe('UserQuestionCard: header, descriptions and previews', () => {
     expect(parsed?.header).toBe('Database')
     expect(parsed?.options[0].description).toBe('Local file, no server')
     expect(parsed?.options[0].preview).toContain('sqlite')
+  })
+
+  it('prevents duplicate onSubmit calls while submission is in flight and trims notes', async () => {
+    let resolveSubmit!: () => void
+    const onSubmit = vi.fn().mockImplementation(
+      () => new Promise<void>((resolve) => { resolveSubmit = resolve }),
+    )
+    render(<UserQuestionCard questions={[QUESTION]} active={true} onSubmit={onSubmit} />)
+
+    fireEvent.click(screen.getByTestId('user-question-note-toggle'))
+    fireEvent.change(screen.getByLabelText('Observação (opcional)'), {
+      target: { value: '  usar bridge local \n\n' },
+    })
+
+    const submitButton = screen.getByRole('button', { name: 'Enviar respostas' })
+    fireEvent.click(submitButton)
+    fireEvent.click(submitButton)
+
+    expect(onSubmit).toHaveBeenCalledTimes(1)
+    expect(onSubmit).toHaveBeenCalledWith([
+      { id: 'q1', selected: [], note: 'usar bridge local' },
+    ])
+
+    resolveSubmit()
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Enviar respostas' })).not.toBeDisabled())
   })
 })

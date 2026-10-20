@@ -1171,5 +1171,100 @@ describe('ChatPage', () => {
       globalThis.ResizeObserver = OrigResizeObserver
     }
   })
+
+  it('does not render a duplicate user answer pinned at the bottom when answering ask_user with trailing whitespace/newlines', async () => {
+    let answered = false
+    let savedMessageContent = ''
+    globalThis.fetch = vi.fn<typeof fetch>().mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : String(input)
+      const method = (init?.method ?? 'GET').toUpperCase()
+      if (url.includes('/events?')) {
+        return new Response('event: heartbeat\ndata: {"cursor":"a.9"}\n\n', { headers: { 'Content-Type': 'text/event-stream' } })
+      }
+      if (url.includes('/messages') && method === 'POST') {
+        const parsed = JSON.parse(String(init?.body ?? '{}')) as { message?: string }
+        // Backend PostgresChatStore.create strips whitespace before persisting
+        savedMessageContent = String(parsed.message ?? '').trim()
+        answered = true
+        return new Response(
+          JSON.stringify({ conversation_id: CONVERSATION_ID, title: 't', turn_id: 'turn-2', message_id: 'msg-3', state: 'running' }),
+          { status: 201, headers: { 'Content-Type': 'application/json' } },
+        )
+      }
+      if (url.endsWith('/v1/projects/sidebar') || url.endsWith('/v1/conversations')) {
+        return new Response(JSON.stringify({ items: [] }), { headers: { 'Content-Type': 'application/json' } })
+      }
+      if (url.includes(`/v1/conversations/${CONVERSATION_ID}`)) {
+        const messages = answered
+          ? [
+              { message_id: 'msg-1', role: 'user', content: 'Inicie a tarefa', status: 'completed', retryable: false, turn_id: 'turn-1' },
+              { message_id: 'msg-2', role: 'assistant', content: 'Preciso confirmar.', status: 'waiting_user', retryable: false, turn_id: 'turn-1' },
+              { message_id: 'msg-3', role: 'user', content: savedMessageContent, status: 'completed', retryable: false, turn_id: 'turn-2' },
+              { message_id: 'msg-4', role: 'assistant', content: 'Prosseguindo com a sua resposta.', status: 'streaming', retryable: false, turn_id: 'turn-2' },
+            ]
+          : [
+              { message_id: 'msg-1', role: 'user', content: 'Inicie a tarefa', status: 'completed', retryable: false, turn_id: 'turn-1' },
+              { message_id: 'msg-2', role: 'assistant', content: 'Preciso confirmar.', status: 'waiting_user', retryable: false, turn_id: 'turn-1' },
+            ]
+        const turns = answered
+          ? [
+              { turn_id: 'turn-1', state: 'waiting_user', created_at: '2026-08-10T20:00:00+00:00', started_at: null, finished_at: null },
+              { turn_id: 'turn-2', state: 'running', created_at: '2026-08-10T20:01:00+00:00', started_at: null, finished_at: null },
+            ]
+          : [
+              { turn_id: 'turn-1', state: 'waiting_user', created_at: '2026-08-10T20:00:00+00:00', started_at: null, finished_at: null },
+            ]
+        return new Response(
+          JSON.stringify({
+            ...snapshotBody({
+              state: answered ? 'running' : 'waiting_user',
+              messages,
+              activities: [
+                activity(1, 'tool.finished', 'Aguardando resposta', {
+                  tool_name: 'ask_user',
+                  tool_kind: 'user_input',
+                  status: 'succeeded',
+                  invocation_id: 'call-questions',
+                  wait_for_user: true,
+                  questions: [
+                    {
+                      id: 'q1',
+                      question: 'Qual modo usar?',
+                      mode: 'single_choice',
+                      options: [
+                        { id: 'opt1', label: 'Modo Local' },
+                        { id: 'opt2', label: 'Modo Cloud' },
+                      ],
+                    },
+                  ],
+                }),
+                activity(2, 'turn.waiting_user', 'Aguardando sua resposta', { state: 'waiting_user' }),
+              ],
+            }),
+            turns,
+          }),
+          { headers: { 'Content-Type': 'application/json' } },
+        )
+      }
+      return new Response('{}', { headers: { 'Content-Type': 'application/json' } })
+    })
+
+    const { container } = renderChat()
+    await screen.findByTestId('user-question-card')
+
+    fireEvent.click(screen.getByLabelText(/Modo Local/))
+    fireEvent.click(screen.getByTestId('user-question-note-toggle'))
+    fireEvent.change(screen.getByLabelText('Observação (opcional)'), {
+      target: { value: 'nota com quebra de linha no final\n' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Enviar respostas' }))
+
+    await screen.findByText('Prosseguindo com a sua resposta.')
+
+    const userBubbles = Array.from(container.querySelectorAll('.bubble--user')).filter((el) =>
+      el.textContent?.includes('Respostas às perguntas do agente:'),
+    )
+    expect(userBubbles).toHaveLength(1)
+  })
 })
 

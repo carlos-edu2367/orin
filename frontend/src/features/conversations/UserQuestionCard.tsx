@@ -21,6 +21,8 @@ export function UserQuestionCard({ questions, active, submitting = false, onSubm
   const [expandedNotes, setExpandedNotes] = useState<Record<string, boolean>>({})
   const [currentIndex, setCurrentIndex] = useState(0)
   const [error, setError] = useState<string | null>(null)
+  const [localSubmitting, setLocalSubmitting] = useState(false)
+  const isSubmitting = submitting || localSubmitting
 
   if (questions.length === 0) return null
 
@@ -53,7 +55,7 @@ export function UserQuestionCard({ questions, active, submitting = false, onSubm
 
   async function advance(event: FormEvent) {
     event.preventDefault()
-    if (!active || submitting) return
+    if (!active || isSubmitting) return
     setError(null)
 
     if (!isLast) {
@@ -61,10 +63,18 @@ export function UserQuestionCard({ questions, active, submitting = false, onSubm
       return
     }
 
+    setLocalSubmitting(true)
     try {
-      await onSubmit(questions.map((question) => answers[question.id] ?? emptyAnswer(question.id)))
+      await onSubmit(
+        questions.map((question) => {
+          const ans = answers[question.id] ?? emptyAnswer(question.id)
+          return { ...ans, note: ans.note.trim() }
+        }),
+      )
     } catch {
       setError('Não foi possível enviar as respostas. Tente novamente.')
+    } finally {
+      setLocalSubmitting(false)
     }
   }
 
@@ -88,7 +98,7 @@ export function UserQuestionCard({ questions, active, submitting = false, onSubm
           {questions.slice(0, currentIndex).map((question, index) => <AnsweredQuestion key={question.id} question={question} answer={answers[question.id] ?? emptyAnswer(question.id)} index={index} onEdit={() => edit(index)} />)}
 
           <form className="user-question-card__step" onSubmit={(event) => void advance(event)}>
-            <fieldset disabled={submitting}>
+            <fieldset disabled={isSubmitting}>
               <legend><span>{String(currentIndex + 1).padStart(2, '0')}</span>{current.question}{current.header && <em className="user-question-card__chip">{current.header}</em>}</legend>
               {current.mode === 'text' ? (
                 <textarea
@@ -144,7 +154,7 @@ export function UserQuestionCard({ questions, active, submitting = false, onSubm
             </fieldset>
             <footer className="user-question-card__actions">
               {currentIndex > 0 && <button className="user-question-card__back" type="button" onClick={() => setCurrentIndex((index) => index - 1)}>← Voltar</button>}
-              <button className="user-question-card__submit" type="submit" disabled={submitting}>{submitting ? 'Enviando…' : isLast ? 'Enviar respostas' : 'Continuar →'}</button>
+              <button className="user-question-card__submit" type="submit" disabled={isSubmitting}>{isSubmitting ? 'Enviando…' : isLast ? 'Enviar respostas' : 'Continuar →'}</button>
             </footer>
             {error && <p className="user-question-card__error" role="alert">{error}</p>}
           </form>

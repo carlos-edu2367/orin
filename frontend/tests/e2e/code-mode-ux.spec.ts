@@ -1267,3 +1267,227 @@ test('Orin allows activating Sem restrições (full_autonomy) via pill, Shift+Ta
   await expect(dialog).toBeVisible()
   await expect(dialog).toContainText('Executa ferramentas sem confirmação e sem restrição ao workspace')
 })
+
+test('answering UserQuestionCard with trailing note whitespace does not render a duplicate user message pinned at the bottom', async ({
+  page,
+}) => {
+  await installCsrfMeta(page)
+  let answered = false
+  let postedPrompt = ''
+
+  await page.route('**/v1/**', async (route) => {
+    const request = route.request()
+    const url = new URL(request.url())
+    const { pathname } = url
+
+    if (request.method() === 'POST' && pathname === '/v1/conversations/conv-question-dedup/messages') {
+      const body = JSON.parse(request.postData() || '{}') as { message?: string }
+      postedPrompt = body.message ?? ''
+      answered = true
+      await fulfillJson(
+        route,
+        {
+          conversation_id: 'conv-question-dedup',
+          title: 'Validação de Resposta Única · Orin',
+          turn_id: 'turn-2',
+          message_id: 'msg-u2',
+          state: 'running',
+          mode: 'code',
+          permission_mode: 'accept_edits',
+        },
+        201,
+      )
+      return
+    }
+
+    if (request.method() === 'GET' && pathname === '/v1/conversations/conv-question-dedup') {
+      await fulfillJson(route, {
+        conversation_id: 'conv-question-dedup',
+        title: 'Validação de Resposta Única · Orin',
+        state: answered ? 'completed' : 'completed',
+        provider: 'opencode',
+        model_id: 'big-pickle',
+        mode: 'code',
+        permission_mode: 'accept_edits',
+        project_id: null,
+        workspace: {
+          mode: 'managed',
+          path: null,
+          folder_name: null,
+          status: 'available',
+        },
+        messages: answered
+          ? [
+              {
+                message_id: 'msg-u1',
+                turn_id: 'turn-1',
+                role: 'user',
+                content: 'Configure o banco de dados do projeto.',
+                status: 'completed',
+                retryable: false,
+                attachments: [],
+                command: null,
+              },
+              {
+                message_id: 'msg-a1',
+                turn_id: 'turn-1',
+                role: 'assistant',
+                content: 'Antes de prosseguir, escolha o banco:',
+                status: 'completed',
+                retryable: false,
+                attachments: [],
+                command: null,
+              },
+              {
+                message_id: 'msg-u2',
+                turn_id: 'turn-2',
+                role: 'user',
+                content: postedPrompt.trim(),
+                status: 'completed',
+                retryable: false,
+                attachments: [],
+                command: null,
+              },
+              {
+                message_id: 'msg-a2',
+                turn_id: 'turn-2',
+                role: 'assistant',
+                content: 'Perfeito! Configurando PostgreSQL com pool local conforme solicitado.',
+                status: 'completed',
+                retryable: false,
+                attachments: [],
+                command: null,
+              },
+            ]
+          : [
+              {
+                message_id: 'msg-u1',
+                turn_id: 'turn-1',
+                role: 'user',
+                content: 'Configure o banco de dados do projeto.',
+                status: 'completed',
+                retryable: false,
+                attachments: [],
+                command: null,
+              },
+              {
+                message_id: 'msg-a1',
+                turn_id: 'turn-1',
+                role: 'assistant',
+                content: 'Antes de prosseguir, escolha o banco:',
+                status: 'completed',
+                retryable: false,
+                attachments: [],
+                command: null,
+              },
+            ],
+        turns: answered
+          ? [
+              {
+                turn_id: 'turn-1',
+                state: 'completed',
+                created_at: '2026-10-20T12:00:00.000Z',
+                started_at: '2026-10-20T12:00:01.000Z',
+                finished_at: '2026-10-20T12:00:05.000Z',
+                scheduled_by_schedule_id: null,
+                code_mode: 'code',
+              },
+              {
+                turn_id: 'turn-2',
+                state: 'completed',
+                created_at: '2026-10-20T12:01:00.000Z',
+                started_at: '2026-10-20T12:01:01.000Z',
+                finished_at: '2026-10-20T12:01:05.000Z',
+                scheduled_by_schedule_id: null,
+                code_mode: 'code',
+              },
+            ]
+          : [
+              {
+                turn_id: 'turn-1',
+                state: 'waiting_user',
+                created_at: '2026-10-20T12:00:00.000Z',
+                started_at: '2026-10-20T12:00:01.000Z',
+                finished_at: null,
+                scheduled_by_schedule_id: null,
+                code_mode: 'code',
+              },
+            ],
+        activities: [
+          {
+            event_id: 'ev-ask-db',
+            cursor: '1',
+            turn_id: 'turn-1',
+            agent_id: 'agent:main',
+            event_type: 'tool.finished',
+            kind: 'tool',
+            state: 'completed',
+            tool_name: 'ask_user',
+            summary: 'Pergunta enviada',
+            occurred_at: '2026-10-20T12:00:03.000Z',
+            payload: {
+              tool_name: 'ask_user',
+              tool_kind: 'user_input',
+              status: 'succeeded',
+              invocation_id: 'inv-ask-db',
+              questions: [
+                {
+                  id: 'db',
+                  question: 'Qual banco devemos usar?',
+                  mode: 'single_choice',
+                  options: [
+                    { id: 'pg', label: 'PostgreSQL' },
+                    { id: 'sqlite', label: 'SQLite' },
+                  ],
+                },
+              ],
+            },
+          },
+        ],
+        activity_cursor: '1',
+      })
+      return
+    }
+
+    if (pathname.endsWith('/events')) {
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/event-stream',
+        body: ': keepalive\n\n',
+      })
+      return
+    }
+    if (pathname === '/v1/conversations' || pathname === '/v1/projects/sidebar' || pathname === '/v1/projects') {
+      await fulfillJson(route, { items: [] })
+      return
+    }
+    if (pathname === '/v1/providers/models') {
+      await fulfillJson(route, { items: [] })
+      return
+    }
+    if (pathname === '/v1/settings/runtime') {
+      await fulfillJson(route, { code_system_notifications: false })
+      return
+    }
+    await fulfillJson(route, {})
+  })
+
+  await page.setViewportSize({ width: 1280, height: 860 })
+  await page.goto('/chats/conv-question-dedup')
+
+  const card = page.getByTestId('user-question-card')
+  await expect(card).toBeVisible()
+  await card.getByText('PostgreSQL').click()
+  await card.getByTestId('user-question-note-toggle').click()
+  await card.getByLabel('Observação (opcional)').fill('usar pool local  \n\n')
+  await card.getByRole('button', { name: 'Enviar respostas' }).click()
+
+  await expect(page.getByText('Perfeito! Configurando PostgreSQL com pool local conforme solicitado.')).toBeVisible()
+
+  // Verify there is only ONE user answer bubble containing "usar pool local" and it is NOT duplicated at the bottom
+  await expect(page.getByText(/usar pool local/)).toHaveCount(1)
+
+  if (processEnv.ORIN_SHOT_QUESTION_DEDUP) {
+    await page.screenshot({ path: processEnv.ORIN_SHOT_QUESTION_DEDUP, fullPage: false })
+  }
+})

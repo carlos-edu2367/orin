@@ -5,6 +5,7 @@ from typing import Any
 import httpx
 
 from agentos.agentic.provider_stream import HTTPProviderStreamTransport
+from .opencode import DEFAULT_OPENCODE_BASE_URL, OpenCodeModelCatalogClient
 
 
 class OpenRouterModelCatalogClient:
@@ -84,31 +85,6 @@ class AnthropicModelCatalogClient:
                 raise ValueError("Anthropic returned an invalid catalog cursor")
             after_id = next_cursor
         raise ValueError("Anthropic catalog pagination exceeded its safety limit")
-
-
-DEFAULT_OPENCODE_BASE_URL = "https://opencode.ai/zen/v1"
-
-
-class OpenCodeModelCatalogClient:
-    """Server-side OpenCode Zen ``GET /zen/v1/models`` adapter."""
-
-    def __init__(self, *, base_url: str = DEFAULT_OPENCODE_BASE_URL, timeout: float = 15.0) -> None:
-        self._base_url = base_url.rstrip("/")
-        self._timeout = timeout
-
-    def fetch(self, api_key: str, *, base_url: str = "") -> list[dict[str, object]]:
-        target = (base_url or self._base_url).rstrip("/")
-        response = httpx.get(
-            f"{target}/models",
-            headers={"Authorization": f"Bearer {api_key}"},
-            timeout=self._timeout,
-        )
-        response.raise_for_status()
-        payload: Any = response.json()
-        data = payload.get("data") if isinstance(payload, dict) else None
-        if not isinstance(data, list) or not all(isinstance(item, dict) for item in data):
-            raise ValueError("OpenCode returned an invalid catalog")
-        return data
 
 
 # Kept in the provider-catalog edge so production composition can depend on a

@@ -728,6 +728,19 @@ class HTTPProviderStreamTransport:
         return endpoint, headers, payload
 
     def stream(self, request: Mapping[str, object]) -> Iterator[NormalizedStreamItem]:
+        if self.provider == "opencode":
+            from agentos.provider_catalog.opencode import is_opencode_cloud, stream_opencode_bridge
+
+            if not is_opencode_cloud(self.base_url):
+                yield from stream_opencode_bridge(
+                    base_url=self.base_url,
+                    model=self.model,
+                    messages=list(request.get("messages") or []),  # type: ignore[arg-type]
+                    tools=list(request.get("tools") or []),  # type: ignore[arg-type]
+                    tool_choice=request.get("tool_choice"),
+                    client=self._client,
+                )
+                return
         endpoint, headers, payload = self._request_for(
             list(request.get("messages") or []),
             list(request.get("tools") or []),
