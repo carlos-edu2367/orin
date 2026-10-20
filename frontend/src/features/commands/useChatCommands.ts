@@ -8,6 +8,7 @@ import { ApiError } from '../../api/errors'
 import { CODE_PERMISSION_MODES } from '../../api/codeMode'
 import { getConversationOverview } from '../../api/conversations'
 import { addDirectory, compactConversation, getContext, getInstance, type ContextReport } from '../../api/sessionTools'
+import { chooseOutputStyle } from '../../api/settings'
 import { BUILTIN_COMMANDS, type BuiltinCommand, findBuiltin, isExcludedCommand, parseSlash } from './builtins'
 
 export type InfoPanel =
@@ -67,6 +68,11 @@ export const SANDBOX_TEXT = [
   'No perfil local, os comandos de shell rodam com as permissões da sua conta, limitados pelas regras de permissão e pelo modo de permissão da sessão.',
   'Num Orin compartilhado (modo servidor), shell, MCP por stdio e hooks de plugins ficam desligados.',
 ]
+
+/** A settings editor on this conversation's folder (W7 Batch E). */
+export function folderPage(section: string, conversationId: string): string {
+  return `/settings/${section}?conversation=${encodeURIComponent(conversationId)}`
+}
 
 function lastAssistant(messages: ChatCommandDeps['messages'], nth: number): string | null {
   const answers = messages.filter((item) => item.role === 'assistant' && item.content.trim())
@@ -158,6 +164,22 @@ export function chatCommandHandlers(deps: ChatCommandDeps): Record<string, Handl
       if (args) await deps.send(args)
     },
     config: () => deps.navigate('/settings/general'),
+    // W7 Batch E: the settings editors open on this conversation's folder.
+    permissions: () => deps.navigate(folderPage('permissions', deps.conversationId)),
+    hooks: () => deps.navigate(folderPage('hooks', deps.conversationId)),
+    agents: () => deps.navigate(folderPage('agents', deps.conversationId)),
+    keybindings: () => deps.navigate('/settings/keybindings'),
+    'output-style': async (args) => {
+      if (!args) { deps.navigate(folderPage('output-styles', deps.conversationId)); return }
+      try {
+        const result = await chooseOutputStyle(deps.client, 'local', args, deps.conversationId)
+        deps.notify(`Estilo de resposta: ${result.styles.find((style) => style.key === result.active)?.name ?? result.active} (nesta pasta).`)
+      } catch (error) {
+        deps.notify(error instanceof ApiError && error.status === 404
+          ? 'Os estilos de resposta só podem ser mudados no Orin local.'
+          : `Não foi possível usar o estilo "${args}". Veja os estilos com /output-style.`)
+      }
+    },
     mcp: () => deps.navigate('/settings/mcp'),
     plugin: () => deps.navigate('/settings/plugins'),
     skills: () => deps.navigate('/settings/skills'),

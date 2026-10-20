@@ -9,7 +9,8 @@ export type SettingsItem = {
   path: string
   lede: string
   badge?: SettingsBadge
-  requires?: 'admin'
+  /** `admin`: an administrator of a shared server; `host_folders`: a local Orin (the person's own files). */
+  requires?: 'admin' | 'host_folders'
 }
 
 export type SettingsGroup = { title: string; items: SettingsItem[] }
@@ -38,6 +39,17 @@ export const SETTINGS_GROUPS: SettingsGroup[] = [
     ],
   },
   {
+    title: 'Orin Code',
+    items: [
+      { id: 'permissions', label: 'Permissões', path: '/settings/permissions', lede: 'As regras de permissão em vigor, de onde vem cada uma, e as que você pode mudar.', requires: 'host_folders' },
+      { id: 'hooks', label: 'Hooks', path: '/settings/hooks', lede: 'Comandos que rodam em momentos do agente, e os arquivos onde ficam.', requires: 'host_folders' },
+      { id: 'agents', label: 'Agentes', path: '/settings/agents', lede: 'Subagentes definidos em arquivos: quando usar, instruções, ferramentas e modelo.', requires: 'host_folders' },
+      { id: 'output-styles', label: 'Estilo de resposta', path: '/settings/output-styles', lede: 'Como o agente escreve as respostas.', requires: 'host_folders' },
+      { id: 'keybindings', label: 'Atalhos', path: '/settings/keybindings', lede: 'As teclas da interface, no formato do keybindings.json do Claude Code.', requires: 'host_folders' },
+      { id: 'trusted-folders', label: 'Pastas confiáveis', path: '/settings/trusted-folders', lede: 'As pastas cujas configurações e extensões o Orin carrega.', requires: 'host_folders' },
+    ],
+  },
+  {
     title: 'Sistema',
     items: [
       { id: 'workspace', label: 'Workspace', path: '/settings/workspace', lede: 'Onde os arquivos de cada conversa são gravados.' },
@@ -58,7 +70,11 @@ export type SettingsAudience = { isAdmin: boolean; capabilities: Capabilities }
 
 export function visibleSettingsGroups(audience: SettingsAudience): SettingsGroup[] {
   return SETTINGS_GROUPS
-    .map((group) => ({ ...group, items: group.items.filter((item) => item.requires !== 'admin' || (audience.isAdmin && audience.capabilities.user_admin)) }))
+    .map((group) => ({
+      ...group,
+      items: group.items.filter((item) => (item.requires !== 'admin' || (audience.isAdmin && audience.capabilities.user_admin))
+        && (item.requires !== 'host_folders' || audience.capabilities.host_folders)),
+    }))
     .filter((group) => group.items.length > 0)
 }
 

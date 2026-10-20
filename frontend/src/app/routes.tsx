@@ -29,6 +29,12 @@ import { UsersSection } from '../features/users/UsersSection'
 import { LibraryHubPage } from '../features/settings/LibraryHubPage'
 import { IntegrationsHubPage } from '../features/settings/IntegrationsHubPage'
 import { WorkspaceShell } from './WorkspaceShell'
+import { AgentsSection } from '../features/codeSettings/AgentsSection'
+import { HooksSection } from '../features/codeSettings/HooksSection'
+import { KeybindingsSection } from '../features/codeSettings/KeybindingsSection'
+import { OutputStylesSection } from '../features/codeSettings/OutputStylesSection'
+import { PermissionsSection } from '../features/codeSettings/PermissionsSection'
+import { TrustedFoldersSection } from '../features/codeSettings/TrustedFoldersSection'
 import { useSession } from './useSession'
 
 export type RouteDefinition = {
@@ -62,7 +68,12 @@ export const routes: RouteDefinition[] = [
   { path: '/settings/vision', element: <VisionSettingsRoute /> },
   { path: '/settings/mcp', element: <SettingsRoute><McpSection /></SettingsRoute> },
   { path: '/settings/plugins', element: <SettingsRoute><PluginsSection /></SettingsRoute> },
-  { path: '/settings/agents', element: <Navigate to="/settings/general" replace /> },
+  { path: '/settings/permissions', element: <SettingsRoute><PermissionsSection /></SettingsRoute> },
+  { path: '/settings/hooks', element: <SettingsRoute><HooksSection /></SettingsRoute> },
+  { path: '/settings/agents', element: <SettingsRoute><AgentsSection /></SettingsRoute> },
+  { path: '/settings/output-styles', element: <SettingsRoute><OutputStylesSection /></SettingsRoute> },
+  { path: '/settings/keybindings', element: <SettingsRoute><KeybindingsSection /></SettingsRoute> },
+  { path: '/settings/trusted-folders', element: <SettingsRoute><TrustedFoldersSection /></SettingsRoute> },
   { path: '/settings/workspace', element: <SettingsRoute><WorkspaceSection /></SettingsRoute> },
   { path: '/settings/background', element: <SettingsRoute><BackgroundSection /></SettingsRoute> },
   { path: '/settings/browser', element: <SettingsRoute><BrowserSection /></SettingsRoute> },
