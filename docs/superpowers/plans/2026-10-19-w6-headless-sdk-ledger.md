@@ -75,3 +75,19 @@ W6 review.
   inside it at once (10 s timeout). The assertion `max_parallel >= 2` is unchanged.
 - Adversarial checks (scratchpad `lote0/serial_check.py`): with a 300 ms checkpoint the test still passes; with the
   runtime forced serial (`MAX_PARALLEL_SUBAGENT_TOOLS = MAX_PARALLEL_TOOLS = 1`) it fails with `max_parallel=1`.
+
+### L0-5 — suites before the push
+
+- Windows (`uv run pytest -q tests/unit tests/integration`): **4054 passed, 127 skipped, 0 failed**.
+- Linux, Docker (python:3.13, non-root `runner`, repo copied to `/work`): **4067 passed, 4 failed, 110 skipped**. The same
+  4 fail on the baseline `eba5b00` in the same container, so none comes from Lote 0, and the CI's Ubuntu job passed
+  them at `eba5b00`:
+  - `test_interruption.py::test_a_cancel_stops_the_running_command` and
+    `hooks/test_processes.py::test_timeout_kills_the_whole_tree`: the owner's container runs `sleep infinity` as PID 1,
+    which never reaps children, so killed processes stay zombies and still "run". A new container
+    `orin-linux-init` (from a snapshot image `orin-linux-test:w6-snapshot`, started with `--init`) passes both. The
+    owner's `orin-linux-test` container was stopped, not removed.
+  - `test_subagents_and_permissions_v076.py::test_verification_command_with_screenshots_preserves_code_mode_verified`
+    and `test_orin_code_phase_a.py::test_runtime_recovers_from_thinking_only_turn_and_filters_code_mode_schemas`: the
+    container has no Node/npm, so the verification step the tests run cannot succeed there.
+- Frontend: not run locally — Lote 0 changes no frontend file; the CI frontend job covers it.
