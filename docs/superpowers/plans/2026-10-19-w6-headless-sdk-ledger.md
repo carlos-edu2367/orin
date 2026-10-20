@@ -493,3 +493,32 @@ Inherited items:
 
 Platform coverage: every batch ran on Windows; the coordinator ran the changed areas on Linux (Docker) before each
 push. The 65 skipped tests need Postgres/Redis and were not run.
+
+## Review fixes (W6 review)
+
+Part 1 of the fixes to `docs/superpowers/reviews/2026-10-20-w6-review.md`: W6-R1, W6-R2 and W6-R3. Each finding was
+written test first; the commit message names the finding.
+
+| Finding | Commits | Tests | Decisions, deviations and what remains |
+| --- | --- | --- | --- |
+| W6-R1 permission for the wrong call | `d1ea356` | `tests/unit/cli_code/test_w6_r1_permission_call.py` (7), `tests/unit/permissions/test_w6_r1_invocation_id.py` (3) | The invocation id travels in the broker's record and event through `agentos/agentic/call_context.py` (a thread-local, set by the toolset's `ActiveInvocation` mixin, which replaces the property in `agent_tools.py`; that file went from 1699 to 1693 lines). `Translator.open_call(invocation, internal)` replaces `open_tool`, which had no other user. A call that is not open (a subagent's) is shown from the broker's own `command` or `path`; with neither, the request is denied without asking the host. |
+| W6-R2 stopping `orin code` stops its turn | `2d937aa`, `bbd17b3` | Unit: `tests/unit/cli_code/test_w6_r2_cancel_on_exit.py` (9), `test_w6_r2_session_lease.py` (5), `tests/unit/agentic/test_w6_r2_cli_lease.py` (14), `tests/unit/api/test_w6_r2_cli_lease_route.py` (3), `tests/unit/conversations/test_w6_r2_turn_lease.py` (2), `tests/unit/workers/test_w6_r2_lease_drop.py` (3). Live: `tests/integration/cli_code/test_w6_r2_lease_live.py` (kills the process 2 s into a 120-word slow answer; the turn must end `cancelled` and the answer must not reach `word119`). `bbd17b3` classifies the new route in `test_profile_isolation.py`, which the route added to the suite broke. | See the list below. |
+
+W6-R2 decisions and deviations:
+- The lease is renewed where the CLI turn is queued (`conversations/chat.py`, before the dispatch row is committed), not in the gateway's create and send routes. The worker can claim a turn as soon as the transaction commits, and a missing lease reads as lost, so a renewal after the response could race the worker. The gateway route only renews.
+- The lease route checks that the turn is in the conversation's `turns` list (the conversation read). A turn that is not among the turns that read returns gets 404 from the heartbeat; the heartbeat is for the current turn, which is recent.
+- The worker wraps `cancelled` for CLI turns (`agentic/session.py`). It records one notice ("orin code stopped following this turn") with the existing `TURN_STARTED` activity type, the precedent the session already uses for notices. The lease file is dropped when the turn closes, however it closes (`workers/chat.py`, `_run_claimed` now wraps `_run_claimed_turn`).
+- A pending permission or host request ends at its next poll after the cancel (`request_and_wait` and `HostRequests.ask` both check `cancelled`). It is not answered with an immediate deny; a wait lasts at most one poll interval after the lease expires.
+- Windows: `SIGBREAK` goes through the same exit path (`signal`), and SIGTERM does too. A closed console window (CTRL_CLOSE) cannot be caught from Python; the lease covers it. The console control handler the spec allowed was not written.
+- `tests/fixtures/fake_ollama.py`: `[[slow:<n>]]` sets the word count. The default stays 40 words (10 s), which finishes before a 15 s lease could end it, so the live test needs 120.
+- TDD order, honestly: the `cli_lease` module, the chat renewal and the worker's drop were written before their tests, so those tests passed on first run and did not fail first. The other R2 tests were run red first.
+
+W6-R3 decisions and deviations:
+- `start_background` records `created` (`process_created`: Windows `GetProcessTimes` on the child's handle; POSIX `/proc/<pid>/stat` field 22, or `ps -o lstart=`). `background_runs`, `attach`/`logs -f`, `stop`, `rm` and `purge` use `_same_process`. A record without `created`, or whose time cannot be read, is finished and kills nothing. That also covers every run recorded before this fix.
+- Windows kills through a handle opened and validated by creation time, with its validated descendants (`_windows_descendants` with an object that has `pid` and `_handle`). POSIX sends SIGKILL to the process group only after the check.
+- Not done: the review's suggested `ended_at` written by the child when it exits. The creation-time check already stops a reused pid from being touched; a finished run is reported as finished without it.
+- Live: `tests/integration/cli_code/test_info_live.py::test_stopping_a_background_run_cancels_its_turn` now asserts the run's process is gone after `stop`.
+
+Suites at the end of part 1 (`uv run pytest -q`): unit `4243 passed, 65 skipped`; integration `121 passed, 65 skipped` (after `bbd17b3`; the first integration run had one failure, the new route missing from the isolation test's classification, fixed in `bbd17b3`). `src/agentos/agentic/agent_tools.py` is 1693 lines. No `agentos.launcher` or `orin-code` process was left running.
+
+Not in this part: W6-R4 to W6-R17 (see the review's "fix order").
