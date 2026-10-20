@@ -34,6 +34,8 @@ from .turn_options import build_turn_options, permission_mode_for
 
 MAX_PROMPT_CHARS = 16000  # what the API accepts for one message
 _END_EVENTS = {"turn.completed", "turn.failed", "turn.waiting_user"}
+# A turn that stops for the person (an answer or an approval) is an error for a script: it did not finish (W6-R13).
+WAITING_MESSAGE = "the turn is waiting for the person (an answer or an approval Orin needs)"
 _CALL_TIMEOUT = 5.0  # seconds: a cancel or a heartbeat is best effort and must not hold the exit (W6-R2)
 
 # Flags this build parses and refuses, each with where it stands; never silently ignored.
@@ -379,8 +381,9 @@ class HeadlessRun:
         usage = TurnUsage(max(0, after.input_tokens - before.input_tokens), max(0, after.output_tokens - before.output_tokens),
                           max(0.0, after.cost_usd - before.cost_usd))
         elapsed = int((self.clock() - started) * 1000)
+        waiting = [WAITING_MESSAGE] if state == "waiting_user" else None
         closing = self.translator.result(state=state, error_code=str(error_code) if error_code else None, usage=usage,
-                                         duration_ms=elapsed, duration_api_ms=elapsed)
+                                         duration_ms=elapsed, duration_api_ms=elapsed, errors=waiting)
         if self.stream_json:
             for message in closing if final else closing[:-1]:  # the last open block's assistant message, then the result
                 self.out.message(message)
@@ -403,7 +406,7 @@ class HeadlessRun:
                     payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
                     state = "completed" if event_type == "turn.completed" else str(payload.get("state") or "failed")
                     if event_type == "turn.waiting_user":
-                        state = "completed"  # an approval Orin waits for ends the headless turn; the person resumes it
+                        state = "waiting_user"  # W6-R13: the turn stopped for the person; that is not a success
                     error_code = payload.get("error_code")
                     return state, error_code
             elif kind == "stream_error":
