@@ -5,6 +5,7 @@ no prompt promises access outside it.
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -70,9 +71,18 @@ def test_a_server_turn_in_full_autonomy_keeps_every_tool_inside_the_workspace(tm
     assert session.workspace.unrestricted is False
     for name, args in _outside_calls(host_folder):
         outcome = tools.invoke(name, args)
-        assert outcome.status != "succeeded", (name, outcome.content)
+        if os.name == "nt":
+            assert outcome.status != "succeeded", (name, outcome.content)
+        # POSIX reads the leading "/" inside the workspace (W1-R3): a call may succeed there, but nothing of the
+        # host folder reaches the model.
         assert "HOSTDATA" not in (outcome.content or ""), (name, outcome.content)
+        if outcome.status == "succeeded":  # a refusal may echo the requested path; a result never lists the host file
+            assert "secret.txt" not in (outcome.content or ""), (name, outcome.content)
     assert not (host_folder / "written.txt").exists()
+    if os.name != "nt":
+        # POSIX (W1-R3): the confined workspace reads the leading "/" inside itself; the write lands there.
+        landed = session.workspace.root.joinpath(*(host_folder / "written.txt").parts[1:])
+        assert landed.is_file()
 
 
 def test_a_desktop_turn_in_full_autonomy_still_reaches_the_host(tmp_path: Path, host_folder: Path) -> None:
