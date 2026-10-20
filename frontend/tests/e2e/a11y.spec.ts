@@ -18,6 +18,13 @@ async function installCsrfMeta(page: Page): Promise<void> {
 }
 
 async function assertNoCriticalOrSeriousViolations(page: Page): Promise<void> {
+  // W7: scan a settled page. A cold first run could catch a fade-in halfway (a half-faded text fails contrast); every
+  // finite animation is awaited, the endless ones (pulses, shimmer) never end and are left out.
+  await page.waitForLoadState('load')
+  await page.evaluate(async () => {
+    const finite = document.getAnimations().filter((animation) => animation.effect?.getComputedTiming().endTime !== Infinity)
+    await Promise.all(finite.map((animation) => animation.finished.catch(() => undefined)))
+  })
   const results = await new AxeBuilder({ page }).analyze()
   const blocking = results.violations.filter((violation) => violation.impact === 'critical' || violation.impact === 'serious')
   expect(blocking, JSON.stringify(blocking, null, 2)).toEqual([])

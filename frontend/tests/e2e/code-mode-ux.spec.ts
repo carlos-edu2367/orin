@@ -1265,5 +1265,6 @@ test('Orin allows activating Sem restrições (full_autonomy) via pill, Shift+Ta
   await page.getByTestId('session-context-trigger').click()
   const dialog = page.getByTestId('session-context-dialog')
   await expect(dialog).toBeVisible()
-  await expect(dialog).toContainText('Executa ferramentas sem confirmação e sem restrição ao workspace')
+  // W7 (W6): the wording follows the instance; a local Orin reaches outside the session's folder in this mode.
+  await expect(dialog).toContainText('Executa ferramentas sem confirmação, inclusive fora da pasta da sessão')
 })
