@@ -19,7 +19,9 @@ from pathlib import Path
 from typing import Any
 
 RETENTION_SECONDS = 7 * 24 * 3600
+SWEEP_EVERY_SECONDS = 3600  # every conversation's folder is pruned at most this often (W6-R9)
 MAX_ENTRY_BYTES = 200_000
+_LAST_SWEEP: dict[str, float] = {}
 _ID = re.compile(r"^tr_[0-9a-f]{32}$")
 
 
@@ -47,6 +49,10 @@ class TranscriptStore:
             data = json.dumps(entry, ensure_ascii=False, default=str).encode("utf-8")
             if len(data) > MAX_ENTRY_BYTES:
                 return None
+            from agentos.installation.api_token import make_private_dir
+
+            make_private_dir(self.folder.parent)  # W6-R15: owner-only on Windows too, or nothing is kept
+            sweep_expired(self.folder.parent, clock=self._clock)  # before this folder exists: it may remove empty ones
             self.folder.mkdir(parents=True, exist_ok=True)
             self._prune()
             entry_id = f"tr_{uuid.uuid4().hex}"
@@ -79,4 +85,31 @@ class TranscriptStore:
             return
 
 
-__all__ = ["MAX_ENTRY_BYTES", "RETENTION_SECONDS", "TranscriptStore", "transcripts_root"]
+def sweep_expired(root: Path, *, clock=time.time, retention: float = RETENTION_SECONDS) -> None:
+    """W6-R9: entries past the retention are removed from every conversation's folder, not only the one being written
+    to (a finished conversation's tool results do not stay forever); empty folders go too. At most once an hour."""
+    now = clock()
+    key = str(root)
+    if now - _LAST_SWEEP.get(key, float("-inf")) < SWEEP_EVERY_SECONDS:
+        return
+    _LAST_SWEEP[key] = now
+    cutoff = now - retention
+    try:
+        folders = [item for item in root.iterdir() if item.is_dir() and not item.is_symlink()]
+    except OSError:
+        return
+    for folder in folders:
+        try:
+            for item in folder.iterdir():
+                try:
+                    if item.is_file() and item.stat().st_mtime < cutoff:
+                        item.unlink()
+                except OSError:
+                    continue
+            if not any(folder.iterdir()):
+                folder.rmdir()
+        except OSError:
+            continue
+
+
+__all__ = ["MAX_ENTRY_BYTES", "RETENTION_SECONDS", "TranscriptStore", "sweep_expired", "transcripts_root"]

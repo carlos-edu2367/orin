@@ -48,8 +48,10 @@ def _windows_user_sid() -> str:
     return sid
 
 
-def _windows_owner_only(path: Path) -> None:
+def _windows_owner_only(path: Path, *, inherit: bool = False) -> None:
     """Replace the whole access list with one entry for the current account, protected from inheritance.
+
+    ``inherit`` (a folder): the entry is inherited by what is created inside it, so its files are owner-only too.
 
     Dropping inherited entries is not enough: an administrator account creates files with explicit SYSTEM,
     Administrators and OWNER RIGHTS entries (seen on CI), so the list is set whole rather than edited.
@@ -72,7 +74,8 @@ def _windows_owner_only(path: Path) -> None:
     kernel32.LocalFree.argtypes = [ctypes.c_void_p]
     descriptor = ctypes.c_void_p()
     # D:P = a protected DACL (nothing inherited); FA = full access; one entry, for this account's SID only.
-    if not advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW(f"D:P(A;;FA;;;{sid})", 1, ctypes.byref(descriptor), None):
+    flags = "OICI" if inherit else ""
+    if not advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW(f"D:P(A;{flags};FA;;;{sid})", 1, ctypes.byref(descriptor), None):
         raise ApiTokenError(f"the owner-only access list could not be built (error {ctypes.get_last_error()})")
     try:
         dacl_security_information, protected_dacl_security_information = 0x00000004, 0x80000000
@@ -88,6 +91,28 @@ def restrict_to_owner(path: Path) -> None:
         _windows_owner_only(path)
     else:
         os.chmod(path, 0o600)
+
+
+_PRIVATE_DIRS: set[str] = set()
+
+
+def make_private_dir(path: Path) -> Path:
+    """Create ``path`` (and its parents) and make it owner-only, its new files included (W6-R15). Raises ``OSError``
+    when the folder cannot be restricted: the caller then keeps nothing in it (fail closed)."""
+    target = Path(path)
+    target.mkdir(parents=True, exist_ok=True)
+    key = os.path.normcase(str(target.resolve()))
+    if key in _PRIVATE_DIRS:
+        return target
+    try:
+        if os.name == "nt":
+            _windows_owner_only(target, inherit=True)
+        else:
+            os.chmod(target, 0o700)
+    except ApiTokenError as error:
+        raise OSError(str(error)) from error
+    _PRIVATE_DIRS.add(key)
+    return target
 
 
 def issue_api_token(run_dir: Path) -> str:
@@ -132,4 +157,4 @@ def revoke_api_token(run_dir: Path) -> None:
         logger.warning("the API token could not be removed", exc_info=True)
 
 
-__all__ = ["ApiTokenError", "TOKEN_FILE_NAME", "issue_api_token", "read_api_token", "restrict_to_owner", "revoke_api_token", "token_path"]
+__all__ = ["ApiTokenError", "TOKEN_FILE_NAME", "issue_api_token", "make_private_dir", "read_api_token", "restrict_to_owner", "revoke_api_token", "token_path"]

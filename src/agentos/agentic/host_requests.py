@@ -62,6 +62,9 @@ class HostRequests:
         if entry is None:
             return None
         try:
+            from agentos.installation.api_token import make_private_dir
+
+            make_private_dir(self.folder.parent)  # W6-R15
             self.folder.mkdir(parents=True, exist_ok=True)
             descriptor = os.open(self._pending(request_id), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
