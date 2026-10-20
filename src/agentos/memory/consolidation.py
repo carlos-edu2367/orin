@@ -11,7 +11,10 @@ import json
 import os
 import re
 import threading
-from collections.abc import Mapping, Sequence
+import time
+import uuid
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -32,6 +35,54 @@ CONSOLIDATION_INSTRUCTION = (
 )
 _SECRET = re.compile(r"(?i)(api[_-]?key|secret|password|passwd|token|bearer|sk-[A-Za-z0-9]{10,}|-----BEGIN)")
 _LOCK = threading.Lock()
+LOCK_WAIT_SECONDS = 5.0
+
+
+@contextmanager
+def _file_lock(path: Path) -> Iterator[bool]:
+    """W3-R23: one writer at a time across processes (Orin and its `orin code` runs share the file). Yields False
+    when the lock could not be taken in time; the caller then changes nothing."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handle = open(path.with_name(path.name + ".lock"), "a+b")  # noqa: SIM115 - held for the block
+    except OSError:
+        yield False
+        return
+    locked = False
+    deadline = time.monotonic() + LOCK_WAIT_SECONDS
+    try:
+        while not locked:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                locked = True
+            except OSError:
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(0.01)
+        yield locked
+    finally:
+        if locked:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
+        handle.close()
 
 
 class ConsolidationState:
@@ -50,14 +101,19 @@ class ConsolidationState:
     def _write(self, data: Mapping[str, Any]) -> None:
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            temporary = self.path.with_suffix(".tmp")
+            temporary = self.path.with_name(f"{self.path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")  # W3-R23
             temporary.write_text(json.dumps(data, sort_keys=True), encoding="utf-8")
-            os.replace(temporary, self.path)
+            try:
+                os.replace(temporary, self.path)
+            finally:
+                temporary.unlink(missing_ok=True)
         except OSError:
             pass
 
     def note_completed_turn(self, user_id: str) -> None:
-        with _LOCK:
+        with _LOCK, _file_lock(self.path) as locked:
+            if not locked:
+                return  # a lost count only delays consolidation
             data = self._read()
             record = data.get(user_id) if isinstance(data.get(user_id), dict) else {}
             turns = record.get("turns") if isinstance(record.get("turns"), int) else 0
@@ -65,8 +121,13 @@ class ConsolidationState:
             self._write(data)
 
     def due(self, user_id: str, now: datetime) -> bool:
-        with _LOCK:
-            record = self._read().get(user_id)
+        with _LOCK, _file_lock(self.path) as locked:
+            if not locked:
+                return False
+            return self._due(self._read().get(user_id), now)
+
+    @staticmethod
+    def _due(record: Any, now: datetime) -> bool:
         if not isinstance(record, dict):
             return False
         turns = record.get("turns") if isinstance(record.get("turns"), int) else 0
@@ -82,10 +143,25 @@ class ConsolidationState:
         return last is None or now - last >= CONSOLIDATION_INTERVAL
 
     def mark_run(self, user_id: str, now: datetime) -> None:
-        with _LOCK:
+        with _LOCK, _file_lock(self.path) as locked:
+            if not locked:
+                return
             data = self._read()
             data[user_id] = {"turns": 0, "last_run": now.isoformat()}
             self._write(data)
+
+    def claim_run(self, user_id: str, now: datetime) -> bool:
+        """W3-R23: whether this caller runs consolidation now; checking and marking are one step, so two processes
+        never both run it."""
+        with _LOCK, _file_lock(self.path) as locked:
+            if not locked:
+                return False
+            data = self._read()
+            if not self._due(data.get(user_id), now):
+                return False
+            data[user_id] = {"turns": 0, "last_run": now.isoformat()}
+            self._write(data)
+            return True
 
 
 def parse_facts(text: str) -> list[str]:

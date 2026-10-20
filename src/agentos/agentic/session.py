@@ -3985,10 +3985,8 @@ class TurnSession:
             return
         state = self._consolidation_state or ConsolidationState()
         state.note_completed_turn(user_id)
-        now = datetime.now(UTC)
-        if not state.due(user_id, now):
+        if not state.claim_run(user_id, datetime.now(UTC)):
             return
-        state.mark_run(user_id, now)
         try:
             history = list(self.store.history_for_turn(self.turn))
         except Exception:  # noqa: BLE001
