@@ -60,6 +60,8 @@ def _windows_owner_only(path: Path) -> None:
     sid = _windows_user_sid()
     if not all(part.isdigit() for part in sid[2:].split("-")):
         raise ApiTokenError("the current Windows account could not be identified")
+    if not hasattr(ctypes, "WinDLL"):
+        raise ApiTokenError("Windows access lists are not available on this system")
     advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
