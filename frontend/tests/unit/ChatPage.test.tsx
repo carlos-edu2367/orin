@@ -557,13 +557,14 @@ describe('ChatPage', () => {
       return new Response('{}', { headers: { 'Content-Type': 'application/json' } })
     })
 
+    // W7: 499 activities render slowly under the full suite's load (it passes alone); the waits get room, not new rules.
     renderChat()
-    await waitFor(() => expect(document.querySelector('.bubble--assistant .markdown-message')?.textContent).toContain('parte-1|'))
+    await waitFor(() => expect(document.querySelector('.bubble--assistant .markdown-message')?.textContent).toContain('parte-1|'), { timeout: 5000 })
 
     emitDelta(500)
     emitDelta(501)
 
-    await waitFor(() => expect(document.querySelector('.bubble--assistant .markdown-message')?.textContent).toBe(`${prefix}parte-500|parte-501|`))
+    await waitFor(() => expect(document.querySelector('.bubble--assistant .markdown-message')?.textContent).toBe(`${prefix}parte-500|parte-501|`), { timeout: 5000 })
     closeStream()
   })
 
