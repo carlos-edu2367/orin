@@ -20,6 +20,7 @@ from pathlib import Path
 from time import monotonic, sleep
 
 from agentos.installation import OrinPaths, RuntimeProfile
+from agentos.installation.api_token import ApiTokenError, issue_api_token, revoke_api_token
 from agentos.installation.layout import migrate_data_layout
 from agentos.omniroute import OmniRouteRuntimeSettingsStore
 from agentos.provider_catalog.omniroute import DEFAULT_OMNIROUTE_BASE_URL
@@ -161,6 +162,13 @@ class Supervisor:
         if self.choice.message:
             self.console.warning(self.choice.message)
         clear_stop_request(self.paths)
+        try:
+            # A fresh token for every run: `orin code` reads it from the run directory (W6, spec §9.1).
+            issue_api_token(self.paths.run)
+        except ApiTokenError as error:
+            # The interface does not need it; only `orin code` stops working, and says why.
+            revoke_api_token(self.paths.run)
+            self.log.warning("no API token for orin code this run: %s", error)
         if self.options.desktop:
             self.desktop_status = DesktopStatusWriter(self.paths, restart_command=self.profile.launcher_command())
             self.desktop_status.set_url(self.base_url)
@@ -417,6 +425,7 @@ class Supervisor:
 
     def _rollback(self) -> None:
         """Undo a partial startup, newest first."""
+        revoke_api_token(self.paths.run)
         if not self.children:
             self.group.close()
             return
@@ -450,6 +459,7 @@ class Supervisor:
         self.group.close()
         clear_state(self.paths)
         clear_stop_request(self.paths)
+        revoke_api_token(self.paths.run)
         self._desktop_stopped("Orin foi encerrado.")
         self.console.stopped()
 

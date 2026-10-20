@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from hashlib import sha256
 from hmac import compare_digest
 from time import monotonic
+from typing import Callable
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,7 +141,7 @@ class LoopbackSecurityService(InMemorySecurityService):
 
     requires_loopback_client = True
 
-    def __init__(self, *, maximum_requests: int = 120) -> None:
+    def __init__(self, *, maximum_requests: int = 120, api_token: Callable[[], str | None] | None = None) -> None:
         super().__init__(maximum_requests=maximum_requests)
         self._principal = AuthenticatedPrincipal(
             user_id="local-user",
@@ -148,11 +149,32 @@ class LoopbackSecurityService(InMemorySecurityService):
             scopes=frozenset({"api"}),
             credential_kind="loopback",
         )
+        # ``orin code`` (W6): the same person, told apart by the per-run token the launcher wrote for them.
+        self._cli_principal = AuthenticatedPrincipal(
+            user_id="local-user",
+            credential_ref="loopback-cli",
+            scopes=frozenset({"api"}),
+            credential_kind="cli_token",
+        )
+        self._api_token = api_token if api_token is not None else _current_run_token
 
     def authenticate(self, *, bearer_token: str | None, session_id: str | None) -> AuthenticatedPrincipal:
         # Mixed credentials are an operational error in local mode.  Accepting
         # them would hide a mistaken host/IdP configuration and weaken the
         # eventual VPS migration path.
-        if bearer_token or session_id:
+        if session_id:
             raise AuthenticationError("loopback mode does not accept credentials")
+        if bearer_token:
+            # The only bearer a local Orin accepts is this run's token; anything else is refused, never ignored.
+            expected = self._api_token()
+            if not expected or not compare_digest(expected.encode("utf-8"), bearer_token.encode("utf-8")):
+                raise AuthenticationError("loopback mode does not accept credentials")
+            return self._cli_principal
         return self._principal
+
+
+def _current_run_token() -> str | None:
+    from agentos.installation.api_token import read_api_token
+    from agentos.installation.paths import orin_paths
+
+    return read_api_token(orin_paths().run)
