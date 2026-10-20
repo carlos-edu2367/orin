@@ -60,6 +60,10 @@ class RuntimeProfile:
         uses ``frontend/dist``; an installation ships the same build as a static
         asset directory. Either way the backend serves files, not a bundler.
         """
+        override = os.environ.get("ORIN_WEB_DIST", "").strip()
+        if override:
+            # An explicit build (packaging, and the runtime tests' stub build): used as is, never searched past.
+            return Path(override)
         candidates = (
             [self.repository / "frontend" / "dist"] if self.repository is not None else []
         ) + [self.root / "web", self.root / "_internal" / "web", _package_root() / "web"]
