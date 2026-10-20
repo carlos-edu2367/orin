@@ -235,6 +235,12 @@ def _accepts_call_id(invoke: Callable[..., object]) -> bool:
 
 
 class AgenticTurnRuntime:
+    # W6, set by the session for an `orin code` turn: the core tools offered (None: all) and those withheld (--tools,
+    # --disallowedTools), and whether Code mode's "verify before you answer" second pass runs (off for a headless run).
+    offered_tools: frozenset[str] | None = None
+    withheld_tools: frozenset[str] = frozenset()
+    completion_gate: bool = True
+
     def __init__(
         self,
         *,
@@ -1178,7 +1184,7 @@ class AgenticTurnRuntime:
             if (finish is not None or has_text) and not (final_iteration and not has_text):
                 completion_gate = getattr(self.toolset, "code_completion_gate", None)
                 gate_ok, gate_reason = (True, None)
-                if callable(completion_gate) and not turn.get("is_subagent") and (final_iteration or code_gate_rejections < 1):
+                if callable(completion_gate) and self.completion_gate and not turn.get("is_subagent") and (final_iteration or code_gate_rejections < 1):
                     try:
                         gate_ok, gate_reason = completion_gate()
                     except Exception:
@@ -1277,6 +1283,9 @@ class AgenticTurnRuntime:
         if self.phases is None:
             if getattr(self.toolset, "_code_mode_active", False) or turn.get("code_mode") == "code":
                 allowed = set(CODE_MODE_CORE_TOOLS)
+                if self.offered_tools is not None:
+                    allowed &= self.offered_tools
+                allowed -= self.withheld_tools
                 active_mcp = getattr(self.toolset, "active_mcp_tool_names", ())
                 if active_mcp:
                     allowed.update(active_mcp)
@@ -2024,7 +2033,10 @@ class AgenticTurnRuntime:
                 cmd_val = parsed_args.get("command")
                 if isinstance(cmd_val, str) and cmd_val.strip():
                     started_meta["command"] = cmd_val.strip()[:240]
-            self._life(turn, "tool_started", tool_name=name, invocation_id=call_id, **started_meta)
+            self._life(
+                turn, "tool_started", tool_name=name, invocation_id=call_id,
+                tool_input=dict(parsed_args) if isinstance(parsed_args, Mapping) else {}, **started_meta,
+            )
             prepared.append((call_id, name, parsed_args, parse_err))
 
         # A call whose exact (name, arguments) signature already failed
@@ -2273,7 +2285,7 @@ class AgenticTurnRuntime:
             self._life(
                 turn, "tool_finished", tool_name=name, invocation_id=call_id, status=outcome.status,
                 summary=outcome.summary, error_code=outcome.error_code, tool_payload=dict(outcome.payload),
-                tool_arguments=dict(arguments),
+                tool_arguments=dict(arguments), tool_content=outcome.content,
             )
             self._hooks(turn, "PostToolUse", tool_name=name, status=outcome.status)
             results.append({

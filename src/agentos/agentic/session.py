@@ -53,7 +53,7 @@ from .loop_settings import BudgetMeter
 from .reminders import ReminderQueue, system_reminder
 from .tools.interaction.notify import NotificationBudget
 from .phases import PhaseController
-from .runtime import AgenticLimits, AgenticTurnRuntime
+from .runtime import CODE_MODE_CORE_TOOLS, AgenticLimits, AgenticTurnRuntime
 from .workspace import resolve_workspace
 
 
@@ -1049,6 +1049,13 @@ class TurnSession:
         self._in_plan_mode: bool = self.permission_mode == "plan_mode"
         self._code_mode_stage: str = "planning" if self._in_plan_mode else "implementing"
         self.main_agent_id = store.main_agent_id(turn) if hasattr(store, "main_agent_id") else str(turn.get("agent_id", "agent:main"))
+        from .cli_turn import cli_options_for
+
+        # W6: an `orin code` turn's options; a corrupt stored value stops the turn here (CliOptionsError).
+        self.cli_options = cli_options_for(turn)
+        if self.cli_options is not None and self.cli_options.permission_prompts == "none":
+            # Nobody can answer a prompt: whatever would ask is refused (W1-R9; closes W3-R24).
+            self.turn["interactive_permissions"] = False
 
     # -- activity -------------------------------------------------------
 
@@ -1152,6 +1159,10 @@ class TurnSession:
                 val = payload.get(k)
                 if isinstance(val, str) and val.strip():
                     started_payload[k] = val.strip()[:240]
+            if self.cli_options is not None and self.cli_options.transcript:
+                from .cli_turn import capped_input
+
+                started_payload["tool_input"] = capped_input(payload.get("tool_input"))  # W6: the CLI's tool_use block
             self._record(
                 AgentActivityEventType.TOOL_STARTED,
                 f"Executando {name}",
@@ -1195,6 +1206,10 @@ class TurnSession:
             status = str(payload.get("status") or "succeeded")
             extra = dict(payload.get("tool_payload") or {})
             summary = str(payload.get("summary") or f"{name} {status}")
+            if self.cli_options is not None and self.cli_options.transcript:
+                from .cli_turn import capped_text
+
+                extra["tool_result"] = capped_text(payload.get("tool_content"))  # W6: the CLI's tool_result block
             self._record(
                 AgentActivityEventType.TOOL_FINISHED,
                 summary,
@@ -3718,7 +3733,9 @@ class TurnSession:
         options = getattr(self, "_code_prompt_options", None)
         if options is None:
             return ""
-        stable = render_code_system_prompt(options)
+        cli = getattr(self, "cli_options", None)
+        # W6: `--system-prompt` replaces Orin's base Code prompt (an empty one keeps it: SDK hosts send "" by default).
+        stable = cli.system_prompt if cli is not None and (cli.system_prompt or "").strip() else render_code_system_prompt(options)
         memory = self._memory.render() if getattr(self, "_memory", None) is not None else ""
         if memory:
             stable += (
@@ -3771,6 +3788,9 @@ class TurnSession:
             public_names=public,
             host_access=self.host_folders,
         )
+        cli = getattr(self, "cli_options", None)
+        if cli is not None and (cli.append_system_prompt or "").strip():
+            dynamic += "\n\n# Instructions from the command line\n" + cli.append_system_prompt.strip()
         return stable, dynamic
 
     def _autocompact_setting(self) -> object:
@@ -3932,13 +3952,19 @@ class TurnSession:
         from agentos.code_mode.permissions import ToolPermissionBroker
 
         trusted_workspace = self._workspace_trusted()
+        from .cli_turn import cli_settings_layer
+
+        cli_layer = cli_settings_layer(self.cli_options, CODE_MODE_CORE_TOOLS)
+        cli_sources = self.cli_options.setting_sources if self.cli_options is not None else None
         try:
-            self.effective_settings = load_effective_settings(self.workspace.root, trusted=trusted_workspace)
+            self.effective_settings = load_effective_settings(
+                self.workspace.root, cli=cli_layer, sources=cli_sources, trusted=trusted_workspace,
+            )
         except Exception:  # noqa: BLE001 - settings never stop a turn from starting
             logger.exception("effective settings failed to load; keeping managed settings only")
             try:
                 # Managed layers survive even when the whole load fails: they are organisation policy.
-                self.effective_settings = load_effective_settings(None, sources=())
+                self.effective_settings = load_effective_settings(None, cli=cli_layer, sources=())
             except Exception:  # noqa: BLE001
                 self.effective_settings = empty_settings()
         if not self.effective_settings.trusted and self.effective_settings.untrusted_ignored:
@@ -4014,6 +4040,8 @@ class TurnSession:
                 payload,
             ),
             "cancelled": lambda: bool(self.cancelled(self.turn)),
+            "cli_settings": cli_layer,
+            "setting_sources": cli_sources,
         }
         try:
             sig = inspect.signature(ToolPermissionBroker)
@@ -4248,6 +4276,11 @@ class TurnSession:
             effort=self._effort(),
             on_completed=self._after_completed_turn,
         )
+        if self.cli_options is not None:
+            from .cli_turn import tool_selection
+
+            runtime.offered_tools, runtime.withheld_tools = tool_selection(self.cli_options, CODE_MODE_CORE_TOOLS)
+            runtime.completion_gate = not self.cli_options.headless
         if resumed is not None:
             runtime.contract = resumed
         return runtime

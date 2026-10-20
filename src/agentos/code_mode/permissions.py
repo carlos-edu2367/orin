@@ -9,6 +9,7 @@ import json
 from pathlib import Path, PurePosixPath
 import re
 import time
+from collections.abc import Collection
 from typing import Any, Callable, Literal, Mapping
 from uuid import uuid4
 
@@ -335,6 +336,7 @@ class ToolPermissionBroker:
         trusted: bool = False,
         classifier: Callable[[str, Mapping[str, Any]], PermissionDecision] | None = None,
         cli_settings: Mapping[str, Any] | None = None,
+        setting_sources: Collection[str] | None = None,
         event_emitter: Callable[[str, str, dict[str, Any]], None] | None = None,
         cancelled: Callable[[], bool] | None = None,
         poll_interval_seconds: float = 0.2,
@@ -346,6 +348,8 @@ class ToolPermissionBroker:
         self.trusted = bool(trusted)
         self.classifier = classifier
         self.cli_settings = dict(cli_settings) if cli_settings is not None else None
+        # W6 `--setting-sources`: which file layers the engine reads (None: all of them).
+        self.setting_sources = tuple(setting_sources) if setting_sources is not None else None
         self.event_emitter = event_emitter
         self.cancelled = cancelled
         self.poll_interval_seconds = max(0.01, float(poll_interval_seconds))
@@ -370,7 +374,7 @@ class ToolPermissionBroker:
         from agentos.permissions.engine import PermissionEngine
 
         # Fresh settings on every call, so a new grant applies to the next call.
-        settings = load_effective_settings(self.workspace_root, cli=self.cli_settings, trusted=self.trusted)
+        settings = load_effective_settings(self.workspace_root, cli=self.cli_settings, sources=self.setting_sources, trusted=self.trusted)
         extra = tuple(getattr(self._workspace, "additional_roots", ()) or ())
         return PermissionEngine(self.workspace_root, settings, classifier=self.classifier, additional_roots=extra)
 
@@ -381,7 +385,7 @@ class ToolPermissionBroker:
             return False
 
     def load_rules(self) -> dict[str, list[str]]:
-        settings = load_effective_settings(self.workspace_root, cli=self.cli_settings, trusted=self.trusted)
+        settings = load_effective_settings(self.workspace_root, cli=self.cli_settings, sources=self.setting_sources, trusted=self.trusted)
         return {kind: [rule for rule, _source in settings.permission_rules(kind)] for kind in ("allow", "ask", "deny")}
 
     def _grants_file(self) -> Path:
