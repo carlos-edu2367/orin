@@ -502,3 +502,78 @@ Planner's verification of Batch F:
   built-in was offered (raised to 200); W7's destructive buttons used `button--danger` alone, which has no visible
   style at rest (now `w7-danger-button`); `@server:uri` put the raw address and error text into the reminder outside
   the escaped attribute (all escaped now).
+
+## Review fixes
+
+Fixes for the findings in `docs/superpowers/reviews/2026-10-20-w7-review.md`, section "Must fix before W8", one commit
+per finding, each with a test that failed for the reason the review gives before the fix.
+
+- **W7-R1** — commit `2ae18b7`. Test: `tests/unit/agentic/test_w7_review_r1.py`. The approval events
+  (`code_mode.decision_required`, `tool.permission_required`) keep `permission_request`, `command`, `path`,
+  `structured_patch`, `suggested_rule` and `rule_suggestion` unredacted; every other field is still redacted.
+  No expectation changed.
+- **W7-R2** — commit `4479d9c`. Test: `tests/unit/hooks/test_w7_review_r2.py`. HTTP hooks receive `tool_input`,
+  `tool_name`, `session_id`, `transcript_path`, `hook_event_name`, `cwd` and `permission_mode` raw; the other fields
+  are redacted. **Expectation changed**: `tests/unit/agentic/test_w7_sink_redaction.py::test_an_http_hook_receives_the_event_without_its_secrets`
+  asserted that a token inside `tool_input` never reaches the hook; it now asserts the decision input is sent intact
+  (the review's contract).
+- **W7-R3** — commit `8190cc8`. Test: `tests/unit/agentic/test_w7_review_r3.py`. The sanitizer takes the top-level
+  keys to keep raw (`raw_keys`) instead of a flag; `assistant.delta` and `agent.thought_delta` keep `content` and
+  `delta`. The `--json-schema`-style answer test parses the streamed deltas. No expectation changed.
+- **W7-R4** — commit `6610347`. Test: `frontend/tests/unit/w7ReviewR4.test.tsx`. The hooks editor takes the saved
+  layer from the PUT response as its baseline; the keybindings editor takes `orin.text` from the PUT response; the
+  shared `generation` is gone. Save is disabled until the text changes again; "Salvo." is shown.
+- **W7-R5** — commit `634e907`. Tests: `tests/unit/api/test_w7_review_r5.py` and
+  `frontend/tests/unit/w7ReviewR5.test.tsx`. `remove` of a rule not in the written file answers 422
+  `rule_not_in_file`; the UI offers "Remover" only when the rule's file is the layer's writable file.
+- **W7-R6** — commit `4d3d476`. Tests: `tests/unit/api/test_w7_review_r6.py` and
+  `frontend/tests/unit/w7ReviewR6.test.tsx`. Editing keeps the frontmatter keys the form does not manage; an agent is
+  editable only when its file stem equals its name; the save payload takes `create: true` for "Novo agente", which
+  answers 409 `agent_exists` when the file exists. No expectation changed.
+- **W7-R7** — commit `332d2ed`. Test: `tests/unit/api/test_w7_review_r7.py`. Project rules, hooks, output styles and
+  project agents refuse (422 `outside_folder`) when their target resolves outside the folder; agent files are written
+  through a random temporary name created with `O_CREAT|O_EXCL`. **Deviation**: the `local` layer is not checked — its
+  file (`workspace_grants_file`) lives in the person's Orin folder, outside the repository, so no link in the
+  repository can redirect it. The junction test uses `mklink /J` (no privilege needed).
+- **W7-R8** — commit `10dd61f`. Test:
+  `tests/unit/conversations/test_w7_review_r8.py`. The waiting turn closed by the next message clears `cli_options`.
+  The case is in a new file, as the rules require, not in `test_w7_cli_options_cleared.py`.
+- **W7-R9** — commit `6d809a3`. Test: `frontend/tests/unit/w7ReviewR9.test.tsx`. "Enviar agora" stops and waits
+  first; the queued item is removed next (a 404 aborts with "O agente já leu esta mensagem."); a failed send puts the
+  text back in an empty composer or queues it again; a turn still running after the wait sends nothing and says so;
+  the queue refreshes in `finally`. Residual: if the re-enqueue also fails while the composer holds other text, the
+  text is not kept and the error says so.
+- **W7-R10** — commit `71442ee`. Test: `frontend/tests/unit/w7ReviewR10.test.tsx`. The picker's Enter acts only from
+  the composer's textarea or with no control focused (the page); Enter on another control and an IME's Enter are not
+  taken. **Deviation** from "only the composer's textarea": the existing `CommandPicker.test.tsx` presses Enter with
+  focus on the page and expects a pick, so the page case is kept.
+- **W7-R11** — commit `cf559ce`. Test: `frontend/tests/unit/w7ReviewR11.test.tsx`. `[role="search"]` added to the
+  permission card's and the chat's Escape checks.
+- **W7-R12** — commit `f24e495`. Test: `frontend/tests/unit/w7ReviewR12.test.tsx`. ctrl+r then Enter puts the recalled
+  text in the composer and sends it through the Enter path (shell, queue while running, attachments); `onRunCommand`
+  is kept for picked `/` commands only.
+- **W7-R13** — commit `3fd1b6e`. Test: `frontend/tests/unit/w7ReviewR13.test.tsx`. `submit()` has an in-flight ref
+  guard; a second Enter while `/fork` runs creates no second fork (verified to fail without the guard).
+- **W7-R14** — commit `70c67e7`. Test: `frontend/tests/unit/w7ReviewR14.test.tsx`. Send-now sends a `/` text (and a
+  `!` text in a Code conversation) through `submit(text, afterStop)` after the stop, never as a prompt. Residual: a
+  queued `/` or `!` item whose command fails is removed from the queue and its text is not put back in the
+  composer (the error says the command failed).
+
+Coordinator's verification of the review fixes:
+
+- The review was done in two passes (`405ead3` backend and editors, `e6c4ab8` chat surfaces) plus `c96e75a`, which
+  adds the findings of a helper reviewer whose report arrived after the first pass had handed back (W7-R13, R14,
+  D22–D24).
+- The fixer handed back before its final suites ended; the coordinator ran them. Found and fixed on top of its commits:
+  `4ce47d4` (the R12 fix failed lint: a ref declared after the effect that read it), `4546b87` (the R5 note repeated
+  the rule's file and told the person to edit the managed policy; the permissions baselines follow), `916daa3` (the
+  streamed-text ChatPage test failed two full runs in a row once W7 grew the suite: its two waits get 5 s; passes 5/5
+  alone and 3/3 full runs since).
+- The reviewer's own reproductions, rerun against `main`: `r2_permission_card_redaction.py` → the card shows the
+  command that runs; `r1_http_hook_redaction.py` → the hook gets the raw command and `session_id`;
+  `r3_activity_overredaction.py` → the answer keeps `"author": "Carlos"` and the structured JSON parses.
+  Residual (low, deferred): an HTTP hook's `usage.input_tokens` is still masked (redaction by key name).
+- Suites after the fixes (Windows): `tests/unit` 4438 passed, 66 skipped; `tests/integration` 123 passed, 65 skipped;
+  frontend 715 passed (3 full runs), lint and build clean, e2e 61 passed. W7 visual specs: 52 passed; two
+  intermittent failures seen while the machine was loaded (`route.fetch: read ECONNRESET` from the dev server, and
+  once the `/help` baseline), each passing on rerun (`w7-commands` 24/24 with `--repeat-each=3`).
