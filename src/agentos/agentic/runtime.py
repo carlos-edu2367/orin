@@ -273,6 +273,7 @@ class AgenticTurnRuntime:
         autocompact: object = "auto",
         prompt_renderer: Callable[[], str] | None = None,
         compact_request: str | None = None,
+        shell_command: str | None = None,
         effort: str | None = None,
         effort_supported: Callable[[str], bool] | None = None,
         model_switched: Callable[[str], None] | None = None,
@@ -283,6 +284,8 @@ class AgenticTurnRuntime:
         self.store, self.provider = store, provider
         # Set for a /compact turn: the turn only summarizes the conversation (instructions may be empty).
         self.compact_request = compact_request
+        # W7 `!command`: the person's own shell command, run as one tool call; the model is not called.
+        self.shell_command = shell_command
         # Reasoning effort for this turn (already checked against the model); None sends nothing.
         self.effort = effort
         # Whether a model accepts the reasoning effort. A fallback that does not loses the effort (it would be rejected).
@@ -706,6 +709,8 @@ class AgenticTurnRuntime:
             return AgenticRunResult("completed", 0, 0, "HOOK_BLOCKED_CONFIG")
         if self.compact_request is not None:
             return self._run_manual_compaction(turn)
+        if self.shell_command is not None:
+            return self._run_shell_command(turn)
         messages = list(self.store.history_for_turn(turn))
         action_count = 0
         self._failed_signatures: dict[str, str] = {}
@@ -2576,6 +2581,41 @@ class AgenticTurnRuntime:
                 self._learning_sink(learned)
         except Exception:  # noqa: BLE001 - learning never breaks a turn
             pass
+
+    def _run_shell_command(self, turn: dict[str, object]) -> AgenticRunResult:
+        """`!command` (W7): one Bash call through the ordinary tool path (hooks, permissions, checkpoints, the tool's
+        card), then the turn ends with the output as the answer, so later turns see it in the history."""
+        import json as _json
+
+        from .tools.public_names import public_name
+
+        command = str(self.shell_command or "").strip()
+        if not command:
+            self.store.delta(turn, "Nenhum comando para executar.")
+            self._life(turn, "completed")
+            self.store.finish(turn)
+            self._settle_quality(turn, "completed")
+            return AgenticRunResult("completed", 0, 0, "EMPTY_SHELL_COMMAND")
+        if self.cancelled(turn):
+            return self._cancel(turn, 0, 0)
+        name = public_name("run_command") if self._names is not None else "run_command"
+        call_id = f"shell_{str(turn.get('turn_id') or '')[-12:]}"
+        results = self._run_toolset(turn, [{"id": call_id, "name": name, "arguments": _json.dumps({"command": command})}])
+        result = results[0] if results else {"status": "failed", "content": "", "error_code": "TOOL_FAILED"}
+        output = str(result.get("content") or "").strip()
+        if len(output) > 12_000:
+            output = output[:12_000] + "\n[saída truncada]"
+        fence = "````" if "```" in output else "```"
+        if result.get("status") == "succeeded":
+            self.store.delta(turn, f"{fence}\n{output or '(sem saída)'}\n{fence}")
+        else:
+            self.store.delta(turn, f"O comando não rodou: {output[:2_000] or result.get('error_code') or 'falhou'}")
+        if self.cancelled(turn):
+            return self._cancel(turn, 1, 1)
+        self._life(turn, "completed")
+        self.store.finish(turn)
+        self._settle_quality(turn, "completed")
+        return AgenticRunResult("completed", 1, 1, None if result.get("status") == "succeeded" else str(result.get("error_code") or "TOOL_FAILED"))
 
     def _run_manual_compaction(self, turn: dict[str, object]) -> AgenticRunResult:
         """/compact: summarize the whole conversation into a boundary, then end the turn."""

@@ -4022,6 +4022,13 @@ class TurnSession:
             logger.exception("memory files could not be loaded")
             return None
 
+    def _shell_request(self, task: str) -> str | None:
+        """The command of a `!` shell turn (W7), or None for an ordinary turn."""
+        if str(self.turn.get("turn_kind") or "") != "shell":
+            return None
+        text = str(task or "").strip()
+        return text[1:].strip() if text.startswith("!") else text
+
     def _compact_request(self, task: str) -> str | None:
         """The instructions of a /compact turn ("" for none), or None for an ordinary turn."""
         if str(self.turn.get("turn_kind") or "") != "compact":
@@ -4185,6 +4192,11 @@ class TurnSession:
                 self.permission_mode = "accept_edits"
         else:
             self.permission_mode = "ask_permissions"
+        if str(self.turn.get("turn_kind") or "") == "shell" and self.permission_mode != "plan_mode":
+            # W7 `!command`: the person typed this command, so it runs without a prompt; deny rules, hooks and a
+            # policy that disables bypass (below) still apply, and plan mode still refuses it. No model runs in this
+            # turn, so nothing else can use the mode.
+            self.permission_mode = "full_autonomy"
         if self.permission_mode == "full_autonomy" and bypass_disabled(self.effective_settings):
             # W6-R4: a policy that disables bypass wins over every route that asks for it (the CLI flags, the SDK's
             # set_permission_mode and the interface alike). Subagents cannot exceed the parent, so they follow.
@@ -4448,6 +4460,7 @@ class TurnSession:
             autocompact=self._autocompact_setting(),
             prompt_renderer=self._render_code_prompt_again if self.turn.get("code_mode") == "code" else None,
             compact_request=self._compact_request(task),
+            shell_command=self._shell_request(task),
             effort=self._effort(),
             on_completed=self._after_completed_turn,
         )
