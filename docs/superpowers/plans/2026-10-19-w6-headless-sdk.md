@@ -10190,3 +10190,2336 @@ feat(w6): orin code plugin, and orin code [prompt] opens the session
 - [ ] **Step 1:** `uv run pytest -q tests/unit` and `uv run pytest -q tests/integration` (timeout 900000 ms each): green; report the counts.
 - [ ] **Step 2:** no `agentos.launcher` and no background `orin-code` process is left; `git status` shows nothing under `data/`.
 - [ ] **Step 3:** Append `## Batch E — MCP from the CLI, subcommands and the interface (Tasks 18–21)` to the ledger (commits, tests, suites, deviations from this plan, expectation changes, anything incomplete). Commit `docs(w6): Batch E ledger`.
+
+---
+
+## Batch F — Inherited fixes and the W6 close
+
+Fixes inherited by W6 from earlier reviews, the Setup hook, two agent and skill fields, and the decision on every flag
+that is still refused. Line numbers are approximate; the edits are exact.
+
+**Every "Create" below is a new file: if a file of that name exists, stop and report — never overwrite it.**
+
+### Deviations decided while planning Batch F (the ledger repeats them)
+
+42. **W4-R26:** `ask_user`, `push_notification`, `use_skill` and `schedule_wakeup` never prompt but are not read-only; plan mode refuses `schedule_wakeup`.
+43. **W1-R10:** at most 2 classifier threads in all; the denial breaker counts per conversation for as long as the worker runs (LRU of 1000).
+44. **W5-D2 on Windows:** a child started outside the Job during the 0.3 s shutdown window is not covered.
+45. **W5-D3:** a publish without `version` is still accepted.
+46. **W3-R23:** a lock not taken within 5 s skips that count (it only delays consolidation).
+47. **Setup:** only `--init` and `--maintenance` (no `--init-only`), on the run's first turn.
+48. **Not applied:** an inline skill's `model`, any skill's `effort`; an agent's `isolation`, `mcpServers`, `memory`, `color`, `hooks` (W8).
+49. **Still refused, with reasons** (fail closed, never ignored): `--fork-session`, `--resume-session-at`, `--resume-drops-turn` (Orin's conversations have no fork or truncate operation yet); `--worktree` (no worktree manager); `--plugin-dir` (plugins load only after the interface's approval, W5); `--agent` (the main thread as an agent needs the agent's prompt in place of Code's own); `--bare`, `--safe-mode`, `--restricted` (each removes protections or settings in ways Orin has not specified); `--desktop`; `--session-mirror`; `--task-budget`; `--prompt-suggestions` (W7); `--exclude-dynamic-system-prompt-sections`; `--thinking-display`; `orin code import` and `review` (W8).
+50. **W3-R31 is unverified:** replaying earlier turns without their thinking blocks against the real Anthropic API needs a key this environment does not have.
+
+### Task 22: The auto-mode classifier: bounded threads, a per-conversation breaker, `autoMode.model` (W1-R10)
+
+Every classifier call used a new one-thread executor; a call that hung past its timeout kept that thread, so hung providers grew threads without bound. Now one module pool of `MAX_CLASSIFIER_THREADS = 2` serves every classifier: while both threads hang, a new call times out and asks (its queued future is cancelled). The denial breaker (3 in a row, 20 in total) was per classifier, and `build_runtime` makes a classifier per turn, so it reset every turn; its counters now live in a small LRU (1000 conversations) keyed by the conversation. `autoMode.model` named a model but the turn's own transport (bound to the turn's model) was used; a different model now gets its own transport through `fallback_provider_factory`.
+
+**Files:**
+- Create: `tests/unit/permissions/test_w6_auto_mode.py`
+- Modify: `src/agentos/agentic/session.py`, `src/agentos/permissions/auto_mode.py`
+
+**Interfaces:**
+- Produces: `MAX_CLASSIFIER_THREADS`; `AutoModeClassifier(..., breaker_key=None)`; the session passes the conversation id and a transport for `autoMode.model`.
+
+- [ ] **Step 1: Write the failing tests** (test files and their fixtures).
+
+Create `tests/unit/permissions/test_w6_auto_mode.py` (it must not exist yet):
+
+```python
+"""W6 (W1-R10): the auto-mode classifier's threads are bounded, its breaker spans a conversation, and
+``autoMode.model`` really picks the model."""
+from __future__ import annotations
+
+import threading
+import time
+import uuid
+
+from agentos.agentic.provider_stream import NormalizedStreamItem, StreamKind
+from agentos.permissions.auto_mode import MAX_CLASSIFIER_THREADS, MAX_CONSECUTIVE_DENIALS, AutoModeClassifier
+
+
+class _Hanging:
+    def __init__(self) -> None:
+        self.release = threading.Event()
+
+    def stream(self, request):
+        self.release.wait(10)
+        return iter([NormalizedStreamItem(StreamKind.TEXT, 1, text='{"decision": "allow", "reason": "x"}')])
+
+
+class _Denying:
+    def stream(self, request):
+        return iter([NormalizedStreamItem(StreamKind.TEXT, 1, text='{"decision": "deny", "reason": "no"}')])
+
+
+def _call(classifier: AutoModeClassifier):
+    return classifier("run_command", {"command": "make deploy"})
+
+
+def test_timed_out_calls_never_grow_the_threads_past_the_pool() -> None:
+    provider = _Hanging()
+    before = threading.active_count()
+    try:
+        for _ in range(6):
+            decision = _call(AutoModeClassifier(provider, provider_name="openrouter", model_id="fast", timeout_seconds=0.1))
+            assert decision.behavior == "ask"
+        assert threading.active_count() <= before + MAX_CLASSIFIER_THREADS
+    finally:
+        provider.release.set()
+        time.sleep(0.2)
+
+
+def test_the_breaker_spans_the_conversations_turns() -> None:
+    key = f"chat_{uuid.uuid4().hex}"
+    for _ in range(MAX_CONSECUTIVE_DENIALS):  # one classifier per turn, as build_runtime makes them
+        assert _call(AutoModeClassifier(_Denying(), provider_name="openrouter", model_id="fast", breaker_key=key)).behavior == "deny"
+    paused = _call(AutoModeClassifier(_Denying(), provider_name="openrouter", model_id="fast", breaker_key=key))
+    assert paused.behavior == "ask" and "paused" in paused.reason
+    other = _call(AutoModeClassifier(_Denying(), provider_name="openrouter", model_id="fast", breaker_key=f"chat_{uuid.uuid4().hex}"))
+    assert other.behavior == "deny"  # another conversation has its own counters
+
+
+def test_automode_model_gets_its_own_transport(tmp_path, monkeypatch) -> None:
+    import json
+
+    from agentos.settings.paths import orin_user_dir
+
+    from tests.unit.cli_code.test_cli_turn_session import _session
+
+    orin_user_dir().mkdir(parents=True, exist_ok=True)
+    (orin_user_dir() / "settings.json").write_text(json.dumps({"autoMode": {"model": "fast-model"}}), encoding="utf-8")
+    asked: list[str] = []
+    session = _session(tmp_path, permission_mode="auto")
+    session.fallback_provider_factory = lambda model_id: asked.append(model_id) or _Denying()
+    session.build_runtime()
+    classifier = session._auto_mode_classifier()
+    assert classifier is not None and classifier.model_id == "fast-model" and asked and set(asked) == {"fast-model"}  # build_runtime made one too
+    assert isinstance(classifier.provider, _Denying)
+```
+
+- [ ] **Step 2: Run them to see them fail.**
+
+Run: `uv run pytest -q tests/unit/permissions/test_w6_auto_mode.py`
+Expected: collection error: `cannot import name 'MAX_CLASSIFIER_THREADS'`.
+
+- [ ] **Step 3: Implement.**
+
+In `src/agentos/agentic/session.py` make these 1 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+            task = next((str(item.get("content") or "") for item in reversed(history) if item.get("role") == "user"), "")
+            return AutoModeClassifier(
+                self.provider_factory(), provider_name=str(self.turn.get("provider") or ""), model_id=model_id,
+                settings=self.effective_settings, context=task, workspace_root=self.workspace.root,
+            )
+```
+
+with
+
+```python
+            task = next((str(item.get("content") or "") for item in reversed(history) if item.get("role") == "user"), "")
+            # W1-R10: a different autoMode.model needs its own transport (the turn's is bound to the turn's model).
+            other_model = model_id != str(self.turn.get("model_id") or "") and self.fallback_provider_factory is not None
+            provider = self.fallback_provider_factory(model_id) if other_model else self.provider_factory()
+            return AutoModeClassifier(
+                provider, provider_name=str(self.turn.get("provider") or ""), model_id=model_id,
+                settings=self.effective_settings, context=task, workspace_root=self.workspace.root,
+                breaker_key=str(self.turn.get("conversation_id") or "") or None,
+            )
+```
+
+
+In `src/agentos/permissions/auto_mode.py` make these 6 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+import threading
+from collections.abc import Mapping
+```
+
+with
+
+```python
+import threading
+from collections import OrderedDict
+from collections.abc import Mapping
+```
+
+2. Replace
+
+```python
+MAX_CONSECUTIVE_DENIALS = 3
+MAX_TOTAL_DENIALS = 20
+```
+
+with
+
+```python
+MAX_CONSECUTIVE_DENIALS = 3
+MAX_TOTAL_DENIALS = 20  # per conversation, for as long as this worker runs (W1-R10)
+# W1-R10: one small pool for every classifier. A call that hangs past its timeout keeps its thread until the provider
+# returns, but no more than this many threads ever exist; while they are all busy a new call times out and asks.
+MAX_CLASSIFIER_THREADS = 2
+_POOL = ThreadPoolExecutor(max_workers=MAX_CLASSIFIER_THREADS, thread_name_prefix="orin-auto-mode")
+_MAX_BREAKERS = 1000
+
+
+class _Breaker:
+    __slots__ = ("consecutive", "total")
+
+    def __init__(self) -> None:
+        self.consecutive = 0
+        self.total = 0
+
+
+_BREAKERS: "OrderedDict[str, _Breaker]" = OrderedDict()
+_BREAKERS_LOCK = threading.Lock()
+
+
+def _breaker_for(key: str | None) -> _Breaker:
+    """The denial counters of one conversation, shared by every turn's classifier (a new one each turn)."""
+    if not key:
+        return _Breaker()
+    with _BREAKERS_LOCK:
+        breaker = _BREAKERS.pop(key, None) or _Breaker()
+        _BREAKERS[key] = breaker
+        while len(_BREAKERS) > _MAX_BREAKERS:
+            _BREAKERS.popitem(last=False)
+        return breaker
+```
+
+3. Replace
+
+```python
+        workspace_root=None,
+    ) -> None:
+```
+
+with
+
+```python
+        workspace_root=None,
+        breaker_key: str | None = None,
+    ) -> None:
+```
+
+4. Replace
+
+```python
+        self._lock = threading.Lock()
+        self._consecutive = 0
+        self._total = 0
+```
+
+with
+
+```python
+        self._lock = threading.Lock()
+        self._breaker = _breaker_for(breaker_key)
+```
+
+5. Replace
+
+```python
+        with self._lock:
+            if self._consecutive >= MAX_CONSECUTIVE_DENIALS or self._total >= MAX_TOTAL_DENIALS:
+                return PermissionDecision("ask", "auto mode paused after repeated denials")
+        executor = ThreadPoolExecutor(max_workers=1)
+        try:
+            future = executor.submit(self._ask_model, internal, dict(arguments))
+            try:
+                reply = future.result(timeout=self.timeout_seconds)
+            except FutureTimeout:
+                return PermissionDecision("ask", "auto mode classifier timed out")
+            except Exception:  # noqa: BLE001
+                return PermissionDecision("ask", "auto mode classifier failed")
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+        verdict = _verdict_from(reply or "")
+```
+
+with
+
+```python
+        with self._lock:
+            if self._breaker.consecutive >= MAX_CONSECUTIVE_DENIALS or self._breaker.total >= MAX_TOTAL_DENIALS:
+                return PermissionDecision("ask", "auto mode paused after repeated denials")
+        future = _POOL.submit(self._ask_model, internal, dict(arguments))
+        try:
+            reply = future.result(timeout=self.timeout_seconds)
+        except FutureTimeout:
+            future.cancel()  # a call still queued behind hung ones never runs
+            return PermissionDecision("ask", "auto mode classifier timed out")
+        except Exception:  # noqa: BLE001
+            return PermissionDecision("ask", "auto mode classifier failed")
+        verdict = _verdict_from(reply or "")
+```
+
+6. Replace
+
+```python
+            if behavior == "deny":
+                self._consecutive += 1
+                self._total += 1
+            else:
+                self._consecutive = 0
+        return PermissionDecision(behavior, str((verdict or {}).get("reason") or f"auto mode: {behavior}")[:300])
+```
+
+with
+
+```python
+            if behavior == "deny":
+                self._breaker.consecutive += 1
+                self._breaker.total += 1
+            else:
+                self._breaker.consecutive = 0
+        return PermissionDecision(behavior, str((verdict or {}).get("reason") or f"auto mode: {behavior}")[:300])
+```
+
+
+- [ ] **Step 4: Run the tests to see them pass.**
+
+Run: `uv run pytest -q tests/unit/permissions tests/unit/cli_code`
+Expected: all pass.
+
+- [ ] **Step 5: Commit.**
+
+```
+fix(w6): bound the auto-mode classifier's threads and keep its breaker per conversation
+
+W1-R10: one small pool for every classifier, denial counters per
+conversation, and autoMode.model gets its own transport.
+```
+
+### Task 23: The SDK relay a turn registers is removed when the turn closes
+
+Batch E's executor found that `register_relay` kept every CLI turn's relay (and through it the session) for the life of the worker. The session now remembers the relay it registered and `_close_hook_dispatcher` (run when the turn's runtime closes) unregisters it. The Batch E test that accepted either of two messages with `or` now checks the one the code prints.
+
+**Files:**
+- Create: `tests/unit/mcp/test_sdk_relay_lifetime.py`
+- Modify: `src/agentos/agentic/session.py`, `tests/unit/cli_code/test_session_subcommands.py`
+
+**Interfaces:**
+- Produces: `TurnSession._sdk_relay`, cleared on close.
+
+- [ ] **Step 1: Write the failing tests** (test files and their fixtures).
+
+In `tests/unit/cli_code/test_session_subcommands.py` make these 1 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+    code, _, err = _run([name, "claude"], tmp_path, monkeypatch)
+    assert code == 1 and "not supported yet" in err or "W8" in err
+```
+
+with
+
+```python
+    code, _, err = _run([name, "claude"], tmp_path, monkeypatch)
+    assert code == 1 and ("not supported yet" in err or "W8" in err)
+```
+
+
+Create `tests/unit/mcp/test_sdk_relay_lifetime.py` (it must not exist yet):
+
+```python
+"""W6 Batch F: a turn's SDK relay is removed when the turn closes (the registry must not keep sessions alive)."""
+from __future__ import annotations
+
+from pathlib import Path
+from types import SimpleNamespace
+
+from agentos.code_mode.cli_options import CliTurnOptions
+from agentos.mcp.transport_sdk import relay_for
+
+from tests.unit.cli_code.test_cli_turn_session import _session
+
+
+def test_the_relay_lives_as_long_as_the_turn(tmp_path: Path) -> None:
+    options = CliTurnOptions(mcp_servers={"calc": {"type": "sdk", "name": "calc"}})
+    session = _session(tmp_path, options)
+    session.mcp_service = SimpleNamespace(allow_stdio=True)  # a desktop Orin reads the person's servers
+    session._mcp_file_connect = lambda config, secrets: ("ok", ())  # no discovery: only the registration matters
+    runtime = session.build_runtime()
+    key = str(session.turn["turn_id"])
+    assert relay_for(key) is not None
+    runtime.close()
+    assert relay_for(key) is None
+```
+
+- [ ] **Step 2: Run them to see them fail.**
+
+Run: `uv run pytest -q tests/unit/mcp/test_sdk_relay_lifetime.py`
+Expected: `test_the_relay_lives_as_long_as_the_turn` fails (the relay is still registered after close).
+
+- [ ] **Step 3: Implement.**
+
+In `src/agentos/agentic/session.py` make these 2 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+    def _close_hook_dispatcher(self) -> None:
+        dispatcher, self._hook_dispatcher = self._hook_dispatcher, None
+```
+
+with
+
+```python
+    def _close_hook_dispatcher(self) -> None:
+        relay, self._sdk_relay = getattr(self, "_sdk_relay", None), None
+        if relay is not None:
+            from agentos.mcp.transport_sdk import unregister_relay
+
+            unregister_relay(*relay)  # the registry must not keep this turn's session alive
+        dispatcher, self._hook_dispatcher = self._hook_dispatcher, None
+```
+
+2. Replace
+
+```python
+
+                # W6: this turn's channel to the SDK host serves its in-process MCP servers.
+                register_relay(relay_key, lambda kind, request, timeout: self._host_requests().ask(kind, request, timeout=timeout))
+            for raw in found.servers:
+```
+
+with
+
+```python
+
+                # W6: this turn's channel to the SDK host serves its in-process MCP servers (removed when the turn closes).
+                def relay(kind, request, timeout):
+                    return self._host_requests().ask(kind, request, timeout=timeout)
+
+                register_relay(relay_key, relay)
+                self._sdk_relay = (relay_key, relay)
+            for raw in found.servers:
+```
+
+
+- [ ] **Step 4: Run the tests to see them pass.**
+
+Run: `uv run pytest -q tests/unit/mcp tests/unit/cli_code`
+Expected: all pass.
+
+Expectation change to record: `test_session_subcommands.py` line 72 asserts the exact refusal text.
+
+- [ ] **Step 5: Commit.**
+
+```
+fix(w6): an SDK relay ends with its turn
+```
+
+### Task 24: Read-only tools and tools that never prompt (W4-R26)
+
+`READ_ONLY_TOOLS` held tools that are not read-only (`ask_user`, `push_notification`, `use_skill`, `schedule_wakeup`), so plan mode allowed scheduling a wakeup, a later run that can change files. They move to `NO_PROMPT_TOOLS`: allowed without a prompt in every mode (deny rules still win), and in plan mode only `PLAN_MODE_NO_PROMPT_TOOLS` (all but `schedule_wakeup`). Decision (W4 review): a wakeup may be scheduled in dontAsk, which never prompts anyway; plan mode refuses it (fail closed).
+
+**Files:**
+- Create: `tests/unit/permissions/test_w6_no_prompt_tools.py`
+- Modify: `src/agentos/permissions/engine.py`, `tests/unit/agentic/tools/test_push_notification.py`, `tests/unit/agentic/tools/test_wakeup_tools.py`
+
+**Interfaces:**
+- Produces: `NO_PROMPT_TOOLS`, `PLAN_MODE_NO_PROMPT_TOOLS` in `permissions/engine.py`.
+
+- [ ] **Step 1: Write the failing tests** (test files and their fixtures).
+
+In `tests/unit/agentic/tools/test_push_notification.py` make these 1 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+    from agentos.agentic.tools.public_names import PUBLIC_NAMES
+    from agentos.permissions.engine import READ_ONLY_TOOLS
+```
+
+with
+
+```python
+    from agentos.agentic.tools.public_names import PUBLIC_NAMES
+    from agentos.permissions.engine import NO_PROMPT_TOOLS as READ_ONLY_TOOLS  # W4-R26: it never prompts
+```
+
+
+In `tests/unit/agentic/tools/test_wakeup_tools.py` make these 1 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+def test_it_is_allowed_without_a_prompt() -> None:
+    from agentos.permissions.engine import READ_ONLY_TOOLS
+    from agentos.agentic.runtime import CODE_MODE_CORE_TOOLS
+```
+
+with
+
+```python
+def test_it_is_allowed_without_a_prompt() -> None:
+    from agentos.permissions.engine import NO_PROMPT_TOOLS as READ_ONLY_TOOLS  # W4-R26: it never prompts
+    from agentos.agentic.runtime import CODE_MODE_CORE_TOOLS
+```
+
+
+Create `tests/unit/permissions/test_w6_no_prompt_tools.py` (it must not exist yet):
+
+```python
+"""W6 (W4-R26): tools that never prompt are not read-only, and plan mode keeps only the harmless ones."""
+from __future__ import annotations
+
+from pathlib import Path
+
+from agentos.code_mode.models import CodePermissionMode as M
+from agentos.permissions.engine import NO_PROMPT_TOOLS, READ_ONLY_TOOLS
+
+from tests.unit.permissions.test_engine import _engine
+
+
+def test_the_lists_do_not_overlap() -> None:
+    assert not NO_PROMPT_TOOLS & READ_ONLY_TOOLS
+    assert {"ask_user", "push_notification", "use_skill", "schedule_wakeup"} <= NO_PROMPT_TOOLS
+
+
+def test_no_prompt_tools_run_unprompted_outside_plan_mode(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    for name in NO_PROMPT_TOOLS:
+        assert engine.decide(name, {}, M.ASK_PERMISSIONS).behavior == "allow", name
+        assert engine.decide(name, {}, M.DONT_ASK).behavior == "allow", name
+
+
+def test_plan_mode_refuses_a_wakeup_but_keeps_asking_the_person(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    assert engine.decide("schedule_wakeup", {"delay_seconds": 60}, M.PLAN_MODE).behavior == "deny"
+    assert engine.decide("schedule_wakeup", {}, M.ACCEPT_EDITS, plan_mode_active=True).behavior == "deny"
+    for name in ("ask_user", "push_notification", "use_skill", "read_file"):
+        assert engine.decide(name, {}, M.PLAN_MODE).behavior == "allow", name
+
+
+def test_a_deny_rule_still_wins(tmp_path: Path) -> None:
+    engine = _engine(tmp_path, user={"permissions": {"deny": ["PushNotification"]}})
+    assert engine.decide("push_notification", {}, M.ASK_PERMISSIONS).behavior == "deny"
+```
+
+- [ ] **Step 2: Run them to see them fail.**
+
+Run: `uv run pytest -q tests/unit/permissions/test_w6_no_prompt_tools.py`
+Expected: collection error: `cannot import name 'NO_PROMPT_TOOLS'`.
+
+- [ ] **Step 3: Implement.**
+
+In `src/agentos/permissions/engine.py` make these 5 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+    "read_file", "view_file", "transcribe_pdf", "list_files", "search_files", "search_code", "glob_files",
+    "project_map", "todo_write", "task_create", "task_update", "task_get", "task_list", "ask_user",
+    "enter_plan_mode", "exit_plan_mode", "write_contract", "report_verification", "use_skill",
+    "search_skills", "list_skills", "read_skill_resource", "recall", "check_subagent", "read_process_output",
+```
+
+with
+
+```python
+    "read_file", "view_file", "transcribe_pdf", "list_files", "search_files", "search_code", "glob_files",
+    "project_map", "todo_write", "task_create", "task_update", "task_get", "task_list",
+    "enter_plan_mode", "exit_plan_mode", "write_contract", "report_verification",
+    "search_skills", "list_skills", "read_skill_resource", "recall", "check_subagent", "read_process_output",
+```
+
+2. Replace
+
+```python
+    "list_plugins", "search_plugin", "list_projects", "read_project_conversation", "cron_list",
+    "schedule_wakeup", "push_notification",
+    "list_mcp_resources", "read_mcp_resource", "read_mcp_resource_dir", "refresh_mcp_tools",
+```
+
+with
+
+```python
+    "list_plugins", "search_plugin", "list_projects", "read_project_conversation", "cron_list",
+    "list_mcp_resources", "read_mcp_resource", "read_mcp_resource_dir", "refresh_mcp_tools",
+```
+
+3. Replace
+
+```python
+})
+DELEGATION_TOOLS: frozenset[str] = frozenset({"run_subagent", "create_agent", "ask_agent", "ask_agents", "send_message"})
+```
+
+with
+
+```python
+})
+# W4-R26: tools that never prompt but are not read-only (they ask the person, notify, run a skill, or schedule a
+# later run). They run unprompted in every mode except plan mode, which keeps only the first three: a wakeup
+# schedules a future run that can change files.
+NO_PROMPT_TOOLS: frozenset[str] = frozenset({"ask_user", "push_notification", "use_skill", "schedule_wakeup"})
+PLAN_MODE_NO_PROMPT_TOOLS: frozenset[str] = frozenset({"ask_user", "push_notification", "use_skill"})
+DELEGATION_TOOLS: frozenset[str] = frozenset({"run_subagent", "create_agent", "ask_agent", "ask_agents", "send_message"})
+```
+
+4. Replace
+
+```python
+        if plan_mode_active or resolved is CodePermissionMode.PLAN_MODE:
+            if internal in READ_ONLY_TOOLS:
+                return PermissionDecision("allow", "read-only tool in plan mode")
+```
+
+with
+
+```python
+        if plan_mode_active or resolved is CodePermissionMode.PLAN_MODE:
+            if internal in READ_ONLY_TOOLS or internal in PLAN_MODE_NO_PROMPT_TOOLS:
+                return PermissionDecision("allow", "read-only tool in plan mode")
+```
+
+5. Replace
+
+```python
+            return PermissionDecision("allow", "read-only or delegation tool")
+        if internal in EDIT_FAMILY and self._is_plan_file(args):
+```
+
+with
+
+```python
+            return PermissionDecision("allow", "read-only or delegation tool")
+        if internal in NO_PROMPT_TOOLS:
+            return PermissionDecision("allow", "a tool that never prompts")
+        if internal in EDIT_FAMILY and self._is_plan_file(args):
+```
+
+
+- [ ] **Step 4: Run the tests to see them pass.**
+
+Run: `uv run pytest -q tests/unit/permissions tests/unit/agentic`
+Expected: all pass.
+
+Expectation change to record: `test_push_notification.py` and `test_wakeup_tools.py` import `NO_PROMPT_TOOLS` (they check that the tool never prompts, which still holds).
+
+- [ ] **Step 5: Commit.**
+
+```
+fix(w6): tools that never prompt are not read-only, and plan mode refuses a wakeup
+
+W4-R26.
+```
+
+### Task 25: A resource blob that is not base64 (W5-D4)
+
+`ReadMcpResource` decoded a binary blob with `validate=False` and failed the whole tool with `Incorrect padding`; an image blob was passed to the provider without any check. A blob that is not valid base64 is now described as unreadable, and an image only travels when it decodes.
+
+**Files:**
+- Create: `tests/unit/mcp/test_w6_resource_blobs.py`
+- Modify: `src/agentos/agentic/tools/mcp/resources.py`
+
+**Interfaces:**
+- Produces: `_blob_size(blob) -> int | None` in `agentic/tools/mcp/resources.py`.
+
+- [ ] **Step 1: Write the failing tests** (test files and their fixtures).
+
+Create `tests/unit/mcp/test_w6_resource_blobs.py` (it must not exist yet):
+
+```python
+"""W6 (W5-D4): a resource blob that is not base64 is described as unreadable, never passed on."""
+from __future__ import annotations
+
+from pathlib import Path
+from types import SimpleNamespace
+
+from agentos.agentic.agent_tools import AgentToolset
+from agentos.agentic.workspace import ConversationWorkspace
+
+
+class _Provider:
+    def __init__(self, contents):
+        self.contents = contents
+
+    def find_server(self, name):
+        return SimpleNamespace() if name == "docs" else None
+
+    def server_slugs(self):
+        return ["docs"]
+
+    def read_resource(self, server, uri):
+        return self.contents
+
+
+def _read(tmp_path: Path, contents):
+    toolset = AgentToolset(ConversationWorkspace(tmp_path / "w", "c1"), public_tool_names=True)
+    toolset._mcp_provider = _Provider(contents)
+    return toolset.read_mcp_resource("docs", "file:///x")
+
+
+def test_a_bad_blob_is_unreadable(tmp_path: Path) -> None:
+    outcome = _read(tmp_path, [{"uri": "file:///x", "mimeType": "application/zip", "blob": "abc"}])
+    assert outcome.status == "succeeded" and "unreadable" in outcome.content and "padding" not in outcome.content
+
+
+def test_a_bad_image_blob_is_not_sent_as_an_image(tmp_path: Path) -> None:
+    outcome = _read(tmp_path, [{"uri": "file:///x", "mimeType": "image/png", "blob": "not base64!"}])
+    assert not outcome.images and "unreadable" in outcome.content
+
+
+def test_a_good_blob_still_reports_its_size(tmp_path: Path) -> None:
+    outcome = _read(tmp_path, [{"uri": "file:///x", "mimeType": "application/zip", "blob": "AAAA"}])
+    assert "3 bytes" in outcome.content
+```
+
+- [ ] **Step 2: Run them to see them fail.**
+
+Run: `uv run pytest -q tests/unit/mcp/test_w6_resource_blobs.py`
+Expected: 2 of the 3 tests fail (`Incorrect padding`; the bad image is sent).
+
+- [ ] **Step 3: Implement.**
+
+In `src/agentos/agentic/tools/mcp/resources.py` make these 4 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+import base64
+import json
+```
+
+with
+
+```python
+import base64
+import binascii
+import json
+```
+
+2. Replace
+
+```python
+            elif isinstance(item.get("blob"), str):
+                if mime.startswith("image/") and len(images) < MAX_RESOURCE_IMAGES:
+                    images.append({"media_type": mime, "data": item["blob"]})
+```
+
+with
+
+```python
+            elif isinstance(item.get("blob"), str):
+                size = _blob_size(item["blob"])
+                if size is None:  # W5-D4: the server sent something that is not base64; never pass it on
+                    parts.append(f"[unreadable binary content, {mime[:80] or 'unknown type'}: not valid base64]")
+                elif mime.startswith("image/") and len(images) < MAX_RESOURCE_IMAGES:
+                    images.append({"media_type": mime, "data": item["blob"]})
+```
+
+3. Replace
+
+```python
+                else:
+                    size = len(base64.b64decode(item["blob"], validate=False)) if item["blob"] else 0
+                    parts.append(f"[binary content of {size} bytes, {mime or 'unknown type'}, not shown]")
+        text = "\n\n".join(parts)
+```
+
+with
+
+```python
+                else:
+                    parts.append(f"[binary content of {size} bytes, {mime[:80] or 'unknown type'}, not shown]")
+        text = "\n\n".join(parts)
+```
+
+4. Replace
+
+```python
+        )
+```
+
+with
+
+```python
+        )
+
+
+def _blob_size(blob: str) -> int | None:
+    """The decoded size of a base64 blob, or None when it is not base64."""
+    if not blob:
+        return 0
+    try:
+        return len(base64.b64decode(blob, validate=True))
+    except (binascii.Error, ValueError):
+        return None
+```
+
+
+- [ ] **Step 4: Run the tests to see them pass.**
+
+Run: `uv run pytest -q tests/unit/mcp`
+Expected: all pass.
+
+- [ ] **Step 5: Commit.**
+
+```
+fix(w6): an MCP resource blob that is not base64 is described as unreadable
+
+W5-D4.
+```
+
+### Task 26: A stdio MCP server's own children end with it (W5-D2)
+
+A server that exited on its own left its children running. On POSIX the server now leads its own process group (`start_new_session`) and the group is killed when the server closes. On Windows the server joins a Job Object (the hooks' `_WindowsJob`) and, because a child started before the Job is assigned (or an interpreter that leaves the Job, such as the Microsoft Store Python) escapes it, the server's descendants are also taken from the process table while it still runs (validated by parent and creation time, handles kept open) and ended after it exits. A child started during the 0.3 s shutdown window outside the Job is not covered.
+
+**Files:**
+- Create: `tests/unit/mcp/test_w6_stdio_children.py`
+- Modify: `src/agentos/mcp/transport_stdio.py`
+
+**Interfaces:**
+- Produces: `StdioTransport._tree(process)`, `._end_children(process, tree=None)`.
+
+- [ ] **Step 1: Write the failing tests** (test files and their fixtures).
+
+Create `tests/unit/mcp/test_w6_stdio_children.py` (it must not exist yet):
+
+```python
+"""W6 (W5-D2): a stdio MCP server's own children end with it, even when it exits on its own."""
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+import time
+
+from agentos.mcp.transport_stdio import StdioTransport
+
+PARENT = """
+import subprocess, sys
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+open(sys.argv[1], "w").write(str(child.pid))
+print("ready", flush=True)
+for line in sys.stdin:
+    pass
+"""
+
+
+def _alive(pid: int) -> bool:
+    if os.name == "nt":
+        out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}"], capture_output=True, text=True, check=False).stdout
+        return str(pid) in out
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    try:  # a zombie of a process we did not start counts as gone
+        with open(f"/proc/{pid}/stat", encoding="ascii") as handle:
+            return handle.read().split()[2] != "Z"
+    except OSError:
+        return True
+
+
+def test_a_polite_servers_child_dies_when_the_server_closes(tmp_path) -> None:
+    script = tmp_path / "server.py"
+    script.write_text(PARENT, encoding="utf-8")
+    marker = tmp_path / "child.pid"
+    transport = StdioTransport(command=sys.executable, args=(str(script), str(marker)), env={}, allow_any_command=True)
+    transport.open()
+    assert transport._replies.get(timeout=30).strip() == b"ready"
+    child = int(marker.read_text())
+    assert _alive(child)
+    transport.close()
+    deadline = time.monotonic() + 10
+    while _alive(child) and time.monotonic() < deadline:
+        time.sleep(0.1)
+    assert not _alive(child)
+```
+
+- [ ] **Step 2: Run them to see them fail.**
+
+Run: `uv run pytest -q tests/unit/mcp/test_w6_stdio_children.py`
+Expected: the child is still alive after `close()`.
+
+- [ ] **Step 3: Implement.**
+
+In `src/agentos/mcp/transport_stdio.py` make these 9 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+import shutil
+import subprocess
+```
+
+with
+
+```python
+import shutil
+import signal
+import subprocess
+```
+
+2. Replace
+
+```python
+from agentos.agentic.agent_tools import _terminate_process_tree
+```
+
+with
+
+```python
+from agentos.agentic.agent_tools import _terminate_process_tree
+from agentos.hooks.processes import _WindowsJob, _close_handles, _terminate_handles, _windows_descendants
+```
+
+3. Replace
+
+```python
+        self._process: subprocess.Popen[bytes] | None = None
+        self._lock = threading.Lock()
+```
+
+with
+
+```python
+        self._process: subprocess.Popen[bytes] | None = None
+        self._job: _WindowsJob | None = None
+        self._lock = threading.Lock()
+```
+
+4. Replace
+
+```python
+        try:
+            self._process = subprocess.Popen(
+```
+
+with
+
+```python
+        try:
+            # W5-D2: on POSIX the server leads its own process group, so its children can be ended with it.
+            self._process = subprocess.Popen(
+```
+
+5. Replace
+
+```python
+                stderr=subprocess.DEVNULL, cwd=self._cwd, env=environment, shell=False, bufsize=0,
+                creationflags=creationflags,
+            )
+```
+
+with
+
+```python
+                stderr=subprocess.DEVNULL, cwd=self._cwd, env=environment, shell=False, bufsize=0,
+                creationflags=creationflags, start_new_session=os.name != "nt",
+            )
+```
+
+6. Replace
+
+```python
+            raise StdioTransportError(f"the MCP server process could not start: {error}") from error
+        self._reader_thread = threading.Thread(target=self._read_loop, args=(self._process,), daemon=True)
+```
+
+with
+
+```python
+            raise StdioTransportError(f"the MCP server process could not start: {error}") from error
+        if os.name == "nt":
+            try:
+                self._job = _WindowsJob()
+                self._job.assign(self._process.pid)
+            except OSError:
+                self._job = None
+        self._reader_thread = threading.Thread(target=self._read_loop, args=(self._process,), daemon=True)
+```
+
+7. Replace
+
+```python
+    def _give_up(self, process: subprocess.Popen[bytes], reason: str) -> StdioTransportError:
+        _terminate_process_tree(process)
+```
+
+with
+
+```python
+    def _give_up(self, process: subprocess.Popen[bytes], reason: str) -> StdioTransportError:
+        tree = self._tree(process)
+        _terminate_process_tree(process)
+```
+
+8. Replace
+
+```python
+        self._process = None
+        return StdioTransportError(reason)
+
+    @staticmethod
+    def _write(process: subprocess.Popen[bytes], frame: Mapping[str, Any]) -> None:
+        assert process.stdin is not None
+        try:
+            process.stdin.write((json.dumps(frame) + "\n").encode())
+            process.stdin.flush()
+        except OSError as error:
+            raise StdioTransportError(f"the MCP server closed its input: {error}") from error
+
+    def close(self) -> None:
+        process, self._process = self._process, None
+        if process is None:
+            return
+        try:
+```
+
+with
+
+```python
+        self._process = None
+        self._end_children(process, tree)
+        return StdioTransportError(reason)
+
+    @staticmethod
+    def _tree(process: subprocess.Popen[bytes]) -> dict[int, int]:
+        """The server's live descendants (Windows), taken while the server still runs: an orphan has no parent chain."""
+        if os.name != "nt":
+            return {}
+        try:
+            return _windows_descendants(process)
+        except (OSError, ValueError):
+            return {}
+
+    def _end_children(self, process: subprocess.Popen[bytes], tree: dict[int, int] | None = None) -> None:
+        """W5-D2: whatever the server started dies with it, even when the server itself exited on its own."""
+        job, self._job = self._job, None
+        if os.name == "nt":
+            # A child started before the Job was assigned (or one that left it) is found by its parent chain and
+            # creation time; the handles were opened while it was validated, so a reused PID is never hit.
+            descendants = dict(tree if tree is not None else self._tree(process))
+            try:
+                _terminate_handles(descendants)
+            except (OSError, ValueError):
+                pass
+            finally:
+                try:
+                    _close_handles(descendants)
+                except (OSError, ValueError):
+                    pass
+            if job is not None:
+                try:
+                    job.terminate()
+                except OSError:
+                    pass
+                job.close()
+            return
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except OSError:  # the group is already empty
+            pass
+
+    @staticmethod
+    def _write(process: subprocess.Popen[bytes], frame: Mapping[str, Any]) -> None:
+        assert process.stdin is not None
+        try:
+            process.stdin.write((json.dumps(frame) + "\n").encode())
+            process.stdin.flush()
+        except OSError as error:
+            raise StdioTransportError(f"the MCP server closed its input: {error}") from error
+
+    def close(self) -> None:
+        process, self._process = self._process, None
+        if process is None:
+            return
+        tree = self._tree(process)
+        try:
+```
+
+9. Replace
+
+```python
+            process.wait(timeout=GRACEFUL_EXIT_SECONDS)
+            return
+        except subprocess.TimeoutExpired:
+            pass
+        _terminate_process_tree(process)
+```
+
+with
+
+```python
+            process.wait(timeout=GRACEFUL_EXIT_SECONDS)
+        except subprocess.TimeoutExpired:
+            _terminate_process_tree(process)
+        self._end_children(process, tree)
+```
+
+
+- [ ] **Step 4: Run the tests to see them pass.**
+
+Run: `uv run pytest -q tests/unit/mcp`
+Expected: all pass.
+
+- [ ] **Step 5: Commit.**
+
+```
+fix(w6): a stdio MCP server's children end with it
+
+W5-D2: a process group on POSIX; a Job Object and the server's validated
+descendants on Windows.
+```
+
+### Task 27: The LSP client: versions, malformed publishes, stderr and malformed diagnostics (W5-D3)
+
+A publish whose `version` is not the file's current version is late and answers nothing; a publish whose `diagnostics` is not a list ends the wait at once (no diagnostics) instead of after the 5 s timeout; the server's stderr is drained and its last 4 KB join the notice when the server is turned off; one malformed item in a diagnostics list is skipped instead of hiding the file's other diagnostics. A publish without `version` is still accepted (nothing tells it apart).
+
+**Files:**
+- Create: `tests/unit/lsp/test_w6_lsp_fixes.py`
+- Modify: `src/agentos/lsp/client.py`, `src/agentos/lsp/manager.py`
+
+**Interfaces:**
+- Produces: `STDERR_TAIL_BYTES`; `LspClient.stderr_tail()`; the manager's failure reason adds the tail.
+
+- [ ] **Step 1: Write the failing tests** (test files and their fixtures).
+
+Create `tests/unit/lsp/test_w6_lsp_fixes.py` (it must not exist yet):
+
+```python
+"""W6 (W5-D3): a late publish answers nothing, a malformed one ends the wait, and stderr's tail reaches the notice."""
+from __future__ import annotations
+
+import sys
+import time
+from pathlib import Path
+
+from agentos.lsp.client import LspClient
+from agentos.lsp.config import LspServerConfig
+from agentos.lsp.manager import LspManager
+
+_FRAMING = r'''
+import json, sys
+
+def read():
+    length = None
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            sys.exit(0)
+        line = line.decode().strip()
+        if not line:
+            break
+        if line.lower().startswith("content-length:"):
+            length = int(line.split(":", 1)[1])
+    return json.loads(sys.stdin.buffer.read(length))
+
+def send(message):
+    body = json.dumps(message).encode()
+    sys.stdout.buffer.write(b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body)
+    sys.stdout.buffer.flush()
+'''
+
+# On every save it publishes for version 1 only: from the second write on, that answer is late.
+STALE = _FRAMING + r'''
+while True:
+    message = read()
+    method = message.get("method")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": message["id"], "result": {"capabilities": {}}})
+    elif method == "textDocument/didSave":
+        uri = message["params"]["textDocument"]["uri"]
+        send({"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics", "params": {"uri": uri, "version": 1,
+              "diagnostics": [{"range": {"start": {"line": 0, "character": 0}}, "severity": 1, "message": "computed for version 1"}]}})
+    elif method == "exit":
+        sys.exit(0)
+'''
+
+MALFORMED_ONLY = _FRAMING + r'''
+while True:
+    message = read()
+    method = message.get("method")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": message["id"], "result": {"capabilities": {}}})
+    elif method == "textDocument/didSave":
+        uri = message["params"]["textDocument"]["uri"]
+        send({"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics", "params": {"uri": uri, "diagnostics": "oops"}})
+    elif method == "exit":
+        sys.exit(0)
+'''
+
+CRASHING = r'''
+import sys
+sys.stdin.buffer.readline()
+sys.stderr.write("fatal: the toolchain for this project is missing\n")
+sys.stderr.flush()
+sys.exit(3)
+'''
+
+
+def _client(tmp_path: Path, source: str, name: str) -> LspClient:
+    script = tmp_path / f"{name}.py"
+    script.write_text(source, encoding="utf-8")
+    config = LspServerConfig(name=f"kit:{name}", plugin_id="kit", command=sys.executable, args=(str(script),),
+                             extensions=((".txt", "plaintext"),), startup_timeout=20)
+    client = LspClient(config, workspace_root=tmp_path)
+    client.start()
+    return client
+
+
+def test_a_publish_for_an_older_version_answers_nothing(tmp_path: Path) -> None:
+    client = _client(tmp_path, STALE, "stale")
+    try:
+        target = tmp_path / "a.txt"
+        first = client.diagnostics(target, "x\n", "plaintext", timeout=10)
+        assert first is not None and first[0]["message"] == "computed for version 1"
+        assert client.diagnostics(target, "y\n", "plaintext", timeout=1) is None
+    finally:
+        client.close()
+
+
+def test_a_malformed_publish_ends_the_wait_at_once(tmp_path: Path) -> None:
+    client = _client(tmp_path, MALFORMED_ONLY, "malformed")
+    try:
+        started = time.monotonic()
+        assert client.diagnostics(tmp_path / "a.txt", "x\n", "plaintext", timeout=5) is None
+        assert time.monotonic() - started < 3
+    finally:
+        client.close()
+
+
+def test_the_failure_notice_carries_the_servers_last_error_output(tmp_path: Path) -> None:
+    script = tmp_path / "crash.py"
+    script.write_text(CRASHING, encoding="utf-8")
+    config = LspServerConfig(name="kit:crash", plugin_id="kit", command=sys.executable, args=(str(script),),
+                             extensions=((".txt", "plaintext"),), startup_timeout=20)
+    (tmp_path / "a.txt").write_text("x", encoding="utf-8")
+    name, found, failure = LspManager([config], workspace_root=tmp_path).check(tmp_path / "a.txt")
+    assert name == "kit:crash" and found is None and "toolchain for this project is missing" in failure
+
+
+def test_one_malformed_diagnostic_does_not_hide_the_others() -> None:
+    from agentos.lsp.manager import format_diagnostics
+
+    text = format_diagnostics("a.py", "kit:x", [
+        {"range": "nonsense", "severity": 1, "message": "bad range"},
+        {"range": {"start": {"line": "two"}}, "severity": 1, "message": "bad line"},
+        {"range": {"start": {"line": 1, "character": 0}}, "severity": 1, "message": "kept"},
+    ])
+    assert text is not None and "kept" in text and "bad" not in text
+```
+
+- [ ] **Step 2: Run them to see them fail.**
+
+Run: `uv run pytest -q tests/unit/lsp/test_w6_lsp_fixes.py`
+Expected: the 4 tests fail.
+
+- [ ] **Step 3: Implement.**
+
+In `src/agentos/lsp/client.py` make these 8 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+SETTLE_SECONDS = 0.3
+```
+
+with
+
+```python
+SETTLE_SECONDS = 0.3
+STDERR_TAIL_BYTES = 4096  # W5-D3: the end of the server's error output, for the notice when it fails
+```
+
+2. Replace
+
+```python
+        self._pending: dict[int, Future] = {}
+        self._diagnostics: dict[str, list[dict[str, Any]]] = {}
+        self._published: dict[str, threading.Event] = {}
+```
+
+with
+
+```python
+        self._pending: dict[int, Future] = {}
+        # None: the server's last publish for the file was malformed (W5-D3)
+        self._diagnostics: dict[str, list[dict[str, Any]] | None] = {}
+        self._published: dict[str, threading.Event] = {}
+```
+
+3. Replace
+
+```python
+        self._closed = False
+```
+
+with
+
+```python
+        self._closed = False
+        self._stderr = bytearray()
+        self._stderr_thread: threading.Thread | None = None
+```
+
+4. Replace
+
+```python
+                [self.config.command, *self.config.args], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL, cwd=str(self.root), env=_environment(self.config), shell=False,
+                creationflags=creationflags,
+```
+
+with
+
+```python
+                [self.config.command, *self.config.args], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, cwd=str(self.root), env=_environment(self.config), shell=False,
+                creationflags=creationflags,
+```
+
+5. Replace
+
+```python
+        threading.Thread(target=self._read_loop, name=f"orin-lsp-{self.config.name}", daemon=True).start()
+        result = self._request("initialize", {
+```
+
+with
+
+```python
+        threading.Thread(target=self._read_loop, name=f"orin-lsp-{self.config.name}", daemon=True).start()
+        self._stderr_thread = threading.Thread(target=self._drain_stderr, name=f"orin-lsp-err-{self.config.name}", daemon=True)
+        self._stderr_thread.start()
+        result = self._request("initialize", {
+```
+
+6. Replace
+
+```python
+            self._notify("workspace/didChangeConfiguration", {"settings": self.config.settings})
+```
+
+with
+
+```python
+            self._notify("workspace/didChangeConfiguration", {"settings": self.config.settings})
+
+    def _drain_stderr(self) -> None:
+        process = self._process
+        stream = process.stderr if process is not None else None
+        if stream is None:
+            return
+        reader = getattr(stream, "read1", None) or stream.read
+        try:
+            while True:
+                chunk = reader(4096)
+                if not chunk:
+                    return
+                with self._state_lock:
+                    self._stderr.extend(chunk)
+                    del self._stderr[:-STDERR_TAIL_BYTES]
+        except (OSError, ValueError):
+            return
+        finally:
+            try:
+                stream.close()
+            except (OSError, ValueError):
+                pass
+
+    def stderr_tail(self) -> str:
+        """The last few KB the server wrote to its error output (W5-D3)."""
+        process, thread = self._process, self._stderr_thread
+        if thread is not None and (process is None or process.poll() is not None):
+            thread.join(0.5)  # the server exited: let the last of its output arrive
+        with self._state_lock:
+            data = bytes(self._stderr)
+        return data.decode("utf-8", errors="replace").replace("\x00", "").strip()
+```
+
+7. Replace
+
+```python
+            uri = str(params.get("uri") or "")
+            items = [item for item in params.get("diagnostics") or [] if isinstance(item, Mapping)]
+            with self._state_lock:
+                self._diagnostics[uri] = [dict(item) for item in items]
+                event = self._published.setdefault(uri, threading.Event())
+```
+
+with
+
+```python
+            uri = str(params.get("uri") or "")
+            raw = params.get("diagnostics")
+            version = params.get("version")
+            with self._state_lock:
+                # W5-D3: a publish for an older version of the file is late and answers nothing.
+                if isinstance(version, int) and not isinstance(version, bool) and version != self._versions.get(uri):
+                    return
+                if isinstance(raw, list):
+                    self._diagnostics[uri] = [dict(item) for item in raw if isinstance(item, Mapping)]
+                else:  # malformed: the wait ends now rather than at its timeout
+                    self._diagnostics[uri] = None
+                event = self._published.setdefault(uri, threading.Event())
+```
+
+8. Replace
+
+```python
+        with self._state_lock:
+            return list(self._diagnostics.get(uri, []))
+```
+
+with
+
+```python
+        with self._state_lock:
+            found = self._diagnostics.get(uri, [])
+            return None if found is None else list(found)
+```
+
+
+In `src/agentos/lsp/manager.py` make these 2 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+    for item in diagnostics:
+        severity = item.get("severity", 1)
+        if severity not in (1, 2):
+            continue
+        start = (item.get("range") or {}).get("start") or {}
+        code = f" [{item['code']}]" if item.get("code") not in (None, "") else ""
+        message = " ".join(str(item.get("message") or "").split())[:300]
+        shown.append(f"- line {int(start.get('line', 0)) + 1}, column {int(start.get('character', 0)) + 1} · {_SEVERITY[severity]} · {message}{code}")
+    if not shown:
+```
+
+with
+
+```python
+    for item in diagnostics:
+        try:
+            severity = item.get("severity", 1)
+            if severity not in (1, 2):
+                continue
+            start = (item.get("range") or {}).get("start") or {}
+            code = f" [{str(item['code'])[:80]}]" if item.get("code") not in (None, "") else ""
+            message = " ".join(str(item.get("message") or "").split())[:300]
+            line, column = int(start.get("line", 0)) + 1, int(start.get("character", 0)) + 1
+        except (AttributeError, TypeError, ValueError):  # one malformed item is skipped, never the file's others
+            continue
+        shown.append(f"- line {line}, column {column} · {_SEVERITY[severity]} · {message}{code}")
+    if not shown:
+```
+
+2. Replace
+
+```python
+                reason = str(error)[:300] or type(error).__name__
+                with self._guard:
+```
+
+with
+
+```python
+                reason = str(error)[:300] or type(error).__name__
+                broken_client = self._clients.get(config.name)
+                tail = getattr(broken_client, "stderr_tail", lambda: "")() if broken_client is not None else ""
+                if tail:  # W5-D3: what the server said before it failed
+                    reason += f"\nIts last error output:\n{tail}"
+                with self._guard:
+```
+
+
+- [ ] **Step 4: Run the tests to see them pass.**
+
+Run: `uv run pytest -q tests/unit/lsp`
+Expected: all pass.
+
+- [ ] **Step 5: Commit.**
+
+```
+fix(w6): the LSP client matches versions, ends a malformed wait and keeps stderr's tail
+
+W5-D3.
+```
+
+### Task 28: The consolidation state across processes (W3-R23)
+
+Concurrent processes (Orin and `orin code --bg` runs) lost counts on `auto-dream.json` (a fixed temp name and an in-process lock only), and two of them could both decide a run was due. Each read-modify-write now holds a lock file (`msvcrt.locking` / `fcntl.flock`, waiting up to 5 s; a lock not taken changes nothing), writes through a unique temp name, and `claim_run` checks and marks in one step; the session uses it.
+
+**Files:**
+- Create: `tests/unit/memory/test_w6_consolidation_state.py`
+- Modify: `src/agentos/agentic/session.py`, `src/agentos/memory/consolidation.py`
+
+**Interfaces:**
+- Produces: `ConsolidationState.claim_run(user_id, now) -> bool`; `_file_lock(path)`.
+
+- [ ] **Step 1: Write the failing tests** (test files and their fixtures).
+
+Create `tests/unit/memory/test_w6_consolidation_state.py` (it must not exist yet):
+
+```python
+"""W6 (W3-R23): the consolidation counters survive concurrent processes, and one run is claimed once."""
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+from datetime import UTC, datetime
+from pathlib import Path
+
+from agentos.memory.consolidation import MIN_TURNS_BETWEEN_RUNS, ConsolidationState
+
+WORKER = """
+import sys
+from agentos.memory.consolidation import ConsolidationState
+state = ConsolidationState(sys.argv[1])
+for _ in range(int(sys.argv[2])):
+    state.note_completed_turn("u")
+"""
+
+CLAIMER = """
+import sys
+from datetime import UTC, datetime
+from agentos.memory.consolidation import ConsolidationState
+print("claimed" if ConsolidationState(sys.argv[1]).claim_run("u", datetime(2026, 1, 1, tzinfo=UTC)) else "no")
+"""
+
+
+def test_concurrent_processes_lose_no_count(tmp_path: Path) -> None:
+    path = tmp_path / "state.json"
+    workers = [subprocess.Popen([sys.executable, "-c", WORKER, str(path), "60"]) for _ in range(4)]
+    for worker in workers:
+        assert worker.wait(timeout=120) == 0
+    assert json.loads(path.read_text(encoding="utf-8"))["u"]["turns"] == 240
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_only_one_process_claims_a_due_run(tmp_path: Path) -> None:
+    path = tmp_path / "state.json"
+    state = ConsolidationState(path)
+    for _ in range(MIN_TURNS_BETWEEN_RUNS):
+        state.note_completed_turn("u")
+    claimers = [subprocess.Popen([sys.executable, "-c", CLAIMER, str(path)], stdout=subprocess.PIPE, text=True) for _ in range(4)]
+    answers = [claimer.communicate(timeout=120)[0].strip() for claimer in claimers]
+    assert answers.count("claimed") == 1
+    assert state.claim_run("u", datetime(2026, 1, 1, tzinfo=UTC)) is False
+```
+
+- [ ] **Step 2: Run them to see them fail.**
+
+Run: `uv run pytest -q tests/unit/memory/test_w6_consolidation_state.py`
+Expected: both tests fail (counts are lost; `claim_run` does not exist).
+
+- [ ] **Step 3: Implement.**
+
+In `src/agentos/agentic/session.py` make these 1 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+        state.note_completed_turn(user_id)
+        now = datetime.now(UTC)
+        if not state.due(user_id, now):
+            return
+        state.mark_run(user_id, now)
+        try:
+```
+
+with
+
+```python
+        state.note_completed_turn(user_id)
+        if not state.claim_run(user_id, datetime.now(UTC)):
+            return
+        try:
+```
+
+
+In `src/agentos/memory/consolidation.py` make these 7 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+import threading
+from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime, timedelta
+```
+
+with
+
+```python
+import threading
+import time
+import uuid
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta
+```
+
+2. Replace
+
+```python
+_LOCK = threading.Lock()
+```
+
+with
+
+```python
+_LOCK = threading.Lock()
+LOCK_WAIT_SECONDS = 5.0
+
+
+@contextmanager
+def _file_lock(path: Path) -> Iterator[bool]:
+    """W3-R23: one writer at a time across processes (Orin and its `orin code` runs share the file). Yields False
+    when the lock could not be taken in time; the caller then changes nothing."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handle = open(path.with_name(path.name + ".lock"), "a+b")  # noqa: SIM115 - held for the block
+    except OSError:
+        yield False
+        return
+    locked = False
+    deadline = time.monotonic() + LOCK_WAIT_SECONDS
+    try:
+        while not locked:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                locked = True
+            except OSError:
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(0.01)
+        yield locked
+    finally:
+        if locked:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
+        handle.close()
+```
+
+3. Replace
+
+```python
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self.path.with_suffix(".tmp")
+            temporary.write_text(json.dumps(data, sort_keys=True), encoding="utf-8")
+            os.replace(temporary, self.path)
+        except OSError:
+```
+
+with
+
+```python
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self.path.with_name(f"{self.path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")  # W3-R23
+            temporary.write_text(json.dumps(data, sort_keys=True), encoding="utf-8")
+            try:
+                os.replace(temporary, self.path)
+            finally:
+                temporary.unlink(missing_ok=True)
+        except OSError:
+```
+
+4. Replace
+
+```python
+    def note_completed_turn(self, user_id: str) -> None:
+        with _LOCK:
+            data = self._read()
+```
+
+with
+
+```python
+    def note_completed_turn(self, user_id: str) -> None:
+        with _LOCK, _file_lock(self.path) as locked:
+            if not locked:
+                return  # a lost count only delays consolidation
+            data = self._read()
+```
+
+5. Replace
+
+```python
+    def due(self, user_id: str, now: datetime) -> bool:
+        with _LOCK:
+            record = self._read().get(user_id)
+        if not isinstance(record, dict):
+```
+
+with
+
+```python
+    def due(self, user_id: str, now: datetime) -> bool:
+        with _LOCK, _file_lock(self.path) as locked:
+            if not locked:
+                return False
+            return self._due(self._read().get(user_id), now)
+
+    @staticmethod
+    def _due(record: Any, now: datetime) -> bool:
+        if not isinstance(record, dict):
+```
+
+6. Replace
+
+```python
+    def mark_run(self, user_id: str, now: datetime) -> None:
+        with _LOCK:
+            data = self._read()
+```
+
+with
+
+```python
+    def mark_run(self, user_id: str, now: datetime) -> None:
+        with _LOCK, _file_lock(self.path) as locked:
+            if not locked:
+                return
+            data = self._read()
+```
+
+7. Replace
+
+```python
+            data[user_id] = {"turns": 0, "last_run": now.isoformat()}
+            self._write(data)
+```
+
+with
+
+```python
+            data[user_id] = {"turns": 0, "last_run": now.isoformat()}
+            self._write(data)
+
+    def claim_run(self, user_id: str, now: datetime) -> bool:
+        """W3-R23: whether this caller runs consolidation now; checking and marking are one step, so two processes
+        never both run it."""
+        with _LOCK, _file_lock(self.path) as locked:
+            if not locked:
+                return False
+            data = self._read()
+            if not self._due(data.get(user_id), now):
+                return False
+            data[user_id] = {"turns": 0, "last_run": now.isoformat()}
+            self._write(data)
+            return True
+```
+
+
+- [ ] **Step 4: Run the tests to see them pass.**
+
+Run: `uv run pytest -q tests/unit/memory tests/unit/agentic`
+Expected: all pass.
+
+- [ ] **Step 5: Commit.**
+
+```
+fix(w6): consolidation counters survive concurrent processes
+
+W3-R23: a lock file, a unique temp name, and one claim per run.
+```
+
+### Task 29: The Setup hook: `orin code --init` and `--maintenance`
+
+The W0 ledger left `Setup` without a trigger. `--init` and `--maintenance` stop being refused: the run's first turn carries `CliTurnOptions.setup` (`init` or `maintenance`), and the session emits `Setup` (matched on `trigger`) before `SessionStart`; its additional context and stdout join the turn as SessionStart's do. `--init-only` does not exist in Orin's parser and stays unknown; both flags together are refused.
+
+**Files:**
+- Create: `tests/unit/hooks/test_w6_setup_hook.py`
+- Modify: `src/agentos/agentic/lifecycle.py`, `src/agentos/agentic/session.py`, `src/agentos/cli_code/headless.py`, `src/agentos/cli_code/turn_options.py`, `src/agentos/code_mode/cli_options.py`, `src/agentos/hooks/matching.py`, `src/agentos/hooks/protocol.py`
+
+**Interfaces:**
+- Produces: `CliTurnOptions.setup`; `build_turn_options(..., first_turn=False)`; `MATCH_FIELDS[SETUP] = "trigger"`.
+
+- [ ] **Step 1: Write the failing tests** (test files and their fixtures).
+
+Create `tests/unit/hooks/test_w6_setup_hook.py` (it must not exist yet):
+
+```python
+"""W6: `orin code --init` / `--maintenance` fire the Setup hooks (matched on their trigger) before SessionStart."""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import pytest
+
+from agentos.agentic.lifecycle import HookEvent
+from agentos.cli_code.args import CliUsageError, parse_code_arguments
+from agentos.cli_code.headless import refuse_unsupported
+from agentos.cli_code.turn_options import build_turn_options
+from agentos.code_mode.cli_options import CliTurnOptions
+from agentos.hooks.matching import matcher_applies
+
+from tests.unit.cli_code.test_cli_turn_session import _session
+from tests.unit.hooks.test_session_hooks_w2 import _user
+
+
+def test_setup_matches_on_its_trigger() -> None:
+    assert matcher_applies(HookEvent.SETUP, "init", {"trigger": "init"})
+    assert not matcher_applies(HookEvent.SETUP, "maintenance", {"trigger": "init"})
+
+
+def parse_code_args(argv):
+    return parse_code_arguments(argv)[0]
+
+
+def test_only_the_first_turn_carries_the_trigger(tmp_path: Path) -> None:
+    options = parse_code_args(["-p", "hi", "--init"])
+    refuse_unsupported(options)  # no longer refused
+    assert build_turn_options(options, tmp_path, host_answers_prompts=False, first_turn=True).setup == "init"
+    assert build_turn_options(options, tmp_path, host_answers_prompts=False).setup is None
+    maintenance = parse_code_args(["-p", "hi", "--maintenance"])
+    assert build_turn_options(maintenance, tmp_path, host_answers_prompts=False, first_turn=True).setup == "maintenance"
+    with pytest.raises(CliUsageError):
+        refuse_unsupported(parse_code_args(["-p", "hi", "--init", "--maintenance"]))
+
+
+def test_a_setup_hook_adds_its_output_to_the_turn(tmp_path: Path) -> None:
+    script = tmp_path / "setup.py"
+    script.write_text("import json, sys; d = json.load(sys.stdin); print('prepared by ' + d['trigger'])", encoding="utf-8")
+    _user({"hooks": {"Setup": [{"matcher": "init", "hooks": [{"type": "command", "command": f'"{sys.executable}" "{script}"'}]}]}})
+    runtime = _session(tmp_path, CliTurnOptions(setup="init")).build_runtime()
+    assert "prepared by init" in runtime.system_prompt + runtime.volatile_prompt
+    plain = _session(tmp_path / "other", CliTurnOptions()).build_runtime()
+    assert "prepared by" not in plain.system_prompt + plain.volatile_prompt
+```
+
+- [ ] **Step 2: Run them to see them fail.**
+
+Run: `uv run pytest -q tests/unit/hooks/test_w6_setup_hook.py`
+Expected: the 3 tests fail.
+
+- [ ] **Step 3: Implement.**
+
+In `src/agentos/agentic/lifecycle.py` make these 1 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+# Non-blocking events that may still inject context into the conversation.
+_CONTEXT_EVENTS = frozenset({HookEvent.SESSION_START, HookEvent.SUBAGENT_START, HookEvent.POST_TOOL_USE_FAILURE})
+_DECISION_RANK = {"allow": 1, "ask": 2, "deny": 3}
+```
+
+with
+
+```python
+# Non-blocking events that may still inject context into the conversation.
+_CONTEXT_EVENTS = frozenset({HookEvent.SESSION_START, HookEvent.SETUP, HookEvent.SUBAGENT_START, HookEvent.POST_TOOL_USE_FAILURE})
+_DECISION_RANK = {"allow": 1, "ask": 2, "deny": 3}
+```
+
+
+In `src/agentos/agentic/session.py` make these 1 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+                        bus.emit(HookEvent.INSTRUCTIONS_LOADED, file_paths=reported, memory_type="Project")
+            source = self._session_start_source(history)
+```
+
+with
+
+```python
+                        bus.emit(HookEvent.INSTRUCTIONS_LOADED, file_paths=reported, memory_type="Project")
+            setup = self.cli_options.setup if getattr(self, "cli_options", None) is not None else None
+            if setup is not None:  # `orin code --init` / `--maintenance`: Setup runs before SessionStart
+                prepared = bus.emit(HookEvent.SETUP, trigger=setup)
+                result["session_context"].extend(prepared.additional_context)
+                result["prompt_context"].extend(f"Hook: {message}" for message in prepared.system_messages)
+            source = self._session_start_source(history)
+```
+
+
+In `src/agentos/cli_code/headless.py` make these 4 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+    "plugin_dirs": "--plugin-dir", "worktree": "--worktree", "fork_session": "--fork-session",
+    "bare": "--bare", "safe_mode": "--safe-mode", "restricted": "--restricted", "init": "--init",
+    "maintenance": "--maintenance", "desktop": "--desktop", "resume_session_at": "--resume-session-at",
+    "resume_drops_turn": "--resume-drops-turn", "session_mirror": "--session-mirror", "task_budget": "--task-budget",
+```
+
+with
+
+```python
+    "plugin_dirs": "--plugin-dir", "worktree": "--worktree", "fork_session": "--fork-session",
+    "bare": "--bare", "safe_mode": "--safe-mode", "restricted": "--restricted",
+    "desktop": "--desktop", "resume_session_at": "--resume-session-at",
+    "resume_drops_turn": "--resume-drops-turn", "session_mirror": "--session-mirror", "task_budget": "--task-budget",
+```
+
+2. Replace
+
+```python
+        raise CliUsageError(f"not supported by orin code yet: {', '.join(flags)}")
+    if options.permission_prompt_tool not in (None, "stdio"):
+```
+
+with
+
+```python
+        raise CliUsageError(f"not supported by orin code yet: {', '.join(flags)}")
+    if options.init and options.maintenance:
+        raise CliUsageError("--init and --maintenance cannot be combined")
+    if options.permission_prompt_tool not in (None, "stdio"):
+```
+
+3. Replace
+
+```python
+        self._init_sent = False
+        self._cursor = "0"
+```
+
+with
+
+```python
+        self._init_sent = False
+        self._setup_sent = False  # --init / --maintenance fire Setup once per run
+        self._cursor = "0"
+```
+
+4. Replace
+
+```python
+        turn_options = build_turn_options(self.options, self.cwd, host_answers_prompts=host,
+                                          sdk_hooks=self.bridge.sdk_hooks, sdk_agents=self.bridge.sdk_agents).model_dump()
+        mode = permission_mode_for(self.options)
+```
+
+with
+
+```python
+        turn_options = build_turn_options(self.options, self.cwd, host_answers_prompts=host,
+                                          sdk_hooks=self.bridge.sdk_hooks, sdk_agents=self.bridge.sdk_agents,
+                                          first_turn=not self._setup_sent).model_dump()
+        self._setup_sent = True
+        mode = permission_mode_for(self.options)
+```
+
+
+In `src/agentos/cli_code/turn_options.py` make these 3 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+                       sdk_hooks: dict[str, list[dict[str, Any]]] | None = None,
+                       sdk_agents: dict[str, Any] | None = None) -> CliTurnOptions:
+    """The "cli" settings layer (``--settings`` first, the explicit flags over it) and the headless switches."""
+```
+
+with
+
+```python
+                       sdk_hooks: dict[str, list[dict[str, Any]]] | None = None,
+                       sdk_agents: dict[str, Any] | None = None, first_turn: bool = False) -> CliTurnOptions:
+    """The "cli" settings layer (``--settings`` first, the explicit flags over it) and the headless switches."""
+```
+
+2. Replace
+
+```python
+    none = options.permission_prompts == "none" or not host_answers_prompts
+    try:
+```
+
+with
+
+```python
+    none = options.permission_prompts == "none" or not host_answers_prompts
+    setup = ("init" if options.init else "maintenance" if options.maintenance else None) if first_turn else None
+    try:
+```
+
+3. Replace
+
+```python
+            mcp_servers=mcp_config_flag(options.mcp_configs, cwd) or None, strict_mcp_config=options.strict_mcp_config,
+        )
+```
+
+with
+
+```python
+            mcp_servers=mcp_config_flag(options.mcp_configs, cwd) or None, strict_mcp_config=options.strict_mcp_config,
+            setup=setup,
+        )
+```
+
+
+In `src/agentos/code_mode/cli_options.py` make these 1 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+    strict_mcp_config: bool = False
+```
+
+with
+
+```python
+    strict_mcp_config: bool = False
+    # --init / --maintenance: the run's first turn fires the Setup hooks with this trigger.
+    setup: Literal["init", "maintenance"] | None = None
+```
+
+
+In `src/agentos/hooks/matching.py` make these 1 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+    HookEvent.SESSION_START: "source",
+    HookEvent.SESSION_END: "reason",
+```
+
+with
+
+```python
+    HookEvent.SESSION_START: "source",
+    HookEvent.SETUP: "trigger",
+    HookEvent.SESSION_END: "reason",
+```
+
+
+In `src/agentos/hooks/protocol.py` make these 1 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+
+_CONTEXT_FROM_STDOUT = frozenset({HookEvent.SESSION_START, HookEvent.USER_PROMPT_SUBMIT, HookEvent.SUBAGENT_START})
+```
+
+with
+
+```python
+
+_CONTEXT_FROM_STDOUT = frozenset({HookEvent.SESSION_START, HookEvent.SETUP, HookEvent.USER_PROMPT_SUBMIT, HookEvent.SUBAGENT_START})
+```
+
+
+- [ ] **Step 4: Run the tests to see them pass.**
+
+Run: `uv run pytest -q tests/unit/hooks tests/unit/cli_code`
+Expected: all pass.
+
+- [ ] **Step 5: Commit.**
+
+```
+feat(w6): orin code --init and --maintenance fire the Setup hooks
+```
+
+### Task 30: An agent file's `effort` and a forked skill's `model` (W5 deviations 4 and 9)
+
+An agent definition's `effort` becomes its subagent runtime's effort when the model takes a reasoning control (else nothing, as for the turn). A skill with `context: fork` asks for its `model` through the same path as an agent file (`modelAliases`, then the person's allowed models; otherwise the parent's model). Not applied, and recorded: an inline skill's `model`, any skill's `effort`, and an agent's `isolation`, `mcpServers`, `memory`, `color` and `hooks`.
+
+**Files:**
+- Create: `tests/unit/agentic/test_w6_agent_effort.py`, `tests/unit/agentic/tools/test_w6_skill_model.py`
+- Modify: `src/agentos/agentic/session.py`, `src/agentos/agentic/tools/orin/disk_skills.py`
+
+**Interfaces:**
+- Produces: `TurnSession._definition_effort(definition, model_id)`, `._allowed_requested_model(requested, who)`; toolset `_skill_model_for`.
+
+- [ ] **Step 1: Write the failing tests** (test files and their fixtures).
+
+Create `tests/unit/agentic/test_w6_agent_effort.py` (it must not exist yet):
+
+```python
+"""W6 (W5 deviation 9): an agent definition's `effort` sets its subagent's reasoning effort, when the model takes one."""
+from __future__ import annotations
+
+import pytest
+
+from agentos.agentic.agent_definitions import load_agent_definitions
+from agentos.agentic.runtime import AgenticTurnRuntime
+
+from tests.unit.agentic.test_agent_definitions_session import _agent, session_and_builds  # noqa: F401 - fixture
+
+
+@pytest.fixture()
+def efforts(monkeypatch: pytest.MonkeyPatch) -> list:
+    seen: list = []
+    original = AgenticTurnRuntime.run
+
+    def run(self, turn_id, **kwargs):
+        seen.append(self.effort)
+        return original(self, turn_id, **kwargs)
+
+    monkeypatch.setattr(AgenticTurnRuntime, "run", run)
+    return seen
+
+
+def test_the_definitions_effort_reaches_the_subagent(session_and_builds, efforts) -> None:  # noqa: F811
+    session, _builds, _prompts, _limits = session_and_builds
+    session.turn["provider"], session.turn["model_id"] = "openai", "gpt-5"
+    _agent("---\nname: deep\ndescription: Deep thinker\neffort: high\n---\nThink hard.")
+    session._agent_definitions = load_agent_definitions(workspace_root=None, trusted=False)
+    outcome = session._run_subagent(subagent_type="deep", task="Think")
+    assert outcome.status == "succeeded", outcome.content
+    assert efforts[-1] == "high"
+
+
+def test_a_model_without_reasoning_control_gets_no_effort(session_and_builds, efforts) -> None:  # noqa: F811
+    session, _builds, _prompts, _limits = session_and_builds  # litellm: no reasoning control
+    _agent("---\nname: deep\ndescription: Deep thinker\neffort: high\n---\nThink hard.")
+    session._agent_definitions = load_agent_definitions(workspace_root=None, trusted=False)
+    assert session._run_subagent(subagent_type="deep", task="Think").status == "succeeded"
+    assert efforts[-1] is None
+
+
+def test_an_unknown_effort_is_ignored(session_and_builds, efforts) -> None:  # noqa: F811
+    session, _builds, _prompts, _limits = session_and_builds
+    session.turn["provider"], session.turn["model_id"] = "openai", "gpt-5"
+    _agent("---\nname: deep\ndescription: Deep thinker\neffort: enormous\n---\nThink hard.")
+    session._agent_definitions = load_agent_definitions(workspace_root=None, trusted=False)
+    assert session._run_subagent(subagent_type="deep", task="Think").status == "succeeded"
+    assert efforts[-1] is None
+```
+
+Create `tests/unit/agentic/tools/test_w6_skill_model.py` (it must not exist yet):
+
+```python
+"""W6 (W5 deviation 4): a forked skill's `model` picks its subagent's model, when the session allows it."""
+from __future__ import annotations
+
+from pathlib import Path
+
+from agentos.agentic.tools._shared import ToolOutcome
+
+from tests.unit.agentic.tools.test_disk_skill_tool import _skill, _toolset
+
+
+def _fork(tmp_path: Path, model_line: str, resolver):
+    _skill("research", f"---\ndescription: Research\ncontext: fork\nagent: Explore\n{model_line}---\nFind the config.")
+    calls: list[dict] = []
+
+    def run_subagent(subagent_type, task, **kwargs):
+        calls.append(kwargs)
+        return ToolOutcome("succeeded", "done", "found", {})
+
+    toolset = _toolset(tmp_path, run_subagent=run_subagent)
+    if resolver is not None:
+        toolset._skill_model_for = resolver
+    assert toolset.invoke("Skill", {"skill": "research"}).status == "succeeded"
+    return calls[-1]
+
+
+def test_an_allowed_model_reaches_the_subagent(tmp_path: Path) -> None:
+    asked: list[str] = []
+    call = _fork(tmp_path, "model: sonnet\n", lambda name: asked.append(name) or "fast-model")
+    assert asked == ["sonnet"] and call.get("model_id") == "fast-model"
+
+
+def test_a_model_the_session_refuses_runs_on_the_parents(tmp_path: Path) -> None:
+    assert _fork(tmp_path, "model: sonnet\n", lambda name: None).get("model_id") is None
+
+
+def test_without_a_model_nothing_is_asked(tmp_path: Path) -> None:
+    asked: list[str] = []
+    assert _fork(tmp_path, "", lambda name: asked.append(name)).get("model_id") is None
+    assert asked == []
+
+
+def test_the_session_resolves_through_aliases_and_the_allow_list(tmp_path: Path, monkeypatch) -> None:
+    from tests.unit.cli_code.test_cli_turn_session import _session
+
+    session = _session(tmp_path)
+    session.effective_settings = type("S", (), {"layers": (type("L", (), {"name": "user", "data": {"modelAliases": {"sonnet": "m2"}}})(),)})()
+    monkeypatch.setattr(session, "_resolve_child_model", lambda requested: requested)
+    monkeypatch.setattr(session, "_child_model_allowed", lambda model, allow_current=False: model == "m2")
+    assert session._allowed_requested_model("sonnet", "a skill") == "m2"
+    assert session._allowed_requested_model("other", "a skill") is None
+    assert session._allowed_requested_model("inherit", "a skill") is None
+```
+
+- [ ] **Step 2: Run them to see them fail.**
+
+Run: `uv run pytest -q tests/unit/agentic/test_w6_agent_effort.py tests/unit/agentic/tools/test_w6_skill_model.py`
+Expected: `test_the_definitions_effort_reaches_the_subagent` and 3 of the skill tests fail.
+
+- [ ] **Step 3: Implement.**
+
+In `src/agentos/agentic/session.py` make these 6 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+
+    def _definition_model(self, spec: Mapping[str, object] | None) -> str | None:
+```
+
+with
+
+```python
+
+    def _definition_effort(self, definition: object, model_id: str) -> str | None:
+        """W5 deviation 9: an agent file's ``effort``, when its model takes a reasoning control (else nothing)."""
+        from .effort import normalize_effort, reasoning_supported
+
+        level = normalize_effort(getattr(definition, "effort", None)) if definition is not None else None
+        if level is None:
+            return None
+        provider = str(self.turn.get("provider") or "")
+        return level if reasoning_supported(provider, str(model_id or ""), self.model_capabilities) else None
+
+    def _definition_model(self, spec: Mapping[str, object] | None) -> str | None:
+```
+
+2. Replace
+
+```python
+            return None
+        from .agent_definitions import resolve_agent_model
+```
+
+with
+
+```python
+            return None
+        return self._allowed_requested_model(definition.model, f"agent {definition.name}")
+
+    def _allowed_requested_model(self, requested: str | None, who: str) -> str | None:
+        """A model an agent file or a skill asks for (aliases through ``modelAliases``), when this person allows it;
+        otherwise None, and the parent's model runs."""
+        from .agent_definitions import resolve_agent_model
+```
+
+3. Replace
+
+```python
+        aliases = operator_value(getattr(self, "effective_settings", None), "modelAliases")
+        wanted = resolve_agent_model(definition.model, aliases if isinstance(aliases, Mapping) else None)
+        if not wanted:
+```
+
+with
+
+```python
+        aliases = operator_value(getattr(self, "effective_settings", None), "modelAliases")
+        wanted = resolve_agent_model(requested, aliases if isinstance(aliases, Mapping) else None)
+        if not wanted:
+```
+
+4. Replace
+
+```python
+            return resolved
+        logger.info("agent %s asks for model %s, which is not allowed here; it runs on the parent's model", definition.name, wanted)
+        return None
+```
+
+with
+
+```python
+            return resolved
+        logger.info("%s asks for model %s, which is not allowed here; it runs on the parent's model", who, wanted)
+        return None
+```
+
+5. Replace
+
+```python
+            cancelled=self._child_cancelled(hook_cancel),
+            **self._subagent_accounting(active_model_id, code_mode=is_code_mode),
+```
+
+with
+
+```python
+            cancelled=self._child_cancelled(hook_cancel),
+            effort=self._definition_effort(definition, active_model_id),
+            **self._subagent_accounting(active_model_id, code_mode=is_code_mode),
+```
+
+6. Replace
+
+```python
+        toolset._skill_hooks_sink = self._skill_hooks  # W5: a skill's own hooks
+        toolset._lsp_after_write = self._lsp_after_write  # W5: diagnostics after Write and Edit
+```
+
+with
+
+```python
+        toolset._skill_hooks_sink = self._skill_hooks  # W5: a skill's own hooks
+        # W5 deviation 4: a forked skill's `model`, resolved as an agent file's is.
+        toolset._skill_model_for = lambda requested: self._allowed_requested_model(requested, "a skill")
+        toolset._lsp_after_write = self._lsp_after_write  # W5: diagnostics after Write and Edit
+```
+
+
+In `src/agentos/agentic/tools/orin/disk_skills.py` make these 1 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+        if skill.context == "fork" and invoked_by == "model" and getattr(self, "_run_subagent", None) is not None:
+            outcome = self.run_subagent(
+                subagent_type=skill.agent or "general-purpose", task=body, description=f"Skill {skill.name}",
+            )
+```
+
+with
+
+```python
+        if skill.context == "fork" and invoked_by == "model" and getattr(self, "_run_subagent", None) is not None:
+            # W5 deviation 4: the skill's `model` when this person allows it (else the parent's). An inline skill's
+            # `model` and any skill's `effort` are not applied: the turn keeps its own model and effort.
+            resolver = getattr(self, "_skill_model_for", None)
+            model = resolver(skill.model) if skill.model and callable(resolver) else None
+            extra = {"model_id": model} if model else {}
+            outcome = self.run_subagent(
+                subagent_type=skill.agent or "general-purpose", task=body, description=f"Skill {skill.name}", **extra,
+            )
+```
+
+
+- [ ] **Step 4: Run the tests to see them pass.**
+
+Run: `uv run pytest -q tests/unit/agentic`
+Expected: all pass.
+
+- [ ] **Step 5: Commit.**
+
+```
+feat(w6): an agent file's effort and a forked skill's model apply
+```
+
+### Batch F close and the W6 close
+
+- [ ] **Step 1:** `uv run pytest -q tests/unit` and `uv run pytest -q tests/integration` (timeout 900000 ms each): green; report the counts.
+- [ ] **Step 2:** `wc -l src/agentos/agentic/agent_tools.py` is still 1699; `git status` shows no file under `data/`.
+- [ ] **Step 3:** Append `## Batch F — Inherited fixes (Tasks 22–30)` to the ledger (commits, tests, suites, deviations from this plan, expectation changes, anything incomplete), followed by `## W6 summary`: what W6 delivers against spec §9 (each subsection), the inherited items and where each was closed or why it remains, and the decisions 42–50 above. Commit `docs(w6): Batch F ledger and W6 summary`.
