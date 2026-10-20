@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 
-from .models import sanitize_public_mapping, sanitize_summary
+from .models import _APPROVAL_RAW_KEYS, _TEXT_DELTA_RAW_KEYS, sanitize_public_mapping, sanitize_summary
 
 
 MAX_ACTIVITY_SUMMARY = 512
@@ -66,6 +66,7 @@ class ActivityVisibility(StrEnum):
 
 
 _APPROVAL_EVENT_TYPES = frozenset({AgentActivityEventType.CODE_MODE_DECISION_REQUIRED, AgentActivityEventType.TOOL_PERMISSION_REQUIRED})
+_TEXT_DELTA_EVENT_TYPES = frozenset({AgentActivityEventType.ASSISTANT_DELTA, AgentActivityEventType.AGENT_THOUGHT_DELTA})
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,8 +118,13 @@ class AgentActivityEvent:
         object.__setattr__(self, "event_type", event_type)
         object.__setattr__(self, "visibility", visibility)
         object.__setattr__(self, "summary", sanitize_summary(self.summary))
-        approval = event_type in _APPROVAL_EVENT_TYPES  # W7-R1: the person approves what these payloads show
-        object.__setattr__(self, "payload", sanitize_public_mapping(self.payload, approval=approval))
+        if event_type in _APPROVAL_EVENT_TYPES:  # W7-R1: the person approves what these payloads show
+            raw_keys = _APPROVAL_RAW_KEYS
+        elif event_type in _TEXT_DELTA_EVENT_TYPES:  # W7-R3: the model's own text is not redacted
+            raw_keys = _TEXT_DELTA_RAW_KEYS
+        else:
+            raw_keys = frozenset()
+        object.__setattr__(self, "payload", sanitize_public_mapping(self.payload, raw_keys=raw_keys))
 
     def __repr__(self) -> str:
         return (

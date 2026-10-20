@@ -256,22 +256,25 @@ _APPROVAL_RAW_KEYS = frozenset(
 )
 
 
-def sanitize_public_mapping(value: Mapping[str, object], *, approval: bool = False) -> Mapping[str, object]:
-    """Redact an activity payload. W7-R1: when ``approval`` is true the payload is what the person approves, so
-    the approval subtree and the command/path/patch/rule fields are kept exactly as the tool will run them."""
+_TEXT_DELTA_RAW_KEYS = frozenset({"content", "delta"})  # W7-R3: the model's own words, not a secret to hide
+
+
+def sanitize_public_mapping(value: Mapping[str, object], *, raw_keys: frozenset[str] = frozenset()) -> Mapping[str, object]:
+    """Redact an activity payload. Top-level keys in ``raw_keys`` are kept as the person approves or the model
+    wrote them (W7-R1 approval subtrees, W7-R3 text deltas); every other key is redacted."""
     if not isinstance(value, Mapping):
         raise ValueError("payload must be a mapping")
-    if not approval:
+    if not raw_keys:
         result = _bounded(value, depth=0, count=[0], redact=True)
         assert isinstance(result, Mapping)
         return result
     count = [0]
-    approved = {key: item for key, item in value.items() if key in _APPROVAL_RAW_KEYS}
-    rest = {key: item for key, item in value.items() if key not in _APPROVAL_RAW_KEYS}
+    raw = {key: item for key, item in value.items() if key in raw_keys}
+    rest = {key: item for key, item in value.items() if key not in raw_keys}
     redacted_rest = _bounded(rest, depth=0, count=count, redact=True)
-    raw_approved = _bounded(approved, depth=0, count=count, redact=False)
-    assert isinstance(redacted_rest, Mapping) and isinstance(raw_approved, Mapping)
-    merged = {key: (raw_approved[key] if key in approved else redacted_rest[key]) for key in value}
+    raw_part = _bounded(raw, depth=0, count=count, redact=False)
+    assert isinstance(redacted_rest, Mapping) and isinstance(raw_part, Mapping)
+    merged = {key: (raw_part[key] if key in raw else redacted_rest[key]) for key in value}
     return MappingProxyType(merged)
 
 
