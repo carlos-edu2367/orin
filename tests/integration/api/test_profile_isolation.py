@@ -126,6 +126,7 @@ INSTANCE = {
     ("GET", "/v1/settings/output-styles"), ("PUT", "/v1/settings/output-styles"),
     ("GET", "/v1/settings/keybindings"), ("PUT", "/v1/settings/keybindings"),
     ("GET", "/v1/settings/trusted-folders"), ("POST", "/v1/settings/trusted-folders/revoke"),
+    ("GET", "/v1/settings/mcp"), ("PUT", "/v1/settings/mcp/approval"),
 }
 AUTH = {("GET", "/v1/auth/me"), ("POST", "/v1/auth/setup"), ("POST", "/v1/auth/login"), ("POST", "/v1/auth/logout"), ("POST", "/v1/auth/password")}
 ADMIN = {("GET", "/v1/admin/users"), ("POST", "/v1/admin/users"), ("PATCH", "/v1/admin/users/{user_id}"), ("POST", "/v1/admin/users/{user_id}/reset-password")}

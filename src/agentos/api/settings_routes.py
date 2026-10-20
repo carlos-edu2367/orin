@@ -22,6 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from agentos.redaction import redact_value
 
 from .contracts import ApplicationNotFoundError
+from .mcp_settings import McpApproval, change_mcp_approval, mcp_report
 from .security import AuthenticatedPrincipal, AuthorizationError
 
 WRITABLE_LAYERS = ("user", "project", "local")
@@ -501,6 +502,23 @@ def register_settings_routes(
         principal = owner(request, mutable=False, purpose="settings.trusted_folders")
         folders = await run_in_threadpool(WorkspaceTrustStore().trusted_roots, principal.user_id)
         return JSONResponse({"folders": folders})
+
+    @app.get("/v1/settings/mcp")
+    async def mcp_servers(request: Request, conversation_id: str | None = None) -> JSONResponse:
+        """W7: the configuration-file MCP servers in force for a folder, per scope, and the project's pending ones."""
+        principal = owner(request, mutable=False, purpose="settings.mcp")
+        root, trusted = folder_of(principal, conversation_id)
+        return JSONResponse(await run_in_threadpool(lambda: mcp_report(root, trusted, personal=services.capabilities.host_folders)))
+
+    @app.put("/v1/settings/mcp/approval")
+    async def mcp_approval(payload: McpApproval, request: Request) -> JSONResponse:
+        """W7: approve, deny or forget one of the project's servers (the per-folder grants file only)."""
+        principal = owner(request, mutable=True, purpose="settings.mcp")
+        root, trusted = folder_of(principal, payload.conversation_id)
+        if root is None:
+            raise ApplicationNotFoundError("conversation folder")
+        await run_in_threadpool(change_mcp_approval, root, trusted, payload)
+        return JSONResponse(await run_in_threadpool(lambda: mcp_report(root, trusted, personal=services.capabilities.host_folders)))
 
     @app.post("/v1/settings/trusted-folders/revoke")
     async def revoke_trusted_folder(payload: TrustedFolderChange, request: Request) -> JSONResponse:
