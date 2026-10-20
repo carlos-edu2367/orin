@@ -63,14 +63,20 @@ def permission_mode_section(
     permission_mode: CodePermissionMode,
     level: CodeAutonomy,
     plan_path: str | None = None,
+    host_access: bool = False,
 ) -> str:
+    # Only an instance with host folders opens paths outside the workspace in full_autonomy (Lote 0).
+    full_scope = (
+        "dentro e fora do workspace (qualquer caminho da máquina" if host_access
+        else "dentro do workspace (esta instância não dá acesso a pastas fora dele"
+    )
     modes_overview = (
         f"### Modo de Permissão Ativo: `{permission_mode.value}`\n"
         "- Modos de permissão suportados na sessão Orin Code (`Shift+Tab`):\n"
         "  - `accept_edits`: auto-aprova edições de arquivos no workspace (`write_file`, `edit_file`) e comandos locais seguros; execução direta sem burocracia.\n"
         "  - `plan_mode`: modo somente leitura e arquitetura; explora o repositório, escreve o plano em `.orin/plans/` e chama `exit_plan_mode` para aprovação.\n"
         "  - `ask_permissions`: solicita confirmação antes de edições de arquivos e comandos shell.\n"
-        "  - `full_autonomy`: autonomia completa sem restrições dentro e fora do workspace (qualquer caminho da máquina; mantendo confirmação apenas para deploy em produção)."
+        f"  - `full_autonomy`: autonomia completa sem confirmações {full_scope}; mantendo confirmação apenas para deploy em produção)."
     )
     if permission_mode is CodePermissionMode.PLAN_MODE or level is CodeAutonomy.PLAN_MODE:
         target_plan = plan_path or ".orin/plans/<slug>.md"
@@ -81,10 +87,16 @@ def permission_mode_section(
             "Não edite arquivos de código de produção nem execute `run_command` mutável enquanto estiver em `plan_mode`."
         )
     elif permission_mode is CodePermissionMode.FULL_AUTONOMY:
-        behavior = (
-            "Você está em `full_autonomy` (modo sem restrições — unrestricted inside and outside the workspace). "
+        where = (
+            "(modo sem restrições — unrestricted inside and outside the workspace). "
             "Você pode ler, criar, editar, buscar arquivos e executar comandos shell tanto dentro quanto fora do workspace "
             "(qualquer caminho ou diretório da máquina) diretamente sem bloqueio de diretório. "
+            if host_access else
+            "(sem pedidos de confirmação). Você pode ler, criar, editar, buscar arquivos e executar comandos dentro do workspace "
+            "diretamente; esta instância não dá acesso a pastas fora dele. "
+        )
+        behavior = (
+            f"Você está em `full_autonomy` {where}"
             "Para tarefas de múltiplos passos, use `todo_write`, `task_create` e `task_update` (mantendo no máximo uma tarefa `in_progress` por vez)."
         )
     elif permission_mode is CodePermissionMode.ACCEPT_EDITS or level is not CodeAutonomy.APPROVAL_REQUIRED:
@@ -121,6 +133,7 @@ def build_code_mode_system_prompt(
     plan_path: str | None = None,
     permits_push: bool = False,
     workspace_root: str | None = None,
+    host_access: bool = False,
     **_extra: object,
 ) -> str:
     raw_mode = permission_mode if permission_mode is not None else (autonomy if autonomy is not None else "accept_edits")
@@ -149,7 +162,7 @@ def build_code_mode_system_prompt(
     return "\n".join((
         "## Modo Code",
         "Você está executando uma tarefa de engenharia com entrega verificável." + plan_notice + workspace_notice,
-        permission_mode_section(permission_mode=resolved_perm, level=level, plan_path=plan_path),
+        permission_mode_section(permission_mode=resolved_perm, level=level, plan_path=plan_path, host_access=host_access),
         "Ao iniciar um projeto do zero, use primeiro o gerador oficial da stack via `verify_project` com `scaffold`; criar package.json ou a estrutura-base manualmente é último recurso.",
         investigation,
         frontend,
@@ -170,9 +183,11 @@ def code_mode_instructions(
     plan_path: str | None = None,
     permits_push: bool = False,
     permission_mode: str | None = None,
+    host_access: bool = False,
 ) -> str:
     return build_code_mode_system_prompt(
         permission_mode=permission_mode or autonomy,
+        host_access=host_access,
         work_kind=work_kind,
         autonomy=autonomy,
         plan_path=plan_path,

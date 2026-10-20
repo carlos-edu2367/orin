@@ -58,7 +58,8 @@ class PlanModeTools:
     def _sync_workspace_restriction(self) -> None:
         from agentos.code_mode.models import CodePermissionMode
 
-        is_full = self._permission_mode is CodePermissionMode.FULL_AUTONOMY
+        # A shared instance (no host folders) keeps full_autonomy inside the workspace: fail closed (Lote 0).
+        is_full = self._permission_mode is CodePermissionMode.FULL_AUTONOMY and bool(getattr(self, "_host_folders", False))
         if getattr(self, "_read_only_mode", False) and not is_full:
             return
         self.workspace.unrestricted = is_full

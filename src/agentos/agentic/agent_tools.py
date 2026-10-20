@@ -279,7 +279,7 @@ class AgentToolset(
         todos_state: list[dict[str, Any]] | None = None,
         on_todo_update: Callable[[list[dict[str, Any]]], None] | None = None,
         background_shells: dict[str, dict[str, Any]] | None = None,
-        read_only_mode: bool = False,
+        read_only_mode: bool = False, host_folders: bool = False,
         default_provider: str | None = None,
         default_model_id: str | None = None,
         default_workspace_path: str | None = None,
@@ -364,6 +364,7 @@ class AgentToolset(
         self._last_browser_navigation_outcome: ToolOutcome | None = None
         self._enable_terminal = enable_terminal and not bool(read_only_mode)
         self._read_only_mode: bool = bool(read_only_mode)
+        self._host_folders: bool = bool(host_folders)  # full_autonomy opens the host only where the instance has host folders
         self.skills = skills
         # The registry is intentionally read-only.  Publishing must go through
         # the application service, with the user identity bound by the trusted

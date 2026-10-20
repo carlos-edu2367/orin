@@ -72,6 +72,7 @@ def test_agent_toolset_full_autonomy_allows_files_search_and_shell_outside_works
         unrestricted_ws,
         code_mode_active=code_mode_active,
         permission_mode="full_autonomy",
+        host_folders=True,
     )
     assert unrestricted_ws.unrestricted is True
 
@@ -144,7 +145,7 @@ def test_plan_mode_and_readonly_subagents_preserve_or_toggle_unrestricted_safely
     ext_file.write_text("secret info\n", encoding="utf-8")
 
     workspace = ConversationWorkspace.at_root(ws_root)
-    parent_tools = AgentToolset(workspace, code_mode_active=True, permission_mode="full_autonomy")
+    parent_tools = AgentToolset(workspace, code_mode_active=True, permission_mode="full_autonomy", host_folders=True)
     assert workspace.unrestricted is True
 
     # A read-only subagent sharing the workspace with permission_mode="plan_mode"
@@ -175,7 +176,7 @@ def test_plan_mode_and_readonly_subagents_preserve_or_toggle_unrestricted_safely
 
 
 def test_prompts_describe_full_autonomy_as_unrestricted_outside_workspace() -> None:
-    code_prompt = build_code_mode_system_prompt(permission_mode="full_autonomy")
+    code_prompt = build_code_mode_system_prompt(permission_mode="full_autonomy", host_access=True)
     assert "outside the workspace" in code_prompt.lower()
 
     turn_ctx = render_code_turn_context(
@@ -187,5 +188,6 @@ def test_prompts_describe_full_autonomy_as_unrestricted_outside_workspace() -> N
         workspace_is_local=True,
         git_status="",
         public_names=True,
+        host_access=True,
     )
     assert "outside the workspace" in turn_ctx.lower()

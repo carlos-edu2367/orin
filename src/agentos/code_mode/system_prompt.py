@@ -131,7 +131,7 @@ def render_code_system_prompt(options: CodePromptOptions) -> str:
     return "\n\n".join(sections)
 
 
-def _mode_text(permission_mode: str, plan_path: str | None, exit_label: str) -> str:
+def _mode_text(permission_mode: str, plan_path: str | None, exit_label: str, *, host_access: bool = False) -> str:
     texts = {
         "accept_edits": "Permission mode: acceptEdits. You have code autonomy for this turn: edit files in the workspace and run local, safe commands directly, without asking first.",
         "plan_mode": (
@@ -142,6 +142,10 @@ def _mode_text(permission_mode: str, plan_path: str | None, exit_label: str) -> 
         "full_autonomy": (
             "Permission mode: bypassPermissions. You have full unrestricted autonomy inside and outside the workspace "
             "(any path or directory on the machine); production deploys still need explicit confirmation."
+            if host_access else
+            # A shared instance has no host folders: the mode skips the prompts, never the workspace boundary (Lote 0).
+            "Permission mode: bypassPermissions. Act inside the workspace without asking first; this instance gives no "
+            "access to folders outside it. Production deploys still need explicit confirmation."
         ),
         "auto": "Permission mode: auto. A classifier approves safe actions; risky ones are refused or sent to the user.",
         "dont_ask": "Permission mode: dontAsk. Anything a rule does not already allow is refused instead of asked; work with the allowed tools.",
@@ -159,9 +163,10 @@ def render_code_turn_context(
     workspace_is_local: bool,
     git_status: str,
     public_names: bool,
+    host_access: bool = False,
 ) -> str:
     exit_label = f"`{tool_label('exit_plan_mode', public_names)}`"
-    lines = ["# Session", f"- {_mode_text(permission_mode, plan_path, exit_label)}"]
+    lines = ["# Session", f"- {_mode_text(permission_mode, plan_path, exit_label, host_access=host_access)}"]
     if permits_push:
         lines.append("- The user authorized `git push` for this turn. Pull requests and deploys still need confirmation.")
     where = (

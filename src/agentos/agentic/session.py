@@ -857,6 +857,15 @@ class _TurnPricing:
         )
 
 
+def full_autonomy_workspace_hint(permission_mode: str, *, host_folders: bool) -> str:
+    """The workspace-hint sentence for ``full_autonomy``: it promises the host only where the instance has host folders."""
+    if permission_mode != "full_autonomy" or not host_folders:
+        return ""
+    return (
+        " Permission mode is `full_autonomy` (unrestricted): you may also read, write, edit, search, and run commands"
+        " in any path or directory outside the workspace on the host machine when needed."
+    )
+
 class TurnSession:
     """Builds the runtime for a turn and owns its subagent lifecycle."""
 
@@ -3006,6 +3015,7 @@ class TurnSession:
             code_mode_work_kind=code_mode_work_kind,
             permission_broker=permission_broker if interactive_permissions else None,
             permission_mode=effective_perm_mode,
+            host_folders=self.host_folders,
             interactive_permissions=interactive_permissions,
             turn_id=str(self.turn.get("turn_id") or "") or None,
             file_history=self.file_history,
@@ -3759,6 +3769,7 @@ class TurnSession:
             workspace_is_local=self.workspace_is_local,
             git_status=git_context.git_status_summary(self.workspace.root) if (self.workspace_is_local and trusted) else "",
             public_names=public,
+            host_access=self.host_folders,
         )
         return stable, dynamic
 
@@ -4154,11 +4165,7 @@ class TurnSession:
                     if self.workspace_is_local
                     else "Files you create there persist for the whole conversation."
                 )
-                + (
-                    " Permission mode is `full_autonomy` (unrestricted): you may also read, write, edit, search, and run commands in any path or directory outside the workspace on the host machine when needed."
-                    if self.permission_mode == "full_autonomy"
-                    else ""
-                )
+                + full_autonomy_workspace_hint(self.permission_mode, host_folders=self.host_folders)
             ),
             subagents_enabled=self.enable_subagents,
             child_model_ids=self.child_model_ids,
