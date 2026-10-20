@@ -17,6 +17,8 @@ import httpx
 from agentos.agentic.lifecycle import HookEvent
 
 from .config import HookSpec
+from agentos.redaction import redact_value
+
 from .processes import run_shell_command
 from .protocol import HookRun, parse_verdict
 
@@ -115,8 +117,10 @@ class HttpHookRunner:
         headers.setdefault("Content-Type", "application/json")
         try:
             client = self.client_factory() if self.client_factory else httpx.Client()
+            # W0-R11: an HTTP hook sends the event to another program; its secrets stay here (command hooks get raw values).
+            body_text = _payload_text(redact_value(dict(payload)))
             with client, client.stream(
-                "POST", spec.url, content=_payload_text(payload).encode("utf-8"), headers=headers,
+                "POST", spec.url, content=body_text.encode("utf-8"), headers=headers,
                 timeout=spec.timeout, follow_redirects=False,
             ) as response:
                 # Read only as far as the cap (W2-R9): a hook endpoint cannot make the worker buffer its whole body.

@@ -102,7 +102,9 @@ _SENSITIVE_SUMMARY = re.compile(r"(?i)(api[_-]?key|access[_-]?token|refresh[_-]?
 
 
 def sanitize_summary(value: str) -> str:
-    return _SENSITIVE_SUMMARY.sub(lambda match: f"{match.group(1)}=[REDACTED]", value)
+    from agentos.redaction import redact_text
+
+    return redact_text(_SENSITIVE_SUMMARY.sub(lambda match: f"{match.group(1)}=[REDACTED]", value))
 
 
 def _bounded(
@@ -123,6 +125,10 @@ def _bounded(
     if isinstance(value, str):
         if len(value) > text_limit:
             raise ValueError("payload text exceeds limit")
+        if redact:  # W0-R11: what the activity log keeps is what its SSE stream and the interface show
+            from agentos.redaction import redact_text
+
+            return redact_text(value)
         return value
     if isinstance(value, Mapping):
         if len(value) > item_limit:
