@@ -24,10 +24,11 @@ export function parseHooksText(text: string): { hooks: Record<string, unknown> |
 function LayerEditor({ layer, entry, onSave }: {
   layer: WritableLayer
   entry: NonNullable<HooksReport['editable'][WritableLayer]>
-  onSave: (layer: WritableLayer, hooks: Record<string, unknown>) => Promise<ReturnType<typeof describeError> | null>
+  onSave: (layer: WritableLayer, hooks: Record<string, unknown>) => Promise<{ hooks: unknown } | { failure: ReturnType<typeof describeError> }>
 }) {
-  const initial = JSON.stringify(entry.hooks, null, 2)
-  const [text, setText] = useState(initial)
+  // W7-R4: the baseline is the text last saved (the PUT answer), not the text the editor mounted with.
+  const [baseline, setBaseline] = useState(() => JSON.stringify(entry.hooks, null, 2))
+  const [text, setText] = useState(baseline)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<ReturnType<typeof describeError> | null>(null)
   const [saved, setSaved] = useState(false)
@@ -37,9 +38,16 @@ function LayerEditor({ layer, entry, onSave }: {
     if (!parsed.hooks) return
     setBusy(true)
     setSaved(false)
-    const failure = await onSave(layer, parsed.hooks)
-    setError(failure)
-    setSaved(failure === null)
+    const result = await onSave(layer, parsed.hooks)
+    if ('failure' in result) {
+      setError(result.failure)
+    } else {
+      const next = JSON.stringify(result.hooks ?? parsed.hooks, null, 2)
+      setBaseline(next)
+      setText(next)
+      setError(null)
+      setSaved(true)
+    }
     setBusy(false)
   }
 
@@ -52,7 +60,7 @@ function LayerEditor({ layer, entry, onSave }: {
         onChange={(event) => { setText(event.target.value); setSaved(false) }} />
       {parsed.error && <p className="code-settings__warning" role="status">{parsed.error}</p>}
       <div className="code-settings__actions">
-        <button type="button" className="button button--primary" disabled={busy || !parsed.hooks || text === initial} onClick={() => void save()}>
+        <button type="button" className="button button--primary" disabled={busy || !parsed.hooks || text === baseline} onClick={() => void save()}>
           {busy ? 'Salvando…' : 'Salvar'}
         </button>
         {saved && <span className="code-settings__muted" role="status">Salvo.</span>}
@@ -72,16 +80,13 @@ export function HooksSection() {
   const conversationId = useFolderConversation()
   const load = useCallback(() => getHooks(client, conversationId), [client, conversationId])
   const hooks = useLoaded(load, 'ler os hooks')
-  const [generation, setGeneration] = useState(0)
-
   async function save(layer: WritableLayer, value: Record<string, unknown>) {
     try {
-      await saveHooks(client, layer, value, conversationId)
-      hooks.reload()
-      setGeneration((current) => current + 1)
-      return null
+      const report = await saveHooks(client, layer, value, conversationId)
+      hooks.reload() // refresh the list in force; the layer's editor keeps the saved text it got back
+      return { hooks: report.editable[layer]?.hooks }
     } catch (error) {
-      return describeError(error, 'salvar os hooks')
+      return { failure: describeError(error, 'salvar os hooks') }
     }
   }
 
@@ -119,7 +124,7 @@ export function HooksSection() {
       )}
       {data && LAYERS.map((layer) => {
         const entry = data.editable[layer]
-        return entry ? <LayerEditor key={`${layer}:${generation}`} layer={layer} entry={entry} onSave={save} /> : null
+        return entry ? <LayerEditor key={layer} layer={layer} entry={entry} onSave={save} /> : null
       })}
     </SettingsSection>
   )
