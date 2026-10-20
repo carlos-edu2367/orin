@@ -44,7 +44,8 @@ def test_a_reused_pid_is_reported_finished_and_purge_leaves_the_bystander_alive(
 
 
 def test_a_process_whose_creation_time_matches_is_running_and_stopped() -> None:
-    child = subprocess.Popen(SLEEP)
+    # Started as `start_background` starts a run: on POSIX it leads its own process group, which `_stop` requires.
+    child = subprocess.Popen(SLEEP, start_new_session=sys.platform != "win32")
     try:
         created = background.process_created(child.pid)
         assert created is not None
