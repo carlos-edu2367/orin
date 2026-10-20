@@ -14,11 +14,11 @@ import threading
 import time
 import uuid
 from collections.abc import Iterator, Mapping, Sequence
-from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from agentos.file_lock import file_lock
 from agentos.settings.paths import orin_user_dir
 
 CONSOLIDATION_INTERVAL = timedelta(hours=24)
@@ -38,51 +38,10 @@ _LOCK = threading.Lock()
 LOCK_WAIT_SECONDS = 5.0
 
 
-@contextmanager
 def _file_lock(path: Path) -> Iterator[bool]:
     """W3-R23: one writer at a time across processes (Orin and its `orin code` runs share the file). Yields False
-    when the lock could not be taken in time; the caller then changes nothing."""
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        handle = open(path.with_name(path.name + ".lock"), "a+b")  # noqa: SIM115 - held for the block
-    except OSError:
-        yield False
-        return
-    locked = False
-    deadline = time.monotonic() + LOCK_WAIT_SECONDS
-    try:
-        while not locked:
-            try:
-                if os.name == "nt":
-                    import msvcrt
-
-                    handle.seek(0)
-                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-                else:
-                    import fcntl
-
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                locked = True
-            except OSError:
-                if time.monotonic() >= deadline:
-                    break
-                time.sleep(0.01)
-        yield locked
-    finally:
-        if locked:
-            try:
-                if os.name == "nt":
-                    import msvcrt
-
-                    handle.seek(0)
-                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-                else:
-                    import fcntl
-
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-            except OSError:
-                pass
-        handle.close()
+    when the lock could not be taken in time; the caller then changes nothing. The lock lives in ``agentos.file_lock``."""
+    return file_lock(path, wait_seconds=LOCK_WAIT_SECONDS)
 
 
 class ConsolidationState:

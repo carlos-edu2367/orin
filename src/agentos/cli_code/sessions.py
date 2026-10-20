@@ -11,13 +11,20 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 import uuid
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
+from agentos.file_lock import file_lock
+
+from .errors import CliRuntimeError
+
 INDEX_FILE_NAME = "cli-sessions.json"
 MAX_SESSIONS = 2000
+READ_ATTEMPTS = 5  # W6-R7: a read that fails (a sharing violation during another process's replace) is retried
+READ_RETRY_SECONDS = 0.05
 _lock = threading.Lock()
 
 
@@ -47,13 +54,32 @@ class SessionIndex:
     def __init__(self, data_dir: Path) -> None:
         self.path = Path(data_dir) / INDEX_FILE_NAME
 
+    def _read_raw(self) -> dict:
+        """The index as stored. A missing file is an empty index; an existing one that cannot be read or parsed is an
+        error, never an empty index: writing an empty index back would drop every session (W6-R7)."""
+        if not self.path.exists():
+            return {"sessions": []}
+        failure: Exception | None = None
+        for attempt in range(READ_ATTEMPTS):
+            try:
+                raw = json.loads(self.path.read_text(encoding="utf-8"))
+            except FileNotFoundError:
+                return {"sessions": []}
+            except (OSError, ValueError) as error:
+                failure = error
+                if attempt + 1 < READ_ATTEMPTS:
+                    time.sleep(READ_RETRY_SECONDS)
+                continue
+            if not isinstance(raw, dict):
+                failure = ValueError("the index is not a JSON object")
+                break
+            return raw
+        raise CliRuntimeError(f"the orin code session index cannot be read ({self.path}): {failure}")
+
     def load(self) -> list[CliSession]:
-        try:
-            raw = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return []
+        raw = self._read_raw()
         sessions: list[CliSession] = []
-        for item in raw.get("sessions", []) if isinstance(raw, dict) else []:
+        for item in raw.get("sessions", []) if isinstance(raw.get("sessions"), list) else []:
             try:
                 sessions.append(CliSession(**{key: item.get(key) for key in CliSession.__slots__}))
             except (TypeError, AttributeError):
@@ -67,7 +93,15 @@ class SessionIndex:
         descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             handle.write(data)
-        os.replace(temporary, self.path)
+        for attempt in range(READ_ATTEMPTS):  # W6-R7: a reader in another process can hold the file for a moment (Windows)
+            try:
+                os.replace(temporary, self.path)
+                return
+            except PermissionError:
+                if attempt + 1 == READ_ATTEMPTS:
+                    temporary.unlink(missing_ok=True)
+                    raise
+                time.sleep(READ_RETRY_SECONDS)
 
     def find(self, reference: str) -> CliSession | None:
         """By session id, by conversation id, or by name (the most recent session with that name)."""
@@ -89,7 +123,11 @@ class SessionIndex:
     def record(self, *, conversation_id: str, folder: Path | str, session_id: str | None = None, name: str | None = None) -> CliSession:
         """Add a session or touch an existing one (same id): its name changes only when a new one is given."""
         now = datetime.now(UTC).isoformat()
-        with _lock:
+        # W6-R7: the load and the write are one step under the lock, so two `orin code` processes never lose each
+        # other's sessions. A lock that cannot be taken changes nothing.
+        with _lock, file_lock(self.path) as locked:
+            if not locked:
+                raise CliRuntimeError("the orin code session index is busy (another run holds it); try again")
             sessions = self.load()
             chosen = (session_id or str(uuid.uuid4())).lower()
             existing = next((item for item in sessions if item.session_id == chosen), None)

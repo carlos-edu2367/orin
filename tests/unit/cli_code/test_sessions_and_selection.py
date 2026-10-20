@@ -37,12 +37,15 @@ def test_a_session_id_cannot_move_to_another_conversation(tmp_path: Path) -> Non
         index.record(conversation_id="chat_2", folder=tmp_path, session_id=taken.session_id)
 
 
-def test_a_broken_index_reads_as_empty(tmp_path: Path) -> None:
+def test_a_broken_index_raises_and_is_not_overwritten(tmp_path: Path) -> None:
+    # W6-R7: an unreadable index is an error, never an empty one (a write would drop every session).
     index = SessionIndex(tmp_path)
     index.path.write_text("{not json", encoding="utf-8")
-    assert index.load() == []
-    index.record(conversation_id="chat_1", folder=tmp_path)
-    assert len(index.load()) == 1
+    with pytest.raises(CliRuntimeError):
+        index.load()
+    with pytest.raises(CliRuntimeError):
+        index.record(conversation_id="chat_1", folder=tmp_path)
+    assert index.path.read_text(encoding="utf-8") == "{not json"
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
