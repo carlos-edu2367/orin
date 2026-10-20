@@ -127,6 +127,44 @@ def parse_agent_file(path: Path, *, origin: str) -> AgentDefinition:
     )
 
 
+MAX_CLI_AGENTS = 32
+
+
+def agents_from_mapping(raw: object, *, origin: str = "cli") -> tuple[list[AgentDefinition], list[tuple[str, str]]]:
+    """Agents given as JSON (``--agents`` or an SDK host's ``initialize.agents``): ``{name: {description, prompt, ...}}``,
+    read with the same rules as an agent file."""
+    found: list[AgentDefinition] = []
+    errors: list[tuple[str, str]] = []
+    if not isinstance(raw, Mapping):
+        return found, ([(origin, "agents must be an object of name -> definition")] if raw is not None else [])
+    for key, value in list(raw.items())[:MAX_CLI_AGENTS]:
+        name = str(key or "").strip().lower()
+        if not _NAME.fullmatch(name):
+            errors.append((str(key)[:64], "an agent needs a name of lowercase letters, digits and hyphens"))
+            continue
+        if not isinstance(value, Mapping):
+            errors.append((name, "an agent's definition must be an object"))
+            continue
+        description = _text(value.get("description"), 1_024)
+        prompt = value.get("prompt")
+        if not description or not isinstance(prompt, str) or not prompt.strip():
+            errors.append((name, "an agent needs a description and a prompt"))
+            continue
+        tools = _list(value.get("tools")) if value.get("tools") not in (None, "", "*") else None
+        turns = value.get("maxTurns")
+        found.append(AgentDefinition(
+            name=name, description=description, prompt=prompt.strip()[:MAX_AGENT_PROMPT_CHARS], origin=origin,
+            tools=tools, disallowed_tools=_list(value.get("disallowedTools")), model=_text(value.get("model"), 120),
+            permission_mode=_text(value.get("permissionMode"), 40),
+            max_turns=int(turns) if isinstance(turns, int) and not isinstance(turns, bool) and 0 < turns <= 500 else None,
+            skills=_list(value.get("skills")),
+            digest=hashlib.sha256(repr(sorted(value.items(), key=str)).encode("utf-8")).hexdigest(),
+        ))
+    if len(raw) > MAX_CLI_AGENTS:
+        errors.append((origin, f"more than {MAX_CLI_AGENTS} agents; the rest are ignored"))
+    return found, errors
+
+
 VERIFIER = AgentDefinition(
     name="verifier",
     description=(

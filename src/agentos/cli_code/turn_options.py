@@ -84,8 +84,25 @@ def _extend(layer: dict[str, Any], dotted: str, items: list[str]) -> None:
             current.append(item)
 
 
+def agents_flag(value: str | None, cwd: Path) -> dict[str, Any]:
+    """``--agents``: a JSON object of agents, or the path of a JSON file holding one."""
+    if value is None or not value.strip():
+        return {}
+    text = value.strip()
+    if not text.startswith("{"):
+        text = _read_text_file(text, cwd, "--agents")
+    try:
+        data = json.loads(text)
+    except ValueError as error:
+        raise CliUsageError("--agents is neither a JSON object nor a JSON file") from error
+    if not isinstance(data, dict):
+        raise CliUsageError("--agents must be a JSON object")
+    return data
+
+
 def build_turn_options(options: CodeOptions, cwd: Path, *, host_answers_prompts: bool,
-                       sdk_hooks: dict[str, list[dict[str, Any]]] | None = None) -> CliTurnOptions:
+                       sdk_hooks: dict[str, list[dict[str, Any]]] | None = None,
+                       sdk_agents: dict[str, Any] | None = None) -> CliTurnOptions:
     """The "cli" settings layer (``--settings`` first, the explicit flags over it) and the headless switches."""
     layer = settings_flag(options.settings, cwd)
     if sdk_hooks:
@@ -126,12 +143,13 @@ def build_turn_options(options: CodeOptions, cwd: Path, *, host_answers_prompts:
 
         instructions = schema_instructions(load_schema(options.json_schema))
         append = f"{append}\n\n{instructions}" if append else instructions
+    agents = {**agents_flag(options.agents, cwd), **(sdk_agents or {})}  # the host's definition wins over the flag's
     none = options.permission_prompts == "none" or not host_answers_prompts
     try:
         return CliTurnOptions(
             settings=layer, setting_sources=options.setting_sources, system_prompt=system_prompt,
             append_system_prompt=append, tools=options.tools, permission_prompts="none" if none else "host",
-            transcript=True, headless=True, trust_workspace=options.trust,
+            transcript=True, headless=True, trust_workspace=options.trust, agents=agents or None,
         )
     except ValueError as error:
         raise CliUsageError(f"the run's options are not valid: {error}") from error

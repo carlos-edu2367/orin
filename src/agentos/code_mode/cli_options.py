@@ -42,6 +42,8 @@ class CliTurnOptions(BaseModel):
     headless: bool = True
     # --trust: the API trusts the workspace folder before it queues the turn (the session itself ignores this).
     trust_workspace: bool = False
+    # --agents and an SDK host's initialize.agents: {name: {description, prompt, tools, model, ...}}.
+    agents: dict[str, Any] | None = None
 
     @field_validator("settings")
     @classmethod
@@ -52,6 +54,19 @@ class CliTurnOptions(BaseModel):
             raise ValueError("cli settings must be plain JSON") from error
         if len(encoded.encode("utf-8")) > MAX_CLI_SETTINGS_BYTES:
             raise ValueError("cli settings are too large")
+        return value
+
+    @field_validator("agents")
+    @classmethod
+    def _agents_are_bounded_json(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        if value is None:
+            return None
+        try:
+            encoded = json.dumps(value, ensure_ascii=False, allow_nan=False)
+        except (TypeError, ValueError) as error:
+            raise ValueError("cli agents must be plain JSON") from error
+        if len(encoded.encode("utf-8")) > 4 * MAX_CLI_SETTINGS_BYTES:
+            raise ValueError("cli agents are too large")
         return value
 
     @field_validator("tools")

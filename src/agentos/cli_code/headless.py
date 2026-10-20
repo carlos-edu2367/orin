@@ -33,7 +33,7 @@ _END_EVENTS = {"turn.completed", "turn.failed", "turn.waiting_user"}
 
 # Flags this build parses and refuses, each with where it stands; never silently ignored.
 UNSUPPORTED: dict[str, str] = {
-    "mcp_configs": "--mcp-config", "strict_mcp_config": "--strict-mcp-config", "agents": "--agents", "agent": "--agent",
+    "mcp_configs": "--mcp-config", "strict_mcp_config": "--strict-mcp-config", "agent": "--agent",
     "plugin_dirs": "--plugin-dir", "worktree": "--worktree", "background": "--bg", "fork_session": "--fork-session",
     "bare": "--bare", "safe_mode": "--safe-mode", "restricted": "--restricted", "init": "--init",
     "maintenance": "--maintenance", "desktop": "--desktop", "resume_session_at": "--resume-session-at",
@@ -201,7 +201,7 @@ class HeadlessRun:
         # Only an SDK host with a can_use_tool callback (--permission-prompt-tool stdio) answers permission prompts.
         host = self.options.permission_prompt_tool == "stdio"
         turn_options = build_turn_options(self.options, self.cwd, host_answers_prompts=host,
-                                          sdk_hooks=self.bridge.sdk_hooks).model_dump()
+                                          sdk_hooks=self.bridge.sdk_hooks, sdk_agents=self.bridge.sdk_agents).model_dump()
         mode = permission_mode_for(self.options)
         body: dict[str, Any] = {"message": prompt, "selection": self.selection.as_request(), "code_mode": "code",
                                 "cli": turn_options, "permission_mode": mode}

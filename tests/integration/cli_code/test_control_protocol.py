@@ -157,3 +157,15 @@ def test_rewind_files_restores_the_folder(orin_runtime: LiveRuntime) -> None:
     assert host.response_to(host.control({"subtype": "rewind_files", "user_message_id": str(uuid.uuid4())}))["subtype"] == "error"
     host.close()
     assert not (workspace / "undone.txt").exists()
+
+
+def test_an_agent_from_the_host_runs_as_a_subagent(orin_runtime: LiveRuntime) -> None:
+    host = Host(orin_runtime, orin_runtime.workspace("agents"), "--permission-mode", "acceptEdits", *MODEL)
+    _start(host, agents={"reviewer": {"description": "Reviews the work", "prompt": "REVIEWER-PERSONA: be strict."}})
+    before = len(orin_runtime.fake.requests)
+    host.prompt("[[agent:reviewer]]")
+    result = _result(host)
+    host.close()
+    assert result["subtype"] == "success" and result["result"] == "Done."
+    systems = [str(m.get("content")) for request in orin_runtime.fake.requests[before:] for m in request.get("messages", []) if m.get("role") == "system"]
+    assert any("REVIEWER-PERSONA" in text for text in systems)

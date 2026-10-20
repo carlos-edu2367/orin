@@ -1625,6 +1625,17 @@ class TurnSession:
         except Exception:  # noqa: BLE001 - a broken agents folder never stops a turn
             logger.exception("agent definitions could not be read")
             return AgentCatalog()
+        if self.cli_options is not None and self.cli_options.agents:
+            from .agent_definitions import agents_from_mapping
+
+            # W6: the person's command line (--agents) or SDK host (initialize.agents): above every folder's agents.
+            found, problems = agents_from_mapping(self.cli_options.agents)
+            for definition in found:
+                previous = catalog.agents.get(definition.name)
+                if previous is not None:
+                    catalog.shadowed.append((definition.name, previous.origin, "cli"))
+                catalog.agents[definition.name] = definition
+            catalog.errors.extend(problems)
         for path, reason in catalog.errors[:20]:
             logger.warning("agent definition %s ignored: %s", path, reason)
         return catalog
