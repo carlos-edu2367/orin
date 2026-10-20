@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import threading
+from collections import OrderedDict
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from pathlib import Path
@@ -35,7 +36,36 @@ DEFAULT_HARD_DENY_PATTERNS: tuple[str, ...] = (
     r"\b(Remove-Item|ri|rm|rmdir|rd|del|erase)\b(?=.*\s-r\w*\b)(?=.*[\s'\"][a-zA-Z]:[\\/]*['\"]?(\s|$))",
 )
 MAX_CONSECUTIVE_DENIALS = 3
-MAX_TOTAL_DENIALS = 20
+MAX_TOTAL_DENIALS = 20  # per conversation, for as long as this worker runs (W1-R10)
+# W1-R10: one small pool for every classifier. A call that hangs past its timeout keeps its thread until the provider
+# returns, but no more than this many threads ever exist; while they are all busy a new call times out and asks.
+MAX_CLASSIFIER_THREADS = 2
+_POOL = ThreadPoolExecutor(max_workers=MAX_CLASSIFIER_THREADS, thread_name_prefix="orin-auto-mode")
+_MAX_BREAKERS = 1000
+
+
+class _Breaker:
+    __slots__ = ("consecutive", "total")
+
+    def __init__(self) -> None:
+        self.consecutive = 0
+        self.total = 0
+
+
+_BREAKERS: "OrderedDict[str, _Breaker]" = OrderedDict()
+_BREAKERS_LOCK = threading.Lock()
+
+
+def _breaker_for(key: str | None) -> _Breaker:
+    """The denial counters of one conversation, shared by every turn's classifier (a new one each turn)."""
+    if not key:
+        return _Breaker()
+    with _BREAKERS_LOCK:
+        breaker = _BREAKERS.pop(key, None) or _Breaker()
+        _BREAKERS[key] = breaker
+        while len(_BREAKERS) > _MAX_BREAKERS:
+            _BREAKERS.popitem(last=False)
+        return breaker
 
 _SYSTEM = (
     "You review tool calls made by an AI coding agent working in a user's project. Decide whether the call can run "
@@ -86,6 +116,7 @@ class AutoModeClassifier:
         context: str = "",
         timeout_seconds: float = 20.0,
         workspace_root=None,
+        breaker_key: str | None = None,
     ) -> None:
         self.provider = provider
         self.provider_name = provider_name
@@ -101,8 +132,7 @@ class AutoModeClassifier:
         root = Path(workspace_root) if workspace_root is not None else Path.cwd()
         self._ctx = MatchContext(root, Path.home(), default_shell())
         self._lock = threading.Lock()
-        self._consecutive = 0
-        self._total = 0
+        self._breaker = _breaker_for(breaker_key)
 
     def _hard_denied(self, internal: str, arguments: Mapping[str, Any]) -> str | None:
         if internal in SHELL_TOOLS:
@@ -155,27 +185,24 @@ class AutoModeClassifier:
         if reason is not None:
             return PermissionDecision("deny", reason)
         with self._lock:
-            if self._consecutive >= MAX_CONSECUTIVE_DENIALS or self._total >= MAX_TOTAL_DENIALS:
+            if self._breaker.consecutive >= MAX_CONSECUTIVE_DENIALS or self._breaker.total >= MAX_TOTAL_DENIALS:
                 return PermissionDecision("ask", "auto mode paused after repeated denials")
-        executor = ThreadPoolExecutor(max_workers=1)
+        future = _POOL.submit(self._ask_model, internal, dict(arguments))
         try:
-            future = executor.submit(self._ask_model, internal, dict(arguments))
-            try:
-                reply = future.result(timeout=self.timeout_seconds)
-            except FutureTimeout:
-                return PermissionDecision("ask", "auto mode classifier timed out")
-            except Exception:  # noqa: BLE001
-                return PermissionDecision("ask", "auto mode classifier failed")
-        finally:
-            executor.shutdown(wait=False, cancel_futures=True)
+            reply = future.result(timeout=self.timeout_seconds)
+        except FutureTimeout:
+            future.cancel()  # a call still queued behind hung ones never runs
+            return PermissionDecision("ask", "auto mode classifier timed out")
+        except Exception:  # noqa: BLE001
+            return PermissionDecision("ask", "auto mode classifier failed")
         verdict = _verdict_from(reply or "")
         behavior = str((verdict or {}).get("decision") or "").strip().lower()
         if behavior not in {"allow", "ask", "deny"}:
             return PermissionDecision("ask", "auto mode classifier gave no usable decision")
         with self._lock:
             if behavior == "deny":
-                self._consecutive += 1
-                self._total += 1
+                self._breaker.consecutive += 1
+                self._breaker.total += 1
             else:
-                self._consecutive = 0
+                self._breaker.consecutive = 0
         return PermissionDecision(behavior, str((verdict or {}).get("reason") or f"auto mode: {behavior}")[:300])

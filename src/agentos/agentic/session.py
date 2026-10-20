@@ -3678,9 +3678,13 @@ class TurnSession:
             model_id = str(model_setting).strip() if isinstance(model_setting, str) and model_setting.strip() else str(self.turn.get("model_id") or "")
             history = self.store.history_for_turn(self.turn)
             task = next((str(item.get("content") or "") for item in reversed(history) if item.get("role") == "user"), "")
+            # W1-R10: a different autoMode.model needs its own transport (the turn's is bound to the turn's model).
+            other_model = model_id != str(self.turn.get("model_id") or "") and self.fallback_provider_factory is not None
+            provider = self.fallback_provider_factory(model_id) if other_model else self.provider_factory()
             return AutoModeClassifier(
-                self.provider_factory(), provider_name=str(self.turn.get("provider") or ""), model_id=model_id,
+                provider, provider_name=str(self.turn.get("provider") or ""), model_id=model_id,
                 settings=self.effective_settings, context=task, workspace_root=self.workspace.root,
+                breaker_key=str(self.turn.get("conversation_id") or "") or None,
             )
         except Exception:  # noqa: BLE001 - no classifier means auto mode asks
             return None
