@@ -23,6 +23,9 @@ import {
 import { attachWorkspaceFolder, detachWorkspaceFolder, inspectWorkspaceFolder, type WorkspaceState } from '../../api/workspace'
 import { CommandPalette } from '../../components/CommandPalette'
 import { ModelPicker } from '../../components/ModelPicker'
+import { listCommandCatalog, type CatalogCommand } from '../../api/sessionTools'
+import { CommandInfoDialog } from '../commands/CommandInfoDialog'
+import { useChatCommands, type InfoPanel } from '../commands/useChatCommands'
 import { OverviewPanel } from '../overview/OverviewPanel'
 import { WorkspaceNavigation } from '../projects/WorkspaceNavigation'
 import { PreferencesModal } from '../settings/PreferencesModal'
@@ -145,6 +148,12 @@ export function ChatPage() {
   const [visionCandidates, setVisionCandidates] = useState<ProviderModel[]>([])
   const [pluginCommands, setPluginCommands] = useState<PluginCommand[]>([])
   const [skills, setSkills] = useState<SkillSummary[]>([])
+  // W7: the folder's own skills and commands, the answer panel of /help and /status, and command notices.
+  const [catalogCommands, setCatalogCommands] = useState<CatalogCommand[]>([])
+  const [infoPanel, setInfoPanel] = useState<InfoPanel | null>(null)
+  const [commandNotice, setCommandNotice] = useState<string | null>(null)
+  const [modelPickerSignal, setModelPickerSignal] = useState(0)
+  const [preferencesOpen, setPreferencesOpen] = useState(false)
   const [visionSetting, setVisionSetting] = useState<VisionModelSetting | null>(null)
   const [chatProvider, setChatProvider] = useState<ProviderName | null>(null)
   const [chatModelId, setChatModelId] = useState('')
@@ -489,6 +498,22 @@ export function ChatPage() {
     })
     return () => controller.abort()
   }, [client])
+
+  // W7: the skills and commands of this conversation's folder, for the `/` picker. Best-effort, like the above.
+  useEffect(() => {
+    if (!conversationId) return
+    let alive = true
+    listCommandCatalog(client, conversationId)
+      .then((value) => { if (alive) setCatalogCommands(value.commands) })
+      .catch(() => { if (alive) setCatalogCommands([]) })
+    return () => { alive = false }
+  }, [client, conversationId])
+
+  useEffect(() => {
+    if (!commandNotice) return
+    const timer = setTimeout(() => setCommandNotice(null), 5000)
+    return () => clearTimeout(timer)
+  }, [commandNotice])
 
   // The turn's own model capabilities, refetched whenever the conversation's
   // model changes. Best-effort: an unrefreshed or unreachable catalog leaves
@@ -873,6 +898,29 @@ export function ChatPage() {
     && !hasTerminalEventForActiveTurn
     && !isActivityTerminal
 
+  const chatCommands = useChatCommands({
+    client, conversationId, navigate, messages,
+    title: conversation?.title ?? '', modelId: effectiveChatModelId, provider: effectiveChatProvider ?? '',
+    permissionMode: codePermissionMode, mode: conversationMode, workspacePath: conversation?.workspace?.path ?? null,
+    send: async (text) => {
+      if (running) { setCommandNotice('Espere o turno atual terminar para enviar.'); return }
+      setPendingUserMessage({ message_id: `pending-${Date.now()}`, role: 'user', content: text, status: 'completed', retryable: false, attachments: [], command: null })
+      try {
+        await sendChatMessage(text, [])
+        await loadSnapshot(false)
+      } catch {
+        setPendingUserMessage(null)
+        setError('Não foi possível enviar. Tente novamente.')
+      }
+    },
+    reload: async () => { await loadSnapshot(false) },
+    notify: setCommandNotice,
+    openInfo: setInfoPanel,
+    openPreferences: () => setPreferencesOpen(true),
+    openModelPicker: () => setModelPickerSignal((value) => value + 1),
+    setPermissionMode: (mode) => changeCodePermissionMode(mode),
+  })
+
   const showAgentPulse =
     running
     && activeTurn !== null
@@ -1229,9 +1277,21 @@ export function ChatPage() {
     }
   }, [])
 
-  async function submit() {
-    const text = message.trim()
+  async function submit(override?: string) {
+    const text = (override ?? message).trim()
     const readyUploads = readyUploadIds()
+    // W7: a built-in slash command runs here (even while a turn runs); a skill or plugin command is sent as before.
+    if (text.startsWith('/') && readyUploads.length === 0 && !stopping) {
+      let outcome: Awaited<ReturnType<typeof chatCommands.run>> | { kind: 'failed' }
+      try {
+        outcome = await chatCommands.run(text)
+      } catch {
+        outcome = { kind: 'failed' }
+      }
+      if (outcome.kind === 'handled') { setMessage(''); setError(null); return }
+      if (outcome.kind === 'excluded') { setError(`/${outcome.name} não existe no Orin.`); return }
+      if (outcome.kind === 'failed') { setError('O comando não pôde ser concluído. Tente novamente.'); return }
+    }
     if ((!text && readyUploads.length === 0) || running || stopping) return
     if (text.length > MAX_MESSAGE_CHARACTERS) {
       setOversizedInput({ text, attachments: readyUploads })
@@ -1421,7 +1481,6 @@ export function ChatPage() {
     }
   }, [client, conversation, conversationId, loadSnapshot, navigate, newProjectDescription, newProjectName, projectBusy])
 
-  const [preferencesOpen, setPreferencesOpen] = useState(false)
 
   const activeConvProjectId = conversation?.project_id ?? projectId ?? null
   const activeConvProjectName =
@@ -1432,6 +1491,7 @@ export function ChatPage() {
   return (
     <main className="chat">
       <PushNotificationToast notice={pushNotice} onDismiss={dismissPushNotice} />
+      {infoPanel && <CommandInfoDialog panel={infoPanel} commands={chatCommands.offered} onClose={() => setInfoPanel(null)} />}
       <header className="chat__bar canvas-header" data-testid="canvas-header">
         <div className="chat__bar-left canvas-header__left">
           {effectiveChatProvider && (
@@ -1446,6 +1506,7 @@ export function ChatPage() {
               loading={chatModelsLoading}
               failed={chatModelsFailed}
               disabled={running || stopping}
+              openSignal={modelPickerSignal}
             />
           )}
           {conversationMode === 'code' && (
@@ -2014,6 +2075,7 @@ export function ChatPage() {
           requests={pendingToolPermissions}
           onResolve={(requestId, decision) => { void handleResolveDockPermission(requestId, decision) }}
         />
+        {commandNotice && <p className="chat__command-notice" role="status">{commandNotice}</p>}
         <Composer
           value={message}
           onChange={setMessage}
@@ -2031,6 +2093,10 @@ export function ChatPage() {
           notice={notice}
           commands={pluginCommands}
           skills={skills}
+          builtinCommands={chatCommands.offered}
+          catalogCommands={catalogCommands}
+          onOpenModelPicker={() => setModelPickerSignal((value) => value + 1)}
+          onRunCommand={(text) => void submit(text)}
           codeMode={conversationMode}
           conversationMode={conversationMode}
           hideCodeModeToggle={true}

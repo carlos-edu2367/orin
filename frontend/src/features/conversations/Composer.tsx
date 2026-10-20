@@ -2,11 +2,14 @@ import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
 import { useEffect, useRef, useState, type ClipboardEvent, type DragEvent, type FormEvent, type KeyboardEvent, type ReactNode } from 'react'
 import type { CodePermissionMode } from '../../api/codeMode'
 import type { PluginCommand } from '../../api/plugins'
+import type { CatalogCommand } from '../../api/sessionTools'
+import type { BuiltinCommand } from '../commands/builtins'
+import { PENDING, useKeybindings } from '../keybindings/engine'
 import type { SkillSummary } from '../../api/skills'
 import type { CodeModeChoice, ConversationMode } from '../../api/conversations'
 import type { TodoItem } from './activityTypes'
 import { AttachmentChips, type ComposerAttachment } from './AttachmentChips'
-import { CommandPicker, commandToken, skillToken } from './CommandPicker'
+import { CommandPicker, slashItems } from './CommandPicker'
 import { applyFileMention, detectFileMention, FileMentionPicker } from './FileMentionPicker'
 import { TodoBar } from './TodoBar'
 import {
@@ -49,6 +52,15 @@ export type ComposerProps = {
   commands?: PluginCommand[]
   /** Available skills offered alongside plugin commands by the `/` picker. */
   skills?: SkillSummary[]
+  /** W7: Orin's built-in commands the chat implements, and the folder's own skills and commands. */
+  builtinCommands?: readonly BuiltinCommand[]
+  catalogCommands?: readonly CatalogCommand[]
+  /** W7 chat:sendNow — interrupt the running turn and send this text. */
+  onSendNow?: () => void
+  /** W7 chat:modelPicker. */
+  onOpenModelPicker?: () => void
+  /** W7: picking a built-in that takes no arguments runs it at once (as Claude Code does). */
+  onRunCommand?: (text: string) => void
   codeMode?: CodeModeChoice
   onCodeModeChange?: (value: CodeModeChoice) => void
   /** Compact segmented mode switch (`[Chat | >_ Code]`) rendered in the composer bar on Home. */
@@ -87,6 +99,7 @@ export function Composer({
   value, onChange, onSubmit, onStop, running = false, disabled = false,
   placeholder = 'Descreva o que você precisa…', settings, hint, error, autoFocus, notice, focusSignal = 0, canSend = true,
   attachments = [], onAttach = () => {}, onRemoveAttachment = () => {}, commands = [], skills = [],
+  builtinCommands = [], catalogCommands = [], onSendNow, onOpenModelPicker, onRunCommand,
   codeMode = 'auto', onCodeModeChange, modeSwitch, sessionContext, hideCodeModeToggle = false, conversationMode,
   codePermissionMode, onCodePermissionModeChange, todos,
   workspaceFiles = [], onSearchWorkspaceFiles,
@@ -142,13 +155,7 @@ export function Composer({
     setPreviousCommandQuery(commandQuery)
     if (commandQuery === null) setDismissed(false)
   }
-  const pickerHasMatches = commandQuery !== null && [
-    ...commands.map((command) => ({ token: commandToken(command), description: command.description })),
-    ...skills.filter((skill) => skill.available).map((skill) => ({ token: skillToken(skill, commands), description: skill.description })),
-  ].some((item) => {
-    const needle = commandQuery.trim().toLowerCase()
-    return !needle || item.token.toLowerCase().includes(needle) || item.description.toLowerCase().includes(needle)
-  })
+  const pickerHasMatches = commandQuery !== null && slashItems(commandQuery, commands, skills, builtinCommands, catalogCommands).length > 0
   const pickerOpen = commandQuery !== null && !dismissed && pickerHasMatches
 
   // `@file` mention autocomplete anywhere in the composer text.
@@ -222,25 +229,62 @@ export function Composer({
     onSubmit()
   }
 
+  const { match } = useKeybindings()
+
+  function insertAtCaret(text: string) {
+    const element = textareaRef.current
+    const start = element?.selectionStart ?? value.length
+    const end = element?.selectionEnd ?? value.length
+    onChange(`${value.slice(0, start)}${text}${value.slice(end)}`)
+    requestAnimationFrame(() => element?.setSelectionRange(start + text.length, start + text.length))
+  }
+
+  // W7: the Chat context of the keybinding engine (keybindings.json can rebind every one of these).
   function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
-    if (event.key === 'Tab' && event.shiftKey && (effectiveCodeMode === 'code' || Boolean(sessionContext) || Boolean(onCodePermissionModeChange))) {
-      event.preventDefault()
-      event.stopPropagation()
-      stepPermissionMode()
-      return
-    }
-    if (pickerOpen && ['Enter', 'ArrowUp', 'ArrowDown', 'Escape'].includes(event.key)) return
+    if (event.nativeEvent.isComposing) return
+    const pickerKeys = pickerOpen && ['Enter', 'Tab', 'ArrowUp', 'ArrowDown', 'Escape'].includes(event.key)
+    if (pickerKeys) return
     if (mentionPickerOpen && ['Enter', 'Tab', 'ArrowUp', 'ArrowDown', 'Escape'].includes(event.key)) return
-    if (event.key === 'Escape' && running && onStop) {
+    const action = match(event.nativeEvent, ['Chat'])
+    if (action === PENDING) { event.preventDefault(); return }
+    const handled = (() => {
+      switch (action) {
+        case 'chat:cycleMode':
+          if (!(effectiveCodeMode === 'code' || Boolean(sessionContext) || Boolean(onCodePermissionModeChange))) return false
+          stepPermissionMode()
+          return true
+        case 'chat:cancel':
+          if (!running || !onStop) return false
+          onStop()
+          return true
+        case 'chat:submit':
+          if (running || !canSend) return true
+          if (value.trim() || attachments.length > 0) onSubmit()
+          return true
+        case 'chat:newline':
+          // Shift+Enter already types a line break; any other key bound to it inserts one.
+          if (event.key === 'Enter' && event.shiftKey) return false
+          insertAtCaret('\n')
+          return true
+        case 'chat:sendNow':
+          if (!value.trim()) return true
+          if (running && onSendNow) onSendNow()
+          else if (!running && canSend) onSubmit()
+          return true
+        case 'chat:modelPicker':
+          if (!onOpenModelPicker) return false
+          onOpenModelPicker()
+          return true
+        case 'chat:clearInput':
+          onChange('')
+          return true
+        default:
+          return false
+      }
+    })()
+    if (handled) {
       event.preventDefault()
       event.stopPropagation()
-      onStop()
-      return
-    }
-    if (event.key === 'Enter' && !event.shiftKey) {
-      event.preventDefault()
-      if (running || !canSend) return
-      if (value.trim() || attachments.length > 0) onSubmit()
     }
   }
 
@@ -276,8 +320,15 @@ export function Composer({
           <CommandPicker
             commands={commands}
             skills={skills}
+            builtins={builtinCommands}
+            catalog={catalogCommands}
             query={commandQuery ?? ''}
-            onSelect={(token) => { onChange(`/${token} `); setDismissed(true) }}
+            onSelect={(token) => {
+              const builtin = builtinCommands.find((item) => item.name === token)
+              setDismissed(true)
+              if (builtin && !builtin.argumentHint && onRunCommand) { onRunCommand(`/${token}`); return }
+              onChange(`/${token} `)
+            }}
             onDismiss={() => setDismissed(true)}
           />
         )}

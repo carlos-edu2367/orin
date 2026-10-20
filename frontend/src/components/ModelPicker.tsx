@@ -24,6 +24,8 @@ export type ModelPickerProps = {
   failed?: boolean
   disabled?: boolean
   variant?: 'split' | 'unified'
+  /** W7: bumped by /model and the chat:modelPicker key to open the model list from outside. */
+  openSignal?: number
 }
 
 /**
@@ -38,6 +40,12 @@ export function ModelPicker(props: ModelPickerProps) {
   const variant = props.variant ?? 'unified'
   const [open, setOpen] = useState<'provider' | 'model' | null>(null)
   const [query, setQuery] = useState('')
+  const [lastOpenSignal, setLastOpenSignal] = useState(props.openSignal ?? 0)
+  if ((props.openSignal ?? 0) !== lastOpenSignal) {
+    // Adjusted during render (React's documented pattern), not in an effect.
+    setLastOpenSignal(props.openSignal ?? 0)
+    if ((props.openSignal ?? 0) > lastOpenSignal && !props.disabled) { setQuery(''); setOpen('model') }
+  }
   const containerRef = useRef<HTMLDivElement>(null)
   const reduced = useReducedMotion()
 
