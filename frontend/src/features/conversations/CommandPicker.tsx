@@ -121,6 +121,13 @@ export function CommandPicker({ commands, skills = [], builtins = [], catalog = 
   useEffect(() => {
     if (matches.length === 0) return
     function onKeyDown(event: KeyboardEvent) {
+      // W7-R10: the composer's Enter picks, and so does Enter with no control focused (the page itself); a
+      // person's Enter on another control (a permission card's button, a dialog, another field) is theirs.
+      // An IME's Enter confirms the composition.
+      const target = event.target
+      const fromComposer = target instanceof HTMLTextAreaElement && target.id === 'composer-message'
+      const fromPage = target === document.body || target === document.documentElement
+      if (!(fromComposer || fromPage) || event.isComposing) return
       if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); event.stopPropagation(); onSelect(matches[highlighted]!.token) }
     }
     window.addEventListener('keydown', onKeyDown, true)
