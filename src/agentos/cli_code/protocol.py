@@ -237,12 +237,15 @@ class Translator:
         if is_error and str(payload.get("error_code") or "") == "CODE_PERMISSION_DENIED":
             self.denials.append({"tool_name": name, "tool_use_id": tool_use_id, "tool_input": tool_input})
 
-    def open_tool(self, internal: str) -> tuple[str, str, dict[str, Any]] | None:
-        """The latest call of this tool still waiting for its result: ``(tool_use id, public name, input)``."""
-        for calls in reversed(list(self._open_tools.values())):
-            for tool_use_id, name, tool_input, called in reversed(calls):
-                if called == internal:
-                    return tool_use_id, name, tool_input
+    def open_call(self, invocation: str, internal: str) -> tuple[str, str, dict[str, Any]] | None:
+        """The call with exactly this invocation id and internal tool name, still waiting for its result.
+
+        Returns ``(tool_use id, public name, input)``, or None: a call of another invocation, or of another tool,
+        is never the answer (W6-R1).
+        """
+        for tool_use_id, name, tool_input, called in self._open_tools.get(invocation, []):
+            if called == internal:
+                return tool_use_id, name, tool_input
         return None
 
     def tool_use_id_for(self, invocation: str) -> str | None:

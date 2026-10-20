@@ -44,6 +44,7 @@ from agentos.reading.extract import extract_text
 from agentos.reading.render import ImageTooLarge, normalize_image, render_pdf_pages
 from agentos.reading.vision import VisionUnavailable
 from .diagnostics import STEP_ORDER, detect_recipe, file_diagnostic_command
+from .call_context import ActiveInvocation
 from .workspace import MAX_LIST_DEPTH, MAX_SEARCH_RESULTS, ConversationWorkspace, WorkspaceError
 from .models import MAX_USER_QUESTION_ITEMS
 from .file_preview import media_type_for
@@ -190,6 +191,7 @@ def _tool_response(outcome: ToolOutcome) -> dict[str, Any]:
 
 
 class AgentToolset(
+    ActiveInvocation,
     ReadTools,
     WriteTools,
     EditTools,
@@ -480,14 +482,6 @@ class AgentToolset(
             {"slug": slug, "display_name": slug, "tool_count": count}
             for slug, count in counts.items()
         )
-
-    @property
-    def _active_invocation_id(self) -> str | None:
-        return getattr(self._tls, "active_invocation_id", None)
-
-    @_active_invocation_id.setter
-    def _active_invocation_id(self, value: str | None) -> None:
-        self._tls.active_invocation_id = value
 
     @property
     def _verified_since_last_edit(self) -> bool:

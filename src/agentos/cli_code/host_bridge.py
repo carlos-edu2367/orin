@@ -53,6 +53,17 @@ def sdk_hooks_layer(hooks: object) -> dict[str, list[dict[str, Any]]]:
     return layer
 
 
+def _broker_input(internal: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+    """The input the host is shown when Orin cannot find the call: the broker's own command or path, or None."""
+    command = payload.get("command")
+    if internal in {"run_command", "powershell"} and isinstance(command, str) and command:
+        return {"command": command}
+    path = payload.get("path")
+    if isinstance(path, str) and path:
+        return {"file_path": path}
+    return None
+
+
 class HostBridge:
     def __init__(self, run: "HeadlessRun") -> None:
         self.run = run
@@ -84,8 +95,7 @@ class HostBridge:
         run = self.run
         request_id = str(payload["permission_request_id"])
         internal = str(payload.get("tool_name") or "")
-        found = run.translator.open_tool(internal) if run.translator is not None else None
-        tool_use_id, name, tool_input = found if found is not None else ("", public_name(internal), {})
+        invocation = str(payload.get("invocation_id") or "")
         path = f"/v1/conversations/{run.conversation_id}/turns/{turn_id}/tool-permission"
 
         def decide(decision: str, reason: str | None) -> None:
@@ -97,6 +107,19 @@ class HostBridge:
         if run.options.permission_prompt_tool != "stdio":
             decide("deny", "nobody can answer a permission prompt in this run")
             return
+
+        # The host is shown the call the broker asked about (W6-R1). A call that is not open here (a subagent's, which
+        # the translator never sees) is shown from the broker's own fields, and a request with neither is refused.
+        found = run.translator.open_call(invocation, internal) if run.translator is not None and invocation else None
+        if found is not None:
+            tool_use_id, name, tool_input = found
+        else:
+            tool_use_id, name = None, public_name(internal)
+            broker_input = _broker_input(internal, payload)
+            if broker_input is None:
+                decide("deny", "orin code cannot show this call to the SDK host")
+                return
+            tool_input = broker_input
 
         def answer(response: dict[str, Any]) -> None:
             body = response.get("response") if isinstance(response.get("response"), dict) else {}
@@ -117,7 +140,7 @@ class HostBridge:
 
         self.ask({
             "subtype": "can_use_tool", "tool_name": name, "input": tool_input, "permission_suggestions": [],
-            "tool_use_id": tool_use_id or None, "blocked_path": payload.get("path") or None,
+            "tool_use_id": tool_use_id, "blocked_path": payload.get("path") or None,
             "decision_reason": str(payload.get("suggested_rule") or "") or None,
         }, answer)
 

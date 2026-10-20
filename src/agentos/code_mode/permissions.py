@@ -15,6 +15,7 @@ from uuid import uuid4
 
 # agentos.permissions.* imports agentos.code_mode.models, so the engine/rules
 # imports stay inside the functions that use them (import cycle through code_mode/__init__).
+from agentos.agentic.call_context import current_invocation_id
 from agentos.settings import load_effective_settings
 from agentos.settings.paths import SettingsPaths, orin_user_dir
 from agentos.settings.writer import add_permission_rule
@@ -477,6 +478,8 @@ class ToolPermissionBroker:
             "conversation_id": conversation_id,
             "created_at": datetime.now(UTC).isoformat(),
             "resolved_at": None,
+            # The call the request is for, when the caller runs in a toolset's thread (W6-R1).
+            "invocation_id": current_invocation_id(),
         }
         if preview is not None:
             record["structured_patch"] = preview["structured_patch"]
@@ -498,6 +501,7 @@ class ToolPermissionBroker:
                 else f"Permissão necessária para `{canonical}`"
             )
             event_payload: dict[str, Any] = {
+                "invocation_id": record["invocation_id"],
                 "stage": "waiting_decision",
                 "state": "waiting_user",
                 "tool_name": canonical,
@@ -517,6 +521,7 @@ class ToolPermissionBroker:
                     "rule_suggestion": suggested_rule,
                     "permission_mode": mode.value,
                     "turn_id": turn_id,
+                    "invocation_id": record["invocation_id"],
                     "structured_patch": record.get("structured_patch"),
                     "added_lines": record.get("added_lines"),
                     "removed_lines": record.get("removed_lines"),
