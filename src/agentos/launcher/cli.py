@@ -81,6 +81,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     commands = parser.add_subparsers(dest="command", metavar="command")
     commands.add_parser("start", parents=[shared], help="start the Orin runtime (the default)")
+    commands.add_parser("code", add_help=False, help="Orin Code from a terminal or an SDK host (`orin code --help`)")
     commands.add_parser("stop", help="stop a running Orin")
     commands.add_parser("restart", parents=[shared], help="stop a running Orin and start it again")
     update = commands.add_parser("update", help="install the latest verified Orin release")
@@ -445,9 +446,22 @@ def command_uninstall(
 # -- entry point --------------------------------------------------------
 
 
+def _invoked_as_orin_code() -> bool:
+    """A frozen build ships one binary; a copy named ``orin-code`` is ``orin code`` (what an SDK's ``cli_path`` runs)."""
+    return Path(sys.argv[0]).stem.lower() == "orin-code"
+
+
 def main(argv: list[str] | None = None) -> int:
+    raw = list(argv if argv is not None else sys.argv[1:])
+    # The runtime re-executes sys.executable with `internal-service` (and `orin code` may start it with `start`): a
+    # frozen copy named orin-code must still run those as the launcher.
+    as_code = argv is None and _invoked_as_orin_code() and raw[:1] not in (["internal-service"], ["start"])
+    if raw[:1] == ["code"] or as_code:
+        from agentos.cli_code.main import main as code_main
+
+        return code_main(raw[1:] if raw[:1] == ["code"] else raw)
     parser = build_parser()
-    arguments = parser.parse_args(argv if argv is not None else sys.argv[1:])
+    arguments = parser.parse_args(raw)
 
     if getattr(arguments, "command", None) == "internal-service":
         return run_service(arguments.service)
