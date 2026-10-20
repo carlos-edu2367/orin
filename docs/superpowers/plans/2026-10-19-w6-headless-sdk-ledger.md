@@ -522,3 +522,77 @@ W6-R3 decisions and deviations:
 Suites at the end of part 1 (`uv run pytest -q`): unit `4243 passed, 65 skipped`; integration `121 passed, 65 skipped` (after `bbd17b3`; the first integration run had one failure, the new route missing from the isolation test's classification, fixed in `bbd17b3`). `src/agentos/agentic/agent_tools.py` is 1693 lines. No `agentos.launcher` or `orin-code` process was left running.
 
 Not in this part: W6-R4 to W6-R17, listed in the review's findings table.
+
+### Part 2
+
+Part 2 of the fixes to `docs/superpowers/reviews/2026-10-20-w6-review.md`: W6-R4, R5, R6, R7, R10, R11 and R13, and R17 items 2, 3 and 6. One commit per finding (R17's three items, one each); each test was written first and the commit names the finding. Deferred by the coordinator and not done: R8, R9, R12, R14, R15, R16, R17 items 1, 4, 5 and 7.
+
+| Finding | Commits | Tests | Decisions, deviations and what remains |
+| --- | --- | --- | --- |
+| W6-R4 managed policy disables bypass | `8cf74aa` | `tests/unit/settings/test_w6_r4_bypass_policy.py` (9), `tests/unit/code_mode/test_w6_r4_session_bypass.py` (4), `tests/unit/cli_code/test_w6_r4_bypass_policy.py` (10); live `tests/integration/cli_code/test_w6_r4_policy_live.py` (1) | See the list below. |
+| W6-R5 `--tools default` | `bfc8ce5` | `tests/unit/cli_code/test_w6_r5_tools_default.py` (10); conformance `test_the_sdk_tools_preset_offers_the_model_its_tools` in `tests/integration/cli_code/test_sdk_conformance.py` | See the list below. |
+| W6-R6 classifier starvation | `0820552` | `tests/unit/permissions/test_w6_r6_classifier_slots.py` (5); `test_w6_auto_mode.py` unchanged and passing | See the list below. |
+| W6-R7 session index under concurrent processes | `764c78a` | `tests/unit/cli_code/test_w6_r7_session_index.py` (9, the four-process race among them) | See the list below. |
+| W6-R10 refused stream-json prompt | `87939e3` | `tests/unit/cli_code/test_w6_r10_refused_prompt.py` (4) | See the list below. |
+| W6-R11 host request without a host | `546b917` | `tests/unit/cli_code/test_w6_r11_no_host.py` (8) | See the list below. |
+| W6-R13 waiting turn is not a success | `c803aaa` | `tests/unit/cli_code/test_w6_r13_waiting_turn.py` (4) | See the list below. |
+| W6-R17 item 2, the claim race | `6a1398a` | `tests/unit/memory/test_w6_consolidation_state.py` (2, the race rewritten) | See the list below. |
+| W6-R17 item 3, cancelled waits | `dfceecf` | `tests/unit/cli_code/test_host_requests.py` (timing asserts in two existing tests) | See the list below. |
+| W6-R17 item 6, Setup hook | `658a620` | `tests/unit/hooks/test_w6_setup_hook.py` (+2) | See the list below. |
+
+W6-R4 decisions and deviations:
+- `bypass_disabled(settings)` (`agentos/agentic/loop_settings.py`) is True when any layer has `permissions.disableBypassPermissionsMode == "disable"`. A lower layer cannot lift a managed disable.
+- The spec says the loader drops that key from a repository's own layers. It does not: `PROJECT_RESTRICTION_VALUES` keeps a repository's `"disable"` on purpose (a restriction). The loader is unchanged; a repository can only restrict, never lift.
+- Session (`agentic/session.py`, after the mode is resolved): `full_autonomy` under a disable becomes `ask_permissions`, for every route (CLI, SDK, interface). One activity notice, "bypass mode is disabled by policy", is recorded with the existing `TURN_STARTED` type, the same precedent as R2.
+- Subagents: `child_permission_mode` cannot exceed the parent's mode, so a downgraded parent gives no `full_autonomy` child. Covered by a test, no extra cap added.
+- CLI: `HeadlessRun.run()` reads the folder's policy before the first turn (`trusted=options.trust`) and refuses with `CliUsageError`, which `main` prints as `Error: bypass mode is disabled by policy (permissions.disableBypassPermissionsMode)`, exit 1. Both flags, `--permission-mode bypassPermissions` and `full_autonomy` are refused.
+- `HeadlessRun.bypass_policy` starts True (fail closed) until `run()` has read the policy; `HostBridge` refuses bypass while it is True.
+- `set_permission_mode bypassPermissions` is refused unless the run started with `--dangerously-skip-permissions` or `--allow-dangerously-skip-permissions` (`bypass_allowed` is captured at start, so a switch away and back works), and always under policy. The spec's literal rule: `--permission-mode bypassPermissions` alone does not allow a later bypass request.
+- Gap, not implemented, as the review asked: `allowManagedPermissionRulesOnly` (so `--allowedTools` is still not dropped by policy).
+- TDD honesty: the settings helper's tests failed first as an ImportError (the function did not exist yet), not on behaviour. The session and CLI tests failed on behaviour first (2 and 6 failures). The live test was run only after the fix; it was not run red first.
+
+W6-R5 decisions and deviations:
+- `tool_selection` (`agentic/cli_turn.py`): `default` anywhere in the list means `tools=None` (Orin's normal set). `--tools ""` still withholds every core tool.
+- `args.py`: after splitting, each name must be `default`, an `mcp__...` name, or a name Orin publishes (`internal_name(name)` is a key of `PUBLIC_NAMES`). Anything else is `CliUsageError` naming it (`Bassh`, `Bash(ls:*)`, `defaults`).
+- The conformance case (the SDK's `claude_code` preset) passed on its first run after the fix. It was not run red first, so it is not proof of the failure on its own; the unit tests are the red ones (8 failed before the fix).
+
+W6-R6 decisions and deviations:
+- `MAX_CLASSIFIER_THREADS = 8` (was 2) and `MAX_CALLS_PER_CONVERSATION = 2`. The slots are a `BoundedSemaphore` on the breaker, so they share the breaker's key; a call with no key gets its own. The worker releases the slot in its `finally`; a call cancelled before it starts releases it in the caller.
+- A call first waits for its slot (at most the timeout; else `ask` "classifier busy"). Then it waits to start in the pool (at most the timeout; else `ask` "classifier busy", and the queued call is cancelled). Then the timeout counts from the start ("timed out").
+- Known limit, not fixed: the breaker map keeps 1000 conversations. A conversation evicted and seen again gets fresh slots and counters (the existing W1 behaviour for the counters).
+- Red: 3 of 5 new tests failed first (starvation, the third call, release at timeout). The other two (a failing call releases its slot; a call queued behind a full pool) pass on the old code too, so they guard the new paths rather than prove them.
+
+W6-R7 decisions and deviations:
+- `src/agentos/file_lock.py` holds `file_lock(path, wait_seconds=5.0)`, moved from `memory/consolidation.py` with the same `.lock` sibling and semantics. `consolidation._file_lock` now delegates to it, and its `contextmanager` import is gone. The memory boundary tests pass.
+- `SessionIndex.record` runs its load and write under `file_lock`. A lock that cannot be taken in time raises `CliRuntimeError` and writes nothing.
+- A missing index is empty. An existing index that cannot be read (`OSError`, retried 5 times at 50 ms) or does not parse raises `CliRuntimeError`. Beyond the spec: a JSON value that is not an object is also an error, not an empty index.
+- Beyond the spec: `os.replace` in the writer is retried on `PermissionError` (5 times at 50 ms), because a reader in another process can hold the file on Windows.
+- Changed an existing test, as the spec requires: `tests/unit/cli_code/test_sessions_and_selection.py::test_a_broken_index_reads_as_empty` became `test_a_broken_index_raises_and_is_not_overwritten` (it asserted the unsafe empty read; it now asserts the error and an unchanged file).
+- Red: the four-process race at the pre-fix code (checked in a scratch copy of `HEAD`) did not keep 160: the writers crashed with `PermissionError [WinError 5]` during `os.replace` and the index kept 0 sessions. The new unit tests failed first too (the lock helper and the error paths were missing).
+
+W6-R10 decisions and deviations:
+- A stream-json user message that Orin cannot take (an image or document block, or more than `MAX_PROMPT_CHARS`) is queued as a refusal, in order. When its turn in the queue comes, it gets `error_during_execution`, `is_error: true`, `errors: [reason]` through the translator, and the session reads on. Queued, not written at once, so nothing lands inside a running turn.
+- Without stream-json output the reason goes to stderr. `-p` text mode still exits 1.
+- Not checked live (the review's `test_r08` flow is unit-tested with a fake `answer`).
+- Red: 3 of 4 failed first (the 4th is the guard for plain text).
+
+W6-R11 decisions and deviations:
+- `HostBridge.ask` answers at once with `{"subtype": "error", "error": "no SDK host on this run"}` unless the run's input format is stream-json. Nothing is written to stdout. The `mcp_message` and `hook_callback` replies post `_error` as before.
+- `build_turn_options` refuses, with exit 1 and `CliUsageError`, a `type: sdk` server from `--mcp-config` and a `callback` hook from the `--settings` layer when the input format is not stream-json. The SDK host's own hooks are only added on stream-json.
+- Changed an existing fixture (not an assertion): `tests/unit/cli_code/test_w6_r1_permission_call.py`'s fake run gained `input_format="stream-json"`, because a permission prompt for a host only exists on stream-json (the real run refuses `stdio` otherwise).
+- Red: 4 of 8 failed first (the four behaviour cases); the others guard what already held.
+
+W6-R13 decisions and deviations:
+- `turn.waiting_user` ends the prompt with state `waiting_user`: `subtype: error_during_execution`, `is_error: true`, `errors: ["the turn is waiting for the person (an answer or an approval Orin needs)"]`. `-p` exits 1 (text mode prints the message as `Error:`). In stream-json the session reads on.
+- The review asked for the reason in the message. The end event's payload carries no question or plan text, so the message is generic.
+- The review's other option (deny `AskUserQuestion` in `-p` runs) was not implemented.
+- Red: 3 of 4 failed first (the completed-turn case is a guard).
+
+W6-R17 decisions and deviations:
+- Item 2: `test_only_one_process_claims_a_due_run` starts four claimers that announce readiness, wait for a barrier file, and claim together. The read is slowed in every run (a wider window). A negative control runs first with `ORIN_TEST_NO_CONSOLIDATION_LOCK=1`, which makes the lock a no-op in the claimers; it asserts more than one claim. The real run asserts exactly one. A probe at this commit gave `claimed` x4 with the lock off and `claimed, no, no, no` with it on. The real leg was not run against a lock-less `consolidation.py` itself; the env var gives the lock-less claimer, which is the evidence.
+- Item 3: the two cancelled or unasked waits assert a return under 1 s. A probe channel that ignored its cancel took 5.6 s and failed the assert.
+- Item 6: the Setup-before-SessionStart order and the `--maintenance` end-to-end test (argv, `build_turn_options`, session) were added. Both passed on their first run, so they assert behaviour the code already has; they are not red-first.
+
+Suites at the end of part 2: unit `uv run pytest -q tests/unit`: 4308 passed, 65 skipped (part 1 ended at 4243 passed, 65 skipped). Integration `uv run pytest -q tests/integration`: 123 passed, 65 skipped (part 1 ended at 121 passed, 65 skipped). `src/agentos/agentic/agent_tools.py` is 1693 lines (untouched in part 2). No `agentos.launcher` or `orin-code` process was left running after the live tests.
+
+Not done in part 2: the deferred items listed at the top; R17 items 1, 4, 5 and 7 (the other test-quality items); the `allowManagedPermissionRulesOnly` gap; the breaker eviction limit under R6.
