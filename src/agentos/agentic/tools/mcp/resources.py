@@ -6,6 +6,7 @@ data; an image arrives as an image; other binary content is described, not shown
 from __future__ import annotations
 
 import base64
+import binascii
 import json
 from typing import Any
 
@@ -67,11 +68,13 @@ class McpResourceTools:
             if isinstance(item.get("text"), str):
                 parts.append(item["text"])
             elif isinstance(item.get("blob"), str):
-                if mime.startswith("image/") and len(images) < MAX_RESOURCE_IMAGES:
+                size = _blob_size(item["blob"])
+                if size is None:  # W5-D4: the server sent something that is not base64; never pass it on
+                    parts.append(f"[unreadable binary content, {mime[:80] or 'unknown type'}: not valid base64]")
+                elif mime.startswith("image/") and len(images) < MAX_RESOURCE_IMAGES:
                     images.append({"media_type": mime, "data": item["blob"]})
                 else:
-                    size = len(base64.b64decode(item["blob"], validate=False)) if item["blob"] else 0
-                    parts.append(f"[binary content of {size} bytes, {mime or 'unknown type'}, not shown]")
+                    parts.append(f"[binary content of {size} bytes, {mime[:80] or 'unknown type'}, not shown]")
         text = "\n\n".join(parts)
         if len(text) > MAX_RESOURCE_TEXT_CHARS:
             text = text[:MAX_RESOURCE_TEXT_CHARS] + "\n[truncated]"
@@ -86,6 +89,16 @@ class McpResourceTools:
             "succeeded", f"Ferramentas MCP atualizadas ({changed} mudança(s))", json.dumps(report, ensure_ascii=False, indent=1),
             {"tool_kind": "mcp", "servers": [item.get("server") for item in report]},
         )
+
+
+def _blob_size(blob: str) -> int | None:
+    """The decoded size of a base64 blob, or None when it is not base64."""
+    if not blob:
+        return 0
+    try:
+        return len(base64.b64decode(blob, validate=True))
+    except (binascii.Error, ValueError):
+        return None
 
 
 def _listing(items: list[dict[str, Any]], what: str) -> ToolOutcome:
