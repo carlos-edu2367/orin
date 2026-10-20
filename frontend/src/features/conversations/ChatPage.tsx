@@ -125,6 +125,7 @@ export function ChatPage() {
   const [conversation, setConversation] = useState<Conversation | null>(null)
   const [chats, setChats] = useState<Array<{ conversation_id: string; title: string; state: string }>>([])
   const [message, setMessage] = useState('')
+  const submitInFlight = useRef(false) // W7-R13
   const composerTextRef = useRef('') // W7-R9: what the composer holds when an async send fails
   useEffect(() => { composerTextRef.current = message }, [message])
   const [codePermissionMode, setCodePermissionMode] = useState<CodePermissionMode>('ask_permissions')
@@ -1359,7 +1360,18 @@ export function ChatPage() {
     }
   }, [])
 
+  /** W7-R13: one submit at a time, so a second Enter while a command (`/fork`, `/compact`…) runs does not run it again. */
   async function submit(override?: string) {
+    if (submitInFlight.current) return
+    submitInFlight.current = true
+    try {
+      await runSubmit(override)
+    } finally {
+      submitInFlight.current = false
+    }
+  }
+
+  async function runSubmit(override?: string) {
     const text = (override ?? message).trim()
     const readyUploads = readyUploadIds()
     // W7 `!command`: a shell turn in the session's folder (Code conversations only).
