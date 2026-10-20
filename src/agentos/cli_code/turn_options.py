@@ -120,11 +120,27 @@ def agents_flag(value: str | None, cwd: Path) -> dict[str, Any]:
     return data
 
 
+def _refuse_host_needs(layer: dict[str, Any], servers: dict[str, Any]) -> None:
+    """Without an SDK host (input not stream-json), a ``type: sdk`` server or a ``callback`` hook can never be answered."""
+    if any(isinstance(server, dict) and server.get("type") == "sdk" for server in servers.values()):
+        raise CliUsageError("--mcp-config has a type sdk server, which needs an SDK host: use --input-format stream-json")
+    hooks = layer.get("hooks")
+    for groups in (hooks.values() if isinstance(hooks, dict) else ()):
+        for group in (groups if isinstance(groups, list) else ()):
+            entries = group.get("hooks") if isinstance(group, dict) else None
+            for hook in (entries if isinstance(entries, list) else ()):
+                if isinstance(hook, dict) and hook.get("type") == "callback":
+                    raise CliUsageError("--settings has a callback hook, which needs an SDK host: use --input-format stream-json")
+
+
 def build_turn_options(options: CodeOptions, cwd: Path, *, host_answers_prompts: bool,
                        sdk_hooks: dict[str, list[dict[str, Any]]] | None = None,
                        sdk_agents: dict[str, Any] | None = None, first_turn: bool = False) -> CliTurnOptions:
     """The "cli" settings layer (``--settings`` first, the explicit flags over it) and the headless switches."""
     layer = settings_flag(options.settings, cwd)
+    servers = mcp_config_flag(options.mcp_configs, cwd)
+    if options.input_format != "stream-json":
+        _refuse_host_needs(layer, servers)  # W6-R11: an SDK server or a callback hook needs the SDK host on stream-json
     if sdk_hooks:
         # The SDK host's hook callbacks (initialize.hooks) join the cli layer's hooks, after --settings' own.
         hooks = layer.setdefault("hooks", {})
@@ -171,7 +187,7 @@ def build_turn_options(options: CodeOptions, cwd: Path, *, host_answers_prompts:
             settings=layer, setting_sources=options.setting_sources, system_prompt=system_prompt,
             append_system_prompt=append, tools=options.tools, permission_prompts="none" if none else "host",
             transcript=True, headless=True, trust_workspace=options.trust, agents=agents or None,
-            mcp_servers=mcp_config_flag(options.mcp_configs, cwd) or None, strict_mcp_config=options.strict_mcp_config,
+            mcp_servers=servers or None, strict_mcp_config=options.strict_mcp_config,
             setup=setup,
         )
     except ValueError as error:

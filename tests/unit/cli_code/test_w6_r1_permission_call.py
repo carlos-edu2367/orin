@@ -16,7 +16,8 @@ def _run(permission_prompt_tool: str = "stdio"):
     run = SimpleNamespace(
         translator=Translator(session_id="s", model="m"),
         conversation_id="chat_1",
-        options=SimpleNamespace(permission_prompt_tool=permission_prompt_tool),
+        # a host can answer only on stream-json (W6-R11); the real run refuses stdio otherwise
+        options=SimpleNamespace(permission_prompt_tool=permission_prompt_tool, input_format="stream-json"),
         out=SimpleNamespace(message=sent.append),
         _debug=lambda line: None,
         client=SimpleNamespace(post=lambda path, body: posted.append((path, body))),

@@ -74,6 +74,11 @@ class HostBridge:
     # -- harness to host ------------------------------------------------------------------------------------------
 
     def ask(self, request: dict[str, Any], on_answer: Callable[[dict[str, Any]], None]) -> None:
+        if self.run.options.input_format != "stream-json":
+            # W6-R11: only an SDK host on stream-json answers. Without one the request would be written into the output and
+            # the turn would wait the full timeout for an answer that cannot come, so it is refused at once.
+            on_answer({"subtype": "error", "error": "no SDK host on this run"})
+            return
         request_id = f"orin_{uuid.uuid4().hex[:16]}"
         self._waiting[request_id] = on_answer
         self.run.out.message({"type": "control_request", "request_id": request_id, "request": request})
