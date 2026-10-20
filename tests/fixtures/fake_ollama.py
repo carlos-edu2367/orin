@@ -8,7 +8,7 @@ It speaks the part of Ollama's native API Orin uses: ``/api/tags`` and ``/api/sh
 - ``[[read:<path>]]``: a ``Read`` call for ``<path>`` and, once its result is back, ``Done.``;
 - ``[[agent:<name>]]``: an ``Agent`` call for the subagent ``<name>`` and, once its result is back, ``Done.``;
 - ``[[tool:<name>:<json arguments>]]``: a call of any tool and, once its result is back, ``Result: <the result>``;
-- ``[[slow]]``: forty words, one every 0.25 s, so a test can interrupt the turn while it streams;
+- ``[[slow]]`` (or ``[[slow:<n>]]``): forty (n) words, one every 0.25 s, so a test can interrupt the turn while it streams;
 - ``[[think]]``: a thinking chunk, then text;
 - ``[[say:<text>]]``: exactly ``<text>`` (used for structured output).
 """
@@ -78,7 +78,8 @@ def script(messages: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], float]
         call = {"function": {"name": name, "arguments": json.loads(arguments or "{}")}}
         return [{"message": {"role": "assistant", "content": "", "tool_calls": [call]}, "done": False}, _done(10, 5)], 0.0
     if kind == "slow":
-        return [*_text(*(f"word{number} " for number in range(40))), _done(10, 40)], 0.25
+        count = int(value) if value.isdigit() else 40
+        return [*_text(*(f"word{number} " for number in range(count))), _done(10, count)], 0.25
     if kind == "think":
         return [{"message": {"role": "assistant", "content": "", "thinking": "Considering the request."}, "done": False},
                 *_text("Thought it through."), _done(10, 6)], 0.0

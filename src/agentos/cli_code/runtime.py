@@ -46,10 +46,12 @@ class OrinClient:
             headers["Idempotency-Key"] = f"cli-{uuid.uuid4().hex}"
         return headers
 
-    def request(self, method: str, path: str, *, body: Any = None, params: dict[str, str] | None = None) -> Any:
+    def request(self, method: str, path: str, *, body: Any = None, params: dict[str, str] | None = None,
+                timeout: float | None = None) -> Any:
         mutating = method.upper() not in {"GET", "HEAD"}
         try:
-            response = self._http.request(method, path, json=body, params=params, headers=self._headers(mutating))
+            response = self._http.request(method, path, json=body, params=params, headers=self._headers(mutating),
+                                          **({"timeout": timeout} if timeout is not None else {}))
         except httpx.HTTPError as error:
             raise CliRuntimeError(f"the local Orin did not answer ({type(error).__name__})") from error
         if response.status_code >= 400:
@@ -64,8 +66,8 @@ class OrinClient:
     def get(self, path: str, **params: str) -> Any:
         return self.request("GET", path, params=params or None)
 
-    def post(self, path: str, body: Any = None) -> Any:
-        return self.request("POST", path, body=body if body is not None else {})
+    def post(self, path: str, body: Any = None, *, timeout: float | None = None) -> Any:
+        return self.request("POST", path, body=body if body is not None else {}, timeout=timeout)
 
     def patch(self, path: str, body: Any) -> Any:
         return self.request("PATCH", path, body=body)

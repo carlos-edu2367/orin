@@ -923,6 +923,11 @@ class PostgresChatStore:
                     "media_type": str(item["media_type"]), "kind": str(item["kind"]),
                     "bytes": int(item["bytes"]), "created_at": now,
                 } for item in attachments])
+            if cli_options is not None:
+                # W6-R2: the turn's lease exists before the worker can see the turn (a missing lease reads as lost).
+                from agentos.agentic import cli_lease
+
+                cli_lease.renew(turn_id)
             c.execute(insert(conversation_turns).values(turn_id=turn_id, conversation_id=conversation_id, user_id=user_id, execution_id=execution_id, user_message_id=user_message_id, assistant_message_id=assistant_message_id, provider=provider, model_id=model_id, state="queued", idempotency_key=idempotency_key, scheduled_by_schedule_id=scheduled_by_schedule_id, code_mode="code" if code_active else None, turn_kind=turn_kind, cli_options=cli_options, created_at=now, updated_at=now))
             if code_active:
                 work_kind = detect_code_request(message)

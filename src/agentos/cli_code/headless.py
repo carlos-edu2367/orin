@@ -19,6 +19,8 @@ from typing import Any, TextIO
 from agentos.code_mode.models import public_permission_mode
 from agentos.version import __version__
 
+from agentos.agentic.cli_lease import HEARTBEAT_SECONDS
+
 from .args import EXIT_ERROR, EXIT_OK, CliUsageError, CodeOptions
 from .errors import CliRuntimeError
 from .host_bridge import HostBridge
@@ -30,6 +32,7 @@ from .turn_options import build_turn_options, permission_mode_for
 
 MAX_PROMPT_CHARS = 16000  # what the API accepts for one message
 _END_EVENTS = {"turn.completed", "turn.failed", "turn.waiting_user"}
+_CALL_TIMEOUT = 5.0  # seconds: a cancel or a heartbeat is best effort and must not hold the exit (W6-R2)
 
 # Flags this build parses and refuses, each with where it stands; never silently ignored.
 UNSUPPORTED: dict[str, str] = {
@@ -53,6 +56,47 @@ def refuse_unsupported(options: CodeOptions) -> None:
         raise CliUsageError("--permission-prompt-tool accepts only stdio (an SDK host's can_use_tool callback)")
     if options.permission_prompt_tool == "stdio" and options.input_format != "stream-json":
         raise CliUsageError("--permission-prompt-tool stdio needs --input-format stream-json")
+
+
+# Runs that have a turn in progress: a process-level exit (Ctrl-C, SIGTERM) cancels their turns (W6-R2).
+_ACTIVE: set["HeadlessRun"] = set()
+_ACTIVE_LOCK = threading.Lock()
+
+
+def cancel_active_turns() -> None:
+    """Cancel the turn of every run in this process that has one running (once per turn; errors ignored)."""
+    with _ACTIVE_LOCK:
+        runs = list(_ACTIVE)
+    for run in runs:
+        run.cancel_turn()
+
+
+class _Heartbeat:
+    """Renews a turn's lease while `orin code` follows it (W6-R2); a dead process stops renewing, and the turn ends."""
+
+    def __init__(self, client: OrinClient, conversation_id: str, turn_id: str, *, interval: float = HEARTBEAT_SECONDS) -> None:
+        self._client = client
+        self._path = f"/v1/conversations/{conversation_id}/turns/{turn_id}/cli-lease"
+        self._interval = interval
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        self._thread = threading.Thread(target=self._beat, name="orin-code-heartbeat", daemon=True)
+        self._thread.start()
+
+    def _beat(self) -> None:
+        while not self._stop.is_set():
+            try:
+                self._client.post(self._path, {}, timeout=_CALL_TIMEOUT)
+            except Exception:  # noqa: BLE001 - a missed renewal is covered by the next one; it never ends the run
+                pass
+            self._stop.wait(self._interval)
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None and self._thread is not threading.current_thread():
+            self._thread.join(timeout=2)
 
 
 def _prompt_text(content: object) -> str:
@@ -117,6 +161,7 @@ class HeadlessRun:
         self._debug = self._debug_sink()
         self.bridge = HostBridge(self)
         self.current_turn_id: str | None = None
+        self._cancelled_turn: str | None = None
         self.initial_selection: Selection | None = None
         self.prompt_turns: dict[str, str] = {}  # a user message's uuid (as the host saw it) -> its turn
 
@@ -316,6 +361,26 @@ class HeadlessRun:
         self.current_turn_id = turn_id
         self.prompt_turns[replayed] = turn_id
         self._start_events()
+        beat = _Heartbeat(self.client, str(self.conversation_id), turn_id)
+        beat.start()
+        try:
+            state, error_code = self._await_turn_end(turn_id)
+        finally:
+            beat.stop()
+        self.current_turn_id = None
+        after = self._usage()
+        usage = TurnUsage(max(0, after.input_tokens - before.input_tokens), max(0, after.output_tokens - before.output_tokens),
+                          max(0.0, after.cost_usd - before.cost_usd))
+        elapsed = int((self.clock() - started) * 1000)
+        closing = self.translator.result(state=state, error_code=str(error_code) if error_code else None, usage=usage,
+                                         duration_ms=elapsed, duration_api_ms=elapsed)
+        if self.stream_json:
+            for message in closing if final else closing[:-1]:  # the last open block's assistant message, then the result
+                self.out.message(message)
+        return closing[-1]
+
+    def _await_turn_end(self, turn_id: str) -> tuple[str, object]:
+        """Relay the turn's events until its end event; returns ``(state, error code)``."""
         state, error_code = "failed", None
         while True:
             kind, item = self.inbox.get()
@@ -333,22 +398,22 @@ class HeadlessRun:
                     if event_type == "turn.waiting_user":
                         state = "completed"  # an approval Orin waits for ends the headless turn; the person resumes it
                     error_code = payload.get("error_code")
-                    break
+                    return state, error_code
             elif kind == "stream_error":
                 raise CliRuntimeError(str(item))
             else:
                 self._handle_input(kind, item)
-        self.current_turn_id = None
-        after = self._usage()
-        usage = TurnUsage(max(0, after.input_tokens - before.input_tokens), max(0, after.output_tokens - before.output_tokens),
-                          max(0.0, after.cost_usd - before.cost_usd))
-        elapsed = int((self.clock() - started) * 1000)
-        closing = self.translator.result(state=state, error_code=str(error_code) if error_code else None, usage=usage,
-                                         duration_ms=elapsed, duration_api_ms=elapsed)
-        if self.stream_json:
-            for message in closing if final else closing[:-1]:  # the last open block's assistant message, then the result
-                self.out.message(message)
-        return closing[-1]
+
+    def cancel_turn(self) -> None:
+        """Ask the local Orin to cancel this run's turn, once per turn (W6-R2); a failure never holds the exit."""
+        turn_id = self.current_turn_id
+        if turn_id is None or self.conversation_id is None or self._cancelled_turn == turn_id:
+            return
+        self._cancelled_turn = turn_id
+        try:
+            self.client.post(f"/v1/conversations/{self.conversation_id}/cancel", {}, timeout=_CALL_TIMEOUT)
+        except Exception as error:  # noqa: BLE001 - best effort: the lease ends the turn when this cannot be sent
+            self._debug(f"turn {turn_id} could not be cancelled: {error}")
 
     # -- stdin ----------------------------------------------------------------------------------------------------
 
@@ -373,6 +438,8 @@ class HeadlessRun:
     def run(self) -> int:
         refuse_unsupported(self.options)
         self._resolve_session()
+        with _ACTIVE_LOCK:
+            _ACTIVE.add(self)
         try:
             if self.options.input_format == "stream-json":
                 return self._run_stream_input()
@@ -389,7 +456,10 @@ class HeadlessRun:
                     self.out.text(str(result.get("result") or "") + "\n")
             return EXIT_ERROR if result["is_error"] else EXIT_OK
         finally:
+            self.cancel_turn()  # an exit (Ctrl-C, an error) while a turn runs stops that turn (W6-R2)
             self._stop.set()
+            with _ACTIVE_LOCK:
+                _ACTIVE.discard(self)
 
     def _run_stream_input(self) -> int:
         threading.Thread(target=self._read_stdin, daemon=True).start()

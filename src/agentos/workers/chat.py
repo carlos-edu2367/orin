@@ -481,6 +481,16 @@ class ChatWorker:
         return Path(workspace.root)
 
     def _run_claimed(self, turn: dict[str, object]) -> None:
+        try:
+            self._run_claimed_turn(turn)
+        finally:
+            if turn.get("cli_options") is not None:
+                # W6-R2: the `orin code` lease of a turn ends with the turn, however the turn ended.
+                from agentos.agentic import cli_lease
+
+                cli_lease.drop(str(turn["turn_id"]))
+
+    def _run_claimed_turn(self, turn: dict[str, object]) -> None:
         turn_id = str(turn["turn_id"])
         refusal = self._preflight_refusal(turn)
         if refusal is not None:

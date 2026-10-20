@@ -1056,6 +1056,33 @@ class TurnSession:
         if self.cli_options is not None and self.cli_options.permission_prompts == "none":
             # Nobody can answer a prompt: whatever would ask is refused (W1-R9; closes W3-R24).
             self.turn["interactive_permissions"] = False
+        if self.cli_options is not None:
+            # W6-R2: `orin code` must keep following its turn; once its lease expires the turn is cancelled.
+            self.cancelled = self._cancelled_with_cli_lease(self.cancelled)
+
+    def _cancelled_with_cli_lease(self, inner: Callable[[dict[str, object]], bool]) -> Callable[[dict[str, object]], bool]:
+        """``inner``, or True once the `orin code` process that started this turn has stopped renewing its lease (W6-R2)."""
+        from . import cli_lease
+
+        turn_id = str(self.turn.get("turn_id") or "")
+        notified = False
+
+        def cancelled(turn: dict[str, object]) -> bool:
+            nonlocal notified
+            if inner(turn):
+                return True
+            if not turn_id or not cli_lease.expired(turn_id):
+                return False
+            if not notified:
+                notified = True
+                try:
+                    self._record(AgentActivityEventType.TURN_STARTED, "orin code stopped following this turn",
+                                 {"cli_lease": "expired"})
+                except Exception:  # noqa: BLE001 - the notice never blocks the stop
+                    pass
+            return True
+
+        return cancelled
 
     # -- activity -------------------------------------------------------
 

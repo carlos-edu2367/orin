@@ -37,6 +37,29 @@ def _configured_model() -> str | None:
     return value.strip() if isinstance(value, str) and value.strip() else None
 
 
+def _exit_on_signal(signum: int, frame: object) -> None:
+    # Leaves through the same path as Ctrl-C, so a running turn is cancelled first (W6-R2).
+    raise SystemExit(EXIT_ERROR)
+
+
+def _install_exit_signals() -> None:
+    """SIGTERM (and SIGBREAK on Windows) end the run like Ctrl-C does. A console window closed on Windows cannot be
+    caught here; the turn's lease ends it instead (W6-R2)."""
+    import signal
+    import threading
+
+    if threading.current_thread() is not threading.main_thread():
+        return
+    for name in ("SIGTERM", "SIGBREAK"):
+        signum = getattr(signal, name, None)
+        if signum is None:
+            continue
+        try:
+            signal.signal(signum, _exit_on_signal)
+        except (OSError, ValueError):
+            pass
+
+
 def run_headless(options: CodeOptions, *, stdin: TextIO, stdout: TextIO, stderr: TextIO) -> int:
     from pathlib import Path
 
@@ -47,6 +70,7 @@ def run_headless(options: CodeOptions, *, stdin: TextIO, stdout: TextIO, stderr:
 
     refuse_unsupported(options)  # before anything starts
     _utf8(stdin, stdout, stderr)
+    _install_exit_signals()
     paths = orin_paths()
     client = connect_local(paths)
     try:
@@ -132,6 +156,10 @@ def main(argv: Sequence[str] | None = None, *, stdin: TextIO | None = None, stdo
         stderr.write(f"Error: {error}\n")
         return EXIT_ERROR
     except KeyboardInterrupt:
+        # Ctrl-C while a turn runs stops that turn before the process goes (W6-R2).
+        from .headless import cancel_active_turns
+
+        cancel_active_turns()
         return EXIT_ERROR
 
 

@@ -14,7 +14,7 @@ from uuid import uuid4
 from fastapi import Depends, FastAPI, File, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
 from agentos.accounts.errors import AccountError
@@ -1530,6 +1530,25 @@ def create_app(services: ApiServices) -> FastAPI:
         if entry is None:
             raise ApplicationNotFoundError(entry_id)
         return JSONResponse(entry)
+
+    @app.post("/v1/conversations/{conversation_id}/turns/{turn_id}/cli-lease", status_code=204)
+    async def renew_cli_lease(conversation_id: str, turn_id: str, request: Request) -> Response:
+        """`orin code` says it still follows this turn (W6-R2); a turn it stops following is cancelled after the lease."""
+        from agentos.agentic import cli_lease
+
+        principal = principal_for(request, mutable=True)
+        services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.cli_lease")
+        if principal.credential_kind != "cli_token":
+            raise AuthorizationError("the turn lease is for orin code")
+        conversation = conversation_record(conversation_id, principal)
+        turns = conversation.get("turns") if isinstance(conversation.get("turns"), list) else []
+        if not any(isinstance(item, dict) and item.get("turn_id") == turn_id for item in turns):
+            raise ApplicationNotFoundError(turn_id)
+        try:
+            await run_in_threadpool(cli_lease.renew, turn_id)
+        except (OSError, ValueError) as error:
+            raise ApplicationNotFoundError(turn_id) from error
+        return Response(status_code=204)
 
     @app.post("/v1/conversations/{conversation_id}/host-requests/{request_id}")
     async def answer_host_request(conversation_id: str, request_id: str, payload: HostRequestAnswer, request: Request) -> JSONResponse:
