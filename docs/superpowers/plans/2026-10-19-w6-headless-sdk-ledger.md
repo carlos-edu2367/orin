@@ -250,9 +250,9 @@ Deviations from the plan (decided or found while executing):
    not with `No module named ...host_bridge`: the live tests do not import the bridge.
 4. **Task 15 imports:** `headless.py` drops `import os` (the plan's replacement); `_control` was its only use.
 5. **Task 15 sdk_host and live test names** are the plan's; nothing was renamed.
-6. **Task 13 gateway placement:** the `host-requests` route is inserted after `workspace-trust` POST, as the plan's
-   anchor requires (the `GET workspace-trust` anchor is followed by the POST route, which is where the new route
-   sits). Behaviour is unaffected.
+6. **Task 13 gateway placement:** the `host-requests` route is inserted directly before the `workspace-trust` POST route
+   (the plan's anchor). Behaviour is unaffected. (During Task 12 the transcript route was briefly put after the POST
+   route and then moved after the `GET workspace-trust` route, where the plan puts it.)
 
 Expectation changes (recorded as the plan names them):
 
