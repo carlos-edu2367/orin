@@ -95,7 +95,7 @@ SCOPED = {
     ("POST", "/v1/providers/{provider}/models:refresh"), ("GET", "/v1/providers/{provider}/models"),
     ("POST", "/v1/providers/{provider}/models"), ("DELETE", "/v1/providers/{provider}/custom-models/{model_id:path}"),
     ("PUT", "/v1/providers/{provider}/favorites/{model_id:path}"), ("DELETE", "/v1/providers/{provider}/favorites/{model_id:path}"),
-    ("POST", "/v1/providers/ollama/test"),
+    ("POST", "/v1/providers/ollama/test"), ("POST", "/v1/providers/opencode/test"),
     ("GET", "/v1/runtime/settings"), ("PUT", "/v1/runtime/settings"),
     ("GET", "/v1/code-mode/settings"), ("PUT", "/v1/code-mode/settings"),
     ("GET", "/v1/settings/vision-model"), ("PUT", "/v1/settings/vision-model"),
