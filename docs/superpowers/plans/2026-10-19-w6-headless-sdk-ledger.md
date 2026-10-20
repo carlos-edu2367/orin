@@ -305,3 +305,75 @@ Not done or not verified (honest gaps):
 - The unit suite (`tests/unit`) was not re-run in this batch.
 - The 65 skipped tests need Postgres/Redis; those paths are not verified here.
 - Windows only; POSIX-specific branches are not covered.
+
+## Batch E — MCP from the CLI, subcommands and the interface (Tasks 18–21)
+
+Commits (verbatim plan files, one commit per task; the trailer is `Co-Authored-By: Claude Opus 5.5`):
+
+- `4e804b7` `feat(w6): MCP servers from orin code's command line and the SDK host` (Task 18)
+- `42bf5e4` `feat(w6): orin code mcp (configuration files and serve)` (Task 19)
+- `7ba396d` `feat(w6): orin code agents, doctor, auto-mode, background runs and purge` (Task 20)
+- `279bdfa` `feat(w6): orin code plugin, and orin code [prompt] opens the session` (Task 21)
+
+Tests (TDD: each new test file was run before its implementation; Task 18's unit file failed on the missing
+`agentos.mcp.transport_sdk`, Task 19's on the missing `commands` package, Task 20's on the unimplemented subcommands,
+Task 21's plugin unit test on the missing `commands.plugin`):
+
+- Task 18: `tests/unit/mcp/test_cli_mcp_servers.py` (5); `tests/integration/cli_code/test_headless.py` and
+  `test_sdk_conformance.py` gained one live test each (`--mcp-config` with the echo server; an SDK host's
+  `create_sdk_mcp_server` relayed through `mcp_message`). Both pass.
+- Task 19: `tests/unit/cli_code/test_mcp_subcommands.py` (9 passed).
+- Task 20: `tests/unit/cli_code/test_session_subcommands.py` (7); `tests/integration/cli_code/test_info_live.py` (3 live:
+  doctor, a background run with attach/agents/logs/rm, stop cancelling the turn). All pass.
+- Task 21: `tests/unit/cli_code/test_plugin_subcommands.py` (1); `tests/integration/cli_code/test_interface_live.py` (2
+  live: plugin list, `orin code "say hello"` opening a Code session). All pass.
+
+Suites after Batch E (Windows, 2026-10-20):
+
+- `uv run pytest -q tests/unit`: 4164 passed, 65 skipped (330 s). The 65 skips are the Postgres/Redis tests, as before.
+- `uv run pytest -q tests/integration`: 120 passed, 65 skipped (224 s). Batch D had 113 passed; the +7 are the new live
+  tests above.
+- `tests/integration/cli_code` alone: 37 passed (143 s) after Task 18; the Task 19 and 21 unit tests and the Task 20/21
+  live files were run separately and passed.
+- After the suites: no `agentos.launcher` or background `orin-code` process is left; `git status` shows nothing under `data/`.
+- `src/agentos/agentic/agent_tools.py` is 1699 lines (untouched by this batch).
+
+Deviations from the plan (decided while implementing; the plan's code was copied verbatim otherwise):
+
+1. **Task 18, `tests/integration/cli_code/test_headless.py`:** the plan's replacement snippet
+   `    assert messages[-1]["result"] == "Done."` occurs twice in the file (the second is inside the `num_turns` assertion
+   on line 62), so the Edit tool refused it. The new test was appended at the end of the file instead, with the
+   preceding line (`assert "line 0000" ...`) added to the old snippet to make it unique. The test body is verbatim.
+2. **Task 18, `session.py` relay:** the plan registers the SDK relay for the turn (`register_relay`) and never removes it.
+   `unregister_relay` is not called anywhere in `src/` (see "Incomplete" below). Left as the plan writes it.
+3. **Task 20, expected failure:** the plan expected a collection error for `test_session_subcommands.py`. Its imports
+   (`main` only) succeed, so the failure is at test-body level: 4 of its 7 tests failed before the implementation, and 3
+   (the parametrized `import`/`review` refusals and `--bg` without a print prompt) already passed through the existing
+   refusal paths.
+4. **Expectation changes (named in the plan):** Task 18 `test_turn_options_builder.py` checks `--session-mirror` instead
+   of `--mcp-config`; Task 20 checks `--resume-session-at` instead of `--bg`. Both applied verbatim.
+5. Parallel Edit calls were used for disjoint snippets in the same file (the calls ran in order; no snippet overlapped).
+
+Incomplete or not verified (honest list):
+
+- **Relay leak:** `register_relay` is called per turn with an SDK server (`session.py`, around line 3573) and nothing
+  unregisters it when the turn ends. The `_RELAYS` dict keeps the closure (and so the session) for every such turn for
+  the life of the process. Needs a `try/finally` with `unregister_relay(relay_key, ask)` around the turn, or at
+  turn close. Not fixed here because the plan specifies this code; flagged for a follow-up.
+- **Plan test precedence:** `test_subcommands_without_support_say_so` asserts `code == 1 and "not supported yet" in err
+  or "W8" in err`; `and` binds tighter, so the `or` branch can pass on its own. Left as written (plan text, not weakened
+  by this batch); it is weaker than it reads.
+- `orin code plugin`: only `list`, `validate` and the update/marketplace-remove refusals are exercised. `install`
+  (inspect + approve), `uninstall`, `enable`, `disable`, `configure`, `details` and `marketplace add|list` have no test
+  against the live API.
+- `orin code doctor`: only the healthy path (exit 0) is tested; the exit-1 path when a check fails is not.
+- `orin code mcp serve`: tested for initialize, tools/list, a Read, a refused Write (dontAsk), an unknown tool, and the
+  stdio framing. `run_command` (Bash) through the MCP server is not exercised.
+- `orin code [prompt]` opens the browser through `webbrowser`; the tests point `BROWSER` at a no-op Python, so the real
+  Windows browser hand-off is not verified.
+- `purge --yes` is tested only for the session index file; the removal of `cli-transcripts` and `cli-host-requests` is
+  not asserted.
+- `auto-mode critique` (a plan-mode turn without tools) is not tested.
+- `mcp login`/`logout` are refused by design (decision 33); the interface does OAuth.
+- No visual check: this batch has no frontend changes.
+- Windows only.
