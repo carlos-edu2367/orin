@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 
 from agentos.agentic.tools.public_names import internal_name
 
-from .paths import path_rule_matches, workspace_path
+from .paths import path_meanings, path_rule_matches, workspace_path
 from .powershell import analyze_for, canonical_cmdlet
 from .shell import ShellAnalysis, analyze_command
 
@@ -240,6 +240,15 @@ def _target(internal: str, arguments: Mapping[str, Any], ctx: MatchContext) -> P
     return workspace_path(str(raw), ctx.workspace_root)
 
 
+def _targets(internal: str, arguments: Mapping[str, Any], ctx: MatchContext) -> list[Path]:
+    """Every file the tool path can name (Lote 0): a deny or ask rule holds when any of them matches."""
+    raw = arguments.get("path") or arguments.get("file_path") or arguments.get("notebook_path")
+    if not raw:
+        target = _target(internal, arguments, ctx)
+        return [target] if target is not None else []
+    return path_meanings(str(raw), ctx.workspace_root, home=ctx.home)
+
+
 def rule_matches(
     rule: PermissionRule,
     internal: str,
@@ -247,7 +256,10 @@ def rule_matches(
     ctx: MatchContext,
     *,
     analysis: ShellAnalysis | None = None,
+    any_meaning: bool = False,
 ) -> bool:
+    """``any_meaning``: a path rule matches when any file the path can name matches — for deny and ask rules only;
+    an allow rule keeps the workspace reading, so a second meaning never grants anything."""
     if not rule_applies_to_tool(rule, internal):
         return False
     if rule.specifier is None:
@@ -262,6 +274,11 @@ def rule_matches(
             return True
         return any(command_matches(spec, sub, shell=dialect) for sub in parsed.subcommands)
     if internal in EDIT_FAMILY or internal in READ_FAMILY:
+        if any_meaning:
+            return any(
+                path_rule_matches(spec, target, workspace_root=ctx.workspace_root, home=ctx.home)
+                for target in _targets(internal, args, ctx)
+            )
         target = _target(internal, args, ctx)
         return target is not None and path_rule_matches(spec, target, workspace_root=ctx.workspace_root, home=ctx.home)
     if internal == "fetch_url":

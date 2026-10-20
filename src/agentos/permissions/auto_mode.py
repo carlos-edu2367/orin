@@ -114,7 +114,7 @@ class AutoModeClassifier:
                     return "matches a built-in hard-deny pattern"
         for rule in self.hard_deny_rules:
             try:
-                if rule_matches(rule, internal, arguments, self._ctx):
+                if rule_matches(rule, internal, arguments, self._ctx, any_meaning=True):
                     return f"matches autoMode.hard_deny rule {rule.raw}"
             except Exception:  # noqa: BLE001
                 continue

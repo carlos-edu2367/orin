@@ -104,6 +104,36 @@ def workspace_path(raw: str, root: Path, extra_roots: tuple[Path, ...] | list[Pa
     return root.joinpath(*segments) if segments else root
 
 
+
+def path_meanings(raw: str, root: Path, extra_roots: tuple[Path, ...] | list[Path] = (), *, home: Path | None = None) -> list[Path]:
+    """Every file a tool path can name: the workspace reading first, then what an unrestricted workspace opens.
+
+    A ``full_autonomy`` workspace expands ``~`` and, on POSIX, opens ``/…`` at the file-system root (a UNC path on
+    Windows); a confined one reads both inside the workspace. A deny or ask rule must hold for either, the way
+    ``PermissionEngine._token_paths`` already reads a shell token.
+    """
+    text = str(raw).strip()
+    meanings = [workspace_path(text, root, extra_roots)]
+    extra: Path | None = None
+    if text.startswith("~"):
+        if text == "~" or text[1] in "/\\":
+            segments = [segment for segment in text[1:].replace("\\", "/").split("/") if segment not in ("", ".")]
+            base = Path(home) if home is not None else Path.home()
+            extra = base.joinpath(*segments) if segments else base
+        else:
+            try:  # ~user/…: what Path.expanduser opens, when that user exists
+                expanded = Path(text).expanduser()
+            except (RuntimeError, KeyError, OSError):
+                expanded = None
+            extra = expanded if expanded is not None and expanded.is_absolute() else None
+    elif not _DRIVE_PREFIX.match(text):
+        candidate = Path(text)
+        if candidate.is_absolute() or (os.name != "nt" and text.startswith("/")):
+            extra = candidate
+    if extra is not None and extra not in meanings:
+        meanings.append(extra)
+    return meanings
+
 def _ntfs_name(part: str) -> str:
     """The name NTFS opens for a component: a stream suffix is ignored, trailing dots and spaces are not part of it."""
     return part.split(":", 1)[0].rstrip(" .")

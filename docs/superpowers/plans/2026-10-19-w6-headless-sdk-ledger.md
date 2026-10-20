@@ -26,3 +26,25 @@ W6 review.
   refused; desktop still reaches the host; default toolset is closed; leaving plan mode on a server stays closed; no
   prompt promises host access).
 - `agent_tools.py`: 1699 lines (guard `< 1700`). W6 code must go in its own modules.
+
+### L0-2 (high, every OS) — deny/ask rules did not see the file a `~` (or POSIX `/…`) path opens in full_autonomy
+
+- Reproduced on Windows (test `test_the_unrestricted_tool_opens_the_home_file` + RED run): the unrestricted workspace
+  opens `<home>/.ssh/id_rsa` for `~/.ssh/id_rsa`, while `rules._target` → `workspace_path` checked
+  `<workspace>/~/.ssh/id_rsa`, so `Read(~/.ssh/**)` / `Edit(~/.ssh/**)` never matched (9 RED cases).
+- Fix: `permissions.paths.path_meanings(raw, root, home=)` lists every file a tool path can name — the workspace
+  reading first, then `~` expanded with the engine's home (also `~\…`, and `~user/…` when that user exists), and on
+  POSIX `/…` at the real root (on Windows a UNC/absolute non-drive path). `rule_matches(any_meaning=True)` checks all
+  of them; the engine passes it for **deny and ask** rules and `autoMode.hard_deny`. Covers Read, Write, Edit,
+  NotebookEdit (`notebook_path`), Glob and Grep (`path`).
+- Decision (fail-closed, recorded): **allow** rules keep the workspace reading only — a second meaning never grants
+  anything. `_inside` (acceptEdits) and the protected-path check are unchanged: in every mode but full_autonomy the
+  workspace is confined, so the workspace reading is the file that opens; in full_autonomy only deny/ask apply.
+- W1-R3 final semantics (decided here): a POSIX `/x` outside every working directory keeps meaning
+  `<workspace>/x` for a confined workspace (what the tool opens) and `/x` for a full_autonomy one (what the tool
+  opens); deny/ask rules see both. Documented in `path_meanings`'s docstring.
+- Known gap, not fixed (pre-existing, also inside the workspace): a Grep/Glob rooted at a *parent* of a denied folder
+  (`path="~"`, or `.` with `Read(secrets/**)`) still walks into it. Needs the search tools to filter files by the
+  deny rules — handed to the W6 review.
+- Tests: `tests/unit/permissions/test_path_meanings.py` (HOME and USERPROFILE monkeypatched to tmp; the POSIX `/…`
+  case is `skipif(os.name == "nt")` and runs in Docker/CI).

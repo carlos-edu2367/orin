@@ -122,10 +122,12 @@ class PermissionEngine:
 
     # -- helpers -----------------------------------------------------------
 
-    def _first(self, rules: list[PermissionRule], internal: str, args: Mapping[str, Any], analysis) -> PermissionRule | None:
+    def _first(
+        self, rules: list[PermissionRule], internal: str, args: Mapping[str, Any], analysis, *, any_meaning: bool = False,
+    ) -> PermissionRule | None:
         for rule in rules:
             try:
-                if rule_matches(rule, internal, args, self.ctx, analysis=analysis):
+                if rule_matches(rule, internal, args, self.ctx, analysis=analysis, any_meaning=any_meaning):
                     return rule
             except Exception:  # noqa: BLE001 - a malformed rule never grants or breaks
                 logger.debug("permission rule %s failed to evaluate", rule.raw, exc_info=True)
@@ -303,7 +305,7 @@ class PermissionEngine:
         dialect = "powershell" if internal == "powershell" else self.ctx.shell
         analysis = analyze_for(str(args.get("command") or ""), dialect) if internal in SHELL_TOOLS else None
 
-        denied = self._first(self._deny, internal, args, analysis)
+        denied = self._first(self._deny, internal, args, analysis, any_meaning=True)
         if denied is not None:
             return PermissionDecision("deny", f"denied by rule {denied.raw}", denied.raw, denied.source)
 
@@ -318,7 +320,7 @@ class PermissionEngine:
                 return PermissionDecision("allow", "plan file")
             return PermissionDecision("deny", "plan mode is read-only")
 
-        asked = self._first(self._ask, internal, args, analysis)
+        asked = self._first(self._ask, internal, args, analysis, any_meaning=True)
         if asked is not None:
             if resolved is CodePermissionMode.DONT_ASK:
                 return PermissionDecision("deny", f"rule {asked.raw} requires a prompt and dontAsk denies prompts", asked.raw, asked.source)
