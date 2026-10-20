@@ -1,4 +1,5 @@
 import { expect, test, type Page, type Route } from '@playwright/test'
+import { env as processEnv } from 'node:process'
 
 // This fake is deliberately test-only and is not a production contract. It simulates
 // only the public responses documented in BACKEND_DISCOVERY.md/BACKEND_CAPABILITY_MATRIX.md:
@@ -189,6 +190,110 @@ test('recovers from a CSRF-rejected save and a rate limit, reusing the same Idem
   expect(idempotencyKeys).toHaveLength(3)
   expect(idempotencyKeys[0]).not.toBe('')
   expect(new Set(idempotencyKeys).size).toBe(1)
+})
+
+test('configures OpenCode Local Bridge without an API key, tests connection, and loads free models', async ({ page }) => {
+  let configured = false
+  const putBodies: Array<Record<string, unknown>> = []
+
+  await page.route('**/v1/providers/**', async (route) => {
+    const request = route.request()
+    const url = new URL(request.url())
+    const pathname = url.pathname
+
+    if (request.method() === 'POST' && pathname === '/v1/providers/opencode/test') {
+      await fulfillJson(route, { connected: true, models_available: 10, base_url: 'http://127.0.0.1:18446' })
+      return
+    }
+    if (request.method() === 'PUT' && pathname === '/v1/providers/opencode') {
+      configured = true
+      putBodies.push(request.postDataJSON() as Record<string, unknown>)
+      await fulfillJson(route, { provider: 'opencode', enabled: true, base_url: 'http://127.0.0.1:18446' })
+      return
+    }
+    if (request.method() === 'POST' && pathname === '/v1/providers/opencode/models:refresh') {
+      await fulfillJson(route, { count: 2, refreshed_at: '2026-10-20T12:00:00Z' })
+      return
+    }
+    if (request.method() === 'GET' && pathname === '/v1/providers/opencode/models') {
+      await fulfillJson(route, {
+        items: [
+          {
+            provider: 'opencode',
+            model_id: 'big-pickle',
+            display_name: 'Big Pickle',
+            context_window: 200000,
+            capabilities: ['tools', 'reasoning'],
+            input_modalities: ['text'],
+            output_modalities: ['text'],
+            pricing: null,
+            is_favorite: false,
+            is_custom: false,
+            refreshed_at: '2026-10-20T12:00:00Z',
+            route_kind: 'model',
+          },
+          {
+            provider: 'opencode',
+            model_id: 'mimo-v2.6-flash-free',
+            display_name: 'MiMo v2.6 Flash Free',
+            context_window: 262144,
+            capabilities: ['tools', 'reasoning'],
+            input_modalities: ['text', 'image'],
+            output_modalities: ['text'],
+            pricing: null,
+            is_favorite: false,
+            is_custom: false,
+            refreshed_at: '2026-10-20T12:00:00Z',
+            route_kind: 'model',
+          },
+        ],
+      })
+      return
+    }
+    if (request.method() === 'GET' && pathname.endsWith('/keys')) {
+      await fulfillJson(route, [])
+      return
+    }
+    if (request.method() === 'GET' && pathname === '/v1/providers/opencode') {
+      await fulfillJson(
+        route,
+        configured
+          ? { provider: 'opencode', enabled: true, base_url: 'http://127.0.0.1:18446' }
+          : { provider: 'opencode', enabled: null, base_url: 'http://127.0.0.1:18446' },
+      )
+      return
+    }
+    if (request.method() === 'GET') {
+      await fulfillJson(route, {})
+      return
+    }
+    await route.abort('failed')
+  })
+
+  const panel = await openProvider(page, 'OpenCode')
+  await expect(panel.getByRole('radio', { name: 'Bridge Local (Grátis)' })).toHaveAttribute('aria-checked', 'true')
+  await expect(panel.getByLabel('URL do servidor')).toHaveValue('http://127.0.0.1:18446')
+
+  await panel.getByRole('button', { name: 'Testar conexão' }).click()
+  await expect(panel.getByText(/10 modelos disponíveis/)).toBeVisible()
+
+  await panel.getByRole('button', { name: 'Salvar', exact: true }).click()
+  await expect(panel.locator('.provider-detail__state')).toHaveText('Habilitado')
+  expect(putBodies).toEqual([
+    {
+      api_key: '',
+      enabled: true,
+      base_url: 'http://127.0.0.1:18446',
+    },
+  ])
+
+  await panel.getByRole('button', { name: 'Atualizar catálogo' }).click()
+  await expect(panel.getByText('Big Pickle')).toBeVisible()
+  await expect(panel.getByText('MiMo v2.6 Flash Free')).toBeVisible()
+  if (processEnv.ORIN_SHOT_OPENCODE_BRIDGE) {
+    await panel.getByRole('radio', { name: 'Bridge Local (Grátis)' }).scrollIntoViewIfNeeded()
+    await page.screenshot({ path: processEnv.ORIN_SHOT_OPENCODE_BRIDGE, fullPage: false })
+  }
 })
 
 async function openProvider(page: Page, name: string) {

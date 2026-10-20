@@ -19,6 +19,7 @@ orin.env
 
 # Local runtime output: process logs, agent workspaces, visual captures.
 .logs/
+.orin/
 data/workspaces/
 data/users/
 frontend/tests/visual/output/

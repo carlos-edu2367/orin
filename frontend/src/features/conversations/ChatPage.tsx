@@ -735,9 +735,18 @@ export function ChatPage() {
     // The optimistic echo is dropped as soon as the durable snapshot contains
     // the same text, so a re-render can never show the message twice.
     const alreadyDurable = pendingUserMessage !== null
-      && base.some((item) => item.role === 'user' && item.content === pendingUserMessage.content)
+      && base.some((item) => item.role === 'user' && item.content.trim() === pendingUserMessage.content.trim())
     return pendingUserMessage && !alreadyDurable ? [...base, pendingUserMessage] : base
   }, [conversation?.messages, streamedByMessage, pendingUserMessage])
+
+  if (
+    pendingUserMessage !== null &&
+    (conversation?.messages ?? []).some(
+      (item) => item.role === 'user' && item.content.trim() === pendingUserMessage.content.trim(),
+    )
+  ) {
+    setPendingUserMessage(null)
+  }
 
   const [resolvedPermissionDecisions, setResolvedPermissionDecisions] = useState<Map<string, 'allowed' | 'denied'>>(() => new Map())
 
@@ -1085,8 +1094,11 @@ export function ChatPage() {
     else element.scrollTop = element.scrollHeight
   }, [reduced])
 
+  const questionSubmitInFlightRef = useRef(false)
+
   const submitQuestionAnswers = useCallback(async (event: ConversationActivityEvent, answers: UserQuestionAnswer[]) => {
-    if (!event.questions || !event.turnId || !openQuestionTurnIds.has(event.turnId) || running) return
+    if (!event.questions || !event.turnId || !openQuestionTurnIds.has(event.turnId) || running || questionSubmitInFlightRef.current) return
+    questionSubmitInFlightRef.current = true
     const byId = new Map(event.questions.map((question) => [question.id, question]))
     const text = ['Respostas às perguntas do agente:']
     for (const answer of answers) {
@@ -1094,9 +1106,10 @@ export function ChatPage() {
       if (!question) continue
       const labels = answer.selected.map((id) => question.options.find((option) => option.id === id)?.label).filter((label): label is string => Boolean(label))
       text.push(`\n${question.question}\n${labels.length ? `Seleção: ${labels.join(', ')}` : 'Seleção: nenhuma'}`)
-      if (answer.note) text.push(`Observação: ${answer.note}`)
+      const note = answer.note.trim()
+      if (note) text.push(`Observação: ${note}`)
     }
-    const response = text.join('\n')
+    const response = text.join('\n').trim()
     setError(null)
     setPendingUserMessage({ message_id: `pending-${Date.now()}`, role: 'user', content: response, status: 'completed', retryable: false, attachments: [], command: null })
     try {
@@ -1107,6 +1120,8 @@ export function ChatPage() {
       setPendingUserMessage(null)
       setError('Não foi possível enviar as respostas. Tente novamente.')
       throw caught
+    } finally {
+      questionSubmitInFlightRef.current = false
     }
   }, [client, loadSnapshot, openQuestionTurnIds, running, sendChatMessage])
 
@@ -1340,8 +1355,9 @@ export function ChatPage() {
     if (request && turnId) {
       await submitToolPermission(client, conversationId, turnId, request.requestId, 'deny')
     }
-    setPendingUserMessage({ message_id: `pending-${Date.now()}`, role: 'user', content: feedback, status: 'completed', retryable: false, attachments: [], command: null })
-    await sendChatMessage(feedback)
+    const normalizedFeedback = feedback.trim()
+    setPendingUserMessage({ message_id: `pending-${Date.now()}`, role: 'user', content: normalizedFeedback, status: 'completed', retryable: false, attachments: [], command: null })
+    await sendChatMessage(normalizedFeedback)
     await loadSnapshot(false)
   }, [client, conversationId, decidedPlanKeys, loadSnapshot, openQuestionTurnIds, sendChatMessage])
 

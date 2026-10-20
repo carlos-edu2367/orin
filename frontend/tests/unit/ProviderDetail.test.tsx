@@ -99,6 +99,46 @@ describe('ProviderDetail', () => {
     expect(await within(region).findByText('Chave 1')).toBeInTheDocument()
     expect(within(region).getByText('Principal')).toBeInTheDocument()
   })
+
+  it('supports OpenCode Local Bridge mode without requiring an API key and tests connection', async () => {
+    let saved = false
+    const fetchImpl = vi.fn<typeof fetch>((input, init) => {
+      const url = String(input)
+      if (url.endsWith('/v1/providers/opencode/test') && init?.method === 'POST') {
+        return Promise.resolve(json({ connected: true, models_available: 10, base_url: 'http://127.0.0.1:18446' }))
+      }
+      if (url.endsWith('/v1/providers/opencode') && init?.method === 'PUT') {
+        saved = true
+        return Promise.resolve(json({ provider: 'opencode', enabled: true, base_url: 'http://127.0.0.1:18446', key_cooldown_seconds: 60 }))
+      }
+      if (url.endsWith('/v1/providers/opencode/keys')) {
+        return Promise.resolve(json([]))
+      }
+      return Promise.resolve(json({ provider: 'opencode', enabled: saved ? true : null, base_url: 'http://127.0.0.1:18446', key_cooldown_seconds: 60 }))
+    })
+    const client = new ApiClient({ fetchImpl, csrfToken: 'csrf', maxAttempts: 1, createIdempotencyKey: () => 'intent-opencode-bridge' })
+    const user = userEvent.setup()
+    render(<MemoryRouter><ProviderDetail provider="opencode" client={client} bootstrap={{ status: 'ready', csrfToken: 'csrf' }} onClose={() => {}} /></MemoryRouter>)
+
+    const region = await screen.findByRole('region', { name: 'OpenCode' })
+    expect(within(region).getByRole('radio', { name: 'Bridge Local (Grátis)' })).toHaveAttribute('aria-checked', 'true')
+    expect(within(region).getByLabelText('URL do servidor')).toHaveValue('http://127.0.0.1:18446')
+
+    await user.click(within(region).getByRole('button', { name: 'Testar conexão' }))
+    expect(await within(region).findByText(/10 modelos disponíveis/)).toBeInTheDocument()
+
+    const saveButton = within(region).getByRole('button', { name: 'Salvar' })
+    expect(saveButton).not.toBeDisabled()
+    await user.click(saveButton)
+
+    const putCall = fetchImpl.mock.calls.find(([input, init]) => String(input).endsWith('/v1/providers/opencode') && init?.method === 'PUT')
+    expect(putCall).toBeDefined()
+    expect(JSON.parse(String(putCall?.[1]?.body))).toEqual({
+      api_key: '',
+      enabled: true,
+      base_url: 'http://127.0.0.1:18446',
+    })
+  })
 })
 
 function json(body: unknown): Response {

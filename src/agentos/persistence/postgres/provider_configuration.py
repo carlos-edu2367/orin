@@ -52,6 +52,7 @@ from agentos.provider_catalog.models import PROVIDERS_WITH_BASE_URL, PROVIDERS_W
 from agentos.provider_catalog.ollama import DEFAULT_OLLAMA_BASE_URL, OllamaCatalogClient, OllamaCloudAuthenticationError, is_ollama_cloud, normalize_ollama_base_url
 from agentos.provider_catalog.omniroute import DEFAULT_OMNIROUTE_BASE_URL, normalize_omniroute_base_url
 from agentos.provider_catalog.omniroute import OmniRouteCatalogClient
+from agentos.provider_catalog.opencode import DEFAULT_OPENCODE_LOCAL_BASE_URL, OPENCODE_CLOUD_BASE_URL, OpenCodeModelCatalogClient, is_opencode_cloud, normalize_opencode_base_url
 from agentos.provider_catalog.installation import OmniRouteInstaller
 
 
@@ -79,7 +80,7 @@ class PostgresProviderConfigurationAdapter:
         provider = str(command["provider"])
         user_id = str(command["user_id"])
         enabled = bool(command["enabled"])
-        base_url = _base_url(provider, command.get("base_url"))
+        base_url = _base_url(provider, command.get("base_url"), command.get("api_key"))
         api_key = _api_key(provider, command.get("api_key"), base_url)
         now = datetime.now(UTC)
         with self._engine.begin() as connection:
@@ -176,10 +177,15 @@ class PostgresProviderConfigurationAdapter:
         provider = str(command.get("provider"))
         if provider not in PROVIDERS_WITH_BASE_URL:
             raise ValueError("connection testing is not available for this provider")
-        base_url = _base_url(provider, command.get("base_url"))
-        client = OmniRouteCatalogClient() if provider == "omniroute" else OllamaCatalogClient()
+        base_url = _base_url(provider, command.get("base_url"), command.get("api_key"))
+        if provider == "omniroute":
+            client: object = OmniRouteCatalogClient()
+        elif provider == "opencode":
+            client = OpenCodeModelCatalogClient()
+        else:
+            client = OllamaCatalogClient()
         try:
-            models = client.fetch(str(command["api_key"]), base_url=str(base_url))
+            models = client.fetch(str(command["api_key"]), base_url=str(base_url))  # type: ignore[attr-defined]
             if provider == "ollama" and is_ollama_cloud(str(base_url)):
                 if not models:
                     raise RuntimeError("Ollama Cloud returned no models")
@@ -219,20 +225,27 @@ class PostgresProviderConfigurationAdapter:
 __all__ = ["PostgresProviderConfigurationAdapter"]
 
 
-def _base_url(provider: str, value: object) -> str | None:
+def _base_url(provider: str, value: object, api_key: object = None) -> str | None:
     if provider == "omniroute":
         return normalize_omniroute_base_url(str(value or DEFAULT_OMNIROUTE_BASE_URL))
     if provider == "ollama":
         return normalize_ollama_base_url(str(value or DEFAULT_OLLAMA_BASE_URL))
+    if provider == "opencode":
+        if isinstance(value, str) and value.strip():
+            return normalize_opencode_base_url(value)
+        default_opencode = OPENCODE_CLOUD_BASE_URL if str(api_key or "").strip() else DEFAULT_OPENCODE_LOCAL_BASE_URL
+        return normalize_opencode_base_url(default_opencode)
     return None
 
 
 def _api_key(provider: str, value: object, base_url: str | None = None) -> str:
     api_key = str(value or "").strip()
     optional = provider in PROVIDERS_WITH_OPTIONAL_KEY
-    # Local Ollama needs no credential; the hosted service always does. The
-    # host is the only thing that distinguishes the two, so it decides here.
+    # Local Ollama and Local OpenCode Bridge need no credential; their hosted
+    # services always do. The host distinguishes the two, so it decides here.
     if provider == "ollama" and base_url is not None and is_ollama_cloud(base_url):
+        optional = False
+    if provider == "opencode" and base_url is not None and is_opencode_cloud(base_url):
         optional = False
     if not optional and len(api_key) < 4:
         raise ValueError("provider API key is required")

@@ -25,6 +25,7 @@ from agentos.persistence.postgres.provider_api_keys import PostgresProviderApiKe
 from agentos.provider_catalog.models import PROVIDERS_WITH_BASE_URL
 from agentos.provider_catalog.ollama import DEFAULT_OLLAMA_BASE_URL, normalize_ollama_base_url
 from agentos.provider_catalog.omniroute import DEFAULT_OMNIROUTE_BASE_URL, normalize_omniroute_base_url
+from agentos.provider_catalog.opencode import OPENCODE_CLOUD_BASE_URL, normalize_opencode_base_url
 from agentos.agentic.runtime import AgenticLimits, AgenticRunResult, AgenticTurnRuntime
 from agentos.agentic.settings import AgentRuntimeSettingsStore
 from agentos.agentic.events import AgentActivityEventType
@@ -1060,6 +1061,8 @@ class ChatWorker:
             return normalize_omniroute_base_url(configured or DEFAULT_OMNIROUTE_BASE_URL)
         if provider == "ollama":
             return normalize_ollama_base_url(configured or DEFAULT_OLLAMA_BASE_URL)
+        if provider == "opencode":
+            return normalize_opencode_base_url(configured or OPENCODE_CLOUD_BASE_URL)
         return PROVIDER_BASE_URLS.get(provider, PROVIDER_BASE_URLS["openrouter"])
 
     def _transport_for(self, user_id: str, provider: str, model_id: str, num_ctx: int | None = None) -> HTTPProviderStreamTransport:

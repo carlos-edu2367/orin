@@ -5,7 +5,7 @@ import { readBrowserSessionBootstrap, type BrowserSessionBootstrap } from '../..
 import { ApiError } from '../../api/errors'
 import {
   addProviderCustomModel, configureProvider, getOmniRouteInstallationStatus, inspectProvider, installOmniRoute, listProviderModels,
-  refreshProviderModels, removeProviderCustomModel, revokeProvider, setProviderModelFavorite, testOllamaConnection, testOmniRouteConnection,
+  refreshProviderModels, removeProviderCustomModel, revokeProvider, setProviderModelFavorite, testOllamaConnection, testOmniRouteConnection, testOpenCodeConnection,
   type ModelOutputModality, type ProviderModel, type ProviderName, type ProviderPublicState,
 } from '../../api/providers'
 
@@ -27,6 +27,8 @@ export type ProviderState = {
   setEnabled: (value: boolean) => void
   ollamaMode: 'local' | 'cloud'
   setOllamaMode: (value: 'local' | 'cloud') => void
+  opencodeMode: 'local' | 'cloud'
+  setOpencodeMode: (value: 'local' | 'cloud') => void
   connection: { connected: boolean; models: number | null } | null
   installed: boolean
   models: ProviderModel[]
@@ -51,9 +53,10 @@ export function useProviderState(client: ApiClient = createBrowserApiClient(), p
   const [load, setLoad] = useState<ProviderLoadState>({ status: 'loading' })
   const [action, setAction] = useState<ProviderActionState>({ pending: false, error: null, kind: null })
   const [apiKey, setApiKey] = useState('')
-  const [baseUrl, setBaseUrl] = useState(() => provider === 'ollama' ? 'http://localhost:11434' : 'http://localhost:20128/v1')
+  const [baseUrl, setBaseUrl] = useState(() => provider === 'ollama' ? 'http://localhost:11434' : provider === 'opencode' ? 'http://127.0.0.1:18446' : 'http://localhost:20128/v1')
   const [enabled, setEnabled] = useState(true)
   const [ollamaMode, setOllamaMode] = useState<'local' | 'cloud'>('local')
+  const [opencodeMode, setOpencodeMode] = useState<'local' | 'cloud'>('local')
   const [connection, setConnection] = useState<{ connected: boolean; models: number | null } | null>(null)
   const [installed, setInstalled] = useState(false)
   const [models, setModels] = useState<ProviderModel[]>([])
@@ -73,6 +76,10 @@ export function useProviderState(client: ApiClient = createBrowserApiClient(), p
         setBaseUrl(state.extra.base_url)
         try { setOllamaMode(new URL(state.extra.base_url).hostname.toLowerCase().endsWith('ollama.com') ? 'cloud' : 'local') } catch { setOllamaMode('local') }
       }
+      if (provider === 'opencode' && typeof state.extra.base_url === 'string') {
+        setBaseUrl(state.extra.base_url)
+        try { setOpencodeMode(new URL(state.extra.base_url).hostname.toLowerCase().endsWith('opencode.ai') ? 'cloud' : 'local') } catch { setOpencodeMode('local') }
+      }
     } catch (error: unknown) {
       if (signal?.aborted || (error instanceof DOMException && error.name === 'AbortError')) return
       const apiError = toApiError(error)
@@ -90,6 +97,10 @@ export function useProviderState(client: ApiClient = createBrowserApiClient(), p
       if (provider === 'ollama' && typeof state.extra.base_url === 'string') {
         setBaseUrl(state.extra.base_url)
         try { setOllamaMode(new URL(state.extra.base_url).hostname.toLowerCase().endsWith('ollama.com') ? 'cloud' : 'local') } catch { setOllamaMode('local') }
+      }
+      if (provider === 'opencode' && typeof state.extra.base_url === 'string') {
+        setBaseUrl(state.extra.base_url)
+        try { setOpencodeMode(new URL(state.extra.base_url).hostname.toLowerCase().endsWith('opencode.ai') ? 'cloud' : 'local') } catch { setOpencodeMode('local') }
       }
     }).catch((error: unknown) => {
       if (controller.signal.aborted || (error instanceof DOMException && error.name === 'AbortError')) return
@@ -113,7 +124,7 @@ export function useProviderState(client: ApiClient = createBrowserApiClient(), p
     intents.current.set(key, intent)
     return intent
   }
-  const requiresApiKey = provider !== 'omniroute' && !(provider === 'ollama' && ollamaMode === 'local')
+  const requiresApiKey = provider !== 'omniroute' && !(provider === 'ollama' && ollamaMode === 'local') && !(provider === 'opencode' && opencodeMode === 'local')
   const canRevoke = load.status === 'loaded' && load.state.enabled === true
 
   async function configure(event?: FormEvent<HTMLFormElement>) {
@@ -122,7 +133,7 @@ export function useProviderState(client: ApiClient = createBrowserApiClient(), p
     mutationRevision.current += 1
     setAction({ pending: true, error: null, kind: 'configure' })
     try {
-      const state = await configureProvider(client, provider, { apiKey, enabled, ...(provider === 'omniroute' || provider === 'ollama' ? { baseUrl } : {}) }, intentFor('configure'))
+      const state = await configureProvider(client, provider, { apiKey, enabled, ...(provider === 'omniroute' || provider === 'ollama' || provider === 'opencode' ? { baseUrl } : {}) }, intentFor('configure'))
       intents.current.delete('configure')
       setLoad({ status: 'loaded', state })
       setApiKey('')
@@ -197,7 +208,7 @@ export function useProviderState(client: ApiClient = createBrowserApiClient(), p
   async function testConnection() {
     if (action.pending || bootstrap.status === 'missing_csrf') return
     setAction({ pending: true, error: null, kind: 'test' })
-    try { const result = await (provider === 'ollama' ? testOllamaConnection(client, { apiKey, baseUrl }, intentFor('test')) : testOmniRouteConnection(client, { apiKey, baseUrl }, intentFor('test'))); intents.current.delete('test'); setConnection({ connected: true, models: result.models_available }); setAction({ pending: false, error: null, kind: null }) }
+    try { const result = await (provider === 'ollama' ? testOllamaConnection(client, { apiKey, baseUrl }, intentFor('test')) : provider === 'opencode' ? testOpenCodeConnection(client, { apiKey, baseUrl }, intentFor('test')) : testOmniRouteConnection(client, { apiKey, baseUrl }, intentFor('test'))); intents.current.delete('test'); setConnection({ connected: true, models: result.models_available }); setAction({ pending: false, error: null, kind: null }) }
     catch (error) { setConnection(null); setAction({ pending: false, error: toApiError(error), kind: 'test' }) }
   }
 
@@ -208,7 +219,7 @@ export function useProviderState(client: ApiClient = createBrowserApiClient(), p
     catch (error) { setAction({ pending: false, error: toApiError(error), kind: 'install' }) }
   }
 
-  return { load, action, apiKey, setApiKey, baseUrl, setBaseUrl, enabled, setEnabled, ollamaMode, setOllamaMode, connection, installed, models, catalog, catalogLoading, canRevoke, requiresApiKey, reload: () => reload(), configure, revoke, refreshModels, loadModels, setFavorite, addCustomModel, removeCustomModel, testConnection, install }
+  return { load, action, apiKey, setApiKey, baseUrl, setBaseUrl, enabled, setEnabled, ollamaMode, setOllamaMode, opencodeMode, setOpencodeMode, connection, installed, models, catalog, catalogLoading, canRevoke, requiresApiKey, reload: () => reload(), configure, revoke, refreshModels, loadModels, setFavorite, addCustomModel, removeCustomModel, testConnection, install }
 }
 
 export function toApiError(error: unknown): ApiError {

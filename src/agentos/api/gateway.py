@@ -2250,6 +2250,20 @@ def create_app(services: ApiServices) -> FastAPI:
         )
         return JSONResponse(_connection_test_public(result))
 
+    @app.post("/v1/providers/opencode/test")
+    async def test_opencode_connection(payload: ProviderSetupRequest, request: Request) -> JSONResponse:
+        principal = principal_for(request, mutable=True)
+        services.security.check_rate_limit(principal, action="provider.test", origin=request.headers.get("origin"))
+        services.security.authorize(principal, action="provider.test", resource_id="opencode", purpose=payload.purpose)
+        _idempotency(request)
+        result = await run_in_threadpool(
+            _require_port(services.provider_configuration).test_connection,
+            {"provider": "opencode", "user_id": principal.user_id, "purpose": payload.purpose,
+             "api_key": payload.api_key.get_secret_value() if payload.api_key is not None else "",
+             "base_url": payload.base_url},
+        )
+        return JSONResponse(_connection_test_public(result))
+
     @app.post("/v1/providers/omniroute/install", dependencies=[capability("omniroute")])
     async def install_omniroute(request: Request) -> JSONResponse:
         principal = principal_for(request, mutable=True)

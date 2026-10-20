@@ -219,6 +219,22 @@ export function testOllamaConnection(
   })
 }
 
+export function testOpenCodeConnection(
+  client: ApiClient,
+  input: { apiKey: string; baseUrl: string },
+  intent = client.createMutationIntent(),
+): Promise<OmniRouteConnection> {
+  return client.request({
+    path: `${providerPath('opencode')}/test`, method: 'POST', intent,
+    body: { api_key: input.apiKey, base_url: input.baseUrl },
+    parse: (value) => {
+      const data = record(value)
+      if (data.connected !== true) throw invalidResponseError()
+      return { connected: true, models_available: data.models_available === null ? null : nonNegativeInteger(data.models_available), base_url: nullableString(data.base_url) }
+    },
+  })
+}
+
 export function inspectProvider(client: ApiClient, provider: ProviderName, signal?: AbortSignal): Promise<ProviderPublicState> {
   return client.request({
     path: providerPath(provider),
