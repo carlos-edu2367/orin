@@ -100,6 +100,11 @@ class CommandHookRunner:
         return HookRun(result.exit_code, result.stdout, result.stderr, result.timed_out, result.error)
 
 
+_RAW_HOOK_FIELDS = frozenset({
+    "tool_input", "tool_name", "session_id", "transcript_path", "hook_event_name", "cwd", "permission_mode",
+})
+
+
 class HttpHookRunner:
     def __init__(self, client_factory: Callable[[], httpx.Client] | None = None) -> None:
         self.client_factory = client_factory
@@ -118,7 +123,10 @@ class HttpHookRunner:
         try:
             client = self.client_factory() if self.client_factory else httpx.Client()
             # W0-R11: an HTTP hook sends the event to another program; its secrets stay here (command hooks get raw values).
-            body_text = _payload_text(redact_value(dict(payload)))
+            # W7-R2: the decision fields (what runs and the ids that correlate the hook) are sent raw; the rest is redacted.
+            raw = dict(payload)
+            redacted = redact_value({key: value for key, value in raw.items() if key not in _RAW_HOOK_FIELDS})
+            body_text = _payload_text({key: (raw[key] if key in _RAW_HOOK_FIELDS else redacted[key]) for key in raw})
             with client, client.stream(
                 "POST", spec.url, content=body_text.encode("utf-8"), headers=headers,
                 timeout=spec.timeout, follow_redirects=False,

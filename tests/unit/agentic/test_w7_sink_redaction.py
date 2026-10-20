@@ -43,4 +43,5 @@ def test_an_http_hook_receives_the_event_without_its_secrets() -> None:
     assert not errors
     runner = HttpHookRunner(client_factory=lambda: httpx.Client(transport=httpx.MockTransport(handler)))
     runner.run(specs[0], {"hook_event_name": HookEvent.PRE_TOOL_USE.value, "tool_input": {"command": f"TOKEN={TOKEN} deploy"}})
-    assert seen and TOKEN.encode() not in seen[0] and b"deploy" in seen[0]
+    # W7-R2: tool_input is the decision's input, sent raw so the hook decides on the command that runs.
+    assert seen and TOKEN.encode() in seen[0] and b"deploy" in seen[0]
