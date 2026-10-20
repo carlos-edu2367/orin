@@ -1,0 +1,388 @@
+"""``orin code -p`` and the SDK's stream-json mode: run turns on the local Orin and speak Claude Code's protocol.
+
+One process may run several turns (stream-json input sends one user message per turn). Three things happen at once —
+stdin (user messages and control requests), the conversation's event stream, and the current turn — so stdin and the
+event stream each have a reader thread feeding one inbox, and only the main thread writes to stdout.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import queue
+import threading
+import time
+import uuid
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any, TextIO
+
+from agentos.code_mode.models import public_permission_mode
+from agentos.version import __version__
+
+from .args import EXIT_ERROR, EXIT_OK, CliUsageError, CodeOptions
+from .errors import CliRuntimeError
+from .protocol import Translator, TurnUsage
+from .runtime import OrinClient
+from .selection import ModelCatalog, Selection, choose_selection
+from .sessions import CliSession, SessionIndex, is_uuid
+from .turn_options import build_turn_options, permission_mode_for
+
+MAX_PROMPT_CHARS = 16000  # what the API accepts for one message
+_END_EVENTS = {"turn.completed", "turn.failed", "turn.waiting_user"}
+
+# Flags this build parses and refuses, each with where it stands; never silently ignored.
+UNSUPPORTED: dict[str, str] = {
+    "mcp_configs": "--mcp-config", "strict_mcp_config": "--strict-mcp-config", "agents": "--agents", "agent": "--agent",
+    "plugin_dirs": "--plugin-dir", "worktree": "--worktree", "background": "--bg", "fork_session": "--fork-session",
+    "bare": "--bare", "safe_mode": "--safe-mode", "restricted": "--restricted", "init": "--init",
+    "maintenance": "--maintenance", "desktop": "--desktop", "resume_session_at": "--resume-session-at",
+    "resume_drops_turn": "--resume-drops-turn", "session_mirror": "--session-mirror", "task_budget": "--task-budget",
+    "prompt_suggestions": "--prompt-suggestions", "exclude_dynamic_system_prompt_sections": "--exclude-dynamic-system-prompt-sections",
+    "thinking_display": "--thinking-display",
+}
+
+
+def refuse_unsupported(options: CodeOptions) -> None:
+    flags = [flag for name, flag in UNSUPPORTED.items() if getattr(options, name) not in (None, False, [], "")]
+    if flags:
+        raise CliUsageError(f"not supported by orin code yet: {', '.join(flags)}")
+    if options.permission_prompt_tool not in (None, "stdio"):
+        raise CliUsageError("--permission-prompt-tool accepts only stdio (an SDK host's can_use_tool callback)")
+    if options.permission_prompt_tool == "stdio" and options.input_format != "stream-json":
+        raise CliUsageError("--permission-prompt-tool stdio needs --input-format stream-json")
+
+
+def _prompt_text(content: object) -> str:
+    """A user message's text; images and documents are refused rather than dropped."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                parts.append(str(block.get("text") or ""))
+            elif isinstance(block, dict):
+                raise CliRuntimeError(f"orin code does not take {block.get('type')!r} blocks in a prompt yet")
+        return "\n".join(parts)
+    raise CliRuntimeError("a user message needs text content")
+
+
+class _Output:
+    def __init__(self, stdout: TextIO) -> None:
+        self._stdout = stdout
+        self._lock = threading.Lock()
+
+    def message(self, payload: dict[str, Any]) -> None:
+        with self._lock:
+            self._stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
+            self._stdout.flush()
+
+    def text(self, value: str) -> None:
+        with self._lock:
+            self._stdout.write(value)
+            self._stdout.flush()
+
+
+class HeadlessRun:
+    def __init__(self, options: CodeOptions, *, client: OrinClient, data_dir: Path, cwd: Path, stdin: TextIO,
+                 stdout: TextIO, stderr: TextIO, clock: Callable[[], float] = time.monotonic,
+                 configured_model: str | None = None) -> None:
+        self.options = options
+        self.client = client
+        self.cwd = cwd
+        self.stdin = stdin
+        self.stderr = stderr
+        self.out = _Output(stdout)
+        self.clock = clock
+        self.index = SessionIndex(data_dir)
+        self.catalog = ModelCatalog(client)
+        self.configured_model = configured_model
+        self.inbox: queue.Queue[tuple[str, Any]] = queue.Queue()
+        self.stream_json = options.output_format == "stream-json"
+        self.session: CliSession | None = None
+        self.conversation_id: str | None = None
+        self.selection: Selection | None = None
+        self.translator: Translator | None = None
+        self._events_started = False
+        self._stop = threading.Event()
+        self._stdin_closed = False
+        self._pending_prompts: list[str] = []
+        self._init_sent = False
+        self._cursor = "0"
+        self._session_id = ""
+        self._debug = self._debug_sink()
+
+    # -- plumbing -------------------------------------------------------------------------------------------------
+
+    def _debug_sink(self) -> Callable[[str], None]:
+        if self.options.debug is None and not self.options.debug_file:
+            return lambda line: None
+        target = self.options.debug_file
+
+        def write(line: str) -> None:
+            text = f"[orin code] {line}\n"
+            if target:
+                with open(target, "a", encoding="utf-8") as handle:
+                    handle.write(text)
+            else:
+                self.stderr.write(text)
+                self.stderr.flush()
+
+        return write
+
+    def _read_stdin(self) -> None:
+        for raw in self.stdin:
+            line = raw.strip()
+            if not line:
+                continue
+            try:
+                item = json.loads(line)
+            except ValueError:
+                self.inbox.put(("bad_input", line[:200]))
+                continue
+            self.inbox.put(("stdin", item))
+        self.inbox.put(("stdin_closed", None))
+
+    def _follow_events(self, conversation_id: str, after: str) -> None:
+        try:
+            for event in self.client.events(conversation_id, after=after, stop=self._stop.is_set):
+                self.inbox.put(("event", event))
+        except Exception as error:  # noqa: BLE001 - after the run ends, closing the client may break the read
+            if not self._stop.is_set():
+                self.inbox.put(("stream_error", str(error)))
+
+    def _start_events(self) -> None:
+        if self._events_started or self.conversation_id is None:
+            return
+        self._events_started = True
+        threading.Thread(target=self._follow_events, args=(self.conversation_id, self._cursor), daemon=True).start()
+
+    # -- sessions and turns ---------------------------------------------------------------------------------------
+
+    def _resolve_session(self) -> None:
+        options = self.options
+        if options.session_id is not None and not is_uuid(options.session_id):
+            raise CliUsageError("--session-id must be a UUID")
+        if options.continue_session:
+            self.session = self.index.latest_for(self.cwd)
+            if self.session is None:
+                raise CliRuntimeError("no orin code session to continue in this folder")
+        elif options.resume is not None:
+            if not options.resume:
+                raise CliUsageError("-r needs a session id or name in a headless run")
+            self.session = self.index.find(options.resume)
+            if self.session is None:
+                raise CliRuntimeError(f"no orin code session {options.resume!r}")
+        elif options.session_id is not None and self.index.find(options.session_id) is not None:
+            raise CliRuntimeError(f"the session id {options.session_id} is already in use")
+        remembered: Selection | None = None
+        if self.session is not None:
+            conversation = self.client.get(f"/v1/conversations/{self.session.conversation_id}")
+            self.conversation_id = self.session.conversation_id
+            self._cursor = str(conversation.get("activity_cursor") or "0") if isinstance(conversation, dict) else "0"
+            if isinstance(conversation, dict) and conversation.get("provider") and conversation.get("model_id"):
+                remembered = Selection(str(conversation["provider"]), str(conversation["model_id"]))
+        self.selection = choose_selection(self.catalog, model=options.model, provider=options.provider,
+                                          remembered=remembered, configured=self.configured_model)
+        session_id = self.session.session_id if self.session is not None else (options.session_id or "").lower() or None
+        self._session_id = session_id or str(uuid.uuid4())
+        self.translator = Translator(session_id=self._session_id, model=self.selection.model_id,
+                                     partial=options.include_partial_messages, hook_events=options.include_hook_events)
+
+    def _send(self, prompt: str) -> str:
+        if len(prompt) > MAX_PROMPT_CHARS:
+            raise CliRuntimeError(f"the prompt has {len(prompt)} characters; Orin takes at most {MAX_PROMPT_CHARS} per message")
+        # Nobody answers a permission prompt in this build yet (can_use_tool arrives with the control protocol), so
+        # whatever would ask is refused at once rather than waiting for an answer that cannot come.
+        host = False
+        turn_options = build_turn_options(self.options, self.cwd, host_answers_prompts=host).model_dump()
+        mode = permission_mode_for(self.options)
+        body: dict[str, Any] = {"message": prompt, "selection": self.selection.as_request(), "code_mode": "code",
+                                "cli": turn_options, "permission_mode": mode}
+        if self.conversation_id is None:
+            created = self.client.post("/v1/conversations", {**body, "workspace_path": str(self.cwd)})
+            self.conversation_id = str(created["conversation_id"])
+            turn_id = str(created["turn_id"])
+        else:
+            sent = self.client.post(f"/v1/conversations/{self.conversation_id}/messages", body)
+            turn_id = str(sent["turn_id"])
+        if not self.options.no_session_persistence:
+            self.session = self.index.record(conversation_id=self.conversation_id, folder=self.cwd,
+                                             session_id=self._session_id, name=self.options.name)
+        self._debug(f"turn {turn_id} queued in {self.conversation_id}")
+        return turn_id
+
+    def _usage(self) -> TurnUsage:
+        if self.conversation_id is None:
+            return TurnUsage()
+        try:
+            overview = self.client.get(f"/v1/conversations/{self.conversation_id}/overview")
+        except CliRuntimeError:
+            return TurnUsage()
+        usage = overview.get("token_usage") if isinstance(overview, dict) else None
+        if not isinstance(usage, dict):
+            return TurnUsage()
+        return TurnUsage(int(usage.get("input_tokens") or 0), int(usage.get("output_tokens") or 0), float(usage.get("estimated_cost_usd") or 0.0))
+
+    def _send_init(self) -> None:
+        if self._init_sent or not self.stream_json:
+            return
+        self._init_sent = True
+        from agentos.agentic.cli_turn import tool_selection
+        from agentos.agentic.runtime import CODE_MODE_CORE_TOOLS
+        from agentos.agentic.tools.public_names import public_name
+
+        turn_options = build_turn_options(self.options, self.cwd, host_answers_prompts=False)
+        offered, withheld = tool_selection(turn_options, CODE_MODE_CORE_TOOLS)
+        tools = sorted(public_name(name) for name in CODE_MODE_CORE_TOOLS if (offered is None or name in offered) and name not in withheld)
+        mode = permission_mode_for(self.options)
+        self.out.message(self.translator.init_message(
+            cwd=str(self.cwd), tools=tools, permission_mode=public_permission_mode(mode), mcp_servers=[],
+            slash_commands=[], version=__version__,
+        ))
+
+    def answer(self, prompt: str) -> dict[str, Any]:
+        """One prompt's answer: a turn, or with ``--json-schema`` as many follow-ups as the answer needs (W3-R25)."""
+        if not self.options.json_schema:
+            return self.run_turn(prompt)
+        from .structured import MAX_STRUCTURED_RETRIES, load_schema, problem, retry_prompt
+
+        schema = load_schema(self.options.json_schema)
+        started = self.clock()
+        totals, model_calls, text = TurnUsage(), 0, prompt
+        for attempt in range(MAX_STRUCTURED_RETRIES + 1):
+            result = self.run_turn(text, final=False)
+            totals = TurnUsage(totals.input_tokens + result["usage"]["input_tokens"], totals.output_tokens + result["usage"]["output_tokens"],
+                               totals.cost_usd + float(result["total_cost_usd"]))
+            model_calls += int(result["num_turns"])
+            if result["is_error"]:
+                break
+            value, issue = problem(schema, str(result.get("result") or ""))
+            if issue is None:
+                result["structured_output"] = value
+                break
+            if attempt == MAX_STRUCTURED_RETRIES:
+                result.update({"subtype": "error_max_structured_output_retries", "is_error": True, "errors": [issue], "stop_reason": None})
+                break
+            text = retry_prompt(issue)
+        elapsed = int((self.clock() - started) * 1000)
+        result.update({"num_turns": model_calls, "duration_ms": elapsed, "duration_api_ms": elapsed, "usage": totals.as_usage(),
+                       "total_cost_usd": totals.cost_usd})
+        result["modelUsage"] = {self.translator.model: {
+            "inputTokens": totals.input_tokens, "outputTokens": totals.output_tokens, "cacheReadInputTokens": 0,
+            "cacheCreationInputTokens": 0, "webSearchRequests": 0, "costUSD": totals.cost_usd,
+        }}
+        if self.stream_json:
+            self.out.message(result)
+        return result
+
+    def run_turn(self, prompt: str, *, final: bool = True) -> dict[str, Any]:
+        """One turn, start to result; returns the result message (written to stdout only when ``final``)."""
+        started = self.clock()
+        before = self._usage()
+        self._send_init()
+        if self.options.replay_user_messages and self.stream_json:
+            self.out.message({"type": "user", "session_id": self._session_id, "uuid": str(uuid.uuid4()),
+                              "message": {"role": "user", "content": prompt}, "parent_tool_use_id": None})
+        turn_id = self._send(prompt)
+        self._start_events()
+        state, error_code = "failed", None
+        while True:
+            kind, item = self.inbox.get()
+            if kind == "event":
+                if str(item.get("turn_id") or "") != turn_id:
+                    continue
+                for message in self.translator.feed(item):
+                    if self.stream_json:
+                        self.out.message(message)
+                event_type = str(item.get("event_type") or "")
+                if event_type in _END_EVENTS:
+                    payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+                    state = "completed" if event_type == "turn.completed" else str(payload.get("state") or "failed")
+                    if event_type == "turn.waiting_user":
+                        state = "completed"  # an approval Orin waits for ends the headless turn; the person resumes it
+                    error_code = payload.get("error_code")
+                    break
+            elif kind == "stream_error":
+                raise CliRuntimeError(str(item))
+            else:
+                self._handle_input(kind, item)
+        after = self._usage()
+        usage = TurnUsage(max(0, after.input_tokens - before.input_tokens), max(0, after.output_tokens - before.output_tokens),
+                          max(0.0, after.cost_usd - before.cost_usd))
+        elapsed = int((self.clock() - started) * 1000)
+        closing = self.translator.result(state=state, error_code=str(error_code) if error_code else None, usage=usage,
+                                         duration_ms=elapsed, duration_api_ms=elapsed)
+        if self.stream_json:
+            for message in closing if final else closing[:-1]:  # the last open block's assistant message, then the result
+                self.out.message(message)
+        return closing[-1]
+
+    # -- stdin ----------------------------------------------------------------------------------------------------
+
+    def _handle_input(self, kind: str, item: Any) -> None:
+        if kind == "stdin_closed":
+            self._stdin_closed = True
+        elif kind == "bad_input":
+            self.stderr.write(f"Error: a stdin line is not JSON: {item}\n")
+        elif kind == "stdin" and isinstance(item, dict):
+            if item.get("type") == "control_request":
+                self._control(item)
+            elif item.get("type") == "user":
+                message = item.get("message") if isinstance(item.get("message"), dict) else {}
+                self._pending_prompts.append(_prompt_text(message.get("content")))
+            elif item.get("type") == "control_response":
+                pass  # answers to requests this build does not send yet
+
+    def _control(self, request: dict[str, Any]) -> None:
+        request_id = str(request.get("request_id") or "")
+        body = request.get("request") if isinstance(request.get("request"), dict) else {}
+        subtype = str(body.get("subtype") or "")
+        if subtype == "initialize":
+            response = {"commands": [], "agents": [], "output_style": "default", "available_output_styles": ["default"],
+                        "models": [], "account": {}, "pid": os.getpid()}
+            self.out.message({"type": "control_response", "response": {"subtype": "success", "request_id": request_id, "response": response}})
+            return
+        self.out.message({"type": "control_response", "response": {
+            "subtype": "error", "request_id": request_id, "error": f"orin code does not handle {subtype or 'this'} requests yet",
+        }})
+
+    # -- entry ----------------------------------------------------------------------------------------------------
+
+    def run(self) -> int:
+        refuse_unsupported(self.options)
+        self._resolve_session()
+        try:
+            if self.options.input_format == "stream-json":
+                return self._run_stream_input()
+            prompt = self.options.prompt if self.options.prompt is not None else self.stdin.read()
+            if not prompt.strip():
+                raise CliUsageError("no prompt: pass one after -p or on stdin")
+            result = self.answer(prompt)
+            if self.options.output_format == "json":
+                self.out.message(result)
+            elif self.options.output_format == "text":
+                if result["is_error"]:
+                    self.stderr.write(f"Error: {'; '.join(result.get('errors') or [result['subtype']])}\n")
+                else:
+                    self.out.text(str(result.get("result") or "") + "\n")
+            return EXIT_ERROR if result["is_error"] else EXIT_OK
+        finally:
+            self._stop.set()
+
+    def _run_stream_input(self) -> int:
+        threading.Thread(target=self._read_stdin, daemon=True).start()
+        if self.options.prompt:
+            self._pending_prompts.append(self.options.prompt)
+        while True:
+            while self._pending_prompts:
+                self.answer(self._pending_prompts.pop(0))
+            if self._stdin_closed:
+                return EXIT_OK
+            kind, item = self.inbox.get()
+            if kind != "event":
+                self._handle_input(kind, item)
+
+
+__all__ = ["HeadlessRun", "MAX_PROMPT_CHARS", "UNSUPPORTED", "refuse_unsupported"]

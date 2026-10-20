@@ -16,8 +16,44 @@ def version_line() -> str:
     return f"{__version__} (Orin Code)"
 
 
+def _utf8(*streams: TextIO) -> None:
+    # A Windows pipe would be cp1252: the protocol is UTF-8 JSON lines, so the real streams are switched to it.
+    for stream in streams:
+        if stream in (sys.stdin, sys.stdout, sys.stderr) and hasattr(stream, "reconfigure"):
+            if stream is sys.stdin:
+                stream.reconfigure(encoding="utf-8")
+            else:
+                stream.reconfigure(encoding="utf-8", newline="\n")
+
+
+def _configured_model() -> str | None:
+    """The person's own model setting (user and managed layers only: a repository never picks the model)."""
+    try:
+        from agentos.settings import load_effective_settings
+
+        value = load_effective_settings(None, sources=("user",)).get("model")
+    except Exception:  # noqa: BLE001 - unreadable settings mean no configured model
+        return None
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
 def run_headless(options: CodeOptions, *, stdin: TextIO, stdout: TextIO, stderr: TextIO) -> int:
-    raise CliRuntimeError("headless runs are not available in this build yet")
+    from pathlib import Path
+
+    from agentos.installation import orin_paths
+
+    from .headless import HeadlessRun, refuse_unsupported
+    from .runtime import connect_local
+
+    refuse_unsupported(options)  # before anything starts
+    _utf8(stdin, stdout, stderr)
+    paths = orin_paths()
+    client = connect_local(paths)
+    try:
+        return HeadlessRun(options, client=client, data_dir=paths.data, cwd=Path.cwd().resolve(), stdin=stdin,
+                           stdout=stdout, stderr=stderr, configured_model=_configured_model()).run()
+    finally:
+        client.close()
 
 
 def open_interface(options: CodeOptions, *, stdout: TextIO, stderr: TextIO) -> int:
