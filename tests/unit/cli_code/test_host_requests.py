@@ -41,7 +41,9 @@ def test_an_unanswered_question_times_out_and_a_cancelled_turn_stops_waiting(tmp
     started = time.monotonic()
     assert _channel(tmp_path, emitted).ask("hook_callback", {}, timeout=0.2) is None
     assert time.monotonic() - started < 3
+    started = time.monotonic()
     assert _channel(tmp_path, [], cancelled=lambda: True).ask("hook_callback", {}, timeout=30) is None
+    assert time.monotonic() - started < 1  # a cancel ends the wait at once; the 30 s timeout is not waited out
 
 
 def test_answers_are_refused_for_unknown_or_finished_questions(tmp_path: Path) -> None:
@@ -52,7 +54,9 @@ def test_answers_are_refused_for_unknown_or_finished_questions(tmp_path: Path) -
 
 
 def test_without_a_cli_turn_nothing_is_asked(tmp_path: Path) -> None:
+    started = time.monotonic()
     assert HostRequests("chat_1", root=tmp_path).ask("hook_callback", {}, timeout=1) is None
+    assert time.monotonic() - started < 1  # nothing is asked, so nothing is waited for
 
 
 class _Conversations:
