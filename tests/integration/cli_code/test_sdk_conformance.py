@@ -13,7 +13,7 @@ from typing import Any
 
 from claude_agent_sdk import (
     AssistantMessage, ClaudeAgentOptions, ClaudeSDKClient, HookMatcher, PermissionResultAllow, PermissionResultDeny,
-    ResultMessage, TextBlock, ToolUseBlock, query,
+    ResultMessage, SystemMessage, TextBlock, ToolUseBlock, query,
 )
 from claude_agent_sdk.types import StreamEvent
 
@@ -47,6 +47,17 @@ def test_a_simple_query(orin_runtime: LiveRuntime) -> None:
     assert texts == ["Hello from fake."]
     result = _result(messages)
     assert result.subtype == "success" and result.result == "Hello from fake." and not result.is_error
+
+
+def test_the_sdk_tools_preset_offers_the_model_its_tools(orin_runtime: LiveRuntime) -> None:
+    """W6-R5: the preset sends `--tools default`; the model must still be offered Orin's tools, not none."""
+    options = _options(orin_runtime, orin_runtime.workspace("sdk-preset"), tools={"type": "preset", "preset": "claude_code"})
+    messages = asyncio.run(_collect("say hello", options))
+    init = [message for message in messages if isinstance(message, SystemMessage) and message.subtype == "init"]
+    assert init, messages
+    offered = init[0].data["tools"]
+    assert offered and "Read" in offered and "Bash" in offered
+    assert _result(messages).subtype == "success"
 
 
 def test_streaming_partial_messages(orin_runtime: LiveRuntime) -> None:

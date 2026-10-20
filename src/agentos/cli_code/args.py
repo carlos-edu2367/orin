@@ -235,11 +235,22 @@ def parse_code_arguments(argv: Sequence[str]) -> tuple[CodeOptions, bool]:
     values["disallowed_tools"] = split_tool_list(values.get("disallowed_tools"))
     if values.get("tools") is not None:
         values["tools"] = split_tool_list(values["tools"])
+        _check_tool_names(values["tools"])
     sources = values.pop("setting_sources")
     values["setting_sources"] = None if sources is None else split_tool_list([sources])
     options = CodeOptions(**values)
     _check_combinations(options)
     return options, show_version
+
+
+def _check_tool_names(names: list[str]) -> None:
+    """Every name is ``default`` (the SDK's preset), an MCP tool, or a tool Orin publishes; anything else is refused (W6-R5)."""
+    from agentos.agentic.tools.public_names import PUBLIC_NAMES, internal_name
+
+    for name in names:
+        if name == "default" or name.startswith("mcp__") or internal_name(name) in PUBLIC_NAMES:
+            continue
+        raise CliUsageError(f"--tools names a tool Orin does not have: {name!r}")
 
 
 def _check_combinations(options: CodeOptions) -> None:

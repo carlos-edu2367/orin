@@ -42,8 +42,10 @@ def tool_selection(options: CliTurnOptions | None, core: Collection[str]) -> tup
     if isinstance(permissions, Mapping):
         withheld.update(internal_name(name) for name in _bare_tool_names(permissions.get("deny")))
     offered: frozenset[str] | None = None
-    if options.tools is not None:
-        offered = frozenset(internal_name(name) for name in options.tools)
+    # W6-R5: the SDK's preset sends `--tools default`; that is Orin's normal set, and it wins over any other name.
+    requested = None if options.tools is None or "default" in options.tools else options.tools
+    if requested is not None:
+        offered = frozenset(internal_name(name) for name in requested)
         withheld.update(name for name in core if name not in offered)
     return offered, frozenset(withheld)
 
