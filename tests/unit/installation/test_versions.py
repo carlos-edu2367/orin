@@ -29,6 +29,21 @@ def test_release_version_is_aligned_across_runtime_and_desktop_metadata() -> Non
     assert desktop["version"] == __version__
     assert desktop_lock["version"] == __version__
     assert desktop_lock["packages"][""]["version"] == __version__
+    # W7: the web interface's own metadata follows the release too.
+    frontend = json.loads((root / "frontend" / "package.json").read_text(encoding="utf-8"))
+    frontend_lock = json.loads((root / "frontend" / "package-lock.json").read_text(encoding="utf-8"))
+    assert frontend["version"] == __version__
+    assert frontend_lock["version"] == __version__
+    assert frontend_lock["packages"][""]["version"] == __version__
+
+
+def test_frontend_dependencies_are_pinned() -> None:
+    """W7: no dependency floats to whatever is newest on the day of an install."""
+    root = Path(__file__).resolve().parents[3]
+    frontend = json.loads((root / "frontend" / "package.json").read_text(encoding="utf-8"))
+    floating = {name: spec for section in ("dependencies", "devDependencies")
+                for name, spec in frontend.get(section, {}).items() if spec.strip() in {"", "*", "latest", "next"}}
+    assert floating == {}
 
 
 def test_status_lists_only_semver_version_directories_and_marks_current(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
