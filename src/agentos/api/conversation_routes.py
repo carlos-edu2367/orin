@@ -10,6 +10,7 @@ from typing import Any, Callable
 from fastapi import FastAPI, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict, Field
 
 from agentos.redaction import redact_text
 
@@ -166,6 +167,34 @@ def command_catalog(root: Path | None, trusted: bool, *, personal: bool) -> list
     )
 
 
+class ForkRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    before_message_id: str | None = Field(default=None, max_length=255)
+    title: str | None = Field(default=None, max_length=160)
+
+
+class RenameRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    title: str = Field(min_length=1, max_length=160)
+
+
+class ShellRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    command: str = Field(min_length=1, max_length=4000)
+
+
+def fork_conversation(services, user_id: str, conversation_id: str, *, before_message_id: str | None = None,
+                      title: str | None = None) -> dict[str, Any]:
+    """Fork in the store, then give a chat outside a project the same folder (a project's chats share the project's)."""
+    result = dict(services.conversation_application.fork(conversation_id, user_id, before_message_id=before_message_id, title=title))
+    workspaces = getattr(services, "local_workspaces", None)
+    if not result.get("project_id") and workspaces is not None:
+        root = workspaces.root_for(conversation_id, user_id)
+        if root:
+            workspaces.set_root(str(result["conversation_id"]), user_id, root)
+    return result
+
+
 def register_conversation_routes(
     app: FastAPI,
     services,
@@ -187,6 +216,45 @@ def register_conversation_routes(
         root = conversation_root(conversation_id, principal)
         stopped = await run_in_threadpool(stop_shell, root, task_id)
         return JSONResponse({"task_id": task_id, "stopped": stopped, "tasks": await run_in_threadpool(shell_tasks, root)})
+
+    @app.post("/v1/conversations/{conversation_id}/fork", status_code=201)
+    async def fork(conversation_id: str, payload: ForkRequest, request: Request) -> JSONResponse:
+        """/branch and /fork (W7): a new conversation with this one's messages (or those before one of them)."""
+        principal = principal_for(request, mutable=True)
+        services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.fork")
+        result = await run_in_threadpool(lambda: fork_conversation(
+            services, principal.user_id, conversation_id, before_message_id=payload.before_message_id, title=payload.title))
+        return JSONResponse(result, status_code=201)
+
+    @app.patch("/v1/conversations/{conversation_id}/title")
+    async def rename(conversation_id: str, payload: RenameRequest, request: Request) -> JSONResponse:
+        """/rename (W7)."""
+        principal = principal_for(request, mutable=True)
+        services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.rename")
+        try:
+            result = await run_in_threadpool(services.conversation_application.rename, conversation_id, principal.user_id, payload.title)
+        except ValueError as error:
+            raise ApplicationValidationError(str(error)) from error
+        return JSONResponse(result)
+
+    @app.post("/v1/conversations/{conversation_id}/shell", status_code=201)
+    async def shell(conversation_id: str, payload: ShellRequest, request: Request) -> JSONResponse:
+        """`!command` (W7): a turn that runs the person's command in the session's folder, without the model."""
+        principal = principal_for(request, mutable=True)
+        services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.shell")
+        services.capabilities.require("shell")
+        key = request.headers.get("idempotency-key") or ""
+        if not key or len(key) > 255:
+            raise ApplicationValidationError("an Idempotency-Key header is required")
+        try:
+            receipt = await run_in_threadpool(services.conversation_application.shell, principal.user_id, conversation_id, payload.command, key)
+        except ValueError as error:
+            raise ApplicationValidationError(str(error)) from error
+        data = receipt if isinstance(receipt, dict) else {
+            "conversation_id": getattr(receipt, "conversation_id", conversation_id), "turn_id": getattr(receipt, "turn_id", None),
+            "message_id": getattr(receipt, "message_id", None), "state": getattr(receipt, "state", None),
+        }
+        return JSONResponse(data, status_code=201)
 
     def trusted(principal: AuthenticatedPrincipal, root: Path) -> bool:
         from agentos.permissions.trust import WorkspaceTrustStore
@@ -235,4 +303,4 @@ def register_conversation_routes(
         return JSONResponse(await run_in_threadpool(run_statusline, conversation_id, command, root, payload))
 
 
-__all__ = ["register_conversation_routes", "shell_tasks", "stop_shell"]
+__all__ = ["fork_conversation", "register_conversation_routes", "shell_tasks", "stop_shell"]

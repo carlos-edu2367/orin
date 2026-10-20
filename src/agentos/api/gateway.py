@@ -226,7 +226,8 @@ class CreateScheduledChatRequest(_RequestModel):
 
 
 class RewindMessageRequest(_RequestModel):
-    mode: str = "code"
+    # W7: "code" restores the files, "conversation" forks the conversation before the message, "both" does both.
+    mode: str = Field(default="code", pattern="^(code|conversation|both)$")
 
 
 class AddDirectoryRequest(_RequestModel):
@@ -1635,8 +1636,13 @@ def create_app(services: ApiServices) -> FastAPI:
     ) -> JSONResponse:
         principal = principal_for(request, mutable=True)
         services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.rewind")
-        if payload.mode != "code":
-            raise ApplicationValidationError("only mode 'code' is available; conversation rewind arrives with the W7 interface")
+        if payload.mode == "conversation":
+            # The conversation goes back to before the message in a new conversation (the original stays as it was).
+            from .conversation_routes import fork_conversation
+
+            conversation_record(conversation_id, principal)
+            fork = await run_in_threadpool(lambda: fork_conversation(services, principal.user_id, conversation_id, before_message_id=message_id))
+            return JSONResponse(_jsonable({"message_id": message_id, "mode": "conversation", "fork": fork}))
         workspace = conversation_workspace(conversation_id, principal)
         history = FileHistory(services.history_root(), conversation_id)
         roots = [Path(workspace.root)]
@@ -1657,6 +1663,11 @@ def create_app(services: ApiServices) -> FastAPI:
         if result["blocked"]:
             # Nothing was changed: the response names the files that blocked the rewind (W4-R10).
             return _error(409, "CONFLICT", "rewind_blocked", retryable=False, details={"files": result["skipped"]})
+        if payload.mode == "both":
+            from .conversation_routes import fork_conversation
+
+            result = {**result, "mode": "both", "fork": await run_in_threadpool(
+                lambda: fork_conversation(services, principal.user_id, conversation_id, before_message_id=message_id))}
         return JSONResponse(_jsonable(result))
 
     @app.get("/v1/conversations/{conversation_id}/directories", dependencies=[capability("host_folders")])

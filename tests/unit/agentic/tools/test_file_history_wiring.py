@@ -97,4 +97,5 @@ def test_the_api_rewinds_one_message_and_lists_the_history(tmp_path: Path) -> No
     assert response.status_code == 200 and response.json()["restored"] == [str(target)]
     assert target.read_bytes() == b"original\n"
     assert client.post("/v1/conversations/conv-api/messages/nope/rewind", json={"mode": "code"}, headers=headers).status_code == 404
-    assert client.post("/v1/conversations/conv-api/messages/um-1/rewind", json={"mode": "both"}, headers=headers).status_code == 422
+    # W7: "conversation" and "both" exist now (they fork the conversation); an unknown mode is still refused.
+    assert client.post("/v1/conversations/conv-api/messages/um-1/rewind", json={"mode": "everything"}, headers=headers).status_code == 422
