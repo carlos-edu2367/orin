@@ -115,6 +115,13 @@ INSTANCE = {
     ("GET", "/v1/providers/omniroute/runtime"), ("PUT", "/v1/providers/omniroute/runtime"), ("POST", "/v1/providers/omniroute/runtime/actions"),
     # Bound to a single-use state value created by the profile that started the sign-in.
     ("GET", "/v1/mcp/oauth/callback"),
+    # W7: host settings files (local profile only; a shared server answers 404 to every one of them).
+    ("GET", "/v1/settings/effective"), ("PUT", "/v1/settings/permissions"),
+    ("GET", "/v1/settings/hooks"), ("PUT", "/v1/settings/hooks"),
+    ("GET", "/v1/settings/agents"), ("PUT", "/v1/settings/agents/{name}"), ("DELETE", "/v1/settings/agents/{name}"),
+    ("GET", "/v1/settings/output-styles"), ("PUT", "/v1/settings/output-styles"),
+    ("GET", "/v1/settings/keybindings"), ("PUT", "/v1/settings/keybindings"),
+    ("GET", "/v1/settings/trusted-folders"), ("POST", "/v1/settings/trusted-folders/revoke"),
 }
 AUTH = {("GET", "/v1/auth/me"), ("POST", "/v1/auth/setup"), ("POST", "/v1/auth/login"), ("POST", "/v1/auth/logout"), ("POST", "/v1/auth/password")}
 ADMIN = {("GET", "/v1/admin/users"), ("POST", "/v1/admin/users"), ("PATCH", "/v1/admin/users/{user_id}"), ("POST", "/v1/admin/users/{user_id}/reset-password")}

@@ -42,6 +42,7 @@ from .contracts import (
 from agentos.provider_catalog.models import PROVIDERS_WITH_OPTIONAL_KEY, ProviderCatalogContext
 from agentos.provider_catalog.service import ProviderCatalogUnavailable
 from .events import CursorError, InMemoryClientEventStream
+from .settings_routes import register_settings_routes
 from .security import (
     AdminRequiredError, AuthenticationError, AuthorizationError, AuthenticatedPrincipal, InMemorySecurityService,
     PasswordChangeRequiredError, RateLimitError,
@@ -2541,6 +2542,12 @@ def create_app(services: ApiServices) -> FastAPI:
     register_auth_routes(app, services, principal_for)
     from .files_routes import register_files_routes
     register_files_routes(app, services, principal_for)
+    # W7: settings the interface edits (host files: local profile only).
+    def conversation_root(conversation_id: str, principal: AuthenticatedPrincipal) -> Path:
+        workspace = conversation_workspace(conversation_id, principal)
+        return Path(getattr(workspace, "root", workspace))
+
+    register_settings_routes(app, services, principal_for, conversation_root)
 
     return app
 

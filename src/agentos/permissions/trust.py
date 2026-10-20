@@ -32,8 +32,14 @@ class WorkspaceTrustStore:
         entries = users.get(str(user_id))
         return isinstance(entries, list) and _key(root) in entries
 
-    def _mutate(self, user_id: str, root: Path, *, add: bool) -> None:
-        key = _key(root)
+    def trusted_roots(self, user_id: str) -> list[str]:
+        """The folders this person trusts, as stored (normalized paths), sorted (W7 settings)."""
+        users = self._read().get("users")
+        entries = users.get(str(user_id)) if isinstance(users, dict) else None
+        return sorted(item for item in entries if isinstance(item, str)) if isinstance(entries, list) else []
+
+    def _mutate(self, user_id: str, root: Path, *, add: bool, key: str | None = None) -> None:
+        key = key if key is not None else _key(root)
 
         def change(data: dict) -> None:
             data["version"] = 1
@@ -63,3 +69,7 @@ class WorkspaceTrustStore:
 
     def revoke(self, user_id: str, root: Path) -> None:
         self._mutate(user_id, root, add=False)
+
+    def revoke_key(self, user_id: str, key: str) -> None:
+        """Revoke a stored entry exactly as ``trusted_roots`` lists it (the folder may no longer exist)."""
+        self._mutate(user_id, Path(key), add=False, key=key)
