@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom'
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
@@ -818,8 +818,10 @@ describe('ChatPage', () => {
     expect(sent).not.toHaveBeenCalled()
   })
 
-  it('reloads the conversation snapshot after handleRewindTurn succeeds', async () => {
+  // W7: a turn's rewind button opens the per-message picker on that turn's message (it replaced the per-turn rewind).
+  it('rewinds a turn through the per-message picker and reloads the conversation snapshot', async () => {
     let rewound = false
+    let perTurnCalled = false
     let snapshotLoads = 0
     globalThis.fetch = vi.fn<typeof fetch>().mockImplementation(async (input, init) => {
       const url = typeof input === 'string' ? input : String(input)
@@ -827,9 +829,13 @@ describe('ChatPage', () => {
       if (url.includes('/events?')) {
         return new Response('event: heartbeat\ndata: {"cursor":"a.9"}\n\n', { headers: { 'Content-Type': 'text/event-stream' } })
       }
-      if (url.includes('/turns/turn-1/rewind') && method === 'POST') {
+      if (url.includes('/turns/turn-1/rewind')) perTurnCalled = true
+      if (url.includes('/file-history')) {
+        return new Response(JSON.stringify({ items: [{ message_id: 'msg-1', turn_id: 'turn-1', kind: 'message', created_at: null, rewound_at: null, files: ['hello.txt'] }] }), { headers: { 'Content-Type': 'application/json' } })
+      }
+      if (url.includes('/messages/msg-1/rewind') && method === 'POST') {
         rewound = true
-        return new Response(JSON.stringify({ status: 'ok', restored: ['hello.txt'] }), { headers: { 'Content-Type': 'application/json' } })
+        return new Response(JSON.stringify({ message_id: 'msg-1', restored: ['hello.txt'], deleted: [], unchanged: [], skipped: [], blocked: false, undo_id: 'u1', unbacked: [] }), { headers: { 'Content-Type': 'application/json' } })
       }
       if (url.endsWith('/v1/projects/sidebar') || url.endsWith('/v1/conversations')) {
         return new Response(JSON.stringify({ items: [] }), { headers: { 'Content-Type': 'application/json' } })
@@ -869,12 +875,13 @@ describe('ChatPage', () => {
     const loadsBeforeRewind = snapshotLoads
 
     await user.click(screen.getByTestId('rewind-turn-button'))
-    const confirmBtn = screen.queryByTestId('rewind-confirm-button')
-    if (confirmBtn) {
-      await user.click(confirmBtn)
-    }
+    const picker = await screen.findByRole('dialog', { name: 'Voltar a uma mensagem' })
+    expect(within(picker).getByRole('option', { selected: true })).toHaveTextContent('Edite hello.txt')
+    await waitFor(() => expect(within(picker).getByRole('button', { name: 'Restaurar o código' })).toBeEnabled())
+    await user.click(within(picker).getByRole('button', { name: 'Restaurar o código' }))
 
     await waitFor(() => expect(rewound).toBe(true))
+    expect(perTurnCalled).toBe(false)
     await waitFor(() => expect(snapshotLoads).toBeGreaterThan(loadsBeforeRewind))
     expect(await screen.findByText('Alterações revertidas.')).toBeInTheDocument()
   })

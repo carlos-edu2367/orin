@@ -32,6 +32,7 @@ import { WorkspaceShell } from './WorkspaceShell'
 import { AgentsSection } from '../features/codeSettings/AgentsSection'
 import { HooksSection } from '../features/codeSettings/HooksSection'
 import { KeybindingsSection } from '../features/codeSettings/KeybindingsSection'
+import { McpScopesSection } from '../features/codeSettings/McpScopesSection'
 import { OutputStylesSection } from '../features/codeSettings/OutputStylesSection'
 import { PermissionsSection } from '../features/codeSettings/PermissionsSection'
 import { TrustedFoldersSection } from '../features/codeSettings/TrustedFoldersSection'
@@ -70,6 +71,7 @@ export const routes: RouteDefinition[] = [
   { path: '/settings/plugins', element: <SettingsRoute><PluginsSection /></SettingsRoute> },
   { path: '/settings/permissions', element: <SettingsRoute><PermissionsSection /></SettingsRoute> },
   { path: '/settings/hooks', element: <SettingsRoute><HooksSection /></SettingsRoute> },
+  { path: '/settings/mcp-scopes', element: <SettingsRoute><McpScopesSection /></SettingsRoute> },
   { path: '/settings/agents', element: <SettingsRoute><AgentsSection /></SettingsRoute> },
   { path: '/settings/output-styles', element: <SettingsRoute><OutputStylesSection /></SettingsRoute> },
   { path: '/settings/keybindings', element: <SettingsRoute><KeybindingsSection /></SettingsRoute> },

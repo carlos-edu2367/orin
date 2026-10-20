@@ -4,7 +4,13 @@ import { invalidResponseError } from './errors'
 export type PluginContribution = { kind: string; reference: string; display_name: string; enabled?: boolean }
 export type PluginCommand = { command_id: string; slug: string; plugin_id: string; description: string; argument_hint: string; qualified: boolean }
 export type PluginSummary = { plugin_id: string; version: string; display_name: string; description: string; author: string; homepage: string | null; state: 'pending_approval' | 'active' | 'disabled' | 'rejected'; warnings: string[]; contribution_count: number; install_path?: string; contributions: PluginContribution[] }
-export type PluginInspectionResult = PluginSummary & { skills: PluginContribution[]; mcp_servers: PluginContribution[]; agents: PluginContribution[]; commands: PluginContribution[]; package_digest: string }
+/** W7: what a plugin's hook or language server will run, shown before it is installed. */
+export type PluginHookPreview = { event: string; matcher: string; command: string }
+export type PluginLspPreview = { name: string; command: string }
+export type PluginInspectionResult = PluginSummary & {
+  skills: PluginContribution[]; mcp_servers: PluginContribution[]; agents: PluginContribution[]; commands: PluginContribution[]; package_digest: string
+  hooks: PluginHookPreview[]; lsp_servers: PluginLspPreview[]
+}
 export type MarketplaceEntry = { name: string; reference: string; owner?: string }
 export type PluginLibraryEntry = { name: string; description: string; source_url: string; origin: 'registry' | 'web'; installable_kind: 'plugin' | 'mcp_raw' | 'unknown' }
 export type PluginLibraryResult = { entries: PluginLibraryEntry[]; web_search_available: boolean }
@@ -29,7 +35,15 @@ function array(value: unknown): string[] { if (!Array.isArray(value) || value.so
 function summary(value: unknown): PluginSummary { const data = record(value); const state = text(data.state); if (!['pending_approval', 'active', 'disabled', 'rejected'].includes(state)) throw invalidResponseError(); return { plugin_id: text(data.plugin_id), version: text(data.version), display_name: text(data.display_name), description: text(data.description ?? ''), author: text(data.author ?? ''), homepage: data.homepage === null || data.homepage === undefined ? null : text(data.homepage), state: state as PluginSummary['state'], warnings: array(data.warnings ?? []), contribution_count: typeof data.contribution_count === 'number' ? data.contribution_count : 0, install_path: data.install_path === undefined ? undefined : text(data.install_path), contributions: Array.isArray(data.contributions) ? data.contributions.map(contribution) : [] } }
 function parseList(value: unknown): PluginSummary[] { if (!Array.isArray(value)) throw invalidResponseError(); return value.map(summary) }
 function contribution(value: unknown): PluginContribution { const data = record(value); return { kind: text(data.kind ?? 'mcp_server'), reference: text(data.reference ?? data.slug ?? ''), display_name: text(data.display_name ?? data.name ?? ''), enabled: data.enabled === undefined ? undefined : data.enabled === true } }
-function parseInspection(value: unknown): PluginInspectionResult { const data = record(value); return { ...summary(data), package_digest: text(data.package_digest), skills: Array.isArray(data.skills) ? data.skills.map(contribution) : [], mcp_servers: Array.isArray(data.mcp_servers) ? data.mcp_servers.map(contribution) : [], agents: Array.isArray(data.agents) ? data.agents.map(contribution) : [], commands: Array.isArray(data.commands) ? data.commands.map((item) => { const row = record(item); return { kind: 'command', reference: text(row.command_id), display_name: text(row.slug) } }) : [] } }
+function bounded(value: unknown, max = 400): string { return typeof value === 'string' ? value.slice(0, max) : '' }
+function hookPreview(value: unknown): PluginHookPreview { const data = record(value); return { event: bounded(data.event, 64), matcher: bounded(data.matcher, 200), command: bounded(data.command, 400) } }
+function lspPreview(value: unknown): PluginLspPreview {
+  const data = record(value)
+  const args = Array.isArray(data.args) ? data.args.filter((item): item is string => typeof item === 'string') : []
+  return { name: bounded(data.name, 120), command: [bounded(data.command, 200), ...args].join(' ').slice(0, 400) }
+}
+function parseInspection(value: unknown): PluginInspectionResult { const data = record(value); return { ...summary(data), package_digest: text(data.package_digest),
+  hooks: Array.isArray(data.hooks) ? data.hooks.slice(0, 100).map(hookPreview) : [], lsp_servers: Array.isArray(data.lsp_servers) ? data.lsp_servers.slice(0, 50).map(lspPreview) : [], skills: Array.isArray(data.skills) ? data.skills.map(contribution) : [], mcp_servers: Array.isArray(data.mcp_servers) ? data.mcp_servers.map(contribution) : [], agents: Array.isArray(data.agents) ? data.agents.map(contribution) : [], commands: Array.isArray(data.commands) ? data.commands.map((item) => { const row = record(item); return { kind: 'command', reference: text(row.command_id), display_name: text(row.slug) } }) : [] } }
 function command(value: unknown): PluginCommand { const data = record(value); return { command_id: text(data.command_id), slug: text(data.slug), plugin_id: text(data.plugin_id), description: text(data.description ?? ''), argument_hint: text(data.argument_hint ?? ''), qualified: data.qualified === true } }
 function parseCommands(value: unknown): PluginCommand[] { if (!Array.isArray(value)) throw invalidResponseError(); return value.map(command) }
 function parseSummary(value: unknown): PluginSummary { return summary(value) }

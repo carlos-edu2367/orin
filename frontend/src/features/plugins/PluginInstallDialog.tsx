@@ -3,6 +3,34 @@ import { approvePlugin, inspectPlugin, type PluginInspectionResult } from '../..
 import { ApiError } from '../../api/errors'
 import type { ApiClient } from '../../api/client'
 
+/** W7: every contribution by name, and the commands its hooks and language servers would run on this computer. */
+function PluginContents({ inspection }: { inspection: PluginInspectionResult }) {
+  const named = (items: readonly { display_name: string; reference: string }[]) => items.map((item) => item.display_name || item.reference).filter(Boolean)
+  const groups: Array<[string, string[]]> = [
+    ['Skills', named(inspection.skills)], ['Comandos', named(inspection.commands).map((name) => `/${name}`)],
+    ['Agentes', named(inspection.agents)], ['Servidores MCP', named(inspection.mcp_servers)],
+  ]
+  const runs = inspection.hooks.length + inspection.lsp_servers.length > 0
+  return (
+    <div className="plugin-dialog__contents">
+      {groups.filter(([, items]) => items.length > 0).map(([title, items]) => (
+        <div key={title} className="plugin-dialog__group"><h4>{title} ({items.length})</h4><p>{items.join(', ')}</p></div>
+      ))}
+      {runs && <p className="plugin-dialog__runs">Este plugin roda comandos no seu computador:</p>}
+      {inspection.hooks.length > 0 && (
+        <div className="plugin-dialog__group"><h4>Hooks ({inspection.hooks.length})</h4>
+          <ul>{inspection.hooks.map((hook, index) => <li key={index}><span>{hook.event}{hook.matcher ? ` · ${hook.matcher}` : ''}</span> <code>{hook.command || '—'}</code></li>)}</ul>
+        </div>
+      )}
+      {inspection.lsp_servers.length > 0 && (
+        <div className="plugin-dialog__group"><h4>Servidores de linguagem ({inspection.lsp_servers.length})</h4>
+          <ul>{inspection.lsp_servers.map((server, index) => <li key={index}><span>{server.name}</span> <code>{server.command || '—'}</code></li>)}</ul>
+        </div>
+      )}
+    </div>
+  )
+}
+
 export function PluginInstallDialog({ client, onClose, onInstalled, initialReference, onNoManifest }: { client: ApiClient; onClose: () => void; onInstalled: () => void; initialReference?: string; onNoManifest?: () => void }) {
   const dialogRef = useRef<HTMLDivElement>(null)
   const [reference, setReference] = useState(initialReference ?? '')
@@ -48,5 +76,5 @@ export function PluginInstallDialog({ client, onClose, onInstalled, initialRefer
     }
   }
   async function install() { if (!inspection) return; setBusy(true); try { await approvePlugin(client, inspection.plugin_id); onInstalled() } catch { setError('Não foi possível instalar o plugin.') } finally { setBusy(false) } }
-  return <div className="plugin-dialog__backdrop"><div className="plugin-dialog" role="dialog" aria-modal="true" aria-labelledby="plugin-dialog-title" tabIndex={-1} ref={dialogRef}><header className="plugin-dialog__head"><div><span className="plugin-dialog__eyebrow">PLUGIN INSTALLER</span><h2 id="plugin-dialog-title">Instalar plugin</h2></div><button type="button" className="button--quiet" onClick={onClose}>Fechar</button></header><p className="plugin-dialog__lede">Inspecione a origem primeiro. A instalação só acontece depois da sua aprovação.</p><form className="plugin-dialog__form" onSubmit={(event) => void inspect(event)}><label htmlFor="plugin-reference">URL, owner/repo ou nome<input id="plugin-reference" value={reference} onChange={(event) => setReference(event.target.value)} placeholder="ex.: github.com/acme/meu-plugin" /></label><button type="submit" className="button button--primary" disabled={busy || !reference.trim()}>{busy ? 'Inspecionando…' : 'Inspecionar origem'}</button></form>{inspection && <div className="plugin-dialog__preview"><div className="plugin-dialog__preview-head"><span className="plugin-dialog__preview-icon" aria-hidden="true">✦</span><div><h3>{inspection.display_name}</h3><p>{inspection.author || 'Autor não informado'} · <code>v{inspection.version}</code></p></div></div><p className="plugin-dialog__description">{inspection.description || 'Sem descrição disponível.'}</p><dl className="plugin-dialog__facts"><div><dt>Contribuições</dt><dd>{inspection.contribution_count}</dd></div><div><dt>Avisos</dt><dd className={inspection.warnings.length > 0 ? 'has-warning' : undefined}>{inspection.warnings.length}</dd></div></dl>{inspection.warnings.length > 0 && <ul className="plugin-dialog__warnings">{inspection.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul>}<button type="button" className="button button--primary" onClick={() => void install()} disabled={busy}>{busy ? 'Instalando…' : 'Confirmar instalação'}</button></div>}{error && <p className="plugin-dialog__error" role="alert">{error}</p>}</div></div>
+  return <div className="plugin-dialog__backdrop"><div className="plugin-dialog" role="dialog" aria-modal="true" aria-labelledby="plugin-dialog-title" tabIndex={-1} ref={dialogRef}><header className="plugin-dialog__head"><div><span className="plugin-dialog__eyebrow">PLUGIN INSTALLER</span><h2 id="plugin-dialog-title">Instalar plugin</h2></div><button type="button" className="button--quiet" onClick={onClose}>Fechar</button></header><p className="plugin-dialog__lede">Inspecione a origem primeiro. A instalação só acontece depois da sua aprovação.</p><form className="plugin-dialog__form" onSubmit={(event) => void inspect(event)}><label htmlFor="plugin-reference">URL, owner/repo ou nome<input id="plugin-reference" value={reference} onChange={(event) => setReference(event.target.value)} placeholder="ex.: github.com/acme/meu-plugin" /></label><button type="submit" className="button button--primary" disabled={busy || !reference.trim()}>{busy ? 'Inspecionando…' : 'Inspecionar origem'}</button></form>{inspection && <div className="plugin-dialog__preview"><div className="plugin-dialog__preview-head"><span className="plugin-dialog__preview-icon" aria-hidden="true">✦</span><div><h3>{inspection.display_name}</h3><p>{inspection.author || 'Autor não informado'} · <code>v{inspection.version}</code></p></div></div><p className="plugin-dialog__description">{inspection.description || 'Sem descrição disponível.'}</p><dl className="plugin-dialog__facts"><div><dt>Contribuições</dt><dd>{inspection.contribution_count}</dd></div><div><dt>Avisos</dt><dd className={inspection.warnings.length > 0 ? 'has-warning' : undefined}>{inspection.warnings.length}</dd></div></dl>{inspection.warnings.length > 0 && <ul className="plugin-dialog__warnings">{inspection.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul>}<PluginContents inspection={inspection} /><button type="button" className="button button--primary" onClick={() => void install()} disabled={busy}>{busy ? 'Instalando…' : 'Confirmar instalação'}</button></div>}{error && <p className="plugin-dialog__error" role="alert">{error}</p>}</div></div>
 }

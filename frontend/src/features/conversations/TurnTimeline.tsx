@@ -54,6 +54,8 @@ export type TurnTimelineProps = {
   onCodeSessionAccept?: (event: ConversationActivityEvent, decision: CodeSessionProposalDecision) => Promise<void>
   onCodeSessionDecline?: (event: ConversationActivityEvent) => Promise<void>
   onRewindTurn?: (turnId: string) => Promise<void>
+  /** W7: open the per-message rewind picker on this turn's message (it replaces the per-turn rewind in the chat). */
+  onOpenRewindTurn?: (turnId: string) => void
   onApprovePlanAcceptEdits?: (event: ConversationActivityEvent) => void | Promise<void>
   onApprovePlanAskPermissions?: (event: ConversationActivityEvent) => void | Promise<void>
   onRequestPlanChanges?: (feedback: string, event: ConversationActivityEvent) => void | Promise<void>
@@ -596,6 +598,7 @@ export function TurnTimeline({
   onCodeSessionAccept,
   onCodeSessionDecline,
   onRewindTurn,
+  onOpenRewindTurn,
   onApprovePlanAcceptEdits,
   onApprovePlanAskPermissions,
   onRequestPlanChanges,
@@ -652,7 +655,7 @@ export function TurnTimeline({
   }, [resolvedItems])
 
   const modifiedTurnId = turnModifiedTurnId(resolvedItems)
-  const canShowRewind = Boolean(modifiedTurnId && (onRewindTurn || (client && conversationId)))
+  const canShowRewind = Boolean(modifiedTurnId && (onOpenRewindTurn || onRewindTurn || (client && conversationId)))
 
   const handleOpenFile = (path: string) => {
     onOpenFile?.(path)
@@ -1154,12 +1157,16 @@ export function TurnTimeline({
                 data-testid="rewind-turn-button"
                 disabled={rewinding || rewound}
                 onClick={() => {
+                  if (onOpenRewindTurn && modifiedTurnId) {
+                    onOpenRewindTurn(modifiedTurnId) // the picker shows every file that changes and asks
+                    return
+                  }
                   setRewindError(null)
                   setConfirmingRewind(true)
                 }}
               >
                 <span aria-hidden="true">↺</span>
-                <span>{rewound ? 'Alterações revertidas' : rewinding ? 'Revertendo…' : 'Reverter alterações'}</span>
+                <span>{onOpenRewindTurn ? 'Voltar a este ponto…' : rewound ? 'Alterações revertidas' : rewinding ? 'Revertendo…' : 'Reverter alterações'}</span>
               </button>
             )}
           </div>

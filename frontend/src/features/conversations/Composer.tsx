@@ -4,7 +4,7 @@ import type { CodePermissionMode } from '../../api/codeMode'
 import type { PluginCommand } from '../../api/plugins'
 import type { CatalogCommand } from '../../api/sessionTools'
 import type { BuiltinCommand } from '../commands/builtins'
-import { PENDING, useKeybindings } from '../keybindings/engine'
+import { PENDING, useKeybindingHandlers, useKeybindings } from '../keybindings/engine'
 import type { SkillSummary } from '../../api/skills'
 import type { CodeModeChoice, ConversationMode } from '../../api/conversations'
 import type { TodoItem } from './activityTypes'
@@ -65,6 +65,8 @@ export type ComposerProps = {
   onQueue?: () => void
   /** W7: Escape twice on an empty composer opens the rewind picker. */
   onOpenRewind?: () => void
+  /** W7: the person's earlier messages in this conversation, oldest first (up/down and ctrl+r). */
+  history?: readonly string[]
   codeMode?: CodeModeChoice
   onCodeModeChange?: (value: CodeModeChoice) => void
   /** Compact segmented mode switch (`[Chat | >_ Code]`) rendered in the composer bar on Home. */
@@ -99,11 +101,19 @@ const MAX_ROWS_HEIGHT = 260
  * is not. Send becomes Stop while a turn runs, in place, so the control the user
  * is already looking at is the one that ends the run.
  */
+/** The `skip`-th most recent message containing `query` (case-insensitive), or null. */
+export function findInHistory(history: readonly string[], query: string, skip: number): string | null {
+  const needle = query.trim().toLowerCase()
+  if (!needle) return null
+  const matches = [...history].reverse().filter((item) => item.toLowerCase().includes(needle))
+  return matches.length > 0 ? matches[Math.min(skip, matches.length - 1)] : null
+}
+
 export function Composer({
   value, onChange, onSubmit, onStop, running = false, disabled = false,
   placeholder = 'Descreva o que você precisa…', settings, hint, error, autoFocus, notice, focusSignal = 0, canSend = true,
   attachments = [], onAttach = () => {}, onRemoveAttachment = () => {}, commands = [], skills = [],
-  builtinCommands = [], catalogCommands = [], onSendNow, onOpenModelPicker, onRunCommand, onQueue, onOpenRewind,
+  builtinCommands = [], catalogCommands = [], onSendNow, onOpenModelPicker, onRunCommand, onQueue, onOpenRewind, history = [],
   codeMode = 'auto', onCodeModeChange, modeSwitch, sessionContext, hideCodeModeToggle = false, conversationMode,
   codePermissionMode, onCodePermissionModeChange, todos,
   workspaceFiles = [], onSearchWorkspaceFiles,
@@ -235,6 +245,48 @@ export function Composer({
 
   const { match } = useKeybindings()
   const lastEscapeAt = useRef(0)
+  // W7 history: where up/down is in `history`, and what was being typed before the first up.
+  const historyAt = useRef<{ index: number; draft: string } | null>(null)
+  const [historySearch, setHistorySearch] = useState<{ query: string; skip: number } | null>(null)
+  const historyMatch = historySearch ? findInHistory(history, historySearch.query, historySearch.skip) : null
+
+  function recall(direction: -1 | 1): boolean {
+    const element = textareaRef.current
+    const caret = element?.selectionStart ?? 0
+    if (direction === -1 && value.slice(0, caret).includes('\n')) return false // not on the first line: the caret moves
+    if (direction === 1 && value.slice(element?.selectionEnd ?? value.length).includes('\n')) return false
+    let at = historyAt.current
+    if (at && history[at.index] !== value) at = null // the person edited a recalled message: start over from here
+    if (direction === -1) {
+      if (history.length === 0) return false
+      const index = at ? Math.max(0, at.index - 1) : history.length - 1
+      historyAt.current = { index, draft: at ? at.draft : value }
+      onChange(history[index])
+      return true
+    }
+    if (!at) return false
+    if (at.index + 1 >= history.length) {
+      historyAt.current = null
+      onChange(at.draft)
+    } else {
+      historyAt.current = { index: at.index + 1, draft: at.draft }
+      onChange(history[at.index + 1])
+    }
+    return true
+  }
+
+  useKeybindingHandlers('HistorySearch', {
+    'historySearch:next': () => setHistorySearch((current) => (current ? { ...current, skip: current.skip + 1 } : current)),
+    'historySearch:accept': () => { if (historyMatch) onChange(historyMatch); setHistorySearch(null) },
+    'historySearch:execute': () => {
+      const text = historyMatch
+      setHistorySearch(null)
+      if (!text) return
+      if (onRunCommand) onRunCommand(text)
+      else onChange(text)
+    },
+    'historySearch:cancel': () => setHistorySearch(null),
+  }, historySearch !== null)
   // W7: `!command` in a Code conversation runs the command in the session's folder (the `!` shell mode).
   const shellMode = effectiveCodeMode === 'code' && value.startsWith('!')
 
@@ -274,7 +326,9 @@ export function Composer({
         }
         case 'chat:submit':
           if (running) {
-            if (onQueue && value.trim() && !shellMode) onQueue()
+            // W7: a `!command` is not queued; the chat says why it waits (it runs between turns, not inside one).
+            if (shellMode) onSubmit()
+            else if (onQueue && value.trim()) onQueue()
             return true
           }
           if (!canSend) return true
@@ -296,6 +350,14 @@ export function Composer({
           return true
         case 'chat:clearInput':
           onChange('')
+          return true
+        case 'history:previous':
+          return recall(-1)
+        case 'history:next':
+          return recall(1)
+        case 'history:search':
+          if (history.length === 0) return false
+          setHistorySearch({ query: '', skip: 0 })
           return true
         default:
           return false
@@ -335,6 +397,18 @@ export function Composer({
       <div className="composer__surface">
         <label className="visually-hidden" htmlFor="composer-message">Mensagem</label>
         <AttachmentChips items={attachments} onRemove={onRemoveAttachment} />
+        {historySearch && (
+          <div className="composer__history-search" role="search">
+            <label>
+              <span className="composer__history-label">Buscar no histórico</span>
+              <input autoFocus value={historySearch.query} aria-describedby="composer-history-match"
+                onChange={(event) => setHistorySearch({ query: event.target.value, skip: 0 })} />
+            </label>
+            <p id="composer-history-match" className="composer__history-match" role="status">
+              {historyMatch ?? (historySearch.query ? 'Nada encontrado.' : 'Digite para buscar; ctrl+r: mais antigo; Tab: usar; Enter: enviar.')}
+            </p>
+          </div>
+        )}
         {shellMode && (
           <p className="composer__shell-badge" role="status">
             <span className="composer__shell-mark">!</span> Modo shell: Enter roda o comando na pasta da sessão, sem o modelo.

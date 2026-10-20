@@ -55,6 +55,16 @@ const PERMISSION_OPTIONS: ReadonlyArray<{ mode: CodePermissionMode; label: strin
   { mode: 'full_autonomy', label: '⚡ Sem restrições', detail: 'Executa ferramentas sem confirmação e sem restrição ao workspace' },
 ]
 
+/**
+ * W7 (W6): what "Sem restrições" means here. On a local Orin it also reaches outside the session's folder; on a shared
+ * server it only skips the confirmations and never leaves the workspace.
+ */
+export function fullAutonomyDetail(hostFolders: boolean): string {
+  return hostFolders
+    ? 'Executa ferramentas sem confirmação, inclusive fora da pasta da sessão'
+    : 'Executa ferramentas sem confirmação, sempre dentro do workspace'
+}
+
 const RISK_SENTENCE: Record<Exclude<WorkspaceRisk, 'none'>, string> = {
   drive_root: 'é um drive inteiro',
   system: 'é uma pasta de sistema',
@@ -532,7 +542,7 @@ export function SessionContextPopover({
                     onClick={() => changePermissionMode(item.mode)}
                   >
                     <span className="session-context-popover__permission-label">{item.label}</span>
-                    <small className="session-context-popover__permission-detail">{item.detail}</small>
+                    <small className="session-context-popover__permission-detail">{item.mode === 'full_autonomy' ? fullAutonomyDetail(capabilities.host_folders) : item.detail}</small>
                   </button>
                 )
               })}

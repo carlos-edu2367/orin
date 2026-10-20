@@ -4185,3 +4185,27 @@ progress.orin-progress::-moz-progress-bar,
 @media (max-width: 640px) {
   .code-settings__agent-form { grid-template-columns: minmax(0, 1fr); }
 }
+
+/* ---------------------------------------------------------------- W7 Batch F: rewind anyway, plugin contents, history search, MCP scopes */
+.rewind-picker__unbacked { margin-top: 8px; padding: 10px 12px; border-radius: 8px; border: 1px solid color-mix(in srgb, var(--danger) 55%, transparent); background: color-mix(in srgb, var(--danger) 8%, transparent); display: grid; gap: 8px; font-size: 13px; }
+.rewind-picker__unbacked p { margin: 0; color: var(--text); }
+.rewind-picker__unbacked ul { margin: 0; padding-left: 18px; }
+.rewind-picker__unbacked code { font: 12px/1.4 var(--mono, monospace); overflow-wrap: anywhere; }
+.rewind-picker__unbacked .button { justify-self: start; }
+.plugin-dialog__contents { display: grid; gap: 10px; margin: 4px 0 12px; }
+.plugin-dialog__group h4 { margin: 0 0 4px; font-size: 12.5px; font-weight: 600; }
+.plugin-dialog__group p { margin: 0; font-size: 12.5px; color: var(--muted); overflow-wrap: anywhere; }
+.plugin-dialog__group ul { margin: 0; padding-left: 18px; display: grid; gap: 4px; font-size: 12.5px; }
+.plugin-dialog__group code { font: 12px/1.4 var(--mono, monospace); overflow-wrap: anywhere; }
+.plugin-dialog__runs { margin: 0; padding: 8px 10px; border-radius: 8px; border: 1px solid rgba(245, 158, 11, 0.45); background: rgba(245, 158, 11, 0.1); font-size: 12.5px; color: var(--text); }
+.composer__history-search { margin: 0 0 6px; padding: 6px 8px; border-radius: 8px; border: 1px solid var(--line); display: grid; gap: 4px; }
+.composer__history-search label { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+.composer__history-search input { flex: 1; min-width: 0; padding: 4px 8px; border-radius: 6px; border: 1px solid var(--line-strong, var(--line)); background: transparent; color: var(--text); font: inherit; font-size: 13px; }
+.composer__history-match { margin: 0; font: 12px/1.4 var(--mono, monospace); color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 72px; overflow: auto; }
+.code-settings__scope-group h3 { margin: 10px 0 6px; font-size: 13px; }
+.code-settings__mcp-pending .code-settings__rule-text { display: grid; gap: 4px; }
+.code-settings__state--on { border-color: color-mix(in srgb, #10b981 60%, transparent); color: var(--text); }
+.code-settings__state--pending { border-color: rgba(245, 158, 11, 0.6); color: var(--text); }
+/* W7: a destructive action that is visible at rest (button--danger alone only colours the hover). */
+.w7-danger-button { min-height: 34px; border-color: color-mix(in srgb, var(--danger) 65%, transparent); background: color-mix(in srgb, var(--danger) 14%, transparent); color: var(--text); }
+.w7-danger-button:hover:not(:disabled) { background: color-mix(in srgb, var(--danger) 24%, transparent); }

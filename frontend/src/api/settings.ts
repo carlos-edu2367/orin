@@ -261,3 +261,54 @@ export function getTrustedFolders(client: ApiClient): Promise<string[]> {
 export function revokeTrustedFolder(client: ApiClient, path: string): Promise<string[]> {
   return client.request({ path: '/v1/settings/trusted-folders/revoke', method: 'POST', body: { path }, parse: (value) => strings(rec(value).folders) })
 }
+
+/** W7 Batch F: a configuration-file MCP server as the settings API shows it (never its env, headers or secrets). */
+export type McpConfigServer = {
+  name: string
+  scope: string
+  source: string
+  transport: string
+  /** The command or address: as the repository writes it for a project server; the program or host otherwise. */
+  shown: string
+  state: 'on' | 'pending' | 'off'
+}
+export type McpConfigReport = {
+  folder: string | null
+  trusted: boolean
+  managedOnly: boolean
+  awaitingTrust: boolean
+  servers: McpConfigServer[]
+  pending: McpConfigServer[]
+  errors: Array<{ where: string; message: string }>
+  choices: { approved: string[]; denied: string[] }
+}
+
+function mcpServer(value: unknown): McpConfigServer | null {
+  const item = rec(value)
+  const state = item.state === 'on' || item.state === 'pending' || item.state === 'off' ? item.state : null
+  return str(item.name) && state ? {
+    name: str(item.name), scope: str(item.scope), source: str(item.source), transport: str(item.transport), shown: str(item.shown), state,
+  } : null
+}
+
+export function parseMcpConfigReport(value: unknown): McpConfigReport {
+  const data = rec(value)
+  const choices = rec(data.choices)
+  return {
+    folder: optStr(data.folder), trusted: bool(data.trusted), managedOnly: bool(data.managed_only), awaitingTrust: bool(data.awaiting_trust),
+    servers: list(data.servers, mcpServer, 60), pending: list(data.pending, mcpServer, 60),
+    errors: list(data.errors, (item) => { const error = rec(item); return { where: str(error.where), message: str(error.message) } }),
+    choices: { approved: strings(choices.enabledMcpjsonServers), denied: strings(choices.disabledMcpjsonServers) },
+  }
+}
+
+export function getMcpConfig(client: ApiClient, conversationId?: string | null): Promise<McpConfigReport> {
+  return client.request({ path: '/v1/settings/mcp', query: query(conversationId), parse: parseMcpConfigReport })
+}
+
+/** Approve, deny or forget one of the project's servers (written to the folder's grants file, outside the repository). */
+export function decideMcpServer(client: ApiClient, conversationId: string, server: string, decision: 'approve' | 'deny' | 'reset'): Promise<McpConfigReport> {
+  return client.request({
+    path: '/v1/settings/mcp/approval', method: 'PUT', body: { conversation_id: conversationId, server, decision }, parse: parseMcpConfigReport,
+  })
+}

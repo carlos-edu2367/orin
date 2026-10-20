@@ -40,6 +40,9 @@ export function skillToken(skill: SkillSummary, commands: PluginCommand[]): stri
 }
 
 /** Every entry the picker offers for a query, built-ins first. Exported for the composer, which must know the same. */
+/** W7: every built-in is offered (56), so the cap leaves room for the folder's commands, plugins and skills after them. */
+export const MAX_SLASH_ITEMS = 200
+
 export function slashItems(
   query: string,
   commands: readonly PluginCommand[],
@@ -69,7 +72,7 @@ export function slashItems(
       description: skill.description,
     })),
   ]
-  if (!needle) return items.slice(0, 50)
+  if (!needle) return items.slice(0, MAX_SLASH_ITEMS)
   // W7: the best match first, as Claude Code does — so Enter on `/context` runs /context, not a command whose
   // description mentions "contexto". Within a rank the order above (built-ins, folder, plugins, skills) holds.
   const rank = (item: SlashItem): number => {
@@ -87,7 +90,7 @@ export function slashItems(
     .filter((entry) => entry.rank >= 0)
     .sort((left, right) => left.rank - right.rank || left.index - right.index)
     .map((entry) => entry.item)
-    .slice(0, 50)
+    .slice(0, MAX_SLASH_ITEMS)
 }
 
 /**

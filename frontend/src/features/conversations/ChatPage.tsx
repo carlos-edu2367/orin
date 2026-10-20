@@ -3,7 +3,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, u
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { createBrowserApiClient } from '../../api/client'
 import {
-  cancelConversation, createConversation, getConversation, listConversations, listOlderConversationActivities, moveConversationToProject, rewindTurn, sendConversationMessage, streamConversationEvents, submitToolPermission, updateConversationPermissionMode,
+  cancelConversation, createConversation, getConversation, listConversations, listOlderConversationActivities, moveConversationToProject, sendConversationMessage, streamConversationEvents, submitToolPermission, updateConversationPermissionMode,
   type Conversation, type ConversationMessage, type ConversationMode,
 } from '../../api/conversations'
 import { ApiError } from '../../api/errors'
@@ -25,7 +25,7 @@ import { CommandPalette } from '../../components/CommandPalette'
 import { ModelPicker } from '../../components/ModelPicker'
 import {
   enqueueMessage, forkConversation, getFileHistory, listCommandCatalog, listQueue, removeQueued, renameConversation, rewindCode,
-  rewindMessage, runShell, type CatalogCommand, type FileHistoryItem, type QueuedInput,
+  rewindMessage, runShell, TOO_LARGE_TO_BACK_UP, type CatalogCommand, type FileHistoryItem, type QueuedInput,
 } from '../../api/sessionTools'
 import { QueuePanel } from './QueuePanel'
 import { RewindPicker, type RewindMode } from './RewindPicker'
@@ -53,6 +53,7 @@ import { StatusLineBar } from './StatusLineBar'
 import { TasksPanel } from './TasksPanel'
 import { TranscriptView } from './TranscriptView'
 import { useKeybindingHandlers } from '../keybindings/engine'
+import { useTheme } from '../../app/ThemeContext'
 import { notifySystem, windowIsAway } from '../notifications/systemNotify'
 import { TurnTimeline } from './TurnTimeline'
 import { WorkspaceFilePreview, type WorkspaceFileReference } from './WorkspaceFileCard'
@@ -166,11 +167,20 @@ export function ChatPage() {
   // W7 Batch D: the message queue, and the rewind picker with the file history it shows.
   const [queue, setQueue] = useState<QueuedInput[]>([])
   const [queueBusy, setQueueBusy] = useState(false)
-  const [rewindState, setRewindState] = useState<{ history: FileHistoryItem[]; busy: boolean; error: string | null } | null>(null)
+  const [rewindState, setRewindState] = useState<{
+    history: FileHistoryItem[]; busy: boolean; error: string | null
+    initialMessageId?: string | null; unbackable?: string[]; unbackableFor?: string | null
+  } | null>(null)
+  const theme = useTheme()
   // W7 Batch D2: the background tasks panel and the detailed transcript (ctrl+o).
   const [tasksOpen, setTasksOpen] = useState(false)
   const [transcriptOpen, setTranscriptOpen] = useState(false)
-  useKeybindingHandlers('Global', { 'app:toggleTranscript': () => setTranscriptOpen((open) => !open) })
+  // W7: ctrl+t (desktop) hides or shows the agent's task list above the composer.
+  const [todosHidden, setTodosHidden] = useState(false)
+  useKeybindingHandlers('Global', {
+    'app:toggleTranscript': () => setTranscriptOpen((open) => !open),
+    'app:toggleTodos': () => setTodosHidden((hidden) => !hidden),
+  })
   const [preferencesOpen, setPreferencesOpen] = useState(false)
   const [visionSetting, setVisionSetting] = useState<VisionModelSetting | null>(null)
   const [chatProvider, setChatProvider] = useState<ProviderName | null>(null)
@@ -948,6 +958,12 @@ export function ChatPage() {
     return () => { cancelled = true }
   }, [client, conversationId, running])
 
+  // W7: the person's messages in this conversation, oldest first, for up/down and ctrl+r in the composer.
+  const sentHistory = useMemo(
+    () => messages.filter((item) => item.role === 'user' && item.content.trim() && !item.message_id.startsWith('pending-')).map((item) => item.content),
+    [messages],
+  )
+
   const chatCommands = useChatCommands({
     client, conversationId, navigate, messages,
     title: conversation?.title ?? '', modelId: effectiveChatModelId, provider: effectiveChatProvider ?? '',
@@ -966,6 +982,7 @@ export function ChatPage() {
     reload: async () => { await loadSnapshot(false) },
     openRewind: () => { void openRewind() },
     openTasks: () => setTasksOpen(true),
+    setAccent: theme.setAccent,
     rename: async (title) => {
       const result = await renameConversation(client, conversationId, title)
       setConversation((current) => (current ? { ...current, title: result.title } : current))
@@ -1325,17 +1342,6 @@ export function ChatPage() {
     await loadSnapshot(false)
   }, [client, conversationId, decidedPlanKeys, loadSnapshot, openQuestionTurnIds, sendChatMessage])
 
-  const handleRewindTurn = useCallback(async (turnId: string) => {
-    setError(null)
-    try {
-      await rewindTurn(client, conversationId, turnId)
-      await loadSnapshot(true)
-    } catch (caught) {
-      setError('Não foi possível reverter as alterações deste turno.')
-      throw caught
-    }
-  }, [client, conversationId, loadSnapshot])
-
   const copyAssistantMessage = useCallback(async (messageId: string, content: string) => {
     if (!content.trim()) return
     try {
@@ -1514,34 +1520,45 @@ export function ChatPage() {
     }
   }
 
-  async function openRewind() {
-    setRewindState({ history: [], busy: true, error: null })
+  /** W7: the rewind picker; from a turn's "voltar a este ponto", it starts on that turn's message. */
+  async function openRewind(turnId?: string) {
+    const initialMessageId = turnId
+      ? messages.find((item) => item.role === 'user' && item.turn_id === turnId)?.message_id ?? null
+      : null
+    setRewindState({ history: [], busy: true, error: null, initialMessageId })
     try {
-      setRewindState({ history: await getFileHistory(client, conversationId), busy: false, error: null })
+      setRewindState({ history: await getFileHistory(client, conversationId), busy: false, error: null, initialMessageId })
     } catch {
-      setRewindState({ history: [], busy: false, error: null })
+      setRewindState({ history: [], busy: false, error: null, initialMessageId })
     }
   }
 
-  async function rewindTo(messageId: string, mode: RewindMode) {
+  async function rewindTo(messageId: string, mode: RewindMode, forceUnbacked: readonly string[] = []) {
     setRewindState((current) => (current ? { ...current, busy: true, error: null } : current))
     try {
       if (mode === 'code') {
-        const result = await rewindCode(client, conversationId, messageId)
+        const result = await rewindCode(client, conversationId, messageId, forceUnbacked)
         setRewindState(null)
-        setCommandNotice(`Código restaurado: ${result.restored.length + result.deleted.length} arquivo(s).`)
+        setCommandNotice(`Código restaurado: ${result.restored.length + result.deleted.length} arquivo(s)${result.unbacked.length > 0 ? `, ${result.unbacked.length} sem cópia para desfazer` : ''}.`)
         await loadSnapshot(false)
         return
       }
-      const result = await rewindMessage(client, conversationId, messageId, mode)
+      const result = await rewindMessage(client, conversationId, messageId, mode, forceUnbacked)
       setRewindState(null)
       window.dispatchEvent(new Event('orin:conversations-updated'))
       navigate(`/chats/${result.fork.conversationId}`, { state: { prefill: result.fork.prompt ?? '' } })
     } catch (caught) {
       const blocked = caught instanceof ApiError && caught.code === 'rewind_blocked'
+      // W7: when only the size of some files blocks the rewind, the picker offers to restore them anyway.
+      const files = blocked ? caught.blockedFiles : []
+      const onlySize = files.length > 0 && files.every((file) => file.reason === TOO_LARGE_TO_BACK_UP)
       setRewindState((current) => (current ? {
         ...current, busy: false,
-        error: blocked ? 'Alguns arquivos não puderam ser restaurados (grandes demais ou fora da pasta); nada foi mudado.' : 'Não foi possível voltar a esta mensagem.',
+        error: blocked
+          ? (onlySize ? 'Nada foi mudado ainda.' : 'Alguns arquivos não puderam ser restaurados (grandes demais ou fora da pasta); nada foi mudado.')
+          : 'Não foi possível voltar a esta mensagem.',
+        unbackable: onlySize ? files.map((file) => file.path) : [],
+        unbackableFor: onlySize ? messageId : null,
       } : current))
     }
   }
@@ -1662,7 +1679,10 @@ export function ChatPage() {
           history={rewindState.history}
           busy={rewindState.busy}
           error={rewindState.error}
-          onRewind={(messageId, mode) => { void rewindTo(messageId, mode) }}
+          initialMessageId={rewindState.initialMessageId ?? null}
+          unbackable={rewindState.unbackable ?? []}
+          unbackableFor={rewindState.unbackableFor ?? null}
+          onRewind={(messageId, mode, force) => { void rewindTo(messageId, mode, force) }}
           onClose={() => setRewindState(null)}
         />
       )}
@@ -1987,7 +2007,7 @@ export function ChatPage() {
                         onToolPermission={submitToolPermissionDecision}
                         onCodeSessionAccept={submitCodeSessionProposal}
                         onCodeSessionDecline={declineCodeSessionProposal}
-                        onRewindTurn={handleRewindTurn}
+                        onOpenRewindTurn={(turnId) => { void openRewind(turnId) }}
                         onApprovePlanAcceptEdits={isTurnFinished ? undefined : handleApprovePlanAcceptEdits}
                         onApprovePlanAskPermissions={isTurnFinished ? undefined : handleApprovePlanAskPermissions}
                         onRequestPlanChanges={isTurnFinished ? undefined : handleRequestPlanChanges}
@@ -2068,7 +2088,7 @@ export function ChatPage() {
                     onToolPermission={submitToolPermissionDecision}
                     onCodeSessionAccept={submitCodeSessionProposal}
                     onCodeSessionDecline={declineCodeSessionProposal}
-                    onRewindTurn={handleRewindTurn}
+                    onOpenRewindTurn={(turnId) => { void openRewind(turnId) }}
                     onApprovePlanAcceptEdits={isUnclaimedTurnActive ? handleApprovePlanAcceptEdits : undefined}
                     onApprovePlanAskPermissions={isUnclaimedTurnActive ? handleApprovePlanAskPermissions : undefined}
                     onRequestPlanChanges={isUnclaimedTurnActive ? handleRequestPlanChanges : undefined}
@@ -2285,7 +2305,8 @@ export function ChatPage() {
           hideCodeModeToggle={true}
           codePermissionMode={codePermissionMode}
           onCodePermissionModeChange={changeCodePermissionMode}
-          todos={activity.todos}
+          todos={todosHidden ? [] : activity.todos}
+          history={sentHistory}
           onSearchWorkspaceFiles={searchWorkspaceFiles}
           worktreeIsolated={worktreeIsolated}
           onWorktreeIsolatedChange={toggleWorktreeIsolation}

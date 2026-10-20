@@ -43,7 +43,7 @@ export function TrustedFoldersSection() {
                   <code className="code-settings__rule-text">{path}</code>
                   {confirming === path ? (
                     <>
-                      <button type="button" className="button button--danger" disabled={busy} onClick={() => void revoke(path)}>Revogar</button>
+                      <button type="button" className="button w7-danger-button" disabled={busy} onClick={() => void revoke(path)}>Revogar</button>
                       <button type="button" className="ghost-button" disabled={busy} onClick={() => setConfirming(null)}>Cancelar</button>
                     </>
                   ) : (

@@ -94,18 +94,28 @@ export type CodeRewindResult = {
   skipped: Array<{ path: string; reason: string }>
   blocked: boolean
   undoId: string | null
+  /** W7: files rewound without an undo copy, because the person chose to (`forceUnbacked`). */
+  unbacked: string[]
 }
 
-export function rewindCode(client: ApiClient, conversationId: string, messageId: string, intent = client.createMutationIntent()): Promise<CodeRewindResult> {
+/** W7: the one reason a person may waive for a file (its current content is too large to back up). */
+export const TOO_LARGE_TO_BACK_UP = 'its current content is too large to keep an undo copy'
+
+function rewindBody(mode: string, forceUnbacked: readonly string[]) {
+  return forceUnbacked.length > 0 ? { mode, force_unbacked: forceUnbacked.slice(0, 50) } : { mode }
+}
+
+export function rewindCode(client: ApiClient, conversationId: string, messageId: string, forceUnbacked: readonly string[] = [],
+  intent = client.createMutationIntent()): Promise<CodeRewindResult> {
   return client.request({
-    path: `${base(conversationId)}/messages/${encodeURIComponent(messageId)}/rewind`, method: 'POST', intent, body: { mode: 'code' },
+    path: `${base(conversationId)}/messages/${encodeURIComponent(messageId)}/rewind`, method: 'POST', intent, body: rewindBody('code', forceUnbacked),
     parse: (value) => {
       const data = rec(value)
       return {
         messageId: str(data.message_id, messageId), restored: strings(data.restored), deleted: strings(data.deleted),
         unchanged: strings(data.unchanged),
         skipped: list(data.skipped, (item) => { const entry = rec(item); return { path: str(entry.path), reason: str(entry.reason) } }),
-        blocked: bool(data.blocked), undoId: optStr(data.undo_id),
+        blocked: bool(data.blocked), undoId: optStr(data.undo_id), unbacked: strings(data.unbacked),
       }
     },
   })
@@ -235,13 +245,15 @@ export function renameConversation(client: ApiClient, conversationId: string, ti
 }
 
 /** Per-message rewind of the conversation (a fork before the message) or of both the files and the conversation. */
-export function rewindMessage(client: ApiClient, conversationId: string, messageId: string, mode: 'conversation' | 'both', intent = client.createMutationIntent()):
-  Promise<{ fork: ForkResult; restored: string[]; deleted: string[] }> {
+export function rewindMessage(client: ApiClient, conversationId: string, messageId: string, mode: 'conversation' | 'both',
+  forceUnbacked: readonly string[] = [], intent = client.createMutationIntent()):
+  Promise<{ fork: ForkResult; restored: string[]; deleted: string[]; unbacked: string[] }> {
   return client.request({
-    path: `${base(conversationId)}/messages/${encodeURIComponent(messageId)}/rewind`, method: 'POST', intent, body: { mode },
+    path: `${base(conversationId)}/messages/${encodeURIComponent(messageId)}/rewind`, method: 'POST', intent,
+    body: rewindBody(mode, mode === 'both' ? forceUnbacked : []),
     parse: (value) => {
       const data = rec(value)
-      return { fork: forkResult(data.fork), restored: strings(data.restored), deleted: strings(data.deleted) }
+      return { fork: forkResult(data.fork), restored: strings(data.restored), deleted: strings(data.deleted), unbacked: strings(data.unbacked) }
     },
   })
 }

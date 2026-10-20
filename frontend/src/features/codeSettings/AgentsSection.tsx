@@ -127,7 +127,7 @@ export function AgentsSection() {
                       <button type="button" className="ghost-button" disabled={busy} onClick={() => { setForm(formOf(agent)); setEditing(agent.name) }}>Editar</button>
                       {confirming === `${agent.origin}:${agent.name}` ? (
                         <>
-                          <button type="button" className="button button--danger" disabled={busy} onClick={() => void remove(agent)}>Apagar o arquivo</button>
+                          <button type="button" className="button w7-danger-button" disabled={busy} onClick={() => void remove(agent)}>Apagar o arquivo</button>
                           <button type="button" className="ghost-button" disabled={busy} onClick={() => setConfirming(null)}>Cancelar</button>
                         </>
                       ) : (

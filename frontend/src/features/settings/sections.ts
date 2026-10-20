@@ -43,6 +43,7 @@ export const SETTINGS_GROUPS: SettingsGroup[] = [
     items: [
       { id: 'permissions', label: 'Permissões', path: '/settings/permissions', lede: 'As regras de permissão em vigor, de onde vem cada uma, e as que você pode mudar.', requires: 'host_folders' },
       { id: 'hooks', label: 'Hooks', path: '/settings/hooks', lede: 'Comandos que rodam em momentos do agente, e os arquivos onde ficam.', requires: 'host_folders' },
+      { id: 'mcp-scopes', label: 'MCP por escopo', path: '/settings/mcp-scopes', lede: 'Servidores MCP dos arquivos de configuração, por escopo, e a aprovação dos servidores de um projeto.', requires: 'host_folders' },
       { id: 'agents', label: 'Agentes', path: '/settings/agents', lede: 'Subagentes definidos em arquivos: quando usar, instruções, ferramentas e modelo.', requires: 'host_folders' },
       { id: 'output-styles', label: 'Estilo de resposta', path: '/settings/output-styles', lede: 'Como o agente escreve as respostas.', requires: 'host_folders' },
       { id: 'keybindings', label: 'Atalhos', path: '/settings/keybindings', lede: 'As teclas da interface, no formato do keybindings.json do Claude Code.', requires: 'host_folders' },

@@ -9,6 +9,8 @@ import { CODE_PERMISSION_MODES } from '../../api/codeMode'
 import { getConversationOverview } from '../../api/conversations'
 import { addDirectory, compactConversation, getContext, getInstance, type ContextReport } from '../../api/sessionTools'
 import { chooseOutputStyle } from '../../api/settings'
+import type { ThemeAccent } from '../../app/ThemeContext'
+import { moreCommandHandlers } from './moreCommands'
 import { BUILTIN_COMMANDS, type BuiltinCommand, findBuiltin, isExcludedCommand, parseSlash } from './builtins'
 
 export type InfoPanel =
@@ -45,6 +47,8 @@ export type ChatCommandDeps = {
   fork?: (prompt: string) => Promise<void>
   /** W7 surfaces (Batch D2). */
   openTasks?: () => void
+  /** W7 Batch F: /color changes the interface's accent. */
+  setAccent?: (accent: ThemeAccent) => void
 }
 
 type Handler = (args: string) => Promise<void> | void
@@ -114,6 +118,7 @@ export function chatCommandHandlers(deps: ChatCommandDeps): Record<string, Handl
     ...(deps.openTasks ? { tasks: () => deps.openTasks?.() } : {}),
   }
   return {
+    ...moreCommandHandlers(deps),
     ...surfaces,
     usage: async () => {
       const overview = await getConversationOverview(deps.client, deps.conversationId)

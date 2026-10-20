@@ -8,7 +8,10 @@ export type ApiErrorDetails = {
   retryAfter: number | null
 }
 
-type ApiErrorInput = Partial<Omit<ApiErrorDetails, 'status'>> & Pick<ApiErrorDetails, 'status'> & { problems?: unknown }
+type ApiErrorInput = Partial<Omit<ApiErrorDetails, 'status'>> & Pick<ApiErrorDetails, 'status'> & { problems?: unknown; files?: unknown }
+
+/** W7: a file a 409 `rewind_blocked` names (`details.files`), and why it blocked the rewind. */
+export type BlockedFile = { path: string; reason: string }
 
 /** W7: what a 422 names as wrong (`details.problems`), bounded so a hostile server cannot flood the interface. */
 const MAX_PROBLEMS = 50
@@ -36,6 +39,7 @@ export class ApiError extends Error {
   readonly retryable: boolean
   readonly retryAfter: number | null
   readonly problems: readonly string[]
+  readonly blockedFiles: readonly BlockedFile[]
 
   constructor(input: ApiErrorInput) {
     const code = safeString(input.code) ?? 'request_failed'
@@ -50,6 +54,7 @@ export class ApiError extends Error {
     this.retryable = input.retryable === true
     this.retryAfter = safeRetryAfter(input.retryAfter)
     this.problems = Object.freeze(safeProblems(input.problems))
+    this.blockedFiles = Object.freeze(safeFiles(input.files))
   }
 
   toPublicDetails(): ApiErrorDetails {
@@ -78,7 +83,16 @@ export function parseApiError(status: number, value: unknown): ApiError {
     retryable: envelope.retryable === true,
     retryAfter: safeRetryAfter(envelope.retry_after),
     problems: isRecord(envelope.details) ? envelope.details.problems : undefined,
+    files: isRecord(envelope.details) ? envelope.details.files : undefined,
   })
+}
+
+function safeFiles(value: unknown): BlockedFile[] {
+  if (!Array.isArray(value)) return []
+  return value
+    .filter((item): item is Record<string, unknown> => isRecord(item) && typeof item.path === 'string' && item.path.length > 0 && item.path.length <= 4096)
+    .slice(0, MAX_PROBLEMS)
+    .map((item) => ({ path: String(item.path), reason: typeof item.reason === 'string' ? item.reason.slice(0, 300) : '' }))
 }
 
 function safeProblems(value: unknown): string[] {

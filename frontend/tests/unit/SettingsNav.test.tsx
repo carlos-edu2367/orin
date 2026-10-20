@@ -19,7 +19,8 @@ describe('SettingsNav', () => {
   it('renders known values and a labelled pending marker', () => {
     renderNav('/settings/general', { skills: { value: '18' }, mcp: { value: '2', pending: true } })
     expect(within(screen.getByRole('link', { name: /Skills/ })).getByText('18')).toBeInTheDocument()
-    expect(within(screen.getByRole('link', { name: /MCP/ })).getByLabelText('Aguardando sua ação')).toBeInTheDocument()
+    // W7: 'MCP por escopo' (Orin Code) also has MCP in its name; the badge belongs to the MCP page's link.
+    expect(within(screen.getByRole('link', { name: /^MCP(?! por escopo)/ })).getByLabelText('Aguardando sua ação')).toBeInTheDocument()
   })
 
   it('does not render an unknown badge as zero', () => {

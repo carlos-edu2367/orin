@@ -24,7 +24,6 @@ export const ACTIONS: Record<string, ActionSpec> = {
   'chat:cancel': both('Chat', 'Interromper o agente', 'escape'),
   'chat:cycleMode': both('Chat', 'Trocar o modo de permissão', 'shift+tab'),
   'chat:modelPicker': both('Chat', 'Escolher o modelo', 'alt+p'),
-  'chat:thinkingToggle': both('Chat', 'Ligar ou desligar o raciocínio estendido', 'alt+t'),
   'chat:sendNow': both('Chat', 'Enviar agora (interrompe e envia)', 'ctrl+enter'),
   'chat:clearInput': { context: 'Chat', label: 'Limpar o campo de mensagem', browser: [], electron: ['ctrl+l'] },
   'history:search': both('Chat', 'Buscar no histórico de mensagens', 'ctrl+r'),
@@ -65,7 +64,7 @@ export const ACTIONS: Record<string, ActionSpec> = {
 export const UNSUPPORTED_ACTIONS = new Set([
   'app:interrupt', 'app:exit', 'app:redraw', 'app:toggleReplTab', 'app:toggleDiffNoiseFilter', 'app:toggleDiffPreSession',
   'app:cycleDiffBase', 'app:diffFileListUp', 'app:diffFileListDown', 'chat:clearScreen', 'chat:killAgents', 'chat:fastMode',
-  'chat:queueSubmit', 'chat:undo', 'chat:externalEditor', 'chat:stash', 'chat:imagePaste', 'abovePrompt:toggle', 'abovePrompt:focus',
+  'chat:queueSubmit', 'chat:undo', 'chat:thinkingToggle', 'chat:externalEditor', 'chat:stash', 'chat:imagePaste', 'abovePrompt:toggle', 'abovePrompt:focus',
   'voice:pushToTalk', 'task:background', 'confirm:nextField', 'confirm:previousField', 'confirm:toggle', 'confirm:cycleMode',
   'permission:toggleDebug', 'historySearch:cycleScope', 'diff:previousSource', 'diff:nextSource', 'diff:back', 'scroll:pageUp',
   'scroll:pageDown', 'scroll:fullPageUp', 'scroll:fullPageDown', 'scroll:top', 'scroll:bottom', 'scroll:lineUp', 'scroll:lineDown',

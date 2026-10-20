@@ -9,16 +9,23 @@ export type RewindableMessage = { messageId: string; content: string; createdAt?
  * The per-message rewind picker (W7, `/rewind` or Esc Esc): choose one of the person's messages, then restore the
  * files as they were before it, go back in the conversation to it (a new conversation; the original stays), or both.
  */
-export function RewindPicker({ messages, history, busy = false, error = null, onRewind, onClose }: {
+export function RewindPicker({ messages, history, busy = false, error = null, initialMessageId = null, unbackable = [], unbackableFor = null, onRewind, onClose }: {
   messages: readonly RewindableMessage[]
   history: readonly FileHistoryItem[]
   busy?: boolean
   error?: string | null
-  onRewind: (messageId: string, mode: RewindMode) => void
+  /** W7: the message to start on (a turn's "voltar a este ponto"); the newest otherwise. */
+  initialMessageId?: string | null
+  /** W7: after a blocked code rewind, the files whose only problem is their size (no undo copy is possible). */
+  unbackable?: readonly string[]
+  /** The message whose rewind named `unbackable`: the offer holds only for that message. */
+  unbackableFor?: string | null
+  onRewind: (messageId: string, mode: RewindMode, forceUnbacked?: readonly string[]) => void
   onClose: () => void
 }) {
   const newestFirst = useMemo(() => [...messages].reverse(), [messages])
-  const [selected, setSelected] = useState(0)
+  const [selected, setSelected] = useState(() => Math.max(0, newestFirst.findIndex((item) => item.messageId === initialMessageId)))
+  const [lastMode, setLastMode] = useState<RewindMode>('code')
   const listRef = useRef<HTMLOListElement>(null)
   const current = newestFirst[selected] ?? null
   // The files a code rewind restores: every file a message from the chosen one onwards changed.
@@ -67,14 +74,23 @@ export function RewindPicker({ messages, history, busy = false, error = null, on
                 ? <p>Nenhum arquivo mudou depois desta mensagem.</p>
                 : <p>{changed.length === 1 ? '1 arquivo mudou' : `${changed.length} arquivos mudaram`} depois desta mensagem: {changed.slice(0, 4).join(', ')}{changed.length > 4 ? '…' : ''}</p>}
               {error && <p className="rewind-picker__error" role="alert">{error}</p>}
+              {unbackable.length > 0 && current && current.messageId === unbackableFor && (
+                <div className="rewind-picker__unbacked">
+                  <p>Estes arquivos ficaram grandes demais para guardar uma cópia; se você restaurar mesmo assim, o conteúdo
+                    atual deles se perde e não dá para desfazer:</p>
+                  <ul>{unbackable.map((path) => <li key={path}><code>{path}</code></li>)}</ul>
+                  <button type="button" className="button w7-danger-button" disabled={busy}
+                    onClick={() => onRewind(current.messageId, lastMode, unbackable)}>Restaurar mesmo assim</button>
+                </div>
+              )}
             </div>
             <div className="rewind-picker__actions">
               <button type="button" className="ghost-button rewind-picker__main" disabled={busy || !current || changed.length === 0}
-                onClick={() => current && onRewind(current.messageId, 'code')}>Restaurar o código</button>
+                onClick={() => { if (current) { setLastMode('code'); onRewind(current.messageId, 'code') } }}>Restaurar o código</button>
               <button type="button" className="ghost-button" disabled={busy || !current}
                 onClick={() => current && onRewind(current.messageId, 'conversation')}>Voltar a conversa</button>
               <button type="button" className="ghost-button" disabled={busy || !current || changed.length === 0}
-                onClick={() => current && onRewind(current.messageId, 'both')}>Os dois</button>
+                onClick={() => { if (current) { setLastMode('both'); onRewind(current.messageId, 'both') } }}>Os dois</button>
             </div>
             <p className="rewind-picker__note">Voltar a conversa abre uma conversa nova a partir desta mensagem; a original continua como está.</p>
           </>
