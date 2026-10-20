@@ -208,3 +208,59 @@ Batch C close (run by the planner; the executor ended without a report, and its 
   Batch C alike: the container had no `node`/`npm`, which both tests run. With Node installed both pass; the CI runners
   have it. Not a code fault.
 - Deviation 1's note: the final `chat.py` matches the replay, so the anchor choice changed nothing.
+
+## Batch D1 — Chat surfaces (Tasks 16–17)
+
+Commits (on `main`, not pushed):
+
+- `8b84b12` feat(w7): shell mode, message queue, permission card and rewind picker in the chat
+- `d127efe` test(w7): browser tests and visual baselines for the chat surfaces
+
+Decisions 17–21 (as planned): the queue is the server's (17); the edit's second option switches to accept-edits and
+other rules are kept for the folder (18); Escape twice on an empty composer opens the rewind picker (19); the light
+theme gets readable colours for the permission card and receipts (20); the older visual specs' failures are left as
+they are (21).
+
+Suites (run after Task 17, on Windows):
+
+- `npm --prefix frontend test`: `Test Files  109 passed (109)` and `Tests  654 passed (654)`. The new file
+  `tests/unit/w7ChatSurfacesD1.test.tsx` has 10 tests.
+- `npm --prefix frontend run lint`: exit 0 (`eslint . --max-warnings=0`).
+- `npm --prefix frontend run build`: exit 0.
+- `npm --prefix frontend run test:e2e`: `46 passed (1.7m)`. The new file `tests/e2e/w7-chat-d1.spec.ts` has 6 tests.
+- `uv run pytest -q tests/unit/installation`: `35 passed, 33 skipped in 0.70s`.
+- `tests/visual/w7-chat-d1.spec.ts` and `tests/visual/w7-commands.spec.ts` (run without `--update-snapshots` after the
+  baselines were written): `18 passed`.
+
+Deviations and notes:
+
+1. Task 16, Step 1 and Task 17, Step 1 hold no test code in the plan; the test files given in the "Create" blocks
+   (`tests/unit/w7ChatSurfacesD1.test.tsx`, `tests/e2e/w7-chat-d1.spec.ts`, `tests/visual/w7-chat-d1.spec.ts`) were
+   written as given. Task 17's Step 2 expects the e2e tests to fail before Task 16; they were run after Task 16 (the
+   plan's order), so that failing run was not observed.
+2. Task 17 writes 12 new PNGs under `frontend/tests/visual/w7-chat-d1.spec.ts-snapshots/`, not the ten the brief names:
+   the spec as written takes six screenshots per theme (shell, queue, permission, rewind, rewind-blocked, rewind-empty).
+   All 12 are in the allowed folder and are committed; the four changed `w7-commands` PNGs are the only other baselines
+   that changed. No other PNG changed.
+3. Queueing and `!` text (plan prose vs. code): the prose says `/` and `!` texts are not queued. The plan's code
+   excludes `!` only in a Code conversation (`shellMode` requires `effectiveCodeMode === 'code'`), so in a chat
+   conversation a `!` text typed while a turn runs is queued. In a Code conversation it is not queued and Enter does
+   nothing while the turn runs. Not changed; left as the plan's code.
+4. The commit trailer is `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`, as the brief asks, although the
+   session's own attribution note names another model.
+5. Not covered: the `both` branch of `rewindMessage` has no test that exercises it end to end (the same gap Batch C
+   recorded as deviation 5); the e2e rewind test uses `conversation` mode only.
+6. Not run: the Linux container suite. The brief asks only for the Windows close checks listed above.
+7. Untouched and failing on `main` (left as decision 21 says): the `settings`, `execution-page`, `live-surface` and
+   `multi-agent` visual specs; they were not run in this batch.
+
+Planner's verification of Batch D1:
+
+- Every source and test file the batch changed is identical to the validated prototype; the plan, applied alone to a
+  clean tree, passed the frontend unit tests (654), lint, build and e2e (46) before the executor ran.
+- 12 new PNGs is right (the plan's "ten" was a miscount: the rewind test takes two screenshots per view).
+- `d8f7051`: the queue baselines were not stable (the running turn's pulse animates and its elapsed-seconds count
+  appears after a second, both on JS timers that the screenshot freeze does not stop). Both are now masked and the
+  queue test waits for the count; 4 consecutive runs of both W7 visual specs passed (18/18).
+- Deviation 3 is a real UX gap for the review: in a Code conversation, Enter on a `!command` while a turn runs does
+  nothing and says nothing.
