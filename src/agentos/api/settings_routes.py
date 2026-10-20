@@ -10,9 +10,11 @@ person edits them (the raw rules and hooks of a writable layer).
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any, Callable, Literal
+from uuid import uuid4
 
 from fastapi import FastAPI, Request
 from fastapi.concurrency import run_in_threadpool
@@ -154,9 +156,31 @@ def effective_report(root: Path | None, trusted: bool) -> dict[str, Any]:
     }
 
 
+def _inside_folder(root: Path | None, target: Path) -> None:
+    """W7-R7: a repository's `.orin` may be a link (a junction or symlink) to another folder; a project write must
+    resolve inside the repository, or it would turn a project rule, hook or agent into one somewhere else."""
+    if root is None:
+        return
+    base = root.resolve()
+    parent = target.resolve().parent
+    if parent != base and base not in parent.parents:
+        raise SettingsRejected("outside_folder", ["a project's settings must stay inside its folder"])
+
+
+def _writable_target(root: Path | None, layer: str) -> Path:
+    from agentos.settings.paths import SettingsPaths
+
+    try:
+        target = SettingsPaths(root).writable_file(layer)
+    except ValueError as error:
+        raise SettingsRejected("project_required", [str(error)]) from error
+    if layer == "project":  # the local layer lives in the person's Orin folder, not in the repository
+        _inside_folder(root, target)
+    return target
+
+
 def change_permission_rule(root: Path | None, change: PermissionRuleChange) -> None:
     from agentos.permissions.rules import parse_rule
-    from agentos.settings.paths import SettingsPaths
     from agentos.settings.writer import update_settings_file
 
     rule = change.rule.strip()
@@ -165,10 +189,7 @@ def change_permission_rule(root: Path | None, change: PermissionRuleChange) -> N
             raise SettingsRejected("invalid_directory", ["a folder is one line"])
     elif change.op == "add" and parse_rule(rule, kind=change.kind, source=change.layer) is None:
         raise SettingsRejected("invalid_rule", [f"'{rule[:200]}' is not a permission rule"])
-    try:
-        target = SettingsPaths(root).writable_file(change.layer)
-    except ValueError as error:
-        raise SettingsRejected("project_required", [str(error)]) from error
+    target = _writable_target(root, change.layer)
 
     def mutate(data: dict[str, Any]) -> None:
         permissions = data.get("permissions")
@@ -223,7 +244,6 @@ def hooks_report(root: Path | None, trusted: bool) -> dict[str, Any]:
 
 def change_hooks(root: Path | None, change: HooksChange) -> None:
     from agentos.hooks.config import parse_hook_mapping
-    from agentos.settings.paths import SettingsPaths
     from agentos.settings.writer import update_settings_file
 
     specs, errors = parse_hook_mapping(change.hooks, change.layer)
@@ -232,10 +252,7 @@ def change_hooks(root: Path | None, change: HooksChange) -> None:
         problems.append("callback hooks exist only for an SDK host")
     if problems:
         raise SettingsRejected("invalid_hooks", problems)
-    try:
-        target = SettingsPaths(root).writable_file(change.layer)
-    except ValueError as error:
-        raise SettingsRejected("project_required", [str(error)]) from error
+    target = _writable_target(root, change.layer)
 
     def mutate(data: dict[str, Any]) -> None:
         if change.hooks:
@@ -330,21 +347,36 @@ def write_agent(root: Path | None, name: str, body: AgentFile) -> Path:
     if body.max_turns is not None:
         lines.append(f"maxTurns: {body.max_turns}")
     folder = _agent_dir(body.scope, root)
-    folder.mkdir(parents=True, exist_ok=True)
     target = folder / f"{clean}.md"
+    if body.scope == "project":
+        _inside_folder(root, target)  # W7-R7
+    folder.mkdir(parents=True, exist_ok=True)
     if body.create and target.exists():
         raise SettingsRejected("agent_exists", [f"there is already an agent '{clean}' in this folder"], status=409)
     existing = target.read_text(encoding="utf-8", errors="replace") if target.is_file() else ""
     text = "\n".join([*lines, *_kept_frontmatter(existing), "---", "", body.prompt.strip(), ""])
-    temporary = folder / f".{clean}.md.tmp"
-    temporary.write_text(text, encoding="utf-8")
+    temporary = _write_new_file(folder, clean, text)
     try:
         parse_agent_file(temporary, origin=body.scope)  # what Orin will read back, checked before it replaces anything
     except (OSError, ValueError) as error:
         temporary.unlink(missing_ok=True)
         raise SettingsRejected("invalid_agent", [str(error)[:300]]) from error
-    temporary.replace(target)
+    os.replace(temporary, target)
     return target
+
+
+def _write_new_file(folder: Path, name: str, text: str) -> Path:
+    """Write ``text`` to a random temporary name created exclusively (O_EXCL), so a file or link planted at a
+    predictable name is never followed or truncated (W7-R7)."""
+    from agentos.settings.writer import PRIVATE_FILE_MODE
+
+    temporary = folder / f".{name}.{uuid4().hex}.tmp"
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, PRIVATE_FILE_MODE)
+    with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+        handle.write(text)
+        handle.flush()
+        os.fsync(handle.fileno())
+    return temporary
 
 
 def delete_agent(root: Path | None, name: str, scope: str) -> bool:
@@ -352,6 +384,8 @@ def delete_agent(root: Path | None, name: str, scope: str) -> bool:
     if not _AGENT_NAME.fullmatch(clean):
         raise SettingsRejected("invalid_agent_name", ["not an agent name"])
     target = _agent_dir(scope, root) / f"{clean}.md"
+    if scope == "project":
+        _inside_folder(root, target)  # W7-R7
     if not target.is_file() or target.is_symlink():
         return False
     target.unlink()
@@ -376,17 +410,13 @@ def output_styles_report(root: Path | None, trusted: bool) -> dict[str, Any]:
 
 
 def change_output_style(root: Path | None, trusted: bool, change: OutputStyleChange) -> None:
-    from agentos.settings.paths import SettingsPaths
     from agentos.settings.writer import update_settings_file
 
     key = change.style.strip().lower()
     known = {item["key"] for item in output_styles_report(root, trusted)["styles"]}
     if key not in known:
         raise SettingsRejected("unknown_output_style", [f"no output style named '{change.style[:80]}'"])
-    try:
-        target = SettingsPaths(root).writable_file(change.layer)
-    except ValueError as error:
-        raise SettingsRejected("project_required", [str(error)]) from error
+    target = _writable_target(root, change.layer)
 
     def mutate(data: dict[str, Any]) -> None:
         data["outputStyle"] = key
