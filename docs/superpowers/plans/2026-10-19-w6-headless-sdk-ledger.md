@@ -276,3 +276,32 @@ Not done or not verified (honest gaps):
   files (`trusted-workspaces.json`, `settings.json`) still stands; this batch's tests do not write there.
 - **Frontend:** no frontend file changed; not run.
 - **Installers:** unchanged.
+
+## Batch D — Conformance (Task 17)
+
+Commit: `2b724cd` `test(w6): the official claude-agent-sdk drives orin code (W6 acceptance)`, the only new file
+`tests/integration/cli_code/test_sdk_conformance.py` (verbatim from the plan; no test weakened or edited).
+
+The official `claude-agent-sdk==0.2.159`, unmodified, with `cli_path` pointing at `orin-code`, against the live runtime
+on the fake Ollama. Results (Windows, 2026-10-20):
+
+- `test_a_simple_query`: passed (single text block "Hello from fake.", success result).
+- `test_streaming_partial_messages`: passed (message_start ... message_stop, two content_block_delta).
+- `test_can_use_tool_allows_and_denies`: passed (allow writes the file; deny leaves it absent and records a permission denial).
+- `test_the_sdks_hooks`: passed (the SDK's PreToolUse hook denies the Write; tool_use_id matches the tool block).
+- `test_interrupt`: passed (error_during_execution after an interrupt, fewer than 40 deltas).
+- `test_resume`: passed (same session_id, success, conversation listed).
+
+Suites after this commit:
+
+- `uv run pytest -q tests/integration/cli_code/test_sdk_conformance.py`: 6 passed (46 s).
+- `uv run pytest -q tests/integration`: 113 passed, 65 skipped (195 s). The 65 skips are the Postgres/Redis tests
+  (`AGENTOS_TEST_POSTGRES_DSN` / `AGENTOS_REDIS_URL` not configured), the same count as after Task 16.
+
+Not done or not verified (honest gaps):
+
+- The plan's "see it can fail" check was not run as a separate step: the test was not made to fail on purpose (the plan
+  forbids editing it). Its failure path is therefore not demonstrated by this batch.
+- The unit suite (`tests/unit`) was not re-run in this batch.
+- The 65 skipped tests need Postgres/Redis; those paths are not verified here.
+- Windows only; POSIX-specific branches are not covered.
