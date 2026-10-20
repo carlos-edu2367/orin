@@ -27,6 +27,8 @@ def _isolated_settings_dirs(tmp_path_factory: pytest.TempPathFactory, monkeypatc
     from agentos.installation.paths import reset_cached_paths
 
     monkeypatch.setenv("ORIN_RUN_DIR", str(root / "orin-run"))
+    # And the data folder (W6): in a checkout it is the repository's data/, the developer's own Orin data.
+    monkeypatch.setenv("ORIN_DATA_DIR", str(root / "orin-data"))
     # Claude Code's ~/.claude.json is found next to ORIN_CLAUDE_HOME (inside this temporary folder) unless overridden.
     monkeypatch.delenv("ORIN_CLAUDE_CONFIG", raising=False)
     reset_cached_paths()

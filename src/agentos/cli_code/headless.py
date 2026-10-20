@@ -213,6 +213,22 @@ class HeadlessRun:
         self._debug(f"turn {turn_id} queued in {self.conversation_id}")
         return turn_id
 
+    def _with_transcript(self, event: dict[str, Any]) -> dict[str, Any]:
+        """A tool event with its input or result, read from the turn's transcript (never in the activity payload)."""
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else None
+        entry_id = payload.get("transcript_id") if payload else None
+        if not isinstance(entry_id, str) or self.conversation_id is None:
+            return event
+        try:
+            entry = self.client.get(f"/v1/conversations/{self.conversation_id}/transcript/{entry_id}")
+        except CliRuntimeError:
+            self._debug(f"transcript {entry_id} could not be read")
+            return event
+        if not isinstance(entry, dict):
+            return event
+        merged = {**payload, **{key: entry[key] for key in ("tool_input", "tool_result") if key in entry}}
+        return {**event, "payload": merged}
+
     def _usage(self) -> TurnUsage:
         if self.conversation_id is None:
             return TurnUsage()
@@ -293,7 +309,7 @@ class HeadlessRun:
             if kind == "event":
                 if str(item.get("turn_id") or "") != turn_id:
                     continue
-                for message in self.translator.feed(item):
+                for message in self.translator.feed(self._with_transcript(item)):
                     if self.stream_json:
                         self.out.message(message)
                 event_type = str(item.get("event_type") or "")

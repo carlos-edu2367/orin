@@ -136,18 +136,27 @@ def test_setting_sources_limit_the_file_layers(tmp_path: Path) -> None:
     assert runtime.toolset._permission_broker.setting_sources == ("project",)
 
 
-def test_tool_events_carry_the_input_and_result_only_for_a_cli_turn(tmp_path: Path) -> None:
+def test_tool_events_point_at_the_transcript_only_for_a_cli_turn(tmp_path: Path) -> None:
+    # Activity payloads are sanitized (512-character strings, redacted keys such as "prompt"): the input and the
+    # result are written to the turn's transcript and the events carry its id (Lote W6, Task 12).
+    from agentos.agentic.cli_transcript import TranscriptStore
+
     session = _session(tmp_path, CliTurnOptions())
-    session.emit_lifecycle(session.turn, "tool_started", tool_name="read_file", invocation_id="c1", tool_input={"path": "a.txt"})
-    session.emit_lifecycle(session.turn, "tool_finished", tool_name="read_file", invocation_id="c1", status="succeeded",
-                           summary="ok", tool_payload={}, tool_content="line 1\n")
+    long_result = "line\n" * 2000
+    session.emit_lifecycle(session.turn, "tool_started", tool_name="run_subagent", invocation_id="c1",
+                           tool_input={"prompt": "review the diff", "subagent_type": "general"})
+    session.emit_lifecycle(session.turn, "tool_finished", tool_name="run_subagent", invocation_id="c1", status="succeeded",
+                           summary="ok", tool_payload={}, tool_content=long_result)
     payloads = {str(event): payload for event, _, payload in session.store.recorded}
     started = next(payload for event, payload in payloads.items() if event.endswith("TOOL_STARTED") or event == "tool.started")
     finished = next(payload for event, payload in payloads.items() if event.endswith("TOOL_FINISHED") or event == "tool.finished")
-    assert started["tool_input"] == {"path": "a.txt"} and finished["tool_result"] == "line 1\n"
+    assert "tool_input" not in started and "tool_result" not in finished
+    store = TranscriptStore("c")
+    assert store.read(started["transcript_id"]) == {"tool_input": {"prompt": "review the diff", "subagent_type": "general"}}
+    assert store.read(finished["transcript_id"]) == {"tool_result": long_result}
     plain = _session(tmp_path / "ui")
     plain.emit_lifecycle(plain.turn, "tool_started", tool_name="read_file", invocation_id="c1", tool_input={"path": "a.txt"})
-    assert all("tool_input" not in payload for _, _, payload in plain.store.recorded)
+    assert all("transcript_id" not in payload and "tool_input" not in payload for _, _, payload in plain.store.recorded)
 
 
 def test_corrupt_stored_options_stop_the_turn(tmp_path: Path) -> None:

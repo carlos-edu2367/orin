@@ -1401,8 +1401,11 @@ def create_app(services: ApiServices) -> FastAPI:
         services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.send")
         cli_options = _cli_options_for(principal, payload.cli)
         if payload.cli is not None and payload.cli.trust_workspace:
-            # `orin code --trust` (W6): before the turn is queued, so the worker already sees a trusted folder.
-            _trust_workspace(principal.user_id, Path(getattr(conversation_workspace(conversation_id, principal), "root")))
+            # `orin code --trust` (W6): before the turn is queued, and only for a folder of the person's own that the
+            # conversation is bound to; a managed workspace has nothing to trust.
+            bound = local_root_for(effective_workspace_id(conversation_record(conversation_id, principal), principal)[0], principal)
+            if bound:
+                _trust_workspace(principal.user_id, Path(bound))
         require_content(payload.message, payload.attachments)
         provider = ""
         model_id = ""
@@ -1507,6 +1510,21 @@ def create_app(services: ApiServices) -> FastAPI:
         root = Path(getattr(workspace, "root", workspace))
         trusted = await run_in_threadpool(WorkspaceTrustStore().is_trusted, principal.user_id, root)
         return JSONResponse({"trusted": bool(trusted), "path": str(root)})
+
+    @app.get("/v1/conversations/{conversation_id}/transcript/{entry_id}")
+    async def read_cli_transcript(conversation_id: str, entry_id: str, request: Request) -> JSONResponse:
+        """A CLI turn's tool input or result (W6), for `orin code` only: it is the unsanitized transcript."""
+        from agentos.agentic.cli_transcript import TranscriptStore
+
+        principal = principal_for(request)
+        services.security.authorize(principal, action="conversation.read", resource_id=conversation_id, purpose="conversation.transcript")
+        conversation_record(conversation_id, principal)
+        if principal.credential_kind != "cli_token":
+            raise AuthorizationError("the transcript is for orin code")
+        entry = await run_in_threadpool(TranscriptStore(conversation_id).read, entry_id)
+        if entry is None:
+            raise ApplicationNotFoundError(entry_id)
+        return JSONResponse(entry)
 
     @app.post("/v1/conversations/{conversation_id}/workspace-trust")
     async def trust_workspace(conversation_id: str, request: Request) -> JSONResponse:

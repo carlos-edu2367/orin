@@ -1059,6 +1059,15 @@ class TurnSession:
 
     # -- activity -------------------------------------------------------
 
+    def _transcript(self):
+        """W6: where a CLI turn's tool inputs and results go (activity payloads are sanitized and bounded)."""
+        store = getattr(self, "_transcript_store", None)
+        if store is None:
+            from .cli_transcript import TranscriptStore
+
+            store = self._transcript_store = TranscriptStore(str(self.turn.get("conversation_id") or "unknown"))
+        return store
+
     def _record(self, event_type: AgentActivityEventType, summary: str, payload: dict[str, object] | None = None, *, agent_id: str | None = None, parent_agent_id: str | None = None) -> None:
         recorder = getattr(self.store, "record", None)
         if recorder is None:
@@ -1162,7 +1171,10 @@ class TurnSession:
             if self.cli_options is not None and self.cli_options.transcript:
                 from .cli_turn import capped_input
 
-                started_payload["tool_input"] = capped_input(payload.get("tool_input"))  # W6: the CLI's tool_use block
+                # W6: the CLI's tool_use block, kept apart from the sanitized activity payload.
+                entry = self._transcript().write({"tool_input": capped_input(payload.get("tool_input"))})
+                if entry:
+                    started_payload["transcript_id"] = entry
             self._record(
                 AgentActivityEventType.TOOL_STARTED,
                 f"Executando {name}",
@@ -1209,7 +1221,10 @@ class TurnSession:
             if self.cli_options is not None and self.cli_options.transcript:
                 from .cli_turn import capped_text
 
-                extra["tool_result"] = capped_text(payload.get("tool_content"))  # W6: the CLI's tool_result block
+                # W6: the CLI's tool_result block, kept apart from the sanitized activity payload.
+                entry = self._transcript().write({"tool_result": capped_text(payload.get("tool_content"))})
+                if entry:
+                    extra["transcript_id"] = entry
             self._record(
                 AgentActivityEventType.TOOL_FINISHED,
                 summary,

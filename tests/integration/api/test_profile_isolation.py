@@ -57,6 +57,7 @@ OWNED = {
     ("GET", "/v1/conversations/{conversation_id}/context"), ("POST", "/v1/conversations/{conversation_id}/compact"),
     ("GET", "/v1/conversations/{conversation_id}/workspace-trust"), ("POST", "/v1/conversations/{conversation_id}/workspace-trust"),
     ("POST", "/v1/conversations/{conversation_id}/turns/{turn_id}/tool-permission"),
+    ("GET", "/v1/conversations/{conversation_id}/transcript/{entry_id}"),
     ("GET", "/v1/conversations/{conversation_id}/overview"),
     ("GET", "/v1/conversations/{conversation_id}/events"),
     ("GET", "/v1/skills/{skill_id}"), ("PUT", "/v1/skills/{skill_id}"),

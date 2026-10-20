@@ -165,3 +165,29 @@ def test_without_the_token_nothing_is_trusted(tmp_path) -> None:
     response = TestClient(app, client=("127.0.0.1", 40000)).post("/v1/conversations", json=body, headers={"Idempotency-Key": "t2"})
     assert response.status_code == 403
     assert WorkspaceTrustStore().is_trusted("local-user", folder.resolve()) is False
+
+
+class _Existing(_Application):
+    def get(self, conversation_id, user_id):
+        return {"conversation_id": conversation_id, "project_id": None}
+
+
+@pytest.mark.parametrize("bound", [True, False])
+def test_trust_on_send_only_covers_a_bound_local_folder(tmp_path, bound: bool) -> None:
+    from agentos.permissions.trust import WorkspaceTrustStore
+
+    folder = tmp_path / "project"
+    folder.mkdir()
+    roots = _Roots()
+    if bound:
+        roots.set_root("chat_test", "local-user", str(folder))
+    app = create_app(ApiServices(security=LoopbackSecurityService(api_token=lambda: "tok"), conversation_application=_Existing(),
+                                 local_workspaces=roots))
+    response = TestClient(app, client=("127.0.0.1", 40000)).post(
+        "/v1/conversations/chat_test/messages", json={"message": "again", "cli": {"trust_workspace": True}},
+        headers={"Authorization": "Bearer tok", "Idempotency-Key": "s1"},
+    )
+    assert response.status_code == 201, response.text
+    assert WorkspaceTrustStore().is_trusted("local-user", folder.resolve()) is bound
+    if not bound:  # a managed workspace has nothing to trust: no folder at all is recorded
+        assert not (WorkspaceTrustStore()._read().get("users") or {}).get("local-user")

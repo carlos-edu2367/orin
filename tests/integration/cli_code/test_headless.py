@@ -148,3 +148,20 @@ def test_json_schema_gives_up_after_its_retries(orin_runtime: LiveRuntime) -> No
     assert result["num_turns"] == 4  # the first answer and three follow-ups
     requests = [item for item in orin_runtime.fake.requests if any("does not satisfy the required JSON Schema" in str(m.get("content")) for m in item.get("messages", []))]
     assert requests
+
+
+def test_a_long_tool_result_reaches_the_host_whole(orin_runtime: LiveRuntime) -> None:
+    # Activity payloads are sanitized (512-character strings, redacted keys): the transcript travels apart from them.
+    workspace = orin_runtime.workspace("long-read")
+    lines = [f"line {number:04d} " + "x" * 60 for number in range(40)]
+    (workspace / "big.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    done = orin_code(orin_runtime, workspace, "-p", "[[read:big.txt]]", "--permission-mode", "acceptEdits",
+                     "--output-format", "stream-json", "--verbose", *MODEL)
+    assert done.returncode == 0, done.stderr
+    messages = _lines(done.stdout)
+    use = next(block for item in messages if item["type"] == "assistant" for block in item["message"]["content"] if block["type"] == "tool_use")
+    assert use["name"] == "Read" and use["input"] == {"file_path": "big.txt"}
+    result = next(block for item in messages if item["type"] == "user" for block in item["message"]["content"])
+    assert result["tool_use_id"] == use["id"]
+    assert "line 0000" in result["content"] and "line 0039" in result["content"] and len(result["content"]) > 2000
+    assert messages[-1]["result"] == "Done."
