@@ -49,13 +49,35 @@ def _windows_user_sid() -> str:
 
 
 def _windows_owner_only(path: Path) -> None:
-    """Drop inherited entries and grant only the current account."""
-    result = subprocess.run(
-        [_system_tool("icacls.exe"), str(path), "/inheritance:r", "/grant:r", f"*{_windows_user_sid()}:(F)"],
-        capture_output=True, text=True, timeout=15, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), check=False,
-    )
-    if result.returncode != 0:
-        raise ApiTokenError(f"icacls could not restrict {path.name} (exit {result.returncode})")
+    """Replace the whole access list with one entry for the current account, protected from inheritance.
+
+    Dropping inherited entries is not enough: an administrator account creates files with explicit SYSTEM,
+    Administrators and OWNER RIGHTS entries (seen on CI), so the list is set whole rather than edited.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    sid = _windows_user_sid()
+    if not all(part.isdigit() for part in sid[2:].split("-")):
+        raise ApiTokenError("the current Windows account could not be identified")
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(wintypes.ULONG)]
+    advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.restype = wintypes.BOOL
+    advapi32.SetFileSecurityW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, ctypes.c_void_p]
+    advapi32.SetFileSecurityW.restype = wintypes.BOOL
+    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    descriptor = ctypes.c_void_p()
+    # D:P = a protected DACL (nothing inherited); FA = full access; one entry, for this account's SID only.
+    if not advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW(f"D:P(A;;FA;;;{sid})", 1, ctypes.byref(descriptor), None):
+        raise ApiTokenError(f"the owner-only access list could not be built (error {ctypes.get_last_error()})")
+    try:
+        dacl_security_information, protected_dacl_security_information = 0x00000004, 0x80000000
+        if not advapi32.SetFileSecurityW(str(path), dacl_security_information | protected_dacl_security_information, descriptor):
+            raise ApiTokenError(f"{path.name} could not be made owner-only (error {ctypes.get_last_error()})")
+    finally:
+        kernel32.LocalFree(descriptor)
 
 
 def restrict_to_owner(path: Path) -> None:

@@ -41,6 +41,22 @@ def test_the_token_file_is_owner_only_on_windows(tmp_path: Path) -> None:
     assert len(entries) == 1 and os.environ["USERNAME"].lower() in entries[0].lower(), listing
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows ACLs")
+def test_explicit_entries_from_the_creating_account_are_removed_too(tmp_path: Path) -> None:
+    # A CI runner's admin account creates files with explicit (not inherited) SYSTEM, Administrators and
+    # OWNER RIGHTS entries; owner-only must remove those as well, not only the inherited ones.
+    from agentos.installation.api_token import restrict_to_owner
+
+    target = tmp_path / "secret"
+    target.write_text("x", encoding="ascii")
+    subprocess.run(["icacls", str(target), "/inheritance:r", "/grant", "*S-1-5-18:(F)", "*S-1-5-32-545:(R)", "*S-1-3-4:(F)"],
+                   capture_output=True, check=True)
+    restrict_to_owner(target)
+    listing = subprocess.run(["icacls", str(target)], capture_output=True, text=True, check=True).stdout
+    entries = [line.strip() for line in listing.splitlines()[:-1] if ":(" in line]
+    assert len(entries) == 1 and os.environ["USERNAME"].lower() in entries[0].lower(), listing
+
+
 def test_a_failed_restriction_leaves_no_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from agentos.installation import api_token
 
@@ -136,10 +152,11 @@ def test_windows_tools_run_from_system32_and_grant_by_sid(tmp_path: Path, monkey
 
     monkeypatch.setenv("SystemRoot", "C:\\Windows")
     monkeypatch.setattr(api_token.subprocess, "run", fake_run)
-    api_token._windows_owner_only(tmp_path / "f")
-    assert PureWindowsPath(calls[0][0]) == PureWindowsPath("C:/Windows/System32/whoami.exe")
-    assert PureWindowsPath(calls[1][0]) == PureWindowsPath("C:/Windows/System32/icacls.exe")
-    assert calls[1][-1] == "*S-1-5-21-1-2-3-1001:(F)" and "/inheritance:r" in calls[1]
+    # The access list is now set through the Windows API by SID (no icacls); the file does not exist, so it fails
+    # after the SID was read from System32's whoami, never from PATH.
+    with pytest.raises(api_token.ApiTokenError):
+        api_token._windows_owner_only(tmp_path / "f")
+    assert len(calls) == 1 and PureWindowsPath(calls[0][0]) == PureWindowsPath("C:/Windows/System32/whoami.exe")
 
 
 def test_an_unknown_windows_account_issues_no_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

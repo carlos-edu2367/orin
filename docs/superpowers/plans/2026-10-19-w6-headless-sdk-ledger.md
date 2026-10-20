@@ -596,3 +596,16 @@ W6-R17 decisions and deviations:
 Suites at the end of part 2: unit `uv run pytest -q tests/unit`: 4308 passed, 65 skipped (part 1 ended at 4243 passed, 65 skipped). Integration `uv run pytest -q tests/integration`: 123 passed, 65 skipped (part 1 ended at 121 passed, 65 skipped). `src/agentos/agentic/agent_tools.py` is 1693 lines (untouched in part 2). No `agentos.launcher` or `orin-code` process was left running after the live tests.
 
 Not done in part 2: the deferred items listed at the top; R17 items 1, 4, 5 and 7 (the other test-quality items); the `allowManagedPermissionRulesOnly` gap; the breaker eviction limit under R6.
+
+### After the push (CI)
+
+- The first CI run of W6 failed on `backend (windows-latest)` only: `test_the_token_file_is_owner_only_on_windows` saw four
+  entries on the API token (`runneradmin`, `SYSTEM`, `Administrators`, `OWNER RIGHTS`), none inherited. The runner's
+  administrator account creates files with those explicit entries, and `icacls /inheritance:r /grant:r` removes only
+  inherited ones, so the file was not owner-only there. Fix: the access list is now set whole through the Windows API
+  (`SetFileSecurityW` with the protected SDDL `D:P(A;;FA;;;<user SID>)`), so nothing else survives. Red first:
+  `test_explicit_entries_from_the_creating_account_are_removed_too` gives a file explicit SYSTEM, Users and OWNER RIGHTS
+  entries, and the old code kept all of them. Expectation change: `test_windows_tools_run_from_system32_and_grant_by_sid`
+  no longer checks an `icacls` call (there is none); it checks that the SID comes from System32's `whoami` only.
+- `test_w6_r3_background_pid_reuse.py`: the child of the "matching" test now leads its own session on POSIX (found on
+  Linux before the push; `_stop` kills only a group leader, as `start_background` creates).
