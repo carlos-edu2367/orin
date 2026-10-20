@@ -28,12 +28,14 @@ import json
 import os
 import queue
 import shutil
+import signal
 import subprocess
 import threading
 import time
 from typing import Any, Mapping
 
 from agentos.agentic.agent_tools import _terminate_process_tree
+from agentos.hooks.processes import _WindowsJob, _close_handles, _terminate_handles, _windows_descendants
 
 from .protocol import MAX_SERVER_REQUESTS_PER_CALL, call_ceiling_seconds, dispatch_server_message
 
@@ -112,6 +114,7 @@ class StdioTransport:
         self._cwd = cwd
         self._timeout = timeout
         self._process: subprocess.Popen[bytes] | None = None
+        self._job: _WindowsJob | None = None
         self._lock = threading.Lock()
         self._replies: queue.Queue[bytes] = queue.Queue()
         self._reader_thread: threading.Thread | None = None
@@ -139,13 +142,20 @@ class StdioTransport:
         environment.update(self._env)
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
         try:
+            # W5-D2: on POSIX the server leads its own process group, so its children can be ended with it.
             self._process = subprocess.Popen(
                 [executable, *self._args], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL, cwd=self._cwd, env=environment, shell=False, bufsize=0,
-                creationflags=creationflags,
+                creationflags=creationflags, start_new_session=os.name != "nt",
             )
         except OSError as error:
             raise StdioTransportError(f"the MCP server process could not start: {error}") from error
+        if os.name == "nt":
+            try:
+                self._job = _WindowsJob()
+                self._job.assign(self._process.pid)
+            except OSError:
+                self._job = None
         self._reader_thread = threading.Thread(target=self._read_loop, args=(self._process,), daemon=True)
         self._reader_thread.start()
 
@@ -214,9 +224,49 @@ class StdioTransport:
                         deadline = time.monotonic() + self._timeout  # the server waited on us: its clock starts again
 
     def _give_up(self, process: subprocess.Popen[bytes], reason: str) -> StdioTransportError:
+        tree = self._tree(process)
         _terminate_process_tree(process)
         self._process = None
+        self._end_children(process, tree)
         return StdioTransportError(reason)
+
+    @staticmethod
+    def _tree(process: subprocess.Popen[bytes]) -> dict[int, int]:
+        """The server's live descendants (Windows), taken while the server still runs: an orphan has no parent chain."""
+        if os.name != "nt":
+            return {}
+        try:
+            return _windows_descendants(process)
+        except (OSError, ValueError):
+            return {}
+
+    def _end_children(self, process: subprocess.Popen[bytes], tree: dict[int, int] | None = None) -> None:
+        """W5-D2: whatever the server started dies with it, even when the server itself exited on its own."""
+        job, self._job = self._job, None
+        if os.name == "nt":
+            # A child started before the Job was assigned (or one that left it) is found by its parent chain and
+            # creation time; the handles were opened while it was validated, so a reused PID is never hit.
+            descendants = dict(tree if tree is not None else self._tree(process))
+            try:
+                _terminate_handles(descendants)
+            except (OSError, ValueError):
+                pass
+            finally:
+                try:
+                    _close_handles(descendants)
+                except (OSError, ValueError):
+                    pass
+            if job is not None:
+                try:
+                    job.terminate()
+                except OSError:
+                    pass
+                job.close()
+            return
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except OSError:  # the group is already empty
+            pass
 
     @staticmethod
     def _write(process: subprocess.Popen[bytes], frame: Mapping[str, Any]) -> None:
@@ -231,6 +281,7 @@ class StdioTransport:
         process, self._process = self._process, None
         if process is None:
             return
+        tree = self._tree(process)
         try:
             if process.stdin is not None:
                 process.stdin.close()
@@ -238,10 +289,9 @@ class StdioTransport:
             pass
         try:
             process.wait(timeout=GRACEFUL_EXIT_SECONDS)
-            return
         except subprocess.TimeoutExpired:
-            pass
-        _terminate_process_tree(process)
+            _terminate_process_tree(process)
+        self._end_children(process, tree)
 
 
 __all__ = ["ALLOWED_COMMANDS", "StdioTransport", "StdioTransportError", "StdioTransportRefused"]
