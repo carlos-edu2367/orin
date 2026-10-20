@@ -811,10 +811,10 @@ class PostgresChatStore:
     def create(self, *, user_id: str, message: str, provider: str, model_id: str, idempotency_key: str, conversation_id: str | None = None, project_id: str | None = None, workspace_id: str | None = None, attachments: Sequence[Mapping[str, object]] = (), new_conversation_id: str | None = None, scheduled_by_schedule_id: str | None = None, code_mode: str = "chat", permission_mode: str | None = None, turn_kind: str | None = None, cli_options: str | None = None) -> ChatReceipt:
         message = message.strip()
         attachments = list(attachments)
-        if turn_kind not in (None, "compact"):
+        if turn_kind not in (None, "compact", "shell"):
             raise ValueError("turn_kind is invalid")
-        # /compact is Orin's own command; a plugin command of the same name never expands it.
-        expansion = None if turn_kind == "compact" else _expand_command(self._command_library, self._skill_library, user_id, message)
+        # /compact and a `!` shell command are Orin's own; a plugin command of the same name never expands them.
+        expansion = None if turn_kind in {"compact", "shell"} else _expand_command(self._command_library, self._skill_library, user_id, message)
         if len(message) > 16000: raise ValueError("message must be a bounded non-blank string")
         if not message and not attachments: raise ValueError("message must be a bounded non-blank string")
         title_source = message or str(attachments[0].get("original_name") or "Arquivo enviado")
@@ -983,6 +983,56 @@ class PostgresChatStore:
         )
         self._activity({"conversation_id": conversation_id, "turn_id": turn_id, "execution_id": execution_id, "user_id": user_id}, AgentActivityEventType.TURN_STARTED, "Execução agendada na fila" if scheduled_by_schedule_id else "Turn queued", {"scheduled_by_schedule_id": scheduled_by_schedule_id} if scheduled_by_schedule_id else None)
         return receipt
+
+    def fork(self, conversation_id: str, user_id: str, *, before_message_id: str | None = None, title: str | None = None) -> dict[str, object]:
+        """W7: a new conversation holding this one's messages — all of them, or those before ``before_message_id`` (a
+        message of the person's, which comes back as ``prompt`` for the composer). Only finished text is copied: the
+        new conversation has the same model, mode, permission mode and project, no turns, attachments or tool steps."""
+        now = datetime.now(UTC)
+        with self._engine.begin() as c:
+            row = c.execute(select(conversations).where(
+                conversations.c.conversation_id == conversation_id, conversations.c.user_id == user_id,
+            )).mappings().first()
+            if row is None:
+                raise ApplicationNotFoundError(conversation_id)
+            rows = c.execute(select(conversation_messages).where(
+                conversation_messages.c.conversation_id == conversation_id,
+            ).order_by(conversation_messages.c.sequence)).mappings().all()
+            prompt = None
+            if before_message_id is not None:
+                chosen = next((item for item in rows if item["message_id"] == before_message_id), None)
+                if chosen is None or chosen["role"] != "user":
+                    raise ApplicationNotFoundError(before_message_id)
+                rows = [item for item in rows if int(item["sequence"]) < int(chosen["sequence"])]
+                prompt = str(chosen["content"])
+            kept = [item for item in rows if item["role"] in ("user", "assistant") and item["status"] == "completed" and str(item["content"]).strip()]
+            new_id = _id("chat")
+            clean_title = " ".join(str(title or "").split())[:160] or f"{row['title']} (ramo)"[:160]
+            c.execute(insert(conversations).values(
+                conversation_id=new_id, user_id=user_id, title=clean_title, provider=row["provider"], model_id=row["model_id"],
+                project_id=row["project_id"], mode=row["mode"], permission_mode=row["permission_mode"],
+                state="completed", created_at=now, updated_at=now,
+            ))
+            if kept:
+                c.execute(insert(conversation_messages), [{
+                    "message_id": _id("msg"), "conversation_id": new_id, "turn_id": None, "user_id": user_id,
+                    "role": item["role"], "content": item["content"], "sequence": index + 1, "status": "completed",
+                    "retryable": False, "created_at": now, "updated_at": now,
+                } for index, item in enumerate(kept)])
+        return {"conversation_id": new_id, "title": clean_title, "prompt": prompt, "messages": len(kept),
+                "project_id": row["project_id"], "source_conversation_id": conversation_id}
+
+    def rename(self, conversation_id: str, user_id: str, title: str) -> dict[str, object]:
+        clean = " ".join(str(title or "").split())[:160]
+        if not clean:
+            raise ValueError("title must be non-blank")
+        with self._engine.begin() as c:
+            result = c.execute(update(conversations).where(
+                conversations.c.conversation_id == conversation_id, conversations.c.user_id == user_id,
+            ).values(title=clean, updated_at=datetime.now(UTC)))
+            if result.rowcount != 1:
+                raise ApplicationNotFoundError(conversation_id)
+        return {"conversation_id": conversation_id, "title": clean}
 
     def set_permission_mode(self, conversation_id: str, user_id: str, permission_mode: str) -> dict[str, object]:
         normalized = known_permission_mode(permission_mode)
@@ -2599,6 +2649,19 @@ class ChatApplication:
         return self.store.context_usage(conversation_id, user_id)
     def set_permission_mode(self, conversation_id: str, user_id: str, permission_mode: str):
         return self.store.set_permission_mode(conversation_id, user_id, permission_mode)
+    def fork(self, conversation_id: str, user_id: str, *, before_message_id: str | None = None, title: str | None = None):
+        return self.store.fork(conversation_id, user_id, before_message_id=before_message_id, title=title)
+    def rename(self, conversation_id: str, user_id: str, title: str):
+        return self.store.rename(conversation_id, user_id, title)
+    def shell(self, user_id: str, conversation_id: str, command: str, idempotency_key: str):
+        """`!command` (W7): a turn that runs the person's command in the Code session's folder, without the model."""
+        text = str(command or "").strip()
+        if not text or len(text) > 4000 or "\x00" in text:
+            raise ValueError("command must be a bounded non-blank string")
+        conversation = self.store.get(conversation_id, user_id)
+        if str(conversation.get("mode") or "chat") != "code":
+            raise ValueError("the shell mode exists only in Code conversations")
+        return self.send(user_id, conversation_id, f"!{text}", idempotency_key, code_mode="code", turn_kind="shell")
     def set_project(self, conversation_id: str, user_id: str, project_id: str | None, *, managed_root: Path | None = None):
         return self.store.set_project(conversation_id, user_id, project_id, managed_root=managed_root)
     def read_project_conversation(self, conversation_id: str, user_id: str, *, limit: int = 20):
