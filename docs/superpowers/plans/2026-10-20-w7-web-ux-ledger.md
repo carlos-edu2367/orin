@@ -416,3 +416,89 @@ Planner's verification of Batch E:
   predate W7, but CI runs this spec: Batch F makes the scan wait for the page to settle.
 - Removing a permission rule is one click by design (decision 30 covers deleting a file and revoking trust); the rule
   can be added back from the same page.
+
+## Batch F — Inherited items (Tasks 22–27)
+
+Commits (one per task, `Co-Authored-By: Claude Opus 5.5`):
+- 423ef5b feat(w7): MCP servers per scope and approving a project's servers through the settings API (Task 22)
+- 19aa526 fix(w7): the plugin library is per person, and a rewind may skip the undo copy of files too large for one (Task 23)
+- 6fb51cf fix(w7): announce only usable folders, escape MCP mentions, clean titles and clear finished CLI options (Task 24)
+- dba1764 fix(w7): plan path, tool schedule retention, stdio Job before the server runs, LSP close and hook responses (Task 25)
+- fa533ed feat(w7): MCP per scope, plugin contents, turn rewind through the picker, history keys and every built-in command (Task 26)
+- f56e248 test(w7): browser tests and visual baselines for Batch F (Task 27)
+
+Suite summaries at the close (run after f56e248):
+- `uv run pytest -q -p no:cacheprovider tests/unit`: 4414 passed, 66 skipped, 30 warnings in 387.05s (0:06:27)
+- `uv run pytest -q -p no:cacheprovider tests/integration`: 123 passed, 65 skipped, 18 warnings in 330.74s (0:05:30)
+- `npm --prefix frontend test`: Test Files 113 passed (113); Tests 698 passed (698)
+- `npm --prefix frontend run lint`: exit 0
+- `npm --prefix frontend run build`: exit 0 (tsc -b and vite build)
+- `npm --prefix frontend run test:e2e`: 61 passed (2.3m)
+- `wc -l src/agentos/agentic/agent_tools.py`: 1693 (under 1700)
+
+Visual (`test:visual`): the update ran for `w7-batch-f`, `w7-settings`, `w7-chat-d1`, `w7-commands` only. 15 baselines changed
+(all named by the plan: 8 desktop `w7-settings-*`, `w7-settings-trusted-mobile-light`, 2 `w7-permission-*`, 4
+`w7-commands`) and 6 were added (`w7-batch-f`). Verification of `w7-chat-d1`, `w7-chat-d2`, `w7-commands`, `w7-settings`,
+`w7-batch-f`: 52 passed. The older visual specs (`settings`, `execution-page`, `live-surface`, `multi-agent`) were not
+run with `--update-snapshots`.
+
+Expectation changes applied (as the plan lists): `tests/unit/ChatPage.test.tsx` (the per-turn rewind test now drives the
+per-message picker, and asserts the per-turn route is not called); `tests/unit/SettingsNav.test.tsx` (the MCP matcher
+excludes "MCP por escopo"); `tests/e2e/code-mode-ux.spec.ts` (the "Sem restrições" wording); fake `user_id` keyword in
+the three plugin test files and the route fakes.
+
+Decisions 32–41 (as the plan records them):
+
+32. Configuration-file MCP servers through the API: never their env, headers or an expanded command line; a project server
+    as its repository file writes it (secret-looking values masked); approvals only in the folder's grants file, refused for
+    an untrusted folder or an unknown name.
+33. The plugin library is per person (W5-D1), its cache too; `discover_library` requires the person.
+34. Rewinding anyway waives only "too large to back up", only for the named files, after every other check; the picker
+    offers it only for the message whose rewind named them.
+35. A turn's rewind goes through the per-message picker on that turn's message; the per-turn route stays for compatibility.
+36. A stdio MCP server runs only inside its Job (started suspended); a server that cannot be contained is not started.
+    A Microsoft Store Python's own children still leave Jobs (platform behaviour, noted).
+37. Tool-made schedules (wakeups, monitor wakes) are deleted a week after they finish; the person's are never deleted.
+38. A finished turn's CLI options are cleared; a turn waiting for the person keeps them.
+39. Every built-in has a handler; where Orin has no equivalent the answer says so and points to what it has.
+40. History keys use this conversation's messages: up/down from the first/last line, ctrl+r to search. `alt+t` (thinking)
+    is not implemented: Orin has no thinking switch.
+41. Deferred, with reasons: file-history blob retention, W5-D5, W6-R16's `hook_started`, W6-R17 item 7, `/ultrareview`
+    (W8), an elicitation card, MCP prompts in the picker and an `@server:` picker.
+
+Deviations and notes:
+1. Task 26 and Task 27 Step 1 are empty in the plan; the test files are listed in Step 3. I created the new test files
+   first (the plan's content, unchanged), ran them red, then implemented.
+2. Task 25: two of the stdio Job tests passed before the change (the child-ends-with-server test and the contained-server
+   test); the rejected-Job test failed as expected. The skill-model test passed before, as the plan says.
+3. Task 26: `SettingsNav.test.tsx` passed before its matcher change (the old matcher still matched the single MCP link);
+   the expectation change is applied as the plan lists.
+4. Task 27 visual update: the plan's command includes `tests/visual/w7-settings.spec.ts` with `--update-snapshots`. I
+   read the prohibition on the older `settings` visual spec as covering `settings.spec.ts` and ran `w7-settings.spec.ts`
+   because the plan names its baselines. Please confirm this reading.
+5. Flakiness: first full `npm --prefix frontend test` had 1 failure (697 passed) in
+   `src/app/__tests__/UiPolishFixesRound2.test.tsx` ("renders a custom styled dropdown in RuntimeSettingsPage ...",
+   "Unable to find role=listbox"). That file passed alone (8/8). The rerun of the full suite passed 698/698. This is not
+   one of the two files named as flaky; it is recorded here, not investigated.
+6. Task 25 Step: an `import logging` edit was first issued as a no-op (identical old and new text) and rejected by the
+   tool; it was then applied correctly. The committed code matches the plan.
+7. The Job Object tests run only on Windows (skipped elsewhere). The Job tests and the Microsoft Store Python caveat are
+   Windows-only, as the plan notes.
+
+Incomplete or open: nothing in the plan is left undone. Items the plan defers stay deferred (decision 41).
+
+Planner's verification of Batch F:
+
+- Every source and test file the batch changed is identical to the validated prototype (62 files; one test file differs
+  only by a trailing blank line). Of the 21 PNGs, 10 differ byte-wise from the prototype's but pass the visual
+  comparison (anti-aliasing); one was opened and checked.
+- Linux (Docker, `orin-linux-test:w6-snapshot`, Node installed): the prototype's `tests/unit` gave 4430 passed, 50
+  skipped, 0 failed. The Job Object tests skip there; the stdio "exits on its own" test runs on both.
+- Deviation 1 (the executor's reading): correct — only `w7-settings.spec.ts` was meant; the older `settings.spec.ts`
+  must not be regenerated.
+- Deviation 3: a third load-dependent frontend test (`UiPolishFixesRound2.test.tsx`, a dropdown `findBy`) joins the
+  known list of pre-existing flakes; it passed alone and on the rerun.
+- Found while building Batch F and fixed in it: the `/` picker's 50-item cap hid the folder's commands once every
+  built-in was offered (raised to 200); W7's destructive buttons used `button--danger` alone, which has no visible
+  style at rest (now `w7-danger-button`); `@server:uri` put the raw address and error text into the reminder outside
+  the escaped attribute (all escaped now).
