@@ -10,8 +10,9 @@ from typing import Any
 from agentos.agentic.lifecycle import HookEvent
 from agentos.settings import EffectiveSettings
 
-HANDLER_TYPES = ("command", "http", "prompt", "agent")
-DEFAULT_TIMEOUTS = {"command": 60, "http": 30, "prompt": 30, "agent": 120}
+HANDLER_TYPES = ("command", "http", "prompt", "agent", "callback")
+DEFAULT_TIMEOUTS = {"command": 60, "http": 30, "prompt": 30, "agent": 120, "callback": 60}
+_CALLBACK_ID = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
 MAX_TIMEOUT = 600
 MAX_HOOKS = 200
 MAX_TEXT = 8_000
@@ -37,9 +38,11 @@ class HookSpec:
     # W5: a plugin's hook runs confined to its folder, without a shell, with this environment added.
     plugin_root: str = ""
     plugin_env: tuple[tuple[str, str], ...] = ()
+    # W6: an SDK host's hook (type "callback"), answered by the host behind `orin code`.
+    callback_id: str = ""
 
     def identity(self) -> tuple[Any, ...]:
-        return (self.event, self.type, self.command, self.url, self.prompt, self.matcher, self.plugin_root)
+        return (self.event, self.type, self.command, self.url, self.prompt, self.matcher, self.plugin_root, self.callback_id)
 
     def label(self) -> str:
         if self.type == "command":
@@ -73,6 +76,14 @@ def _entry(event: HookEvent, matcher: str, source: str, raw: Any) -> HookSpec | 
         "on_failure": "block" if raw.get("onFailure") == "block" else "ignore",
         "status_message": str(raw.get("statusMessage") or "")[:200],
     }
+    if kind == "callback":
+        # Only `orin code` writes the cli layer: a callback anywhere else would wait for a host that is not there.
+        if source != "cli":
+            return "callback hooks come only from an SDK host through orin code"
+        callback_id = raw.get("callback_id")
+        if not isinstance(callback_id, str) or not _CALLBACK_ID.fullmatch(callback_id):
+            return "callback hook needs a 'callback_id'"
+        return HookSpec(**common, callback_id=callback_id)
     if kind == "command":
         command = raw.get("command")
         if not isinstance(command, str) or not command.strip() or len(command) > MAX_TEXT:

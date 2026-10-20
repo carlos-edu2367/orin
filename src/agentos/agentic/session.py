@@ -1059,6 +1059,14 @@ class TurnSession:
 
     # -- activity -------------------------------------------------------
 
+    def _callback_runner(self):
+        """W6: an SDK host's hooks run through `orin code`; an interface turn has none."""
+        if self.cli_options is None:
+            return None
+        from agentos.hooks.runners import CallbackHookRunner
+
+        return CallbackHookRunner(lambda kind, request, timeout: self._host_requests().ask(kind, request, timeout=timeout))
+
     def _host_requests(self):
         """W6: the channel to the SDK host behind `orin code` (hook callbacks, SDK MCP messages)."""
         channel = getattr(self, "_host_channel", None)
@@ -3242,6 +3250,7 @@ class TurnSession:
                     default_model=str(self.turn.get("model_id") or ""),
                 ),
                 agent_runner=AgentHookRunner(self._hook_agent),
+                callback_runner=self._callback_runner(),
                 recorder=self._record_hook,
             )
             self._hook_dispatcher = dispatcher
@@ -3308,6 +3317,7 @@ class TurnSession:
                 self.provider_factory, provider_name=str(self.turn.get("provider") or ""), default_model=str(self.turn.get("model_id") or ""),
             ),
             agent_runner=AgentHookRunner(self._hook_agent),
+            callback_runner=self._callback_runner(),
             recorder=self._record_hook,
         )
         wanted = str(agent_id or "")

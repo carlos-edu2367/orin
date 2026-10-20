@@ -37,6 +37,22 @@ def _with_arguments(prompt: str, payload: Mapping[str, Any]) -> str:
     return prompt.replace("$ARGUMENTS", text) if "$ARGUMENTS" in prompt else f"{prompt}\n\nEvent: {text}"
 
 
+class CallbackHookRunner:
+    """W6: an SDK host's hook, asked through `orin code`; its JSON answer is read as a command hook's stdout."""
+
+    def __init__(self, ask) -> None:
+        self._ask = ask  # (kind, request, timeout) -> dict | None
+
+    def run(self, spec: HookSpec, payload: Mapping[str, Any]) -> HookRun:
+        answer = self._ask("hook_callback", {"callback_id": spec.callback_id, "input": dict(payload),
+                                             "tool_use_id": payload.get("tool_use_id")}, spec.timeout)
+        if answer is None:
+            return HookRun(None, "", "", timed_out=True)
+        if "_error" in answer:
+            return HookRun(None, "", "", error=str(answer.get("_error"))[:300])
+        return HookRun(0, json.dumps(answer, ensure_ascii=False, default=str), "")
+
+
 class CommandHookRunner:
     def __init__(self, project_dir: Path, *, env_file: Path | None = None) -> None:
         self.project_dir = Path(project_dir)

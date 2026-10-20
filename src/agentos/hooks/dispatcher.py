@@ -26,11 +26,13 @@ class HookDispatcher:
         http_runner=None,
         prompt_runner=None,
         agent_runner=None,
+        callback_runner=None,
         recorder: Callable[[Mapping[str, Any]], None] | None = None,
         max_workers: int = 8,
     ) -> None:
         self.specs = tuple(specs)
-        self.runners = {"command": command_runner, "http": http_runner, "prompt": prompt_runner, "agent": agent_runner}
+        self.runners = {"command": command_runner, "http": http_runner, "prompt": prompt_runner, "agent": agent_runner,
+                        "callback": callback_runner}
         self.recorder = recorder
         self.max_workers = max(1, int(max_workers))
         self._background = ThreadPoolExecutor(max_workers=4, thread_name_prefix="orin-hook-async")
@@ -65,7 +67,7 @@ class HookDispatcher:
         try:
             if runner is None:
                 raise RuntimeError(f"no runner for {spec.type} hooks")
-            if spec.type in {"command", "http"}:
+            if spec.type in {"command", "http", "callback"}:
                 run = runner.run(spec, payload)
                 exit_code = run.exit_code
                 decision = decision_from_command(spec.event, run, on_failure=spec.on_failure)
