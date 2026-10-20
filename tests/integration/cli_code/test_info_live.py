@@ -59,3 +59,10 @@ def test_stopping_a_background_run_cancels_its_turn(orin_runtime: LiveRuntime) -
                 break
             time.sleep(0.5)
     assert turns[-1]["state"] == "cancelled"
+    # The run's process is gone too (W6-R3: stop kills the validated process, nothing else).
+    from agentos.launcher.state import process_is_alive
+
+    gone_by = time.monotonic() + 30
+    while process_is_alive(int(record["pid"])) and time.monotonic() < gone_by:
+        time.sleep(0.2)
+    assert not process_is_alive(int(record["pid"]))

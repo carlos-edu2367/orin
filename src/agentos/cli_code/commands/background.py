@@ -35,10 +35,63 @@ def background_root() -> Path:
     return orin_paths().data / "cli-background"
 
 
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_PROCESS_TERMINATE = 0x0001
+_SYNCHRONIZE = 0x00100000
+
+
 def _alive(pid: int) -> bool:
     from agentos.launcher.state import process_is_alive
 
     return process_is_alive(pid)
+
+
+def process_created(pid: int) -> int | str | None:
+    """When the process with this pid started, read the same way for a record and for a later check (W6-R3).
+
+    Windows: the creation time from ``GetProcessTimes``; POSIX: field 22 of ``/proc/<pid>/stat``, or where there is
+    no ``/proc``, ``ps -o lstart=``. None when it cannot be read.
+    """
+    if pid <= 0:
+        return None
+    if os.name == "nt":
+        from agentos.hooks.processes import _windows_creation_time, _windows_kernel32
+
+        kernel32 = _windows_kernel32()
+        handle = kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            return None
+        try:
+            return _windows_creation_time(kernel32, handle)
+        finally:
+            kernel32.CloseHandle(handle)
+    stat = Path(f"/proc/{pid}/stat")
+    if stat.is_file():
+        try:
+            fields = stat.read_text(encoding="utf-8").rsplit(")", 1)[1].split()
+            return int(fields[19])  # starttime: field 22 counting pid and comm
+        except (OSError, IndexError, ValueError):
+            return None
+    try:
+        result = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True, check=False, timeout=10)  # noqa: S603, S607
+    except (OSError, subprocess.SubprocessError):
+        return None
+    value = result.stdout.strip()
+    return value or None
+
+
+def _same_process(record: dict[str, Any]) -> bool:
+    """True only when the record's pid is alive and its creation time is the one recorded at start.
+
+    A record without a creation time (written before this check existed), or one whose time cannot be read, is
+    treated as a different process: it is reported as finished and nothing is killed for it (W6-R3).
+    """
+    pid = int(record.get("pid") or 0)
+    recorded = record.get("created")
+    if pid <= 0 or recorded is None or recorded == "" or not _alive(pid):
+        return False
+    current = process_created(pid)
+    return current is not None and current == recorded
 
 
 def _record(run_id: str) -> dict[str, Any]:
@@ -59,7 +112,7 @@ def background_runs() -> list[dict[str, Any]]:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
-        data["state"] = "running" if _alive(int(data.get("pid") or 0)) else "finished"
+        data["state"] = "running" if _same_process(data) else "finished"
         runs.append(data)
     return runs
 
@@ -89,21 +142,56 @@ def start_background(argv: list[str], *, cwd: Path, stdout: TextIO) -> int:
         flags["start_new_session"] = True
     with open(log, "wb") as handle:
         process = subprocess.Popen(command, cwd=str(cwd), stdin=subprocess.DEVNULL, stdout=handle, stderr=subprocess.STDOUT, close_fds=True, **flags)
-    record = {"id": run_id, "pid": process.pid, "cwd": str(cwd), "args": args, "log": str(log),
-              "session_id": session_id, "started_at": datetime.now(UTC).isoformat()}
+    record = {"id": run_id, "pid": process.pid, "created": process_created(process.pid), "cwd": str(cwd), "args": args,
+              "log": str(log), "session_id": session_id, "started_at": datetime.now(UTC).isoformat()}
     (root / f"{run_id}.json").write_text(json.dumps(record, indent=1), encoding="utf-8")
     stdout.write(f"{run_id}\n")
     return 0
 
 
 def _stop(record: dict[str, Any]) -> bool:
-    pid = int(record.get("pid") or 0)
-    if not _alive(pid):
+    """Cancel the run's turn and stop its process tree, but only when the record still names that process (W6-R3)."""
+    if not _same_process(record):
         return False
     _cancel_turn(record)
-    from agentos.launcher.state import kill_process_tree
+    return _kill_verified_windows(record) if os.name == "nt" else _kill_verified_posix(record)
 
-    kill_process_tree(pid)
+
+def _kill_verified_windows(record: dict[str, Any]) -> bool:
+    """Terminate the run and its descendants through handles opened and validated first; never by bare pid."""
+    from types import SimpleNamespace
+
+    from agentos.hooks.processes import _close_handles, _windows_creation_time, _windows_descendants, _windows_kernel32
+
+    kernel32 = _windows_kernel32()
+    pid = int(record["pid"])
+    handle = kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION | _PROCESS_TERMINATE | _SYNCHRONIZE, False, pid)
+    if not handle:
+        return False
+    descendants: dict[int, int] = {}
+    try:
+        if _windows_creation_time(kernel32, handle) != record.get("created"):
+            return False  # the pid now belongs to another process
+        descendants = _windows_descendants(SimpleNamespace(pid=pid, _handle=handle))
+        for child in descendants.values():
+            kernel32.TerminateProcess(child, 1)
+        return bool(kernel32.TerminateProcess(handle, 1))
+    finally:
+        _close_handles(descendants)
+        kernel32.CloseHandle(handle)
+
+
+def _kill_verified_posix(record: dict[str, Any]) -> bool:
+    """SIGKILL the run's process group (it starts its own session); called only after the check."""
+    import signal
+
+    pid = int(record["pid"])
+    try:
+        if os.getpgid(pid) != pid:
+            return False
+        os.killpg(pid, signal.SIGKILL)
+    except OSError:
+        return False
     return True
 
 
@@ -180,11 +268,11 @@ def run(name: str, argv: list[str], *, cwd: Path, stdout: TextIO, stderr: TextIO
             position += len(chunk)
             stdout.write(chunk.decode("utf-8", errors="replace"))
             stdout.flush()
-        if not follow or not _alive(int(record.get("pid") or 0)):
+        if not follow or not _same_process(record):
             if follow and chunk:
                 continue
             return 0
         time.sleep(0.5)
 
 
-__all__ = ["background_runs", "run", "start_background"]
+__all__ = ["background_runs", "process_created", "run", "start_background"]
