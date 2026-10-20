@@ -1361,22 +1361,27 @@ export function ChatPage() {
   }, [])
 
   /** W7-R13: one submit at a time, so a second Enter while a command (`/fork`, `/compact`…) runs does not run it again. */
-  async function submit(override?: string) {
+  /**
+   * `afterStop` (W7-R14): send-now has just stopped the turn, but this closure still sees it running; the
+   * stop-related checks are then skipped, because the turn is known to have stopped.
+   */
+  async function submit(override?: string, afterStop = false) {
     if (submitInFlight.current) return
     submitInFlight.current = true
     try {
-      await runSubmit(override)
+      await runSubmit(override, afterStop)
     } finally {
       submitInFlight.current = false
     }
   }
 
-  async function runSubmit(override?: string) {
+  async function runSubmit(override: string | undefined, afterStop: boolean) {
     const text = (override ?? message).trim()
     const readyUploads = readyUploadIds()
+    const turnBusy = !afterStop && (running || stopping)
     // W7 `!command`: a shell turn in the session's folder (Code conversations only).
-    if (conversationMode === 'code' && text.startsWith('!') && text.length > 1 && readyUploads.length === 0 && !override) {
-      if (running || stopping) { setCommandNotice('Espere o turno atual terminar para rodar um comando.'); return }
+    if (conversationMode === 'code' && text.startsWith('!') && text.length > 1 && readyUploads.length === 0) {
+      if (turnBusy) { setCommandNotice('Espere o turno atual terminar para rodar um comando.'); return }
       setMessage('')
       setError(null)
       try {
@@ -1389,7 +1394,7 @@ export function ChatPage() {
       return
     }
     // W7: a built-in slash command runs here (even while a turn runs); a skill or plugin command is sent as before.
-    if (text.startsWith('/') && readyUploads.length === 0 && !stopping) {
+    if (text.startsWith('/') && readyUploads.length === 0 && !(stopping && !afterStop)) {
       let outcome: Awaited<ReturnType<typeof chatCommands.run>> | { kind: 'failed' }
       try {
         outcome = await chatCommands.run(text)
@@ -1400,7 +1405,7 @@ export function ChatPage() {
       if (outcome.kind === 'excluded') { setError(`/${outcome.name} não existe no Orin.`); return }
       if (outcome.kind === 'failed') { setError('O comando não pôde ser concluído. Tente novamente.'); return }
     }
-    if ((!text && readyUploads.length === 0) || running || stopping) return
+    if ((!text && readyUploads.length === 0) || turnBusy) return
     if (text.length > MAX_MESSAGE_CHARACTERS) {
       setOversizedInput({ text, attachments: readyUploads })
       return
@@ -1538,9 +1543,13 @@ export function ChatPage() {
           setError('O agente já leu esta mensagem.')
           return
         }
-      } else {
-        setMessage('')
       }
+      // W7-R14: a built-in command or a `!` shell turn is not a prompt: it runs as Enter would run it.
+      if (clean.startsWith('/') || (conversationMode === 'code' && clean.startsWith('!'))) {
+        await submit(clean, true)
+        return
+      }
+      if (!queueId) setMessage('')
       setPendingUserMessage({ message_id: `pending-${Date.now()}`, role: 'user', content: clean, status: 'completed', retryable: false, attachments: [], command: null })
       await sendChatMessage(clean, [])
       await loadSnapshot(false)
