@@ -82,6 +82,16 @@ def main(argv: Sequence[str] | None = None, *, stdin: TextIO | None = None, stdo
         if show_version:
             stdout.write(version_line() + "\n")
             return EXIT_OK
+        if options.headless and options.background:
+            from pathlib import Path
+
+            from .commands.background import start_background
+            from .headless import refuse_unsupported
+
+            refuse_unsupported(options)
+            if not options.print_mode or not (options.prompt or "").strip():
+                raise CliUsageError("--bg runs a -p prompt in the background")
+            return start_background(args, cwd=Path.cwd().resolve(), stdout=stdout)
         if options.headless:
             return run_headless(options, stdin=stdin, stdout=stdout, stderr=stderr)
         return open_interface(options, stdout=stdout, stderr=stderr)

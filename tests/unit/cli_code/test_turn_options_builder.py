@@ -71,7 +71,7 @@ def test_permission_modes(argv: list[str], mode: str) -> None:
     assert permission_mode_for(_options(*argv)) == mode
 
 
-@pytest.mark.parametrize("argv", [["--fork-session"], ["--session-mirror"], ["--agent", "reviewer"], ["--bg"], ["--permission-prompt-tool", "mcp__p__ask"], ["--thinking-display", "summarized"]])
+@pytest.mark.parametrize("argv", [["--fork-session"], ["--session-mirror"], ["--agent", "reviewer"], ["--resume-session-at", "x"], ["--permission-prompt-tool", "mcp__p__ask"], ["--thinking-display", "summarized"]])
 def test_flags_without_support_yet_are_refused(argv: list[str]) -> None:
     with pytest.raises(CliUsageError):
         refuse_unsupported(_options(*argv))
