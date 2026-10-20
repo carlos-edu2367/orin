@@ -609,3 +609,9 @@ Not done in part 2: the deferred items listed at the top; R17 items 1, 4, 5 and 
   no longer checks an `icacls` call (there is none); it checks that the SID comes from System32's `whoami` only.
 - `test_w6_r3_background_pid_reuse.py`: the child of the "matching" test now leads its own session on POSIX (found on
   Linux before the push; `_stop` kills only a group leader, as `start_background` creates).
+- Second CI run: `backend (ubuntu-latest)` failed on `test_windows_tools_run_from_system32_and_grant_by_sid` (it fakes
+  `whoami` on every OS and reached `ctypes.WinDLL` on Linux); the Windows path now fails closed with `ApiTokenError`
+  where the Windows API does not exist. Third run: `backend (windows-latest)` failed on the W5 test
+  `test_stdio_server_that_sends_too_many_requests_in_one_call_is_refused`, whose 0.5 s answer timeout a slow runner's
+  Python start-up exceeded (it passed in the first run). Its timeout is now 2 s; the request cap is still reached long
+  before the 20 s ceiling and the test still checks the cap's message and `elapsed < 4.5`.

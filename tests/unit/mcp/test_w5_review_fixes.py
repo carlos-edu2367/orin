@@ -115,8 +115,8 @@ def test_stdio_server_pinging_forever_is_cut_at_the_call_ceiling(tmp_path: Path)
 def test_stdio_server_that_sends_too_many_requests_in_one_call_is_refused(tmp_path: Path) -> None:
     script = tmp_path / "pinger.py"
     script.write_text(PINGING_SERVER, encoding="utf-8")
-    # Pings every 5 ms: the request cap is reached well before the 5 s ceiling of timeout=0.5.
-    transport = StdioTransport(command=sys.executable, args=(str(script), "0.005"), env={}, timeout=0.5, allow_any_command=True)
+    # Pings every 5 ms: the request cap is reached well before the 20 s ceiling of timeout=2 (a slow CI start-up fits).
+    transport = StdioTransport(command=sys.executable, args=(str(script), "0.005"), env={}, timeout=2.0, allow_any_command=True)
     transport.on_message = _answer_every_ping
     transport.open()
     started = time.monotonic()
