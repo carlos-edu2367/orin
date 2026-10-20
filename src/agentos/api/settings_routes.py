@@ -174,7 +174,11 @@ def change_permission_rule(root: Path | None, change: PermissionRuleChange) -> N
             permissions = data["permissions"] = {}
         current = permissions.get(change.kind)
         items = [item for item in current if isinstance(item, str)] if isinstance(current, list) else []
-        items = [item for item in items if item.strip() != rule]
+        remaining = [item for item in items if item.strip() != rule]
+        if change.op == "remove" and len(remaining) == len(items):
+            # W7-R5: the rule lives in another file (a Claude Code file, or another layer); nothing to remove here.
+            raise SettingsRejected("rule_not_in_file", [f"'{rule[:200]}' is not in this file"])
+        items = remaining
         if change.op == "add":
             items.append(rule)
         if items:

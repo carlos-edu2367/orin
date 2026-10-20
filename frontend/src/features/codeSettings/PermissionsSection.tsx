@@ -81,9 +81,12 @@ export function PermissionsSection() {
                     <span className="code-settings__warning">sem efeito: também está em Negar</span>
                   )}
                   {entry.file && <span className="code-settings__file">{entry.file}</span>}
-                  {isWritable(entry.layer) && writable.includes(entry.layer) && (
+                  {/* W7-R5: the rule can be removed only from the file the editor writes for its layer. */}
+                  {isWritable(entry.layer) && entry.file !== null && data.writable[entry.layer] === entry.file ? (
                     <button type="button" className="ghost-button" disabled={busy} aria-label={`Remover ${entry.rule} (${LAYER_SHORT[entry.layer]})`}
                       onClick={() => void change(kind, { rule: entry.rule, layer: entry.layer as WritableLayer }, 'remove')}>Remover</button>
+                  ) : (
+                    <span className="code-settings__muted">Vem de {entry.file ?? 'outro arquivo'}; remova-a nesse arquivo.</span>
                   )}
                 </li>
               ))}
