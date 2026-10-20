@@ -61,7 +61,10 @@ def open_interface(options: CodeOptions, *, stdout: TextIO, stderr: TextIO) -> i
 
 
 def run_subcommand(name: str, argv: Sequence[str], *, stdout: TextIO, stderr: TextIO) -> int:
-    raise CliRuntimeError(f"`orin code {name}` is not available in this build yet")
+    from .commands import run_subcommand as dispatch
+
+    _utf8(stdout, stderr)
+    return dispatch(name, list(argv), stdout=stdout, stderr=stderr)
 
 
 def main(argv: Sequence[str] | None = None, *, stdin: TextIO | None = None, stdout: TextIO | None = None,
