@@ -39,17 +39,20 @@ MAX_CONSECUTIVE_DENIALS = 3
 MAX_TOTAL_DENIALS = 20  # per conversation, for as long as this worker runs (W1-R10)
 # W1-R10: one small pool for every classifier. A call that hangs past its timeout keeps its thread until the provider
 # returns, but no more than this many threads ever exist; while they are all busy a new call times out and asks.
-MAX_CLASSIFIER_THREADS = 2
+MAX_CLASSIFIER_THREADS = 8
+# W6-R6: one conversation's hung calls may hold only this many of the shared threads, so the others keep theirs.
+MAX_CALLS_PER_CONVERSATION = 2
 _POOL = ThreadPoolExecutor(max_workers=MAX_CLASSIFIER_THREADS, thread_name_prefix="orin-auto-mode")
 _MAX_BREAKERS = 1000
 
 
 class _Breaker:
-    __slots__ = ("consecutive", "total")
+    __slots__ = ("consecutive", "total", "slots")
 
     def __init__(self) -> None:
         self.consecutive = 0
         self.total = 0
+        self.slots = threading.BoundedSemaphore(MAX_CALLS_PER_CONVERSATION)  # its calls in flight (W6-R6)
 
 
 _BREAKERS: "OrderedDict[str, _Breaker]" = OrderedDict()
@@ -178,6 +181,15 @@ class AutoModeClassifier:
                 text.append(event.text)
         return "".join(text)
 
+    def _guarded(self, slots: threading.BoundedSemaphore, started: threading.Event, internal: str,
+                 arguments: Mapping[str, Any]) -> str:
+        """Runs in the pool. The conversation's slot is released when the call ends, whether it answered or hung."""
+        started.set()
+        try:
+            return self._ask_model(internal, arguments)
+        finally:
+            slots.release()
+
     def __call__(self, internal: str, arguments: Mapping[str, Any]) -> PermissionDecision:
         if internal in SHELL_TOOLS and len(str(arguments.get("command") or "")) > MAX_CLASSIFIED_COMMAND_CHARS:
             return PermissionDecision("ask", "command too long for auto mode")
@@ -187,11 +199,24 @@ class AutoModeClassifier:
         with self._lock:
             if self._breaker.consecutive >= MAX_CONSECUTIVE_DENIALS or self._breaker.total >= MAX_TOTAL_DENIALS:
                 return PermissionDecision("ask", "auto mode paused after repeated denials")
-        future = _POOL.submit(self._ask_model, internal, dict(arguments))
+        # W6-R6: the conversation's slot first (waiting at most the timeout), then the shared pool. The slot is released
+        # by the worker when its call ends, even a hung one; a call cancelled before it starts releases it here.
+        slots = self._breaker.slots
+        if not slots.acquire(timeout=self.timeout_seconds):
+            return PermissionDecision("ask", "auto mode classifier busy")
+        started = threading.Event()
+        try:
+            future = _POOL.submit(self._guarded, slots, started, internal, dict(arguments))
+        except Exception:  # noqa: BLE001 - the pool refused the call: nothing will release the slot but this
+            slots.release()
+            return PermissionDecision("ask", "auto mode classifier failed")
+        if not started.wait(self.timeout_seconds):  # queued behind other conversations' calls; the timeout counts from start
+            if future.cancel():
+                slots.release()  # it never runs, so the worker will not release the slot
+            return PermissionDecision("ask", "auto mode classifier busy")
         try:
             reply = future.result(timeout=self.timeout_seconds)
         except FutureTimeout:
-            future.cancel()  # a call still queued behind hung ones never runs
             return PermissionDecision("ask", "auto mode classifier timed out")
         except Exception:  # noqa: BLE001
             return PermissionDecision("ask", "auto mode classifier failed")
