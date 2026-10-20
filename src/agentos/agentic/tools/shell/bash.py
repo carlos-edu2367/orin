@@ -18,6 +18,7 @@ from uuid import uuid4
 from pydantic import BaseModel, ConfigDict, Field
 
 from agentos.agentic.workspace import WorkspaceError
+from agentos.process_identity import process_created
 from agentos.agentic.reminders import system_reminder
 from agentos.agentic.tools._shared import (
     AgentToolError,
@@ -245,6 +246,7 @@ class BashTools:
                     "description": clean_description,
                     "log_path": log_relative,
                     "started_at": datetime.now(UTC).isoformat(),
+                    "created": process_created(process.pid),  # W7: the tasks panel stops only this very process
                     "notified_exit": False,
                 }
                 self._save_process_manifest(manifest)
@@ -398,6 +400,7 @@ class BashTools:
                             "description": clean_description,
                             "log_path": auto_log_rel,
                             "started_at": datetime.now(UTC).isoformat(),
+                            "created": process_created(process.pid),
                             "notified_exit": False,
                             "auto_backgrounded": True,
                             "detected_url": detected_url,

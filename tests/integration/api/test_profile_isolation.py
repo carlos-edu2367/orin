@@ -61,6 +61,7 @@ OWNED = {
     ("GET", "/v1/conversations/{conversation_id}/transcript/{entry_id}"),
     ("POST", "/v1/conversations/{conversation_id}/host-requests/{request_id}"),
     ("GET", "/v1/conversations/{conversation_id}/overview"),
+    ("GET", "/v1/conversations/{conversation_id}/tasks"), ("POST", "/v1/conversations/{conversation_id}/tasks/{task_id}/stop"),
     ("GET", "/v1/conversations/{conversation_id}/events"),
     ("GET", "/v1/skills/{skill_id}"), ("PUT", "/v1/skills/{skill_id}"),
     ("DELETE", "/v1/skills/{skill_id}/versions/{version}"), ("GET", "/v1/skills/{skill_id}/agents"),

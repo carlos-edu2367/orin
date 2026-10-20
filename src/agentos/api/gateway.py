@@ -42,6 +42,7 @@ from .contracts import (
 from agentos.provider_catalog.models import PROVIDERS_WITH_OPTIONAL_KEY, ProviderCatalogContext
 from agentos.provider_catalog.service import ProviderCatalogUnavailable
 from .events import CursorError, InMemoryClientEventStream
+from .conversation_routes import register_conversation_routes
 from .settings_routes import register_settings_routes
 from .security import (
     AdminRequiredError, AuthenticationError, AuthorizationError, AuthenticatedPrincipal, InMemorySecurityService,
@@ -2548,6 +2549,7 @@ def create_app(services: ApiServices) -> FastAPI:
         return Path(getattr(workspace, "root", workspace))
 
     register_settings_routes(app, services, principal_for, conversation_root)
+    register_conversation_routes(app, services, principal_for, conversation_root)
 
     return app
 
