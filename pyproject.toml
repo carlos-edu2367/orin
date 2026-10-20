@@ -41,9 +41,14 @@ orin-code = "agentos.cli_code.main:main"
 
 [dependency-groups]
 dev = [
+    # W6: the official SDK drives orin code in the conformance tests (built from its sdist: no bundled claude binary).
+    "claude-agent-sdk==0.2.159",
     "pyinstaller>=6.11,<7",
     "pytest>=8.3,<9",
 ]
+
+[tool.uv]
+no-binary-package = ["claude-agent-sdk"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
