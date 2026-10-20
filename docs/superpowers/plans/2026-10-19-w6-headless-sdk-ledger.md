@@ -63,3 +63,15 @@ W6 review.
   asserts the W1-R3 meaning — the path resolves inside the workspace, the write lands there and the external file is
   never created. Added, on every OS: a `../` write is refused and the external file still does not exist. The `../`
   resolve case and `key()` refusal are unchanged. Green on Windows and in Docker (python:3.13, non-root).
+
+### L0-4 — intermittent `test_parallel_run_subagent_and_checkpoint_concurrency` (systematic debugging)
+
+- Root cause (read, then confirmed): every parallel call takes `checkpoint_lock` in the runtime for
+  `effect_started` (the test's journal write sleeps 20 ms plus a SQLite write) before the handler runs, and the
+  handler overlapped only if the next call's wait for that lock fit into the first handler's 80 ms sleep. On a slow
+  runner it does not, and `max_parallel` stayed 1. Confirmed by making the checkpoint take 100 ms: the old test failed
+  every time. The runtime itself was running the calls in parallel.
+- Fix (test only, no runtime change): the handler counts under a lock and waits on an `Event` set when two calls are
+  inside it at once (10 s timeout). The assertion `max_parallel >= 2` is unchanged.
+- Adversarial checks (scratchpad `lote0/serial_check.py`): with a 300 ms checkpoint the test still passes; with the
+  runtime forced serial (`MAX_PARALLEL_SUBAGENT_TOOLS = MAX_PARALLEL_TOOLS = 1`) it fails with `max_parallel=1`.

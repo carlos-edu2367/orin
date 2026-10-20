@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import socket
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -228,13 +229,22 @@ def test_parallel_run_subagent_and_checkpoint_concurrency(tmp_path: Path) -> Non
 
     active_count = 0
     max_parallel = 0
+    count_lock = threading.Lock()
+    two_running = threading.Event()
 
     def tool_handler(name: str, args: dict[str, Any]) -> ToolOutcome:
+        # Each call stays inside the handler until a second one is inside too: two calls overlap whenever the runtime
+        # really runs them in parallel, however long the serialized checkpoint takes. A serial runtime leaves the
+        # first call alone until the timeout, so max_parallel stays 1 and the assertion below fails.
         nonlocal active_count, max_parallel
-        active_count += 1
-        max_parallel = max(max_parallel, active_count)
-        time.sleep(0.08)
-        active_count -= 1
+        with count_lock:
+            active_count += 1
+            max_parallel = max(max_parallel, active_count)
+            if active_count >= 2:
+                two_running.set()
+        two_running.wait(timeout=10)
+        with count_lock:
+            active_count -= 1
         return ToolOutcome(
             "succeeded",
             f"Subagent {args.get('description')}",
