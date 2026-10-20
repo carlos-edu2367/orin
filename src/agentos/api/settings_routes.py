@@ -36,10 +36,11 @@ _TOOL_NAME = re.compile(r"^[A-Za-z_][\w.:-]*$")  # an agent file lists tool name
 class SettingsRejected(ValueError):
     """A change the API refuses, with the reasons the editor shows."""
 
-    def __init__(self, code: str, problems: list[str]) -> None:
+    def __init__(self, code: str, problems: list[str], status: int = 422) -> None:
         super().__init__(code)
         self.code = code
         self.problems = problems[:50]
+        self.status = status
 
 
 class PermissionRuleChange(BaseModel):
@@ -70,6 +71,7 @@ class AgentFile(BaseModel):
     permission_mode: Literal["default", "acceptEdits", "plan", "dontAsk", "bypassPermissions", "auto"] | None = None
     max_turns: int | None = Field(default=None, ge=1, le=500)
     effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None
+    create: bool = False  # W7-R6: a new agent; refuses (409) to replace an existing file
 
 
 class OutputStyleChange(BaseModel):
@@ -93,7 +95,7 @@ def _rejected(error: SettingsRejected) -> JSONResponse:
     return JSONResponse(
         {"error": {"code": error.code, "category": "VALIDATION", "message_key": error.code, "retryable": False,
                    "details": {"problems": error.problems}}},
-        status_code=422,
+        status_code=error.status,
     )
 
 
@@ -264,7 +266,8 @@ def agents_report(root: Path | None, trusted: bool) -> dict[str, Any]:
     agents = []
     for definition in catalog.agents.values():
         path = definition.path
-        editable = path is not None and any(path.parent == folder for folder in editable_dirs.values())
+        # W7-R6: the editor addresses `<folder>/<name>.md`, so only an agent stored under its own name is editable.
+        editable = path is not None and path.stem == definition.name and any(path.parent == folder for folder in editable_dirs.values())
         agents.append({
             "name": definition.name, "description": definition.description, "origin": definition.origin,
             "path": str(path) if path else None, "editable": editable, "prompt": definition.prompt,
@@ -281,6 +284,30 @@ def agents_report(root: Path | None, trusted: bool) -> dict[str, Any]:
 
 def _scalar(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)
+
+
+_FORM_FRONTMATTER_KEYS = frozenset({"name", "description", "tools", "disallowedTools", "model", "permissionMode", "effort", "maxTurns"})
+_FRONTMATTER_KEY = re.compile(r"^([A-Za-z_][\w-]*):")
+
+
+def _kept_frontmatter(text: str) -> list[str]:
+    """The frontmatter lines of an agent file for keys the form does not manage (skills, hooks, color, …), so an
+    edit of the description does not delete them (W7-R6)."""
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return []
+    end = next((index for index in range(1, len(lines)) if lines[index].strip() == "---"), None)
+    if end is None:
+        return []
+    kept: list[str] = []
+    keeping = False
+    for line in lines[1:end]:
+        key = _FRONTMATTER_KEY.match(line)
+        if key:
+            keeping = key.group(1) not in _FORM_FRONTMATTER_KEYS
+        if keeping:
+            kept.append(line)
+    return kept
 
 
 def write_agent(root: Path | None, name: str, body: AgentFile) -> Path:
@@ -302,10 +329,13 @@ def write_agent(root: Path | None, name: str, body: AgentFile) -> Path:
             lines.append(f"{key}: {_scalar(value.strip())}")
     if body.max_turns is not None:
         lines.append(f"maxTurns: {body.max_turns}")
-    text = "\n".join([*lines, "---", "", body.prompt.strip(), ""])
     folder = _agent_dir(body.scope, root)
     folder.mkdir(parents=True, exist_ok=True)
     target = folder / f"{clean}.md"
+    if body.create and target.exists():
+        raise SettingsRejected("agent_exists", [f"there is already an agent '{clean}' in this folder"], status=409)
+    existing = target.read_text(encoding="utf-8", errors="replace") if target.is_file() else ""
+    text = "\n".join([*lines, *_kept_frontmatter(existing), "---", "", body.prompt.strip(), ""])
     temporary = folder / f".{clean}.md.tmp"
     temporary.write_text(text, encoding="utf-8")
     try:

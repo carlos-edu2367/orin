@@ -71,7 +71,7 @@ export function AgentsSection() {
     setBusy(true)
     setError(null)
     try {
-      await saveAgent(client, form.name, draftOf(form), conversationId)
+      await saveAgent(client, form.name, draftOf(form), conversationId, editing === null) // W7-R6: a new agent never replaces a file
       setForm(null)
       setEditing(null)
       setTried(false)

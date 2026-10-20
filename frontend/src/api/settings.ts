@@ -185,7 +185,7 @@ export type AgentDraft = {
   effort: string | null
 }
 
-export function saveAgent(client: ApiClient, name: string, draft: AgentDraft, conversationId?: string | null): Promise<AgentsReport> {
+export function saveAgent(client: ApiClient, name: string, draft: AgentDraft, conversationId?: string | null, create = false): Promise<AgentsReport> {
   return client.request({
     path: `/v1/settings/agents/${encodeURIComponent(name)}`,
     method: 'PUT',
@@ -194,6 +194,7 @@ export function saveAgent(client: ApiClient, name: string, draft: AgentDraft, co
       disallowed_tools: draft.disallowedTools, ...(draft.model ? { model: draft.model } : {}),
       ...(draft.permissionMode ? { permission_mode: draft.permissionMode } : {}),
       ...(draft.maxTurns ? { max_turns: draft.maxTurns } : {}), ...(draft.effort ? { effort: draft.effort } : {}),
+      ...(create ? { create: true } : {}),
       ...(conversationId ? { conversation_id: conversationId } : {}),
     },
     parse: parseAgentsReport,
