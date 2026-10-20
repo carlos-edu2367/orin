@@ -5198,3 +5198,2701 @@ feat(w6): --json-schema answers are validated and retried
 - [ ] **Step 1:** `uv run pytest -q tests/unit` and `uv run pytest -q tests/integration` (timeout 600000 ms each): green; report the counts.
 - [ ] **Step 2:** `wc -l src/agentos/agentic/agent_tools.py` is still 1699.
 - [ ] **Step 3:** Append `## Batch B — Headless turns (Tasks 6–11)` to the ledger: commits, tests added, suite results, deviations from this plan, the expectation change in `test_w3_schema.py`, anything incomplete. Commit `docs(w6): Batch B ledger`.
+
+---
+
+## Batch C — The control protocol
+
+Batch B ran turns and answered `initialize`. This batch fixes how a CLI turn's transcript travels (Task 12), gives a
+turn a way to ask the SDK host (Task 13), runs the host's hooks as callback hooks (Task 14), implements the control
+protocol both ways (Task 15) and accepts the host's agents (Task 16). SDK MCP servers (`mcp_message`) and
+`--mcp-config` move to Batch D: they need an MCP transport that relays through the CLI.
+
+**Every "Create" below is a new file: if a file of that name exists, stop and report — never overwrite it.**
+
+### Deviations decided while planning Batch C (the ledger repeats them)
+
+22. **A CLI turn's tool inputs and results live in an owner-only transcript store** (`<ORIN_DATA_DIR>/cli-transcripts`, 7-day retention, 200 KB per entry), read only with the CLI token; the activity events carry `transcript_id`. (Replaces deviation 8's mechanism.)
+23. **A turn's questions for the host are files plus a `host.request` event**, answered through the API by the CLI; another process of the same user could forge an answer, as with Orin's permission replies.
+24. **`can_use_tool`: an `updatedInput` different from the asked input is refused; `updatedPermissions` are not persisted** (each allow is `allow_once`).
+25. **`set_permission_mode`, `set_model` and `set_max_thinking_tokens` apply from the next turn**, not to the running one.
+26. **`rewind_files` knows a prompt by the uuid the host saw** (replayed with `--replay-user-messages`, or sent by the host); it rewinds code only (Orin's API).
+27. **Callback hooks are accepted only from the cli settings layer**; a host that does not answer in time is a hook timeout.
+28. **`--agents` and `initialize.agents` sit above every folder's agents; `--agent` stays refused.**
+29. **`tests/conftest.py` isolates `ORIN_DATA_DIR`.**
+30. **`mcp_message`, SDK MCP servers, `--mcp-config` and `--strict-mcp-config` are Batch D.**
+
+### Task 12: The transcript leaves the activity log (fixes Batch B's design)
+
+Batch B put each CLI tool event's input and result in the activity payload. Those payloads are sanitized for every viewer (`agentic/models.py::_bounded`): **a string over 512 characters makes the whole event fail** (`payload text exceeds limit`) and keys such as `prompt` or `headers` are redacted — so a real `Read` result never reached the host (reproduced: the new live test `test_a_long_tool_result_reaches_the_host_whole` fails on Batch B's code). Now the session writes each entry to a CLI transcript store (`agentic/cli_transcript.py`: one owner-only JSON file per entry under `<ORIN_DATA_DIR>/cli-transcripts/<conversation hash>`, at most 200 KB, pruned after 7 days) and the event carries only `transcript_id`; `GET /v1/conversations/{id}/transcript/{entry_id}` returns an entry to the CLI token only, after the ownership check. Two more fixes ride along: `--trust` on a message to an existing conversation trusts only a local folder the conversation is bound to (Batch B trusted the conversation's workspace root, which can be a managed folder — the Batch B executor flagged it), and `tests/conftest.py` now isolates `ORIN_DATA_DIR` too (in a checkout the data folder is the repository's `data/`, the developer's own Orin data; Batch C's tests write there otherwise). **Note:** `src/agentos/agentic/transcript.py` already exists and is unrelated (rehydration of tool steps): the new module is `cli_transcript.py`; never overwrite an existing file.
+
+**Files:**
+- Create: `src/agentos/agentic/cli_transcript.py`, `tests/unit/cli_code/test_transcript.py`
+- Modify: `src/agentos/agentic/session.py`, `src/agentos/api/gateway.py`, `src/agentos/cli_code/headless.py`, `tests/conftest.py`, `tests/fixtures/fake_ollama.py`, `tests/integration/api/test_profile_isolation.py`, `tests/integration/cli_code/test_headless.py`, `tests/unit/cli_code/test_cli_turn_session.py`, `tests/unit/cli_code/test_turn_options.py`
+
+**Interfaces:**
+- Produces: `TranscriptStore(conversation_id, *, root=None, clock=time.time)` with `write(entry) -> str | None` (`tr_<32 hex>`) and `read(entry_id) -> dict | None`; `RETENTION_SECONDS`, `MAX_ENTRY_BYTES`, `transcripts_root()`; `TurnSession._transcript()`; tool events of a CLI turn carry `transcript_id` (entries `{"tool_input": ...}` / `{"tool_result": ...}`); `GET /v1/conversations/{conversation_id}/transcript/{entry_id}`; `HeadlessRun._with_transcript(event)`; fake Ollama marker `[[read:<path>]]`.
+
+- [ ] **Step 1: Write the failing tests** (test files and their fixtures).
+
+In `tests/conftest.py` make these 1 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+    monkeypatch.setenv("ORIN_RUN_DIR", str(root / "orin-run"))
+    # Claude Code's ~/.claude.json is found next to ORIN_CLAUDE_HOME (inside this temporary folder) unless overridden.
+```
+
+with
+
+```python
+    monkeypatch.setenv("ORIN_RUN_DIR", str(root / "orin-run"))
+    # And the data folder (W6): in a checkout it is the repository's data/, the developer's own Orin data.
+    monkeypatch.setenv("ORIN_DATA_DIR", str(root / "orin-data"))
+    # Claude Code's ~/.claude.json is found next to ORIN_CLAUDE_HOME (inside this temporary folder) unless overridden.
+```
+
+
+In `tests/fixtures/fake_ollama.py` make these 3 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+- ``[[write:<path>]]``: a ``Write`` call creating ``<path>`` with ``hi`` and, once its result is back, ``Done.``;
+- ``[[slow]]``: forty words, one every 0.25 s, so a test can interrupt the turn while it streams;
+```
+
+with
+
+```python
+- ``[[write:<path>]]``: a ``Write`` call creating ``<path>`` with ``hi`` and, once its result is back, ``Done.``;
+- ``[[read:<path>]]``: a ``Read`` call for ``<path>`` and, once its result is back, ``Done.``;
+- ``[[slow]]``: forty words, one every 0.25 s, so a test can interrupt the turn while it streams;
+```
+
+2. Replace
+
+```python
+MODEL = "fake-coder:latest"
+_MARKER = re.compile(r"\[\[(write|slow|think|say)(?::([^\]]*))?\]\]")
+```
+
+with
+
+```python
+MODEL = "fake-coder:latest"
+_MARKER = re.compile(r"\[\[(write|read|slow|think|say)(?::([^\]]*))?\]\]")
+```
+
+3. Replace
+
+```python
+        call = {"function": {"name": "Write", "arguments": {"file_path": value or "hello.txt", "content": "hi\n"}}}
+        return [{"message": {"role": "assistant", "content": "", "tool_calls": [call]}, "done": False}, _done(10, 5)], 0.0
+```
+
+with
+
+```python
+        call = {"function": {"name": "Write", "arguments": {"file_path": value or "hello.txt", "content": "hi\n"}}}
+        return [{"message": {"role": "assistant", "content": "", "tool_calls": [call]}, "done": False}, _done(10, 5)], 0.0
+    if kind == "read":
+        if answered:
+            return [*_text("Done."), _done(20, 2)], 0.0
+        call = {"function": {"name": "Read", "arguments": {"file_path": value or "README.md"}}}
+        return [{"message": {"role": "assistant", "content": "", "tool_calls": [call]}, "done": False}, _done(10, 5)], 0.0
+```
+
+
+In `tests/integration/api/test_profile_isolation.py` make these 1 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+    ("POST", "/v1/conversations/{conversation_id}/turns/{turn_id}/tool-permission"),
+    ("GET", "/v1/conversations/{conversation_id}/overview"),
+```
+
+with
+
+```python
+    ("POST", "/v1/conversations/{conversation_id}/turns/{turn_id}/tool-permission"),
+    ("GET", "/v1/conversations/{conversation_id}/transcript/{entry_id}"),
+    ("GET", "/v1/conversations/{conversation_id}/overview"),
+```
+
+
+In `tests/integration/cli_code/test_headless.py` make these 1 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+    assert requests
+```
+
+with
+
+```python
+    assert requests
+
+
+def test_a_long_tool_result_reaches_the_host_whole(orin_runtime: LiveRuntime) -> None:
+    # Activity payloads are sanitized (512-character strings, redacted keys): the transcript travels apart from them.
+    workspace = orin_runtime.workspace("long-read")
+    lines = [f"line {number:04d} " + "x" * 60 for number in range(40)]
+    (workspace / "big.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    done = orin_code(orin_runtime, workspace, "-p", "[[read:big.txt]]", "--permission-mode", "acceptEdits",
+                     "--output-format", "stream-json", "--verbose", *MODEL)
+    assert done.returncode == 0, done.stderr
+    messages = _lines(done.stdout)
+    use = next(block for item in messages if item["type"] == "assistant" for block in item["message"]["content"] if block["type"] == "tool_use")
+    assert use["name"] == "Read" and use["input"] == {"file_path": "big.txt"}
+    result = next(block for item in messages if item["type"] == "user" for block in item["message"]["content"])
+    assert result["tool_use_id"] == use["id"]
+    assert "line 0000" in result["content"] and "line 0039" in result["content"] and len(result["content"]) > 2000
+    assert messages[-1]["result"] == "Done."
+```
+
+
+In `tests/unit/cli_code/test_cli_turn_session.py` make these 3 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+
+def test_tool_events_carry_the_input_and_result_only_for_a_cli_turn(tmp_path: Path) -> None:
+    session = _session(tmp_path, CliTurnOptions())
+    session.emit_lifecycle(session.turn, "tool_started", tool_name="read_file", invocation_id="c1", tool_input={"path": "a.txt"})
+    session.emit_lifecycle(session.turn, "tool_finished", tool_name="read_file", invocation_id="c1", status="succeeded",
+                           summary="ok", tool_payload={}, tool_content="line 1\n")
+    payloads = {str(event): payload for event, _, payload in session.store.recorded}
+```
+
+with
+
+```python
+
+def test_tool_events_point_at_the_transcript_only_for_a_cli_turn(tmp_path: Path) -> None:
+    # Activity payloads are sanitized (512-character strings, redacted keys such as "prompt"): the input and the
+    # result are written to the turn's transcript and the events carry its id (Lote W6, Task 12).
+    from agentos.agentic.cli_transcript import TranscriptStore
+
+    session = _session(tmp_path, CliTurnOptions())
+    long_result = "line\n" * 2000
+    session.emit_lifecycle(session.turn, "tool_started", tool_name="run_subagent", invocation_id="c1",
+                           tool_input={"prompt": "review the diff", "subagent_type": "general"})
+    session.emit_lifecycle(session.turn, "tool_finished", tool_name="run_subagent", invocation_id="c1", status="succeeded",
+                           summary="ok", tool_payload={}, tool_content=long_result)
+    payloads = {str(event): payload for event, _, payload in session.store.recorded}
+```
+
+2. Replace
+
+```python
+    finished = next(payload for event, payload in payloads.items() if event.endswith("TOOL_FINISHED") or event == "tool.finished")
+    assert started["tool_input"] == {"path": "a.txt"} and finished["tool_result"] == "line 1\n"
+    plain = _session(tmp_path / "ui")
+```
+
+with
+
+```python
+    finished = next(payload for event, payload in payloads.items() if event.endswith("TOOL_FINISHED") or event == "tool.finished")
+    assert "tool_input" not in started and "tool_result" not in finished
+    store = TranscriptStore("c")
+    assert store.read(started["transcript_id"]) == {"tool_input": {"prompt": "review the diff", "subagent_type": "general"}}
+    assert store.read(finished["transcript_id"]) == {"tool_result": long_result}
+    plain = _session(tmp_path / "ui")
+```
+
+3. Replace
+
+```python
+    plain.emit_lifecycle(plain.turn, "tool_started", tool_name="read_file", invocation_id="c1", tool_input={"path": "a.txt"})
+    assert all("tool_input" not in payload for _, _, payload in plain.store.recorded)
+```
+
+with
+
+```python
+    plain.emit_lifecycle(plain.turn, "tool_started", tool_name="read_file", invocation_id="c1", tool_input={"path": "a.txt"})
+    assert all("transcript_id" not in payload and "tool_input" not in payload for _, _, payload in plain.store.recorded)
+```
+
+
+Create `tests/unit/cli_code/test_transcript.py` (it must not exist yet):
+
+```python
+"""W6 Task 12: a CLI turn's transcript lives apart from the sanitized activity log."""
+from __future__ import annotations
+
+import os
+import stat
+import time
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
+
+from agentos.agentic.cli_transcript import RETENTION_SECONDS, TranscriptStore
+from agentos.api.gateway import ApiServices, create_app
+from agentos.api.security import LoopbackSecurityService
+
+
+def test_entries_are_written_and_read_back(tmp_path: Path) -> None:
+    store = TranscriptStore("chat_1", root=tmp_path)
+    entry = store.write({"tool_result": "x" * 5000})
+    assert entry and entry.startswith("tr_") and store.read(entry) == {"tool_result": "x" * 5000}
+    assert TranscriptStore("chat_2", root=tmp_path).read(entry) is None  # another conversation's folder
+    for bad in ("../x", "tr_123", "", "tr_" + "g" * 32):
+        assert store.read(bad) is None
+
+
+def test_oversized_entries_are_not_written(tmp_path: Path) -> None:
+    assert TranscriptStore("chat_1", root=tmp_path).write({"tool_result": "x" * 300_000}) is None
+
+
+def test_old_entries_are_pruned_on_write(tmp_path: Path) -> None:
+    now = [time.time()]
+    store = TranscriptStore("chat_1", root=tmp_path, clock=lambda: now[0])
+    old = store.write({"a": 1})
+    path = store.folder / f"{old}.json"
+    stamp = now[0] - RETENTION_SECONDS - 10
+    os.utime(path, (stamp, stamp))
+    store.write({"b": 2})
+    assert not path.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
+def test_entries_are_owner_only(tmp_path: Path) -> None:
+    store = TranscriptStore("chat_1", root=tmp_path)
+    entry = store.write({"a": 1})
+    assert stat.S_IMODE((store.folder / f"{entry}.json").stat().st_mode) == 0o600
+
+
+class _Conversations:
+    def get(self, conversation_id, user_id):
+        if conversation_id != "chat_1":
+            from agentos.api.gateway import ApplicationNotFoundError
+
+            raise ApplicationNotFoundError(conversation_id)
+        return {"conversation_id": "chat_1", "project_id": None}
+
+
+def test_only_the_cli_token_reads_the_transcript(monkeypatch) -> None:
+    entry = TranscriptStore("chat_1").write({"tool_input": {"prompt": "secret plan"}})
+    app = create_app(ApiServices(security=LoopbackSecurityService(api_token=lambda: "tok"), conversation_application=_Conversations()))
+    client = TestClient(app, client=("127.0.0.1", 40000))
+    ok = client.get(f"/v1/conversations/chat_1/transcript/{entry}", headers={"Authorization": "Bearer tok"})
+    assert ok.status_code == 200 and ok.json() == {"tool_input": {"prompt": "secret plan"}}
+    assert client.get(f"/v1/conversations/chat_1/transcript/{entry}").status_code == 403
+    assert client.get(f"/v1/conversations/chat_9/transcript/{entry}", headers={"Authorization": "Bearer tok"}).status_code == 404
+    assert client.get("/v1/conversations/chat_1/transcript/tr_" + "0" * 32, headers={"Authorization": "Bearer tok"}).status_code == 404
+```
+
+In `tests/unit/cli_code/test_turn_options.py` make these 1 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+    assert WorkspaceTrustStore().is_trusted("local-user", folder.resolve()) is False
+```
+
+with
+
+```python
+    assert WorkspaceTrustStore().is_trusted("local-user", folder.resolve()) is False
+
+
+class _Existing(_Application):
+    def get(self, conversation_id, user_id):
+        return {"conversation_id": conversation_id, "project_id": None}
+
+
+@pytest.mark.parametrize("bound", [True, False])
+def test_trust_on_send_only_covers_a_bound_local_folder(tmp_path, bound: bool) -> None:
+    from agentos.permissions.trust import WorkspaceTrustStore
+
+    folder = tmp_path / "project"
+    folder.mkdir()
+    roots = _Roots()
+    if bound:
+        roots.set_root("chat_test", "local-user", str(folder))
+    app = create_app(ApiServices(security=LoopbackSecurityService(api_token=lambda: "tok"), conversation_application=_Existing(),
+                                 local_workspaces=roots))
+    response = TestClient(app, client=("127.0.0.1", 40000)).post(
+        "/v1/conversations/chat_test/messages", json={"message": "again", "cli": {"trust_workspace": True}},
+        headers={"Authorization": "Bearer tok", "Idempotency-Key": "s1"},
+    )
+    assert response.status_code == 201, response.text
+    assert WorkspaceTrustStore().is_trusted("local-user", folder.resolve()) is bound
+    if not bound:  # a managed workspace has nothing to trust: no folder at all is recorded
+        assert not (WorkspaceTrustStore()._read().get("users") or {}).get("local-user")
+```
+
+
+- [ ] **Step 2: Run them to see them fail.**
+
+Run: `uv run pytest -q tests/unit/cli_code/test_transcript.py tests/unit/cli_code/test_cli_turn_session.py tests/unit/cli_code/test_turn_options.py && uv run pytest -q tests/integration/cli_code/test_headless.py -k long_tool`
+Expected: `test_transcript.py` and `test_cli_turn_session.py` fail to collect (`No module named 'agentos.agentic.cli_transcript'`); `test_trust_on_send_only_covers_a_bound_local_folder[False]` fails (a managed folder is trusted); the live `test_a_long_tool_result_reaches_the_host_whole` fails with `StopIteration` (no tool result reaches the host).
+
+- [ ] **Step 3: Implement.**
+
+Create `src/agentos/agentic/cli_transcript.py` (it must not exist yet):
+
+```python
+"""The tool inputs and results of an ``orin code`` turn, kept apart from the activity log (W6).
+
+Activity payloads are sanitized for every viewer: strings are bounded at 512 characters and keys such as ``prompt``
+or ``headers`` are redacted, so a real tool result cannot ride an activity event. A CLI turn's tool events carry a
+``transcript_id`` instead, and the entry itself is written here — one owner-only JSON file per tool event under
+``<ORIN_DATA_DIR>/cli-transcripts/<conversation>`` — for ``orin code`` to read back through the API with its token.
+Entries older than ``RETENTION_SECONDS`` are removed whenever a conversation's folder is written to.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+import time
+import uuid
+from pathlib import Path
+from typing import Any
+
+RETENTION_SECONDS = 7 * 24 * 3600
+MAX_ENTRY_BYTES = 200_000
+_ID = re.compile(r"^tr_[0-9a-f]{32}$")
+
+
+def transcripts_root() -> Path:
+    from agentos.installation.paths import orin_paths
+
+    return orin_paths().data / "cli-transcripts"
+
+
+def _folder(root: Path, conversation_id: str) -> Path:
+    digest = hashlib.sha256(conversation_id.encode("utf-8")).hexdigest()[:32]
+    return root / digest
+
+
+class TranscriptStore:
+    def __init__(self, conversation_id: str, *, root: Path | None = None, clock=time.time) -> None:
+        if not conversation_id:
+            raise ValueError("a transcript needs its conversation")
+        self.folder = _folder(root or transcripts_root(), conversation_id)
+        self._clock = clock
+
+    def write(self, entry: dict[str, Any]) -> str | None:
+        """Store one entry and return its id; None when it could not be written (the turn goes on)."""
+        try:
+            data = json.dumps(entry, ensure_ascii=False, default=str).encode("utf-8")
+            if len(data) > MAX_ENTRY_BYTES:
+                return None
+            self.folder.mkdir(parents=True, exist_ok=True)
+            self._prune()
+            entry_id = f"tr_{uuid.uuid4().hex}"
+            descriptor = os.open(self.folder / f"{entry_id}.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(data)
+            return entry_id
+        except (OSError, TypeError, ValueError):
+            return None
+
+    def read(self, entry_id: str) -> dict[str, Any] | None:
+        if not isinstance(entry_id, str) or not _ID.fullmatch(entry_id):
+            return None
+        try:
+            data = json.loads((self.folder / f"{entry_id}.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return data if isinstance(data, dict) else None
+
+    def _prune(self) -> None:
+        cutoff = self._clock() - RETENTION_SECONDS
+        try:
+            for item in self.folder.iterdir():
+                try:
+                    if item.suffix == ".json" and item.stat().st_mtime < cutoff:
+                        item.unlink()
+                except OSError:
+                    continue
+        except OSError:
+            return
+
+
+__all__ = ["MAX_ENTRY_BYTES", "RETENTION_SECONDS", "TranscriptStore", "transcripts_root"]
+```
+
+In `src/agentos/agentic/session.py` make these 3 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+
+    def _record(self, event_type: AgentActivityEventType, summary: str, payload: dict[str, object] | None = None, *, agent_id: str | None = None, parent_agent_id: str | None = None) -> None:
+```
+
+with
+
+```python
+
+    def _transcript(self):
+        """W6: where a CLI turn's tool inputs and results go (activity payloads are sanitized and bounded)."""
+        store = getattr(self, "_transcript_store", None)
+        if store is None:
+            from .cli_transcript import TranscriptStore
+
+            store = self._transcript_store = TranscriptStore(str(self.turn.get("conversation_id") or "unknown"))
+        return store
+
+    def _record(self, event_type: AgentActivityEventType, summary: str, payload: dict[str, object] | None = None, *, agent_id: str | None = None, parent_agent_id: str | None = None) -> None:
+```
+
+2. Replace
+
+```python
+
+                started_payload["tool_input"] = capped_input(payload.get("tool_input"))  # W6: the CLI's tool_use block
+            self._record(
+```
+
+with
+
+```python
+
+                # W6: the CLI's tool_use block, kept apart from the sanitized activity payload.
+                entry = self._transcript().write({"tool_input": capped_input(payload.get("tool_input"))})
+                if entry:
+                    started_payload["transcript_id"] = entry
+            self._record(
+```
+
+3. Replace
+
+```python
+
+                extra["tool_result"] = capped_text(payload.get("tool_content"))  # W6: the CLI's tool_result block
+            self._record(
+```
+
+with
+
+```python
+
+                # W6: the CLI's tool_result block, kept apart from the sanitized activity payload.
+                entry = self._transcript().write({"tool_result": capped_text(payload.get("tool_content"))})
+                if entry:
+                    extra["transcript_id"] = entry
+            self._record(
+```
+
+
+In `src/agentos/api/gateway.py` make these 2 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+        if payload.cli is not None and payload.cli.trust_workspace:
+            # `orin code --trust` (W6): before the turn is queued, so the worker already sees a trusted folder.
+            _trust_workspace(principal.user_id, Path(getattr(conversation_workspace(conversation_id, principal), "root")))
+        require_content(payload.message, payload.attachments)
+```
+
+with
+
+```python
+        if payload.cli is not None and payload.cli.trust_workspace:
+            # `orin code --trust` (W6): before the turn is queued, and only for a folder of the person's own that the
+            # conversation is bound to; a managed workspace has nothing to trust.
+            bound = local_root_for(effective_workspace_id(conversation_record(conversation_id, principal), principal)[0], principal)
+            if bound:
+                _trust_workspace(principal.user_id, Path(bound))
+        require_content(payload.message, payload.attachments)
+```
+
+2. Replace
+
+```python
+        return JSONResponse({"trusted": bool(trusted), "path": str(root)})
+```
+
+with
+
+```python
+        return JSONResponse({"trusted": bool(trusted), "path": str(root)})
+
+    @app.get("/v1/conversations/{conversation_id}/transcript/{entry_id}")
+    async def read_cli_transcript(conversation_id: str, entry_id: str, request: Request) -> JSONResponse:
+        """A CLI turn's tool input or result (W6), for `orin code` only: it is the unsanitized transcript."""
+        from agentos.agentic.cli_transcript import TranscriptStore
+
+        principal = principal_for(request)
+        services.security.authorize(principal, action="conversation.read", resource_id=conversation_id, purpose="conversation.transcript")
+        conversation_record(conversation_id, principal)
+        if principal.credential_kind != "cli_token":
+            raise AuthorizationError("the transcript is for orin code")
+        entry = await run_in_threadpool(TranscriptStore(conversation_id).read, entry_id)
+        if entry is None:
+            raise ApplicationNotFoundError(entry_id)
+        return JSONResponse(entry)
+```
+
+
+In `src/agentos/cli_code/headless.py` make these 2 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+
+    def _usage(self) -> TurnUsage:
+```
+
+with
+
+```python
+
+    def _with_transcript(self, event: dict[str, Any]) -> dict[str, Any]:
+        """A tool event with its input or result, read from the turn's transcript (never in the activity payload)."""
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else None
+        entry_id = payload.get("transcript_id") if payload else None
+        if not isinstance(entry_id, str) or self.conversation_id is None:
+            return event
+        try:
+            entry = self.client.get(f"/v1/conversations/{self.conversation_id}/transcript/{entry_id}")
+        except CliRuntimeError:
+            self._debug(f"transcript {entry_id} could not be read")
+            return event
+        if not isinstance(entry, dict):
+            return event
+        merged = {**payload, **{key: entry[key] for key in ("tool_input", "tool_result") if key in entry}}
+        return {**event, "payload": merged}
+
+    def _usage(self) -> TurnUsage:
+```
+
+2. Replace
+
+```python
+                    continue
+                for message in self.translator.feed(item):
+                    if self.stream_json:
+```
+
+with
+
+```python
+                    continue
+                for message in self.translator.feed(self._with_transcript(item)):
+                    if self.stream_json:
+```
+
+
+- [ ] **Step 4: Run the tests to see them pass.**
+
+Run: `uv run pytest -q tests/unit/cli_code tests/integration/api/test_profile_isolation.py && uv run pytest -q tests/integration/cli_code`
+Expected: all pass.
+
+Expectation changes to record: `test_cli_turn_session.py::test_tool_events_carry_the_input_and_result_only_for_a_cli_turn` is replaced by `test_tool_events_point_at_the_transcript_only_for_a_cli_turn` (it asserted the broken design); `tests/conftest.py` isolates `ORIN_DATA_DIR`.
+
+- [ ] **Step 5: Commit.**
+
+```
+fix(w6): a CLI turn's transcript lives apart from the sanitized activity log
+
+Activity payloads refuse strings over 512 characters and redact keys such as
+prompt: tool inputs and results now go to an owner-only transcript store the
+CLI reads with its token. --trust on send covers only a bound local folder;
+the tests isolate ORIN_DATA_DIR.
+```
+
+### Task 13: Questions for the SDK host (`host.request`)
+
+A turn sometimes needs the host behind `orin code` (an SDK hook callback; later an SDK MCP server). The worker cannot reach it, so `HostRequests` (`agentic/host_requests.py`) writes a pending file (`<ORIN_DATA_DIR>/cli-host-requests/<conversation hash>/host_<hex>.json`, owner-only), puts the question's body in the CLI transcript and records a `host.request` activity event (`{request_id, kind, transcript_id}`); the CLI asks the host and posts the answer to `POST /v1/conversations/{id}/host-requests/{request_id}` (CLI token only, ownership checked, ≤ 256 KB), which writes the reply file the worker polls for. No answer in time, a cancelled turn, or a session without a transcript gives `None`.
+
+**Files:**
+- Create: `src/agentos/agentic/host_requests.py`, `tests/unit/cli_code/test_host_requests.py`
+- Modify: `src/agentos/agentic/events.py`, `src/agentos/agentic/session.py`, `src/agentos/api/gateway.py`, `tests/integration/api/test_profile_isolation.py`
+
+**Interfaces:**
+- Produces: `HostRequests(conversation_id, *, emit=None, cancelled=None, root=None, transcript=None, poll_seconds=0.1, clock=..., sleep=...)` with `ask(kind, request, *, timeout) -> dict | None` and `answer(request_id, response) -> bool`; `AgentActivityEventType.HOST_REQUEST = "host.request"`; `TurnSession._host_requests()`; `POST /v1/conversations/{conversation_id}/host-requests/{request_id}` with body `{"response": {...}}`.
+
+- [ ] **Step 1: Write the failing tests** (test files and their fixtures).
+
+In `tests/integration/api/test_profile_isolation.py` make these 1 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+    ("GET", "/v1/conversations/{conversation_id}/transcript/{entry_id}"),
+    ("GET", "/v1/conversations/{conversation_id}/overview"),
+```
+
+with
+
+```python
+    ("GET", "/v1/conversations/{conversation_id}/transcript/{entry_id}"),
+    ("POST", "/v1/conversations/{conversation_id}/host-requests/{request_id}"),
+    ("GET", "/v1/conversations/{conversation_id}/overview"),
+```
+
+
+Create `tests/unit/cli_code/test_host_requests.py` (it must not exist yet):
+
+```python
+"""W6 Task 13: a turn's questions for the SDK host travel through files the API answers."""
+from __future__ import annotations
+
+import threading
+import time
+from pathlib import Path
+
+from fastapi.testclient import TestClient
+
+from agentos.agentic.cli_transcript import TranscriptStore
+from agentos.agentic.host_requests import HostRequests
+from agentos.api.gateway import ApiServices, create_app
+from agentos.api.security import LoopbackSecurityService
+
+
+def _channel(tmp_path: Path, emitted: list[dict], **kwargs) -> HostRequests:
+    return HostRequests("chat_1", emit=emitted.append, root=tmp_path / "requests",
+                        transcript=TranscriptStore("chat_1", root=tmp_path / "transcripts"), poll_seconds=0.01, **kwargs)
+
+
+def test_a_question_is_announced_and_its_answer_returned(tmp_path: Path) -> None:
+    emitted: list[dict] = []
+    channel = _channel(tmp_path, emitted)
+
+    def host() -> None:
+        while not emitted:
+            time.sleep(0.01)
+        event = emitted[0]
+        body = TranscriptStore("chat_1", root=tmp_path / "transcripts").read(event["transcript_id"])
+        assert body == {"host_request": {"kind": "hook_callback", "request": {"callback_id": "hook_0"}}}
+        assert HostRequests("chat_1", root=tmp_path / "requests").answer(event["request_id"], {"continue": True})
+
+    threading.Thread(target=host, daemon=True).start()
+    assert channel.ask("hook_callback", {"callback_id": "hook_0"}, timeout=5) == {"continue": True}
+    assert emitted[0]["kind"] == "hook_callback" and emitted[0]["request_id"].startswith("host_")
+    assert list(channel.folder.iterdir()) == []  # nothing left behind
+
+
+def test_an_unanswered_question_times_out_and_a_cancelled_turn_stops_waiting(tmp_path: Path) -> None:
+    emitted: list[dict] = []
+    started = time.monotonic()
+    assert _channel(tmp_path, emitted).ask("hook_callback", {}, timeout=0.2) is None
+    assert time.monotonic() - started < 3
+    assert _channel(tmp_path, [], cancelled=lambda: True).ask("hook_callback", {}, timeout=30) is None
+
+
+def test_answers_are_refused_for_unknown_or_finished_questions(tmp_path: Path) -> None:
+    channel = HostRequests("chat_1", root=tmp_path)
+    assert channel.answer("host_" + "0" * 32, {"a": 1}) is False
+    assert channel.answer("../escape", {"a": 1}) is False
+    assert channel.answer("host_" + "0" * 32, "not a mapping") is False
+
+
+def test_without_a_cli_turn_nothing_is_asked(tmp_path: Path) -> None:
+    assert HostRequests("chat_1", root=tmp_path).ask("hook_callback", {}, timeout=1) is None
+
+
+class _Conversations:
+    def get(self, conversation_id, user_id):
+        return {"conversation_id": conversation_id, "project_id": None}
+
+
+def test_only_the_cli_token_answers(tmp_path: Path) -> None:
+    from agentos.agentic import host_requests
+
+    emitted: list[dict] = []
+    channel = HostRequests("chat_1", emit=emitted.append, transcript=TranscriptStore("chat_1", root=tmp_path), poll_seconds=0.01)
+    result: list[object] = []
+    worker = threading.Thread(target=lambda: result.append(channel.ask("mcp_message", {"server_name": "s"}, timeout=10)), daemon=True)
+    worker.start()
+    while not emitted:
+        time.sleep(0.01)
+    request_id = emitted[0]["request_id"]
+    app = create_app(ApiServices(security=LoopbackSecurityService(api_token=lambda: "tok"), conversation_application=_Conversations()))
+    client = TestClient(app, client=("127.0.0.1", 40000))
+    body = {"response": {"mcp_response": {"jsonrpc": "2.0", "id": 1, "result": {}}}}
+    assert client.post(f"/v1/conversations/chat_1/host-requests/{request_id}", json=body, headers={"Idempotency-Key": "a"}).status_code == 403
+    ok = client.post(f"/v1/conversations/chat_1/host-requests/{request_id}", json=body, headers={"Authorization": "Bearer tok", "Idempotency-Key": "b"})
+    assert ok.status_code == 200
+    worker.join(5)
+    assert result == [body["response"]]
+    again = client.post(f"/v1/conversations/chat_1/host-requests/{request_id}", json=body, headers={"Authorization": "Bearer tok", "Idempotency-Key": "c"})
+    assert again.status_code == 404
+    assert host_requests.host_requests_root().is_dir()
+```
+
+- [ ] **Step 2: Run them to see them fail.**
+
+Run: `uv run pytest -q tests/unit/cli_code/test_host_requests.py`
+Expected: collection error: `No module named 'agentos.agentic.host_requests'`.
+
+- [ ] **Step 3: Implement.**
+
+In `src/agentos/agentic/events.py` make these 1 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+    NOTIFICATION_PUSHED = "notification.pushed"
+```
+
+with
+
+```python
+    NOTIFICATION_PUSHED = "notification.pushed"
+    # W6: a question for the SDK host behind `orin code` (its body is in the turn's CLI transcript).
+    HOST_REQUEST = "host.request"
+```
+
+
+Create `src/agentos/agentic/host_requests.py` (it must not exist yet):
+
+```python
+"""Questions a turn asks the SDK host behind ``orin code`` (W6): SDK hook callbacks and SDK MCP messages.
+
+The worker cannot reach the host directly: the CLI between them follows the conversation's events. So a question
+is a pending file (owner-only, in ``<ORIN_DATA_DIR>/cli-host-requests/<conversation>``), its body goes to the turn's
+CLI transcript (activity payloads are sanitized), and a ``host.request`` activity event tells the CLI it exists. The
+CLI asks the host over the control protocol and posts the answer back through the API, which writes the reply file
+the worker is waiting for. A question nobody answers in time, or one the turn is cancelled during, gets ``None``.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+import time
+import uuid
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any
+
+from .cli_transcript import TranscriptStore
+
+MAX_REPLY_BYTES = 262_144
+_ID = re.compile(r"^host_[0-9a-f]{32}$")
+
+
+def host_requests_root() -> Path:
+    from agentos.installation.paths import orin_paths
+
+    return orin_paths().data / "cli-host-requests"
+
+
+class HostRequests:
+    def __init__(self, conversation_id: str, *, emit: Callable[[dict[str, Any]], None] | None = None,
+                 cancelled: Callable[[], bool] | None = None, root: Path | None = None,
+                 transcript: TranscriptStore | None = None, poll_seconds: float = 0.1,
+                 clock: Callable[[], float] = time.monotonic, sleep: Callable[[float], None] = time.sleep) -> None:
+        if not conversation_id:
+            raise ValueError("a host request needs its conversation")
+        digest = hashlib.sha256(conversation_id.encode("utf-8")).hexdigest()[:32]
+        self.folder = (root or host_requests_root()) / digest
+        self._emit = emit
+        self._cancelled = cancelled or (lambda: False)
+        self._transcript = transcript
+        self._poll = max(0.01, float(poll_seconds))
+        self._clock = clock
+        self._sleep = sleep
+
+    def _pending(self, request_id: str) -> Path:
+        return self.folder / f"{request_id}.json"
+
+    def _reply(self, request_id: str) -> Path:
+        return self.folder / f"{request_id}.reply.json"
+
+    def ask(self, kind: str, request: dict[str, Any], *, timeout: float) -> dict[str, Any] | None:
+        """Ask the host and wait for its answer; None on timeout, cancellation or when the question cannot be asked."""
+        if self._emit is None or self._transcript is None:
+            return None
+        request_id = f"host_{uuid.uuid4().hex}"
+        entry = self._transcript.write({"host_request": {"kind": kind, "request": request}})
+        if entry is None:
+            return None
+        try:
+            self.folder.mkdir(parents=True, exist_ok=True)
+            descriptor = os.open(self._pending(request_id), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps({"kind": kind}))
+        except OSError:
+            return None
+        try:
+            self._emit({"request_id": request_id, "kind": kind, "transcript_id": entry})
+            deadline = self._clock() + max(0.1, float(timeout))
+            while self._clock() < deadline:
+                if self._cancelled():
+                    return None
+                answer = self._take(request_id)
+                if answer is not None:
+                    return answer
+                self._sleep(self._poll)
+            return self._take(request_id)
+        finally:
+            for path in (self._pending(request_id), self._reply(request_id)):
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+
+    def _take(self, request_id: str) -> dict[str, Any] | None:
+        try:
+            data = json.loads(self._reply(request_id).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return data if isinstance(data, dict) else None
+
+    def answer(self, request_id: str, response: dict[str, Any]) -> bool:
+        """The CLI's answer (through the API): written only for a question still waiting."""
+        if not isinstance(request_id, str) or not _ID.fullmatch(request_id) or not isinstance(response, dict):
+            return False
+        if not self._pending(request_id).is_file():
+            return False
+        data = json.dumps(response, ensure_ascii=False)
+        if len(data.encode("utf-8")) > MAX_REPLY_BYTES:
+            return False
+        temporary = self.folder / f".{request_id}.{uuid.uuid4().hex[:8]}.tmp"
+        try:
+            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(data)
+            os.replace(temporary, self._reply(request_id))
+        except OSError:
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+            return False
+        return True
+
+
+__all__ = ["HostRequests", "MAX_REPLY_BYTES", "host_requests_root"]
+```
+
+In `src/agentos/agentic/session.py` make these 1 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+    # -- activity -------------------------------------------------------
+```
+
+with
+
+```python
+    # -- activity -------------------------------------------------------
+
+    def _host_requests(self):
+        """W6: the channel to the SDK host behind `orin code` (hook callbacks, SDK MCP messages)."""
+        channel = getattr(self, "_host_channel", None)
+        if channel is None:
+            from .host_requests import HostRequests
+
+            channel = self._host_channel = HostRequests(
+                str(self.turn.get("conversation_id") or "unknown"),
+                emit=lambda payload: self._record(AgentActivityEventType.HOST_REQUEST, "Pergunta ao host do SDK", payload),
+                cancelled=lambda: bool(self.cancelled(self.turn)),
+                transcript=self._transcript(),
+            )
+        return channel
+```
+
+
+In `src/agentos/api/gateway.py` make these 2 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+    permission_mode: str | None = Field(default=None, pattern="^(accept_edits|plan_mode|ask_permissions|full_autonomy|auto|dont_ask|default|acceptEdits|plan|bypassPermissions|dontAsk|manual)$")
+    # W6: what `orin code` attaches to the turn; accepted only with this run's CLI token.
+    cli: CliTurnOptions | None = None
+
+
+class UpdateConversationPermissionModeRequest(_RequestModel):
+```
+
+with
+
+```python
+    permission_mode: str | None = Field(default=None, pattern="^(accept_edits|plan_mode|ask_permissions|full_autonomy|auto|dont_ask|default|acceptEdits|plan|bypassPermissions|dontAsk|manual)$")
+    # W6: what `orin code` attaches to the turn; accepted only with this run's CLI token.
+    cli: CliTurnOptions | None = None
+
+
+class HostRequestAnswer(_RequestModel):
+    """`orin code`'s answer to a question its turn asked the SDK host (W6)."""
+    response: dict[str, Any]
+
+
+class UpdateConversationPermissionModeRequest(_RequestModel):
+```
+
+2. Replace
+
+```python
+
+    @app.post("/v1/conversations/{conversation_id}/workspace-trust")
+```
+
+with
+
+```python
+
+    @app.post("/v1/conversations/{conversation_id}/host-requests/{request_id}")
+    async def answer_host_request(conversation_id: str, request_id: str, payload: HostRequestAnswer, request: Request) -> JSONResponse:
+        """The SDK host's answer, relayed by `orin code` (W6): only its token may write it."""
+        from agentos.agentic.host_requests import HostRequests
+
+        principal = principal_for(request, mutable=True)
+        services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.host_request")
+        conversation_record(conversation_id, principal)
+        if principal.credential_kind != "cli_token":
+            raise AuthorizationError("only orin code answers its host's requests")
+        answered = await run_in_threadpool(HostRequests(conversation_id).answer, request_id, payload.response)
+        if not answered:
+            raise ApplicationNotFoundError(request_id)
+        return JSONResponse({"request_id": request_id, "answered": True})
+
+    @app.post("/v1/conversations/{conversation_id}/workspace-trust")
+```
+
+
+- [ ] **Step 4: Run the tests to see them pass.**
+
+Run: `uv run pytest -q tests/unit/cli_code tests/unit/agentic tests/integration/api/test_profile_isolation.py`
+Expected: all pass.
+
+- [ ] **Step 5: Commit.**
+
+```
+feat(w6): a turn can ask the SDK host behind orin code
+```
+
+### Task 14: SDK hook callbacks in the worker (W2 ledger)
+
+A hook of type `callback` (`{"type": "callback", "callback_id": "hook_0", "timeout": 30}`) is accepted **only from the cli settings layer** (only `orin code` writes it; anywhere else it is a configuration error), and `CallbackHookRunner` asks the host through `HostRequests` (`kind: hook_callback`, with the hook's input and `tool_use_id`); the host's JSON answer is read exactly like a command hook's stdout (`decision_from_command`), no answer is a timeout and `{"_error": ...}` a failure (both follow the hook's `onFailure`). The session gives the dispatcher this runner for CLI turns only.
+
+**Files:**
+- Create: `tests/unit/hooks/test_callback_hooks.py`
+- Modify: `src/agentos/agentic/session.py`, `src/agentos/hooks/config.py`, `src/agentos/hooks/dispatcher.py`, `src/agentos/hooks/runners.py`
+
+**Interfaces:**
+- Consumes: `TurnSession._host_requests()` (Task 13).
+- Produces: `HANDLER_TYPES` includes `callback`; `HookSpec.callback_id`; `CallbackHookRunner(ask)` where `ask(kind, request, timeout) -> dict | None`; `HookDispatcher(..., callback_runner=None)`; `TurnSession._callback_runner()`.
+
+- [ ] **Step 1: Write the failing tests** (test files and their fixtures).
+
+Create `tests/unit/hooks/test_callback_hooks.py` (it must not exist yet):
+
+```python
+"""W6 Task 14: an SDK host's hooks (type "callback") come only from the cli layer and are answered by the host."""
+from __future__ import annotations
+
+import json
+
+from agentos.agentic.lifecycle import HookEvent
+from agentos.hooks.config import parse_hook_mapping
+from agentos.hooks.protocol import decision_from_command
+from agentos.hooks.runners import CallbackHookRunner
+
+DECLARED = {"PreToolUse": [{"matcher": "Write", "hooks": [{"type": "callback", "callback_id": "hook_0", "timeout": 5}]}]}
+
+
+def test_callback_hooks_come_only_from_the_cli_layer() -> None:
+    specs, errors = parse_hook_mapping(DECLARED, "cli")
+    assert errors == () and [(spec.type, spec.callback_id, spec.timeout, spec.matcher) for spec in specs] == [("callback", "hook_0", 5.0, "Write")]
+    for source in ("user", "project", "local", "managed", "plugin:x"):
+        specs, errors = parse_hook_mapping(DECLARED, source)
+        assert specs == () and errors and "SDK host" in errors[0].message
+
+
+def test_a_callback_needs_an_id() -> None:
+    _, errors = parse_hook_mapping({"PreToolUse": [{"hooks": [{"type": "callback", "callback_id": "../x y"}]}]}, "cli")
+    assert errors and "callback_id" in errors[0].message
+
+
+def test_two_callbacks_are_two_hooks() -> None:
+    specs, _ = parse_hook_mapping({"PreToolUse": [{"hooks": [{"type": "callback", "callback_id": "hook_0"},
+                                                            {"type": "callback", "callback_id": "hook_1"}]}]}, "cli")
+    assert len({spec.identity() for spec in specs}) == 2
+
+
+def test_the_runner_reads_the_hosts_answer_as_a_command_hooks_output() -> None:
+    asked: list[tuple] = []
+    answer = {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": "no"}}
+    runner = CallbackHookRunner(lambda kind, request, timeout: asked.append((kind, request, timeout)) or answer)
+    (spec,), _ = parse_hook_mapping(DECLARED, "cli")
+    run = runner.run(spec, {"tool_name": "Write", "tool_use_id": "tool-call:1"})
+    assert asked == [("hook_callback", {"callback_id": "hook_0", "input": {"tool_name": "Write", "tool_use_id": "tool-call:1"},
+                                        "tool_use_id": "tool-call:1"}, 5.0)]
+    assert run.exit_code == 0 and json.loads(run.stdout) == answer
+    assert decision_from_command(HookEvent.PRE_TOOL_USE, run).permission_decision == "deny"
+
+
+def test_no_answer_and_an_error_are_failures() -> None:
+    (spec,), _ = parse_hook_mapping(DECLARED, "cli")
+    assert CallbackHookRunner(lambda *_: None).run(spec, {}).timed_out is True
+    failed = CallbackHookRunner(lambda *_: {"_error": "host crashed"}).run(spec, {})
+    assert failed.exit_code is None and failed.error == "host crashed"
+```
+
+- [ ] **Step 2: Run them to see them fail.**
+
+Run: `uv run pytest -q tests/unit/hooks/test_callback_hooks.py`
+Expected: `test_callback_hooks.py` fails (`unsupported hook type 'callback'`, then `cannot import name 'CallbackHookRunner'`).
+
+- [ ] **Step 3: Implement.**
+
+In `src/agentos/agentic/session.py` make these 3 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+    # -- activity -------------------------------------------------------
+```
+
+with
+
+```python
+    # -- activity -------------------------------------------------------
+
+    def _callback_runner(self):
+        """W6: an SDK host's hooks run through `orin code`; an interface turn has none."""
+        if self.cli_options is None:
+            return None
+        from agentos.hooks.runners import CallbackHookRunner
+
+        return CallbackHookRunner(lambda kind, request, timeout: self._host_requests().ask(kind, request, timeout=timeout))
+```
+
+2. Replace
+
+```python
+                agent_runner=AgentHookRunner(self._hook_agent),
+                recorder=self._record_hook,
+```
+
+with
+
+```python
+                agent_runner=AgentHookRunner(self._hook_agent),
+                callback_runner=self._callback_runner(),
+                recorder=self._record_hook,
+```
+
+3. Replace
+
+```python
+            agent_runner=AgentHookRunner(self._hook_agent),
+            recorder=self._record_hook,
+```
+
+with
+
+```python
+            agent_runner=AgentHookRunner(self._hook_agent),
+            callback_runner=self._callback_runner(),
+            recorder=self._record_hook,
+```
+
+
+In `src/agentos/hooks/config.py` make these 4 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+
+HANDLER_TYPES = ("command", "http", "prompt", "agent")
+DEFAULT_TIMEOUTS = {"command": 60, "http": 30, "prompt": 30, "agent": 120}
+MAX_TIMEOUT = 600
+```
+
+with
+
+```python
+
+HANDLER_TYPES = ("command", "http", "prompt", "agent", "callback")
+DEFAULT_TIMEOUTS = {"command": 60, "http": 30, "prompt": 30, "agent": 120, "callback": 60}
+_CALLBACK_ID = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
+MAX_TIMEOUT = 600
+```
+
+2. Replace
+
+```python
+    plugin_env: tuple[tuple[str, str], ...] = ()
+```
+
+with
+
+```python
+    plugin_env: tuple[tuple[str, str], ...] = ()
+    # W6: an SDK host's hook (type "callback"), answered by the host behind `orin code`.
+    callback_id: str = ""
+```
+
+3. Replace
+
+```python
+    def identity(self) -> tuple[Any, ...]:
+        return (self.event, self.type, self.command, self.url, self.prompt, self.matcher, self.plugin_root)
+```
+
+with
+
+```python
+    def identity(self) -> tuple[Any, ...]:
+        return (self.event, self.type, self.command, self.url, self.prompt, self.matcher, self.plugin_root, self.callback_id)
+```
+
+4. Replace
+
+```python
+    }
+    if kind == "command":
+```
+
+with
+
+```python
+    }
+    if kind == "callback":
+        # Only `orin code` writes the cli layer: a callback anywhere else would wait for a host that is not there.
+        if source != "cli":
+            return "callback hooks come only from an SDK host through orin code"
+        callback_id = raw.get("callback_id")
+        if not isinstance(callback_id, str) or not _CALLBACK_ID.fullmatch(callback_id):
+            return "callback hook needs a 'callback_id'"
+        return HookSpec(**common, callback_id=callback_id)
+    if kind == "command":
+```
+
+
+In `src/agentos/hooks/dispatcher.py` make these 3 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+        agent_runner=None,
+        recorder: Callable[[Mapping[str, Any]], None] | None = None,
+```
+
+with
+
+```python
+        agent_runner=None,
+        callback_runner=None,
+        recorder: Callable[[Mapping[str, Any]], None] | None = None,
+```
+
+2. Replace
+
+```python
+        self.specs = tuple(specs)
+        self.runners = {"command": command_runner, "http": http_runner, "prompt": prompt_runner, "agent": agent_runner}
+        self.recorder = recorder
+```
+
+with
+
+```python
+        self.specs = tuple(specs)
+        self.runners = {"command": command_runner, "http": http_runner, "prompt": prompt_runner, "agent": agent_runner,
+                        "callback": callback_runner}
+        self.recorder = recorder
+```
+
+3. Replace
+
+```python
+                raise RuntimeError(f"no runner for {spec.type} hooks")
+            if spec.type in {"command", "http"}:
+                run = runner.run(spec, payload)
+```
+
+with
+
+```python
+                raise RuntimeError(f"no runner for {spec.type} hooks")
+            if spec.type in {"command", "http", "callback"}:
+                run = runner.run(spec, payload)
+```
+
+
+In `src/agentos/hooks/runners.py` make these 1 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+    return prompt.replace("$ARGUMENTS", text) if "$ARGUMENTS" in prompt else f"{prompt}\n\nEvent: {text}"
+```
+
+with
+
+```python
+    return prompt.replace("$ARGUMENTS", text) if "$ARGUMENTS" in prompt else f"{prompt}\n\nEvent: {text}"
+
+
+class CallbackHookRunner:
+    """W6: an SDK host's hook, asked through `orin code`; its JSON answer is read as a command hook's stdout."""
+
+    def __init__(self, ask) -> None:
+        self._ask = ask  # (kind, request, timeout) -> dict | None
+
+    def run(self, spec: HookSpec, payload: Mapping[str, Any]) -> HookRun:
+        answer = self._ask("hook_callback", {"callback_id": spec.callback_id, "input": dict(payload),
+                                             "tool_use_id": payload.get("tool_use_id")}, spec.timeout)
+        if answer is None:
+            return HookRun(None, "", "", timed_out=True)
+        if "_error" in answer:
+            return HookRun(None, "", "", error=str(answer.get("_error"))[:300])
+        return HookRun(0, json.dumps(answer, ensure_ascii=False, default=str), "")
+```
+
+
+- [ ] **Step 4: Run the tests to see them pass.**
+
+Run: `uv run pytest -q tests/unit/hooks tests/unit/agentic`
+Expected: all pass.
+
+- [ ] **Step 5: Commit.**
+
+```
+feat(w6): an SDK host's hooks run as callback hooks
+```
+
+### Task 15: The control protocol (`can_use_tool`, `hook_callback`, interrupt and the rest)
+
+`HostBridge` (`cli_code/host_bridge.py`) speaks the control protocol both ways. Harness → host: on a `code_mode.decision_required` event of the current turn it sends `can_use_tool` (public tool name, the call's input, its `tool_use_id`) and posts the decision (`allow` → `allow_once`; an `updatedInput` different from the input is **refused** — Orin runs the call it asked about; `updatedPermissions` are not persisted; `deny` with its message, and `interrupt: true` also cancels the turn); on a `host.request` event it sends `hook_callback` (with the CLI's session id and the `toolu_` id) and posts the answer. Host → harness: `initialize` (stores the host's hook callbacks, which join the cli layer as `callback` hooks, and its agents), `interrupt` (cancels the running turn), `set_permission_mode`, `set_model`, `set_max_thinking_tokens` (all three apply from the next turn), `mcp_status` (Orin's MCP servers) and `rewind_files` (the prompt's message, by the uuid the host saw replayed or sent). Without `--permission-prompt-tool stdio` nobody answers prompts, as before. The live tests drive `orin-code` with a small SDK-style host (`tests/integration/cli_code/sdk_host.py`).
+
+**Files:**
+- Create: `src/agentos/cli_code/host_bridge.py`, `tests/integration/cli_code/sdk_host.py`, `tests/integration/cli_code/test_control_protocol.py`
+- Modify: `src/agentos/cli_code/headless.py`, `src/agentos/cli_code/protocol.py`, `src/agentos/cli_code/turn_options.py`, `tests/integration/cli_code/test_headless.py`
+
+**Interfaces:**
+- Consumes: Tasks 12–14.
+- Produces: `HostBridge(run)` with `ask`, `answered`, `on_turn_event`, `handle`, `interrupt`; `sdk_hooks_layer(hooks)`; `Translator.open_tool(internal)` and `tool_use_id_for(invocation)`; `HeadlessRun.bridge`, `current_turn_id`, `initial_selection`, `prompt_turns`; `build_turn_options(..., sdk_hooks=None)`.
+
+- [ ] **Step 1: Write the failing tests** (test files and their fixtures).
+
+Create `tests/integration/cli_code/sdk_host.py` (it must not exist yet):
+
+```python
+"""A minimal SDK host for the live tests: drives `orin-code` over stream-json the way claude-agent-sdk does."""
+
+from __future__ import annotations
+
+import json
+import os
+import queue
+import subprocess
+import sys
+import threading
+import time
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any
+
+from .live_runtime import LiveRuntime
+
+
+class Host:
+    def __init__(self, runtime: LiveRuntime, cwd: Path, *args: str,
+                 on_request: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None) -> None:
+        executable = Path(sys.executable).parent / ("orin-code.exe" if os.name == "nt" else "orin-code")
+        self.process = subprocess.Popen(
+            [str(executable), "--output-format", "stream-json", "--verbose", "--input-format", "stream-json", *args],
+            cwd=str(cwd), env=runtime.env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", bufsize=1,
+        )
+        self.messages: list[dict[str, Any]] = []
+        self.requests: list[dict[str, Any]] = []
+        self._inbox: queue.Queue[dict[str, Any] | None] = queue.Queue()
+        self._on_request = on_request
+        self._counter = 0
+        threading.Thread(target=self._read, daemon=True).start()
+
+    def _read(self) -> None:
+        for line in self.process.stdout:
+            if not line.strip():
+                continue
+            message = json.loads(line)
+            if message.get("type") == "control_request":
+                self.requests.append(message)
+                answer = self._on_request(message["request"]) if self._on_request else None
+                response = ({"subtype": "success", "request_id": message["request_id"], "response": answer}
+                            if answer is not None else
+                            {"subtype": "error", "request_id": message["request_id"], "error": "no handler"})
+                self.send({"type": "control_response", "response": response})
+                continue
+            self.messages.append(message)
+            self._inbox.put(message)
+        self._inbox.put(None)
+
+    def send(self, message: dict[str, Any]) -> None:
+        self.process.stdin.write(json.dumps(message) + "\n")
+        self.process.stdin.flush()
+
+    def control(self, request: dict[str, Any]) -> str:
+        self._counter += 1
+        request_id = f"req_{self._counter}"
+        self.send({"type": "control_request", "request_id": request_id, "request": request})
+        return request_id
+
+    def prompt(self, text: str, **extra: Any) -> None:
+        self.send({"type": "user", "session_id": "", "message": {"role": "user", "content": text}, "parent_tool_use_id": None, **extra})
+
+    def wait_for(self, predicate: Callable[[dict[str, Any]], bool], timeout: float = 120) -> dict[str, Any]:
+        for message in self.messages:
+            if predicate(message):
+                return message
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                message = self._inbox.get(timeout=max(0.1, deadline - time.monotonic()))
+            except queue.Empty:
+                break
+            if message is None:
+                raise AssertionError(f"orin-code exited: {self.process.stderr.read()[-2000:]}")
+            if predicate(message):
+                return message
+        raise AssertionError(f"timed out; got {[item.get('type') for item in self.messages]}")
+
+    def response_to(self, request_id: str) -> dict[str, Any]:
+        found = self.wait_for(lambda m: m.get("type") == "control_response" and m["response"].get("request_id") == request_id)
+        return found["response"]
+
+    def results(self) -> list[dict[str, Any]]:
+        return [item for item in self.messages if item.get("type") == "result"]
+
+    def close(self, timeout: float = 120) -> int:
+        try:
+            self.process.stdin.close()
+        except OSError:
+            pass
+        return self.process.wait(timeout=timeout)
+
+
+__all__ = ["Host"]
+```
+
+Create `tests/integration/cli_code/test_control_protocol.py` (it must not exist yet):
+
+```python
+"""W6 Tasks 14-16: the control protocol between `orin code` and an SDK host, on the live runtime."""
+from __future__ import annotations
+
+import uuid
+
+from .live_runtime import LiveRuntime
+from .sdk_host import Host
+
+MODEL = ["--model", "ollama/fake-coder:latest"]
+INITIALIZE = {"subtype": "initialize", "hooks": None}
+
+
+def _start(host: Host, **initialize) -> None:
+    assert host.response_to(host.control({**INITIALIZE, **initialize}))["subtype"] == "success"
+
+
+def _result(host: Host, count: int = 1) -> dict:
+    host.wait_for(lambda m: m.get("type") == "result" and len(host.results()) >= count)
+    return host.results()[count - 1]
+
+
+def test_can_use_tool_allows_a_write(orin_runtime: LiveRuntime) -> None:
+    workspace = orin_runtime.workspace("cut-allow")
+    host = Host(orin_runtime, workspace, "--permission-prompt-tool", "stdio", *MODEL,
+                on_request=lambda request: {"behavior": "allow", "updatedInput": request["input"]} if request["subtype"] == "can_use_tool" else None)
+    _start(host)
+    host.prompt("[[write:allowed.txt]]")
+    result = _result(host)
+    assert host.close() == 0
+    assert (workspace / "allowed.txt").read_text(encoding="utf-8") == "hi\n"
+    (asked,) = [item["request"] for item in host.requests if item["request"]["subtype"] == "can_use_tool"]
+    use = next(block for item in host.messages if item["type"] == "assistant" for block in item["message"]["content"] if block["type"] == "tool_use")
+    assert asked["tool_name"] == "Write" and asked["input"]["file_path"] == "allowed.txt" and asked["tool_use_id"] == use["id"]
+    assert result["subtype"] == "success" and result["permission_denials"] == []
+
+
+def test_can_use_tool_denies_a_write(orin_runtime: LiveRuntime) -> None:
+    workspace = orin_runtime.workspace("cut-deny")
+    host = Host(orin_runtime, workspace, "--permission-prompt-tool", "stdio", *MODEL,
+                on_request=lambda request: {"behavior": "deny", "message": "not in this folder"} if request["subtype"] == "can_use_tool" else None)
+    _start(host)
+    host.prompt("[[write:denied.txt]]")
+    result = _result(host)
+    host.close()
+    assert not (workspace / "denied.txt").exists()
+    assert result["permission_denials"][0]["tool_name"] == "Write"
+    tool_result = next(block for item in host.messages if item["type"] == "user" for block in item["message"]["content"])
+    assert tool_result["is_error"] is True and "not in this folder" in tool_result["content"]
+
+
+def test_changed_input_is_refused(orin_runtime: LiveRuntime) -> None:
+    workspace = orin_runtime.workspace("cut-changed")
+
+    def change(request):
+        if request["subtype"] != "can_use_tool":
+            return None
+        return {"behavior": "allow", "updatedInput": {**request["input"], "file_path": "elsewhere.txt"}}
+
+    host = Host(orin_runtime, workspace, "--permission-prompt-tool", "stdio", *MODEL, on_request=change)
+    _start(host)
+    host.prompt("[[write:asked.txt]]")
+    _result(host)
+    host.close()
+    assert not (workspace / "asked.txt").exists() and not (workspace / "elsewhere.txt").exists()
+
+
+def test_without_a_callback_nothing_asks_the_host(orin_runtime: LiveRuntime) -> None:
+    workspace = orin_runtime.workspace("no-callback")
+    host = Host(orin_runtime, workspace, *MODEL)
+    _start(host)
+    host.prompt("[[write:x.txt]]")
+    result = _result(host)
+    host.close()
+    assert host.requests == [] and not (workspace / "x.txt").exists() and result["permission_denials"]
+
+
+def test_interrupt_stops_the_turn(orin_runtime: LiveRuntime) -> None:
+    host = Host(orin_runtime, orin_runtime.workspace("interrupt"), "--include-partial-messages", *MODEL)
+    _start(host)
+    host.prompt("[[slow]]")
+    host.wait_for(lambda m: m.get("type") == "stream_event" and m["event"]["type"] == "content_block_delta")
+    assert host.response_to(host.control({"subtype": "interrupt"}))["subtype"] == "success"
+    result = _result(host)
+    host.close()
+    assert result["is_error"] is True and result["subtype"] == "error_during_execution"
+    deltas = [m for m in host.messages if m.get("type") == "stream_event" and m["event"]["type"] == "content_block_delta"]
+    assert len(deltas) < 40
+
+
+def test_set_permission_mode_applies_to_the_next_turn(orin_runtime: LiveRuntime) -> None:
+    workspace = orin_runtime.workspace("set-mode")
+    host = Host(orin_runtime, workspace, *MODEL)
+    _start(host)
+    assert host.response_to(host.control({"subtype": "set_permission_mode", "mode": "acceptEdits"}))["subtype"] == "success"
+    assert host.response_to(host.control({"subtype": "set_permission_mode", "mode": "yolo"}))["subtype"] == "error"
+    host.prompt("[[write:mode.txt]]")
+    _result(host)
+    host.close()
+    assert (workspace / "mode.txt").exists()
+
+
+def test_set_model_and_mcp_status(orin_runtime: LiveRuntime) -> None:
+    host = Host(orin_runtime, orin_runtime.workspace("model"), *MODEL)
+    _start(host)
+    assert host.response_to(host.control({"subtype": "set_model", "model": "ollama/fake-coder:latest"}))["subtype"] == "success"
+    assert host.response_to(host.control({"subtype": "set_model", "model": "nowhere/none"}))["subtype"] == "error"
+    status = host.response_to(host.control({"subtype": "mcp_status"}))
+    assert status["subtype"] == "success" and isinstance(status["response"]["mcpServers"], list)
+    assert host.response_to(host.control({"subtype": "set_max_thinking_tokens", "max_thinking_tokens": 8000}))["subtype"] == "success"
+    assert host.response_to(host.control({"subtype": "teleport"}))["subtype"] == "error"
+    host.close()
+
+
+def test_an_sdk_hook_can_refuse_a_tool(orin_runtime: LiveRuntime) -> None:
+    workspace = orin_runtime.workspace("sdk-hook")
+    seen: list[dict] = []
+
+    def answer(request):
+        if request["subtype"] != "hook_callback":
+            return None
+        seen.append(request)
+        return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                       "permissionDecisionReason": "the host says no"}}
+
+    host = Host(orin_runtime, workspace, "--permission-mode", "acceptEdits", *MODEL, on_request=answer)
+    _start(host, hooks={"PreToolUse": [{"matcher": "Write", "hookCallbackIds": ["hook_0"], "timeout": 30}]})
+    host.prompt("[[write:hooked.txt]]")
+    _result(host)
+    host.close()
+    assert not (workspace / "hooked.txt").exists()
+    (call,) = seen
+    assert call["callback_id"] == "hook_0" and call["input"]["tool_name"] == "Write"
+    assert call["input"]["hook_event_name"] == "PreToolUse" and call["tool_use_id"].startswith("toolu_")
+
+
+def test_an_sdk_hook_that_allows_lets_the_tool_run(orin_runtime: LiveRuntime) -> None:
+    workspace = orin_runtime.workspace("sdk-hook-ok")
+    host = Host(orin_runtime, workspace, "--permission-mode", "acceptEdits", *MODEL,
+                on_request=lambda request: {"continue": True} if request["subtype"] == "hook_callback" else None)
+    _start(host, hooks={"PostToolUse": [{"matcher": None, "hookCallbackIds": ["hook_1"]}]})
+    host.prompt("[[write:after.txt]]")
+    _result(host)
+    host.close()
+    assert (workspace / "after.txt").exists()
+    assert any(item["request"]["subtype"] == "hook_callback" for item in host.requests)
+
+
+def test_rewind_files_restores_the_folder(orin_runtime: LiveRuntime) -> None:
+    workspace = orin_runtime.workspace("rewind")
+    host = Host(orin_runtime, workspace, "--permission-mode", "acceptEdits", "--replay-user-messages", *MODEL)
+    _start(host)
+    prompt_id = str(uuid.uuid4())
+    host.prompt("[[write:undone.txt]]", uuid=prompt_id)
+    _result(host)
+    assert (workspace / "undone.txt").exists()
+    assert host.response_to(host.control({"subtype": "rewind_files", "user_message_id": prompt_id}))["subtype"] == "success"
+    assert host.response_to(host.control({"subtype": "rewind_files", "user_message_id": str(uuid.uuid4())}))["subtype"] == "error"
+    host.close()
+    assert not (workspace / "undone.txt").exists()
+```
+
+In `tests/integration/cli_code/test_headless.py` make these 1 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+    assert responses["req_1"]["subtype"] == "success"
+    assert responses["req_2"]["subtype"] == "error"  # Batch C answers mcp_status
+    kinds = [item["type"] for item in messages if item["type"] != "control_response"]
+```
+
+with
+
+```python
+    assert responses["req_1"]["subtype"] == "success"
+    assert responses["req_2"]["subtype"] == "success" and isinstance(responses["req_2"]["response"]["mcpServers"], list)
+    kinds = [item["type"] for item in messages if item["type"] != "control_response"]
+```
+
+
+- [ ] **Step 2: Run them to see them fail.**
+
+Run: `uv run pytest -q tests/integration/cli_code/test_control_protocol.py`
+Expected: collection error: `No module named 'agentos.cli_code.host_bridge'` for the bridge; the live tests fail.
+
+- [ ] **Step 3: Implement.**
+
+In `src/agentos/cli_code/headless.py` make these 18 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+import json
+import os
+import queue
+```
+
+with
+
+```python
+import json
+import queue
+```
+
+2. Replace
+
+```python
+from .errors import CliRuntimeError
+from .protocol import Translator, TurnUsage
+```
+
+with
+
+```python
+from .errors import CliRuntimeError
+from .host_bridge import HostBridge
+from .protocol import Translator, TurnUsage
+```
+
+3. Replace
+
+```python
+        self._stdin_closed = False
+        self._pending_prompts: list[str] = []
+        self._init_sent = False
+```
+
+with
+
+```python
+        self._stdin_closed = False
+        self._pending_prompts: list[tuple[str, str | None]] = []
+        self._init_sent = False
+```
+
+4. Replace
+
+```python
+        self._debug = self._debug_sink()
+```
+
+with
+
+```python
+        self._debug = self._debug_sink()
+        self.bridge = HostBridge(self)
+        self.current_turn_id: str | None = None
+        self.initial_selection: Selection | None = None
+        self.prompt_turns: dict[str, str] = {}  # a user message's uuid (as the host saw it) -> its turn
+```
+
+5. Replace
+
+```python
+                                          remembered=remembered, configured=self.configured_model)
+        session_id = self.session.session_id if self.session is not None else (options.session_id or "").lower() or None
+```
+
+with
+
+```python
+                                          remembered=remembered, configured=self.configured_model)
+        self.initial_selection = self.selection
+        session_id = self.session.session_id if self.session is not None else (options.session_id or "").lower() or None
+```
+
+6. Replace
+
+```python
+            raise CliRuntimeError(f"the prompt has {len(prompt)} characters; Orin takes at most {MAX_PROMPT_CHARS} per message")
+        # Nobody answers a permission prompt in this build yet (can_use_tool arrives with the control protocol), so
+        # whatever would ask is refused at once rather than waiting for an answer that cannot come.
+        host = False
+        turn_options = build_turn_options(self.options, self.cwd, host_answers_prompts=host).model_dump()
+        mode = permission_mode_for(self.options)
+```
+
+with
+
+```python
+            raise CliRuntimeError(f"the prompt has {len(prompt)} characters; Orin takes at most {MAX_PROMPT_CHARS} per message")
+        # Only an SDK host with a can_use_tool callback (--permission-prompt-tool stdio) answers permission prompts.
+        host = self.options.permission_prompt_tool == "stdio"
+        turn_options = build_turn_options(self.options, self.cwd, host_answers_prompts=host,
+                                          sdk_hooks=self.bridge.sdk_hooks).model_dump()
+        mode = permission_mode_for(self.options)
+```
+
+7. Replace
+
+```python
+
+    def answer(self, prompt: str) -> dict[str, Any]:
+        """One prompt's answer: a turn, or with ``--json-schema`` as many follow-ups as the answer needs (W3-R25)."""
+```
+
+with
+
+```python
+
+    def answer(self, prompt: str, *, prompt_uuid: str | None = None) -> dict[str, Any]:
+        """One prompt's answer: a turn, or with ``--json-schema`` as many follow-ups as the answer needs (W3-R25)."""
+```
+
+8. Replace
+
+```python
+        if not self.options.json_schema:
+            return self.run_turn(prompt)
+        from .structured import MAX_STRUCTURED_RETRIES, load_schema, problem, retry_prompt
+```
+
+with
+
+```python
+        if not self.options.json_schema:
+            return self.run_turn(prompt, prompt_uuid=prompt_uuid)
+        from .structured import MAX_STRUCTURED_RETRIES, load_schema, problem, retry_prompt
+```
+
+9. Replace
+
+```python
+        for attempt in range(MAX_STRUCTURED_RETRIES + 1):
+            result = self.run_turn(text, final=False)
+            totals = TurnUsage(totals.input_tokens + result["usage"]["input_tokens"], totals.output_tokens + result["usage"]["output_tokens"],
+```
+
+with
+
+```python
+        for attempt in range(MAX_STRUCTURED_RETRIES + 1):
+            result = self.run_turn(text, final=False, prompt_uuid=prompt_uuid if attempt == 0 else None)
+            totals = TurnUsage(totals.input_tokens + result["usage"]["input_tokens"], totals.output_tokens + result["usage"]["output_tokens"],
+```
+
+10. Replace
+
+```python
+
+    def run_turn(self, prompt: str, *, final: bool = True) -> dict[str, Any]:
+        """One turn, start to result; returns the result message (written to stdout only when ``final``)."""
+```
+
+with
+
+```python
+
+    def run_turn(self, prompt: str, *, final: bool = True, prompt_uuid: str | None = None) -> dict[str, Any]:
+        """One turn, start to result; returns the result message (written to stdout only when ``final``)."""
+```
+
+11. Replace
+
+```python
+        self._send_init()
+        if self.options.replay_user_messages and self.stream_json:
+            self.out.message({"type": "user", "session_id": self._session_id, "uuid": str(uuid.uuid4()),
+                              "message": {"role": "user", "content": prompt}, "parent_tool_use_id": None})
+```
+
+with
+
+```python
+        self._send_init()
+        replayed = prompt_uuid or str(uuid.uuid4())
+        if self.options.replay_user_messages and self.stream_json:
+            self.out.message({"type": "user", "session_id": self._session_id, "uuid": replayed,
+                              "message": {"role": "user", "content": prompt}, "parent_tool_use_id": None})
+```
+
+12. Replace
+
+```python
+        turn_id = self._send(prompt)
+        self._start_events()
+```
+
+with
+
+```python
+        turn_id = self._send(prompt)
+        self.current_turn_id = turn_id
+        self.prompt_turns[replayed] = turn_id
+        self._start_events()
+```
+
+13. Replace
+
+```python
+                        self.out.message(message)
+                event_type = str(item.get("event_type") or "")
+```
+
+with
+
+```python
+                        self.out.message(message)
+                self.bridge.on_turn_event(item, turn_id)
+                event_type = str(item.get("event_type") or "")
+```
+
+14. Replace
+
+```python
+                self._handle_input(kind, item)
+        after = self._usage()
+```
+
+with
+
+```python
+                self._handle_input(kind, item)
+        self.current_turn_id = None
+        after = self._usage()
+```
+
+15. Replace
+
+```python
+            if item.get("type") == "control_request":
+                self._control(item)
+            elif item.get("type") == "user":
+```
+
+with
+
+```python
+            if item.get("type") == "control_request":
+                self.bridge.handle(item)
+            elif item.get("type") == "user":
+```
+
+16. Replace
+
+```python
+                message = item.get("message") if isinstance(item.get("message"), dict) else {}
+                self._pending_prompts.append(_prompt_text(message.get("content")))
+            elif item.get("type") == "control_response":
+                pass  # answers to requests this build does not send yet
+
+    def _control(self, request: dict[str, Any]) -> None:
+        request_id = str(request.get("request_id") or "")
+        body = request.get("request") if isinstance(request.get("request"), dict) else {}
+        subtype = str(body.get("subtype") or "")
+        if subtype == "initialize":
+            response = {"commands": [], "agents": [], "output_style": "default", "available_output_styles": ["default"],
+                        "models": [], "account": {}, "pid": os.getpid()}
+            self.out.message({"type": "control_response", "response": {"subtype": "success", "request_id": request_id, "response": response}})
+            return
+        self.out.message({"type": "control_response", "response": {
+            "subtype": "error", "request_id": request_id, "error": f"orin code does not handle {subtype or 'this'} requests yet",
+        }})
+```
+
+with
+
+```python
+                message = item.get("message") if isinstance(item.get("message"), dict) else {}
+                self._pending_prompts.append((_prompt_text(message.get("content")), str(item.get("uuid") or "") or None))
+            elif item.get("type") == "control_response" and isinstance(item.get("response"), dict):
+                self.bridge.answered(item["response"])
+            elif item.get("type") == "control_cancel_request":
+                pass  # the host gave up on one of its own requests; nothing of Orin's is waiting on it
+```
+
+17. Replace
+
+```python
+        if self.options.prompt:
+            self._pending_prompts.append(self.options.prompt)
+        while True:
+```
+
+with
+
+```python
+        if self.options.prompt:
+            self._pending_prompts.append((self.options.prompt, None))
+        while True:
+```
+
+18. Replace
+
+```python
+            while self._pending_prompts:
+                self.answer(self._pending_prompts.pop(0))
+            if self._stdin_closed:
+```
+
+with
+
+```python
+            while self._pending_prompts:
+                text, prompt_uuid = self._pending_prompts.pop(0)
+                self.answer(text, prompt_uuid=prompt_uuid)
+            if self._stdin_closed:
+```
+
+
+Create `src/agentos/cli_code/host_bridge.py` (it must not exist yet):
+
+```python
+"""The control protocol between ``orin code`` and its SDK host (spec §9.3).
+
+Host to harness: ``initialize`` (the host's hook callbacks and agents), ``interrupt``, ``set_permission_mode``,
+``set_model``, ``set_max_thinking_tokens``, ``rewind_files`` and ``mcp_status``. Harness to host: ``can_use_tool``
+when a turn asks for a permission, and ``hook_callback`` when a turn runs one of the host's hooks. Every answer the
+host gives goes back to the worker through the local API: a permission decision, or a host-request reply.
+"""
+
+from __future__ import annotations
+
+import os
+import uuid
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
+
+from agentos.agentic.tools.public_names import public_name
+
+from .args import PERMISSION_MODES
+from .errors import CliRuntimeError
+from .selection import resolve_model
+
+if TYPE_CHECKING:  # pragma: no cover
+    from .headless import HeadlessRun
+
+MAX_SDK_HOOKS = 100
+
+
+def sdk_hooks_layer(hooks: object) -> dict[str, list[dict[str, Any]]]:
+    """``initialize.hooks`` (``{event: [{matcher, hookCallbackIds, timeout}]}``) as the cli layer's ``hooks`` setting."""
+    layer: dict[str, list[dict[str, Any]]] = {}
+    if not isinstance(hooks, dict):
+        return layer
+    count = 0
+    for event, matchers in hooks.items():
+        if not isinstance(event, str) or not isinstance(matchers, list):
+            continue
+        groups: list[dict[str, Any]] = []
+        for matcher in matchers:
+            if not isinstance(matcher, dict):
+                continue
+            entries = []
+            for callback_id in matcher.get("hookCallbackIds") or []:
+                if isinstance(callback_id, str) and callback_id and count < MAX_SDK_HOOKS:
+                    entry: dict[str, Any] = {"type": "callback", "callback_id": callback_id}
+                    if isinstance(matcher.get("timeout"), (int, float)) and not isinstance(matcher.get("timeout"), bool):
+                        entry["timeout"] = matcher["timeout"]
+                    entries.append(entry)
+                    count += 1
+            if entries:
+                groups.append({"matcher": str(matcher.get("matcher") or ""), "hooks": entries})
+        if groups:
+            layer[event] = groups
+    return layer
+
+
+class HostBridge:
+    def __init__(self, run: "HeadlessRun") -> None:
+        self.run = run
+        self._waiting: dict[str, Callable[[dict[str, Any]], None]] = {}
+        self.sdk_hooks: dict[str, list[dict[str, Any]]] = {}
+        self.sdk_agents: dict[str, Any] = {}
+
+    # -- harness to host ------------------------------------------------------------------------------------------
+
+    def ask(self, request: dict[str, Any], on_answer: Callable[[dict[str, Any]], None]) -> None:
+        request_id = f"orin_{uuid.uuid4().hex[:16]}"
+        self._waiting[request_id] = on_answer
+        self.run.out.message({"type": "control_request", "request_id": request_id, "request": request})
+
+    def answered(self, response: dict[str, Any]) -> None:
+        callback = self._waiting.pop(str(response.get("request_id") or ""), None)
+        if callback is not None:
+            callback(response)
+
+    def on_turn_event(self, event: dict[str, Any], turn_id: str) -> None:
+        kind = str(event.get("event_type") or "")
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        if kind == "code_mode.decision_required" and payload.get("permission_request_id"):
+            self._permission(payload, turn_id)
+        elif kind == "host.request" and payload.get("request_id"):
+            self._host_request(payload)
+
+    def _permission(self, payload: dict[str, Any], turn_id: str) -> None:
+        run = self.run
+        request_id = str(payload["permission_request_id"])
+        internal = str(payload.get("tool_name") or "")
+        found = run.translator.open_tool(internal) if run.translator is not None else None
+        tool_use_id, name, tool_input = found if found is not None else ("", public_name(internal), {})
+        path = f"/v1/conversations/{run.conversation_id}/turns/{turn_id}/tool-permission"
+
+        def decide(decision: str, reason: str | None) -> None:
+            try:
+                run.client.post(path, {"request_id": request_id, "decision": decision, **({"reason": reason[:500]} if reason else {})})
+            except CliRuntimeError as error:
+                run._debug(f"permission {request_id} could not be answered: {error}")
+
+        if run.options.permission_prompt_tool != "stdio":
+            decide("deny", "nobody can answer a permission prompt in this run")
+            return
+
+        def answer(response: dict[str, Any]) -> None:
+            body = response.get("response") if isinstance(response.get("response"), dict) else {}
+            if response.get("subtype") != "success":
+                decide("deny", str(response.get("error") or "the host could not decide"))
+                return
+            if body.get("behavior") == "allow":
+                updated = body.get("updatedInput")
+                if isinstance(updated, dict) and updated != tool_input:
+                    # Orin runs the call it was asked about; it cannot swap in other input (fail closed).
+                    decide("deny", "orin code cannot run a tool with input the host changed")
+                    return
+                decide("allow_once", None)
+                return
+            decide("deny", str(body.get("message") or "denied by the host"))
+            if body.get("interrupt") is True:
+                self.interrupt()
+
+        self.ask({
+            "subtype": "can_use_tool", "tool_name": name, "input": tool_input, "permission_suggestions": [],
+            "tool_use_id": tool_use_id or None, "blocked_path": payload.get("path") or None,
+            "decision_reason": str(payload.get("suggested_rule") or "") or None,
+        }, answer)
+
+    def _host_request(self, payload: dict[str, Any]) -> None:
+        run = self.run
+        request_id = str(payload["request_id"])
+        try:
+            entry = run.client.get(f"/v1/conversations/{run.conversation_id}/transcript/{payload.get('transcript_id')}")
+        except CliRuntimeError as error:
+            run._debug(f"host request {request_id} could not be read: {error}")
+            return
+        body = (entry or {}).get("host_request") if isinstance(entry, dict) else None
+        if not isinstance(body, dict):
+            return
+        kind, inner = body.get("kind"), body.get("request") if isinstance(body.get("request"), dict) else {}
+
+        def reply(response: dict[str, Any]) -> None:
+            try:
+                run.client.post(f"/v1/conversations/{run.conversation_id}/host-requests/{request_id}", {"response": response})
+            except CliRuntimeError as error:
+                run._debug(f"host request {request_id} could not be answered: {error}")
+
+        if kind == "hook_callback":
+            hook_input = dict(inner.get("input") or {})
+            hook_input["session_id"] = run._session_id
+            invocation = str(inner.get("tool_use_id") or hook_input.get("tool_use_id") or "")
+            mapped = run.translator.tool_use_id_for(invocation) if run.translator is not None and invocation else None
+            if mapped:
+                hook_input["tool_use_id"] = mapped
+
+            def hook_answer(response: dict[str, Any]) -> None:
+                if response.get("subtype") == "success" and isinstance(response.get("response"), dict):
+                    reply(response["response"])
+                else:
+                    reply({"_error": str(response.get("error") or "the host's hook failed")[:500]})
+
+            self.ask({"subtype": "hook_callback", "callback_id": str(inner.get("callback_id") or ""), "input": hook_input,
+                      "tool_use_id": mapped or invocation or None}, hook_answer)
+        else:
+            reply({"_error": f"orin code does not relay {kind!r} requests"})
+
+    # -- host to harness ------------------------------------------------------------------------------------------
+
+    def _respond(self, request_id: str, response: dict[str, Any] | None = None, error: str | None = None) -> None:
+        if error is not None:
+            body: dict[str, Any] = {"subtype": "error", "request_id": request_id, "error": error}
+        else:
+            body = {"subtype": "success", "request_id": request_id, "response": response or {}}
+        self.run.out.message({"type": "control_response", "response": body})
+
+    def interrupt(self) -> None:
+        run = self.run
+        if run.conversation_id is not None and run.current_turn_id is not None:
+            run.client.post(f"/v1/conversations/{run.conversation_id}/cancel", {})
+
+    def handle(self, message: dict[str, Any]) -> None:
+        request_id = str(message.get("request_id") or "")
+        body = message.get("request") if isinstance(message.get("request"), dict) else {}
+        subtype = str(body.get("subtype") or "")
+        handler = getattr(self, f"_on_{subtype}", None)
+        if handler is None:
+            self._respond(request_id, error=f"orin code does not handle {subtype or 'this'} requests")
+            return
+        try:
+            self._respond(request_id, handler(body))
+        except (CliRuntimeError, ValueError) as error:
+            self._respond(request_id, error=str(error))
+
+    def _on_initialize(self, body: dict[str, Any]) -> dict[str, Any]:
+        self.sdk_hooks = sdk_hooks_layer(body.get("hooks"))
+        agents = body.get("agents")
+        self.sdk_agents = dict(agents) if isinstance(agents, dict) else {}
+        return {"commands": [], "agents": sorted(self.sdk_agents), "output_style": "default",
+                "available_output_styles": ["default"], "models": [], "account": {}, "pid": os.getpid()}
+
+    def _on_interrupt(self, body: dict[str, Any]) -> dict[str, Any]:
+        self.interrupt()
+        return {}
+
+    def _on_set_permission_mode(self, body: dict[str, Any]) -> dict[str, Any]:
+        mode = str(body.get("mode") or "")
+        if mode not in PERMISSION_MODES:
+            raise ValueError(f"unknown permission mode {mode!r}")
+        self.run.options.permission_mode = mode
+        self.run.options.dangerously_skip_permissions = False
+        return {}
+
+    def _on_set_model(self, body: dict[str, Any]) -> dict[str, Any]:
+        run = self.run
+        model = body.get("model")
+        if model is None:
+            run.selection = run.initial_selection
+        else:
+            run.selection = resolve_model(run.catalog, str(model), run.options.provider)
+        if run.translator is not None:
+            run.translator.model = run.selection.model_id
+        return {}
+
+    def _on_set_max_thinking_tokens(self, body: dict[str, Any]) -> dict[str, Any]:
+        value = body.get("max_thinking_tokens")
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
+            raise ValueError("max_thinking_tokens must be a whole number")
+        self.run.options.max_thinking_tokens = value
+        self.run.options.effort = None
+        self.run.options.thinking = "disabled" if value == 0 else None
+        return {}
+
+    def _on_mcp_status(self, body: dict[str, Any]) -> dict[str, Any]:
+        listed = self.run.client.get("/v1/mcp/servers")
+        items = listed.get("items") if isinstance(listed, dict) else listed
+        servers = []
+        for item in items if isinstance(items, list) else []:
+            if isinstance(item, dict):
+                state = str(item.get("state") or "")
+                servers.append({"name": str(item.get("display_name") or item.get("slug") or ""),
+                                "status": "connected" if state == "active" else (state or "unknown")})
+        return {"mcpServers": servers}
+
+    def _on_rewind_files(self, body: dict[str, Any]) -> dict[str, Any]:
+        run = self.run
+        turn_id = run.prompt_turns.get(str(body.get("user_message_id") or ""))
+        if turn_id is None or run.conversation_id is None:
+            raise ValueError("that user message is not one of this run's prompts")
+        conversation = run.client.get(f"/v1/conversations/{run.conversation_id}")
+        messages = conversation.get("messages") if isinstance(conversation, dict) else []
+        message_id = next((str(item.get("message_id")) for item in messages or []
+                           if isinstance(item, dict) and item.get("role") == "user" and item.get("turn_id") == turn_id), None)
+        if message_id is None:
+            raise ValueError("the prompt's message was not found")
+        run.client.post(f"/v1/conversations/{run.conversation_id}/messages/{message_id}/rewind", {"mode": "code"})
+        return {}
+
+
+__all__ = ["HostBridge", "MAX_SDK_HOOKS", "sdk_hooks_layer"]
+```
+
+In `src/agentos/cli_code/protocol.py` make these 4 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+        self._next_index = 0
+        self._open_tools: dict[str, list[tuple[str, str]]] = {}  # invocation id -> [(tool_use id, public name)]
+        self._text_since_tools: list[str] = []
+```
+
+with
+
+```python
+        self._next_index = 0
+        # invocation id -> [(tool_use id, public name, input, internal name)]
+        self._open_tools: dict[str, list[tuple[str, str, dict[str, Any], str]]] = {}
+        self._text_since_tools: list[str] = []
+```
+
+2. Replace
+
+```python
+        out.append(self._assistant(block))
+        self._open_tools.setdefault(invocation, []).append((tool_use_id, name))
+        self._text_since_tools = []
+```
+
+with
+
+```python
+        out.append(self._assistant(block))
+        self._open_tools.setdefault(invocation, []).append((tool_use_id, name, tool_input, internal))
+        self._text_since_tools = []
+```
+
+3. Replace
+
+```python
+            return  # a result with no call the host saw (Orin's own bookkeeping, e.g. todo settling)
+        tool_use_id, name = pending.pop(0)
+        if not pending:
+```
+
+with
+
+```python
+            return  # a result with no call the host saw (Orin's own bookkeeping, e.g. todo settling)
+        tool_use_id, name, tool_input, _ = pending.pop(0)
+        if not pending:
+```
+
+4. Replace
+
+```python
+        if is_error and str(payload.get("error_code") or "") == "CODE_PERMISSION_DENIED":
+            self.denials.append({"tool_name": name, "tool_use_id": tool_use_id, "tool_input": {}})
+```
+
+with
+
+```python
+        if is_error and str(payload.get("error_code") or "") == "CODE_PERMISSION_DENIED":
+            self.denials.append({"tool_name": name, "tool_use_id": tool_use_id, "tool_input": tool_input})
+
+    def open_tool(self, internal: str) -> tuple[str, str, dict[str, Any]] | None:
+        """The latest call of this tool still waiting for its result: ``(tool_use id, public name, input)``."""
+        for calls in reversed(list(self._open_tools.values())):
+            for tool_use_id, name, tool_input, called in reversed(calls):
+                if called == internal:
+                    return tool_use_id, name, tool_input
+        return None
+
+    def tool_use_id_for(self, invocation: str) -> str | None:
+        calls = self._open_tools.get(invocation)
+        return calls[0][0] if calls else None
+```
+
+
+In `src/agentos/cli_code/turn_options.py` make these 2 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+
+def build_turn_options(options: CodeOptions, cwd: Path, *, host_answers_prompts: bool) -> CliTurnOptions:
+    """The "cli" settings layer (``--settings`` first, the explicit flags over it) and the headless switches."""
+```
+
+with
+
+```python
+
+def build_turn_options(options: CodeOptions, cwd: Path, *, host_answers_prompts: bool,
+                       sdk_hooks: dict[str, list[dict[str, Any]]] | None = None) -> CliTurnOptions:
+    """The "cli" settings layer (``--settings`` first, the explicit flags over it) and the headless switches."""
+```
+
+2. Replace
+
+```python
+    layer = settings_flag(options.settings, cwd)
+    _extend(layer, "permissions.allow", options.allowed_tools)
+```
+
+with
+
+```python
+    layer = settings_flag(options.settings, cwd)
+    if sdk_hooks:
+        # The SDK host's hook callbacks (initialize.hooks) join the cli layer's hooks, after --settings' own.
+        hooks = layer.setdefault("hooks", {})
+        if not isinstance(hooks, dict):
+            hooks = layer["hooks"] = {}
+        for event, groups in sdk_hooks.items():
+            current = hooks.setdefault(event, [])
+            if isinstance(current, list):
+                current.extend(groups)
+    _extend(layer, "permissions.allow", options.allowed_tools)
+```
+
+
+- [ ] **Step 4: Run the tests to see them pass.**
+
+Run: `uv run pytest -q tests/unit/cli_code && uv run pytest -q tests/integration/cli_code (timeout 900000 ms)`
+Expected: all pass.
+
+Expectation change to record: `test_headless.py::test_an_sdk_style_stream_json_session` now expects `mcp_status` to succeed (Batch B answered it with an error).
+
+- [ ] **Step 5: Commit.**
+
+```
+feat(w6): the SDK control protocol
+
+can_use_tool and hook_callback to the host; initialize, interrupt,
+set_permission_mode, set_model, set_max_thinking_tokens, mcp_status and
+rewind_files from it.
+```
+
+### Task 16: Agents from `--agents` and from the SDK host
+
+`agents_from_mapping` reads `{name: {description, prompt, tools, disallowedTools, model, maxTurns, permissionMode, skills}}` with the same rules as an agent file (at most 32); `CliTurnOptions.agents` carries them (the host's `initialize.agents` over `--agents`, a JSON object or a JSON file), and the session puts them in the turn's catalog as origin `cli`, above every folder's agents (a builtin or folder agent of the same name is shadowed and recorded). `--agent` (running the main thread as an agent) stays refused. The fake Ollama gains `[[agent:<name>]]`.
+
+**Files:**
+- Create: `tests/unit/cli_code/test_cli_agents.py`
+- Modify: `src/agentos/agentic/agent_definitions.py`, `src/agentos/agentic/session.py`, `src/agentos/cli_code/headless.py`, `src/agentos/cli_code/turn_options.py`, `src/agentos/code_mode/cli_options.py`, `tests/fixtures/fake_ollama.py`, `tests/integration/cli_code/test_control_protocol.py`, `tests/unit/cli_code/test_turn_options_builder.py`
+
+**Interfaces:**
+- Produces: `agents_from_mapping(raw, *, origin='cli') -> (definitions, errors)`, `MAX_CLI_AGENTS = 32`; `CliTurnOptions.agents`; `agents_flag(value, cwd)`; `build_turn_options(..., sdk_agents=None)`.
+
+- [ ] **Step 1: Write the failing tests** (test files and their fixtures).
+
+In `tests/fixtures/fake_ollama.py` make these 3 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+- ``[[read:<path>]]``: a ``Read`` call for ``<path>`` and, once its result is back, ``Done.``;
+- ``[[slow]]``: forty words, one every 0.25 s, so a test can interrupt the turn while it streams;
+```
+
+with
+
+```python
+- ``[[read:<path>]]``: a ``Read`` call for ``<path>`` and, once its result is back, ``Done.``;
+- ``[[agent:<name>]]``: an ``Agent`` call for the subagent ``<name>`` and, once its result is back, ``Done.``;
+- ``[[slow]]``: forty words, one every 0.25 s, so a test can interrupt the turn while it streams;
+```
+
+2. Replace
+
+```python
+MODEL = "fake-coder:latest"
+_MARKER = re.compile(r"\[\[(write|read|slow|think|say)(?::([^\]]*))?\]\]")
+```
+
+with
+
+```python
+MODEL = "fake-coder:latest"
+_MARKER = re.compile(r"\[\[(write|read|agent|slow|think|say)(?::([^\]]*))?\]\]")
+```
+
+3. Replace
+
+```python
+        call = {"function": {"name": "Read", "arguments": {"file_path": value or "README.md"}}}
+        return [{"message": {"role": "assistant", "content": "", "tool_calls": [call]}, "done": False}, _done(10, 5)], 0.0
+```
+
+with
+
+```python
+        call = {"function": {"name": "Read", "arguments": {"file_path": value or "README.md"}}}
+        return [{"message": {"role": "assistant", "content": "", "tool_calls": [call]}, "done": False}, _done(10, 5)], 0.0
+    if kind == "agent":
+        if answered:
+            return [*_text("Done."), _done(20, 2)], 0.0
+        call = {"function": {"name": "Agent", "arguments": {"subagent_type": value, "description": "check", "prompt": "check the work"}}}
+        return [{"message": {"role": "assistant", "content": "", "tool_calls": [call]}, "done": False}, _done(10, 5)], 0.0
+```
+
+
+In `tests/integration/cli_code/test_control_protocol.py` make these 1 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+    assert not (workspace / "undone.txt").exists()
+```
+
+with
+
+```python
+    assert not (workspace / "undone.txt").exists()
+
+
+def test_an_agent_from_the_host_runs_as_a_subagent(orin_runtime: LiveRuntime) -> None:
+    host = Host(orin_runtime, orin_runtime.workspace("agents"), "--permission-mode", "acceptEdits", *MODEL)
+    _start(host, agents={"reviewer": {"description": "Reviews the work", "prompt": "REVIEWER-PERSONA: be strict."}})
+    before = len(orin_runtime.fake.requests)
+    host.prompt("[[agent:reviewer]]")
+    result = _result(host)
+    host.close()
+    assert result["subtype"] == "success" and result["result"] == "Done."
+    systems = [str(m.get("content")) for request in orin_runtime.fake.requests[before:] for m in request.get("messages", []) if m.get("role") == "system"]
+    assert any("REVIEWER-PERSONA" in text for text in systems)
+```
+
+
+Create `tests/unit/cli_code/test_cli_agents.py` (it must not exist yet):
+
+```python
+"""W6 Task 17: agents from --agents and from an SDK host's initialize."""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from agentos.agentic.agent_definitions import MAX_CLI_AGENTS, agents_from_mapping
+from agentos.cli_code.args import parse_code_arguments
+from agentos.cli_code.turn_options import build_turn_options
+from agentos.code_mode.cli_options import CliTurnOptions
+
+from .test_cli_turn_session import _session
+
+
+def test_agents_are_read_like_agent_files() -> None:
+    found, errors = agents_from_mapping({
+        "Reviewer": {"description": "Reviews diffs", "prompt": "Review carefully.", "tools": ["Read", "Grep"], "maxTurns": 5},
+        "bad name!": {"description": "x", "prompt": "y"},
+        "empty": {"description": "no prompt"},
+        "notmap": "x",
+    })
+    assert [item.name for item in found] == ["reviewer"]
+    assert found[0].origin == "cli" and found[0].tools == ("Read", "Grep") and found[0].max_turns == 5
+    assert len(errors) == 3
+    many, problems = agents_from_mapping({f"a{n}": {"description": "d", "prompt": "p"} for n in range(MAX_CLI_AGENTS + 3)})
+    assert len(many) == MAX_CLI_AGENTS and problems
+    assert agents_from_mapping(None) == ([], [])
+
+
+def test_the_flag_and_the_host_merge(tmp_path: Path) -> None:
+    (tmp_path / "agents.json").write_text(json.dumps({"a": {"description": "from file", "prompt": "p"}}), encoding="utf-8")
+    options = parse_code_arguments(["-p", "x", "--agents", "agents.json"])[0]
+    built = build_turn_options(options, tmp_path, host_answers_prompts=False,
+                               sdk_agents={"a": {"description": "from host", "prompt": "q"}, "b": {"description": "d", "prompt": "p"}})
+    assert built.agents == {"a": {"description": "from host", "prompt": "q"}, "b": {"description": "d", "prompt": "p"}}
+
+
+def test_cli_agents_join_the_turns_catalog_above_the_folders(tmp_path: Path) -> None:
+    session = _session(tmp_path, CliTurnOptions(agents={"verifier": {"description": "mine", "prompt": "My checks."},
+                                                        "reviewer": {"description": "r", "prompt": "Review."}}))
+    catalog = session._load_agent_definitions(False)
+    assert catalog.get("reviewer").origin == "cli" and catalog.get("verifier").prompt == "My checks."
+    assert ("verifier", "builtin", "cli") in catalog.shadowed
+```
+
+In `tests/unit/cli_code/test_turn_options_builder.py` make these 1 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+
+@pytest.mark.parametrize("argv", [["--fork-session"], ["--mcp-config", "{}"], ["--agents", "{}"], ["--bg"], ["--permission-prompt-tool", "mcp__p__ask"], ["--thinking-display", "summarized"]])
+def test_flags_without_support_yet_are_refused(argv: list[str]) -> None:
+```
+
+with
+
+```python
+
+@pytest.mark.parametrize("argv", [["--fork-session"], ["--mcp-config", "{}"], ["--agent", "reviewer"], ["--bg"], ["--permission-prompt-tool", "mcp__p__ask"], ["--thinking-display", "summarized"]])
+def test_flags_without_support_yet_are_refused(argv: list[str]) -> None:
+```
+
+
+- [ ] **Step 2: Run them to see them fail.**
+
+Run: `uv run pytest -q tests/unit/cli_code/test_cli_agents.py`
+Expected: collection error: `cannot import name 'agents_from_mapping'`.
+
+- [ ] **Step 3: Implement.**
+
+In `src/agentos/agentic/agent_definitions.py` make these 1 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+    )
+```
+
+with
+
+```python
+    )
+
+
+MAX_CLI_AGENTS = 32
+
+
+def agents_from_mapping(raw: object, *, origin: str = "cli") -> tuple[list[AgentDefinition], list[tuple[str, str]]]:
+    """Agents given as JSON (``--agents`` or an SDK host's ``initialize.agents``): ``{name: {description, prompt, ...}}``,
+    read with the same rules as an agent file."""
+    found: list[AgentDefinition] = []
+    errors: list[tuple[str, str]] = []
+    if not isinstance(raw, Mapping):
+        return found, ([(origin, "agents must be an object of name -> definition")] if raw is not None else [])
+    for key, value in list(raw.items())[:MAX_CLI_AGENTS]:
+        name = str(key or "").strip().lower()
+        if not _NAME.fullmatch(name):
+            errors.append((str(key)[:64], "an agent needs a name of lowercase letters, digits and hyphens"))
+            continue
+        if not isinstance(value, Mapping):
+            errors.append((name, "an agent's definition must be an object"))
+            continue
+        description = _text(value.get("description"), 1_024)
+        prompt = value.get("prompt")
+        if not description or not isinstance(prompt, str) or not prompt.strip():
+            errors.append((name, "an agent needs a description and a prompt"))
+            continue
+        tools = _list(value.get("tools")) if value.get("tools") not in (None, "", "*") else None
+        turns = value.get("maxTurns")
+        found.append(AgentDefinition(
+            name=name, description=description, prompt=prompt.strip()[:MAX_AGENT_PROMPT_CHARS], origin=origin,
+            tools=tools, disallowed_tools=_list(value.get("disallowedTools")), model=_text(value.get("model"), 120),
+            permission_mode=_text(value.get("permissionMode"), 40),
+            max_turns=int(turns) if isinstance(turns, int) and not isinstance(turns, bool) and 0 < turns <= 500 else None,
+            skills=_list(value.get("skills")),
+            digest=hashlib.sha256(repr(sorted(value.items(), key=str)).encode("utf-8")).hexdigest(),
+        ))
+    if len(raw) > MAX_CLI_AGENTS:
+        errors.append((origin, f"more than {MAX_CLI_AGENTS} agents; the rest are ignored"))
+    return found, errors
+```
+
+
+In `src/agentos/agentic/session.py` make these 1 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+            return AgentCatalog()
+        for path, reason in catalog.errors[:20]:
+```
+
+with
+
+```python
+            return AgentCatalog()
+        if self.cli_options is not None and self.cli_options.agents:
+            from .agent_definitions import agents_from_mapping
+
+            # W6: the person's command line (--agents) or SDK host (initialize.agents): above every folder's agents.
+            found, problems = agents_from_mapping(self.cli_options.agents)
+            for definition in found:
+                previous = catalog.agents.get(definition.name)
+                if previous is not None:
+                    catalog.shadowed.append((definition.name, previous.origin, "cli"))
+                catalog.agents[definition.name] = definition
+            catalog.errors.extend(problems)
+        for path, reason in catalog.errors[:20]:
+```
+
+
+In `src/agentos/cli_code/headless.py` make these 2 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+UNSUPPORTED: dict[str, str] = {
+    "mcp_configs": "--mcp-config", "strict_mcp_config": "--strict-mcp-config", "agents": "--agents", "agent": "--agent",
+    "plugin_dirs": "--plugin-dir", "worktree": "--worktree", "background": "--bg", "fork_session": "--fork-session",
+```
+
+with
+
+```python
+UNSUPPORTED: dict[str, str] = {
+    "mcp_configs": "--mcp-config", "strict_mcp_config": "--strict-mcp-config", "agent": "--agent",
+    "plugin_dirs": "--plugin-dir", "worktree": "--worktree", "background": "--bg", "fork_session": "--fork-session",
+```
+
+2. Replace
+
+```python
+        turn_options = build_turn_options(self.options, self.cwd, host_answers_prompts=host,
+                                          sdk_hooks=self.bridge.sdk_hooks).model_dump()
+        mode = permission_mode_for(self.options)
+```
+
+with
+
+```python
+        turn_options = build_turn_options(self.options, self.cwd, host_answers_prompts=host,
+                                          sdk_hooks=self.bridge.sdk_hooks, sdk_agents=self.bridge.sdk_agents).model_dump()
+        mode = permission_mode_for(self.options)
+```
+
+
+In `src/agentos/cli_code/turn_options.py` make these 3 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+
+def build_turn_options(options: CodeOptions, cwd: Path, *, host_answers_prompts: bool,
+                       sdk_hooks: dict[str, list[dict[str, Any]]] | None = None) -> CliTurnOptions:
+    """The "cli" settings layer (``--settings`` first, the explicit flags over it) and the headless switches."""
+```
+
+with
+
+```python
+
+def agents_flag(value: str | None, cwd: Path) -> dict[str, Any]:
+    """``--agents``: a JSON object of agents, or the path of a JSON file holding one."""
+    if value is None or not value.strip():
+        return {}
+    text = value.strip()
+    if not text.startswith("{"):
+        text = _read_text_file(text, cwd, "--agents")
+    try:
+        data = json.loads(text)
+    except ValueError as error:
+        raise CliUsageError("--agents is neither a JSON object nor a JSON file") from error
+    if not isinstance(data, dict):
+        raise CliUsageError("--agents must be a JSON object")
+    return data
+
+
+def build_turn_options(options: CodeOptions, cwd: Path, *, host_answers_prompts: bool,
+                       sdk_hooks: dict[str, list[dict[str, Any]]] | None = None,
+                       sdk_agents: dict[str, Any] | None = None) -> CliTurnOptions:
+    """The "cli" settings layer (``--settings`` first, the explicit flags over it) and the headless switches."""
+```
+
+2. Replace
+
+```python
+        append = f"{append}\n\n{instructions}" if append else instructions
+    none = options.permission_prompts == "none" or not host_answers_prompts
+```
+
+with
+
+```python
+        append = f"{append}\n\n{instructions}" if append else instructions
+    agents = {**agents_flag(options.agents, cwd), **(sdk_agents or {})}  # the host's definition wins over the flag's
+    none = options.permission_prompts == "none" or not host_answers_prompts
+```
+
+3. Replace
+
+```python
+            append_system_prompt=append, tools=options.tools, permission_prompts="none" if none else "host",
+            transcript=True, headless=True, trust_workspace=options.trust,
+        )
+```
+
+with
+
+```python
+            append_system_prompt=append, tools=options.tools, permission_prompts="none" if none else "host",
+            transcript=True, headless=True, trust_workspace=options.trust, agents=agents or None,
+        )
+```
+
+
+In `src/agentos/code_mode/cli_options.py` make these 2 replacement(s) (each old snippet occurs exactly once):
+
+1. Replace
+
+```python
+    trust_workspace: bool = False
+```
+
+with
+
+```python
+    trust_workspace: bool = False
+    # --agents and an SDK host's initialize.agents: {name: {description, prompt, tools, model, ...}}.
+    agents: dict[str, Any] | None = None
+```
+
+2. Replace
+
+```python
+            raise ValueError("cli settings are too large")
+        return value
+```
+
+with
+
+```python
+            raise ValueError("cli settings are too large")
+        return value
+
+    @field_validator("agents")
+    @classmethod
+    def _agents_are_bounded_json(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        if value is None:
+            return None
+        try:
+            encoded = json.dumps(value, ensure_ascii=False, allow_nan=False)
+        except (TypeError, ValueError) as error:
+            raise ValueError("cli agents must be plain JSON") from error
+        if len(encoded.encode("utf-8")) > 4 * MAX_CLI_SETTINGS_BYTES:
+            raise ValueError("cli agents are too large")
+        return value
+```
+
+
+- [ ] **Step 4: Run the tests to see them pass.**
+
+Run: `uv run pytest -q tests/unit/cli_code tests/unit/agentic && uv run pytest -q tests/integration/cli_code`
+Expected: all pass.
+
+Expectation change to record: `test_turn_options_builder.py::test_flags_without_support_yet_are_refused` now checks `--agent` instead of `--agents`.
+
+- [ ] **Step 5: Commit.**
+
+```
+feat(w6): agents from --agents and from the SDK host
+```
+
+### Batch C close
+
+- [ ] **Step 1:** `uv run pytest -q tests/unit` and `uv run pytest -q tests/integration` (timeout 900000 ms each): green; report the counts.
+- [ ] **Step 2:** `wc -l src/agentos/agentic/agent_tools.py` is still 1699; `git status` shows no file under `data/`.
+- [ ] **Step 3:** Append `## Batch C — The control protocol (Tasks 12–16)` to the ledger (commits, tests, suites, deviations from this plan, the expectation changes, anything incomplete). Commit `docs(w6): Batch C ledger`.
