@@ -155,7 +155,8 @@ class HeadlessRun:
         self._events_started = False
         self._stop = threading.Event()
         self._stdin_closed = False
-        self._pending_prompts: list[tuple[str, str | None]] = []
+        # (text, the host's uuid, the reason Orin refuses it or None): a refused prompt is answered in order (W6-R10)
+        self._pending_prompts: list[tuple[str, str | None, str | None]] = []
         self._init_sent = False
         self._setup_sent = False  # --init / --maintenance fire Setup once per run
         self._cursor = "0"
@@ -433,7 +434,16 @@ class HeadlessRun:
                 self.bridge.handle(item)
             elif item.get("type") == "user":
                 message = item.get("message") if isinstance(item.get("message"), dict) else {}
-                self._pending_prompts.append((_prompt_text(message.get("content")), str(item.get("uuid") or "") or None))
+                prompt_uuid = str(item.get("uuid") or "") or None
+                try:
+                    text = _prompt_text(message.get("content"))
+                    if len(text) > MAX_PROMPT_CHARS:
+                        raise CliRuntimeError(f"the prompt has {len(text)} characters; Orin takes at most {MAX_PROMPT_CHARS} per message")
+                except CliRuntimeError as error:
+                    # W6-R10: the session goes on; this prompt gets an error result when its turn in the queue comes.
+                    self._pending_prompts.append(("", prompt_uuid, str(error)))
+                    return
+                self._pending_prompts.append((text, prompt_uuid, None))
             elif item.get("type") == "control_response" and isinstance(item.get("response"), dict):
                 self.bridge.answered(item["response"])
             elif item.get("type") == "control_cancel_request":
@@ -475,13 +485,25 @@ class HeadlessRun:
             with _ACTIVE_LOCK:
                 _ACTIVE.discard(self)
 
+    def _refuse_prompt(self, reason: str) -> None:
+        """An error result for a prompt Orin cannot take (W6-R10); the session stays open for the next one."""
+        if not self.stream_json:
+            self.stderr.write(f"Error: {reason}\n")
+            return
+        for message in self.translator.result(state="failed", error_code=None, usage=TurnUsage(), duration_ms=0,
+                                              duration_api_ms=0, errors=[reason]):
+            self.out.message(message)
+
     def _run_stream_input(self) -> int:
         threading.Thread(target=self._read_stdin, daemon=True).start()
         if self.options.prompt:
-            self._pending_prompts.append((self.options.prompt, None))
+            self._pending_prompts.append((self.options.prompt, None, None))
         while True:
             while self._pending_prompts:
-                text, prompt_uuid = self._pending_prompts.pop(0)
+                text, prompt_uuid, refusal = self._pending_prompts.pop(0)
+                if refusal is not None:
+                    self._refuse_prompt(refusal)
+                    continue
                 self.answer(text, prompt_uuid=prompt_uuid)
             if self._stdin_closed:
                 return EXIT_OK
