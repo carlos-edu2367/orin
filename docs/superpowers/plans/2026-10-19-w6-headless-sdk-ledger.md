@@ -213,3 +213,66 @@ Not verified in this batch (honest gaps):
   decision).
 - **Frontend**: no frontend file changed in this batch; not run.
 - **Installers**: unchanged (`orin-code.exe` is still only the console script; Batch A note stands).
+
+## Batch C — The control protocol (Tasks 12–16)
+
+Commits on `main` after the plan commit `7454faa` (`git log --oneline 7454faa..HEAD`):
+
+- `ac96e37` fix(w6): a CLI turn's transcript lives apart from the sanitized activity log (Task 12)
+- `a9fa171` feat(w6): a turn can ask the SDK host behind orin code (Task 13)
+- `227a64c` feat(w6): an SDK host's hooks run as callback hooks (Task 14)
+- `8632209` feat(w6): the SDK control protocol (Task 15)
+- `68d2fb3` feat(w6): agents from --agents and from the SDK host (Task 16)
+
+Tests added: `tests/unit/cli_code/test_transcript.py`, `tests/unit/cli_code/test_host_requests.py`,
+`tests/unit/cli_code/test_cli_agents.py`, `tests/unit/hooks/test_callback_hooks.py`; the trust-on-send cases in
+`test_turn_options.py`; the tool-event transcript case in `test_cli_turn_session.py`; the live
+`test_a_long_tool_result_reaches_the_host_whole` (`test_headless.py`); `tests/integration/cli_code/test_control_protocol.py`
+(10 live tests on `tests/integration/cli_code/sdk_host.py`); the profile-isolation rows for the transcript and
+host-request routes.
+
+Suites (Windows, 2026-10-20, after Task 16):
+
+- `uv run pytest -q tests/unit`: 4141 passed, 65 skipped.
+- `uv run pytest -q tests/integration`: 107 passed, 65 skipped (live `tests/integration/cli_code`: 29 passed).
+- No `agentos.launcher` process left after the live runs.
+- `src/agentos/agentic/agent_tools.py` is still 1699 lines; nothing under `data/` was written in this batch (its last
+  write is from 17 October).
+
+Deviations from the plan (decided or found while executing):
+
+1. **Task 12 live RED not run.** The unit REDs were run (`ModuleNotFoundError` for `cli_transcript`; the trust case
+   failed on the managed-folder assertion). `test_a_long_tool_result_reaches_the_host_whole` was not run red before its
+   fix; it is green now.
+2. **Task 13 and Task 14 REDs** failed at collection as the plan says, but Task 14's first error was the
+   `ImportError` for `CallbackHookRunner`, not `unsupported hook type` (the test's expected first failure).
+3. **Task 15 RED** of the live control-protocol tests failed at run time (`FileNotFoundError`: the write never happened),
+   not with `No module named ...host_bridge`: the live tests do not import the bridge.
+4. **Task 15 imports:** `headless.py` drops `import os` (the plan's replacement); `_control` was its only use.
+5. **Task 15 sdk_host and live test names** are the plan's; nothing was renamed.
+6. **Task 13 gateway placement:** the `host-requests` route is inserted after `workspace-trust` POST, as the plan's
+   anchor requires (the `GET workspace-trust` anchor is followed by the POST route, which is where the new route
+   sits). Behaviour is unaffected.
+
+Expectation changes (recorded as the plan names them):
+
+- `tests/unit/cli_code/test_cli_turn_session.py::test_tool_events_carry_the_input_and_result_only_for_a_cli_turn` is
+  replaced by `test_tool_events_point_at_the_transcript_only_for_a_cli_turn` (it asserted the design Task 12 removes).
+- `tests/integration/cli_code/test_headless.py::test_an_sdk_style_stream_json_session`: `mcp_status` now succeeds.
+- `tests/unit/cli_code/test_turn_options_builder.py::test_flags_without_support_yet_are_refused`: `--agents` is
+  replaced by `--agent` (`--agents` is now supported).
+- `tests/conftest.py` isolates `ORIN_DATA_DIR` (Task 12).
+
+Not done or not verified (honest gaps):
+
+- **Batch D still refused:** `mcp_message`, SDK MCP servers, `--mcp-config` and `--strict-mcp-config`. Any other control
+  subtype answers an error.
+- **Windows only.** POSIX branches (`test_entries_are_owner_only`, file modes) were skipped or not run here.
+- **Host-request and hook timeouts** are covered by unit tests with fake clocks and by the live `sdk_hook` tests; no live
+  test has a host that times out.
+- **`can_use_tool`** only ever allows once (`allow_once`); `updatedPermissions` are not persisted, as deviation 24 says.
+  An allow with a changed `updatedInput` is denied and the turn is not interrupted.
+- **Pre-existing test pollution (not from this batch, not fixed):** the earlier note on the real `C:\Users\carlos\.orin`
+  files (`trusted-workspaces.json`, `settings.json`) still stands; this batch's tests do not write there.
+- **Frontend:** no frontend file changed; not run.
+- **Installers:** unchanged.
