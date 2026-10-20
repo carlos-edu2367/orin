@@ -125,6 +125,8 @@ export function ChatPage() {
   const [conversation, setConversation] = useState<Conversation | null>(null)
   const [chats, setChats] = useState<Array<{ conversation_id: string; title: string; state: string }>>([])
   const [message, setMessage] = useState('')
+  const composerTextRef = useRef('') // W7-R9: what the composer holds when an async send fails
+  useEffect(() => { composerTextRef.current = message }, [message])
   const [codePermissionMode, setCodePermissionMode] = useState<CodePermissionMode>('ask_permissions')
   const [codeSystemNotifications, setCodeSystemNotifications] = useState(false)
   const [pushNotice, setPushNotice] = useState<PushNotice | null>(null)
@@ -1494,29 +1496,54 @@ export function ChatPage() {
   }
 
   /** W7 "send now": stop the running turn, wait until it has stopped, then send the text. */
+  /** W7-R9: waits until the stopped turn is no longer running; false when it still runs after the wait. */
+  async function waitUntilStopped(): Promise<boolean> {
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const snapshot = await loadSnapshot(false).catch(() => null)
+      if (snapshot && !snapshot.turns.some((turn) => RUNNING_STATES.has(turn.state))) return true
+      await new Promise((resolve) => setTimeout(resolve, 500))
+    }
+    return false
+  }
+
   async function sendNow(text: string, queueId?: string) {
     const clean = text.trim()
     if (!clean || queueBusy) return
     setQueueBusy(true)
     try {
-      if (queueId) await removeQueued(client, conversationId, queueId).catch(() => undefined)
-      if (!queueId) setMessage('')
       await stop()
-      for (let attempt = 0; attempt < 20; attempt += 1) {
-        const snapshot = await loadSnapshot(false).catch(() => null)
-        if (!snapshot || !snapshot.turns.some((turn) => RUNNING_STATES.has(turn.state))) break
-        await new Promise((resolve) => setTimeout(resolve, 500))
+      if (!(await waitUntilStopped())) {
+        setError('O turno ainda está rodando; a mensagem não foi enviada. Tente de novo quando ele parar.')
+        return
+      }
+      if (queueId) {
+        // The turn may have read the item already: then the server answers 404 and the text is not sent again.
+        const cancelled = await removeQueued(client, conversationId, queueId).catch((caught: unknown) => {
+          if (caught instanceof ApiError && caught.status === 404) return false
+          throw caught
+        })
+        if (!cancelled) {
+          setError('O agente já leu esta mensagem.')
+          return
+        }
+      } else {
+        setMessage('')
       }
       setPendingUserMessage({ message_id: `pending-${Date.now()}`, role: 'user', content: clean, status: 'completed', retryable: false, attachments: [], command: null })
       await sendChatMessage(clean, [])
       await loadSnapshot(false)
-      await refreshQueue()
     } catch {
       setPendingUserMessage(null)
       setError('Não foi possível enviar agora. A mensagem continua com você.')
-      if (!queueId) setMessage(clean)
+      // The text is not lost: back in an empty composer, or else queued again behind what the person is typing.
+      if (composerTextRef.current.trim()) {
+        await enqueueMessage(client, conversationId, clean).catch(() => setError('Não foi possível guardar a mensagem. Ela não foi enviada.'))
+      } else {
+        setMessage(clean)
+      }
     } finally {
       setQueueBusy(false)
+      await refreshQueue()
     }
   }
 
