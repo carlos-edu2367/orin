@@ -86,7 +86,11 @@ export function PermissionsSection() {
                     <button type="button" className="ghost-button" disabled={busy} aria-label={`Remover ${entry.rule} (${LAYER_SHORT[entry.layer]})`}
                       onClick={() => void change(kind, { rule: entry.rule, layer: entry.layer as WritableLayer }, 'remove')}>Remover</button>
                   ) : (
-                    <span className="code-settings__muted">Vem de {entry.file ?? 'outro arquivo'}; remova-a nesse arquivo.</span>
+                    <span className="code-settings__muted">
+                      {entry.layer === 'managed' ? 'definida pela política gerenciada'
+                        : entry.layer === 'cli' ? 'vem da linha de comando'
+                          : 'para removê-la, edite o arquivo acima'}
+                    </span>
                   )}
                 </li>
               ))}

@@ -29,6 +29,8 @@ describe('W7-R5 removing a rule', () => {
     expect(await screen.findByText('Bash(git status)')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Remover Bash(git status) (usuário)' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Remover Bash(curl:*) (usuário)' })).toBeNull()
-    expect(screen.getByText(/Vem de C:\/u\/\.claude\/settings\.json/)).toBeInTheDocument()
+    // The rule's own file is shown once, with how to remove it there (no second copy of the path).
+    expect(screen.getByText('C:/u/.claude/settings.json')).toBeInTheDocument()
+    expect(screen.getByText('para removê-la, edite o arquivo acima')).toBeInTheDocument()
   })
 })
