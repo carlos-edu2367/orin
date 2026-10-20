@@ -23,14 +23,18 @@ logger = logging.getLogger(__name__)
 
 READ_ONLY_TOOLS: frozenset[str] = frozenset({
     "read_file", "view_file", "transcribe_pdf", "list_files", "search_files", "search_code", "glob_files",
-    "project_map", "todo_write", "task_create", "task_update", "task_get", "task_list", "ask_user",
-    "enter_plan_mode", "exit_plan_mode", "write_contract", "report_verification", "use_skill",
+    "project_map", "todo_write", "task_create", "task_update", "task_get", "task_list",
+    "enter_plan_mode", "exit_plan_mode", "write_contract", "report_verification",
     "search_skills", "list_skills", "read_skill_resource", "recall", "check_subagent", "read_process_output",
     "preview_logs", "search_mcp_tools", "inspect_mcp_server", "list_mcp_servers", "list_mcp_catalog",
     "list_plugins", "search_plugin", "list_projects", "read_project_conversation", "cron_list",
-    "schedule_wakeup", "push_notification",
     "list_mcp_resources", "read_mcp_resource", "read_mcp_resource_dir", "refresh_mcp_tools",
 })
+# W4-R26: tools that never prompt but are not read-only (they ask the person, notify, run a skill, or schedule a
+# later run). They run unprompted in every mode except plan mode, which keeps only the first three: a wakeup
+# schedules a future run that can change files.
+NO_PROMPT_TOOLS: frozenset[str] = frozenset({"ask_user", "push_notification", "use_skill", "schedule_wakeup"})
+PLAN_MODE_NO_PROMPT_TOOLS: frozenset[str] = frozenset({"ask_user", "push_notification", "use_skill"})
 DELEGATION_TOOLS: frozenset[str] = frozenset({"run_subagent", "create_agent", "ask_agent", "ask_agents", "send_message"})
 SAFE_FILE_COMMANDS: frozenset[str] = frozenset({"mkdir", "touch", "cp", "mv"})
 _PLAN_SUBAGENTS = frozenset({"explore", "plan"})
@@ -310,7 +314,7 @@ class PermissionEngine:
             return PermissionDecision("deny", f"denied by rule {denied.raw}", denied.raw, denied.source)
 
         if plan_mode_active or resolved is CodePermissionMode.PLAN_MODE:
-            if internal in READ_ONLY_TOOLS:
+            if internal in READ_ONLY_TOOLS or internal in PLAN_MODE_NO_PROMPT_TOOLS:
                 return PermissionDecision("allow", "read-only tool in plan mode")
             if internal in {"run_subagent", "ask_agent"}:
                 kind = str(args.get("subagent_type") or args.get("name") or "").strip().lower()
@@ -351,6 +355,8 @@ class PermissionEngine:
 
         if internal in READ_ONLY_TOOLS or internal in DELEGATION_TOOLS:
             return PermissionDecision("allow", "read-only or delegation tool")
+        if internal in NO_PROMPT_TOOLS:
+            return PermissionDecision("allow", "a tool that never prompts")
         if internal in EDIT_FAMILY and self._is_plan_file(args):
             return PermissionDecision("allow", "plan file")
 

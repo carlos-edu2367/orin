@@ -86,7 +86,7 @@ def test_a_day_holds_at_most_the_cap(tmp_path: Path, monkeypatch: pytest.MonkeyP
 
 
 def test_it_is_allowed_without_a_prompt() -> None:
-    from agentos.permissions.engine import READ_ONLY_TOOLS
+    from agentos.permissions.engine import NO_PROMPT_TOOLS as READ_ONLY_TOOLS  # W4-R26: it never prompts
     from agentos.agentic.runtime import CODE_MODE_CORE_TOOLS
     from agentos.agentic.tools.public_names import PUBLIC_NAMES, arguments_in
 

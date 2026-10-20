@@ -60,7 +60,7 @@ def test_it_is_allowed_and_published_in_code_mode() -> None:
     from agentos.agentic.events import AgentActivityEventType
     from agentos.agentic.runtime import CODE_MODE_CORE_TOOLS
     from agentos.agentic.tools.public_names import PUBLIC_NAMES
-    from agentos.permissions.engine import READ_ONLY_TOOLS
+    from agentos.permissions.engine import NO_PROMPT_TOOLS as READ_ONLY_TOOLS  # W4-R26: it never prompts
 
     assert "push_notification" in READ_ONLY_TOOLS and "push_notification" in CODE_MODE_CORE_TOOLS
     assert PUBLIC_NAMES["push_notification"] == "PushNotification"
