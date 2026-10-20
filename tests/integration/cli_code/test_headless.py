@@ -127,3 +127,24 @@ def test_flags_this_build_does_not_handle_are_refused_before_anything_runs(orin_
 def test_a_prompt_longer_than_orin_takes_is_an_error(orin_runtime: LiveRuntime) -> None:
     done = orin_code(orin_runtime, orin_runtime.workspace("long"), "-p", "x" * 16001, *MODEL)
     assert done.returncode == 1 and "16000" in done.stderr
+
+
+SCHEMA = '{"type": "object", "required": ["n"], "properties": {"n": {"type": "integer"}}}'
+
+
+def test_json_schema_returns_structured_output(orin_runtime: LiveRuntime) -> None:
+    done = orin_code(orin_runtime, orin_runtime.workspace("schema-ok"), "-p", '[[say:{"n": 3}]]', "--json-schema", SCHEMA,
+                     "--output-format", "json", *MODEL)
+    assert done.returncode == 0, done.stderr
+    (result,) = _lines(done.stdout)
+    assert result["subtype"] == "success" and result["structured_output"] == {"n": 3}
+
+
+def test_json_schema_gives_up_after_its_retries(orin_runtime: LiveRuntime) -> None:
+    done = orin_code(orin_runtime, orin_runtime.workspace("schema-bad"), "-p", "[[say:not json]]", "--json-schema", SCHEMA,
+                     "--output-format", "json", *MODEL)
+    (result,) = _lines(done.stdout)
+    assert done.returncode == 1 and result["subtype"] == "error_max_structured_output_retries"
+    assert result["num_turns"] == 4  # the first answer and three follow-ups
+    requests = [item for item in orin_runtime.fake.requests if any("does not satisfy the required JSON Schema" in str(m.get("content")) for m in item.get("messages", []))]
+    assert requests

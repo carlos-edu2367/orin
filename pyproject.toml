@@ -7,6 +7,8 @@ name = "agentos"
 version = "0.9.3"
 requires-python = ">=3.13"
 dependencies = [
+    # W6: `orin code --json-schema` validates the run's answer.
+    "jsonschema>=4.20,<5",
     "SQLAlchemy>=2.0,<3",
     "alembic>=1.14,<2",
     "cryptography>=43,<46",
