@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 
 MAX_MESSAGE_BYTES = 8_000_000
 SETTLE_SECONDS = 0.3
+STDERR_TAIL_BYTES = 4096  # W5-D3: the end of the server's error output, for the notice when it fails
 
 
 class LspError(RuntimeError):
@@ -52,12 +53,15 @@ class LspClient:
         self._process: subprocess.Popen[bytes] | None = None
         self._ids = itertools.count(1)
         self._pending: dict[int, Future] = {}
-        self._diagnostics: dict[str, list[dict[str, Any]]] = {}
+        # None: the server's last publish for the file was malformed (W5-D3)
+        self._diagnostics: dict[str, list[dict[str, Any]] | None] = {}
         self._published: dict[str, threading.Event] = {}
         self._versions: dict[str, int] = {}
         self._write_lock = threading.Lock()
         self._state_lock = threading.Lock()
         self._closed = False
+        self._stderr = bytearray()
+        self._stderr_thread: threading.Thread | None = None
 
     # -- process and framing ----------------------------------------------------
 
@@ -66,12 +70,14 @@ class LspClient:
         try:
             self._process = subprocess.Popen(
                 [self.config.command, *self.config.args], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL, cwd=str(self.root), env=_environment(self.config), shell=False,
+                stderr=subprocess.PIPE, cwd=str(self.root), env=_environment(self.config), shell=False,
                 creationflags=creationflags,
             )
         except OSError as error:
             raise LspError(f"could not start {self.config.command}: {error}") from error
         threading.Thread(target=self._read_loop, name=f"orin-lsp-{self.config.name}", daemon=True).start()
+        self._stderr_thread = threading.Thread(target=self._drain_stderr, name=f"orin-lsp-err-{self.config.name}", daemon=True)
+        self._stderr_thread.start()
         result = self._request("initialize", {
             "processId": os.getpid(), "rootUri": self.root.as_uri(), "rootPath": str(self.root),
             "workspaceFolders": [{"uri": self.root.as_uri(), "name": self.root.name or "workspace"}],
@@ -86,6 +92,37 @@ class LspClient:
         self._notify("initialized", {})
         if self.config.settings is not None:
             self._notify("workspace/didChangeConfiguration", {"settings": self.config.settings})
+
+    def _drain_stderr(self) -> None:
+        process = self._process
+        stream = process.stderr if process is not None else None
+        if stream is None:
+            return
+        reader = getattr(stream, "read1", None) or stream.read
+        try:
+            while True:
+                chunk = reader(4096)
+                if not chunk:
+                    return
+                with self._state_lock:
+                    self._stderr.extend(chunk)
+                    del self._stderr[:-STDERR_TAIL_BYTES]
+        except (OSError, ValueError):
+            return
+        finally:
+            try:
+                stream.close()
+            except (OSError, ValueError):
+                pass
+
+    def stderr_tail(self) -> str:
+        """The last few KB the server wrote to its error output (W5-D3)."""
+        process, thread = self._process, self._stderr_thread
+        if thread is not None and (process is None or process.poll() is not None):
+            thread.join(0.5)  # the server exited: let the last of its output arrive
+        with self._state_lock:
+            data = bytes(self._stderr)
+        return data.decode("utf-8", errors="replace").replace("\x00", "").strip()
 
     def _send(self, message: Mapping[str, Any]) -> None:
         process = self._process
@@ -168,9 +205,16 @@ class LspClient:
         params = message.get("params") if isinstance(message.get("params"), Mapping) else {}
         if method == "textDocument/publishDiagnostics":
             uri = str(params.get("uri") or "")
-            items = [item for item in params.get("diagnostics") or [] if isinstance(item, Mapping)]
+            raw = params.get("diagnostics")
+            version = params.get("version")
             with self._state_lock:
-                self._diagnostics[uri] = [dict(item) for item in items]
+                # W5-D3: a publish for an older version of the file is late and answers nothing.
+                if isinstance(version, int) and not isinstance(version, bool) and version != self._versions.get(uri):
+                    return
+                if isinstance(raw, list):
+                    self._diagnostics[uri] = [dict(item) for item in raw if isinstance(item, Mapping)]
+                else:  # malformed: the wait ends now rather than at its timeout
+                    self._diagnostics[uri] = None
                 event = self._published.setdefault(uri, threading.Event())
             event.set()
             return
@@ -214,7 +258,8 @@ class LspClient:
         event.clear()
         event.wait(SETTLE_SECONDS)  # a server may publish twice (a quick pass, then a full one): keep the last
         with self._state_lock:
-            return list(self._diagnostics.get(uri, []))
+            found = self._diagnostics.get(uri, [])
+            return None if found is None else list(found)
 
     def close(self) -> None:
         if self._closed:

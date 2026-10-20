@@ -21,13 +21,17 @@ def format_diagnostics(label: str, server: str, diagnostics: Sequence[Mapping[st
     """The errors and warnings as reminder text, or None when there are none."""
     shown: list[str] = []
     for item in diagnostics:
-        severity = item.get("severity", 1)
-        if severity not in (1, 2):
+        try:
+            severity = item.get("severity", 1)
+            if severity not in (1, 2):
+                continue
+            start = (item.get("range") or {}).get("start") or {}
+            code = f" [{str(item['code'])[:80]}]" if item.get("code") not in (None, "") else ""
+            message = " ".join(str(item.get("message") or "").split())[:300]
+            line, column = int(start.get("line", 0)) + 1, int(start.get("character", 0)) + 1
+        except (AttributeError, TypeError, ValueError):  # one malformed item is skipped, never the file's others
             continue
-        start = (item.get("range") or {}).get("start") or {}
-        code = f" [{item['code']}]" if item.get("code") not in (None, "") else ""
-        message = " ".join(str(item.get("message") or "").split())[:300]
-        shown.append(f"- line {int(start.get('line', 0)) + 1}, column {int(start.get('character', 0)) + 1} · {_SEVERITY[severity]} · {message}{code}")
+        shown.append(f"- line {line}, column {column} · {_SEVERITY[severity]} · {message}{code}")
     if not shown:
         return None
     more = f"\n- ... and {len(shown) - MAX_SHOWN} more" if len(shown) > MAX_SHOWN else ""
@@ -87,6 +91,10 @@ class LspManager:
                 return config.name, client.diagnostics(target, text, language, timeout=self._timeout), ""
             except (LspError, OSError) as error:
                 reason = str(error)[:300] or type(error).__name__
+                broken_client = self._clients.get(config.name)
+                tail = getattr(broken_client, "stderr_tail", lambda: "")() if broken_client is not None else ""
+                if tail:  # W5-D3: what the server said before it failed
+                    reason += f"\nIts last error output:\n{tail}"
                 with self._guard:
                     self._failed[config.name] = reason
                 broken = self._clients.pop(config.name, None)
