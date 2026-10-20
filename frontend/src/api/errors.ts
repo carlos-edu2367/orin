@@ -8,7 +8,11 @@ export type ApiErrorDetails = {
   retryAfter: number | null
 }
 
-type ApiErrorInput = Partial<Omit<ApiErrorDetails, 'status'>> & Pick<ApiErrorDetails, 'status'>
+type ApiErrorInput = Partial<Omit<ApiErrorDetails, 'status'>> & Pick<ApiErrorDetails, 'status'> & { problems?: unknown }
+
+/** W7: what a 422 names as wrong (`details.problems`), bounded so a hostile server cannot flood the interface. */
+const MAX_PROBLEMS = 50
+const MAX_PROBLEM_CHARS = 500
 
 const RESYNC_CODES = new Set([
   'cursor_invalid',
@@ -31,6 +35,7 @@ export class ApiError extends Error {
   readonly correlationId: string | null
   readonly retryable: boolean
   readonly retryAfter: number | null
+  readonly problems: readonly string[]
 
   constructor(input: ApiErrorInput) {
     const code = safeString(input.code) ?? 'request_failed'
@@ -44,6 +49,7 @@ export class ApiError extends Error {
     this.correlationId = safeString(input.correlationId) ?? null
     this.retryable = input.retryable === true
     this.retryAfter = safeRetryAfter(input.retryAfter)
+    this.problems = Object.freeze(safeProblems(input.problems))
   }
 
   toPublicDetails(): ApiErrorDetails {
@@ -71,7 +77,16 @@ export function parseApiError(status: number, value: unknown): ApiError {
     correlationId: safeString(envelope.correlation_id),
     retryable: envelope.retryable === true,
     retryAfter: safeRetryAfter(envelope.retry_after),
+    problems: isRecord(envelope.details) ? envelope.details.problems : undefined,
   })
+}
+
+function safeProblems(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  return value
+    .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+    .slice(0, MAX_PROBLEMS)
+    .map((item) => item.trim().slice(0, MAX_PROBLEM_CHARS))
 }
 
 export async function parseApiErrorResponse(response: Response): Promise<ApiError> {
