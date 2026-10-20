@@ -130,3 +130,81 @@ Incomplete or weak, not fixed in this batch:
 - `/export` strips path-breaking characters from the file name only; it is a browser download, so no server path is
   involved.
 - `src/agentos/agentic/agent_tools.py` is 1693 lines, 7 under the 1700 limit.
+
+## Batch C — Backend for the chat surfaces (Tasks 12–15)
+
+Commits (the plan's messages, and the trailer `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`):
+
+- `d0f143f` `feat(w7): fork and rename a conversation, and shell turns in the store` (Task 12)
+- `b81d041` `feat(w7): a shell turn runs the person's command without the model` (Task 13)
+- `2503033` `feat(w7): fork, rename and shell routes, and rewinding the conversation` (Task 14)
+- `a1e9ffc` `feat(w7): @server:uri brings an MCP resource into the turn` (Task 15)
+
+Tests (the plan's new files): `tests/unit/conversations/test_w7_fork_rename_shell.py` (4),
+`tests/unit/agentic/test_w7_shell_session.py` (4), `tests/unit/agentic/test_w7_shell_turn.py` (3),
+`tests/unit/api/test_w7_fork_rename_shell_api.py` (6), `tests/unit/agentic/test_w7_mcp_mentions.py` (3).
+
+Suites run during the batch (Windows, on `main` after `a1e9ffc`):
+
+- `uv run pytest -q tests/unit/conversations`: 119 passed (Task 12).
+- `uv run pytest -q tests/unit/agentic`: 1310 passed, 7 skipped (Task 13).
+- `uv run pytest -q tests/unit/api` and `tests/integration/api/test_profile_isolation.py`: 144 passed; 4 passed (Task 14).
+- `uv run pytest -q tests/unit/agentic tests/unit/mcp`: 1538 passed, 7 skipped (Task 15).
+- Full suites: see the "Batch C close" line below.
+
+Deviations from the plan:
+
+1. Task 12, Step 3, edit 2: the plan's anchor `        return receipt` occurs twice in `chat.py` (the store's
+   `create` and `ChatApplication.send`). The fork and rename bodies use the store's engine, so they go into
+   `PostgresChatStore`, after `create` and before `set_permission_mode`; the anchor used is that method's
+   `return receipt` line together with the following `def set_permission_mode` line, which is unique.
+2. Task 13, Step 2: 5 of the 7 tests failed first, as planned. The two that already passed were
+   `test_plan_mode_keeps_refusing` and `test_a_policy_that_disables_bypass_still_wins`: they assert behaviour the
+   code already had, so they could not fail before the change.
+3. Task 14, Step 2: `test_a_shared_server_has_no_shell_mode` passed before the routes existed (an unknown route is a
+   404 too), the same situation as Batch A's Task 2. The other three new tests failed first, as planned.
+4. Task 15, TDD order: I wrote the test file, checked the symbols it needs, and then wrote the implementation before
+   running the new test file. So the red run the plan asks for (Step 2) was not observed; the three tests were run
+   only once, after the implementation, and all passed. Nothing else in the batch was done in that order.
+5. Task 14 coverage gap: the plan's tests cover `mode: conversation` (the fork) and an unknown mode (422), but no test
+   reaches the `mode: both` branch of the rewind route (the file rewind followed by the fork). That branch is written
+   as the plan says and is covered only by the suites that run it indirectly, if at all.
+6. Batch C close, Step 3: the ledger is not committed, as the person asked; this section is the ledger's update.
+   Decisions 13–16 are recorded below.
+
+Expectation changes:
+
+- `tests/unit/agentic/tools/test_file_history_wiring.py`: the plan's one change (`mode: both` is no longer refused; the
+  test now asks for `mode: everything`, which is still a 422).
+- `tests/integration/api/test_profile_isolation.py`: the three new routes are classified as owned by a conversation
+  (the plan's edit).
+
+Decisions in force from Batch C (the plan's decisions 13–16):
+
+13. A fork copies only finished text messages (no turns, attachments or tool steps), with the same model, mode,
+    permission mode and project; a managed workspace's files are not copied.
+14. A shell turn (`!command`) runs in bypass mode because the person typed the command; deny rules, hooks and a
+    policy that disables bypass still apply, and plan mode still refuses it. No model is called in that turn.
+15. Rewinding the conversation forks it before the message: the new conversation opens with the message in the
+    composer; the original stays as it was.
+16. `@server:uri` counts only for a connected server's name, at most five per message and 20 000 characters.
+
+Incomplete or weak, not fixed in this batch:
+
+- The `mode: both` rewind branch has no test (deviation 5).
+- `ChatApplication.shell` relies on `store.get` for the owner check; the Code-mode check reads `mode` from that record.
+- The `@server:uri` resolver calls `find_server` without a guard; a provider that raises there would fail the turn
+  setup rather than report the mention (the plan's code, unchanged).
+- `rename` strips whitespace and length-limits the title, but does not refuse control characters.
+- The status of the full suites is in the "Batch C close" line below.
+
+Batch C close (run by the planner; the executor ended without a report, and its suites had not finished):
+
+- Every file the batch changed is identical to the planner's validated replay (12 files).
+- Windows: `tests/unit` 4375 passed, 66 skipped; `tests/integration` 123 passed, 65 skipped.
+- Linux (Docker, `python:3.12` image): `tests/unit` 4393 passed, 48 skipped. An earlier run in that container failed
+  `test_verification_command_with_screenshots_preserves_code_mode_verified` and
+  `test_runtime_recovers_from_thinking_only_turn_and_filters_code_mode_schemas` at `v0.9.4`, at `edc60f5` and after
+  Batch C alike: the container had no `node`/`npm`, which both tests run. With Node installed both pass; the CI runners
+  have it. Not a code fault.
+- Deviation 1's note: the final `chat.py` matches the replay, so the anchor choice changed nothing.
