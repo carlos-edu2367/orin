@@ -3687,11 +3687,14 @@ class TurnSession:
             return
         name, _, arguments = text[1:].partition(" ")
         if name.startswith("mcp__"):
-            self._apply_mcp_prompt(name, arguments.strip())
+            if self._prompt_expansion_allowed("mcp_prompt", name, arguments.strip(), "mcp", text):
+                self._apply_mcp_prompt(name, arguments.strip())
             return
         skill = toolset.disk_skill(name)
         if skill is None or not skill.user_invocable:
             return  # not a command the person can run: the message stays an ordinary message
+        if not self._prompt_expansion_allowed("slash_command", skill.name, arguments.strip(), skill.origin, text):
+            return
         try:
             result = toolset.run_disk_skill(skill, arguments.strip(), invoked_by="user")
         except AgentToolError as error:
@@ -3703,6 +3706,39 @@ class TurnSession:
         self._reminders.add(
             COMMAND_KIND, f"The person ran {invocation}. Carry out its instructions.{fork}\n{content}", key=f"command:{skill.name}",
         )
+
+    def _notify_permission_prompt(self, summary: str) -> None:
+        """Notification hooks (W7): Orin waits for the person to answer a permission prompt."""
+        bus = self.lifecycle
+        if bus is None:
+            return
+        try:
+            bus.emit(HookEvent.NOTIFICATION, message=str(summary)[:500], title="Orin", notification_type="permission_prompt")
+        except Exception:  # noqa: BLE001 - a notification never stops a turn
+            logger.exception("Notification hooks failed")
+
+    def _prompt_expansion_allowed(self, expansion_type: str, name: str, arguments: str, source: str, prompt: str) -> bool:
+        """UserPromptExpansion (W7): hooks see a typed command before it expands; one may block it or add context."""
+        from agentos.agentic.reminders import COMMAND_KIND
+
+        bus = self.lifecycle
+        if bus is None:
+            return True
+        try:
+            decision = bus.emit(
+                HookEvent.USER_PROMPT_EXPANSION, expansion_type=expansion_type, command_name=name,
+                command_args=arguments, command_source=source, prompt=prompt,
+            )
+        except Exception:  # noqa: BLE001 - lifecycle never stops a turn
+            logger.exception("UserPromptExpansion hooks failed")
+            return True
+        for index, context in enumerate(decision.additional_context):
+            self._reminders.add(COMMAND_KIND, context, key=f"expansion:{name}:{index}")
+        if decision.blocked:
+            reason = decision.reason or "blocked by a hook"
+            self._reminders.add(COMMAND_KIND, f"/{name} did not run: a hook blocked it ({reason[:500]}). Tell the person.", key=f"command:{name}")
+            return False
+        return True
 
     def _apply_mcp_prompt(self, name: str, arguments: str) -> None:
         """``/mcp__server__prompt args`` runs that MCP prompt; its messages join the turn as the person's command (W5).
@@ -4173,11 +4209,11 @@ class TurnSession:
         broker_kwargs: dict[str, Any] = {
             "trusted": trusted_workspace,
             "classifier": self._auto_mode_classifier() if self.permission_mode == "auto" else None,
-            "event_emitter": lambda _event_name, summary, payload: self._record(
+            "event_emitter": lambda _event_name, summary, payload: (self._record(
                 AgentActivityEventType.CODE_MODE_DECISION_REQUIRED,
                 summary,
                 payload,
-            ),
+            ), self._notify_permission_prompt(summary)),
             "cancelled": lambda: bool(self.cancelled(self.turn)),
             "cli_settings": cli_layer,
             "setting_sources": cli_sources,

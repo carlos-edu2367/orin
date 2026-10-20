@@ -10,7 +10,9 @@ from typing import Any
 
 from agentos.agentic.lifecycle import HookEvent, LifecycleDecision
 
-_CONTEXT_FROM_STDOUT = frozenset({HookEvent.SESSION_START, HookEvent.SETUP, HookEvent.USER_PROMPT_SUBMIT, HookEvent.SUBAGENT_START})
+_CONTEXT_FROM_STDOUT = frozenset({
+    HookEvent.SESSION_START, HookEvent.SETUP, HookEvent.USER_PROMPT_SUBMIT, HookEvent.USER_PROMPT_EXPANSION, HookEvent.SUBAGENT_START,
+})
 
 
 @dataclass(frozen=True, slots=True)

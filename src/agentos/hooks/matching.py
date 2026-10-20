@@ -17,6 +17,7 @@ MATCH_FIELDS: dict[HookEvent, str] = {
     HookEvent.PERMISSION_DENIED: "tool_name",
     HookEvent.SESSION_START: "source",
     HookEvent.SETUP: "trigger",
+    HookEvent.USER_PROMPT_EXPANSION: "command_name",
     HookEvent.SESSION_END: "reason",
     HookEvent.PRE_COMPACT: "trigger",
     HookEvent.POST_COMPACT: "trigger",
