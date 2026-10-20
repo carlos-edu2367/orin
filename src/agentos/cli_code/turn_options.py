@@ -84,9 +84,19 @@ def _extend(layer: dict[str, Any], dotted: str, items: list[str]) -> None:
             current.append(item)
 
 
-def build_turn_options(options: CodeOptions, cwd: Path, *, host_answers_prompts: bool) -> CliTurnOptions:
+def build_turn_options(options: CodeOptions, cwd: Path, *, host_answers_prompts: bool,
+                       sdk_hooks: dict[str, list[dict[str, Any]]] | None = None) -> CliTurnOptions:
     """The "cli" settings layer (``--settings`` first, the explicit flags over it) and the headless switches."""
     layer = settings_flag(options.settings, cwd)
+    if sdk_hooks:
+        # The SDK host's hook callbacks (initialize.hooks) join the cli layer's hooks, after --settings' own.
+        hooks = layer.setdefault("hooks", {})
+        if not isinstance(hooks, dict):
+            hooks = layer["hooks"] = {}
+        for event, groups in sdk_hooks.items():
+            current = hooks.setdefault(event, [])
+            if isinstance(current, list):
+                current.extend(groups)
     _extend(layer, "permissions.allow", options.allowed_tools)
     _extend(layer, "permissions.deny", options.disallowed_tools)
     _extend(layer, "permissions.additionalDirectories", [str((cwd / Path(item).expanduser()).resolve()) for item in options.add_dirs])

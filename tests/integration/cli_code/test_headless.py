@@ -109,7 +109,7 @@ def test_an_sdk_style_stream_json_session(orin_runtime: LiveRuntime) -> None:
     messages = _lines(done.stdout)
     responses = {item["response"]["request_id"]: item["response"] for item in messages if item["type"] == "control_response"}
     assert responses["req_1"]["subtype"] == "success"
-    assert responses["req_2"]["subtype"] == "error"  # Batch C answers mcp_status
+    assert responses["req_2"]["subtype"] == "success" and isinstance(responses["req_2"]["response"]["mcpServers"], list)
     kinds = [item["type"] for item in messages if item["type"] != "control_response"]
     assert kinds == ["system", "assistant", "result"]
 

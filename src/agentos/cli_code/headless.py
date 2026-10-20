@@ -8,7 +8,6 @@ event stream each have a reader thread feeding one inbox, and only the main thre
 from __future__ import annotations
 
 import json
-import os
 import queue
 import threading
 import time
@@ -22,6 +21,7 @@ from agentos.version import __version__
 
 from .args import EXIT_ERROR, EXIT_OK, CliUsageError, CodeOptions
 from .errors import CliRuntimeError
+from .host_bridge import HostBridge
 from .protocol import Translator, TurnUsage
 from .runtime import OrinClient
 from .selection import ModelCatalog, Selection, choose_selection
@@ -107,11 +107,15 @@ class HeadlessRun:
         self._events_started = False
         self._stop = threading.Event()
         self._stdin_closed = False
-        self._pending_prompts: list[str] = []
+        self._pending_prompts: list[tuple[str, str | None]] = []
         self._init_sent = False
         self._cursor = "0"
         self._session_id = ""
         self._debug = self._debug_sink()
+        self.bridge = HostBridge(self)
+        self.current_turn_id: str | None = None
+        self.initial_selection: Selection | None = None
+        self.prompt_turns: dict[str, str] = {}  # a user message's uuid (as the host saw it) -> its turn
 
     # -- plumbing -------------------------------------------------------------------------------------------------
 
@@ -185,6 +189,7 @@ class HeadlessRun:
                 remembered = Selection(str(conversation["provider"]), str(conversation["model_id"]))
         self.selection = choose_selection(self.catalog, model=options.model, provider=options.provider,
                                           remembered=remembered, configured=self.configured_model)
+        self.initial_selection = self.selection
         session_id = self.session.session_id if self.session is not None else (options.session_id or "").lower() or None
         self._session_id = session_id or str(uuid.uuid4())
         self.translator = Translator(session_id=self._session_id, model=self.selection.model_id,
@@ -193,10 +198,10 @@ class HeadlessRun:
     def _send(self, prompt: str) -> str:
         if len(prompt) > MAX_PROMPT_CHARS:
             raise CliRuntimeError(f"the prompt has {len(prompt)} characters; Orin takes at most {MAX_PROMPT_CHARS} per message")
-        # Nobody answers a permission prompt in this build yet (can_use_tool arrives with the control protocol), so
-        # whatever would ask is refused at once rather than waiting for an answer that cannot come.
-        host = False
-        turn_options = build_turn_options(self.options, self.cwd, host_answers_prompts=host).model_dump()
+        # Only an SDK host with a can_use_tool callback (--permission-prompt-tool stdio) answers permission prompts.
+        host = self.options.permission_prompt_tool == "stdio"
+        turn_options = build_turn_options(self.options, self.cwd, host_answers_prompts=host,
+                                          sdk_hooks=self.bridge.sdk_hooks).model_dump()
         mode = permission_mode_for(self.options)
         body: dict[str, Any] = {"message": prompt, "selection": self.selection.as_request(), "code_mode": "code",
                                 "cli": turn_options, "permission_mode": mode}
@@ -258,17 +263,17 @@ class HeadlessRun:
             slash_commands=[], version=__version__,
         ))
 
-    def answer(self, prompt: str) -> dict[str, Any]:
+    def answer(self, prompt: str, *, prompt_uuid: str | None = None) -> dict[str, Any]:
         """One prompt's answer: a turn, or with ``--json-schema`` as many follow-ups as the answer needs (W3-R25)."""
         if not self.options.json_schema:
-            return self.run_turn(prompt)
+            return self.run_turn(prompt, prompt_uuid=prompt_uuid)
         from .structured import MAX_STRUCTURED_RETRIES, load_schema, problem, retry_prompt
 
         schema = load_schema(self.options.json_schema)
         started = self.clock()
         totals, model_calls, text = TurnUsage(), 0, prompt
         for attempt in range(MAX_STRUCTURED_RETRIES + 1):
-            result = self.run_turn(text, final=False)
+            result = self.run_turn(text, final=False, prompt_uuid=prompt_uuid if attempt == 0 else None)
             totals = TurnUsage(totals.input_tokens + result["usage"]["input_tokens"], totals.output_tokens + result["usage"]["output_tokens"],
                                totals.cost_usd + float(result["total_cost_usd"]))
             model_calls += int(result["num_turns"])
@@ -293,15 +298,18 @@ class HeadlessRun:
             self.out.message(result)
         return result
 
-    def run_turn(self, prompt: str, *, final: bool = True) -> dict[str, Any]:
+    def run_turn(self, prompt: str, *, final: bool = True, prompt_uuid: str | None = None) -> dict[str, Any]:
         """One turn, start to result; returns the result message (written to stdout only when ``final``)."""
         started = self.clock()
         before = self._usage()
         self._send_init()
+        replayed = prompt_uuid or str(uuid.uuid4())
         if self.options.replay_user_messages and self.stream_json:
-            self.out.message({"type": "user", "session_id": self._session_id, "uuid": str(uuid.uuid4()),
+            self.out.message({"type": "user", "session_id": self._session_id, "uuid": replayed,
                               "message": {"role": "user", "content": prompt}, "parent_tool_use_id": None})
         turn_id = self._send(prompt)
+        self.current_turn_id = turn_id
+        self.prompt_turns[replayed] = turn_id
         self._start_events()
         state, error_code = "failed", None
         while True:
@@ -312,6 +320,7 @@ class HeadlessRun:
                 for message in self.translator.feed(self._with_transcript(item)):
                     if self.stream_json:
                         self.out.message(message)
+                self.bridge.on_turn_event(item, turn_id)
                 event_type = str(item.get("event_type") or "")
                 if event_type in _END_EVENTS:
                     payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
@@ -324,6 +333,7 @@ class HeadlessRun:
                 raise CliRuntimeError(str(item))
             else:
                 self._handle_input(kind, item)
+        self.current_turn_id = None
         after = self._usage()
         usage = TurnUsage(max(0, after.input_tokens - before.input_tokens), max(0, after.output_tokens - before.output_tokens),
                           max(0.0, after.cost_usd - before.cost_usd))
@@ -344,25 +354,14 @@ class HeadlessRun:
             self.stderr.write(f"Error: a stdin line is not JSON: {item}\n")
         elif kind == "stdin" and isinstance(item, dict):
             if item.get("type") == "control_request":
-                self._control(item)
+                self.bridge.handle(item)
             elif item.get("type") == "user":
                 message = item.get("message") if isinstance(item.get("message"), dict) else {}
-                self._pending_prompts.append(_prompt_text(message.get("content")))
-            elif item.get("type") == "control_response":
-                pass  # answers to requests this build does not send yet
-
-    def _control(self, request: dict[str, Any]) -> None:
-        request_id = str(request.get("request_id") or "")
-        body = request.get("request") if isinstance(request.get("request"), dict) else {}
-        subtype = str(body.get("subtype") or "")
-        if subtype == "initialize":
-            response = {"commands": [], "agents": [], "output_style": "default", "available_output_styles": ["default"],
-                        "models": [], "account": {}, "pid": os.getpid()}
-            self.out.message({"type": "control_response", "response": {"subtype": "success", "request_id": request_id, "response": response}})
-            return
-        self.out.message({"type": "control_response", "response": {
-            "subtype": "error", "request_id": request_id, "error": f"orin code does not handle {subtype or 'this'} requests yet",
-        }})
+                self._pending_prompts.append((_prompt_text(message.get("content")), str(item.get("uuid") or "") or None))
+            elif item.get("type") == "control_response" and isinstance(item.get("response"), dict):
+                self.bridge.answered(item["response"])
+            elif item.get("type") == "control_cancel_request":
+                pass  # the host gave up on one of its own requests; nothing of Orin's is waiting on it
 
     # -- entry ----------------------------------------------------------------------------------------------------
 
@@ -390,10 +389,11 @@ class HeadlessRun:
     def _run_stream_input(self) -> int:
         threading.Thread(target=self._read_stdin, daemon=True).start()
         if self.options.prompt:
-            self._pending_prompts.append(self.options.prompt)
+            self._pending_prompts.append((self.options.prompt, None))
         while True:
             while self._pending_prompts:
-                self.answer(self._pending_prompts.pop(0))
+                text, prompt_uuid = self._pending_prompts.pop(0)
+                self.answer(text, prompt_uuid=prompt_uuid)
             if self._stdin_closed:
                 return EXIT_OK
             kind, item = self.inbox.get()

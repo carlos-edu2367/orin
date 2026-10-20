@@ -63,7 +63,8 @@ class Translator:
         self._message_id: str | None = None
         self._block: _Block | None = None
         self._next_index = 0
-        self._open_tools: dict[str, list[tuple[str, str]]] = {}  # invocation id -> [(tool_use id, public name)]
+        # invocation id -> [(tool_use id, public name, input, internal name)]
+        self._open_tools: dict[str, list[tuple[str, str, dict[str, Any], str]]] = {}
         self._text_since_tools: list[str] = []
         self.model_calls = 0
         self.denials: list[dict[str, Any]] = []
@@ -209,7 +210,7 @@ class Translator:
                                      "delta": {"type": "input_json_delta", "partial_json": json.dumps(tool_input, ensure_ascii=False)}}))
             out.append(self._stream({"type": "content_block_stop", "index": index}))
         out.append(self._assistant(block))
-        self._open_tools.setdefault(invocation, []).append((tool_use_id, name))
+        self._open_tools.setdefault(invocation, []).append((tool_use_id, name, tool_input, internal))
         self._text_since_tools = []
 
     def _tool_result(self, out: list[dict[str, Any]], payload: Mapping[str, Any]) -> None:
@@ -217,7 +218,7 @@ class Translator:
         pending = self._open_tools.get(invocation)
         if not pending:
             return  # a result with no call the host saw (Orin's own bookkeeping, e.g. todo settling)
-        tool_use_id, name = pending.pop(0)
+        tool_use_id, name, tool_input, _ = pending.pop(0)
         if not pending:
             del self._open_tools[invocation]
         status = str(payload.get("status") or "succeeded")
@@ -234,7 +235,19 @@ class Translator:
             "tool_use_result": content,
         })
         if is_error and str(payload.get("error_code") or "") == "CODE_PERMISSION_DENIED":
-            self.denials.append({"tool_name": name, "tool_use_id": tool_use_id, "tool_input": {}})
+            self.denials.append({"tool_name": name, "tool_use_id": tool_use_id, "tool_input": tool_input})
+
+    def open_tool(self, internal: str) -> tuple[str, str, dict[str, Any]] | None:
+        """The latest call of this tool still waiting for its result: ``(tool_use id, public name, input)``."""
+        for calls in reversed(list(self._open_tools.values())):
+            for tool_use_id, name, tool_input, called in reversed(calls):
+                if called == internal:
+                    return tool_use_id, name, tool_input
+        return None
+
+    def tool_use_id_for(self, invocation: str) -> str | None:
+        calls = self._open_tools.get(invocation)
+        return calls[0][0] if calls else None
 
     # -- end of the turn ------------------------------------------------------------------------------------------
 
