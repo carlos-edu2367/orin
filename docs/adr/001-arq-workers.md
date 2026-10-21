@@ -1,5 +1,7 @@
 # ADR 001 — ARQ para Workers
 
+> **Nota de evolução (runtime local):** No produto instalado e no perfil local (`orin`), o despacho e a execução concorrente de turnos rodam sobre a tabela durável `conversation_turn_dispatches` no SQLite local (`orin.db`) e no pool supervisionado `ConcurrentTurnRunner` (`src/agentos/workers/publisher.py`), sem exigir Redis ou ARQ. As fronteiras de isolamento entre gateway HTTP e worker descritas abaixo permanecem válidas.
+
 **Status:** Aceita  
 **Data:** 2026-08-06
 

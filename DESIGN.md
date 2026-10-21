@@ -12,25 +12,29 @@ subtle surfaces and typography rather than dense boxes or decorative effects.
 
 ## Tokens and visual rules
 
-- Use the existing `--orin-*` tokens in `frontend/src/styles/theme.css`.
+- Use the existing `--orin-*` and surface tokens in `frontend/src/styles/theme.css`.
 - Backgrounds stay near `--orin-ink` / `--orin-surface`; raised content uses
-  the existing translucent surface tokens.
+  the existing translucent surface tokens (`--surface-raised`, `--bg-subtle`).
 - Violet is an affordance and focus color, not a fill for large regions.
 - Success, warning and danger use the existing semantic tokens. Never convey a
   state through color alone.
 - Controls are compact, labelled and keyboard reachable. Icon-only controls
   require an accessible name and a tooltip/title.
+- Interactive decision cards (`UserQuestionCard`, `CodeSessionProposalCard`,
+  `McpApprovalCard`, `PluginApprovalCard`, `ToolPermissionCard`) use a single
+  elevated surface without nested double borders (`cards-inside-cards`).
 
-## Code mode
+## Chat and Code modes
 
-Code mode is a visible workflow, not an opaque setting. Its central card is
-the canonical representation: `Planejar → Implementar → Testar → Corrigir →
-Entregar`. It must state whether work is running, awaiting a person, blocked,
-or completed; it must not imply validation that did not happen.
+Each conversation is created in either **Orin Chat** or **Orin Code** (the mode
+is an immutable property of the conversation). In Orin Chat, the agent can
+propose handing off engineering work into a dedicated Code session through the
+`CodeSessionProposalCard` (`ProposeCodeSession`).
 
-The composer toggle is a quiet explicit override. Automatic detection remains
-server-side, so the absence of an active toggle never means code work is
-disabled.
+In Orin Code, progress is surfaced through the `TodoBar`, inline diffs,
+`PlanApprovalCard`, and collapsible tool batches. It must state whether work is
+running, awaiting a person, blocked, or completed; it must not imply validation
+that did not happen.
 
 ## Responsive and accessibility expectations
 

@@ -1,5 +1,7 @@
 # ADR 002 — PostgreSQL como system of record
 
+> **Nota de evolução (runtime local):** No perfil local e nas builds distribuídas do Orin, o *system of record* transacional padrão é o **SQLite local** (`orin.db` em modo WAL, gerenciado pelas mesmas migrações Alembic e portas SQLAlchemy), eliminando a dependência de um servidor PostgreSQL externo. Os contratos de domínio, versão, ownership e outbox descritos nesta ADR continuam aplicando-se integralmente.
+
 **Status:** Aceita  
 **Data:** 2026-08-06
 

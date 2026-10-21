@@ -1,45 +1,75 @@
 # MCP Connectors
 
 Orin connects to MCP (Model Context Protocol) servers so the agent can use
-tools a remote or local server publishes, alongside its built-in ones. This
-document is the pragmatic implementation notes; the normative design is
-[RFC 903](architecture/900-extensibility/903-mcp-future.md) and the
-implementation plan is
-[docs/superpowers/plans/2026-08-14-mcp-connectors.md](superpowers/plans/2026-08-14-mcp-connectors.md).
+tools, resources, and prompts published by local or remote servers alongside its
+built-in capabilities, and can also expose Orin's own file/shell tools as an MCP
+server via `orin code mcp serve`.
 
 ## What is supported
 
-- **Tools only.** A connected server's `tools/list` results become native
-  tools, namespaced `mcp__<server-slug>__<tool-name>` so they can never
-  collide with a built-in tool or with another server's tool of the same
-  name.
-- **Two transports**: `stdio` (a local subprocess, launched via `npx`, `uvx`,
-  `node`, `python`, `python3`, `uv`, `deno`, or `bun`) and `http` (a remote
-  HTTPS endpoint speaking streamable HTTP or SSE).
-- **Resources and prompts are not implemented.** RFC 903 requires each MCP
-  surface to map to a proprietary local port before it can be enabled — no
-  such mapping exists yet for resources or prompts, so a server that only
-  offers those has nothing usable in Orin today.
+- **Tools with lazy loading and on-demand search (`ToolSearch`).** A connected
+  server's `tools/list` results are namespaced `mcp__<server-slug>__<tool-name>`
+  so they never collide with built-in tools or other servers. There is no fixed
+  256-tool ceiling (`MAX_TOOLS_PER_SERVER` was removed; pagination detects
+  repeated cursors up to `MAX_TOOL_PAGES = 1000`). To protect the context window
+  against large MCP servers, schemas are lazy-loaded on demand through
+  `ToolSearch` (`search_mcp_tools`), `inspect_mcp_server`, and `call_mcp_tool`
+  (or deferred automatically when tool definitions exceed the context budget).
+- **Resources, Prompts, and Elicitation.**
+  - **Resources:** `ListMcpResources`, `ReadMcpResource`, `ReadMcpResourceDir`,
+    and `@server:uri` mentions in the composer; binary blobs validate base64 and
+    report unreadable content cleanly.
+  - **Prompts:** discovered prompts are exposed as `/mcp__<server>__<prompt>`
+    commands.
+  - **Elicitation & Dynamic Refresh:** `Elicitation` / `ElicitationResult`
+    lifecycle hooks and `RefreshMcpTools` (plus `notifications/tools/list_changed`).
+- **Four client transports + SDK relay:**
+  - `stdio`: local subprocess (`npx`, `uvx`, `node`, `python`, `python3`, `uv`,
+    `deno`, or `bun`), isolated in a Windows Job Object / POSIX process group so
+    child processes always terminate when the server closes.
+  - `http`: remote HTTPS endpoint speaking streamable HTTP.
+  - `sse`: remote Server-Sent Events MCP endpoint.
+  - `ws`: WebSocket (`wss://`) MCP endpoint.
+  - `sdk`: in-process control-protocol relay (`mcp_message`) for SDK MCP servers
+    registered by `claude-agent-sdk` hosts driving `orin code`.
+- **Four configuration scopes:**
+  1. `managed`: `managed-mcp.json`, plus `allowedMcpServers` / `deniedMcpServers`
+     policy enforcement;
+  2. `user`: servers configured in **Settings → MCP** (stored in SQLite) and
+     `mcpServers` in `~/.claude.json`;
+  3. `project`: `.mcp.json` at the repo root and `.orin/mcp.json` (requires
+     **Workspace Trust** and per-server approval);
+  4. `local`: per-user × per-project state and CLI `--mcp-config` /
+     `--strict-mcp-config`.
+  - Environment expansion `${VAR}` and `${VAR:-default}` is supported across
+    `command`, `args`, `env`, `url`, and `headers`.
+- **Browser automation via Playwright MCP:** **Settings → Navegador** installs
+  and activates the official `@playwright/mcp` (`npx -y @playwright/mcp@latest`)
+  in one click using the curated `playwright` catalog entry.
+- **`orin code mcp` CLI & MCP server mode:**
+  - Manage servers from the terminal with `orin code mcp list|get|add|add-json|remove|reset-project-choices`.
+  - Run `orin code mcp serve` to expose Orin's `Read`, `Edit`, `Write`, `Glob`,
+    `Grep`, and `Bash` tools over `stdio` to external MCP hosts (enforcing
+    `allow`/`deny` rules and refusing any operation that would require an
+    interactive prompt).
 
 ## How a connection gets approved
 
-A connection never activates itself. The flow is always:
+A connection never activates itself without user consent:
 
-1. **Propose** — the agent (via `configure_mcp`) or the user (via **Settings
-   → MCP → Adicionar servidor**) creates a server row in `pending_approval`.
-   A proposal carries only credential *names*, never values.
-2. **Approve** — the user supplies any required credential value, either in
-   the chat's approval card or inline on the server's card in Settings. Only
-   this step opens a real connection: the server answers `initialize` and
-   `tools/list`, and only on success does the row become `active` and the
-   discovered tools get cached.
-3. **Use** — from then on, the turn's tool set is built entirely from the
-   cache. No network call happens just to list an approved server's tools; a
-   session to the server itself opens lazily, the first time the model
-   actually calls one of its tools, and closes with the turn.
-
-A failed approval leaves the server `pending_approval` with a recorded
-`state_reason` — nothing partially activates.
+1. **Propose** — the agent (via `configure_mcp`), a `.mcp.json` project file, or
+   the user (via **Settings → MCP → Adicionar servidor** or **Settings →
+   Navegador**) registers a server in `pending_approval`. A proposal carries
+   only credential *names*, never secret values.
+2. **Approve** — the user supplies any required credential value in the chat's
+   approval card or in Settings (and grants Workspace Trust for project-scoped
+   `.mcp.json` servers). Approval tests the connection (`initialize` and
+   `tools/list`) and caches the discovered descriptors on success.
+3. **Use (Lazy-Loaded)** — at turn start, the system prompt includes a compact
+   summary of active MCP servers and tool counts. The agent uses `ToolSearch`
+   (`search_mcp_tools`), `inspect_mcp_server`, or `call_mcp_tool` to search by
+   name, description, or JSON schema properties and activate only the tools
+   needed for the current turn.
 
 ## Where credentials live
 
@@ -52,7 +82,7 @@ encrypted with `AGENTOS_PROVIDER_ENCRYPTION_KEY`, the same
 ever returns a decrypted value; only credential *names* are ever part of a
 public response.
 
-## Servers that ask you to sign in
+## Servers that ask you to sign in (OAuth 2.1)
 
 A remote server that follows the MCP Authorization spec answers the first
 connection with `401`. Approval then returns `409 mcp_authorization_required`
@@ -76,9 +106,7 @@ tool call fails with `MCP_REAUTH_REQUIRED`, the server moves to `error`, and
 **Reconnect** in Settings runs the same sign-in again. Removing the server
 revokes the grant when the server advertises a revocation endpoint.
 
-Every URL taken from OAuth metadata follows the HTTP network policy below.
-
-## The stdio launcher allowlist
+## The stdio launcher allowlist and process cleanup
 
 Only `npx`, `uvx`, `node`, `python`, `python3`, `uv`, `deno`, and `bun` may be
 launched (`src/agentos/mcp/transport_stdio.py`). The command runs with
@@ -86,63 +114,47 @@ launched (`src/agentos/mcp/transport_stdio.py`). The command runs with
 plus only that server's own credentials) — the worker's own environment is
 never inherited.
 
-`shell=False` is not the whole story on Windows: `npx`/`uvx` resolve to
-`.cmd`/`.bat` shims, which the OS loader transparently re-invokes through
-`cmd.exe` regardless of `shell=False`. That means anything on the resulting
-command line is subject to `cmd.exe`'s own operator and `%VAR%` expansion
-rules. `%` and `^` are forbidden alongside the POSIX shell metacharacters
-(`;&|`$><`) in the command, every argument, *and* every credential value —
-a value containing a forbidden character is refused before the process ever
-starts, rather than risking it being reinterpreted by the shim.
+On Windows, `npx`/`uvx` resolve to `.cmd`/`.bat` shims, which the OS loader
+re-invokes through `cmd.exe` regardless of `shell=False`. `%` and `^` are
+forbidden alongside POSIX shell metacharacters (`;&|`$><`) in the command,
+every argument, *and* every credential value. When a `stdio` session closes,
+Orin closes `stdin`, waits 300 ms, and terminates the entire Windows Job Object
+/ POSIX process group (plus any recorded descendant PIDs) so child processes
+never leak.
 
-## The HTTP network policy
+## The HTTP / SSE / WebSocket network policy
 
-An `http` server must resolve to a public HTTPS address — the same
-`_public_url` policy the agent's own `fetch_url` tool already enforces
-(loopback, private, and link-local ranges are refused). This check re-runs
-immediately before *every* request, not only once when the server is first
-configured: a server the operator doesn't control DNS for could otherwise
-pass validation once and then repoint its own domain at a private address
-for the actual connection (a DNS-rebinding race). Per-request re-checking
-closes the "validate once, reuse forever" version of that gap.
-
-**Known residual limitation:** the connection still isn't pinned to the IP
-address that was validated — httpx re-resolves DNS independently a few
-milliseconds after the policy check. Fully closing this needs a
-transport-level IP pin (a custom `httpcore` `NetworkBackend`), which is a
-larger change than this pass covers. This is the same class of risk the
-project's README already discloses for SSRF hardening generally.
+Remote MCP endpoints must resolve to a public address — the same `_public_url`
+policy enforced across Orin's outbound network tools (loopback, private, and
+link-local ranges are refused). This check re-runs immediately before *every*
+request to mitigate DNS-rebinding races.
 
 ## Adding a server to the curated catalog
 
 The catalog (`src/agentos/mcp/catalog.py`) is what lets the agent *explain* a
 connection instead of guessing one. Each entry is a `McpCatalogEntry`
-declaring: what the server does, its transport, how it's launched (or its
-URL), and — critically — exactly which credential the user needs to fetch
-and where from (`McpSecretRequirement.how_to_obtain`). Add a new entry there;
-`list_mcp_catalog` and **Settings → MCP** both read from it directly, no
-other wiring needed.
+declaring what the server does, its transport, how it's launched (or its URL),
+and which credentials the user needs (`McpSecretRequirement.how_to_obtain`).
+`list_mcp_catalog`, **Settings → MCP**, and **Settings → Navegador** (for
+`catalog_id="playwright"`) read from it directly.
 
 ## When a server fails
 
-- **Approval fails** (the server didn't answer, or rejected the credential):
-  the row stays `pending_approval`, `state_reason` records why, and the
-  gateway route returns `502`. The user can retry with a different value.
+- **Approval fails:** the row stays `pending_approval`, `state_reason` records
+  why, and the gateway route returns `502`.
 - **A configured server is unreachable at turn time:** the worker logs the
-  failure and simply runs the turn without that server's tools — a broken
-  MCP configuration never blocks the turn from starting.
-- **An individual tool call fails:** the model gets a normal failed
-  `ToolOutcome` (`MCP_TOOL_ERROR` for a server-side refusal,
-  `MCP_UNAVAILABLE` for a transport/protocol failure) and can react to it
-  like any other tool failure.
-- **A signed-in server stops accepting Orin** (grant revoked or expired): the
-  tool call returns `MCP_REAUTH_REQUIRED` with a message telling the user to
-  reconnect in Settings → MCP, and the server moves to `error`.
+  failure and runs the turn without that server's tools — a broken MCP server
+  never blocks the turn from starting.
+- **An individual tool call fails:** the model gets a failed `ToolOutcome`
+  (`MCP_TOOL_ERROR` or `MCP_UNAVAILABLE`) and can react to it like any other
+  tool failure. Outputs above `MAX_MCP_OUTPUT_TOKENS` (25k tokens) are truncated
+  and persisted to disk so oversized payloads never overflow the prompt.
+- **A signed-in server stops accepting Orin:** the tool call returns
+  `MCP_REAUTH_REQUIRED` and the server moves to `error`.
 
 ## Removing a server
 
-Disabling (**Settings → MCP**, or the API's `PUT .../enabled`) is reversible:
-the row moves to `disabled` and its tools stop being published, but the
-cache and encrypted credential stay in place. Removing deletes the row and
-its cached tools entirely; the chat and Settings UI both require an explicit
-second confirmation before this happens.
+Disabling (**Settings → MCP**, or `PUT .../enabled`) moves the row to `disabled`
+and stops publishing its tools while keeping the cache and encrypted credential.
+Removing (`DELETE` or `orin code mcp remove`) deletes the row and its cached
+tools entirely.

@@ -2,14 +2,14 @@
 
 `software_quality_cases.json` é a matriz de dez pedidos ponta a ponta para os modelos baratos alvo. Cada caso deve iniciar em um workspace gerenciado vazio.
 
-Para cada combinação caso/modelo, registre os payloads estruturados de `verify_project` e, quando `frontend` for verdadeiro, de `verify_frontend`. A nota mecânica é a soma dos indicadores abaixo; não atribua nota por impressão visual.
+Para cada combinação caso/modelo, registre os payloads estruturados de `VerifyProject` (`verify_project`) e, quando `frontend` for verdadeiro, a evidência de inicialização/verificação via `PreviewStart` (`preview_start`) ou **Playwright MCP** (`@playwright/mcp`). A nota mecânica é a soma dos indicadores abaixo; não atribua nota por impressão visual.
 
 | Indicador | Evidência |
 | --- | --- |
 | instalação | `verify_project.payload.steps` contém `install` executado e aprovado, quando a receita a oferece |
 | typecheck, lint, build e teste | toda etapa detectada foi executada e aprovada; `all_passed` é `true` |
-| servidor | processo `npm run dev` ou equivalente permanece ativo e expõe a URL usada na verificação |
-| renderização | `verify_frontend.payload.all_ok` é `true` para cada rota declarada |
+| servidor | processo iniciado por `preview_start` (`npm run dev` ou equivalente) permanece ativo e expõe a URL local |
+| renderização | verificação da rota local sem erros de console/página via Playwright MCP quando habilitado |
 
 ## Baseline v0.2.25 (pré-Fases 4–5)
 

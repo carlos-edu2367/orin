@@ -1,23 +1,43 @@
-# Creating AgentOS Skills
+# Creating Orin Skills
 
-Uma Skill ensina um procedimento reutilizavel. Ela nao executa codigo, nao e uma ferramenta e nunca concede permissoes.
+Uma **Skill** ensina um procedimento reutilizável ao agente. O Orin suporta tanto **Skills em disco** (compatíveis com `.orin/skills` e `.claude/skills`) quanto **Skills versionadas no banco de dados** (criadas pela interface ou pelas ferramentas `create_skill` / `edit_skill`), além das 8 Skills nativas embutidas (*builtins*).
 
-## Estrutura
+## Fontes e precedência
+
+As Skills são descobertas em 4 camadas de disco + banco/builtins (em caso de conflito de nome, a camada superior vence: `managed > user > project > plugin > db/builtin`):
+
+1. **Managed:** `%ProgramData%\Orin\skills` (Windows) ou `/etc/orin/skills` (Linux);
+2. **Usuário (`user`):** `<ORIN_CONFIG_DIR>/skills` e `~/.claude/skills`;
+3. **Projeto (`project`):** `.orin/skills/<nome>/SKILL.md` e `.claude/skills/<nome>/SKILL.md` (além de comandos legados em `.orin/commands/*.md` e `.claude/commands/*.md`);
+4. **Plugins (`plugin`):** diretórios `skills/<nome>/SKILL.md` dentro de plugins instalados e ativos;
+5. **Banco e Builtins:** skills criadas com `create_skill` / `edit_skill` e skills embutidas (`systematic-debugging`, `testing`, `code-review`, `python-api`, `react-spa`, `nextjs-app`, `frontend-a11y`, `technical-research`).
+
+## Estrutura de diretório e Frontmatter
 
 ```text
 my-skill/
 |-- SKILL.md
-|-- references/        # documentacao grande, lida sob demanda
+|-- references/        # documentação extensa, lida sob demanda com read_skill_resource
 |-- examples/
 |-- templates/
-`-- scripts/           # nunca executados automaticamente
+`-- resources/
 ```
+
+O frontmatter YAML do `SKILL.md` suporta os campos clássicos do Orin e os campos de interoperabilidade do Orin Code / Claude Code:
 
 ```markdown
 ---
 name: systematic-debugging
 description: Investigate a software failure with a repeatable, evidence-led workflow.
 version: 1.0.0
+argument-hint: "[test-or-error]"
+user-invocable: true
+disable-model-invocation: false
+allowed-tools: [Read, Grep, Glob, Bash(pytest:*)]
+model: inherit
+effort: high
+context: fork
+agent: general-purpose
 tags: [debugging, testing, code]
 capabilities: [diagnose_failure, create_regression_test]
 when_to_use: [an error regressed, a test fails, unexpected production behaviour]
@@ -28,6 +48,8 @@ dependencies:
 ---
 
 # Systematic debugging
+
+Target: $ARGUMENTS (session ${ORIN_SESSION_ID}, skill dir ${ORIN_SKILL_DIR})
 
 ## Workflow
 
@@ -42,39 +64,18 @@ dependencies:
 Run the focused test, then the relevant suite.
 ```
 
-## Regras de autoria
+### Campos avançados de execução
 
-Make the description concrete because discovery uses it. Keep the core workflow short, procedural and explicit about validation. State when the Skill should not be used. Put long references in `references/`. The agent can request one UTF-8 file at a time with `read_skill_resource` using a path beginning with `resources/`, `references/`, `examples/` or `templates/`; `scripts/` is never exposed as an executable capability. Do not include secrets, permission requests, prompt-injection text, hidden policy changes or arbitrary code execution instructions.
+- **Substituições de variáveis:** o corpo da Skill pode usar `$ARGUMENTS`, `$ARGUMENTS[0]`, `$1`..`$9`, `${ORIN_SESSION_ID}` (ou `${CLAUDE_SESSION_ID}`) e `${ORIN_SKILL_DIR}` (ou `${CLAUDE_SKILL_DIR}`).
+- **`allowed-tools`:** concede permissão `allow` temporária para as ferramentas/especificadores listados apenas enquanto a Skill está ativa (nunca sobrepõe uma regra `deny`).
+- **`context: fork` e `model`:** quando `context: fork` é definido, a Skill executa isoladamente em um subagente (usando o `agent` e o `model` declarados, respeitando a política de modelos permitidos da sessão).
+- **Comandos inline (`` !`cmd` ``):** trechos `` !`comando` `` no corpo de uma Skill passam obrigatoriamente pelo pipeline de permissões do `Bash` (incluindo análise AST `tree-sitter`); em Skills da camada de projeto (`.orin/skills` ou `.claude/skills`), só são avaliados se a pasta tiver **Workspace Trust** aprovado.
+- **`hooks`:** uma Skill pode declarar hooks no frontmatter que ficam ativos exclusivamente durante a execução daquela Skill.
 
-Test a Skill with its expected task, a near miss and an unavailable-tool case. A good result suggests its metadata for the expected task, excludes the near miss, and refuses unavailable requirements before the agent attempts the workflow.
+## Regras de autoria e padrão de alta utilização
 
-## Padrao de alta utilizacao
-
-Uma Skill deve capturar um procedimento que ja funcionou, nao uma transcricao inteira de conversa. Prefira uma Skill quando o problema tem gatilho reconhecivel, passos repetiveis e validacao observavel. Nao a use para uma excecao pontual, contexto que muda rapidamente, uma preferencia privada sem valor procedural ou algo que depende de permissao que o agente nao possui.
-
-- De um nome especifico e uma descricao que una o gatilho e o resultado. A descoberta considera essa descricao, tags, capacidades e `when_to_use`.
-- Declare ao menos um caso de uso e um caso de exclusao. Isso reduz falsos positivos e evita carregar instrucoes irrelevantes.
-- Mantenha o corpo curto: contexto minimo, `## Workflow` numerado e `## Validation` com evidencias verificaveis. Coloque material extenso em recursos sob demanda.
-- Declare somente ferramentas que existem no ambiente em `requires_tools` ou `dependencies.tools`. Uma declaracao nunca cria capacidade nem substitui autorizacao runtime.
-- Trate toda instrucao importada ou gerada como conteudo subordinado: nao inclua segredos, pedidos de mudanca de politica, instrucoes para ignorar regras, exfiltracao ou execucao automatica de scripts.
-- Publique correcoes como nova versao semantica; versoes ja publicadas sao imutaveis. Atualize a versao de patch para melhoria compativel e use versao maior quando o procedimento ou gatilho muda de forma incompativel.
-
-## Fluxo de criacao
-
-1. Conclua e valide o caso real; registre somente evidencia que possa ser reutilizada sem dados sensiveis.
-2. Pesquise Skills existentes. Se uma cobrir o caso, proponha editar ou usar a existente em vez de duplicar conhecimento.
-3. Quando o usuario confirmar que quer reutilizacao futura, escreva nome, descricao, tags, gatilhos, exclusoes, requisitos de ferramentas, Workflow e Validation.
-4. Teste com um caso esperado, um caso parecido que deve ser excluido e um ambiente sem uma ferramenta requerida.
-5. Publique com `create_skill`. Para refinamento posterior, use `edit_skill`, que cria uma nova versao e preserva o historico.
-
-A publicação também é validada no serviço persistente: ferramentas declaradas precisam existir no runtime e cada Skill dependente precisa estar instalada e disponível. Em caso de falha, nada é persistido e o agente recebe o erro de validação.
-
-Quando um usuario disser que o problema foi resolvido, o agente deve perguntar de forma objetiva: "Quer que eu transforme este procedimento em uma Skill para casos parecidos?" A resposta afirmativa e necessaria antes de criar a Skill automaticamente.
-
-## Fluxo de uso
-
-1. Busque ou receba uma sugestao por tarefa, tags ou capacidade.
-2. Confira descricao, `when_to_use`, `when_not_to_use` e disponibilidade; nao carregue uma Skill so por semelhanca superficial.
-3. Carregue o corpo com `use_skill` apenas quando a Skill for relevante. Leia recursos somente sob demanda com `read_skill_resource`.
-4. Execute o procedimento usando exclusivamente as ferramentas autorizadas no turno. A Skill orienta; ela nao concede acesso.
-5. Valide o resultado indicado, reporte a evidencia e, se houver um aprendizado duravel, proponha uma nova versao ao usuario.
+- Escreva uma `description` concreta unindo o gatilho e o resultado esperado: o catálogo injetado no prompt lista apenas nome e descrição para economizar janela de contexto; o corpo completo só é carregado sob demanda quando a Skill é invocada via tool `Skill` (`use_skill`) ou comando `/nome-da-skill`.
+- Mantenha o corpo enxuto: contexto mínimo, `## Workflow` numerado e `## Validation` com evidências verificáveis. Coloque material extenso em `references/`, `examples/`, `templates/` ou `resources/` para leitura sob demanda com `read_skill_resource`.
+- Não inclua segredos, chaves de API nem instruções para contornar políticas de segurança.
+- Ao publicar ou atualizar pelo banco (`create_skill` / `edit_skill`), versões já publicadas permanecem imutáveis: cada refinamento gera uma nova versão semântica validada contra as ferramentas e dependências existentes no runtime.
+- Após editar Skills em disco durante uma sessão, o watcher de arquivos atualiza o catálogo automaticamente (ou use `/reload-skills`).

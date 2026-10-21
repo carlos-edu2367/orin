@@ -33,10 +33,10 @@ From a checkout, install `orin` as an editable tool:
 uv tool install --editable .
 ```
 
-That puts `orin` on your PATH pointing at this checkout, so a `git pull` is
-reflected in `orin` immediately. `uv tool uninstall orin` removes it and leaves
-your data, configuration and logs alone. (Released builds install through
-`OrinSetup`; see *Distribution* below.)
+That puts `orin` and `orin-code` on your PATH pointing at this checkout, so a
+`git pull` is reflected immediately. `uv tool uninstall agentos` removes the
+shims and leaves your data, configuration and logs alone. (Released builds
+install through `OrinSetup`; see *Release build and updates* below.)
 
 ## What starts, in what order
 
@@ -44,7 +44,7 @@ your data, configuration and logs alone. (Released builds install through
 | --- | --- | --- |
 | Services | local SQLite database and schema migrations | SQLite answers `SELECT 1` and migration reaches head |
 | Backend | HTTP, SSE, and the web interface itself | `/healthz` answers, then `/readyz` confirms the database and queue |
-| Workers | durable turn worker and scheduled-chat worker | the chat worker has written a fresh heartbeat |
+| Workers | durable concurrent turn worker and scheduled-chat worker | the chat worker has written a fresh heartbeat |
 | OmniRouter | the optional local gateway — **only if you enabled it** | `GET <gateway>/v1/models` returns 2xx |
 | Frontend | the built SPA the backend serves | `GET /` returns the application document |
 
@@ -110,18 +110,24 @@ Orin binds `127.0.0.1` only, never a LAN address. Port 49200 by default.
 ## Commands
 
 ```powershell
-orin                    # start, wait for ready, open the browser
-orin --port 9000        # start on a specific port
-orin --no-browser       # start without opening a browser
-orin --desktop          # start and host the API-served app in Electron
-orin --desktop --background   # the same, with no window: only the tray icon
-orin autostart on|off|status  # start Orin in the background at sign-in
-orin -v                 # show startup detail on the console
-orin start              # the same as `orin`
-orin stop
-orin restart
-orin status
-orin logs [--service backend|worker|scheduler|launcher] [-n 50] [--follow]
+orin                              # start, wait for ready, open the browser
+orin --port 9000                  # start on a specific port
+orin --no-browser                 # start without opening a browser
+orin --desktop                    # start and host the API-served app in Electron
+orin --desktop --background       # start in the system tray without opening a window
+orin autostart on|off|status      # start Orin in the background at sign-in
+orin code [prompt | -p ...]       # open or run an Orin Code session (see docs/ORIN_CODE.md)
+orin -v                           # show startup detail on the console
+orin start                        # the same as `orin`
+orin stop                         # stop a running Orin
+orin restart                      # stop and start again
+orin status                       # show whether Orin is running (exit 0 running, 3 stopped)
+orin logs [--service backend|worker|scheduler|launcher] [-n 50] [-f|--follow]
+orin update [--check|--to VER|--rollback|--apply|--restart|--json]
+orin --uninstall [--yes]          # remove an installed Orin runtime and local data
+orin serve                        # run as a multi-profile server (needs ORIN_PUBLIC_URL)
+orin user create <username> [--admin]
+orin user reset-password <username>
 orin --version
 orin --help
 ```
@@ -138,15 +144,9 @@ directory). The splash polls that file and displays actual launcher stages:
 SQLite, migrations, API, `/healthz`, `/readyz`, worker, scheduler and the
 frontend probe.
 
-launcher confirms readiness it provides the chosen loopback URL, and Electron
-loads `http://127.0.0.1:<port>` in the same `BrowserWindow`. This preserves the
-existing cookies, SSE, WebSocket, upload, download, and routing behavior.
 Electron never starts services or workers itself. Once the launcher confirms
 readiness it provides the chosen loopback URL, and Electron loads
 `http://127.0.0.1:<port>` in the same `BrowserWindow`. This preserves the
-existing cookies, SSE, WebSocket, upload, download, and routing behavior.
-launcher confirms readiness it provides the chosen loopback URL, and Electron
-loads `http://127.0.0.1:<port>` in the same `BrowserWindow`. This preserves the
 existing cookies, SSE, WebSocket, upload, download, and routing behavior.
 
 The shell is a single Electron instance. A second `orin --desktop` asks its
@@ -206,17 +206,17 @@ of the process table.
 ## Where Orin keeps things
 
 Mutable state never lives inside the installation directory. That separation is
-what will let a future `orin update` replace the runtime without touching
-anything you care about.
+what lets `orin update` replace the runtime without touching anything you care
+about.
 
-| | Development (this checkout) | Installed |
-| --- | --- | --- |
-| Installation | the repository | `%LOCALAPPDATA%\Programs\Orin\current` |
-| Config | `.env.local` in the repository | `%APPDATA%\Orin\config` |
-| Data, workspaces | `data\` | `%LOCALAPPDATA%\Orin\data` |
-| Logs | `.logs\` | `%LOCALAPPDATA%\Orin\logs` |
-| Cache | `.cache\` | `%LOCALAPPDATA%\Orin\cache` |
-| Run state | `data\run\` | `%LOCALAPPDATA%\Orin\run` |
+| | Development (this checkout) | Installed (Windows) | Installed (Linux) |
+| --- | --- | --- | --- |
+| Installation | the repository | `%LOCALAPPDATA%\Programs\Orin\current` | `~/.local/share/Orin/versions/current` |
+| Config | `.env.local` in the repository | `%APPDATA%\Orin\config` | `~/.config/Orin` |
+| Data, workspaces | `data/` | `%LOCALAPPDATA%\Orin\data` | `~/.local/share/Orin/data` |
+| Logs | `.logs/` | `%LOCALAPPDATA%\Orin\logs` | `~/.local/state/Orin/logs` |
+| Cache | `.cache/` | `%LOCALAPPDATA%\Orin\cache` | `~/.cache/Orin` |
+| Run state | `data/run/` | `%LOCALAPPDATA%\Orin\run` | `~/.local/state/Orin/run` |
 
 Set `ORIN_HOME` to relocate the whole layout, or `ORIN_DATA_DIR`,
 `ORIN_LOGS_DIR`, `ORIN_CONFIG_DIR`, `ORIN_CACHE_DIR`, `ORIN_RUN_DIR` to move one
@@ -234,7 +234,7 @@ DEVELOPMENT                    RUNTIME
 source                         orin
   ↓                              ↓
 vite dev server, hot reload    built assets served by the backend
-uvicorn --reload                supervised child processes
+uvicorn --reload               supervised child processes
 ```
 
 The frontend dev server is a development tool. It is not part of running Orin:
@@ -266,32 +266,33 @@ gateway from surviving the process that started it.
 and falls back to terminating the recorded process tree if the supervisor does
 not act on it.
 
-## Windows release build
+## Release build and updates
 
 Nothing above is tied to a repository, a virtual environment, or a working
 directory, so packaging is a build problem rather than a redesign.
 
 **The launcher is already a multi-call binary.** It starts services by
 re-executing *itself* with a hidden verb — `orin internal-service backend` — not
-by invoking `python -m` against a source tree. Freezing changes only which
-executable that is.
+by invoking `python -m` against a source tree, and a copy named `orin-code`
+dispatches directly to `orin code`. Freezing changes only which executable that
+is.
 
 **The installation directory is already read-only at runtime.** Configuration,
 data, logs and run state resolve to per-user locations outside it.
 
-The release workflow is implemented as follows:
+The release workflow operates as follows:
 
 1. **Build** — CI produces `frontend/dist` and freezes the launcher and backend
-   into one `orin.exe` (PyInstaller onedir), shipped as a versioned archive with
-   the web bundle as a static asset directory inside the installation.
-2. **`OrinSetup` / `install.ps1` / `install.sh`** — `OrinSetup` (a small frozen
-   program with a window, or `--silent` in a terminal) is the installer; the two
-   scripts are one-line bootstraps that download and run it. It downloads the archive, unpacks it to
-   `%LOCALAPPDATA%\Programs\Orin\<version>`, repoints a `current` junction, and
-   writes the `orin.cmd` shim into the bin directory, adds it to PATH and
-   creates the shortcuts. All of it is one Python engine
-   (`agentos.installation`), shared with `orin update` and `orin --uninstall`;
-   there is no second implementation in PowerShell or Bash.
+   into `orin` / `orin.exe` (PyInstaller onedir), shipped as a versioned archive
+   with the web bundle as a static asset directory inside the installation.
+2. **`OrinSetup` / `install.ps1` / `install.sh`** — `OrinSetup` (a frozen
+   installer with a GUI window, or `--silent` in a terminal) is the installer;
+   the two scripts are one-line bootstraps that download and run it. It downloads
+   the archive, unpacks it to `<versions_root>/<version>`, repoints the `current`
+   link, writes the `orin` shim into the user bin directory, adds it to PATH and
+   creates shortcuts. All of it is one Python engine (`agentos.installation`),
+   shared with `orin update` and `orin --uninstall`; there is no second
+   implementation in PowerShell or Bash.
 3. **`orin update`** — implemented by one Python engine
    (`agentos.installation.updater`) that the terminal, the app's update button
    and the `OrinSetup` window all share. It downloads the next version
@@ -304,12 +305,12 @@ The release workflow is implemented as follows:
    User data was never inside either version, so neither direction can lose it.
 
    ```text
-   orin update                  update to the latest release
-   orin update --check          only report whether one exists
-   orin update --to 0.5.0       install an exact version
-   orin update --rollback       go back to the version this one replaced
-   orin update --json           one JSON object per line (for the app and scripts)
-   orin update --apply          activate an update the app already downloaded
+   orin update                    update to the latest release
+   orin update --check            only report whether one exists
+   orin update --to 0.9.6         install an exact version
+   orin update --rollback         go back to the version this one replaced
+   orin update --json             one JSON object per line (for the app and scripts)
+   orin update --apply            activate an update the app already downloaded
    orin update --apply --restart  ...and reopen Orin Desktop afterwards
    ```
 
@@ -326,5 +327,5 @@ The release workflow is implemented as follows:
    kept in `update-state.json` (`last_attempt`) so the next launch can say so.
 
 The installed runtime has no Docker, PostgreSQL, Redis, Python or Node
-dependency. OmniRoute remains a separately installed optional npm integration;
-it is never started unless the user explicitly enables it.
+dependency. OmniRoute and MCP `stdio` servers (such as `@playwright/mcp`) remain
+optional integrations enabled on demand by the user.

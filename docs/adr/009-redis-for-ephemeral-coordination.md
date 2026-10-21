@@ -1,5 +1,7 @@
 # ADR 009 — Redis para coordenação efêmera
 
+> **Nota de evolução (runtime local):** No perfil local do Orin (`orin`), filas de despacho, heartbeats de workers, leases de turnos/OAuth, sessões e sinais de cancelamento operam diretamente sobre o SQLite local (`orin.db`) e arquivos de lease em `ORIN_RUN_DIR`, sem exigir Redis instalado. O contrato de que a coordenação efêmera nunca substitui o store durável permanece inalterado.
+
 **Status:** Aceita  
 **Data:** 2026-08-06
 

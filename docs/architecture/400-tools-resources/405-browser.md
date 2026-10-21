@@ -1,5 +1,7 @@
 # RFC 405 — Browser
 
+> **Nota de evolução (v0.9.x):** No runtime atual do Orin, o subsistema de navegador interno foi substituído pelo servidor oficial **Playwright MCP** (`@playwright/mcp`, gerenciado em **Configurações → Navegador** e documentado em [docs/MCP.md](../../MCP.md)). Os contratos de domínio abaixo permanecem registrados como referência arquitetural da camada `src/agentos/browser/`.
+
 **Estado:** Normativa  
 **Idioma:** PT-BR  
 **Relações:** [RFC 000 — Visão geral](../000-overview.md), [RFC 050 — Princípios de design](../050-design-principles.md), [RFC 060 — Glossário e convenções](../060-glossary-and-conventions.md), [RFC 101 — Runtime](../100-kernel/101-runtime.md), [RFC 102 — Ciclo de vida da Execution](../100-kernel/102-execution-lifecycle.md), [RFC 103 — Sistema de eventos](../100-kernel/103-event-system.md), [RFC 401 — Tool Runtime](401-tool-runtime.md), [RFC 402 — Resource Manager](402-resource-manager.md), [RFC 403 — Filesystem](403-filesystem.md)

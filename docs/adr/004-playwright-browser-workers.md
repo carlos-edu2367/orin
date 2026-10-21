@@ -1,5 +1,7 @@
 # ADR 004 — Playwright em Browser Workers dedicados
 
+> **Nota de evolução (v0.9.x — Superada):** O subsistema de navegador interno (`IsolatedConversationBrowser`, instalador próprio do Chromium e tools nativas `browse_page`/`browser_*`) foi removido. A automação de navegador no Orin agora é feita de forma padronizada via **Playwright MCP** (`@playwright/mcp` sobre transporte `stdio` isolado em Job Object / process group), instalável em um clique em **Configurações → Navegador**. O registro abaixo é mantido como histórico arquitetural.
+
 **Status:** Aceita  
 **Data:** 2026-08-06
 

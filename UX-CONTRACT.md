@@ -1,33 +1,44 @@
 # UX contract
 
-## Code mode lifecycle
+## Chat and Code mode lifecycle
 
-1. A request enters Code mode when the user enables `Code` or the server
-   classifies a clearly technical request. A user can opt out for a turn.
-2. With the default preference, Orin writes a plan under `.orin/plans/` and
-   asks through the existing user-question flow before code or commands run.
-3. After approval, activity updates preserve the five lifecycle stages.
-4. Automated tests are required for implementation work. Frontend changes also
-   require browser validation when a browser capability is available.
-5. A failed check sends work back to correction. A genuine decision or a
-   blocked external dependency produces an explicit waiting/blocked card.
-6. Completion is shown only after the recorded delivery state; caveats remain
-   visible instead of being silently treated as success.
+1. A conversation is either **Orin Chat** or **Orin Code** for its entire lifetime.
+   From a Chat conversation, the agent may propose opening a new Code session via
+   `ProposeCodeSession` (`CodeSessionProposalCard`), letting the user review or
+   edit the workspace folder, provider/model, permission mode, and prompt.
+2. In `plan` mode (or when `EnterPlanMode` / `ExitPlanMode` is used), Orin writes
+   a plan under `.orin/plans/` and presents a `PlanApprovalCard` before mutating
+   project files or running commands.
+3. Automated tests and `VerifyProject` checks are expected for implementation
+   work. When browser verification is needed, the agent uses the **Playwright MCP**
+   server (`@playwright/mcp`, managed in *Configurações → Navegador*).
+4. A genuine decision or a permission prompt produces an explicit interactive
+   card (`UserQuestionCard`, `ToolPermissionCard`, `McpApprovalCard`,
+   `PluginApprovalCard`).
+5. Completion is shown alongside the turn's work duration (`Trabalhou por...`)
+   and token/USD cost estimates in the overview panel; caveats remain visible
+   instead of being silently treated as success.
 
-## Autonomy and side effects
+## Permissions and autonomy
 
-- `approval_required` is the default.
-- `code_autonomy` and `full_autonomy` are global user preferences, not project
-  settings. They can be changed in Runtime settings.
-- Commits are allowed by the workflow. Pushes and pull requests require an
-  explicit user request unless full autonomy was selected. Production deploys
-  always require confirmation.
+- Six canonical permission modes are supported: `default`, `acceptEdits`,
+  `plan`, `auto` (local classifier with circuit breaker), `dontAsk`, and
+  `bypassPermissions` (legacy aliases `ask_permissions`, `accept_edits`,
+  `plan_mode`, and `full_autonomy` map to these).
+- `Shift+Tab` in the composer cycles through `default → acceptEdits → plan`
+  (plus `auto` when configured, and `bypassPermissions` when allowed by settings).
+- Multi-layer rules (`deny → ask → allow`) across `managed`, `cli`, `local`,
+  `project`, and `user` settings govern tool execution, backed by a `tree-sitter`
+  AST parser for `Bash` and `PowerShell` commands and **Workspace Trust** for
+  repository-provided hooks and MCP servers.
 
 ## Notifications and monitoring
 
-- Long work is monitored in the background when enabled.
-- Desktop notifications are opt-in and only announce completion, a block, or a
-  required decision. The activity timeline remains the source of detail.
+- Multiple sessions (Chat and Code) and background subagents/commands can run
+  concurrently, with live status indicators in the sidebar (`running`,
+  `waiting_user`, `failed`).
+- Desktop/web notifications (`PushNotification` and the `Notification` hook) are
+  opt-in and announce completion, idle attention, or a required permission/decision.
 - Notification delivery failure must never change task state.
 
 ## Activity in chat
@@ -38,5 +49,7 @@
   live clock; once settled, it is one sentence summarising the batch ("Explorou
   3 arquivos, executou 4 comandos"). Expanding it lists every individual call
   as a verb and target, with failures marked, so no call or failure is lost.
-- Approval requests and browser captures remain independent cards because they
-  have an action or visual evidence the person needs to reach directly.
+- Parallel subagents fold into separate per-agent `SubagentTaskContainer` blocks
+  keyed by `agentId`, never shattering when events interleave.
+- Approval requests, plan reviews, user questions, and code-session proposals
+  remain independent interactive cards so the person can act on them directly.

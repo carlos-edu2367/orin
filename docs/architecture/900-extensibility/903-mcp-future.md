@@ -1,6 +1,6 @@
 # RFC 903 — MCP: posição futura e critérios de adoção
 
-**Estado:** Parcialmente adotada — v1 expõe somente tools; ver [docs/MCP.md](../../MCP.md) e "Estado da implementação" abaixo  
+**Estado:** Adotada pragmaticamente — suporta tools (lazy-loaded), resources, prompts, elicitation, OAuth e 4 transportes (`stdio`, `http`, `sse`, `ws`); ver [docs/MCP.md](../../MCP.md) e "Estado da implementação" abaixo  
 **Idioma:** PT-BR  
 **Relações:** [RFC 000 — Visão geral](../000-overview.md), [RFC 050 — Princípios de design](../050-design-principles.md), [RFC 060 — Glossário e convenções](../060-glossary-and-conventions.md), [RFC 102 — Ciclo de vida da Execution](../100-kernel/102-execution-lifecycle.md), [RFC 103 — Sistema de eventos](../100-kernel/103-event-system.md), [RFC 104 — Pipeline de contexto](../100-kernel/104-context-pipeline.md), [RFC 401 — Tool Runtime](../400-tools-resources/401-tool-runtime.md), [RFC 402 — Resource Manager](../400-tools-resources/402-resource-manager.md), [RFC 501 — Provider API](../500-providers-models/501-provider-api.md), [RFC 602 — Artifact Storage](../600-platform-data/602-artifact-storage.md), [RFC 702 — Segurança](../700-api-security/702-security.md), [RFC 803 — Observabilidade](../800-operations/803-observability.md), [RFC 901 — Plugin SDK](901-plugin-sdk.md)
 
@@ -61,7 +61,7 @@ e o que permanece adiado.
 - quarentena automática por violação repetida de schema;
 - reconciliação de efeito `UNKNOWN` após cancelamento de uma chamada de tool
   em andamento;
-- resources e prompts do MCP — exigem uma porta local proprietária própria
+- (implementado em v0.9.x: resources, prompts, elicitation, lazy loading via `ToolSearch` e 4 transportes `stdio`/`http`/`sse`/`ws`; ver [docs/MCP.md](../../MCP.md)) — antes exigiam uma porta local proprietária própria
   (ver "Mapeamento para contratos atuais" abaixo) que ainda não existe;
 - IP pinning na sessão HTTP — o guard de SSRF revalida a cada chamada, mas
   ainda há uma corrida estreita contra a resolução DNS interna do `httpx`
