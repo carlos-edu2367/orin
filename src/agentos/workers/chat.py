@@ -23,6 +23,7 @@ from agentos.agentic.provider_stream import HTTPProviderStreamTransport
 from agentos.agentic.provider_key_fallback import MultiKeyProviderStreamTransport
 from agentos.persistence.postgres.provider_api_keys import PostgresProviderApiKeyAdapter
 from agentos.provider_catalog.models import PROVIDERS_WITH_BASE_URL
+from agentos.provider_catalog.nvidia import DEFAULT_NVIDIA_BASE_URL, normalize_nvidia_base_url
 from agentos.provider_catalog.ollama import DEFAULT_OLLAMA_BASE_URL, normalize_ollama_base_url
 from agentos.provider_catalog.omniroute import DEFAULT_OMNIROUTE_BASE_URL, normalize_omniroute_base_url
 from agentos.provider_catalog.opencode import OPENCODE_CLOUD_BASE_URL, normalize_opencode_base_url
@@ -118,6 +119,7 @@ PROVIDER_BASE_URLS = {
     "openrouter": "https://openrouter.ai/api/v1",
     "opencode": "https://opencode.ai/zen/v1",
     "openai": "https://api.openai.com/v1",
+    "nvidia": DEFAULT_NVIDIA_BASE_URL,
     "omniroute": DEFAULT_OMNIROUTE_BASE_URL,
     "ollama": DEFAULT_OLLAMA_BASE_URL,
 }
@@ -1063,32 +1065,65 @@ class ChatWorker:
             return normalize_ollama_base_url(configured or DEFAULT_OLLAMA_BASE_URL)
         if provider == "opencode":
             return normalize_opencode_base_url(configured or OPENCODE_CLOUD_BASE_URL)
+        if provider == "nvidia":
+            return normalize_nvidia_base_url(configured or DEFAULT_NVIDIA_BASE_URL)
         return PROVIDER_BASE_URLS.get(provider, PROVIDER_BASE_URLS["openrouter"])
 
-    def _transport_for(self, user_id: str, provider: str, model_id: str, num_ctx: int | None = None) -> HTTPProviderStreamTransport:
-        """Build a transport for any (user, provider, model), not just the turn's own.
-
-        This is the credential-handling seam a visual-reading model on a
-        *different* provider (``_vision_reader_factory``) and a subagent's
-        favorite-model override (``child_provider_factory``) go through, so a
-        provider's credential is only ever looked up under its own name. It
-        always uses the principal key (no fallback rotation): unlike the
-        turn's own provider (``_provider_transport``), these calls are
-        secondary reads a turn can already recover from without a key-swap.
-        """
+    def _transport_for(
+        self,
+        user_id: str | Mapping[str, object],
+        provider: str,
+        model_id: str = "",
+        num_ctx: int | None = None,
+    ) -> object:
+        """Build a multi-key rotating transport for any (user, provider, model), including vision and subagents."""
+        if isinstance(user_id, Mapping):
+            resolved_model_id = str(model_id or user_id.get("model_id") or "")
+            resolved_user_id = str(user_id["user_id"])
+        else:
+            resolved_user_id = str(user_id)
+            resolved_model_id = str(model_id or "")
         with self.store._engine.connect() as c:
-            credential = c.execute(select(provider_configurations.c.base_url, provider_configurations.c.enabled).where(provider_configurations.c.user_id == user_id, provider_configurations.c.provider == provider)).mappings().first()
+            credential = c.execute(
+                select(
+                    provider_configurations.c.base_url,
+                    provider_configurations.c.enabled,
+                    provider_configurations.c.key_cooldown_seconds,
+                ).where(
+                    provider_configurations.c.user_id == resolved_user_id,
+                    provider_configurations.c.provider == provider,
+                )
+            ).mappings().first()
         if credential is None or not credential["enabled"]:
             raise ValueError("provider unavailable")
-        chosen = PostgresProviderApiKeyAdapter(self.store._engine, cipher=ProviderSecretCipher.from_environment(required=True)).next_available_key(user_id, provider)
-        if chosen is None:
+        base_url = self._base_url_for(provider, credential)
+        keys = PostgresProviderApiKeyAdapter(
+            self.store._engine,
+            cipher=ProviderSecretCipher.from_environment(required=True),
+        )
+
+        def build(api_key: str) -> HTTPProviderStreamTransport:
+            return HTTPProviderStreamTransport(
+                provider=provider,
+                base_url=base_url,
+                api_key=api_key,
+                model=resolved_model_id,
+                num_ctx=num_ctx,
+            )
+
+        if keys.next_available_key(resolved_user_id, provider) is None:
             if provider not in PROVIDERS_WITH_BASE_URL:
                 raise ValueError("provider credential is missing")
-            api_key = ""
-        else:
-            api_key = chosen.plaintext
-        base_url = self._base_url_for(provider, credential)
-        return HTTPProviderStreamTransport(provider=provider, base_url=base_url, api_key=api_key, model=model_id, num_ctx=num_ctx)
+            return build("")
+        return MultiKeyProviderStreamTransport(
+            key_pool=keys,
+            user_id=resolved_user_id,
+            provider=provider,
+            cooldown_seconds=int(credential.get("key_cooldown_seconds") or 60),
+            transport_factory=build,
+            model=resolved_model_id,
+            base_url=base_url,
+        )
 
     def _provider_transport(self, turn: dict[str, object]) -> object:
         provider = str(turn["provider"])

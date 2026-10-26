@@ -103,3 +103,75 @@ def test_opencode_provider_transport_uses_zen_base_url_and_rotates_keys_on_rejec
     ]
     assert [item.text for item in items] == ["ok from opencode"]
 
+
+def test_nvidia_provider_transport_uses_integrate_base_url_and_wraps_in_multi_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    from agentos.agentic.provider_stream import HTTPProviderStreamTransport, NormalizedStreamItem, StreamKind
+    from agentos.workers.chat import ChatWorker
+
+    engine = _engine_with_provider("nvidia", base_url=None, with_key=True)
+    seen: list[tuple[str, str, str]] = []
+
+    def fake_stream(self, request):
+        seen.append((self.base_url, self._api_key, self.model))
+        yield NormalizedStreamItem(StreamKind.TEXT, 1, text="ok from nvidia")
+
+    monkeypatch.setattr(HTTPProviderStreamTransport, "stream", fake_stream)
+    worker = ChatWorker.__new__(ChatWorker)
+    worker.store = type("S", (), {"_engine": engine})()
+
+    transport = worker._provider_transport(
+        {"provider": "nvidia", "user_id": "user-1", "model_id": "meta/llama-3.1-70b-instruct"}
+    )
+    items = list(transport.stream({}))
+
+    assert isinstance(transport, MultiKeyProviderStreamTransport)
+    assert seen == [("https://integrate.api.nvidia.com/v1", "sk-configured", "meta/llama-3.1-70b-instruct")]
+    assert [item.text for item in items] == ["ok from nvidia"]
+
+
+def test_transport_for_subagents_and_vision_returns_multi_key_and_rotates_on_rejection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agentos.agentic.provider_stream import HTTPProviderStreamTransport, NormalizedStreamItem, ProviderKeyRejected, StreamKind
+    from agentos.workers.chat import ChatWorker
+
+    engine = _engine_with_provider("nvidia", base_url=None, with_key=True)
+    cipher = ProviderSecretCipher(_TEST_ENCRYPTION_KEY)
+    now = datetime.now(UTC)
+    with engine.begin() as connection:
+        connection.execute(
+            insert(provider_api_keys).values(
+                user_id="user-1",
+                provider="nvidia",
+                label="paid-backup",
+                api_key_ciphertext=cipher.encrypt("nvapi-second-key"),
+                secret_ref="key-ref-2",
+                position=1,
+                status="active",
+                cooldown_until=None,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+
+    seen: list[tuple[str, str]] = []
+
+    def fake_stream(self, request):
+        seen.append((self.base_url, self._api_key))
+        if self._api_key == "sk-configured":
+            raise ProviderKeyRejected("out of credits", status_code=402, exhausted=True)
+        yield NormalizedStreamItem(StreamKind.TEXT, 1, text="ok from subagent")
+
+    monkeypatch.setattr(HTTPProviderStreamTransport, "stream", fake_stream)
+    worker = ChatWorker.__new__(ChatWorker)
+    worker.store = type("S", (), {"_engine": engine})()
+
+    transport = worker._transport_for({"user_id": "user-1"}, "nvidia")
+    items = list(transport.stream({}))
+
+    assert isinstance(transport, MultiKeyProviderStreamTransport)
+    assert seen == [
+        ("https://integrate.api.nvidia.com/v1", "sk-configured"),
+        ("https://integrate.api.nvidia.com/v1", "nvapi-second-key"),
+    ]
+    assert [item.text for item in items] == ["ok from subagent"]

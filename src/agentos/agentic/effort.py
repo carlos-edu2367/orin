@@ -12,6 +12,7 @@ THINKING_HEADROOM = 4_000
 # Anthropic rejects a thinking budget below this, so a cap that cannot hold it gets no thinking at all.
 ANTHROPIC_MIN_THINKING_BUDGET = 1_024
 OPENAI_EFFORT = {"low": "low", "medium": "medium", "high": "high", "xhigh": "high", "max": "high"}
+_OPENAI_STYLE_PROVIDERS = frozenset({"openai", "omniroute", "opencode", "nvidia"})
 _ANTHROPIC_THINKING_MODEL = re.compile(r"claude-(?:(?:opus|sonnet|haiku)-[4-9]|[4-9]|3-7)")
 _OPENAI_REASONING_MODEL = re.compile(r"^(?:o[1-9]|gpt-[5-9])")
 
@@ -28,7 +29,7 @@ def reasoning_supported(provider: str, model_id: str, capabilities: Iterable[str
     names = {str(item).strip().lower() for item in capabilities or ()}
     model = str(model_id or "").strip().lower().lstrip("~").rsplit("/", 1)[-1]
     name = str(provider or "").lower()
-    if name in {"openrouter", "omniroute"}:
+    if name in {"openrouter", "omniroute", "nvidia"}:
         return "reasoning" in names
     if name == "opencode":
         return "reasoning" in names or bool(_OPENAI_REASONING_MODEL.match(model))
@@ -67,9 +68,9 @@ def apply_effort(
         payload["max_tokens"] = max(current if isinstance(current, int) and not isinstance(current, bool) else 0, budget + THINKING_HEADROOM)
     elif name == "openrouter":
         payload["reasoning"] = {"effort": OPENAI_EFFORT[level]}
-    elif name in {"openai", "omniroute", "opencode"}:
+    elif name in _OPENAI_STYLE_PROVIDERS:
         payload["reasoning_effort"] = OPENAI_EFFORT[level]
     return payload
 
 
-__all__ = ["EFFORT_LEVELS", "OPENAI_EFFORT", "THINKING_BUDGET", "apply_effort", "normalize_effort", "reasoning_supported"]
+__all__ = ["EFFORT_LEVELS", "OPENAI_EFFORT", "THINKING_BUDGET", "_OPENAI_STYLE_PROVIDERS", "apply_effort", "normalize_effort", "reasoning_supported"]
