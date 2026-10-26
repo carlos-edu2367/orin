@@ -709,7 +709,25 @@ def _process_is_running(pid: int) -> bool:
         return True
     except OSError:
         return False
-    return True
+    return not _is_zombie(pid)
+
+
+def _is_zombie(pid: int) -> bool:
+    """Whether ``pid`` has exited but still waits for its parent to reap it.
+
+    A command killed together with its shell is reparented to PID 1, and
+    not every PID 1 reaps promptly (container supervisors often don't), so
+    ``kill(pid, 0)`` keeps reporting the dead process as alive. Linux exposes
+    the state in ``/proc``; elsewhere the check is skipped.
+    """
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    # The command name is parenthesised and may itself contain spaces or
+    # parentheses, so the state is the first field after the last ")".
+    fields = stat.rpartition(")")[2].split()
+    return bool(fields) and fields[0] in {"Z", "X"}
 
 
 def _append_reminder(outcome: ToolOutcome, items: list[str], limit: int) -> None:

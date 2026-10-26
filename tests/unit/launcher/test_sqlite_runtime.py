@@ -38,7 +38,11 @@ def test_local_runtime_creates_and_migrates_its_own_sqlite_database(tmp_path: Pa
         engine.dispose()
 
 
-def test_frozen_layout_finds_assets_under_pyinstaller_internal_directory(tmp_path: Path) -> None:
+def test_frozen_layout_finds_assets_under_pyinstaller_internal_directory(tmp_path: Path, monkeypatch) -> None:
+    # An exported PLAYWRIGHT_BROWSERS_PATH deliberately wins over the bundled
+    # one, so a machine that sets it (CI images, dev containers) must not leak
+    # it into an assertion about the bundled default.
+    monkeypatch.delenv("PLAYWRIGHT_BROWSERS_PATH", raising=False)
     root = tmp_path / "runtime"
     internal = root / "_internal"
     (internal / "web").mkdir(parents=True)
