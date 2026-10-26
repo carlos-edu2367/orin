@@ -12,6 +12,7 @@ needing to know why.
 """
 from __future__ import annotations
 
+import math
 from typing import Any, Callable, Iterator, Mapping, Protocol
 
 from .provider_stream import (
@@ -51,6 +52,22 @@ class MultiKeyProviderStreamTransport:
         self.model = model
         self.base_url = base_url
 
+    def _resolve_cooldown(self, retry_after_seconds: object) -> int:
+        default_cooldown = max(1, min(int(self._cooldown_seconds), 3600))
+        if retry_after_seconds is None or isinstance(retry_after_seconds, bool):
+            return default_cooldown
+        try:
+            parsed = float(str(retry_after_seconds).strip())
+        except (TypeError, ValueError):
+            return default_cooldown
+        if math.isnan(parsed):
+            return default_cooldown
+        if parsed == float("inf"):
+            return 3600
+        if parsed == float("-inf") or parsed <= 0:
+            return 1
+        return max(1, min(int(math.ceil(parsed)), 3600))
+
     def stream(self, request: Mapping[str, object]) -> Iterator[NormalizedStreamItem]:
         tried: set[int] = set()
         credential = self._key_pool.next_available_key(self._user_id, self._provider, exclude=frozenset(tried))
@@ -83,11 +100,7 @@ class MultiKeyProviderStreamTransport:
                 if rejected.exhausted and hasattr(self._key_pool, "mark_exhausted"):
                     self._key_pool.mark_exhausted(credential.id)
                 else:
-                    cooldown = (
-                        max(1, min(int(rejected.retry_after_seconds), 3600))
-                        if rejected.retry_after_seconds is not None
-                        else self._cooldown_seconds
-                    )
+                    cooldown = self._resolve_cooldown(rejected.retry_after_seconds)
                     self._key_pool.mark_cooldown(credential.id, cooldown)
                 next_credential = self._key_pool.next_available_key(self._user_id, self._provider, exclude=frozenset(tried))
                 if next_credential is None:

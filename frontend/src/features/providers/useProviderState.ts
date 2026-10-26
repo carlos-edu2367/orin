@@ -68,9 +68,14 @@ export function useProviderState(client: ApiClient = createBrowserApiClient(), p
   const [enabled, setEnabled] = useState(true)
   const [ollamaMode, setOllamaMode] = useState<'local' | 'cloud'>('local')
   const [opencodeMode, setOpencodeMode] = useState<'local' | 'cloud'>('local')
-  const [nvidiaMode, setNvidiaMode] = useState<'cloud' | 'self-hosted'>('cloud')
+  const [nvidiaMode, setNvidiaModeState] = useState<'cloud' | 'self-hosted'>('cloud')
   const [nvidiaTestResult, setNvidiaTestResult] = useState<NvidiaTestResult | null>(null)
   const [connection, setConnection] = useState<{ connected: boolean; models: number | null } | null>(null)
+  const setNvidiaMode = (value: 'cloud' | 'self-hosted') => {
+    setNvidiaModeState(value)
+    setNvidiaTestResult(null)
+    setConnection(null)
+  }
   const [installed, setInstalled] = useState(false)
   const [models, setModels] = useState<ProviderModel[]>([])
   const [catalogLoading, setCatalogLoading] = useState(false)

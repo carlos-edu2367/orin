@@ -28,6 +28,10 @@ def normalize_nvidia_base_url(value: str) -> str:
     if (hostname == "nvidia.com" or hostname.endswith(".nvidia.com")) and parsed.scheme != "https":
         raise ValueError("nvidia cloud base_url must use https")
     path = parsed.path.rstrip("/")
+    for suffix in ("/chat/completions", "/models"):
+        if path.lower().endswith(suffix):
+            path = path[: -len(suffix)].rstrip("/")
+            break
     if not path:
         path = "/v1"
     return urlunparse((parsed.scheme, parsed.netloc, path, "", "", ""))

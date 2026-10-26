@@ -170,6 +170,9 @@ describe('ProviderDetail', () => {
     expect(await within(region).findByText('Sem saldo / Esgotada')).toBeInTheDocument()
     await user.click(within(region).getByRole('button', { name: 'Reativar' }))
     expect(await within(region).findByText('Ativa')).toBeInTheDocument()
+
+    await user.click(within(region).getByRole('radio', { name: 'Self-Hosted NIM' }))
+    expect(within(region).queryByText(/24 modelos disponíveis/)).toBeNull()
   })
 })
 

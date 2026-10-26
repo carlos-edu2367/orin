@@ -217,3 +217,90 @@ def test_pricing_matches_nvidia_prefixed_models() -> None:
 def test_resolver_catalog_includes_nvidia() -> None:
     listing = inspect.getsource(resolver_catalog.PostgresProviderModelCatalog.list_models)
     assert '"nvidia"' in listing
+
+
+def test_normalize_nvidia_base_url_strips_accidental_endpoint_suffixes() -> None:
+    assert (
+        normalize_nvidia_base_url("https://integrate.api.nvidia.com/v1/models")
+        == "https://integrate.api.nvidia.com/v1"
+    )
+    assert (
+        normalize_nvidia_base_url("https://integrate.api.nvidia.com/v1/chat/completions/")
+        == "https://integrate.api.nvidia.com/v1"
+    )
+    assert (
+        normalize_nvidia_base_url("http://localhost:8000/models")
+        == "http://localhost:8000/v1"
+    )
+
+
+def test_nvidia_empty_api_key_preserves_pool_keys_and_all_exhausted_tier3_refresh_sanitizes_errors(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from sqlalchemy import create_engine
+    from agentos.persistence.postgres.provider_api_keys import PostgresProviderApiKeyAdapter
+    from agentos.persistence.postgres.provider_configuration import PostgresProviderConfigurationAdapter
+    from agentos.persistence.postgres.provider_models import PostgresProviderCatalogRepository
+    from agentos.persistence.postgres.schema import (
+        metadata,
+        provider_api_keys,
+        provider_configurations,
+        provider_model_favorites,
+        provider_models,
+    )
+    from agentos.persistence.provider_secrets import ProviderSecretCipher
+    from agentos.provider_catalog.service import ProviderCatalogUnavailable
+
+    engine = create_engine("sqlite://")
+    metadata.create_all(
+        engine,
+        tables=[provider_configurations, provider_api_keys, provider_models, provider_model_favorites],
+    )
+    cipher = ProviderSecretCipher(b"0" * 32)
+    keys = PostgresProviderApiKeyAdapter(engine, cipher=cipher)
+    config = PostgresProviderConfigurationAdapter(engine, cipher=cipher, key_pool=keys)
+
+    k1 = keys.add_key({"user_id": "u1", "provider": "nvidia", "api_key": "nvapi-secret-tier3-a", "label": "Trial A"})
+    k2 = keys.add_key({"user_id": "u1", "provider": "nvidia", "api_key": "nvapi-secret-tier3-b", "label": "Trial B"})
+    keys.mark_exhausted(k1["id"])
+    keys.mark_exhausted(k2["id"])
+
+    saved = config.configure(
+        {
+            "user_id": "u1",
+            "provider": "nvidia",
+            "enabled": True,
+            "api_key": "",
+            "base_url": "https://integrate.api.nvidia.com/v1",
+        }
+    )
+    assert saved["has_secret"] is True
+    pool_after_save = keys.list_keys({"user_id": "u1", "provider": "nvidia"})
+    assert [row["id"] for row in pool_after_save] == [k1["id"], k2["id"]]
+
+    seen_auth: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        auth = request.headers.get("authorization", "")
+        seen_auth.append(auth)
+        return httpx.Response(
+            402,
+            json={"error": {"message": f"Out of credits for {auth}"}},
+            request=request,
+        )
+
+    client = NvidiaModelCatalogClient(transport=httpx.MockTransport(handler))
+    repo = PostgresProviderCatalogRepository(engine, cipher=cipher, keys=keys)
+    service = ProviderModelCatalogService(repo, {}, nvidia_client=client)
+    ctx = ProviderCatalogContext(user_id="u1", purpose="provider.catalog.refresh")
+
+    with pytest.raises(ProviderCatalogUnavailable) as exc_info:
+        service.refresh(ctx, "nvidia")
+
+    assert seen_auth == ["Bearer nvapi-secret-tier3-a", "Bearer nvapi-secret-tier3-b"]
+    assert "nvapi-secret-tier3-a" not in str(exc_info.value)
+    assert "nvapi-secret-tier3-b" not in str(exc_info.value)
+    assert "nvapi-secret-tier3-a" not in repr(exc_info.value.__cause__)
+    assert "nvapi-secret-tier3-b" not in repr(exc_info.value.__cause__)
+    assert "nvapi-secret-tier3-a" not in caplog.text
+    assert "nvapi-secret-tier3-b" not in caplog.text

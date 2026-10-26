@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from enum import StrEnum
 import json
+import re
 from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable, Iterator, Mapping
 
@@ -91,6 +92,13 @@ def _has_auth_marker(text: str) -> bool:
     return any(marker in lowered for marker in _AUTH_MARKERS)
 
 
+_SECRET_TOKEN_RE = re.compile(r"(?:nvapi-[A-Za-z0-9_-]+|sk-[A-Za-z0-9_-]+|Bearer\s+\S+)", re.IGNORECASE)
+
+
+def _redact_secrets(text: str) -> str:
+    return _SECRET_TOKEN_RE.sub("[REDACTED]", text or "")
+
+
 class ProviderKeyRejected(RuntimeError):
     """Raised when the provider rejects the API key before any stream output is produced."""
 
@@ -102,7 +110,7 @@ class ProviderKeyRejected(RuntimeError):
         exhausted: bool = False,
         retry_after_seconds: int | float | None = None,
     ) -> None:
-        super().__init__(message)
+        super().__init__(_redact_secrets(str(message or "")))
         self.status_code = status_code
         self.exhausted = exhausted
         self.retry_after_seconds = retry_after_seconds
@@ -140,6 +148,14 @@ def _classify_http_rejection(response: httpx.Response) -> ProviderKeyRejected | 
                 exhausted=True,
             )
         raw_retry = parse_retry_after(response.headers)
+        if raw_retry is None:
+            raw_header = str(response.headers.get("retry-after") or "").strip()
+            try:
+                parsed_num = float(raw_header)
+                if parsed_num < 0:
+                    raw_retry = 1.0
+            except ValueError:
+                pass
         retry_after = max(1, min(int(raw_retry), 3600)) if raw_retry is not None else None
         return ProviderKeyRejected(
             "HTTP 429: rate limited",

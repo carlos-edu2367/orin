@@ -416,3 +416,169 @@ def test_nvidia_ecosystem_effort_http_adapter_cli_and_production_settings() -> N
     assert "NVIDIA_API_KEY" in ProductionSettings.model_fields
     assert "NVIDIA_ENABLED" in ProductionSettings.model_fields
     assert "NVIDIA_MODEL" in ProductionSettings.model_fields
+
+
+def test_malformed_retry_after_headers_and_values_do_not_crash_and_clamp_to_1_3600() -> None:
+    headers_and_expected = [
+        ("abc", None, 60),
+        ("-99", 1, 1),
+        ("99999999", 3600, 3600),
+        ("", None, 60),
+    ]
+    for raw_header, expected_parsed, _ in headers_and_expected:
+        transport = HTTPProviderStreamTransport(
+            provider="nvidia",
+            base_url="https://integrate.api.nvidia.com/v1",
+            api_key="nvapi-test",
+            model="meta/llama-3.1-70b-instruct",
+            client=httpx.Client(
+                transport=httpx.MockTransport(
+                    lambda req, h=raw_header: httpx.Response(
+                        429,
+                        headers={"Retry-After": h},
+                        json={"error": {"message": "Rate limit reached"}},
+                        request=req,
+                    )
+                )
+            ),
+        )
+        with pytest.raises(ProviderKeyRejected) as exc_info:
+            list(transport.stream({"messages": [{"role": "user", "content": "hi"}], "tools": []}))
+        assert exc_info.value.retry_after_seconds == expected_parsed
+
+    keys = [ProviderApiKeyCredential(id=i, plaintext=f"nvapi-{i}") for i in range(1, 6)]
+    pool = _FakeKeyPool(keys)
+    raw_values = ["abc", "-99", "99999999", ""]
+
+    def factory(plaintext: str):
+        idx = int(plaintext.split("-")[1]) - 1
+        if idx < len(raw_values):
+            return _FakeTransport(
+                items=[],
+                error=ProviderKeyRejected(
+                    "rate limited",
+                    status_code=429,
+                    exhausted=False,
+                    retry_after_seconds=raw_values[idx],  # type: ignore[arg-type]
+                ),
+                fail_after=0,
+            )
+        return _FakeTransport(items=[_text("ok")])
+
+    multi = MultiKeyProviderStreamTransport(
+        key_pool=pool,
+        user_id="u",
+        provider="nvidia",
+        cooldown_seconds=60,
+        transport_factory=factory,
+    )
+    items = list(multi.stream({}))
+    assert items == [_text("ok")]
+    assert pool.cooldowns == [(1, 60), (2, 1), (3, 3600), (4, 60)]
+    for _, secs in pool.cooldowns:
+        assert 1 <= secs <= 3600
+
+
+def test_mid_stream_402_exhausted_failure_after_first_content_token_does_not_rotate_or_duplicate_output() -> None:
+    first = ProviderApiKeyCredential(id=1, plaintext="nvapi-key-1")
+    second = ProviderApiKeyCredential(id=2, plaintext="nvapi-key-2")
+    pool = _FakeKeyPool([first, second])
+    built: list[str] = []
+
+    def factory(plaintext: str):
+        built.append(plaintext)
+        if plaintext == "nvapi-key-1":
+            return _FakeTransport(
+                items=[_text("partial-1"), _text("partial-2")],
+                error=ProviderKeyRejected("HTTP 402: out of credits", status_code=402, exhausted=True),
+                fail_after=1,
+            )
+        return _FakeTransport(items=[_text("from-second-key")])
+
+    transport = MultiKeyProviderStreamTransport(
+        key_pool=pool,
+        user_id="u",
+        provider="nvidia",
+        cooldown_seconds=60,
+        transport_factory=factory,
+    )
+
+    emitted: list[NormalizedStreamItem] = []
+    with pytest.raises(ProviderKeyRejected) as exc_info:
+        for item in transport.stream({}):
+            emitted.append(item)
+
+    assert exc_info.value.status_code == 402
+    assert exc_info.value.exhausted is True
+    assert emitted == [_text("partial-1")]
+    assert built == ["nvapi-key-1"]
+    assert pool.exhausted == []
+    assert pool.cooldowns == []
+
+
+def test_all_keys_exhausted_falls_back_to_tier_3_and_surfaces_sanitized_error_without_leaking_nvapi_plaintext(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from sqlalchemy import create_engine
+    from agentos.persistence.postgres.provider_api_keys import PostgresProviderApiKeyAdapter
+    from agentos.persistence.postgres.schema import metadata, provider_api_keys
+    from agentos.persistence.provider_secrets import ProviderSecretCipher
+
+    engine = create_engine("sqlite://")
+    metadata.create_all(engine, tables=[provider_api_keys])
+    adapter = PostgresProviderApiKeyAdapter(engine, cipher=ProviderSecretCipher(b"0" * 32))
+
+    k1 = adapter.add_key({"user_id": "u1", "provider": "nvidia", "api_key": "nvapi-secret-leak-key-1", "label": "K1"})
+    k2 = adapter.add_key({"user_id": "u1", "provider": "nvidia", "api_key": "nvapi-secret-leak-key-2", "label": "K2"})
+    adapter.mark_exhausted(k1["id"])
+    adapter.mark_exhausted(k2["id"])
+
+    tried_keys: list[str] = []
+
+    def factory(plaintext: str):
+        tried_keys.append(plaintext)
+        if plaintext == "nvapi-secret-leak-key-1":
+            return HTTPProviderStreamTransport(
+                provider="nvidia",
+                base_url="https://integrate.api.nvidia.com/v1",
+                api_key=plaintext,
+                model="meta/llama-3.1-70b-instruct",
+                client=httpx.Client(
+                    transport=httpx.MockTransport(
+                        lambda req: httpx.Response(
+                            402,
+                            json={"error": {"message": f"Exhausted key {plaintext}"}},
+                            request=req,
+                        )
+                    )
+                ),
+            )
+        return _FakeTransport(
+            items=[
+                NormalizedStreamItem(
+                    StreamKind.ERROR,
+                    1,
+                    error_code="AUTHENTICATION",
+                    text=f"Authentication failed for key {plaintext}",
+                )
+            ]
+        )
+
+    transport = MultiKeyProviderStreamTransport(
+        key_pool=adapter,
+        user_id="u1",
+        provider="nvidia",
+        cooldown_seconds=60,
+        transport_factory=factory,
+    )
+
+    with pytest.raises(ProviderKeyRejected) as exc_info:
+        list(transport.stream({"messages": [{"role": "user", "content": "hi"}], "tools": []}))
+
+    assert tried_keys == ["nvapi-secret-leak-key-1", "nvapi-secret-leak-key-2"]
+    assert "nvapi-secret-leak-key-1" not in str(exc_info.value)
+    assert "nvapi-secret-leak-key-2" not in str(exc_info.value)
+    assert "nvapi-secret-leak-key-1" not in repr(exc_info.value)
+    assert "nvapi-secret-leak-key-2" not in repr(exc_info.value)
+    assert "nvapi-secret-leak-key-1" not in caplog.text
+    assert "nvapi-secret-leak-key-2" not in caplog.text
