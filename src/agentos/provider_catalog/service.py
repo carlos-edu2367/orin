@@ -6,6 +6,7 @@ from typing import Callable, Mapping, Sequence
 
 from .modalities import VALID_OUTPUT_MODALITIES, infer_output_modalities
 from .models import PROVIDERS_WITH_OPTIONAL_KEY, PricingSummary, ProviderCatalogContext, ProviderModelRecord, RefreshReceipt
+from .nvidia import DEFAULT_NVIDIA_BASE_URL, NvidiaModelCatalogClient, is_nvidia_cloud, normalize_nvidia_base_url
 from .ports import ProviderCatalogRepository, ProviderCatalogUpstream
 
 
@@ -17,12 +18,14 @@ class ProviderModelCatalogService:
     def __init__(
         self,
         repository: ProviderCatalogRepository,
-        upstreams: Mapping[str, ProviderCatalogUpstream],
+        upstreams: Mapping[str, ProviderCatalogUpstream] | None = None,
         *,
+        nvidia_client: NvidiaModelCatalogClient | None = None,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._repository = repository
-        self._upstreams = dict(upstreams)
+        self._upstreams = dict(upstreams or {})
+        self._nvidia_client = nvidia_client or NvidiaModelCatalogClient()
         self._now = now
 
     def refresh(self, context: ProviderCatalogContext, provider: str) -> RefreshReceipt:
@@ -33,16 +36,33 @@ class ProviderModelCatalogService:
         api_key = credential.get("api_key")
         if not isinstance(api_key, str) or (not api_key and normalized_provider not in PROVIDERS_WITH_OPTIONAL_KEY):
             raise ProviderCatalogUnavailable("provider credential is unavailable")
-        upstream = self._upstreams.get(normalized_provider)
-        if upstream is None:
-            raise ProviderCatalogUnavailable("provider catalog is not supported")
-        try:
-            raw_models = upstream.fetch(api_key, base_url=str(credential.get("base_url") or ""))
-        except Exception as error:
-            raise ProviderCatalogUnavailable("provider catalog refresh failed") from error
-        refreshed_at = self._now()
-        normalizer = _NORMALIZERS.get(normalized_provider, _normalize_openai)
-        records = [normalizer(model, refreshed_at) for model in raw_models]
+        if normalized_provider == "nvidia":
+            base_url = normalize_nvidia_base_url(str(credential.get("base_url") or DEFAULT_NVIDIA_BASE_URL))
+            if is_nvidia_cloud(base_url) and not api_key.strip():
+                raise ValueError("provider API key is required for NVIDIA NIM Cloud")
+            upstream = self._upstreams.get("nvidia")
+            try:
+                if upstream is not None and hasattr(upstream, "fetch_models"):
+                    raw_payload = upstream.fetch_models(api_key, base_url=base_url)  # type: ignore[attr-defined]
+                elif upstream is not None:
+                    raw_payload = {"data": upstream.fetch(api_key, base_url=base_url)}
+                else:
+                    raw_payload = self._nvidia_client.fetch_models(api_key, base_url=base_url)
+            except Exception as error:
+                raise ProviderCatalogUnavailable("provider catalog refresh failed") from error
+            refreshed_at = self._now()
+            records = self._normalize("nvidia", raw_payload, refreshed_at)
+        else:
+            upstream = self._upstreams.get(normalized_provider)
+            if upstream is None:
+                raise ProviderCatalogUnavailable("provider catalog is not supported")
+            try:
+                raw_models = upstream.fetch(api_key, base_url=str(credential.get("base_url") or ""))
+            except Exception as error:
+                raise ProviderCatalogUnavailable("provider catalog refresh failed") from error
+            refreshed_at = self._now()
+            normalizer = _NORMALIZERS.get(normalized_provider, _normalize_openai)
+            records = [normalizer(model, refreshed_at) for model in raw_models]
         # The repository stores one row per (user, provider, model_id); an upstream
         # catalog that lists the same id twice (OmniRoute is known to do this — see
         # tests/unit/provider_catalog/test_service.py) would otherwise violate that
@@ -53,6 +73,46 @@ class ProviderModelCatalogService:
         records = sorted(deduplicated.values(), key=lambda item: (item.display_name.casefold(), item.model_id))
         self._repository.replace(context, normalized_provider, records, refreshed_at)
         return RefreshReceipt(refreshed_at, len(records))
+
+    def _normalize(
+        self,
+        provider: str,
+        raw_payload: object,
+        refreshed_at: datetime | None = None,
+    ) -> list[ProviderModelRecord]:
+        ts = refreshed_at if refreshed_at is not None else getattr(self, "_now", lambda: datetime.now(UTC))()
+        normalized_provider = _provider(provider)
+        if normalized_provider == "nvidia":
+            return self._normalize_nvidia(raw_payload, ts)
+        normalizer = _NORMALIZERS.get(normalized_provider, _normalize_openai)
+        if isinstance(raw_payload, Mapping):
+            raw_data = raw_payload.get("data")
+            items = raw_data if isinstance(raw_data, list) else []
+        elif isinstance(raw_payload, list):
+            items = raw_payload
+        else:
+            items = []
+        return [normalizer(dict(item), ts) for item in items if isinstance(item, Mapping)]
+
+    def _normalize_nvidia(
+        self,
+        raw_payload: object,
+        refreshed_at: datetime | None = None,
+    ) -> list[ProviderModelRecord]:
+        ts = refreshed_at if refreshed_at is not None else getattr(self, "_now", lambda: datetime.now(UTC))()
+        if isinstance(raw_payload, Mapping):
+            raw_data = raw_payload.get("data")
+            items = raw_data if isinstance(raw_data, list) else []
+        elif isinstance(raw_payload, list):
+            items = raw_payload
+        else:
+            items = []
+        records: list[ProviderModelRecord] = []
+        for item in items:
+            if not isinstance(item, Mapping):
+                continue
+            records.append(_normalize_nvidia(dict(item), ts))
+        return records
 
     def list(self, context: ProviderCatalogContext, provider: str, favorites_only: bool = False) -> list[ProviderModelRecord]:
         return self._repository.list(context, _provider(provider), favorites_only)
@@ -102,7 +162,7 @@ class ProviderModelCatalogService:
 
 def _provider(value: str) -> str:
     normalized = value.strip().lower()
-    if normalized not in {"openai", "anthropic", "openrouter", "opencode", "omniroute", "ollama"}:
+    if normalized not in {"openai", "anthropic", "openrouter", "opencode", "omniroute", "ollama", "nvidia"}:
         raise ProviderCatalogUnavailable("unsupported provider")
     return normalized
 
@@ -242,6 +302,49 @@ def _normalize_ollama(raw: dict[str, object], refreshed_at: datetime) -> Provide
     )
 
 
+_NVIDIA_THINKING_MARKERS = ("deepseek-r1", "qwq", "thinking", "nemotron-ultra", "reasoning")
+_NVIDIA_VISION_MARKERS = ("vision", "vl", "vlm", "pixtral", "cosmos", "neva", "paligemma")
+
+
+def _normalize_nvidia(raw: dict[str, object], refreshed_at: datetime) -> ProviderModelRecord:
+    model_id = _text(raw.get("id"))
+    if model_id is None:
+        raise ProviderCatalogUnavailable("provider returned an invalid model")
+    display_name = _text(raw.get("name")) or model_id
+    context_window = raw.get("context_length") or raw.get("max_model_len") or raw.get("context_window")
+    if isinstance(context_window, bool) or not isinstance(context_window, int) or context_window < 1:
+        context_window = None
+    lower_id = model_id.lower()
+    raw_caps = {
+        str(val).strip().lower()
+        for val in (*_list(raw.get("supported_parameters")), *_list(raw.get("capabilities")))
+        if _text(val)
+    }
+    caps: set[str] = {"tools"} | raw_caps
+    if any(marker in lower_id for marker in _NVIDIA_THINKING_MARKERS):
+        caps.add("reasoning")
+    is_vision = any(marker in lower_id for marker in _NVIDIA_VISION_MARKERS) or "vision" in raw_caps
+    if is_vision:
+        caps.add("vision")
+    explicit_inputs = _modalities(raw.get("input_modalities"))
+    if explicit_inputs:
+        input_modalities = explicit_inputs if not is_vision or "image" in explicit_inputs else (*explicit_inputs, "image")
+    else:
+        input_modalities = ("text", "image") if is_vision else ("text",)
+    pricing = raw.get("pricing") if isinstance(raw.get("pricing"), dict) else {}
+    return ProviderModelRecord(
+        provider="nvidia",
+        model_id=model_id,
+        display_name=display_name,
+        context_window=context_window,
+        capabilities=tuple(sorted(caps)),
+        input_modalities=input_modalities,
+        output_modalities=infer_output_modalities(model_id, _modalities(raw.get("output_modalities"))),
+        pricing=_pricing(pricing),
+        refreshed_at=refreshed_at,
+    )
+
+
 def _list(value: object) -> list[object]:
     return value if isinstance(value, list) else []
 
@@ -291,4 +394,5 @@ _NORMALIZERS = {
     "openai": _normalize_openai,
     "omniroute": _normalize_omniroute,
     "ollama": _normalize_ollama,
+    "nvidia": _normalize_nvidia,
 }

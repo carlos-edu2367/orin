@@ -6,7 +6,7 @@ from typing import Mapping
 
 
 # Reference fallback rates (USD per 1M tokens: (input_per_million, output_per_million))
-# Used when direct providers (OpenAI, Anthropic, etc.) do not publish per-model pricing in /v1/models.
+# Used when direct providers (OpenAI, Anthropic, NVIDIA, etc.) do not publish per-model pricing in /v1/models.
 _FALLBACK_PRICING_PER_MILLION: tuple[tuple[str, tuple[float, float]], ...] = (
     ("claude-opus-4", (15.0, 75.0)),
     ("claude-3-opus", (15.0, 75.0)),
@@ -36,6 +36,21 @@ _FALLBACK_PRICING_PER_MILLION: tuple[tuple[str, tuple[float, float]], ...] = (
     ("deepseek-r1", (0.55, 2.19)),
     ("deepseek-chat", (0.27, 1.10)),
     ("deepseek-v3", (0.27, 1.10)),
+    ("llama-3.1-405b", (5.0, 16.0)),
+    ("llama-3.3-70b", (0.88, 0.88)),
+    ("llama-3.1-70b", (0.88, 0.88)),
+    ("llama-3.1-8b", (0.20, 0.20)),
+    ("nemotron", (0.88, 0.88)),
+    ("qwq-32b", (0.60, 0.60)),
+)
+
+_VENDOR_PREFIXES: tuple[str, ...] = (
+    "meta/",
+    "nvidia/",
+    "deepseek-ai/",
+    "mistralai/",
+    "google/",
+    "qwen/",
 )
 
 
@@ -49,6 +64,22 @@ def _parse_rate(value: object) -> float | None:
     if not math.isfinite(rate) or rate < 0:
         return None
     return rate
+
+
+def _match_pricing(model_id: str) -> tuple[float, float] | None:
+    norm_model = str(model_id or "").strip().lower().lstrip("~")
+    if not norm_model:
+        return None
+    stripped = norm_model
+    for vendor in _VENDOR_PREFIXES:
+        if stripped.startswith(vendor):
+            stripped = stripped[len(vendor) :]
+            break
+    slug = stripped.split("/", 1)[-1]
+    for prefix, rates in _FALLBACK_PRICING_PER_MILLION:
+        if stripped.startswith(prefix) or slug.startswith(prefix) or prefix in norm_model:
+            return rates
+    return None
 
 
 def resolve_rates_per_million(
@@ -74,12 +105,7 @@ def resolve_rates_per_million(
         if in_rate is not None and out_rate is not None:
             return (in_rate, out_rate)
 
-    norm_model = str(model_id or "").strip().lower().lstrip("~")
-    slug = norm_model.split("/", 1)[-1]
-    for prefix, rates in _FALLBACK_PRICING_PER_MILLION:
-        if slug.startswith(prefix) or prefix in norm_model:
-            return rates
-    return None
+    return _match_pricing(model_id)
 
 
 def estimate_cost_usd(
@@ -102,4 +128,4 @@ def estimate_cost_usd(
     return round(total, 6)
 
 
-__all__ = ["estimate_cost_usd", "resolve_rates_per_million"]
+__all__ = ["_match_pricing", "estimate_cost_usd", "resolve_rates_per_million"]
