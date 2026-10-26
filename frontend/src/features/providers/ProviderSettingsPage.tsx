@@ -2,7 +2,8 @@ import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { ApiClient, createBrowserApiClient, type MutationIntent } from '../../api/client'
 import { readBrowserSessionBootstrap, type BrowserSessionBootstrap } from '../../api/browserSession'
 import { ApiError, isAuthenticationError, isCsrfAuthorizationError } from '../../api/errors'
-import { configureProvider, inspectProvider, revokeProvider, refreshProviderModels, listProviderModels, setProviderModelFavorite, testOmniRouteConnection, testOllamaConnection, installOmniRoute, getOmniRouteInstallationStatus, getOmniRouteRuntime, setOmniRouteAutoStart, controlOmniRoute, PROVIDER_NAMES, type OmniRouteRuntime, type ProviderModel, type ProviderName, type ProviderPublicState } from '../../api/providers'
+import { configureProvider, inspectProvider, revokeProvider, refreshProviderModels, listProviderModels, setProviderModelFavorite, testNvidiaConnection, testOmniRouteConnection, testOllamaConnection, installOmniRoute, getOmniRouteInstallationStatus, getOmniRouteRuntime, setOmniRouteAutoStart, controlOmniRoute, PROVIDER_NAMES, type NvidiaTestResult, type OmniRouteRuntime, type ProviderModel, type ProviderName, type ProviderPublicState } from '../../api/providers'
+import { NvidiaSetup } from './NvidiaSetup'
 import { OMNIROUTE_FREE_PROVIDER_GUIDES } from './omnirouteFreeProviders'
 import { VisionModelSetting } from './VisionModelSetting'
 import { Brand } from '../../components/Brand'
@@ -53,19 +54,27 @@ type LoadState =
   | { status: 'loaded'; state: ProviderPublicState }
   | { status: 'unavailable'; error: ApiError }
 
-type ProviderAction = 'configure' | 'revoke' | 'refresh' | 'test' | 'install' | 'favorite' | null
+type ProviderAction = 'configure' | 'revoke' | 'refresh' | 'test' | 'install' | 'favorite' | 'custom-model' | null
 type ActionState = { pending: boolean; error: ApiError | null; kind: ProviderAction }
 
 function ProviderPanel({ provider, client, bootstrap }: { provider: ProviderName; client: ApiClient; bootstrap: BrowserSessionBootstrap }) {
   const [load, setLoad] = useState<LoadState>({ status: 'loading' })
   const [action, setAction] = useState<ActionState>({ pending: false, error: null, kind: null })
   const [apiKey, setApiKey] = useState('')
-  const [baseUrl, setBaseUrl] = useState(() => provider === 'ollama' ? 'http://localhost:11434' : 'http://localhost:20128/v1')
+  const [baseUrl, setBaseUrl] = useState(() =>
+    provider === 'ollama'
+      ? 'http://localhost:11434'
+      : provider === 'nvidia'
+        ? 'https://integrate.api.nvidia.com/v1'
+        : 'http://localhost:20128/v1',
+  )
   const [enabled, setEnabled] = useState(true)
   const [omniOpen, setOmniOpen] = useState(provider !== 'omniroute')
   // Ollama's mode is not stored: it is read back from the saved URL's host,
   // exactly as the backend derives it. One source, so the two cannot disagree.
   const [ollamaMode, setOllamaMode] = useState<'local' | 'cloud'>('local')
+  const [nvidiaMode, setNvidiaMode] = useState<'cloud' | 'self-hosted'>('cloud')
+  const [nvidiaTestResult, setNvidiaTestResult] = useState<NvidiaTestResult | null>(null)
   const [connection, setConnection] = useState<{ connected: boolean; models: number | null } | null>(null)
   const [installed, setInstalled] = useState(false)
   const [models, setModels] = useState<ProviderModel[]>([])
@@ -86,6 +95,14 @@ function ProviderPanel({ provider, client, bootstrap }: { provider: ProviderName
         if (provider === 'ollama' && typeof state.extra.base_url === 'string') {
           setBaseUrl(state.extra.base_url)
           setOllamaMode(/(^|\.)ollama\.com$/i.test(new URL(state.extra.base_url).hostname) ? 'cloud' : 'local')
+        }
+        if (provider === 'nvidia' && typeof state.extra.base_url === 'string') {
+          setBaseUrl(state.extra.base_url)
+          try {
+            setNvidiaMode(/(^|\.)nvidia\.com$/i.test(new URL(state.extra.base_url).hostname) ? 'cloud' : 'self-hosted')
+          } catch {
+            setNvidiaMode('self-hosted')
+          }
         }
       })
       .catch((error: unknown) => {
@@ -138,9 +155,13 @@ function ProviderPanel({ provider, client, bootstrap }: { provider: ProviderName
     return created
   }
 
-  // OmniRoute and a local Ollama are both reachable without a credential;
-  // Ollama Cloud narrows back to requiring one, same as every other provider.
-  const requiresApiKey = provider !== 'omniroute' && !(provider === 'ollama' && ollamaMode === 'local')
+  const canRevoke = load.status === 'loaded' && load.state.enabled === true
+  // OmniRoute, a local Ollama, and a self-hosted NVIDIA NIM are reachable without a credential;
+  // Cloud modes narrow back to requiring one (unless already configured), same as other providers.
+  const requiresApiKey =
+    provider !== 'omniroute' &&
+    !(provider === 'ollama' && ollamaMode === 'local') &&
+    !(provider === 'nvidia' && (nvidiaMode === 'self-hosted' || canRevoke))
 
   async function onSave(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -148,7 +169,16 @@ function ProviderPanel({ provider, client, bootstrap }: { provider: ProviderName
     setAction({ pending: true, error: null, kind: 'configure' })
     const intent = intentFor('configure')
     try {
-      const state = await configureProvider(client, provider, { apiKey, enabled, ...(provider === 'omniroute' || provider === 'ollama' ? { baseUrl } : {}) }, intent)
+      const state = await configureProvider(
+        client,
+        provider,
+        {
+          apiKey,
+          enabled,
+          ...(provider === 'omniroute' || provider === 'ollama' || provider === 'nvidia' ? { baseUrl } : {}),
+        },
+        intent,
+      )
       intents.current.delete('configure')
       setLoad({ status: 'loaded', state })
       setApiKey('')
@@ -158,7 +188,7 @@ function ProviderPanel({ provider, client, bootstrap }: { provider: ProviderName
       // setup. Fetching the catalog here is what actually finishes the flow.
       // A refresh failure is reported on the catalog, never as a failed save:
       // the credential is already stored at this point.
-      if ((provider === 'omniroute' || provider === 'ollama') && state.enabled === true) {
+      if ((provider === 'omniroute' || provider === 'ollama' || provider === 'nvidia') && state.enabled === true) {
         try {
           await refreshProviderModels(client, provider, intentFor('refresh'))
           intents.current.delete('refresh')
@@ -230,6 +260,22 @@ function ProviderPanel({ provider, client, bootstrap }: { provider: ProviderName
     }
   }
 
+  async function onTestNvidia() {
+    if (provider !== 'nvidia' || action.pending || bootstrap.status === 'missing_csrf') return
+    setAction({ pending: true, error: null, kind: 'test' })
+    try {
+      const result = await testNvidiaConnection(client, { apiKey, baseUrl }, intentFor('test'))
+      intents.current.delete('test')
+      setNvidiaTestResult(result)
+      setConnection({ connected: result.reachable && result.authenticated, models: result.model_count })
+      setAction({ pending: false, error: null, kind: null })
+    } catch (error) {
+      setNvidiaTestResult(null)
+      setConnection(null)
+      setAction({ pending: false, error: toApiError(error), kind: 'test' })
+    }
+  }
+
   async function onInstall() {
     if (provider !== 'omniroute' || action.pending || bootstrap.status === 'missing_csrf') return
     setAction({ pending: true, error: null, kind: 'install' })
@@ -256,9 +302,9 @@ function ProviderPanel({ provider, client, bootstrap }: { provider: ProviderName
     }
   }
 
-  const canRevoke = load.status === 'loaded' && load.state.enabled === true
   const isOmniRoute = provider === 'omniroute'
   const isOllama = provider === 'ollama'
+  const isNvidia = provider === 'nvidia'
 
   return (
     <article className="provider-panel" aria-labelledby={`provider-${provider}-title`}>
@@ -307,7 +353,26 @@ function ProviderPanel({ provider, client, bootstrap }: { provider: ProviderName
         onEnabledChange={setEnabled}
       />}
 
-      {!isOmniRoute && !isOllama && <form className="provider-panel__form" onSubmit={onSave}>
+      {isNvidia && <NvidiaSetup
+        mode={nvidiaMode}
+        enabled={enabled}
+        apiKey={apiKey}
+        baseUrl={baseUrl}
+        action={action}
+        canRevoke={canRevoke}
+        bootstrap={bootstrap}
+        connection={connection}
+        testResult={nvidiaTestResult}
+        onModeChange={(mode) => { setNvidiaMode(mode); setBaseUrl(mode === 'cloud' ? 'https://integrate.api.nvidia.com/v1' : 'http://localhost:8000/v1'); setNvidiaTestResult(null); setConnection(null); setModels([]); setCatalog({ loaded: false, error: null }) }}
+        onTest={onTestNvidia}
+        onSave={onSave}
+        onRevoke={onRevoke}
+        onApiKeyChange={setApiKey}
+        onBaseUrlChange={setBaseUrl}
+        onEnabledChange={setEnabled}
+      />}
+
+      {!isOmniRoute && !isOllama && !isNvidia && <form className="provider-panel__form" onSubmit={onSave}>
         <label htmlFor={`${provider}-api-key`}>Chave de API</label>
         <input
           id={`${provider}-api-key`}
@@ -348,7 +413,7 @@ function ProviderPanel({ provider, client, bootstrap }: { provider: ProviderName
       </form>}
       {isOmniRoute && omniOpen && <OmniRouteFreeSetup />}
       {canRevoke && <section className="provider-panel__catalog" aria-label={`Modelos de ${providerLabel(provider)}`}>
-        {(isOmniRoute || isOllama) && <button type="button" className="button button--secondary" disabled={action.pending || bootstrap.status === 'missing_csrf'} onClick={onRefresh}>
+        {(isOmniRoute || isOllama || isNvidia) && <button type="button" className="button button--secondary" disabled={action.pending || bootstrap.status === 'missing_csrf'} onClick={onRefresh}>
           {action.pending && action.kind === 'refresh' ? 'Atualizando…' : 'Atualizar catálogo'}
         </button>}
         <button type="button" className="button button--secondary" disabled={catalogLoading} onClick={loadModels}>
@@ -390,6 +455,8 @@ function providerLabel(provider: ProviderName): string {
       return 'Anthropic'
     case 'openrouter':
       return 'OpenRouter'
+    case 'nvidia':
+      return 'NVIDIA NIM'
     case 'opencode':
       return 'OpenCode'
     case 'omniroute':

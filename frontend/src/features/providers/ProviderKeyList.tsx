@@ -1,7 +1,13 @@
 import { useState } from 'react'
 import type { ProviderApiKeyState } from '../../api/providers'
 
-function KeyRow({ apiKey, index, isLast, pending, onRename, onRemove, onMoveUp, onMoveDown }: {
+function formatStatusLabel(apiKey: ProviderApiKeyState): string {
+  if (apiKey.status === 'exhausted') return 'Sem saldo / Esgotada'
+  if (apiKey.status === 'cooldown') return `Em cooldown até ${formatCooldown(apiKey.cooldownUntil)}`
+  return 'Ativa'
+}
+
+function KeyRow({ apiKey, index, isLast, pending, onRename, onRemove, onMoveUp, onMoveDown, onActivate }: {
   apiKey: ProviderApiKeyState
   index: number
   isLast: boolean
@@ -10,6 +16,7 @@ function KeyRow({ apiKey, index, isLast, pending, onRename, onRemove, onMoveUp, 
   onRemove: (keyId: number) => void
   onMoveUp: (keyId: number) => void
   onMoveDown: (keyId: number) => void
+  onActivate?: (keyId: number) => Promise<void> | void
 }) {
   // A draft kept separate from `apiKey.label` so typing a new label doesn't
   // fire a request (and self-disable via `pending`) on every keystroke; the
@@ -28,23 +35,26 @@ function KeyRow({ apiKey, index, isLast, pending, onRename, onRemove, onMoveUp, 
     if (next !== (apiKey.label ?? null)) onRename(apiKey.id, next)
   }
 
+  const canReactivate = apiKey.status === 'exhausted' || apiKey.status === 'cooldown'
+
   return <li>
-    <div className="provider-key-list__identity"><span className="provider-key-list__label">{apiKey.label ?? `Chave ${index + 1}`}</span>{index === 0 && <span className="provider-key-list__badge">Principal</span>}<span className="provider-key-list__status" role="status">{apiKey.status === 'cooldown' ? `Em cooldown até ${formatCooldown(apiKey.cooldownUntil)}` : 'Ativa'}</span></div>
-    <div className="provider-key-list__controls"><button type="button" className="icon-button" aria-label="Mover para cima" disabled={pending || index === 0} onClick={() => onMoveUp(apiKey.id)}>↑</button><button type="button" className="icon-button" aria-label="Mover para baixo" disabled={pending || isLast} onClick={() => onMoveDown(apiKey.id)}>↓</button><button type="button" className="button button--quiet provider-key-list__remove" aria-label="Remover chave" disabled={pending} onClick={() => onRemove(apiKey.id)}>Remover</button></div>
+    <div className="provider-key-list__identity"><span className="provider-key-list__label">{apiKey.label ?? `Chave ${index + 1}`}</span>{index === 0 && <span className="provider-key-list__badge">Principal</span>}<span className={`provider-key-list__status provider-key-list__status--${apiKey.status}`} role="status">{formatStatusLabel(apiKey)}</span></div>
+    <div className="provider-key-list__controls">{canReactivate && <button type="button" className="button button--secondary provider-key-list__activate" disabled={pending} onClick={() => void onActivate?.(apiKey.id)}>Reativar</button>}<button type="button" className="icon-button" aria-label="Mover para cima" disabled={pending || index === 0} onClick={() => onMoveUp(apiKey.id)}>↑</button><button type="button" className="icon-button" aria-label="Mover para baixo" disabled={pending || isLast} onClick={() => onMoveDown(apiKey.id)}>↓</button><button type="button" className="button button--quiet provider-key-list__remove" aria-label="Remover chave" disabled={pending} onClick={() => onRemove(apiKey.id)}>Remover</button></div>
     <label className="provider-key-list__rename">Apelido<input aria-label="Apelido" value={draft} onChange={(event) => setDraft(event.target.value)} onBlur={commit} disabled={pending} /></label>
   </li>
 }
 
-export function ProviderKeyList({ keys, pending, cooldownSeconds, onAdd, onRename, onRemove, onMoveUp, onMoveDown, onCooldownSecondsChange }: {
+export function ProviderKeyList({ keys, pending = false, cooldownSeconds = 60, onAdd, onRename, onRemove, onMoveUp, onMoveDown, onCooldownSecondsChange, onActivate }: {
   keys: ProviderApiKeyState[]
-  pending: boolean
-  cooldownSeconds: number
+  pending?: boolean
+  cooldownSeconds?: number
   onAdd: (apiKey: string, label?: string) => Promise<boolean>
   onRename: (keyId: number, label: string | null) => void
   onRemove: (keyId: number) => void
   onMoveUp: (keyId: number) => void
   onMoveDown: (keyId: number) => void
   onCooldownSecondsChange: (seconds: number) => void
+  onActivate?: (id: number) => Promise<void> | void
 }) {
   const [newKey, setNewKey] = useState('')
   const [newLabel, setNewLabel] = useState('')
@@ -75,12 +85,12 @@ export function ProviderKeyList({ keys, pending, cooldownSeconds, onAdd, onRenam
 
   return <section className="provider-key-list" aria-label="Chaves de API">
     <div className="provider-panel__section-heading"><div><p className="eyebrow">FALLBACK E ROTACIONAMENTO</p><h3>Chaves de API</h3></div><span>{keys.length === 0 ? 'Nenhuma adicionada' : `${keys.length} ${keys.length === 1 ? 'chave' : 'chaves'}`}</span></div>
-    <p className="provider-key-list__lede">Adicione chaves alternativas para manter o acesso disponível quando uma delas entrar em cooldown.</p>
+    <p className="provider-key-list__lede">Adicione chaves alternativas para manter o acesso disponível quando uma delas entrar em cooldown ou ficar sem saldo.</p>
     <div className="provider-key-list__notice" role="note"><span aria-hidden="true">↗</span><p><strong>Fallback automático</strong> Ao adicionar mais de uma chave API, o fallback automático será ativado.</p></div>
     <ul aria-label="Chaves configuradas">
       {keys.map((key, index) => <KeyRow
         key={key.id} apiKey={key} index={index} isLast={index === keys.length - 1} pending={pending}
-        onRename={onRename} onRemove={onRemove} onMoveUp={onMoveUp} onMoveDown={onMoveDown}
+        onRename={onRename} onRemove={onRemove} onMoveUp={onMoveUp} onMoveDown={onMoveDown} onActivate={onActivate}
       />)}
     </ul>
     <div className="provider-key-list__section provider-key-list__add">

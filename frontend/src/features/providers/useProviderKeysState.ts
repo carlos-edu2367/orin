@@ -3,13 +3,13 @@ import { ApiClient, type MutationIntent } from '../../api/client'
 import type { BrowserSessionBootstrap } from '../../api/browserSession'
 import { ApiError } from '../../api/errors'
 import {
-  addProviderKey, listProviderKeys, removeProviderKey, renameProviderKey, reorderProviderKeys,
+  activateProviderApiKey, addProviderKey, listProviderKeys, removeProviderKey, renameProviderKey, reorderProviderKeys,
   type ProviderApiKeyState, type ProviderName,
 } from '../../api/providers'
 import { toApiError } from './useProviderState'
 
 export type ProviderKeysLoadState = { status: 'loading' } | { status: 'loaded' } | { status: 'unavailable'; error: ApiError }
-export type ProviderKeysAction = 'add' | 'rename' | 'remove' | 'reorder' | null
+export type ProviderKeysAction = 'add' | 'rename' | 'remove' | 'reorder' | 'activate' | null
 export type ProviderKeysActionState = { pending: boolean; error: ApiError | null; kind: ProviderKeysAction }
 
 export type ProviderKeysState = {
@@ -20,6 +20,7 @@ export type ProviderKeysState = {
   add: (apiKey: string, label?: string) => Promise<boolean>
   rename: (keyId: number, label: string | null) => Promise<boolean>
   remove: (keyId: number) => Promise<void>
+  activate: (keyId: number) => Promise<void>
   moveUp: (keyId: number) => Promise<void>
   moveDown: (keyId: number) => Promise<void>
 }
@@ -106,6 +107,19 @@ export function useProviderKeysState(client: ApiClient, provider: ProviderName, 
     }
   }
 
+  async function activate(keyId: number) {
+    if (action.pending || bootstrap.status === 'missing_csrf') return
+    setAction({ pending: true, error: null, kind: 'activate' })
+    try {
+      const updated = await activateProviderApiKey(client, provider, keyId, intentFor(`activate:${keyId}`))
+      intents.current.delete(`activate:${keyId}`)
+      setKeys((current) => current.map((key) => key.id === updated.id ? updated : key))
+      setAction({ pending: false, error: null, kind: null })
+    } catch (error) {
+      setAction({ pending: false, error: toApiError(error), kind: 'activate' })
+    }
+  }
+
   async function move(keyId: number, direction: -1 | 1) {
     if (action.pending || bootstrap.status === 'missing_csrf') return
     const index = keys.findIndex((key) => key.id === keyId)
@@ -127,7 +141,7 @@ export function useProviderKeysState(client: ApiClient, provider: ProviderName, 
   return {
     load, keys, action,
     reload: () => reload(),
-    add, rename, remove,
+    add, rename, remove, activate,
     moveUp: (keyId: number) => move(keyId, -1),
     moveDown: (keyId: number) => move(keyId, 1),
   }
