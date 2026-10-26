@@ -2197,6 +2197,17 @@ def create_app(services: ApiServices) -> FastAPI:
         })
         return JSONResponse(status_code=204, content=None)
 
+    @app.post("/v1/providers/{provider}/keys/{key_id}:activate")
+    async def activate_provider_key(provider: str, key_id: int, request: Request) -> JSONResponse:
+        provider_name = _provider_name(provider)
+        principal = principal_for(request, mutable=True)
+        services.security.check_rate_limit(principal, action="provider.keys.activate", origin=request.headers.get("origin"))
+        services.security.authorize(principal, action="provider.keys.activate", resource_id=provider_name, purpose="provider.keys.activate")
+        result = _require_port(services.provider_api_keys).activate_key({
+            "provider": provider_name, "user_id": principal.user_id, "key_id": key_id,
+        })
+        return JSONResponse(_provider_key_public(result))
+
     @app.put("/v1/providers/{provider}/keys:reorder")
     async def reorder_provider_keys(provider: str, payload: ProviderApiKeyReorderRequest, request: Request) -> JSONResponse:
         provider_name = _provider_name(provider)
@@ -2259,6 +2270,19 @@ def create_app(services: ApiServices) -> FastAPI:
         result = await run_in_threadpool(
             _require_port(services.provider_configuration).test_connection,
             {"provider": "opencode", "user_id": principal.user_id, "purpose": payload.purpose,
+             "api_key": payload.api_key.get_secret_value() if payload.api_key is not None else "",
+             "base_url": payload.base_url},
+        )
+        return JSONResponse(_connection_test_public(result))
+
+    @app.post("/v1/providers/nvidia/test")
+    async def test_nvidia_connection(payload: ProviderSetupRequest, request: Request) -> JSONResponse:
+        principal = principal_for(request, mutable=True)
+        services.security.check_rate_limit(principal, action="provider.test", origin=request.headers.get("origin"))
+        services.security.authorize(principal, action="provider.test", resource_id="nvidia", purpose=payload.purpose)
+        result = await run_in_threadpool(
+            _require_port(services.provider_configuration).test_connection,
+            {"provider": "nvidia", "user_id": principal.user_id, "purpose": payload.purpose,
              "api_key": payload.api_key.get_secret_value() if payload.api_key is not None else "",
              "base_url": payload.base_url},
         )
@@ -2660,7 +2684,7 @@ def _is_loopback_client(host: str | None) -> bool:
 
 def _provider_name(value: str) -> str:
     normalized = value.strip().lower()
-    if normalized not in {"openai", "anthropic", "openrouter", "opencode", "omniroute", "ollama"}:
+    if normalized not in {"openai", "anthropic", "openrouter", "opencode", "omniroute", "ollama", "nvidia"}:
         raise ValueError("unsupported provider")
     return normalized
 
@@ -2708,7 +2732,17 @@ def _catalog_refresh_public(value: object) -> dict[str, object]:
 
 def _connection_test_public(value: object) -> dict[str, object]:
     data = _jsonable(value)
-    if not isinstance(data, dict) or data.get("connected") is not True:
+    if not isinstance(data, dict):
+        raise ValueError("provider connection response is invalid")
+    if isinstance(data.get("reachable"), bool):
+        count = data.get("model_count")
+        model_count = count if isinstance(count, int) and count >= 0 else 0
+        return {
+            "reachable": data["reachable"],
+            "model_count": model_count,
+            "authenticated": bool(data.get("authenticated", True)),
+        }
+    if data.get("connected") is not True:
         raise ValueError("provider connection response is invalid")
     count = data.get("models_available")
     return {
