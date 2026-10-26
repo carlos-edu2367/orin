@@ -11,7 +11,7 @@ from agentos.provider_catalog.modalities import infer_output_modalities
 from agentos.provider_catalog.models import PricingSummary, ProviderCatalogContext, ProviderModelRecord
 
 from .schema import provider_configurations, provider_model_catalog, provider_model_favorites
-from .provider_api_keys import PostgresProviderApiKeyAdapter
+from .provider_api_keys import PostgresProviderApiKeyAdapter, ProviderApiKeyCredential
 from agentos.persistence.provider_secrets import ProviderSecretCipher
 
 
@@ -22,10 +22,13 @@ class PostgresProviderCatalogRepository:
         *,
         cipher: ProviderSecretCipher | None = None,
         keys: PostgresProviderApiKeyAdapter | None = None,
+        key_pool: PostgresProviderApiKeyAdapter | None = None,
     ) -> None:
         self._engine = engine
         self._cipher = cipher or ProviderSecretCipher.from_environment()
-        self._keys = keys or PostgresProviderApiKeyAdapter(engine, cipher=self._cipher)
+        resolved_keys = key_pool or keys or PostgresProviderApiKeyAdapter(engine, cipher=self._cipher)
+        self._keys = resolved_keys
+        self._key_pool = resolved_keys
 
     def credential(self, context: ProviderCatalogContext, provider: str) -> dict[str, object] | None:
         with self._engine.connect() as connection:
@@ -47,6 +50,36 @@ class PostgresProviderCatalogRepository:
         key = self._keys.next_available_key(context.user_id, provider)
         value["api_key"] = key.plaintext if key is not None else ""
         return value
+
+    def next_available_key(
+        self,
+        user_id: str,
+        provider: str,
+        *,
+        exclude: frozenset[int] = frozenset(),
+    ) -> ProviderApiKeyCredential | None:
+        return self._keys.next_available_key(user_id, provider, exclude=exclude)
+
+    def mark_exhausted(self, key_id: int) -> None:
+        self._keys.mark_exhausted(key_id)
+
+    def mark_cooldown(self, key_id: int, cooldown_seconds: int) -> None:
+        self._keys.mark_cooldown(key_id, cooldown_seconds)
+
+    def mark_active(self, key_id: int) -> None:
+        self._keys.mark_active(key_id)
+
+    def cooldown_seconds(self, context: ProviderCatalogContext, provider: str) -> int:
+        with self._engine.connect() as connection:
+            value = connection.execute(
+                select(provider_configurations.c.key_cooldown_seconds).where(
+                    provider_configurations.c.user_id == context.user_id,
+                    provider_configurations.c.provider == provider,
+                )
+            ).scalar_one_or_none()
+        if isinstance(value, int) and value >= 1:
+            return value
+        return 60
 
     def replace(self, context: ProviderCatalogContext, provider: str, records: list[ProviderModelRecord], refreshed_at: datetime) -> None:
         now = datetime.now(UTC)

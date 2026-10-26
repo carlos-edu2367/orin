@@ -28,6 +28,26 @@ from .schema import provider_api_keys, provider_configurations
 from agentos.persistence.provider_secrets import ProviderSecretCipher
 
 
+_ALLOWED_PROVIDERS = frozenset({
+    "openai",
+    "anthropic",
+    "google",
+    "groq",
+    "openrouter",
+    "opencode",
+    "omniroute",
+    "ollama",
+    "nvidia",
+})
+
+
+def _provider(value: object) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized not in _ALLOWED_PROVIDERS:
+        raise ValueError("unsupported provider")
+    return normalized
+
+
 @dataclass(frozen=True, slots=True)
 class ProviderApiKeyCredential:
     """A decrypted key ready to build a transport with; never logged or returned to a client."""
@@ -63,9 +83,32 @@ class PostgresProviderApiKeyAdapter:
         """A transaction of our own, unless the caller already opened one."""
         return nullcontext(connection) if connection is not None else self._engine.begin()
 
+    @staticmethod
+    def _provider(value: object) -> str:
+        return _provider(value)
+
+    @staticmethod
+    def _user_id(command: dict[str, object]) -> str:
+        user_id = str(command.get("user_id") or "").strip()
+        if not user_id:
+            raise ValueError("user_id is required")
+        return user_id
+
+    @staticmethod
+    def _key_id(value: object) -> int:
+        if value is None or isinstance(value, bool):
+            raise ValueError("key_id is required")
+        return int(value)
+
+    @staticmethod
+    def _serialize(row) -> dict[str, object]:
+        return _public(row)
+
     def list_keys(self, query: dict[str, object]) -> list[dict[str, object]]:
-        provider, user_id = str(query["provider"]), str(query["user_id"])
+        provider, user_id = self._provider(query.get("provider")), self._user_id(query)
         with self._engine.connect() as connection:
+            if not sa_inspect(connection).has_table("provider_api_keys"):
+                return []
             rows = connection.execute(
                 select(provider_api_keys).where(
                     provider_api_keys.c.user_id == user_id, provider_api_keys.c.provider == provider,
@@ -74,7 +117,7 @@ class PostgresProviderApiKeyAdapter:
         return [_public(row) for row in rows]
 
     def add_key(self, command: dict[str, object]) -> dict[str, object]:
-        provider, user_id = str(command["provider"]), str(command["user_id"])
+        provider, user_id = self._provider(command.get("provider")), self._user_id(command)
         api_key = str(command.get("api_key") or "").strip()
         if len(api_key) < 4:
             raise ValueError("provider API key is required")
@@ -115,7 +158,7 @@ class PostgresProviderApiKeyAdapter:
         return _public({"id": row_id, "label": str(label) if label else None, "position": next_position, "status": "active", "cooldown_until": None})
 
     def rename_key(self, command: dict[str, object]) -> dict[str, object]:
-        provider, user_id, key_id = str(command["provider"]), str(command["user_id"]), int(command["key_id"])
+        provider, user_id, key_id = self._provider(command.get("provider")), self._user_id(command), self._key_id(command.get("key_id"))
         label = command.get("label")
         with self._engine.begin() as connection:
             existing = connection.execute(
@@ -133,7 +176,7 @@ class PostgresProviderApiKeyAdapter:
         return _public({**existing, "label": str(label) if label else None})
 
     def remove_key(self, command: dict[str, object]) -> None:
-        provider, user_id, key_id = str(command["provider"]), str(command["user_id"]), int(command["key_id"])
+        provider, user_id, key_id = self._provider(command.get("provider")), self._user_id(command), self._key_id(command.get("key_id"))
         with self._engine.begin() as connection:
             existing = connection.execute(
                 select(provider_api_keys).where(
@@ -159,7 +202,7 @@ class PostgresProviderApiKeyAdapter:
                 )
 
     def reorder_keys(self, command: dict[str, object]) -> list[dict[str, object]]:
-        provider, user_id = str(command["provider"]), str(command["user_id"])
+        provider, user_id = self._provider(command.get("provider")), self._user_id(command)
         ordered_ids = [int(item) for item in command["ordered_ids"]]
         with self._engine.begin() as connection:
             existing_ids = connection.execute(
@@ -182,37 +225,85 @@ class PostgresProviderApiKeyAdapter:
         return self.list_keys({"provider": provider, "user_id": user_id})
 
     def next_available_key(self, user_id: str, provider: str, *, exclude: frozenset[int] = frozenset()) -> ProviderApiKeyCredential | None:
-        """Earliest-position key not yet tried; falls back to the earliest-position
-        key overall (ignoring cooldown) once every untried key is in cooldown."""
+        """Select the best candidate key across 3 priority tiers:
+        1. Tier 1: status != 'exhausted' and (cooldown_until is None or cooldown_until <= now)
+        2. Tier 2: status != 'exhausted' and cooldown_until > now
+        3. Tier 3: status == 'exhausted' (last-resort fallback when all active/cooldown keys are excluded)
+        """
+        provider_name = self._provider(provider)
         with self._engine.connect() as connection:
+            if not sa_inspect(connection).has_table("provider_api_keys"):
+                return None
             rows = connection.execute(
                 select(provider_api_keys).where(
-                    provider_api_keys.c.user_id == user_id, provider_api_keys.c.provider == provider,
+                    provider_api_keys.c.user_id == user_id, provider_api_keys.c.provider == provider_name,
                 ).order_by(provider_api_keys.c.position)
             ).mappings().all()
         candidates = [row for row in rows if row["id"] not in exclude]
         if not candidates:
             return None
         now = datetime.now(UTC)
-        available = [row for row in candidates if row["status"] != "cooldown" or row["cooldown_until"] is None or _as_aware(row["cooldown_until"]) <= now]
-        chosen = available[0] if available else candidates[0]
+        tier_1 = [
+            row
+            for row in candidates
+            if str(row["status"]) != "exhausted"
+            and (
+                str(row["status"]) != "cooldown"
+                or row["cooldown_until"] is None
+                or _as_aware(row["cooldown_until"]) <= now
+            )
+        ]
+        if tier_1:
+            chosen = tier_1[0]
+        else:
+            tier_2 = [row for row in candidates if str(row["status"]) != "exhausted"]
+            chosen = tier_2[0] if tier_2 else candidates[0]
         return ProviderApiKeyCredential(id=int(chosen["id"]), plaintext=self._cipher.decrypt(str(chosen["api_key_ciphertext"])))
 
     def mark_cooldown(self, key_id: int, cooldown_seconds: int) -> None:
         with self._engine.begin() as connection:
             connection.execute(
-                update(provider_api_keys).where(provider_api_keys.c.id == key_id).values(
+                update(provider_api_keys).where(provider_api_keys.c.id == int(key_id)).values(
                     status="cooldown", cooldown_until=datetime.now(UTC) + timedelta(seconds=cooldown_seconds), updated_at=datetime.now(UTC),
                 )
+            )
+
+    def mark_exhausted(self, key_id: int) -> None:
+        now = datetime.now(UTC)
+        with self._engine.begin() as connection:
+            connection.execute(
+                update(provider_api_keys)
+                .where(provider_api_keys.c.id == int(key_id))
+                .values(status="exhausted", cooldown_until=None, updated_at=now)
             )
 
     def mark_active(self, key_id: int) -> None:
         with self._engine.begin() as connection:
             connection.execute(
-                update(provider_api_keys).where(provider_api_keys.c.id == key_id).values(
+                update(provider_api_keys).where(provider_api_keys.c.id == int(key_id)).values(
                     status="active", cooldown_until=None, updated_at=datetime.now(UTC),
                 )
             )
+
+    def activate_key(self, command: dict[str, object]) -> dict[str, object]:
+        user_id = self._user_id(command)
+        provider_name = self._provider(command.get("provider"))
+        key_id = self._key_id(command.get("key_id"))
+        now = datetime.now(UTC)
+        with self._engine.begin() as connection:
+            updated = connection.execute(
+                update(provider_api_keys)
+                .where(
+                    provider_api_keys.c.id == key_id,
+                    provider_api_keys.c.user_id == user_id,
+                    provider_api_keys.c.provider == provider_name,
+                )
+                .values(status="active", cooldown_until=None, updated_at=now)
+            )
+            if not updated.rowcount:
+                raise ApplicationNotFoundError("provider API key not found")
+            row = connection.execute(select(provider_api_keys).where(provider_api_keys.c.id == key_id)).mappings().one()
+        return self._serialize(row)
 
     def set_primary_key(self, command: dict[str, object], *, connection: Connection | None = None) -> dict[str, object]:
         """Upsert the position-0 key. The seam ``configure()``'s legacy single-key
@@ -223,10 +314,12 @@ class PostgresProviderApiKeyAdapter:
         ``engine.begin()``) to make this write part of that same transaction
         -- ``configure()`` does, so the provider_configurations row and its
         principal key either both commit or neither does."""
-        provider, user_id = str(command["provider"]), str(command["user_id"])
+        provider, user_id = self._provider(command.get("provider")), self._user_id(command)
         api_key = str(command["api_key"])
         now = datetime.now(UTC)
         with self._scope(connection) as connection:
+            if not sa_inspect(connection).has_table("provider_api_keys"):
+                return _public({"id": 0, "label": None, "position": 0, "status": "active", "cooldown_until": None})
             existing = connection.execute(
                 select(provider_api_keys).where(
                     provider_api_keys.c.user_id == user_id, provider_api_keys.c.provider == provider, provider_api_keys.c.position == 0,
@@ -261,8 +354,10 @@ class PostgresProviderApiKeyAdapter:
 
         Pass an open ``connection`` to share the caller's transaction; see
         ``set_primary_key``."""
-        provider, user_id = str(command["provider"]), str(command["user_id"])
+        provider, user_id = self._provider(command.get("provider")), self._user_id(command)
         with self._scope(connection) as connection:
+            if not sa_inspect(connection).has_table("provider_api_keys"):
+                return
             connection.execute(
                 delete(provider_api_keys).where(
                     provider_api_keys.c.user_id == user_id, provider_api_keys.c.provider == provider, provider_api_keys.c.position == 0,

@@ -4,10 +4,57 @@ from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Callable, Mapping, Sequence
 
+import httpx
+
 from .modalities import VALID_OUTPUT_MODALITIES, infer_output_modalities
 from .models import PROVIDERS_WITH_OPTIONAL_KEY, PricingSummary, ProviderCatalogContext, ProviderModelRecord, RefreshReceipt
-from .nvidia import DEFAULT_NVIDIA_BASE_URL, NvidiaModelCatalogClient, is_nvidia_cloud, normalize_nvidia_base_url
+from .nvidia import (
+    DEFAULT_NVIDIA_BASE_URL,
+    NvidiaAuthenticationError,
+    NvidiaModelCatalogClient,
+    is_nvidia_cloud,
+    normalize_nvidia_base_url,
+)
 from .ports import ProviderCatalogRepository, ProviderCatalogUpstream
+
+
+_QUOTA_EXHAUSTION_MARKERS = (
+    "insufficient_quota",
+    "quota exceeded",
+    "out of credits",
+    "credit balance",
+    "billing_hard_limit_reached",
+    "exhausted",
+    "payment required",
+    "not enough credits",
+)
+
+
+def _classify_catalog_key_error(error: Exception) -> str | None:
+    if isinstance(error, NvidiaAuthenticationError):
+        return "exhausted"
+    if type(error).__name__ in {"OpenCodeAuthenticationError", "OllamaCloudAuthenticationError"}:
+        return "exhausted"
+    if isinstance(error, httpx.HTTPStatusError):
+        status = error.response.status_code
+        if status in (401, 402, 403):
+            return "exhausted"
+        if status == 429:
+            body_text = ""
+            try:
+                body_text = error.response.text.lower()
+            except Exception:
+                body_text = ""
+            if any(marker in body_text for marker in _QUOTA_EXHAUSTION_MARKERS):
+                return "exhausted"
+            return "cooldown"
+        return None
+    status_attr = getattr(error, "status_code", None)
+    if getattr(error, "exhausted", False) is True or status_attr in (401, 402, 403):
+        return "exhausted"
+    if status_attr == 429:
+        return "cooldown"
+    return None
 
 
 class ProviderCatalogUnavailable(RuntimeError):
@@ -28,6 +75,33 @@ class ProviderModelCatalogService:
         self._nvidia_client = nvidia_client or NvidiaModelCatalogClient()
         self._now = now
 
+    def _fetch_provider_records(
+        self,
+        normalized_provider: str,
+        api_key: str,
+        base_url_raw: object,
+        refreshed_at: datetime,
+    ) -> list[ProviderModelRecord]:
+        if normalized_provider == "nvidia":
+            base_url = normalize_nvidia_base_url(str(base_url_raw or DEFAULT_NVIDIA_BASE_URL))
+            if is_nvidia_cloud(base_url) and not api_key.strip():
+                raise ValueError("provider API key is required for NVIDIA NIM Cloud")
+            upstream = self._upstreams.get("nvidia")
+            if upstream is not None and hasattr(upstream, "fetch_models"):
+                raw_payload = upstream.fetch_models(api_key, base_url=base_url)  # type: ignore[attr-defined]
+            elif upstream is not None:
+                raw_payload = {"data": upstream.fetch(api_key, base_url=base_url)}
+            else:
+                raw_payload = self._nvidia_client.fetch_models(api_key, base_url=base_url)
+            return self._normalize("nvidia", raw_payload, refreshed_at)
+
+        upstream = self._upstreams.get(normalized_provider)
+        if upstream is None:
+            raise ProviderCatalogUnavailable("provider catalog is not supported")
+        raw_models = upstream.fetch(api_key, base_url=str(base_url_raw or ""))
+        normalizer = _NORMALIZERS.get(normalized_provider, _normalize_openai)
+        return [normalizer(model, refreshed_at) for model in raw_models]
+
     def refresh(self, context: ProviderCatalogContext, provider: str) -> RefreshReceipt:
         normalized_provider = _provider(provider)
         credential = self._repository.credential(context, normalized_provider)
@@ -36,33 +110,64 @@ class ProviderModelCatalogService:
         api_key = credential.get("api_key")
         if not isinstance(api_key, str) or (not api_key and normalized_provider not in PROVIDERS_WITH_OPTIONAL_KEY):
             raise ProviderCatalogUnavailable("provider credential is unavailable")
+
+        base_url_raw = credential.get("base_url")
         if normalized_provider == "nvidia":
-            base_url = normalize_nvidia_base_url(str(credential.get("base_url") or DEFAULT_NVIDIA_BASE_URL))
-            if is_nvidia_cloud(base_url) and not api_key.strip():
+            normalized_base = normalize_nvidia_base_url(str(base_url_raw or DEFAULT_NVIDIA_BASE_URL))
+            if is_nvidia_cloud(normalized_base) and not api_key.strip():
                 raise ValueError("provider API key is required for NVIDIA NIM Cloud")
-            upstream = self._upstreams.get("nvidia")
-            try:
-                if upstream is not None and hasattr(upstream, "fetch_models"):
-                    raw_payload = upstream.fetch_models(api_key, base_url=base_url)  # type: ignore[attr-defined]
-                elif upstream is not None:
-                    raw_payload = {"data": upstream.fetch(api_key, base_url=base_url)}
-                else:
-                    raw_payload = self._nvidia_client.fetch_models(api_key, base_url=base_url)
-            except Exception as error:
-                raise ProviderCatalogUnavailable("provider catalog refresh failed") from error
-            refreshed_at = self._now()
-            records = self._normalize("nvidia", raw_payload, refreshed_at)
+        elif normalized_provider not in self._upstreams:
+            raise ProviderCatalogUnavailable("provider catalog is not supported")
+
+        refreshed_at = self._now()
+        next_key_fn = getattr(self._repository, "next_available_key", None)
+        first_pool_key = next_key_fn(context.user_id, normalized_provider) if callable(next_key_fn) else None
+
+        if first_pool_key is not None and callable(next_key_fn):
+            tried: set[int] = set()
+            current_key = first_pool_key
+            while True:
+                tried.add(current_key.id)
+                try:
+                    records = self._fetch_provider_records(
+                        normalized_provider,
+                        current_key.plaintext,
+                        base_url_raw,
+                        refreshed_at,
+                    )
+                    mark_active_fn = getattr(self._repository, "mark_active", None)
+                    if callable(mark_active_fn):
+                        mark_active_fn(current_key.id)
+                    break
+                except ProviderCatalogUnavailable:
+                    raise
+                except Exception as error:
+                    classification = _classify_catalog_key_error(error)
+                    if classification == "exhausted":
+                        mark_exhausted_fn = getattr(self._repository, "mark_exhausted", None)
+                        if callable(mark_exhausted_fn):
+                            mark_exhausted_fn(current_key.id)
+                    elif classification == "cooldown":
+                        mark_cooldown_fn = getattr(self._repository, "mark_cooldown", None)
+                        cooldown_fn = getattr(self._repository, "cooldown_seconds", None)
+                        cooldown_secs = cooldown_fn(context, normalized_provider) if callable(cooldown_fn) else 60
+                        if callable(mark_cooldown_fn):
+                            mark_cooldown_fn(current_key.id, cooldown_secs)
+                    else:
+                        raise ProviderCatalogUnavailable("provider catalog refresh failed") from error
+
+                    next_key = next_key_fn(context.user_id, normalized_provider, exclude=frozenset(tried))
+                    if next_key is None:
+                        raise ProviderCatalogUnavailable("provider catalog refresh failed") from error
+                    current_key = next_key
         else:
-            upstream = self._upstreams.get(normalized_provider)
-            if upstream is None:
-                raise ProviderCatalogUnavailable("provider catalog is not supported")
             try:
-                raw_models = upstream.fetch(api_key, base_url=str(credential.get("base_url") or ""))
+                records = self._fetch_provider_records(normalized_provider, api_key, base_url_raw, refreshed_at)
+            except ProviderCatalogUnavailable:
+                raise
             except Exception as error:
                 raise ProviderCatalogUnavailable("provider catalog refresh failed") from error
-            refreshed_at = self._now()
-            normalizer = _NORMALIZERS.get(normalized_provider, _normalize_openai)
-            records = [normalizer(model, refreshed_at) for model in raw_models]
+
         # The repository stores one row per (user, provider, model_id); an upstream
         # catalog that lists the same id twice (OmniRoute is known to do this — see
         # tests/unit/provider_catalog/test_service.py) would otherwise violate that

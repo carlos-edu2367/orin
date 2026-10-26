@@ -49,10 +49,32 @@ from .schema import provider_configurations
 from .provider_api_keys import PostgresProviderApiKeyAdapter
 from agentos.persistence.provider_secrets import ProviderSecretCipher
 from agentos.provider_catalog.models import PROVIDERS_WITH_BASE_URL, PROVIDERS_WITH_OPTIONAL_KEY
-from agentos.provider_catalog.ollama import DEFAULT_OLLAMA_BASE_URL, OllamaCatalogClient, OllamaCloudAuthenticationError, is_ollama_cloud, normalize_ollama_base_url
-from agentos.provider_catalog.omniroute import DEFAULT_OMNIROUTE_BASE_URL, normalize_omniroute_base_url
-from agentos.provider_catalog.omniroute import OmniRouteCatalogClient
-from agentos.provider_catalog.opencode import DEFAULT_OPENCODE_LOCAL_BASE_URL, OPENCODE_CLOUD_BASE_URL, OpenCodeModelCatalogClient, is_opencode_cloud, normalize_opencode_base_url
+from agentos.provider_catalog.nvidia import (
+    DEFAULT_NVIDIA_BASE_URL,
+    NvidiaAuthenticationError,
+    NvidiaModelCatalogClient,
+    is_nvidia_cloud,
+    normalize_nvidia_base_url,
+)
+from agentos.provider_catalog.ollama import (
+    DEFAULT_OLLAMA_BASE_URL,
+    OllamaCatalogClient,
+    OllamaCloudAuthenticationError,
+    is_ollama_cloud,
+    normalize_ollama_base_url,
+)
+from agentos.provider_catalog.omniroute import (
+    DEFAULT_OMNIROUTE_BASE_URL,
+    OmniRouteCatalogClient,
+    normalize_omniroute_base_url,
+)
+from agentos.provider_catalog.opencode import (
+    DEFAULT_OPENCODE_LOCAL_BASE_URL,
+    OPENCODE_CLOUD_BASE_URL,
+    OpenCodeModelCatalogClient,
+    is_opencode_cloud,
+    normalize_opencode_base_url,
+)
 from agentos.provider_catalog.installation import OmniRouteInstaller
 
 
@@ -61,6 +83,7 @@ def _public(row) -> dict[str, object]:
         "provider": str(row["provider"]),
         "enabled": bool(row["enabled"]),
         "secret_ref": str(row["secret_ref"]),
+        "has_secret": bool(row.get("has_secret")),
         "key_cooldown_seconds": int(row["key_cooldown_seconds"]),
         "catalog_refreshed_at": row.get("catalog_refreshed_at"),
         **({"base_url": row["base_url"]} if str(row["provider"]) in PROVIDERS_WITH_BASE_URL and row.get("base_url") else {}),
@@ -70,18 +93,31 @@ def _public(row) -> dict[str, object]:
 class PostgresProviderConfigurationAdapter:
     """Production adapter for the ``ProviderConfigurationApplication`` port (frontend Fase D)."""
 
-    def __init__(self, engine: Engine, *, cipher: ProviderSecretCipher | None = None, installer: OmniRouteInstaller | None = None, keys: PostgresProviderApiKeyAdapter | None = None) -> None:
+    def __init__(
+        self,
+        engine: Engine,
+        *,
+        cipher: ProviderSecretCipher | None = None,
+        installer: OmniRouteInstaller | None = None,
+        keys: PostgresProviderApiKeyAdapter | None = None,
+        key_pool: PostgresProviderApiKeyAdapter | None = None,
+        nvidia_client: NvidiaModelCatalogClient | None = None,
+    ) -> None:
         self._engine = engine
         self._cipher = cipher or ProviderSecretCipher.from_environment()
         self._installer = installer or OmniRouteInstaller()
-        self._keys = keys or PostgresProviderApiKeyAdapter(engine, cipher=self._cipher)
+        resolved_keys = key_pool or keys or PostgresProviderApiKeyAdapter(engine, cipher=self._cipher)
+        self._keys = resolved_keys
+        self._key_pool = resolved_keys
+        self._nvidia_client = nvidia_client or NvidiaModelCatalogClient()
 
     def configure(self, command: dict[str, object]) -> dict[str, object]:
-        provider = str(command["provider"])
+        provider = str(command["provider"]).strip().lower()
         user_id = str(command["user_id"])
         enabled = bool(command["enabled"])
-        base_url = _base_url(provider, command.get("base_url"), command.get("api_key"))
-        api_key = _api_key(provider, command.get("api_key"), base_url)
+        existing_keys = self._key_pool.list_keys({"user_id": user_id, "provider": provider})
+        base_url = _base_url(provider, command.get("base_url"), command.get("api_key"), has_existing_keys=bool(existing_keys))
+        api_key = _api_key(provider, command.get("api_key"), base_url, has_existing_keys=bool(existing_keys))
         now = datetime.now(UTC)
         with self._engine.begin() as connection:
             existing = connection.execute(
@@ -99,27 +135,43 @@ class PostgresProviderConfigurationAdapter:
                         catalog_refreshed_at=None, created_at=now, updated_at=now,
                     )
                 )
-                row = {"provider": provider, "enabled": enabled, "base_url": base_url, "secret_ref": secret_ref, "key_cooldown_seconds": 60, "catalog_refreshed_at": None}
+                row = {
+                    "provider": provider,
+                    "enabled": enabled,
+                    "base_url": base_url,
+                    "secret_ref": secret_ref,
+                    "has_secret": bool(api_key or existing_keys),
+                    "key_cooldown_seconds": 60,
+                    "catalog_refreshed_at": None,
+                }
             else:
                 connection.execute(
                     update(provider_configurations).where(provider_configurations.c.id == existing["id"]).values(
                         enabled=enabled, base_url=base_url, catalog_refreshed_at=None, updated_at=now,
                     )
                 )
-                row = {"provider": provider, "enabled": enabled, "base_url": base_url, "secret_ref": existing["secret_ref"], "key_cooldown_seconds": existing["key_cooldown_seconds"], "catalog_refreshed_at": None}
+                row = {
+                    "provider": provider,
+                    "enabled": enabled,
+                    "base_url": base_url,
+                    "secret_ref": existing["secret_ref"],
+                    "has_secret": bool(api_key or existing_keys),
+                    "key_cooldown_seconds": existing["key_cooldown_seconds"],
+                    "catalog_refreshed_at": None,
+                }
             # Sharing this connection/transaction with the key write below
             # means the provider_configurations row and its principal key
             # commit -- or fail -- together, instead of a crash between two
             # separate transactions leaving a provider that reads as
             # configured with no key behind it.
             if api_key:
-                self._keys.set_primary_key({"provider": provider, "user_id": user_id, "api_key": api_key}, connection=connection)
-            else:
-                self._keys.clear_primary_key({"provider": provider, "user_id": user_id}, connection=connection)
+                self._key_pool.set_primary_key({"provider": provider, "user_id": user_id, "api_key": api_key}, connection=connection)
+            elif not existing_keys:
+                self._key_pool.clear_primary_key({"provider": provider, "user_id": user_id}, connection=connection)
         return _public(row)
 
     def set_key_cooldown_seconds(self, command: dict[str, object]) -> dict[str, object]:
-        provider = str(command["provider"])
+        provider = str(command["provider"]).strip().lower()
         user_id = str(command["user_id"])
         seconds = int(command["seconds"])
         if seconds < 1:
@@ -138,10 +190,11 @@ class PostgresProviderConfigurationAdapter:
                     key_cooldown_seconds=seconds, updated_at=datetime.now(UTC),
                 )
             )
-        return _public({**existing, "key_cooldown_seconds": seconds})
+        has_secret = bool(self._key_pool.list_keys({"user_id": user_id, "provider": provider}))
+        return _public({**existing, "has_secret": has_secret, "key_cooldown_seconds": seconds})
 
     def inspect(self, query: dict[str, object]) -> dict[str, object]:
-        provider = str(query["provider"])
+        provider = str(query["provider"]).strip().lower()
         user_id = str(query["user_id"])
         with self._engine.connect() as connection:
             row = connection.execute(
@@ -152,10 +205,11 @@ class PostgresProviderConfigurationAdapter:
             ).mappings().first()
         if row is None:
             raise ApplicationNotFoundError(provider)
-        return _public(row)
+        has_secret = bool(self._key_pool.list_keys({"user_id": user_id, "provider": provider}))
+        return _public({**row, "has_secret": has_secret})
 
     def revoke(self, command: dict[str, object]) -> dict[str, object]:
-        provider = str(command["provider"])
+        provider = str(command["provider"]).strip().lower()
         user_id = str(command["user_id"])
         with self._engine.begin() as connection:
             existing = connection.execute(
@@ -171,13 +225,29 @@ class PostgresProviderConfigurationAdapter:
                     enabled=False, updated_at=datetime.now(UTC),
                 )
             )
-        return _public({**existing, "enabled": False})
+        has_secret = bool(self._key_pool.list_keys({"user_id": user_id, "provider": provider}))
+        return _public({**existing, "has_secret": has_secret, "enabled": False})
 
     def test_connection(self, command: dict[str, object]) -> dict[str, object]:
-        provider = str(command.get("provider"))
+        provider = str(command.get("provider") or "").strip().lower()
         if provider not in PROVIDERS_WITH_BASE_URL:
             raise ValueError("connection testing is not available for this provider")
         base_url = _base_url(provider, command.get("base_url"), command.get("api_key"))
+        if provider == "nvidia":
+            api_key = str(command.get("api_key") or "").strip()
+            if not api_key and command.get("user_id"):
+                cred = self._key_pool.next_available_key(str(command["user_id"]), "nvidia")
+                if cred is not None:
+                    api_key = cred.plaintext
+            try:
+                payload = self._nvidia_client.fetch_models(api_key, base_url=str(base_url))
+            except NvidiaAuthenticationError:
+                return {"reachable": True, "model_count": 0, "authenticated": False}
+            except Exception as error:
+                raise ValueError("provider connection failed") from error
+            data = payload.get("data") if isinstance(payload, dict) else []
+            model_count = len(data) if isinstance(data, list) else 0
+            return {"reachable": True, "model_count": model_count, "authenticated": True}
         if provider == "omniroute":
             client: object = OmniRouteCatalogClient()
         elif provider == "opencode":
@@ -225,7 +295,7 @@ class PostgresProviderConfigurationAdapter:
 __all__ = ["PostgresProviderConfigurationAdapter"]
 
 
-def _base_url(provider: str, value: object, api_key: object = None) -> str | None:
+def _base_url(provider: str, value: object, api_key: object = None, *, has_existing_keys: bool = False) -> str | None:
     if provider == "omniroute":
         return normalize_omniroute_base_url(str(value or DEFAULT_OMNIROUTE_BASE_URL))
     if provider == "ollama":
@@ -233,20 +303,30 @@ def _base_url(provider: str, value: object, api_key: object = None) -> str | Non
     if provider == "opencode":
         if isinstance(value, str) and value.strip():
             return normalize_opencode_base_url(value)
-        default_opencode = OPENCODE_CLOUD_BASE_URL if str(api_key or "").strip() else DEFAULT_OPENCODE_LOCAL_BASE_URL
+        default_opencode = (
+            OPENCODE_CLOUD_BASE_URL
+            if str(api_key or "").strip() or has_existing_keys
+            else DEFAULT_OPENCODE_LOCAL_BASE_URL
+        )
         return normalize_opencode_base_url(default_opencode)
+    if provider == "nvidia":
+        return normalize_nvidia_base_url(str(value or DEFAULT_NVIDIA_BASE_URL))
     return None
 
 
-def _api_key(provider: str, value: object, base_url: str | None = None) -> str:
+def _api_key(provider: str, value: object, base_url: str | None = None, *, has_existing_keys: bool = False) -> str:
     api_key = str(value or "").strip()
+    if api_key and len(api_key) < 4:
+        raise ValueError("provider API key is required")
     optional = provider in PROVIDERS_WITH_OPTIONAL_KEY
-    # Local Ollama and Local OpenCode Bridge need no credential; their hosted
-    # services always do. The host distinguishes the two, so it decides here.
+    # Local Ollama, Local OpenCode Bridge, and Self-Hosted NVIDIA NIM need no
+    # credential; their hosted cloud services always do.
     if provider == "ollama" and base_url is not None and is_ollama_cloud(base_url):
         optional = False
     if provider == "opencode" and base_url is not None and is_opencode_cloud(base_url):
         optional = False
-    if not optional and len(api_key) < 4:
+    if provider == "nvidia" and base_url is not None and is_nvidia_cloud(base_url):
+        optional = False
+    if not optional and not api_key and not has_existing_keys:
         raise ValueError("provider API key is required")
     return api_key
