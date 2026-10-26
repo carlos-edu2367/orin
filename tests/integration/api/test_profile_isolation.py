@@ -78,6 +78,7 @@ OWNED = {
     ("PUT", "/v1/plugins/{plugin_id}/hooks-enabled"), ("DELETE", "/v1/plugins/{plugin_id}"),
     ("GET", "/v1/plugins/{plugin_id}/config"), ("PUT", "/v1/plugins/{plugin_id}/config"),
     ("PATCH", "/v1/providers/{provider}/keys/{key_id}"), ("DELETE", "/v1/providers/{provider}/keys/{key_id}"),
+    ("POST", "/v1/providers/{provider}/keys/{key_id}:activate"),
     ("POST", "/v1/events/streams/{stream_id}/read"), ("GET", "/v1/events/streams/{stream_id}"),
     *{("GET", f"/v1/{resource}/{{resource_id}}") for resource in ("agents", "capabilities", "tools", "workspaces", "artifacts")},
 }
@@ -95,7 +96,7 @@ SCOPED = {
     ("POST", "/v1/providers/{provider}/models:refresh"), ("GET", "/v1/providers/{provider}/models"),
     ("POST", "/v1/providers/{provider}/models"), ("DELETE", "/v1/providers/{provider}/custom-models/{model_id:path}"),
     ("PUT", "/v1/providers/{provider}/favorites/{model_id:path}"), ("DELETE", "/v1/providers/{provider}/favorites/{model_id:path}"),
-    ("POST", "/v1/providers/ollama/test"), ("POST", "/v1/providers/opencode/test"),
+    ("POST", "/v1/providers/ollama/test"), ("POST", "/v1/providers/opencode/test"), ("POST", "/v1/providers/nvidia/test"),
     ("GET", "/v1/runtime/settings"), ("PUT", "/v1/runtime/settings"),
     ("GET", "/v1/code-mode/settings"), ("PUT", "/v1/code-mode/settings"),
     ("GET", "/v1/settings/vision-model"), ("PUT", "/v1/settings/vision-model"),
