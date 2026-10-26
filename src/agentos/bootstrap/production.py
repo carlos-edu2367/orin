@@ -46,6 +46,7 @@ from agentos.persistence.postgres.provider_api_keys import PostgresProviderApiKe
 from agentos.persistence.provider_secrets import ProviderSecretCipher
 from agentos.persistence.postgres.provider_models import PostgresProviderCatalogRepository
 from agentos.persistence.postgres.security import PostgresSecurityService
+from agentos.provider_catalog.context_reference import OpenRouterContextReference
 from agentos.provider_catalog.http import AnthropicModelCatalogClient, OpenAIModelCatalogClient, OpenCodeModelCatalogClient, OpenRouterModelCatalogClient
 from agentos.provider_catalog.nvidia import NvidiaModelCatalogClient
 from agentos.provider_catalog.ollama import OllamaCatalogClient
@@ -354,7 +355,7 @@ def compose_production_services(engine: Engine, *, localhost_trust_enabled: bool
             "openai": OpenAIModelCatalogClient(),
             "opencode": OpenCodeModelCatalogClient(),
             "openrouter": OpenRouterModelCatalogClient(),
-        }),
+        }, context_reference=OpenRouterContextReference()),
         conversation_application=ChatApplication(PostgresChatStore(engine, PostgresAgenticActivityStore(engine, cursor_secret), command_library=command_library, skill_library=skill_library), ExecutionApplicationAdapter(engine)),
         projects=PostgresProjectStore(engine),
         omniroute_runtime=omniroute_runtime,

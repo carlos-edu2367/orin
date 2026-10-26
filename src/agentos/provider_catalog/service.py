@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
-from typing import Callable, Mapping, Sequence
+from typing import Callable, Mapping, Protocol, Sequence
 
 import httpx
 
+from .context_reference import ContextWindowLookup, context_window_from_id
 from .modalities import VALID_OUTPUT_MODALITIES, infer_output_modalities
 from .models import PROVIDERS_WITH_OPTIONAL_KEY, PricingSummary, ProviderCatalogContext, ProviderModelRecord, RefreshReceipt
 from .nvidia import (
@@ -61,6 +63,10 @@ class ProviderCatalogUnavailable(RuntimeError):
     """A sanitized failure to refresh a credential-scoped model catalog."""
 
 
+class ContextWindowReference(Protocol):
+    def load(self) -> ContextWindowLookup: ...
+
+
 class ProviderModelCatalogService:
     def __init__(
         self,
@@ -68,12 +74,35 @@ class ProviderModelCatalogService:
         upstreams: Mapping[str, ProviderCatalogUpstream] | None = None,
         *,
         nvidia_client: NvidiaModelCatalogClient | None = None,
+        context_reference: ContextWindowReference | None = None,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._repository = repository
         self._upstreams = dict(upstreams or {})
         self._nvidia_client = nvidia_client or NvidiaModelCatalogClient()
+        self._context_reference = context_reference
         self._now = now
+
+    def _fill_context_windows(self, records: list[ProviderModelRecord]) -> list[ProviderModelRecord]:
+        """Give models the upstream listed without a window a known one.
+
+        Without it every such model ran on the chat worker's flat 60k
+        fallback. A failing reference is not a failed refresh: the models
+        stay usable, just without the better window.
+        """
+        if all(record.context_window is not None for record in records):
+            return records
+        lookup: ContextWindowLookup = context_window_from_id
+        if self._context_reference is not None:
+            try:
+                lookup = self._context_reference.load()
+            except Exception:
+                lookup = context_window_from_id
+        filled: list[ProviderModelRecord] = []
+        for record in records:
+            window = record.context_window if record.context_window is not None else lookup(record.model_id)
+            filled.append(record if window == record.context_window else replace(record, context_window=window))
+        return filled
 
     def _fetch_provider_records(
         self,
@@ -93,14 +122,14 @@ class ProviderModelCatalogService:
                 raw_payload = {"data": upstream.fetch(api_key, base_url=base_url)}
             else:
                 raw_payload = self._nvidia_client.fetch_models(api_key, base_url=base_url)
-            return self._normalize("nvidia", raw_payload, refreshed_at)
+            return self._fill_context_windows(self._normalize("nvidia", raw_payload, refreshed_at))
 
         upstream = self._upstreams.get(normalized_provider)
         if upstream is None:
             raise ProviderCatalogUnavailable("provider catalog is not supported")
         raw_models = upstream.fetch(api_key, base_url=str(base_url_raw or ""))
         normalizer = _NORMALIZERS.get(normalized_provider, _normalize_openai)
-        return [normalizer(model, refreshed_at) for model in raw_models]
+        return [record for model in raw_models if (record := normalizer(model, refreshed_at)) is not None]
 
     def refresh(self, context: ProviderCatalogContext, provider: str) -> RefreshReceipt:
         normalized_provider = _provider(provider)
@@ -197,7 +226,8 @@ class ProviderModelCatalogService:
             items = raw_payload
         else:
             items = []
-        return [normalizer(dict(item), ts) for item in items if isinstance(item, Mapping)]
+        normalized = (normalizer(dict(item), ts) for item in items if isinstance(item, Mapping))
+        return [record for record in normalized if record is not None]
 
     def _normalize_nvidia(
         self,
@@ -272,12 +302,22 @@ def _provider(value: str) -> str:
     return normalized
 
 
-def _normalize_openrouter(raw: dict[str, object], refreshed_at: datetime) -> ProviderModelRecord:
+# OpenRouter names its text-to-speech output "speech"; the rest of Orin calls it audio.
+_OPENROUTER_OUTPUT_ALIASES = {"speech": "audio"}
+
+
+def _normalize_openrouter(raw: dict[str, object], refreshed_at: datetime) -> ProviderModelRecord | None:
     model_id = _text(raw.get("id"))
     if model_id is None:
         raise ProviderCatalogUnavailable("provider returned an invalid model")
     display_name = _text(raw.get("name")) or model_id
     architecture = raw.get("architecture") if isinstance(raw.get("architecture"), dict) else {}
+    raw_outputs = _modalities(architecture.get("output_modalities"))
+    outputs = tuple(dict.fromkeys(_OPENROUTER_OUTPUT_ALIASES.get(item.lower(), item.lower()) for item in raw_outputs))
+    # Embeddings, rerankers, classifiers and transcription models can neither
+    # chat nor back a media tool, so they would only clutter the catalog.
+    if outputs and not any(item in VALID_OUTPUT_MODALITIES for item in outputs):
+        return None
     pricing = raw.get("pricing") if isinstance(raw.get("pricing"), dict) else {}
     context_window = raw.get("context_length")
     if isinstance(context_window, bool) or not isinstance(context_window, int) or context_window < 1:
@@ -289,7 +329,7 @@ def _normalize_openrouter(raw: dict[str, object], refreshed_at: datetime) -> Pro
         context_window=context_window,
         capabilities=tuple(sorted({_text(value) for value in _list(raw.get("supported_parameters")) if _text(value)})),
         input_modalities=_modalities(architecture.get("input_modalities")),
-        output_modalities=infer_output_modalities(model_id, _modalities(architecture.get("output_modalities"))),
+        output_modalities=infer_output_modalities(model_id, outputs),
         pricing=_pricing(pricing),
         refreshed_at=refreshed_at,
     )

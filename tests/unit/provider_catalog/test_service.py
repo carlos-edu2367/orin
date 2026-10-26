@@ -361,3 +361,40 @@ def test_opencode_catalog_rejects_malformed_upstream_payloads(monkeypatch: pytes
     with pytest.raises(ProviderCatalogUnavailable):
         service.refresh(context("user-a"), "opencode")
 
+
+
+def test_openrouter_refresh_keeps_media_models_and_drops_non_generative_ones() -> None:
+    class MediaOpenRouter:
+        def fetch(self, api_key: str, *, base_url: str = "") -> list[dict[str, object]]:
+            def model(model_id: str, outputs: list[str], context_length: int = 0) -> dict[str, object]:
+                return {
+                    "id": model_id, "name": model_id, "context_length": context_length,
+                    "architecture": {"input_modalities": ["text"], "output_modalities": outputs},
+                }
+            return [
+                model("anthropic/claude-test", ["text"], 200000),
+                model("qwen/qwen-image-3", ["image"], 65536),
+                model("elevenlabs/eleven-v4", ["speech"]),
+                model("google/veo-3.1", ["video"]),
+                model("google/gemini-3.1-flash-image", ["image", "text"], 131072),
+                model("openai/text-embedding-3-large", ["embeddings"], 8192),
+                model("cohere/rerank-v3.5", ["rerank"], 4096),
+                model("openai/whisper-large-v3-turbo", ["transcription"]),
+                model("perplexity/pplx-decider-flash-v1.2", ["decisions"], 262144),
+            ]
+
+    repository = FakeRepository()
+    service = ProviderModelCatalogService(repository, {"openrouter": MediaOpenRouter()}, now=lambda: datetime(2026, 10, 26, tzinfo=UTC))
+
+    service.refresh(context("user-a"), "openrouter")
+
+    outputs = {item.model_id: item.output_modalities for item in service.list(context("user-a"), "openrouter")}
+    assert outputs == {
+        "anthropic/claude-test": ("text",),
+        "qwen/qwen-image-3": ("image",),
+        "elevenlabs/eleven-v4": ("audio",),
+        "google/veo-3.1": ("video",),
+        "google/gemini-3.1-flash-image": ("image", "text"),
+    }
+    windows = {item.model_id: item.context_window for item in service.list(context("user-a"), "openrouter")}
+    assert windows["elevenlabs/eleven-v4"] is None

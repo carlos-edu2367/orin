@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import httpx
 
-from agentos.provider_catalog.http import AnthropicModelCatalogClient, OpenAIModelCatalogClient
+from agentos.provider_catalog.http import AnthropicModelCatalogClient, OpenAIModelCatalogClient, OpenRouterModelCatalogClient
 
 
 def test_openai_catalog_uses_bearer_auth_and_its_models_endpoint(monkeypatch) -> None:
@@ -17,6 +17,21 @@ def test_openai_catalog_uses_bearer_auth_and_its_models_endpoint(monkeypatch) ->
 
     assert OpenAIModelCatalogClient().fetch("test-key") == [{"id": "gpt-test"}]
     assert seen == {"url": "https://api.openai.com/v1/models", "headers": {"Authorization": "Bearer test-key"}}
+
+
+def test_openrouter_catalog_asks_for_every_output_modality(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def get(url: str, **kwargs):
+        seen["url"] = url
+        seen["params"] = kwargs.get("params")
+        return httpx.Response(200, json={"data": [{"id": "qwen/qwen-image-3"}]}, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr("agentos.provider_catalog.http.httpx.get", get)
+
+    assert OpenRouterModelCatalogClient().fetch("test-key") == [{"id": "qwen/qwen-image-3"}]
+    # The endpoint lists only text-output models unless asked otherwise.
+    assert seen == {"url": "https://openrouter.ai/api/v1/models", "params": {"output_modalities": "all"}}
 
 
 def test_anthropic_catalog_pages_with_the_documented_cursor_and_headers(monkeypatch) -> None:

@@ -331,6 +331,16 @@ h1 { margin: 0; color: var(--orin-text); font-size: clamp(42px, 6vw, 76px); font
 .provider-panel__custom-model label { display: grid; flex: 1 1 140px; gap: 6px; color: rgb(var(--orin-text-rgb) / .45); font-size: 10px; }
 .provider-panel__custom-model input, .provider-panel__custom-model select { min-width: 0; padding: 9px 10px; border: 1px solid rgb(var(--orin-text-rgb) / .12); border-radius: 8px; background: rgb(var(--orin-text-rgb) / .03); color: var(--orin-text); font: 12px var(--orin-mono); }
 .provider-panel__model-badge { margin-left: 7px; color: var(--orin-accent); font-size: 10px; }
+.provider-panel__model-context { color: rgb(var(--orin-text-rgb) / .42); font-size: 10px; }
+.provider-panel__catalog-filters { display: grid; gap: 10px; margin-top: 16px; }
+.provider-panel__catalog-filters label { display: grid; gap: 6px; color: rgb(var(--orin-text-rgb) / .45); font-size: 10px; }
+.provider-panel__catalog-filters input { min-width: 0; padding: 9px 10px; border: 1px solid rgb(var(--orin-text-rgb) / .12); border-radius: 8px; background: rgb(var(--orin-text-rgb) / .03); color: var(--orin-text); font: 12px var(--orin-mono); }
+.provider-panel__catalog-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.provider-panel__catalog-chip { padding: 5px 10px; border: 1px solid rgb(var(--orin-text-rgb) / .12); border-radius: 999px; background: transparent; color: rgb(var(--orin-text-rgb) / .7); font-size: 11px; cursor: pointer; }
+.provider-panel__catalog-chip span { margin-left: 3px; color: rgb(var(--orin-text-rgb) / .4); }
+.provider-panel__catalog-chip[aria-pressed="true"] { border-color: var(--orin-accent); color: var(--orin-text); background: rgb(var(--orin-text-rgb) / .05); }
+.provider-panel__catalog-chip:focus-visible { outline: 2px solid var(--orin-accent); outline-offset: 2px; }
+.provider-panel__catalog-count { margin: 0; color: rgb(var(--orin-text-rgb) / .45); font-size: 11px; }
 .provider-panel__model-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
 
 .ollama-flow { gap: 14px; }

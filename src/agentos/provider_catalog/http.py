@@ -16,9 +16,13 @@ class OpenRouterModelCatalogClient:
         self._timeout = timeout
 
     def fetch(self, api_key: str, *, base_url: str = "") -> list[dict[str, object]]:
+        # Without ``output_modalities`` OpenRouter lists only text-output
+        # models, which hides every image, speech and video model from the
+        # catalog. The normalizer drops the kinds the agent cannot use.
         response = httpx.get(
             f"{self._base_url}/api/v1/models",
             headers={"Authorization": f"Bearer {api_key}"},
+            params={"output_modalities": "all"},
             timeout=self._timeout,
         )
         response.raise_for_status()
