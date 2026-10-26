@@ -54,6 +54,18 @@ class ProviderModelRecord:
         if self.route_kind not in {"model", "auto"}:
             raise ValueError("route_kind must be model or auto")
 
+    @property
+    def supports_thinking(self) -> bool:
+        return "reasoning" in self.capabilities or "thinking" in self.capabilities
+
+    @property
+    def supports_vision(self) -> bool:
+        return "image" in self.input_modalities or "vision" in self.capabilities
+
+    @property
+    def supports_tools(self) -> bool:
+        return "tools" in self.capabilities or "tool_choice" in self.capabilities
+
 
 @dataclass(frozen=True, slots=True)
 class RefreshReceipt:
@@ -70,5 +82,5 @@ class RefreshReceipt:
 # because the catalog service, the credential adapter, the chat worker and the
 # gateway all branch on them; Ollama and OpenCode narrow the second set at
 # runtime, since only their local mode is keyless.
-PROVIDERS_WITH_BASE_URL = frozenset({"omniroute", "ollama", "opencode"})
-PROVIDERS_WITH_OPTIONAL_KEY = frozenset({"omniroute", "ollama", "opencode"})
+PROVIDERS_WITH_BASE_URL = frozenset({"omniroute", "ollama", "opencode", "nvidia"})
+PROVIDERS_WITH_OPTIONAL_KEY = frozenset({"omniroute", "ollama", "opencode", "nvidia"})

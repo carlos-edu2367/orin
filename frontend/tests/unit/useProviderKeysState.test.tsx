@@ -47,4 +47,22 @@ describe('useProviderKeysState', () => {
 
     expect(result.current.keys).toHaveLength(0)
   })
+
+  it('reactivates an exhausted key and updates its status in local state', async () => {
+    const fetchImpl = vi.fn<typeof fetch>((input, init) => {
+      const url = String(input)
+      if (init?.method === 'POST' && url.endsWith('/keys/1:activate')) {
+        return Promise.resolve(json({ id: 1, label: 'NVIDIA 1', position: 0, status: 'active', cooldown_until: null }))
+      }
+      return Promise.resolve(json([{ id: 1, label: 'NVIDIA 1', position: 0, status: 'exhausted', cooldown_until: null }]))
+    })
+    const client = new ApiClient({ fetchImpl, maxAttempts: 1, createIdempotencyKey: () => 'intent-activate' })
+
+    const { result } = renderHook(() => useProviderKeysState(client, 'nvidia', { status: 'ready', csrfToken: 'csrf' }))
+    await waitFor(() => expect(result.current.keys[0]?.status).toBe('exhausted'))
+
+    await act(async () => { await result.current.activate(1) })
+
+    expect(result.current.keys[0]?.status).toBe('active')
+  })
 })

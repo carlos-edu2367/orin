@@ -257,3 +257,83 @@ def test_adding_first_key_ensures_provider_configuration_row_when_table_exists()
     assert row is not None
     assert row["enabled"] is True
     assert row["key_cooldown_seconds"] == 60
+
+
+def test_mark_exhausted_sets_status_exhausted_and_clears_cooldown() -> None:
+    adapter = _adapter()
+    key = adapter.add_key(_query(api_key="nvapi-first-key"))
+    adapter.mark_cooldown(key["id"], 3600)
+
+    adapter.mark_exhausted(key["id"])
+
+    saved = adapter.list_keys(_query())[0]
+    assert saved["status"] == "exhausted"
+    assert saved["cooldown_until"] is None
+
+
+def test_next_available_key_skips_exhausted_keys_in_favor_of_active_or_cooldown() -> None:
+    adapter = _adapter()
+    first = adapter.add_key(_query(api_key="nvapi-exhausted-0"))
+    second = adapter.add_key(_query(api_key="nvapi-cooldown-1"))
+    third = adapter.add_key(_query(api_key="nvapi-active-2"))
+    adapter.mark_exhausted(first["id"])
+    adapter.mark_cooldown(second["id"], 3600)
+
+    # Tier 1: active key wins
+    assert adapter.next_available_key("user-1", "openai").plaintext == "nvapi-active-2"
+
+    # When Tier 1 is excluded, Tier 2 (unexpired cooldown) wins over Tier 3 (exhausted)
+    assert (
+        adapter.next_available_key("user-1", "openai", exclude=frozenset({third["id"]})).plaintext
+        == "nvapi-cooldown-1"
+    )
+
+    # When Tier 1 and Tier 2 are excluded, Tier 3 (exhausted) is used as last-resort fallback
+    assert (
+        adapter.next_available_key("user-1", "openai", exclude=frozenset({second["id"], third["id"]})).plaintext
+        == "nvapi-exhausted-0"
+    )
+
+
+def test_activate_key_resets_exhausted_or_cooldown_key_to_active() -> None:
+    adapter = _adapter()
+    key = adapter.add_key(_query(api_key="nvapi-exhausted-key", label="Free Tier 1"))
+    adapter.mark_exhausted(key["id"])
+
+    activated = adapter.activate_key(_query(key_id=key["id"]))
+
+    assert activated["id"] == key["id"]
+    assert activated["status"] == "active"
+    assert activated["cooldown_until"] is None
+
+
+def test_activate_key_raises_not_found_for_unknown_key() -> None:
+    with pytest.raises(ApplicationNotFoundError):
+        _adapter().activate_key(_query(key_id=999))
+
+
+def test_activate_key_enforces_user_and_provider_isolation() -> None:
+    adapter = _adapter()
+    key = adapter.add_key(_query(api_key="nvapi-user1-key", provider="nvidia", user_id="user-1"))
+    adapter.mark_exhausted(key["id"])
+
+    with pytest.raises(ApplicationNotFoundError):
+        adapter.activate_key({"provider": "nvidia", "user_id": "user-2", "key_id": key["id"]})
+
+    with pytest.raises(ApplicationNotFoundError):
+        adapter.activate_key({"provider": "openai", "user_id": "user-1", "key_id": key["id"]})
+
+    saved = adapter.list_keys({"provider": "nvidia", "user_id": "user-1"})[0]
+    assert saved["status"] == "exhausted"
+
+
+def test_set_primary_key_clears_an_existing_exhausted_status() -> None:
+    adapter = _adapter()
+    key = adapter.set_primary_key(_query(api_key="nvapi-old", provider="nvidia"))
+    adapter.mark_exhausted(key["id"])
+
+    adapter.set_primary_key(_query(api_key="nvapi-new", provider="nvidia"))
+
+    saved = adapter.list_keys(_query(provider="nvidia"))[0]
+    assert saved["status"] == "active"
+    assert saved["cooldown_until"] is None

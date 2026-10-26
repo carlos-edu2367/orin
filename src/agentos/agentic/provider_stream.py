@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from enum import StrEnum
 import json
+import re
 from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable, Iterator, Mapping
 
@@ -56,16 +57,119 @@ class RateLimitInfo:
     limit: int | None = None
 
 
-class ProviderKeyRejected(Exception):
-    """The response indicates the credential itself is the problem: an
-    authentication/authorization/rate-limit HTTP status, or the connection
-    could not be established at all. A caller with more than one API key
-    for this provider can retry with a different one; any other error (a
-    bad request, a provider-side failure, a mid-stream drop after content
-    already flowed) is not this."""
+_QUOTA_EXHAUSTION_MARKERS = (
+    "insufficient_quota",
+    "quota exceeded",
+    "exceeded your current quota",
+    "out of credits",
+    "out of usage",
+    "credit balance",
+    "billing_hard_limit_reached",
+    "exhausted",
+    "payment required",
+    "not enough credits",
+)
 
-    status_code: int | None = None
-    retry_after_seconds: float | None = None
+_AUTH_MARKERS = (
+    "invalid_api_key",
+    "invalid api key",
+    "unauthorized",
+    "authentication failed",
+    "authentication_error",
+    "forbidden",
+    "permission denied",
+    "permission_error",
+)
+
+
+def _has_quota_exhaustion_marker(text: str) -> bool:
+    lowered = (text or "").lower()
+    return any(marker in lowered for marker in _QUOTA_EXHAUSTION_MARKERS)
+
+
+def _has_auth_marker(text: str) -> bool:
+    lowered = (text or "").lower()
+    return any(marker in lowered for marker in _AUTH_MARKERS)
+
+
+_SECRET_TOKEN_RE = re.compile(r"(?:nvapi-[A-Za-z0-9_-]+|sk-[A-Za-z0-9_-]+|Bearer\s+\S+)", re.IGNORECASE)
+
+
+def _redact_secrets(text: str) -> str:
+    return _SECRET_TOKEN_RE.sub("[REDACTED]", text or "")
+
+
+class ProviderKeyRejected(RuntimeError):
+    """Raised when the provider rejects the API key before any stream output is produced."""
+
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        status_code: int | None = None,
+        exhausted: bool = False,
+        retry_after_seconds: int | float | None = None,
+    ) -> None:
+        super().__init__(_redact_secrets(str(message or "")))
+        self.status_code = status_code
+        self.exhausted = exhausted
+        self.retry_after_seconds = retry_after_seconds
+
+
+def _response_body_text(response: httpx.Response) -> str:
+    try:
+        response.read()
+    except Exception:
+        pass
+    try:
+        return response.text or ""
+    except Exception:
+        try:
+            return (response.content or b"").decode("utf-8", "replace")
+        except Exception:
+            return ""
+
+
+def _classify_http_rejection(response: httpx.Response) -> ProviderKeyRejected | None:
+    status_code = response.status_code
+    body_text = _response_body_text(response)
+    quota_matched = _has_quota_exhaustion_marker(body_text)
+    if status_code in (401, 402, 403):
+        return ProviderKeyRejected(
+            f"HTTP {status_code}: key rejected",
+            status_code=status_code,
+            exhausted=True,
+        )
+    if status_code == 429:
+        if quota_matched:
+            return ProviderKeyRejected(
+                "HTTP 429: quota exhausted",
+                status_code=429,
+                exhausted=True,
+            )
+        raw_retry = parse_retry_after(response.headers)
+        if raw_retry is None:
+            raw_header = str(response.headers.get("retry-after") or "").strip()
+            try:
+                parsed_num = float(raw_header)
+                if parsed_num < 0:
+                    raw_retry = 1.0
+            except ValueError:
+                pass
+        retry_after = max(1, min(int(raw_retry), 3600)) if raw_retry is not None else None
+        return ProviderKeyRejected(
+            "HTTP 429: rate limited",
+            status_code=429,
+            exhausted=False,
+            retry_after_seconds=retry_after,
+        )
+    if status_code in (400, 422) and quota_matched:
+        return ProviderKeyRejected(
+            f"HTTP {status_code}: quota exhausted",
+            status_code=status_code,
+            exhausted=True,
+        )
+    return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,6 +186,7 @@ class NormalizedStreamItem:
     finish_reason: FinishReason | None = None
     rate_limit: RateLimitInfo | None = None
     error: ProviderError | None = None
+    error_code: str | None = None
     call_id: str | None = None
     # Anthropic extended thinking: the block's signature, and an encrypted (redacted) block.
     signature: str | None = None
@@ -95,6 +200,16 @@ class NormalizedStreamItem:
             object.__setattr__(self, "call_id", self.tool_call_id)
         if self.finish_reason is not None and not isinstance(self.finish_reason, FinishReason):
             object.__setattr__(self, "finish_reason", _finish(self.finish_reason))
+        if self.error_code is None and self.error is not None:
+            cat = getattr(self.error, "category", None)
+            if cat in (
+                ProviderErrorCategory.RATE_LIMITED,
+                ProviderErrorCategory.QUOTA_EXCEEDED,
+                ProviderErrorCategory.AUTHENTICATION,
+            ):
+                object.__setattr__(self, "error_code", str(cat.value))
+            elif getattr(self.error, "code", None):
+                object.__setattr__(self, "error_code", str(self.error.code))
 
     def get(self, key: str, default: Any = None) -> Any:
         if key in ("type", "kind"):
@@ -111,6 +226,35 @@ class NormalizedStreamItem:
 
 NormalizedStreamEvent = NormalizedStreamItem
 
+
+def _classify_stream_error_item(item: NormalizedStreamItem) -> ProviderKeyRejected | None:
+    if item.kind != StreamKind.ERROR:
+        return None
+    code = str(item.error_code or (item.error.code if item.error else "") or "").upper()
+    cat = str(item.error.category.value if item.error and hasattr(item.error, "category") else "").upper()
+    text = f"{item.text or ''} {item.error.code if item.error else ''} {item.error_code or ''}"
+    quota_matched = (
+        _has_quota_exhaustion_marker(text)
+        or code == "QUOTA_EXCEEDED"
+        or cat == "QUOTA_EXCEEDED"
+        or "QUOTA" in code
+    )
+    auth_matched = (
+        _has_auth_marker(text)
+        or code == "AUTHENTICATION"
+        or cat in ("AUTHENTICATION", "AUTHORIZATION")
+    )
+    rate_matched = (
+        code == "RATE_LIMITED"
+        or cat == "RATE_LIMITED"
+        or "rate limit" in text.lower()
+        or "rate_limit" in text.lower()
+    )
+    if quota_matched or auth_matched:
+        return ProviderKeyRejected(item.text or "stream key rejected", exhausted=True)
+    if rate_matched:
+        return ProviderKeyRejected(item.text or "stream key rate limited", exhausted=False)
+    return None
 
 
 def _anthropic_tool_choice(value: object) -> dict[str, str]:
@@ -182,13 +326,17 @@ def _safe_error(payload: Mapping[str, Any]) -> ProviderError:
     error = payload.get("error") if isinstance(payload.get("error"), Mapping) else payload
     category = ProviderErrorCategory.UNKNOWN
     status = str(error.get("type") or error.get("error_type") or error.get("code") or "provider_error").lower()
-    if "rate" in status or "quota" in status:
+    message_text = str(error.get("message") or payload.get("message") or "").lower()
+    combined = f"{status} {message_text}"
+    if _has_quota_exhaustion_marker(combined) or "quota" in status:
+        category = ProviderErrorCategory.QUOTA_EXCEEDED
+    elif "rate" in status or "rate limit" in message_text or "rate_limit" in message_text or "too many requests" in message_text:
         category = ProviderErrorCategory.RATE_LIMITED
     elif "timeout" in status:
         category = ProviderErrorCategory.TIMEOUT
-    elif "auth" in status or "permission" in status:
+    elif "auth" in status or "permission" in status or _has_auth_marker(combined):
         category = ProviderErrorCategory.AUTHENTICATION
-    retryability = Retryability.SAFE if category in {ProviderErrorCategory.RATE_LIMITED, ProviderErrorCategory.TIMEOUT, ProviderErrorCategory.CONNECTION, ProviderErrorCategory.PROVIDER_INTERNAL} else Retryability.NEVER
+    retryability = Retryability.SAFE if category in {ProviderErrorCategory.RATE_LIMITED, ProviderErrorCategory.QUOTA_EXCEEDED, ProviderErrorCategory.TIMEOUT, ProviderErrorCategory.CONNECTION, ProviderErrorCategory.PROVIDER_INTERNAL} else Retryability.NEVER
     candidate = str(error.get("code") or error.get("error_type") or "PROVIDER_ERROR").upper()
     safe_code = candidate if candidate.replace("_", "").isalnum() and len(candidate) <= 64 else "PROVIDER_ERROR"
     return ProviderError(category, safe_code, "provider stream failed", retryability)
@@ -750,25 +898,35 @@ class HTTPProviderStreamTransport:
         )
         try:
             with self._client.stream("POST", endpoint, headers=headers, json=payload) as response:
+                if response.status_code >= 400:
+                    response.read()
                 try:
                     response.raise_for_status()
                 except httpx.HTTPStatusError as error:
-                    if error.response.status_code in (401, 403, 429):
-                        rejected = ProviderKeyRejected(str(error))
-                        rejected.status_code = error.response.status_code
-                        rejected.retry_after_seconds = parse_retry_after(error.response.headers)
+                    rejected = _classify_http_rejection(error.response)
+                    if rejected is not None:
                         raise rejected from error
                     raise
                 limit = project_rate_limit_headers(response.headers)
                 has_limit = any(value is not None for value in (limit.remaining, limit.reset_after_seconds, limit.limit))
-                if has_limit:
-                    yield NormalizedStreamItem(StreamKind.RATE_LIMIT, 1, rate_limit=limit)
+                pending_limit = NormalizedStreamItem(StreamKind.RATE_LIMIT, 1, rate_limit=limit) if has_limit else None
                 events = (
                     normalize_ndjson(response.iter_lines()) if self.provider == "ollama"
                     else normalize_sse(response.iter_lines(), provider=self.provider)
                 )
+                emitted_any = False
                 for item in events:
+                    if not emitted_any and item.sequence == 1 and item.kind is StreamKind.ERROR:
+                        rejected = _classify_stream_error_item(item)
+                        if rejected is not None:
+                            raise rejected
+                    if pending_limit is not None:
+                        yield pending_limit
+                        pending_limit = None
+                    emitted_any = True
                     yield replace(item, sequence=item.sequence + (1 if has_limit else 0))
+                if pending_limit is not None:
+                    yield pending_limit
         except httpx.TransportError as error:
             raise ProviderKeyRejected(str(error)) from error
 
@@ -785,6 +943,8 @@ __all__ = [
     "ProviderKeyRejected",
     "RateLimitInfo",
     "StreamKind",
+    "_classify_http_rejection",
+    "_classify_stream_error_item",
     "normalize_ndjson",
     "normalize_sse",
     "project_messages",

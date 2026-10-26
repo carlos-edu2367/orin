@@ -47,6 +47,7 @@ from agentos.persistence.provider_secrets import ProviderSecretCipher
 from agentos.persistence.postgres.provider_models import PostgresProviderCatalogRepository
 from agentos.persistence.postgres.security import PostgresSecurityService
 from agentos.provider_catalog.http import AnthropicModelCatalogClient, OpenAIModelCatalogClient, OpenCodeModelCatalogClient, OpenRouterModelCatalogClient
+from agentos.provider_catalog.nvidia import NvidiaModelCatalogClient
 from agentos.provider_catalog.ollama import OllamaCatalogClient
 from agentos.provider_catalog.omniroute import OmniRouteCatalogClient
 from agentos.provider_catalog.service import ProviderModelCatalogService
@@ -102,6 +103,9 @@ class ProductionSettings(AgentOSSettings):
     OPENAI_ENABLED: bool = False
     OPENAI_API_KEY: SecretStr | None = None
     OPENAI_MODEL: str | None = None
+    NVIDIA_ENABLED: bool = False
+    NVIDIA_API_KEY: SecretStr | None = None
+    NVIDIA_MODEL: str | None = None
 
     @property
     def public_origin(self) -> str | None:
@@ -344,6 +348,7 @@ def compose_production_services(engine: Engine, *, localhost_trust_enabled: bool
         provider_api_keys=PostgresProviderApiKeyAdapter(engine, cipher=provider_cipher),
         provider_catalog=ProviderModelCatalogService(provider_repository, {
             "anthropic": AnthropicModelCatalogClient(),
+            "nvidia": NvidiaModelCatalogClient(),
             "ollama": OllamaCatalogClient(),
             "omniroute": OmniRouteCatalogClient(),
             "openai": OpenAIModelCatalogClient(),

@@ -139,6 +139,41 @@ describe('ProviderDetail', () => {
       base_url: 'http://127.0.0.1:18446',
     })
   })
+
+  it('supports NVIDIA NIM setup, tests connection, and reactivates an exhausted key from the fallback list', async () => {
+    let keyStatus: 'exhausted' | 'active' = 'exhausted'
+    const fetchImpl = vi.fn<typeof fetch>((input, init) => {
+      const url = String(input)
+      if (url.endsWith('/v1/providers/nvidia/test') && init?.method === 'POST') {
+        return Promise.resolve(json({ reachable: true, authenticated: true, model_count: 24 }))
+      }
+      if (url.endsWith('/v1/providers/nvidia/keys/1:activate') && init?.method === 'POST') {
+        keyStatus = 'active'
+        return Promise.resolve(json({ id: 1, label: 'NVIDIA Trial 1', position: 0, status: 'active', cooldown_until: null }))
+      }
+      if (url.endsWith('/v1/providers/nvidia/keys')) {
+        return Promise.resolve(json([{ id: 1, label: 'NVIDIA Trial 1', position: 0, status: keyStatus, cooldown_until: null }]))
+      }
+      return Promise.resolve(json({ provider: 'nvidia', enabled: true, base_url: 'https://integrate.api.nvidia.com/v1', key_cooldown_seconds: 60 }))
+    })
+    const client = new ApiClient({ fetchImpl, csrfToken: 'csrf', maxAttempts: 1, createIdempotencyKey: () => 'intent-nvidia' })
+    const user = userEvent.setup()
+    render(<MemoryRouter><ProviderDetail provider="nvidia" client={client} bootstrap={{ status: 'ready', csrfToken: 'csrf' }} onClose={() => {}} /></MemoryRouter>)
+
+    const region = await screen.findByRole('region', { name: 'NVIDIA NIM' })
+    expect(within(region).getByRole('radio', { name: 'NVIDIA NIM Cloud' })).toHaveAttribute('aria-checked', 'true')
+    expect(within(region).getByLabelText('URL do servidor')).toHaveValue('https://integrate.api.nvidia.com/v1')
+
+    await user.click(within(region).getByRole('button', { name: 'Testar conexão' }))
+    expect(await within(region).findByText(/24 modelos disponíveis/)).toBeInTheDocument()
+
+    expect(await within(region).findByText('Sem saldo / Esgotada')).toBeInTheDocument()
+    await user.click(within(region).getByRole('button', { name: 'Reativar' }))
+    expect(await within(region).findByText('Ativa')).toBeInTheDocument()
+
+    await user.click(within(region).getByRole('radio', { name: 'Self-Hosted NIM' }))
+    expect(within(region).queryByText(/24 modelos disponíveis/)).toBeNull()
+  })
 })
 
 function json(body: unknown): Response {

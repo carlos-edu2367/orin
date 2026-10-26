@@ -275,6 +275,8 @@ class HTTPProviderAdapter:
     def _category_for_status(status: int) -> ProviderErrorCategory:
         if status in {401}:
             return ProviderErrorCategory.AUTHENTICATION
+        if status in {402}:
+            return ProviderErrorCategory.QUOTA_EXCEEDED
         if status in {403}:
             return ProviderErrorCategory.AUTHORIZATION
         if status in {404}:
@@ -353,8 +355,19 @@ class OpenRouterHTTPAdapter(OpenAIHTTPAdapter):
     provider_kind = "openrouter"
 
 
+class NvidiaHTTPAdapter(OpenAIHTTPAdapter):
+    provider_kind = "nvidia"
+
+
 class AnthropicHTTPAdapter(HTTPProviderAdapter):
     provider_kind = "anthropic"
 
 
-__all__ = ["ProviderHTTPSettings", "HTTPProviderAdapter", "OpenAIHTTPAdapter", "OpenRouterHTTPAdapter", "AnthropicHTTPAdapter"]
+__all__ = [
+    "ProviderHTTPSettings",
+    "HTTPProviderAdapter",
+    "OpenAIHTTPAdapter",
+    "OpenRouterHTTPAdapter",
+    "NvidiaHTTPAdapter",
+    "AnthropicHTTPAdapter",
+]

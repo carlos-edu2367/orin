@@ -120,6 +120,8 @@ function providerLabel(provider: ProviderName): string {
       return 'Anthropic'
     case 'openrouter':
       return 'OpenRouter'
+    case 'nvidia':
+      return 'NVIDIA NIM'
     case 'opencode':
       return 'OpenCode'
     case 'omniroute':

@@ -485,6 +485,7 @@ provider_model_catalog = Table(
     UniqueConstraint("user_id", "provider", "model_id", name="uq_provider_model_catalog_scope"),
 )
 Index("ix_provider_model_catalog_scope", provider_model_catalog.c.user_id, provider_model_catalog.c.provider)
+provider_models = provider_model_catalog
 
 
 provider_model_favorites = Table(

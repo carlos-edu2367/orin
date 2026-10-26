@@ -360,6 +360,10 @@ h1 { margin: 0; color: var(--orin-text); font-size: clamp(42px, 6vw, 76px); font
 .provider-key-list__label { overflow: hidden; color: var(--orin-text); font-size: 12px; font-weight: 560; text-overflow: ellipsis; white-space: nowrap; }
 .provider-key-list__badge { padding: 3px 6px; border-radius: 999px; background: rgb(var(--orin-accent-rgb) / .13); color: var(--orin-accent); font-size: 9px; font-weight: 700; letter-spacing: .04em; }
 .provider-key-list__status { color: rgb(var(--orin-text-rgb) / .43); font-size: 10px; }
+.provider-key-list__status--exhausted { padding: 2px 7px; border: 1px solid rgb(239 68 68 / .35); border-radius: 999px; background: rgb(239 68 68 / .12); color: #f87171; font-weight: 600; }
+.provider-key-list__status--cooldown { padding: 2px 7px; border: 1px solid rgb(245 158 11 / .35); border-radius: 999px; background: rgb(245 158 11 / .12); color: #fbbf24; font-weight: 560; }
+.provider-key-list__status--active { color: rgb(34 197 94 / .85); font-weight: 560; }
+.provider-key-list__activate { min-height: 27px; padding: 0 9px; font-size: 10px; }
 .provider-key-list__controls { display: flex; align-items: center; gap: 5px; }
 .icon-button { display: inline-grid; place-items: center; width: 27px; height: 27px; padding: 0; border: 1px solid rgb(var(--orin-text-rgb) / .12); border-radius: 7px; background: transparent; color: rgb(var(--orin-text-rgb) / .65); cursor: pointer; }
 .icon-button:hover:not(:disabled) { border-color: var(--orin-accent); color: var(--orin-text); }

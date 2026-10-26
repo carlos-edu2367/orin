@@ -5,8 +5,8 @@ import { readBrowserSessionBootstrap, type BrowserSessionBootstrap } from '../..
 import { ApiError } from '../../api/errors'
 import {
   addProviderCustomModel, configureProvider, getOmniRouteInstallationStatus, inspectProvider, installOmniRoute, listProviderModels,
-  refreshProviderModels, removeProviderCustomModel, revokeProvider, setProviderModelFavorite, testOllamaConnection, testOmniRouteConnection, testOpenCodeConnection,
-  type ModelOutputModality, type ProviderModel, type ProviderName, type ProviderPublicState,
+  refreshProviderModels, removeProviderCustomModel, revokeProvider, setProviderModelFavorite, testNvidiaConnection, testOllamaConnection, testOmniRouteConnection, testOpenCodeConnection,
+  type ModelOutputModality, type NvidiaTestResult, type ProviderModel, type ProviderName, type ProviderPublicState,
 } from '../../api/providers'
 
 export type ProviderLoadState =
@@ -29,6 +29,9 @@ export type ProviderState = {
   setOllamaMode: (value: 'local' | 'cloud') => void
   opencodeMode: 'local' | 'cloud'
   setOpencodeMode: (value: 'local' | 'cloud') => void
+  nvidiaMode: 'cloud' | 'self-hosted'
+  setNvidiaMode: (value: 'cloud' | 'self-hosted') => void
+  nvidiaTestResult: NvidiaTestResult | null
   connection: { connected: boolean; models: number | null } | null
   installed: boolean
   models: ProviderModel[]
@@ -53,11 +56,26 @@ export function useProviderState(client: ApiClient = createBrowserApiClient(), p
   const [load, setLoad] = useState<ProviderLoadState>({ status: 'loading' })
   const [action, setAction] = useState<ProviderActionState>({ pending: false, error: null, kind: null })
   const [apiKey, setApiKey] = useState('')
-  const [baseUrl, setBaseUrl] = useState(() => provider === 'ollama' ? 'http://localhost:11434' : provider === 'opencode' ? 'http://127.0.0.1:18446' : 'http://localhost:20128/v1')
+  const [baseUrl, setBaseUrl] = useState(() =>
+    provider === 'ollama'
+      ? 'http://localhost:11434'
+      : provider === 'opencode'
+        ? 'http://127.0.0.1:18446'
+        : provider === 'nvidia'
+          ? 'https://integrate.api.nvidia.com/v1'
+          : 'http://localhost:20128/v1',
+  )
   const [enabled, setEnabled] = useState(true)
   const [ollamaMode, setOllamaMode] = useState<'local' | 'cloud'>('local')
   const [opencodeMode, setOpencodeMode] = useState<'local' | 'cloud'>('local')
+  const [nvidiaMode, setNvidiaModeState] = useState<'cloud' | 'self-hosted'>('cloud')
+  const [nvidiaTestResult, setNvidiaTestResult] = useState<NvidiaTestResult | null>(null)
   const [connection, setConnection] = useState<{ connected: boolean; models: number | null } | null>(null)
+  const setNvidiaMode = (value: 'cloud' | 'self-hosted') => {
+    setNvidiaModeState(value)
+    setNvidiaTestResult(null)
+    setConnection(null)
+  }
   const [installed, setInstalled] = useState(false)
   const [models, setModels] = useState<ProviderModel[]>([])
   const [catalogLoading, setCatalogLoading] = useState(false)
@@ -79,6 +97,10 @@ export function useProviderState(client: ApiClient = createBrowserApiClient(), p
       if (provider === 'opencode' && typeof state.extra.base_url === 'string') {
         setBaseUrl(state.extra.base_url)
         try { setOpencodeMode(new URL(state.extra.base_url).hostname.toLowerCase().endsWith('opencode.ai') ? 'cloud' : 'local') } catch { setOpencodeMode('local') }
+      }
+      if (provider === 'nvidia' && typeof state.extra.base_url === 'string') {
+        setBaseUrl(state.extra.base_url)
+        try { setNvidiaMode(new URL(state.extra.base_url).hostname.toLowerCase().endsWith('nvidia.com') ? 'cloud' : 'self-hosted') } catch { setNvidiaMode('self-hosted') }
       }
     } catch (error: unknown) {
       if (signal?.aborted || (error instanceof DOMException && error.name === 'AbortError')) return
@@ -102,6 +124,10 @@ export function useProviderState(client: ApiClient = createBrowserApiClient(), p
         setBaseUrl(state.extra.base_url)
         try { setOpencodeMode(new URL(state.extra.base_url).hostname.toLowerCase().endsWith('opencode.ai') ? 'cloud' : 'local') } catch { setOpencodeMode('local') }
       }
+      if (provider === 'nvidia' && typeof state.extra.base_url === 'string') {
+        setBaseUrl(state.extra.base_url)
+        try { setNvidiaMode(new URL(state.extra.base_url).hostname.toLowerCase().endsWith('nvidia.com') ? 'cloud' : 'self-hosted') } catch { setNvidiaMode('self-hosted') }
+      }
     }).catch((error: unknown) => {
       if (controller.signal.aborted || (error instanceof DOMException && error.name === 'AbortError')) return
       const apiError = toApiError(error)
@@ -124,8 +150,12 @@ export function useProviderState(client: ApiClient = createBrowserApiClient(), p
     intents.current.set(key, intent)
     return intent
   }
-  const requiresApiKey = provider !== 'omniroute' && !(provider === 'ollama' && ollamaMode === 'local') && !(provider === 'opencode' && opencodeMode === 'local')
   const canRevoke = load.status === 'loaded' && load.state.enabled === true
+  const requiresApiKey =
+    provider !== 'omniroute' &&
+    !(provider === 'ollama' && ollamaMode === 'local') &&
+    !(provider === 'opencode' && opencodeMode === 'local') &&
+    !(provider === 'nvidia' && (nvidiaMode === 'self-hosted' || canRevoke))
 
   async function configure(event?: FormEvent<HTMLFormElement>) {
     event?.preventDefault()
@@ -133,7 +163,16 @@ export function useProviderState(client: ApiClient = createBrowserApiClient(), p
     mutationRevision.current += 1
     setAction({ pending: true, error: null, kind: 'configure' })
     try {
-      const state = await configureProvider(client, provider, { apiKey, enabled, ...(provider === 'omniroute' || provider === 'ollama' || provider === 'opencode' ? { baseUrl } : {}) }, intentFor('configure'))
+      const state = await configureProvider(
+        client,
+        provider,
+        {
+          apiKey,
+          enabled,
+          ...(provider === 'omniroute' || provider === 'ollama' || provider === 'opencode' || provider === 'nvidia' ? { baseUrl } : {}),
+        },
+        intentFor('configure'),
+      )
       intents.current.delete('configure')
       setLoad({ status: 'loaded', state })
       setApiKey('')
@@ -208,8 +247,29 @@ export function useProviderState(client: ApiClient = createBrowserApiClient(), p
   async function testConnection() {
     if (action.pending || bootstrap.status === 'missing_csrf') return
     setAction({ pending: true, error: null, kind: 'test' })
-    try { const result = await (provider === 'ollama' ? testOllamaConnection(client, { apiKey, baseUrl }, intentFor('test')) : provider === 'opencode' ? testOpenCodeConnection(client, { apiKey, baseUrl }, intentFor('test')) : testOmniRouteConnection(client, { apiKey, baseUrl }, intentFor('test'))); intents.current.delete('test'); setConnection({ connected: true, models: result.models_available }); setAction({ pending: false, error: null, kind: null }) }
-    catch (error) { setConnection(null); setAction({ pending: false, error: toApiError(error), kind: 'test' }) }
+    try {
+      if (provider === 'nvidia') {
+        const result = await testNvidiaConnection(client, { apiKey, baseUrl }, intentFor('test'))
+        intents.current.delete('test')
+        setNvidiaTestResult(result)
+        setConnection({ connected: result.reachable && result.authenticated, models: result.model_count })
+      } else {
+        const result = await (
+          provider === 'ollama'
+            ? testOllamaConnection(client, { apiKey, baseUrl }, intentFor('test'))
+            : provider === 'opencode'
+              ? testOpenCodeConnection(client, { apiKey, baseUrl }, intentFor('test'))
+              : testOmniRouteConnection(client, { apiKey, baseUrl }, intentFor('test'))
+        )
+        intents.current.delete('test')
+        setConnection({ connected: true, models: result.models_available })
+      }
+      setAction({ pending: false, error: null, kind: null })
+    } catch (error) {
+      setNvidiaTestResult(null)
+      setConnection(null)
+      setAction({ pending: false, error: toApiError(error), kind: 'test' })
+    }
   }
 
   async function install() {
@@ -219,7 +279,12 @@ export function useProviderState(client: ApiClient = createBrowserApiClient(), p
     catch (error) { setAction({ pending: false, error: toApiError(error), kind: 'install' }) }
   }
 
-  return { load, action, apiKey, setApiKey, baseUrl, setBaseUrl, enabled, setEnabled, ollamaMode, setOllamaMode, opencodeMode, setOpencodeMode, connection, installed, models, catalog, catalogLoading, canRevoke, requiresApiKey, reload: () => reload(), configure, revoke, refreshModels, loadModels, setFavorite, addCustomModel, removeCustomModel, testConnection, install }
+  return {
+    load, action, apiKey, setApiKey, baseUrl, setBaseUrl, enabled, setEnabled,
+    ollamaMode, setOllamaMode, opencodeMode, setOpencodeMode, nvidiaMode, setNvidiaMode, nvidiaTestResult,
+    connection, installed, models, catalog, catalogLoading, canRevoke, requiresApiKey,
+    reload: () => reload(), configure, revoke, refreshModels, loadModels, setFavorite, addCustomModel, removeCustomModel, testConnection, install,
+  }
 }
 
 export function toApiError(error: unknown): ApiError {

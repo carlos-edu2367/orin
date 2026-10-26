@@ -1,7 +1,7 @@
-import type { ApiClient } from './client'
+import { createBrowserApiClient, type ApiClient, type MutationIntent } from './client'
 import { invalidResponseError } from './errors'
 
-export const PROVIDER_NAMES = ['openai', 'anthropic', 'openrouter', 'opencode', 'omniroute', 'ollama'] as const
+export const PROVIDER_NAMES = ['openai', 'anthropic', 'openrouter', 'nvidia', 'opencode', 'omniroute', 'ollama'] as const
 export type ProviderName = (typeof PROVIDER_NAMES)[number]
 
 /**
@@ -30,8 +30,19 @@ export type ProviderApiKeyState = {
   id: number
   label: string | null
   position: number
-  status: 'active' | 'cooldown'
+  status: 'active' | 'cooldown' | 'exhausted'
   cooldownUntil: string | null
+}
+
+export type ProviderApiKey = ProviderApiKeyState
+
+export type NvidiaTestResult = {
+  reachable: boolean
+  authenticated: boolean
+  model_count: number
+  connected?: boolean
+  models_available?: number | null
+  base_url?: string | null
 }
 
 export type ProviderModel = {
@@ -49,12 +60,16 @@ export type ProviderModel = {
   route_kind: 'model' | 'auto'
 }
 
-function providerPath(provider: ProviderName): string {
+function providerPath(provider: ProviderName | string): string {
   return `/v1/providers/${encodeURIComponent(provider)}`
 }
 
-function providerKeysPath(provider: ProviderName): string {
+function providerKeysPath(provider: ProviderName | string): string {
   return `${providerPath(provider)}/keys`
+}
+
+function isApiClient(value: unknown): value is ApiClient {
+  return typeof value === 'object' && value !== null && 'request' in value && typeof (value as ApiClient).request === 'function'
 }
 
 export function listProviderKeys(client: ApiClient, provider: ProviderName, signal?: AbortSignal): Promise<ProviderApiKeyState[]> {
@@ -90,6 +105,27 @@ export function removeProviderKey(client: ApiClient, provider: ProviderName, key
   })
 }
 
+export function activateProviderApiKey(
+  clientOrProvider: ApiClient | ProviderName | string,
+  providerOrKeyId: ProviderName | string | number,
+  keyIdOrIntent?: number | MutationIntent,
+  maybeIntent?: MutationIntent,
+): Promise<ProviderApiKeyState> {
+  const hasClient = isApiClient(clientOrProvider)
+  const client = hasClient ? clientOrProvider : createBrowserApiClient()
+  const provider = String(hasClient ? providerOrKeyId : clientOrProvider)
+  const keyId = Number(hasClient ? keyIdOrIntent : providerOrKeyId)
+  const intent = (hasClient ? maybeIntent : (keyIdOrIntent as MutationIntent | undefined)) ?? client.createMutationIntent()
+  return client.request({
+    path: `${providerKeysPath(provider)}/${keyId}:activate`,
+    method: 'POST',
+    intent,
+    parse: parseProviderApiKeyState,
+  })
+}
+
+export const activateProviderKey = activateProviderApiKey
+
 export function reorderProviderKeys(client: ApiClient, provider: ProviderName, orderedIds: number[], intent = client.createMutationIntent()): Promise<ProviderApiKeyState[]> {
   return client.request({
     path: `${providerKeysPath(provider)}:reorder`, method: 'PUT', intent,
@@ -112,7 +148,7 @@ export function setProviderKeyCooldownSeconds(client: ApiClient, provider: Provi
 function parseProviderApiKeyState(value: unknown): ProviderApiKeyState {
   const data = record(value)
   if (!Number.isInteger(data.id)) throw invalidResponseError()
-  if (data.status !== 'active' && data.status !== 'cooldown') throw invalidResponseError()
+  if (data.status !== 'active' && data.status !== 'cooldown' && data.status !== 'exhausted') throw invalidResponseError()
   if (!Number.isInteger(data.position) || (data.position as number) < 0) throw invalidResponseError()
   return {
     id: data.id as number,
@@ -232,6 +268,62 @@ export function testOpenCodeConnection(
       if (data.connected !== true) throw invalidResponseError()
       return { connected: true, models_available: data.models_available === null ? null : nonNegativeInteger(data.models_available), base_url: nullableString(data.base_url) }
     },
+  })
+}
+
+function parseNvidiaTestResult(value: unknown): NvidiaTestResult {
+  const data = record(value)
+  if (typeof data.reachable === 'boolean') {
+    const reachable = data.reachable
+    const authenticated = typeof data.authenticated === 'boolean' ? data.authenticated : true
+    const modelCount =
+      typeof data.model_count === 'number' && Number.isInteger(data.model_count) && data.model_count >= 0
+        ? data.model_count
+        : typeof data.models_available === 'number' && Number.isInteger(data.models_available) && data.models_available >= 0
+          ? data.models_available
+          : 0
+    return {
+      reachable,
+      authenticated,
+      model_count: modelCount,
+      connected: typeof data.connected === 'boolean' ? data.connected : reachable && authenticated,
+      models_available: data.models_available === null ? null : modelCount,
+      base_url: nullableString(data.base_url),
+    }
+  }
+  if (data.connected === true) {
+    const modelsAvailable = data.models_available === null ? null : nonNegativeInteger(data.models_available)
+    const modelCount = typeof data.model_count === 'number' ? nonNegativeInteger(data.model_count) : (modelsAvailable ?? 0)
+    return {
+      reachable: true,
+      authenticated: typeof data.authenticated === 'boolean' ? data.authenticated : true,
+      model_count: modelCount,
+      connected: true,
+      models_available: modelsAvailable,
+      base_url: nullableString(data.base_url),
+    }
+  }
+  throw invalidResponseError()
+}
+
+export function testNvidiaConnection(
+  clientOrInput: ApiClient | { apiKey?: string; baseUrl?: string },
+  inputOrIntent?: { apiKey?: string; baseUrl?: string } | MutationIntent,
+  maybeIntent?: MutationIntent,
+): Promise<NvidiaTestResult> {
+  const hasClient = isApiClient(clientOrInput)
+  const client = hasClient ? clientOrInput : createBrowserApiClient()
+  const input = (hasClient ? inputOrIntent : clientOrInput) as { apiKey?: string; baseUrl?: string }
+  const intent = (hasClient ? maybeIntent : (inputOrIntent as MutationIntent | undefined)) ?? client.createMutationIntent()
+  return client.request({
+    path: `${providerPath('nvidia')}/test`,
+    method: 'POST',
+    intent,
+    body: {
+      ...(input.apiKey !== undefined ? { api_key: input.apiKey } : {}),
+      ...(input.baseUrl !== undefined && input.baseUrl !== '' ? { base_url: input.baseUrl } : {}),
+    },
+    parse: parseNvidiaTestResult,
   })
 }
 

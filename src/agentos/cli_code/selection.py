@@ -13,7 +13,7 @@ from typing import Protocol
 
 from .errors import CliRuntimeError
 
-KNOWN_PROVIDERS: tuple[str, ...] = ("anthropic", "openai", "openrouter", "opencode", "ollama", "omniroute")
+KNOWN_PROVIDERS: tuple[str, ...] = ("anthropic", "openai", "openrouter", "nvidia", "opencode", "ollama", "omniroute")
 
 
 class _Api(Protocol):

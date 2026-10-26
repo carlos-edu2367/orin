@@ -305,3 +305,148 @@ async function openProvider(page: Page, name: string) {
   await expect(panel).toBeVisible()
   return panel
 }
+
+
+test('configures NVIDIA NIM Cloud & Self-Hosted NIM, displays exhausted/cooldown keys, and reactivates an exhausted key', async ({ page }) => {
+  let key1Status: 'exhausted' | 'active' = 'exhausted'
+  const activatedIds: number[] = []
+
+  await page.route('**/v1/providers/**', async (route) => {
+    const request = route.request()
+    const url = new URL(request.url())
+    const pathname = url.pathname
+
+    if (request.method() === 'POST' && pathname === '/v1/providers/nvidia/test') {
+      await fulfillJson(route, { reachable: true, authenticated: true, model_count: 42 })
+      return
+    }
+    if (request.method() === 'POST' && pathname === '/v1/providers/nvidia/keys/1:activate') {
+      key1Status = 'active'
+      activatedIds.push(1)
+      await fulfillJson(route, {
+        id: 1,
+        provider: 'nvidia',
+        label: 'Conta Free 1 (build.nvidia.com)',
+        position: 0,
+        status: 'active',
+        cooldown_until: null,
+      })
+      return
+    }
+    if (request.method() === 'GET' && pathname === '/v1/providers/nvidia/keys') {
+      await fulfillJson(route, [
+        {
+          id: 1,
+          provider: 'nvidia',
+          label: 'Conta Free 1 (build.nvidia.com)',
+          position: 0,
+          status: key1Status,
+          cooldown_until: null,
+        },
+        {
+          id: 2,
+          provider: 'nvidia',
+          label: 'Conta Free 2 (Rate Limited)',
+          position: 1,
+          status: 'cooldown',
+          cooldown_until: '2026-10-26T04:30:00Z',
+        },
+        {
+          id: 3,
+          provider: 'nvidia',
+          label: 'Conta Paga Produção',
+          position: 2,
+          status: 'active',
+          cooldown_until: null,
+        },
+      ])
+      return
+    }
+    if (request.method() === 'GET' && pathname === '/v1/providers/nvidia/models') {
+      await fulfillJson(route, {
+        items: [
+          {
+            provider: 'nvidia',
+            model_id: 'deepseek-ai/deepseek-r1',
+            display_name: 'DeepSeek R1 (NVIDIA NIM)',
+            context_window: 131072,
+            capabilities: ['tools', 'reasoning'],
+            input_modalities: ['text'],
+            output_modalities: ['text'],
+            pricing: { input_per_million_usd: 0, output_per_million_usd: 0 },
+            is_favorite: true,
+            is_custom: false,
+            refreshed_at: '2026-10-25T23:00:00Z',
+            route_kind: 'model',
+          },
+          {
+            provider: 'nvidia',
+            model_id: 'meta/llama-3.2-90b-vision-instruct',
+            display_name: 'Llama 3.2 90B Vision Instruct',
+            context_window: 131072,
+            capabilities: ['tools'],
+            input_modalities: ['text', 'image'],
+            output_modalities: ['text'],
+            pricing: null,
+            is_favorite: false,
+            is_custom: false,
+            refreshed_at: '2026-10-25T23:00:00Z',
+            route_kind: 'model',
+          },
+        ],
+      })
+      return
+    }
+    if (request.method() === 'GET' && pathname === '/v1/providers/nvidia') {
+      await fulfillJson(route, {
+        provider: 'nvidia',
+        enabled: true,
+        has_secret: true,
+        base_url: 'https://integrate.api.nvidia.com/v1',
+        key_cooldown_seconds: 60,
+        catalog_refreshed_at: '2026-10-25T23:00:00Z',
+      })
+      return
+    }
+    if (request.method() === 'GET' && pathname.endsWith('/models')) {
+      await fulfillJson(route, { items: [] })
+      return
+    }
+    if (request.method() === 'GET' && pathname.endsWith('/keys')) {
+      await fulfillJson(route, [])
+      return
+    }
+    if (request.method() === 'GET') {
+      await fulfillJson(route, {})
+      return
+    }
+    await route.abort('failed')
+  })
+
+  await page.setViewportSize({ width: 1440, height: 900 })
+  const panel = await openProvider(page, 'NVIDIA NIM')
+  await expect(panel.getByRole('radio', { name: 'NVIDIA NIM Cloud' })).toHaveAttribute('aria-checked', 'true')
+  await expect(panel.getByLabel('URL do servidor')).toHaveValue('https://integrate.api.nvidia.com/v1')
+
+  await panel.getByRole('button', { name: 'Testar conexão' }).click()
+  await expect(panel.getByText(/Endpoint acessível · Autenticado · 42 modelos disponíveis/)).toBeVisible()
+
+  await expect(panel.getByText('Sem saldo / Esgotada')).toBeVisible()
+  await expect(panel.getByText(/Em cooldown até/)).toBeVisible()
+
+  if (processEnv.ORIN_SHOT_NVIDIA_DESKTOP) {
+    await page.screenshot({ path: processEnv.ORIN_SHOT_NVIDIA_DESKTOP, fullPage: true })
+  }
+
+  await panel.getByRole('button', { name: 'Reativar' }).first().click()
+  expect(activatedIds).toEqual([1])
+  await expect(panel.getByText('Sem saldo / Esgotada')).toHaveCount(0)
+
+  await panel.getByRole('radio', { name: 'Self-Hosted NIM' }).click()
+  await expect(panel.getByLabel('URL do servidor')).toHaveValue('http://localhost:8000/v1')
+
+  await page.setViewportSize({ width: 390, height: 844 })
+  if (processEnv.ORIN_SHOT_NVIDIA_MOBILE) {
+    await page.screenshot({ path: processEnv.ORIN_SHOT_NVIDIA_MOBILE, fullPage: true })
+  }
+})
