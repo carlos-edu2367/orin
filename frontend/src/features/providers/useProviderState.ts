@@ -176,6 +176,16 @@ export function useProviderState(client: ApiClient = createBrowserApiClient(), p
       intents.current.delete('configure')
       setLoad({ status: 'loaded', state })
       setApiKey('')
+      if ((provider === 'omniroute' || provider === 'ollama' || provider === 'opencode') && state.enabled === true) {
+        try {
+          await refreshProviderModels(client, provider, intentFor('refresh'))
+          intents.current.delete('refresh')
+          await loadModels()
+        } catch (refreshError) {
+          setModels([])
+          setCatalog({ loaded: true, error: toApiError(refreshError) })
+        }
+      }
       setAction({ pending: false, error: null, kind: null })
     } catch (error) {
       setAction({ pending: false, error: toApiError(error), kind: 'configure' })

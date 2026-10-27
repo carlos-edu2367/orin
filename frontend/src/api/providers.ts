@@ -414,6 +414,8 @@ export function removeProviderCustomModel(client: ApiClient, provider: ProviderN
  * both present and override that choice.
  */
 export type VisionModelSetting = { provider: ProviderName | null; modelId: string | null; mode: 'automatic' | 'manual' }
+export type MediaModality = 'image' | 'audio' | 'video'
+export type MediaModelSettings = Record<MediaModality, VisionModelSetting>
 
 export function getVisionModelSetting(client: ApiClient, signal?: AbortSignal): Promise<VisionModelSetting> {
   return client.request({ path: '/v1/settings/vision-model', signal, parse: parseVisionModelSetting })
@@ -426,6 +428,36 @@ export function setVisionModelSetting(
 ): Promise<VisionModelSetting> {
   return client.request({
     path: '/v1/settings/vision-model',
+    method: 'PUT',
+    body: { provider: input.provider, model_id: input.modelId },
+    intent,
+    parse: parseVisionModelSetting,
+  })
+}
+
+export function getMediaModelSettings(client: ApiClient, signal?: AbortSignal): Promise<MediaModelSettings> {
+  return client.request({
+    path: '/v1/settings/media-models',
+    signal,
+    parse: (value) => {
+      const data = record(value)
+      return {
+        image: parseVisionModelSetting(data.image),
+        audio: parseVisionModelSetting(data.audio),
+        video: parseVisionModelSetting(data.video),
+      }
+    },
+  })
+}
+
+export function setMediaModelSetting(
+  client: ApiClient,
+  modality: MediaModality,
+  input: { provider: ProviderName; modelId: string } | { provider: null; modelId: null },
+  intent = client.createMutationIntent(),
+): Promise<VisionModelSetting> {
+  return client.request({
+    path: `/v1/settings/media-models/${modality}`,
     method: 'PUT',
     body: { provider: input.provider, model_id: input.modelId },
     intent,

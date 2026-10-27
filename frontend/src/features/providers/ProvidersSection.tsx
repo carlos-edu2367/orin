@@ -3,6 +3,7 @@ import { createBrowserApiClient, type ApiClient } from '../../api/client'
 import { inspectProvider, listProviderModels, PROVIDER_NAMES, type ProviderName } from '../../api/providers'
 import { useSession } from '../../app/useSession'
 import { SettingsSection } from '../settings/SettingsSection'
+import { MediaModelsSetting } from './MediaModelsSetting'
 import { VisionModelSetting } from './VisionModelSetting'
 import { ProviderGrid, type ProviderCardStates } from './ProviderGrid'
 
@@ -28,7 +29,7 @@ export function ProvidersSection({ client: providedClient }: { client?: ApiClien
     })).then((entries) => { if (!controller.signal.aborted) setStates(Object.fromEntries(entries) as ProviderCardStates) }).catch(() => undefined)
     return () => controller.abort()
   }, [client, omniroute])
-  return <SettingsSection eyebrow="PROVIDERS / CONEXÕES"><ProviderGrid states={states} /><VisionModelSetting client={client} /></SettingsSection>
+  return <SettingsSection eyebrow="PROVIDERS / CONEXÕES"><ProviderGrid states={states} /><VisionModelSetting client={client} /><MediaModelsSetting client={client} /></SettingsSection>
 }
 
 export type { ProviderName }

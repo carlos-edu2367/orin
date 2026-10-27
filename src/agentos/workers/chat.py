@@ -26,7 +26,11 @@ from agentos.provider_catalog.models import PROVIDERS_WITH_BASE_URL
 from agentos.provider_catalog.nvidia import DEFAULT_NVIDIA_BASE_URL, normalize_nvidia_base_url
 from agentos.provider_catalog.ollama import DEFAULT_OLLAMA_BASE_URL, normalize_ollama_base_url
 from agentos.provider_catalog.omniroute import DEFAULT_OMNIROUTE_BASE_URL, normalize_omniroute_base_url
-from agentos.provider_catalog.opencode import OPENCODE_CLOUD_BASE_URL, normalize_opencode_base_url
+from agentos.provider_catalog.opencode import (
+    DEFAULT_OPENCODE_LOCAL_BASE_URL,
+    OPENCODE_CLOUD_BASE_URL,
+    normalize_opencode_base_url,
+)
 from agentos.agentic.runtime import AgenticLimits, AgenticRunResult, AgenticTurnRuntime
 from agentos.agentic.settings import AgentRuntimeSettingsStore
 from agentos.agentic.events import AgentActivityEventType
@@ -98,6 +102,7 @@ from agentos.persistence.postgres.schema import (
     code_mode_runs,
     conversation_dispatches,
     conversation_turns,
+    media_model_selections,
     provider_configurations,
     provider_model_catalog,
     provider_model_favorites,
@@ -1064,7 +1069,7 @@ class ChatWorker:
         if provider == "ollama":
             return normalize_ollama_base_url(configured or DEFAULT_OLLAMA_BASE_URL)
         if provider == "opencode":
-            return normalize_opencode_base_url(configured or OPENCODE_CLOUD_BASE_URL)
+            return normalize_opencode_base_url(configured or (OPENCODE_CLOUD_BASE_URL if str(credential.get("api_key") or "").strip() else DEFAULT_OPENCODE_LOCAL_BASE_URL))
         if provider == "nvidia":
             return normalize_nvidia_base_url(configured or DEFAULT_NVIDIA_BASE_URL)
         return PROVIDER_BASE_URLS.get(provider, PROVIDER_BASE_URLS["openrouter"])
@@ -1096,10 +1101,14 @@ class ChatWorker:
             ).mappings().first()
         if credential is None or not credential["enabled"]:
             raise ValueError("provider unavailable")
-        base_url = self._base_url_for(provider, credential)
         keys = PostgresProviderApiKeyAdapter(
             self.store._engine,
             cipher=ProviderSecretCipher.from_environment(required=True),
+        )
+        first_key = keys.next_available_key(resolved_user_id, provider)
+        base_url = self._base_url_for(
+            provider,
+            {"base_url": credential["base_url"], "api_key": first_key.plaintext if first_key is not None else ""},
         )
 
         def build(api_key: str) -> HTTPProviderStreamTransport:
@@ -1111,7 +1120,7 @@ class ChatWorker:
                 num_ctx=num_ctx,
             )
 
-        if keys.next_available_key(resolved_user_id, provider) is None:
+        if first_key is None:
             if provider not in PROVIDERS_WITH_BASE_URL:
                 raise ValueError("provider credential is missing")
             return build("")
@@ -1137,8 +1146,9 @@ class ChatWorker:
             ).mappings().first()
         if config is None or not config["enabled"]:
             raise ValueError("provider unavailable")
-        base_url = self._base_url_for(provider, {"base_url": config["base_url"]})
         keys = PostgresProviderApiKeyAdapter(self.store._engine, cipher=ProviderSecretCipher.from_environment(required=True))
+        first_key = keys.next_available_key(user_id, provider)
+        base_url = self._base_url_for(provider, {"base_url": config["base_url"], "api_key": first_key.plaintext if first_key is not None else ""})
 
         def build(api_key: str) -> HTTPProviderStreamTransport:
             return HTTPProviderStreamTransport(provider=provider, base_url=base_url, api_key=api_key, model=model_id, num_ctx=num_ctx)
@@ -1152,7 +1162,7 @@ class ChatWorker:
                 key_pool=keys, user_id=user_id, provider=provider,
                 cooldown_seconds=int(config["key_cooldown_seconds"]), transport_factory=build,
             )
-        if keys.next_available_key(user_id, provider) is None:
+        if first_key is None:
             return build("")
         return MultiKeyProviderStreamTransport(
             key_pool=keys, user_id=user_id, provider=provider,
@@ -1291,10 +1301,40 @@ class ChatWorker:
         from agentos.provider_catalog.modalities import SameProviderMediaModelPolicy
 
         active_provider = str(turn.get("provider") or "").strip().lower()
-        if not active_provider:
+        user_id = str(turn.get("user_id") or "").strip()
+        if not active_provider or not user_id:
             return SameProviderMediaModelPolicy.from_catalog_models(turn_provider="", favorite_models=())
+        enabled_providers: set[str] = {active_provider}
+        defaults: dict[str, tuple[str, str]] = {}
         try:
             with self.store._engine.connect() as connection:
+                enabled_rows = connection.execute(
+                    select(provider_configurations.c.provider).where(
+                        provider_configurations.c.user_id == user_id,
+                        provider_configurations.c.enabled.is_(True),
+                    )
+                ).all()
+                for erow in enabled_rows:
+                    if erow.provider:
+                        enabled_providers.add(str(erow.provider).strip().lower())
+
+                try:
+                    default_rows = connection.execute(
+                        select(
+                            media_model_selections.c.modality,
+                            media_model_selections.c.provider,
+                            media_model_selections.c.model_id,
+                        ).where(media_model_selections.c.user_id == user_id)
+                    ).all()
+                    for drow in default_rows:
+                        mod = str(drow.modality or "").strip().lower()
+                        prov = str(drow.provider or "").strip().lower()
+                        mid = str(drow.model_id or "").strip()
+                        if mod and prov in enabled_providers and mid:
+                            defaults[mod] = (prov, mid)
+                except Exception:
+                    pass
+
                 rows = connection.execute(
                     select(
                         provider_model_catalog.c.provider,
@@ -1308,8 +1348,8 @@ class ChatWorker:
                         & (provider_model_favorites.c.model_id == provider_model_catalog.c.model_id),
                     )
                     .where(
-                        provider_model_catalog.c.user_id == turn["user_id"],
-                        provider_model_catalog.c.provider == active_provider,
+                        provider_model_catalog.c.user_id == user_id,
+                        provider_model_catalog.c.provider.in_(sorted(enabled_providers)),
                     )
                     .order_by(provider_model_catalog.c.display_name, provider_model_catalog.c.model_id)
                 ).all()
@@ -1329,19 +1369,25 @@ class ChatWorker:
         return SameProviderMediaModelPolicy.from_catalog_models(
             turn_provider=active_provider,
             favorite_models=favorites,
+            defaults_by_modality=defaults if defaults else None,
+            enabled_providers=enabled_providers,
         )
 
     def _media_client_for_turn(self, turn: dict[str, object]):
         from agentos.agentic.media_client import MediaGenerationClient
 
-        def build() -> MediaGenerationClient | None:
-            provider = str(turn.get("provider") or "").strip().lower()
+        def build(target_provider: str | None = None, *, transport=None) -> MediaGenerationClient | None:
+            provider = str(target_provider or turn.get("provider") or "").strip().lower()
             user_id = str(turn.get("user_id") or "").strip()
             if not provider or not user_id:
                 return None
             with self.store._engine.connect() as c:
                 credential = c.execute(
-                    select(provider_configurations.c.base_url, provider_configurations.c.enabled)
+                    select(
+                        provider_configurations.c.base_url,
+                        provider_configurations.c.enabled,
+                        provider_configurations.c.key_cooldown_seconds,
+                    )
                     .where(
                         provider_configurations.c.user_id == user_id,
                         provider_configurations.c.provider == provider,
@@ -1349,18 +1395,27 @@ class ChatWorker:
                 ).mappings().first()
             if credential is None or not credential["enabled"]:
                 return None
-            chosen = PostgresProviderApiKeyAdapter(
+            key_pool = PostgresProviderApiKeyAdapter(
                 self.store._engine,
                 cipher=ProviderSecretCipher.from_environment(required=True),
-            ).next_available_key(user_id, provider)
+            )
+            chosen = key_pool.next_available_key(user_id, provider)
             if chosen is None:
                 if provider not in PROVIDERS_WITH_BASE_URL:
                     return None
                 api_key = ""
             else:
                 api_key = chosen.plaintext
-            base_url = self._base_url_for(provider, credential)
-            return MediaGenerationClient(provider=provider, base_url=base_url, api_key=api_key)
+            base_url = self._base_url_for(provider, {"base_url": credential["base_url"], "api_key": api_key})
+            return MediaGenerationClient(
+                provider=provider,
+                base_url=base_url,
+                api_key=api_key,
+                transport=transport,
+                key_pool=key_pool,
+                user_id=user_id,
+                cooldown_seconds=int(credential.get("key_cooldown_seconds") or 60),
+            )
 
         return build
 

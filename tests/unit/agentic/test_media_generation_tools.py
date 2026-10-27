@@ -238,3 +238,242 @@ def test_openrouter_media_error_surfaces_http_status_and_upstream_metadata() -> 
     assert "Resource has been exhausted" in msg
 
 
+def test_openrouter_dedicated_image_model_calls_api_v1_images_endpoint() -> None:
+    called_paths: list[str] = []
+    seen_bodies: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        called_paths.append(request.url.path)
+        body = json.loads(request.content.decode("utf-8"))
+        seen_bodies.append(body)
+        if request.url.path.endswith("/chat/completions"):
+            return httpx.Response(
+                404,
+                json={
+                    "error": {
+                        "message": "qwen/qwen-image-2.1-pro is an image generation model and cannot be used with the chat/completions endpoint. Use the /api/v1/images endpoint instead."
+                    }
+                },
+            )
+        if request.url.path.endswith("/api/v1/images"):
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {
+                            "b64_json": base64.b64encode(PNG_1X1).decode("ascii"),
+                            "media_type": "image/webp",
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(404)
+
+    client = MediaGenerationClient(
+        provider="openrouter",
+        base_url="https://openrouter.ai/api/v1",
+        api_key="sk-or-test",
+        transport=httpx.MockTransport(handler),
+    )
+    data, ext = client.generate_image(
+        model="qwen/qwen-image-2.1-pro",
+        prompt="A cyberpunk owl",
+        size="1536x1024",
+    )
+    assert data == PNG_1X1
+    assert ext == "webp"
+    assert called_paths == ["/api/v1/images"]
+    assert seen_bodies[0]["model"] == "qwen/qwen-image-2.1-pro"
+    assert seen_bodies[0]["prompt"] == "A cyberpunk owl"
+
+
+def test_openrouter_image_generation_bidirectional_fallback_between_images_and_chat() -> None:
+    def chat_to_images_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/chat/completions"):
+            return httpx.Response(
+                404,
+                json={
+                    "error": {
+                        "message": "google/gemini-custom-image is an image generation model and cannot be used with the chat/completions endpoint. Use the /api/v1/images endpoint instead."
+                    }
+                },
+            )
+        if request.url.path.endswith("/api/v1/images"):
+            return httpx.Response(
+                200,
+                json={"data": [{"b64_json": base64.b64encode(PNG_1X1).decode("ascii"), "media_type": "image/png"}]},
+            )
+        return httpx.Response(404)
+
+    client_a = MediaGenerationClient(
+        provider="openrouter",
+        base_url="https://openrouter.ai/api/v1",
+        api_key="sk-or-test",
+        transport=httpx.MockTransport(chat_to_images_handler),
+    )
+    data_a, ext_a = client_a.generate_image(model="google/gemini-custom-image", prompt="Test fallback to /images")
+    assert data_a == PNG_1X1
+    assert ext_a == "png"
+
+
+def test_openrouter_elevenlabs_audio_uses_compatible_default_voice_and_fallback() -> None:
+    voices_tried: list[str] = []
+
+    def audio_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/audio/speech"):
+            body = json.loads(request.content.decode("utf-8"))
+            voice = str(body.get("voice") or "")
+            voices_tried.append(voice)
+            if voice in {"alloy", "invalid-voice"}:
+                return httpx.Response(400, json={"error": {"message": f"Unsupported voice '{voice}' for ElevenLabs"}})
+            return httpx.Response(200, content=FAKE_MP3, headers={"content-type": "audio/mpeg"})
+        return httpx.Response(404)
+
+    client = MediaGenerationClient(
+        provider="openrouter",
+        base_url="https://openrouter.ai/api/v1",
+        api_key="sk-or-test",
+        transport=httpx.MockTransport(audio_handler),
+    )
+    # Default "alloy" is automatically mapped to "george" for elevenlabs models without even failing first
+    data, ext = client.generate_audio(model="elevenlabs/eleven-v3", text="Olá Orin", voice="alloy")
+    assert data == FAKE_MP3
+    assert ext == "mp3"
+    assert voices_tried == ["george"]
+
+    # If an explicit custom voice fails with 400, it retries with "george"
+    voices_tried.clear()
+    data2, ext2 = client.generate_audio(model="elevenlabs/eleven-v3", text="Olá Orin", voice="invalid-voice")
+    assert data2 == FAKE_MP3
+    assert ext2 == "mp3"
+    assert voices_tried == ["invalid-voice", "george"]
+
+
+def test_openrouter_async_video_generation_polls_pending_and_downloads_content(monkeypatch: pytest.MonkeyPatch) -> None:
+    import time
+
+    monkeypatch.setattr(time, "sleep", lambda _: None)
+    calls: list[tuple[str, str]] = []
+
+    def video_handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.method, request.url.path))
+        if request.method == "POST" and request.url.path.endswith("/api/v1/videos"):
+            return httpx.Response(
+                202,
+                json={
+                    "id": "gen-vid-999",
+                    "pollingUrl": "/api/v1/videos/gen-vid-999",
+                    "status": "pending",
+                },
+            )
+        if request.method == "GET" and request.url.path.endswith("/api/v1/videos/gen-vid-999"):
+            return httpx.Response(200, json={"id": "gen-vid-999", "status": "completed"})
+        if request.method == "GET" and request.url.path.endswith("/api/v1/videos/gen-vid-999/content"):
+            return httpx.Response(200, content=FAKE_MP4, headers={"content-type": "video/mp4"})
+        return httpx.Response(404)
+
+    client = MediaGenerationClient(
+        provider="openrouter",
+        base_url="https://openrouter.ai/api/v1",
+        api_key="sk-or-test",
+        transport=httpx.MockTransport(video_handler),
+    )
+    data, ext = client.generate_video(model="google/veo-3.1", prompt="A drone shot over mountains")
+    assert data == FAKE_MP4
+    assert ext == "mp4"
+    assert calls == [
+        ("POST", "/api/v1/videos"),
+        ("GET", "/api/v1/videos/gen-vid-999"),
+        ("GET", "/api/v1/videos/gen-vid-999/content"),
+    ]
+
+
+def test_infer_output_modalities_recognizes_qwen_image_seedream_and_elevenlabs() -> None:
+    from agentos.provider_catalog.modalities import infer_output_modalities
+
+    assert infer_output_modalities("qwen/qwen-image-2.1-pro") == ("image",)
+    assert infer_output_modalities("bytedance-seed/seedream-4.5") == ("image",)
+    assert infer_output_modalities("elevenlabs/eleven-v3") == ("audio",)
+    assert infer_output_modalities("elevenlabs/eleven-v4-turbo") == ("audio",)
+
+
+def test_cross_provider_media_policy_uses_configured_default_and_routes_client_by_provider(tmp_path: Path) -> None:
+    workspace = ConversationWorkspace(tmp_path)
+    # Turn is running on NVIDIA, while default image is OpenRouter (qwen-image-2.1-pro, even without being favorited)
+    # and default audio is OpenRouter (elevenlabs/eleven-v3), plus an OpenAI favorite (gpt-image-1).
+    policy = SameProviderMediaModelPolicy.from_catalog_models(
+        turn_provider="nvidia",
+        favorite_models=[
+            ("openai", "gpt-image-1", ("image",)),
+        ],
+        defaults_by_modality={
+            "image": ("openrouter", "qwen/qwen-image-2.1-pro"),
+            "audio": ("openrouter", "elevenlabs/eleven-v3"),
+        },
+        enabled_providers=("nvidia", "openrouter", "openai"),
+    )
+
+    assert policy.has_modality("image") is True
+    assert policy.has_modality("audio") is True
+    assert policy.has_modality("video") is False
+
+    requested_providers: list[str] = []
+
+    def client_factory(target_provider: str | None = None) -> MediaGenerationClient:
+        prov = str(target_provider or "nvidia")
+        requested_providers.append(prov)
+        if prov == "openrouter":
+            def or_handler(request: httpx.Request) -> httpx.Response:
+                if request.url.path.endswith("/api/v1/images"):
+                    return httpx.Response(
+                        200,
+                        json={"data": [{"b64_json": base64.b64encode(PNG_1X1).decode("ascii"), "media_type": "image/png"}]},
+                    )
+                if request.url.path.endswith("/api/v1/audio/speech"):
+                    return httpx.Response(200, content=FAKE_MP3, headers={"content-type": "audio/mpeg"})
+                return httpx.Response(404)
+
+            return MediaGenerationClient(
+                provider="openrouter",
+                base_url="https://openrouter.ai/api/v1",
+                api_key="sk-or",
+                transport=httpx.MockTransport(or_handler),
+            )
+        return MediaGenerationClient(
+            provider=prov,
+            base_url="https://api.openai.com/v1",
+            api_key="sk-oa",
+            transport=_mock_transport(),
+        )
+
+    toolset = AgentToolset(workspace, media_policy=policy, media_client=client_factory)
+    tool_names = {d.name for d in toolset.definitions()}
+    assert "generate_image" in tool_names
+    assert "generate_audio" in tool_names
+    assert "generate_video" not in tool_names
+
+    # 1. Calling generate_image without specifying model uses configured default (openrouter + qwen/qwen-image-2.1-pro)
+    img_res = toolset.execute("generate_image", {"prompt": "Astronaut cat", "output_path": "generated/qwen.png"})
+    assert img_res["status"] == "succeeded"
+    assert img_res["payload"]["provider"] == "openrouter"
+    assert img_res["payload"]["model"] == "qwen/qwen-image-2.1-pro"
+
+    # 2. Calling generate_audio without specifying model uses configured default (openrouter + elevenlabs/eleven-v3)
+    aud_res = toolset.execute("generate_audio", {"text": "Hello from Eleven v3", "output_path": "generated/eleven.mp3"})
+    assert aud_res["status"] == "succeeded"
+    assert aud_res["payload"]["provider"] == "openrouter"
+    assert aud_res["payload"]["model"] == "elevenlabs/eleven-v3"
+
+    # 3. Explicitly requesting another favorited model from another enabled provider (openai:gpt-image-1) routes to openai!
+    img_oa = toolset.execute(
+        "generate_image",
+        {"prompt": "OpenAI cat", "model": "gpt-image-1", "output_path": "generated/oa.png"},
+    )
+    assert img_oa["status"] == "succeeded"
+    assert img_oa["payload"]["provider"] == "openai"
+    assert img_oa["payload"]["model"] == "gpt-image-1"
+    assert requested_providers == ["openrouter", "openrouter", "openai"]
+
+
+
+

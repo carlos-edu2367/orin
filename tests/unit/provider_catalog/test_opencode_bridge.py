@@ -323,3 +323,183 @@ def test_provider_configuration_allows_keyless_local_opencode_and_requires_key_f
                 "base_url": OPENCODE_CLOUD_BASE_URL,
             }
         )
+
+
+def test_chat_worker_opencode_transport_without_keys_defaults_to_local_bridge(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from sqlalchemy import insert
+    from agentos.workers.chat import ChatWorker
+
+    monkeypatch.setenv("AGENTOS_PROVIDER_ENCRYPTION_KEY", _TEST_CIPHER_KEY)
+    engine = create_local_engine(f"sqlite:///{tmp_path / 'worker_opencode.db'}")
+    metadata.create_all(engine)
+    now = datetime.now(UTC)
+    with engine.begin() as conn:
+        conn.execute(
+            insert(provider_configurations).values(
+                user_id="user-1",
+                provider="opencode",
+                enabled=True,
+                base_url=None,
+                secret_ref="ref-1",
+                key_cooldown_seconds=60,
+                catalog_refreshed_at=now,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+
+    worker = ChatWorker.__new__(ChatWorker)
+    worker.store = type("S", (), {"_engine": engine})()
+
+    transport = worker._provider_transport(
+        {"provider": "opencode", "user_id": "user-1", "model_id": "deepseek-v4.1-flash-free"}
+    )
+    assert isinstance(transport, HTTPProviderStreamTransport)
+    assert transport.base_url == DEFAULT_OPENCODE_LOCAL_BASE_URL
+
+    direct = worker._transport_for("user-1", "opencode", "deepseek-v4.1-flash-free")
+    assert isinstance(direct, HTTPProviderStreamTransport)
+    assert direct.base_url == DEFAULT_OPENCODE_LOCAL_BASE_URL
+
+
+def test_catalog_service_list_auto_refreshes_local_opencode_after_save_or_legacy_null_url(
+    tmp_path: Any,
+) -> None:
+    from sqlalchemy import insert, select
+    from agentos.persistence.postgres.provider_models import PostgresProviderCatalogRepository
+
+    engine = create_local_engine(f"sqlite:///{tmp_path / 'catalog_auto.db'}")
+    metadata.create_all(engine)
+    cipher = ProviderSecretCipher(_TEST_CIPHER_KEY)
+    cfg = PostgresProviderConfigurationAdapter(engine, cipher=cipher)
+    repo = PostgresProviderCatalogRepository(engine, cipher=cipher)
+
+    class _FakeUpstream:
+        def fetch(self, api_key: str, *, base_url: str = "") -> list[dict[str, object]]:
+            return [
+                {
+                    "id": "deepseek-v4.1-flash-free",
+                    "name": "DeepSeek V4.1 Flash Free",
+                    "context_length": 128000,
+                    "supported_parameters": ["tools"],
+                    "input_modalities": ["text"],
+                    "output_modalities": ["text"],
+                }
+            ]
+
+    service = ProviderModelCatalogService(repo, {"opencode": _FakeUpstream()})
+    ctx = ProviderCatalogContext("user-1", "conversation.send")
+
+    # Case 1: User just clicked "Salvar" on Local Bridge (`catalog_refreshed_at=None`)
+    cfg.configure(
+        {
+            "provider": "opencode",
+            "user_id": "user-1",
+            "enabled": True,
+            "api_key": "",
+            "base_url": DEFAULT_OPENCODE_LOCAL_BASE_URL,
+        }
+    )
+    models = service.list(ctx, "opencode")
+    assert [m.model_id for m in models] == ["deepseek-v4.1-flash-free"]
+    assert models[0].display_name == "DeepSeek V4.1 Flash Free"
+
+    # Case 2: Legacy 0.9.4 row with `base_url=None` and no API key
+    now = datetime.now(UTC)
+    with engine.begin() as conn:
+        conn.execute(provider_configurations.delete())
+        conn.execute(
+            insert(provider_configurations).values(
+                user_id="user-1",
+                provider="opencode",
+                enabled=True,
+                base_url=None,
+                secret_ref="legacy-ref",
+                key_cooldown_seconds=60,
+                catalog_refreshed_at=now,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    models_legacy = service.list(ctx, "opencode")
+    assert [m.model_id for m in models_legacy] == ["deepseek-v4.1-flash-free"]
+    with engine.connect() as conn:
+        saved_base_url = conn.execute(
+            select(provider_configurations.c.base_url).where(
+                provider_configurations.c.user_id == "user-1",
+                provider_configurations.c.provider == "opencode",
+            )
+        ).scalar_one()
+    assert saved_base_url == DEFAULT_OPENCODE_LOCAL_BASE_URL
+
+
+def test_stream_opencode_bridge_parses_fenced_json_tool_calls_and_preserves_late_system_notes() -> None:
+    captured_payloads: list[dict[str, Any]] = []
+
+    class _FakeBridgeManager:
+        def ensure_running(self, base_url: str) -> None:
+            pass
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json
+
+        body = json.loads(request.content.decode("utf-8")) if request.content else {}
+        if request.url.path == "/session":
+            return httpx.Response(200, json={"id": "ses_fenced"})
+        if request.url.path == "/session/ses_fenced/message":
+            captured_payloads.append(body)
+            return httpx.Response(
+                200,
+                json={
+                    "info": {"id": "m1", "role": "assistant", "tokens": {"input": 50, "output": 20}},
+                    "parts": [
+                        {
+                            "type": "text",
+                            "text": (
+                                "Executando busca:\n"
+                                "<orin_tool_call>\n"
+                                "```json\n"
+                                '{"name": "web_search", "arguments": {"query": "digital products 2026"}}\n'
+                                "```\n"
+                                "</orin_tool_call>"
+                            ),
+                        }
+                    ],
+                },
+            )
+        return httpx.Response(404)
+
+    items = list(
+        stream_opencode_bridge(
+            base_url="http://127.0.0.1:18446",
+            model="deepseek-v4.1-flash-free",
+            messages=[
+                {"role": "system", "content": "Stable system prompt."},
+                {"role": "user", "content": "Crie uma landing page."},
+                {"role": "system", "content": "Fase atual: PLAN. Ferramentas disponíveis: web_search."},
+            ],
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "web_search",
+                        "description": "Search the web",
+                        "parameters": {"type": "object", "properties": {"query": {"type": "string"}}},
+                    },
+                }
+            ],
+            client=httpx.Client(transport=httpx.MockTransport(handler)),
+            bridge_manager=_FakeBridgeManager(),
+        )
+    )
+
+    tool_items = [i for i in items if i.kind is StreamKind.TOOL_CALL]
+    text_items = [i for i in items if i.kind is StreamKind.TEXT]
+    assert len(tool_items) == 1
+    assert tool_items[0].tool_name == "web_search"
+    assert tool_items[0].arguments_delta == '{"query": "digital products 2026"}'
+    assert not any("<orin_tool_call>" in (i.text or "") for i in text_items)
+    assert "Fase atual: PLAN" in captured_payloads[0]["parts"][0]["text"]
+

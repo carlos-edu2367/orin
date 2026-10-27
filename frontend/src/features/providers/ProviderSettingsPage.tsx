@@ -5,6 +5,7 @@ import { ApiError, isAuthenticationError, isCsrfAuthorizationError } from '../..
 import { configureProvider, inspectProvider, revokeProvider, refreshProviderModels, listProviderModels, setProviderModelFavorite, testNvidiaConnection, testOmniRouteConnection, testOllamaConnection, installOmniRoute, getOmniRouteInstallationStatus, getOmniRouteRuntime, setOmniRouteAutoStart, controlOmniRoute, PROVIDER_NAMES, type NvidiaTestResult, type OmniRouteRuntime, type ProviderModel, type ProviderName, type ProviderPublicState } from '../../api/providers'
 import { NvidiaSetup } from './NvidiaSetup'
 import { OMNIROUTE_FREE_PROVIDER_GUIDES } from './omnirouteFreeProviders'
+import { MediaModelsSetting } from './MediaModelsSetting'
 import { VisionModelSetting } from './VisionModelSetting'
 import { Brand } from '../../components/Brand'
 
@@ -44,6 +45,7 @@ export function ProviderSettingsPage({ client = createBrowserApiClient(), bootst
           ))}
         </div>
         <VisionModelSetting client={client} bootstrap={session} />
+        <MediaModelsSetting client={client} bootstrap={session} />
       </section>
     </main>
   )
@@ -175,7 +177,7 @@ function ProviderPanel({ provider, client, bootstrap }: { provider: ProviderName
         {
           apiKey,
           enabled,
-          ...(provider === 'omniroute' || provider === 'ollama' || provider === 'nvidia' ? { baseUrl } : {}),
+          ...(provider === 'omniroute' || provider === 'ollama' || provider === 'nvidia' || provider === 'opencode' ? { baseUrl } : {}),
         },
         intent,
       )
@@ -188,7 +190,7 @@ function ProviderPanel({ provider, client, bootstrap }: { provider: ProviderName
       // setup. Fetching the catalog here is what actually finishes the flow.
       // A refresh failure is reported on the catalog, never as a failed save:
       // the credential is already stored at this point.
-      if ((provider === 'omniroute' || provider === 'ollama' || provider === 'nvidia') && state.enabled === true) {
+      if ((provider === 'omniroute' || provider === 'ollama' || provider === 'nvidia' || provider === 'opencode') && state.enabled === true) {
         try {
           await refreshProviderModels(client, provider, intentFor('refresh'))
           intents.current.delete('refresh')

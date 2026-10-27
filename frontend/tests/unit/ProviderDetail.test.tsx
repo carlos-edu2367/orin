@@ -111,6 +111,8 @@ describe('ProviderDetail', () => {
         saved = true
         return Promise.resolve(json({ provider: 'opencode', enabled: true, base_url: 'http://127.0.0.1:18446', key_cooldown_seconds: 60 }))
       }
+      if (url.endsWith('/v1/providers/opencode/models:refresh') && init?.method === 'POST') return Promise.resolve(json({ count: 1, refreshed_at: '2026-10-20T15:20:00Z' }))
+      if (url.endsWith('/v1/providers/opencode/models') && (!init?.method || init.method === 'GET')) return Promise.resolve(json({ items: [{ ...model(), provider: 'opencode', model_id: 'deepseek-v4.1-flash-free', display_name: 'DeepSeek V4.1 Flash Free' }] }))
       if (url.endsWith('/v1/providers/opencode/keys')) {
         return Promise.resolve(json([]))
       }
@@ -130,6 +132,8 @@ describe('ProviderDetail', () => {
     const saveButton = within(region).getByRole('button', { name: 'Salvar' })
     expect(saveButton).not.toBeDisabled()
     await user.click(saveButton)
+    expect(await within(region).findByText('DeepSeek V4.1 Flash Free')).toBeInTheDocument()
+    expect(fetchImpl.mock.calls.some(([requestInput]) => String(requestInput).endsWith('/v1/providers/opencode/models:refresh'))).toBe(true)
 
     const putCall = fetchImpl.mock.calls.find(([input, init]) => String(input).endsWith('/v1/providers/opencode') && init?.method === 'PUT')
     expect(putCall).toBeDefined()

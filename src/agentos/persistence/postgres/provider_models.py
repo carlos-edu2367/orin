@@ -9,6 +9,7 @@ from sqlalchemy.engine import Engine
 
 from agentos.provider_catalog.modalities import infer_output_modalities
 from agentos.provider_catalog.models import PricingSummary, ProviderCatalogContext, ProviderModelRecord
+from agentos.provider_catalog.opencode import DEFAULT_OPENCODE_LOCAL_BASE_URL
 
 from .schema import provider_configurations, provider_model_catalog, provider_model_favorites
 from .provider_api_keys import PostgresProviderApiKeyAdapter, ProviderApiKeyCredential
@@ -93,6 +94,8 @@ class PostgresProviderCatalogRepository:
             if configuration is None or configuration["enabled"] is not True:
                 raise LookupError("provider is not enabled")
             base_url = configuration["base_url"]
+            if provider == "opencode" and base_url is None and self._keys.next_available_key(context.user_id, provider) is None:
+                base_url = DEFAULT_OPENCODE_LOCAL_BASE_URL
             custom_ids = set(connection.execute(select(provider_model_catalog.c.model_id).where(
                 provider_model_catalog.c.user_id == context.user_id,
                 provider_model_catalog.c.provider == provider,
@@ -129,7 +132,7 @@ class PostgresProviderCatalogRepository:
             connection.execute(update(provider_configurations).where(
                 provider_configurations.c.user_id == context.user_id,
                 provider_configurations.c.provider == provider,
-            ).values(catalog_refreshed_at=refreshed_at, updated_at=now))
+            ).values(base_url=base_url, catalog_refreshed_at=refreshed_at, updated_at=now))
 
     def list(self, context: ProviderCatalogContext, provider: str, favorites_only: bool = False) -> list[ProviderModelRecord]:
         statement = select(
@@ -220,6 +223,8 @@ class PostgresProviderCatalogRepository:
             if configuration is None or configuration["enabled"] is not True:
                 raise LookupError("provider is not enabled")
             base_url = configuration["base_url"]
+            if provider == "opencode" and base_url is None and self._keys.next_available_key(context.user_id, provider) is None:
+                base_url = DEFAULT_OPENCODE_LOCAL_BASE_URL
             existing = connection.execute(select(provider_model_catalog.c.id).where(
                 provider_model_catalog.c.user_id == context.user_id,
                 provider_model_catalog.c.provider == provider,

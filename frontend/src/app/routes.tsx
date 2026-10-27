@@ -7,6 +7,7 @@ import { ExecutionPage } from '../features/executions/ExecutionPage'
 import { ExecutionRoute } from '../features/executions/ExecutionRoute'
 import { ProvidersSection } from '../features/providers/ProvidersSection'
 import { ProviderDetail } from '../features/providers/ProviderDetail'
+import { MediaModelsSetting } from '../features/providers/MediaModelsSetting'
 import { VisionModelSetting } from '../features/providers/VisionModelSetting'
 import { PROVIDER_NAMES, type ProviderName } from '../api/providers'
 import { Home } from './Home'
@@ -67,6 +68,7 @@ export const routes: RouteDefinition[] = [
   { path: '/settings/skills', element: <SettingsRoute><SkillsSection /></SettingsRoute> },
   { path: '/settings/skills/:skillId', element: <SettingsRoute><SkillsSection /></SettingsRoute> },
   { path: '/settings/vision', element: <VisionSettingsRoute /> },
+  { path: '/settings/media', element: <MediaSettingsRoute /> },
   { path: '/settings/mcp', element: <SettingsRoute><McpSection /></SettingsRoute> },
   { path: '/settings/plugins', element: <SettingsRoute><PluginsSection /></SettingsRoute> },
   { path: '/settings/permissions', element: <SettingsRoute><PermissionsSection /></SettingsRoute> },
@@ -141,4 +143,13 @@ function VisionSettingsRoute() {
 function VisionModelSettingRouteContent() {
   const client = useMemo(() => createBrowserApiClient(), [])
   return <VisionModelSetting client={client} />
+}
+
+function MediaSettingsRoute() {
+  return <SettingsRoute><SettingsSection eyebrow="INTELIGÊNCIA / GERAÇÃO DE MÍDIA"><MediaModelsSettingRouteContent /></SettingsSection></SettingsRoute>
+}
+
+function MediaModelsSettingRouteContent() {
+  const client = useMemo(() => createBrowserApiClient(), [])
+  return <MediaModelsSetting client={client} />
 }

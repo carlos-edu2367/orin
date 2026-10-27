@@ -17,6 +17,7 @@ from .nvidia import (
     is_nvidia_cloud,
     normalize_nvidia_base_url,
 )
+from .opencode import DEFAULT_OPENCODE_LOCAL_BASE_URL, is_opencode_cloud
 from .ports import ProviderCatalogRepository, ProviderCatalogUpstream
 
 
@@ -250,7 +251,20 @@ class ProviderModelCatalogService:
         return records
 
     def list(self, context: ProviderCatalogContext, provider: str, favorites_only: bool = False) -> list[ProviderModelRecord]:
-        return self._repository.list(context, _provider(provider), favorites_only)
+        normalized_provider = _provider(provider)
+        items = self._repository.list(context, normalized_provider, favorites_only)
+        if normalized_provider == "opencode":
+            credential = self._repository.credential(context, normalized_provider)
+            if isinstance(credential, Mapping) and credential.get("enabled") is True:
+                raw_base = str(credential.get("base_url") or "")
+                has_key = bool(str(credential.get("api_key") or "").strip())
+                if (not raw_base and not has_key) or (not items and not is_opencode_cloud(raw_base or DEFAULT_OPENCODE_LOCAL_BASE_URL)):
+                    try:
+                        self.refresh(context, normalized_provider)
+                        items = self._repository.list(context, normalized_provider, favorites_only)
+                    except Exception:
+                        pass
+        return items
 
     def favorite(self, context: ProviderCatalogContext, provider: str, model_id: str, favorite: bool) -> ProviderModelRecord:
         if not isinstance(model_id, str) or not model_id.strip():

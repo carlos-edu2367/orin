@@ -12,14 +12,25 @@ from agentos.agentic.tools.spec import ToolSpec
 class MediaTools:
     """Mixed into ``AgentToolset``; ``self`` is the toolset."""
 
-    def _resolve_media_client(self):
-        client = self._media_client
-        if callable(client) and not hasattr(client, "generate_image"):
-            client = client()
-            self._media_client = client
+    def _resolve_media_client(self, target_provider: str | None = None):
+        raw = self._media_client
+        if callable(raw) and not hasattr(raw, "generate_image"):
+            try:
+                client = raw(target_provider) if target_provider is not None else raw()
+            except TypeError:
+                client = raw()
+        else:
+            client = raw
         if self._media_policy is None or client is None:
-            raise AgentToolError("Ferramenta de geração de mídia indisponível para o provedor atual.")
+            raise AgentToolError("Ferramenta de geração de mídia indisponível para o provedor selecionado.")
         return client
+
+    def _resolve_media_target(self, modality: str, requested_model: str | None) -> tuple[str, str]:
+        if hasattr(self._media_policy, "resolve_target"):
+            target = self._media_policy.resolve_target(modality, requested_model)
+            return target.provider, target.model_id
+        resolved_model = self._media_policy.resolve_model(modality, requested_model)
+        return str(getattr(self._media_policy, "turn_provider", "") or ""), resolved_model
 
     def _resolve_media_output_path(self, output_path: str | None, *, default_prefix: str, ext: str) -> str:
         clean_ext = (ext or "bin").lstrip(".").lower() or "bin"
@@ -47,18 +58,18 @@ class MediaTools:
         if self._media_policy is None:
             raise AgentToolError("Geração de imagem não habilitada para este provedor.", error_code="MEDIA_NOT_AVAILABLE")
         try:
-            resolved_model = self._media_policy.resolve_model("image", model)
+            resolved_provider, resolved_model = self._resolve_media_target("image", model)
         except PermissionError as error:
             raise AgentToolError(str(error), error_code="MODEL_NOT_ALLOWED") from error
-        if resolved_model is None:
+        if not resolved_model:
             allowed = ", ".join(self._media_policy.models_for("image")) or "nenhum"
             raise AgentToolError(
-                f"Modelo de imagem inválido ou não favoritado no provedor ativo ({self._media_policy.turn_provider}). Permitidos: {allowed}",
+                f"Modelo de imagem inválido ou não favoritado ({self._media_policy.turn_provider}). Permitidos: {allowed}",
                 error_code="MODEL_NOT_ALLOWED",
             )
         if output_path is not None and str(output_path).strip():
             self.workspace.resolve(str(output_path))
-        client = self._resolve_media_client()
+        client = self._resolve_media_client(resolved_provider)
         try:
             data, ext = client.generate_image(
                 model=resolved_model,
@@ -79,7 +90,7 @@ class MediaTools:
             "uri": workspace_uri,
             "markdown": markdown_ref,
             "model": resolved_model,
-            "provider": self._media_policy.turn_provider,
+            "provider": resolved_provider or self._media_policy.turn_provider,
             "bytes": written,
         }
         return ToolOutcome(
@@ -105,18 +116,18 @@ class MediaTools:
         if self._media_policy is None:
             raise AgentToolError("Geração de áudio não habilitada para este provedor.", error_code="MEDIA_NOT_AVAILABLE")
         try:
-            resolved_model = self._media_policy.resolve_model("audio", model)
+            resolved_provider, resolved_model = self._resolve_media_target("audio", model)
         except PermissionError as error:
             raise AgentToolError(str(error), error_code="MODEL_NOT_ALLOWED") from error
-        if resolved_model is None:
+        if not resolved_model:
             allowed = ", ".join(self._media_policy.models_for("audio")) or "nenhum"
             raise AgentToolError(
-                f"Modelo de áudio inválido ou não favoritado no provedor ativo ({self._media_policy.turn_provider}). Permitidos: {allowed}",
+                f"Modelo de áudio inválido ou não favoritado ({self._media_policy.turn_provider}). Permitidos: {allowed}",
                 error_code="MODEL_NOT_ALLOWED",
             )
         if output_path is not None and str(output_path).strip():
             self.workspace.resolve(str(output_path))
-        client = self._resolve_media_client()
+        client = self._resolve_media_client(resolved_provider)
         try:
             data, ext = client.generate_audio(
                 model=resolved_model,
@@ -138,7 +149,7 @@ class MediaTools:
             "uri": workspace_uri,
             "markdown": markdown_ref,
             "model": resolved_model,
-            "provider": self._media_policy.turn_provider,
+            "provider": resolved_provider or self._media_policy.turn_provider,
             "bytes": written,
         }
         return ToolOutcome(
@@ -162,18 +173,18 @@ class MediaTools:
         if self._media_policy is None:
             raise AgentToolError("Geração de vídeo não habilitada para este provedor.", error_code="MEDIA_NOT_AVAILABLE")
         try:
-            resolved_model = self._media_policy.resolve_model("video", model)
+            resolved_provider, resolved_model = self._resolve_media_target("video", model)
         except PermissionError as error:
             raise AgentToolError(str(error), error_code="MODEL_NOT_ALLOWED") from error
-        if resolved_model is None:
+        if not resolved_model:
             allowed = ", ".join(self._media_policy.models_for("video")) or "nenhum"
             raise AgentToolError(
-                f"Modelo de vídeo inválido ou não favoritado no provedor ativo ({self._media_policy.turn_provider}). Permitidos: {allowed}",
+                f"Modelo de vídeo inválido ou não favoritado ({self._media_policy.turn_provider}). Permitidos: {allowed}",
                 error_code="MODEL_NOT_ALLOWED",
             )
         if output_path is not None and str(output_path).strip():
             self.workspace.resolve(str(output_path))
-        client = self._resolve_media_client()
+        client = self._resolve_media_client(resolved_provider)
         try:
             data, ext = client.generate_video(
                 model=resolved_model,
@@ -193,7 +204,7 @@ class MediaTools:
             "uri": workspace_uri,
             "markdown": markdown_ref,
             "model": resolved_model,
-            "provider": self._media_policy.turn_provider,
+            "provider": resolved_provider or self._media_policy.turn_provider,
             "bytes": written,
         }
         return ToolOutcome(

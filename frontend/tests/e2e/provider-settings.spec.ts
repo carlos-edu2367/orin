@@ -29,7 +29,7 @@ function providerFromUrl(url: string): string {
 }
 
 test.beforeEach(async ({ page }) => {
-  await page.route('**/providers', async (route) => {
+  await page.route(/\/(providers|media)$/, async (route) => {
     const response = await route.fetch()
     const body = (await response.text()).replace('<head>', '<head><meta name="csrf-token" content="csrf-e2e-test">')
     await route.fulfill({ response, body })
@@ -287,7 +287,7 @@ test('configures OpenCode Local Bridge without an API key, tests connection, and
     },
   ])
 
-  await panel.getByRole('button', { name: 'Atualizar catálogo' }).click()
+
   await expect(panel.getByText('Big Pickle')).toBeVisible()
   await expect(panel.getByText('MiMo v2.6 Flash Free')).toBeVisible()
   if (processEnv.ORIN_SHOT_OPENCODE_BRIDGE) {
@@ -449,4 +449,95 @@ test('configures NVIDIA NIM Cloud & Self-Hosted NIM, displays exhausted/cooldown
   if (processEnv.ORIN_SHOT_NVIDIA_MOBILE) {
     await page.screenshot({ path: processEnv.ORIN_SHOT_NVIDIA_MOBILE, fullPage: true })
   }
+})
+
+test('configures cross-provider default models for image, audio, and video generation', async ({ page }) => {
+  const savedMediaModels: Record<string, { provider: string | null; model_id: string | null; mode: 'automatic' | 'manual' }> = {
+    image: { provider: null, model_id: null, mode: 'automatic' },
+    audio: { provider: null, model_id: null, mode: 'automatic' },
+    video: { provider: null, model_id: null, mode: 'automatic' },
+  }
+
+  await page.route('**/v1/settings/media-models**', async (route) => {
+    const request = route.request()
+    const url = new URL(request.url())
+    const pathname = url.pathname
+    if (request.method() === 'GET' && pathname === '/v1/settings/media-models') {
+      await fulfillJson(route, savedMediaModels)
+      return
+    }
+    const putMatch = /^\/v1\/settings\/media-models\/(image|audio|video)$/.exec(pathname)
+    if (request.method() === 'PUT' && putMatch) {
+      const mod = putMatch[1]
+      const body = request.postDataJSON() as { provider: string | null; model_id: string | null }
+      const next = {
+        provider: body.provider,
+        model_id: body.model_id,
+        mode: body.provider === null ? ('automatic' as const) : ('manual' as const),
+      }
+      savedMediaModels[mod] = next
+      await fulfillJson(route, { modality: mod, ...next })
+      return
+    }
+    await route.abort('failed')
+  })
+
+  await page.route('**/v1/providers/**', async (route) => {
+    const request = route.request()
+    const pathname = new URL(request.url()).pathname
+    if (request.method() === 'GET' && pathname === '/v1/providers/openrouter/models') {
+      await fulfillJson(route, {
+        items: [
+          {
+            provider: 'openrouter',
+            model_id: 'qwen/qwen-image-2.1-pro',
+            display_name: 'Qwen Image 2.1 Pro',
+            context_window: null,
+            capabilities: [],
+            input_modalities: ['text'],
+            output_modalities: ['image'],
+            pricing: null,
+            is_favorite: false,
+            is_custom: false,
+            refreshed_at: '2026-10-27T12:00:00Z',
+            route_kind: 'model',
+          },
+          {
+            provider: 'openrouter',
+            model_id: 'elevenlabs/eleven-v3',
+            display_name: 'ElevenLabs: Eleven v3',
+            context_window: null,
+            capabilities: [],
+            input_modalities: ['text'],
+            output_modalities: ['audio'],
+            pricing: null,
+            is_favorite: true,
+            is_custom: false,
+            refreshed_at: '2026-10-27T12:00:00Z',
+            route_kind: 'model',
+          },
+        ],
+      })
+      return
+    }
+    if (request.method() === 'GET' && pathname.endsWith('/models')) {
+      await fulfillJson(route, { items: [] })
+      return
+    }
+    await fulfillJson(route, {})
+  })
+
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto('/settings/media')
+
+  await expect(page.getByRole('heading', { name: 'Geração de mídia', level: 2 })).toBeVisible()
+
+  const imageRow = page.getByTestId('media-model-row-image')
+  await imageRow.getByLabel('Filtrar modelos de imagem').fill('qwen 2.1')
+  await imageRow.getByLabel('Modelo padrão de imagem').selectOption('openrouter:qwen/qwen-image-2.1-pro')
+  await expect(imageRow.locator('.media-models-setting__badge')).toHaveText('OpenRouter · qwen/qwen-image-2.1-pro')
+
+  const audioRow = page.getByTestId('media-model-row-audio')
+  await audioRow.getByLabel('Modelo padrão de áudio').selectOption('openrouter:elevenlabs/eleven-v3')
+  await expect(audioRow.locator('.media-models-setting__badge')).toHaveText('OpenRouter · elevenlabs/eleven-v3')
 })

@@ -434,6 +434,7 @@ class ApiServices:
         local_workspaces: object | None = None,
         uploads: object | None = None,
         vision_model_settings: object | None = None,
+        media_model_settings: object | None = None,
         scheduled_chats: object | None = None,
         accounts: object | None = None,
         capabilities: InstanceCapabilities | None = None,
@@ -464,6 +465,7 @@ class ApiServices:
         self.workspace_root = Path(workspace_root) if workspace_root is not None else None
         self.uploads = uploads
         self.vision_model_settings = vision_model_settings
+        self.media_model_settings = media_model_settings
         self.scheduled_chats = scheduled_chats
         self.file_history_root = Path(file_history_root) if file_history_root is not None else None
         # W4 /add-dir: ConversationDirectoryStore (host folders only: closed with capabilities.host_folders).
@@ -2490,6 +2492,51 @@ def create_app(services: ApiServices) -> FastAPI:
             return JSONResponse({"provider": None, "model_id": None, "mode": "automatic"})
         store.set(principal.user_id, payload.provider, payload.model_id)
         return JSONResponse({"provider": payload.provider, "model_id": payload.model_id, "mode": "manual"})
+
+    @app.get("/v1/settings/media-models")
+    async def get_media_model_settings(request: Request) -> JSONResponse:
+        principal = principal_for(request)
+        services.security.authorize(principal, action="settings.vision_model.read", resource_id=None, purpose="settings.vision_model.read")
+        store = services.media_model_settings or services.vision_model_settings
+        if store is None:
+            raise ApplicationNotFoundError("media_model_settings is not available")
+        selections = store.get_all(principal.user_id) if hasattr(store, "get_all") else {}
+        response_body: dict[str, dict[str, str | None]] = {}
+        for mod in ("image", "audio", "video"):
+            sel = selections.get(mod)
+            if sel is None:
+                response_body[mod] = {"provider": None, "model_id": None, "mode": "automatic"}
+            else:
+                response_body[mod] = {"provider": sel.provider, "model_id": sel.model_id, "mode": "manual"}
+        return JSONResponse(response_body)
+
+    @app.put("/v1/settings/media-models/{modality}")
+    async def set_media_model_setting(modality: str, payload: VisionModelRequest, request: Request) -> JSONResponse:
+        principal = principal_for(request, mutable=True)
+        services.security.authorize(principal, action="settings.vision_model.configure", resource_id=None, purpose="settings.vision_model.configure")
+        norm_modality = str(modality or "").strip().lower()
+        if norm_modality not in {"image", "audio", "video"}:
+            raise ApplicationValidationError("modality must be image, audio, or video")
+        if (payload.provider is None) != (payload.model_id is None):
+            raise ApplicationValidationError("provider and model_id must both be present or both be absent")
+        store = _require_port(services.media_model_settings)
+        if payload.provider is None:
+            store.clear(principal.user_id, norm_modality)
+            return JSONResponse({"modality": norm_modality, "provider": None, "model_id": None, "mode": "automatic"})
+        try:
+            provider_name = _provider_name(payload.provider)
+        except ValueError as exc:
+            raise ApplicationValidationError("unsupported provider") from exc
+        clean_model_id = str(payload.model_id or "").strip()
+        if not clean_model_id:
+            raise ApplicationValidationError("model_id cannot be blank")
+        store.set(principal.user_id, norm_modality, provider_name, clean_model_id)
+        return JSONResponse({
+            "modality": norm_modality,
+            "provider": provider_name,
+            "model_id": clean_model_id,
+            "mode": "manual",
+        })
 
     @app.post("/v1/providers/{provider}/models:refresh")
     async def refresh_provider_models(provider: str, request: Request) -> JSONResponse:

@@ -690,6 +690,18 @@ vision_model_selections = Table(
     Column("updated_at", DateTime(timezone=True), nullable=False),
 )
 
+media_model_selections = Table(
+    "media_model_selections", metadata,
+    Column("id", Integer, primary_key=True),
+    Column("user_id", String(255), nullable=False),
+    Column("modality", String(32), nullable=False),
+    Column("provider", String(64), nullable=False),
+    Column("model_id", String(512), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+    UniqueConstraint("user_id", "modality", name="uq_media_model_selections_user_modality"),
+    CheckConstraint("modality IN ('image', 'audio', 'video')", name="ck_media_model_selections_modality"),
+)
+
 conversation_dispatches = Table(
     "conversation_dispatches", metadata,
     Column("id", Integer, primary_key=True), Column("turn_id", String(255), nullable=False, unique=True), Column("state", String(32), nullable=False),

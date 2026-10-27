@@ -52,7 +52,7 @@ from agentos.provider_catalog.nvidia import NvidiaModelCatalogClient
 from agentos.provider_catalog.ollama import OllamaCatalogClient
 from agentos.provider_catalog.omniroute import OmniRouteCatalogClient
 from agentos.provider_catalog.service import ProviderModelCatalogService
-from agentos.reading.store import PostgresVisionModelSettingsStore
+from agentos.reading.store import PostgresMediaModelSettingsStore, PostgresVisionModelSettingsStore
 from agentos.resources.service import ResourceManagerService
 from agentos.filesystem.local import LocalFilesystemAdapter, LocalWorkspaceRootResolver
 from agentos.filesystem.service import FilesystemService
@@ -364,6 +364,7 @@ def compose_production_services(engine: Engine, *, localhost_trust_enabled: bool
         local_workspaces=PostgresLocalWorkspaceStore(engine),
         uploads=staging,
         vision_model_settings=PostgresVisionModelSettingsStore(engine),
+        media_model_settings=PostgresMediaModelSettingsStore(engine),
         scheduled_chats=ScheduledChatService(engine),
         conversation_directories=ConversationDirectoryStore(engine),
     )

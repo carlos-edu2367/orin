@@ -100,6 +100,7 @@ SCOPED = {
     ("GET", "/v1/runtime/settings"), ("PUT", "/v1/runtime/settings"),
     ("GET", "/v1/code-mode/settings"), ("PUT", "/v1/code-mode/settings"),
     ("GET", "/v1/settings/vision-model"), ("PUT", "/v1/settings/vision-model"),
+    ("GET", "/v1/settings/media-models"), ("PUT", "/v1/settings/media-models/{modality}"),
     ("GET", "/v1/files/download"),
     # Skill preferences keyed by (caller, agent_id): an agent id names a role,
     # not a record someone owns, so every profile reads and writes its own row.

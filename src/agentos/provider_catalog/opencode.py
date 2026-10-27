@@ -121,6 +121,15 @@ def _locate_opencode_binary() -> str | None:
             return str(exe_candidate)
     found = shutil.which("opencode")
     if found:
+        sibling_exe = (
+            Path(found).parent
+            / "node_modules"
+            / "opencode-ai"
+            / "bin"
+            / "opencode.exe"
+        )
+        if sibling_exe.is_file():
+            return str(sibling_exe)
         return found
     if appdata:
         cmd_candidate = Path(appdata) / "npm" / "opencode.cmd"
@@ -428,6 +437,8 @@ def _format_bridge_conversation_transcript(
         if role == "system":
             if text_content.strip():
                 system_parts.append(text_content.strip())
+                if turns_text:
+                    turns_text.append(f"[System]\n{text_content.strip()}")
             continue
         if role == "user":
             turns_text.append(f"[User]\n{text_content}")
@@ -485,6 +496,9 @@ def _parse_orin_tool_calls(
 
     for match in _ORIN_TOOL_CALL_RE.finditer(text):
         raw_json = match.group(1).strip()
+        if raw_json.startswith("```"):
+            raw_json = re.sub(r"^```(?:json)?\s*", "", raw_json, flags=re.IGNORECASE)
+            raw_json = re.sub(r"\s*```$", "", raw_json).strip()
         if not allowed_names:
             continue
         try:
@@ -528,7 +542,7 @@ def stream_opencode_bridge(
     tool_choice: object = None,
     client: httpx.Client | None = None,
     bridge_manager: Any | None = None,
-    timeout: float = 120.0,
+    timeout: float = 180.0,
 ) -> Iterator[NormalizedStreamItem]:
     """Drive a local `opencode serve` instance and yield normalized Orin stream items."""
     normalized_base = normalize_opencode_base_url(base_url)

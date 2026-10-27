@@ -175,3 +175,113 @@ def test_transport_for_subagents_and_vision_returns_multi_key_and_rotates_on_rej
         ("https://integrate.api.nvidia.com/v1", "nvapi-second-key"),
     ]
     assert [item.text for item in items] == ["ok from subagent"]
+
+
+def test_opencode_provider_transport_without_keys_defaults_to_local_bridge_url() -> None:
+    from agentos.agentic.provider_stream import HTTPProviderStreamTransport
+    from agentos.workers.chat import ChatWorker
+
+    engine = _engine_with_provider("opencode", base_url=None, with_key=False)
+    worker = ChatWorker.__new__(ChatWorker)
+    worker.store = type("S", (), {"_engine": engine})()
+
+    transport = worker._provider_transport({"provider": "opencode", "user_id": "user-1", "model_id": "deepseek-v4.1-flash-free"})
+
+    assert isinstance(transport, HTTPProviderStreamTransport)
+    assert transport.base_url == "http://127.0.0.1:18446"
+
+
+def test_worker_media_policy_and_client_support_cross_provider_defaults_and_key_rotation() -> None:
+    import base64
+    import httpx
+    from agentos.persistence.postgres.schema import (
+        media_model_selections,
+        provider_api_keys,
+        provider_configurations,
+    )
+    from agentos.workers.chat import ChatWorker
+
+    engine = _engine_with_provider("nvidia", base_url=None, with_key=True)
+    cipher = ProviderSecretCipher(_TEST_ENCRYPTION_KEY)
+    now = datetime.now(UTC)
+    with engine.begin() as conn:
+        conn.execute(
+            insert(provider_configurations).values(
+                user_id="user-1",
+                provider="openrouter",
+                secret_ref="ref-or-1",
+                base_url=None,
+                enabled=True,
+                key_cooldown_seconds=60,
+                catalog_refreshed_at=None,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        conn.execute(
+            insert(provider_api_keys).values(
+                [
+                    {
+                        "user_id": "user-1",
+                        "provider": "openrouter",
+                        "label": "or-key-1",
+                        "api_key_ciphertext": cipher.encrypt("sk-or-exhausted"),
+                        "secret_ref": "ref-or-1",
+                        "position": 0,
+                        "status": "active",
+                        "cooldown_until": None,
+                        "created_at": now,
+                        "updated_at": now,
+                    },
+                    {
+                        "user_id": "user-1",
+                        "provider": "openrouter",
+                        "label": "or-key-2",
+                        "api_key_ciphertext": cipher.encrypt("sk-or-valid"),
+                        "secret_ref": "ref-or-2",
+                        "position": 1,
+                        "status": "active",
+                        "cooldown_until": None,
+                        "created_at": now,
+                        "updated_at": now,
+                    },
+                ]
+            )
+        )
+        conn.execute(
+            insert(media_model_selections).values(
+                user_id="user-1",
+                modality="image",
+                provider="openrouter",
+                model_id="qwen/qwen-image-2.1-pro",
+                updated_at=now,
+            )
+        )
+
+    worker = ChatWorker.__new__(ChatWorker)
+    worker.store = type("S", (), {"_engine": engine})()
+    turn = {"user_id": "user-1", "provider": "nvidia", "model_id": "meta/llama-3.1-70b-instruct"}
+
+    policy = worker._media_policy_for_turn(turn)
+    target = policy.resolve_target("image")
+    assert target.provider == "openrouter"
+    assert target.model_id == "qwen/qwen-image-2.1-pro"
+
+    auth_headers: list[str] = []
+    png_b64 = base64.b64encode(b"\x89PNG\r\n\x1a\nfake").decode("ascii")
+
+    def mock_or_handler(request: httpx.Request) -> httpx.Response:
+        auth = request.headers.get("Authorization", "")
+        auth_headers.append(auth)
+        if "sk-or-exhausted" in auth:
+            return httpx.Response(402, json={"error": {"message": "Insufficient credits"}})
+        return httpx.Response(200, json={"data": [{"b64_json": png_b64, "media_type": "image/png"}]})
+
+    build_client = worker._media_client_for_turn(turn)
+    media_client = build_client("openrouter", transport=httpx.MockTransport(mock_or_handler))
+    assert media_client is not None
+    data, ext = media_client.generate_image(model="qwen/qwen-image-2.1-pro", prompt="A dragon")
+    assert ext == "png"
+    assert data == b"\x89PNG\r\n\x1a\nfake"
+    assert auth_headers == ["Bearer sk-or-exhausted", "Bearer sk-or-valid"]
+
