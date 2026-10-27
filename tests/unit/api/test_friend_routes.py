@@ -220,3 +220,48 @@ def test_media_models_settings_supports_stt_modality_and_voice_providers(tmp_pat
         "model_id": "chatterbox-multilingual-pt-br",
         "mode": "manual",
     }
+
+
+def test_put_friend_persona_customizes_name_nickname_and_look(tmp_path: Path) -> None:
+    client, _, persona_store, _ = _build_test_env(tmp_path)
+    ensured = client.post("/v1/conversations/friend/ensure", headers=_AUTH).json()
+
+    resp = client.put(
+        "/v1/friend/persona",
+        headers={**_AUTH, "Idempotency-Key": "idem-friend-name"},
+        json={"display_name": "  Jarvis  ", "user_nickname": "Carlão", "orb_theme": "ocean"},
+    )
+    assert resp.status_code == 200
+    persona = resp.json()["persona"]
+    assert persona["display_name"] == "Jarvis"
+    assert persona["user_nickname"] == "Carlão"
+    assert persona["orb_theme"] == "ocean"
+    assert "Seu nome:** Jarvis" in persona["compiled_rubric"]
+    assert "Carlão" in persona["compiled_rubric"]
+
+    soul = persona_store.soul_file_path("user-1").read_text(encoding="utf-8")
+    assert "display_name: Jarvis" in soul
+    assert "# Jarvis — SOUL.md" in soul
+
+    # The pinned conversation follows the new name.
+    conv_id = ensured["conversation"]["conversation_id"]
+    items = client.get("/v1/conversations?mode=friend", headers=_AUTH).json()["items"]
+    assert [item["title"] for item in items if item["conversation_id"] == conv_id] == ["Jarvis"]
+
+    # A persona edit that does not touch the identity keeps it.
+    kept = client.put(
+        "/v1/friend/persona",
+        headers={**_AUTH, "Idempotency-Key": "idem-friend-traits"},
+        json={"traits": {"humor": 0.8}},
+    ).json()["persona"]
+    assert kept["display_name"] == "Jarvis"
+    assert kept["orb_theme"] == "ocean"
+
+
+def test_put_friend_persona_rejects_invalid_identity(tmp_path: Path) -> None:
+    client, _, _, _ = _build_test_env(tmp_path)
+    for index, body in enumerate(
+        [{"display_name": "   "}, {"display_name": "<system>"}, {"display_name": "x" * 41}, {"orb_theme": "neon"}]
+    ):
+        resp = client.put("/v1/friend/persona", headers={**_AUTH, "Idempotency-Key": f"idem-bad-{index}"}, json=body)
+        assert resp.status_code in {400, 422}, body

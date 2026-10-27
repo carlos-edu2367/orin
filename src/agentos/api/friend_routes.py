@@ -13,7 +13,9 @@ from agentos.api.contracts import ApplicationNotFoundError, ApplicationValidatio
 from agentos.memory.friend_persona import (
     DEFAULT_TRAITS,
     VALID_BOND_STAGES,
+    VALID_ORB_THEMES,
     FriendPersonaStore,
+    validate_display_name,
     validate_style_note,
 )
 from agentos.persistence.postgres.agent_memory import PostgresAgentMemoryStore
@@ -38,9 +40,12 @@ class UpdateFriendPersonaRequest(BaseModel):
     affinity_score: float | None = Field(default=None, ge=0.0, le=100.0)
     current_mood: str | None = Field(default=None, max_length=120)
     style_notes: list[str] | str | None = None
+    display_name: str | None = Field(default=None, max_length=80)
+    user_nickname: str | None = Field(default=None, max_length=80)
+    orb_theme: str | None = Field(default=None, max_length=32)
 
 
-def _engine_from_services(services: Any) -> Any:
+def engine_from_services(services: Any) -> Any:
     conv = getattr(services, "conversation_application", None)
     if conv is None:
         return None
@@ -55,7 +60,7 @@ def _persona_store_for(services: Any) -> FriendPersonaStore:
     store = getattr(services, "friend_persona", None)
     if store is not None:
         return store
-    engine = _engine_from_services(services)
+    engine = engine_from_services(services)
     if engine is None:
         raise RuntimeError("friend_persona service is unavailable")
     created = FriendPersonaStore(engine)
@@ -67,7 +72,7 @@ def _memory_store_for(services: Any, user_id: str) -> PostgresAgentMemoryStore:
     factory = getattr(services, "friend_memory_factory", None)
     if callable(factory):
         return factory(user_id)
-    engine = _engine_from_services(services)
+    engine = engine_from_services(services)
     if engine is None:
         raise RuntimeError("friend_memory_factory service is unavailable")
     return PostgresAgentMemoryStore(engine, user_id=user_id)
@@ -253,7 +258,26 @@ def register_friend_routes(app: FastAPI, services: Any, principal_for: Any) -> N
                 raise ApplicationValidationError(str(exc)) from exc
             mood = cleaned_mood
 
+        display_name = None
+        if payload.display_name is not None:
+            try:
+                display_name = validate_display_name(payload.display_name)
+            except ValueError as exc:
+                raise ApplicationValidationError(str(exc)) from exc
+        user_nickname = None
+        if payload.user_nickname is not None:
+            try:
+                user_nickname = validate_display_name(payload.user_nickname, allow_blank=True)
+            except ValueError as exc:
+                raise ApplicationValidationError(str(exc)) from exc
+        orb_theme = None
+        if payload.orb_theme is not None:
+            orb_theme = payload.orb_theme.strip().lower()
+            if orb_theme not in VALID_ORB_THEMES:
+                raise ApplicationValidationError(f"unsupported orb_theme: {payload.orb_theme!r}")
+
         persona_store = _persona_store_for(services)
+        conv_app = getattr(services, "conversation_application", None)
 
         def _update() -> dict[str, object]:
             try:
@@ -264,9 +288,22 @@ def register_friend_routes(app: FastAPI, services: Any, principal_for: Any) -> N
                     current_mood=mood,
                     bond_stage=bond_stage,
                     affinity_score=payload.affinity_score,
+                    display_name=display_name,
+                    user_nickname=user_nickname,
+                    orb_theme=orb_theme,
                 )
             except ValueError as exc:
                 raise ApplicationValidationError(str(exc)) from exc
+            if display_name is not None and conv_app is not None and hasattr(conv_app, "ensure_friend_conversation"):
+                # The pinned conversation carries the companion's name, so the
+                # sidebar and the chat header follow a rename without a reload.
+                try:
+                    conv = conv_app.ensure_friend_conversation(principal.user_id)
+                    conv_id = str(conv.get("conversation_id") or "") if isinstance(conv, Mapping) else ""
+                    if conv_id and str(conv.get("title") or "") != display_name and hasattr(conv_app, "rename"):
+                        conv_app.rename(conv_id, principal.user_id, display_name)
+                except Exception:
+                    pass
             soul_path = str(persona_store.soul_file_path(principal.user_id))
             updated_dict = {**updated.to_dict(), "soul_markdown_path": soul_path}
             return {**updated_dict, "persona": updated_dict}
@@ -293,4 +330,4 @@ def register_friend_routes(app: FastAPI, services: Any, principal_for: Any) -> N
         return JSONResponse({"memory_id": clean_id, "deleted": True}, status_code=200)
 
 
-__all__ = ["UpdateFriendPersonaRequest", "register_friend_routes"]
+__all__ = ["UpdateFriendPersonaRequest", "engine_from_services", "register_friend_routes"]

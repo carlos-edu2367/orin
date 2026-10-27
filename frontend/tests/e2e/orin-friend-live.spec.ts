@@ -1,4 +1,5 @@
 import AxeBuilder from '@axe-core/playwright'
+import { Buffer } from 'node:buffer'
 import { expect, test, type Page, type Route } from '@playwright/test'
 
 const FRIEND_CONVERSATION_ID = 'conv-orin-friend-pinned'
@@ -30,6 +31,12 @@ async function assertNoCriticalOrSeriousViolations(page: Page): Promise<void> {
   )
   expect(blocking, JSON.stringify(blocking, null, 2)).toEqual([])
 }
+
+// A fake capture device (a steady tone) lets the Live stage prove the microphone works.
+test.use({
+  permissions: ['microphone'],
+  launchOptions: { args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', '--use-gl=swiftshader', '--enable-unsafe-swiftshader'] },
+})
 
 test.describe('Orin Friend & Modo Conversa Live (E2E)', () => {
   test.beforeEach(async ({ page }) => {
@@ -97,6 +104,9 @@ test.describe('Orin Friend & Modo Conversa Live (E2E)', () => {
           current_mood: 'focado e bem-humorado',
           soul_markdown_path: 'C:/Users/User/.orin/friend/SOUL.md',
           updated_at: '2026-10-27T15:00:00Z',
+          display_name: 'Orin',
+          user_nickname: 'Carlos',
+          orb_theme: 'aurora',
         })
         return
       }
@@ -234,6 +244,26 @@ test.describe('Orin Friend & Modo Conversa Live (E2E)', () => {
         return
       }
 
+      if (path === '/v1/live-voice/capabilities') {
+        await fulfillJson(route, {
+          stt: {
+            local_sidecar: { available: true, device: 'cuda', model_id: 'faster-whisper-large-v3-turbo', reason: 'Whisper local pronto (GPU).' },
+            openai: { available: false, model_id: 'gpt-4o-mini-transcribe', reason: '' },
+            groq: { available: false, model_id: 'whisper-large-v3-turbo', reason: '' },
+          },
+          tts: { openai: { available: false, model_id: 'gpt-4o-mini-tts', voices: [], reason: '' } },
+          recommended_stt: 'local_sidecar',
+          recommended_tts: 'browser',
+          hardware: { has_cuda: true, device_name: 'NVIDIA GeForce RTX 4060', free_vram_gb: 6, total_vram_gb: 8 },
+        })
+        return
+      }
+
+      if (path === '/v1/live-voice/local-whisper/install') {
+        await fulfillJson(route, { state: 'installed', message: '', command: 'uv pip install faster-whisper' })
+        return
+      }
+
       if (path.includes('/v1/settings/media-models/') && method === 'PUT') {
         const modality = path.split('/').pop() ?? 'audio'
         await fulfillJson(route, {
@@ -270,8 +300,11 @@ test.describe('Orin Friend & Modo Conversa Live (E2E)', () => {
     await expect(soulDrawer).toBeVisible()
     await expect(soulDrawer).toContainText('Nunca confie num regex escrito às 3h da manhã')
 
+    await expect(soulDrawer.getByTestId('friend-name-input')).toHaveValue('Orin')
+    await page.screenshot({ path: test.info().outputPath('friend-personalize.png') })
+
     // Fecha o drawer e abre o LiveVoiceStage
-    await page.getByTestId('close-friend-soul-drawer-button').click()
+    await page.getByTestId('close-friend-soul-drawer').click()
 
     const liveToggle = page.getByTestId('composer-live-voice-toggle')
     await expect(liveToggle).toBeVisible()
@@ -279,20 +312,133 @@ test.describe('Orin Friend & Modo Conversa Live (E2E)', () => {
 
     const liveStage = page.getByTestId('live-voice-stage')
     await expect(liveStage).toBeVisible()
+    // The fake capture device plays a tone: the meter must show the microphone is alive.
+    await expect(page.getByTestId('live-mic-meter')).not.toHaveAttribute('aria-valuenow', '0', { timeout: 10_000 })
+    await expect(page.getByTestId('live-voice-active-profile-pill')).toContainText('Whisper local')
+    await page.waitForTimeout(800)
+    await page.screenshot({ path: test.info().outputPath('live-stage.png') })
 
-    // Abre a Configuração Rápida de Voz (1 Clique) direto de dentro do LiveVoiceStage
     const openQuickSettingsBtn = page.getByTestId('live-voice-open-settings-button')
     await expect(openQuickSettingsBtn).toBeVisible()
     await openQuickSettingsBtn.click()
 
     const quickSettingsModal = page.getByTestId('live-voice-quick-settings')
     await expect(quickSettingsModal).toBeVisible()
-    await expect(page.getByTestId('live-quick-hardware-banner')).toContainText('RTX 4060')
-
-    await page.getByTestId('live-preset-card-hybrid_fast').click()
-    await page.getByTestId('live-quick-test-voice-button').click()
-    await expect(page.getByTestId('live-quick-voice-preview-status')).toContainText('Olá!')
+    await expect(page.getByTestId('live-stt-option-local_sidecar')).toContainText('Pronto · GPU')
+    await expect(page.getByTestId('live-stt-option-local_sidecar')).toContainText('RTX 4060')
+    await page.screenshot({ path: test.info().outputPath('voice-settings.png'), fullPage: true })
 
     await assertNoCriticalOrSeriousViolations(page)
+  })
+
+  test('ouve o microfone de verdade: envia o áudio pelo WebSocket, recebe a transcrição e manda a mensagem', async ({ page }) => {
+    // A short end-of-sentence pause so the fake device's beeps close an utterance quickly.
+    await page.addInitScript(() => {
+      window.localStorage.setItem('orin.live-voice.prefs.v1', JSON.stringify({ endSilenceMs: 400, sensitivity: 0.7 }))
+    })
+    const received = { binaryFrames: 0, speechEnds: 0, configs: [] as Array<Record<string, unknown>>, csrf: '' }
+    await page.routeWebSocket(/\/v1\/conversations\/[^/]+\/live/, (ws) => {
+      received.csrf = new URL(ws.url()).searchParams.get('csrf') ?? ''
+      ws.send(JSON.stringify({ type: 'session.ready', conversation_id: FRIEND_CONVERSATION_ID, audio_epoch: 1 }))
+      ws.onMessage((message) => {
+        if (typeof message !== 'string') {
+          received.binaryFrames += 1
+          return
+        }
+        const event = JSON.parse(message) as Record<string, unknown>
+        if (event.type === 'config') received.configs.push(event)
+        if (event.type === 'audio_speech_end' && received.speechEnds === 0) {
+          received.speechEnds += 1
+          ws.send(JSON.stringify({ type: 'stt.processing', provider: 'local_sidecar', audio_ms: 900 }))
+          ws.send(JSON.stringify({ type: 'stt.transcript', is_end_of_utterance: true, text: 'Oi Orin, tudo bem?', audio_epoch: 1 }))
+        }
+      })
+    })
+
+    await page.goto('/')
+    await page.getByTestId('sidebar-orin-friend-button').click()
+    const sent = page.waitForRequest((request) => request.method() === 'POST' && /\/v1\/conversations\/[^/]+\/messages$/.test(new URL(request.url()).pathname))
+    await page.getByTestId('composer-live-voice-toggle').click()
+    await expect(page.getByTestId('live-voice-stage')).toBeVisible()
+
+    const request = await sent
+    expect(JSON.stringify(request.postDataJSON())).toContain('Oi Orin, tudo bem?')
+    expect(received.binaryFrames).toBeGreaterThan(5)
+    expect(received.csrf).toBe('csrf-e2e-orin-friend-live')
+    expect(received.configs.at(-1)).toMatchObject({ stt_provider: 'local_sidecar', stt_model: 'faster-whisper-large-v3-turbo' })
+    await expect(page.getByTestId('live-voice-captions')).toContainText('Oi Orin, tudo bem?')
+  })
+
+  test('fala a resposta: o trecho <speak> do turno vira áudio pelo WebSocket e o palco mostra a legenda', async ({ page }) => {
+    await page.addInitScript(() => {
+      window.localStorage.setItem('orin.live-voice.prefs.v1', JSON.stringify({ tts: 'openai', openaiVoice: 'nova', endSilenceMs: 400 }))
+    })
+    await page.route('**/v1/live-voice/capabilities', (route) => fulfillJson(route, {
+      stt: {
+        local_sidecar: { available: true, device: 'cuda', model_id: 'faster-whisper-large-v3-turbo', reason: '' },
+        openai: { available: true, model_id: 'gpt-4o-mini-transcribe', reason: '' },
+        groq: { available: false, model_id: 'whisper-large-v3-turbo', reason: '' },
+      },
+      tts: { openai: { available: true, model_id: 'gpt-4o-mini-tts', voices: ['coral', 'nova'], reason: '' } },
+      recommended_stt: 'local_sidecar',
+      recommended_tts: 'openai',
+      hardware: { has_cuda: true, device_name: 'NVIDIA GeForce RTX 4060', free_vram_gb: 6, total_vram_gb: 8 },
+    }))
+    let replied = false
+    let speakDelivered = false
+    await page.route('**/v1/conversations/*/messages', async (route) => {
+      if (route.request().method() !== 'POST') return route.fallback()
+      replied = true
+      await fulfillJson(route, { conversation_id: FRIEND_CONVERSATION_ID, turn_id: 'turn-friend-2', message_id: 'msg-friend-u2', state: 'queued' }, 202)
+    })
+    await page.route('**/v1/conversations/*/events*', async (route) => {
+      if (replied && !speakDelivered) {
+        speakDelivered = true
+        const event = {
+          event_id: 'ev-speak-1', turn_id: 'turn-friend-2', agent_id: 'agent:main', event_type: 'speak.chunk_ready',
+          summary: 'Tudo ótimo por aqui!', cursor: '2',
+          payload: { tts_text: 'Tudo ótimo por aqui!', clean_text: 'Tudo ótimo por aqui' },
+        }
+        await route.fulfill({ status: 200, contentType: 'text/event-stream', body: `id: 2\ndata: ${JSON.stringify(event)}\n\n` })
+        return
+      }
+      await route.fulfill({ status: 200, contentType: 'text/event-stream', body: 'event: heartbeat\ndata: {"cursor":"1"}\n\n' })
+    })
+
+    const spoken: Array<Record<string, unknown>> = []
+    await page.routeWebSocket(/\/v1\/conversations\/[^/]+\/live/, (ws) => {
+      ws.send(JSON.stringify({ type: 'session.ready', conversation_id: FRIEND_CONVERSATION_ID, audio_epoch: 1 }))
+      let transcribed = false
+      ws.onMessage((message) => {
+        if (typeof message !== 'string') return
+        const event = JSON.parse(message) as Record<string, unknown>
+        if (event.type === 'audio_speech_end' && !transcribed) {
+          transcribed = true
+          ws.send(JSON.stringify({ type: 'stt.transcript', is_end_of_utterance: true, text: 'Como você está?', audio_epoch: 1 }))
+        }
+        if (event.type === 'speak_text') {
+          spoken.push(event)
+          // 1.2 s of a soft 220 Hz tone at 24 kHz stands in for the synthesized voice.
+          const samples = new Int16Array(24000 * 1.2)
+          for (let i = 0; i < samples.length; i += 1) samples[i] = Math.round(Math.sin((2 * Math.PI * 220 * i) / 24000) * 6000)
+          const pcm = Buffer.from(samples.buffer).toString('base64')
+          ws.send(JSON.stringify({
+            type: 'tts.chunk', epoch: 1, audio_epoch: 1, chunk_seq: 0, clean_text: String(event.text), pcm_base64: pcm,
+            sample_rate: 24000, duration_ms: 1200, word_timings: [], provider: 'openai',
+          }))
+        }
+      })
+    })
+
+    await page.goto('/')
+    await page.getByTestId('sidebar-orin-friend-button').click()
+    await page.getByTestId('composer-live-voice-toggle').click()
+    await expect(page.getByTestId('live-voice-active-profile-pill')).toContainText('Voz OpenAI')
+
+    await expect.poll(() => spoken.length, { timeout: 20_000 }).toBeGreaterThan(0)
+    expect(spoken[0]).toMatchObject({ type: 'speak_text', text: 'Tudo ótimo por aqui!' })
+    await expect(page.getByTestId('live-voice-stage')).toHaveAttribute('data-voice-state', 'speaking')
+    await expect(page.getByTestId('live-voice-assistant-caption')).toContainText('Tudo ótimo por aqui!')
+    await page.screenshot({ path: test.info().outputPath('live-speaking.png') })
   })
 })

@@ -9,9 +9,21 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 
 from agentos.agentic.speak_stream import BoundaryKind, ProsodicChunk, SpeakStreamParser
+from agentos.live_voice.credentials import CLOUD_VOICE_PROVIDERS, resolve_cloud_credential
+from agentos.live_voice.engines import (
+    LOCAL_WHISPER_INSTALL_COMMAND,
+    OPENAI_TTS_SAMPLE_RATE,
+    OPENAI_TTS_VOICES,
+    LocalWhisperEngine,
+    LocalWhisperInstaller,
+    VoiceEngineError,
+    synthesize_openai_speech,
+    transcribe_openai_compatible,
+)
 from agentos.live_voice.hardware_governor import VoiceHardwareGovernor
 from agentos.live_voice.prosody_continuity import ProsodyContinuityEngine
 from agentos.live_voice.providers import (
@@ -410,6 +422,103 @@ class LiveVoiceSession:
             )
         return events
 
+    def register_cloud_chunk(
+        self,
+        clean_text: str,
+        pcm_bytes: bytes,
+        sample_rate: int,
+        *,
+        provider: str,
+    ) -> dict[str, Any]:
+        """Ledger + echo bookkeeping for one chunk synthesized by a real cloud engine."""
+        seq = self.next_chunk_seq
+        self.next_chunk_seq += 1
+        aligned = pcm_bytes if len(pcm_bytes) % 2 == 0 else pcm_bytes[:-1]
+        duration_ms = max(1, int(round(len(aligned) / 2 / max(1, sample_rate) * 1000.0)))
+        entry = self.ledger.register_chunk(chunk_seq=seq, clean_text=clean_text, duration_ms=duration_ms)
+        self.recent_tts_texts.append(clean_text)
+        if len(self.recent_tts_texts) > 8:
+            self.recent_tts_texts = self.recent_tts_texts[-8:]
+        return {
+            "type": "tts.chunk",
+            "audio_epoch": self.audio_epoch,
+            "epoch": self.audio_epoch,
+            "chunk_seq": seq,
+            "clean_text": clean_text,
+            "tts_text": clean_text,
+            "boundary_kind": BoundaryKind.PERIOD.value,
+            "sample_rate": sample_rate,
+            "duration_ms": entry.duration_ms,
+            "pcm_base64": base64.b64encode(aligned).decode("ascii"),
+            "word_timings": [wt.to_dict() for wt in entry.word_timings],
+            "provider": provider,
+            "model_id": self.voice_config.tts_model,
+        }
+
+
+def _voice_capabilities(
+    governor: VoiceHardwareGovernor,
+    services: Any,
+    user_id: str | None,
+) -> dict[str, Any]:
+    """What can actually run for this person right now — never what merely could."""
+    profile = governor.recommend()
+    whisper_installed = LocalWhisperEngine.is_installed()
+    whisper_device = LocalWhisperEngine.preferred_device() if whisper_installed else ("cuda" if profile.has_cuda else "cpu")
+    openai_ready = resolve_cloud_credential(services, user_id, "openai") is not None
+    groq_ready = resolve_cloud_credential(services, user_id, "groq") is not None
+    stt = {
+        "local_sidecar": {
+            "available": whisper_installed,
+            "device": whisper_device,
+            "model_id": "faster-whisper-large-v3-turbo" if whisper_device == "cuda" else "faster-whisper-small-int8",
+            "reason": (
+                f"Whisper local pronto ({'GPU' if whisper_device == 'cuda' else 'CPU'})."
+                if whisper_installed
+                else "Instale o Whisper local para transcrever sem nuvem."
+            ),
+            "install_command": None if whisper_installed else LOCAL_WHISPER_INSTALL_COMMAND,
+        },
+        "openai": {
+            "available": openai_ready,
+            "model_id": "gpt-4o-mini-transcribe",
+            "reason": "Usa a sua chave OpenAI." if openai_ready else "Configure uma chave OpenAI em Configurações → Provedores.",
+        },
+        "groq": {
+            "available": groq_ready,
+            "model_id": "whisper-large-v3-turbo",
+            "reason": "Usa GROQ_API_KEY." if groq_ready else "Defina GROQ_API_KEY no ambiente do Orin.",
+        },
+    }
+    tts = {
+        "openai": {
+            "available": openai_ready,
+            "model_id": "gpt-4o-mini-tts",
+            "voices": list(OPENAI_TTS_VOICES),
+            "reason": "Voz natural da OpenAI com a sua chave." if openai_ready else "Configure uma chave OpenAI em Configurações → Provedores.",
+        },
+    }
+    if whisper_installed:
+        recommended_stt = "local_sidecar"
+    elif openai_ready:
+        recommended_stt = "openai"
+    elif groq_ready:
+        recommended_stt = "groq"
+    else:
+        recommended_stt = "browser"
+    return {
+        "stt": stt,
+        "tts": tts,
+        "recommended_stt": recommended_stt,
+        "recommended_tts": "openai" if openai_ready else "browser",
+        "hardware": {
+            "has_cuda": bool(profile.has_cuda),
+            "device_name": profile.device_name,
+            "total_vram_gb": profile.total_vram_gb,
+            "free_vram_gb": profile.free_vram_gb,
+        },
+    }
+
 
 def register_live_voice_routes(
     app: FastAPI,
@@ -418,19 +527,25 @@ def register_live_voice_routes(
 ) -> None:
     """Registra as rotas HTTP e WebSocket do Motor de Áudio Full-Duplex do Orin:
     - `GET /v1/live-voice/hardware-status`
+    - `GET /v1/live-voice/capabilities`
     - `WEBSOCKET /v1/conversations/{conversation_id}/live`
     """
     governor = VoiceHardwareGovernor()
+    whisper = LocalWhisperEngine()
+
+    def _optional_user_id(request: Request) -> str | None:
+        if principal_for is None:
+            return None
+        try:
+            return str(principal_for(request).user_id)
+        except Exception:
+            return None
 
     @app.get("/v1/live-voice/hardware-status")
     @app.get("/v1/live-voice/hardware")
     async def get_live_voice_hardware_status(request: Request) -> JSONResponse:
-        if principal_for is not None:
-            try:
-                principal_for(request)
-            except Exception:
-                pass
-        profile = governor.recommend()
+        _optional_user_id(request)
+        profile = await run_in_threadpool(governor.recommend)
         profile_dict = profile.to_dict()
         reason_text = (
             "; ".join(profile.warnings)
@@ -461,13 +576,106 @@ def register_live_voice_routes(
             }
         )
 
+    @app.get("/v1/live-voice/capabilities")
+    async def get_live_voice_capabilities(request: Request) -> JSONResponse:
+        if principal_for is not None:
+            principal = principal_for(request)
+            user_id: str | None = str(principal.user_id)
+        else:
+            user_id = None
+        payload = await run_in_threadpool(_voice_capabilities, governor, services, user_id)
+        return JSONResponse(payload)
+
+    installer = LocalWhisperInstaller()
+
+    @app.get("/v1/live-voice/local-whisper/install")
+    async def get_local_whisper_install(request: Request) -> JSONResponse:
+        if principal_for is not None:
+            principal_for(request)
+        return JSONResponse(installer.status())
+
+    @app.post("/v1/live-voice/local-whisper/install")
+    async def start_local_whisper_install(request: Request) -> JSONResponse:
+        if principal_for is not None:
+            principal = principal_for(request, mutable=True)
+            security = getattr(services, "security", None)
+            if security is not None:
+                security.authorize(principal, action="conversation.create", resource_id=None, purpose="live_voice.install_whisper")
+        return JSONResponse(installer.start(), status_code=202)
+
+    def _transcribe(session: LiveVoiceSession, user_id: str | None, pcm: bytes, sample_rate: int, hint: str) -> str:
+        provider = session.voice_config.stt_provider
+        if provider == "local_sidecar":
+            return whisper.transcribe(
+                pcm,
+                sample_rate=sample_rate,
+                language=session.voice_config.language,
+                model_id=session.voice_config.stt_model,
+                prompt_hint=None,
+            )
+        if provider in CLOUD_VOICE_PROVIDERS:
+            credential = resolve_cloud_credential(services, user_id, provider)
+            if credential is None:
+                raise VoiceEngineError(
+                    "cloud_stt_no_key",
+                    "Sem chave configurada para este provedor de transcrição.",
+                    hint="Configurações → Provedores" if provider == "openai" else "GROQ_API_KEY",
+                )
+            default_model = SUPPORTED_STT_PROVIDERS[provider]["models"][0]["id"]
+            model_id = session.voice_config.stt_model
+            if model_id not in {m["id"] for m in SUPPORTED_STT_PROVIDERS[provider]["models"]}:
+                model_id = default_model
+            return transcribe_openai_compatible(
+                credential,
+                pcm,
+                sample_rate=sample_rate,
+                language=session.voice_config.language,
+                model_id=model_id,
+            )
+        if hint:
+            return hint
+        raise VoiceEngineError("stt_provider_unsupported", f"O provedor de transcrição {provider!r} ainda não é suportado.")
+
+    def _synthesize_cloud(session: LiveVoiceSession, user_id: str | None, text: str, instructions: str | None) -> bytes:
+        credential = resolve_cloud_credential(services, user_id, "openai")
+        if credential is None:
+            raise VoiceEngineError(
+                "cloud_tts_no_key",
+                "Sem chave OpenAI para a voz natural; usando a voz do sistema.",
+                hint="Configurações → Provedores",
+            )
+        model_id = session.voice_config.tts_model
+        if model_id not in {m["id"] for m in SUPPORTED_TTS_PROVIDERS["openai"]["models"]}:
+            model_id = "gpt-4o-mini-tts"
+        return synthesize_openai_speech(
+            credential,
+            text,
+            model_id=model_id,
+            voice=session.voice_config.voice_id,
+            speed=session.voice_config.speed,
+            instructions=instructions,
+        )
+
     @app.websocket("/v1/conversations/{conversation_id}/live")
     @app.websocket("/v1/conversations/{conversation_id}/live-voice")
     async def live_voice_websocket(
         websocket: WebSocket,
         conversation_id: str,
     ) -> None:
-        _ = services
+        user_id: str | None = None
+        if principal_for is not None:
+            try:
+                principal = principal_for(websocket)
+                security = getattr(services, "security", None)
+                if security is not None:
+                    # A browser sends cookies on a cross-site WebSocket too, so the
+                    # session's CSRF token travels in the query string instead.
+                    security.validate_csrf(principal, websocket.query_params.get("csrf"), websocket.headers.get("origin"))
+                    security.authorize(principal, action="conversation.list", resource_id=conversation_id, purpose="conversation.live_voice")
+                user_id = str(principal.user_id)
+            except Exception:
+                await websocket.close(code=4401)
+                return
         await websocket.accept()
         session = LiveVoiceSession(
             conversation_id=conversation_id,
@@ -491,6 +699,7 @@ def register_live_voice_routes(
             }
         )
 
+        last_vad_state: bool | None = None
         try:
             while True:
                 raw_msg = await websocket.receive()
@@ -501,13 +710,17 @@ def register_live_voice_routes(
                     pcm_frame: bytes = raw_msg["bytes"]
                     session.append_pcm_input(pcm_frame)
                     is_voice = session.vad_detector.is_speech(pcm_frame)
-                    await websocket.send_json(
-                        {
-                            "type": "vad.frame",
-                            "is_speech": is_voice,
-                            "buffered_bytes": len(session.pcm_input_buffer),
-                        }
-                    )
+                    # Only state changes are acknowledged: answering every 32 ms
+                    # frame doubles the socket traffic for no information.
+                    if is_voice != last_vad_state:
+                        last_vad_state = is_voice
+                        await websocket.send_json(
+                            {
+                                "type": "vad.frame",
+                                "is_speech": is_voice,
+                                "buffered_bytes": len(session.pcm_input_buffer),
+                            }
+                        )
                     continue
 
                 text_data = raw_msg.get("text")
@@ -543,7 +756,31 @@ def register_live_voice_routes(
                         }
                     )
 
+                elif msg_type == "audio_reset":
+                    session.pcm_input_buffer.clear()
+                    await websocket.send_json({"type": "audio.reset", "audio_epoch": session.audio_epoch})
+
                 elif msg_type == "speak_text":
+                    raw_text = str(msg.get("text") or "")
+                    if session.voice_config.tts_provider == "openai" and principal_for is not None:
+                        clean = re.sub(r"</?speak>", "", raw_text, flags=re.IGNORECASE).strip()[:2000]
+                        if not clean:
+                            continue
+                        try:
+                            pcm = await run_in_threadpool(
+                                _synthesize_cloud,
+                                session,
+                                user_id,
+                                clean,
+                                str(msg.get("instructions") or "") or None,
+                            )
+                        except VoiceEngineError as exc:
+                            await websocket.send_json({**exc.to_event("tts.error"), "text": clean})
+                            continue
+                        await websocket.send_json(
+                            session.register_cloud_chunk(clean, pcm, OPENAI_TTS_SAMPLE_RATE, provider="openai")
+                        )
+                        continue
                     override_raw = msg.get("chunk_duration_override_ms")
                     dur_override = (
                         _safe_int(override_raw, 1000, minimum=20, maximum=120_000)
@@ -551,7 +788,7 @@ def register_live_voice_routes(
                         else None
                     )
                     chunk_events = session.synthesize_speak_text(
-                        str(msg.get("text") or ""),
+                        raw_text,
                         chunk_duration_override_ms=dur_override,
                     )
                     for ev in chunk_events:
@@ -601,19 +838,31 @@ def register_live_voice_routes(
                             pcm_payload = base64.b64decode(str(msg["pcm_base64"]))
                         except Exception:
                             pass
+                    sample_rate = _safe_int(msg.get("sample_rate"), 16000, minimum=8000, maximum=48000)
 
-                    if pcm_payload:
-                        stt_res = session.stt_adapter.transcribe(
-                            pcm_payload,
-                            sample_rate=_safe_int(msg.get("sample_rate"), 16000, minimum=8000, maximum=48000),
-                            language=session.voice_config.language,
-                            provider=session.voice_config.stt_provider,
-                            model_id=session.voice_config.stt_model,
-                            prompt_hint=hint or None,
+                    if pcm_payload and not hint:
+                        await websocket.send_json(
+                            {
+                                "type": "stt.processing",
+                                "provider": session.voice_config.stt_provider,
+                                "audio_ms": int(len(pcm_payload) / 2 / sample_rate * 1000),
+                            }
                         )
-                        transcript = stt_res.text
+                        try:
+                            transcript = await run_in_threadpool(
+                                _transcribe, session, user_id, pcm_payload, sample_rate, hint
+                            )
+                        except VoiceEngineError as exc:
+                            session.pcm_input_buffer.clear()
+                            await websocket.send_json(exc.to_event("stt.error"))
+                            continue
                     else:
                         transcript = hint
+
+                    if not transcript.strip():
+                        session.pcm_input_buffer.clear()
+                        await websocket.send_json({"type": "stt.empty", "audio_epoch": session.audio_epoch})
+                        continue
 
                     # 1. Guarda Anti-Eco Textual
                     if is_echo_of_recent_tts(

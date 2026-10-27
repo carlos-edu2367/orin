@@ -947,6 +947,9 @@ user_friend_personas = Table(
     Column("soul_sha256", String(64), nullable=False, server_default=""),
     Column("last_reflected_at", DateTime(timezone=True), nullable=True),
     Column("updated_at", DateTime(timezone=True), nullable=False),
+    Column("display_name", String(40), nullable=False, server_default="Orin"),
+    Column("user_nickname", String(40), nullable=False, server_default=""),
+    Column("orb_theme", String(24), nullable=False, server_default="aurora"),
 )
 
 # Agent Skills are procedural packages.  Keep identity, immutable published

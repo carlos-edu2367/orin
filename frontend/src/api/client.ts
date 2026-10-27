@@ -58,6 +58,11 @@ export class ApiClient {
     return typeof this.csrfSource === 'function' ? this.csrfSource() : this.csrfSource
   }
 
+  /** A WebSocket cannot carry the CSRF header, so the live voice socket sends it in the query string. */
+  socketCsrfToken(): string | undefined {
+    return this.csrf()
+  }
+
   createMutationIntent(): MutationIntent {
     return Object.freeze({ idempotencyKey: this.createKey() })
   }

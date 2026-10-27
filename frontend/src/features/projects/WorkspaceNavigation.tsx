@@ -139,6 +139,8 @@ export function WorkspaceNavigation({
   const isRailCollapsed = railCollapsed !== undefined ? railCollapsed : internalCollapsed
 
   const [chats, setChats] = useState<WorkspaceNavigationConversationSummary[]>([])
+  // The pinned companion carries the name the person gave it.
+  const friendName = chats.find((chat) => chat.mode === 'friend')?.title?.trim() || 'Orin Friend'
   const [projects, setProjects] = useState<ProjectSidebarItem[]>([])
   const [creatingProject, setCreatingProject] = useState(false)
   const [projectName, setProjectName] = useState('')
@@ -449,13 +451,13 @@ export function WorkspaceNavigation({
             type="button"
             data-testid="sidebar-orin-friend-button"
             onClick={() => void handleOpenOrinFriend()}
-            title="Orin Friend (Companheiro com memória evolutiva e conversa por voz)"
+            title={`${friendName} — seu companheiro com memória e conversa por voz`}
             aria-current={isOrinFriendActive ? 'page' : undefined}
             className="project-navigation__cta-btn flex w-full items-center justify-between gap-2 rounded-lg border border-[var(--orin-border-subtle)] bg-[var(--orin-accent-bg)] px-3 py-2 text-xs font-semibold text-[var(--orin-text-primary)] transition-colors hover:border-[var(--orin-accent)] hover:bg-[var(--orin-surface-selected)]"
           >
             <span className="flex items-center gap-2">
               <span className="font-mono text-sm text-[var(--orin-text-primary)]" aria-hidden="true">◈</span>
-              <span className="project-navigation__rail-hide">Orin Friend</span>
+              <span className="project-navigation__rail-hide">{friendName}</span>
             </span>
             <span className="project-navigation__rail-hide rounded-full bg-[#4C1D95] px-1.5 py-0.5 font-mono text-[10px] text-[#F4F2FF]">
               LIVE

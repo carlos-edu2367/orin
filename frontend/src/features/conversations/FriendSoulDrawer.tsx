@@ -1,23 +1,32 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import {
   clampFriendTraits,
+  FRIEND_ORB_THEMES,
   type FriendBondStage,
   type FriendMemoryEntry,
   type FriendMemoryKind,
+  type FriendOrbTheme,
   type FriendPersonaState,
   type FriendTraitVector,
 } from '../../api/conversations'
+import { LiveOrb } from './live/LiveOrb'
+import { ORB_THEMES } from './live/orbThemes'
+
+export type FriendPersonaUpdate = {
+  traits: FriendTraitVector
+  style_notes: string[]
+  current_mood: string
+  display_name: string
+  user_nickname: string
+  orb_theme: FriendOrbTheme
+}
 
 export type FriendSoulDrawerProps = {
   isOpen: boolean
   persona: FriendPersonaState | null
   memories: FriendMemoryEntry[]
   onClose: () => void
-  onUpdatePersona: (input: {
-    traits: FriendTraitVector
-    style_notes: string[]
-    current_mood: string
-  }) => Promise<FriendPersonaState | void> | void
+  onUpdatePersona: (input: FriendPersonaUpdate) => Promise<FriendPersonaState | void> | void
   onSyncSoul: () => Promise<FriendPersonaState | void> | void
   onDeleteMemory: (memoryId: string) => Promise<void> | void
 }
@@ -25,81 +34,67 @@ export type FriendSoulDrawerProps = {
 type TraitMeta = {
   key: keyof FriendTraitVector
   label: string
+  low: string
+  high: string
   min: number
   max: number
-  description: string
 }
 
 const TRAIT_META: ReadonlyArray<TraitMeta> = [
+  { key: 'warmth', label: 'Acolhimento', low: 'Objetivo', high: 'Caloroso', min: 0.3, max: 0.95 },
+  { key: 'humor', label: 'Bom humor', low: 'Sério', high: 'Brincalhão', min: 0.1, max: 0.9 },
+  { key: 'sarcasm', label: 'Ironia', low: 'Literal', high: 'Provocador', min: 0.0, max: 0.75 },
+  { key: 'formality', label: 'Formalidade', low: 'Descontraído', high: 'Formal', min: 0.05, max: 0.85 },
+  { key: 'verbosity', label: 'Tamanho das respostas', low: 'Curtas', high: 'Detalhadas', min: 0.15, max: 0.8 },
+  { key: 'candor', label: 'Sinceridade', low: 'Gentil', high: 'Direto (nunca bajula)', min: 0.5, max: 0.95 },
+  { key: 'energy', label: 'Energia', low: 'Calmo', high: 'Animado', min: 0.2, max: 0.9 },
+]
+
+export const PERSONALITY_PRESETS: ReadonlyArray<{ id: string; label: string; description: string; traits: FriendTraitVector }> = [
   {
-    key: 'warmth',
-    label: 'Acolhimento (Warmth)',
-    min: 0.3,
-    max: 0.95,
-    description: 'Empatia e calor humano na conversa.',
+    id: 'parceiro',
+    label: 'Parceiro tranquilo',
+    description: 'Amigo presente, leve e honesto.',
+    traits: { warmth: 0.7, humor: 0.5, sarcasm: 0.2, formality: 0.3, verbosity: 0.4, candor: 0.7, energy: 0.5 },
   },
   {
-    key: 'humor',
-    label: 'Bom Humor (Humor)',
-    min: 0.1,
-    max: 0.9,
-    description: 'Leveza, tiradas rápidas e espírito descontraído.',
+    id: 'animado',
+    label: 'Animado',
+    description: 'Empolgado, faz piada, energia alta.',
+    traits: { warmth: 0.8, humor: 0.75, sarcasm: 0.2, formality: 0.15, verbosity: 0.45, candor: 0.65, energy: 0.85 },
   },
   {
-    key: 'sarcasm',
-    label: 'Ironia Fina (Sarcasm)',
-    min: 0.0,
-    max: 0.75,
-    description: 'Provocação inteligente entre amigos.',
+    id: 'ironico',
+    label: 'Irônico',
+    description: 'Provoca com carinho e fala a real.',
+    traits: { warmth: 0.55, humor: 0.7, sarcasm: 0.65, formality: 0.2, verbosity: 0.35, candor: 0.8, energy: 0.6 },
   },
   {
-    key: 'formality',
-    label: 'Formalidade (Formality)',
-    min: 0.05,
-    max: 0.85,
-    description: 'Mais coloquial (baixo) vs. mais estruturado (alto).',
+    id: 'profissional',
+    label: 'Profissional',
+    description: 'Organizado, claro e formal.',
+    traits: { warmth: 0.5, humor: 0.2, sarcasm: 0.05, formality: 0.7, verbosity: 0.55, candor: 0.85, energy: 0.45 },
   },
   {
-    key: 'verbosity',
-    label: 'Prolixidade (Verbosity)',
-    min: 0.15,
-    max: 0.8,
-    description: 'Respostas curtas de bate-papo vs. explicações longas.',
-  },
-  {
-    key: 'candor',
-    label: 'Sinceridade (Candor · Piso 0.50)',
-    min: 0.5,
-    max: 0.95,
-    description: 'Honestidade direta sem bajulação artificial (mínimo travado em 0.50).',
-  },
-  {
-    key: 'energy',
-    label: 'Energia (Energy)',
-    min: 0.2,
-    max: 0.9,
-    description: 'Ritmo e entusiasmo na voz e no texto.',
+    id: 'direto',
+    label: 'Direto ao ponto',
+    description: 'Respostas curtas, sem rodeios.',
+    traits: { warmth: 0.5, humor: 0.3, sarcasm: 0.15, formality: 0.35, verbosity: 0.18, candor: 0.9, energy: 0.5 },
   },
 ]
 
-const DEFAULT_TRAITS: FriendTraitVector = {
-  warmth: 0.65,
-  humor: 0.5,
-  sarcasm: 0.25,
-  formality: 0.35,
-  verbosity: 0.4,
-  candor: 0.7,
-  energy: 0.55,
-}
+const MOOD_SUGGESTIONS = ['sereno', 'animado', 'curioso', 'focado', 'brincalhão', 'acolhedor']
+
+const DEFAULT_TRAITS: FriendTraitVector = PERSONALITY_PRESETS[0].traits
 
 export function bondStageLabel(stage: FriendBondStage): string {
   switch (stage) {
     case 'acquaintance':
       return 'Conhecido'
     case 'buddy':
-      return 'Parceiro (Buddy)'
+      return 'Parceiro'
     case 'close_friend':
-      return 'Amigo Próximo'
+      return 'Amigo próximo'
     case 'confidant':
       return 'Confidente'
   }
@@ -108,13 +103,37 @@ export function bondStageLabel(stage: FriendBondStage): string {
 function memoryKindLabel(kind: FriendMemoryKind): string {
   switch (kind) {
     case 'inside_joke':
-      return 'Piada Interna'
+      return 'Piada interna'
     case 'milestone':
       return 'Marco'
     case 'emotional':
       return 'Emocional'
     case 'episodic':
-      return 'Episódica'
+      return 'Momento'
+  }
+}
+
+function sameTraits(a: FriendTraitVector, b: FriendTraitVector): boolean {
+  return (Object.keys(a) as Array<keyof FriendTraitVector>).every((key) => Math.abs(a[key] - b[key]) < 0.005)
+}
+
+type Draft = {
+  name: string
+  nickname: string
+  theme: FriendOrbTheme
+  traits: FriendTraitVector
+  mood: string
+  notes: string
+}
+
+function draftFrom(persona: FriendPersonaState | null): Draft {
+  return {
+    name: persona?.display_name ?? 'Orin',
+    nickname: persona?.user_nickname ?? '',
+    theme: persona?.orb_theme ?? 'aurora',
+    traits: clampFriendTraits(persona?.traits ?? DEFAULT_TRAITS),
+    mood: persona?.current_mood ?? 'sereno',
+    notes: (persona?.style_notes ?? []).join('\n'),
   }
 }
 
@@ -127,45 +146,64 @@ export function FriendSoulDrawer({
   onSyncSoul,
   onDeleteMemory,
 }: FriendSoulDrawerProps) {
-  const [traitOverrides, setTraitOverrides] = useState<FriendTraitVector | null>(null)
-  const [moodOverride, setMoodOverride] = useState<string | null>(null)
-  const [notesOverride, setNotesOverride] = useState<string | null>(null)
-  const [isSaving, setIsSaving] = useState(false)
+  const [draft, setDraft] = useState<Draft>(() => draftFrom(persona))
+  const [dirty, setDirty] = useState(false)
+  const [status, setStatus] = useState<{ tone: 'ok' | 'error' | 'busy'; text: string } | null>(null)
   const [isSyncing, setIsSyncing] = useState(false)
 
-  const draftTraits = traitOverrides ?? clampFriendTraits(persona?.traits ?? DEFAULT_TRAITS)
-  const draftMood = moodOverride ?? persona?.current_mood ?? 'neutro'
-  const draftNotesText = notesOverride ?? (persona?.style_notes ?? []).join('\n')
+  // A freshly loaded persona replaces the draft unless the person is mid-edit.
+  const [seenPersona, setSeenPersona] = useState(persona)
+  if (persona !== seenPersona) {
+    setSeenPersona(persona)
+    if (!dirty) setDraft(draftFrom(persona))
+  }
+
+  useEffect(() => {
+    if (!isOpen) return
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [isOpen, onClose])
 
   if (!isOpen) return null
 
-  const affinity = persona?.affinity_score ?? 0
-  const bondStage = persona?.bond_stage ?? 'acquaintance'
-
-  function handleTraitChange(key: keyof FriendTraitVector, rawValue: string) {
-    const parsed = Number.parseFloat(rawValue)
-    const nextRaw = {
-      ...draftTraits,
-      [key]: Number.isFinite(parsed) ? parsed : draftTraits[key],
-    }
-    setTraitOverrides(clampFriendTraits(nextRaw))
+  function edit(patch: Partial<Draft>) {
+    setDraft((current) => ({ ...current, ...patch }))
+    setDirty(true)
+    setStatus(null)
   }
 
+  const nameError = !draft.name.trim()
+    ? 'Dê um nome a ele.'
+    : draft.name.trim().length > 40
+      ? 'Use até 40 caracteres.'
+      : /[<>{}`]/.test(draft.name)
+        ? 'Evite os caracteres < > { } `.'
+        : null
+  const activePreset = PERSONALITY_PRESETS.find((preset) => sameTraits(preset.traits, draft.traits))?.id ?? null
+  const displayName = draft.name.trim() || 'Orin'
+
   async function handleSave() {
-    setIsSaving(true)
+    if (nameError) {
+      setStatus({ tone: 'error', text: nameError })
+      return
+    }
+    setStatus({ tone: 'busy', text: 'Salvando…' })
     try {
-      const clamped = clampFriendTraits(draftTraits)
-      const notes = draftNotesText
-        .split('\n')
-        .map((line) => line.trim())
-        .filter(Boolean)
       await onUpdatePersona({
-        traits: clamped,
-        style_notes: notes,
-        current_mood: draftMood.trim() || 'neutro',
+        traits: clampFriendTraits(draft.traits),
+        style_notes: draft.notes.split('\n').map((line) => line.trim()).filter(Boolean),
+        current_mood: draft.mood.trim() || 'sereno',
+        display_name: draft.name.trim(),
+        user_nickname: draft.nickname.trim(),
+        orb_theme: draft.theme,
       })
-    } finally {
-      setIsSaving(false)
+      setDirty(false)
+      setStatus({ tone: 'ok', text: `${displayName} foi atualizado.` })
+    } catch {
+      setStatus({ tone: 'error', text: 'Não consegui salvar. Confira os campos e tente de novo.' })
     }
   }
 
@@ -173,237 +211,222 @@ export function FriendSoulDrawer({
     setIsSyncing(true)
     try {
       await onSyncSoul()
-      setTraitOverrides(null)
-      setMoodOverride(null)
-      setNotesOverride(null)
+      setDirty(false)
     } finally {
       setIsSyncing(false)
     }
   }
 
   return (
-    <aside
-      className="friend-soul-drawer"
-      data-testid="friend-soul-drawer"
-      aria-label="Personalidade e Memórias do Orin Friend"
-      style={{
-        position: 'fixed',
-        top: 0,
-        right: 0,
-        bottom: 0,
-        width: 'min(440px, 94vw)',
-        zIndex: 80,
-        background: '#100E20',
-        color: '#F4F2FF',
-        borderLeft: '1px solid rgba(167, 139, 250, 0.24)',
-        boxShadow: '-16px 0 48px rgba(7, 6, 17, 0.72)',
-        display: 'flex',
-        flexDirection: 'column',
-        overflowY: 'auto',
-        padding: '1.25rem',
-        gap: '1.25rem',
-      }}
-    >
-      <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.75rem' }}>
-        <div>
-          <span
-            style={{
-              fontSize: '0.72rem',
-              textTransform: 'uppercase',
-              letterSpacing: '0.08em',
-              color: '#A78BFA',
-              fontWeight: 600,
-            }}
-          >
-            ◈ Personalidade Evolutiva · SOUL.md
-          </span>
-          <h2 style={{ margin: '0.2rem 0 0', fontSize: '1.15rem' }}>Orin Friend</h2>
-        </div>
-        <button
-          type="button"
-          className="btn-ghost"
-          data-testid="close-friend-soul-drawer-button"
-          onClick={onClose}
-          aria-label="Fechar painel do Orin Friend"
-        >
-          ✕
-        </button>
-      </header>
+    <div className="friend-drawer" data-testid="friend-soul-drawer" role="dialog" aria-modal="true" aria-label={`Personalizar ${displayName}`}>
+      <button type="button" className="friend-drawer__scrim" aria-label="Fechar" tabIndex={-1} onClick={onClose} />
+      <aside className="friend-drawer__panel">
+        <header className="friend-drawer__header">
+          <div className="friend-drawer__preview" aria-hidden="true">
+            <LiveOrb phase="listening" theme={draft.theme} level={() => 0} size={64} staticMode />
+          </div>
+          <div className="friend-drawer__title">
+            <span className="friend-drawer__eyebrow">Personalizar</span>
+            <h2>{displayName}</h2>
+          </div>
+          <button type="button" className="voice-button is-quiet" data-testid="close-friend-soul-drawer" onClick={onClose} aria-label={`Fechar personalização de ${displayName}`}>
+            Fechar
+          </button>
+        </header>
 
-      <section
-        style={{
-          padding: '0.9rem 1rem',
-          borderRadius: '0.75rem',
-          background: 'rgba(139, 92, 246, 0.1)',
-          border: '1px solid rgba(167, 139, 250, 0.25)',
-          display: 'grid',
-          gap: '0.5rem',
-        }}
-      >
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <strong data-testid="friend-bond-stage-label">{bondStageLabel(bondStage)}</strong>
-          <span
-            data-testid="friend-affinity-score"
-            style={{ fontFamily: 'var(--font-mono, monospace)', color: '#C4B5FD', fontWeight: 600 }}
-          >
-            Afinidade: {affinity.toFixed(1)}%
-          </span>
+        <div className="friend-drawer__body">
+          <section className="friend-card" data-testid="friend-bond-card">
+            <div className="friend-card__row">
+              <strong data-testid="friend-bond-stage">{bondStageLabel(persona?.bond_stage ?? 'acquaintance')}</strong>
+              <span className="friend-card__muted" data-testid="friend-affinity-score">Afinidade {(persona?.affinity_score ?? 0).toFixed(0)}%</span>
+            </div>
+            <div className="friend-progress" aria-hidden="true">
+              <span style={{ width: `${Math.min(100, Math.max(0, persona?.affinity_score ?? 0))}%` }} />
+            </div>
+            <p className="friend-card__muted">O vínculo cresce sozinho conforme vocês conversam.</p>
+          </section>
+
+          <section className="friend-section">
+            <h3>Identidade</h3>
+            <div className="voice-field">
+              <label htmlFor="friend-name-input">Nome</label>
+              <input
+                id="friend-name-input"
+                data-testid="friend-name-input"
+                value={draft.name}
+                maxLength={40}
+                onChange={(event) => edit({ name: event.target.value })}
+                aria-invalid={nameError ? true : undefined}
+                placeholder="Orin"
+              />
+              {nameError && dirty && <span className="voice-settings__error">{nameError}</span>}
+            </div>
+            <div className="voice-field">
+              <label htmlFor="friend-nickname-input">Como {displayName} te chama</label>
+              <input
+                id="friend-nickname-input"
+                data-testid="friend-nickname-input"
+                value={draft.nickname}
+                maxLength={40}
+                onChange={(event) => edit({ nickname: event.target.value })}
+                placeholder="Seu nome ou apelido"
+              />
+            </div>
+            <div className="voice-field">
+              <span className="voice-field__label" id="friend-theme-label">Aparência</span>
+              <div className="friend-swatches" role="radiogroup" aria-labelledby="friend-theme-label">
+                {FRIEND_ORB_THEMES.map((themeId) => {
+                  const theme = ORB_THEMES[themeId]
+                  return (
+                    <button
+                      key={themeId}
+                      type="button"
+                      role="radio"
+                      aria-checked={draft.theme === themeId}
+                      className={`friend-swatch${draft.theme === themeId ? ' is-checked' : ''}`}
+                      data-testid={`friend-theme-${themeId}`}
+                      onClick={() => edit({ theme: themeId })}
+                      title={theme.label}
+                    >
+                      <span
+                        className="friend-swatch__dot"
+                        style={{ background: `radial-gradient(circle at 35% 30%, ${theme.core[2]}, ${theme.core[1]} 45%, ${theme.core[0]})` }}
+                      />
+                      <span>{theme.label}</span>
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+          </section>
+
+          <section className="friend-section">
+            <h3>Personalidade</h3>
+            <div className="friend-presets" role="radiogroup" aria-label="Estilo de personalidade">
+              {PERSONALITY_PRESETS.map((preset) => (
+                <button
+                  key={preset.id}
+                  type="button"
+                  role="radio"
+                  aria-checked={activePreset === preset.id}
+                  className={`friend-preset${activePreset === preset.id ? ' is-checked' : ''}`}
+                  data-testid={`friend-preset-${preset.id}`}
+                  onClick={() => edit({ traits: { ...preset.traits } })}
+                >
+                  <strong>{preset.label}</strong>
+                  <span>{preset.description}</span>
+                </button>
+              ))}
+            </div>
+            <details className="friend-advanced" open={activePreset === null ? true : undefined}>
+              <summary>Ajuste fino{activePreset === null ? ' (personalizado)' : ''}</summary>
+              {TRAIT_META.map((meta) => (
+                <div key={meta.key} className="friend-trait">
+                  <div className="friend-trait__head">
+                    <label htmlFor={`friend-trait-${meta.key}`}>{meta.label}</label>
+                    <span className="voice-field__value">{Math.round(draft.traits[meta.key] * 100)}</span>
+                  </div>
+                  <input
+                    id={`friend-trait-${meta.key}`}
+                    data-testid={`friend-trait-slider-${meta.key}`}
+                    type="range"
+                    min={meta.min}
+                    max={meta.max}
+                    step={0.01}
+                    value={draft.traits[meta.key]}
+                    onChange={(event) =>
+                      edit({ traits: clampFriendTraits({ ...draft.traits, [meta.key]: Number(event.target.value) }) })
+                    }
+                  />
+                  <div className="friend-trait__ends" aria-hidden="true">
+                    <span>{meta.low}</span>
+                    <span>{meta.high}</span>
+                  </div>
+                </div>
+              ))}
+            </details>
+          </section>
+
+          <section className="friend-section">
+            <h3>Clima e jeito de falar</h3>
+            <div className="voice-field">
+              <label htmlFor="friend-mood-input">Humor de agora</label>
+              <input
+                id="friend-mood-input"
+                data-testid="friend-mood-input"
+                value={draft.mood}
+                maxLength={60}
+                list="friend-mood-suggestions"
+                onChange={(event) => edit({ mood: event.target.value })}
+              />
+              <datalist id="friend-mood-suggestions">
+                {MOOD_SUGGESTIONS.map((mood) => <option key={mood} value={mood} />)}
+              </datalist>
+            </div>
+            <div className="voice-field">
+              <label htmlFor="friend-style-notes">Instruções de estilo (uma por linha)</label>
+              <textarea
+                id="friend-style-notes"
+                data-testid="friend-style-notes-textarea"
+                value={draft.notes}
+                rows={4}
+                onChange={(event) => edit({ notes: event.target.value })}
+                placeholder={'Ex.: Me chama de chefe quando eu terminar algo\nFala de futebol comigo às segundas'}
+              />
+            </div>
+          </section>
+
+          <section className="friend-section">
+            <h3>Memórias e piadas internas ({memories.length})</h3>
+            {memories.length === 0 ? (
+              <p className="friend-card__muted">Nada ainda — as memórias aparecem aqui conforme vocês conversam.</p>
+            ) : (
+              <ul className="friend-memories">
+                {memories.map((memory) => (
+                  <li key={memory.id} data-testid={`friend-memory-item-${memory.id}`}>
+                    <span className="voice-badge is-muted">{memoryKindLabel(memory.kind)}</span>
+                    <span className="friend-memories__text">{memory.content}</span>
+                    <button
+                      type="button"
+                      className="voice-button is-quiet is-small"
+                      data-testid={`delete-friend-memory-${memory.id}`}
+                      onClick={() => void onDeleteMemory(memory.id)}
+                      aria-label={`Esquecer memória: ${memory.content}`}
+                    >
+                      Esquecer
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+
+          <section className="friend-section">
+            <h3>Arquivo SOUL.md</h3>
+            <p className="friend-card__muted">
+              Tudo isso também fica em <code data-testid="friend-soul-path">{persona?.soul_markdown_path ?? '~/.orin/friend/SOUL.md'}</code>; editou lá fora? Sincronize.
+            </p>
+            <button type="button" className="voice-button" data-testid="sync-friend-soul-button" disabled={isSyncing} onClick={() => void handleSync()}>
+              {isSyncing ? 'Sincronizando…' : 'Sincronizar SOUL.md'}
+            </button>
+          </section>
         </div>
-        <div
-          style={{
-            height: '6px',
-            borderRadius: '999px',
-            background: 'rgba(255, 255, 255, 0.08)',
-            overflow: 'hidden',
-          }}
-        >
-          <div
-            style={{
-              width: `${Math.min(100, Math.max(0, affinity))}%`,
-              height: '100%',
-              background: 'linear-gradient(90deg, #8B5CF6, #C4B5FD)',
-            }}
-          />
-        </div>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.82rem' }}>
-          <span>
-            Humor atual: <strong>{draftMood}</strong>
+
+        <footer className="friend-drawer__footer">
+          <span className={`friend-drawer__status is-${status?.tone ?? 'idle'}`} role="status" data-testid="friend-save-status">
+            {status?.text ?? (dirty ? 'Alterações não salvas' : '')}
           </span>
           <button
             type="button"
-            className="btn-secondary"
-            data-testid="friend-soul-sync-button"
-            disabled={isSyncing}
-            onClick={() => void handleSync()}
-            style={{ fontSize: '0.76rem', padding: '0.25rem 0.6rem' }}
+            className="voice-button is-primary"
+            data-testid="save-friend-persona-button"
+            disabled={status?.tone === 'busy' || !dirty}
+            onClick={() => void handleSave()}
           >
-            {isSyncing ? 'Sincronizando…' : 'Sincronizar SOUL.md'}
+            Salvar alterações
           </button>
-        </div>
-        {persona?.soul_markdown_path && (
-          <code style={{ fontSize: '0.72rem', opacity: 0.72, wordBreak: 'break-all' }}>
-            {persona.soul_markdown_path}
-          </code>
-        )}
-      </section>
-
-      <section style={{ display: 'grid', gap: '0.8rem' }}>
-        <h3 style={{ margin: 0, fontSize: '0.95rem', color: '#E9D5FF' }}>7 Traços de Personalidade</h3>
-        {TRAIT_META.map((trait) => {
-          const val = draftTraits[trait.key]
-          return (
-            <div key={trait.key} style={{ display: 'grid', gap: '0.2rem' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.84rem' }}>
-                <label htmlFor={`trait-slider-${trait.key}`}>{trait.label}</label>
-                <span style={{ fontFamily: 'var(--font-mono, monospace)', color: '#A78BFA' }}>
-                  {val.toFixed(2)}
-                </span>
-              </div>
-              <input
-                id={`trait-slider-${trait.key}`}
-                data-testid={`trait-slider-${trait.key}`}
-                type="range"
-                min={0}
-                max={1}
-                step={0.01}
-                value={val}
-                onChange={(e) => handleTraitChange(trait.key, e.target.value)}
-              />
-              <span style={{ fontSize: '0.74rem', opacity: 0.7 }}>{trait.description}</span>
-            </div>
-          )
-        })}
-
-        <div style={{ display: 'grid', gap: '0.35rem', marginTop: '0.25rem' }}>
-          <label htmlFor="friend-mood-input" style={{ fontSize: '0.84rem' }}>
-            Humor / Estado de espírito atual
-          </label>
-          <input
-            id="friend-mood-input"
-            data-testid="friend-mood-input"
-            type="text"
-            value={draftMood}
-            onChange={(e) => setMoodOverride(e.target.value)}
-          />
-        </div>
-
-        <div style={{ display: 'grid', gap: '0.35rem' }}>
-          <label htmlFor="friend-style-notes-textarea" style={{ fontSize: '0.84rem' }}>
-            Notas de estilo aprendidas (1 por linha)
-          </label>
-          <textarea
-            id="friend-style-notes-textarea"
-            data-testid="friend-style-notes-textarea"
-            rows={3}
-            value={draftNotesText}
-            onChange={(e) => setNotesOverride(e.target.value)}
-          />
-        </div>
-
-        <button
-          type="button"
-          className="btn-primary"
-          data-testid="friend-soul-save-button"
-          disabled={isSaving}
-          onClick={() => void handleSave()}
-        >
-          {isSaving ? 'Salvando…' : 'Salvar Personalidade'}
-        </button>
-      </section>
-
-      <section style={{ display: 'grid', gap: '0.65rem' }}>
-        <h3 style={{ margin: 0, fontSize: '0.95rem', color: '#E9D5FF' }}>
-          Memórias Afetivas & Piadas Internas ({memories.length})
-        </h3>
-        {memories.length === 0 ? (
-          <p style={{ fontSize: '0.84rem', opacity: 0.7, margin: 0 }}>
-            Nenhuma memória afetiva registrada ainda. Converse com o Orin Friend para criar histórias e piadas internas!
-          </p>
-        ) : (
-          <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'grid', gap: '0.55rem' }}>
-            {memories.map((mem) => (
-              <li
-                key={mem.id}
-                data-testid={`friend-memory-item-${mem.id}`}
-                style={{
-                  padding: '0.7rem 0.85rem',
-                  borderRadius: '0.65rem',
-                  background: 'rgba(255, 255, 255, 0.04)',
-                  border: '1px solid rgba(255, 255, 255, 0.08)',
-                  display: 'grid',
-                  gap: '0.35rem',
-                }}
-              >
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.5rem' }}>
-                  <span
-                    style={{
-                      fontSize: '0.72rem',
-                      padding: '0.12rem 0.45rem',
-                      borderRadius: '999px',
-                      background: 'rgba(139, 92, 246, 0.2)',
-                      color: '#C4B5FD',
-                    }}
-                  >
-                    {memoryKindLabel(mem.kind)}
-                    {mem.emotion_tag ? ` · ${mem.emotion_tag}` : ''}
-                  </span>
-                  <button
-                    type="button"
-                    className="btn-ghost"
-                    data-testid={`delete-friend-memory-${mem.id}`}
-                    onClick={() => void onDeleteMemory(mem.id)}
-                    aria-label={`Excluir memória ${mem.id}`}
-                    style={{ fontSize: '0.75rem', padding: '0.15rem 0.45rem' }}
-                  >
-                    Excluir
-                  </button>
-                </div>
-                <p style={{ margin: 0, fontSize: '0.86rem', lineHeight: 1.45 }}>{mem.content}</p>
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
-    </aside>
+        </footer>
+      </aside>
+    </div>
   )
 }

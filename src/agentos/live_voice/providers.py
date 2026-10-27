@@ -313,11 +313,13 @@ class MultiProviderSTTAdapter:
             except Exception:
                 pass
 
-        transcript = (prompt_hint or "Fala reconhecida pelo adaptador STT.").strip()
+        # Without a transport the adapter can only echo a transcript the client
+        # already produced (browser speech recognition). It never invents one.
+        transcript = (prompt_hint or "").strip()
         return STTTranscriptionResult(
             text=transcript,
             language=language,
-            confidence=0.92,
+            confidence=0.92 if transcript else 0.0,
             duration_ms=max(1, duration_ms),
             provider=chosen_provider,
             model_id=chosen_model,

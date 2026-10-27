@@ -617,6 +617,10 @@ export function parseConversationActivityEvent(value: unknown, cursor: string): 
       }
     }
   }
+  if (type === 'speak.chunk_ready') {
+    const spoken = optionalText(payload.tts_text, 2000) ?? optionalText(payload.clean_text, 2000)
+    if (spoken) event.speakText = spoken
+  }
   const planApproval = parsePlanApproval(payload)
   if (planApproval) {
     event.planApproval = planApproval
@@ -1299,7 +1303,15 @@ export type FriendPersonaState = {
   current_mood: string
   soul_markdown_path: string | null
   updated_at?: string | null
+  /** The name the companion answers to. */
+  display_name: string
+  /** How the companion addresses the person ('' = by no particular name). */
+  user_nickname: string
+  orb_theme: FriendOrbTheme
 }
+
+export const FRIEND_ORB_THEMES = ['aurora', 'ocean', 'sunset', 'mint', 'mono'] as const
+export type FriendOrbTheme = (typeof FRIEND_ORB_THEMES)[number]
 
 export type FriendMemoryKind = 'episodic' | 'inside_joke' | 'milestone' | 'emotional'
 
@@ -1354,6 +1366,11 @@ export function parseFriendPersonaState(value: unknown): FriendPersonaState {
     current_mood: typeof data.current_mood === 'string' && data.current_mood ? data.current_mood : 'neutro',
     soul_markdown_path: typeof data.soul_markdown_path === 'string' ? data.soul_markdown_path : null,
     updated_at: typeof data.updated_at === 'string' ? data.updated_at : null,
+    display_name: typeof data.display_name === 'string' && data.display_name.trim() ? data.display_name : 'Orin',
+    user_nickname: typeof data.user_nickname === 'string' ? data.user_nickname : '',
+    orb_theme: (FRIEND_ORB_THEMES as readonly string[]).includes(String(data.orb_theme))
+      ? (data.orb_theme as FriendOrbTheme)
+      : 'aurora',
   }
 }
 
@@ -1404,6 +1421,9 @@ export function updateFriendPersona(
     traits?: Partial<FriendTraitVector>
     style_notes?: string[]
     current_mood?: string
+    display_name?: string
+    user_nickname?: string
+    orb_theme?: FriendOrbTheme
   },
   intent = client.createMutationIntent(),
 ): Promise<FriendPersonaState> {
@@ -1416,6 +1436,9 @@ export function updateFriendPersona(
       ...(safeTraits ? { traits: safeTraits } : {}),
       ...(input.style_notes ? { style_notes: input.style_notes } : {}),
       ...(input.current_mood ? { current_mood: input.current_mood } : {}),
+      ...(input.display_name !== undefined ? { display_name: input.display_name } : {}),
+      ...(input.user_nickname !== undefined ? { user_nickname: input.user_nickname } : {}),
+      ...(input.orb_theme ? { orb_theme: input.orb_theme } : {}),
     },
     parse: parseFriendPersonaState,
   })
@@ -1491,13 +1514,16 @@ export type LiveVoiceServerEvent =
   | {
       type: 'tts.chunk'
       epoch: number
+      audio_epoch?: number
       chunk_seq: number
       clean_text: string
       pcm_base64: string
       sample_rate: number
       duration_ms: number
       word_timings: WordTiming[]
+      provider?: string
     }
+  | { type: 'tts.error'; code: string; message: string; text?: string; hint?: string }
   | {
       type: 'audio.clear'
       previous_epoch: number
@@ -1508,6 +1534,9 @@ export type LiveVoiceServerEvent =
       unspoken_text: string
       system_receipt: string
     }
+  | { type: 'stt.processing'; provider: string; audio_ms: number }
+  | { type: 'stt.error'; code: string; message: string; hint?: string }
+  | { type: 'stt.empty'; audio_epoch: number }
   | {
       type: 'stt.transcript'
       is_end_of_utterance: boolean
@@ -1518,6 +1547,7 @@ export type LiveVoiceServerEvent =
       type: 'vad.eou_wait'
       is_end_of_utterance: false
       required_silence_ms: number
+      silence_ms?: number
       partial_text: string
       detected_hold_marker: string | null
     }
@@ -1526,28 +1556,65 @@ export type LiveVoiceServerEvent =
       text: string
       audio_epoch: number
     }
+  | { type: 'vad.frame'; is_speech: boolean; buffered_bytes: number }
+  | { type: 'config.updated'; voice_config: Record<string, unknown> }
+  | { type: 'error'; code: string; message: string }
+
+export type LiveVoiceSocketStatus = 'connecting' | 'open' | 'closed' | 'unauthorized'
+
+export type LiveVoiceSocketConfig = {
+  stt_provider?: string
+  stt_model?: string
+  tts_provider?: string
+  tts_model?: string
+  voice_id?: string
+  speed?: number
+  language?: string
+}
 
 export type LiveVoiceSocketHandle = {
   sendBargeIn: (epoch: number, chunkSeq: number, playedMs: number) => void
-  sendSpeakText: (text: string) => void
+  sendSpeakText: (text: string, instructions?: string) => void
   sendPlaybackProgress: (chunkSeq: number, playedMs: number) => void
-  sendSpeechEnd: (transcriptHint: string, silenceMs?: number) => void
+  sendSpeechEnd: (transcriptHint: string, silenceMs?: number, extra?: Record<string, unknown>) => void
   sendPcmFrame: (pcmBytes: ArrayBuffer) => void
+  sendConfig: (config: LiveVoiceSocketConfig) => void
+  sendAudioReset: () => void
+  isOpen: () => boolean
   close: () => void
+}
+
+export type LiveVoiceSocketOptions = {
+  csrfToken?: string
+  onStatus?: (status: LiveVoiceSocketStatus) => void
 }
 
 export function connectLiveVoiceSession(
   conversationId: string,
   onEvent: (event: LiveVoiceServerEvent) => void,
+  options: LiveVoiceSocketOptions = {},
 ): LiveVoiceSocketHandle | null {
   if (typeof window === 'undefined' || typeof window.WebSocket === 'undefined' || !conversationId) {
     return null
   }
   const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-  const url = `${proto}//${window.location.host}/v1/conversations/${encodeURIComponent(conversationId)}/live`
+  const query = options.csrfToken ? `?csrf=${encodeURIComponent(options.csrfToken)}` : ''
+  const url = `${proto}//${window.location.host}/v1/conversations/${encodeURIComponent(conversationId)}/live${query}`
   let ws: WebSocket | null = null
+  // Config sent before the socket opens is replayed on open, so a caller never
+  // has to wait for `session.ready` before choosing its engines.
+  let pendingConfig: LiveVoiceSocketConfig | null = null
   try {
     ws = new window.WebSocket(url)
+    ws.binaryType = 'arraybuffer'
+    options.onStatus?.('connecting')
+    ws.onopen = () => {
+      options.onStatus?.('open')
+      if (pendingConfig && ws) ws.send(JSON.stringify({ type: 'config', ...pendingConfig }))
+    }
+    ws.onclose = (event) => {
+      options.onStatus?.(event.code === 4401 ? 'unauthorized' : 'closed')
+    }
     ws.onmessage = (msg) => {
       if (typeof msg.data !== 'string') return
       try {
@@ -1563,8 +1630,9 @@ export function connectLiveVoiceSession(
     return null
   }
 
+  const isOpen = () => Boolean(ws && ws.readyState === window.WebSocket.OPEN)
   const sendJson = (payload: Record<string, unknown>) => {
-    if (ws && ws.readyState === window.WebSocket.OPEN) {
+    if (ws && isOpen()) {
       ws.send(JSON.stringify(payload))
     }
   }
@@ -1572,16 +1640,22 @@ export function connectLiveVoiceSession(
   return {
     sendBargeIn: (epoch, chunkSeq, playedMs) =>
       sendJson({ type: 'barge_in', epoch, chunk_seq: chunkSeq, played_ms: playedMs }),
-    sendSpeakText: (text) => sendJson({ type: 'speak_text', text }),
+    sendSpeakText: (text, instructions) => sendJson({ type: 'speak_text', text, ...(instructions ? { instructions } : {}) }),
     sendPlaybackProgress: (chunkSeq, playedMs) =>
       sendJson({ type: 'playback_progress', chunk_seq: chunkSeq, played_ms: playedMs }),
-    sendSpeechEnd: (transcriptHint, silenceMs = 420) =>
-      sendJson({ type: 'audio_speech_end', transcript_hint: transcriptHint, silence_ms: silenceMs }),
+    sendSpeechEnd: (transcriptHint, silenceMs = 420, extra = {}) =>
+      sendJson({ type: 'audio_speech_end', transcript_hint: transcriptHint, silence_ms: silenceMs, ...extra }),
     sendPcmFrame: (pcmBytes) => {
-      if (ws && ws.readyState === window.WebSocket.OPEN) {
+      if (ws && isOpen()) {
         ws.send(pcmBytes)
       }
     },
+    sendConfig: (config) => {
+      pendingConfig = { ...(pendingConfig ?? {}), ...config }
+      sendJson({ type: 'config', ...config })
+    },
+    sendAudioReset: () => sendJson({ type: 'audio_reset' }),
+    isOpen,
     close: () => {
       try {
         ws?.close()

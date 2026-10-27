@@ -1,0 +1,435 @@
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import type { ApiClient } from '../../../api/client'
+import { connectLiveVoiceSession, type LiveVoiceServerEvent, type LiveVoiceSocketHandle } from '../../../api/conversations'
+import { UNAVAILABLE_CAPABILITIES, type LiveVoiceCapabilities } from '../../../api/liveVoice'
+import type { LiveVoicePhase } from '../activityTypes'
+import { BrowserRecognition, browserRecognitionSupported } from './browserRecognition'
+import { isEchoOfRecentTts } from './echo'
+import { EnergyVad, LIVE_SAMPLE_RATE, MicAccessError, MicCapture, concatPcm, type VadEvent } from './liveAudio'
+import { SpeechOutput } from './liveSpeech'
+import { resolveStt, resolveTts, type LiveVoicePrefs, type ResolvedStt } from './liveVoicePrefs'
+
+export type AssistantSpeechItem = { id: string; text: string }
+
+export type LiveVoiceIssue = {
+  code: string
+  message: string
+  hint?: string
+}
+
+export type UseLiveVoiceOptions = {
+  active: boolean
+  conversationId?: string
+  client: ApiClient
+  prefs: LiveVoicePrefs
+  capabilities: LiveVoiceCapabilities | null
+  /** Everything the assistant has asked to say in this conversation, oldest first. */
+  assistantSpeech: ReadonlyArray<AssistantSpeechItem>
+  /** A turn is running (the assistant is thinking or using tools). */
+  assistantBusy: boolean
+  onUtterance: (text: string) => void
+  voiceInstructions?: string
+  pushToTalk?: boolean
+}
+
+export type LiveVoiceController = {
+  phase: LiveVoicePhase
+  sttEngine: ResolvedStt
+  ttsEngine: 'system' | 'openai'
+  userText: string
+  assistantText: string
+  assistantCharIndex: number
+  issue: LiveVoiceIssue | null
+  muted: boolean
+  setMuted: (muted: boolean) => void
+  interrupt: () => void
+  setPushToTalkHeld: (held: boolean) => void
+  /** 0..1, read every animation frame by the orb and the meter. */
+  micLevel: () => number
+  outputLevel: () => number
+  dismissIssue: () => void
+}
+
+const INTERRUPTED_FLASH_MS = 900
+const AWAIT_REPLY_TIMEOUT_MS = 90_000
+const TRANSCRIBE_TIMEOUT_MS = 25_000
+
+export function useLiveVoice(options: UseLiveVoiceOptions): LiveVoiceController {
+  const { active, conversationId, client, prefs, capabilities, assistantSpeech, assistantBusy } = options
+  const caps = capabilities ?? UNAVAILABLE_CAPABILITIES
+  const browserSupported = useMemo(() => browserRecognitionSupported(), [])
+  // Until the server says what can run, nothing is started: a guess would open the wrong engine.
+  const sttEngine = capabilities ? resolveStt(prefs.stt, caps, browserSupported) : null
+  const ttsEngine = resolveTts(prefs.tts, caps)
+
+  const [micState, setMicState] = useState<'connecting' | 'ready' | 'error'>('connecting')
+  const [userSpeaking, setUserSpeaking] = useState(false)
+  const [transcribing, setTranscribing] = useState(false)
+  const [awaitingReply, setAwaitingReply] = useState(false)
+  const [speaking, setSpeaking] = useState(false)
+  const [interrupted, setInterrupted] = useState(false)
+  const [muted, setMutedState] = useState(false)
+  const [userText, setUserText] = useState('')
+  const [assistantText, setAssistantText] = useState('')
+  const [assistantCharIndex, setAssistantCharIndex] = useState(0)
+  const [issue, setIssue] = useState<LiveVoiceIssue | null>(null)
+
+  const socketRef = useRef<LiveVoiceSocketHandle | null>(null)
+  const micRef = useRef<MicCapture | null>(null)
+  const vadRef = useRef<EnergyVad | null>(null)
+  const speechRef = useRef<SpeechOutput | null>(null)
+  const recognitionRef = useRef<BrowserRecognition | null>(null)
+  const epochRef = useRef(1)
+  const spokenIdsRef = useRef<Set<string> | null>(null)
+  const recentSpokenRef = useRef<string[]>([])
+  const suppressRef = useRef(false)
+  const eouTimerRef = useRef<number | null>(null)
+  const interruptTimerRef = useRef<number | null>(null)
+  const mutedRef = useRef(false)
+  const pttHeldRef = useRef(false)
+
+  // Latest values for callbacks living inside long-lived audio handlers.
+  const latest = useRef({ options, sttEngine, ttsEngine, prefs })
+  useLayoutEffect(() => {
+    latest.current = { options, sttEngine, ttsEngine, prefs }
+  })
+
+  const clearEouTimer = () => {
+    if (eouTimerRef.current !== null) window.clearTimeout(eouTimerRef.current)
+    eouTimerRef.current = null
+  }
+
+  const deliverTranscript = useCallback((raw: string) => {
+    const text = raw.trim()
+    setTranscribing(false)
+    if (!text) return
+    const speechActive = speechRef.current?.speaking ?? false
+    if (speechActive && isEchoOfRecentTts(text, recentSpokenRef.current)) return
+    if (!speechActive && isEchoOfRecentTts(text, recentSpokenRef.current.slice(-2), 0.85)) return
+    setUserText(text)
+    setAwaitingReply(true)
+    suppressRef.current = false
+    latest.current.options.onUtterance(text)
+  }, [])
+
+  const interrupt = useCallback(() => {
+    const speech = speechRef.current
+    if (!speech?.speaking) return
+    const position = speech.playbackPosition()
+    speech.stop()
+    suppressRef.current = true
+    if (position) socketRef.current?.sendBargeIn(epochRef.current, position.chunkSeq, position.playedMs)
+    setSpeaking(false)
+    setInterrupted(true)
+    if (interruptTimerRef.current !== null) window.clearTimeout(interruptTimerRef.current)
+    interruptTimerRef.current = window.setTimeout(() => setInterrupted(false), INTERRUPTED_FLASH_MS)
+  }, [])
+
+  const handleVad = useCallback((event: VadEvent) => {
+    const socket = socketRef.current
+    const engine = latest.current.sttEngine
+    const serverStt = engine !== null && engine !== 'browser'
+    if (event.type === 'speech_start') {
+      clearEouTimer()
+      if (speechRef.current?.speaking) {
+        if (!latest.current.prefs.bargeIn) return
+        interrupt()
+      }
+      setUserSpeaking(true)
+      if (serverStt) for (const frame of event.preRoll) socket?.sendPcmFrame(frame.slice().buffer)
+    } else if (event.type === 'speech_frame') {
+      if (serverStt) socket?.sendPcmFrame(event.frame.slice().buffer)
+    } else {
+      setUserSpeaking(false)
+      if (!serverStt) return
+      const audioMs = (concatPcm(event.frames).length / LIVE_SAMPLE_RATE) * 1000
+      // A cough or a click is not a sentence: drop it before paying for a transcription.
+      if (audioMs < 350) {
+        socket?.sendAudioReset()
+        return
+      }
+      setTranscribing(true)
+      socket?.sendSpeechEnd('', event.silenceMs, { sample_rate: LIVE_SAMPLE_RATE })
+    }
+  }, [interrupt])
+
+  const handleServerEvent = useCallback((event: LiveVoiceServerEvent) => {
+    switch (event.type) {
+      case 'session.ready':
+        epochRef.current = event.audio_epoch
+        break
+      case 'audio.clear':
+        epochRef.current = event.new_epoch
+        break
+      case 'stt.processing':
+        setTranscribing(true)
+        break
+      case 'stt.transcript':
+        setIssue(null)
+        deliverTranscript(event.text)
+        break
+      case 'stt.empty':
+      case 'vad.echo_discarded':
+        setTranscribing(false)
+        break
+      case 'stt.error':
+        setTranscribing(false)
+        setIssue({ code: event.code, message: event.message, hint: event.hint })
+        break
+      case 'vad.eou_wait': {
+        setTranscribing(false)
+        setUserText(event.partial_text)
+        clearEouTimer()
+        const waitMs = Math.max(200, event.required_silence_ms - (event.silence_ms ?? 0))
+        eouTimerRef.current = window.setTimeout(() => {
+          if (vadRef.current?.speaking) return
+          setTranscribing(true)
+          socketRef.current?.sendSpeechEnd('', event.required_silence_ms, { sample_rate: LIVE_SAMPLE_RATE })
+        }, waitMs)
+        break
+      }
+      case 'tts.chunk':
+        epochRef.current = event.epoch ?? event.audio_epoch ?? epochRef.current
+        if (suppressRef.current) break
+        speechRef.current?.playPcm(event.clean_text, event.pcm_base64, event.sample_rate, event.chunk_seq)
+        break
+      case 'tts.error':
+        setIssue({ code: event.code, message: event.message, hint: event.hint })
+        if (event.text && !suppressRef.current) speechRef.current?.speakSystem(event.text)
+        break
+      default:
+        break
+    }
+  }, [deliverTranscript])
+
+  // Socket, speaker and microphone live exactly as long as the Live mode is open.
+  useEffect(() => {
+    if (!active || !conversationId) return
+    let disposed = false
+    spokenIdsRef.current = null
+    suppressRef.current = false
+
+    const socket = connectLiveVoiceSession(conversationId, (event) => handleServerEvent(event), {
+      csrfToken: client.socketCsrfToken(),
+      onStatus: (status) => {
+        if (status === 'unauthorized') setIssue({ code: 'unauthorized', message: 'Sua sessão expirou. Recarregue a página para voltar a conversar por voz.' })
+      },
+    })
+    socketRef.current = socket
+
+    const speech = new SpeechOutput({
+      onStart: (text) => {
+        setSpeaking(true)
+        setAwaitingReply(false)
+        setAssistantText(text)
+        setAssistantCharIndex(0)
+        vadRef.current?.setDucking(true)
+        recognitionRef.current?.setPaused(true)
+        recentSpokenRef.current = [...recentSpokenRef.current.slice(-7), text]
+      },
+      onProgress: (_text, charIndex) => setAssistantCharIndex(charIndex),
+      onIdle: () => {
+        setSpeaking(false)
+        // The room still rings for a moment after the last word.
+        window.setTimeout(() => {
+          if (!speechRef.current?.speaking) {
+            vadRef.current?.setDucking(false)
+            recognitionRef.current?.setPaused(false)
+          }
+        }, 250)
+      },
+    }, { voiceUri: prefs.systemVoiceUri, rate: prefs.rate, pitch: prefs.pitch })
+    speechRef.current = speech
+
+    const vad = new EnergyVad({ sensitivity: prefs.sensitivity, endSilenceMs: prefs.endSilenceMs })
+    vadRef.current = vad
+
+    void MicCapture.open({
+      deviceId: prefs.micDeviceId,
+      onFrame: (frame, rms) => {
+        if (mutedRef.current) return
+        if (latest.current.options.pushToTalk && !pttHeldRef.current) return
+        for (const event of vad.process(frame, rms)) handleVad(event)
+      },
+    })
+      .then((mic) => {
+        if (disposed) {
+          mic.close()
+          return
+        }
+        micRef.current = mic
+        setMicState('ready')
+      })
+      .catch((error: unknown) => {
+        if (disposed) return
+        setMicState('error')
+        setIssue({
+          code: error instanceof MicAccessError ? `mic_${error.state}` : 'mic_error',
+          message: error instanceof Error ? error.message : 'Não foi possível abrir o microfone.',
+        })
+      })
+
+    return () => {
+      disposed = true
+      clearEouTimer()
+      if (interruptTimerRef.current !== null) window.clearTimeout(interruptTimerRef.current)
+      micRef.current?.close()
+      micRef.current = null
+      recognitionRef.current?.stop()
+      recognitionRef.current = null
+      speech.dispose()
+      speechRef.current = null
+      socket?.close()
+      socketRef.current = null
+      vadRef.current = null
+      setSpeaking(false)
+      setUserSpeaking(false)
+      setTranscribing(false)
+      setAwaitingReply(false)
+      setMicState('connecting')
+      setIssue(null)
+      setUserText('')
+      setAssistantText('')
+    }
+    // The audio graph is rebuilt only for a new conversation or microphone.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, conversationId, prefs.micDeviceId, client, handleServerEvent, handleVad])
+
+  // Tuning changes apply live, without reopening the microphone.
+  useEffect(() => {
+    vadRef.current?.setSensitivity(prefs.sensitivity)
+    speechRef.current?.setSystemVoice({ voiceUri: prefs.systemVoiceUri, rate: prefs.rate, pitch: prefs.pitch })
+  }, [prefs.sensitivity, prefs.systemVoiceUri, prefs.rate, prefs.pitch])
+
+  // Tell the server which engines to use.
+  const capsStt = caps.stt
+  useEffect(() => {
+    if (!active) return
+    const socket = socketRef.current
+    if (!socket) return
+    const serverStt = sttEngine && sttEngine !== 'browser' ? sttEngine : null
+    socket.sendConfig({
+      ...(serverStt ? { stt_provider: serverStt, stt_model: capsStt[serverStt].modelId ?? undefined } : {}),
+      tts_provider: ttsEngine === 'openai' ? 'openai' : 'local_sidecar',
+      ...(ttsEngine === 'openai' ? { tts_model: 'gpt-4o-mini-tts', voice_id: prefs.openaiVoice } : {}),
+      speed: prefs.rate,
+      language: 'pt',
+    })
+  }, [active, conversationId, sttEngine, ttsEngine, prefs.openaiVoice, prefs.rate, capsStt])
+
+  // Browser recognition runs alongside the microphone (which still drives the meter and barge-in).
+  useEffect(() => {
+    if (!active || sttEngine !== 'browser') return
+    const recognition = new BrowserRecognition({
+      onInterim: (text) => {
+        setUserText(text)
+        setUserSpeaking(true)
+      },
+      onFinal: (text) => {
+        setUserSpeaking(false)
+        deliverTranscript(text)
+      },
+      onError: (code, message) => setIssue({ code: `browser_${code}`, message }),
+    })
+    recognitionRef.current = recognition
+    recognition.start()
+    return () => {
+      recognition.stop()
+      if (recognitionRef.current === recognition) recognitionRef.current = null
+    }
+  }, [active, sttEngine, deliverTranscript])
+
+  // Capabilities arrive after the socket opens, so "nothing can hear you" is only claimed once they did.
+  const missingStt: LiveVoiceIssue | null = micState === 'ready' && capabilities !== null && sttEngine === null
+    ? {
+        code: 'no_stt',
+        message: 'Nenhum jeito de te ouvir está pronto ainda. Abra a configuração de voz para instalar o Whisper local ou usar sua chave OpenAI.',
+      }
+    : null
+
+  // Speak whatever the assistant adds after the Live mode opened.
+  useEffect(() => {
+    if (!active) return
+    if (spokenIdsRef.current === null) {
+      spokenIdsRef.current = new Set(assistantSpeech.map((item) => item.id))
+      return
+    }
+    const spoken = spokenIdsRef.current
+    for (const item of assistantSpeech) {
+      if (spoken.has(item.id)) continue
+      spoken.add(item.id)
+      if (suppressRef.current || mutedRef.current) continue
+      if (latest.current.ttsEngine === 'openai' && socketRef.current?.isOpen()) {
+        setAwaitingReply(true)
+        socketRef.current.sendSpeakText(item.text, latest.current.options.voiceInstructions)
+      } else {
+        speechRef.current?.speakSystem(item.text)
+      }
+    }
+  }, [active, assistantSpeech])
+
+  // "Thinking" ends when the turn that answered ends, even if it chose not to speak.
+  const wasBusyRef = useRef(assistantBusy)
+  useEffect(() => {
+    if (wasBusyRef.current && !assistantBusy) setAwaitingReply(false)
+    wasBusyRef.current = assistantBusy
+  }, [assistantBusy])
+  // A transcription that never answers (server restarted, socket dropped) must not freeze the stage.
+  useEffect(() => {
+    if (!transcribing) return
+    const timer = window.setTimeout(() => setTranscribing(false), TRANSCRIBE_TIMEOUT_MS)
+    return () => window.clearTimeout(timer)
+  }, [transcribing])
+  useEffect(() => {
+    if (!awaitingReply) return
+    const timer = window.setTimeout(() => setAwaitingReply(false), AWAIT_REPLY_TIMEOUT_MS)
+    return () => window.clearTimeout(timer)
+  }, [awaitingReply])
+
+  const setMuted = useCallback((next: boolean) => {
+    mutedRef.current = next
+    setMutedState(next)
+    if (next) {
+      vadRef.current?.reset()
+      socketRef.current?.sendAudioReset()
+      setUserSpeaking(false)
+    }
+    recognitionRef.current?.setPaused(next)
+  }, [])
+
+  const setPushToTalkHeld = useCallback((held: boolean) => {
+    pttHeldRef.current = held
+    if (!held) {
+      const event = vadRef.current?.flush()
+      if (event) handleVad(event)
+    }
+  }, [handleVad])
+
+  let phase: LiveVoicePhase
+  if (micState === 'connecting') phase = 'connecting'
+  else if (micState === 'error') phase = 'error'
+  else if (muted) phase = 'muted'
+  else if (interrupted) phase = 'interrupted'
+  else if (speaking) phase = 'speaking'
+  else if (userSpeaking) phase = 'hearing'
+  else if (transcribing) phase = 'transcribing'
+  else if (awaitingReply || assistantBusy) phase = assistantBusy && !awaitingReply ? 'working' : 'thinking'
+  else phase = 'listening'
+
+  return {
+    phase,
+    sttEngine,
+    ttsEngine,
+    userText,
+    assistantText,
+    assistantCharIndex,
+    issue: issue ?? missingStt,
+    muted,
+    setMuted,
+    interrupt,
+    setPushToTalkHeld,
+    micLevel: () => (mutedRef.current ? 0 : micRef.current?.level ?? 0),
+    outputLevel: () => speechRef.current?.level ?? 0,
+    dismissIssue: () => setIssue(null),
+  }
+}

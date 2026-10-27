@@ -225,6 +225,7 @@ export function ChatPage() {
 
   const conversationMode: ConversationMode = useMemo(() => {
     if (conversation?.mode === 'code') return 'code'
+    if (conversation?.mode === 'friend') return 'friend'
     if (conversation?.mode === 'chat') return 'chat'
     return conversation?.turns.some((turn) => turn.code_mode === 'code') ? 'code' : 'chat'
   }, [conversation?.mode, conversation?.turns])
@@ -776,6 +777,8 @@ export function ChatPage() {
     }
     return activity.events
       .filter((event) => {
+        // Speech events feed the Live voice, not the visible timeline.
+        if (event.type.startsWith('speak.')) return false
         if (event.kind === 'lifecycle' && Boolean(event.parentAgentId)) return false
         if ((event.type === 'delegation.failed' || event.type === 'DELEGATION_FAILED') && event.turnId && cancelledTurns.has(event.turnId)) {
           return false
@@ -969,6 +972,47 @@ export function ChatPage() {
     && openQuestionTurnIds.size === 0
     && !hasTerminalEventForActiveTurn
     && !isActivityTerminal
+
+  const friendDisplayName = friendPersona?.display_name || (conversationMode === 'friend' ? conversation?.title : undefined) || 'Orin'
+
+  // The persona is the friend conversation's identity: load it with the conversation.
+  useEffect(() => {
+    if (conversationMode !== 'friend') return
+    const controller = new AbortController()
+    getFriendPersona(client, controller.signal).then(setFriendPersona).catch(() => {})
+    return () => controller.abort()
+  }, [client, conversationMode, conversationId])
+  useEffect(() => {
+    if (!friendSoulOpen) return
+    const controller = new AbortController()
+    getFriendPersona(client, controller.signal).then(setFriendPersona).catch(() => {})
+    listFriendMemories(client, controller.signal).then(setFriendMemories).catch(() => {})
+    return () => controller.abort()
+  }, [client, friendSoulOpen])
+
+  // What the Live voice should say: the turn's `<speak>` chunks as they stream,
+  // or, for a turn that spoke none, the start of its final answer.
+  const assistantSpeech = useMemo(() => {
+    const items: Array<{ id: string; text: string }> = []
+    const turnsWithSpeech = new Set<string>()
+    for (const event of activity.events) {
+      if (event.type !== 'speak.chunk_ready' || !event.speakText || event.parentAgentId) continue
+      if (event.turnId) turnsWithSpeech.add(event.turnId)
+      items.push({ id: `speak:${event.eventId}`, text: event.speakText })
+    }
+    for (const item of messages) {
+      if (item.role !== 'assistant' || item.status !== 'completed' || !item.content.trim()) continue
+      if (item.turn_id && turnsWithSpeech.has(item.turn_id)) continue
+      items.push({ id: `message:${item.message_id}`, text: spokenSummaryOf(item.content) })
+    }
+    return items
+  }, [activity.events, messages])
+
+  const liveWorkingStatus = useMemo(() => {
+    if (!running) return null
+    const latestTool = [...activity.events].reverse().find((event) => event.kind === 'tool' && !event.parentAgentId)
+    return latestTool && latestTool.state === 'working' ? latestTool.summary || null : null
+  }, [activity.events, running])
 
   // The queue lives on the server: read it when the chat opens (a reload keeps it visible) and whenever the turn
   // starts or ends (a turn that ends has read what was queued for it).
@@ -1936,36 +1980,31 @@ export function ChatPage() {
             </svg>
             <span className="chat__action-label visually-hidden">Visão geral</span>
           </button>
+          {conversationMode === 'friend' && (
+            <button
+              type="button"
+              className={friendSoulOpen ? 'ghost-button chat__icon-action chat__text-action is-active' : 'ghost-button chat__icon-action chat__text-action'}
+              aria-pressed={friendSoulOpen}
+              aria-label={`Personalizar ${friendDisplayName}: nome, aparência, personalidade e memórias`}
+              title={`Personalizar ${friendDisplayName}`}
+              data-testid="open-friend-soul-drawer-button"
+              onClick={() => setFriendSoulOpen((prev) => !prev)}
+            >
+              <svg aria-hidden="true" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"><path d="M12 3l1.9 4.6L18.5 9l-4.6 1.9L12 15.5l-1.9-4.6L5.5 9l4.6-1.4z" /><path d="M19 15l.8 1.9L21.7 18l-1.9.8L19 20.7l-.8-1.9L16.3 18l1.9-1.1z" /></svg>
+              <span className="chat__action-label">Personalizar</span>
+            </button>
+          )}
           <button
             type="button"
-            className={friendSoulOpen ? 'ghost-button chat__icon-action is-active' : 'ghost-button chat__icon-action'}
-            aria-pressed={friendSoulOpen}
-            aria-label="Personalidade e Memórias do Orin Friend (SOUL.md)"
-            title="Personalidade e Memórias do Orin Friend (SOUL.md)"
-            data-testid="open-friend-soul-drawer-button"
-            onClick={() => {
-              setFriendSoulOpen((prev) => {
-                const next = !prev
-                if (next) {
-                  void getFriendPersona(client).then(setFriendPersona).catch(() => {})
-                  void listFriendMemories(client).then(setFriendMemories).catch(() => {})
-                }
-                return next
-              })
-            }}
-          >
-            <span aria-hidden="true" style={{ fontSize: '12px', color: 'var(--text-primary)', fontWeight: 700 }}>◈ SOUL</span>
-          </button>
-          <button
-            type="button"
-            className={liveVoiceSettingsOpen ? 'ghost-button chat__icon-action is-active' : 'ghost-button chat__icon-action'}
+            className={liveVoiceSettingsOpen ? 'ghost-button chat__icon-action chat__text-action is-active' : 'ghost-button chat__icon-action chat__text-action'}
             aria-pressed={liveVoiceSettingsOpen}
-            aria-label="Configuração Rápida de Voz Live (TTS/STT)"
-            title="Configuração Rápida de Voz Live (TTS/STT)"
+            aria-label="Configurar voz e microfone"
+            title="Configurar voz e microfone"
             data-testid="open-live-voice-settings-button"
             onClick={() => setLiveVoiceSettingsOpen((prev) => !prev)}
           >
-            <span aria-hidden="true" style={{ fontSize: '12px', color: 'var(--text-primary)', fontWeight: 600 }}>⚙ Voz</span>
+            <svg aria-hidden="true" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"><rect x="9" y="3" width="6" height="12" rx="3" /><path d="M5 11a7 7 0 0 0 14 0M12 18v3" /></svg>
+            <span className="chat__action-label">Voz</span>
           </button>
           <CommandPalette conversations={chats} />
         </div>
@@ -2477,6 +2516,9 @@ export function ChatPage() {
         onUpdatePersona={async (input) => {
           const updated = await updateFriendPersona(client, input)
           setFriendPersona(updated)
+          if (updated.display_name) {
+            setConversation((current) => (current && current.mode === 'friend' ? { ...current, title: updated.display_name } : current))
+          }
           return updated
         }}
         onSyncSoul={async () => {
@@ -2492,18 +2534,40 @@ export function ChatPage() {
       <LiveVoiceStage
         isOpen={liveVoiceOpen}
         conversationId={conversationId}
+        client={client}
+        companionName={conversationMode === 'friend' ? friendDisplayName : 'Orin'}
+        userNickname={conversationMode === 'friend' ? friendPersona?.user_nickname ?? '' : ''}
+        orbThemeId={conversationMode === 'friend' ? friendPersona?.orb_theme ?? 'aurora' : 'aurora'}
+        assistantSpeech={assistantSpeech}
+        assistantBusy={running}
+        workingStatusText={liveWorkingStatus}
         onUserSpeechUtterance={(spokenPrompt) => {
           void submit(spokenPrompt)
         }}
+        onOpenPersonalize={conversationMode === 'friend' ? () => setFriendSoulOpen(true) : undefined}
         onClose={() => setLiveVoiceOpen(false)}
       />
       <LiveVoiceQuickSettings
         isOpen={liveVoiceSettingsOpen}
         client={client}
+        companionName={conversationMode === 'friend' ? friendDisplayName : 'Orin'}
         onClose={() => setLiveVoiceSettingsOpen(false)}
       />
     </main>
   )
+}
+
+/** The first sentences of an answer, without markup — long answers stay on screen, not in the ear. */
+function spokenSummaryOf(content: string): string {
+  const plain = content
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/^\s*\|.*\|\s*$/gm, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  if (plain.length <= 420) return plain
+  const cut = plain.slice(0, 420)
+  const lastStop = Math.max(cut.lastIndexOf('. '), cut.lastIndexOf('! '), cut.lastIndexOf('? '))
+  return lastStop > 120 ? cut.slice(0, lastStop + 1) : `${cut.trimEnd()}…`
 }
 
 function placeholderFor(message: ConversationMessage): string {

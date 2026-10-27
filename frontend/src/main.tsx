@@ -7,6 +7,7 @@ import './styles/index.css'
 // Loaded after the Tailwind layers so the product's component styles win over
 // preflight without any !important.
 import './styles/agentos.css'
+import './styles/live.css'
 
 initThemeDom()
 

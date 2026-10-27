@@ -8,7 +8,7 @@ post-session reflection (`W3-R27`).
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 import hashlib
 import json
@@ -51,6 +51,10 @@ MAX_TRAIT_DELTA_PER_SESSION = 0.03
 VALID_BOND_STAGES = ("acquaintance", "buddy", "close_friend", "confidant")
 MAX_STYLE_NOTES = 20
 MAX_STYLE_NOTE_CHARS = 280
+DEFAULT_DISPLAY_NAME = "Orin"
+MAX_NAME_CHARS = 40
+DEFAULT_ORB_THEME = "aurora"
+VALID_ORB_THEMES = ("aurora", "ocean", "sunset", "mint", "mono")
 
 _PROMPT_INJECTION_RE = re.compile(
     r"(?ix)(?:ignore\s+(?:all\s+)?(?:previous|prior|above)\s+(?:instructions|policy|prompts|rules)|"
@@ -92,6 +96,25 @@ def validate_style_note(note: str) -> str:
     return cleaned
 
 
+def validate_display_name(name: str, *, allow_blank: bool = False) -> str:
+    """A name the companion answers to: one short line, no prompt-injection payloads."""
+    cleaned = re.sub(r"\s+", " ", str(name or "")).strip()
+    if not cleaned:
+        if allow_blank:
+            return ""
+        raise ValueError("name cannot be blank")
+    if len(cleaned) > MAX_NAME_CHARS:
+        raise ValueError(f"name must be at most {MAX_NAME_CHARS} characters")
+    if any(ch in cleaned for ch in "<>{}`") or _PROMPT_INJECTION_RE.search(cleaned):
+        raise ValueError("name contains unsupported characters")
+    return cleaned
+
+
+def normalize_orb_theme(theme: str | None) -> str:
+    cleaned = str(theme or "").strip().lower()
+    return cleaned if cleaned in VALID_ORB_THEMES else DEFAULT_ORB_THEME
+
+
 def bond_stage_for_affinity(affinity_score: float, current_stage: str = "acquaintance") -> str:
     score = max(0.0, min(100.0, float(affinity_score)))
     if score >= 80.0:
@@ -112,6 +135,9 @@ def compile_persona_rubric(
     traits: Mapping[str, float],
     bond_stage: str,
     style_notes: Sequence[str] = (),
+    *,
+    display_name: str = DEFAULT_DISPLAY_NAME,
+    user_nickname: str = "",
 ) -> str:
     """Compile a deterministic, cache-safe PT-BR personality rubric for system prompt injection."""
     norm = normalize_traits(traits)
@@ -155,6 +181,11 @@ def compile_persona_rubric(
 
     lines = [
         "### Rubrica de Personalidade do Orin Friend (Caixa de Vidro)",
+        f"- **Seu nome:** {display_name or DEFAULT_DISPLAY_NAME}. É assim que o usuário te chama; apresente-se e assine por esse nome.",
+    ]
+    if user_nickname:
+        lines.append(f"- **Como chamar o usuário:** {user_nickname}. Use esse nome de forma natural, sem repetir em toda frase.")
+    lines += [
         f"- **Estágio do Vínculo (`{bond_stage}`):** {stage_desc}",
         f"- **Calor Humano (`warmth={norm['warmth']:.2f}`):** {warmth_desc}.",
         f"- **Humor (`humor={norm['humor']:.2f}`) & Ironia (`sarcasm={norm['sarcasm']:.2f}`):** {humor_desc}; {sarcasm_desc}.",
@@ -183,6 +214,9 @@ class FriendPersonaState:
     soul_sha256: str = ""
     last_reflected_at: datetime | None = None
     updated_at: datetime | None = None
+    display_name: str = DEFAULT_DISPLAY_NAME
+    user_nickname: str = ""
+    orb_theme: str = DEFAULT_ORB_THEME
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -198,6 +232,9 @@ class FriendPersonaState:
             "soul_sha256": self.soul_sha256,
             "last_reflected_at": self.last_reflected_at.isoformat() if self.last_reflected_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            "display_name": self.display_name,
+            "user_nickname": self.user_nickname,
+            "orb_theme": self.orb_theme,
         }
 
 
@@ -215,10 +252,13 @@ def render_soul_markdown(state: FriendPersonaState) -> str:
         f"bond_stage: {state.bond_stage}\n"
         f"affinity_score: {state.affinity_score:.1f}\n"
         f"current_mood: {state.current_mood}\n"
+        f"display_name: {state.display_name}\n"
+        f"user_nickname: {state.user_nickname}\n"
+        f"orb_theme: {state.orb_theme}\n"
         "traits:\n"
         f"{traits_lines}\n"
         "---\n"
-        "# Orin Friend — SOUL.md\n\n"
+        f"# {state.display_name} — SOUL.md\n\n"
         "## Notas de Estilo e Convivência\n"
         f"{notes_lines}\n"
     )
@@ -257,7 +297,7 @@ def parse_soul_markdown(markdown_text: str) -> dict[str, Any]:
             val = val.strip().strip("\"'")
             if key == "traits":
                 in_traits = True
-            elif key in {"bond_stage", "current_mood", "user_id"}:
+            elif key in {"bond_stage", "current_mood", "user_id", "display_name", "user_nickname", "orb_theme"}:
                 parsed[key] = val
             elif key == "affinity_score":
                 try:
@@ -360,20 +400,7 @@ class FriendPersonaStore:
             updated_at=now,
         )
         soul_sha = self._write_soul_file(provisional)
-        final_state = FriendPersonaState(
-            user_id=provisional.user_id,
-            version=provisional.version,
-            bond_stage=provisional.bond_stage,
-            affinity_score=provisional.affinity_score,
-            current_mood=provisional.current_mood,
-            traits=provisional.traits,
-            style_notes=provisional.style_notes,
-            compiled_rubric=provisional.compiled_rubric,
-            interaction_count=provisional.interaction_count,
-            soul_sha256=soul_sha,
-            last_reflected_at=provisional.last_reflected_at,
-            updated_at=now,
-        )
+        final_state = replace(provisional, soul_sha256=soul_sha, updated_at=now)
 
         with self._engine.begin() as conn:
             existing = conn.execute(
@@ -394,6 +421,9 @@ class FriendPersonaStore:
                         soul_sha256=final_state.soul_sha256,
                         last_reflected_at=final_state.last_reflected_at,
                         updated_at=now,
+                        display_name=final_state.display_name,
+                        user_nickname=final_state.user_nickname,
+                        orb_theme=final_state.orb_theme,
                     )
                 )
         return final_state
@@ -431,11 +461,17 @@ class FriendPersonaStore:
         new_affinity = round(max(0.0, min(100.0, current.affinity_score + clamped_affinity_delta)), 2)
         new_stage = bond_stage_for_affinity(new_affinity, current.bond_stage)
         new_mood = (str(mood).strip()[:64] if mood and str(mood).strip() else current.current_mood)
-        rubric = compile_persona_rubric(updated_traits, new_stage, validated_notes)
+        rubric = compile_persona_rubric(
+            updated_traits,
+            new_stage,
+            validated_notes,
+            display_name=current.display_name,
+            user_nickname=current.user_nickname,
+        )
         now = datetime.now(UTC)
 
-        next_state = FriendPersonaState(
-            user_id=user_id,
+        next_state = replace(
+            current,
             version=current.version + 1,
             bond_stage=new_stage,
             affinity_score=new_affinity,
@@ -459,9 +495,17 @@ class FriendPersonaStore:
         current_mood: str | None = None,
         bond_stage: str | None = None,
         affinity_score: float | None = None,
+        display_name: str | None = None,
+        user_nickname: str | None = None,
+        orb_theme: str | None = None,
     ) -> FriendPersonaState:
         """Direct Glass-Box update initiated by the user in UI settings."""
         current = self.get_or_create(user_id)
+        new_name = validate_display_name(display_name) if display_name is not None else current.display_name
+        new_nickname = (
+            validate_display_name(user_nickname, allow_blank=True) if user_nickname is not None else current.user_nickname
+        )
+        new_theme = normalize_orb_theme(orb_theme) if orb_theme is not None else current.orb_theme
         updated_traits = dict(current.traits)
         if traits:
             for k, v in traits.items():
@@ -488,11 +532,17 @@ class FriendPersonaStore:
         else:
             new_stage = bond_stage_for_affinity(new_affinity, current.bond_stage)
         new_mood = str(current_mood).strip()[:64] if current_mood and str(current_mood).strip() else current.current_mood
-        rubric = compile_persona_rubric(updated_traits, new_stage, validated_notes)
+        rubric = compile_persona_rubric(
+            updated_traits,
+            new_stage,
+            validated_notes,
+            display_name=new_name,
+            user_nickname=new_nickname,
+        )
         now = datetime.now(UTC)
 
-        next_state = FriendPersonaState(
-            user_id=user_id,
+        next_state = replace(
+            current,
             version=current.version + 1,
             bond_stage=new_stage,
             affinity_score=new_affinity,
@@ -500,10 +550,11 @@ class FriendPersonaStore:
             traits=updated_traits,
             style_notes=validated_notes,
             compiled_rubric=rubric,
-            interaction_count=current.interaction_count,
             soul_sha256="",
-            last_reflected_at=current.last_reflected_at,
             updated_at=now,
+            display_name=new_name,
+            user_nickname=new_nickname,
+            orb_theme=new_theme,
         )
         return self._persist_and_mirror(next_state)
 
@@ -539,10 +590,24 @@ class FriendPersonaStore:
         )
         new_mood = str(parsed.get("current_mood") or current.current_mood).strip()[:64] or current.current_mood
         new_notes = list(parsed.get("style_notes") or current.style_notes)
-        rubric = compile_persona_rubric(merged_traits, new_stage, new_notes)
+        try:
+            new_name = validate_display_name(str(parsed.get("display_name") or current.display_name))
+        except ValueError:
+            new_name = current.display_name
+        try:
+            new_nickname = validate_display_name(str(parsed.get("user_nickname", current.user_nickname) or ""), allow_blank=True)
+        except ValueError:
+            new_nickname = current.user_nickname
+        new_theme = normalize_orb_theme(str(parsed.get("orb_theme") or current.orb_theme))
+        rubric = compile_persona_rubric(
+            merged_traits, new_stage, new_notes, display_name=new_name, user_nickname=new_nickname
+        )
         now = datetime.now(UTC)
 
         synced_state = FriendPersonaState(
+            display_name=new_name,
+            user_nickname=new_nickname,
+            orb_theme=new_theme,
             user_id=resolved_user_id,
             version=max(current.version + 1, int(parsed.get("version") or (current.version + 1))),
             bond_stage=new_stage,
@@ -570,6 +635,9 @@ class FriendPersonaStore:
                     compiled_rubric=synced_state.compiled_rubric,
                     soul_sha256=synced_state.soul_sha256,
                     updated_at=now,
+                    display_name=synced_state.display_name,
+                    user_nickname=synced_state.user_nickname,
+                    orb_theme=synced_state.orb_theme,
                 )
             )
         return synced_state
@@ -583,20 +651,7 @@ class FriendPersonaStore:
 
     def _persist_and_mirror(self, state: FriendPersonaState) -> FriendPersonaState:
         soul_sha = self._write_soul_file(state)
-        final_state = FriendPersonaState(
-            user_id=state.user_id,
-            version=state.version,
-            bond_stage=state.bond_stage,
-            affinity_score=state.affinity_score,
-            current_mood=state.current_mood,
-            traits=state.traits,
-            style_notes=state.style_notes,
-            compiled_rubric=state.compiled_rubric,
-            interaction_count=state.interaction_count,
-            soul_sha256=soul_sha,
-            last_reflected_at=state.last_reflected_at,
-            updated_at=state.updated_at,
-        )
+        final_state = replace(state, soul_sha256=soul_sha)
         with self._engine.begin() as conn:
             conn.execute(
                 update(user_friend_personas)
@@ -613,6 +668,9 @@ class FriendPersonaStore:
                     soul_sha256=final_state.soul_sha256,
                     last_reflected_at=final_state.last_reflected_at,
                     updated_at=final_state.updated_at,
+                    display_name=final_state.display_name,
+                    user_nickname=final_state.user_nickname,
+                    orb_theme=final_state.orb_theme,
                 )
             )
         return final_state
@@ -639,8 +697,15 @@ class FriendPersonaStore:
         raw_notes = row.get("style_notes_json")
         style_notes = [str(item) for item in raw_notes] if isinstance(raw_notes, list) else []
         bond_stage = str(row.get("bond_stage") or "acquaintance")
-        rubric = str(row.get("compiled_rubric") or "") or compile_persona_rubric(traits, bond_stage, style_notes)
+        display_name = str(row.get("display_name") or DEFAULT_DISPLAY_NAME)
+        user_nickname = str(row.get("user_nickname") or "")
+        rubric = str(row.get("compiled_rubric") or "") or compile_persona_rubric(
+            traits, bond_stage, style_notes, display_name=display_name, user_nickname=user_nickname
+        )
         return FriendPersonaState(
+            display_name=display_name,
+            user_nickname=user_nickname,
+            orb_theme=normalize_orb_theme(row.get("orb_theme")),
             user_id=str(row["user_id"]),
             version=int(row.get("version") or 1),
             bond_stage=bond_stage,
@@ -814,6 +879,8 @@ class FriendReflectionConsolidator:
 
 
 __all__ = [
+    "DEFAULT_DISPLAY_NAME",
+    "DEFAULT_ORB_THEME",
     "DEFAULT_TRAITS",
     "FRIEND_REFLECTION_INSTRUCTION",
     "FriendPersonaState",
@@ -822,11 +889,14 @@ __all__ = [
     "MAX_TRAIT_DELTA_PER_SESSION",
     "TRAIT_BOUNDS",
     "VALID_BOND_STAGES",
+    "VALID_ORB_THEMES",
     "bond_stage_for_affinity",
     "compile_persona_rubric",
+    "normalize_orb_theme",
     "normalize_traits",
     "parse_soul_markdown",
     "render_soul_markdown",
     "untainted_user_excerpt",
+    "validate_display_name",
     "validate_style_note",
 ]

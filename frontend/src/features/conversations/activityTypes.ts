@@ -25,7 +25,17 @@ export const activityStates = [
 
 export type ActivityState = (typeof activityStates)[number]
 export type OrinMode = 'friend' | 'chat' | 'cowork' | 'code'
-export type LiveVoicePhase = 'listening' | 'thinking' | 'working' | 'speaking' | 'interrupted'
+export type LiveVoicePhase =
+  | 'connecting'
+  | 'listening'
+  | 'hearing'
+  | 'transcribing'
+  | 'thinking'
+  | 'working'
+  | 'speaking'
+  | 'interrupted'
+  | 'muted'
+  | 'error'
 export type DelegatedCodeSessionInfo = {
   code_conversation_id: string
   goal: string
@@ -222,6 +232,8 @@ export type ConversationActivityEvent = {
   /** Live task list emitted by `todo_write`. */
   todos?: TodoItem[]
   delegatedCodeSession?: DelegatedCodeSessionInfo
+  /** A `speak.chunk_ready` event's text, ready for the Live voice to say. */
+  speakText?: string
 }
 
 export type ActivityEvent = ConversationActivityEvent

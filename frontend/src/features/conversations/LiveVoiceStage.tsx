@@ -1,230 +1,196 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { useReducedMotion } from 'motion/react'
-import { connectLiveVoiceSession, type LiveVoiceSocketHandle, type WordTiming } from '../../api/conversations'
-import { LiveVoiceQuickSettings } from './LiveVoiceQuickSettings'
+import { createBrowserApiClient, type ApiClient } from '../../api/client'
+import { getLiveVoiceCapabilities, type LiveVoiceCapabilities } from '../../api/liveVoice'
 import type { LiveVoicePhase } from './activityTypes'
+import { LiveVoiceQuickSettings } from './LiveVoiceQuickSettings'
+import { LevelMeter } from './live/LevelMeter'
+import { LiveOrb } from './live/LiveOrb'
+import { loadLiveVoicePrefs, onLiveVoicePrefsChange, STT_LABELS, type LiveVoicePrefs } from './live/liveVoicePrefs'
+import { orbTheme } from './live/orbThemes'
+import { useLiveVoice, type AssistantSpeechItem } from './live/useLiveVoice'
 
-export type LongFormMicConstraints = {
-  echoCancellation: boolean
-  noiseSuppression: boolean
-  autoGainControl: boolean
-  channelCount: number
-  sampleRate: number
-}
-
-export const LONG_FORM_MIC_CONSTRAINTS: LongFormMicConstraints = {
-  echoCancellation: true,
-  noiseSuppression: true,
-  autoGainControl: false,
-  channelCount: 1,
-  sampleRate: 24000,
-}
-
-export const LIVE_VOICE_DUCKING_MULTIPLIER = 2.8
-export const LIVE_VOICE_DUCKING_MIN_SPEECH_MS = 220
-export const LIVE_VOICE_DUCKING_TAIL_MS = 250
-export const LIVE_VOICE_ECHO_SIMILARITY_THRESHOLD = 0.65
-
-export type DuckingEvaluationInput = {
-  rmsEnergy: number
-  baseThreshold: number
-  sustainedSpeechMs: number
-  isAssistantSpeaking: boolean
-  msSinceLastTtsChunk: number
-}
-
-export function shouldTriggerDuckingBargeIn(input: DuckingEvaluationInput): boolean {
-  const inDuckingWindow =
-    input.isAssistantSpeaking || input.msSinceLastTtsChunk <= LIVE_VOICE_DUCKING_TAIL_MS
-  if (!inDuckingWindow) {
-    return input.rmsEnergy >= input.baseThreshold
-  }
-  const requiredEnergy = input.baseThreshold * LIVE_VOICE_DUCKING_MULTIPLIER
-  return (
-    input.rmsEnergy >= requiredEnergy &&
-    input.sustainedSpeechMs >= LIVE_VOICE_DUCKING_MIN_SPEECH_MS
-  )
-}
-
-function normalizeLexicalText(text: string): string {
-  return text
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-}
-
-function charTrigrams(text: string): Map<string, number> {
-  const padded = `  ${text}  `
-  const counts = new Map<string, number>()
-  for (let i = 0; i <= padded.length - 3; i += 1) {
-    const gram = padded.slice(i, i + 3)
-    counts.set(gram, (counts.get(gram) ?? 0) + 1)
-  }
-  return counts
-}
-
-export function computeEchoSimilarity(transcript: string, referenceTts: string): number {
-  const normMic = normalizeLexicalText(transcript)
-  const normTts = normalizeLexicalText(referenceTts)
-  if (!normMic || !normTts) return 0
-  if (normMic === normTts) return 1
-  if (normMic.length >= 6 && normTts.includes(normMic)) {
-    return 0.92
-  }
-
-  const micWords = normMic.split(' ').filter(Boolean)
-  const ttsWordsSet = new Set(normTts.split(' ').filter(Boolean))
-  if (micWords.length === 0 || ttsWordsSet.size === 0) return 0
-
-  let matchedWords = 0
-  for (const w of micWords) {
-    if (ttsWordsSet.has(w)) matchedWords += 1
-  }
-  const wordContainment = matchedWords / micWords.length
-
-  const gramsA = charTrigrams(normMic)
-  const gramsB = charTrigrams(normTts)
-  let intersection = 0
-  let totalA = 0
-  let totalB = 0
-  for (const [gram, countA] of gramsA.entries()) {
-    totalA += countA
-    const countB = gramsB.get(gram) ?? 0
-    intersection += Math.min(countA, countB)
-  }
-  for (const countB of gramsB.values()) {
-    totalB += countB
-  }
-  const trigramDice = totalA + totalB > 0 ? (2 * intersection) / (totalA + totalB) : 0
-
-  return Number(Math.min(1, wordContainment * 0.85 + trigramDice * 0.15).toFixed(4))
-}
-
-export function isEchoOfRecentTts(
-  transcript: string,
-  recentTtsSentences: ReadonlyArray<string>,
-  threshold = LIVE_VOICE_ECHO_SIMILARITY_THRESHOLD,
-): boolean {
-  for (const sentence of recentTtsSentences) {
-    if (computeEchoSimilarity(transcript, sentence) >= threshold) {
-      return true
-    }
-  }
-  return false
-}
+export {
+  LIVE_VOICE_DUCKING_MIN_SPEECH_MS,
+  LIVE_VOICE_DUCKING_MULTIPLIER,
+  LIVE_VOICE_DUCKING_TAIL_MS,
+  LIVE_VOICE_ECHO_SIMILARITY_THRESHOLD,
+  LONG_FORM_MIC_CONSTRAINTS,
+  computeEchoSimilarity,
+  isEchoOfRecentTts,
+  shouldTriggerDuckingBargeIn,
+  type DuckingEvaluationInput,
+  type LongFormMicConstraints,
+} from './live/echo'
 
 export type LiveVoiceStageProps = {
   isOpen: boolean
   conversationId?: string
-  voiceState?: LiveVoicePhase
-  spokenText?: string
-  userTranscript?: string
-  wordTimings?: WordTiming[]
-  playbackElapsedMs?: number
+  client?: ApiClient
+  companionName?: string
+  userNickname?: string
+  orbThemeId?: string
+  assistantSpeech?: ReadonlyArray<AssistantSpeechItem>
+  assistantBusy?: boolean
   workingStatusText?: string | null
-  isPushToTalkMode?: boolean
-  isPushToTalkActive?: boolean
+  /** Pins the displayed phase (visual tests and previews). */
+  phaseOverride?: LiveVoicePhase
   reducedMotion?: boolean
-  onBargeIn?: (spokenCharOffset: number) => void
   onUserSpeechUtterance?: (text: string) => void
-  onTogglePushToTalkMode?: () => void
-  onPushToTalkHoldChange?: (holding: boolean) => void
+  onOpenPersonalize?: () => void
   onClose: () => void
 }
 
-function stateLabel(state: LiveVoicePhase): string {
-  switch (state) {
+export function stateLabel(phase: LiveVoicePhase, name = 'Orin', working?: string | null): string {
+  switch (phase) {
+    case 'connecting':
+      return 'Ligando o microfone…'
     case 'listening':
+      return 'Estou ouvindo'
+    case 'hearing':
       return 'Ouvindo você…'
+    case 'transcribing':
+      return 'Entendendo o que você disse…'
     case 'thinking':
       return 'Pensando…'
     case 'working':
-      return 'Trabalhando em segundo plano…'
+      return working || 'Trabalhando nisso…'
     case 'speaking':
-      return 'Falando com você'
+      return `${name} está falando`
     case 'interrupted':
-      return 'Interrompido — pode falar!'
+      return 'Parei — pode falar!'
+    case 'muted':
+      return 'Microfone desligado'
+    case 'error':
+      return 'Não consegui usar o microfone'
+  }
+}
+
+function Caption({ text, charIndex }: { text: string; charIndex: number }) {
+  const words = useMemo(() => [...text.matchAll(/\S+/g)].map((match) => ({ word: match[0], start: match.index ?? 0 })), [text])
+  let active = -1
+  for (let i = 0; i < words.length; i += 1) if (words[i].start <= charIndex) active = i
+  return (
+    <p className="live-stage__caption-text" data-testid="live-voice-assistant-caption">
+      {words.map((item, index) => (
+        <span
+          key={`${item.start}-${item.word}`}
+          className={index === active ? 'is-active' : index < active ? 'is-said' : undefined}
+          data-testid={index === active ? 'live-caption-active-word' : undefined}
+        >
+          {item.word}{' '}
+        </span>
+      ))}
+    </p>
+  )
+}
+
+function Icon({ name }: { name: 'mic' | 'mic-off' | 'gear' | 'close' | 'hand' | 'ptt' | 'user' }) {
+  const common = { width: 20, height: 20, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.8, strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const, 'aria-hidden': true }
+  switch (name) {
+    case 'mic':
+      return <svg {...common}><rect x="9" y="3" width="6" height="12" rx="3" /><path d="M5 11a7 7 0 0 0 14 0M12 18v3" /></svg>
+    case 'mic-off':
+      return <svg {...common}><path d="M15 9.5V6a3 3 0 0 0-5.7-1.3M9 9v2a3 3 0 0 0 4.6 2.5M5 11a7 7 0 0 0 11.2 5.6M19 11a7 7 0 0 1-.6 2.8M12 18v3M3 3l18 18" /></svg>
+    case 'gear':
+      return <svg {...common}><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" /></svg>
+    case 'close':
+      return <svg {...common}><path d="M6 6l12 12M18 6L6 18" /></svg>
+    case 'hand':
+      return <svg {...common}><path d="M8 13V5.5a1.5 1.5 0 0 1 3 0V12M11 11.5v-7a1.5 1.5 0 0 1 3 0V12M14 11.5V6.5a1.5 1.5 0 0 1 3 0V15a6 6 0 0 1-6 6h-1a6 6 0 0 1-5-2.7L3.5 15a1.5 1.5 0 0 1 2.4-1.8L8 15" /></svg>
+    case 'ptt':
+      return <svg {...common}><rect x="4" y="9" width="16" height="10" rx="3" /><path d="M9 9V6a3 3 0 0 1 6 0v3" /></svg>
+    case 'user':
+      return <svg {...common}><circle cx="12" cy="8" r="4" /><path d="M4 21a8 8 0 0 1 16 0" /></svg>
   }
 }
 
 export function LiveVoiceStage({
   isOpen,
   conversationId,
-  voiceState = 'listening',
-  spokenText = '',
-  userTranscript = '',
-  wordTimings = [],
-  playbackElapsedMs = 0,
+  client: providedClient,
+  companionName = 'Orin',
+  userNickname = '',
+  orbThemeId = 'aurora',
+  assistantSpeech = [],
+  assistantBusy = false,
   workingStatusText = null,
-  isPushToTalkMode = false,
-  isPushToTalkActive = false,
+  phaseOverride,
   reducedMotion: forcedReducedMotion,
-  onBargeIn,
   onUserSpeechUtterance,
-  onTogglePushToTalkMode,
-  onPushToTalkHoldChange,
+  onOpenPersonalize,
   onClose,
 }: LiveVoiceStageProps) {
   const systemReducedMotion = useReducedMotion()
   const isReducedMotion = Boolean(forcedReducedMotion ?? systemReducedMotion)
-  const [interruptedTruncatedText, setInterruptedTruncatedText] = useState<string | null>(null)
-  const [quickSettingsOpen, setQuickSettingsOpen] = useState(false)
-  const [activeProfileSummary, setActiveProfileSummary] = useState('100% Local Expressivo (PT-BR)')
-  const socketRef = useRef<LiveVoiceSocketHandle | null>(null)
-  const epochRef = useRef<number>(1)
-  const chunkSeqRef = useRef<number>(0)
+  const client = useMemo(() => providedClient ?? createBrowserApiClient(), [providedClient])
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [prefs, setPrefs] = useState<LiveVoicePrefs>(() => loadLiveVoicePrefs())
+  const [capabilities, setCapabilities] = useState<LiveVoiceCapabilities | null>(null)
+  const [pushToTalk, setPushToTalk] = useState(false)
+  const utteranceRef = useRef(onUserSpeechUtterance)
+  useEffect(() => { utteranceRef.current = onUserSpeechUtterance }, [onUserSpeechUtterance])
 
+  useEffect(() => onLiveVoicePrefsChange(setPrefs), [])
+
+  const refreshCapabilities = useCallback(() => {
+    const controller = new AbortController()
+    getLiveVoiceCapabilities(client, controller.signal).then(setCapabilities).catch(() => {})
+    return () => controller.abort()
+  }, [client])
   useEffect(() => {
-    if (!isOpen || !conversationId) return
-    const handle = connectLiveVoiceSession(conversationId, (event) => {
-      if (event.type === 'session.ready') {
-        epochRef.current = event.audio_epoch
-      } else if (event.type === 'tts.chunk') {
-        epochRef.current = event.epoch
-        chunkSeqRef.current = event.chunk_seq
-        setInterruptedTruncatedText(null)
-      } else if (event.type === 'audio.clear') {
-        epochRef.current = event.new_epoch
-        if (event.truncated_text) {
-          setInterruptedTruncatedText(event.truncated_text)
-        }
-      } else if (event.type === 'stt.transcript' && event.is_end_of_utterance && event.text.trim()) {
-        onUserSpeechUtterance?.(event.text.trim())
-      }
-    })
-    socketRef.current = handle
-    return () => {
-      handle?.close()
-      socketRef.current = null
-    }
-  }, [isOpen, conversationId, onUserSpeechUtterance])
+    if (!isOpen) return
+    return refreshCapabilities()
+  }, [isOpen, refreshCapabilities])
 
-  const activeWordTiming = useMemo(() => {
-    if (wordTimings.length === 0) return null
-    return (
-      wordTimings.find(
-        (wt) => playbackElapsedMs >= wt.start_ms && playbackElapsedMs <= wt.end_ms,
-      ) ?? wordTimings[wordTimings.length - 1]
-    )
-  }, [wordTimings, playbackElapsedMs])
+  const voice = useLiveVoice({
+    active: isOpen && !phaseOverride,
+    conversationId,
+    client,
+    prefs,
+    capabilities,
+    assistantSpeech,
+    assistantBusy,
+    pushToTalk,
+    onUtterance: (text) => utteranceRef.current?.(text),
+    voiceInstructions: `Você é ${companionName}. Fale em português do Brasil, de forma natural, calorosa e conversacional.`,
+  })
+  const phase = phaseOverride ?? voice.phase
+  const { setMuted, muted, interrupt, setPushToTalkHeld } = voice
+
+  // The orb reacts to whoever is talking.
+  const micLevel = voice.micLevel
+  const outputLevel = voice.outputLevel
+  const phaseRef = useRef(phase)
+  useEffect(() => { phaseRef.current = phase }, [phase])
+  const micLevelRef = useRef(micLevel)
+  const outputLevelRef = useRef(outputLevel)
+  useEffect(() => {
+    micLevelRef.current = micLevel
+    outputLevelRef.current = outputLevel
+  })
+  const orbLevel = useCallback(
+    () => (phaseRef.current === 'speaking' ? outputLevelRef.current() : micLevelRef.current() * 0.9),
+    [],
+  )
+  const meterLevel = useCallback(() => micLevelRef.current(), [])
 
   useEffect(() => {
     if (!isOpen) return
-    function handleKeyDown(e: KeyboardEvent) {
-      if (e.key === 'Escape') {
-        onClose()
-      } else if (e.code === 'Space' && e.ctrlKey) {
-        e.preventDefault()
-        onPushToTalkHoldChange?.(true)
+    const typing = (target: EventTarget | null) =>
+      target instanceof HTMLElement && (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName))
+    function handleKeyDown(event: KeyboardEvent) {
+      if (settingsOpen || typing(event.target)) return
+      if (event.key === 'Escape') onClose()
+      else if (event.code === 'Space' && pushToTalk) {
+        event.preventDefault()
+        if (!event.repeat) setPushToTalkHeld(true)
+      } else if (event.key.toLowerCase() === 'm' && !event.ctrlKey && !event.metaKey && !event.altKey) {
+        setMuted(!muted)
       }
     }
-    function handleKeyUp(e: KeyboardEvent) {
-      if (e.code === 'Space') {
-        onPushToTalkHoldChange?.(false)
-      }
+    function handleKeyUp(event: KeyboardEvent) {
+      if (event.code === 'Space' && pushToTalk) setPushToTalkHeld(false)
     }
     window.addEventListener('keydown', handleKeyDown)
     window.addEventListener('keyup', handleKeyUp)
@@ -232,244 +198,175 @@ export function LiveVoiceStage({
       window.removeEventListener('keydown', handleKeyDown)
       window.removeEventListener('keyup', handleKeyUp)
     }
-  }, [isOpen, onClose, onPushToTalkHoldChange])
+  }, [isOpen, onClose, settingsOpen, pushToTalk, muted, setMuted, setPushToTalkHeld])
 
   if (!isOpen) return null
 
-  function handleBargeInClick() {
-    const charOffset = activeWordTiming ? activeWordTiming.char_end : spokenText.length
-    if (spokenText) {
-      setInterruptedTruncatedText(`${spokenText.slice(0, charOffset).trim()} [interrompido]`)
-    }
-    socketRef.current?.sendBargeIn(epochRef.current, chunkSeqRef.current, playbackElapsedMs)
-    onBargeIn?.(charOffset)
-  }
+  const palette = orbTheme(orbThemeId)
+  const stageStyle = {
+    '--live-top': palette.stageTop,
+    '--live-bottom': palette.stageBottom,
+    '--live-glow': palette.glow,
+    '--live-accent': palette.core[1],
+  } as CSSProperties
+  const greeting = userNickname ? `Oi, ${userNickname}!` : 'Oi!'
+  const speakingNow = phase === 'speaking'
+  const sttLabel = voice.sttEngine ? STT_LABELS[voice.sttEngine] : 'Sem transcrição'
+  const ttsLabel = voice.ttsEngine === 'openai' ? 'Voz OpenAI' : 'Voz do sistema'
+  const issueNeedsSetup = voice.issue
+    && ['no_stt', 'local_stt_unavailable', 'cloud_stt_no_key', 'browser_network', 'cloud_tts_no_key'].includes(voice.issue.code)
 
   return (
     <div
-      className="live-voice-stage"
+      className="live-stage"
       data-testid="live-voice-stage"
-      data-voice-state={voiceState}
+      data-voice-state={phase}
       data-reduced-motion={isReducedMotion ? 'true' : 'false'}
       role="dialog"
-      aria-label="Modo Conversa Live"
-      style={{
-        position: 'fixed',
-        inset: 0,
-        zIndex: 90,
-        background: 'radial-gradient(circle at 50% 35%, rgba(139, 92, 246, 0.20), #070611 72%)',
-        color: '#F4F2FF',
-        display: 'flex',
-        flexDirection: 'column',
-        justifyContent: 'space-between',
-        alignItems: 'center',
-        padding: '2rem 1.5rem',
-      }}
+      aria-modal="true"
+      aria-label={`Conversa por voz com ${companionName}`}
+      style={stageStyle}
     >
-      <header
-        style={{
-          width: '100%',
-          maxWidth: '760px',
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-        }}
-      >
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', flexWrap: 'wrap' }}>
-          <span
-            style={{
-              padding: '0.22rem 0.65rem',
-              borderRadius: '999px',
-              background: 'rgba(139, 92, 246, 0.22)',
-              border: '1px solid rgba(167, 139, 250, 0.4)',
-              color: '#DDD6FE',
-              fontSize: '0.78rem',
-              fontWeight: 600,
-            }}
-          >
-            ((•)) CONVERSA LIVE · FULL-DUPLEX
-          </span>
-          <span
-            data-testid="live-voice-active-profile-pill"
-            style={{
-              padding: '0.2rem 0.6rem',
-              borderRadius: '999px',
-              background: 'rgba(255, 255, 255, 0.06)',
-              border: '1px solid rgba(255, 255, 255, 0.14)',
-              fontSize: '0.76rem',
-              color: '#E9D5FF',
-            }}
-          >
-            ◈ {activeProfileSummary}
-          </span>
-          <span style={{ fontSize: '0.76rem', opacity: 0.72 }}>
-            Anti-Eco 4 Barreiras Ativo
-          </span>
+      <div className="live-stage__backdrop" aria-hidden="true" />
+      <header className="live-stage__top">
+        <div className="live-stage__identity">
+          <span className="live-stage__live-dot" aria-hidden="true" />
+          <strong data-testid="live-voice-companion-name">{companionName}</strong>
+          <span className="live-stage__chip">Ao vivo</span>
         </div>
-
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+        <button
+          type="button"
+          className="live-stage__engines"
+          data-testid="live-voice-active-profile-pill"
+          onClick={() => setSettingsOpen(true)}
+          title="Trocar como ele te ouve e qual voz usa"
+        >
+          <span>Ouve: {sttLabel}</span>
+          <span aria-hidden="true">·</span>
+          <span>Fala: {ttsLabel}</span>
+        </button>
+        <div className="live-stage__top-actions">
+          {onOpenPersonalize && (
+            <button type="button" className="live-icon-button" onClick={onOpenPersonalize} aria-label={`Personalizar ${companionName}`} title={`Personalizar ${companionName}`}>
+              <Icon name="user" />
+            </button>
+          )}
           <button
             type="button"
-            className="btn-secondary"
+            className="live-icon-button"
             data-testid="live-voice-open-settings-button"
-            onClick={() => setQuickSettingsOpen(true)}
-            aria-label="Configurar voz, ouvido e hardware do modo Live"
+            onClick={() => setSettingsOpen(true)}
+            aria-label="Configurar voz e microfone"
+            title="Configurar voz e microfone"
           >
-            ⚙ Configurar Voz
+            <Icon name="gear" />
           </button>
-
           <button
             type="button"
-            className="btn-ghost"
+            className="live-icon-button"
             data-testid="live-voice-close-button"
             onClick={onClose}
-            aria-label="Sair do modo Conversa Live"
+            aria-label="Encerrar conversa por voz (Esc)"
+            title="Encerrar (Esc)"
           >
-            Encerrar Live (Esc)
+            <Icon name="close" />
           </button>
         </div>
       </header>
 
-      <main
-        style={{
-          display: 'flex',
-          flexDirection: 'column',
-          alignItems: 'center',
-          gap: '1.5rem',
-          maxWidth: '680px',
-          textAlign: 'center',
-        }}
-      >
-        <div
-          data-testid="live-voice-orb"
-          style={{
-            width: '148px',
-            height: '148px',
-            borderRadius: '999px',
-            background:
-              voiceState === 'interrupted'
-                ? 'radial-gradient(circle, #F59E0B, #78350F)'
-                : voiceState === 'speaking'
-                  ? 'radial-gradient(circle, #C4B5FD, #8B5CF6 60%, #2E1065)'
-                  : 'radial-gradient(circle, #A78BFA, #6D28D9 65%, #1E1B4B)',
-            boxShadow: isReducedMotion
-              ? '0 0 0 2px rgba(167, 139, 250, 0.5)'
-              : '0 0 56px rgba(139, 92, 246, 0.55)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            transition: isReducedMotion ? 'none' : 'transform 180ms ease, box-shadow 180ms ease',
-          }}
-        >
-          <span style={{ fontSize: '2rem', fontWeight: 700 }}>◈</span>
+      <main className="live-stage__center">
+        <div className="live-stage__orb" data-testid="live-voice-orb">
+          <LiveOrb phase={phase} theme={orbThemeId} level={orbLevel} staticMode={isReducedMotion} />
         </div>
 
-        <div style={{ display: 'grid', gap: '0.45rem' }}>
-          <strong data-testid="live-voice-state-label" style={{ fontSize: '1.1rem', color: '#DDD6FE' }}>
-            {stateLabel(voiceState)}
-          </strong>
-          {workingStatusText && (
-            <div
-              data-testid="live-voice-working-badge"
-              style={{
-                padding: '0.35rem 0.85rem',
-                borderRadius: '999px',
-                background: 'rgba(16, 14, 32, 0.88)',
-                border: '1px solid rgba(139, 92, 246, 0.35)',
-                fontSize: '0.82rem',
-                color: '#C4B5FD',
-              }}
-            >
-              ⚙ {workingStatusText}
-            </div>
-          )}
-        </div>
+        <p className="live-stage__status" data-testid="live-voice-state-label" aria-live="polite">
+          {stateLabel(phase, companionName, workingStatusText)}
+        </p>
 
-        <div
-          data-testid="live-voice-captions"
-          style={{
-            minHeight: '4.5rem',
-            padding: '1rem 1.25rem',
-            borderRadius: '1rem',
-            background: 'rgba(16, 14, 32, 0.78)',
-            border: '1px solid rgba(255, 255, 255, 0.08)',
-            fontSize: '1.05rem',
-            lineHeight: 1.55,
-          }}
-        >
-          {interruptedTruncatedText ? (
-            <p style={{ margin: 0, color: '#FCD34D' }}>{interruptedTruncatedText}</p>
-          ) : wordTimings.length > 0 ? (
-            <p style={{ margin: 0, display: 'flex', flexWrap: 'wrap', gap: '0.32rem', justifyContent: 'center' }}>
-              {wordTimings.map((wt, idx) => {
-                const isActive = activeWordTiming === wt
-                return (
-                  <span
-                    key={`${wt.word}-${idx}`}
-                    data-testid={isActive ? 'live-caption-active-word' : undefined}
-                    style={{
-                      color: isActive ? '#F4F2FF' : 'rgba(244, 242, 255, 0.65)',
-                      background: isActive ? 'rgba(139, 92, 246, 0.35)' : 'transparent',
-                      padding: '0.05rem 0.25rem',
-                      borderRadius: '0.3rem',
-                      fontWeight: isActive ? 700 : 400,
-                    }}
-                  >
-                    {wt.word}
-                  </span>
-                )
-              })}
-            </p>
-          ) : spokenText ? (
-            <p style={{ margin: 0 }}>{spokenText}</p>
-          ) : userTranscript ? (
-            <p style={{ margin: 0, opacity: 0.82 }}>“{userTranscript}”</p>
+        <div className="live-stage__caption" data-testid="live-voice-captions">
+          {speakingNow && voice.assistantText ? (
+            <Caption text={voice.assistantText} charIndex={voice.assistantCharIndex} />
+          ) : voice.userText ? (
+            <p className="live-stage__caption-text is-user" data-testid="live-voice-user-caption">“{voice.userText}”</p>
           ) : (
-            <p style={{ margin: 0, opacity: 0.55 }}>
-              Fale naturalmente — você pode interromper o Orin a qualquer momento.
+            <p className="live-stage__caption-text is-hint">
+              {greeting} Pode falar naturalmente — você pode me interromper quando quiser.
             </p>
           )}
         </div>
+
+        {voice.issue && (
+          <div className="live-stage__issue" role="alert" data-testid="live-voice-issue">
+            <span>{voice.issue.message}</span>
+            <div className="live-stage__issue-actions">
+              {issueNeedsSetup && (
+                <button type="button" className="live-pill-button" onClick={() => setSettingsOpen(true)}>
+                  Resolver na configuração
+                </button>
+              )}
+              <button type="button" className="live-pill-button is-quiet" onClick={voice.dismissIssue}>
+                Dispensar
+              </button>
+            </div>
+          </div>
+        )}
       </main>
 
-      <footer
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: '0.85rem',
-          flexWrap: 'wrap',
-          justifyContent: 'center',
-        }}
-      >
-        <button
-          type="button"
-          className="btn-secondary"
-          data-testid="live-voice-barge-in-button"
-          onClick={handleBargeInClick}
-        >
-          ✋ Interromper fala (Barge-in &lt;80ms)
-        </button>
-
-        <button
-          type="button"
-          className={isPushToTalkMode ? 'btn-primary' : 'btn-secondary'}
-          data-testid="live-voice-ptt-button"
-          onClick={() => onTogglePushToTalkMode?.()}
-          onMouseDown={() => onPushToTalkHoldChange?.(true)}
-          onMouseUp={() => onPushToTalkHoldChange?.(false)}
-        >
-          {isPushToTalkMode
-            ? isPushToTalkActive
-              ? '🎙 Gravando PTT (Solte Ctrl+Espaço)'
-              : '🎙 Push-to-Talk Ativo (Segure Ctrl+Espaço)'
-            : '🎙 Ativar Push-to-Talk (Sem Fone)'}
-        </button>
+      <footer className="live-stage__dock">
+        <div className="live-stage__meter">
+          <LevelMeter level={meterLevel} disabled={muted || phase === 'error'} />
+        </div>
+        <div className="live-stage__controls">
+          <button
+            type="button"
+            className={`live-round-button${muted ? ' is-off' : ''}`}
+            data-testid="live-voice-mute-button"
+            aria-pressed={muted}
+            onClick={() => setMuted(!muted)}
+            aria-label={muted ? 'Ligar microfone (M)' : 'Desligar microfone (M)'}
+            title={muted ? 'Ligar microfone (M)' : 'Desligar microfone (M)'}
+          >
+            <Icon name={muted ? 'mic-off' : 'mic'} />
+          </button>
+          <button
+            type="button"
+            className="live-round-button is-wide"
+            data-testid="live-voice-barge-in-button"
+            onClick={interrupt}
+            disabled={!speakingNow}
+            title="Interromper a fala"
+          >
+            <Icon name="hand" />
+            <span>Interromper</span>
+          </button>
+          <button
+            type="button"
+            className={`live-round-button is-wide${pushToTalk ? ' is-on' : ''}`}
+            data-testid="live-voice-ptt-button"
+            aria-pressed={pushToTalk}
+            onClick={() => setPushToTalk((value) => !value)}
+            onPointerDown={() => pushToTalk && setPushToTalkHeld(true)}
+            onPointerUp={() => pushToTalk && setPushToTalkHeld(false)}
+            onPointerLeave={() => pushToTalk && setPushToTalkHeld(false)}
+            title="Sem fone? Segure para falar (Espaço) e o microfone só abre enquanto você segura."
+          >
+            <Icon name="ptt" />
+            <span>{pushToTalk ? 'Segure para falar' : 'Modo sem fone'}</span>
+          </button>
+          <button type="button" className="live-round-button is-end" onClick={onClose} aria-label="Encerrar conversa por voz" title="Encerrar">
+            <Icon name="close" />
+          </button>
+        </div>
       </footer>
 
       <LiveVoiceQuickSettings
-        isOpen={quickSettingsOpen}
-        onClose={() => setQuickSettingsOpen(false)}
-        onProfileSummaryChange={setActiveProfileSummary}
+        isOpen={settingsOpen}
+        client={client}
+        companionName={companionName}
+        onClose={() => {
+          setSettingsOpen(false)
+          refreshCapabilities()
+        }}
       />
     </div>
   )

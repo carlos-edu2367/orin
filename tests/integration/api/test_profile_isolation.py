@@ -104,6 +104,7 @@ SCOPED = {
     ("GET", "/v1/settings/media-models"), ("PUT", "/v1/settings/media-models/{modality}"),
     ("GET", "/v1/friend/persona"), ("PUT", "/v1/friend/persona"), ("POST", "/v1/friend/soul/sync"),
     ("POST", "/v1/conversations/friend/ensure"),
+    ("GET", "/v1/live-voice/capabilities"),
     ("GET", "/v1/files/download"),
     # Skill preferences keyed by (caller, agent_id): an agent id names a role,
     # not a record someone owns, so every profile reads and writes its own row.
@@ -118,6 +119,7 @@ CREATE = {
 INSTANCE = {
     ("GET", "/v1/plugins/library"), ("GET", "/v1/mcp/catalog"), ("GET", "/v1/installation/status"), ("GET", "/v1/instance"),
     ("GET", "/v1/live-voice/hardware"), ("GET", "/v1/live-voice/hardware-status"),
+    ("GET", "/v1/live-voice/local-whisper/install"), ("POST", "/v1/live-voice/local-whisper/install"),
     ("DELETE", "/v1/installation/versions/{version}"), ("POST", "/v1/installation/update"),
     ("GET", "/v1/installation/update/status"), ("POST", "/v1/installation/update/prepare"),
     ("GET", "/v1/installation/autostart"), ("PUT", "/v1/installation/autostart"),
