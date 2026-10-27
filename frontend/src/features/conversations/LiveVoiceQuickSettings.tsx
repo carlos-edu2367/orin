@@ -2,12 +2,16 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { createBrowserApiClient, type ApiClient } from '../../api/client'
 import { connectLiveVoiceSession } from '../../api/conversations'
 import {
+  deleteChatterboxVoice,
   getLiveVoiceCapabilities,
-  getLocalWhisperInstall,
-  startLocalWhisperInstall,
+  startEngineInstall,
   UNAVAILABLE_CAPABILITIES,
+  uploadChatterboxVoice,
+  type EngineInstallStatus,
+  type LiveTtsEngineId,
   type LiveVoiceCapabilities,
-  type LocalWhisperInstallStatus,
+  type LiveVoiceModel,
+  type LocalEngineId,
 } from '../../api/liveVoice'
 import { browserRecognitionSupported, isElectron } from './live/browserRecognition'
 import { LevelMeter } from './live/LevelMeter'
@@ -18,7 +22,12 @@ import {
   resolveStt,
   resolveTts,
   saveLiveVoicePrefs,
+  sortVoicesForPortuguese,
   STT_LABELS,
+  sttModelFor,
+  TTS_LABELS,
+  ttsSelection,
+  voiceLabel,
   type LiveVoicePrefs,
   type SttChoice,
   type TtsChoice,
@@ -31,6 +40,8 @@ export type LiveVoiceQuickSettingsProps = {
   onClose: () => void
 }
 
+type Badge = { text: string; tone: 'ok' | 'warn' | 'muted' }
+
 type OptionCardProps = {
   name: string
   value: string
@@ -38,7 +49,7 @@ type OptionCardProps = {
   disabled?: boolean
   title: string
   description: string
-  badge?: { text: string; tone: 'ok' | 'warn' | 'muted' }
+  badge?: Badge
   onSelect: () => void
   children?: ReactNode
   testId?: string
@@ -60,6 +71,75 @@ function OptionCard({ name, value, checked, disabled, title, description, badge,
   )
 }
 
+function installBadge(status: EngineInstallStatus | undefined, gpuHint = false): Badge {
+  if (!status) return { text: 'Indisponível', tone: 'muted' }
+  if (status.state === 'running') return { text: 'Instalando…', tone: 'warn' }
+  if (status.installed) {
+    const gpu = status.device === 'cuda' || status.device === 'mps'
+    return { text: gpu ? 'Pronto · GPU' : 'Pronto · CPU', tone: gpu || !gpuHint ? 'ok' : 'warn' }
+  }
+  if (status.state === 'failed') return { text: 'Falhou', tone: 'warn' }
+  return { text: 'Não instalado', tone: 'muted' }
+}
+
+function InstallControl({ engine, status, onInstall }: { engine: LocalEngineId; status?: EngineInstallStatus; onInstall: (engine: LocalEngineId) => void }) {
+  if (!status || status.installed) return null
+  const running = status.state === 'running'
+  return (
+    <span className="voice-option__extra">
+      <button
+        type="button"
+        className="voice-button is-primary"
+        data-testid={`live-install-${engine}-button`}
+        disabled={running}
+        onClick={(event) => {
+          event.preventDefault()
+          onInstall(engine)
+        }}
+      >
+        {running ? 'Instalando…' : status.state === 'failed' ? 'Tentar de novo' : `Instalar agora${status.sizeHint ? ` (${status.sizeHint})` : ''}`}
+      </button>
+      <span className="voice-option__note" role="status">
+        {status.message || 'Instala num ambiente isolado; o Orin não é alterado.'}
+      </span>
+    </span>
+  )
+}
+
+const VENDOR_LABELS: Record<string, string> = {
+  elevenlabs: 'ElevenLabs', google: 'Google', openai: 'OpenAI', mistralai: 'Mistral', minimax: 'MiniMax', microsoft: 'Microsoft',
+  deepgram: 'Deepgram', 'fish-audio': 'Fish Audio', 'x-ai': 'xAI', qwen: 'Qwen', heygen: 'HeyGen', hexgrad: 'Kokoro (nuvem)',
+  'bytedance-seed': 'ByteDance', canopylabs: 'Canopy Labs', sesame: 'Sesame',
+}
+
+function ModelSelect({ id, models, value, onChange, testId }: { id: string; models: LiveVoiceModel[]; value: string; onChange: (id: string) => void; testId: string }) {
+  const groups = useMemo(() => {
+    const byVendor = new Map<string, LiveVoiceModel[]>()
+    for (const item of models) byVendor.set(item.vendor, [...(byVendor.get(item.vendor) ?? []), item])
+    return [...byVendor.entries()]
+  }, [models])
+  return (
+    <select id={id} data-testid={testId} value={value} onChange={(event) => onChange(event.target.value)}>
+      {groups.length > 1
+        ? groups.map(([vendor, items]) => (
+            <optgroup key={vendor} label={VENDOR_LABELS[vendor] ?? vendor}>
+              {items.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+            </optgroup>
+          ))
+        : models.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+    </select>
+  )
+}
+
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result).replace(/^data:[^,]*,/, ''))
+    reader.onerror = () => reject(reader.error)
+    reader.readAsDataURL(file)
+  })
+}
+
 const SAMPLE_TEXT = 'Oi! Essa é a minha voz. Se gostar, é só fechar e começar a conversar.'
 
 export function LiveVoiceQuickSettings(props: LiveVoiceQuickSettingsProps) {
@@ -72,14 +152,15 @@ function VoiceSettingsPanel({ client: providedClient, companionName = 'Orin', on
   const client = useMemo(() => providedClient ?? createBrowserApiClient(), [providedClient])
   const [prefs, setPrefs] = useState<LiveVoicePrefs>(() => loadLiveVoicePrefs())
   const [caps, setCaps] = useState<LiveVoiceCapabilities | null>(null)
-  const [install, setInstall] = useState<LocalWhisperInstallStatus | null>(null)
   const [mics, setMics] = useState<Array<{ deviceId: string; label: string }>>([])
   const [micError, setMicError] = useState<string | null>(null)
   const [voices, setVoices] = useState<SystemVoice[]>(() => listSystemVoices())
   const [sampleState, setSampleState] = useState<string | null>(null)
+  const [clipState, setClipState] = useState<string | null>(null)
   const [savedAt, setSavedAt] = useState<number | null>(null)
   const micRef = useRef<MicCapture | null>(null)
   const sampleRef = useRef<SpeechOutput | null>(null)
+  const clipInputRef = useRef<HTMLInputElement | null>(null)
   const browserSupported = useMemo(() => browserRecognitionSupported(), [])
 
   const loadCaps = useCallback((signal?: AbortSignal) => {
@@ -89,13 +170,12 @@ function VoiceSettingsPanel({ client: providedClient, companionName = 'Orin', on
   useEffect(() => {
     const controller = new AbortController()
     loadCaps(controller.signal)
-    getLocalWhisperInstall(client, controller.signal).then(setInstall).catch(() => {})
     const offVoices = onSystemVoicesChanged(() => setVoices(listSystemVoices()))
     return () => {
       controller.abort()
       offVoices()
     }
-  }, [client, loadCaps])
+  }, [loadCaps])
 
   // While the panel is open the chosen microphone is live, so the meter proves it works.
   useEffect(() => {
@@ -122,32 +202,28 @@ function VoiceSettingsPanel({ client: providedClient, companionName = 'Orin', on
     }
   }, [prefs.micDeviceId])
 
-  // Poll a running install until it settles, then re-read what can run.
+  const capabilities = caps ?? UNAVAILABLE_CAPABILITIES
+  const installing = [capabilities.stt.local_sidecar.install, capabilities.tts.kokoro.install, capabilities.tts.chatterbox.install]
+    .some((status) => status?.state === 'running')
+
+  // Re-read what can run while an engine installs, until it settles.
   useEffect(() => {
-    if (install?.state !== 'running') return
-    const timer = window.setInterval(() => {
-      getLocalWhisperInstall(client)
-        .then((status) => {
-          setInstall(status)
-          if (status.state !== 'running') loadCaps()
-        })
-        .catch(() => {})
-    }, 2500)
+    if (!installing) return
+    const timer = window.setInterval(() => loadCaps(), 2500)
     return () => window.clearInterval(timer)
-  }, [install?.state, client, loadCaps])
+  }, [installing, loadCaps])
 
   useEffect(() => () => sampleRef.current?.dispose(), [])
 
   const meterLevel = useCallback(() => micRef.current?.level ?? 0, [])
 
-  const capabilities = caps ?? UNAVAILABLE_CAPABILITIES
   const autoStt = resolveStt('auto', capabilities, browserSupported)
   const effectiveStt = resolveStt(prefs.stt, capabilities, browserSupported)
   const effectiveTts = resolveTts(prefs.tts, capabilities)
-  const local = capabilities.stt.local_sidecar
-  const openaiStt = capabilities.stt.openai
-  const openaiTts = capabilities.tts.openai
+  const selection = effectiveTts === 'system' ? null : ttsSelection(prefs, capabilities, effectiveTts)
   const hardware = capabilities.hardware
+  const stt = capabilities.stt
+  const tts = capabilities.tts
 
   function update(patch: Partial<LiveVoicePrefs>) {
     setPrefs((current) => {
@@ -158,11 +234,51 @@ function VoiceSettingsPanel({ client: providedClient, companionName = 'Orin', on
     setSavedAt(Date.now())
   }
 
-  async function handleInstall() {
+  function chooseTtsModel(engine: LiveTtsEngineId, modelId: string) {
+    update({ ttsModels: { ...prefs.ttsModels, [engine]: modelId } })
+  }
+
+  function chooseTtsVoice(engine: LiveTtsEngineId, modelId: string, voice: string) {
+    update({ ttsVoices: { ...prefs.ttsVoices, [`${engine}:${modelId}`]: voice } })
+  }
+
+  async function handleInstall(engine: LocalEngineId) {
     try {
-      setInstall(await startLocalWhisperInstall(client))
+      const status = await startEngineInstall(client, engine)
+      setCaps((current) => {
+        const base = current ?? UNAVAILABLE_CAPABILITIES
+        if (engine === 'whisper') return { ...base, stt: { ...base.stt, local_sidecar: { ...base.stt.local_sidecar, install: status } } }
+        return { ...base, tts: { ...base.tts, [engine]: { ...base.tts[engine], install: status } } }
+      })
     } catch {
-      setInstall({ state: 'failed', message: 'Não consegui iniciar a instalação. Tente pelo terminal.', command: local.installCommand ?? 'uv pip install faster-whisper' })
+      setSampleState('Não consegui iniciar a instalação. Tente de novo.')
+    }
+  }
+
+  async function handleClipUpload(file: File) {
+    setClipState('Enviando o clipe…')
+    try {
+      const clip = await uploadChatterboxVoice(client, {
+        name: file.name.replace(/\.[^.]+$/, ''),
+        filename: file.name,
+        dataBase64: await fileToBase64(file),
+      })
+      chooseTtsVoice('chatterbox', selection?.modelId || 'chatterbox-multilingual', clip.id)
+      setClipState(`Voz “${clip.name}” adicionada.`)
+      loadCaps()
+    } catch {
+      setClipState('Não consegui usar esse arquivo. Envie um WAV/MP3 de até 12 MB.')
+    }
+  }
+
+  async function handleClipDelete(clipId: string) {
+    try {
+      await deleteChatterboxVoice(client, clipId)
+      chooseTtsVoice('chatterbox', selection?.modelId || 'chatterbox-multilingual', 'default')
+      setClipState('Voz removida.')
+      loadCaps()
+    } catch {
+      setClipState('Não consegui remover essa voz.')
     }
   }
 
@@ -172,34 +288,30 @@ function VoiceSettingsPanel({ client: providedClient, companionName = 'Orin', on
     sampleRef.current = output
     output.setSystemVoice({ voiceUri: prefs.systemVoiceUri, rate: prefs.rate, pitch: prefs.pitch })
     output.setEvents({ onIdle: () => setSampleState(null) })
-    if (effectiveTts === 'system') {
+    if (effectiveTts === 'system' || !selection) {
       setSampleState('Tocando a voz do sistema…')
       output.speakSystem(SAMPLE_TEXT)
       return
     }
-    setSampleState('Gerando a voz da OpenAI…')
+    const engineLabel = TTS_LABELS[effectiveTts]
+    setSampleState(`Gerando a voz (${engineLabel})…`)
     const socket = connectLiveVoiceSession('voice-preview', (event) => {
       if (event.type === 'session.ready') {
         socket?.sendSpeakText(SAMPLE_TEXT, `Você é ${companionName}. Fale em português do Brasil, com calor e naturalidade.`)
       } else if (event.type === 'tts.chunk') {
-        setSampleState('Tocando a voz da OpenAI…')
-        output.playPcm(event.clean_text, event.pcm_base64, event.sample_rate, event.chunk_seq)
+        setSampleState(`Tocando ${engineLabel}…`)
+        if (event.encoding && event.encoding !== 'pcm16' && event.audio_base64) output.playEncoded(event.clean_text, event.audio_base64, event.chunk_seq)
+        else if (event.pcm_base64) output.playPcm(event.clean_text, event.pcm_base64, event.sample_rate, event.chunk_seq)
         socket?.close()
       } else if (event.type === 'tts.error') {
         setSampleState(event.message)
         socket?.close()
       }
     }, { csrfToken: client.socketCsrfToken() })
-    socket?.sendConfig({ tts_provider: 'openai', tts_model: 'gpt-4o-mini-tts', voice_id: prefs.openaiVoice, speed: prefs.rate })
+    socket?.sendConfig({ tts_provider: effectiveTts, tts_model: selection.modelId, voice_id: selection.voice, speed: prefs.rate, language: 'pt' })
   }
 
-  const localBadge = local.available
-    ? { text: local.device === 'cuda' ? 'Pronto · GPU' : 'Pronto · CPU', tone: 'ok' as const }
-    : install?.state === 'running'
-      ? { text: 'Instalando…', tone: 'warn' as const }
-      : { text: 'Não instalado', tone: 'muted' as const }
-
-  const sttChoices: Array<{ value: SttChoice; title: string; description: string; disabled: boolean; badge: OptionCardProps['badge']; extra?: ReactNode }> = [
+  const sttChoices: Array<{ value: SttChoice; title: string; description: string; disabled: boolean; badge: Badge; extra?: ReactNode }> = [
     {
       value: 'auto',
       title: 'Automático',
@@ -213,34 +325,35 @@ function VoiceSettingsPanel({ client: providedClient, companionName = 'Orin', on
       description: hardware.hasCuda
         ? `Roda na sua ${hardware.deviceName ?? 'GPU'}; nada sai do seu computador.`
         : 'Roda no seu computador; nada sai da sua máquina.',
-      disabled: !local.available,
-      badge: localBadge,
-      extra: !local.available ? (
-        <span className="voice-option__extra">
-          <button
-            type="button"
-            className="voice-button is-primary"
-            data-testid="live-install-whisper-button"
-            onClick={(event) => {
-              event.preventDefault()
-              void handleInstall()
-            }}
-            disabled={install?.state === 'running'}
-          >
-            {install?.state === 'running' ? 'Instalando…' : 'Instalar agora'}
-          </button>
-          <span className="voice-option__note" role="status">
-            {install?.message || `Ou pelo terminal: ${local.installCommand ?? install?.command ?? 'uv pip install faster-whisper'}`}
-          </span>
+      disabled: !stt.local_sidecar.available,
+      badge: installBadge(stt.local_sidecar.install),
+      extra: <InstallControl engine="whisper" status={stt.local_sidecar.install} onInstall={(engine) => void handleInstall(engine)} />,
+    },
+    {
+      value: 'openrouter',
+      title: 'OpenRouter (nuvem)',
+      description: stt.openrouter.available ? 'Whisper, Voxtral, Scribe e outros, com a sua chave OpenRouter.' : 'Configure uma chave OpenRouter em Configurações → Provedores.',
+      disabled: !stt.openrouter.available,
+      badge: stt.openrouter.available ? { text: 'Pronto', tone: 'ok' } : { text: 'Sem chave', tone: 'muted' },
+      extra: stt.openrouter.available && stt.openrouter.models.length > 0 && prefs.stt === 'openrouter' ? (
+        <span className="voice-field voice-option__extra">
+          <label htmlFor="live-quick-stt-model">Modelo</label>
+          <ModelSelect
+            id="live-quick-stt-model"
+            testId="live-quick-stt-model-select"
+            models={stt.openrouter.models}
+            value={sttModelFor(prefs, capabilities, 'openrouter') ?? ''}
+            onChange={(modelId) => update({ sttModels: { ...prefs.sttModels, openrouter: modelId } })}
+          />
         </span>
       ) : undefined,
     },
     {
       value: 'openai',
       title: 'OpenAI (nuvem)',
-      description: openaiStt.available ? 'Usa a sua chave OpenAI. Rápido e preciso.' : 'Configure uma chave OpenAI em Configurações → Provedores.',
-      disabled: !openaiStt.available,
-      badge: openaiStt.available ? { text: 'Pronto', tone: 'ok' } : { text: 'Sem chave', tone: 'muted' },
+      description: stt.openai.available ? 'Usa a sua chave OpenAI. Rápido e preciso.' : 'Configure uma chave OpenAI em Configurações → Provedores.',
+      disabled: !stt.openai.available,
+      badge: stt.openai.available ? { text: 'Pronto', tone: 'ok' } : { text: 'Sem chave', tone: 'muted' },
     },
     {
       value: 'browser',
@@ -254,6 +367,63 @@ function VoiceSettingsPanel({ client: providedClient, companionName = 'Orin', on
       badge: browserSupported ? { text: 'Pronto', tone: 'ok' } : { text: 'Indisponível', tone: 'muted' },
     },
   ]
+
+  const autoTts = resolveTts('auto', capabilities)
+  const ttsChoices: Array<{ value: TtsChoice; title: string; description: string; disabled: boolean; badge: Badge; extra?: ReactNode }> = [
+    {
+      value: 'auto',
+      title: 'Automático',
+      description: `Usa ${autoTts === 'system' ? 'a voz do sistema' : TTS_LABELS[autoTts]} agora.`,
+      disabled: false,
+      badge: { text: 'Recomendado', tone: 'ok' },
+    },
+    {
+      value: 'system',
+      title: 'Voz do sistema (grátis)',
+      description: 'As vozes já instaladas no seu computador. Funciona sempre.',
+      disabled: false,
+      badge: { text: 'Pronto', tone: 'ok' },
+    },
+    {
+      value: 'chatterbox',
+      title: 'Chatterbox (local, mais natural)',
+      description: hardware.hasCuda
+        ? `Voz expressiva que pode clonar uma voz sua; roda na sua ${hardware.deviceName ?? 'GPU'}.`
+        : 'Voz expressiva e clonável. Sem GPU NVIDIA fica lenta (vários segundos por frase).',
+      disabled: !tts.chatterbox.available,
+      badge: installBadge(tts.chatterbox.install, true),
+      extra: <InstallControl engine="chatterbox" status={tts.chatterbox.install} onInstall={(engine) => void handleInstall(engine)} />,
+    },
+    {
+      value: 'kokoro',
+      title: 'Kokoro (local, leve)',
+      description: 'Rápida até na CPU, sem internet. Vozes em português: Dora, Alex e Santa.',
+      disabled: !tts.kokoro.available,
+      badge: installBadge(tts.kokoro.install),
+      extra: <InstallControl engine="kokoro" status={tts.kokoro.install} onInstall={(engine) => void handleInstall(engine)} />,
+    },
+    {
+      value: 'openrouter',
+      title: 'OpenRouter (nuvem)',
+      description: tts.openrouter.available
+        ? `${tts.openrouter.models.length} modelos (${[...new Set(tts.openrouter.models.map((item) => VENDOR_LABELS[item.vendor] ?? item.vendor))].slice(0, 5).join(', ')}…), cada um com suas vozes.`
+        : 'Configure uma chave OpenRouter em Configurações → Provedores.',
+      disabled: !tts.openrouter.available,
+      badge: tts.openrouter.available ? { text: 'Pronto', tone: 'ok' } : { text: 'Sem chave', tone: 'muted' },
+    },
+    {
+      value: 'openai',
+      title: 'OpenAI (nuvem)',
+      description: tts.openai.available ? 'Muito expressiva; usa a sua chave OpenAI.' : 'Configure uma chave OpenAI em Configurações → Provedores.',
+      disabled: !tts.openai.available,
+      badge: tts.openai.available ? { text: 'Pronto', tone: 'ok' } : { text: 'Sem chave', tone: 'muted' },
+    },
+  ]
+
+  const modelVoices = selection && effectiveTts !== 'system'
+    ? sortVoicesForPortuguese(selection.model?.voices.length ? selection.model.voices : tts[effectiveTts].voices)
+    : []
+  const clips = tts.chatterbox.voiceClips ?? [{ id: 'default', name: 'Voz padrão do Chatterbox' }]
 
   return (
     <div className="voice-settings" data-testid="live-voice-quick-settings" role="dialog" aria-modal="true" aria-labelledby="voice-settings-title">
@@ -295,28 +465,12 @@ function VoiceSettingsPanel({ client: providedClient, companionName = 'Orin', on
           <p className="voice-settings__hint">Fale algo: as barras devem subir. Se não subirem, escolha outro microfone.</p>
           <div className="voice-field is-inline">
             <label htmlFor="live-quick-sensitivity">Sensibilidade</label>
-            <input
-              id="live-quick-sensitivity"
-              type="range"
-              min={0}
-              max={1}
-              step={0.05}
-              value={prefs.sensitivity}
-              onChange={(event) => update({ sensitivity: Number(event.target.value) })}
-            />
+            <input id="live-quick-sensitivity" type="range" min={0} max={1} step={0.05} value={prefs.sensitivity} onChange={(event) => update({ sensitivity: Number(event.target.value) })} />
             <span className="voice-field__value">{Math.round(prefs.sensitivity * 100)}%</span>
           </div>
           <div className="voice-field is-inline">
             <label htmlFor="live-quick-silence">Pausa que encerra a frase</label>
-            <input
-              id="live-quick-silence"
-              type="range"
-              min={400}
-              max={2000}
-              step={100}
-              value={prefs.endSilenceMs}
-              onChange={(event) => update({ endSilenceMs: Number(event.target.value) })}
-            />
+            <input id="live-quick-silence" type="range" min={400} max={2000} step={100} value={prefs.endSilenceMs} onChange={(event) => update({ endSilenceMs: Number(event.target.value) })} />
             <span className="voice-field__value">{(prefs.endSilenceMs / 1000).toFixed(1)}s</span>
           </div>
         </div>
@@ -346,17 +500,7 @@ function VoiceSettingsPanel({ client: providedClient, companionName = 'Orin', on
 
         <div className="voice-settings__section" data-testid="live-quick-tts-options" role="radiogroup" aria-labelledby="voice-settings-tts-title">
           <h3 id="voice-settings-tts-title">3. A voz de {companionName}</h3>
-          {([
-            { value: 'auto', title: 'Automático', description: `Usa ${openaiTts.available ? 'a voz natural da OpenAI' : 'a voz do sistema'}.`, disabled: false, badge: { text: 'Recomendado', tone: 'ok' } },
-            { value: 'system', title: 'Voz do sistema (grátis, local)', description: 'As vozes já instaladas no seu computador.', disabled: false, badge: { text: 'Pronto', tone: 'ok' } },
-            {
-              value: 'openai',
-              title: 'Voz natural OpenAI',
-              description: openaiTts.available ? 'Muito mais expressiva; usa a sua chave OpenAI.' : 'Configure uma chave OpenAI em Configurações → Provedores.',
-              disabled: !openaiTts.available,
-              badge: openaiTts.available ? { text: 'Pronto', tone: 'ok' } : { text: 'Sem chave', tone: 'muted' },
-            },
-          ] as Array<{ value: TtsChoice; title: string; description: string; disabled: boolean; badge: OptionCardProps['badge'] }>).map((choice) => (
+          {ttsChoices.map((choice) => (
             <OptionCard
               key={choice.value}
               name="live-tts"
@@ -368,56 +512,128 @@ function VoiceSettingsPanel({ client: providedClient, companionName = 'Orin', on
               badge={choice.badge}
               onSelect={() => update({ tts: choice.value })}
               testId={`live-tts-option-${choice.value}`}
-            />
+            >
+              {choice.extra}
+            </OptionCard>
           ))}
 
-          {effectiveTts === 'system' ? (
-            <div className="voice-field">
-              <label htmlFor="live-quick-system-voice">Voz</label>
-              <select
-                id="live-quick-system-voice"
-                data-testid="live-quick-tts-select"
-                value={prefs.systemVoiceUri ?? ''}
-                onChange={(event) => update({ systemVoiceUri: event.target.value || null })}
-              >
-                <option value="">Melhor voz em português</option>
-                {voices.map((voice) => (
-                  <option key={voice.uri} value={voice.uri}>{voice.name} ({voice.lang})</option>
-                ))}
-              </select>
-            </div>
-          ) : (
-            <div className="voice-field">
-              <label htmlFor="live-quick-openai-voice">Voz</label>
-              <select
-                id="live-quick-openai-voice"
-                data-testid="live-quick-tts-select"
-                value={prefs.openaiVoice}
-                onChange={(event) => update({ openaiVoice: event.target.value })}
-              >
-                {(openaiTts.voices.length ? openaiTts.voices : ['coral', 'nova', 'shimmer', 'sage', 'ash', 'onyx']).map((voice) => (
-                  <option key={voice} value={voice}>{voice}</option>
-                ))}
-              </select>
-            </div>
-          )}
-          <div className="voice-field is-inline">
-            <label htmlFor="live-quick-rate">Velocidade</label>
-            <input id="live-quick-rate" type="range" min={0.7} max={1.5} step={0.05} value={prefs.rate} onChange={(event) => update({ rate: Number(event.target.value) })} />
-            <span className="voice-field__value">{prefs.rate.toFixed(2)}×</span>
-          </div>
-          {effectiveTts === 'system' && (
+          <div className="voice-settings__subpanel" data-testid="live-quick-voice-picker">
+            <p className="voice-settings__hint">Falando com: <strong>{TTS_LABELS[effectiveTts]}</strong></p>
+            {effectiveTts === 'system' && (
+              <div className="voice-field">
+                <label htmlFor="live-quick-system-voice">Voz</label>
+                <select
+                  id="live-quick-system-voice"
+                  data-testid="live-quick-tts-select"
+                  value={prefs.systemVoiceUri ?? ''}
+                  onChange={(event) => update({ systemVoiceUri: event.target.value || null })}
+                >
+                  <option value="">Melhor voz em português</option>
+                  {voices.map((voice) => (
+                    <option key={voice.uri} value={voice.uri}>{voice.name} ({voice.lang})</option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            {selection && effectiveTts !== 'system' && tts[effectiveTts].models.length > 1 && (
+              <div className="voice-field">
+                <label htmlFor="live-quick-tts-model">Modelo</label>
+                <ModelSelect
+                  id="live-quick-tts-model"
+                  testId="live-quick-tts-model-select"
+                  models={tts[effectiveTts].models}
+                  value={selection.modelId}
+                  onChange={(modelId) => chooseTtsModel(effectiveTts, modelId)}
+                />
+              </div>
+            )}
+
+            {selection && effectiveTts !== 'system' && effectiveTts !== 'chatterbox' && (
+              <div className="voice-field">
+                <label htmlFor="live-quick-tts-voice">Voz{modelVoices.length ? ` (${modelVoices.length} neste modelo)` : ''}</label>
+                {modelVoices.length > 0 ? (
+                  <select
+                    id="live-quick-tts-voice"
+                    data-testid="live-quick-tts-select"
+                    value={selection.voice}
+                    onChange={(event) => chooseTtsVoice(effectiveTts, selection.modelId, event.target.value)}
+                  >
+                    {modelVoices.map((voice) => (
+                      <option key={voice} value={voice}>{voiceLabel(effectiveTts, voice)}</option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    id="live-quick-tts-voice"
+                    data-testid="live-quick-tts-select"
+                    value={selection.voice}
+                    placeholder="Este modelo não lista vozes; deixe vazio para a padrão"
+                    onChange={(event) => chooseTtsVoice(effectiveTts, selection.modelId, event.target.value.trim())}
+                  />
+                )}
+              </div>
+            )}
+
+            {selection && effectiveTts === 'chatterbox' && (
+              <div className="voice-field">
+                <label htmlFor="live-quick-tts-voice">Voz</label>
+                <div className="voice-settings__row">
+                  <select
+                    id="live-quick-tts-voice"
+                    data-testid="live-quick-tts-select"
+                    value={selection.voice}
+                    onChange={(event) => chooseTtsVoice('chatterbox', selection.modelId, event.target.value)}
+                  >
+                    {clips.map((clip) => <option key={clip.id} value={clip.id}>{clip.name}</option>)}
+                  </select>
+                  {selection.voice !== 'default' && (
+                    <button type="button" className="voice-button is-quiet is-small" onClick={() => void handleClipDelete(selection.voice)}>
+                      Remover
+                    </button>
+                  )}
+                </div>
+                <div className="voice-settings__row">
+                  <button type="button" className="voice-button" data-testid="live-chatterbox-upload-button" onClick={() => clipInputRef.current?.click()}>
+                    Clonar uma voz (enviar áudio)
+                  </button>
+                  <input
+                    ref={clipInputRef}
+                    type="file"
+                    accept=".wav,.mp3,.flac,.ogg,.m4a,audio/*"
+                    hidden
+                    data-testid="live-chatterbox-upload-input"
+                    onChange={(event) => {
+                      const file = event.target.files?.[0]
+                      if (file) void handleClipUpload(file)
+                      event.target.value = ''
+                    }}
+                  />
+                </div>
+                <p className="voice-settings__hint" role="status">
+                  {clipState ?? 'Um clipe de 5 a 15 segundos de fala limpa, sem música, já basta.'}
+                </p>
+              </div>
+            )}
+
             <div className="voice-field is-inline">
-              <label htmlFor="live-quick-pitch">Tom</label>
-              <input id="live-quick-pitch" type="range" min={0.6} max={1.5} step={0.05} value={prefs.pitch} onChange={(event) => update({ pitch: Number(event.target.value) })} />
-              <span className="voice-field__value">{prefs.pitch.toFixed(2)}</span>
+              <label htmlFor="live-quick-rate">Velocidade</label>
+              <input id="live-quick-rate" type="range" min={0.7} max={1.5} step={0.05} value={prefs.rate} onChange={(event) => update({ rate: Number(event.target.value) })} />
+              <span className="voice-field__value">{prefs.rate.toFixed(2)}×</span>
             </div>
-          )}
-          <div className="voice-settings__row">
-            <button type="button" className="voice-button" data-testid="live-quick-test-voice-button" onClick={playSample}>
-              Ouvir amostra
-            </button>
-            {sampleState && <span className="voice-settings__hint" role="status" data-testid="live-quick-voice-preview-status">{sampleState}</span>}
+            {effectiveTts === 'system' && (
+              <div className="voice-field is-inline">
+                <label htmlFor="live-quick-pitch">Tom</label>
+                <input id="live-quick-pitch" type="range" min={0.6} max={1.5} step={0.05} value={prefs.pitch} onChange={(event) => update({ pitch: Number(event.target.value) })} />
+                <span className="voice-field__value">{prefs.pitch.toFixed(2)}</span>
+              </div>
+            )}
+            <div className="voice-settings__row">
+              <button type="button" className="voice-button" data-testid="live-quick-test-voice-button" onClick={playSample}>
+                Ouvir amostra
+              </button>
+              {sampleState && <span className="voice-settings__hint" role="status" data-testid="live-quick-voice-preview-status">{sampleState}</span>}
+            </div>
           </div>
         </div>
 

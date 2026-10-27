@@ -26,6 +26,12 @@ SUPPORTED_STT_PROVIDERS: dict[str, dict[str, Any]] = {
             },
         ],
     },
+    "openrouter": {
+        "label": "OpenRouter (Whisper, Voxtral, Scribe e outros)",
+        "models": [
+            {"id": "openai/whisper-large-v3-turbo", "label": "Whisper Large v3 Turbo (OpenRouter)"},
+        ],
+    },
     "groq": {
         "label": "Groq Cloud (Ultra-Low Latency)",
         "models": [
@@ -67,6 +73,18 @@ SUPPORTED_TTS_PROVIDERS: dict[str, dict[str, Any]] = {
                 "vram_gb": 0.25,
             },
         ],
+    },
+    "kokoro": {
+        "label": "Kokoro local (ambiente isolado)",
+        "models": [{"id": "kokoro-82m-onnx", "label": "Kokoro-82M v1.0 ONNX"}],
+    },
+    "chatterbox": {
+        "label": "Chatterbox local (ambiente isolado)",
+        "models": [{"id": "chatterbox-multilingual", "label": "Chatterbox Multilingual (23 idiomas, clonagem)"}],
+    },
+    "openrouter": {
+        "label": "OpenRouter (ElevenLabs, Gemini, Voxtral, MiniMax…)",
+        "models": [{"id": "elevenlabs/eleven-v3", "label": "ElevenLabs Eleven v3 (OpenRouter)"}],
     },
     "elevenlabs": {
         "label": "ElevenLabs",

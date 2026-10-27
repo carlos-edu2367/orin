@@ -68,6 +68,7 @@ export type SystemVoiceSettings = { voiceUri: string | null; rate: number; pitch
 type QueueItem =
   | { kind: 'system'; text: string }
   | { kind: 'pcm'; text: string; pcm: Int16Array; sampleRate: number; chunkSeq: number }
+  | { kind: 'encoded'; text: string; data: ArrayBuffer; chunkSeq: number }
 
 type AudioContextCtor = typeof AudioContext
 
@@ -104,7 +105,7 @@ export class SpeechOutput {
 
   /** Chunk sequence and milliseconds played of the PCM chunk now playing, for barge-in receipts. */
   playbackPosition(): { chunkSeq: number; playedMs: number } | null {
-    if (!this.current || this.current.kind !== 'pcm' || !this.context) return null
+    if (!this.current || this.current.kind === 'system' || !this.context) return null
     return { chunkSeq: this.current.chunkSeq, playedMs: Math.max(0, Math.round((this.context.currentTime - this.startedAt) * 1000)) }
   }
 
@@ -119,6 +120,14 @@ export class SpeechOutput {
     const pcm = decodePcm16(pcmBase64)
     if (pcm.length === 0) return
     this.queue.push({ kind: 'pcm', text, pcm, sampleRate, chunkSeq })
+    this.pump()
+  }
+
+  /** MP3/WAV from a cloud voice; the browser decodes it, sample rate included. */
+  playEncoded(text: string, base64: string, chunkSeq: number): void {
+    const bytes = decodeBase64(base64)
+    if (bytes.byteLength === 0) return
+    this.queue.push({ kind: 'encoded', text, data: bytes.buffer as ArrayBuffer, chunkSeq })
     this.pump()
   }
 
@@ -163,7 +172,8 @@ export class SpeechOutput {
       this.pump()
     }
     if (item.kind === 'system') this.playSystem(item.text, finish)
-    else this.playBuffer(item, finish)
+    else if (item.kind === 'pcm') this.playBuffer(item, finish)
+    else this.playEncodedItem(item, finish)
   }
 
   private playSystem(text: string, done: () => void): void {
@@ -208,10 +218,34 @@ export class SpeechOutput {
       done()
       return
     }
-    void context.resume().catch(() => {})
     const buffer = context.createBuffer(1, item.pcm.length, item.sampleRate)
     const channel = buffer.getChannelData(0)
     for (let i = 0; i < item.pcm.length; i += 1) channel[i] = item.pcm[i] / 0x8000
+    this.startBuffer(item, buffer, done)
+  }
+
+  private playEncodedItem(item: Extract<QueueItem, { kind: 'encoded' }>, done: () => void): void {
+    const context = this.ensureContext()
+    if (!context || !this.analyser) {
+      done()
+      return
+    }
+    const generation = this.generation
+    context
+      .decodeAudioData(item.data.slice(0))
+      .then((buffer) => {
+        if (generation === this.generation && this.current === item) this.startBuffer(item, buffer, done)
+      })
+      .catch(() => done())
+  }
+
+  private startBuffer(item: Extract<QueueItem, { kind: 'pcm' | 'encoded' }>, buffer: AudioBuffer, done: () => void): void {
+    const context = this.context
+    if (!context || !this.analyser) {
+      done()
+      return
+    }
+    void context.resume().catch(() => {})
     const source = context.createBufferSource()
     source.buffer = buffer
     source.connect(this.analyser)
@@ -219,7 +253,7 @@ export class SpeechOutput {
     this.source = source
     this.startedAt = context.currentTime
     source.start()
-    const durationMs = (item.pcm.length / item.sampleRate) * 1000
+    const durationMs = buffer.duration * 1000
     const words = [...item.text.matchAll(/\S+/g)]
     // Approximate word progress for captions; PCM carries no timing marks.
     const tick = () => {
@@ -237,7 +271,7 @@ export class SpeechOutput {
     let phase = 0
     this.levelTimer = window.setInterval(() => {
       let target = 0
-      if (this.current?.kind === 'pcm' && this.analyser && this.analyserData) {
+      if ((this.current?.kind === 'pcm' || this.current?.kind === 'encoded') && this.analyser && this.analyserData) {
         this.analyser.getByteTimeDomainData(this.analyserData)
         let sum = 0
         for (let i = 0; i < this.analyserData.length; i += 1) {
@@ -261,14 +295,19 @@ export class SpeechOutput {
   }
 }
 
-export function decodePcm16(base64: string): Int16Array {
+function decodeBase64(base64: string): Uint8Array {
   try {
     const binary = atob(base64)
-    const length = binary.length - (binary.length % 2)
-    const bytes = new Uint8Array(length)
-    for (let i = 0; i < length; i += 1) bytes[i] = binary.charCodeAt(i)
-    return new Int16Array(bytes.buffer)
+    const bytes = new Uint8Array(binary.length)
+    for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i)
+    return bytes
   } catch {
-    return new Int16Array(0)
+    return new Uint8Array(0)
   }
+}
+
+export function decodePcm16(base64: string): Int16Array {
+  const bytes = decodeBase64(base64)
+  const length = bytes.byteLength - (bytes.byteLength % 2)
+  return new Int16Array(bytes.buffer, 0, length / 2)
 }

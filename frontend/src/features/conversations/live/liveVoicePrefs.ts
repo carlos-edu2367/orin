@@ -1,16 +1,22 @@
-import type { LiveSttEngineId, LiveVoiceCapabilities } from '../../../api/liveVoice'
+import type { LiveSttEngineId, LiveTtsEngineId, LiveVoiceCapabilities, LiveVoiceModel } from '../../../api/liveVoice'
 
 /** Who turns your voice into text. `auto` picks the best engine that can actually run. */
 export type SttChoice = 'auto' | LiveSttEngineId | 'browser'
 /** Who gives the companion its voice. */
-export type TtsChoice = 'auto' | 'system' | 'openai'
+export type TtsChoice = 'auto' | 'system' | LiveTtsEngineId
+export type TtsEngine = 'system' | LiveTtsEngineId
 
 export type LiveVoicePrefs = {
   micDeviceId: string
   stt: SttChoice
+  /** Chosen model per transcription engine (OpenRouter has many). */
+  sttModels: Partial<Record<LiveSttEngineId, string>>
   tts: TtsChoice
+  /** Chosen model per voice engine. */
+  ttsModels: Partial<Record<LiveTtsEngineId, string>>
+  /** Chosen voice per `engine:model` — each model has its own voices. */
+  ttsVoices: Record<string, string>
   systemVoiceUri: string | null
-  openaiVoice: string
   rate: number
   pitch: number
   /** 0 (ignores quiet sounds) .. 1 (hears a whisper). */
@@ -24,9 +30,11 @@ export type LiveVoicePrefs = {
 export const DEFAULT_LIVE_VOICE_PREFS: LiveVoicePrefs = {
   micDeviceId: 'default',
   stt: 'auto',
+  sttModels: {},
   tts: 'auto',
+  ttsModels: {},
+  ttsVoices: {},
   systemVoiceUri: null,
-  openaiVoice: 'coral',
   rate: 1.05,
   pitch: 1,
   sensitivity: 0.6,
@@ -36,21 +44,31 @@ export const DEFAULT_LIVE_VOICE_PREFS: LiveVoicePrefs = {
 
 const STORAGE_KEY = 'orin.live-voice.prefs.v1'
 const PREFS_EVENT = 'orin:live-voice-prefs'
+const STT_CHOICES: SttChoice[] = ['auto', 'local_sidecar', 'openai', 'openrouter', 'groq', 'browser']
+const TTS_CHOICES: TtsChoice[] = ['auto', 'system', 'openai', 'openrouter', 'kokoro', 'chatterbox']
 
 function clamp(value: unknown, min: number, max: number, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? Math.min(max, Math.max(min, value)) : fallback
 }
 
+function stringMap(value: unknown): Record<string, string> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return {}
+  return Object.fromEntries(Object.entries(value).filter((entry): entry is [string, string] => typeof entry[1] === 'string'))
+}
+
 export function normalizeLiveVoicePrefs(raw: unknown): LiveVoicePrefs {
   const data = typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>) : {}
-  const stt = data.stt
-  const tts = data.tts
+  const voices = stringMap(data.ttsVoices)
+  // v1 kept a single OpenAI voice; it becomes that model's voice.
+  if (typeof data.openaiVoice === 'string' && !voices['openai:gpt-4o-mini-tts']) voices['openai:gpt-4o-mini-tts'] = data.openaiVoice
   return {
     micDeviceId: typeof data.micDeviceId === 'string' && data.micDeviceId ? data.micDeviceId : 'default',
-    stt: stt === 'local_sidecar' || stt === 'openai' || stt === 'groq' || stt === 'browser' ? stt : 'auto',
-    tts: tts === 'system' || tts === 'openai' ? tts : 'auto',
+    stt: STT_CHOICES.find((choice) => choice === data.stt) ?? 'auto',
+    sttModels: stringMap(data.sttModels),
+    tts: TTS_CHOICES.find((choice) => choice === data.tts) ?? 'auto',
+    ttsModels: stringMap(data.ttsModels),
+    ttsVoices: voices,
     systemVoiceUri: typeof data.systemVoiceUri === 'string' ? data.systemVoiceUri : null,
-    openaiVoice: typeof data.openaiVoice === 'string' && data.openaiVoice ? data.openaiVoice : 'coral',
     rate: clamp(data.rate, 0.6, 1.6, DEFAULT_LIVE_VOICE_PREFS.rate),
     pitch: clamp(data.pitch, 0.5, 1.6, DEFAULT_LIVE_VOICE_PREFS.pitch),
     sensitivity: clamp(data.sensitivity, 0, 1, DEFAULT_LIVE_VOICE_PREFS.sensitivity),
@@ -92,21 +110,89 @@ export type ResolvedStt = LiveSttEngineId | 'browser' | null
 export function resolveStt(choice: SttChoice, caps: LiveVoiceCapabilities, browserSupported: boolean): ResolvedStt {
   if (choice === 'browser') return browserSupported ? 'browser' : null
   if (choice !== 'auto') return caps.stt[choice].available ? choice : null
-  if (caps.stt.local_sidecar.available) return 'local_sidecar'
-  if (caps.stt.openai.available) return 'openai'
-  if (caps.stt.groq.available) return 'groq'
+  for (const engine of ['local_sidecar', 'openai', 'openrouter', 'groq'] as const) {
+    if (caps.stt[engine].available) return engine
+  }
   return browserSupported ? 'browser' : null
 }
 
-export function resolveTts(choice: TtsChoice, caps: LiveVoiceCapabilities): 'system' | 'openai' {
-  if (choice === 'openai') return caps.tts.openai.available ? 'openai' : 'system'
+export function resolveTts(choice: TtsChoice, caps: LiveVoiceCapabilities): TtsEngine {
   if (choice === 'system') return 'system'
-  return caps.tts.openai.available ? 'openai' : 'system'
+  if (choice !== 'auto') return caps.tts[choice].available ? choice : 'system'
+  return caps.recommendedTts !== 'browser' && caps.tts[caps.recommendedTts].available ? caps.recommendedTts : 'system'
+}
+
+const DEFAULT_VOICE: Partial<Record<LiveTtsEngineId, string>> = { kokoro: 'pf_dora', chatterbox: 'default', openai: 'coral' }
+
+/** The model and voice an engine will use: the person's pick when it still exists, a sensible default otherwise. */
+export function ttsSelection(
+  prefs: LiveVoicePrefs,
+  caps: LiveVoiceCapabilities,
+  engine: LiveTtsEngineId,
+): { model: LiveVoiceModel | null; modelId: string; voice: string } {
+  const status = caps.tts[engine]
+  const wanted = prefs.ttsModels[engine]
+  const model = status.models.find((item) => item.id === wanted)
+    ?? status.models.find((item) => item.id === status.modelId)
+    ?? status.models[0]
+    ?? null
+  const modelId = model?.id ?? wanted ?? status.modelId ?? ''
+  const voices = model?.voices.length ? model.voices : status.voices
+  const chosen = prefs.ttsVoices[`${engine}:${modelId}`]
+  const fallback = DEFAULT_VOICE[engine]
+  const voice = chosen && (voices.length === 0 || voices.includes(chosen))
+    ? chosen
+    : fallback && (voices.length === 0 || voices.includes(fallback))
+      ? fallback
+      : sortVoicesForPortuguese(voices)[0] ?? ''
+  return { model, modelId, voice }
+}
+
+export function sttModelFor(prefs: LiveVoicePrefs, caps: LiveVoiceCapabilities, engine: LiveSttEngineId): string | null {
+  const status = caps.stt[engine]
+  const wanted = prefs.sttModels[engine]
+  if (wanted && (status.models.length === 0 || status.models.some((item) => item.id === wanted))) return wanted
+  return status.modelId
+}
+
+const PORTUGUESE_VOICE = /(^p[fm]_)|pt[-_]?br|portugu|brazil|brasil/i
+
+/** Portuguese voices first; otherwise the provider's own order. */
+export function sortVoicesForPortuguese(voices: readonly string[]): string[] {
+  return [...voices].sort((a, b) => Number(PORTUGUESE_VOICE.test(b)) - Number(PORTUGUESE_VOICE.test(a)))
+}
+
+const KOKORO_LANGS: Record<string, string> = {
+  a: 'inglês EUA', b: 'inglês UK', e: 'espanhol', f: 'francês', h: 'hindi', i: 'italiano', j: 'japonês', p: 'português BR', z: 'chinês',
+}
+
+export function voiceLabel(engine: TtsEngine, voice: string): string {
+  if (engine === 'kokoro') {
+    const match = /^([a-z])([fm])_(.+)$/.exec(voice)
+    if (match) {
+      const name = match[3].charAt(0).toUpperCase() + match[3].slice(1)
+      return `${name} · ${KOKORO_LANGS[match[1]] ?? match[1]} · ${match[2] === 'f' ? 'feminina' : 'masculina'}`
+    }
+  }
+  if (engine === 'openrouter' || engine === 'openai') {
+    const bare = voice.replace(/:.*$/, '')
+    return /^[a-z]+$/.test(bare) ? bare.charAt(0).toUpperCase() + bare.slice(1) : bare.replace(/_/g, ' ')
+  }
+  return voice
 }
 
 export const STT_LABELS: Record<LiveSttEngineId | 'browser', string> = {
   local_sidecar: 'Whisper local',
   openai: 'OpenAI',
+  openrouter: 'OpenRouter',
   groq: 'Groq',
   browser: 'Navegador',
+}
+
+export const TTS_LABELS: Record<TtsEngine, string> = {
+  system: 'Voz do sistema',
+  kokoro: 'Kokoro',
+  chatterbox: 'Chatterbox',
+  openai: 'OpenAI',
+  openrouter: 'OpenRouter',
 }

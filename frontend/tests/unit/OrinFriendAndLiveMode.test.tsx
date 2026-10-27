@@ -27,7 +27,7 @@ import {
 } from '../../src/features/conversations/LiveVoiceStage';
 import { EnergyVad, LIVE_FRAME_SAMPLES, StreamingResampler, levelFromRms } from '../../src/features/conversations/live/liveAudio';
 import { textForSpeech } from '../../src/features/conversations/live/liveSpeech';
-import { loadLiveVoicePrefs, resolveStt, resolveTts } from '../../src/features/conversations/live/liveVoicePrefs';
+import { loadLiveVoicePrefs, normalizeLiveVoicePrefs, resolveStt, resolveTts, ttsSelection, voiceLabel } from '../../src/features/conversations/live/liveVoicePrefs';
 import { UNAVAILABLE_CAPABILITIES } from '../../src/api/liveVoice';
 import {
   CodeSessionLiveCard,
@@ -433,8 +433,10 @@ describe('5. MediaModelsSetting — Seletores Independentes de STT e TTS + Voice
     });
   });
 
-  it('abre a configuração de voz no palco Live e mostra só o que roda de verdade, com instalação do Whisper em 1 clique', async () => {
-    let installState = 'idle';
+  it('abre a configuração de voz e escolhe motor, modelo e a voz de cada modelo (ElevenLabs v3 ≠ v4 pelo OpenRouter)', async () => {
+    let whisperState = 'idle';
+    const elevenV3 = ['adam', 'george'];
+    const elevenV4 = ['sarah', 'bella', 'will'];
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
@@ -442,25 +444,38 @@ describe('5. MediaModelsSetting — Seletores Independentes de STT e TTS + Voice
         const method = init?.method ?? 'GET';
         const json = (body: unknown, status = 200) =>
           new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+        const install = (engine: string, state: string) => ({ engine, label: engine, installed: state === 'installed', state, step: '', message: '', device: state === 'installed' ? 'cuda' : null, size_hint: '~1 GB', gpu: true });
         if (url.endsWith('/v1/live-voice/capabilities')) {
           return json({
             stt: {
-              local_sidecar: { available: false, device: 'cuda', model_id: 'faster-whisper-large-v3-turbo', reason: '', install_command: 'uv pip install faster-whisper' },
-              openai: { available: true, model_id: 'gpt-4o-mini-transcribe', reason: '' },
+              local_sidecar: { available: whisperState === 'installed', device: 'cuda', model_id: 'faster-whisper-large-v3-turbo', reason: '', install: install('whisper', whisperState) },
+              openai: { available: false, model_id: 'gpt-4o-mini-transcribe', reason: '' },
+              openrouter: { available: true, model_id: 'openai/whisper-large-v3-turbo', reason: '', models: [{ id: 'openai/whisper-large-v3-turbo', name: 'Whisper' }] },
               groq: { available: false, model_id: 'whisper-large-v3-turbo', reason: '' },
             },
-            tts: { openai: { available: true, model_id: 'gpt-4o-mini-tts', voices: ['coral', 'nova'], reason: '' } },
-            recommended_stt: 'openai',
-            recommended_tts: 'openai',
+            tts: {
+              openai: { available: false, models: [], voices: [], reason: '' },
+              openrouter: {
+                available: true,
+                model_id: 'elevenlabs/eleven-v3',
+                reason: '',
+                models: [
+                  { id: 'elevenlabs/eleven-v3', name: 'ElevenLabs: Eleven v3', vendor: 'elevenlabs', voices: elevenV3 },
+                  { id: 'elevenlabs/eleven-v4', name: 'ElevenLabs: Eleven v4', vendor: 'elevenlabs', voices: elevenV4 },
+                  { id: 'google/gemini-3.8-flash-tts', name: 'Gemini TTS', vendor: 'google', voices: ['Kore', 'Puck'], supports_instructions: true },
+                ],
+              },
+              kokoro: { available: true, model_id: 'kokoro-82m-onnx', voices: ['pf_dora', 'pm_alex', 'af_bella'], models: [{ id: 'kokoro-82m-onnx', name: 'Kokoro', voices: ['pf_dora', 'pm_alex', 'af_bella'] }], install: install('kokoro', 'installed') },
+              chatterbox: { available: false, model_id: 'chatterbox-multilingual', voices: ['default'], voice_clips: [{ id: 'default', name: 'Voz padrão do Chatterbox' }], install: install('chatterbox', 'idle') },
+            },
+            recommended_stt: 'openrouter',
+            recommended_tts: 'openrouter',
             hardware: { has_cuda: true, device_name: 'NVIDIA GeForce RTX 4060', free_vram_gb: 6, total_vram_gb: 8 },
           });
         }
-        if (url.endsWith('/v1/live-voice/local-whisper/install')) {
-          if (method === 'POST') {
-            installState = 'running';
-            return json({ state: 'running', message: 'Baixando e instalando o Whisper local…', command: 'uv pip install faster-whisper' }, 202);
-          }
-          return json({ state: installState, message: '', command: 'uv pip install faster-whisper' });
+        if (url.endsWith('/v1/live-voice/engines/whisper/install') && method === 'POST') {
+          whisperState = 'running';
+          return json(install('whisper', 'running'), 202);
         }
         return json({ items: [] });
       }),
@@ -471,18 +486,28 @@ describe('5. MediaModelsSetting — Seletores Independentes de STT e TTS + Voice
 
     const panel = await screen.findByTestId('live-voice-quick-settings');
     expect(panel.textContent).toContain('Configurar voz de Jarvis');
-    // Automático escolhe a OpenAI porque é o que está disponível; o Whisper ainda não está instalado.
-    expect(await screen.findByText('Usa o melhor disponível agora: OpenAI.')).toBeTruthy();
+    expect(await screen.findByText('Usa o melhor disponível agora: OpenRouter.')).toBeTruthy();
     expect(screen.getByTestId('live-stt-option-local_sidecar').textContent).toContain('Não instalado');
-    expect(screen.getByTestId('live-stt-option-local_sidecar').textContent).toContain('RTX 4060');
+    expect(screen.getByTestId('live-tts-option-kokoro').textContent).toContain('Pronto · GPU');
 
     fireEvent.click(screen.getByTestId('live-install-whisper-button'));
     await waitFor(() => expect(screen.getByTestId('live-install-whisper-button').textContent).toBe('Instalando…'));
 
-    // Trocar a voz para a do sistema é salvo neste dispositivo.
-    fireEvent.click(within(screen.getByTestId('live-tts-option-system')).getByRole('radio'));
+    // Automático fala pelo OpenRouter: o modelo padrão (Eleven v3) mostra as vozes dele.
+    const voicePicker = screen.getByTestId('live-quick-voice-picker');
+    const voiceSelect = () => within(voicePicker).getByTestId('live-quick-tts-select') as HTMLSelectElement;
+    expect([...voiceSelect().options].map((option) => option.value)).toEqual(elevenV3);
+    fireEvent.change(within(voicePicker).getByTestId('live-quick-tts-model-select'), { target: { value: 'elevenlabs/eleven-v4' } });
+    await waitFor(() => expect([...voiceSelect().options].map((option) => option.value)).toEqual(elevenV4));
+    fireEvent.change(voiceSelect(), { target: { value: 'bella' } });
+    expect(loadLiveVoicePrefs().ttsVoices['openrouter:elevenlabs/eleven-v4']).toBe('bella');
+
+    // Cada motor guarda sua própria voz: no Kokoro a voz em português vem primeiro.
+    fireEvent.click(within(screen.getByTestId('live-tts-option-kokoro')).getByRole('radio'));
+    await waitFor(() => expect(voiceSelect().options[0].textContent).toBe('Dora · português BR · feminina'));
     expect(await screen.findByText('✓ Salvo neste dispositivo')).toBeTruthy();
-    expect(loadLiveVoicePrefs().tts).toBe('system');
+    expect(loadLiveVoicePrefs().tts).toBe('kokoro');
+    expect(loadLiveVoicePrefs().ttsVoices['openrouter:elevenlabs/eleven-v4']).toBe('bella');
   });
 });
 
@@ -530,7 +555,7 @@ describe('6. Motor de áudio do modo Live', () => {
   it('escolhe sozinho o melhor jeito de ouvir e de falar entre o que está disponível', () => {
     const caps = {
       ...UNAVAILABLE_CAPABILITIES,
-      stt: { ...UNAVAILABLE_CAPABILITIES.stt, local_sidecar: { available: true, reason: '', modelId: 'faster-whisper-large-v3-turbo' } },
+      stt: { ...UNAVAILABLE_CAPABILITIES.stt, local_sidecar: { available: true, reason: '', modelId: 'faster-whisper-large-v3-turbo', models: [], voices: [] } },
     };
     expect(resolveStt('auto', caps, true)).toBe('local_sidecar');
     expect(resolveStt('auto', UNAVAILABLE_CAPABILITIES, true)).toBe('browser');
@@ -543,5 +568,26 @@ describe('6. Motor de áudio do modo Live', () => {
   it('fala só o texto, sem markdown, links ou marcadores de cena', () => {
     expect(textForSpeech('**Pronto!** Veja [o guia](https://x.dev) [riso leve] e `npm test`.')).toBe('Pronto! Veja o guia e npm test.');
     expect(textForSpeech('```py\nprint(1)\n```\n- Item')).toBe('Item');
+  });
+
+  it('guarda modelo e voz por motor e cai para uma voz válida quando o modelo muda', () => {
+    const model = (id: string, voices: string[]) => ({ id, name: id, vendor: id.split('/')[0], voices, supportsInstructions: false });
+    const caps = {
+      ...UNAVAILABLE_CAPABILITIES,
+      tts: {
+        ...UNAVAILABLE_CAPABILITIES.tts,
+        openrouter: { available: true, reason: '', modelId: 'elevenlabs/eleven-v3', voices: [], models: [model('elevenlabs/eleven-v3', ['adam']), model('elevenlabs/eleven-v4', ['sarah', 'bella'])] },
+      },
+      recommendedTts: 'openrouter' as const,
+    };
+    const prefs = normalizeLiveVoicePrefs({ ttsModels: { openrouter: 'elevenlabs/eleven-v4' }, ttsVoices: { 'openrouter:elevenlabs/eleven-v4': 'bella', 'openrouter:elevenlabs/eleven-v3': 'bella' } });
+    expect(resolveTts('auto', caps)).toBe('openrouter');
+    expect(ttsSelection(prefs, caps, 'openrouter')).toMatchObject({ modelId: 'elevenlabs/eleven-v4', voice: 'bella' });
+    // 'bella' does not exist in v3: the model's own first voice is used instead.
+    expect(ttsSelection({ ...prefs, ttsModels: { openrouter: 'elevenlabs/eleven-v3' } }, caps, 'openrouter')).toMatchObject({ voice: 'adam' });
+    // A model that vanished from the catalog falls back to the default model.
+    expect(ttsSelection({ ...prefs, ttsModels: { openrouter: 'gone/model' } }, caps, 'openrouter').modelId).toBe('elevenlabs/eleven-v3');
+    expect(normalizeLiveVoicePrefs({ openaiVoice: 'nova' }).ttsVoices['openai:gpt-4o-mini-tts']).toBe('nova');
+    expect(voiceLabel('kokoro', 'pm_alex')).toBe('Alex · português BR · masculina');
   });
 });

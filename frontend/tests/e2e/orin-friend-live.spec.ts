@@ -247,11 +247,20 @@ test.describe('Orin Friend & Modo Conversa Live (E2E)', () => {
       if (path === '/v1/live-voice/capabilities') {
         await fulfillJson(route, {
           stt: {
-            local_sidecar: { available: true, device: 'cuda', model_id: 'faster-whisper-large-v3-turbo', reason: 'Whisper local pronto (GPU).' },
+            local_sidecar: {
+              available: true, device: 'cuda', model_id: 'faster-whisper-large-v3-turbo', reason: 'Whisper local pronto (GPU).',
+              install: { engine: 'whisper', label: 'Whisper local', installed: true, state: 'installed', step: '', message: '', device: 'cuda', size_hint: '', gpu: true },
+            },
             openai: { available: false, model_id: 'gpt-4o-mini-transcribe', reason: '' },
+            openrouter: { available: false, model_id: 'openai/whisper-large-v3-turbo', reason: '' },
             groq: { available: false, model_id: 'whisper-large-v3-turbo', reason: '' },
           },
-          tts: { openai: { available: false, model_id: 'gpt-4o-mini-tts', voices: [], reason: '' } },
+          tts: {
+            openai: { available: false, model_id: 'gpt-4o-mini-tts', voices: [], reason: '' },
+            openrouter: { available: false, models: [], reason: '' },
+            kokoro: { available: false, model_id: 'kokoro-82m-onnx', voices: ['pf_dora'], install: { engine: 'kokoro', label: 'Kokoro', installed: false, state: 'idle', step: '', message: '', device: null, size_hint: '~400 MB', gpu: true } },
+            chatterbox: { available: false, model_id: 'chatterbox-multilingual', voices: ['default'], voice_clips: [{ id: 'default', name: 'Voz padrão do Chatterbox' }], install: { engine: 'chatterbox', label: 'Chatterbox', installed: false, state: 'idle', step: '', message: '', device: null, size_hint: '~6 GB', gpu: true } },
+          },
           recommended_stt: 'local_sidecar',
           recommended_tts: 'browser',
           hardware: { has_cuda: true, device_name: 'NVIDIA GeForce RTX 4060', free_vram_gb: 6, total_vram_gb: 8 },
@@ -259,10 +268,6 @@ test.describe('Orin Friend & Modo Conversa Live (E2E)', () => {
         return
       }
 
-      if (path === '/v1/live-voice/local-whisper/install') {
-        await fulfillJson(route, { state: 'installed', message: '', command: 'uv pip install faster-whisper' })
-        return
-      }
 
       if (path.includes('/v1/settings/media-models/') && method === 'PUT') {
         const modality = path.split('/').pop() ?? 'audio'
@@ -369,9 +374,14 @@ test.describe('Orin Friend & Modo Conversa Live (E2E)', () => {
     await expect(page.getByTestId('live-voice-captions')).toContainText('Oi Orin, tudo bem?')
   })
 
-  test('fala a resposta: o trecho <speak> do turno vira áudio pelo WebSocket e o palco mostra a legenda', async ({ page }) => {
+  test('fala a resposta com a voz escolhida do modelo (OpenRouter · ElevenLabs v4) e mostra a legenda', async ({ page }) => {
     await page.addInitScript(() => {
-      window.localStorage.setItem('orin.live-voice.prefs.v1', JSON.stringify({ tts: 'openai', openaiVoice: 'nova', endSilenceMs: 400 }))
+      window.localStorage.setItem('orin.live-voice.prefs.v1', JSON.stringify({
+        tts: 'openrouter',
+        ttsModels: { openrouter: 'elevenlabs/eleven-v4' },
+        ttsVoices: { 'openrouter:elevenlabs/eleven-v4': 'bella' },
+        endSilenceMs: 400,
+      }))
     })
     await page.route('**/v1/live-voice/capabilities', (route) => fulfillJson(route, {
       stt: {
@@ -379,9 +389,22 @@ test.describe('Orin Friend & Modo Conversa Live (E2E)', () => {
         openai: { available: true, model_id: 'gpt-4o-mini-transcribe', reason: '' },
         groq: { available: false, model_id: 'whisper-large-v3-turbo', reason: '' },
       },
-      tts: { openai: { available: true, model_id: 'gpt-4o-mini-tts', voices: ['coral', 'nova'], reason: '' } },
+      tts: {
+        openai: { available: false, models: [], voices: [], reason: '' },
+        openrouter: {
+          available: true,
+          model_id: 'elevenlabs/eleven-v3',
+          reason: '',
+          models: [
+            { id: 'elevenlabs/eleven-v3', name: 'ElevenLabs: Eleven v3', vendor: 'elevenlabs', voices: ['adam'] },
+            { id: 'elevenlabs/eleven-v4', name: 'ElevenLabs: Eleven v4', vendor: 'elevenlabs', voices: ['sarah', 'bella'] },
+          ],
+        },
+        kokoro: { available: false, voices: [], models: [], reason: '' },
+        chatterbox: { available: false, voices: [], models: [], reason: '' },
+      },
       recommended_stt: 'local_sidecar',
-      recommended_tts: 'openai',
+      recommended_tts: 'openrouter',
       hardware: { has_cuda: true, device_name: 'NVIDIA GeForce RTX 4060', free_vram_gb: 6, total_vram_gb: 8 },
     }))
     let replied = false
@@ -406,6 +429,7 @@ test.describe('Orin Friend & Modo Conversa Live (E2E)', () => {
     })
 
     const spoken: Array<Record<string, unknown>> = []
+    const configs: Array<Record<string, unknown>> = []
     await page.routeWebSocket(/\/v1\/conversations\/[^/]+\/live/, (ws) => {
       ws.send(JSON.stringify({ type: 'session.ready', conversation_id: FRIEND_CONVERSATION_ID, audio_epoch: 1 }))
       let transcribed = false
@@ -416,15 +440,22 @@ test.describe('Orin Friend & Modo Conversa Live (E2E)', () => {
           transcribed = true
           ws.send(JSON.stringify({ type: 'stt.transcript', is_end_of_utterance: true, text: 'Como você está?', audio_epoch: 1 }))
         }
+        if (event.type === 'config') configs.push(event)
         if (event.type === 'speak_text') {
           spoken.push(event)
-          // 1.2 s of a soft 220 Hz tone at 24 kHz stands in for the synthesized voice.
+          // A cloud voice answers with an encoded file the browser decodes itself:
+          // 1.2 s of a soft 220 Hz tone as a 24 kHz WAV stands in for it.
           const samples = new Int16Array(24000 * 1.2)
           for (let i = 0; i < samples.length; i += 1) samples[i] = Math.round(Math.sin((2 * Math.PI * 220 * i) / 24000) * 6000)
-          const pcm = Buffer.from(samples.buffer).toString('base64')
+          const header = Buffer.alloc(44)
+          header.write('RIFF', 0); header.writeUInt32LE(36 + samples.byteLength, 4); header.write('WAVE', 8)
+          header.write('fmt ', 12); header.writeUInt32LE(16, 16); header.writeUInt16LE(1, 20); header.writeUInt16LE(1, 22)
+          header.writeUInt32LE(24000, 24); header.writeUInt32LE(48000, 28); header.writeUInt16LE(2, 32); header.writeUInt16LE(16, 34)
+          header.write('data', 36); header.writeUInt32LE(samples.byteLength, 40)
+          const wav = Buffer.concat([header, Buffer.from(samples.buffer)]).toString('base64')
           ws.send(JSON.stringify({
-            type: 'tts.chunk', epoch: 1, audio_epoch: 1, chunk_seq: 0, clean_text: String(event.text), pcm_base64: pcm,
-            sample_rate: 24000, duration_ms: 1200, word_timings: [], provider: 'openai',
+            type: 'tts.chunk', epoch: 1, audio_epoch: 1, chunk_seq: 0, clean_text: String(event.text), encoding: 'wav', audio_base64: wav,
+            mime: 'audio/wav', sample_rate: 0, duration_ms: 1200, word_timings: [], provider: 'openrouter',
           }))
         }
       })
@@ -433,10 +464,11 @@ test.describe('Orin Friend & Modo Conversa Live (E2E)', () => {
     await page.goto('/')
     await page.getByTestId('sidebar-orin-friend-button').click()
     await page.getByTestId('composer-live-voice-toggle').click()
-    await expect(page.getByTestId('live-voice-active-profile-pill')).toContainText('Voz OpenAI')
+    await expect(page.getByTestId('live-voice-active-profile-pill')).toContainText('OpenRouter · Bella')
 
     await expect.poll(() => spoken.length, { timeout: 20_000 }).toBeGreaterThan(0)
     expect(spoken[0]).toMatchObject({ type: 'speak_text', text: 'Tudo ótimo por aqui!' })
+    expect(configs.at(-1)).toMatchObject({ tts_provider: 'openrouter', tts_model: 'elevenlabs/eleven-v4', voice_id: 'bella' })
     await expect(page.getByTestId('live-voice-stage')).toHaveAttribute('data-voice-state', 'speaking')
     await expect(page.getByTestId('live-voice-assistant-caption')).toContainText('Tudo ótimo por aqui!')
     await page.screenshot({ path: test.info().outputPath('live-speaking.png') })

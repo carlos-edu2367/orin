@@ -837,3 +837,15 @@
 /* Chat header labelled actions (Personalizar / Voz). */
 .chat__text-action { display: inline-flex; align-items: center; gap: 6px; width: auto; padding: 0 10px; }
 .chat__text-action .chat__action-label { font-size: 12.5px; font-weight: 600; }
+
+.voice-settings__subpanel {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border-radius: 14px;
+  border: 1px dashed var(--orin-border);
+  background: var(--orin-surface-translucent);
+}
+
+.voice-settings__row select { flex: 1; min-width: 0; }
+.voice-option__extra.voice-field { display: grid; gap: 4px; width: 100%; }

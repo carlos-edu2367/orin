@@ -7,7 +7,7 @@ import { BrowserRecognition, browserRecognitionSupported } from './browserRecogn
 import { isEchoOfRecentTts } from './echo'
 import { EnergyVad, LIVE_SAMPLE_RATE, MicAccessError, MicCapture, concatPcm, type VadEvent } from './liveAudio'
 import { SpeechOutput } from './liveSpeech'
-import { resolveStt, resolveTts, type LiveVoicePrefs, type ResolvedStt } from './liveVoicePrefs'
+import { resolveStt, resolveTts, sttModelFor, ttsSelection, type LiveVoicePrefs, type ResolvedStt, type TtsEngine } from './liveVoicePrefs'
 
 export type AssistantSpeechItem = { id: string; text: string }
 
@@ -35,7 +35,10 @@ export type UseLiveVoiceOptions = {
 export type LiveVoiceController = {
   phase: LiveVoicePhase
   sttEngine: ResolvedStt
-  ttsEngine: 'system' | 'openai'
+  ttsEngine: TtsEngine
+  /** Model and voice the chosen engine speaks with ('' for the system voice). */
+  ttsModelId: string
+  ttsVoice: string
   userText: string
   assistantText: string
   assistantCharIndex: number
@@ -61,6 +64,10 @@ export function useLiveVoice(options: UseLiveVoiceOptions): LiveVoiceController 
   // Until the server says what can run, nothing is started: a guess would open the wrong engine.
   const sttEngine = capabilities ? resolveStt(prefs.stt, caps, browserSupported) : null
   const ttsEngine = resolveTts(prefs.tts, caps)
+  const ttsChoice = ttsEngine === 'system' ? { modelId: '', voice: '' } : ttsSelection(prefs, caps, ttsEngine)
+  const ttsModelId = ttsChoice.modelId
+  const ttsVoice = ttsChoice.voice
+  const sttModel = sttEngine && sttEngine !== 'browser' ? sttModelFor(prefs, caps, sttEngine) : null
 
   const [micState, setMicState] = useState<'connecting' | 'ready' | 'error'>('connecting')
   const [userSpeaking, setUserSpeaking] = useState(false)
@@ -191,7 +198,11 @@ export function useLiveVoice(options: UseLiveVoiceOptions): LiveVoiceController 
       case 'tts.chunk':
         epochRef.current = event.epoch ?? event.audio_epoch ?? epochRef.current
         if (suppressRef.current) break
-        speechRef.current?.playPcm(event.clean_text, event.pcm_base64, event.sample_rate, event.chunk_seq)
+        if (event.encoding && event.encoding !== 'pcm16' && event.audio_base64) {
+          speechRef.current?.playEncoded(event.clean_text, event.audio_base64, event.chunk_seq)
+        } else if (event.pcm_base64) {
+          speechRef.current?.playPcm(event.clean_text, event.pcm_base64, event.sample_rate, event.chunk_seq)
+        }
         break
       case 'tts.error':
         setIssue({ code: event.code, message: event.message, hint: event.hint })
@@ -301,21 +312,21 @@ export function useLiveVoice(options: UseLiveVoiceOptions): LiveVoiceController 
     speechRef.current?.setSystemVoice({ voiceUri: prefs.systemVoiceUri, rate: prefs.rate, pitch: prefs.pitch })
   }, [prefs.sensitivity, prefs.systemVoiceUri, prefs.rate, prefs.pitch])
 
-  // Tell the server which engines to use.
-  const capsStt = caps.stt
+  // Tell the server which engines, models and voice to use.
   useEffect(() => {
     if (!active) return
     const socket = socketRef.current
     if (!socket) return
     const serverStt = sttEngine && sttEngine !== 'browser' ? sttEngine : null
     socket.sendConfig({
-      ...(serverStt ? { stt_provider: serverStt, stt_model: capsStt[serverStt].modelId ?? undefined } : {}),
-      tts_provider: ttsEngine === 'openai' ? 'openai' : 'local_sidecar',
-      ...(ttsEngine === 'openai' ? { tts_model: 'gpt-4o-mini-tts', voice_id: prefs.openaiVoice } : {}),
+      ...(serverStt ? { stt_provider: serverStt, ...(sttModel ? { stt_model: sttModel } : {}) } : {}),
+      // The system voice never reaches the server; `local_sidecar` keeps its config valid.
+      tts_provider: ttsEngine === 'system' ? 'local_sidecar' : ttsEngine,
+      ...(ttsEngine !== 'system' ? { tts_model: ttsModelId, voice_id: ttsVoice } : {}),
       speed: prefs.rate,
       language: 'pt',
     })
-  }, [active, conversationId, sttEngine, ttsEngine, prefs.openaiVoice, prefs.rate, capsStt])
+  }, [active, conversationId, sttEngine, sttModel, ttsEngine, ttsModelId, ttsVoice, prefs.rate])
 
   // Browser recognition runs alongside the microphone (which still drives the meter and barge-in).
   useEffect(() => {
@@ -359,7 +370,7 @@ export function useLiveVoice(options: UseLiveVoiceOptions): LiveVoiceController 
       if (spoken.has(item.id)) continue
       spoken.add(item.id)
       if (suppressRef.current || mutedRef.current) continue
-      if (latest.current.ttsEngine === 'openai' && socketRef.current?.isOpen()) {
+      if (latest.current.ttsEngine !== 'system' && socketRef.current?.isOpen()) {
         setAwaitingReply(true)
         socketRef.current.sendSpeakText(item.text, latest.current.options.voiceInstructions)
       } else {
@@ -420,6 +431,8 @@ export function useLiveVoice(options: UseLiveVoiceOptions): LiveVoiceController 
     phase,
     sttEngine,
     ttsEngine,
+    ttsModelId,
+    ttsVoice,
     userText,
     assistantText,
     assistantCharIndex,

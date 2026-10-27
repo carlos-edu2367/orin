@@ -6,7 +6,7 @@ import type { LiveVoicePhase } from './activityTypes'
 import { LiveVoiceQuickSettings } from './LiveVoiceQuickSettings'
 import { LevelMeter } from './live/LevelMeter'
 import { LiveOrb } from './live/LiveOrb'
-import { loadLiveVoicePrefs, onLiveVoicePrefsChange, STT_LABELS, type LiveVoicePrefs } from './live/liveVoicePrefs'
+import { loadLiveVoicePrefs, onLiveVoicePrefsChange, STT_LABELS, TTS_LABELS, voiceLabel, type LiveVoicePrefs } from './live/liveVoicePrefs'
 import { orbTheme } from './live/orbThemes'
 import { useLiveVoice, type AssistantSpeechItem } from './live/useLiveVoice'
 
@@ -212,9 +212,11 @@ export function LiveVoiceStage({
   const greeting = userNickname ? `Oi, ${userNickname}!` : 'Oi!'
   const speakingNow = phase === 'speaking'
   const sttLabel = voice.sttEngine ? STT_LABELS[voice.sttEngine] : 'Sem transcrição'
-  const ttsLabel = voice.ttsEngine === 'openai' ? 'Voz OpenAI' : 'Voz do sistema'
+  const ttsLabel = voice.ttsEngine === 'system' || !voice.ttsVoice
+    ? TTS_LABELS[voice.ttsEngine]
+    : `${TTS_LABELS[voice.ttsEngine]} · ${voiceLabel(voice.ttsEngine, voice.ttsVoice).split(' · ')[0]}`
   const issueNeedsSetup = voice.issue
-    && ['no_stt', 'local_stt_unavailable', 'cloud_stt_no_key', 'browser_network', 'cloud_tts_no_key'].includes(voice.issue.code)
+    && ['no_stt', 'local_stt_unavailable', 'local_stt_failed', 'local_tts_unavailable', 'local_tts_failed', 'cloud_stt_no_key', 'browser_network', 'cloud_tts_no_key'].includes(voice.issue.code)
 
   return (
     <div

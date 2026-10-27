@@ -31,6 +31,9 @@ datas += [
     (str(WEB), "web"),
     (str(PLAYWRIGHT_DRIVER), "playwright/driver"),
     (str(ROOT / "src" / "agentos" / "persistence" / "postgres" / "migrations"), "agentos/persistence/postgres/migrations"),
+    # Voice engine workers run as plain scripts inside their own isolated
+    # environments (see agentos.live_voice.local_runtime), so they ship as files.
+    (str(ROOT / "src" / "agentos" / "live_voice" / "workers"), "agentos/live_voice/workers"),
 ]
 binaries = collect_dynamic_libs("pypdfium2")
 # ripgrep for Grep: bundled when the release step placed it under packaging/vendor/ripgrep (see its README).

@@ -1517,7 +1517,12 @@ export type LiveVoiceServerEvent =
       audio_epoch?: number
       chunk_seq: number
       clean_text: string
-      pcm_base64: string
+      /** Raw 16-bit PCM; absent when the engine returned an encoded file. */
+      pcm_base64?: string
+      /** `pcm16` (default) or an encoded `mp3`/`wav` in `audio_base64`. */
+      encoding?: 'pcm16' | 'mp3' | 'wav'
+      audio_base64?: string
+      mime?: string
       sample_rate: number
       duration_ms: number
       word_timings: WordTiming[]

@@ -23,6 +23,7 @@ from agentos.live_voice.engines import (
     synthesize_openai_speech,
     transcribe_openai_compatible,
 )
+from agentos.live_voice.local_runtime import LocalEngineRuntime
 from agentos.live_voice.providers import MultiProviderSTTAdapter
 from agentos.live_voice.session import register_live_voice_routes
 
@@ -55,12 +56,13 @@ def test_stt_adapter_never_invents_a_transcript() -> None:
     assert result.text == ""
 
 
-def test_local_whisper_reports_install_hint_when_missing(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(LocalWhisperEngine, "is_installed", staticmethod(lambda: False))
+def test_local_whisper_reports_install_hint_when_missing(tmp_path) -> None:
+    engine = LocalWhisperEngine(LocalEngineRuntime(root=tmp_path))
+    engine.importable = staticmethod(lambda: False)  # type: ignore[method-assign]
     with pytest.raises(VoiceEngineError) as caught:
-        LocalWhisperEngine().transcribe(_speech_pcm(), sample_rate=16000)
+        engine.transcribe(_speech_pcm(), sample_rate=16000)
     assert caught.value.code == "local_stt_unavailable"
-    assert caught.value.hint == engines.LOCAL_WHISPER_INSTALL_COMMAND
+    assert caught.value.hint == "install:whisper"
 
 
 def test_openai_transcription_posts_wav_and_returns_text() -> None:
@@ -102,18 +104,22 @@ def test_openai_speech_requests_raw_pcm_and_sanitises_voice() -> None:
     assert seen["instructions"] == "calmo"
 
 
-def _app(principal_for: Any = None, services: Any = None) -> FastAPI:
+def _app(principal_for: Any = None, services: Any = None, runtime: Any = None) -> FastAPI:
     app = FastAPI()
-    register_live_voice_routes(app, services=services, principal_for=principal_for)
+    register_live_voice_routes(app, services=services, principal_for=principal_for, runtime=runtime)
     return app
 
 
-def test_capabilities_endpoint_reports_only_what_can_run(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(LocalWhisperEngine, "is_installed", staticmethod(lambda: False))
-    payload = TestClient(_app()).get("/v1/live-voice/capabilities").json()
+def test_capabilities_endpoint_reports_only_what_can_run(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    monkeypatch.setattr(LocalWhisperEngine, "importable", staticmethod(lambda: False))
+    payload = TestClient(_app(runtime=LocalEngineRuntime(root=tmp_path))).get("/v1/live-voice/capabilities").json()
     assert payload["stt"]["local_sidecar"]["available"] is False
-    assert payload["stt"]["local_sidecar"]["install_command"] == engines.LOCAL_WHISPER_INSTALL_COMMAND
+    assert payload["stt"]["local_sidecar"]["install"]["state"] == "idle"
     assert payload["stt"]["openai"]["available"] is False
+    assert payload["stt"]["openrouter"]["available"] is False
+    assert payload["tts"]["kokoro"]["available"] is False
+    assert payload["tts"]["kokoro"]["voices"][:3] == ["pf_dora", "pm_alex", "pm_santa"]
+    assert payload["tts"]["chatterbox"]["voice_clips"] == [{"id": "default", "name": "Voz padrão do Chatterbox"}]
     assert payload["recommended_stt"] in {"browser", "groq"}
     assert payload["recommended_tts"] == "browser"
 
@@ -142,9 +148,9 @@ def test_websocket_validates_csrf_from_query_string() -> None:
     assert calls == [("tok-1", None)]
 
 
-def test_websocket_reports_stt_error_instead_of_fake_text(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(LocalWhisperEngine, "is_installed", staticmethod(lambda: False))
-    with TestClient(_app()).websocket_connect("/v1/conversations/c1/live") as ws:
+def test_websocket_reports_stt_error_instead_of_fake_text(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    monkeypatch.setattr(LocalWhisperEngine, "importable", staticmethod(lambda: False))
+    with TestClient(_app(runtime=LocalEngineRuntime(root=tmp_path))).websocket_connect("/v1/conversations/c1/live") as ws:
         ws.receive_json()
         ws.send_json({"type": "config", "stt_provider": "local_sidecar"})
         ws.receive_json()

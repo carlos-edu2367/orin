@@ -119,7 +119,9 @@ CREATE = {
 INSTANCE = {
     ("GET", "/v1/plugins/library"), ("GET", "/v1/mcp/catalog"), ("GET", "/v1/installation/status"), ("GET", "/v1/instance"),
     ("GET", "/v1/live-voice/hardware"), ("GET", "/v1/live-voice/hardware-status"),
-    ("GET", "/v1/live-voice/local-whisper/install"), ("POST", "/v1/live-voice/local-whisper/install"),
+    # Local voice engines (and Chatterbox reference clips) are installed once per machine.
+    ("GET", "/v1/live-voice/engines/{engine}/install"), ("POST", "/v1/live-voice/engines/{engine}/install"),
+    ("POST", "/v1/live-voice/engines/chatterbox/voices"), ("DELETE", "/v1/live-voice/engines/chatterbox/voices/{clip_id}"),
     ("DELETE", "/v1/installation/versions/{version}"), ("POST", "/v1/installation/update"),
     ("GET", "/v1/installation/update/status"), ("POST", "/v1/installation/update/prepare"),
     ("GET", "/v1/installation/autostart"), ("PUT", "/v1/installation/autostart"),

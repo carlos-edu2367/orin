@@ -11,19 +11,24 @@ from typing import Any
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict, Field
 
+from agentos.api.contracts import ApplicationNotFoundError, ApplicationValidationError
 from agentos.agentic.speak_stream import BoundaryKind, ProsodicChunk, SpeakStreamParser
 from agentos.live_voice.credentials import CLOUD_VOICE_PROVIDERS, resolve_cloud_credential
 from agentos.live_voice.engines import (
-    LOCAL_WHISPER_INSTALL_COMMAND,
     OPENAI_TTS_SAMPLE_RATE,
     OPENAI_TTS_VOICES,
     LocalWhisperEngine,
-    LocalWhisperInstaller,
+    OpenRouterVoiceCatalog,
     VoiceEngineError,
+    synthesize_local,
     synthesize_openai_speech,
+    synthesize_openrouter_speech,
     transcribe_openai_compatible,
+    transcribe_openrouter,
 )
+from agentos.live_voice.local_runtime import ENGINE_SPECS, KOKORO_VOICES, LocalEngineRuntime, local_runtime
 from agentos.live_voice.hardware_governor import VoiceHardwareGovernor
 from agentos.live_voice.prosody_continuity import ProsodyContinuityEngine
 from agentos.live_voice.providers import (
@@ -42,6 +47,8 @@ from agentos.live_voice.vad_eou import (
     SileroVADDetector,
     is_echo_of_recent_tts,
 )
+
+OPENROUTER_DEFAULT_STT_MODEL = "openai/whisper-large-v3-turbo"
 
 # Limite máximo de 60 segundos de áudio PCM 16kHz mono Int16 (~1.92 MB) para prevenir DoS de memória
 MAX_PCM_INPUT_BUFFER_BYTES = 16000 * 2 * 60
@@ -305,10 +312,10 @@ class LiveVoiceSession:
 
         self.voice_config = VoiceConfig(
             tts_provider=tts_prov,
-            tts_model=str(payload.get("tts_model") or self.voice_config.tts_model).strip(),
+            tts_model=str(payload.get("tts_model") or self.voice_config.tts_model).strip()[:160],
             stt_provider=stt_prov,
             stt_model=str(payload.get("stt_model") or self.voice_config.stt_model).strip(),
-            voice_id=str(payload.get("voice_id") or self.voice_config.voice_id).strip(),
+            voice_id=str(payload.get("voice_id") or self.voice_config.voice_id).strip()[:160],
             reference_audio_path=payload.get(
                 "reference_audio_path", self.voice_config.reference_audio_path
             ),
@@ -422,24 +429,33 @@ class LiveVoiceSession:
             )
         return events
 
-    def register_cloud_chunk(
+    def register_audio_chunk(
         self,
         clean_text: str,
-        pcm_bytes: bytes,
+        audio_bytes: bytes,
         sample_rate: int,
         *,
         provider: str,
+        encoding: str = "pcm16",
     ) -> dict[str, Any]:
-        """Ledger + echo bookkeeping for one chunk synthesized by a real cloud engine."""
+        """Ledger + echo bookkeeping for one chunk synthesized by a real engine.
+
+        PCM carries its own length; an encoded chunk (MP3/WAV) is decoded by the
+        browser, so its duration is estimated from the text for the ledger.
+        """
         seq = self.next_chunk_seq
         self.next_chunk_seq += 1
-        aligned = pcm_bytes if len(pcm_bytes) % 2 == 0 else pcm_bytes[:-1]
-        duration_ms = max(1, int(round(len(aligned) / 2 / max(1, sample_rate) * 1000.0)))
+        if encoding == "pcm16":
+            payload = audio_bytes if len(audio_bytes) % 2 == 0 else audio_bytes[:-1]
+            duration_ms = max(1, int(round(len(payload) / 2 / max(1, sample_rate) * 1000.0)))
+        else:
+            payload = audio_bytes
+            duration_ms = max(400, len(clean_text.split()) * 330)
         entry = self.ledger.register_chunk(chunk_seq=seq, clean_text=clean_text, duration_ms=duration_ms)
         self.recent_tts_texts.append(clean_text)
         if len(self.recent_tts_texts) > 8:
             self.recent_tts_texts = self.recent_tts_texts[-8:]
-        return {
+        event: dict[str, Any] = {
             "type": "tts.chunk",
             "audio_epoch": self.audio_epoch,
             "epoch": self.audio_epoch,
@@ -449,24 +465,45 @@ class LiveVoiceSession:
             "boundary_kind": BoundaryKind.PERIOD.value,
             "sample_rate": sample_rate,
             "duration_ms": entry.duration_ms,
-            "pcm_base64": base64.b64encode(aligned).decode("ascii"),
+            "encoding": encoding,
             "word_timings": [wt.to_dict() for wt in entry.word_timings],
             "provider": provider,
             "model_id": self.voice_config.tts_model,
         }
+        if encoding == "pcm16":
+            event["pcm_base64"] = base64.b64encode(payload).decode("ascii")
+        else:
+            event["audio_base64"] = base64.b64encode(payload).decode("ascii")
+            event["mime"] = "audio/mpeg" if encoding == "mp3" else "audio/wav"
+        return event
+
+    def register_cloud_chunk(self, clean_text: str, pcm_bytes: bytes, sample_rate: int, *, provider: str) -> dict[str, Any]:
+        return self.register_audio_chunk(clean_text, pcm_bytes, sample_rate, provider=provider)
+
+
+REAL_TTS_PROVIDERS = frozenset({"openai", "openrouter", "kokoro", "chatterbox"})
+LOCAL_TTS_PROVIDERS = frozenset({"kokoro", "chatterbox"})
 
 
 def _voice_capabilities(
     governor: VoiceHardwareGovernor,
     services: Any,
     user_id: str | None,
+    runtime: LocalEngineRuntime,
+    catalog: OpenRouterVoiceCatalog,
 ) -> dict[str, Any]:
     """What can actually run for this person right now — never what merely could."""
     profile = governor.recommend()
-    whisper_installed = LocalWhisperEngine.is_installed()
-    whisper_device = LocalWhisperEngine.preferred_device() if whisper_installed else ("cuda" if profile.has_cuda else "cpu")
+    whisper = LocalWhisperEngine(runtime)
+    whisper_installed = whisper.is_installed()
+    whisper_device = whisper.device() if whisper_installed else ("cuda" if profile.has_cuda else "cpu")
     openai_ready = resolve_cloud_credential(services, user_id, "openai") is not None
     groq_ready = resolve_cloud_credential(services, user_id, "groq") is not None
+    openrouter_ready = resolve_cloud_credential(services, user_id, "openrouter") is not None
+    # The catalog is public, but it is only worth a request when the person can use it.
+    speech_models = catalog.speech_models() if openrouter_ready else []
+    transcription_models = catalog.transcription_models() if openrouter_ready else []
+    engines = {engine: runtime.status(engine) for engine in ENGINE_SPECS}
     stt = {
         "local_sidecar": {
             "available": whisper_installed,
@@ -477,12 +514,18 @@ def _voice_capabilities(
                 if whisper_installed
                 else "Instale o Whisper local para transcrever sem nuvem."
             ),
-            "install_command": None if whisper_installed else LOCAL_WHISPER_INSTALL_COMMAND,
+            "install": engines["whisper"],
         },
         "openai": {
             "available": openai_ready,
             "model_id": "gpt-4o-mini-transcribe",
             "reason": "Usa a sua chave OpenAI." if openai_ready else "Configure uma chave OpenAI em Configurações → Provedores.",
+        },
+        "openrouter": {
+            "available": openrouter_ready,
+            "model_id": OPENROUTER_DEFAULT_STT_MODEL,
+            "models": [{"id": m["id"], "name": m["name"]} for m in transcription_models],
+            "reason": "Usa a sua chave OpenRouter." if openrouter_ready else "Configure uma chave OpenRouter em Configurações → Provedores.",
         },
         "groq": {
             "available": groq_ready,
@@ -490,27 +533,74 @@ def _voice_capabilities(
             "reason": "Usa GROQ_API_KEY." if groq_ready else "Defina GROQ_API_KEY no ambiente do Orin.",
         },
     }
+    clips = [{"id": "default", "name": "Voz padrão do Chatterbox"}] + runtime.list_voice_clips()
     tts = {
         "openai": {
             "available": openai_ready,
             "model_id": "gpt-4o-mini-tts",
+            "models": [{"id": m["id"], "name": m["label"], "voices": list(OPENAI_TTS_VOICES)} for m in SUPPORTED_TTS_PROVIDERS["openai"]["models"]],
             "voices": list(OPENAI_TTS_VOICES),
             "reason": "Voz natural da OpenAI com a sua chave." if openai_ready else "Configure uma chave OpenAI em Configurações → Provedores.",
+        },
+        "openrouter": {
+            "available": openrouter_ready and bool(speech_models),
+            "model_id": next((m["id"] for m in speech_models if m["id"].startswith("elevenlabs/")), speech_models[0]["id"] if speech_models else None),
+            "models": speech_models,
+            "reason": (
+                "ElevenLabs, Gemini, Voxtral e outras vozes com a sua chave OpenRouter."
+                if openrouter_ready
+                else "Configure uma chave OpenRouter em Configurações → Provedores."
+            ),
+        },
+        "kokoro": {
+            "available": engines["kokoro"]["installed"],
+            "model_id": "kokoro-82m-onnx",
+            "models": [{"id": "kokoro-82m-onnx", "name": "Kokoro-82M v1.0", "voices": list(KOKORO_VOICES)}],
+            "voices": list(KOKORO_VOICES),
+            "reason": "Leve, roda na CPU, sem internet." if engines["kokoro"]["installed"] else "Instale para ter uma voz local leve.",
+            "install": engines["kokoro"],
+        },
+        "chatterbox": {
+            "available": engines["chatterbox"]["installed"],
+            "model_id": "chatterbox-multilingual",
+            "models": [{"id": "chatterbox-multilingual", "name": "Chatterbox Multilingual", "voices": [c["id"] for c in clips]}],
+            "voices": [c["id"] for c in clips],
+            "voice_clips": clips,
+            "reason": (
+                "Voz mais natural e clonável, roda na sua GPU."
+                if engines["chatterbox"]["installed"]
+                else "Instale para a voz local mais expressiva (recomenda GPU NVIDIA)."
+            ),
+            "install": engines["chatterbox"],
         },
     }
     if whisper_installed:
         recommended_stt = "local_sidecar"
     elif openai_ready:
         recommended_stt = "openai"
+    elif openrouter_ready:
+        recommended_stt = "openrouter"
     elif groq_ready:
         recommended_stt = "groq"
     else:
         recommended_stt = "browser"
+    if engines["chatterbox"]["installed"] and profile.has_cuda:
+        recommended_tts = "chatterbox"
+    elif openai_ready:
+        recommended_tts = "openai"
+    elif tts["openrouter"]["available"]:
+        recommended_tts = "openrouter"
+    elif engines["kokoro"]["installed"]:
+        recommended_tts = "kokoro"
+    elif engines["chatterbox"]["installed"]:
+        recommended_tts = "chatterbox"
+    else:
+        recommended_tts = "browser"
     return {
         "stt": stt,
         "tts": tts,
         "recommended_stt": recommended_stt,
-        "recommended_tts": "openai" if openai_ready else "browser",
+        "recommended_tts": recommended_tts,
         "hardware": {
             "has_cuda": bool(profile.has_cuda),
             "device_name": profile.device_name,
@@ -520,18 +610,32 @@ def _voice_capabilities(
     }
 
 
+class VoiceClipUpload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(default="", max_length=60)
+    filename: str = Field(min_length=1, max_length=200)
+    data_base64: str = Field(min_length=4, max_length=17_000_000)
+
+
 def register_live_voice_routes(
     app: FastAPI,
     services: Any = None,
     principal_for: Callable[..., Any] | None = None,
+    *,
+    runtime: LocalEngineRuntime | None = None,
+    openrouter_catalog: OpenRouterVoiceCatalog | None = None,
 ) -> None:
     """Registra as rotas HTTP e WebSocket do Motor de Áudio Full-Duplex do Orin:
     - `GET /v1/live-voice/hardware-status`
     - `GET /v1/live-voice/capabilities`
+    - `GET|POST /v1/live-voice/engines/{engine}/install`
+    - `POST|DELETE /v1/live-voice/engines/chatterbox/voices`
     - `WEBSOCKET /v1/conversations/{conversation_id}/live`
     """
     governor = VoiceHardwareGovernor()
-    whisper = LocalWhisperEngine()
+    engines_runtime = runtime or local_runtime()
+    catalog = openrouter_catalog or OpenRouterVoiceCatalog()
+    whisper = LocalWhisperEngine(engines_runtime)
 
     def _optional_user_id(request: Request) -> str | None:
         if principal_for is None:
@@ -540,6 +644,14 @@ def register_live_voice_routes(
             return str(principal_for(request).user_id)
         except Exception:
             return None
+
+    def _mutable(request: Request, purpose: str) -> None:
+        if principal_for is None:
+            return
+        principal = principal_for(request, mutable=True)
+        security = getattr(services, "security", None)
+        if security is not None:
+            security.authorize(principal, action="conversation.create", resource_id=None, purpose=purpose)
 
     @app.get("/v1/live-voice/hardware-status")
     @app.get("/v1/live-voice/hardware")
@@ -583,25 +695,40 @@ def register_live_voice_routes(
             user_id: str | None = str(principal.user_id)
         else:
             user_id = None
-        payload = await run_in_threadpool(_voice_capabilities, governor, services, user_id)
+        payload = await run_in_threadpool(_voice_capabilities, governor, services, user_id, engines_runtime, catalog)
         return JSONResponse(payload)
 
-    installer = LocalWhisperInstaller()
+    def _known_engine(engine: str) -> str:
+        if engine not in ENGINE_SPECS:
+            raise ApplicationNotFoundError(engine)
+        return engine
 
-    @app.get("/v1/live-voice/local-whisper/install")
-    async def get_local_whisper_install(request: Request) -> JSONResponse:
+    @app.get("/v1/live-voice/engines/{engine}/install")
+    async def get_engine_install(engine: str, request: Request) -> JSONResponse:
         if principal_for is not None:
             principal_for(request)
-        return JSONResponse(installer.status())
+        return JSONResponse(engines_runtime.status(_known_engine(engine)))
 
-    @app.post("/v1/live-voice/local-whisper/install")
-    async def start_local_whisper_install(request: Request) -> JSONResponse:
-        if principal_for is not None:
-            principal = principal_for(request, mutable=True)
-            security = getattr(services, "security", None)
-            if security is not None:
-                security.authorize(principal, action="conversation.create", resource_id=None, purpose="live_voice.install_whisper")
-        return JSONResponse(installer.start(), status_code=202)
+    @app.post("/v1/live-voice/engines/{engine}/install")
+    async def start_engine_install(engine: str, request: Request) -> JSONResponse:
+        _mutable(request, f"live_voice.install_{engine}")
+        return JSONResponse(engines_runtime.start_install(_known_engine(engine)), status_code=202)
+
+    @app.post("/v1/live-voice/engines/chatterbox/voices")
+    async def upload_chatterbox_voice(payload: VoiceClipUpload, request: Request) -> JSONResponse:
+        _mutable(request, "live_voice.voice_clip")
+        try:
+            clip = await run_in_threadpool(engines_runtime.save_voice_clip, payload.name, payload.filename, payload.data_base64)
+        except ValueError as exc:
+            raise ApplicationValidationError(str(exc)) from exc
+        return JSONResponse(clip, status_code=201)
+
+    @app.delete("/v1/live-voice/engines/chatterbox/voices/{clip_id}")
+    async def delete_chatterbox_voice(clip_id: str, request: Request) -> JSONResponse:
+        _mutable(request, "live_voice.voice_clip")
+        if not engines_runtime.delete_voice_clip(clip_id):
+            raise ApplicationNotFoundError(clip_id)
+        return JSONResponse({"id": clip_id, "deleted": True})
 
     def _transcribe(session: LiveVoiceSession, user_id: str | None, pcm: bytes, sample_rate: int, hint: str) -> str:
         provider = session.voice_config.stt_provider
@@ -619,7 +746,14 @@ def register_live_voice_routes(
                 raise VoiceEngineError(
                     "cloud_stt_no_key",
                     "Sem chave configurada para este provedor de transcrição.",
-                    hint="Configurações → Provedores" if provider == "openai" else "GROQ_API_KEY",
+                    hint="GROQ_API_KEY" if provider == "groq" else "Configurações → Provedores",
+                )
+            if provider == "openrouter":
+                model_id = session.voice_config.stt_model
+                if "/" not in model_id:
+                    model_id = OPENROUTER_DEFAULT_STT_MODEL
+                return transcribe_openrouter(
+                    credential, pcm, sample_rate=sample_rate, language=session.voice_config.language, model_id=model_id
                 )
             default_model = SUPPORTED_STT_PROVIDERS[provider]["models"][0]["id"]
             model_id = session.voice_config.stt_model
@@ -636,18 +770,44 @@ def register_live_voice_routes(
             return hint
         raise VoiceEngineError("stt_provider_unsupported", f"O provedor de transcrição {provider!r} ainda não é suportado.")
 
-    def _synthesize_cloud(session: LiveVoiceSession, user_id: str | None, text: str, instructions: str | None) -> bytes:
-        credential = resolve_cloud_credential(services, user_id, "openai")
+    def _synthesize(session: LiveVoiceSession, user_id: str | None, text: str, instructions: str | None) -> tuple[bytes, int, str]:
+        """Return (audio, sample rate, encoding) from the engine the session chose."""
+        provider = session.voice_config.tts_provider
+        if provider in LOCAL_TTS_PROVIDERS:
+            pcm, rate = synthesize_local(
+                engines_runtime,
+                provider,
+                text,
+                voice=session.voice_config.voice_id,
+                speed=session.voice_config.speed,
+                language=session.voice_config.language,
+            )
+            return pcm, rate, "pcm16"
+        credential = resolve_cloud_credential(services, user_id, provider)
         if credential is None:
             raise VoiceEngineError(
                 "cloud_tts_no_key",
-                "Sem chave OpenAI para a voz natural; usando a voz do sistema.",
+                f"Sem chave {'OpenRouter' if provider == 'openrouter' else 'OpenAI'} para essa voz; usando a voz do sistema.",
                 hint="Configurações → Provedores",
             )
+        if provider == "openrouter":
+            model_id = session.voice_config.tts_model
+            model = catalog.model(model_id) if "/" in model_id else None
+            voices = model["voices"] if model else []
+            voice = session.voice_config.voice_id if not voices or session.voice_config.voice_id in voices else voices[0]
+            audio, encoding, rate = synthesize_openrouter_speech(
+                credential,
+                text,
+                model_id=model_id,
+                voice=voice or None,
+                speed=session.voice_config.speed,
+                instructions=instructions,
+            )
+            return audio, rate, encoding
         model_id = session.voice_config.tts_model
         if model_id not in {m["id"] for m in SUPPORTED_TTS_PROVIDERS["openai"]["models"]}:
             model_id = "gpt-4o-mini-tts"
-        return synthesize_openai_speech(
+        pcm = synthesize_openai_speech(
             credential,
             text,
             model_id=model_id,
@@ -655,6 +815,7 @@ def register_live_voice_routes(
             speed=session.voice_config.speed,
             instructions=instructions,
         )
+        return pcm, OPENAI_TTS_SAMPLE_RATE, "pcm16"
 
     @app.websocket("/v1/conversations/{conversation_id}/live")
     @app.websocket("/v1/conversations/{conversation_id}/live-voice")
@@ -762,13 +923,15 @@ def register_live_voice_routes(
 
                 elif msg_type == "speak_text":
                     raw_text = str(msg.get("text") or "")
-                    if session.voice_config.tts_provider == "openai" and principal_for is not None:
+                    provider = session.voice_config.tts_provider
+                    # Cloud voices need the person's key, so they run only on an authenticated socket.
+                    if provider in LOCAL_TTS_PROVIDERS or (provider in REAL_TTS_PROVIDERS and principal_for is not None):
                         clean = re.sub(r"</?speak>", "", raw_text, flags=re.IGNORECASE).strip()[:2000]
                         if not clean:
                             continue
                         try:
-                            pcm = await run_in_threadpool(
-                                _synthesize_cloud,
+                            audio, rate, encoding = await run_in_threadpool(
+                                _synthesize,
                                 session,
                                 user_id,
                                 clean,
@@ -778,7 +941,7 @@ def register_live_voice_routes(
                             await websocket.send_json({**exc.to_event("tts.error"), "text": clean})
                             continue
                         await websocket.send_json(
-                            session.register_cloud_chunk(clean, pcm, OPENAI_TTS_SAMPLE_RATE, provider="openai")
+                            session.register_audio_chunk(clean, audio, rate, provider=provider, encoding=encoding)
                         )
                         continue
                     override_raw = msg.get("chunk_duration_override_ms")
