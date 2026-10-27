@@ -19,6 +19,7 @@ from sqlalchemy import (
     UniqueConstraint,
     create_engine,
     ForeignKeyConstraint,
+    text,
 )
 
 
@@ -699,7 +700,7 @@ media_model_selections = Table(
     Column("model_id", String(512), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),
     UniqueConstraint("user_id", "modality", name="uq_media_model_selections_user_modality"),
-    CheckConstraint("modality IN ('image', 'audio', 'video')", name="ck_media_model_selections_modality"),
+    CheckConstraint("modality IN ('image', 'audio', 'video', 'stt')", name="ck_media_model_selections_modality"),
 )
 
 conversation_dispatches = Table(
@@ -915,6 +916,8 @@ agent_memories = Table(
     # contradict. A preference outranks an operational note for prompt space.
     Column("kind", String(16), nullable=False, server_default="fact"),
     Column("confidence", Float, nullable=False, server_default="1.0"),
+    Column("emotional_valence", Float, nullable=False, server_default=text("0.0")),
+    Column("salience", Float, nullable=False, server_default=text("0.5")),
     # Who produced it. Without this, a wrong memory is untraceable.
     Column("source", String(16), nullable=False, server_default="user_explicit"),
     Column("hit_count", Integer, nullable=False, server_default="0"),
@@ -929,6 +932,22 @@ agent_memories = Table(
     UniqueConstraint("user_id", "scope_type", "project_id", "fact", name="uq_agent_memories_scope_fact"),
 )
 Index("ix_agent_memories_user_updated", agent_memories.c.user_id, agent_memories.c.updated_at)
+
+user_friend_personas = Table(
+    "user_friend_personas", metadata,
+    Column("user_id", String(255), primary_key=True),
+    Column("version", Integer, nullable=False, server_default=text("1")),
+    Column("bond_stage", String(32), nullable=False, server_default="acquaintance"),
+    Column("affinity_score", Float, nullable=False, server_default=text("10.0")),
+    Column("current_mood", String(64), nullable=False, server_default="sereno"),
+    Column("traits_json", JSON, nullable=False, default=dict),
+    Column("style_notes_json", JSON, nullable=False, default=list),
+    Column("compiled_rubric", Text, nullable=False, server_default=""),
+    Column("interaction_count", Integer, nullable=False, server_default=text("0")),
+    Column("soul_sha256", String(64), nullable=False, server_default=""),
+    Column("last_reflected_at", DateTime(timezone=True), nullable=True),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+)
 
 # Agent Skills are procedural packages.  Keep identity, immutable published
 # versions and execution evidence distinct: a current version may move while
@@ -1176,6 +1195,7 @@ __all__ = [
     "projects",
     "workspace_roots",
     "agent_memories",
+    "user_friend_personas",
     "skills",
     "skill_versions",
     "agent_skills",

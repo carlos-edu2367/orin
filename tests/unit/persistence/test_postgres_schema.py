@@ -51,6 +51,7 @@ def test_persistence_schema_contains_only_the_durable_boundary_tables():
             "vision_model_selections",
             "media_model_selections",
             "agent_memories",
+            "user_friend_personas",
             "skills",
             "skill_versions",
             "agent_skills",
@@ -114,3 +115,24 @@ def test_schema_binds_audit_and_outbox_to_the_full_record_scope():
     assert any(constraint.name == "uq_persistence_records_ownership" for constraint in records.constraints)
     assert any(len(constraint.column_keys) == 8 for constraint in audit.foreign_key_constraints)
     assert any(len(constraint.column_keys) == 8 for constraint in outbox.foreign_key_constraints)
+
+
+def test_schema_includes_friend_persona_and_affective_memory_columns():
+    memories = metadata.tables["agent_memories"]
+    personas = metadata.tables["user_friend_personas"]
+
+    assert {"emotional_valence", "salience"} <= set(memories.c.keys())
+    assert {
+        "user_id",
+        "version",
+        "bond_stage",
+        "affinity_score",
+        "current_mood",
+        "traits_json",
+        "style_notes_json",
+        "compiled_rubric",
+        "interaction_count",
+        "soul_sha256",
+        "last_reflected_at",
+        "updated_at",
+    } <= set(personas.c.keys())

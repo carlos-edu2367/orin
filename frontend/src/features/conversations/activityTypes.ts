@@ -9,7 +9,10 @@
 
 export const activityStates = [
   'queued',
+  'listening',
   'working',
+  'speaking',
+  'interrupted',
   'waiting_tool',
   'waiting_agent',
   'waiting_user',
@@ -21,6 +24,19 @@ export const activityStates = [
 ] as const
 
 export type ActivityState = (typeof activityStates)[number]
+export type OrinMode = 'friend' | 'chat' | 'cowork' | 'code'
+export type LiveVoicePhase = 'listening' | 'thinking' | 'working' | 'speaking' | 'interrupted'
+export type DelegatedCodeSessionInfo = {
+  code_conversation_id: string
+  goal: string
+  status: 'running' | 'completed' | 'failed'
+  completed_todo_count: number
+  total_todo_count: number
+  active_task_title?: string | null
+  modified_files_count?: number
+  examined_files_count?: number
+  friendly_milestone?: string | null
+}
 
 /** Drives the icon, grouping rule and copy for an activity card. */
 export type ActivityKind = 'lifecycle' | 'message' | 'tool' | 'agent' | 'artifact'
@@ -205,6 +221,7 @@ export type ConversationActivityEvent = {
   elapsedMs?: number
   /** Live task list emitted by `todo_write`. */
   todos?: TodoItem[]
+  delegatedCodeSession?: DelegatedCodeSessionInfo
 }
 
 export type ActivityEvent = ConversationActivityEvent

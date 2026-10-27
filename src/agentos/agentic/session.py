@@ -407,6 +407,24 @@ def memories_for_task(memory_store: object | None, task: str) -> list[dict[str, 
         return []
 
 
+def memories_for_friend_task(memory_store: object | None, task: str) -> list[dict[str, object]]:
+    """Dual-layer affective and relational memories for Orin Friend."""
+    if memory_store is None:
+        return []
+    try:
+        friend_ranker = getattr(memory_store, "relevant_for_friend", None)
+        if callable(friend_ranker):
+            items = list(friend_ranker(task, limit=18))
+            affective = [item for item in items if str(item.get("scope_type") or "") == "friend"]
+            return affective if affective else items
+        lister = getattr(memory_store, "list_friend_memories", None)
+        if callable(lister):
+            return list(lister(limit=18))
+    except Exception:  # noqa: BLE001 - a prompt enrichment never breaks a turn
+        return []
+    return []
+
+
 def learning_sink_for(memory_store, record, project_id: str | None):
     """Turn what a turn learned into stored memory and one visible card.
 
@@ -449,11 +467,11 @@ def learning_sink_for(memory_store, record, project_id: str | None):
 
 def build_system_prompt(
     *,
-    tool_names: tuple[str, ...],
-    memories: list[dict[str, object]],
-    agents: list[dict[str, object]],
-    workspace_hint: str,
-    subagents_enabled: bool,
+    tool_names: tuple[str, ...] = (),
+    memories: Sequence[Mapping[str, object]] = (),
+    agents: Sequence[Mapping[str, object]] = (),
+    workspace_hint: str = "",
+    subagents_enabled: bool = True,
     child_model_ids: tuple[str, ...] = (),
     skill_catalog: tuple[object, ...] = (),
     tool_ledger: tuple[Mapping[str, str], ...] = (),
@@ -466,6 +484,12 @@ def build_system_prompt(
     mcp_servers: tuple[Mapping[str, Any], ...] = (),
     stable_override: str = "",
     public_names: bool = False,
+    conversation_mode: str = "chat",
+    live_mode: bool = False,
+    friend_rubric: str = "",
+    friend_mood: str = "",
+    friend_memories: Sequence[Mapping[str, object]] = (),
+    **_extra_kwargs: object,
 ) -> tuple[str, str]:
     from agentos.agentic.tools.public_names import public_name
 
@@ -519,8 +543,19 @@ def build_system_prompt(
             "- If approved, use `create_skill` with a concrete discovery description, when_to_use, when_not_to_use, a short evidence-led Workflow, and Validation. Declare only tools available now; a Skill never grants permissions or runs scripts automatically.",
             "- Improve an existing custom Skill with `edit_skill`; this publishes a new immutable version. Never attempt to alter a system Skill or another user's Skill.",
         ]
-    from .prompts import extension_guidance_lines
+    from .prompts import (
+        FRIEND_SYSTEM_PROMPT_SECTION,
+        LIVE_MODE_SPEAK_GUIDANCE,
+        extension_guidance_lines,
+    )
     lines += extension_guidance_lines(tool_names)
+    norm_conv_mode = str(conversation_mode or "chat").strip().lower()
+    if norm_conv_mode == "friend":
+        lines += ["", FRIEND_SYSTEM_PROMPT_SECTION]
+        if friend_rubric and str(friend_rubric).strip():
+            lines += ["", str(friend_rubric).strip()]
+    if live_mode or norm_conv_mode == "friend":
+        lines += ["", LIVE_MODE_SPEAK_GUIDANCE]
     lines += [
         "",
         "## Workspace",
@@ -597,7 +632,23 @@ def build_system_prompt(
         ]
     if memories:
         volatile += ["", "## What you remember about this user"]
-        volatile += [f"- {item['fact']}" for item in memories[:12]]
+        volatile += [f"- {item['fact']}" for item in list(memories)[:12] if item.get("fact")]
+    if friend_mood and str(friend_mood).strip():
+        volatile += [
+            "",
+            "## Estado Emocional e Humor Atual (Orin Friend)",
+            f"- Humor atual: {str(friend_mood).strip()}",
+        ]
+    if friend_memories:
+        volatile += [
+            "",
+            "## Memórias Afetivas e Relacionais (Dual-Layer)",
+        ]
+        for item in list(friend_memories)[:18]:
+            cat = str(item.get("category") or "friend").strip()
+            fact_val = str(item.get("fact") or "").strip()
+            if fact_val:
+                volatile.append(f"- [{cat}] {fact_val}")
     if hook_context:
         volatile += [
             "",
@@ -927,8 +978,23 @@ class TurnSession:
         consolidation_state=None,
         background_runner: Callable[[Callable[[], None]], object] | None = None,
         file_history_root: Path | str | None = None,
+        friend_persona_store=None,
+        conversation_mode: str | None = None,
     ) -> None:
         self.turn = turn
+        self.friend_persona_store = friend_persona_store
+        raw_conv_mode = str(
+            conversation_mode
+            or turn.get("conversation_mode")
+            or turn.get("mode")
+            or ("code" if turn.get("code_mode") == "code" else "chat")
+        ).strip().lower()
+        self.conversation_mode = raw_conv_mode if raw_conv_mode in {"chat", "code", "friend"} else "chat"
+        self.turn["conversation_mode"] = self.conversation_mode
+        if self.conversation_mode == "friend" and "live_mode" not in self.turn:
+            self.turn["live_mode"] = True
+        self._built_system_prompt: str | None = None
+        self._built_volatile_prompt: str | None = None
         self.lifecycle: LifecycleBus | None = lifecycle
         # The turn model's catalog prices; the cost estimator uses them when the provider reports no cost.
         self.catalog_pricing = dict(catalog_pricing) if catalog_pricing else None
@@ -1443,6 +1509,19 @@ class TurnSession:
             return
         if state == "running" and agent_id is not None:
             self._record(AgentActivityEventType.TURN_STARTED, f"{agent_name or 'Subagente'} trabalhando", base, agent_id=actor)
+            return
+        if state in {
+            AgentActivityEventType.SPEAK_BLOCK_STARTED.value,
+            AgentActivityEventType.SPEAK_DELTA.value,
+            AgentActivityEventType.SPEAK_CHUNK_READY.value,
+            AgentActivityEventType.SPEAK_FILLER_TRIGGERED.value,
+            AgentActivityEventType.SPEAK_INTERRUPTED.value,
+            AgentActivityEventType.SPEAK_FINISHED.value,
+            AgentActivityEventType.CODE_SESSION_PROGRESS.value,
+        }:
+            summary_text = str(payload.get("summary") or payload.get("clean_text") or state)[:240]
+            clean_payload = {k: v for k, v in payload.items() if k != "summary"}
+            self._record(AgentActivityEventType(state), summary_text, clean_payload, agent_id=actor)
             return
 
     # -- subagents ------------------------------------------------------
@@ -4427,6 +4506,21 @@ class TurnSession:
                     )[:12]
             except Exception:
                 project_sessions = ()
+        friend_rubric = ""
+        friend_mood = ""
+        friend_memories: list[dict[str, object]] = []
+        if self.conversation_mode == "friend" and not prompt_blocked:
+            if self.friend_persona_store is not None:
+                try:
+                    sync_fn = getattr(self.friend_persona_store, "sync_from_disk_if_modified", None)
+                    if callable(sync_fn) and active_user_id:
+                        sync_fn(active_user_id)
+                    persona_state = self.friend_persona_store.get_or_create(active_user_id or "local-user")
+                    friend_rubric = str(getattr(persona_state, "compiled_rubric", "") or "")
+                    friend_mood = str(getattr(persona_state, "current_mood", "") or "")
+                except Exception:
+                    logger.debug("friend persona could not be loaded for turn", exc_info=True)
+            friend_memories = memories_for_friend_task(self.memory, task)
         prompt, volatile_prompt = build_system_prompt(
             tool_names=prompt_tool_names,
             memories=memories,
@@ -4452,7 +4546,14 @@ class TurnSession:
             workspace_guidance="" if self.turn.get("code_mode") == "code" else workspace_guidance,
             project_sessions=project_sessions,
             mcp_servers=toolset.mcp_server_summaries(),
+            conversation_mode=self.conversation_mode,
+            live_mode=bool(self.turn.get("live_mode")) or self.conversation_mode == "friend",
+            friend_rubric=friend_rubric,
+            friend_mood=friend_mood,
+            friend_memories=friend_memories,
         )
+        self._built_system_prompt = prompt
+        self._built_volatile_prompt = volatile_prompt
         first_user_context = ""
         if code_turn_context:
             if self.effective_settings.get("excludeDynamicSystemPromptSections") is True:
@@ -4530,6 +4631,22 @@ class TurnSession:
         if resumed is not None:
             runtime.contract = resumed
         return runtime
+
+    @property
+    def _system_prompt(self) -> str:
+        if self._built_system_prompt is None:
+            self.build_runtime()
+        return self._built_system_prompt or ""
+
+    @property
+    def _volatile_prompt(self) -> str:
+        if self._built_volatile_prompt is None:
+            self.build_runtime()
+        return self._built_volatile_prompt or ""
+
+    def run(self):
+        runtime = self.build_runtime()
+        return runtime.run(str(self.turn["turn_id"]), turn=self.turn)
 
     def _managed_workspace_is_new(self) -> bool:
         if self.workspace_is_local:

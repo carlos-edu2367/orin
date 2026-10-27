@@ -7,16 +7,18 @@ import {
   listProviderModels,
   getMediaModelSettings,
   setMediaModelSetting,
+  getVoiceHardwareDiagnostic,
   type MediaModality,
   type MediaModelSettings,
+  type MediaProviderName,
   type ProviderModel,
-  type ProviderName,
+  type VoiceHardwareDiagnostic,
 } from '../../api/providers'
 
 const AUTOMATIC_VALUE = 'automatic'
 
 type MediaModelsSettingProps = {
-  client: ApiClient
+  client?: ApiClient
   bootstrap?: BrowserSessionBootstrap
 }
 
@@ -27,6 +29,64 @@ type ModalityMeta = {
   searchLabel: string
   searchPlaceholder: string
   description: string
+}
+
+type BuiltinVoicePreset = {
+  provider: MediaProviderName
+  model_id: string
+  display_name: string
+}
+
+const VOICE_PRESETS_BY_MODALITY: Partial<Record<MediaModality, ReadonlyArray<BuiltinVoicePreset>>> = {
+  audio: [
+    {
+      provider: 'local_sidecar',
+      model_id: 'chatterbox-pt-br',
+      display_name: 'Chatterbox PT-BR Expressive (Sidecar Local · GPU >= 6GB)',
+    },
+    {
+      provider: 'local_sidecar',
+      model_id: 'f5-tts-pt-br',
+      display_name: 'F5-TTS PT-BR Flow-Matching (Sidecar Local · GPU >= 4GB)',
+    },
+    {
+      provider: 'local_sidecar',
+      model_id: 'kokoro-82m-onnx',
+      display_name: 'Kokoro-82M v1.0 ONNX (Sidecar Local · CPU Ultra-Rápido)',
+    },
+    {
+      provider: 'elevenlabs',
+      model_id: 'eleven_flash_v2_5',
+      display_name: 'ElevenLabs Flash v2.5 (~75ms Cloud)',
+    },
+    {
+      provider: 'openai',
+      model_id: 'gpt-4o-mini-tts',
+      display_name: 'OpenAI GPT-4o Mini TTS (Cloud)',
+    },
+  ],
+  stt: [
+    {
+      provider: 'local_sidecar',
+      model_id: 'faster-whisper-large-v3-turbo',
+      display_name: 'Faster-Whisper Large-v3-Turbo (Sidecar Local · GPU/CPU int8)',
+    },
+    {
+      provider: 'groq',
+      model_id: 'whisper-large-v3-turbo',
+      display_name: 'Groq Whisper Large-v3-Turbo (<200ms Cloud)',
+    },
+    {
+      provider: 'deepgram',
+      model_id: 'nova-3',
+      display_name: 'Deepgram Nova-3 Streaming (Cloud)',
+    },
+    {
+      provider: 'openai',
+      model_id: 'gpt-4o-mini-transcribe',
+      display_name: 'OpenAI GPT-4o Mini Transcribe (Cloud)',
+    },
+  ],
 }
 
 const MODALITIES: ReadonlyArray<ModalityMeta> = [
@@ -40,11 +100,19 @@ const MODALITIES: ReadonlyArray<ModalityMeta> = [
   },
   {
     id: 'audio',
-    title: 'Áudio e voz',
+    title: 'Áudio e voz — TTS',
     selectLabel: 'Modelo padrão de áudio',
     searchLabel: 'Filtrar modelos de áudio',
-    searchPlaceholder: 'Ex.: eleven v3, tts-1, kokoro…',
-    description: 'Usado em generate_audio para locução, síntese de voz (TTS) e efeitos sonoros.',
+    searchPlaceholder: 'Ex.: chatterbox, f5-tts, kokoro, eleven v3…',
+    description: 'Usado na Conversa Live, no Orin Friend e em generate_audio para síntese de voz (TTS) expressiva.',
+  },
+  {
+    id: 'stt',
+    title: 'Ouvido e transcrição — STT',
+    selectLabel: 'Modelo padrão de transcrição (STT)',
+    searchLabel: 'Filtrar modelos de transcrição',
+    searchPlaceholder: 'Ex.: faster-whisper, groq, deepgram…',
+    description: 'Usado para transcrição em tempo real (STT) do microfone durante o modo Conversa Live.',
   },
   {
     id: 'video',
@@ -59,17 +127,40 @@ const MODALITIES: ReadonlyArray<ModalityMeta> = [
 const DEFAULT_SETTINGS: MediaModelSettings = {
   image: { provider: null, modelId: null, mode: 'automatic' },
   audio: { provider: null, modelId: null, mode: 'automatic' },
+  stt: { provider: null, modelId: null, mode: 'automatic' },
   video: { provider: null, modelId: null, mode: 'automatic' },
 }
 
-export function MediaModelsSetting({ client, bootstrap: providedBootstrap }: MediaModelsSettingProps) {
-  const bootstrap =
-    providedBootstrap ??
-    (typeof document === 'undefined' ? { status: 'missing_csrf' as const } : readBrowserSessionBootstrap(document))
+export function MediaModelsSetting({ client: providedClient, bootstrap: providedBootstrap }: MediaModelsSettingProps = {}) {
+  const client = useMemo(
+    () =>
+      providedClient ??
+      new ApiClient({
+        fetchImpl: (...args) => fetch(...args),
+        csrfToken: 'orin-session-csrf',
+        maxAttempts: 1,
+        createIdempotencyKey: () => `media-intent-${Date.now()}`,
+      }),
+    [providedClient],
+  )
+  const bootstrap: BrowserSessionBootstrap = useMemo(() => {
+    if (providedBootstrap) return providedBootstrap
+    if (!providedClient) return { status: 'ready', csrfToken: 'orin-session-csrf' }
+    return typeof document === 'undefined'
+      ? { status: 'missing_csrf' as const }
+      : readBrowserSessionBootstrap(document)
+  }, [providedBootstrap, providedClient])
+
   const [models, setModels] = useState<ProviderModel[]>([])
   const [modelsLoaded, setModelsLoaded] = useState(false)
   const [settings, setSettings] = useState<MediaModelSettings | null>(null)
-  const [queries, setQueries] = useState<Record<MediaModality, string>>({ image: '', audio: '', video: '' })
+  const [hardwareDiag, setHardwareDiag] = useState<VoiceHardwareDiagnostic | null>(null)
+  const [queries, setQueries] = useState<Record<MediaModality, string>>({
+    image: '',
+    audio: '',
+    stt: '',
+    video: '',
+  })
   const [pendingModality, setPendingModality] = useState<MediaModality | null>(null)
   const [error, setError] = useState<ApiError | null>(null)
   const intents = useRef(new Map<MediaModality, MutationIntent>())
@@ -92,16 +183,28 @@ export function MediaModelsSetting({ client, bootstrap: providedBootstrap }: Med
         if (err instanceof DOMException && err.name === 'AbortError') return
         setSettings(DEFAULT_SETTINGS)
       })
+    getVoiceHardwareDiagnostic(client, controller.signal)
+      .then((diag) => {
+        if (!controller.signal.aborted && (diag.reason || diag.gpu_name || diag.free_vram_gb > 0)) {
+          setHardwareDiag(diag)
+        }
+      })
+      .catch(() => {
+        // Diagnóstico de hardware opcional
+      })
     return () => controller.abort()
   }, [client])
 
   const modelsByModality = useMemo(() => {
-    const map: Record<MediaModality, ProviderModel[]> = { image: [], audio: [], video: [] }
+    const map: Record<MediaModality, ProviderModel[]> = { image: [], audio: [], stt: [], video: [] }
     for (const model of models) {
       for (const mod of ['image', 'audio', 'video'] as const) {
         if (model.output_modalities.includes(mod)) {
           map[mod].push(model)
         }
+      }
+      if (model.input_modalities.includes('audio')) {
+        map.stt.push(model)
       }
     }
     return map
@@ -109,6 +212,11 @@ export function MediaModelsSetting({ client, bootstrap: providedBootstrap }: Med
 
   async function onChange(modality: MediaModality, value: string) {
     if (pendingModality !== null || bootstrap.status === 'missing_csrf') return
+    const optimisticNext =
+      value === AUTOMATIC_VALUE
+        ? { provider: null, modelId: null, mode: 'automatic' as const }
+        : { ...splitValue(value), mode: 'manual' as const }
+    setSettings((prev) => ({ ...(prev ?? DEFAULT_SETTINGS), [modality]: optimisticNext }))
     setPendingModality(modality)
     setError(null)
     let intent = intents.current.get(modality)
@@ -130,14 +238,74 @@ export function MediaModelsSetting({ client, bootstrap: providedBootstrap }: Med
     }
   }
 
+  async function onSaveAllSettings() {
+    if (!settings || bootstrap.status === 'missing_csrf') return
+    setError(null)
+    try {
+      await fetch('/v1/settings/media-models', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          image: {
+            provider: settings.image.provider,
+            model_id: settings.image.modelId,
+            mode: settings.image.mode,
+          },
+          audio: {
+            provider: settings.audio.provider,
+            model_id: settings.audio.modelId,
+            mode: settings.audio.mode,
+          },
+          stt: {
+            provider: settings.stt.provider,
+            model_id: settings.stt.modelId,
+            mode: settings.stt.mode,
+          },
+          video: {
+            provider: settings.video.provider,
+            model_id: settings.video.modelId,
+            mode: settings.video.mode,
+          },
+        }),
+      })
+    } catch (err) {
+      setError(toApiError(err))
+    }
+  }
+
   return (
     <section className="vision-model-setting media-models-setting" aria-labelledby="media-models-setting-title">
-      <h2 id="media-models-setting-title">Geração de mídia</h2>
+      <h2 id="media-models-setting-title">Geração de mídia e Voz Live</h2>
       <p className="vision-model-setting__hint">
-        Defina o provider e o modelo padrão para criar imagens, áudios e vídeos. O modelo escolhido aqui é autorizado
-        automaticamente e usado mesmo quando o chat está em outro provider — além disso, outros favoritos dos seus
-        providers ativos continuam disponíveis se você pedir no prompt.
+        Defina o provider e o modelo padrão para criar imagens, síntese de voz (TTS), transcrição de ouvido (STT) e
+        vídeos. No modo Automático, o VoiceHardwareGovernor seleciona o melhor modelo local ou cloud sem travar seu PC.
       </p>
+
+      {hardwareDiag && (
+        <div
+          className="voice-hardware-governor-card"
+          data-testid="voice-hardware-governor-card"
+          style={{
+            marginBottom: '1rem',
+            padding: '0.85rem 1rem',
+            borderRadius: '0.75rem',
+            background: 'rgba(139, 92, 246, 0.08)',
+            border: '1px solid rgba(139, 92, 246, 0.28)',
+          }}
+        >
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.75rem' }}>
+            <strong>◈ Governador de Hardware de Voz (Auto-Routing)</strong>
+            <span>
+              {hardwareDiag.gpu_available
+                ? `${hardwareDiag.gpu_name ?? 'GPU'} · ${hardwareDiag.free_vram_gb.toFixed(1)} GB VRAM livre`
+                : `CPU · ${hardwareDiag.free_ram_gb.toFixed(1)} GB RAM livre`}
+            </span>
+          </div>
+          {hardwareDiag.reason && (
+            <p style={{ margin: '0.35rem 0 0', fontSize: '0.85rem', opacity: 0.88 }}>{hardwareDiag.reason}</p>
+          )}
+        </div>
+      )}
 
       <div className="media-models-setting__rows">
         {MODALITIES.map((meta) => {
@@ -149,11 +317,19 @@ export function MediaModelsSetting({ client, bootstrap: providedBootstrap }: Med
           const query = queries[meta.id]
           const words = query.toLowerCase().split(/\s+/).filter(Boolean)
           const allForMod = modelsByModality[meta.id]
+          const builtinPresets = VOICE_PRESETS_BY_MODALITY[meta.id] ?? []
           const filtered = allForMod.filter((item) => {
             const key = `${item.provider}:${item.model_id}`
             if (key === currentValue) return true
             if (words.length === 0) return true
             const haystack = `${item.display_name} ${item.model_id} ${providerLabel(item.provider)}`.toLowerCase()
+            return words.every((word) => haystack.includes(word))
+          })
+          const filteredPresets = builtinPresets.filter((preset) => {
+            const key = `${preset.provider}:${preset.model_id}`
+            if (key === currentValue) return true
+            if (words.length === 0) return true
+            const haystack = `${preset.display_name} ${preset.model_id} ${providerLabel(preset.provider)}`.toLowerCase()
             return words.every((word) => haystack.includes(word))
           })
           const favorites = filtered.filter((item) => item.is_favorite)
@@ -200,11 +376,24 @@ export function MediaModelsSetting({ client, bootstrap: providedBootstrap }: Med
                     {currentSetting?.mode === 'manual' &&
                       currentSetting.provider &&
                       currentSetting.modelId &&
-                      !filtered.some((m) => `${m.provider}:${m.model_id}` === currentValue) && (
+                      !filtered.some((m) => `${m.provider}:${m.model_id}` === currentValue) &&
+                      !filteredPresets.some((p) => `${p.provider}:${p.model_id}` === currentValue) && (
                         <option value={currentValue}>
                           {currentSetting.modelId} ({providerLabel(currentSetting.provider)})
                         </option>
                       )}
+                    {filteredPresets.length > 0 && (
+                      <optgroup label="Voz Live & Sidecar Local">
+                        {filteredPresets.map((preset) => (
+                          <option
+                            key={`${preset.provider}:${preset.model_id}`}
+                            value={`${preset.provider}:${preset.model_id}`}
+                          >
+                            {preset.display_name} ({providerLabel(preset.provider)})
+                          </option>
+                        ))}
+                      </optgroup>
+                    )}
                     {favorites.length > 0 && (
                       <optgroup label="Favoritos">
                         {favorites.map((model) => (
@@ -232,12 +421,24 @@ export function MediaModelsSetting({ client, bootstrap: providedBootstrap }: Med
                   </select>
                 </div>
               </div>
-              {modelsLoaded && allForMod.length === 0 && (
+              {modelsLoaded && allForMod.length === 0 && builtinPresets.length === 0 && (
                 <p role="status">Nenhum modelo de {meta.title.toLowerCase()} encontrado no catálogo ainda.</p>
               )}
             </div>
           )
         })}
+      </div>
+
+      <div style={{ marginTop: '1rem', display: 'flex', justifyContent: 'flex-end' }}>
+        <button
+          type="button"
+          className="btn-secondary"
+          data-testid="save-media-models-button"
+          disabled={!settings || bootstrap.status === 'missing_csrf'}
+          onClick={() => void onSaveAllSettings()}
+        >
+          Salvar configurações de voz e mídia
+        </button>
       </div>
 
       {bootstrap.status === 'missing_csrf' && (
@@ -248,12 +449,12 @@ export function MediaModelsSetting({ client, bootstrap: providedBootstrap }: Med
   )
 }
 
-function splitValue(value: string): { provider: ProviderName; modelId: string } {
+function splitValue(value: string): { provider: MediaProviderName; modelId: string } {
   const [provider, ...rest] = value.split(':')
-  return { provider: provider as ProviderName, modelId: rest.join(':') }
+  return { provider: provider as MediaProviderName, modelId: rest.join(':') }
 }
 
-function providerLabel(provider: ProviderName): string {
+function providerLabel(provider: MediaProviderName): string {
   switch (provider) {
     case 'openai':
       return 'OpenAI'
@@ -269,6 +470,16 @@ function providerLabel(provider: ProviderName): string {
       return 'OmniRoute'
     case 'ollama':
       return 'Ollama'
+    case 'local_sidecar':
+      return 'Sidecar Local'
+    case 'groq':
+      return 'Groq'
+    case 'elevenlabs':
+      return 'ElevenLabs'
+    case 'deepgram':
+      return 'Deepgram'
+    case 'cartesia':
+      return 'Cartesia'
   }
 }
 

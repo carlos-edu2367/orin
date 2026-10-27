@@ -11,7 +11,6 @@ import json
 import os
 import re
 import threading
-import time
 import uuid
 from collections.abc import Iterator, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
@@ -19,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from agentos.file_lock import file_lock
+from agentos.memory.friend_persona import FriendReflectionConsolidator
 from agentos.settings.paths import orin_user_dir
 
 CONSOLIDATION_INTERVAL = timedelta(hours=24)
@@ -153,13 +153,18 @@ def transcript_excerpt(history: Sequence[Mapping[str, Any]]) -> str:
     """The newest text of the person's own messages that fits the excerpt budget, in order.
 
     Assistant text is left out: it can echo tool, web or repository content, and consolidation would
-    persist whatever an injected page said as a "fact" (W3-R27).
+    persist whatever an injected page said as a "fact" (W3-R27). Tainted and tool-sourced messages
+    are likewise excluded.
     """
     parts: list[str] = []
     remaining = MAX_TRANSCRIPT_CHARS
     for item in reversed(list(history)):
         role, content = item.get("role"), item.get("content")
         if role != "user" or not isinstance(content, str) or not content.strip():
+            continue
+        if item.get("tainted") is True or item.get("tool_call_id") is not None:
+            continue
+        if str(item.get("source") or "").lower() in {"tool", "mcp", "web", "system", "subagent"}:
             continue
         line = f"{role}: {content.strip()}"
         if len(line) > remaining:
@@ -200,6 +205,11 @@ class MemoryConsolidator:
 
 
 __all__ = [
-    "CONSOLIDATION_INTERVAL", "MIN_TURNS_BETWEEN_RUNS", "ConsolidationState", "MemoryConsolidator",
-    "parse_facts", "transcript_excerpt",
+    "CONSOLIDATION_INTERVAL",
+    "MIN_TURNS_BETWEEN_RUNS",
+    "ConsolidationState",
+    "FriendReflectionConsolidator",
+    "MemoryConsolidator",
+    "parse_facts",
+    "transcript_excerpt",
 ]

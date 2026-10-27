@@ -17,7 +17,9 @@ from typing import Callable, Mapping
 from agentos.providers.models import ProviderError, ProviderErrorCategory, Retryability
 
 from .action_loop import ActionLoop, MalformedToolCall
+from .events import AgentActivityEventType
 from .provider_stream import ANTHROPIC_REQUIRED_MAX_TOKENS, NormalizedStreamItem, StreamKind
+from .speak_stream import SpeakParseResult, SpeakStreamParser
 from .contract import ContractError, TaskContract, parse as parse_contract, synthesize as synthesize_contract
 from .quality import TurnQualityCounters
 from .learning import LearnedMemory, TurnLearningLedger
@@ -738,6 +740,41 @@ class AgenticTurnRuntime:
         emitted_text_in_turn = False
         last_emitted_text_ended_with_newline = True
         continuing_text = False
+        is_live_or_friend = self._is_live_or_friend(turn)
+        self._active_turn_live_or_friend = is_live_or_friend
+        pending_optimistic_lie_retraction = False
+
+        def emit_optimistic_lie_retraction() -> None:
+            nonlocal pending_optimistic_lie_retraction
+            if not pending_optimistic_lie_retraction:
+                return
+            pending_optimistic_lie_retraction = False
+            retraction_text = "Atenção: houve uma falha ao executar a ação. Veja o detalhe na tela."
+            self._record_speak_event(
+                turn,
+                AgentActivityEventType.SPEAK_CHUNK_READY,
+                retraction_text,
+                {
+                    "chunk_index": 0,
+                    "block_index": 999,
+                    "clean_text": retraction_text,
+                    "tts_text": retraction_text,
+                    "raw_tts_text": retraction_text,
+                    "normalized_text": retraction_text,
+                    "boundary_kind": "retraction",
+                    "is_first_in_block": True,
+                    "is_last_in_block": True,
+                    "inline_markers": [],
+                    "optimistic_lie_retraction": True,
+                },
+            )
+            self._record_speak_event(
+                turn,
+                AgentActivityEventType.SPEAK_FINISHED,
+                "Retratação de falha concluída",
+                {"optimistic_lie_retraction": True},
+            )
+
         iterations = range(1, self.limits.max_iterations + 1) if self.limits.max_iterations is not None else count(1)
         for iteration in iterations:
             self.counters.note_iteration()
@@ -841,6 +878,67 @@ class AgenticTurnRuntime:
             rate_limited = False
             context_overflow_error = False
             call_cost_reported = False
+            speak_parser = SpeakStreamParser() if is_live_or_friend else None
+            iteration_had_speak = False
+
+            def emit_speak_parse_result(parse_result: SpeakParseResult) -> str:
+                nonlocal iteration_had_speak, pending_optimistic_lie_retraction
+                if parse_result.speak_opened:
+                    iteration_had_speak = True
+                    pending_optimistic_lie_retraction = False
+                    self._record_speak_event(
+                        turn,
+                        AgentActivityEventType.SPEAK_BLOCK_STARTED,
+                        "Iniciando fala em voz alta",
+                        {
+                            "iteration": iteration,
+                            "block_index": max(0, (speak_parser.speak_blocks_count - 1) if speak_parser else 0),
+                        },
+                    )
+                if parse_result.speak_delta:
+                    iteration_had_speak = True
+                    self._record_speak_event(
+                        turn,
+                        AgentActivityEventType.SPEAK_DELTA,
+                        "Delta de fala",
+                        {"delta": parse_result.speak_delta, "iteration": iteration},
+                    )
+                for chunk in parse_result.chunks:
+                    iteration_had_speak = True
+                    if not parse_result.used_zero_speak_fallback:
+                        pending_optimistic_lie_retraction = False
+                    self._record_speak_event(
+                        turn,
+                        AgentActivityEventType.SPEAK_CHUNK_READY,
+                        chunk.clean_text[:120] or "Chunk de fala pronta",
+                        {
+                            "chunk_index": chunk.chunk_index,
+                            "block_index": chunk.block_index,
+                            "raw_text": chunk.raw_tts_text,
+                            "clean_text": chunk.clean_text,
+                            "tts_text": chunk.tts_text,
+                            "raw_tts_text": chunk.raw_tts_text,
+                            "normalized_text": chunk.normalized_text,
+                            "boundary_kind": chunk.boundary_kind,
+                            "is_first_in_block": chunk.is_first_in_block,
+                            "is_last_in_block": chunk.is_last_in_block,
+                            "inline_markers": list(chunk.inline_markers),
+                            "used_zero_speak_fallback": parse_result.used_zero_speak_fallback,
+                            "iteration": iteration,
+                        },
+                    )
+                if parse_result.speak_closed:
+                    self._record_speak_event(
+                        turn,
+                        AgentActivityEventType.SPEAK_FINISHED,
+                        "Fala concluída",
+                        {
+                            "iteration": iteration,
+                            "blocks_count": speak_parser.speak_blocks_count if speak_parser else 0,
+                            "used_zero_speak_fallback": parse_result.used_zero_speak_fallback,
+                        },
+                    )
+                return parse_result.visual_delta
 
             def flush_thinking_buffer() -> None:
                 nonlocal last_thinking_flush
@@ -899,21 +997,31 @@ class AgenticTurnRuntime:
                     if event.kind is StreamKind.TEXT and event.text:
                         flush_thinking_buffer()
                         chunk_text = event.text
-                        if (
-                            not text_parts
-                            and emitted_text_in_turn
-                            and not last_emitted_text_ended_with_newline
-                            and not chunk_text.startswith("\n")
-                            and not continuing_text
-                        ):
-                            chunk_text = "\n\n" + chunk_text
-                        text_parts.append(chunk_text)
-                        continuing_text = False
-                        self.store.delta(turn, chunk_text)
-                        emitted_text_in_turn = True
-                        last_emitted_text_ended_with_newline = chunk_text.endswith("\n")
+                        if speak_parser is not None:
+                            chunk_text = emit_speak_parse_result(speak_parser.feed(chunk_text))
+                        if chunk_text:
+                            if (
+                                not text_parts
+                                and emitted_text_in_turn
+                                and not last_emitted_text_ended_with_newline
+                                and not chunk_text.startswith("\n")
+                                and not continuing_text
+                            ):
+                                chunk_text = "\n\n" + chunk_text
+                            text_parts.append(chunk_text)
+                            continuing_text = False
+                            self.store.delta(turn, chunk_text)
+                            emitted_text_in_turn = True
+                            last_emitted_text_ended_with_newline = chunk_text.endswith("\n")
                     elif event.kind is StreamKind.TOOL_CALL and event.tool_call_id:
                         flush_thinking_buffer()
+                        if speak_parser is not None:
+                            tail_text = emit_speak_parse_result(speak_parser.on_non_text_boundary("tool_call"))
+                            if tail_text:
+                                text_parts.append(tail_text)
+                                self.store.delta(turn, tail_text)
+                                emitted_text_in_turn = True
+                                last_emitted_text_ended_with_newline = tail_text.endswith("\n")
                         call_id = (
                             f"iter{iteration}-{event.tool_call_id}"
                             if event.tool_call_id.startswith("tool-call:") and iteration > 1
@@ -971,6 +1079,15 @@ class AgenticTurnRuntime:
                             context_overflow_error = True
                         retryable_error = event.error.retryability.value == "SAFE"
                 flush_thinking_buffer()
+                if speak_parser is not None:
+                    allow_fallback = bool(turn.get("live_mode")) and not calls and not pending_optimistic_lie_retraction
+                    fin_res = speak_parser.finish(live_voice_enabled=allow_fallback)
+                    fin_tail = emit_speak_parse_result(fin_res)
+                    if fin_tail:
+                        text_parts.append(fin_tail)
+                        self.store.delta(turn, fin_tail)
+                        emitted_text_in_turn = True
+                        last_emitted_text_ended_with_newline = fin_tail.endswith("\n")
             except Exception as exc:
                 if not reactive_compacted and not text_parts and not calls and self._is_context_length_error(exc) and self.clock() < deadline:
                     self._effect_finished(
@@ -1126,6 +1243,13 @@ class AgenticTurnRuntime:
                         tool_name=str(result.get("name") or ""), tool_call_id=str(result.get("id") or ""),
                     )
                     messages.extend(self._tool_result_messages(turn, result))
+                if is_live_or_friend and iteration_had_speak:
+                    if any(
+                        str(res.get("status") or "").lower() == "failed"
+                        and self._is_mutating_tool_name(str(res.get("name") or ""))
+                        for res in results
+                    ):
+                        pending_optimistic_lie_retraction = True
                 if self.cancelled(turn):
                     return self._cancel(turn, iteration, action_count)
                 stop_reason = getattr(self.toolset, "stop_requested", None)
@@ -1268,6 +1392,7 @@ class AgenticTurnRuntime:
                     result_ref=f"conversation-message:{turn['assistant_message_id']}",
                     private_result={"outcome": "final"},
                 )
+                emit_optimistic_lie_retraction()
                 self._settle_remaining_todos(turn, str(turn_id))
                 self._life(turn, "completed")
                 self.store.finish(turn)
@@ -1360,7 +1485,9 @@ class AgenticTurnRuntime:
         used = system + memory + history + input_tokens + tools + skills + mcps
         limit = self.limits.context_window_tokens or self.limits.max_context_tokens
         kept_message_ids = {id(item) for item in window if item.get("role") != "system"}
-        omitted = max(0, len(messages) - sum(1 for item in messages if id(item) in kept_message_ids))
+        omitted = getattr(self, "_last_omitted_messages", None)
+        if not isinstance(omitted, int):
+            omitted = max(0, len(messages) - sum(1 for item in messages if id(item) in kept_message_ids))
         return {
             "used_tokens": used,
             "limit_tokens": limit,
@@ -1795,6 +1922,7 @@ class AgenticTurnRuntime:
             kept.update(unit)
         ordered_kept = sorted(kept)
         omitted = len(messages) - len(ordered_kept)
+        self._last_omitted_messages = omitted
         marker = None
         if omitted > 0:
             # Naming the tools whose results left the window turns re-reading
@@ -1814,11 +1942,15 @@ class AgenticTurnRuntime:
         window: list[dict[str, object]] = []
         previous = -1
         marker_inserted = False
+        rehydrate_speak = bool(getattr(self, "_active_turn_live_or_friend", False))
         for index in ordered_kept:
             if marker is not None and not marker_inserted and index != previous + 1:
                 window.append(marker)
                 marker_inserted = True
-            window.append(messages[index])
+            msg_item = messages[index]
+            if rehydrate_speak and msg_item.get("role") == "assistant":
+                msg_item = self._rehydrate_assistant_speak(msg_item)
+            window.append(msg_item)
             previous = index
         if marker is not None and not marker_inserted:
             window.append(marker)
@@ -2342,6 +2474,58 @@ class AgenticTurnRuntime:
         if hasattr(self.store, "get_turn"):
             return self.store.get_turn(turn_id)
         raise LookupError("turn store cannot load a turn")
+
+    @staticmethod
+    def _is_live_or_friend(turn: Mapping[str, object]) -> bool:
+        if bool(turn.get("live_mode")):
+            return True
+        mode = str(turn.get("conversation_mode") or turn.get("mode") or "").strip().lower()
+        return mode == "friend"
+
+    def _is_mutating_tool_name(self, name: str) -> bool:
+        if self.toolset is None:
+            return True
+        is_mutating_fn = getattr(self.toolset, "is_mutating", None)
+        if callable(is_mutating_fn):
+            return bool(is_mutating_fn(name))
+        is_ro_fn = getattr(self.toolset, "is_read_only", None)
+        if callable(is_ro_fn):
+            return not bool(is_ro_fn(name)) and name not in {"run_subagent", "ask_agent", "check_subagent"}
+        return True
+
+    @staticmethod
+    def _rehydrate_assistant_speak(message: dict[str, object]) -> dict[str, object]:
+        if message.get("role") != "assistant":
+            return message
+        content = message.get("content")
+        if not isinstance(content, str) or not content.strip() or "<speak>" in content:
+            return message
+        stripped = content.lstrip()
+        leading_ws = content[: len(content) - len(stripped)]
+        parts = stripped.split("\n\n", 1)
+        first_para = parts[0].strip()
+        if not first_para or first_para.startswith(("```", "#", "|", "- ", "* ")):
+            return message
+        rehydrated = f"{leading_ws}<speak>{first_para}</speak>"
+        if len(parts) > 1:
+            rehydrated = f"{rehydrated}\n\n{parts[1]}"
+        return {**message, "content": rehydrated}
+
+    def _record_speak_event(
+        self,
+        turn: dict[str, object],
+        event_type: AgentActivityEventType,
+        summary: str,
+        payload: dict[str, object],
+    ) -> None:
+        recorder = getattr(self.store, "record", None)
+        if callable(recorder):
+            try:
+                recorder(turn, event_type, summary, payload)
+                return
+            except Exception:  # noqa: BLE001
+                pass
+        self._life(turn, event_type.value, summary=summary, **payload)
 
     def _life(self, turn: dict[str, object], state: str, **payload: object) -> None:
         if hasattr(self.store, "lifecycle"):

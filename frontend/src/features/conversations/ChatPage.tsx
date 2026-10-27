@@ -5,6 +5,8 @@ import { createBrowserApiClient } from '../../api/client'
 import {
   cancelConversation, createConversation, getConversation, listConversations, listOlderConversationActivities, moveConversationToProject, sendConversationMessage, streamConversationEvents, submitToolPermission, updateConversationPermissionMode,
   type Conversation, type ConversationMessage, type ConversationMode,
+  getFriendPersona, updateFriendPersona, syncFriendSoul, listFriendMemories, deleteFriendMemory,
+  type FriendPersonaState, type FriendMemoryEntry,
 } from '../../api/conversations'
 import { ApiError } from '../../api/errors'
 import { approveMcpServer } from '../../api/mcp'
@@ -44,6 +46,10 @@ import {
 } from './CodePermissionDock'
 import type { CodeSessionProposalDecision } from './CodeSessionProposalCard'
 import { Composer } from './Composer'
+import { FriendSoulDrawer } from './FriendSoulDrawer'
+import { LiveVoiceQuickSettings } from './LiveVoiceQuickSettings'
+import { LiveVoiceStage } from './LiveVoiceStage'
+import { CodeSessionLiveCard } from './CodeSessionLiveCard'
 import { ContextIndicator } from './ContextIndicator'
 import { MarkdownMessage } from './MarkdownMessage'
 import { MessageCommandChip } from './MessageCommandChip'
@@ -185,6 +191,11 @@ export function ChatPage() {
     'app:toggleTodos': () => setTodosHidden((hidden) => !hidden),
   })
   const [preferencesOpen, setPreferencesOpen] = useState(false)
+  const [friendSoulOpen, setFriendSoulOpen] = useState(false)
+  const [friendPersona, setFriendPersona] = useState<FriendPersonaState | null>(null)
+  const [friendMemories, setFriendMemories] = useState<FriendMemoryEntry[]>([])
+  const [liveVoiceOpen, setLiveVoiceOpen] = useState(false)
+  const [liveVoiceSettingsOpen, setLiveVoiceSettingsOpen] = useState(false)
   const [visionSetting, setVisionSetting] = useState<VisionModelSetting | null>(null)
   const [chatProvider, setChatProvider] = useState<ProviderName | null>(null)
   const [chatModelId, setChatModelId] = useState('')
@@ -1925,6 +1936,37 @@ export function ChatPage() {
             </svg>
             <span className="chat__action-label visually-hidden">Visão geral</span>
           </button>
+          <button
+            type="button"
+            className={friendSoulOpen ? 'ghost-button chat__icon-action is-active' : 'ghost-button chat__icon-action'}
+            aria-pressed={friendSoulOpen}
+            aria-label="Personalidade e Memórias do Orin Friend (SOUL.md)"
+            title="Personalidade e Memórias do Orin Friend (SOUL.md)"
+            data-testid="open-friend-soul-drawer-button"
+            onClick={() => {
+              setFriendSoulOpen((prev) => {
+                const next = !prev
+                if (next) {
+                  void getFriendPersona(client).then(setFriendPersona).catch(() => {})
+                  void listFriendMemories(client).then(setFriendMemories).catch(() => {})
+                }
+                return next
+              })
+            }}
+          >
+            <span aria-hidden="true" style={{ fontSize: '12px', color: 'var(--text-primary)', fontWeight: 700 }}>◈ SOUL</span>
+          </button>
+          <button
+            type="button"
+            className={liveVoiceSettingsOpen ? 'ghost-button chat__icon-action is-active' : 'ghost-button chat__icon-action'}
+            aria-pressed={liveVoiceSettingsOpen}
+            aria-label="Configuração Rápida de Voz Live (TTS/STT)"
+            title="Configuração Rápida de Voz Live (TTS/STT)"
+            data-testid="open-live-voice-settings-button"
+            onClick={() => setLiveVoiceSettingsOpen((prev) => !prev)}
+          >
+            <span aria-hidden="true" style={{ fontSize: '12px', color: 'var(--text-primary)', fontWeight: 600 }}>⚙ Voz</span>
+          </button>
           <CommandPalette conversations={chats} />
         </div>
       </header>
@@ -2180,6 +2222,24 @@ export function ChatPage() {
                 )
             })()}
 
+            {!loadFailure && activity.events.some((ev) => Boolean(ev.delegatedCodeSession)) && (() => {
+              const latestDelegated = [...activity.events].reverse().find((ev) => Boolean(ev.delegatedCodeSession))?.delegatedCodeSession
+              if (!latestDelegated) return null
+              return (
+                <CodeSessionLiveCard
+                  codeConversationId={latestDelegated.code_conversation_id}
+                  goal={latestDelegated.goal}
+                  status={latestDelegated.status}
+                  completedTodoCount={latestDelegated.completed_todo_count}
+                  totalTodoCount={latestDelegated.total_todo_count}
+                  activeTaskTitle={latestDelegated.active_task_title}
+                  modifiedFilesCount={latestDelegated.modified_files_count}
+                  examinedFilesCount={latestDelegated.examined_files_count}
+                  friendlyMilestone={latestDelegated.friendly_milestone}
+                  onOpenCodeSession={(codeConvId) => navigate(`/chats/${encodeURIComponent(codeConvId)}`)}
+                />
+              )
+            })()}
             <AnimatePresence>
               {!loadFailure && showAgentPulse && (
                 <motion.div
@@ -2366,6 +2426,8 @@ export function ChatPage() {
           onOpenRewind={() => void openRewind()}
           codeMode={conversationMode}
           conversationMode={conversationMode}
+          isLiveVoiceActive={liveVoiceOpen}
+          onToggleLiveVoice={() => setLiveVoiceOpen((v) => !v)}
           hideCodeModeToggle={true}
           codePermissionMode={codePermissionMode}
           onCodePermissionModeChange={changeCodePermissionMode}
@@ -2407,6 +2469,39 @@ export function ChatPage() {
           </section>
         </div>
       )}
+      <FriendSoulDrawer
+        isOpen={friendSoulOpen}
+        persona={friendPersona}
+        memories={friendMemories}
+        onClose={() => setFriendSoulOpen(false)}
+        onUpdatePersona={async (input) => {
+          const updated = await updateFriendPersona(client, input)
+          setFriendPersona(updated)
+          return updated
+        }}
+        onSyncSoul={async () => {
+          const synced = await syncFriendSoul(client)
+          setFriendPersona(synced)
+          return synced
+        }}
+        onDeleteMemory={async (memoryId) => {
+          await deleteFriendMemory(client, memoryId)
+          setFriendMemories((prev) => prev.filter((m) => m.id !== memoryId))
+        }}
+      />
+      <LiveVoiceStage
+        isOpen={liveVoiceOpen}
+        conversationId={conversationId}
+        onUserSpeechUtterance={(spokenPrompt) => {
+          void submit(spokenPrompt)
+        }}
+        onClose={() => setLiveVoiceOpen(false)}
+      />
+      <LiveVoiceQuickSettings
+        isOpen={liveVoiceSettingsOpen}
+        client={client}
+        onClose={() => setLiveVoiceSettingsOpen(false)}
+      />
     </main>
   )
 }

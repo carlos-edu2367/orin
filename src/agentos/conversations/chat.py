@@ -819,7 +819,7 @@ class PostgresChatStore:
         if not message and not attachments: raise ValueError("message must be a bounded non-blank string")
         title_source = message or str(attachments[0].get("original_name") or "Arquivo enviado")
         requested_code_mode = str(code_mode or "chat")
-        if requested_code_mode not in {"auto", "code", "chat"}:
+        if requested_code_mode not in {"auto", "code", "chat", "friend"}:
             raise ValueError("code_mode is invalid")
         now = datetime.now(UTC)
         with self._engine.begin() as c:
@@ -837,7 +837,11 @@ class PostgresChatStore:
                 )
             if conversation_id is None:
                 conversation_id = new_conversation_id or _id("chat")
-                conv_mode = "code" if requested_code_mode == "code" else "chat"
+                conv_mode = (
+                    "code"
+                    if requested_code_mode == "code"
+                    else ("friend" if requested_code_mode == "friend" else "chat")
+                )
                 default_perm = "accept_edits" if conv_mode == "code" else "ask_permissions"
                 conv_perm = known_permission_mode(permission_mode) or default_perm
                 if conv_perm not in _VALID_PERMISSION_MODES:
@@ -857,7 +861,8 @@ class PostgresChatStore:
             else:
                 row = c.execute(select(conversations).where(conversations.c.conversation_id == conversation_id, conversations.c.user_id == user_id)).mappings().first()
                 if row is None: raise ApplicationNotFoundError(conversation_id)
-                conv_mode = "code" if str(row.get("mode") or "chat") == "code" else "chat"
+                raw_conv_mode = str(row.get("mode") or "chat").strip().lower()
+                conv_mode = raw_conv_mode if raw_conv_mode in {"chat", "code", "friend"} else "chat"
                 conv_perm = str(row.get("permission_mode") or ("accept_edits" if conv_mode == "code" else "ask_permissions"))
                 permission_mode = known_permission_mode(permission_mode)
                 if permission_mode and permission_mode in _VALID_PERMISSION_MODES and permission_mode != conv_perm:
@@ -1223,8 +1228,68 @@ class PostgresChatStore:
             ],
         }
 
-    def list(self, user_id: str) -> dict[str, object]:
-        with self._engine.connect() as c: rows = c.execute(select(conversations).where(conversations.c.user_id == user_id, conversations.c.project_id.is_(None)).order_by(conversations.c.updated_at.desc())).mappings().all()
+    def ensure_friend_conversation(
+        self,
+        user_id: str,
+        *,
+        provider: str = "openrouter",
+        model_id: str = "anthropic/claude-sonnet-4.5",
+    ) -> dict[str, object]:
+        """Return the singleton pinned `Orin Friend` conversation (`mode='friend'`) for `user_id`, creating it if needed."""
+        now = datetime.now(UTC)
+        with self._engine.begin() as c:
+            row = c.execute(
+                select(conversations)
+                .where(
+                    conversations.c.user_id == user_id,
+                    conversations.c.mode == "friend",
+                )
+                .order_by(conversations.c.created_at.asc())
+            ).mappings().first()
+            if row is not None:
+                return {
+                    "conversation_id": str(row["conversation_id"]),
+                    "title": str(row["title"]),
+                    "state": str(row["state"]),
+                    "mode": "friend",
+                    "permission_mode": str(row.get("permission_mode") or "ask_permissions"),
+                    "provider": str(row["provider"]),
+                    "model_id": str(row["model_id"]),
+                    "updated_at": row["updated_at"].isoformat() if isinstance(row.get("updated_at"), datetime) else str(row.get("updated_at") or ""),
+                }
+            conversation_id = _id("chat")
+            c.execute(
+                insert(conversations).values(
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                    title="Orin Friend",
+                    provider=provider,
+                    model_id=model_id,
+                    project_id=None,
+                    mode="friend",
+                    permission_mode="ask_permissions",
+                    state="completed",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+        return {
+            "conversation_id": conversation_id,
+            "title": "Orin Friend",
+            "state": "completed",
+            "mode": "friend",
+            "permission_mode": "ask_permissions",
+            "provider": provider,
+            "model_id": model_id,
+            "updated_at": now.isoformat(),
+        }
+
+    def list(self, user_id: str, *, mode: str | None = None) -> dict[str, object]:
+        stmt = select(conversations).where(conversations.c.user_id == user_id, conversations.c.project_id.is_(None))
+        if mode is not None and str(mode).strip():
+            stmt = stmt.where(conversations.c.mode == str(mode).strip().lower())
+        with self._engine.connect() as c:
+            rows = c.execute(stmt.order_by(conversations.c.updated_at.desc())).mappings().all()
         return {"items": [{"conversation_id": r["conversation_id"], "title": r["title"], "state": r["state"], "mode": str(r.get("mode") or "chat"), "permission_mode": str(r.get("permission_mode") or "ask_permissions"), "updated_at": r["updated_at"].isoformat()} for r in rows]}
 
     def get(self, conversation_id: str, user_id: str) -> dict[str, object]:
@@ -1322,7 +1387,8 @@ class PostgresChatStore:
                 (dict(item.get("payload") or {}) for item in reversed(activities) if item.get("event_type") in {AgentActivityEventType.CONTEXT_UPDATED.value, AgentActivityEventType.CONTEXT_COMPACTED.value} and isinstance(item.get("payload"), Mapping) and "used_tokens" in item["payload"]),
                 None,
             )
-        conv_mode = "code" if str(conv.get("mode") or "chat") == "code" else "chat"
+        raw_conv_mode = str(conv.get("mode") or "chat").strip().lower()
+        conv_mode = raw_conv_mode if raw_conv_mode in {"chat", "code", "friend"} else "chat"
         conv_perm = str(conv.get("permission_mode") or ("accept_edits" if conv_mode == "code" else "ask_permissions"))
         turn_by_message: dict[str, str] = {}
         for t in turns:
@@ -2670,7 +2736,10 @@ class ChatApplication:
         return self.store.set_project(conversation_id, user_id, project_id, managed_root=managed_root)
     def read_project_conversation(self, conversation_id: str, user_id: str, *, limit: int = 20):
         return self.store.read_project_conversation(conversation_id, user_id, limit=limit)
-    def list(self, user_id: str): return self.store.list(user_id)
+    def ensure_friend_conversation(self, user_id: str, **kwargs):
+        return self.store.ensure_friend_conversation(user_id, **kwargs)
+    def list(self, user_id: str, *, mode: str | None = None):
+        return self.store.list(user_id, mode=mode)
     def quality_summary(self, user_id: str, *, days: int = 30): return {"items": self.store.quality_summary(user_id, days=days), "window_days": days}
     def get(self, conversation_id: str, user_id: str): return self.store.get(conversation_id, user_id)
     def list_older_activities(self, conversation_id: str, user_id: str, *, before_id: int, limit: int = 100):

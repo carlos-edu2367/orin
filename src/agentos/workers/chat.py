@@ -67,6 +67,7 @@ from agentos.plugins.hook_engine import HookEngine
 from agentos.plugins.fetcher import PluginFetcher
 from agentos.plugins.service import PluginService
 from agentos.profile_files.binding import relative_display
+from agentos.memory.friend_persona import FriendPersonaStore
 from agentos.persistence.postgres.agent_memory import PostgresAgentMemoryStore
 from agentos.persistence.postgres.agentic_activity import PostgresAgenticActivityStore
 from agentos.persistence.postgres.conversation_agents import ConversationAgentStore
@@ -1463,6 +1464,8 @@ class ChatWorker:
                 project_id=str(turn["project_id"]) if turn.get("project_id") else None,
                 execution_id=str(turn["execution_id"]),
             ),
+            friend_persona_store=FriendPersonaStore(engine),
+            conversation_mode=str(turn.get("conversation_mode") or "chat"),
             provider_factory=lambda: self._provider_transport(turn),
             workspace_root=self._workspace_root,
             enable_terminal=self._capabilities.shell,

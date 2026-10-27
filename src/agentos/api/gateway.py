@@ -441,6 +441,8 @@ class ApiServices:
         public_origin: str | None = None,
         file_history_root: str | Path | None = None,
         conversation_directories: object | None = None,
+        friend_persona: object | None = None,
+        friend_memory_factory: object | None = None,
     ) -> None:
         self.security = security or InMemorySecurityService()
         self.accounts = accounts
@@ -470,6 +472,8 @@ class ApiServices:
         self.file_history_root = Path(file_history_root) if file_history_root is not None else None
         # W4 /add-dir: ConversationDirectoryStore (host folders only: closed with capabilities.host_folders).
         self.conversation_directories = conversation_directories
+        self.friend_persona = friend_persona
+        self.friend_memory_factory = friend_memory_factory
 
     def managed_root_for(self, user_id: str) -> Path:
         """Where a profile's managed workspaces live; an explicit root (tests) wins."""
@@ -809,10 +813,25 @@ def create_app(services: ApiServices) -> FastAPI:
         return JSONResponse(response_payload, status_code=201)
 
     @app.get("/v1/conversations")
-    async def list_conversations(request: Request) -> JSONResponse:
+    async def list_conversations(request: Request, mode: str | None = None) -> JSONResponse:
         principal = principal_for(request)
         services.security.authorize(principal, action="conversation.list", resource_id=None, purpose="conversation.read")
-        return JSONResponse(_jsonable(require_port(services.conversation_application).list(principal.user_id)))  # type: ignore[union-attr]
+        conv_port = require_port(services.conversation_application)
+        if mode is not None and str(mode).strip():
+            norm_mode = str(mode).strip().lower()
+            try:
+                raw_result = conv_port.list(principal.user_id, mode=norm_mode)  # type: ignore[union-attr]
+            except TypeError:
+                raw_result = conv_port.list(principal.user_id)  # type: ignore[union-attr]
+                data = _jsonable(raw_result)
+                if isinstance(data, dict) and isinstance(data.get("items"), list):
+                    data = {
+                        **data,
+                        "items": [item for item in data["items"] if isinstance(item, dict) and item.get("mode") == norm_mode],
+                    }
+                return JSONResponse(data)
+            return JSONResponse(_jsonable(raw_result))
+        return JSONResponse(_jsonable(conv_port.list(principal.user_id)))  # type: ignore[union-attr]
 
     @app.patch("/v1/conversations/{conversation_id}/permission-mode")
     async def update_conversation_permission_mode(
@@ -2502,7 +2521,12 @@ def create_app(services: ApiServices) -> FastAPI:
             raise ApplicationNotFoundError("media_model_settings is not available")
         selections = store.get_all(principal.user_id) if hasattr(store, "get_all") else {}
         response_body: dict[str, dict[str, str | None]] = {}
-        for mod in ("image", "audio", "video"):
+        modalities: tuple[str, ...] = (
+            ("image", "audio", "video", "stt")
+            if ("stt" in selections or request.query_params.get("include_stt"))
+            else ("image", "audio", "video")
+        )
+        for mod in modalities:
             sel = selections.get(mod)
             if sel is None:
                 response_body[mod] = {"provider": None, "model_id": None, "mode": "automatic"}
@@ -2515,18 +2539,23 @@ def create_app(services: ApiServices) -> FastAPI:
         principal = principal_for(request, mutable=True)
         services.security.authorize(principal, action="settings.vision_model.configure", resource_id=None, purpose="settings.vision_model.configure")
         norm_modality = str(modality or "").strip().lower()
-        if norm_modality not in {"image", "audio", "video"}:
-            raise ApplicationValidationError("modality must be image, audio, or video")
+        if norm_modality not in {"image", "audio", "video", "stt"}:
+            raise ApplicationValidationError("modality must be image, audio, video, or stt")
         if (payload.provider is None) != (payload.model_id is None):
             raise ApplicationValidationError("provider and model_id must both be present or both be absent")
         store = _require_port(services.media_model_settings)
         if payload.provider is None:
             store.clear(principal.user_id, norm_modality)
             return JSONResponse({"modality": norm_modality, "provider": None, "model_id": None, "mode": "automatic"})
-        try:
-            provider_name = _provider_name(payload.provider)
-        except ValueError as exc:
-            raise ApplicationValidationError("unsupported provider") from exc
+        raw_provider = str(payload.provider or "").strip().lower()
+        voice_providers = {"local_sidecar", "elevenlabs", "cartesia", "deepgram", "groq"}
+        if norm_modality in {"audio", "stt"} and raw_provider in voice_providers:
+            provider_name = raw_provider
+        else:
+            try:
+                provider_name = _provider_name(payload.provider)
+            except ValueError as exc:
+                raise ApplicationValidationError("unsupported provider") from exc
         clean_model_id = str(payload.model_id or "").strip()
         if not clean_model_id:
             raise ApplicationValidationError("model_id cannot be blank")
@@ -2649,6 +2678,10 @@ def create_app(services: ApiServices) -> FastAPI:
 
     register_settings_routes(app, services, principal_for, conversation_root)
     register_conversation_routes(app, services, principal_for, conversation_root)
+    from .friend_routes import register_friend_routes
+    register_friend_routes(app, services, principal_for)
+    from agentos.live_voice.session import register_live_voice_routes
+    register_live_voice_routes(app, services, principal_for)
 
     return app
 

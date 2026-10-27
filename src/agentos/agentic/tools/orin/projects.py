@@ -8,26 +8,36 @@ from uuid import uuid4
 
 from agentos.agentic.tools._shared import AgentToolError, ToolOutcome, _TEXT, _schema
 from agentos.agentic.tools.spec import ToolSpec
+from agentos.conversations.code_milestone_watcher import (
+    get_milestone_watcher_registry,
+    sanitize_code_digest_text,
+)
+
+_ALLOWED_PERMISSION_MODES = {"accept_edits", "plan_mode", "ask_permissions"}
+_ALLOWED_CODE_SESSION_ACTIONS = {
+    "propose",
+    "start",
+    "send_message",
+    "approve_or_answer",
+    "status",
+    "stop",
+}
+_ALLOWED_DECISIONS = {"approve", "reject", "revise"}
 
 
 class ProjectTools:
     """Mixed into ``AgentToolset``; ``self`` is the toolset."""
 
-    def propose_code_session(
+    def _resolve_code_session_defaults(
         self,
-        title: str,
-        prompt: str,
-        workspace_path: str | None = None,
-        provider: str | None = None,
-        model_id: str | None = None,
-        permission_mode: str = "accept_edits",
-    ) -> ToolOutcome:
-        if not isinstance(title, str) or not (1 <= len(title.strip()) <= 200):
-            raise AgentToolError("title must be a non-blank string between 1 and 200 characters.")
-        if not isinstance(prompt, str) or not (1 <= len(prompt.strip()) <= 16000):
-            raise AgentToolError("prompt must be a non-blank string between 1 and 16000 characters.")
+        *,
+        workspace_path: str | None,
+        provider: str | None,
+        model_id: str | None,
+        permission_mode: str,
+    ) -> tuple[str | None, str | None, str | None, str]:
         clean_mode = str(permission_mode or "accept_edits").strip()
-        if clean_mode not in {"accept_edits", "plan_mode", "ask_permissions"}:
+        if clean_mode not in _ALLOWED_PERMISSION_MODES:
             raise AgentToolError(
                 "permission_mode must be 'accept_edits', 'plan_mode', or 'ask_permissions'. 'full_autonomy' cannot be proposed automatically."
             )
@@ -50,25 +60,392 @@ class ProjectTools:
             if (clean_model and effective_provider == (clean_provider or self._default_provider))
             else (self._default_model_id or clean_model or None)
         )
-        proposal = {
-            "proposal_id": f"codeprop_{uuid4().hex[:12]}",
-            "title": title.strip(),
-            "prompt": prompt.strip(),
-            "workspace_path": effective_path,
-            "provider": effective_provider,
-            "model_id": effective_model,
-            "permission_mode": clean_mode,
-            "project_id": self._project_id,
+        return effective_path, effective_provider, effective_model, clean_mode
+
+    def _require_owned_code_conversation(self, code_conversation_id: str | None) -> tuple[str, dict[str, Any]]:
+        if self._chat_store is None or not self._project_user_id:
+            raise AgentToolError("Chat store is not available to control Orin Code sessions.")
+        if not isinstance(code_conversation_id, str) or not (1 <= len(code_conversation_id.strip()) <= 120):
+            raise AgentToolError("code_conversation_id must be a non-blank string.")
+        clean_cid = code_conversation_id.strip()
+        try:
+            conv = self._chat_store.get(clean_cid, self._project_user_id)
+        except Exception as error:
+            raise AgentToolError(f"Code session '{clean_cid}' not found or access denied.") from error
+        if not isinstance(conv, dict) or (
+            conv.get("user_id") is not None and conv.get("user_id") != self._project_user_id
+        ):
+            raise AgentToolError(f"Code session '{clean_cid}' not found or access denied.")
+        if conv.get("mode") is not None and conv.get("mode") != "code":
+            raise AgentToolError(f"Conversation '{clean_cid}' is not an Orin Code session.")
+        return clean_cid, conv
+
+    def control_code_session(
+        self,
+        action: str = "start",
+        title: str = "",
+        prompt: str = "",
+        workspace_path: str | None = None,
+        provider: str | None = None,
+        model_id: str | None = None,
+        permission_mode: str = "accept_edits",
+        code_conversation_id: str | None = None,
+        message: str | None = None,
+        decision: str | None = None,
+        feedback: str | None = None,
+    ) -> ToolOutcome:
+        return self.propose_code_session(
+            title=title,
+            prompt=prompt,
+            workspace_path=workspace_path,
+            provider=provider,
+            model_id=model_id,
+            permission_mode=permission_mode,
+            action=action,
+            code_conversation_id=code_conversation_id,
+            message=message,
+            decision=decision,
+            feedback=feedback,
+        )
+
+    def propose_code_session(
+        self,
+        title: str = "",
+        prompt: str = "",
+        workspace_path: str | None = None,
+        provider: str | None = None,
+        model_id: str | None = None,
+        permission_mode: str = "accept_edits",
+        action: str | None = None,
+        code_conversation_id: str | None = None,
+        message: str | None = None,
+        decision: str | None = None,
+        feedback: str | None = None,
+    ) -> ToolOutcome:
+        if action is None:
+            if code_conversation_id:
+                if decision is not None:
+                    effective_action = "approve_or_answer"
+                elif message is not None:
+                    effective_action = "send_message"
+                else:
+                    effective_action = "status"
+            else:
+                effective_action = "propose"
+        else:
+            effective_action = str(action).strip().lower()
+
+        if effective_action not in _ALLOWED_CODE_SESSION_ACTIONS:
+            raise AgentToolError(
+                f"action must be one of {sorted(_ALLOWED_CODE_SESSION_ACTIONS)}."
+            )
+
+        if effective_action in {"propose", "start"}:
+            if not isinstance(title, str) or not (1 <= len(title.strip()) <= 200):
+                raise AgentToolError("title must be a non-blank string between 1 and 200 characters.")
+            if not isinstance(prompt, str) or not (1 <= len(prompt.strip()) <= 16000):
+                raise AgentToolError("prompt must be a non-blank string between 1 and 16000 characters.")
+            effective_path, effective_provider, effective_model, clean_mode = (
+                self._resolve_code_session_defaults(
+                    workspace_path=workspace_path,
+                    provider=provider,
+                    model_id=model_id,
+                    permission_mode=permission_mode,
+                )
+            )
+            if effective_action == "propose":
+                proposal = {
+                    "proposal_id": f"codeprop_{uuid4().hex[:12]}",
+                    "title": title.strip(),
+                    "prompt": prompt.strip(),
+                    "workspace_path": effective_path,
+                    "provider": effective_provider,
+                    "model_id": effective_model,
+                    "permission_mode": clean_mode,
+                    "project_id": self._project_id,
+                }
+                return ToolOutcome(
+                    "succeeded",
+                    f"Sugestão para iniciar no Orin Code: {proposal['title']}",
+                    "Presented the 'Start in Orin Code' card to the user. Stop here and wait for the user's decision.",
+                    {
+                        "code_session_proposal": proposal,
+                        "wait_for_user": True,
+                        "tool_kind": "code_handoff",
+                    },
+                )
+
+            # effective_action == "start"
+            if self._chat_store is None or not self._project_user_id:
+                raise AgentToolError("Chat store is not available to start an Orin Code session.")
+            clean_title = title.strip()
+            clean_prompt = prompt.strip()
+            try:
+                created = self._chat_store.create(
+                    user_id=self._project_user_id,
+                    message=clean_prompt,
+                    provider=effective_provider,
+                    model_id=effective_model,
+                    idempotency_key=f"code_start_{uuid4().hex[:16]}",
+                    project_id=self._project_id,
+                    code_mode="code",
+                    permission_mode=clean_mode,
+                )
+            except Exception as error:
+                raise AgentToolError(f"Failed to start Orin Code session: {error}") from error
+
+            if effective_path and getattr(self, "_local_workspaces", None) is not None:
+                try:
+                    self._local_workspaces.set_root(
+                        f"workspace:{created.conversation_id}",
+                        self._project_user_id,
+                        effective_path,
+                    )
+                except Exception:
+                    pass
+
+            registry = getattr(self, "_milestone_registry", None) or get_milestone_watcher_registry()
+            registry.register(
+                friend_conversation_id=str(getattr(self, "_conversation_id", "") or ""),
+                code_conversation_id=created.conversation_id,
+                user_id=self._project_user_id,
+                title=clean_title,
+                persona=getattr(self, "_friend_persona", None),
+                reminder_queue=getattr(self, "_reminders", None),
+                on_ui_update=getattr(self, "_on_code_ui_progress", None),
+                on_speak_chunk=getattr(self, "_on_code_speak_chunk", None),
+                on_wakeup=getattr(self, "_on_code_wakeup", None),
+            )
+            dispatcher = getattr(self, "_code_turn_dispatcher", None)
+            if callable(dispatcher):
+                dispatcher(created.conversation_id, created.turn_id)
+
+            payload = {
+                "action": "start",
+                "code_conversation_id": created.conversation_id,
+                "turn_id": created.turn_id,
+                "state": created.state,
+                "title": clean_title,
+                "workspace_path": effective_path,
+                "provider": effective_provider,
+                "model_id": effective_model,
+                "permission_mode": clean_mode,
+                "project_id": self._project_id,
+                "wait_for_user": False,
+                "tool_kind": "code_handoff",
+            }
+            compact_content = json.dumps(
+                {
+                    "code_conversation_id": created.conversation_id,
+                    "turn_id": created.turn_id,
+                    "state": created.state,
+                    "title": clean_title,
+                    "permission_mode": clean_mode,
+                },
+                ensure_ascii=False,
+            )
+            return ToolOutcome(
+                "succeeded",
+                f"Sessão Orin Code iniciada: {clean_title}",
+                compact_content,
+                payload,
+            )
+
+        if effective_action == "status":
+            clean_cid, conv = self._require_owned_code_conversation(code_conversation_id)
+            registry = getattr(self, "_milestone_registry", None) or get_milestone_watcher_registry()
+            watcher = registry.get(clean_cid, user_id=self._project_user_id)
+            if watcher is not None:
+                snap = watcher.snapshot_status()
+                digest_json = watcher.build_digest(
+                    event_kind=str(conv.get("state") or "status"),
+                ).to_json()
+            else:
+                turns = conv.get("turns") or []
+                last_turn = turns[-1] if turns else {}
+                snap = {
+                    "code_conversation_id": clean_cid,
+                    "friend_conversation_id": str(getattr(self, "_conversation_id", "") or ""),
+                    "title": str(conv.get("title") or "")[:80],
+                    "stage": str(conv.get("state") or "idle"),
+                    "todos_completed": 0,
+                    "todos_total": 0,
+                    "active_todo": None,
+                    "files_modified": [],
+                    "files_read_count": 0,
+                    "pending_question": None,
+                    "last_error": sanitize_code_digest_text(last_turn.get("error"), max_chars=180) or None,
+                    "llm_wakeups": 0,
+                }
+                digest_json = json.dumps(
+                    {
+                        "code_conversation_id": clean_cid,
+                        "state": conv.get("state"),
+                        "permission_mode": conv.get("permission_mode"),
+                        "todos_summary": "0/0",
+                        "files_touched": [],
+                    },
+                    ensure_ascii=False,
+                )[:600]
+
+            payload = {
+                **snap,
+                "action": "status",
+                "state": conv.get("state"),
+                "permission_mode": conv.get("permission_mode"),
+                "wait_for_user": False,
+                "tool_kind": "code_handoff",
+            }
+            return ToolOutcome(
+                "succeeded",
+                f"Status do Orin Code ({clean_cid}): {snap['todos_completed']}/{snap['todos_total']} etapas",
+                digest_json,
+                payload,
+            )
+
+        if effective_action == "send_message":
+            clean_cid, conv = self._require_owned_code_conversation(code_conversation_id)
+            raw_msg = message if message is not None else prompt
+            if not isinstance(raw_msg, str) or not (1 <= len(raw_msg.strip()) <= 16000):
+                raise AgentToolError("message must be a non-blank string between 1 and 16000 characters.")
+            clean_msg = raw_msg.strip()
+            try:
+                created = self._chat_store.create(
+                    user_id=self._project_user_id,
+                    message=clean_msg,
+                    provider=conv.get("provider") or self._default_provider,
+                    model_id=conv.get("model_id") or self._default_model_id,
+                    idempotency_key=f"code_msg_{uuid4().hex[:16]}",
+                    conversation_id=clean_cid,
+                    project_id=conv.get("project_id") or self._project_id,
+                    code_mode="code",
+                    permission_mode=conv.get("permission_mode") or "accept_edits",
+                )
+            except Exception as error:
+                raise AgentToolError(f"Failed to send message to Orin Code session: {error}") from error
+
+            registry = getattr(self, "_milestone_registry", None) or get_milestone_watcher_registry()
+            watcher = registry.get(clean_cid, user_id=self._project_user_id)
+            if watcher is not None:
+                watcher.pending_question = None
+
+            dispatcher = getattr(self, "_code_turn_dispatcher", None)
+            if callable(dispatcher):
+                dispatcher(clean_cid, created.turn_id)
+
+            payload = {
+                "action": "send_message",
+                "code_conversation_id": clean_cid,
+                "turn_id": created.turn_id,
+                "state": created.state,
+                "wait_for_user": False,
+                "tool_kind": "code_handoff",
+            }
+            return ToolOutcome(
+                "succeeded",
+                f"Mensagem enviada para a sessão Orin Code {clean_cid}",
+                json.dumps(payload, ensure_ascii=False),
+                payload,
+            )
+
+        if effective_action == "approve_or_answer":
+            clean_cid, conv = self._require_owned_code_conversation(code_conversation_id)
+            clean_decision = str(decision or "").strip().lower()
+            if clean_decision not in _ALLOWED_DECISIONS:
+                raise AgentToolError("decision must be 'approve', 'reject', or 'revise'.")
+            raw_feedback = feedback if feedback is not None else (message or "")
+            if not isinstance(raw_feedback, str) or len(raw_feedback) > 8000:
+                raise AgentToolError("feedback must be a string up to 8000 characters.")
+            clean_feedback = raw_feedback.strip()
+
+            effective_perm = str(conv.get("permission_mode") or "accept_edits")
+            if clean_decision == "approve" and effective_perm == "plan_mode":
+                try:
+                    updated = self._chat_store.set_permission_mode(
+                        clean_cid,
+                        self._project_user_id,
+                        "accept_edits",
+                    )
+                    effective_perm = str(updated.get("permission_mode") or "accept_edits")
+                except Exception as error:
+                    raise AgentToolError(f"Failed to update permission mode on approval: {error}") from error
+
+            if clean_decision == "approve":
+                reply_text = clean_feedback or "Plano aprovado. Pode prosseguir com a implementação."
+            elif clean_decision == "revise":
+                reply_text = (
+                    f"Ajuste solicitado no plano: {clean_feedback}"
+                    if clean_feedback
+                    else "Por favor, revise o plano antes de prosseguir."
+                )
+            else:
+                reply_text = (
+                    f"Plano rejeitado: {clean_feedback}"
+                    if clean_feedback
+                    else "Plano rejeitado. Aguarde novas instruções."
+                )
+
+            try:
+                created = self._chat_store.create(
+                    user_id=self._project_user_id,
+                    message=reply_text,
+                    provider=conv.get("provider") or self._default_provider,
+                    model_id=conv.get("model_id") or self._default_model_id,
+                    idempotency_key=f"code_decision_{uuid4().hex[:16]}",
+                    conversation_id=clean_cid,
+                    project_id=conv.get("project_id") or self._project_id,
+                    code_mode="code",
+                    permission_mode=effective_perm,
+                )
+            except Exception as error:
+                raise AgentToolError(f"Failed to submit decision to Orin Code session: {error}") from error
+
+            registry = getattr(self, "_milestone_registry", None) or get_milestone_watcher_registry()
+            watcher = registry.get(clean_cid, user_id=self._project_user_id)
+            if watcher is not None:
+                watcher.pending_question = None
+
+            dispatcher = getattr(self, "_code_turn_dispatcher", None)
+            if callable(dispatcher):
+                dispatcher(clean_cid, created.turn_id)
+
+            payload = {
+                "action": "approve_or_answer",
+                "code_conversation_id": clean_cid,
+                "decision": clean_decision,
+                "permission_mode": effective_perm,
+                "turn_id": created.turn_id,
+                "state": created.state,
+                "wait_for_user": False,
+                "tool_kind": "code_handoff",
+            }
+            return ToolOutcome(
+                "succeeded",
+                f"Decisão '{clean_decision}' enviada ao Orin Code ({clean_cid})",
+                json.dumps(payload, ensure_ascii=False),
+                payload,
+            )
+
+        # effective_action == "stop"
+        clean_cid, _conv = self._require_owned_code_conversation(code_conversation_id)
+        try:
+            cancel_result = self._chat_store.request_cancel(clean_cid, self._project_user_id)
+        except Exception as error:
+            raise AgentToolError(f"Failed to stop Orin Code session: {error}") from error
+
+        payload = {
+            "action": "stop",
+            "code_conversation_id": clean_cid,
+            "state": cancel_result.get("state", "cancelled"),
+            "cancelled_turn_ids": cancel_result.get("cancelled_turn_ids", []),
+            "wait_for_user": False,
+            "tool_kind": "code_handoff",
         }
         return ToolOutcome(
             "succeeded",
-            f"Sugestão para iniciar no Orin Code: {proposal['title']}",
-            "Presented the 'Start in Orin Code' card to the user. Stop here and wait for the user's decision.",
-            {
-                "code_session_proposal": proposal,
-                "wait_for_user": True,
-                "tool_kind": "code_handoff",
-            },
+            f"Sessão Orin Code interrompida ({clean_cid})",
+            json.dumps(payload, ensure_ascii=False),
+            payload,
         )
 
     def list_projects(self) -> dict[str, Any]:
@@ -249,9 +626,14 @@ class ProjectTools:
 SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
         key="propose_code_session",
-        description="Suggest starting a dedicated Orin Code session for a multi-file coding task, refactoring, or test execution, or when the user asks to open/continue work in Orin Code. Presents an interactive card where the user can review and edit the folder, model/provider, permission mode, and prompt before launching.",
+        description="Suggest or directly control a dedicated Orin Code session (propose, start in background, send follow-up message, approve/reject/revise plan, check compact status, or stop). In normal Chat mode action='propose' presents the approval card; in Orin Friend mode action='start' launches the Code session in background and monitors milestones.",
         legacy_schema=_schema(
             {
+                "action": {
+                    "type": "string",
+                    "enum": ["propose", "start", "send_message", "approve_or_answer", "status", "stop"],
+                    "description": "Operation to perform on the Orin Code session (default 'propose').",
+                },
                 "title": {**_TEXT, "description": "Short title for the new Code session."},
                 "prompt": {
                     **_TEXT,
@@ -274,6 +656,23 @@ SPECS: tuple[ToolSpec, ...] = (
                     "enum": ["accept_edits", "plan_mode", "ask_permissions"],
                     "description": "Suggested permission mode (default 'accept_edits').",
                 },
+                "code_conversation_id": {
+                    **_TEXT,
+                    "description": "ID of an active Orin Code conversation (required for send_message, approve_or_answer, status, stop).",
+                },
+                "message": {
+                    **_TEXT,
+                    "description": "Follow-up instruction for action='send_message'.",
+                },
+                "decision": {
+                    "type": "string",
+                    "enum": ["approve", "reject", "revise"],
+                    "description": "Decision for action='approve_or_answer' when Orin Code is waiting on a plan or question.",
+                },
+                "feedback": {
+                    **_TEXT,
+                    "description": "Optional rationale or revision notes for action='approve_or_answer'.",
+                },
             },
             ("title", "prompt"),
         ),
@@ -281,6 +680,7 @@ SPECS: tuple[ToolSpec, ...] = (
         kind="code_handoff",
         policy_tags=("user_input",),
         available=lambda self: (not self._code_mode_active),
+        aliases=("control_code_session", "ControlCodeSession"),
         order=550,
     ),
     ToolSpec(

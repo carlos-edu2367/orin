@@ -16,6 +16,8 @@ from sqlalchemy.engine import Engine
 from agentos.persistence.postgres.schema import media_model_selections, vision_model_selections
 from agentos.provider_catalog.modalities import MEDIA_MODALITIES
 
+VALID_MEDIA_MODALITIES: tuple[str, ...] = tuple(dict.fromkeys((*MEDIA_MODALITIES, "stt")))
+
 
 @dataclass(frozen=True, slots=True)
 class VisionModelSelection:
@@ -28,6 +30,8 @@ class MediaModelSelection:
     modality: str
     provider: str
     model_id: str
+    voice_id: str | None = None
+    reference_audio_path: str | None = None
 
 
 class PostgresVisionModelSettingsStore:
@@ -79,7 +83,7 @@ class PostgresMediaModelSettingsStore:
         result: dict[str, MediaModelSelection] = {}
         for row in rows:
             mod = str(row["modality"]).strip().lower()
-            if mod in MEDIA_MODALITIES:
+            if mod in VALID_MEDIA_MODALITIES:
                 result[mod] = MediaModelSelection(
                     modality=mod,
                     provider=str(row["provider"]).strip().lower(),
@@ -89,13 +93,23 @@ class PostgresMediaModelSettingsStore:
 
     def get(self, user_id: str, modality: str) -> MediaModelSelection | None:
         norm_mod = str(modality or "").strip().lower()
-        if norm_mod not in MEDIA_MODALITIES:
+        if norm_mod not in VALID_MEDIA_MODALITIES:
             raise ValueError(f"unsupported media modality: {modality!r}")
         return self.get_all(user_id).get(norm_mod)
 
-    def set(self, user_id: str, modality: str, provider: str, model_id: str) -> None:
+    def set(
+        self,
+        user_id: str,
+        modality: str,
+        provider: str,
+        model_id: str,
+        *,
+        voice_id: str | None = None,
+        reference_audio_path: str | None = None,
+    ) -> None:
+        _ = (voice_id, reference_audio_path)
         norm_mod = str(modality or "").strip().lower()
-        if norm_mod not in MEDIA_MODALITIES:
+        if norm_mod not in VALID_MEDIA_MODALITIES:
             raise ValueError(f"unsupported media modality: {modality!r}")
         now = datetime.now(UTC)
         with self._engine.begin() as connection:
@@ -120,7 +134,7 @@ class PostgresMediaModelSettingsStore:
 
     def clear(self, user_id: str, modality: str) -> None:
         norm_mod = str(modality or "").strip().lower()
-        if norm_mod not in MEDIA_MODALITIES:
+        if norm_mod not in VALID_MEDIA_MODALITIES:
             raise ValueError(f"unsupported media modality: {modality!r}")
         with self._engine.begin() as connection:
             connection.execute(

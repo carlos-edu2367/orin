@@ -33,6 +33,7 @@ OWNED = {
     ("GET", "/v1/projects/{project_id}/memories"), ("DELETE", "/v1/projects/{project_id}/memories/{memory_id}"),
     ("DELETE", "/v1/schedules/{schedule_id}"),
     ("DELETE", "/v1/memories/{memory_id}"), ("PATCH", "/v1/memories/{memory_id}"),
+    ("DELETE", "/v1/friend/memories/{memory_id}"),
     ("GET", "/v1/conversations/{conversation_id}"),
     ("GET", "/v1/conversations/{conversation_id}/activities"),
     ("PATCH", "/v1/conversations/{conversation_id}/permission-mode"),
@@ -84,7 +85,7 @@ OWNED = {
 }
 LISTING = {
     ("GET", "/v1/conversations"), ("GET", "/v1/schedules"), ("GET", "/v1/projects"), ("GET", "/v1/projects/sidebar"),
-    ("GET", "/v1/memories"), ("GET", "/v1/skills"), ("GET", "/v1/plugins"), ("GET", "/v1/plugins/commands"),
+    ("GET", "/v1/memories"), ("GET", "/v1/friend/memories"), ("GET", "/v1/skills"), ("GET", "/v1/plugins"), ("GET", "/v1/plugins/commands"),
     ("GET", "/v1/plugins/marketplaces"), ("GET", "/v1/mcp/servers"), ("GET", "/v1/executions"),
     ("GET", "/v1/runtime/quality"), ("GET", "/v1/files"),
     *{("GET", f"/v1/{resource}") for resource in ("agents", "capabilities", "tools", "workspaces", "artifacts")},
@@ -101,6 +102,8 @@ SCOPED = {
     ("GET", "/v1/code-mode/settings"), ("PUT", "/v1/code-mode/settings"),
     ("GET", "/v1/settings/vision-model"), ("PUT", "/v1/settings/vision-model"),
     ("GET", "/v1/settings/media-models"), ("PUT", "/v1/settings/media-models/{modality}"),
+    ("GET", "/v1/friend/persona"), ("PUT", "/v1/friend/persona"), ("POST", "/v1/friend/soul/sync"),
+    ("POST", "/v1/conversations/friend/ensure"),
     ("GET", "/v1/files/download"),
     # Skill preferences keyed by (caller, agent_id): an agent id names a role,
     # not a record someone owns, so every profile reads and writes its own row.
@@ -114,6 +117,7 @@ CREATE = {
 }
 INSTANCE = {
     ("GET", "/v1/plugins/library"), ("GET", "/v1/mcp/catalog"), ("GET", "/v1/installation/status"), ("GET", "/v1/instance"),
+    ("GET", "/v1/live-voice/hardware"), ("GET", "/v1/live-voice/hardware-status"),
     ("DELETE", "/v1/installation/versions/{version}"), ("POST", "/v1/installation/update"),
     ("GET", "/v1/installation/update/status"), ("POST", "/v1/installation/update/prepare"),
     ("GET", "/v1/installation/autostart"), ("PUT", "/v1/installation/autostart"),
@@ -275,7 +279,31 @@ def test_admin_routes_refuse_a_member(world):
 
 
 def test_per_profile_settings_do_not_cross(world):
+    from agentos.memory.friend_persona import FriendPersonaStore
+    from agentos.persistence.postgres.agent_memory import PostgresAgentMemoryStore
+    from agentos.reading.store import PostgresMediaModelSettingsStore
+
     a = world.admin()
     b = world.member("bruno", admin=a)
     assert a.api.put("/v1/runtime/settings", json={"max_iterations": 7}, headers=a.headers()).status_code == 200
     assert b.api.get("/v1/runtime/settings").json().get("max_iterations") != 7
+
+    persona_store = FriendPersonaStore(world.engine, soul_dir=world.home / "soul_isolation")
+    persona_store.apply_reflection_deltas(
+        a.user_id,
+        {"warmth": 0.03},
+        mood="radiante",
+        new_style_notes=[f"{SECRET} nota de estilo"],
+    )
+    b_persona = persona_store.get_or_create(b.user_id)
+    assert b_persona.current_mood != "radiante"
+    assert all(SECRET not in note for note in b_persona.style_notes)
+
+    mem_a = PostgresAgentMemoryStore(world.engine, a.user_id)
+    mem_b = PostgresAgentMemoryStore(world.engine, b.user_id)
+    mem_a.save(f"{SECRET} piada interna", kind="inside_joke", scope_type="friend")
+    assert all(SECRET not in str(row["fact"]) for row in mem_b.relevant_for_friend("piada interna"))
+
+    media_store = PostgresMediaModelSettingsStore(world.engine)
+    media_store.set(a.user_id, "stt", "local", "faster-whisper-large-v3-turbo")
+    assert media_store.get(b.user_id, "stt") is None

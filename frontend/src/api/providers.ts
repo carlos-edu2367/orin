@@ -413,8 +413,60 @@ export function removeProviderCustomModel(client: ApiClient, provider: ProviderN
  * local Ollama, then anything else); `'manual'` means `provider`/`modelId` are
  * both present and override that choice.
  */
-export type VisionModelSetting = { provider: ProviderName | null; modelId: string | null; mode: 'automatic' | 'manual' }
-export type MediaModality = 'image' | 'audio' | 'video'
+export const MEDIA_PROVIDER_NAMES = [
+  ...PROVIDER_NAMES,
+  'local_sidecar',
+  'groq',
+  'elevenlabs',
+  'deepgram',
+  'cartesia',
+] as const
+export type MediaProviderName = (typeof MEDIA_PROVIDER_NAMES)[number]
+export type VisionModelSetting = { provider: MediaProviderName | null; modelId: string | null; mode: 'automatic' | 'manual' }
+export type MediaModality = 'image' | 'audio' | 'stt' | 'video'
+
+export type VoiceHardwareDiagnostic = {
+  gpu_available: boolean
+  gpu_name: string | null
+  free_vram_gb: number
+  free_ram_gb: number
+  cpu_idle_percent: number
+  recommended_tts_provider: string
+  recommended_tts_model: string
+  recommended_stt_provider: string
+  recommended_stt_model: string
+  reason: string
+}
+
+export function getVoiceHardwareDiagnostic(
+  client: ApiClient,
+  signal?: AbortSignal,
+): Promise<VoiceHardwareDiagnostic> {
+  return client.request({
+    path: '/v1/live-voice/hardware',
+    signal,
+    parse: (value) => {
+      const data = record(value)
+      return {
+        gpu_available: Boolean(data.gpu_available),
+        gpu_name: typeof data.gpu_name === 'string' ? data.gpu_name : null,
+        free_vram_gb: typeof data.free_vram_gb === 'number' ? data.free_vram_gb : 0,
+        free_ram_gb: typeof data.free_ram_gb === 'number' ? data.free_ram_gb : 0,
+        cpu_idle_percent:
+          typeof data.cpu_idle_percent === 'number'
+            ? data.cpu_idle_percent
+            : typeof data.cpu_Idle_percent === 'number'
+              ? data.cpu_Idle_percent
+              : 0,
+        recommended_tts_provider: typeof data.recommended_tts_provider === 'string' ? data.recommended_tts_provider : 'openai',
+        recommended_tts_model: typeof data.recommended_tts_model === 'string' ? data.recommended_tts_model : 'gpt-4o-mini-tts',
+        recommended_stt_provider: typeof data.recommended_stt_provider === 'string' ? data.recommended_stt_provider : 'groq',
+        recommended_stt_model: typeof data.recommended_stt_model === 'string' ? data.recommended_stt_model : 'whisper-large-v3-turbo',
+        reason: typeof data.reason === 'string' ? data.reason : '',
+      }
+    },
+  })
+}
 export type MediaModelSettings = Record<MediaModality, VisionModelSetting>
 
 export function getVisionModelSetting(client: ApiClient, signal?: AbortSignal): Promise<VisionModelSetting> {
@@ -423,7 +475,7 @@ export function getVisionModelSetting(client: ApiClient, signal?: AbortSignal): 
 
 export function setVisionModelSetting(
   client: ApiClient,
-  input: { provider: ProviderName; modelId: string } | { provider: null; modelId: null },
+  input: { provider: MediaProviderName; modelId: string } | { provider: null; modelId: null },
   intent = client.createMutationIntent(),
 ): Promise<VisionModelSetting> {
   return client.request({
@@ -444,6 +496,7 @@ export function getMediaModelSettings(client: ApiClient, signal?: AbortSignal): 
       return {
         image: parseVisionModelSetting(data.image),
         audio: parseVisionModelSetting(data.audio),
+        stt: data.stt ? parseVisionModelSetting(data.stt) : { provider: null, modelId: null, mode: 'automatic' },
         video: parseVisionModelSetting(data.video),
       }
     },
@@ -453,7 +506,7 @@ export function getMediaModelSettings(client: ApiClient, signal?: AbortSignal): 
 export function setMediaModelSetting(
   client: ApiClient,
   modality: MediaModality,
-  input: { provider: ProviderName; modelId: string } | { provider: null; modelId: null },
+  input: { provider: MediaProviderName; modelId: string } | { provider: null; modelId: null },
   intent = client.createMutationIntent(),
 ): Promise<VisionModelSetting> {
   return client.request({
@@ -468,7 +521,7 @@ export function setMediaModelSetting(
 function parseVisionModelSetting(value: unknown): VisionModelSetting {
   const data = record(value)
   if (data.mode !== 'automatic' && data.mode !== 'manual') throw invalidResponseError()
-  const provider = PROVIDER_NAMES.includes(data.provider as ProviderName) ? data.provider as ProviderName : null
+  const provider = MEDIA_PROVIDER_NAMES.includes(data.provider as MediaProviderName) ? (data.provider as MediaProviderName) : null
   return { provider, modelId: nullableString(data.model_id), mode: data.mode }
 }
 

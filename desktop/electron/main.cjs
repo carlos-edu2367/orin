@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Notification, shell, Tray } = require('electron')
+const { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, nativeImage, Notification, session, shell, Tray } = require('electron')
 const { spawn } = require('node:child_process')
 const fs = require('node:fs/promises')
 const path = require('node:path')
@@ -36,6 +36,35 @@ app.whenReady().then(async () => {
   // Orin owns its navigation through the application UI. The stock Electron
   // File/Edit/View bar is both redundant and visually disconnected from it.
   Menu.setApplicationMenu(null)
+  if (session && session.defaultSession) {
+    const allowedPermissions = new Set(['media', 'microphone', 'audioCapture'])
+    session.defaultSession.setPermissionCheckHandler((webContents, permission, requestingOrigin) => {
+      if (allowedPermissions.has(permission) && isLocalOrinUrl(requestingOrigin || (webContents && webContents.getURL()))) {
+        return true
+      }
+      return false
+    })
+    session.defaultSession.setPermissionRequestHandler((webContents, permission, callback, details) => {
+      const origin = (details && details.requestingUrl) || (webContents && webContents.getURL()) || ''
+      if (allowedPermissions.has(permission) && isLocalOrinUrl(origin)) {
+        callback(true)
+        return
+      }
+      callback(false)
+    })
+  }
+  if (globalShortcut && typeof globalShortcut.register === 'function') {
+    try {
+      globalShortcut.register('CommandOrControl+Shift+L', () => {
+        showWindow()
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('desktop:toggle-live-voice')
+        }
+      })
+    } catch {
+      // Shortcut registration is optional on restricted window managers
+    }
+  }
   preferences = await loadPreferences()
   registerIpc()
   mainWindow = new BrowserWindow({
@@ -351,6 +380,15 @@ function createTray() {
     tray.setToolTip('Orin — em segundo plano')
     tray.setContextMenu(Menu.buildFromTemplate([
       { label: 'Abrir o Orin', click: () => showWindow() },
+      {
+        label: 'Conversa Live (Orin Friend)',
+        click: () => {
+          showWindow()
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('desktop:toggle-live-voice')
+          }
+        },
+      },
       { type: 'separator' },
       { label: 'Sair do Orin', click: () => closeWindow() },
     ]))

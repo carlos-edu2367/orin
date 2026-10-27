@@ -5,6 +5,9 @@ import { activityStateLabel } from './activitySummary'
 
 export type AgentActivityMode =
   | 'idle'
+  | 'listening'
+  | 'speaking'
+  | 'interrupted'
   | 'thinking'
   | 'planning'
   | 'responding'
@@ -237,7 +240,10 @@ function PulseFigure({ mode }: { mode: AgentActivityMode }) {
 
 function modeLabel(mode: AgentActivityMode, state: ActivityState): string {
   switch (mode) {
+    case 'listening': return 'Ouvindo você'
     case 'thinking': return 'Pensando'
+    case 'speaking': return 'Falando'
+    case 'interrupted': return 'Interrompido'
     case 'planning': return 'Planejando'
     case 'responding': return 'Respondendo'
     case 'reading': return 'Lendo arquivos'

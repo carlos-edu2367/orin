@@ -23,7 +23,7 @@ import {
   type CodePermissionMode,
 } from './codeMode'
 
-export type ConversationMode = 'chat' | 'code'
+export type ConversationMode = 'friend' | 'chat' | 'code'
 export type PermissionMode = CodePermissionMode
 export { normalizeCodePermissionMode, nextCodePermissionMode, type CodePermissionMode }
 
@@ -41,7 +41,7 @@ export type CreateConversationInput = {
   permission_mode?: PermissionMode
 }
 
-export type CodeModeChoice = 'auto' | 'code' | 'chat'
+export type CodeModeChoice = 'auto' | 'code' | 'chat' | 'friend'
 
 export type ConversationReceipt = {
   conversation_id: string
@@ -96,7 +96,7 @@ function parseModeAndPermission(data: Record<string, unknown>, fallbackMode: Con
   mode: ConversationMode
   permission_mode: PermissionMode
 } {
-  const mode: ConversationMode = data.mode === 'code' ? 'code' : data.mode === 'chat' ? 'chat' : fallbackMode
+  const mode: ConversationMode = data.mode === 'friend' ? 'friend' : data.mode === 'code' ? 'code' : data.mode === 'chat' ? 'chat' : fallbackMode
   const defaultPermission: PermissionMode = mode === 'code' ? 'accept_edits' : 'ask_permissions'
   const permission_mode: PermissionMode = typeof data.permission_mode === 'string'
     ? normalizeCodePermissionMode(data.permission_mode)
@@ -601,6 +601,22 @@ export function parseConversationActivityEvent(value: unknown, cursor: string): 
   if (pluginApproval) event.pluginApproval = pluginApproval
   const codeSessionProposal = parseCodeSessionProposalRequest(payload)
   if (codeSessionProposal) event.codeSessionProposal = codeSessionProposal
+  if (typeof payload.delegated_code_session === 'object' && payload.delegated_code_session !== null && !Array.isArray(payload.delegated_code_session)) {
+    const rawDel = payload.delegated_code_session as Record<string, unknown>
+    if (typeof rawDel.code_conversation_id === 'string' && rawDel.code_conversation_id) {
+      event.delegatedCodeSession = {
+        code_conversation_id: rawDel.code_conversation_id,
+        goal: typeof rawDel.goal === 'string' ? rawDel.goal : 'Tarefa no Orin Code',
+        status: rawDel.status === 'completed' || rawDel.status === 'failed' ? rawDel.status : 'running',
+        completed_todo_count: typeof rawDel.completed_todo_count === 'number' ? rawDel.completed_todo_count : 0,
+        total_todo_count: typeof rawDel.total_todo_count === 'number' ? rawDel.total_todo_count : 0,
+        active_task_title: typeof rawDel.active_task_title === 'string' ? rawDel.active_task_title : null,
+        modified_files_count: typeof rawDel.modified_files_count === 'number' ? rawDel.modified_files_count : 0,
+        examined_files_count: typeof rawDel.examined_files_count === 'number' ? rawDel.examined_files_count : 0,
+        friendly_milestone: typeof rawDel.friendly_milestone === 'string' ? rawDel.friendly_milestone : null,
+      }
+    }
+  }
   const planApproval = parsePlanApproval(payload)
   if (planApproval) {
     event.planApproval = planApproval
@@ -1261,4 +1277,317 @@ export function trustConversationWorkspace(
       return { trusted: data.trusted, path: data.path }
     },
   })
+}
+
+export type FriendTraitVector = {
+  warmth: number
+  humor: number
+  sarcasm: number
+  formality: number
+  verbosity: number
+  candor: number
+  energy: number
+}
+
+export type FriendBondStage = 'acquaintance' | 'buddy' | 'close_friend' | 'confidant'
+
+export type FriendPersonaState = {
+  traits: FriendTraitVector
+  affinity_score: number
+  bond_stage: FriendBondStage
+  style_notes: string[]
+  current_mood: string
+  soul_markdown_path: string | null
+  updated_at?: string | null
+}
+
+export type FriendMemoryKind = 'episodic' | 'inside_joke' | 'milestone' | 'emotional'
+
+export type FriendMemoryEntry = {
+  id: string
+  kind: FriendMemoryKind
+  content: string
+  importance: number
+  emotion_tag: string | null
+  created_at: string
+}
+
+export type WordTiming = {
+  word: string
+  start_ms: number
+  end_ms: number
+  char_start: number
+  char_end: number
+}
+
+export function clampFriendTraits(traits: Partial<FriendTraitVector>): FriendTraitVector {
+  const clamp = (val: number | undefined, min: number, max: number, def: number) => {
+    const n = typeof val === 'number' && Number.isFinite(val) ? val : def
+    return Math.min(max, Math.max(min, Number(n.toFixed(2))))
+  }
+  return {
+    warmth: clamp(traits.warmth, 0.3, 0.95, 0.65),
+    humor: clamp(traits.humor, 0.1, 0.9, 0.5),
+    sarcasm: clamp(traits.sarcasm, 0.0, 0.75, 0.25),
+    formality: clamp(traits.formality, 0.05, 0.85, 0.35),
+    verbosity: clamp(traits.verbosity, 0.15, 0.8, 0.4),
+    candor: clamp(traits.candor, 0.5, 0.95, 0.7),
+    energy: clamp(traits.energy, 0.2, 0.9, 0.55),
+  }
+}
+
+export function parseFriendPersonaState(value: unknown): FriendPersonaState {
+  const outer = record(value)
+  const data = typeof outer.persona === 'object' && outer.persona !== null && !Array.isArray(outer.persona)
+    ? (outer.persona as Record<string, unknown>)
+    : outer
+  const rawTraits = typeof data.traits === 'object' && data.traits !== null ? (data.traits as Partial<FriendTraitVector>) : {}
+  const bondStage: FriendBondStage =
+    data.bond_stage === 'buddy' || data.bond_stage === 'close_friend' || data.bond_stage === 'confidant'
+      ? data.bond_stage
+      : 'acquaintance'
+  return {
+    traits: clampFriendTraits(rawTraits),
+    affinity_score: typeof data.affinity_score === 'number' && Number.isFinite(data.affinity_score) ? data.affinity_score : 0,
+    bond_stage: bondStage,
+    style_notes: Array.isArray(data.style_notes) ? data.style_notes.filter((s): s is string => typeof s === 'string') : [],
+    current_mood: typeof data.current_mood === 'string' && data.current_mood ? data.current_mood : 'neutro',
+    soul_markdown_path: typeof data.soul_markdown_path === 'string' ? data.soul_markdown_path : null,
+    updated_at: typeof data.updated_at === 'string' ? data.updated_at : null,
+  }
+}
+
+export function ensureFriendConversation(
+  client: ApiClient = createBrowserApiClient(),
+  intent = client.createMutationIntent(),
+): Promise<{ conversation_id: string; title: string; mode: ConversationMode; state: string }> {
+  return client.request({
+    path: '/v1/conversations/friend/ensure',
+    method: 'POST',
+    intent,
+    body: {},
+    parse: (value) => {
+      const outer = record(value)
+      const data = typeof outer.conversation === 'object' && outer.conversation !== null && !Array.isArray(outer.conversation)
+        ? (outer.conversation as Record<string, unknown>)
+        : outer
+      const id =
+        typeof data.conversation_id === 'string'
+          ? data.conversation_id
+          : typeof data.id === 'string'
+            ? data.id
+            : 'conv-orin-friend'
+      return {
+        conversation_id: id,
+        title: typeof data.title === 'string' ? data.title : 'Orin Friend',
+        mode: 'friend',
+        state: typeof data.state === 'string' ? data.state : typeof data.status === 'string' ? data.status : 'idle',
+      }
+    },
+  })
+}
+
+export function getFriendPersona(
+  client: ApiClient = createBrowserApiClient(),
+  signal?: AbortSignal,
+): Promise<FriendPersonaState> {
+  return client.request({
+    path: '/v1/friend/persona',
+    signal,
+    parse: parseFriendPersonaState,
+  })
+}
+
+export function updateFriendPersona(
+  client: ApiClient = createBrowserApiClient(),
+  input: {
+    traits?: Partial<FriendTraitVector>
+    style_notes?: string[]
+    current_mood?: string
+  },
+  intent = client.createMutationIntent(),
+): Promise<FriendPersonaState> {
+  const safeTraits = input.traits ? clampFriendTraits(input.traits) : undefined
+  return client.request({
+    path: '/v1/friend/persona',
+    method: 'PUT',
+    intent,
+    body: {
+      ...(safeTraits ? { traits: safeTraits } : {}),
+      ...(input.style_notes ? { style_notes: input.style_notes } : {}),
+      ...(input.current_mood ? { current_mood: input.current_mood } : {}),
+    },
+    parse: parseFriendPersonaState,
+  })
+}
+
+export function syncFriendSoul(
+  client: ApiClient = createBrowserApiClient(),
+  intent = client.createMutationIntent(),
+): Promise<FriendPersonaState> {
+  return client.request({
+    path: '/v1/friend/soul/sync',
+    method: 'POST',
+    intent,
+    body: {},
+    parse: parseFriendPersonaState,
+  })
+}
+
+export function listFriendMemories(
+  client: ApiClient = createBrowserApiClient(),
+  signal?: AbortSignal,
+): Promise<FriendMemoryEntry[]> {
+  return client.request({
+    path: '/v1/friend/memories',
+    signal,
+    parse: (value) => {
+      const items = Array.isArray(value)
+        ? value
+        : typeof value === 'object' && value !== null && Array.isArray((value as { items?: unknown }).items)
+          ? (value as { items: unknown[] }).items
+          : []
+      return items.map((item) => {
+        const d = record(item)
+        const kind: FriendMemoryKind =
+          d.kind === 'inside_joke' || d.kind === 'milestone' || d.kind === 'emotional' ? d.kind : 'episodic'
+        return {
+          id: typeof d.id === 'string' ? d.id : String(d.memory_id ?? ''),
+          kind,
+          content: typeof d.content === 'string' ? d.content : '',
+          importance: typeof d.importance === 'number' ? d.importance : 0.5,
+          emotion_tag: typeof d.emotion_tag === 'string' ? d.emotion_tag : null,
+          created_at: typeof d.created_at === 'string' ? d.created_at : new Date().toISOString(),
+        }
+      })
+    },
+  })
+}
+
+export function deleteFriendMemory(
+  client: ApiClient = createBrowserApiClient(),
+  memoryId: string,
+  intent = client.createMutationIntent(),
+): Promise<void> {
+  return client.request({
+    path: `/v1/friend/memories/${encodeURIComponent(memoryId)}`,
+    method: 'DELETE',
+    intent,
+    parse: () => {
+      return undefined
+    },
+  })
+}
+
+
+export type LiveVoiceServerEvent =
+  | {
+      type: 'session.ready'
+      conversation_id: string
+      audio_epoch: number
+      hardware_profile?: Record<string, unknown>
+      voice_config?: Record<string, unknown>
+    }
+  | {
+      type: 'tts.chunk'
+      epoch: number
+      chunk_seq: number
+      clean_text: string
+      pcm_base64: string
+      sample_rate: number
+      duration_ms: number
+      word_timings: WordTiming[]
+    }
+  | {
+      type: 'audio.clear'
+      previous_epoch: number
+      new_epoch: number
+      interrupted_chunk_seq: number
+      played_ms: number
+      truncated_text: string
+      unspoken_text: string
+      system_receipt: string
+    }
+  | {
+      type: 'stt.transcript'
+      is_end_of_utterance: boolean
+      text: string
+      audio_epoch: number
+    }
+  | {
+      type: 'vad.eou_wait'
+      is_end_of_utterance: false
+      required_silence_ms: number
+      partial_text: string
+      detected_hold_marker: string | null
+    }
+  | {
+      type: 'vad.echo_discarded'
+      text: string
+      audio_epoch: number
+    }
+
+export type LiveVoiceSocketHandle = {
+  sendBargeIn: (epoch: number, chunkSeq: number, playedMs: number) => void
+  sendSpeakText: (text: string) => void
+  sendPlaybackProgress: (chunkSeq: number, playedMs: number) => void
+  sendSpeechEnd: (transcriptHint: string, silenceMs?: number) => void
+  sendPcmFrame: (pcmBytes: ArrayBuffer) => void
+  close: () => void
+}
+
+export function connectLiveVoiceSession(
+  conversationId: string,
+  onEvent: (event: LiveVoiceServerEvent) => void,
+): LiveVoiceSocketHandle | null {
+  if (typeof window === 'undefined' || typeof window.WebSocket === 'undefined' || !conversationId) {
+    return null
+  }
+  const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+  const url = `${proto}//${window.location.host}/v1/conversations/${encodeURIComponent(conversationId)}/live`
+  let ws: WebSocket | null = null
+  try {
+    ws = new window.WebSocket(url)
+    ws.onmessage = (msg) => {
+      if (typeof msg.data !== 'string') return
+      try {
+        const parsed = JSON.parse(msg.data) as LiveVoiceServerEvent
+        if (parsed && typeof parsed.type === 'string') {
+          onEvent(parsed)
+        }
+      } catch {
+        // Ignore malformed frames
+      }
+    }
+  } catch {
+    return null
+  }
+
+  const sendJson = (payload: Record<string, unknown>) => {
+    if (ws && ws.readyState === window.WebSocket.OPEN) {
+      ws.send(JSON.stringify(payload))
+    }
+  }
+
+  return {
+    sendBargeIn: (epoch, chunkSeq, playedMs) =>
+      sendJson({ type: 'barge_in', epoch, chunk_seq: chunkSeq, played_ms: playedMs }),
+    sendSpeakText: (text) => sendJson({ type: 'speak_text', text }),
+    sendPlaybackProgress: (chunkSeq, playedMs) =>
+      sendJson({ type: 'playback_progress', chunk_seq: chunkSeq, played_ms: playedMs }),
+    sendSpeechEnd: (transcriptHint, silenceMs = 420) =>
+      sendJson({ type: 'audio_speech_end', transcript_hint: transcriptHint, silence_ms: silenceMs }),
+    sendPcmFrame: (pcmBytes) => {
+      if (ws && ws.readyState === window.WebSocket.OPEN) {
+        ws.send(pcmBytes)
+      }
+    },
+    close: () => {
+      try {
+        ws?.close()
+      } catch {
+        // Ignore close errors
+      }
+    },
+  }
 }

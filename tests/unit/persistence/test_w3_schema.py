@@ -22,8 +22,10 @@ def test_w3_tables_and_columns_exist_after_migrations() -> None:
     inspector = inspect(engine)
     names = set(inspector.get_table_names())
     assert {table.name for table in W3_TABLES} <= names
+    assert "user_friend_personas" in names
     assert "turn_kind" in {column["name"] for column in inspector.get_columns("conversation_turns")}
     assert "lease_renewed_at" in {column["name"] for column in inspector.get_columns("conversation_dispatches")}
+    assert {"emotional_valence", "salience"} <= {column["name"] for column in inspector.get_columns("agent_memories")}
 
 
 def test_the_migration_matches_the_metadata_columns() -> None:
@@ -51,7 +53,7 @@ def test_the_migration_reaches_head_after_the_store_patched_the_database(tmp_pat
     PostgresChatStore(engine)
     upgrade(engine)
     with engine.connect() as connection:
-        assert connection.execute(text("select version_num from alembic_version")).scalar() == "0053_media_model_selections"
+        assert connection.execute(text("select version_num from alembic_version")).scalar() == "0054_orin_friend_and_live_mode"
     inspector = inspect(engine)
     assert {table.name for table in W3_TABLES} <= set(inspector.get_table_names())
     assert "turn_kind" in {column["name"] for column in inspector.get_columns("conversation_turns")}
@@ -81,4 +83,4 @@ def test_the_store_adds_the_idempotency_key_to_an_older_queue_table(tmp_path: Pa
     assert "ux_conversation_input_queue_idempotency" in {index["name"] for index in inspector.get_indexes("conversation_input_queue")}
     upgrade(engine)
     with engine.connect() as connection:
-        assert connection.execute(text("select version_num from alembic_version")).scalar() == "0053_media_model_selections"
+        assert connection.execute(text("select version_num from alembic_version")).scalar() == "0054_orin_friend_and_live_mode"

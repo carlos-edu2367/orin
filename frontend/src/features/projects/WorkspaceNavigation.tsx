@@ -2,7 +2,7 @@ import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { ApiClient, createBrowserApiClient } from '../../api/client'
-import { listConversations, type Conversation, type ConversationMode } from '../../api/conversations'
+import { ensureFriendConversation, listConversations, type Conversation, type ConversationMode } from '../../api/conversations'
 import { createProject, listProjectSidebar, type ProjectSidebarItem } from '../../api/projects'
 import { inspectNewWorkspaceFolder } from '../../api/workspace'
 import { useTheme } from '../../app/ThemeContext'
@@ -18,6 +18,9 @@ export type WorkspaceNavigationProps = {
   onChatsChange?: (chats: WorkspaceNavigationConversationSummary[]) => void
   onNewConversation?: () => void
   onNewCodeConversation?: () => void
+  onOpenOrinFriend?: () => void
+  isOrinFriendActive?: boolean
+  friendBondStage?: string
   railCollapsed?: boolean
   onToggleRail?: () => void
   onOpenPreferences?: () => void
@@ -74,6 +77,19 @@ function detectApplePlatform(): boolean {
 }
 
 function ModeBadge({ mode, conversationId }: { mode?: ConversationMode; conversationId: string }) {
+  if (mode === 'friend') {
+    return (
+      <span
+        className="project-navigation__mode-icon project-navigation__mode-icon--friend inline-flex shrink-0 items-center justify-center rounded border border-[var(--orin-border-subtle)] bg-[var(--orin-accent-bg)] px-1 py-0.5 font-mono text-[10px] font-bold leading-none text-[#A78BFA]"
+        title="Orin Friend"
+        data-testid={`conversation-mode-icon-${conversationId}`}
+        data-mode="friend"
+        aria-hidden="true"
+      >
+        ◈
+      </span>
+    )
+  }
   if (mode === 'code') {
     return (
       <span
@@ -107,6 +123,8 @@ export function WorkspaceNavigation({
   onChatsChange,
   onNewConversation,
   onNewCodeConversation,
+  onOpenOrinFriend,
+  isOrinFriendActive,
   railCollapsed,
   onToggleRail,
   onOpenPreferences,
@@ -318,6 +336,20 @@ export function WorkspaceNavigation({
     navigate('/?mode=code')
   }, [navigate, onNewCodeConversation])
 
+  const handleOpenOrinFriend = useCallback(async () => {
+    setMobileOpen(false)
+    if (onOpenOrinFriend) {
+      onOpenOrinFriend()
+      return
+    }
+    try {
+      const friendConv = await ensureFriendConversation(apiClient)
+      navigate(`/chats/${encodeURIComponent(friendConv.conversation_id)}`)
+    } catch {
+      navigate('/?mode=friend')
+    }
+  }, [apiClient, navigate, onOpenOrinFriend])
+
   const openCommandPalette = useCallback(() => {
     setMobileOpen(false)
     document.dispatchEvent(
@@ -411,6 +443,25 @@ export function WorkspaceNavigation({
             )}
           </div>
         </header>
+
+        <div className="mb-2">
+          <button
+            type="button"
+            data-testid="sidebar-orin-friend-button"
+            onClick={() => void handleOpenOrinFriend()}
+            title="Orin Friend (Companheiro com memória evolutiva e conversa por voz)"
+            aria-current={isOrinFriendActive ? 'page' : undefined}
+            className="project-navigation__cta-btn flex w-full items-center justify-between gap-2 rounded-lg border border-[var(--orin-border-subtle)] bg-[var(--orin-accent-bg)] px-3 py-2 text-xs font-semibold text-[var(--orin-text-primary)] transition-colors hover:border-[var(--orin-accent)] hover:bg-[var(--orin-surface-selected)]"
+          >
+            <span className="flex items-center gap-2">
+              <span className="font-mono text-sm text-[var(--orin-text-primary)]" aria-hidden="true">◈</span>
+              <span className="project-navigation__rail-hide">Orin Friend</span>
+            </span>
+            <span className="project-navigation__rail-hide rounded-full bg-[#4C1D95] px-1.5 py-0.5 font-mono text-[10px] text-[#F4F2FF]">
+              LIVE
+            </span>
+          </button>
+        </div>
 
         <div className="project-navigation__cta-group mb-2.5 grid grid-cols-2 gap-1.5" role="group" aria-label="Criar nova sessão">
           <button

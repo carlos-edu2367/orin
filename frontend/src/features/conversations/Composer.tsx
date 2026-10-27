@@ -23,9 +23,14 @@ import {
 export { formatPermissionModePill, formatPermissionModeTitle }
 
 export type ComposerProps = {
-  value: string
-  onChange: (value: string) => void
-  onSubmit: () => void
+  value?: string
+  onSend?: (value?: string) => void
+  mode?: ConversationMode
+  onModeChange?: (mode: ConversationMode) => void
+  isLiveVoiceActive?: boolean
+  onToggleLiveVoice?: () => void
+  onChange?: (value: string) => void
+  onSubmit?: () => void
   onStop?: () => void
   running?: boolean
   disabled?: boolean
@@ -110,7 +115,7 @@ export function findInHistory(history: readonly string[], query: string, skip: n
 }
 
 export function Composer({
-  value, onChange, onSubmit, onStop, running = false, disabled = false,
+  value = '', onChange = () => {}, onSubmit = () => {}, onStop, running = false, disabled = false,
   placeholder = 'Descreva o que você precisa…', settings, hint, error, autoFocus, notice, focusSignal = 0, canSend = true,
   attachments = [], onAttach = () => {}, onRemoveAttachment = () => {}, commands = [], skills = [],
   builtinCommands = [], catalogCommands = [], onSendNow, onOpenModelPicker, onRunCommand, onQueue, onOpenRewind, history = [],
@@ -118,6 +123,7 @@ export function Composer({
   codePermissionMode, onCodePermissionModeChange, todos,
   workspaceFiles = [], onSearchWorkspaceFiles,
   worktreeIsolated, onWorktreeIsolatedChange, worktreeBranch = null,
+  isLiveVoiceActive = false, onToggleLiveVoice,
 }: ComposerProps) {
   const effectiveCodeMode: CodeModeChoice = modeSwitch?.mode ?? conversationMode ?? codeMode
   const showCodeModeToggle = Boolean(!modeSwitch && onCodeModeChange && !hideCodeModeToggle && conversationMode === undefined)
@@ -132,6 +138,18 @@ export function Composer({
   const activePermissionMode = sessionContext?.permissionMode ?? codePermissionMode ?? internalPermissionMode
   const activeWorktreeIsolated = sessionContext?.worktreeIsolated ?? worktreeIsolated ?? internalWorktreeIsolated
   const reduced = useReducedMotion()
+
+  useEffect(() => {
+    if (!onToggleLiveVoice) return
+    function handleGlobalAltL(event: globalThis.KeyboardEvent) {
+      if (event.altKey && !event.ctrlKey && !event.metaKey && event.key.toLowerCase() === 'l') {
+        event.preventDefault()
+        onToggleLiveVoice?.()
+      }
+    }
+    window.addEventListener('keydown', handleGlobalAltL)
+    return () => window.removeEventListener('keydown', handleGlobalAltL)
+  }, [onToggleLiveVoice])
 
   function changePermissionMode(next: CodePermissionMode) {
     setInternalPermissionMode(next)
@@ -602,6 +620,24 @@ export function Composer({
           </div>
           <div className="composer__actions">
             {hint && <span className="composer__hint" role="status" aria-live="polite">{hint}</span>}
+            {onToggleLiveVoice && (
+              <button
+                type="button"
+                data-testid="composer-live-voice-toggle"
+                aria-pressed={isLiveVoiceActive}
+                aria-label={isLiveVoiceActive ? 'Encerrar Conversa Live (Alt+L)' : 'Iniciar Conversa Live por voz (Alt+L)'}
+                title="Conversa Live Full-Duplex (Alt+L)"
+                onClick={onToggleLiveVoice}
+                className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 font-mono text-[11px] font-semibold transition-colors ${
+                  isLiveVoiceActive
+                    ? 'border-[#7C3AED] bg-[#4C1D95] text-[#F4F2FF]'
+                    : 'border-[var(--border-subtle)] bg-[var(--surface-raised)] text-[var(--text-primary)] hover:border-[var(--accent-primary)]'
+                }`}
+              >
+                <span aria-hidden="true">((•))</span>
+                <span>LIVE</span>
+              </button>
+            )}
             <AnimatePresence mode="wait" initial={false}>
               {running ? (
                 <motion.button

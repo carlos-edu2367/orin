@@ -16,7 +16,7 @@ import sys
 
 from .ports import DEFAULT_PORT
 
-SERVICES = ("backend", "worker", "scheduler")
+SERVICES = ("backend", "worker", "scheduler", "voice-sidecar")
 
 
 def run_backend() -> int:
@@ -64,7 +64,24 @@ def run_scheduler() -> int:
     return 0
 
 
-_RUNNERS = {"backend": run_backend, "worker": run_worker, "scheduler": run_scheduler}
+def run_voice_sidecar() -> int:
+    """Isolated local STT/TTS sidecar (orin-voice-sidecar) started on demand."""
+    from agentos.live_voice.sidecar import main
+
+    try:
+        main()
+    except KeyboardInterrupt:
+        return 0
+    return 0
+
+
+_RUNNERS = {
+    "backend": run_backend,
+    "worker": run_worker,
+    "scheduler": run_scheduler,
+    "voice-sidecar": run_voice_sidecar,
+    "orin-voice-sidecar": run_voice_sidecar,
+}
 
 
 def run_service(name: str) -> int:
@@ -75,4 +92,4 @@ def run_service(name: str) -> int:
     return runner()
 
 
-__all__ = ["SERVICES", "run_service"]
+__all__ = ["SERVICES", "run_service", "run_voice_sidecar"]

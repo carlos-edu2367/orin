@@ -57,6 +57,14 @@ class AgentActivityEventType(StrEnum):
     NOTIFICATION_PUSHED = "notification.pushed"
     # W6: a question for the SDK host behind `orin code` (its body is in the turn's CLI transcript).
     HOST_REQUEST = "host.request"
+    # Orin Friend & Live Voice Mode events
+    SPEAK_BLOCK_STARTED = "speak.block_started"
+    SPEAK_DELTA = "speak.delta"
+    SPEAK_CHUNK_READY = "speak.chunk_ready"
+    SPEAK_FILLER_TRIGGERED = "speak.filler_triggered"
+    SPEAK_INTERRUPTED = "speak.interrupted"
+    SPEAK_FINISHED = "speak.finished"
+    CODE_SESSION_PROGRESS = "code_session.progress"
 
 
 class ActivityVisibility(StrEnum):
@@ -67,6 +75,23 @@ class ActivityVisibility(StrEnum):
 
 _APPROVAL_EVENT_TYPES = frozenset({AgentActivityEventType.CODE_MODE_DECISION_REQUIRED, AgentActivityEventType.TOOL_PERMISSION_REQUIRED})
 _TEXT_DELTA_EVENT_TYPES = frozenset({AgentActivityEventType.ASSISTANT_DELTA, AgentActivityEventType.AGENT_THOUGHT_DELTA})
+_SPEAK_EVENT_TYPES = frozenset({
+    AgentActivityEventType.SPEAK_BLOCK_STARTED,
+    AgentActivityEventType.SPEAK_DELTA,
+    AgentActivityEventType.SPEAK_CHUNK_READY,
+    AgentActivityEventType.SPEAK_FILLER_TRIGGERED,
+    AgentActivityEventType.SPEAK_INTERRUPTED,
+    AgentActivityEventType.SPEAK_FINISHED,
+})
+_SPEAK_RAW_KEYS = _TEXT_DELTA_RAW_KEYS | frozenset({
+    "raw_text",
+    "clean_text",
+    "tts_text",
+    "raw_tts_text",
+    "normalized_text",
+    "speak_delta",
+    "text",
+})
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,6 +147,8 @@ class AgentActivityEvent:
             raw_keys = _APPROVAL_RAW_KEYS
         elif event_type in _TEXT_DELTA_EVENT_TYPES:  # W7-R3: the model's own text is not redacted
             raw_keys = _TEXT_DELTA_RAW_KEYS
+        elif event_type in _SPEAK_EVENT_TYPES:
+            raw_keys = _SPEAK_RAW_KEYS
         else:
             raw_keys = frozenset()
         object.__setattr__(self, "payload", sanitize_public_mapping(self.payload, raw_keys=raw_keys))
