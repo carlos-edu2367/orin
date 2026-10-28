@@ -1405,3 +1405,54 @@ def test_claude_code_model_catalog_reads_live_cache_directory_and_auto_upgrades_
     assert len(upgraded) >= 19
     assert any(r.model_id == "claude-opus-5-5" for r in upgraded)
     assert any(r.model_id == "claude-opus-6-0" for r in upgraded)
+
+
+def test_fetch_published_claude_cli_models_parses_official_remote_catalog(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import io
+    import urllib.request
+    from agentos.provider_catalog.claude_code import _fetch_published_claude_cli_models
+
+    sample_catalog = {
+        "schema_version": 1,
+        "version": 9999,
+        "surfaces": {
+            "cc": {
+                "model_selector_config": [
+                    {
+                        "id": "cc",
+                        "models": [
+                            {
+                                "id": "claude-opus-7-0",
+                                "name": "Opus 7.0",
+                                "runtime": {"max_input_tokens": 2_000_000},
+                            },
+                            {
+                                "id": "claude-sonnet-7-0",
+                                "name": "Claude Sonnet 7.0",
+                                "runtime": {"max_input_tokens": 1_000_000},
+                            },
+                        ],
+                    }
+                ]
+            }
+        },
+    }
+
+    class _FakeResp(io.BytesIO):
+        def __enter__(self) -> "_FakeResp":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            self.close()
+
+    monkeypatch.setattr(
+        urllib.request,
+        "urlopen",
+        lambda req, timeout=4.0: _FakeResp(json.dumps(sample_catalog).encode("utf-8")),
+    )
+
+    discovered = _fetch_published_claude_cli_models()
+    assert ("claude-opus-7-0", "Claude Opus 7.0 (Assinatura CLI)", 2_000_000) in discovered
+    assert ("claude-sonnet-7-0", "Claude Sonnet 7.0 (Assinatura CLI)", 1_000_000) in discovered

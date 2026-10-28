@@ -40,6 +40,7 @@ from agentos.providers.models import (
 
 
 DEFAULT_CLAUDE_CLI_BRIDGE_URL = "http://127.0.0.1:18447"
+PUBLISHED_CLAUDE_MODEL_CATALOG_URL = "https://downloads.claude.ai/model-catalog/v1/catalog.json"
 ANTHROPIC_CLOUD_BASE_URL = "https://api.anthropic.com"
 DEFAULT_ANTHROPIC_BASE_URL = ANTHROPIC_CLOUD_BASE_URL
 
@@ -403,6 +404,77 @@ def check_claude_cli_status(
     return dict(payload)
 
 
+def _format_catalog_model_entry(entry: Mapping[str, Any]) -> tuple[str, str, int] | None:
+    model_id = str(entry.get("id") or "").strip()
+    if not model_id or not _SAFE_MODEL_RE.match(model_id):
+        return None
+    raw_name = str(entry.get("name") or model_id).strip()
+    if not raw_name.lower().startswith("claude"):
+        display_name = f"Claude {raw_name}"
+    else:
+        display_name = raw_name
+    if "(assinatura cli)" not in display_name.lower():
+        display_name = f"{display_name} (Assinatura CLI)"
+
+    runtime = entry.get("runtime") if isinstance(entry.get("runtime"), Mapping) else {}
+    max_input = runtime.get("max_input_tokens")
+    if isinstance(max_input, int) and not isinstance(max_input, bool) and max_input > 0:
+        context_window = max_input
+    elif any(legacy in model_id for legacy in ("4-5", "4-1", "4-0", "3-7", "3-5")):
+        context_window = 200_000
+    else:
+        context_window = 1_000_000
+    return (model_id, display_name, context_window)
+
+
+def _fetch_published_claude_cli_models(*, timeout: float = 4.0) -> list[tuple[str, str, int]]:
+    """Fetch Anthropic's live published Claude Code model catalog from downloads.claude.ai."""
+    import urllib.request
+
+    catalog_url = os.environ.get("CLAUDE_CODE_MODEL_CATALOG_URL", PUBLISHED_CLAUDE_MODEL_CATALOG_URL).strip()
+    if not catalog_url.startswith("https://"):
+        return []
+    try:
+        req = urllib.request.Request(
+            catalog_url,
+            headers={"Accept": "application/json", "User-Agent": "claude-code/2.1.309"},
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            payload = json.loads(resp.read().decode("utf-8", errors="replace"))
+    except Exception:
+        return []
+
+    if not isinstance(payload, Mapping):
+        return []
+    surfaces = payload.get("surfaces")
+    if not isinstance(surfaces, Mapping):
+        return []
+
+    discovered: list[tuple[str, str, int]] = []
+    seen_ids: set[str] = set()
+    for surface_key in ("cc", "ccd", "chat"):
+        surface = surfaces.get(surface_key)
+        if not isinstance(surface, Mapping):
+            continue
+        configs = surface.get("model_selector_config")
+        if not isinstance(configs, list):
+            continue
+        for cfg in configs:
+            if not isinstance(cfg, Mapping):
+                continue
+            raw_models = cfg.get("models")
+            if not isinstance(raw_models, list):
+                continue
+            for entry in raw_models:
+                if not isinstance(entry, Mapping):
+                    continue
+                parsed = _format_catalog_model_entry(entry)
+                if parsed is not None and parsed[0] not in seen_ids:
+                    seen_ids.add(parsed[0])
+                    discovered.append(parsed)
+    return discovered
+
+
 def _discover_cached_claude_cli_models(
     *,
     org_id: str | None = None,
@@ -508,6 +580,11 @@ class ClaudeCodeModelCatalogClient:
         seen_ids: set[str] = set()
 
         for item in _discover_cached_claude_cli_models(org_id=org_id, cache_dir=self._cache_dir):
+            if item[0] not in seen_ids:
+                seen_ids.add(item[0])
+                merged.append(item)
+
+        for item in _fetch_published_claude_cli_models(timeout=min(self._timeout, 4.0)):
             if item[0] not in seen_ids:
                 seen_ids.add(item[0])
                 merged.append(item)
