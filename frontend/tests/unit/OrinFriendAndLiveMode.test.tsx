@@ -57,8 +57,15 @@ import {
 } from '../../src/api/conversations';
 import type { ApiClient } from '../../src/api/client';
 import * as ConversationsApi from '../../src/api/conversations';
+import * as LiveVoiceApi from '../../src/api/liveVoice';
 import * as ChatPageModule from '../../src/features/conversations/ChatPage';
 import { useLiveVoice } from '../../src/features/conversations/live/useLiveVoice';
+import {
+  matchWakeWord,
+  phoneticSkeletonPtBr,
+  setLiveVoiceStageOpen,
+} from '../../src/features/conversations/live/wakeWord';
+import { GlobalWakeWordListener } from '../../src/features/conversations/live/GlobalWakeWordListener';
 import { act, renderHook } from '@testing-library/react';
 
 afterEach(() => {
@@ -2465,4 +2472,218 @@ describe('9. Thinking Audio Cue (Web Audio), Ciclo de Vida useLiveVoice e Seleç
     }
   });
 });
+
+describe('10. Wake Word "Orin" Multissotaque e Ativação Automática do Orin Friend Live', () => {
+  it('10.1 matchWakeWord reconhece "Orin" em diversos sotaques brasileiros e internacionais, extrai commandRemainder e rejeita falsos positivos', () => {
+    const positiveVariants = [
+      'Orin',
+      'orin!',
+      'Órin',
+      'Orim',
+      'Órim',
+      'Oryn',
+      'Oring',
+      'Ourin',
+      'Ourim',
+      'Aurin',
+      'Horin',
+      'Horim',
+      'Orem',
+      'Órem',
+      'Oren',
+      'Ori',
+      'Orinho',
+      'Orion',
+      'Urin',
+      'Urim',
+      'Olin',
+      'Olim',
+      'Olhin',
+      'O rin',
+      'Oh rin',
+      'All in',
+      'Oi Orin',
+      'Ei Orim',
+      'Fala Órem',
+      'Hey Ourin',
+      'Olá Urin',
+      'Ô Olin',
+      'Bom dia Orin',
+    ];
+
+    for (const phrase of positiveVariants) {
+      const res = matchWakeWord(phrase);
+      expect(res.matched, `Esperava match para: ${phrase}`).toBe(true);
+      expect(res.confidence).toBeGreaterThanOrEqual(0.78);
+      expect(res.commandRemainder).toBe('');
+    }
+
+    expect(phoneticSkeletonPtBr('Ourinho')).toBe('ORN');
+    expect(phoneticSkeletonPtBr('Horim')).toBe('ORN');
+    expect(phoneticSkeletonPtBr('Olin')).toBe('ORN');
+
+    const withCommand = matchWakeWord('Oi Orim, me ajuda a revisar esse código agora?');
+    expect(withCommand.matched).toBe(true);
+    expect(withCommand.commandRemainder).toBe('me ajuda a revisar esse código agora?');
+
+    const customNameMatch = matchWakeWord('Fala Jarvis, tudo certo?', ['Jarvis']);
+    expect(customNameMatch.matched).toBe(true);
+    expect(customNameMatch.commandRemainder).toBe('tudo certo?');
+
+    const falsePositives = [
+      '',
+      'Olha isso aqui',
+      'Hora do almoço',
+      'Agora eu vou sair',
+      'Ordem do dia',
+      'Onde você está',
+      'Ontem choveu muito',
+      'Ouro puro',
+      'Outro arquivo',
+      'Origem do problema',
+      'Orçamento aprovado',
+      'Orelha esquerda',
+      'Eu gosto de programar em Python com o Orin todo dia',
+    ];
+    for (const phrase of falsePositives) {
+      const res = matchWakeWord(phrase);
+      expect(res.matched, `Falso positivo indevido para: ${phrase}`).toBe(false);
+    }
+  });
+
+  it('10.2 wakeWordEnabled vem ativo por padrão nas preferências e pode ser alternado nas configurações rápidas de voz', async () => {
+    window.localStorage.removeItem('orin.live-voice.prefs.v1');
+    expect(DEFAULT_LIVE_VOICE_PREFS.wakeWordEnabled).toBe(true);
+    expect(loadLiveVoicePrefs().wakeWordEnabled).toBe(true);
+    expect(normalizeLiveVoicePrefs({ wakeWordEnabled: false }).wakeWordEnabled).toBe(false);
+
+    vi.spyOn(MicCapture, 'open').mockResolvedValue({
+      level: 0,
+      deviceLabel: 'Mic Teste',
+      close: vi.fn(),
+    } as unknown as MicCapture);
+    vi.spyOn(LiveVoiceApi, 'getLiveVoiceCapabilities').mockResolvedValue(UNAVAILABLE_CAPABILITIES);
+
+    render(<LiveVoiceStage isOpen={true} conversationId="conv-wake-pref" companionName="Orin" phaseOverride="listening" reducedMotion onClose={vi.fn()} />);
+    fireEvent.click(screen.getByTestId('live-voice-open-settings-button'));
+
+    const toggle = (await screen.findByTestId('live-wake-word-toggle')) as HTMLInputElement;
+    expect(toggle.checked).toBe(true);
+
+    fireEvent.click(toggle);
+    expect(loadLiveVoicePrefs().wakeWordEnabled).toBe(false);
+  });
+
+  it('10.3 GlobalWakeWordListener pausa quando o modo Live está aberto e, em standby, detecta a wake word, traz a janela para frente e abre o Orin Friend no modo Live', async () => {
+    window.localStorage.removeItem('orin.live-voice.prefs.v1');
+    setLiveVoiceStageOpen(false);
+
+    let capturedOnFrame: ((frame: Int16Array, rms: number) => void) | undefined;
+    const closeMicMock = vi.fn();
+    vi.spyOn(MicCapture, 'open').mockImplementation(async (opts) => {
+      capturedOnFrame = opts?.onFrame;
+      return {
+        level: 0,
+        deviceLabel: 'Mic Standby',
+        close: closeMicMock,
+      } as unknown as MicCapture;
+    });
+
+    vi.spyOn(LiveVoiceApi, 'getLiveVoiceCapabilities').mockResolvedValue({
+      ...UNAVAILABLE_CAPABILITIES,
+      stt: {
+        ...UNAVAILABLE_CAPABILITIES.stt,
+        local_sidecar: { available: true, reason: '', modelId: 'faster-whisper-large-v3-turbo', models: [], voices: [] },
+      },
+      recommendedStt: 'local_sidecar',
+    });
+
+    const checkWakeWordSpy = vi.spyOn(LiveVoiceApi, 'checkWakeWord').mockResolvedValue({
+      matched: true,
+      wake_variant: 'orim',
+      command_remainder: 'qual é a pauta de hoje?',
+      confidence: 0.94,
+      transcript: 'Oi Orim, qual é a pauta de hoje?',
+    });
+
+    const ensureFriendSpy = vi.spyOn(ConversationsApi, 'ensureFriendConversation').mockResolvedValue({
+      conversation_id: 'friend-conv-wake-1',
+      title: 'Orin',
+      state: 'idle',
+      mode: 'friend',
+      permission_mode: 'accept_edits',
+      turns: [],
+      messages: [],
+      activities: [],
+      activity_cursor: '0',
+    } as unknown as ConversationsApi.Conversation);
+
+    const wakeDesktopMock = vi.fn().mockResolvedValue({ ok: true });
+    window.orinDesktop = {
+      onUpdateAvailable: vi.fn(() => () => {}),
+      wakeToLiveFriend: wakeDesktopMock,
+    };
+
+    const openFriendEvents: Array<{ conversationId: string; commandRemainder: string }> = [];
+    const onOpenFriendLive = (ev: Event) => {
+      openFriendEvents.push((ev as CustomEvent).detail);
+    };
+    window.addEventListener('orin:open-friend-live', onOpenFriendLive);
+
+    const fakeClient = {
+      request: vi.fn(),
+      createMutationIntent: () => ({ idempotencyKey: 'k-wake' }),
+    } as unknown as ApiClient;
+
+    try {
+      render(
+        <MemoryRouter initialEntries={['/']}>
+          <GlobalWakeWordListener client={fakeClient} />
+        </MemoryRouter>,
+      );
+
+      await waitFor(() => expect(capturedOnFrame).toBeDefined());
+
+      // Se o LiveVoiceStage abrir, o listener global fecha o microfone de standby imediatamente
+      act(() => {
+        setLiveVoiceStageOpen(true);
+      });
+      await waitFor(() => expect(closeMicMock).toHaveBeenCalled());
+
+      // Ao fechar o LiveVoiceStage, o microfone de standby volta a escutar
+      capturedOnFrame = undefined;
+      act(() => {
+        setLiveVoiceStageOpen(false);
+      });
+      await waitFor(() => expect(capturedOnFrame).toBeDefined());
+
+      // Simula fala curta ("Oi Orim, qual é a pauta de hoje?") seguida de silêncio
+      const speechFrame = new Int16Array(LIVE_FRAME_SAMPLES).fill(9000);
+      const silenceFrame = new Int16Array(LIVE_FRAME_SAMPLES).fill(10);
+      act(() => {
+        for (let i = 0; i < 12; i += 1) {
+          capturedOnFrame?.(speechFrame, 0.25);
+        }
+        for (let i = 0; i < 18; i += 1) {
+          capturedOnFrame?.(silenceFrame, 0.0002);
+        }
+      });
+
+      await waitFor(() => expect(checkWakeWordSpy).toHaveBeenCalledTimes(1));
+      await waitFor(() => expect(ensureFriendSpy).toHaveBeenCalledTimes(1));
+      expect(wakeDesktopMock).toHaveBeenCalledTimes(1);
+      expect(openFriendEvents).toEqual([
+        {
+          conversationId: 'friend-conv-wake-1',
+          commandRemainder: 'qual é a pauta de hoje?',
+        },
+      ]);
+    } finally {
+      window.removeEventListener('orin:open-friend-live', onOpenFriendLive);
+      delete window.orinDesktop;
+      setLiveVoiceStageOpen(false);
+    }
+  });
+});
+
 

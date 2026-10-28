@@ -32,6 +32,7 @@ import {
   type SttChoice,
   type TtsChoice,
 } from './live/liveVoicePrefs'
+import { setLiveVoiceQuickSettingsOpen } from './live/wakeWord'
 
 export type LiveVoiceQuickSettingsProps = {
   isOpen: boolean
@@ -166,6 +167,11 @@ function VoiceSettingsPanel({ client: providedClient, companionName = 'Orin', on
   const loadCaps = useCallback((signal?: AbortSignal) => {
     getLiveVoiceCapabilities(client, signal).then(setCaps).catch(() => setCaps((current) => current ?? UNAVAILABLE_CAPABILITIES))
   }, [client])
+
+  useEffect(() => {
+    setLiveVoiceQuickSettingsOpen(true)
+    return () => setLiveVoiceQuickSettingsOpen(false)
+  }, [])
 
   useEffect(() => {
     const controller = new AbortController()
@@ -642,6 +648,15 @@ function VoiceSettingsPanel({ client: providedClient, companionName = 'Orin', on
           <label className="voice-toggle">
             <input type="checkbox" checked={prefs.bargeIn} onChange={(event) => update({ bargeIn: event.target.checked })} />
             <span>Parar de falar quando eu começar a falar por cima</span>
+          </label>
+          <label className="voice-toggle">
+            <input
+              type="checkbox"
+              data-testid="live-wake-word-toggle"
+              checked={prefs.wakeWordEnabled}
+              onChange={(event) => update({ wakeWordEnabled: event.target.checked })}
+            />
+            <span>Ativar por voz dizendo “{companionName}” em segundo plano (abre direto no modo Live do Orin Friend)</span>
           </label>
           <p className="voice-settings__hint">
             Sem fone de ouvido? Use o <strong>Modo sem fone</strong> na conversa: o microfone só abre enquanto você segura Espaço.

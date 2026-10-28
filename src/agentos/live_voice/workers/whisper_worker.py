@@ -69,12 +69,14 @@ def transcribe(request: dict[str, Any]) -> dict[str, Any]:
         duration = audio.size / rate
         target = np.linspace(0.0, duration, int(duration * 16000), endpoint=False)
         audio = np.interp(target, np.linspace(0.0, duration, audio.size, endpoint=False), audio).astype(np.float32)
+    prompt_hint = str(request.get("prompt_hint") or "").strip() or None
     segments, _info = model.transcribe(
         audio,
         language=str(request.get("language") or "pt").split("-")[0],
         beam_size=1,
         vad_filter=True,
         condition_on_previous_text=False,
+        initial_prompt=prompt_hint,
     )
     return {"text": " ".join(segment.text.strip() for segment in segments).strip(), "device": device}
 

@@ -249,6 +249,7 @@ class LocalWhisperEngine:
                         "language": language,
                         "sample_rate": sample_rate,
                         "pcm_base64": base64.b64encode(pcm_bytes).decode("ascii"),
+                        "prompt_hint": prompt_hint or "",
                     },
                 )
             except LocalEngineError as exc:
@@ -627,13 +628,16 @@ def transcribe_openrouter(
     sample_rate: int,
     language: str = "pt-BR",
     model_id: str = "openai/whisper-large-v3-turbo",
+    prompt_hint: str | None = None,
     transport: httpx.BaseTransport | None = None,
 ) -> str:
-    body = {
+    body: dict[str, Any] = {
         "model": model_id,
         "input_audio": {"data": base64.b64encode(pcm16_to_wav(pcm_bytes, sample_rate)).decode("ascii"), "format": "wav"},
         "language": (language or "pt").split("-")[0],
     }
+    if prompt_hint:
+        body["prompt"] = prompt_hint[:400]
     url = f"{credential.base_url.rstrip('/')}/audio/transcriptions"
     headers = _openrouter_headers(credential)
     try:

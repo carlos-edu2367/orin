@@ -56,7 +56,7 @@ app.whenReady().then(async () => {
   if (globalShortcut && typeof globalShortcut.register === 'function') {
     try {
       globalShortcut.register('CommandOrControl+Shift+L', () => {
-        showWindow()
+        wakeWindowToForeground()
         if (mainWindow && !mainWindow.isDestroyed()) {
           mainWindow.webContents.send('desktop:toggle-live-voice')
         }
@@ -88,6 +88,7 @@ app.whenReady().then(async () => {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      backgroundThrottling: false,
     },
   })
   protectNavigation(mainWindow)
@@ -146,6 +147,11 @@ function registerIpc() {
     const notification = new Notification({ title: payload.title, body: payload.body, icon: iconPath, silent: false })
     notification.on('click', () => showWindow())
     notification.show()
+    return true
+  })
+  ipcMain.handle('desktop:wake-live-voice', (event) => {
+    if (!fromApp(event)) return false
+    wakeWindowToForeground()
     return true
   })
 }
@@ -372,6 +378,20 @@ function showWindow() {
   mainWindow.focus()
 }
 
+function wakeWindowToForeground() {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  destroyTray()
+  if (mainWindow.isMinimized()) mainWindow.restore()
+  mainWindow.show()
+  try {
+    mainWindow.setAlwaysOnTop(true)
+    mainWindow.focus()
+    mainWindow.setAlwaysOnTop(false)
+  } catch {
+    mainWindow.focus()
+  }
+}
+
 function createTray() {
   if (tray) return true
   try {
@@ -383,7 +403,7 @@ function createTray() {
       {
         label: 'Conversa Live (Orin Friend)',
         click: () => {
-          showWindow()
+          wakeWindowToForeground()
           if (mainWindow && !mainWindow.isDestroyed()) {
             mainWindow.webContents.send('desktop:toggle-live-voice')
           }

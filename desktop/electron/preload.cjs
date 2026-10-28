@@ -16,4 +16,10 @@ contextBridge.exposeInMainWorld('orinDesktop', Object.freeze({
   setPreferences: (preferences) => ipcRenderer.invoke('desktop:set-preferences', preferences),
   applyUpdate: () => ipcRenderer.invoke('desktop:apply-update'),
   notifyCodeMode: (notification) => ipcRenderer.invoke('desktop:notify-code-mode', notification),
+  wakeToLiveFriend: () => ipcRenderer.invoke('desktop:wake-live-voice'),
+  onToggleLiveVoice: (callback) => {
+    const listener = () => callback()
+    ipcRenderer.on('desktop:toggle-live-voice', listener)
+    return () => ipcRenderer.removeListener('desktop:toggle-live-voice', listener)
+  },
 }))

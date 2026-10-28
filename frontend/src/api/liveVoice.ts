@@ -175,3 +175,48 @@ export function deleteChatterboxVoice(client: ApiClient, clipId: string): Promis
     parse: () => undefined,
   })
 }
+
+export type WakeCheckResponse = {
+  matched: boolean
+  wake_variant: string
+  command_remainder: string
+  confidence: number
+  transcript: string
+}
+
+export function checkWakeWord(
+  client: ApiClient,
+  input: {
+    pcmBase64: string
+    sampleRate?: number
+    sttProvider?: string
+    sttModel?: string | null
+    customNames?: string[]
+  },
+  signal?: AbortSignal,
+): Promise<WakeCheckResponse> {
+  return client.request({
+    path: '/v1/live-voice/wake-check',
+    method: 'POST',
+    signal,
+    intent: client.createMutationIntent(),
+    body: {
+      pcm_base64: input.pcmBase64,
+      sample_rate: input.sampleRate ?? 16000,
+      stt_provider: input.sttProvider ?? 'auto',
+      stt_model: input.sttModel ?? null,
+      custom_names: input.customNames ?? [],
+    },
+    parse: (value) => {
+      const data = record(value)
+      return {
+        matched: data.matched === true,
+        wake_variant: typeof data.wake_variant === 'string' ? data.wake_variant : '',
+        command_remainder: typeof data.command_remainder === 'string' ? data.command_remainder : '',
+        confidence: typeof data.confidence === 'number' ? data.confidence : 0,
+        transcript: typeof data.transcript === 'string' ? data.transcript : '',
+      }
+    },
+  })
+}
+

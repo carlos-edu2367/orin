@@ -10,6 +10,8 @@ interface OrinDesktopBridge {
   getPreferences?: () => Promise<{ closeBehavior: 'ask' | 'background' | 'quit' } | null>
   setPreferences?: (preferences: { closeBehavior: 'ask' | 'background' | 'quit' }) => Promise<{ closeBehavior: 'ask' | 'background' | 'quit' } | null>
   notifyCodeMode?: (notification: { title: string; body: string }) => Promise<boolean>
+  wakeToLiveFriend?: () => Promise<boolean>
+  onToggleLiveVoice?: (callback: () => void) => () => void
 }
 
 interface Window {

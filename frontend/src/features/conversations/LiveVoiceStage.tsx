@@ -9,6 +9,7 @@ import { LiveOrb } from './live/LiveOrb'
 import { loadLiveVoicePrefs, onLiveVoicePrefsChange, STT_LABELS, TTS_LABELS, voiceLabel, type LiveVoicePrefs } from './live/liveVoicePrefs'
 import { orbTheme } from './live/orbThemes'
 import { useLiveVoice, type AssistantSpeechItem } from './live/useLiveVoice'
+import { setLiveVoiceStageOpen } from './live/wakeWord'
 
 export {
   LIVE_VOICE_DUCKING_MIN_SPEECH_MS,
@@ -138,6 +139,12 @@ export function LiveVoiceStage({
     getLiveVoiceCapabilities(client, controller.signal).then(setCapabilities).catch(() => {})
     return () => controller.abort()
   }, [client])
+  useEffect(() => {
+    if (!isOpen) return
+    setLiveVoiceStageOpen(true)
+    return () => setLiveVoiceStageOpen(false)
+  }, [isOpen])
+
   useEffect(() => {
     if (!isOpen) return
     return refreshCapabilities()

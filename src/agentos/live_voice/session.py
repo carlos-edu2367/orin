@@ -48,8 +48,13 @@ from agentos.live_voice.vad_eou import (
     SileroVADDetector,
     is_echo_of_recent_tts,
 )
+from agentos.live_voice.wake_word import (
+    build_wake_prompt_hint,
+    match_wake_word,
+)
 
 OPENROUTER_DEFAULT_STT_MODEL = "openai/whisper-large-v3-turbo"
+MAX_WAKE_PCM_BYTES = 16000 * 2 * 6  # Máximo de 6s de áudio 16kHz PCM16 para wake word
 
 # Limite máximo de 60 segundos de áudio PCM 16kHz mono Int16 (~1.92 MB) para prevenir DoS de memória
 MAX_PCM_INPUT_BUFFER_BYTES = 16000 * 2 * 60
@@ -794,6 +799,17 @@ class VoiceClipUpload(BaseModel):
     data_base64: str = Field(min_length=4, max_length=17_000_000)
 
 
+class WakeCheckRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    pcm_base64: str | None = Field(default=None, max_length=320_000)
+    sample_rate: int = Field(default=16000, ge=8000, le=48000)
+    transcript_hint: str | None = Field(default=None, max_length=600)
+    stt_provider: str | None = Field(default=None, max_length=64)
+    stt_model: str | None = Field(default=None, max_length=160)
+    language: str = Field(default="pt-BR", max_length=32)
+    custom_wake_words: list[str] | None = Field(default=None, max_length=5)
+
+
 def register_live_voice_routes(
     app: FastAPI,
     services: Any = None,
@@ -907,7 +923,15 @@ def register_live_voice_routes(
             raise ApplicationNotFoundError(clip_id)
         return JSONResponse({"id": clip_id, "deleted": True})
 
-    def _transcribe(session: LiveVoiceSession, user_id: str | None, pcm: bytes, sample_rate: int, hint: str) -> str:
+    def _transcribe(
+        session: LiveVoiceSession,
+        user_id: str | None,
+        pcm: bytes,
+        sample_rate: int,
+        hint: str,
+        *,
+        prompt_hint: str | None = None,
+    ) -> str:
         provider = session.voice_config.stt_provider
         if provider == "local_sidecar":
             return whisper.transcribe(
@@ -915,7 +939,7 @@ def register_live_voice_routes(
                 sample_rate=sample_rate,
                 language=session.voice_config.language,
                 model_id=session.voice_config.stt_model,
-                prompt_hint=None,
+                prompt_hint=prompt_hint,
             )
         if provider in CLOUD_VOICE_PROVIDERS:
             credential = resolve_cloud_credential(services, user_id, provider)
@@ -930,7 +954,12 @@ def register_live_voice_routes(
                 if "/" not in model_id:
                     model_id = OPENROUTER_DEFAULT_STT_MODEL
                 return transcribe_openrouter(
-                    credential, pcm, sample_rate=sample_rate, language=session.voice_config.language, model_id=model_id
+                    credential,
+                    pcm,
+                    sample_rate=sample_rate,
+                    language=session.voice_config.language,
+                    model_id=model_id,
+                    prompt_hint=prompt_hint,
                 )
             default_model = SUPPORTED_STT_PROVIDERS[provider]["models"][0]["id"]
             model_id = session.voice_config.stt_model
@@ -942,10 +971,78 @@ def register_live_voice_routes(
                 sample_rate=sample_rate,
                 language=session.voice_config.language,
                 model_id=model_id,
+                prompt_hint=prompt_hint,
             )
         if hint:
             return hint
         raise VoiceEngineError("stt_provider_unsupported", f"O provedor de transcrição {provider!r} ainda não é suportado.")
+
+    @app.post("/v1/live-voice/wake-check")
+    async def check_wake_word_route(payload: WakeCheckRequest, request: Request) -> JSONResponse:
+        user_id: str | None = None
+        if principal_for is not None:
+            principal = principal_for(request, mutable=True)
+            security = getattr(services, "security", None)
+            if security is not None:
+                security.authorize(principal, action="conversation.list", resource_id=None, purpose="live_voice.wake_check")
+            user_id = str(principal.user_id)
+
+        custom_words = [str(w).strip()[:40] for w in (payload.custom_wake_words or []) if str(w).strip()]
+        hint_text = (payload.transcript_hint or "").strip()
+        if hint_text:
+            matched = match_wake_word(hint_text, custom_names=custom_words)
+            return JSONResponse(matched.to_dict())
+
+        raw_b64 = (payload.pcm_base64 or "").strip()
+        if not raw_b64:
+            return JSONResponse(match_wake_word("", custom_names=custom_words).to_dict())
+        try:
+            pcm_bytes = base64.b64decode(raw_b64, validate=False)
+        except Exception as exc:
+            raise ApplicationValidationError("Invalid pcm_base64 payload") from exc
+        if len(pcm_bytes) > MAX_WAKE_PCM_BYTES:
+            raise ApplicationValidationError("Wake check audio exceeds maximum allowed duration")
+
+        def _run_wake_stt() -> dict[str, object]:
+            caps = _voice_capabilities(governor, services, user_id, engines_runtime, catalog)
+            req_prov = (payload.stt_provider or "").strip().lower()
+            if req_prov in SUPPORTED_STT_PROVIDERS and caps["stt"].get(req_prov, {}).get("available"):
+                chosen_prov = req_prov
+            else:
+                rec = str(caps.get("recommended_stt") or "")
+                chosen_prov = rec if rec in SUPPORTED_STT_PROVIDERS else "local_sidecar"
+            default_stt_model = str(caps["stt"].get(chosen_prov, {}).get("model_id") or "")
+            stt_model = (payload.stt_model or "").strip() or default_stt_model
+
+            temp_session = LiveVoiceSession(
+                conversation_id="wake-check",
+                hardware_governor=governor,
+                voice_config=VoiceConfig(
+                    stt_provider=chosen_prov,
+                    stt_model=stt_model,
+                    language=payload.language or "pt-BR",
+                ),
+            )
+            prompt_hint = build_wake_prompt_hint(custom_words)
+            try:
+                transcript = _transcribe(
+                    temp_session,
+                    user_id,
+                    pcm_bytes,
+                    payload.sample_rate,
+                    "",
+                    prompt_hint=prompt_hint,
+                )
+            except VoiceEngineError as exc:
+                return {
+                    **match_wake_word("", custom_names=custom_words).to_dict(),
+                    "error_code": exc.code,
+                    "error_message": exc.message,
+                }
+            return match_wake_word(transcript, custom_names=custom_words).to_dict()
+
+        result = await run_in_threadpool(_run_wake_stt)
+        return JSONResponse(result)
 
     def _synthesize(
         session: LiveVoiceSession,

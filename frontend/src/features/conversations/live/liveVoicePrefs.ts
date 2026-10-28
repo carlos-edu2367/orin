@@ -25,6 +25,8 @@ export type LiveVoicePrefs = {
   endSilenceMs: number
   /** Speaking over the companion interrupts it. */
   bargeIn: boolean
+  /** Background wake word ("Orin") opens Orin Friend directly in Live mode. */
+  wakeWordEnabled: boolean
 }
 
 export const DEFAULT_LIVE_VOICE_PREFS: LiveVoicePrefs = {
@@ -40,6 +42,7 @@ export const DEFAULT_LIVE_VOICE_PREFS: LiveVoicePrefs = {
   sensitivity: 0.6,
   endSilenceMs: 600,
   bargeIn: true,
+  wakeWordEnabled: true,
 }
 
 const STORAGE_KEY = 'orin.live-voice.prefs.v1'
@@ -100,6 +103,7 @@ export function normalizeLiveVoicePrefs(raw: unknown): LiveVoicePrefs {
     sensitivity: clamp(data.sensitivity, 0, 1, DEFAULT_LIVE_VOICE_PREFS.sensitivity),
     endSilenceMs: clamp(data.endSilenceMs, 400, 2000, DEFAULT_LIVE_VOICE_PREFS.endSilenceMs),
     bargeIn: typeof data.bargeIn === 'boolean' ? data.bargeIn : true,
+    wakeWordEnabled: typeof data.wakeWordEnabled === 'boolean' ? data.wakeWordEnabled : true,
   }
 }
 

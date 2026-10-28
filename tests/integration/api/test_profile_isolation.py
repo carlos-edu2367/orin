@@ -105,6 +105,7 @@ SCOPED = {
     ("GET", "/v1/friend/persona"), ("PUT", "/v1/friend/persona"), ("POST", "/v1/friend/soul/sync"),
     ("POST", "/v1/conversations/friend/ensure"),
     ("GET", "/v1/live-voice/capabilities"),
+    ("POST", "/v1/live-voice/wake-check"),
     ("GET", "/v1/files/download"),
     # Skill preferences keyed by (caller, agent_id): an agent id names a role,
     # not a record someone owns, so every profile reads and writes its own row.

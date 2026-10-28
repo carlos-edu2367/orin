@@ -269,6 +269,17 @@ test.describe('Orin Friend & Modo Conversa Live (E2E)', () => {
       }
 
 
+      if (path === '/v1/live-voice/wake-check' && method === 'POST') {
+        await fulfillJson(route, {
+          matched: false,
+          wake_variant: '',
+          command_remainder: '',
+          confidence: 0,
+          transcript: '',
+        })
+        return
+      }
+
       if (path.includes('/v1/settings/media-models/') && method === 'PUT') {
         const modality = path.split('/').pop() ?? 'audio'
         await fulfillJson(route, {
@@ -472,5 +483,71 @@ test.describe('Orin Friend & Modo Conversa Live (E2E)', () => {
     await expect(page.getByTestId('live-voice-stage')).toHaveAttribute('data-voice-state', 'speaking')
     await expect(page.getByTestId('live-voice-assistant-caption')).toContainText('Tudo ótimo por aqui!')
     await page.screenshot({ path: test.info().outputPath('live-speaking.png') })
+  })
+
+  test('wake word "Orin" em segundo plano (com sotaque regional) traz a janela para frente, abre direto no modo Live do Orin Friend e envia o comando', async ({ page }) => {
+    await page.addInitScript(() => {
+      ;(window as unknown as { __wakeCalls?: number }).__wakeCalls = 0
+      window.orinDesktop = {
+        onUpdateAvailable: () => () => {},
+        wakeToLiveFriend: async () => {
+          ;(window as unknown as { __wakeCalls: number }).__wakeCalls += 1
+          return true
+        },
+      }
+    })
+
+    const sentMessages: Array<Record<string, unknown>> = []
+    await page.route('**/v1/conversations/*/messages', async (route) => {
+      if (route.request().method() !== 'POST') return route.fallback()
+      const payload = (route.request().postDataJSON() ?? {}) as Record<string, unknown>
+      sentMessages.push(payload)
+      await fulfillJson(
+        route,
+        {
+          conversation_id: FRIEND_CONVERSATION_ID,
+          turn_id: 'turn-friend-wake',
+          message_id: 'msg-friend-wake',
+          state: 'queued',
+        },
+        202,
+      )
+    })
+
+    await page.goto('/')
+    // Começa na tela inicial fora do modo Live
+    await expect(page.getByTestId('live-voice-stage')).toHaveCount(0)
+
+    // Simula o usuário falando com sotaque regional ("Oi Orim, me mostra o status do build") em segundo plano
+    await page.evaluate(() => {
+      window.dispatchEvent(
+        new CustomEvent('orin:simulate-wake-word', {
+          detail: { transcript: 'Oi Orim, me mostra o status do build' },
+        }),
+      )
+    })
+
+    // Deve abrir automaticamente a conversa do Orin Friend direto no LiveVoiceStage
+    const liveStage = page.getByTestId('live-voice-stage')
+    await expect(liveStage).toBeVisible()
+    await expect(page).toHaveURL(new RegExp(`/chats/${FRIEND_CONVERSATION_ID}$`))
+
+    const wakeCalls = await page.evaluate(() => (window as unknown as { __wakeCalls?: number }).__wakeCalls ?? 0)
+    expect(wakeCalls).toBe(1)
+
+    // O comando falado após a wake word deve ser enviado automaticamente em live_mode: true
+    await expect.poll(() => sentMessages.length, { timeout: 10_000 }).toBe(1)
+    expect(sentMessages[0]).toMatchObject({
+      message: 'me mostra o status do build',
+      live_mode: true,
+    })
+
+    // Verifica o toggle da wake word nas configurações rápidas do modo Live
+    await page.getByTestId('live-voice-open-settings-button').click()
+    const wakeToggle = page.getByTestId('live-wake-word-toggle')
+    await expect(wakeToggle).toBeVisible()
+    await expect(wakeToggle).toBeChecked()
+    await wakeToggle.click()
+    await expect(wakeToggle).not.toBeChecked()
   })
 })

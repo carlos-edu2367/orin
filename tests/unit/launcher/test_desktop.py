@@ -131,3 +131,17 @@ def test_datastore_failure_is_published_to_the_desktop_snapshot(tmp_path: Path, 
     assert supervisor.desktop_status.snapshot.mode == "error"
     assert supervisor.desktop_status.snapshot.services["database"].state == "error"
     assert "SQLite database" in supervisor.desktop_status.snapshot.message
+
+
+def test_electron_main_and_preload_support_background_wake_live_voice() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    main_cjs = (repo_root / "desktop" / "electron" / "main.cjs").read_text(encoding="utf-8")
+    preload_cjs = (repo_root / "desktop" / "electron" / "preload.cjs").read_text(encoding="utf-8")
+
+    assert "backgroundThrottling: false" in main_cjs
+    assert "'desktop:wake-live-voice'" in main_cjs
+    assert "wakeWindowToForeground" in main_cjs
+    assert "wakeToLiveFriend" in preload_cjs
+    assert "onToggleLiveVoice" in preload_cjs
+    assert "'desktop:toggle-live-voice'" in preload_cjs
+

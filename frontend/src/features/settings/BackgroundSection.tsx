@@ -2,6 +2,12 @@ import { useEffect, useState } from 'react'
 import { ApiClient, createBrowserApiClient } from '../../api/client'
 import { getAutostart, setAutostart, type AutostartStatus } from '../../api/autostart'
 import { useSession } from '../../app/useSession'
+import {
+  loadLiveVoicePrefs,
+  onLiveVoicePrefsChange,
+  saveLiveVoicePrefs,
+  type LiveVoicePrefs,
+} from '../conversations/live/liveVoicePrefs'
 import { SettingsSection } from './SettingsSection'
 
 type CloseBehavior = 'ask' | 'background' | 'quit'
@@ -23,8 +29,11 @@ export function BackgroundSection({ client: providedClient }: { client?: ApiClie
   const desktop = typeof window !== 'undefined' ? window.orinDesktop : undefined
   const [autostart, setAutostartState] = useState<AutostartStatus | null>(null)
   const [closeBehavior, setCloseBehavior] = useState<CloseBehavior | null>(null)
+  const [voicePrefs, setVoicePrefs] = useState<LiveVoicePrefs>(() => loadLiveVoicePrefs())
   const [error, setError] = useState(false)
   const [saving, setSaving] = useState(false)
+
+  useEffect(() => onLiveVoicePrefsChange(setVoicePrefs), [])
 
   useEffect(() => {
     let active = true
@@ -85,6 +94,23 @@ export function BackgroundSection({ client: providedClient }: { client?: ApiClie
             ))}
           </fieldset>
         )}
+
+        <label className="background-settings__row">
+          <input
+            type="checkbox"
+            data-testid="background-wake-word-toggle"
+            checked={voicePrefs.wakeWordEnabled}
+            onChange={(event) => {
+              const next = { ...voicePrefs, wakeWordEnabled: event.target.checked }
+              setVoicePrefs(next)
+              saveLiveVoicePrefs(next)
+            }}
+          />
+          <span>
+            <strong>Acordar com a palavra de ativação “Orin”</strong>
+            <small>Quando o Orin está em segundo plano ou fora do modo Live, falar “Orin” (ou “Oi Orin”) abre direto no modo Live do Orin Friend.</small>
+          </span>
+        </label>
       </section>
     </SettingsSection>
   )

@@ -1,6 +1,7 @@
 import { useMemo } from 'react'
 import { BrowserRouter, Route, Routes } from 'react-router-dom'
 import { createBrowserApiClient } from '../api/client'
+import { GlobalWakeWordListener } from '../features/conversations/live/GlobalWakeWordListener'
 import { KeybindingsProvider } from '../features/keybindings/engine'
 import { routes } from './routes'
 import { SessionGate } from './SessionGate'
@@ -14,6 +15,7 @@ export function App() {
       <UpdateBanner />
       <BrowserRouter>
         <SessionGate>
+          <GlobalWakeWordListener client={client} />
           <Routes>
             {routes.map((route) => <Route key={route.path} path={route.path} element={route.element} />)}
             <Route path="*" element={routes[0].element} />

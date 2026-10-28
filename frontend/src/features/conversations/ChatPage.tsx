@@ -196,6 +196,7 @@ export function ChatPage() {
   const [friendMemories, setFriendMemories] = useState<FriendMemoryEntry[]>([])
   const [liveVoiceOpen, setLiveVoiceOpen] = useState(false)
   const [liveVoiceSettingsOpen, setLiveVoiceSettingsOpen] = useState(false)
+  const pendingWakeUtteranceRef = useRef<string | null>(null)
   const [visionSetting, setVisionSetting] = useState<VisionModelSetting | null>(null)
   const [chatProvider, setChatProvider] = useState<ProviderName | null>(null)
   const [chatModelId, setChatModelId] = useState('')
@@ -985,6 +986,34 @@ export function ChatPage() {
 
   const friendDisplayName = friendPersona?.display_name || (conversationMode === 'friend' ? conversation?.title : undefined) || 'Orin'
 
+  // Auto-open LiveVoiceStage when navigated from background wake word (`?live=1` or `orin:open-friend-live`).
+  useEffect(() => {
+    const params = new URLSearchParams(location.search)
+    const locState = (location.state as { openLiveVoice?: boolean; initialLiveUtterance?: string } | null) ?? null
+    const wantsLive = params.get('live') === '1' || Boolean(locState?.openLiveVoice)
+    if (!wantsLive) return
+    const utterance = (params.get('utterance') ?? locState?.initialLiveUtterance ?? '').trim()
+    if (utterance) {
+      pendingWakeUtteranceRef.current = utterance
+    }
+    setLiveVoiceOpen(true)
+    navigate(conversationPath, { replace: true, state: null })
+  }, [conversationPath, location.search, location.state, navigate])
+
+  useEffect(() => {
+    const onOpenFriendLive = (event: Event) => {
+      const detail = (event as CustomEvent<{ conversationId?: string; commandRemainder?: string }>).detail
+      if (detail?.conversationId && detail.conversationId !== conversationId) return
+      const remainder = detail?.commandRemainder?.trim() ?? ''
+      if (remainder) {
+        pendingWakeUtteranceRef.current = remainder
+      }
+      setLiveVoiceOpen(true)
+    }
+    window.addEventListener('orin:open-friend-live', onOpenFriendLive)
+    return () => window.removeEventListener('orin:open-friend-live', onOpenFriendLive)
+  }, [conversationId])
+
   // The persona is the friend conversation's identity: load it with the conversation.
   useEffect(() => {
     if (conversationMode !== 'friend') return
@@ -1444,6 +1473,14 @@ export function ChatPage() {
       submitInFlight.current = false
     }
   }
+
+  useEffect(() => {
+    if (!liveVoiceOpen || loading || !conversation) return
+    const pendingUtterance = pendingWakeUtteranceRef.current
+    if (!pendingUtterance) return
+    pendingWakeUtteranceRef.current = null
+    void submit(pendingUtterance, false, true)
+  })
 
   async function runSubmit(override: string | undefined, afterStop: boolean, liveModeOverride?: boolean) {
     const text = (override ?? message).trim()
