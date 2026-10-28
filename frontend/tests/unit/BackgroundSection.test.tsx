@@ -32,7 +32,7 @@ describe('BackgroundSection', () => {
     render(<MemoryRouter><BackgroundSection client={client} /></MemoryRouter>)
 
     expect(await screen.findByText(/disponível no Orin instalado/)).toBeInTheDocument()
-    expect(screen.queryByRole('checkbox')).not.toBeInTheDocument()
+    expect(screen.queryByRole('checkbox', { name: /ao ligar o computador/ })).not.toBeInTheDocument()
   })
 
   it('lets the desktop app choose what closing the window does', async () => {

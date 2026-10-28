@@ -304,10 +304,24 @@ def test_claude_code_model_catalog_client_lists_subscription_models(
     assert len(status_calls) == 1
     by_id = {str(m["id"]): m for m in models}
     for expected_id in (
+        "claude-opus-5-5",
+        "claude-fable-5-1",
+        "claude-sonnet-5-5",
+        "claude-haiku-5-5",
+        "claude-opus-5",
+        "claude-sonnet-5",
+        "claude-fable-5",
+        "claude-opus-4-8",
         "claude-opus-4-7",
+        "claude-opus-4-6",
         "claude-sonnet-4-6",
+        "claude-opus-4-5-20251101",
         "claude-sonnet-4-5",
         "claude-haiku-4-5-20251001",
+        "claude-opus-4-1-20250805",
+        "claude-opus-4-0",
+        "claude-sonnet-4-0",
+        "claude-3-7-sonnet-20250219",
     ):
         assert expected_id in by_id
         entry = by_id[expected_id]
@@ -964,10 +978,10 @@ def test_anthropic_model_catalog_client_delegates_to_claude_cli_bridge_in_local_
     )
     ctx = ProviderCatalogContext(user_id="user-1", purpose="provider.catalog.refresh")
     receipt = service.refresh(ctx, "anthropic")
-    assert receipt.count == 4
+    assert receipt.count >= 18
 
     records = service.list(ctx, "anthropic")
-    assert len(records) == 4
+    assert len(records) >= 18
     for record in records:
         assert "tools" in record.capabilities
         assert "vision" in record.capabilities
@@ -1062,11 +1076,9 @@ def test_provider_configuration_allows_keyless_local_claude_cli_and_requires_key
             "base_url": DEFAULT_CLAUDE_CLI_BRIDGE_URL,
         }
     )
-    assert conn_ok == {
-        "connected": True,
-        "models_available": 4,
-        "base_url": DEFAULT_CLAUDE_CLI_BRIDGE_URL,
-    }
+    assert conn_ok["connected"] is True
+    assert conn_ok["models_available"] >= 18
+    assert conn_ok["base_url"] == DEFAULT_CLAUDE_CLI_BRIDGE_URL
 
     # 5. test_connection raises ProviderCredentialRejectedError or ValueError when CLI status fails
     def fail_status(**kwargs: Any) -> dict[str, object]:
@@ -1288,3 +1300,108 @@ def test_gateway_anthropic_test_and_configure_endpoints() -> None:
 
 
 
+
+
+def test_claude_code_model_catalog_reads_live_cache_directory_and_auto_upgrades_legacy_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from datetime import UTC, datetime
+    from agentos.provider_catalog.models import ProviderCatalogContext, ProviderModelRecord
+    from agentos.provider_catalog.service import ProviderModelCatalogService
+
+    monkeypatch.setattr(
+        "agentos.provider_catalog.claude_code.check_claude_cli_status",
+        lambda **kwargs: {
+            "loggedIn": True,
+            "authMethod": "claude.ai",
+            "subscriptionType": "max",
+            "orgId": "org-live-test",
+        },
+    )
+
+    cache_dir = tmp_path / "model-catalog"
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "org-live-test-cc.json").write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "fetchedAt": 1793201481996,
+                "organizationUuid": "org-live-test",
+                "catalog": {
+                    "surface": "cc",
+                    "config": {
+                        "id": "cc",
+                        "models": [
+                            {
+                                "id": "claude-opus-6-0",
+                                "name": "Opus 6.0",
+                                "runtime": {"max_input_tokens": 2_000_000},
+                            }
+                        ],
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    client = ClaudeCodeModelCatalogClient(cache_dir=cache_dir)
+    models = client.fetch("", base_url=DEFAULT_CLAUDE_CLI_BRIDGE_URL)
+    by_id = {str(m["id"]): m for m in models}
+    assert "claude-opus-6-0" in by_id
+    assert by_id["claude-opus-6-0"]["display_name"] == "Claude Opus 6.0 (Assinatura CLI)"
+    assert by_id["claude-opus-6-0"]["max_input_tokens"] == 2_000_000
+
+    # Verify service.list() auto-upgrades a legacy 4-item cache in CLI bridge mode
+    class _LegacyRepo:
+        def __init__(self) -> None:
+            self.saved: list[Any] = [
+                ProviderModelRecord(
+                    provider="anthropic",
+                    model_id="claude-opus-4-7",
+                    display_name="Claude Opus 4.7 (Assinatura CLI)",
+                    context_window=200_000,
+                    capabilities=("tools", "reasoning"),
+                    input_modalities=("text",),
+                    output_modalities=("text",),
+                    pricing=None,
+                    refreshed_at=datetime(2026, 10, 28, tzinfo=UTC),
+                )
+            ]
+
+        def credential(self, context: ProviderCatalogContext, provider: str) -> dict[str, object] | None:
+            return {
+                "enabled": True,
+                "api_key": "",
+                "base_url": DEFAULT_CLAUDE_CLI_BRIDGE_URL,
+            }
+
+        def replace(
+            self,
+            context: ProviderCatalogContext,
+            provider: str,
+            records: list[Any],
+            refreshed_at: datetime,
+        ) -> None:
+            self.saved = list(records)
+
+        def list(
+            self,
+            context: ProviderCatalogContext,
+            provider: str,
+            favorites_only: bool = False,
+        ) -> list[Any]:
+            return list(self.saved)
+
+    repo = _LegacyRepo()
+    service = ProviderModelCatalogService(
+        repo,  # type: ignore[arg-type]
+        {"anthropic": client},
+        now=lambda: datetime(2026, 10, 28, tzinfo=UTC),
+    )
+    ctx = ProviderCatalogContext(user_id="user-1", purpose="provider.catalog.list")
+    upgraded = service.list(ctx, "anthropic")
+    assert len(upgraded) >= 19
+    assert any(r.model_id == "claude-opus-5-5" for r in upgraded)
+    assert any(r.model_id == "claude-opus-6-0" for r in upgraded)

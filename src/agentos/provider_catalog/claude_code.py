@@ -46,7 +46,7 @@ DEFAULT_ANTHROPIC_BASE_URL = ANTHROPIC_CLOUD_BASE_URL
 _CLOUD_HOSTS = frozenset({"api.anthropic.com", "anthropic.com"})
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
-_SAFE_MODEL_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+_SAFE_MODEL_RE = re.compile(r"^[A-Za-z0-9._:\-\[\]]{1,128}$")
 _SAFE_FALLBACK_MODEL_RE = re.compile(r"^[A-Za-z0-9.,_:-]{1,128}$")
 _VALID_EFFORT_LEVELS = frozenset({"low", "medium", "high", "xhigh", "max"})
 
@@ -89,10 +89,24 @@ _PUBLIC_ARG_RENAMES: dict[str, dict[str, str]] = {
 }
 
 _SUBSCRIPTION_MODELS: tuple[tuple[str, str, int], ...] = (
-    ("claude-opus-4-7", "Claude Opus 4.7 (Assinatura CLI)", 200_000),
-    ("claude-sonnet-4-6", "Claude Sonnet 4.6 (Assinatura CLI)", 200_000),
+    ("claude-opus-5-5", "Claude Opus 5.5 (Assinatura CLI)", 1_000_000),
+    ("claude-fable-5-1", "Claude Fable 5.1 (Assinatura CLI)", 1_000_000),
+    ("claude-sonnet-5-5", "Claude Sonnet 5.5 (Assinatura CLI)", 1_000_000),
+    ("claude-haiku-5-5", "Claude Haiku 5.5 (Assinatura CLI)", 1_000_000),
+    ("claude-opus-5", "Claude Opus 5 (Assinatura CLI)", 1_000_000),
+    ("claude-sonnet-5", "Claude Sonnet 5 (Assinatura CLI)", 1_000_000),
+    ("claude-fable-5", "Claude Fable 5 (Assinatura CLI)", 1_000_000),
+    ("claude-opus-4-8", "Claude Opus 4.8 (Assinatura CLI)", 1_000_000),
+    ("claude-opus-4-7", "Claude Opus 4.7 (Assinatura CLI)", 1_000_000),
+    ("claude-opus-4-6", "Claude Opus 4.6 (Assinatura CLI)", 1_000_000),
+    ("claude-sonnet-4-6", "Claude Sonnet 4.6 (Assinatura CLI)", 1_000_000),
+    ("claude-opus-4-5-20251101", "Claude Opus 4.5 (Assinatura CLI)", 200_000),
     ("claude-sonnet-4-5", "Claude Sonnet 4.5 (Assinatura CLI)", 200_000),
     ("claude-haiku-4-5-20251001", "Claude Haiku 4.5 (Assinatura CLI)", 200_000),
+    ("claude-opus-4-1-20250805", "Claude Opus 4.1 (Assinatura CLI)", 200_000),
+    ("claude-opus-4-0", "Claude Opus 4.0 (Assinatura CLI)", 200_000),
+    ("claude-sonnet-4-0", "Claude Sonnet 4.0 (Assinatura CLI)", 200_000),
+    ("claude-3-7-sonnet-20250219", "Claude 3.7 Sonnet (Assinatura CLI)", 200_000),
 )
 
 
@@ -389,16 +403,122 @@ def check_claude_cli_status(
     return dict(payload)
 
 
+def _discover_cached_claude_cli_models(
+    *,
+    org_id: str | None = None,
+    cache_dir: Path | None = None,
+) -> list[tuple[str, str, int]]:
+    """Read live served models from `~/.claude/cache/model-catalog/*.json` when present."""
+    candidate_dirs: list[Path] = []
+    if cache_dir is not None:
+        candidate_dirs.append(cache_dir)
+    else:
+        userprofile = os.environ.get("USERPROFILE")
+        if userprofile:
+            candidate_dirs.append(Path(userprofile) / ".claude" / "cache" / "model-catalog")
+        try:
+            candidate_dirs.append(Path.home() / ".claude" / "cache" / "model-catalog")
+        except Exception:
+            pass
+
+    scored_files: list[tuple[int, int, int, list[Mapping[str, Any]]]] = []
+    seen_paths: set[Path] = set()
+    norm_org = str(org_id or "").strip().lower()
+
+    for directory in candidate_dirs:
+        try:
+            if not directory.is_dir():
+                continue
+            files = list(directory.glob("*.json"))
+        except Exception:
+            continue
+        for file_path in files:
+            try:
+                resolved = file_path.resolve()
+                if resolved in seen_paths:
+                    continue
+                seen_paths.add(resolved)
+                payload = json.loads(file_path.read_text(encoding="utf-8", errors="replace"))
+            except Exception:
+                continue
+            if not isinstance(payload, Mapping):
+                continue
+            catalog = payload.get("catalog")
+            if not isinstance(catalog, Mapping):
+                continue
+            config = catalog.get("config")
+            if not isinstance(config, Mapping):
+                continue
+            raw_models = config.get("models")
+            if not isinstance(raw_models, list) or not raw_models:
+                continue
+            surface = str(catalog.get("surface") or "").strip().lower()
+            file_org = str(payload.get("organizationUuid") or "").strip().lower()
+            org_match = 1 if (norm_org and (file_org == norm_org or norm_org in file_path.name.lower())) else 0
+            cc_match = 1 if surface == "cc" else 0
+            fetched_at = payload.get("fetchedAt")
+            fetched_score = int(fetched_at) if isinstance(fetched_at, (int, float)) else 0
+            valid_entries = [m for m in raw_models if isinstance(m, Mapping)]
+            if valid_entries:
+                scored_files.append((org_match, cc_match, fetched_score, valid_entries))
+
+    scored_files.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+    discovered: list[tuple[str, str, int]] = []
+    seen_ids: set[str] = set()
+
+    for _, _, _, entries in scored_files:
+        for entry in entries:
+            model_id = str(entry.get("id") or "").strip()
+            if not model_id or not _SAFE_MODEL_RE.match(model_id) or model_id in seen_ids:
+                continue
+            raw_name = str(entry.get("name") or model_id).strip()
+            if not raw_name.lower().startswith("claude"):
+                display_name = f"Claude {raw_name}"
+            else:
+                display_name = raw_name
+            if "(assinatura cli)" not in display_name.lower():
+                display_name = f"{display_name} (Assinatura CLI)"
+
+            runtime = entry.get("runtime") if isinstance(entry.get("runtime"), Mapping) else {}
+            max_input = runtime.get("max_input_tokens")
+            if isinstance(max_input, int) and not isinstance(max_input, bool) and max_input > 0:
+                context_window = max_input
+            elif any(legacy in model_id for legacy in ("4-5", "4-1", "4-0", "3-7", "3-5")):
+                context_window = 200_000
+            else:
+                context_window = 1_000_000
+
+            seen_ids.add(model_id)
+            discovered.append((model_id, display_name, context_window))
+
+    return discovered
+
+
 class ClaudeCodeModelCatalogClient:
     """Model catalog client for the local Claude Code CLI (`claude -p`) subscription."""
 
-    def __init__(self, *, timeout: float = 8.0) -> None:
+    def __init__(self, *, timeout: float = 8.0, cache_dir: Path | None = None) -> None:
         self._timeout = timeout
+        self._cache_dir = cache_dir
 
     def fetch(self, api_key: str = "", *, base_url: str = "") -> list[dict[str, object]]:
-        check_claude_cli_status(timeout=self._timeout)
+        status = check_claude_cli_status(timeout=self._timeout)
+        org_id = str(status.get("orgId") or "").strip() or None
+        merged: list[tuple[str, str, int]] = []
+        seen_ids: set[str] = set()
+
+        for item in _discover_cached_claude_cli_models(org_id=org_id, cache_dir=self._cache_dir):
+            if item[0] not in seen_ids:
+                seen_ids.add(item[0])
+                merged.append(item)
+
+        for item in _SUBSCRIPTION_MODELS:
+            if item[0] not in seen_ids:
+                seen_ids.add(item[0])
+                merged.append(item)
+
         models: list[dict[str, object]] = []
-        for model_id, display_name, context_window in _SUBSCRIPTION_MODELS:
+        for model_id, display_name, context_window in merged:
             models.append(
                 {
                     "id": model_id,
@@ -409,6 +529,7 @@ class ClaudeCodeModelCatalogClient:
                     "supported_parameters": ["tools", "vision", "reasoning"],
                     "input_modalities": ["text", "image"],
                     "output_modalities": ["text"],
+                    "pricing": {"prompt": "0", "completion": "0"},
                     "capabilities": {
                         "image_input": {"supported": True},
                         "thinking": {"supported": True},

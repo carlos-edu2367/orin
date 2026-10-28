@@ -256,7 +256,7 @@ class ProviderModelCatalogService:
     def list(self, context: ProviderCatalogContext, provider: str, favorites_only: bool = False) -> list[ProviderModelRecord]:
         normalized_provider = _provider(provider)
         items = self._repository.list(context, normalized_provider, favorites_only)
-        if normalized_provider == "anthropic" and not items:
+        if normalized_provider == "anthropic" and (not items or (not favorites_only and len(items) < 12)):
             credential = self._repository.credential(context, normalized_provider)
             if isinstance(credential, Mapping) and credential.get("enabled") is True and is_claude_cli_bridge_url(str(credential.get("base_url") or "")):
                 try:
@@ -414,6 +414,7 @@ def _normalize_anthropic(raw: dict[str, object], refreshed_at: datetime) -> Prov
     max_input_tokens = raw.get("max_input_tokens")
     context_window = max_input_tokens if isinstance(max_input_tokens, int) and not isinstance(max_input_tokens, bool) and max_input_tokens > 0 else None
     input_modalities = ("text", "image") if "image_input" in capability_names else ("text",)
+    pricing = raw.get("pricing") if isinstance(raw.get("pricing"), dict) else None
     return ProviderModelRecord(
         provider="anthropic",
         model_id=model_id,
@@ -422,7 +423,7 @@ def _normalize_anthropic(raw: dict[str, object], refreshed_at: datetime) -> Prov
         capabilities=capability_names,
         input_modalities=input_modalities,
         output_modalities=infer_output_modalities(model_id),
-        pricing=None,
+        pricing=_pricing(pricing) if pricing is not None else None,
         refreshed_at=refreshed_at,
     )
 
