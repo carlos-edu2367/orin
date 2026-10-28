@@ -73,10 +73,10 @@ def test_same_provider_media_policy_enforces_favorites_and_resolves_defaults() -
     assert policy.resolve_model("image") == "gpt-image-1"
     assert policy.resolve_model("image", "dall-e-3") == "dall-e-3"
 
-    with pytest.raises(PermissionError, match="not a favorited image model"):
+    with pytest.raises(PermissionError, match="not an authorized image model"):
         policy.resolve_model("image", "flux-pro")
 
-    with pytest.raises(PermissionError, match="no favorited video model"):
+    with pytest.raises(PermissionError, match="no configured or favorited video model"):
         policy.resolve_model("video")
 
 

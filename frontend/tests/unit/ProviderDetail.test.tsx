@@ -178,6 +178,103 @@ describe('ProviderDetail', () => {
     await user.click(within(region).getByRole('radio', { name: 'Self-Hosted NIM' }))
     expect(within(region).queryByText(/24 modelos disponíveis/)).toBeNull()
   })
+
+  it('supports Anthropic Claude Code CLI Local mode without requiring an API key and tests connection', async () => {
+    let saved = false
+    const fetchImpl = vi.fn<typeof fetch>((input, init) => {
+      const url = String(input)
+      if (url.endsWith('/v1/providers/anthropic/test') && init?.method === 'POST') {
+        return Promise.resolve(json({ connected: true, models_available: 4, base_url: 'http://127.0.0.1:18447' }))
+      }
+      if (url.endsWith('/v1/providers/anthropic') && init?.method === 'PUT') {
+        saved = true
+        return Promise.resolve(json({ provider: 'anthropic', enabled: true, base_url: 'http://127.0.0.1:18447', key_cooldown_seconds: 60 }))
+      }
+      if (url.endsWith('/v1/providers/anthropic/models:refresh') && init?.method === 'POST') {
+        return Promise.resolve(json({ count: 1, refreshed_at: '2026-10-28T16:20:00Z' }))
+      }
+      if (url.endsWith('/v1/providers/anthropic/models') && (!init?.method || init.method === 'GET')) {
+        return Promise.resolve(json({ items: [{ ...model(), provider: 'anthropic', model_id: 'claude-sonnet-4-6', display_name: 'Claude Sonnet 4.6 (Assinatura CLI)' }] }))
+      }
+      if (url.endsWith('/v1/providers/anthropic/keys')) {
+        return Promise.resolve(json([]))
+      }
+      return Promise.resolve(json({ provider: 'anthropic', enabled: saved ? true : null, base_url: 'http://127.0.0.1:18447', key_cooldown_seconds: 60 }))
+    })
+    const client = new ApiClient({ fetchImpl, csrfToken: 'csrf', maxAttempts: 1, createIdempotencyKey: () => 'intent-anthropic-local' })
+    const user = userEvent.setup()
+    render(<MemoryRouter><ProviderDetail provider="anthropic" client={client} bootstrap={{ status: 'ready', csrfToken: 'csrf' }} onClose={() => {}} /></MemoryRouter>)
+
+    const region = await screen.findByRole('region', { name: 'Anthropic' })
+    expect(within(region).getByRole('radio', { name: 'Assinatura Claude Code (CLI Local)' })).toHaveAttribute('aria-checked', 'true')
+    expect(within(region).getByLabelText('URL do servidor')).toHaveValue('http://127.0.0.1:18447')
+
+    await user.click(within(region).getByRole('button', { name: 'Testar conexão' }))
+    expect(await within(region).findByText(/4 modelos disponíveis/)).toBeInTheDocument()
+    const testCall = fetchImpl.mock.calls.find(([input, init]) => String(input).endsWith('/v1/providers/anthropic/test') && init?.method === 'POST')
+    expect(testCall).toBeDefined()
+    expect(JSON.parse(String(testCall?.[1]?.body))).toEqual({
+      api_key: '',
+      base_url: 'http://127.0.0.1:18447',
+    })
+
+    const saveButton = within(region).getByRole('button', { name: 'Salvar' })
+    expect(saveButton).not.toBeDisabled()
+    await user.click(saveButton)
+    expect(await within(region).findByText('Claude Sonnet 4.6 (Assinatura CLI)')).toBeInTheDocument()
+    expect(fetchImpl.mock.calls.some(([requestInput]) => String(requestInput).endsWith('/v1/providers/anthropic/models:refresh'))).toBe(true)
+
+    const putCall = fetchImpl.mock.calls.find(([input, init]) => String(input).endsWith('/v1/providers/anthropic') && init?.method === 'PUT')
+    expect(putCall).toBeDefined()
+    expect(JSON.parse(String(putCall?.[1]?.body))).toEqual({
+      api_key: '',
+      enabled: true,
+      base_url: 'http://127.0.0.1:18447',
+    })
+  })
+
+  it('supports switching Anthropic to Cloud API key mode and requires an API key to save', async () => {
+    const fetchImpl = vi.fn<typeof fetch>((input, init) => {
+      const url = String(input)
+      if (url.endsWith('/v1/providers/anthropic') && init?.method === 'PUT') {
+        return Promise.resolve(json({ provider: 'anthropic', enabled: true, base_url: 'https://api.anthropic.com', key_cooldown_seconds: 60 }))
+      }
+      if (url.endsWith('/v1/providers/anthropic/models:refresh') && init?.method === 'POST') {
+        return Promise.resolve(json({ count: 1, refreshed_at: '2026-10-28T16:20:00Z' }))
+      }
+      if (url.endsWith('/v1/providers/anthropic/models') && (!init?.method || init.method === 'GET')) {
+        return Promise.resolve(json({ items: [] }))
+      }
+      if (url.endsWith('/v1/providers/anthropic/keys')) {
+        return Promise.resolve(json([]))
+      }
+      return Promise.resolve(json({ provider: 'anthropic', enabled: null, key_cooldown_seconds: 60 }))
+    })
+    const client = new ApiClient({ fetchImpl, csrfToken: 'csrf', maxAttempts: 1, createIdempotencyKey: () => 'intent-anthropic-cloud' })
+    const user = userEvent.setup()
+    render(<MemoryRouter><ProviderDetail provider="anthropic" client={client} bootstrap={{ status: 'ready', csrfToken: 'csrf' }} onClose={() => {}} /></MemoryRouter>)
+
+    const region = await screen.findByRole('region', { name: 'Anthropic' })
+    await user.click(within(region).getByRole('radio', { name: 'Cloud (Chave de API)' }))
+    expect(within(region).getByLabelText('URL do servidor')).toHaveValue('https://api.anthropic.com')
+
+    const saveButton = within(region).getByRole('button', { name: 'Salvar' })
+    expect(saveButton).toBeDisabled()
+
+    await user.type(within(region).getByLabelText('Chave de API'), 'sk-ant-api03-test-key')
+    expect(saveButton).not.toBeDisabled()
+    await user.click(saveButton)
+
+    await waitFor(() => {
+      const putCall = fetchImpl.mock.calls.find(([input, init]) => String(input).endsWith('/v1/providers/anthropic') && init?.method === 'PUT')
+      expect(putCall).toBeDefined()
+      expect(JSON.parse(String(putCall?.[1]?.body))).toEqual({
+        api_key: 'sk-ant-api03-test-key',
+        enabled: true,
+        base_url: 'https://api.anthropic.com',
+      })
+    })
+  })
 })
 
 function json(body: unknown): Response {

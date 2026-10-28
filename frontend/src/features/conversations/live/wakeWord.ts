@@ -179,7 +179,7 @@ function cleanRemainder(
 ): string {
   let cleaned = text
     .slice(cutIndex)
-    .replace(/^[\s,.:;!?—–\-]+/, '')
+    .replace(/^[\s,.:;!?—–-]+/, '')
     .trim()
   if (depth < 2 && cleaned) {
     const nested = matchWakeWord(cleaned, customNames, depth + 1)

@@ -23,6 +23,11 @@ from agentos.agentic.provider_stream import HTTPProviderStreamTransport
 from agentos.agentic.provider_key_fallback import MultiKeyProviderStreamTransport
 from agentos.persistence.postgres.provider_api_keys import PostgresProviderApiKeyAdapter
 from agentos.provider_catalog.models import PROVIDERS_WITH_BASE_URL
+from agentos.provider_catalog.claude_code import (
+    DEFAULT_CLAUDE_CLI_BRIDGE_URL,
+    is_claude_cli_bridge_url,
+    normalize_anthropic_base_url,
+)
 from agentos.provider_catalog.nvidia import DEFAULT_NVIDIA_BASE_URL, normalize_nvidia_base_url
 from agentos.provider_catalog.ollama import DEFAULT_OLLAMA_BASE_URL, normalize_ollama_base_url
 from agentos.provider_catalog.omniroute import DEFAULT_OMNIROUTE_BASE_URL, normalize_omniroute_base_url
@@ -1065,6 +1070,10 @@ class ChatWorker:
 
     def _base_url_for(self, provider: str, credential) -> str:
         configured = str(credential.get("base_url") or "")
+        if provider == "anthropic":
+            if configured and is_claude_cli_bridge_url(configured):
+                return normalize_anthropic_base_url(configured)
+            return PROVIDER_BASE_URLS["anthropic"]
         if provider == "omniroute":
             return normalize_omniroute_base_url(configured or DEFAULT_OMNIROUTE_BASE_URL)
         if provider == "ollama":
@@ -1122,7 +1131,9 @@ class ChatWorker:
             )
 
         if first_key is None:
-            if provider not in PROVIDERS_WITH_BASE_URL:
+            if provider not in PROVIDERS_WITH_BASE_URL or (
+                provider == "anthropic" and not is_claude_cli_bridge_url(base_url)
+            ):
                 raise ValueError("provider credential is missing")
             return build("")
         return MultiKeyProviderStreamTransport(
@@ -1154,7 +1165,9 @@ class ChatWorker:
         def build(api_key: str) -> HTTPProviderStreamTransport:
             return HTTPProviderStreamTransport(provider=provider, base_url=base_url, api_key=api_key, model=model_id, num_ctx=num_ctx)
 
-        if provider not in PROVIDERS_WITH_BASE_URL:
+        if provider not in PROVIDERS_WITH_BASE_URL or (
+            provider == "anthropic" and not is_claude_cli_bridge_url(base_url)
+        ):
             # configure()'s validation never lets a required-key provider stay
             # enabled with zero keys, so there is no need to spend a query
             # confirming one exists before wrapping -- MultiKeyProviderStreamTransport
@@ -1402,7 +1415,9 @@ class ChatWorker:
             )
             chosen = key_pool.next_available_key(user_id, provider)
             if chosen is None:
-                if provider not in PROVIDERS_WITH_BASE_URL:
+                if provider not in PROVIDERS_WITH_BASE_URL or (
+                    provider == "anthropic" and not is_claude_cli_bridge_url(str(credential["base_url"] or ""))
+                ):
                     return None
                 api_key = ""
             else:

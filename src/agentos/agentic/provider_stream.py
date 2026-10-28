@@ -876,6 +876,23 @@ class HTTPProviderStreamTransport:
         return endpoint, headers, payload
 
     def stream(self, request: Mapping[str, object]) -> Iterator[NormalizedStreamItem]:
+        if self.provider == "anthropic":
+            from agentos.provider_catalog.claude_code import (
+                is_claude_cli_bridge_url,
+                stream_claude_code_bridge,
+            )
+
+            if is_claude_cli_bridge_url(self.base_url):
+                yield from stream_claude_code_bridge(
+                    request,
+                    base_url=self.base_url,
+                    model=self.model,
+                    messages=list(request.get("messages") or []),  # type: ignore[arg-type]
+                    tools=list(request.get("tools") or []),  # type: ignore[arg-type]
+                    tool_choice=request.get("tool_choice"),
+                    effort=str(request.get("effort")) if request.get("effort") is not None else None,
+                )
+                return
         if self.provider == "opencode":
             from agentos.provider_catalog.opencode import is_opencode_cloud, stream_opencode_bridge
 

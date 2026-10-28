@@ -579,6 +579,7 @@ export function useLiveVoice(options: UseLiveVoiceOptions): LiveVoiceController 
   }, [active, assistantBusy, assistantSpeech, recordItemSeen, unsuppressSeq, userSpeaking, transcribing])
 
   useEffect(() => {
+    const justFinishedBusy = wasBusyRef.current && !assistantBusy
     if (!wasBusyRef.current && assistantBusy) {
       hasUserSpokenOrBusyRef.current = true
       seededFromEmptyRef.current = false
@@ -586,25 +587,23 @@ export function useLiveVoice(options: UseLiveVoiceOptions): LiveVoiceController 
       vadCandidateSuppressRef.current = false
       hasSpokenInTurnRef.current = false
     }
-    if (wasBusyRef.current && !assistantBusy) {
+    if (justFinishedBusy) {
       setAwaitingReply(false)
       hasSpokenInTurnRef.current = false
     }
     wasBusyRef.current = assistantBusy
-  }, [assistantBusy])
 
-  const effectiveAwaitingReply = awaitingReply && !(wasBusyRef.current && !assistantBusy)
-  const shouldPlayThinkingCue =
-    active &&
-    !muted &&
-    !speaking &&
-    !speechRef.current?.speaking &&
-    !userSpeaking &&
-    !interrupted &&
-    !manualInterruptRef.current &&
-    (transcribing || effectiveAwaitingReply || assistantBusy)
+    const effectiveAwaitingReply = awaitingReply && !justFinishedBusy
+    const shouldPlayThinkingCue =
+      active &&
+      !muted &&
+      !speaking &&
+      !speechRef.current?.speaking &&
+      !userSpeaking &&
+      !interrupted &&
+      !manualInterruptRef.current &&
+      (transcribing || effectiveAwaitingReply || assistantBusy)
 
-  useEffect(() => {
     if (!shouldPlayThinkingCue) {
       speechRef.current?.stopThinking()
       return
@@ -623,7 +622,18 @@ export function useLiveVoice(options: UseLiveVoiceOptions): LiveVoiceController 
       }
     }, 1000)
     return () => window.clearTimeout(timer)
-  }, [shouldPlayThinkingCue, assistantSpeech, unsuppressSeq])
+  }, [
+    active,
+    muted,
+    speaking,
+    userSpeaking,
+    interrupted,
+    transcribing,
+    awaitingReply,
+    assistantBusy,
+    assistantSpeech,
+    unsuppressSeq,
+  ])
 
   // A transcription that never answers (server restarted, socket dropped) must not freeze the stage.
   useEffect(() => {

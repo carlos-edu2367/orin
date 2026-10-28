@@ -49,11 +49,13 @@ export function GlobalWakeWordListener({ client }: { client: ApiClient }) {
     companionName,
     prefs,
   })
-  runtimeRef.current = {
-    caps,
-    companionName,
-    prefs,
-  }
+  useEffect(() => {
+    runtimeRef.current = {
+      caps,
+      companionName,
+      prefs,
+    }
+  }, [caps, companionName, prefs])
 
   useEffect(() => onLiveVoicePrefsChange(setPrefs), [])
   useEffect(() => onLiveVoiceStageOpenChange(setStageOpen), [])

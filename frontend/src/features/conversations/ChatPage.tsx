@@ -996,7 +996,7 @@ export function ChatPage() {
     if (utterance) {
       pendingWakeUtteranceRef.current = utterance
     }
-    setLiveVoiceOpen(true)
+    queueMicrotask(() => setLiveVoiceOpen(true))
     navigate(conversationPath, { replace: true, state: null })
   }, [conversationPath, location.search, location.state, navigate])
 
@@ -1008,7 +1008,7 @@ export function ChatPage() {
       if (remainder) {
         pendingWakeUtteranceRef.current = remainder
       }
-      setLiveVoiceOpen(true)
+      queueMicrotask(() => setLiveVoiceOpen(true))
     }
     window.addEventListener('orin:open-friend-live', onOpenFriendLive)
     return () => window.removeEventListener('orin:open-friend-live', onOpenFriendLive)

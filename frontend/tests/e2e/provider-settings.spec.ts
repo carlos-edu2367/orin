@@ -541,3 +541,112 @@ test('configures cross-provider default models for image, audio, and video gener
   await audioRow.getByLabel('Modelo padrão de áudio').selectOption('openrouter:elevenlabs/eleven-v3')
   await expect(audioRow.locator('.media-models-setting__badge')).toHaveText('OpenRouter · elevenlabs/eleven-v3')
 })
+
+
+test('configures Anthropic Claude Code CLI subscription without an API key, tests connection, loads subscription models, and toggles Cloud API key mode', async ({ page }) => {
+  let configured = false
+  const putBodies: Array<Record<string, unknown>> = []
+
+  await page.route('**/v1/providers/**', async (route) => {
+    const request = route.request()
+    const url = new URL(request.url())
+    const pathname = url.pathname
+
+    if (request.method() === 'POST' && pathname === '/v1/providers/anthropic/test') {
+      await fulfillJson(route, { connected: true, models_available: 4, base_url: 'http://127.0.0.1:18447' })
+      return
+    }
+    if (request.method() === 'PUT' && pathname === '/v1/providers/anthropic') {
+      configured = true
+      putBodies.push(request.postDataJSON() as Record<string, unknown>)
+      await fulfillJson(route, { provider: 'anthropic', enabled: true, base_url: 'http://127.0.0.1:18447' })
+      return
+    }
+    if (request.method() === 'POST' && pathname === '/v1/providers/anthropic/models:refresh') {
+      await fulfillJson(route, { count: 4, refreshed_at: '2026-10-28T12:00:00Z' })
+      return
+    }
+    if (request.method() === 'GET' && pathname === '/v1/providers/anthropic/models') {
+      await fulfillJson(route, {
+        items: [
+          {
+            provider: 'anthropic',
+            model_id: 'claude-opus-4-7',
+            display_name: 'Claude Opus 4.7 (Assinatura CLI)',
+            context_window: 200000,
+            capabilities: ['tools', 'reasoning'],
+            input_modalities: ['text'],
+            output_modalities: ['text'],
+            pricing: { input_per_million_usd: 0, output_per_million_usd: 0 },
+            is_favorite: true,
+            is_custom: false,
+            refreshed_at: '2026-10-28T12:00:00Z',
+            route_kind: 'model',
+          },
+          {
+            provider: 'anthropic',
+            model_id: 'claude-sonnet-4-6',
+            display_name: 'Claude Sonnet 4.6 (Assinatura CLI)',
+            context_window: 200000,
+            capabilities: ['tools', 'reasoning'],
+            input_modalities: ['text'],
+            output_modalities: ['text'],
+            pricing: { input_per_million_usd: 0, output_per_million_usd: 0 },
+            is_favorite: false,
+            is_custom: false,
+            refreshed_at: '2026-10-28T12:00:00Z',
+            route_kind: 'model',
+          },
+        ],
+      })
+      return
+    }
+    if (request.method() === 'GET' && pathname.endsWith('/keys')) {
+      await fulfillJson(route, [])
+      return
+    }
+    if (request.method() === 'GET' && pathname === '/v1/providers/anthropic') {
+      await fulfillJson(
+        route,
+        configured
+          ? { provider: 'anthropic', enabled: true, base_url: 'http://127.0.0.1:18447' }
+          : { provider: 'anthropic', enabled: null, base_url: 'http://127.0.0.1:18447' },
+      )
+      return
+    }
+    if (request.method() === 'GET') {
+      await fulfillJson(route, {})
+      return
+    }
+    await route.abort('failed')
+  })
+
+  await page.setViewportSize({ width: 1440, height: 900 })
+  const panel = await openProvider(page, 'Anthropic')
+  await expect(panel.getByRole('radio', { name: 'Assinatura Claude Code (CLI Local)' })).toHaveAttribute('aria-checked', 'true')
+  await expect(panel.getByLabel('URL do servidor')).toHaveValue('http://127.0.0.1:18447')
+
+  await panel.getByRole('button', { name: 'Testar conexão' }).click()
+  await expect(panel.getByText(/4 modelos disponíveis/)).toBeVisible()
+
+  await panel.getByRole('button', { name: 'Salvar', exact: true }).click()
+  await expect(panel.locator('.provider-detail__state')).toHaveText('Habilitado')
+  expect(putBodies).toEqual([
+    {
+      api_key: '',
+      enabled: true,
+      base_url: 'http://127.0.0.1:18447',
+    },
+  ])
+
+  await expect(panel.getByText('Claude Opus 4.7 (Assinatura CLI)')).toBeVisible()
+  await expect(panel.getByText('Claude Sonnet 4.6 (Assinatura CLI)')).toBeVisible()
+
+  if (processEnv.ORIN_SHOT_ANTHROPIC_CLI_BRIDGE) {
+    await panel.getByRole('radio', { name: 'Assinatura Claude Code (CLI Local)' }).scrollIntoViewIfNeeded()
+    await page.screenshot({ path: processEnv.ORIN_SHOT_ANTHROPIC_CLI_BRIDGE, fullPage: true })
+  }
+
+  await panel.getByRole('radio', { name: 'Cloud (Chave de API)' }).click()
+  await expect(panel.getByLabel('URL do servidor')).toHaveValue('https://api.anthropic.com')
+})

@@ -271,6 +271,22 @@ export function testOpenCodeConnection(
   })
 }
 
+export function testAnthropicConnection(
+  client: ApiClient,
+  input: { apiKey: string; baseUrl: string },
+  intent = client.createMutationIntent(),
+): Promise<OmniRouteConnection> {
+  return client.request({
+    path: `${providerPath('anthropic')}/test`, method: 'POST', intent,
+    body: { api_key: input.apiKey, base_url: input.baseUrl },
+    parse: (value) => {
+      const data = record(value)
+      if (data.connected !== true) throw invalidResponseError()
+      return { connected: true, models_available: data.models_available === null ? null : nonNegativeInteger(data.models_available), base_url: nullableString(data.base_url) }
+    },
+  })
+}
+
 function parseNvidiaTestResult(value: unknown): NvidiaTestResult {
   const data = record(value)
   if (typeof data.reachable === 'boolean') {

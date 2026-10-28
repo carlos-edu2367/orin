@@ -5,7 +5,7 @@ import { readBrowserSessionBootstrap, type BrowserSessionBootstrap } from '../..
 import { ApiError } from '../../api/errors'
 import {
   addProviderCustomModel, configureProvider, getOmniRouteInstallationStatus, inspectProvider, installOmniRoute, listProviderModels,
-  refreshProviderModels, removeProviderCustomModel, revokeProvider, setProviderModelFavorite, testNvidiaConnection, testOllamaConnection, testOmniRouteConnection, testOpenCodeConnection,
+  refreshProviderModels, removeProviderCustomModel, revokeProvider, setProviderModelFavorite, testAnthropicConnection, testNvidiaConnection, testOllamaConnection, testOmniRouteConnection, testOpenCodeConnection,
   type ModelOutputModality, type NvidiaTestResult, type ProviderModel, type ProviderName, type ProviderPublicState,
 } from '../../api/providers'
 
@@ -29,6 +29,8 @@ export type ProviderState = {
   setOllamaMode: (value: 'local' | 'cloud') => void
   opencodeMode: 'local' | 'cloud'
   setOpencodeMode: (value: 'local' | 'cloud') => void
+  anthropicMode: 'local' | 'cloud'
+  setAnthropicMode: (value: 'local' | 'cloud') => void
   nvidiaMode: 'cloud' | 'self-hosted'
   setNvidiaMode: (value: 'cloud' | 'self-hosted') => void
   nvidiaTestResult: NvidiaTestResult | null
@@ -61,13 +63,16 @@ export function useProviderState(client: ApiClient = createBrowserApiClient(), p
       ? 'http://localhost:11434'
       : provider === 'opencode'
         ? 'http://127.0.0.1:18446'
-        : provider === 'nvidia'
-          ? 'https://integrate.api.nvidia.com/v1'
-          : 'http://localhost:20128/v1',
+        : provider === 'anthropic'
+          ? 'http://127.0.0.1:18447'
+          : provider === 'nvidia'
+            ? 'https://integrate.api.nvidia.com/v1'
+            : 'http://localhost:20128/v1',
   )
   const [enabled, setEnabled] = useState(true)
   const [ollamaMode, setOllamaMode] = useState<'local' | 'cloud'>('local')
   const [opencodeMode, setOpencodeMode] = useState<'local' | 'cloud'>('local')
+  const [anthropicMode, setAnthropicMode] = useState<'local' | 'cloud'>('local')
   const [nvidiaMode, setNvidiaModeState] = useState<'cloud' | 'self-hosted'>('cloud')
   const [nvidiaTestResult, setNvidiaTestResult] = useState<NvidiaTestResult | null>(null)
   const [connection, setConnection] = useState<{ connected: boolean; models: number | null } | null>(null)
@@ -98,6 +103,15 @@ export function useProviderState(client: ApiClient = createBrowserApiClient(), p
         setBaseUrl(state.extra.base_url)
         try { setOpencodeMode(new URL(state.extra.base_url).hostname.toLowerCase().endsWith('opencode.ai') ? 'cloud' : 'local') } catch { setOpencodeMode('local') }
       }
+      if (provider === 'anthropic') {
+        if (typeof state.extra.base_url === 'string' && state.extra.base_url) {
+          setBaseUrl(state.extra.base_url)
+          try { setAnthropicMode(new URL(state.extra.base_url).hostname.toLowerCase().endsWith('anthropic.com') ? 'cloud' : 'local') } catch { setAnthropicMode('local') }
+        } else if (state.enabled !== null && state.extra.has_secret === true) {
+          setAnthropicMode('cloud')
+          setBaseUrl('https://api.anthropic.com')
+        }
+      }
       if (provider === 'nvidia' && typeof state.extra.base_url === 'string') {
         setBaseUrl(state.extra.base_url)
         try { setNvidiaMode(new URL(state.extra.base_url).hostname.toLowerCase().endsWith('nvidia.com') ? 'cloud' : 'self-hosted') } catch { setNvidiaMode('self-hosted') }
@@ -123,6 +137,15 @@ export function useProviderState(client: ApiClient = createBrowserApiClient(), p
       if (provider === 'opencode' && typeof state.extra.base_url === 'string') {
         setBaseUrl(state.extra.base_url)
         try { setOpencodeMode(new URL(state.extra.base_url).hostname.toLowerCase().endsWith('opencode.ai') ? 'cloud' : 'local') } catch { setOpencodeMode('local') }
+      }
+      if (provider === 'anthropic') {
+        if (typeof state.extra.base_url === 'string' && state.extra.base_url) {
+          setBaseUrl(state.extra.base_url)
+          try { setAnthropicMode(new URL(state.extra.base_url).hostname.toLowerCase().endsWith('anthropic.com') ? 'cloud' : 'local') } catch { setAnthropicMode('local') }
+        } else if (state.enabled !== null && state.extra.has_secret === true) {
+          setAnthropicMode('cloud')
+          setBaseUrl('https://api.anthropic.com')
+        }
       }
       if (provider === 'nvidia' && typeof state.extra.base_url === 'string') {
         setBaseUrl(state.extra.base_url)
@@ -155,6 +178,7 @@ export function useProviderState(client: ApiClient = createBrowserApiClient(), p
     provider !== 'omniroute' &&
     !(provider === 'ollama' && ollamaMode === 'local') &&
     !(provider === 'opencode' && opencodeMode === 'local') &&
+    !(provider === 'anthropic' && anthropicMode === 'local') &&
     !(provider === 'nvidia' && (nvidiaMode === 'self-hosted' || canRevoke))
 
   async function configure(event?: FormEvent<HTMLFormElement>) {
@@ -169,14 +193,14 @@ export function useProviderState(client: ApiClient = createBrowserApiClient(), p
         {
           apiKey,
           enabled,
-          ...(provider === 'omniroute' || provider === 'ollama' || provider === 'opencode' || provider === 'nvidia' ? { baseUrl } : {}),
+          ...(provider === 'omniroute' || provider === 'ollama' || provider === 'opencode' || provider === 'nvidia' || provider === 'anthropic' ? { baseUrl } : {}),
         },
         intentFor('configure'),
       )
       intents.current.delete('configure')
       setLoad({ status: 'loaded', state })
       setApiKey('')
-      if ((provider === 'omniroute' || provider === 'ollama' || provider === 'opencode') && state.enabled === true) {
+      if ((provider === 'omniroute' || provider === 'ollama' || provider === 'opencode' || provider === 'anthropic') && state.enabled === true) {
         try {
           await refreshProviderModels(client, provider, intentFor('refresh'))
           intents.current.delete('refresh')
@@ -269,7 +293,9 @@ export function useProviderState(client: ApiClient = createBrowserApiClient(), p
             ? testOllamaConnection(client, { apiKey, baseUrl }, intentFor('test'))
             : provider === 'opencode'
               ? testOpenCodeConnection(client, { apiKey, baseUrl }, intentFor('test'))
-              : testOmniRouteConnection(client, { apiKey, baseUrl }, intentFor('test'))
+              : provider === 'anthropic'
+                ? testAnthropicConnection(client, { apiKey, baseUrl }, intentFor('test'))
+                : testOmniRouteConnection(client, { apiKey, baseUrl }, intentFor('test'))
         )
         intents.current.delete('test')
         setConnection({ connected: true, models: result.models_available })
@@ -291,7 +317,7 @@ export function useProviderState(client: ApiClient = createBrowserApiClient(), p
 
   return {
     load, action, apiKey, setApiKey, baseUrl, setBaseUrl, enabled, setEnabled,
-    ollamaMode, setOllamaMode, opencodeMode, setOpencodeMode, nvidiaMode, setNvidiaMode, nvidiaTestResult,
+    ollamaMode, setOllamaMode, opencodeMode, setOpencodeMode, anthropicMode, setAnthropicMode, nvidiaMode, setNvidiaMode, nvidiaTestResult,
     connection, installed, models, catalog, catalogLoading, canRevoke, requiresApiKey,
     reload: () => reload(), configure, revoke, refreshModels, loadModels, setFavorite, addCustomModel, removeCustomModel, testConnection, install,
   }

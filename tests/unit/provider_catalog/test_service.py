@@ -200,8 +200,8 @@ def test_the_provider_shape_rules_have_a_single_definition() -> None:
     """Four layers consult these; a per-module copy is a drift waiting to happen."""
     from agentos.provider_catalog.models import PROVIDERS_WITH_BASE_URL, PROVIDERS_WITH_OPTIONAL_KEY
 
-    assert PROVIDERS_WITH_BASE_URL == frozenset({"omniroute", "ollama", "opencode", "nvidia"})
-    assert PROVIDERS_WITH_OPTIONAL_KEY == frozenset({"omniroute", "ollama", "opencode", "nvidia"})
+    assert PROVIDERS_WITH_BASE_URL == frozenset({"omniroute", "ollama", "opencode", "nvidia", "anthropic"})
+    assert PROVIDERS_WITH_OPTIONAL_KEY == frozenset({"omniroute", "ollama", "opencode", "nvidia", "anthropic"})
 
 
 class FakeOllama:

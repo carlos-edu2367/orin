@@ -76,6 +76,14 @@ from agentos.provider_catalog.opencode import (
     normalize_opencode_base_url,
 )
 from agentos.provider_catalog.installation import OmniRouteInstaller
+from agentos.provider_catalog.claude_code import (
+    ANTHROPIC_CLOUD_BASE_URL,
+    DEFAULT_CLAUDE_CLI_BRIDGE_URL,
+    ProviderTransportError,
+    is_claude_cli_bridge_url,
+    normalize_anthropic_base_url,
+)
+from agentos.provider_catalog.http import AnthropicModelCatalogClient
 
 
 def _public(row) -> dict[str, object]:
@@ -252,6 +260,9 @@ class PostgresProviderConfigurationAdapter:
             client: object = OmniRouteCatalogClient()
         elif provider == "opencode":
             client = OpenCodeModelCatalogClient()
+        elif provider == "anthropic":
+            client = AnthropicModelCatalogClient()
+            base_url = base_url or (ANTHROPIC_CLOUD_BASE_URL if str(command.get("api_key") or "").strip() else DEFAULT_CLAUDE_CLI_BRIDGE_URL)
         else:
             client = OllamaCatalogClient()
         try:
@@ -263,7 +274,7 @@ class PostgresProviderConfigurationAdapter:
                 for model in models:
                     try:
                         client.verify_cloud_access(str(command["api_key"]), base_url=str(base_url), model=str(model["id"]))
-                    except OllamaCloudAuthenticationError as error:
+                    except (OllamaCloudAuthenticationError, ProviderTransportError) as error:
                         # The Cloud catalog can contain models that are not
                         # enabled for this account. A single forbidden model
                         # must not make a valid credential look rejected.
@@ -274,7 +285,7 @@ class PostgresProviderConfigurationAdapter:
                     if last_model_error is not None:
                         raise last_model_error
                     raise RuntimeError("Ollama Cloud returned no usable models")
-        except OllamaCloudAuthenticationError as error:
+        except (OllamaCloudAuthenticationError, ProviderTransportError) as error:
             raise ProviderCredentialRejectedError from error
         except RuntimeError as error:
             # The adapter only permits the gateway's safe generic response.
@@ -311,6 +322,11 @@ def _base_url(provider: str, value: object, api_key: object = None, *, has_exist
         return normalize_opencode_base_url(default_opencode)
     if provider == "nvidia":
         return normalize_nvidia_base_url(str(value or DEFAULT_NVIDIA_BASE_URL))
+    if provider == "anthropic":
+        if isinstance(value, str) and value.strip():
+            normalized = normalize_anthropic_base_url(value)
+            return None if normalized == ANTHROPIC_CLOUD_BASE_URL else normalized
+        return None
     return None
 
 
@@ -326,6 +342,8 @@ def _api_key(provider: str, value: object, base_url: str | None = None, *, has_e
     if provider == "opencode" and base_url is not None and is_opencode_cloud(base_url):
         optional = False
     if provider == "nvidia" and base_url is not None and is_nvidia_cloud(base_url):
+        optional = False
+    if provider == "anthropic" and not (base_url is not None and is_claude_cli_bridge_url(base_url)):
         optional = False
     if not optional and not api_key and not has_existing_keys:
         raise ValueError("provider API key is required")

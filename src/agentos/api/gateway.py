@@ -40,6 +40,7 @@ from .contracts import (
     SecurityService,
 )
 from agentos.provider_catalog.models import PROVIDERS_WITH_OPTIONAL_KEY, ProviderCatalogContext
+from agentos.provider_catalog.claude_code import is_claude_cli_bridge_url
 from agentos.provider_catalog.service import ProviderCatalogUnavailable
 from .events import CursorError, InMemoryClientEventStream
 from .conversation_routes import register_conversation_routes
@@ -2145,7 +2146,7 @@ def create_app(services: ApiServices) -> FastAPI:
     @app.put("/v1/providers/{provider}")
     async def configure_provider(provider: str, payload: ProviderSetupRequest, request: Request) -> JSONResponse:
         provider_name = _provider_name(provider)
-        if provider_name not in PROVIDERS_WITH_OPTIONAL_KEY and payload.api_key is None:
+        if (provider_name not in PROVIDERS_WITH_OPTIONAL_KEY or (provider_name == "anthropic" and not (payload.base_url and is_claude_cli_bridge_url(payload.base_url)))) and payload.api_key is None:
             raise ValueError("API key is required for this provider")
         principal = principal_for(request, mutable=True)
         services.security.check_rate_limit(principal, action="provider.configure", origin=request.headers.get("origin"))
@@ -2283,6 +2284,20 @@ def create_app(services: ApiServices) -> FastAPI:
         result = await run_in_threadpool(
             _require_port(services.provider_configuration).test_connection,
             {"provider": "ollama", "user_id": principal.user_id, "purpose": payload.purpose,
+             "api_key": payload.api_key.get_secret_value() if payload.api_key is not None else "",
+             "base_url": payload.base_url},
+        )
+        return JSONResponse(_connection_test_public(result))
+
+    @app.post("/v1/providers/anthropic/test")
+    async def test_anthropic_connection(payload: ProviderSetupRequest, request: Request) -> JSONResponse:
+        principal = principal_for(request, mutable=True)
+        services.security.check_rate_limit(principal, action="provider.test", origin=request.headers.get("origin"))
+        services.security.authorize(principal, action="provider.test", resource_id="anthropic", purpose=payload.purpose)
+        _idempotency(request)
+        result = await run_in_threadpool(
+            _require_port(services.provider_configuration).test_connection,
+            {"provider": "anthropic", "user_id": principal.user_id, "purpose": payload.purpose,
              "api_key": payload.api_key.get_secret_value() if payload.api_key is not None else "",
              "base_url": payload.base_url},
         )

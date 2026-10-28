@@ -53,8 +53,8 @@ export const BRANDS: Record<ProviderName, ProviderBrand> = {
     logoUrl: anthropicLogo,
     keyPlaceholder: 'sk-ant-...',
     docsUrl: 'https://console.anthropic.com/settings/keys',
-    supportsBaseUrl: false,
-    keyOptional: false,
+    supportsBaseUrl: true,
+    keyOptional: true,
   },
   openrouter: {
     id: 'openrouter',

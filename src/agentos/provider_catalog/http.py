@@ -5,6 +5,11 @@ from typing import Any
 import httpx
 
 from agentos.agentic.provider_stream import HTTPProviderStreamTransport
+from .claude_code import (
+    DEFAULT_CLAUDE_CLI_BRIDGE_URL,
+    ClaudeCodeModelCatalogClient,
+    is_claude_cli_bridge_url,
+)
 from .opencode import DEFAULT_OPENCODE_BASE_URL, OpenCodeModelCatalogClient
 
 
@@ -62,6 +67,10 @@ class AnthropicModelCatalogClient:
         self._timeout = timeout
 
     def fetch(self, api_key: str, *, base_url: str = "") -> list[dict[str, object]]:
+        if is_claude_cli_bridge_url(base_url):
+            return ClaudeCodeModelCatalogClient(timeout=self._timeout).fetch(
+                api_key, base_url=base_url
+            )
         models: list[dict[str, object]] = []
         after_id: str | None = None
         # The API's page size is capped at 1000.  The defensive cap prevents a
@@ -97,7 +106,12 @@ ProviderStreamHTTPClient = HTTPProviderStreamTransport
 
 
 __all__ = [
-    "AnthropicModelCatalogClient", "DEFAULT_OPENCODE_BASE_URL",
-    "OpenAIModelCatalogClient", "OpenCodeModelCatalogClient",
-    "OpenRouterModelCatalogClient", "ProviderStreamHTTPClient",
+    "AnthropicModelCatalogClient",
+    "ClaudeCodeModelCatalogClient",
+    "DEFAULT_CLAUDE_CLI_BRIDGE_URL",
+    "DEFAULT_OPENCODE_BASE_URL",
+    "OpenAIModelCatalogClient",
+    "OpenCodeModelCatalogClient",
+    "OpenRouterModelCatalogClient",
+    "ProviderStreamHTTPClient",
 ]

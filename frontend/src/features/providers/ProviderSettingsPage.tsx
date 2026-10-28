@@ -2,7 +2,8 @@ import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { ApiClient, createBrowserApiClient, type MutationIntent } from '../../api/client'
 import { readBrowserSessionBootstrap, type BrowserSessionBootstrap } from '../../api/browserSession'
 import { ApiError, isAuthenticationError, isCsrfAuthorizationError } from '../../api/errors'
-import { configureProvider, inspectProvider, revokeProvider, refreshProviderModels, listProviderModels, setProviderModelFavorite, testNvidiaConnection, testOmniRouteConnection, testOllamaConnection, installOmniRoute, getOmniRouteInstallationStatus, getOmniRouteRuntime, setOmniRouteAutoStart, controlOmniRoute, PROVIDER_NAMES, type NvidiaTestResult, type OmniRouteRuntime, type ProviderModel, type ProviderName, type ProviderPublicState } from '../../api/providers'
+import { configureProvider, inspectProvider, revokeProvider, refreshProviderModels, listProviderModels, setProviderModelFavorite, testAnthropicConnection, testNvidiaConnection, testOmniRouteConnection, testOllamaConnection, installOmniRoute, getOmniRouteInstallationStatus, getOmniRouteRuntime, setOmniRouteAutoStart, controlOmniRoute, PROVIDER_NAMES, type NvidiaTestResult, type OmniRouteRuntime, type ProviderModel, type ProviderName, type ProviderPublicState } from '../../api/providers'
+import { AnthropicSetup } from './AnthropicSetup'
 import { NvidiaSetup } from './NvidiaSetup'
 import { OMNIROUTE_FREE_PROVIDER_GUIDES } from './omnirouteFreeProviders'
 import { MediaModelsSetting } from './MediaModelsSetting'
@@ -66,7 +67,7 @@ function ProviderPanel({ provider, client, bootstrap }: { provider: ProviderName
   const [baseUrl, setBaseUrl] = useState(() =>
     provider === 'ollama'
       ? 'http://localhost:11434'
-      : provider === 'nvidia'
+      : provider === 'anthropic' ? 'http://127.0.0.1:18447' : provider === 'nvidia'
         ? 'https://integrate.api.nvidia.com/v1'
         : 'http://localhost:20128/v1',
   )
@@ -75,6 +76,7 @@ function ProviderPanel({ provider, client, bootstrap }: { provider: ProviderName
   // Ollama's mode is not stored: it is read back from the saved URL's host,
   // exactly as the backend derives it. One source, so the two cannot disagree.
   const [ollamaMode, setOllamaMode] = useState<'local' | 'cloud'>('local')
+  const [anthropicMode, setAnthropicMode] = useState<'local' | 'cloud'>('local')
   const [nvidiaMode, setNvidiaMode] = useState<'cloud' | 'self-hosted'>('cloud')
   const [nvidiaTestResult, setNvidiaTestResult] = useState<NvidiaTestResult | null>(null)
   const [connection, setConnection] = useState<{ connected: boolean; models: number | null } | null>(null)
@@ -97,6 +99,15 @@ function ProviderPanel({ provider, client, bootstrap }: { provider: ProviderName
         if (provider === 'ollama' && typeof state.extra.base_url === 'string') {
           setBaseUrl(state.extra.base_url)
           setOllamaMode(/(^|\.)ollama\.com$/i.test(new URL(state.extra.base_url).hostname) ? 'cloud' : 'local')
+        }
+        if (provider === 'anthropic') {
+          if (typeof state.extra.base_url === 'string' && state.extra.base_url) {
+            setBaseUrl(state.extra.base_url)
+            try { setAnthropicMode(/(^|\.)anthropic\.com$/i.test(new URL(state.extra.base_url).hostname) ? 'cloud' : 'local') } catch { setAnthropicMode('local') }
+          } else if (state.enabled !== null && state.extra.has_secret === true) {
+            setAnthropicMode('cloud')
+            setBaseUrl('https://api.anthropic.com')
+          }
         }
         if (provider === 'nvidia' && typeof state.extra.base_url === 'string') {
           setBaseUrl(state.extra.base_url)
@@ -162,7 +173,7 @@ function ProviderPanel({ provider, client, bootstrap }: { provider: ProviderName
   // Cloud modes narrow back to requiring one (unless already configured), same as other providers.
   const requiresApiKey =
     provider !== 'omniroute' &&
-    !(provider === 'ollama' && ollamaMode === 'local') &&
+    !(provider === 'ollama' && ollamaMode === 'local') && !(provider === 'anthropic' && anthropicMode === 'local') &&
     !(provider === 'nvidia' && (nvidiaMode === 'self-hosted' || canRevoke))
 
   async function onSave(event: FormEvent<HTMLFormElement>) {
@@ -177,7 +188,7 @@ function ProviderPanel({ provider, client, bootstrap }: { provider: ProviderName
         {
           apiKey,
           enabled,
-          ...(provider === 'omniroute' || provider === 'ollama' || provider === 'nvidia' || provider === 'opencode' ? { baseUrl } : {}),
+          ...(provider === 'omniroute' || provider === 'ollama' || provider === 'nvidia' || provider === 'opencode' || provider === 'anthropic' ? { baseUrl } : {}),
         },
         intent,
       )
@@ -190,7 +201,7 @@ function ProviderPanel({ provider, client, bootstrap }: { provider: ProviderName
       // setup. Fetching the catalog here is what actually finishes the flow.
       // A refresh failure is reported on the catalog, never as a failed save:
       // the credential is already stored at this point.
-      if ((provider === 'omniroute' || provider === 'ollama' || provider === 'nvidia' || provider === 'opencode') && state.enabled === true) {
+      if ((provider === 'omniroute' || provider === 'ollama' || provider === 'nvidia' || provider === 'opencode' || provider === 'anthropic') && state.enabled === true) {
         try {
           await refreshProviderModels(client, provider, intentFor('refresh'))
           intents.current.delete('refresh')
@@ -278,6 +289,20 @@ function ProviderPanel({ provider, client, bootstrap }: { provider: ProviderName
     }
   }
 
+  async function onTestAnthropic() {
+    if (provider !== 'anthropic' || action.pending || bootstrap.status === 'missing_csrf') return
+    setAction({ pending: true, error: null, kind: 'test' })
+    try {
+      const result = await testAnthropicConnection(client, { apiKey, baseUrl }, intentFor('test'))
+      intents.current.delete('test')
+      setConnection({ connected: true, models: result.models_available })
+      setAction({ pending: false, error: null, kind: null })
+    } catch (error) {
+      setConnection(null)
+      setAction({ pending: false, error: toApiError(error), kind: 'test' })
+    }
+  }
+
   async function onInstall() {
     if (provider !== 'omniroute' || action.pending || bootstrap.status === 'missing_csrf') return
     setAction({ pending: true, error: null, kind: 'install' })
@@ -306,6 +331,7 @@ function ProviderPanel({ provider, client, bootstrap }: { provider: ProviderName
 
   const isOmniRoute = provider === 'omniroute'
   const isOllama = provider === 'ollama'
+  const isAnthropic = provider === 'anthropic'
   const isNvidia = provider === 'nvidia'
 
   return (
@@ -355,6 +381,24 @@ function ProviderPanel({ provider, client, bootstrap }: { provider: ProviderName
         onEnabledChange={setEnabled}
       />}
 
+      {isAnthropic && <AnthropicSetup
+        mode={anthropicMode}
+        enabled={enabled}
+        apiKey={apiKey}
+        baseUrl={baseUrl}
+        action={action}
+        canRevoke={canRevoke}
+        bootstrap={bootstrap}
+        connection={connection}
+        onModeChange={(mode) => { setAnthropicMode(mode); setBaseUrl(mode === 'cloud' ? 'https://api.anthropic.com' : 'http://127.0.0.1:18447'); setConnection(null); setModels([]); setCatalog({ loaded: false, error: null }) }}
+        onTest={onTestAnthropic}
+        onSave={onSave}
+        onRevoke={onRevoke}
+        onApiKeyChange={setApiKey}
+        onBaseUrlChange={setBaseUrl}
+        onEnabledChange={setEnabled}
+      />}
+
       {isNvidia && <NvidiaSetup
         mode={nvidiaMode}
         enabled={enabled}
@@ -374,7 +418,7 @@ function ProviderPanel({ provider, client, bootstrap }: { provider: ProviderName
         onEnabledChange={setEnabled}
       />}
 
-      {!isOmniRoute && !isOllama && !isNvidia && <form className="provider-panel__form" onSubmit={onSave}>
+      {!isOmniRoute && !isOllama && !isAnthropic && !isNvidia && <form className="provider-panel__form" onSubmit={onSave}>
         <label htmlFor={`${provider}-api-key`}>Chave de API</label>
         <input
           id={`${provider}-api-key`}
@@ -415,7 +459,7 @@ function ProviderPanel({ provider, client, bootstrap }: { provider: ProviderName
       </form>}
       {isOmniRoute && omniOpen && <OmniRouteFreeSetup />}
       {canRevoke && <section className="provider-panel__catalog" aria-label={`Modelos de ${providerLabel(provider)}`}>
-        {(isOmniRoute || isOllama || isNvidia) && <button type="button" className="button button--secondary" disabled={action.pending || bootstrap.status === 'missing_csrf'} onClick={onRefresh}>
+        {(isOmniRoute || isOllama || isAnthropic || isNvidia) && <button type="button" className="button button--secondary" disabled={action.pending || bootstrap.status === 'missing_csrf'} onClick={onRefresh}>
           {action.pending && action.kind === 'refresh' ? 'Atualizando…' : 'Atualizar catálogo'}
         </button>}
         <button type="button" className="button button--secondary" disabled={catalogLoading} onClick={loadModels}>
