@@ -9,12 +9,81 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import sys
 import traceback
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 Handler = Callable[[dict[str, Any]], dict[str, Any]]
+
+_WINDOWS_DLL_DIR_HANDLES: list[Any] = []
+
+
+def _safe_is_dir(path: Path) -> bool:
+    try:
+        return path.is_dir()
+    except OSError:
+        return False
+
+
+def expose_windows_dll_directories() -> list[str]:
+    """Register venv, base Python, and native wheel DLL directories on Windows.
+
+    Handles returned by ``os.add_dll_directory`` are kept in ``_WINDOWS_DLL_DIR_HANDLES``
+    so garbage collection never revokes the registered search paths.
+    """
+    if os.name != "nt":
+        return []
+    candidates: list[Path] = [
+        Path(sys.prefix),
+        Path(sys.prefix) / "Scripts",
+        Path(sys.prefix) / "Library" / "bin",
+        Path(sys.base_prefix),
+        Path(sys.base_prefix) / "DLLs",
+    ]
+    for entry in list(sys.path):
+        if not entry:
+            continue
+        site = Path(entry)
+        nvidia = site / "nvidia"
+        if _safe_is_dir(nvidia):
+            candidates.extend(nvidia.glob("*/bin"))
+            candidates.extend(nvidia.glob("*/lib"))
+        for sub in (
+            site / "torch" / "lib",
+            site / "ctranslate2",
+            site / "onnxruntime" / "capi",
+            site / "espeakng_loader",
+        ):
+            if _safe_is_dir(sub):
+                candidates.append(sub)
+
+    exposed: list[str] = []
+    seen: set[str] = set()
+    add_dll_dir = getattr(os, "add_dll_directory", None)
+    for d in candidates:
+        dir_str = str(d)
+        if dir_str in seen or not _safe_is_dir(d):
+            continue
+        seen.add(dir_str)
+        if add_dll_dir is not None:
+            try:
+                handle = add_dll_dir(dir_str)
+                if handle is not None:
+                    _WINDOWS_DLL_DIR_HANDLES.append(handle)
+            except OSError:
+                pass
+        current_path = os.environ.get("PATH", "")
+        path_parts = current_path.split(os.pathsep) if current_path else []
+        if dir_str not in path_parts:
+            os.environ["PATH"] = f"{dir_str}{os.pathsep}{current_path}" if current_path else dir_str
+        exposed.append(dir_str)
+    return exposed
+
+
+expose_windows_dll_directories()
 
 
 def pcm16_base64(samples: Any) -> str:
@@ -35,6 +104,7 @@ def pcm16_from_base64(data: str) -> Any:
 
 
 def serve(handlers: dict[str, Handler]) -> None:
+    expose_windows_dll_directories()
     out = sys.stdout
     sys.stdout = sys.stderr
     handlers = {"ping": lambda _req: {"pong": True}, **handlers}

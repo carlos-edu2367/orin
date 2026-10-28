@@ -51,6 +51,14 @@ VOICE_CLIP_EXTENSIONS = (".wav", ".mp3", ".flac", ".ogg", ".m4a")
 MAX_VOICE_CLIP_BYTES = 12 * 1024 * 1024
 INSTALL_TIMEOUT_SECONDS = 3600
 REQUEST_TIMEOUT_SECONDS = {"load": 1800.0, "transcribe": 120.0, "synthesize": 180.0}
+_WINDOWS_MSVC_DLL_GLOBS = (
+    "msvcp140*.dll",
+    "vcomp140*.dll",
+    "concrt140*.dll",
+    "vcruntime140*.dll",
+    "vcamp140*.dll",
+    "vccorlib140*.dll",
+)
 
 # Voices shipped in Kokoro v1.0's voices-v1.0.bin; Brazilian Portuguese first.
 KOKORO_VOICES: tuple[str, ...] = (
@@ -331,6 +339,89 @@ class LocalEngineRuntime:
             tail = (completed.stderr or completed.stdout or "").strip().splitlines()[-1:] or ["sem detalhes"]
             raise LocalEngineError("install_failed", f"Falhou: {tail[0][:240]}")
 
+    def _find_uv_binary(self) -> Path | None:
+        _, binary = _uv_asset()
+        for candidate in (self.root / "tools" / binary, self.root / "tools" / "uv.exe"):
+            if candidate.is_file():
+                return candidate
+        found = shutil.which("uv")
+        return Path(found) if found else None
+
+    def _ensure_windows_msvc_runtime(self, engine_id: str, venv: Path) -> None:
+        """Ensure ``msvc-runtime`` DLLs exist in ``venv`` and base Python on Windows.
+
+        Standalone CPython distributions downloaded by ``uv`` do not ship ``msvcp140.dll``,
+        ``msvcp140_1.dll``, ``vcomp140.dll``, or ``concrt140.dll``. When Windows lacks the
+        system-wide VC++ Redistributable, native wheels (``ctranslate2.dll``, ``c10.dll``)
+        fail with ``WinError 126``. Installing ``msvc-runtime`` and mirroring its DLLs into
+        ``venv`` and the base Python ``home`` directory makes ``LoadLibraryExW`` resolve them
+        directly from the application directory.
+        """
+        if os.name != "nt":
+            return
+        scripts = venv / "Scripts"
+        pyvenv_cfg = venv / "pyvenv.cfg"
+        has_msvcp = (scripts / "msvcp140.dll").is_file() or (venv / "msvcp140.dll").is_file()
+        if not has_msvcp and pyvenv_cfg.is_file():
+            uv = self._find_uv_binary()
+            venv_python = scripts / "python.exe"
+            if uv is not None and venv_python.is_file():
+                env = {
+                    **os.environ,
+                    "UV_CACHE_DIR": str(self.root / "uv-cache"),
+                    "UV_PYTHON_INSTALL_DIR": str(self.root / "python"),
+                }
+                argv = [str(uv), "pip", "install", "--python", str(venv_python), "msvc-runtime"]
+                try:
+                    self.runner(
+                        argv,
+                        capture_output=True,
+                        text=True,
+                        timeout=INSTALL_TIMEOUT_SECONDS,
+                        check=False,
+                        env=env,
+                        creationflags=_no_window(),
+                    )
+                except Exception:  # noqa: BLE001
+                    _LOGGER.debug("could not auto-install msvc-runtime for %s", engine_id, exc_info=True)
+
+        source_dirs = [d for d in (scripts, venv) if d.is_dir()]
+        if not source_dirs:
+            return
+        dll_files: list[Path] = []
+        for src_dir in source_dirs:
+            for pattern in _WINDOWS_MSVC_DLL_GLOBS:
+                dll_files.extend(src_dir.glob(pattern))
+        if not dll_files:
+            return
+
+        targets: list[Path] = [venv]
+        if pyvenv_cfg.is_file():
+            try:
+                for raw_line in pyvenv_cfg.read_text(encoding="utf-8", errors="ignore").splitlines():
+                    if raw_line.strip().lower().startswith("home"):
+                        _, _, val = raw_line.partition("=")
+                        home_dir = Path(val.strip())
+                        if home_dir.is_dir() and home_dir not in targets:
+                            targets.append(home_dir)
+            except OSError:
+                pass
+        python_root = self.root / "python"
+        if python_root.is_dir():
+            for py_dir in python_root.glob("cpython-*"):
+                if py_dir.is_dir() and py_dir not in targets:
+                    targets.append(py_dir)
+
+        for dll in dll_files:
+            for target_dir in targets:
+                dest = target_dir / dll.name
+                if dest == dll or dest.is_file():
+                    continue
+                try:
+                    shutil.copy2(dll, dest)
+                except OSError:
+                    pass
+
     def _install(self, engine: str) -> None:
         spec = ENGINE_SPECS[engine]
         engine_dir = self.engine_dir(engine)
@@ -347,11 +438,14 @@ class LocalEngineRuntime:
                 self._run([str(uv), "venv", "--python", spec.python, str(engine_dir / "venv")], log=log, env=env)
             gpu = self.gpu_probe()
             packages = list(spec.packages) + (list(spec.cuda_packages) if gpu else [])
+            if os.name == "nt" and "msvc-runtime" not in packages:
+                packages.append("msvc-runtime")
             argv = [str(uv), "pip", "install", "--python", str(python), *packages]
             if spec.torch_cuda_index and gpu:
                 argv += ["--extra-index-url", PYTORCH_CUDA_INDEX, "--index-strategy", "unsafe-best-match"]
             self._step(engine, "packages", f"Instalando {spec.label} ({spec.size_hint}) — pode levar alguns minutos…")
             self._run(argv, log=log, env=env)
+            self._ensure_windows_msvc_runtime(engine, engine_dir / "venv")
             for url, name in spec.downloads:
                 target = engine_dir / name
                 if not target.is_file():
@@ -416,10 +510,16 @@ class LocalEngineRuntime:
             existing = self._workers.get(engine)
             if existing is not None:
                 return existing
+            venv = self.engine_dir(engine) / "venv"
+            self._ensure_windows_msvc_runtime(engine, venv)
             argv = [str(self.python_path(engine)), str(WORKERS_DIR / ENGINE_SPECS[engine].worker)]
             if engine == "kokoro":
                 argv.append(str(self.engine_dir(engine)))
             env = {"HF_HUB_DISABLE_TELEMETRY": "1", "HF_HOME": str(self.root / "hf-cache")}
+            if os.name == "nt":
+                current_path = os.environ.get("PATH", "")
+                prefix_paths = f"{venv / 'Scripts'}{os.pathsep}{venv}"
+                env["PATH"] = f"{prefix_paths}{os.pathsep}{current_path}" if current_path else prefix_paths
             created = WorkerProcess(argv, log_path=self.engine_dir(engine) / "worker.log", env=env)
             self._workers[engine] = created
             return created

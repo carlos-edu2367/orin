@@ -13,41 +13,24 @@ from agentos.agentic.speak_stream import (
 
 
 class TestCanonicalUserExample:
-    """Requisito inegociável do usuário:
-    '<speak>Olá, meu nome é X, posso te auxiliar com várias coisas!</speak>'
-    DEVE produzir exatamente 3 ProsodicChunks:
-      0: 'Olá' (tts_text='Olá,', boundary_kind=COMMA, is_first_in_block=True)
-      1: 'meu nome é X' (tts_text='meu nome é X,', boundary_kind=COMMA)
-      2: 'posso te auxiliar com várias coisas' (tts_text='posso te auxiliar com várias coisas!', boundary_kind=EXCLAMATION, is_last_in_block=True)
+    """Cohesive PT-BR prosodic chunking:
+    Short greetings/openers like 'Olá,' or 'meu nome é X,' must NOT be chopped into
+    1-3 word micro-fragments that trigger Spanish/Italian accent drift in TTS models.
     """
 
     CANONICAL_INPUT = "<speak>Olá, meu nome é X, posso te auxiliar com várias coisas!</speak>"
 
     @staticmethod
     def _assert_canonical_chunks(chunks: list[ProsodicChunk]) -> None:
-        assert len(chunks) == 3, f"Expected 3 chunks, got {len(chunks)}: {chunks}"
+        assert len(chunks) == 1, f"Expected 1 cohesive chunk, got {len(chunks)}: {chunks}"
 
-        c0, c1, c2 = chunks
-        assert c0.clean_text == "Olá"
-        assert c0.tts_text == "Olá,"
-        assert c0.boundary_kind == BoundaryKind.COMMA
+        c0 = chunks[0]
+        assert c0.clean_text == "Olá, meu nome é X, posso te auxiliar com várias coisas"
+        assert c0.tts_text == "Olá, meu nome é X, posso te auxiliar com várias coisas!"
+        assert c0.boundary_kind == BoundaryKind.EXCLAMATION
         assert c0.is_first_in_block is True
-        assert c0.is_last_in_block is False
+        assert c0.is_last_in_block is True
         assert c0.chunk_index == 0
-
-        assert c1.clean_text == "meu nome é X"
-        assert c1.tts_text == "meu nome é X,"
-        assert c1.boundary_kind == BoundaryKind.COMMA
-        assert c1.is_first_in_block is False
-        assert c1.is_last_in_block is False
-        assert c1.chunk_index == 1
-
-        assert c2.clean_text == "posso te auxiliar com várias coisas"
-        assert c2.tts_text == "posso te auxiliar com várias coisas!"
-        assert c2.boundary_kind == BoundaryKind.EXCLAMATION
-        assert c2.is_first_in_block is False
-        assert c2.is_last_in_block is True
-        assert c2.chunk_index == 2
 
     def test_canonical_example_single_delta(self) -> None:
         parser = SpeakStreamParser()
@@ -120,9 +103,9 @@ class TestSpeakStreamParserAdversarial:
         visual += fin.visual_delta
 
         assert visual == "Oi, tudo bem com você?"
-        assert len(chunks) == 2
-        assert chunks[0].clean_text == "Oi"
-        assert chunks[1].clean_text == "tudo bem com você"
+        assert len(chunks) == 1
+        assert chunks[0].clean_text == "Oi, tudo bem com você"
+        assert chunks[0].tts_text == "Oi, tudo bem com você?"
 
     def test_mathematical_less_than_inside_speak(self) -> None:
         parser = SpeakStreamParser()
@@ -162,9 +145,9 @@ class TestSpeakStreamParserAdversarial:
         assert "[sigh]" in markers
         assert "[hmm]" not in visual
         assert "[sigh]" not in visual
-        assert len(chunks) == 2
-        assert chunks[0].clean_text == "Claro"
-        assert chunks[1].clean_text == "vamos resolver isso agora"
+        assert len(chunks) == 1
+        assert chunks[0].clean_text == "Claro, vamos resolver isso agora"
+        assert chunks[0].tts_text == "Claro, vamos resolver isso agora."
 
     def test_unclosed_speak_flushed_on_non_text_boundary_and_finish(self) -> None:
         parser = SpeakStreamParser()
@@ -200,24 +183,21 @@ class TestSpeakStreamParserAdversarial:
         chunks = r.chunks + fin.chunks
         assert r.speak_opened is True
         assert r.speak_closed is True
-        assert len(chunks) == 2
-        assert chunks[0].clean_text == "Olá"
-        assert chunks[1].clean_text == "[h"
+        assert len(chunks) == 1
+        assert chunks[0].clean_text == "Olá, [h"
 
     def test_multiple_speak_blocks_in_same_turn_separate_block_indices(self) -> None:
         parser = SpeakStreamParser()
         r1 = parser.feed("<speak>Vou rodar os testes agora.</speak>\nExecutando pytest...\n<speak>Pronto, tudo passou!</speak>")
         chunks = r1.chunks + parser.finish().chunks
-        assert len(chunks) == 3
+        assert len(chunks) == 2
         assert chunks[0].block_index == 0
         assert chunks[0].clean_text == "Vou rodar os testes agora"
         assert chunks[0].is_last_in_block is True
         assert chunks[1].block_index == 1
-        assert chunks[1].clean_text == "Pronto"
+        assert chunks[1].clean_text == "Pronto, tudo passou"
         assert chunks[1].is_first_in_block is True
-        assert chunks[2].block_index == 1
-        assert chunks[2].clean_text == "tudo passou"
-        assert chunks[2].is_last_in_block is True
+        assert chunks[1].is_last_in_block is True
 
 
 class TestPTBRProsodicGuardsAndNormalizer:
@@ -228,30 +208,26 @@ class TestPTBRProsodicGuardsAndNormalizer:
         fin = parser.finish()
         chunks = res.chunks + fin.chunks
 
-        assert len(chunks) == 3, f"Expected 3 chunks, got {chunks}"
-        assert chunks[0].clean_text == "Sr. Carlos"
+        assert len(chunks) == 2, f"Expected 2 chunks, got {chunks}"
+        assert chunks[0].clean_text == "Sr. Carlos, o lote custa R$ 1.250,50 às 14h30 na Av. Paulista"
         assert "senhor Carlos" in chunks[0].tts_text
+        assert "1250 reais e 50 centavos" in chunks[0].tts_text
+        assert "14 horas e 30 minutos" in chunks[0].tts_text
+        assert "avenida Paulista" in chunks[0].tts_text
 
-        assert chunks[1].clean_text == "o lote custa R$ 1.250,50 às 14h30 na Av. Paulista"
-        assert "1250 reais e 50 centavos" in chunks[1].tts_text
-        assert "14 horas e 30 minutos" in chunks[1].tts_text
-        assert "avenida Paulista" in chunks[1].tts_text
-
-        assert chunks[2].clean_text == "tudo certo"
-        assert chunks[2].tts_text == "tudo certo?"
-        assert chunks[2].boundary_kind == BoundaryKind.QUESTION
-        assert chunks[2].is_last_in_block is True
+        assert chunks[1].clean_text == "tudo certo"
+        assert chunks[1].tts_text == "tudo certo?"
+        assert chunks[1].boundary_kind == BoundaryKind.QUESTION
+        assert chunks[1].is_last_in_block is True
 
     def test_non_standalone_openers_agglutinate_first_chunk(self) -> None:
         parser = SpeakStreamParser()
         res = parser.feed("<speak>Mas, pensando bem, vamos fazer isso agora.</speak>")
         chunks = res.chunks + parser.finish().chunks
 
-        assert len(chunks) == 2
-        assert chunks[0].clean_text == "Mas, pensando bem"
-        assert chunks[0].tts_text == "Mas, pensando bem,"
-        assert chunks[1].clean_text == "vamos fazer isso agora"
-        assert chunks[1].tts_text == "vamos fazer isso agora."
+        assert len(chunks) == 1
+        assert chunks[0].clean_text == "Mas, pensando bem, vamos fazer isso agora"
+        assert chunks[0].tts_text == "Mas, pensando bem, vamos fazer isso agora."
 
     def test_forbidden_chunk_endings_never_leave_dangling_proclitics(self) -> None:
         chunker = PTBRProsodicChunker()
@@ -269,7 +245,7 @@ class TestPTBRProsodicGuardsAndNormalizer:
     def test_multiple_punctuation_ellipsis_and_interrobang_preserved(self) -> None:
         parser = SpeakStreamParser()
         chunks: list[ProsodicChunk] = []
-        for ch in "<speak>Espere um pouco... Sério isso?! Vamos lá!!</speak>":
+        for ch in "<speak>Espere só um pouquinho agora... Você está falando sério mesmo?! Vamos resolver isso juntos!!</speak>":
             chunks.extend(parser.feed(ch).chunks)
         chunks.extend(parser.finish().chunks)
 
@@ -293,15 +269,21 @@ class TestPTBRProsodicGuardsAndNormalizer:
         assert "avenida" in norm.normalize("Av. Brasil")
         assert "etcétera" in norm.normalize("livros, cadernos, etc.")
 
-        tech = norm.normalize("A API usa SQL, MCP, LLM, TTS, STT e JSON na GPU e CPU com RAM.")
-        assert "A P I" in tech
-        assert "S Q L" in tech
-        assert "M C P" in tech
-        assert "L L M" in tech
-        assert "T T S" in tech
-        assert "S T T" in tech
-        assert "G P U" in tech
-        assert "C P U" in tech
+        tech = norm.normalize("A API e as APIs usam URL, URLs, SQL, MCP, MCPs, LLM, LLMs, TTS, STT e JSON na GPU e CPU com RAM.")
+        assert "á pê i" in tech
+        assert "á pê is" in tech
+        assert "u érre éle" in tech
+        assert "u érre éles" in tech
+        assert "ésse quê éle" in tech
+        assert "ême cê pê" in tech
+        assert "ême cê pês" in tech
+        assert "éle éle ême" in tech
+        assert "éle éle êmes" in tech
+        assert "tê tê ésse" in tech
+        assert "ésse tê tê" in tech
+        assert "gê pê u" in tech
+        assert "cê pê u" in tech
+        assert "rã" in tech
 
 
 class TestStripNonSpeakableContent:
@@ -441,8 +423,14 @@ class TestLiveCallRegressionsAndRealTimeFallback:
         assert "arquivos do projeto com você" in full_spoken
 
     def test_chunker_gear1_does_not_split_single_non_greeting_word_comma_and_gear2_avoids_micro_comma_fragments(self) -> None:
-        assert PTBRProsodicChunker.GEAR_2_COMMA_MIN_CHARS == 36
-        assert PTBRProsodicChunker.GEAR_2_COMMA_MIN_WORDS == 6
+        assert PTBRProsodicChunker.GEAR_1_MIN_CHARS == 28
+        assert PTBRProsodicChunker.GEAR_1_MIN_WORDS == 5
+        assert PTBRProsodicChunker.COMMA_MIN_CHARS == 48
+        assert PTBRProsodicChunker.COMMA_MIN_WORDS == 8
+        assert PTBRProsodicChunker.STRONG_MIN_CHARS == 24
+        assert PTBRProsodicChunker.STRONG_MIN_WORDS == 4
+        assert PTBRProsodicChunker.GEAR_1_SOFT_MAX_CHARS == 110
+        assert PTBRProsodicChunker.GEAR_2_SOFT_MAX_CHARS == 160
 
         parser = SpeakStreamParser()
         res = parser.feed(
@@ -455,6 +443,19 @@ class TestLiveCallRegressionsAndRealTimeFallback:
         assert chunks[0].clean_text.startswith("Hoje, vamos analisar")
         for c in chunks:
             assert c.clean_text != "sem pressa"
+
+        # Short cognates ("Pronto, vou verificar.", "Claro! Estou aqui para ajudar.", "Em resumo: tudo está funcionando.")
+        # must NEVER be split into 1-2 word micro-fragments that trigger Spanish/Italian accent drift!
+        for sample, expected_clean in [
+            ("<speak>Pronto, vou verificar.</speak>", "Pronto, vou verificar"),
+            ("<speak>Claro! Estou aqui para ajudar.</speak>", "Claro! Estou aqui para ajudar"),
+            ("<speak>Em resumo: tudo está funcionando.</speak>", "Em resumo: tudo está funcionando"),
+            ("<speak>Pronto! Já resolvi o problema para você.</speak>", "Pronto! Já resolvi o problema para você"),
+        ]:
+            p = SpeakStreamParser()
+            ch_list = p.feed(sample).chunks + p.finish().chunks
+            assert len(ch_list) == 1, f"Expected 1 cohesive chunk for {sample!r}, got {ch_list}"
+            assert ch_list[0].clean_text == expected_clean
 
     def test_realtime_fallback_stops_at_fenced_code_and_partial_fallback_ignores_pure_code_blocks(self) -> None:
         parser = SpeakStreamParser(live_voice_enabled=True)

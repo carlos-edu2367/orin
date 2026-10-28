@@ -31,8 +31,11 @@ OPENAI_TTS_SAMPLE_RATE = 24000
 CLOUD_TIMEOUT_SECONDS = 60.0
 
 PTBR_DEFAULT_TTS_INSTRUCTIONS = (
-    "Fale estritamente em português do Brasil (pt-BR) nativo, natural, fluido e expressivo. "
-    "Nunca use sotaque de Portugal (pt-PT) nem pronúncia lusitana."
+    "Speak strictly in native Brazilian Portuguese (pt-BR, Brazilian accent). "
+    "NEVER use European Portuguese (pt-PT), Spanish (es), or Italian (it) pronunciation, "
+    "even on short phrases or cognates. "
+    "Fale estritamente em português do Brasil (pt-BR) nativo, natural e fluido, com pronúncia brasileira autêntica. "
+    "Nunca use sotaque de Portugal (pt-PT), espanhol nem italiano."
 )
 
 LOCAL_WHISPER_MODEL_ALIASES: dict[str, str] = {
@@ -89,8 +92,20 @@ def normalize_ptbr_instructions(
     if not lang_norm.startswith("pt"):
         return raw
 
-    if "Nunca use sotaque de Portugal" in raw:
+    raw_lower = raw.lower()
+    has_pt_guard = "nunca use sotaque de portugal" in raw_lower
+    has_es_it_guard = (
+        ("espanhol" in raw_lower or "spanish" in raw_lower)
+        and ("italiano" in raw_lower or "italian" in raw_lower)
+    )
+    if has_pt_guard and has_es_it_guard:
         combined = raw
+    elif has_pt_guard:
+        combined = (
+            f"{raw} Speak strictly in native Brazilian Portuguese (pt-BR). "
+            "Never use European Portuguese (pt-PT), Spanish (es), or Italian (it) pronunciation. "
+            "Nunca use sotaque de Portugal (pt-PT), espanhol ou italiano."
+        )
     elif raw:
         combined = f"{PTBR_DEFAULT_TTS_INSTRUCTIONS} {raw}"
     else:
@@ -395,6 +410,42 @@ def synthesize_openai_speech(
 # Models that read the `instructions` field (tone, pacing, Brazilian Portuguese enforcement).
 _INSTRUCTION_PREFIXES = ("openai/", "google/", "fish-audio/", "elevenlabs/", "minimax/", "cartesia/")
 
+_PREFERRED_PTBR_SPEECH_MODELS: tuple[str, ...] = (
+    "elevenlabs/eleven-multilingual-v2",
+    "elevenlabs/eleven-v3",
+    "elevenlabs/eleven-flash-v2.5",
+    "elevenlabs/eleven-turbo-v2.5",
+    "openai/gpt-4o-mini-tts",
+    "google/gemini-2.5-flash-preview-tts",
+)
+
+_ENGLISH_ONLY_SPEECH_MODELS: frozenset[str] = frozenset(
+    {
+        "elevenlabs/eleven-flash-v2",
+        "elevenlabs/eleven-turbo-v2",
+        "openai/tts-1",
+        "openai/tts-1-hd",
+    }
+)
+
+_PTBR_OPENROUTER_MODEL_UPGRADES: dict[str, str] = {
+    "openai/tts-1": "openai/gpt-4o-mini-tts",
+    "openai/tts-1-hd": "openai/gpt-4o-mini-tts",
+    "elevenlabs/eleven-flash-v2": "elevenlabs/eleven-flash-v2.5",
+    "elevenlabs/eleven-turbo-v2": "elevenlabs/eleven-turbo-v2.5",
+}
+
+
+def _speech_model_sort_key(m: dict[str, Any]) -> tuple[int, int, str, str]:
+    mid = str(m.get("id") or "")
+    if mid in _PREFERRED_PTBR_SPEECH_MODELS:
+        return (0, _PREFERRED_PTBR_SPEECH_MODELS.index(mid), m["vendor"], m["name"])
+    if mid in _ENGLISH_ONLY_SPEECH_MODELS:
+        return (3, 0, m["vendor"], m["name"])
+    if m.get("supports_instructions"):
+        return (1, 0, m["vendor"], m["name"])
+    return (2, 0, m["vendor"], m["name"])
+
 
 def _openrouter_headers(credential: CloudCredential) -> dict[str, str]:
     return {
@@ -446,7 +497,10 @@ class OpenRouterVoiceCatalog:
                     "free": model_id.endswith(":free"),
                 }
             )
-        models.sort(key=lambda m: (m["vendor"], m["name"]))
+        if modality == "speech":
+            models.sort(key=_speech_model_sort_key)
+        else:
+            models.sort(key=lambda m: (m["vendor"], m["name"]))
         with self._lock:
             self._cache[modality] = (time.monotonic(), models)
         return models
@@ -487,50 +541,62 @@ def synthesize_openrouter_speech(
     only produce PCM (Gemini, HeyGen) answer 400 and are retried as 16-bit PCM
     and remembered in `_OPENROUTER_PCM_ONLY_MODELS`.
     """
-    minimal_body: dict[str, Any] = {"model": model_id, "input": text}
+    lang_norm = (language or "pt-BR").strip().lower()
+    effective_model = (model_id or "").strip()
+    if lang_norm.startswith("pt") and effective_model in _PTBR_OPENROUTER_MODEL_UPGRADES:
+        effective_model = _PTBR_OPENROUTER_MODEL_UPGRADES[effective_model]
+
+    minimal_body: dict[str, Any] = {"model": effective_model, "input": text}
     if voice:
         minimal_body["voice"] = voice
-    if model_id.startswith("openai/") and abs(float(speed or 1.0) - 1.0) > 0.01:
+    if effective_model.startswith("openai/") and abs(float(speed or 1.0) - 1.0) > 0.01:
         minimal_body["speed"] = max(0.5, min(2.0, float(speed)))
 
-    body: dict[str, Any] = dict(minimal_body)
-    lang_norm = (language or "pt-BR").strip().lower()
-    if lang_norm.startswith("pt"):
-        body["language_code"] = "pt"
-    if previous_text and previous_text.strip():
-        body["previous_text"] = previous_text.strip()[:300]
     norm_instructions = normalize_ptbr_instructions(
         instructions,
         language=language,
         previous_text=previous_text,
     )
+    instructed_body: dict[str, Any] = dict(minimal_body)
     if norm_instructions:
-        body["instructions"] = norm_instructions[:500]
+        instructed_body["instructions"] = norm_instructions[:500]
 
-    preferred_fmt = "pcm" if model_id in _OPENROUTER_PCM_ONLY_MODELS else "mp3"
+    body: dict[str, Any] = dict(instructed_body)
+    if effective_model.startswith("elevenlabs/"):
+        if lang_norm.startswith("pt"):
+            body["language_code"] = "pt"
+        if previous_text and previous_text.strip():
+            body["previous_text"] = previous_text.strip()[:300]
+
+    preferred_fmt = "pcm" if effective_model in _OPENROUTER_PCM_ONLY_MODELS else "mp3"
     url = f"{credential.base_url.rstrip('/')}/audio/speech"
     headers = _openrouter_headers(credential)
 
-    def _run_requests(client: httpx.Client) -> httpx.Response:
-        resp = client.post(url, headers=headers, json={**body, "response_format": preferred_fmt})
-        if resp.status_code in (400, 422):
+    def _post_with_body_cascade(client: httpx.Client, fmt: str) -> httpx.Response:
+        resp = client.post(url, headers=headers, json={**body, "response_format": fmt})
+        if resp.status_code not in (400, 422):
+            return resp
+        err_lower = _cloud_error_message(resp).lower()
+        is_format_err = any(tok in err_lower for tok in ("pcm", "mp3", "response_format", "format"))
+        if fmt == "mp3" and is_format_err:
+            return resp
+        if body != instructed_body:
+            resp = client.post(url, headers=headers, json={**instructed_body, "response_format": fmt})
+            if resp.status_code not in (400, 422):
+                return resp
             err_lower = _cloud_error_message(resp).lower()
-            is_format_err = any(tok in err_lower for tok in ("pcm", "mp3", "response_format", "format"))
-            if preferred_fmt == "mp3" and is_format_err:
-                resp = client.post(url, headers=headers, json={**body, "response_format": "pcm"})
-                if resp.status_code < 400:
-                    _OPENROUTER_PCM_ONLY_MODELS.add(model_id)
-                elif body != minimal_body:
-                    resp = client.post(url, headers=headers, json={**minimal_body, "response_format": "pcm"})
-                    if resp.status_code < 400:
-                        _OPENROUTER_PCM_ONLY_MODELS.add(model_id)
-            else:
-                if body != minimal_body:
-                    resp = client.post(url, headers=headers, json={**minimal_body, "response_format": preferred_fmt})
-                if resp.status_code in (400, 422) and preferred_fmt == "mp3":
-                    resp = client.post(url, headers=headers, json={**minimal_body, "response_format": "pcm"})
-                    if resp.status_code < 400:
-                        _OPENROUTER_PCM_ONLY_MODELS.add(model_id)
+            if fmt == "mp3" and any(tok in err_lower for tok in ("pcm", "mp3", "response_format", "format")):
+                return resp
+        if instructed_body != minimal_body:
+            resp = client.post(url, headers=headers, json={**minimal_body, "response_format": fmt})
+        return resp
+
+    def _run_requests(client: httpx.Client) -> httpx.Response:
+        resp = _post_with_body_cascade(client, preferred_fmt)
+        if resp.status_code in (400, 422) and preferred_fmt == "mp3":
+            resp = _post_with_body_cascade(client, "pcm")
+            if resp.status_code < 400:
+                _OPENROUTER_PCM_ONLY_MODELS.add(effective_model)
         return resp
 
     try:

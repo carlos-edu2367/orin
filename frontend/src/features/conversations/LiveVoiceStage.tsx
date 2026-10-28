@@ -153,7 +153,7 @@ export function LiveVoiceStage({
     assistantBusy,
     pushToTalk,
     onUtterance: (text) => utteranceRef.current?.(text),
-    voiceInstructions: `Você é ${companionName}. Fale SEMPRE em português do Brasil (pt-BR) nativo, de forma natural, calorosa, concisa e conversacional. Nunca use sotaque de Portugal (pt-PT).`,
+    voiceInstructions: `Você é ${companionName}. Fale SEMPRE estritamente em português do Brasil (pt-BR) nativo, de forma natural, calorosa, concisa e conversacional. Nunca use sotaque de Portugal (pt-PT), espanhol (es) ou italiano (it).`,
   })
   const phase = phaseOverride ?? voice.phase
   const { setMuted, muted, interrupt, setPushToTalkHeld } = voice
@@ -170,7 +170,13 @@ export function LiveVoiceStage({
     outputLevelRef.current = outputLevel
   })
   const orbLevel = useCallback(
-    () => (phaseRef.current === 'speaking' ? outputLevelRef.current() : micLevelRef.current() * 0.9),
+    () =>
+      phaseRef.current === 'speaking' ||
+      phaseRef.current === 'thinking' ||
+      phaseRef.current === 'working' ||
+      phaseRef.current === 'transcribing'
+        ? Math.max(outputLevelRef.current(), micLevelRef.current() * 0.4)
+        : micLevelRef.current() * 0.9,
     [],
   )
   const meterLevel = useCallback(() => micLevelRef.current(), [])

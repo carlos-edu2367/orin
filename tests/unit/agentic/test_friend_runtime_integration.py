@@ -229,16 +229,12 @@ def test_runtime_emits_speak_chunks_before_tool_execution_and_strips_tags_from_s
         payload for kind, payload in events_before_tool if kind == f"event:{AgentActivityEventType.SPEAK_CHUNK_READY.value}"
     ]
     assert any(kind == f"event:{AgentActivityEventType.SPEAK_BLOCK_STARTED.value}" for kind, _ in events_before_tool)
-    assert len(chunk_events_before_tool) == 3
+    assert len(chunk_events_before_tool) == 1
     assert [c["raw_text"] for c in chunk_events_before_tool] == [
-        "Olá,",
-        "meu nome é Orin,",
-        "vou checar sua agenda!",
+        "Olá, meu nome é Orin, vou checar sua agenda!",
     ]
     assert [c["clean_text"] for c in chunk_events_before_tool] == [
-        "Olá",
-        "meu nome é Orin",
-        "vou checar sua agenda",
+        "Olá, meu nome é Orin, vou checar sua agenda",
     ]
     assert any(kind == f"event:{AgentActivityEventType.SPEAK_FINISHED.value}" for kind, _ in events_before_tool)
 

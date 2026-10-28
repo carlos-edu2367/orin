@@ -297,7 +297,7 @@ function VoiceSettingsPanel({ client: providedClient, companionName = 'Orin', on
     setSampleState(`Gerando a voz (${engineLabel})…`)
     const socket = connectLiveVoiceSession('voice-preview', (event) => {
       if (event.type === 'session.ready') {
-        socket?.sendSpeakText(SAMPLE_TEXT, `Você é ${companionName}. Fale em português do Brasil, com calor e naturalidade.`)
+        socket?.sendSpeakText(SAMPLE_TEXT, `Você é ${companionName}. Fale SEMPRE estritamente em português do Brasil (pt-BR) nativo, com calor e naturalidade. Nunca use sotaque de Portugal (pt-PT), espanhol (es) ou italiano (it).`)
       } else if (event.type === 'tts.chunk') {
         setSampleState(`Tocando ${engineLabel}…`)
         if (event.encoding && event.encoding !== 'pcm16' && event.audio_base64) output.playEncoded(event.clean_text, event.audio_base64, event.chunk_seq)
@@ -308,7 +308,7 @@ function VoiceSettingsPanel({ client: providedClient, companionName = 'Orin', on
         socket?.close()
       }
     }, { csrfToken: client.socketCsrfToken() })
-    socket?.sendConfig({ tts_provider: effectiveTts, tts_model: selection.modelId, voice_id: selection.voice, speed: prefs.rate, language: 'pt' })
+    socket?.sendConfig({ tts_provider: effectiveTts, tts_model: selection.modelId, voice_id: selection.voice, speed: prefs.rate, language: 'pt-BR' })
   }
 
   const sttChoices: Array<{ value: SttChoice; title: string; description: string; disabled: boolean; badge: Badge; extra?: ReactNode }> = [

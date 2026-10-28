@@ -193,14 +193,30 @@ def test_voice_config_defaults_to_pt_br_and_normalizes_instructions() -> None:
     cfg = VoiceConfig()
     assert cfg.language == "pt-BR"
 
+    assert "Speak strictly in native Brazilian Portuguese (pt-BR, Brazilian accent)" in engines.PTBR_DEFAULT_TTS_INSTRUCTIONS
+    assert "NEVER use European Portuguese (pt-PT), Spanish (es), or Italian (it) pronunciation" in engines.PTBR_DEFAULT_TTS_INSTRUCTIONS
+    assert "Nunca use sotaque de Portugal (pt-PT), espanhol nem italiano" in engines.PTBR_DEFAULT_TTS_INSTRUCTIONS
+
     instr = engines.normalize_ptbr_instructions("voz suave", language="pt-BR")
     assert "português do Brasil (pt-BR)" in instr
     assert "Nunca use sotaque de Portugal (pt-PT)" in instr
+    assert "Spanish (es)" in instr
+    assert "Italian (it)" in instr
+    assert "espanhol" in instr.lower()
+    assert "italiano" in instr.lower()
     assert "voz suave" in instr
 
     # Idempotent when called twice
     instr_twice = engines.normalize_ptbr_instructions(instr, language="pt-BR")
     assert instr_twice.count("Nunca use sotaque de Portugal") == 1
+
+    # Partial guard missing Spanish/Italian prohibition gets upgraded
+    partial = engines.normalize_ptbr_instructions(
+        "Fale em português do Brasil (pt-BR). Nunca use sotaque de Portugal.",
+        language="pt-BR",
+    )
+    assert "Spanish (es)" in partial and "Italian (it)" in partial
+    assert "espanhol" in partial.lower() and "italiano" in partial.lower()
 
     # Non-Portuguese language is untouched
     assert engines.normalize_ptbr_instructions("speak warmly", language="en-US") == "speak warmly"

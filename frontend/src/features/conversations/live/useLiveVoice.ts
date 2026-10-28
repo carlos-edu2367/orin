@@ -55,6 +55,7 @@ export type LiveVoiceController = {
   /** 0..1, read every animation frame by the orb and the meter. */
   micLevel: () => number
   outputLevel: () => number
+  thinkingAudio: () => boolean
   dismissIssue: () => void
 }
 
@@ -102,6 +103,7 @@ export function useLiveVoice(options: UseLiveVoiceOptions): LiveVoiceController 
   const manualInterruptRef = useRef(false)
   const vadCandidateSuppressRef = useRef(false)
   const pendingTtsCountRef = useRef(0)
+  const hasSpokenInTurnRef = useRef(false)
   const [unsuppressSeq, setUnsuppressSeq] = useState(0)
   const eouTimerRef = useRef<number | null>(null)
   const interruptTimerRef = useRef<number | null>(null)
@@ -171,6 +173,7 @@ export function useLiveVoice(options: UseLiveVoiceOptions): LiveVoiceController 
     }
     setUserText(text)
     setAwaitingReply(true)
+    hasSpokenInTurnRef.current = false
     manualInterruptRef.current = false
     vadCandidateSuppressRef.current = false
     latest.current.options.onUtterance(text)
@@ -178,6 +181,7 @@ export function useLiveVoice(options: UseLiveVoiceOptions): LiveVoiceController 
 
   const stopSpeechPlayback = useCallback((isManual: boolean) => {
     const speech = speechRef.current
+    speech?.stopThinking()
     if (!speech?.speaking && pendingTtsCountRef.current === 0 && !isManual) return
     const position = speech?.playbackPosition() ?? null
     speech?.stop()
@@ -215,6 +219,8 @@ export function useLiveVoice(options: UseLiveVoiceOptions): LiveVoiceController 
     const serverStt = engine !== null && engine !== 'browser'
     if (event.type === 'speech_start') {
       clearEouTimer()
+      speechRef.current?.stopThinking()
+      hasSpokenInTurnRef.current = false
       if (speechRef.current?.speaking) {
         if (!latest.current.prefs.bargeIn) return
         stopSpeechPlayback(false)
@@ -339,6 +345,7 @@ export function useLiveVoice(options: UseLiveVoiceOptions): LiveVoiceController 
     manualInterruptRef.current = false
     vadCandidateSuppressRef.current = false
     pendingTtsCountRef.current = 0
+    hasSpokenInTurnRef.current = false
 
     const socket = connectLiveVoiceSession(conversationId, (event) => handleServerEvent(event), {
       csrfToken: client.socketCsrfToken(),
@@ -359,6 +366,8 @@ export function useLiveVoice(options: UseLiveVoiceOptions): LiveVoiceController 
 
     const speech = new SpeechOutput({
       onStart: (text) => {
+        hasSpokenInTurnRef.current = true
+        speechRef.current?.stopThinking()
         setSpeaking(true)
         setAwaitingReply(false)
         setAssistantText(text)
@@ -498,6 +507,7 @@ export function useLiveVoice(options: UseLiveVoiceOptions): LiveVoiceController 
       seededFromEmptyRef.current = false
       manualInterruptRef.current = false
       vadCandidateSuppressRef.current = false
+      hasSpokenInTurnRef.current = false
     } else if (assistantBusy) {
       hasUserSpokenOrBusyRef.current = true
       seededFromEmptyRef.current = false
@@ -574,10 +584,47 @@ export function useLiveVoice(options: UseLiveVoiceOptions): LiveVoiceController 
       seededFromEmptyRef.current = false
       manualInterruptRef.current = false
       vadCandidateSuppressRef.current = false
+      hasSpokenInTurnRef.current = false
     }
-    if (wasBusyRef.current && !assistantBusy) setAwaitingReply(false)
+    if (wasBusyRef.current && !assistantBusy) {
+      setAwaitingReply(false)
+      hasSpokenInTurnRef.current = false
+    }
     wasBusyRef.current = assistantBusy
   }, [assistantBusy])
+
+  const effectiveAwaitingReply = awaitingReply && !(wasBusyRef.current && !assistantBusy)
+  const shouldPlayThinkingCue =
+    active &&
+    !muted &&
+    !speaking &&
+    !speechRef.current?.speaking &&
+    !userSpeaking &&
+    !interrupted &&
+    !manualInterruptRef.current &&
+    (transcribing || effectiveAwaitingReply || assistantBusy)
+
+  useEffect(() => {
+    if (!shouldPlayThinkingCue) {
+      speechRef.current?.stopThinking()
+      return
+    }
+    if (!hasSpokenInTurnRef.current) {
+      speechRef.current?.startThinking()
+      return
+    }
+    if (pendingTtsCountRef.current > 0) {
+      speechRef.current?.stopThinking()
+      return
+    }
+    const timer = window.setTimeout(() => {
+      if (pendingTtsCountRef.current === 0 && !speechRef.current?.speaking) {
+        speechRef.current?.startThinking()
+      }
+    }, 1000)
+    return () => window.clearTimeout(timer)
+  }, [shouldPlayThinkingCue, assistantSpeech, unsuppressSeq])
+
   // A transcription that never answers (server restarted, socket dropped) must not freeze the stage.
   useEffect(() => {
     if (!transcribing) return
@@ -597,6 +644,7 @@ export function useLiveVoice(options: UseLiveVoiceOptions): LiveVoiceController 
     mutedRef.current = next
     setMutedState(next)
     if (next) {
+      speechRef.current?.stopThinking()
       vadRef.current?.reset()
       socketRef.current?.sendAudioReset()
       setUserSpeaking(false)
@@ -639,6 +687,7 @@ export function useLiveVoice(options: UseLiveVoiceOptions): LiveVoiceController 
     setPushToTalkHeld,
     micLevel: () => (mutedRef.current ? 0 : micRef.current?.level ?? 0),
     outputLevel: () => speechRef.current?.level ?? 0,
+    thinkingAudio: () => Boolean(speechRef.current?.thinking),
     dismissIssue: () => setIssue(null),
   }
 }

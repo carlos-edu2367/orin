@@ -55,9 +55,14 @@ OPENROUTER_DEFAULT_STT_MODEL = "openai/whisper-large-v3-turbo"
 MAX_PCM_INPUT_BUFFER_BYTES = 16000 * 2 * 60
 
 
-def split_realtime_tts_clauses(text: str, *, max_chars: int = 120) -> list[str]:
-    """Split text into sentence/clause chunks (`<= max_chars`) so the first audio chunk
-    can be synthesized and streamed immediately while subsequent clauses pipeline in parallel.
+def split_realtime_tts_clauses(
+    text: str,
+    *,
+    max_chars: int = 120,
+    min_chunk_chars: int = 38,
+) -> list[str]:
+    """Split text into sentence/clause chunks (`<= max_chars`) while merging short
+    micro-fragments (`< min_chunk_chars`) so short openings/cognates are never isolated.
     """
     cleaned = re.sub(r"\s+", " ", (text or "").strip())
     if not cleaned:
@@ -73,7 +78,7 @@ def split_realtime_tts_clauses(text: str, *, max_chars: int = 120) -> list[str]:
         for part in parts:
             if not current:
                 current = part
-            elif len(current) + 1 + len(part) <= max_chars:
+            elif len(current) + 1 + len(part) <= max_chars or len(current) < min_chunk_chars:
                 current = f"{current} {part}"
             else:
                 clauses.append(current)
@@ -106,6 +111,29 @@ def split_realtime_tts_clauses(text: str, *, max_chars: int = 120) -> list[str]:
                 buf = w
         if buf:
             final_clauses.append(buf)
+
+    if min_chunk_chars > 0 and len(final_clauses) > 1:
+        merged: list[str] = []
+        i = 0
+        while i < len(final_clauses):
+            curr = final_clauses[i]
+            while (
+                len(curr) < min_chunk_chars
+                and i + 1 < len(final_clauses)
+                and len(curr) + 1 + len(final_clauses[i + 1]) <= max_chars
+            ):
+                i += 1
+                curr = f"{curr} {final_clauses[i]}"
+            if (
+                len(curr) < min_chunk_chars
+                and merged
+                and len(merged[-1]) + 1 + len(curr) <= max_chars
+            ):
+                merged[-1] = f"{merged[-1]} {curr}"
+            else:
+                merged.append(curr)
+            i += 1
+        final_clauses = merged
     return final_clauses
 
 
@@ -548,6 +576,91 @@ class LiveVoiceSession:
 REAL_TTS_PROVIDERS = frozenset({"openai", "openrouter", "kokoro", "chatterbox"})
 LOCAL_TTS_PROVIDERS = frozenset({"kokoro", "chatterbox"})
 
+_OPENROUTER_PREFERRED_TTS_MODELS: tuple[str, ...] = (
+    "elevenlabs/eleven-multilingual-v2",
+    "elevenlabs/eleven-v3",
+    "elevenlabs/eleven-flash-v2.5",
+    "elevenlabs/eleven-turbo-v2.5",
+    "openai/gpt-4o-mini-tts",
+    "google/gemini-2.5-flash-preview-tts",
+)
+_OPENROUTER_ENGLISH_ONLY_TTS_MODELS: frozenset[str] = frozenset(
+    {
+        "elevenlabs/eleven-flash-v2",
+        "elevenlabs/eleven-turbo-v2",
+        "openai/tts-1",
+        "openai/tts-1-hd",
+    }
+)
+_OPENROUTER_PTBR_MODEL_UPGRADES: dict[str, str] = {
+    "openai/tts-1": "openai/gpt-4o-mini-tts",
+    "openai/tts-1-hd": "openai/gpt-4o-mini-tts",
+    "elevenlabs/eleven-flash-v2": "elevenlabs/eleven-flash-v2.5",
+    "elevenlabs/eleven-turbo-v2": "elevenlabs/eleven-turbo-v2.5",
+}
+
+
+def _select_default_openrouter_tts_model(speech_models: list[dict[str, Any]]) -> str | None:
+    if not speech_models:
+        return None
+    available_ids = {str(m.get("id") or "") for m in speech_models}
+    for preferred in _OPENROUTER_PREFERRED_TTS_MODELS:
+        if preferred in available_ids:
+            return preferred
+    for m in speech_models:
+        mid = str(m.get("id") or "")
+        if mid and mid not in _OPENROUTER_ENGLISH_ONLY_TTS_MODELS:
+            return mid
+    return str(speech_models[0].get("id") or "") or None
+
+
+def _select_preferred_ptbr_voice(voices: list[str], requested_voice: str) -> str | None:
+    req = (requested_voice or "").strip()
+    if not voices:
+        return req or None
+    if req in voices:
+        return req
+    for v in voices:
+        vl = v.lower()
+        if "pt-br" in vl or "pt_br" in vl:
+            return v
+    for preferred_exact in ("pf_dora", "pm_alex"):
+        for v in voices:
+            if v.lower() == preferred_exact:
+                return v
+    for v in voices:
+        vl = v.lower()
+        if vl.startswith(("pf_", "pm_")):
+            return v
+    for preferred_eleven in ("sarah", "aria", "brian"):
+        for v in voices:
+            if v.lower() == preferred_eleven:
+                return v
+    return voices[0]
+
+
+def _resolve_openrouter_model_and_voice(
+    session: LiveVoiceSession,
+    catalog: OpenRouterVoiceCatalog,
+) -> tuple[str, str | None]:
+    model_id = (session.voice_config.tts_model or "").strip()
+    lang_norm = (session.voice_config.language or "pt-BR").strip().lower()
+    if lang_norm.startswith("pt") and model_id in _OPENROUTER_PTBR_MODEL_UPGRADES:
+        model_id = _OPENROUTER_PTBR_MODEL_UPGRADES[model_id]
+    if "/" not in model_id:
+        model_id = (
+            _select_default_openrouter_tts_model(catalog.speech_models())
+            or "elevenlabs/eleven-multilingual-v2"
+        )
+    model = catalog.model(model_id)
+    if model is None and model_id in _OPENROUTER_PTBR_MODEL_UPGRADES.values():
+        fallback_default = _select_default_openrouter_tts_model(catalog.speech_models())
+        if fallback_default:
+            model = catalog.model(fallback_default)
+    voices = model["voices"] if model else []
+    voice = _select_preferred_ptbr_voice(voices, session.voice_config.voice_id)
+    return model_id, voice
+
 
 def _voice_capabilities(
     governor: VoiceHardwareGovernor,
@@ -608,7 +721,7 @@ def _voice_capabilities(
         },
         "openrouter": {
             "available": openrouter_ready and bool(speech_models),
-            "model_id": next((m["id"] for m in speech_models if m["id"].startswith("elevenlabs/")), speech_models[0]["id"] if speech_models else None),
+            "model_id": _select_default_openrouter_tts_model(speech_models),
             "models": speech_models,
             "reason": (
                 "ElevenLabs, Gemini, Voxtral e outras vozes com a sua chave OpenRouter."
@@ -861,15 +974,12 @@ def register_live_voice_routes(
                 hint="Configurações → Provedores",
             )
         if provider == "openrouter":
-            model_id = session.voice_config.tts_model
-            model = catalog.model(model_id) if "/" in model_id else None
-            voices = model["voices"] if model else []
-            voice = session.voice_config.voice_id if not voices or session.voice_config.voice_id in voices else voices[0]
+            model_id, voice = _resolve_openrouter_model_and_voice(session, catalog)
             audio, encoding, rate = synthesize_openrouter_speech(
                 credential,
                 text,
                 model_id=model_id,
-                voice=voice or None,
+                voice=voice,
                 speed=session.voice_config.speed,
                 language=session.voice_config.language,
                 instructions=instructions,
@@ -925,8 +1035,10 @@ def register_live_voice_routes(
         )
 
         ws_send_lock = asyncio.Lock()
+        speak_pipeline_lock = asyncio.Lock()
         pending_tts_tasks: set[asyncio.Task[Any]] = set()
         tts_pipeline_sem = asyncio.Semaphore(2)
+        last_scheduled_text: list[str] = []
 
         async def _ws_send(payload: dict[str, Any]) -> None:
             async with ws_send_lock:
@@ -937,9 +1049,10 @@ def register_live_voice_routes(
                 if not t.done():
                     t.cancel()
             pending_tts_tasks.clear()
+            last_scheduled_text.clear()
 
         async def _run_speak_pipeline(
-            clauses: list[str],
+            clause_pairs: list[tuple[str, str | None]],
             target_epoch: int,
             provider: str,
             instructions_arg: str | None,
@@ -957,41 +1070,42 @@ def register_live_voice_routes(
                         prev_text,
                     )
 
-            prev_tail = session.recent_tts_texts[-1] if session.recent_tts_texts else None
-            clause_tasks: list[tuple[str, asyncio.Task[tuple[bytes, int, str]]]] = []
-            for idx, clause in enumerate(clauses):
-                prev = clauses[idx - 1] if idx > 0 else prev_tail
-                t = asyncio.create_task(_synth_clause(clause, prev))
-                clause_tasks.append((clause, t))
+            async with speak_pipeline_lock:
+                if session.audio_epoch != target_epoch:
+                    return
+                clause_tasks: list[tuple[str, asyncio.Task[tuple[bytes, int, str]]]] = []
+                for clause, prev in clause_pairs:
+                    t = asyncio.create_task(_synth_clause(clause, prev))
+                    clause_tasks.append((clause, t))
 
-            try:
-                for clause_text, c_task in clause_tasks:
-                    if session.audio_epoch != target_epoch:
-                        break
-                    try:
-                        audio, rate, encoding = await c_task
-                    except asyncio.CancelledError:
-                        break
-                    except VoiceEngineError as exc:
-                        async with ws_send_lock:
-                            if session.audio_epoch == target_epoch:
-                                await websocket.send_json({**exc.to_event("tts.error"), "text": clause_text})
-                        break
-                    async with ws_send_lock:
+                try:
+                    for clause_text, c_task in clause_tasks:
                         if session.audio_epoch != target_epoch:
                             break
-                        ev = session.register_audio_chunk(
-                            clause_text,
-                            audio,
-                            rate,
-                            provider=provider,
-                            encoding=encoding,
-                        )
-                        await websocket.send_json(ev)
-            finally:
-                for _c, c_task in clause_tasks:
-                    if not c_task.done():
-                        c_task.cancel()
+                        try:
+                            audio, rate, encoding = await c_task
+                        except asyncio.CancelledError:
+                            break
+                        except VoiceEngineError as exc:
+                            async with ws_send_lock:
+                                if session.audio_epoch == target_epoch:
+                                    await websocket.send_json({**exc.to_event("tts.error"), "text": clause_text})
+                            break
+                        async with ws_send_lock:
+                            if session.audio_epoch != target_epoch:
+                                break
+                            ev = session.register_audio_chunk(
+                                clause_text,
+                                audio,
+                                rate,
+                                provider=provider,
+                                encoding=encoding,
+                            )
+                            await websocket.send_json(ev)
+                finally:
+                    for _c, c_task in clause_tasks:
+                        if not c_task.done():
+                            c_task.cancel()
 
         await _ws_send(
             {
@@ -1071,13 +1185,31 @@ def register_live_voice_routes(
                     # Cloud voices need the person's key, so they run only on an authenticated socket.
                     if provider in LOCAL_TTS_PROVIDERS or (provider in REAL_TTS_PROVIDERS and principal_for is not None):
                         clean = re.sub(r"</?speak>", "", raw_text, flags=re.IGNORECASE).strip()[:2000]
-                        clauses = split_realtime_tts_clauses(clean, max_chars=120)
+                        clause_max = 120 if provider in LOCAL_TTS_PROVIDERS else 280
+                        clause_min = 38 if provider in LOCAL_TTS_PROVIDERS else 80
+                        clauses = split_realtime_tts_clauses(
+                            clean,
+                            max_chars=clause_max,
+                            min_chunk_chars=clause_min,
+                        )
                         if not clauses:
                             continue
+                        prev_tail = (
+                            last_scheduled_text[-1]
+                            if last_scheduled_text
+                            else (session.recent_tts_texts[-1] if session.recent_tts_texts else None)
+                        )
+                        clause_pairs: list[tuple[str, str | None]] = []
+                        for clause in clauses:
+                            clause_pairs.append((clause, prev_tail))
+                            last_scheduled_text.append(clause)
+                            prev_tail = clause
+                        if len(last_scheduled_text) > 16:
+                            del last_scheduled_text[:-16]
                         instructions_arg = str(msg.get("instructions") or "") or None
                         pipeline_task = asyncio.create_task(
                             _run_speak_pipeline(
-                                clauses,
+                                clause_pairs,
                                 session.audio_epoch,
                                 provider,
                                 instructions_arg,

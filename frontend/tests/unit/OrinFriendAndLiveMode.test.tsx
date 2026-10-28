@@ -1789,3 +1789,680 @@ describe('8. Hardening Cross-Stack Audit 3B (Deduplicação, Histórico/Resync, 
     expect(setDuckingSpy).toHaveBeenCalledWith(false);
   });
 });
+
+describe('9. Thinking Audio Cue (Web Audio), Ciclo de Vida useLiveVoice e Seleção pt-BR (2G)', () => {
+  it('9.1 SpeechOutput sintetiza motif contemplativo (E4->A4 / D4->G4) fora do analyser, pulsa level e corta imediatamente ao falar ou parar', () => {
+    vi.useFakeTimers();
+    try {
+      const createdOscillators: Array<{
+        type: string;
+        frequency: { value: number; setValueAtTime: ReturnType<typeof vi.fn> };
+        connect: ReturnType<typeof vi.fn>;
+        disconnect: ReturnType<typeof vi.fn>;
+        start: ReturnType<typeof vi.fn>;
+        stop: ReturnType<typeof vi.fn>;
+        onended: (() => void) | null;
+      }> = [];
+      const createdGains: Array<{
+        gain: {
+          value: number;
+          setValueAtTime: ReturnType<typeof vi.fn>;
+          linearRampToValueAtTime: ReturnType<typeof vi.fn>;
+          exponentialRampToValueAtTime: ReturnType<typeof vi.fn>;
+          cancelScheduledValues: ReturnType<typeof vi.fn>;
+        };
+        connect: ReturnType<typeof vi.fn>;
+        disconnect: ReturnType<typeof vi.fn>;
+      }> = [];
+      const createdFilters: Array<{
+        type: string;
+        frequency: { value: number; setValueAtTime: ReturnType<typeof vi.fn> };
+        connect: ReturnType<typeof vi.fn>;
+      }> = [];
+      const destinationNode = { kind: 'destination' };
+      const analyserNode = {
+        fftSize: 512,
+        connect: vi.fn(),
+        getByteTimeDomainData: vi.fn(),
+      };
+
+      class FakeSynthAudioContext {
+        currentTime = 10;
+        destination = destinationNode;
+        createAnalyser = vi.fn(() => analyserNode);
+        createOscillator = vi.fn(() => {
+          const osc = {
+            type: 'sine',
+            frequency: { value: 0, setValueAtTime: vi.fn() },
+            connect: vi.fn(),
+            disconnect: vi.fn(),
+            start: vi.fn(),
+            stop: vi.fn(),
+            onended: null as (() => void) | null,
+          };
+          createdOscillators.push(osc);
+          return osc;
+        });
+        createGain = vi.fn(() => {
+          const g = {
+            gain: {
+              value: 1,
+              setValueAtTime: vi.fn(),
+              linearRampToValueAtTime: vi.fn(),
+              exponentialRampToValueAtTime: vi.fn(),
+              cancelScheduledValues: vi.fn(),
+            },
+            connect: vi.fn(),
+            disconnect: vi.fn(),
+          };
+          createdGains.push(g);
+          return g;
+        });
+        createBiquadFilter = vi.fn(() => {
+          const f = {
+            type: 'lowpass',
+            frequency: { value: 0, setValueAtTime: vi.fn() },
+            connect: vi.fn(),
+          };
+          createdFilters.push(f);
+          return f;
+        });
+        resume = vi.fn().mockResolvedValue(undefined);
+        close = vi.fn().mockResolvedValue(undefined);
+      }
+
+      Object.defineProperty(window, 'AudioContext', {
+        value: FakeSynthAudioContext,
+        configurable: true,
+        writable: true,
+      });
+
+      const speech = new SpeechOutput();
+      expect(speech.thinking).toBe(false);
+      expect(speech.thinkingPulseCount).toBe(0);
+
+      speech.startThinking();
+      expect(speech.thinking).toBe(true);
+      // Chamada duplicada enquanto já está pensando é ignorada
+      speech.startThinking();
+      expect(speech.thinkingPulseCount).toBe(0);
+
+      // Primeiro motif após 180ms (passo par: E4 = 329.63 Hz em t+0.00s, A4 = 440.00 Hz em t+0.18s)
+      vi.advanceTimersByTime(180);
+      expect(speech.thinkingPulseCount).toBe(1);
+      expect(speech.level).toBeCloseTo(0.12);
+      expect(createdOscillators).toHaveLength(2);
+      expect(createdOscillators[0].frequency.setValueAtTime).toHaveBeenCalledWith(329.63, 10);
+      expect(createdOscillators[1].frequency.setValueAtTime).toHaveBeenCalledWith(440, 10.18);
+      expect(createdFilters[0]?.type).toBe('lowpass');
+      expect(createdFilters[0]?.frequency.value).toBe(880);
+      // Master thinkingGain conecta no destination, NUNCA no analyser!
+      expect(createdGains[0]?.connect).toHaveBeenCalledWith(destinationNode);
+      for (const g of createdGains) {
+        expect(g.connect).not.toHaveBeenCalledWith(analyserNode);
+      }
+
+      // Após 260ms o pulso visual cai suavemente para 0.02
+      vi.advanceTimersByTime(260);
+      expect(speech.level).toBeCloseTo(0.02);
+
+      // Segundo motif após 1350ms do primeiro (passo ímpar: D4 = 293.66 Hz, G4 = 392.00 Hz)
+      vi.advanceTimersByTime(1350 - 260);
+      expect(speech.thinkingPulseCount).toBe(2);
+      expect(createdOscillators).toHaveLength(4);
+      expect(createdOscillators[2].frequency.setValueAtTime).toHaveBeenCalledWith(293.66, 10);
+      expect(createdOscillators[3].frequency.setValueAtTime).toHaveBeenCalledWith(392, 10.18);
+
+      // Corta imediatamente quando speakSystem / playPcm / playEncoded / stop / dispose é chamado
+      speech.stopThinking();
+      expect(speech.thinking).toBe(false);
+      expect(speech.level).toBe(0);
+
+      const countAfterStop = speech.thinkingPulseCount;
+      vi.advanceTimersByTime(3000);
+      expect(speech.thinkingPulseCount).toBe(countAfterStop);
+
+      // Verifica corte imediato na primeira linha de playPcm / playEncoded / speakSystem / stop / dispose
+      speech.startThinking();
+      expect(speech.thinking).toBe(true);
+      speech.playPcm('Teste', '', 24000, 1);
+      expect(speech.thinking).toBe(false);
+
+      speech.startThinking();
+      expect(speech.thinking).toBe(true);
+      speech.playEncoded('Teste', '', 1);
+      expect(speech.thinking).toBe(false);
+
+      speech.startThinking();
+      expect(speech.thinking).toBe(true);
+      speech.speakSystem('```ts\nconst vazio = 1;\n```');
+      expect(speech.thinking).toBe(false);
+
+      speech.startThinking();
+      expect(speech.thinking).toBe(true);
+      speech.dispose();
+      expect(speech.thinking).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('9.2 useLiveVoice controla o ciclo de vida do som de pensamento (imediato antes da 1ª fala, sem tocar entre chunks, 1000ms em tool longa, sem ativar setDucking)', async () => {
+    let serverEventHandler: ((event: LiveVoiceServerEvent) => void) | null = null;
+    const sendSpeakTextMock = vi.fn().mockReturnValue(true);
+    const setDuckingSpy = vi.spyOn(EnergyVad.prototype, 'setDucking');
+    const startThinkingSpy = vi.spyOn(SpeechOutput.prototype, 'startThinking');
+    const stopThinkingSpy = vi.spyOn(SpeechOutput.prototype, 'stopThinking');
+
+    vi.spyOn(ConversationsApi, 'connectLiveVoiceSession').mockImplementation((_convId, onEvent) => {
+      serverEventHandler = onEvent;
+      return {
+        sendBargeIn: vi.fn(),
+        sendSpeakText: sendSpeakTextMock,
+        sendPlaybackProgress: vi.fn(),
+        sendSpeechEnd: vi.fn(),
+        sendPcmFrame: vi.fn(),
+        sendConfig: vi.fn(),
+        sendAudioReset: vi.fn(),
+        isOpen: () => true,
+        close: vi.fn(),
+      };
+    });
+
+    vi.spyOn(MicCapture, 'open').mockResolvedValue({
+      level: 0,
+      deviceLabel: 'Mic Teste',
+      close: vi.fn(),
+    } as unknown as MicCapture);
+
+    let finishCurrentSpeech: (() => void) | null = null;
+    vi.spyOn(SpeechOutput.prototype, 'playPcm').mockImplementation(function (this: SpeechOutput, text: string) {
+      this.stopThinking();
+      (this as unknown as { current: unknown }).current = { kind: 'pcm', text, chunkSeq: 1 };
+      const evs = (this as unknown as { events: { onStart?: (t: string) => void; onIdle?: () => void } }).events;
+      evs.onStart?.(text);
+      finishCurrentSpeech = () => {
+        (this as unknown as { current: unknown }).current = null;
+        evs.onIdle?.();
+      };
+    });
+
+    const caps = {
+      ...UNAVAILABLE_CAPABILITIES,
+      stt: {
+        ...UNAVAILABLE_CAPABILITIES.stt,
+        local_sidecar: { available: true, reason: '', modelId: 'faster-whisper-large-v3-turbo', models: [], voices: [] },
+      },
+      tts: {
+        ...UNAVAILABLE_CAPABILITIES.tts,
+        kokoro: { available: true, reason: '', modelId: 'kokoro-82m-onnx', voices: ['pf_dora'], models: [] },
+      },
+      recommendedStt: 'local_sidecar' as const,
+      recommendedTts: 'kokoro' as const,
+    };
+
+    const fakeClient = { socketCsrfToken: () => 'csrf-1' } as unknown as ApiClient;
+    const onUtterance = vi.fn();
+
+    const { result, rerender } = renderHook(
+      (props: { speech: Array<{ id: string; text: string; turnId?: string }>; busy: boolean }) =>
+        useLiveVoice({
+          active: true,
+          conversationId: 'conv-thinking-1',
+          client: fakeClient,
+          prefs: DEFAULT_LIVE_VOICE_PREFS,
+          capabilities: caps,
+          assistantSpeech: props.speech,
+          assistantBusy: props.busy,
+          onUtterance,
+        }),
+      { initialProps: { speech: [] as Array<{ id: string; text: string; turnId?: string }>, busy: false } },
+    );
+
+    vi.useFakeTimers();
+    try {
+      setDuckingSpy.mockClear();
+      startThinkingSpy.mockClear();
+
+      // 1. Usuário termina de falar (stt.transcript) -> awaitingReply = true, hasSpokenInTurn = false
+      // Deve iniciar thinking cue IMEDIATAMENTE e NÃO deve chamar setDucking(true)!
+      act(() => {
+        serverEventHandler?.({
+          type: 'stt.transcript',
+          is_end_of_utterance: true,
+          text: 'Analise os logs do servidor para mim',
+          audio_epoch: 1,
+        });
+      });
+      expect(startThinkingSpy).toHaveBeenCalled();
+      expect(result.current.thinkingAudio()).toBe(true);
+      expect(setDuckingSpy).not.toHaveBeenCalledWith(true);
+
+      // 2. Assistente enfileira 2 chunks (pendingTtsCount = 2) e o Chunk 1 começa a tocar:
+      // O som de pensamento deve parar imediatamente quando o Chunk 1 começa a falar!
+      rerender({
+        speech: [
+          { id: 'speak:1', text: 'Vou analisar os logs agora.', turnId: 't1' },
+          { id: 'speak:2', text: 'Já encontrei o primeiro arquivo.', turnId: 't1' },
+        ],
+        busy: true,
+      });
+      act(() => {
+        serverEventHandler?.({
+          type: 'tts.chunk',
+          epoch: 1,
+          chunk_seq: 1,
+          clean_text: 'Vou analisar os logs agora.',
+          pcm_base64: 'AAAA',
+          sample_rate: 24000,
+          duration_ms: 400,
+          word_timings: [],
+        });
+      });
+      expect(result.current.thinkingAudio()).toBe(false);
+
+      // 3. Chunk 1 termina de tocar, mas Chunk 2 ainda está pendente (pendingTtsCount === 1 > 0):
+      // NÃO deve iniciar o som de pensamento durante a pausa entre frases!
+      startThinkingSpy.mockClear();
+      act(() => {
+        finishCurrentSpeech?.();
+      });
+      act(() => {
+        vi.advanceTimersByTime(1500);
+      });
+      expect(startThinkingSpy).not.toHaveBeenCalled();
+      expect(result.current.thinkingAudio()).toBe(false);
+
+      // 4. Chunk 2 chega e termina de tocar (pendingTtsCount === 0), mas o turno continua busy (tool rodando):
+      // Deve aguardar 1000ms antes de religar o som de pensamento!
+      act(() => {
+        serverEventHandler?.({
+          type: 'tts.chunk',
+          epoch: 1,
+          chunk_seq: 2,
+          clean_text: 'Já encontrei o primeiro arquivo.',
+          pcm_base64: 'AAAA',
+          sample_rate: 24000,
+          duration_ms: 400,
+          word_timings: [],
+        });
+      });
+      startThinkingSpy.mockClear();
+      act(() => {
+        finishCurrentSpeech?.();
+      });
+      act(() => {
+        vi.advanceTimersByTime(900);
+      });
+      expect(startThinkingSpy).not.toHaveBeenCalled();
+      expect(result.current.thinkingAudio()).toBe(false);
+
+      act(() => {
+        vi.advanceTimersByTime(150);
+      });
+      expect(startThinkingSpy).toHaveBeenCalledTimes(1);
+      expect(result.current.thinkingAudio()).toBe(true);
+
+      // 5. Quando o turno termina (busy: false), o som de pensamento para imediatamente
+      stopThinkingSpy.mockClear();
+      rerender({
+        speech: [
+          { id: 'speak:1', text: 'Vou analisar os logs agora.', turnId: 't1' },
+          { id: 'speak:2', text: 'Já encontrei o primeiro arquivo.', turnId: 't1' },
+        ],
+        busy: false,
+      });
+      expect(stopThinkingSpy).toHaveBeenCalled();
+      expect(result.current.thinkingAudio()).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('9.3 liveVoicePrefs nunca escolhe modelos OpenRouter somente-inglês (eleven-flash-v2 / eleven-turbo-v2) por padrão e migra localStorage legado para v2.5', () => {
+    const model = (id: string, voices: string[] = ['aria']) => ({
+      id,
+      name: id,
+      vendor: id.split('/')[0],
+      voices,
+      supportsInstructions: false,
+    });
+
+    // 1. Mesmo que o catálogo liste eleven-flash-v2 primeiro ou como modelId, ttsSelection deve preferir modelo multilíngue
+    const capsWithEnglishFirst = {
+      ...UNAVAILABLE_CAPABILITIES,
+      tts: {
+        ...UNAVAILABLE_CAPABILITIES.tts,
+        openrouter: {
+          available: true,
+          reason: '',
+          modelId: 'elevenlabs/eleven-flash-v2',
+          voices: [],
+          models: [
+            model('elevenlabs/eleven-flash-v2', ['aria']),
+            model('elevenlabs/eleven-turbo-v2', ['aria']),
+            model('elevenlabs/eleven-multilingual-v2', ['charlotte', 'brian']),
+            model('elevenlabs/eleven-flash-v2.5', ['aria']),
+          ],
+        },
+      },
+      recommendedTts: 'openrouter' as const,
+    };
+
+    const defaultSelection = ttsSelection(DEFAULT_LIVE_VOICE_PREFS, capsWithEnglishFirst, 'openrouter');
+    expect(defaultSelection.modelId).toBe('elevenlabs/eleven-multilingual-v2');
+    expect(defaultSelection.modelId).not.toBe('elevenlabs/eleven-flash-v2');
+    expect(defaultSelection.modelId).not.toBe('elevenlabs/eleven-turbo-v2');
+
+    // 2. Migração automática no loadLiveVoicePrefs / normalizeLiveVoicePrefs de v2 (inglês) para v2.5 (multilíngue)
+    window.localStorage.setItem(
+      'orin.live-voice.prefs.v1',
+      JSON.stringify({
+        openrouterModel: 'elevenlabs/eleven-flash-v2',
+        ttsModels: { openrouter: 'elevenlabs/eleven-flash-v2' },
+      }),
+    );
+    const migratedFlash = loadLiveVoicePrefs();
+    expect(migratedFlash.ttsModels.openrouter).toBe('elevenlabs/eleven-flash-v2.5');
+
+    window.localStorage.setItem(
+      'orin.live-voice.prefs.v1',
+      JSON.stringify({
+        openrouterModel: 'elevenlabs/eleven-turbo-v2',
+      }),
+    );
+    const migratedTurbo = loadLiveVoicePrefs();
+    expect(migratedTurbo.ttsModels.openrouter).toBe('elevenlabs/eleven-turbo-v2.5');
+    window.localStorage.removeItem('orin.live-voice.prefs.v1');
+  });
+
+  it('9.4 LiveVoiceStage e LiveVoiceQuickSettings enviam instruções pt-BR reforçadas (proibindo pt-PT, es e it) e language: pt-BR no preview', async () => {
+    const sendConfigMock = vi.fn();
+    const sendSpeakTextMock = vi.fn();
+    let previewEventHandler: ((event: LiveVoiceServerEvent) => void) | null = null;
+
+    vi.spyOn(ConversationsApi, 'connectLiveVoiceSession').mockImplementation((convId, onEvent) => {
+      if (convId === 'voice-preview') {
+        previewEventHandler = onEvent;
+      }
+      return {
+        sendBargeIn: vi.fn(),
+        sendSpeakText: sendSpeakTextMock,
+        sendPlaybackProgress: vi.fn(),
+        sendSpeechEnd: vi.fn(),
+        sendPcmFrame: vi.fn(),
+        sendConfig: sendConfigMock,
+        sendAudioReset: vi.fn(),
+        isOpen: () => true,
+        close: vi.fn(),
+      };
+    });
+
+    vi.spyOn(MicCapture, 'open').mockResolvedValue({
+      level: 0,
+      deviceLabel: 'Mic Teste',
+      close: vi.fn(),
+    } as unknown as MicCapture);
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: Parameters<typeof fetch>[0]) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        if (url.endsWith('/v1/live-voice/capabilities')) {
+          return new Response(
+            JSON.stringify({
+              stt: {
+                local_sidecar: { available: true, device: 'cuda', model_id: 'faster-whisper-large-v3-turbo', reason: '' },
+                openai: { available: false, model_id: 'gpt-4o-mini-transcribe', reason: '' },
+                openrouter: { available: false, model_id: '', reason: '', models: [] },
+                groq: { available: false, model_id: '', reason: '' },
+              },
+              tts: {
+                openai: { available: true, model_id: 'gpt-4o-mini-tts', models: [{ id: 'gpt-4o-mini-tts', name: 'GPT-4o mini TTS', vendor: 'openai', voices: ['coral'] }], voices: ['coral'], reason: '' },
+                openrouter: { available: false, model_id: '', reason: '', models: [] },
+                kokoro: { available: false, model_id: 'kokoro-82m-onnx', voices: [], models: [] },
+                chatterbox: { available: false, model_id: 'chatterbox-multilingual', voices: [] },
+              },
+              recommended_stt: 'local_sidecar',
+              recommended_tts: 'openai',
+              hardware: { has_cuda: true, device_name: 'RTX', free_vram_gb: 8, total_vram_gb: 8 },
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
+        return new Response(JSON.stringify({ items: [] }), { status: 200 });
+      }),
+    );
+
+    window.localStorage.removeItem('orin.live-voice.prefs.v1');
+    const { rerender } = render(
+      <LiveVoiceStage
+        isOpen={true}
+        conversationId="conv-stage-ptbr"
+        companionName="Orin"
+        assistantSpeech={[]}
+        assistantBusy={true}
+        reducedMotion={true}
+        onClose={vi.fn()}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByTestId('live-voice-active-profile-pill').textContent).toContain('OpenAI'),
+    );
+
+    rerender(
+      <LiveVoiceStage
+        isOpen={true}
+        conversationId="conv-stage-ptbr"
+        companionName="Orin"
+        assistantSpeech={[{ id: 'speak:stage-1', text: 'Olá, estou aqui!' }]}
+        assistantBusy={true}
+        reducedMotion={true}
+        onClose={vi.fn()}
+      />,
+    );
+
+    await waitFor(() => expect(sendSpeakTextMock).toHaveBeenCalled());
+    const stageInstructions = sendSpeakTextMock.mock.calls[0][1] as string;
+    expect(stageInstructions).toContain('estritamente em português do Brasil (pt-BR) nativo');
+    expect(stageInstructions).toContain('Nunca use sotaque de Portugal (pt-PT), espanhol (es) ou italiano (it).');
+
+    // Abre as configurações rápidas e clica em "Ouvir amostra"
+    fireEvent.click(screen.getByTestId('live-voice-open-settings-button'));
+    const testBtn = await screen.findByTestId('live-quick-test-voice-button');
+    await waitFor(() => expect(screen.getByTestId('live-quick-voice-picker').textContent).toContain('OpenAI'));
+
+    sendConfigMock.mockClear();
+    sendSpeakTextMock.mockClear();
+    fireEvent.click(testBtn);
+
+    expect(sendConfigMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        language: 'pt-BR',
+      }),
+    );
+
+    act(() => {
+      previewEventHandler?.({ type: 'session.ready', conversation_id: 'voice-preview', audio_epoch: 1 });
+    });
+    expect(sendSpeakTextMock).toHaveBeenCalledTimes(1);
+    const previewInstructions = sendSpeakTextMock.mock.calls[0][1] as string;
+    expect(previewInstructions).toContain('pt-BR');
+    expect(previewInstructions).toContain('pt-PT');
+    expect(previewInstructions).toMatch(/espanhol/i);
+    expect(previewInstructions).toMatch(/italiano/i);
+  });
+
+  it('9.5 adversarial: SpeechOutput resiste a FakeAudioContext mínimo ou falha de Web Audio, e useLiveVoice cancela timer de 1000ms se Chunk 2 chegar antes ou usuário falar/mutar', async () => {
+    vi.useFakeTimers();
+    try {
+      // 1. FakeAudioContext mínimo ({}) sem createAnalyser / createOscillator / close
+      class MinimalAudioContext {}
+      Object.defineProperty(window, 'AudioContext', {
+        value: MinimalAudioContext,
+        configurable: true,
+        writable: true,
+      });
+
+      const minimalSpeech = new SpeechOutput();
+      minimalSpeech.startThinking();
+      vi.advanceTimersByTime(200);
+      expect(minimalSpeech.thinkingPulseCount).toBe(1);
+      expect(minimalSpeech.level).toBeCloseTo(0.12);
+      expect(() => minimalSpeech.dispose()).not.toThrow();
+
+      // 2. AudioContext que lança exceção ao construir não deve quebrar startThinking
+      class ThrowingAudioContext {
+        constructor() {
+          throw new Error('WebAudio blocked');
+        }
+      }
+      Object.defineProperty(window, 'AudioContext', {
+        value: ThrowingAudioContext,
+        configurable: true,
+        writable: true,
+      });
+      const resilientSpeech = new SpeechOutput();
+      expect(() => {
+        resilientSpeech.startThinking();
+        vi.advanceTimersByTime(200);
+        resilientSpeech.stopThinking();
+      }).not.toThrow();
+
+      // 3. No useLiveVoice: se o Chunk 2 chegar em 400ms (< 1000ms) após o fim do Chunk 1, o timer de 1000ms é cancelado;
+      // e se o usuário mutar ou falar (VAD speech_start), o som de pensamento para imediatamente.
+      let serverEventHandler: ((event: LiveVoiceServerEvent) => void) | null = null;
+      let capturedOnFrame: ((frame: Int16Array, rms: number) => void) | undefined;
+
+      vi.spyOn(ConversationsApi, 'connectLiveVoiceSession').mockImplementation((_convId, onEvent) => {
+        serverEventHandler = onEvent;
+        return {
+          sendBargeIn: vi.fn(),
+          sendSpeakText: vi.fn().mockReturnValue(true),
+          sendPlaybackProgress: vi.fn(),
+          sendSpeechEnd: vi.fn(),
+          sendPcmFrame: vi.fn(),
+          sendConfig: vi.fn(),
+          sendAudioReset: vi.fn(),
+          isOpen: () => true,
+          close: vi.fn(),
+        };
+      });
+      vi.spyOn(MicCapture, 'open').mockImplementation(async (opts) => {
+        capturedOnFrame = opts?.onFrame;
+        return {
+          level: 0,
+          deviceLabel: 'Mic Teste',
+          close: vi.fn(),
+        } as unknown as MicCapture;
+      });
+
+      let finishCurrentSpeech: (() => void) | null = null;
+      vi.spyOn(SpeechOutput.prototype, 'playPcm').mockImplementation(function (this: SpeechOutput, text: string) {
+        this.stopThinking();
+        (this as unknown as { current: unknown }).current = { kind: 'pcm', text, chunkSeq: 1 };
+        const evs = (this as unknown as { events: { onStart?: (t: string) => void; onIdle?: () => void } }).events;
+        evs.onStart?.(text);
+        finishCurrentSpeech = () => {
+          (this as unknown as { current: unknown }).current = null;
+          evs.onIdle?.();
+        };
+      });
+
+      const caps = {
+        ...UNAVAILABLE_CAPABILITIES,
+        stt: {
+          ...UNAVAILABLE_CAPABILITIES.stt,
+          local_sidecar: { available: true, reason: '', modelId: 'faster-whisper-large-v3-turbo', models: [], voices: [] },
+        },
+        tts: {
+          ...UNAVAILABLE_CAPABILITIES.tts,
+          kokoro: { available: true, reason: '', modelId: 'kokoro-82m-onnx', voices: ['pf_dora'], models: [] },
+        },
+        recommendedStt: 'local_sidecar' as const,
+        recommendedTts: 'kokoro' as const,
+      };
+      const fakeClient = { socketCsrfToken: () => 'csrf-1' } as unknown as ApiClient;
+
+      const { result, rerender } = renderHook(
+        (props: { speech: Array<{ id: string; text: string; turnId?: string }>; busy: boolean }) =>
+          useLiveVoice({
+            active: true,
+            conversationId: 'conv-adv-thinking',
+            client: fakeClient,
+            prefs: DEFAULT_LIVE_VOICE_PREFS,
+            capabilities: caps,
+            assistantSpeech: props.speech,
+            assistantBusy: props.busy,
+            onUtterance: vi.fn(),
+          }),
+        { initialProps: { speech: [] as Array<{ id: string; text: string; turnId?: string }>, busy: true } },
+      );
+
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(result.current.thinkingAudio()).toBe(true);
+
+      // Mutar o microfone corta o som de pensamento na hora
+      act(() => {
+        result.current.setMuted(true);
+      });
+      expect(result.current.thinkingAudio()).toBe(false);
+
+      act(() => {
+        result.current.setMuted(false);
+      });
+      expect(result.current.thinkingAudio()).toBe(true);
+
+      // Usuário começa a falar (speech_start no VAD) -> corta o som de pensamento na hora
+      const loudFrame = new Int16Array(LIVE_FRAME_SAMPLES).fill(12000);
+      act(() => {
+        for (let i = 0; i < 6; i += 1) capturedOnFrame?.(loudFrame, 0.35);
+      });
+      expect(result.current.thinkingAudio()).toBe(false);
+
+      act(() => {
+        serverEventHandler?.({ type: 'stt.empty', audio_epoch: 1 });
+      });
+
+      // Chunk 1 toca e termina; Chunk 2 chega em 400ms (< 1000ms) -> timer cancelado sem religar thinkingAudio
+      rerender({ speech: [{ id: 'speak:a1', text: 'Primeira frase.', turnId: 't-adv' }], busy: true });
+      act(() => {
+        serverEventHandler?.({
+          type: 'tts.chunk',
+          epoch: 1,
+          chunk_seq: 1,
+          clean_text: 'Primeira frase.',
+          pcm_base64: 'AAAA',
+          sample_rate: 24000,
+          duration_ms: 300,
+          word_timings: [],
+        });
+      });
+      act(() => {
+        finishCurrentSpeech?.();
+      });
+      act(() => {
+        vi.advanceTimersByTime(400);
+      });
+      expect(result.current.thinkingAudio()).toBe(false);
+
+      rerender({
+        speech: [
+          { id: 'speak:a1', text: 'Primeira frase.', turnId: 't-adv' },
+          { id: 'speak:a2', text: 'Segunda frase chegou rápido.', turnId: 't-adv' },
+        ],
+        busy: true,
+      });
+      act(() => {
+        vi.advanceTimersByTime(1000);
+      });
+      expect(result.current.thinkingAudio()).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+

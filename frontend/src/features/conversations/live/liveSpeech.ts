@@ -74,6 +74,7 @@ type AudioContextCtor = typeof AudioContext
 
 export class SpeechOutput {
   level = 0
+  thinkingPulseCount = 0
   private queue: QueueItem[] = []
   private current: QueueItem | null = null
   private context: AudioContext | null = null
@@ -85,6 +86,12 @@ export class SpeechOutput {
   private analyserData: Uint8Array<ArrayBuffer> | null = null
   private generation = 0
   private activeUtterance: SpeechSynthesisUtterance | null = null
+  private thinkingActive = false
+  private thinkingTimer: number | null = null
+  private thinkingPulseTimer: number | null = null
+  private thinkingStep = 0
+  private thinkingGain: GainNode | null = null
+  private thinkingNodes: Array<{ osc: OscillatorNode; gain: GainNode }> = []
 
   constructor(private events: SpeechOutputEvents = {}, private system: SystemVoiceSettings = { voiceUri: null, rate: 1.05, pitch: 1 }) {}
 
@@ -100,8 +107,156 @@ export class SpeechOutput {
     return this.current !== null || this.queue.length > 0
   }
 
+  get thinking(): boolean {
+    return this.thinkingActive
+  }
+
   get currentText(): string {
     return this.current?.text ?? ''
+  }
+
+  startThinking(): void {
+    if (this.thinkingActive || this.speaking) return
+    this.thinkingActive = true
+    if (typeof window === 'undefined') return
+    const scheduleNext = (delayMs: number) => {
+      this.thinkingTimer = window.setTimeout(() => {
+        this.thinkingTimer = null
+        if (!this.thinkingActive || this.speaking) return
+        this.emitThinkingMotif()
+        if (this.thinkingActive && !this.speaking) {
+          scheduleNext(1350)
+        }
+      }, delayMs)
+    }
+    scheduleNext(180)
+  }
+
+  stopThinking(): void {
+    if (this.thinkingTimer !== null && typeof window !== 'undefined') {
+      window.clearTimeout(this.thinkingTimer)
+    }
+    this.thinkingTimer = null
+    if (this.thinkingPulseTimer !== null && typeof window !== 'undefined') {
+      window.clearTimeout(this.thinkingPulseTimer)
+    }
+    this.thinkingPulseTimer = null
+    if (!this.thinkingActive) return
+    this.thinkingActive = false
+    const now = typeof this.context?.currentTime === 'number' ? this.context.currentTime : 0
+    if (this.thinkingGain?.gain) {
+      try {
+        this.thinkingGain.gain.cancelScheduledValues?.(now)
+        this.thinkingGain.gain.setValueAtTime?.(Math.max(0.0001, this.thinkingGain.gain.value || 1), now)
+        this.thinkingGain.gain.exponentialRampToValueAtTime?.(0.0001, now + 0.03)
+      } catch {
+        // Context may be minimal mock or closed.
+      }
+    }
+    const nodes = this.thinkingNodes.splice(0)
+    for (const { osc, gain } of nodes) {
+      try {
+        osc.stop?.()
+      } catch {
+        // Not started or already stopped.
+      }
+      try {
+        osc.disconnect?.()
+        gain.disconnect?.()
+      } catch {
+        // Already disconnected.
+      }
+    }
+    if (!this.speaking) {
+      this.level = 0
+    }
+  }
+
+  private emitThinkingMotif(): void {
+    if (!this.thinkingActive || this.speaking) return
+    this.thinkingPulseCount += 1
+    const step = this.thinkingStep
+    this.thinkingStep += 1
+    this.level = 0.12
+    if (this.thinkingPulseTimer !== null && typeof window !== 'undefined') {
+      window.clearTimeout(this.thinkingPulseTimer)
+    }
+    if (typeof window !== 'undefined') {
+      this.thinkingPulseTimer = window.setTimeout(() => {
+        this.thinkingPulseTimer = null
+        if (this.thinkingActive && !this.speaking) {
+          this.level = 0.02
+        }
+      }, 260)
+    }
+    const context = this.ensureContext()
+    if (!context || typeof context.createOscillator !== 'function' || typeof context.createGain !== 'function') return
+    try {
+      void context.resume?.()?.catch?.(() => {})
+      const now = typeof context.currentTime === 'number' ? context.currentTime : 0
+      if (!this.thinkingGain) {
+        const master = context.createGain()
+        if (master.gain) {
+          master.gain.value = 1
+          master.gain.setValueAtTime?.(1, now)
+        }
+        if (context.destination) master.connect?.(context.destination)
+        this.thinkingGain = master
+      } else if (this.thinkingGain.gain) {
+        this.thinkingGain.gain.cancelScheduledValues?.(now)
+        this.thinkingGain.gain.value = 1
+        this.thinkingGain.gain.setValueAtTime?.(1, now)
+      }
+      let targetNode: AudioNode = this.thinkingGain
+      if (typeof context.createBiquadFilter === 'function') {
+        const filter = context.createBiquadFilter()
+        filter.type = 'lowpass'
+        if (filter.frequency) {
+          filter.frequency.value = 880
+          filter.frequency.setValueAtTime?.(880, now)
+        }
+        filter.connect?.(this.thinkingGain)
+        targetNode = filter
+      }
+      const notes: ReadonlyArray<readonly [number, number]> =
+        step % 2 === 0
+          ? [[329.63, 0], [440.0, 0.18]]
+          : [[293.66, 0], [392.0, 0.18]]
+      for (const [freq, offsetSec] of notes) {
+        const t0 = now + offsetSec
+        const osc = context.createOscillator()
+        const noteGain = context.createGain()
+        osc.type = 'sine'
+        if (osc.frequency) {
+          osc.frequency.value = freq
+          osc.frequency.setValueAtTime?.(freq, t0)
+        }
+        if (noteGain.gain) {
+          noteGain.gain.value = 0.0001
+          noteGain.gain.setValueAtTime?.(0.0001, t0)
+          noteGain.gain.linearRampToValueAtTime?.(0.032, t0 + 0.025)
+          noteGain.gain.exponentialRampToValueAtTime?.(0.0001, t0 + 0.2)
+        }
+        osc.connect?.(noteGain)
+        noteGain.connect?.(targetNode)
+        const entry = { osc, gain: noteGain }
+        this.thinkingNodes.push(entry)
+        osc.onended = () => {
+          const idx = this.thinkingNodes.indexOf(entry)
+          if (idx >= 0) this.thinkingNodes.splice(idx, 1)
+          try {
+            osc.disconnect?.()
+            noteGain.disconnect?.()
+          } catch {
+            // Already disconnected.
+          }
+        }
+        osc.start?.(t0)
+        osc.stop?.(t0 + 0.21)
+      }
+    } catch {
+      // Synthesizing thinking motif is best-effort and must never crash the voice stage.
+    }
   }
 
   /** Chunk sequence and milliseconds played of the PCM chunk now playing, for barge-in receipts. */
@@ -111,6 +266,7 @@ export class SpeechOutput {
   }
 
   speakSystem(text: string): void {
+    this.stopThinking()
     const clean = textForSpeech(text)
     if (!clean) return
     this.queue.push({ kind: 'system', text: clean })
@@ -118,6 +274,7 @@ export class SpeechOutput {
   }
 
   playPcm(text: string, pcmBase64: string, sampleRate: number, chunkSeq: number): void {
+    this.stopThinking()
     const pcm = decodePcm16(pcmBase64)
     if (pcm.length === 0) return
     this.queue.push({ kind: 'pcm', text, pcm, sampleRate, chunkSeq })
@@ -126,6 +283,7 @@ export class SpeechOutput {
 
   /** MP3/WAV from a cloud voice; the browser decodes it, sample rate included. */
   playEncoded(text: string, base64: string, chunkSeq: number): void {
+    this.stopThinking()
     const bytes = decodeBase64(base64)
     if (bytes.byteLength === 0) return
     this.queue.push({ kind: 'encoded', text, data: bytes.buffer as ArrayBuffer, chunkSeq })
@@ -134,6 +292,7 @@ export class SpeechOutput {
 
   /** Stop at once and drop everything queued (barge-in, mute, close). */
   stop(): void {
+    this.stopThinking()
     this.generation += 1
     this.queue = []
     const wasSpeaking = this.current !== null
@@ -153,8 +312,10 @@ export class SpeechOutput {
   }
 
   dispose(): void {
+    this.stopThinking()
     this.stop()
-    void this.context?.close().catch(() => {})
+    this.thinkingGain = null
+    void this.context?.close?.()?.catch?.(() => {})
     this.context = null
   }
 
@@ -225,14 +386,20 @@ export class SpeechOutput {
     const w = window as unknown as { AudioContext?: AudioContextCtor; webkitAudioContext?: AudioContextCtor }
     const Ctor = w.AudioContext ?? w.webkitAudioContext
     if (!Ctor) return null
-    const context = new Ctor()
-    const analyser = context.createAnalyser()
-    analyser.fftSize = 512
-    analyser.connect(context.destination)
-    this.context = context
-    this.analyser = analyser
-    this.analyserData = new Uint8Array(new ArrayBuffer(analyser.fftSize))
-    return context
+    try {
+      const context = new Ctor()
+      this.context = context
+      if (typeof context.createAnalyser === 'function') {
+        const analyser = context.createAnalyser()
+        analyser.fftSize = 512
+        analyser.connect?.(context.destination)
+        this.analyser = analyser
+        this.analyserData = new Uint8Array(new ArrayBuffer(analyser.fftSize))
+      }
+      return context
+    } catch {
+      return null
+    }
   }
 
   private playBuffer(item: Extract<QueueItem, { kind: 'pcm' }>, done: () => void): void {

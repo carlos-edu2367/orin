@@ -84,7 +84,12 @@ SUPPORTED_TTS_PROVIDERS: dict[str, dict[str, Any]] = {
     },
     "openrouter": {
         "label": "OpenRouter (ElevenLabs, Gemini, Voxtral, MiniMax…)",
-        "models": [{"id": "elevenlabs/eleven-v3", "label": "ElevenLabs Eleven v3 (OpenRouter)"}],
+        "models": [
+            {"id": "elevenlabs/eleven-multilingual-v2", "label": "ElevenLabs Multilingual v2 (OpenRouter PT-BR)"},
+            {"id": "elevenlabs/eleven-v3", "label": "ElevenLabs Eleven v3 (OpenRouter)"},
+            {"id": "elevenlabs/eleven-flash-v2.5", "label": "ElevenLabs Flash v2.5 (OpenRouter PT-BR)"},
+            {"id": "openai/gpt-4o-mini-tts", "label": "OpenAI GPT-4o Mini TTS (OpenRouter PT-BR)"},
+        ],
     },
     "elevenlabs": {
         "label": "ElevenLabs",

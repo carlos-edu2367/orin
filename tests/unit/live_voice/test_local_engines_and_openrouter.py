@@ -344,6 +344,89 @@ def test_openrouter_speech_passes_previous_text_and_retries_unknown_fields() -> 
     assert "instructions" not in bodies[-1]
 
 
+def test_openrouter_speech_auto_upgrades_english_only_and_legacy_models_for_ptbr() -> None:
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.read())
+        bodies.append(body)
+        return httpx.Response(200, content=b"ID3mp3", headers={"content-type": "audio/mpeg"})
+
+    transport = httpx.MockTransport(handler)
+    for raw_model, expected_upgraded in [
+        ("openai/tts-1", "openai/gpt-4o-mini-tts"),
+        ("openai/tts-1-hd", "openai/gpt-4o-mini-tts"),
+        ("elevenlabs/eleven-flash-v2", "elevenlabs/eleven-flash-v2.5"),
+        ("elevenlabs/eleven-turbo-v2", "elevenlabs/eleven-turbo-v2.5"),
+    ]:
+        synthesize_openrouter_speech(
+            OPENROUTER,
+            "Pronto, tudo certo!",
+            model_id=raw_model,
+            voice="coral",
+            language="pt-BR",
+            transport=transport,
+        )
+        assert bodies[-1]["model"] == expected_upgraded
+        assert "instructions" in bodies[-1]
+        assert "Brazilian Portuguese" in bodies[-1]["instructions"]
+
+
+def test_openrouter_speech_retry_cascade_preserves_instructions_when_extra_fields_rejected() -> None:
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.read())
+        bodies.append(body)
+        if "language_code" in body or "previous_text" in body:
+            return httpx.Response(400, json={"error": {"message": "Unknown field: language_code"}})
+        return httpx.Response(200, content=b"ID3mp3", headers={"content-type": "audio/mpeg"})
+
+    transport = httpx.MockTransport(handler)
+    audio, enc, _ = synthesize_openrouter_speech(
+        OPENROUTER,
+        "Claro, vou verificar isso agora.",
+        model_id="elevenlabs/eleven-multilingual-v2",
+        voice="sarah",
+        previous_text="Olá, como posso ajudar?",
+        transport=transport,
+    )
+    assert (audio, enc) == (b"ID3mp3", "mp3")
+    assert len(bodies) == 2
+    assert "language_code" in bodies[0]
+    assert "language_code" not in bodies[1]
+    assert "previous_text" not in bodies[1]
+    assert "instructions" in bodies[1]
+    assert "Brazilian Portuguese" in bodies[1]["instructions"]
+
+
+def test_openrouter_catalog_prioritizes_multilingual_ptbr_models_before_english_only_v2() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": [
+            {"id": "elevenlabs/eleven-flash-v2", "name": "ElevenLabs: Eleven Flash v2", "supported_voices": ["adam"]},
+            {"id": "elevenlabs/eleven-turbo-v2", "name": "ElevenLabs: Eleven Turbo v2", "supported_voices": ["adam"]},
+            {"id": "openai/tts-1", "name": "OpenAI: TTS-1", "supported_voices": ["alloy"]},
+            {"id": "google/gemini-2.5-flash-preview-tts", "name": "Google: Gemini 2.5 Flash Preview TTS", "supported_voices": ["Kore"]},
+            {"id": "openai/gpt-4o-mini-tts", "name": "OpenAI: GPT-4o Mini TTS", "supported_voices": ["coral"]},
+            {"id": "elevenlabs/eleven-flash-v2.5", "name": "ElevenLabs: Eleven Flash v2.5", "supported_voices": ["sarah"]},
+            {"id": "elevenlabs/eleven-v3", "name": "ElevenLabs: Eleven v3", "supported_voices": ["sarah"]},
+            {"id": "elevenlabs/eleven-multilingual-v2", "name": "ElevenLabs: Eleven Multilingual v2", "supported_voices": ["sarah"]},
+        ]})
+
+    catalog = OpenRouterVoiceCatalog(base_url="https://openrouter.test/api/v1", transport=httpx.MockTransport(handler))
+    ids = [m["id"] for m in catalog.speech_models()]
+    assert ids[0] == "elevenlabs/eleven-multilingual-v2"
+    for preferred in (
+        "elevenlabs/eleven-multilingual-v2",
+        "elevenlabs/eleven-v3",
+        "elevenlabs/eleven-flash-v2.5",
+        "openai/gpt-4o-mini-tts",
+        "google/gemini-2.5-flash-preview-tts",
+    ):
+        assert ids.index(preferred) < ids.index("elevenlabs/eleven-flash-v2")
+        assert ids.index(preferred) < ids.index("elevenlabs/eleven-turbo-v2")
+
+
 def test_kokoro_and_chatterbox_workers_enforce_ptbr_and_seed(monkeypatch: pytest.MonkeyPatch) -> None:
     workers_dir = str(runtime_module.WORKERS_DIR)
     if workers_dir not in sys.path:

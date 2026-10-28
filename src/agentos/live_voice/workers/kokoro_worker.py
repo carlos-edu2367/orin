@@ -10,7 +10,9 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from _protocol import pcm16_base64, serve
+from _protocol import expose_windows_dll_directories, pcm16_base64, serve
+
+expose_windows_dll_directories()
 
 _engine: Any = None
 _model_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else Path.cwd()
@@ -19,6 +21,7 @@ _model_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else Path.cwd()
 def _espeak_data_dir() -> str:
     """espeak-ng keeps its data path in a 160-byte buffer and silently falls back to a
     build-machine path when it is longer, so deep install folders get a short copy."""
+    expose_windows_dll_directories()
     import espeakng_loader
 
     data = Path(espeakng_loader.get_data_path())
@@ -35,6 +38,7 @@ def _espeak_data_dir() -> str:
 def _kokoro() -> Any:
     global _engine
     if _engine is None:
+        expose_windows_dll_directories()
         import espeakng_loader
         from kokoro_onnx import Kokoro
         from kokoro_onnx.config import EspeakConfig

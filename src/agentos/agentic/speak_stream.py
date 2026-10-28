@@ -228,21 +228,21 @@ class PTBRTextNormalizer:
     }
 
     TECH_ACRONYMS: dict[str, str] = {
-        "APIs": "A P Is",
-        "API": "A P I",
-        "URLs": "U R Ls",
-        "URL": "U R L",
-        "SQL": "S Q L",
-        "MCPs": "M C Ps",
-        "MCP": "M C P",
-        "LLMs": "L L Ms",
-        "LLM": "L L M",
-        "TTS": "T T S",
-        "STT": "S T T",
+        "APIs": "á pê is",
+        "API": "á pê i",
+        "URLs": "u érre éles",
+        "URL": "u érre éle",
+        "SQL": "ésse quê éle",
+        "MCPs": "ême cê pês",
+        "MCP": "ême cê pê",
+        "LLMs": "éle éle êmes",
+        "LLM": "éle éle ême",
+        "TTS": "tê tê ésse",
+        "STT": "ésse tê tê",
         "JSON": "jeison",
-        "CPU": "C P U",
-        "GPU": "G P U",
-        "RAM": "R A M",
+        "CPU": "cê pê u",
+        "GPU": "gê pê u",
+        "RAM": "rã",
     }
 
     _BRL_RE = re.compile(
@@ -559,13 +559,17 @@ class PTBRProsodicChunker:
         " mas ",
     )
 
-    GEAR_1_SOFT_MAX_CHARS: int = 48
-    GEAR_2_SOFT_MAX_CHARS: int = 95
-    GEAR_1_MIN_CHARS: int = 2
-    GEAR_1_MIN_WORDS: int = 1
-    GEAR_2_COMMA_MIN_CHARS: int = 36
-    GEAR_2_COMMA_MIN_WORDS: int = 6
-    GEAR_2_STRONG_MIN_CHARS: int = 3
+    GEAR_1_SOFT_MAX_CHARS: int = 110
+    GEAR_2_SOFT_MAX_CHARS: int = 160
+    GEAR_1_MIN_CHARS: int = 28
+    GEAR_1_MIN_WORDS: int = 5
+    COMMA_MIN_CHARS: int = 48
+    COMMA_MIN_WORDS: int = 8
+    GEAR_2_COMMA_MIN_CHARS: int = 48
+    GEAR_2_COMMA_MIN_WORDS: int = 8
+    STRONG_MIN_CHARS: int = 24
+    STRONG_MIN_WORDS: int = 4
+    GEAR_2_STRONG_MIN_CHARS: int = 24
 
     def __init__(
         self,
@@ -652,6 +656,27 @@ class PTBRProsodicChunker:
     @classmethod
     def _extract_words(cls, text: str) -> list[str]:
         return re.findall(r"[\wÀ-ÿ]+", text)
+
+    def _check_punctuation_split(
+        self,
+        candidate_clean: str,
+        boundary_kind: BoundaryKind,
+    ) -> bool:
+        words = self._extract_words(candidate_clean)
+        if boundary_kind in {
+            BoundaryKind.COMMA,
+            BoundaryKind.SEMICOLON,
+            BoundaryKind.COLON,
+            BoundaryKind.EM_DASH,
+        }:
+            return (
+                len(candidate_clean) >= self.COMMA_MIN_CHARS
+                and len(words) >= self.COMMA_MIN_WORDS
+            )
+        return (
+            len(candidate_clean) >= self.STRONG_MIN_CHARS
+            and len(words) >= self.STRONG_MIN_WORDS
+        )
 
     @classmethod
     def _violates_clitic_or_opener_guards(cls, candidate_clean: str) -> bool:
@@ -791,34 +816,9 @@ class PTBRProsodicChunker:
                     if self._violates_clitic_or_opener_guards(candidate_clean):
                         i = p_end
                         continue
-
-                    words = self._extract_words(candidate_clean)
-                    if self._chunk_index == 0:
-                        # Marcha 1 (Ignição Rápida)
-                        if len(candidate_clean) < self.GEAR_1_MIN_CHARS or len(words) < 1:
-                            i = p_end
-                            continue
-                        if (
-                            boundary_kind == BoundaryKind.COMMA
-                            and len(words) == 1
-                            and words[0].lower() not in STANDALONE_GREETING_OPENERS
-                        ):
-                            i = p_end
-                            continue
-                    else:
-                        # Marcha 2 (Cruzeiro Prosódico)
-                        if boundary_kind == BoundaryKind.COMMA:
-                            if not (self._chunk_index == 1 and self._first_chunk_words == 1 and len(words) >= 4):
-                                if (
-                                    len(candidate_clean) < self.GEAR_2_COMMA_MIN_CHARS
-                                    and len(words) < self.GEAR_2_COMMA_MIN_WORDS
-                                ):
-                                    i = p_end
-                                    continue
-                        else:
-                            if len(candidate_clean) < self.GEAR_2_STRONG_MIN_CHARS:
-                                i = p_end
-                                continue
+                    if not self._check_punctuation_split(candidate_clean, boundary_kind):
+                        i = p_end
+                        continue
 
                 # Para "etc." no fim da frase no flush, preserva o ponto na clean_text
                 if is_last and punct_run == "." and self._is_abbreviation_at(self._buffer, p_end):

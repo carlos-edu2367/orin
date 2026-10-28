@@ -9,7 +9,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from _protocol import pcm16_base64, serve
+from _protocol import expose_windows_dll_directories, pcm16_base64, serve
+
+expose_windows_dll_directories()
 
 _model: Any = None
 _device = "cpu"
@@ -19,6 +21,7 @@ _DEFAULT_SEED = 42
 
 
 def _seed_deterministic(seed: int = _DEFAULT_SEED) -> None:
+    expose_windows_dll_directories()
     try:
         import torch
 
@@ -38,6 +41,7 @@ def _seed_deterministic(seed: int = _DEFAULT_SEED) -> None:
 def _chatterbox() -> Any:
     global _model, _device, _builtin_conds
     if _model is None:
+        expose_windows_dll_directories()
         import torch
         from chatterbox.mtl_tts import ChatterboxMultilingualTTS
 

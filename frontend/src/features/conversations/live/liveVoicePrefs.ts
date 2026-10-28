@@ -47,6 +47,20 @@ const PREFS_EVENT = 'orin:live-voice-prefs'
 const STT_CHOICES: SttChoice[] = ['auto', 'local_sidecar', 'openai', 'openrouter', 'groq', 'browser']
 const TTS_CHOICES: TtsChoice[] = ['auto', 'system', 'openai', 'openrouter', 'kokoro', 'chatterbox']
 
+const LEGACY_ENGLISH_ONLY_OPENROUTER_MODELS: Record<string, string> = {
+  'elevenlabs/eleven-flash-v2': 'elevenlabs/eleven-flash-v2.5',
+  'elevenlabs/eleven-turbo-v2': 'elevenlabs/eleven-turbo-v2.5',
+}
+
+const PREFERRED_OPENROUTER_TTS_MODELS: readonly string[] = [
+  'elevenlabs/eleven-multilingual-v2',
+  'elevenlabs/eleven-v3',
+  'elevenlabs/eleven-flash-v2.5',
+  'elevenlabs/eleven-turbo-v2.5',
+  'openai/gpt-4o-mini-tts',
+  'google/gemini-2.5-flash-preview-tts',
+]
+
 function clamp(value: unknown, min: number, max: number, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? Math.min(max, Math.max(min, value)) : fallback
 }
@@ -59,14 +73,26 @@ function stringMap(value: unknown): Record<string, string> {
 export function normalizeLiveVoicePrefs(raw: unknown): LiveVoicePrefs {
   const data = typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>) : {}
   const voices = stringMap(data.ttsVoices)
+  const ttsModels = stringMap(data.ttsModels)
   // v1 kept a single OpenAI voice; it becomes that model's voice.
   if (typeof data.openaiVoice === 'string' && !voices['openai:gpt-4o-mini-tts']) voices['openai:gpt-4o-mini-tts'] = data.openaiVoice
+  if (typeof data.openrouterModel === 'string' && data.openrouterModel && !ttsModels.openrouter) {
+    ttsModels.openrouter = data.openrouterModel
+  }
+  if (ttsModels.openrouter && LEGACY_ENGLISH_ONLY_OPENROUTER_MODELS[ttsModels.openrouter]) {
+    const oldModel = ttsModels.openrouter
+    const newModel = LEGACY_ENGLISH_ONLY_OPENROUTER_MODELS[oldModel]
+    ttsModels.openrouter = newModel
+    if (voices[`openrouter:${oldModel}`] && !voices[`openrouter:${newModel}`]) {
+      voices[`openrouter:${newModel}`] = voices[`openrouter:${oldModel}`]
+    }
+  }
   return {
     micDeviceId: typeof data.micDeviceId === 'string' && data.micDeviceId ? data.micDeviceId : 'default',
     stt: STT_CHOICES.find((choice) => choice === data.stt) ?? 'auto',
     sttModels: stringMap(data.sttModels),
     tts: TTS_CHOICES.find((choice) => choice === data.tts) ?? 'auto',
-    ttsModels: stringMap(data.ttsModels),
+    ttsModels,
     ttsVoices: voices,
     systemVoiceUri: typeof data.systemVoiceUri === 'string' ? data.systemVoiceUri : null,
     rate: clamp(data.rate, 0.6, 1.6, DEFAULT_LIVE_VOICE_PREFS.rate),
@@ -124,6 +150,36 @@ export function resolveTts(choice: TtsChoice, caps: LiveVoiceCapabilities): TtsE
 
 const DEFAULT_VOICE: Partial<Record<LiveTtsEngineId, string>> = { kokoro: 'pf_dora', chatterbox: 'default', openai: 'coral' }
 
+export function chooseDefaultOpenRouterModel(
+  models: readonly LiveVoiceModel[],
+  preferredModelId?: string | null,
+): LiveVoiceModel | null {
+  if (preferredModelId && !(preferredModelId in LEGACY_ENGLISH_ONLY_OPENROUTER_MODELS)) {
+    const preferred = models.find((item) => item.id === preferredModelId)
+    if (preferred) return preferred
+  }
+  for (const candidateId of PREFERRED_OPENROUTER_TTS_MODELS) {
+    const match = models.find((item) => item.id === candidateId)
+    if (match) return match
+  }
+  const nonEnglishOnly = models.find((item) => !(item.id in LEGACY_ENGLISH_ONLY_OPENROUTER_MODELS))
+  return nonEnglishOnly ?? models[0] ?? null
+}
+
+export function chooseDefaultVoiceForModel(engine: LiveTtsEngineId, voices: readonly string[]): string {
+  const fallback = DEFAULT_VOICE[engine]
+  if (fallback && (voices.length === 0 || voices.includes(fallback))) {
+    return fallback
+  }
+  const ptMatch = voices.find((v) => PORTUGUESE_VOICE.test(v))
+  if (ptMatch) return ptMatch
+  for (const preferred of ['sarah', 'aria', 'coral', 'nova', 'brian']) {
+    const match = voices.find((v) => v.toLowerCase() === preferred)
+    if (match) return match
+  }
+  return sortVoicesForPortuguese(voices)[0] ?? ''
+}
+
 /** The model and voice an engine will use: the person's pick when it still exists, a sensible default otherwise. */
 export function ttsSelection(
   prefs: LiveVoicePrefs,
@@ -131,20 +187,26 @@ export function ttsSelection(
   engine: LiveTtsEngineId,
 ): { model: LiveVoiceModel | null; modelId: string; voice: string } {
   const status = caps.tts[engine]
-  const wanted = prefs.ttsModels[engine]
-  const model = status.models.find((item) => item.id === wanted)
-    ?? status.models.find((item) => item.id === status.modelId)
-    ?? status.models[0]
-    ?? null
-  const modelId = model?.id ?? wanted ?? status.modelId ?? ''
+  const rawWanted = prefs.ttsModels[engine]
+  const wanted =
+    engine === 'openrouter' && rawWanted && LEGACY_ENGLISH_ONLY_OPENROUTER_MODELS[rawWanted]
+      ? LEGACY_ENGLISH_ONLY_OPENROUTER_MODELS[rawWanted]
+      : rawWanted
+  const defaultModel =
+    engine === 'openrouter'
+      ? chooseDefaultOpenRouterModel(status.models, status.modelId)
+      : status.models.find((item) => item.id === status.modelId) ?? status.models[0] ?? null
+  const model = status.models.find((item) => item.id === wanted) ?? defaultModel
+  const fallbackStatusModelId =
+    engine === 'openrouter' && status.modelId && LEGACY_ENGLISH_ONLY_OPENROUTER_MODELS[status.modelId]
+      ? LEGACY_ENGLISH_ONLY_OPENROUTER_MODELS[status.modelId]
+      : status.modelId
+  const modelId = model?.id ?? wanted ?? fallbackStatusModelId ?? ''
   const voices = model?.voices.length ? model.voices : status.voices
   const chosen = prefs.ttsVoices[`${engine}:${modelId}`]
-  const fallback = DEFAULT_VOICE[engine]
   const voice = chosen && (voices.length === 0 || voices.includes(chosen))
     ? chosen
-    : fallback && (voices.length === 0 || voices.includes(fallback))
-      ? fallback
-      : sortVoicesForPortuguese(voices)[0] ?? ''
+    : chooseDefaultVoiceForModel(engine, voices)
   return { model, modelId, voice }
 }
 

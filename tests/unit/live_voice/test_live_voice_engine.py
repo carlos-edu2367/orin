@@ -576,13 +576,7 @@ def test_websocket_red_team_malformed_inputs_echo_guard_and_buffer_cap() -> None
             }
         )
         c0 = ws.receive_json()
-        c1 = ws.receive_json()
-        c2 = ws.receive_json()
-        assert [c0["clean_text"], c1["clean_text"], c2["clean_text"]] == [
-            "Olá",
-            "meu nome é Orin",
-            "posso te auxiliar com várias coisas",
-        ]
+        assert 'posso te auxiliar' in c0['clean_text']
 
         # Microfone capta eco da fala recente do Orin -> vad.echo_discarded
         ws.send_json(
@@ -756,3 +750,160 @@ def test_websocket_speak_text_splits_long_text_and_pipelines_without_blocking_ba
         pong = ws.receive_json()
         assert pong["type"] == "pong"
         assert pong["audio_epoch"] == 2
+
+
+def test_split_realtime_tts_clauses_merges_short_cognates_and_avoids_micro_fragments() -> None:
+    from agentos.live_voice.session import split_realtime_tts_clauses
+
+    assert split_realtime_tts_clauses("Pronto! Vou te explicar agora.") == [
+        "Pronto! Vou te explicar agora."
+    ]
+    assert split_realtime_tts_clauses("Claro, vamos ver isso.") == [
+        "Claro, vamos ver isso."
+    ]
+    assert split_realtime_tts_clauses("Certo. Já resolvi o problema para você hoje.") == [
+        "Certo. Já resolvi o problema para você hoje."
+    ]
+
+    long_with_short_intro = (
+        "Pronto! A primeira frase do Orin explica como o motor de voz funciona com baixíssima latência no Brasil. "
+        "A segunda frase demonstra que o sintetizador divide textos longos e pré-carrega duas partes em paralelo."
+    )
+    clauses = split_realtime_tts_clauses(long_with_short_intro, max_chars=120)
+    assert len(clauses) == 2
+    assert clauses[0].startswith("Pronto! A primeira frase")
+    assert all(len(c) <= 120 for c in clauses)
+    assert all(len(c) >= 38 for c in clauses)
+
+
+def test_openrouter_default_model_and_voice_selection_prefers_multilingual_ptbr(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    import httpx
+    from agentos.live_voice.engines import CloudCredential, OpenRouterVoiceCatalog
+    from agentos.live_voice.local_runtime import LocalEngineRuntime
+    from agentos.live_voice import session as session_mod
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        "id": "elevenlabs/eleven-flash-v2",
+                        "name": "ElevenLabs: Eleven Flash v2",
+                        "supported_voices": ["george", "adam"],
+                    },
+                    {
+                        "id": "elevenlabs/eleven-multilingual-v2",
+                        "name": "ElevenLabs: Eleven Multilingual v2",
+                        "supported_voices": ["george", "sarah", "adam"],
+                    },
+                ]
+            },
+        )
+
+    catalog = OpenRouterVoiceCatalog(
+        base_url="https://openrouter.test/api/v1",
+        transport=httpx.MockTransport(handler),
+    )
+    monkeypatch.setattr(
+        session_mod,
+        "resolve_cloud_credential",
+        lambda _s, _u, prov: CloudCredential("openrouter", "https://openrouter.test/api/v1", "sk-or")
+        if prov == "openrouter"
+        else None,
+    )
+    caps = session_mod._voice_capabilities(
+        VoiceHardwareGovernor(),
+        None,
+        "u1",
+        LocalEngineRuntime(root=tmp_path),
+        catalog,
+    )
+    assert caps["tts"]["openrouter"]["model_id"] == "elevenlabs/eleven-multilingual-v2"
+
+    sess = session_mod.LiveVoiceSession(conversation_id="c1")
+    sess.update_config(
+        {
+            "tts_provider": "openrouter",
+            "tts_model": "elevenlabs/eleven-flash-v2",
+            "voice_id": "orin-default-ptbr",
+            "language": "pt-BR",
+        }
+    )
+    resolved_model, resolved_voice = session_mod._resolve_openrouter_model_and_voice(sess, catalog)
+    assert resolved_model in {"elevenlabs/eleven-flash-v2.5", "elevenlabs/eleven-multilingual-v2"}
+    sess.update_config({"tts_model": "elevenlabs/eleven-multilingual-v2", "voice_id": "nonexistent"})
+    resolved_model2, resolved_voice2 = session_mod._resolve_openrouter_model_and_voice(sess, catalog)
+    assert resolved_model2 == "elevenlabs/eleven-multilingual-v2"
+    assert resolved_voice2 == "sarah"
+
+
+def test_websocket_sequential_speak_text_messages_preserve_fifo_order_and_previous_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import time as _time
+    from types import SimpleNamespace
+    from agentos.live_voice.engines import CloudCredential
+    from agentos.live_voice import session as session_mod
+
+    seen_calls: list[dict[str, Any]] = []
+
+    def fake_synthesize_openai_speech(
+        credential: CloudCredential,
+        text: str,
+        *,
+        model_id: str = "gpt-4o-mini-tts",
+        voice: str = "coral",
+        speed: float = 1.0,
+        language: str = "pt-BR",
+        instructions: str | None = None,
+        previous_text: str | None = None,
+        transport: Any = None,
+    ) -> bytes:
+        seen_calls.append({"text": text, "previous_text": previous_text})
+        # First message is slower than second message; sequential pipeline lock must keep FIFO order!
+        if "Primeira mensagem" in text:
+            _time.sleep(0.08)
+        else:
+            _time.sleep(0.01)
+        return b"\x01\x00" * 1200
+
+    monkeypatch.setattr(session_mod, "synthesize_openai_speech", fake_synthesize_openai_speech)
+    monkeypatch.setattr(
+        session_mod,
+        "resolve_cloud_credential",
+        lambda _s, _u, _p: CloudCredential("openai", "https://api.openai.test/v1", "sk-test"),
+    )
+
+    app = FastAPI()
+    register_live_voice_routes(
+        app,
+        services=None,
+        principal_for=lambda _r, **_k: SimpleNamespace(user_id="u1"),
+    )
+    client = TestClient(app)
+
+    with client.websocket_connect("/v1/conversations/conv_seq_order/live") as ws:
+        ws.receive_json()  # session.ready
+        ws.send_json({"type": "config", "tts_provider": "openai", "tts_model": "gpt-4o-mini-tts"})
+        assert ws.receive_json()["type"] == "config.updated"
+
+        msg1 = "Primeira mensagem completa para testar a fila sequencial de voz."
+        msg2 = "Segunda mensagem enviada imediatamente após a primeira no socket."
+        ws.send_json({"type": "speak_text", "text": msg1})
+        ws.send_json({"type": "speak_text", "text": msg2})
+
+        c0 = ws.receive_json()
+        c1 = ws.receive_json()
+        assert c0["type"] == "tts.chunk"
+        assert c1["type"] == "tts.chunk"
+        assert c0["clean_text"] == msg1
+        assert c1["clean_text"] == msg2
+        assert c0["chunk_seq"] == 0
+        assert c1["chunk_seq"] == 1
+        assert len(seen_calls) == 2
+        assert seen_calls[0]["text"] == msg1
+        assert seen_calls[1]["text"] == msg2
+        assert seen_calls[1]["previous_text"] == msg1

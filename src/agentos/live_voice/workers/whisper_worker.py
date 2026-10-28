@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from _protocol import pcm16_from_base64, serve
+from _protocol import expose_windows_dll_directories, pcm16_from_base64, serve
 
 MODEL_ALIASES = {
     "faster-whisper-large-v3-turbo": "large-v3-turbo",
@@ -17,20 +17,22 @@ _models: dict[str, Any] = {}
 
 def _expose_cuda_libraries() -> None:
     """The cuBLAS/cuDNN wheels keep their DLLs under site-packages/nvidia/*/bin (Windows) or lib (Linux)."""
+    expose_windows_dll_directories()
     for entry in sys.path:
         nvidia = Path(entry) / "nvidia"
         if not nvidia.is_dir():
             continue
         for lib_dir in [*nvidia.glob("*/bin"), *nvidia.glob("*/lib")]:
-            if os.name == "nt" and hasattr(os, "add_dll_directory"):
-                try:
-                    os.add_dll_directory(str(lib_dir))
-                except OSError:
-                    pass
-            os.environ["PATH"] = f"{lib_dir}{os.pathsep}{os.environ.get('PATH', '')}"
+            current_path = os.environ.get("PATH", "")
+            if str(lib_dir) not in current_path.split(os.pathsep):
+                os.environ["PATH"] = f"{lib_dir}{os.pathsep}{current_path}" if current_path else str(lib_dir)
+
+
+_expose_cuda_libraries()
 
 
 def _model(model_id: str) -> tuple[Any, str]:
+    _expose_cuda_libraries()
     import ctranslate2
     from faster_whisper import WhisperModel
 
