@@ -42,7 +42,11 @@ const TWO_WORD_PREFIXES: ReadonlyArray<readonly [string, string]> = [
 
 const WAKE_VARIANTS_1_TOKEN = new Set([
   'orin',
+  'orinz',
+  'orins',
   'orim',
+  'orimz',
+  'orims',
   'oryn',
   'oring',
   'ourin',
@@ -126,6 +130,7 @@ export function phoneticSkeletonPtBr(word: string): string {
   let w = stripAccentsLower(word).replace(/[^a-z]/g, '')
   if (!w) return ''
   w = w.replace(/^h+/, '')
+  w = w.replace(/(?<=[nm])[sz]+$/, '')
   for (const prefix of ['our', 'aur', 'or', 'ur', 'olh', 'ol']) {
     if (w.startsWith(prefix)) {
       w = 'or' + w.slice(prefix.length)
@@ -166,16 +171,31 @@ function tokenizeWithSpans(text: string): TokenSpan[] {
   return spans
 }
 
-function cleanRemainder(text: string, cutIndex: number): string {
-  return text
+function cleanRemainder(
+  text: string,
+  cutIndex: number,
+  customNames?: ReadonlyArray<string>,
+  depth = 0,
+): string {
+  let cleaned = text
     .slice(cutIndex)
     .replace(/^[\s,.:;!?—–\-]+/, '')
     .trim()
+  if (depth < 2 && cleaned) {
+    const nested = matchWakeWord(cleaned, customNames, depth + 1)
+    if (nested.matched) {
+      cleaned = nested.commandRemainder
+    }
+  }
+  const normRem = stripAccentsLower(cleaned.replace(/[^\p{L}\p{N}\s]/gu, '')).trim()
+  if (VOCATIVE_PREFIXES.has(normRem)) return ''
+  return cleaned
 }
 
 export function matchWakeWord(
   transcript: string,
   customNames?: ReadonlyArray<string>,
+  depth = 0,
 ): WakeWordMatch {
   const noMatch: WakeWordMatch = {
     matched: false,
@@ -230,7 +250,7 @@ export function matchWakeWord(
       return {
         matched: true,
         wakeVariant: `${candidate.raw} ${spans[idx + 1].raw}`,
-        commandRemainder: cleanRemainder(transcript, spans[idx + 1].end),
+        commandRemainder: cleanRemainder(transcript, spans[idx + 1].end, customNames, depth),
         confidence: 0.96,
       }
     }
@@ -239,7 +259,7 @@ export function matchWakeWord(
       return {
         matched: true,
         wakeVariant: `${candidate.raw} ${spans[idx + 1].raw}`,
-        commandRemainder: cleanRemainder(transcript, spans[idx + 1].end),
+        commandRemainder: cleanRemainder(transcript, spans[idx + 1].end, customNames, depth),
         confidence: pairConf,
       }
     }
@@ -249,7 +269,7 @@ export function matchWakeWord(
     return {
       matched: true,
       wakeVariant: candidate.raw,
-      commandRemainder: cleanRemainder(transcript, candidate.end),
+      commandRemainder: cleanRemainder(transcript, candidate.end, customNames, depth),
       confidence: 0.98,
     }
   }
@@ -259,7 +279,7 @@ export function matchWakeWord(
     return {
       matched: true,
       wakeVariant: candidate.raw,
-      commandRemainder: cleanRemainder(transcript, candidate.end),
+      commandRemainder: cleanRemainder(transcript, candidate.end, customNames, depth),
       confidence: conf,
     }
   }
@@ -268,7 +288,7 @@ export function matchWakeWord(
     return {
       matched: true,
       wakeVariant: candidate.raw,
-      commandRemainder: cleanRemainder(transcript, candidate.end),
+      commandRemainder: cleanRemainder(transcript, candidate.end, customNames, depth),
       confidence: 0.82,
     }
   }

@@ -2509,6 +2509,9 @@ describe('10. Wake Word "Orin" Multissotaque e Ativação Automática do Orin Fr
       'Olá Urin',
       'Ô Olin',
       'Bom dia Orin',
+      'Oi Orinz.',
+      'Ei Orin, ei Orin.',
+      'Orin, ô Orin.',
     ];
 
     for (const phrase of positiveVariants) {
@@ -2679,10 +2682,55 @@ describe('10. Wake Word "Orin" Multissotaque e Ativação Automática do Orin Fr
         },
       ]);
     } finally {
+      checkWakeWordSpy.mockRestore();
       window.removeEventListener('orin:open-friend-live', onOpenFriendLive);
       delete window.orinDesktop;
       setLiveVoiceStageOpen(false);
     }
+  });
+
+  it('10.4 checkWakeWord envia custom_wake_words no payload e interpreta tanto detected/matched_variant quanto matched/wake_variant', async () => {
+    const rawBackendPayload = {
+      detected: true,
+      matched_variant: 'orinz',
+      command_remainder: '',
+      confidence: 0.92,
+      transcript: 'Oi Orinz.',
+    };
+    const requestMock = vi.fn().mockImplementation(async (opts: { parse?: (v: unknown) => unknown }) =>
+      opts.parse ? opts.parse(rawBackendPayload) : rawBackendPayload,
+    );
+    const fakeClient = {
+      request: requestMock,
+      createMutationIntent: () => ({ idempotencyKey: 'k-wake-check' }),
+    } as unknown as ApiClient;
+
+    const result = await LiveVoiceApi.checkWakeWord(fakeClient, {
+      pcmBase64: 'AAAA',
+      sampleRate: 16000,
+      sttProvider: 'auto',
+      customNames: ['Jarvis'],
+    });
+
+    expect(requestMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        path: '/v1/live-voice/wake-check',
+        method: 'POST',
+        body: expect.objectContaining({
+          pcm_base64: 'AAAA',
+          sample_rate: 16000,
+          stt_provider: 'auto',
+          custom_wake_words: ['Jarvis'],
+        }),
+      }),
+    );
+    expect(result).toEqual({
+      matched: true,
+      wake_variant: 'orinz',
+      command_remainder: '',
+      confidence: 0.92,
+      transcript: 'Oi Orinz.',
+    });
   });
 });
 

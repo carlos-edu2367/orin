@@ -17,9 +17,7 @@ import unicodedata
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-DEFAULT_WAKE_PROMPT_HINT = (
-    "Orin. Oi Orin, ei Orin, fala Orin, olá Orin, hey Orin, ok Orin, ô Orin."
-)
+DEFAULT_WAKE_PROMPT_HINT = "Assistente Orin. Oi Orin."
 
 # Multi-word and single-word vocative greetings that commonly precede the wake word.
 WAKE_GREETING_MULTIWORD: tuple[str, ...] = (
@@ -57,7 +55,11 @@ WAKE_GREETING_SINGLE: frozenset[str] = frozenset(
 ORIN_SINGLE_TOKEN_VARIANTS: frozenset[str] = frozenset(
     {
         "orin",
+        "orinz",
+        "orins",
         "orim",
+        "orimz",
+        "orims",
         "oryn",
         "orinn",
         "orrin",
@@ -174,11 +176,13 @@ class WakeWordMatch:
     def to_dict(self) -> dict[str, object]:
         return {
             "detected": self.detected,
+            "matched": self.detected,
             "transcript": self.transcript,
             "wake_phrase": self.wake_phrase,
             "command_remainder": self.command_remainder,
             "confidence": round(float(self.confidence), 3),
             "matched_variant": self.matched_variant,
+            "wake_variant": self.matched_variant,
         }
 
 
@@ -224,6 +228,8 @@ def phonetic_skeleton_ptbr(word: str) -> str:
     w = re.sub(r"(.)\1+", r"\1", w)
     # Unify intervocalic liquid/palatal/rhotic substitutions ("olhin" -> "orin", "olin" -> "orin")
     w = re.sub(r"^o(?:lh|l)(?=[iey])", "or", w)
+    # Strip trailing sibilant noise often added by STT ("orinz", "orins", "orimz")
+    w = re.sub(r"(?<=[nm])[sz]+$", "", w)
     # Unify nasal coda ("-im", "-in", "-em", "-en", "-yn", "-ing", "-inh", "-ion") -> "in"
     w = re.sub(r"(?:ing|inh|ion|im|in|em|en|yn|an)$", "in", w)
 
@@ -260,10 +266,23 @@ def _tokenize_with_spans(raw: str) -> list[_TokenSpan]:
     return spans
 
 
-def _clean_remainder(raw: str, cut_index: int) -> str:
+def _clean_remainder(raw: str, cut_index: int, custom_names: Sequence[str] | None = None) -> str:
     tail = raw[cut_index:]
     # Strip leading punctuation/separators after the wake phrase (",", "!", ":", ".", "-", "—", "?")
-    return re.sub(r"^[\s,.;:!?—–\-]+", "", tail).strip()
+    cleaned = re.sub(r"^[\s,.;:!?—–\-]+", "", tail).strip()
+    # If Whisper echoed the wake phrase twice (e.g. "Ei Orin, ei Orin." or "Orin, ô Orin."), strip the echo.
+    for _ in range(2):
+        if not cleaned:
+            break
+        nested = _match_once(cleaned, custom_names=custom_names)
+        if not nested.detected:
+            break
+        cleaned = nested.command_remainder
+    # If the remainder is only a trailing punctuation mark or single greeting word ("oi.", "ei."), drop it.
+    norm_rem = _strip_accents(re.sub(r"[^\wÀ-ÿ\s]", "", cleaned)).strip()
+    if norm_rem in WAKE_GREETING_SINGLE or norm_rem in WAKE_GREETING_MULTIWORD:
+        return ""
+    return cleaned
 
 
 def _match_custom_name_tokens(
@@ -283,14 +302,11 @@ def _match_custom_name_tokens(
     return None
 
 
-def match_wake_word(
+def _match_once(
     transcript: str,
     *,
     custom_names: Sequence[str] | None = None,
 ) -> WakeWordMatch:
-    """Evaluate whether `transcript` starts with the wake word 'Orin' (or a custom name),
-    tolerating regional PT-BR and international accents while rejecting everyday collisions.
-    """
     raw = (transcript or "").strip()
     if not raw:
         return WakeWordMatch(detected=False, transcript="")
@@ -327,7 +343,7 @@ def match_wake_word(
             consumed, matched_var, conf = custom_hit
             end_span = tokens[idx + consumed - 1].end
             wake_phrase = raw[:end_span].strip(" ,.;:!?—–-")
-            remainder = _clean_remainder(raw, end_span)
+            remainder = re.sub(r"^[\s,.;:!?—–\-]+", "", raw[end_span:]).strip()
             return WakeWordMatch(
                 detected=True,
                 transcript=raw,
@@ -343,7 +359,7 @@ def match_wake_word(
         if pair in ORIN_TWO_TOKEN_VARIANTS:
             end_span = tokens[idx + 1].end
             wake_phrase = raw[:end_span].strip(" ,.;:!?—–-")
-            remainder = _clean_remainder(raw, end_span)
+            remainder = re.sub(r"^[\s,.;:!?—–\-]+", "", raw[end_span:]).strip()
             return WakeWordMatch(
                 detected=True,
                 transcript=raw,
@@ -372,7 +388,7 @@ def match_wake_word(
     if confidence >= 0.80:
         end_span = tokens[idx].end
         wake_phrase = raw[:end_span].strip(" ,.;:!?—–-")
-        remainder = _clean_remainder(raw, end_span)
+        remainder = re.sub(r"^[\s,.;:!?—–\-]+", "", raw[end_span:]).strip()
         return WakeWordMatch(
             detected=True,
             transcript=raw,
@@ -383,6 +399,30 @@ def match_wake_word(
         )
 
     return WakeWordMatch(detected=False, transcript=raw)
+
+
+def match_wake_word(
+    transcript: str,
+    *,
+    custom_names: Sequence[str] | None = None,
+) -> WakeWordMatch:
+    """Evaluate whether `transcript` starts with the wake word 'Orin' (or a custom name),
+    tolerating regional PT-BR and international accents while rejecting everyday collisions.
+    """
+    first = _match_once(transcript, custom_names=custom_names)
+    if not first.detected or not first.command_remainder:
+        return first
+    cleaned_rem = _clean_remainder(first.command_remainder, 0, custom_names=custom_names)
+    if cleaned_rem == first.command_remainder:
+        return first
+    return WakeWordMatch(
+        detected=first.detected,
+        transcript=first.transcript,
+        wake_phrase=first.wake_phrase,
+        command_remainder=cleaned_rem,
+        confidence=first.confidence,
+        matched_variant=first.matched_variant,
+    )
 
 
 __all__ = [

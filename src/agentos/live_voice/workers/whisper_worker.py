@@ -70,11 +70,13 @@ def transcribe(request: dict[str, Any]) -> dict[str, Any]:
         target = np.linspace(0.0, duration, int(duration * 16000), endpoint=False)
         audio = np.interp(target, np.linspace(0.0, duration, audio.size, endpoint=False), audio).astype(np.float32)
     prompt_hint = str(request.get("prompt_hint") or "").strip() or None
+    if prompt_hint and prompt_hint.startswith("Orin. Oi Orin"):
+        prompt_hint = "Assistente Orin. Oi Orin."
     segments, _info = model.transcribe(
         audio,
         language=str(request.get("language") or "pt").split("-")[0],
         beam_size=1,
-        vad_filter=True,
+        vad_filter=not bool(prompt_hint),
         condition_on_previous_text=False,
         initial_prompt=prompt_hint,
     )

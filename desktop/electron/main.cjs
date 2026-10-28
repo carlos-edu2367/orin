@@ -26,6 +26,12 @@ if (!app.requestSingleInstanceLock()) {
   app.quit()
 }
 
+try {
+  app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required')
+} catch {
+  // Ignore in test environments where commandLine may not be stubbed.
+}
+
 app.on('second-instance', () => showWindow())
 
 app.whenReady().then(async () => {

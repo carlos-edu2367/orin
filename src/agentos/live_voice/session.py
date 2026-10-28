@@ -807,7 +807,8 @@ class WakeCheckRequest(BaseModel):
     stt_provider: str | None = Field(default=None, max_length=64)
     stt_model: str | None = Field(default=None, max_length=160)
     language: str = Field(default="pt-BR", max_length=32)
-    custom_wake_words: list[str] | None = Field(default=None, max_length=5)
+    custom_wake_words: list[str] | None = Field(default=None, max_length=8)
+    custom_names: list[str] | None = Field(default=None, max_length=8)
 
 
 def register_live_voice_routes(
@@ -987,7 +988,8 @@ def register_live_voice_routes(
                 security.authorize(principal, action="conversation.list", resource_id=None, purpose="live_voice.wake_check")
             user_id = str(principal.user_id)
 
-        custom_words = [str(w).strip()[:40] for w in (payload.custom_wake_words or []) if str(w).strip()]
+        raw_custom = list(payload.custom_wake_words or []) + list(payload.custom_names or [])
+        custom_words = [str(w).strip()[:40] for w in raw_custom if str(w).strip()]
         hint_text = (payload.transcript_hint or "").strip()
         if hint_text:
             matched = match_wake_word(hint_text, custom_names=custom_words)

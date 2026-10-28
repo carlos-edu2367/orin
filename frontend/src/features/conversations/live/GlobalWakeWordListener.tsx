@@ -26,8 +26,9 @@ import {
 } from './wakeWord'
 
 const WAKE_COOLDOWN_MS = 2800
-const MIN_WAKE_FRAMES = Math.ceil(200 / LIVE_FRAME_MS)
-const MAX_WAKE_FRAMES = Math.ceil(3800 / LIVE_FRAME_MS)
+const MIN_WAKE_FRAMES = Math.ceil(160 / LIVE_FRAME_MS)
+const MAX_WAKE_FRAMES = Math.ceil(5800 / LIVE_FRAME_MS)
+const MIN_STANDBY_SENSITIVITY = 0.78
 
 export type OpenFriendLiveDetail = {
   conversationId: string
@@ -42,9 +43,24 @@ export function GlobalWakeWordListener({ client }: { client: ApiClient }) {
   const [companionName, setCompanionName] = useState<string>('Orin')
   const lastWakeAtRef = useRef<number>(0)
   const checkingRef = useRef<boolean>(false)
+  const vadRef = useRef<EnergyVad | null>(null)
+  const runtimeRef = useRef({
+    caps,
+    companionName,
+    prefs,
+  })
+  runtimeRef.current = {
+    caps,
+    companionName,
+    prefs,
+  }
 
   useEffect(() => onLiveVoicePrefsChange(setPrefs), [])
   useEffect(() => onLiveVoiceStageOpenChange(setStageOpen), [])
+
+  useEffect(() => {
+    vadRef.current?.setSensitivity(Math.max(prefs.sensitivity, MIN_STANDBY_SENSITIVITY))
+  }, [prefs.sensitivity])
 
   useEffect(() => {
     const controller = new AbortController()
@@ -138,15 +154,22 @@ export function GlobalWakeWordListener({ client }: { client: ApiClient }) {
     let browserRec: BrowserRecognition | null = null
 
     const browserSupported = browserRecognitionSupported()
-    const effectiveStt = resolveStt(prefs.stt, caps, browserSupported)
 
     const vad = new EnergyVad({
-      sensitivity: prefs.sensitivity,
-      endSilenceMs: 450,
+      sensitivity: Math.max(runtimeRef.current.prefs.sensitivity, MIN_STANDBY_SENSITIVITY),
+      endSilenceMs: 420,
       startSpeechMs: 64,
       preRollMs: 280,
-      maxUtteranceMs: 3800,
+      maxUtteranceMs: 5000,
     })
+    vadRef.current = vad
+
+    const releaseStandbyMic = () => {
+      micInstance?.close()
+      micInstance = null
+      browserRec?.stop()
+      browserRec = null
+    }
 
     const inspectSpeechFrames = async (frames: Int16Array[]) => {
       if (cancelled || checkingRef.current || isLiveVoiceStageOpen()) return
@@ -154,28 +177,39 @@ export function GlobalWakeWordListener({ client }: { client: ApiClient }) {
 
       checkingRef.current = true
       try {
+        const {
+          caps: currentCaps,
+          companionName: currentCompanionName,
+          prefs: currentPrefs,
+        } = runtimeRef.current
+        const effectiveStt = resolveStt(currentPrefs.stt, currentCaps, browserSupported)
         const sttProvider =
           effectiveStt && effectiveStt !== 'browser' ? effectiveStt : 'auto'
         const sttModel =
-          sttProvider !== 'auto' ? sttModelFor(prefs, caps, sttProvider) : null
+          sttProvider !== 'auto' ? sttModelFor(currentPrefs, currentCaps, sttProvider) : null
 
         const res = await checkWakeWord(client, {
           pcmBase64: pcm16ToBase64(frames),
           sampleRate: 16000,
           sttProvider,
           sttModel,
-          customNames: companionName !== 'Orin' ? [companionName] : [],
+          customNames: currentCompanionName !== 'Orin' ? [currentCompanionName] : [],
         })
         if (cancelled || isLiveVoiceStageOpen()) return
-        if (res.matched && res.confidence >= 0.78) {
-          await triggerWakeIntoFriendLive(res.command_remainder)
+        const localCheck = res.transcript
+          ? matchWakeWord(res.transcript, [currentCompanionName])
+          : null
+        if (res.matched && res.confidence >= 0.75) {
+          const remainder = localCheck?.matched
+            ? localCheck.commandRemainder
+            : res.command_remainder
+          releaseStandbyMic()
+          await triggerWakeIntoFriendLive(remainder)
           return
         }
-        if (res.transcript) {
-          const fallback = matchWakeWord(res.transcript, [companionName])
-          if (fallback.matched && fallback.confidence >= 0.78) {
-            await triggerWakeIntoFriendLive(fallback.commandRemainder)
-          }
+        if (localCheck && localCheck.matched && localCheck.confidence >= 0.75) {
+          releaseStandbyMic()
+          await triggerWakeIntoFriendLive(localCheck.commandRemainder)
         }
       } catch {
         // Ignore standby check errors so background loop stays silent and resilient.
@@ -186,7 +220,7 @@ export function GlobalWakeWordListener({ client }: { client: ApiClient }) {
 
     MicCapture.open({
       deviceId: prefs.micDeviceId,
-      headphoneMode: false,
+      headphoneMode: true,
       onFrame: (frame, rms) => {
         if (cancelled || isLiveVoiceStageOpen()) return
         const events = vad.process(frame, rms)
@@ -208,14 +242,20 @@ export function GlobalWakeWordListener({ client }: { client: ApiClient }) {
         // If mic permission is not granted yet or unavailable, standby waits quietly.
       })
 
-    if (effectiveStt === 'browser' && browserSupported) {
+    const initialStt = resolveStt(
+      runtimeRef.current.prefs.stt,
+      runtimeRef.current.caps,
+      browserSupported,
+    )
+    if (initialStt === 'browser' && browserSupported) {
       browserRec = new BrowserRecognition(
         {
           onInterim: () => undefined,
           onFinal: (text: string) => {
             if (cancelled || isLiveVoiceStageOpen()) return
-            const matched = matchWakeWord(text, [companionName])
-            if (matched.matched && matched.confidence >= 0.78) {
+            const matched = matchWakeWord(text, [runtimeRef.current.companionName])
+            if (matched.matched && matched.confidence >= 0.75) {
+              releaseStandbyMic()
               void triggerWakeIntoFriendLive(matched.commandRemainder)
             }
           },
@@ -228,16 +268,13 @@ export function GlobalWakeWordListener({ client }: { client: ApiClient }) {
 
     return () => {
       cancelled = true
-      micInstance?.close()
-      micInstance = null
-      browserRec?.stop()
-      browserRec = null
+      vadRef.current = null
+      releaseStandbyMic()
     }
   }, [
-    caps,
     client,
-    companionName,
-    prefs,
+    prefs.micDeviceId,
+    prefs.wakeWordEnabled,
     stageOpen,
     triggerWakeIntoFriendLive,
   ])

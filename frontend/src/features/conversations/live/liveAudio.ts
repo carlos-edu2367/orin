@@ -264,6 +264,7 @@ export class MicCapture {
   private sink: GainNode | null = null
   private pending: number[] = []
   private resampler: StreamingResampler
+  private removeInteractionResume: (() => void) | null = null
 
   private constructor(
     private readonly context: AudioContext,
@@ -306,7 +307,24 @@ export class MicCapture {
   }
 
   private async wire(): Promise<void> {
-    if (this.context.state === 'suspended') await this.context.resume().catch(() => {})
+    if (this.context.state === 'suspended') {
+      await this.context.resume().catch(() => {})
+    }
+    if (this.context.state === 'suspended' && typeof window !== 'undefined') {
+      const resumeOnGesture = () => {
+        if (!this.closed && this.context.state === 'suspended') {
+          void this.context.resume().catch(() => {})
+        }
+        this.removeInteractionResume?.()
+      }
+      window.addEventListener('pointerdown', resumeOnGesture, { once: true, passive: true })
+      window.addEventListener('keydown', resumeOnGesture, { once: true, passive: true })
+      this.removeInteractionResume = () => {
+        window.removeEventListener('pointerdown', resumeOnGesture)
+        window.removeEventListener('keydown', resumeOnGesture)
+        this.removeInteractionResume = null
+      }
+    }
     this.source = this.context.createMediaStreamSource(this.stream)
     // Processing nodes only run while connected to the destination; a muted
     // gain keeps the graph alive without playing the microphone back.
@@ -357,6 +375,7 @@ export class MicCapture {
     if (this.closed) return
     this.closed = true
     this.level = 0
+    this.removeInteractionResume?.()
     try {
       if (this.node && 'port' in this.node) this.node.port.onmessage = null
       this.node?.disconnect()

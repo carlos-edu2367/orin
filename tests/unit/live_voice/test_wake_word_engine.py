@@ -253,6 +253,21 @@ def test_whisper_worker_forwards_prompt_hint_to_faster_whisper(monkeypatch: pyte
     )
     assert res["text"] == "Oi Orin"
     assert captured_kwargs.get("initial_prompt") == "Orin. Oi Orin."
+    assert captured_kwargs.get("vad_filter") is False
+
+
+def test_match_wake_word_handles_orinz_and_strips_repeated_wake_echo_in_remainder() -> None:
+    res_z = match_wake_word("Oi Orinz.")
+    assert res_z.detected is True
+    assert res_z.command_remainder == ""
+
+    res_echo1 = match_wake_word("Ei Orin, ei Orin.")
+    assert res_echo1.detected is True
+    assert res_echo1.command_remainder == ""
+
+    res_echo2 = match_wake_word("Orin, ô Orin.")
+    assert res_echo2.detected is True
+    assert res_echo2.command_remainder == ""
 
 
 def test_wake_check_endpoint_evaluates_transcript_hint_and_pcm_audio(
@@ -311,11 +326,30 @@ def test_wake_check_endpoint_evaluates_transcript_hint_and_pcm_audio(
     assert r2.status_code == 200
     body2 = r2.json()
     assert body2["detected"] is True
+    assert body2["matched"] is True
+    assert body2["wake_variant"] == "orim"
     assert body2["transcript"] == "Ei Orim, abre o projeto"
     assert body2["command_remainder"] == "abre o projeto"
     assert len(captured_prompt_hints) == 1
     assert "Orin" in (captured_prompt_hints[0] or "")
     assert "Jarvis" in (captured_prompt_hints[0] or "")
+
+    # 2b. Via payload exato do frontend (com custom_names e stt_provider='auto')
+    r2b = client.post(
+        "/v1/live-voice/wake-check",
+        json={
+            "pcm_base64": short_pcm,
+            "sample_rate": 16000,
+            "stt_provider": "auto",
+            "stt_model": None,
+            "custom_names": ["Jarvis"],
+        },
+    )
+    assert r2b.status_code == 200
+    body2b = r2b.json()
+    assert body2b["matched"] is True
+    assert body2b["detected"] is True
+    assert body2b["command_remainder"] == "abre o projeto"
 
     # 3. Falso positivo rejeitado
     r3 = client.post(

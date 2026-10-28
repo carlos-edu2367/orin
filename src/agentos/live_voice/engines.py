@@ -267,7 +267,7 @@ class LocalWhisperEngine:
                 pcm16_to_float32(pcm_bytes, sample_rate),
                 language=(language or "pt").split("-")[0],
                 beam_size=1,
-                vad_filter=True,
+                vad_filter=not bool(prompt_hint),
                 condition_on_previous_text=False,
                 initial_prompt=prompt_hint or None,
             )

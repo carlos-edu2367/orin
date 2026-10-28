@@ -205,13 +205,20 @@ export function checkWakeWord(
       sample_rate: input.sampleRate ?? 16000,
       stt_provider: input.sttProvider ?? 'auto',
       stt_model: input.sttModel ?? null,
-      custom_names: input.customNames ?? [],
+      custom_wake_words: input.customNames ?? [],
     },
     parse: (value) => {
       const data = record(value)
+      const matched = data.matched === true || data.detected === true
+      const wakeVariant =
+        typeof data.wake_variant === 'string' && data.wake_variant
+          ? data.wake_variant
+          : typeof data.matched_variant === 'string'
+            ? data.matched_variant
+            : ''
       return {
-        matched: data.matched === true,
-        wake_variant: typeof data.wake_variant === 'string' ? data.wake_variant : '',
+        matched,
+        wake_variant: wakeVariant,
         command_remainder: typeof data.command_remainder === 'string' ? data.command_remainder : '',
         confidence: typeof data.confidence === 'number' ? data.confidence : 0,
         transcript: typeof data.transcript === 'string' ? data.transcript : '',
