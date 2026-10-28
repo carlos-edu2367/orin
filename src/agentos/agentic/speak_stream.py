@@ -22,6 +22,10 @@ class VocalMarker(str):
     """String representing an inline vocal marker (e.g. '[hmm]') that compares equal
     to both bracketed ('[hmm]') and unbracketed ('hmm') forms."""
 
+    @property
+    def marker(self) -> str:
+        return self.strip("[] \t\r\n").lower()
+
     def __eq__(self, other: object) -> bool:
         if isinstance(other, str):
             return self.strip("[] \t\r\n").lower() == other.strip("[] \t\r\n").lower()
@@ -34,17 +38,93 @@ class VocalMarker(str):
 KNOWN_VOCAL_MARKERS: frozenset[str] = frozenset(
     {
         "hmm",
+        "uh-huh",
+        "aham",
         "sigh",
+        "suspiro",
         "breath",
         "laugh",
         "chuckle",
+        "riso",
+        "risos",
+        "riso leve",
         "gasp",
         "pausa",
         "pause",
+        "pausa curta",
+        "pausa longa",
         "uhm",
         "ahn",
+        "clear_throat",
+        "tosse",
+        "pigam",
+        "expira",
+        "inspira",
     }
 )
+
+STAGE_DIRECTION_WORDS: frozenset[str] = frozenset(
+    {
+        "sorriso",
+        "silêncio",
+        "silencio",
+        "calmo",
+        "animado",
+        "suave",
+        "sério",
+        "serio",
+        "irônico",
+        "ironico",
+        "baixo",
+        "baixinho",
+        "alto",
+        "enfático",
+        "enfatico",
+        "gentil",
+        "empolgado",
+        "curioso",
+        "pensativo",
+    }
+)
+
+STANDALONE_GREETING_OPENERS: frozenset[str] = frozenset(
+    {
+        "olá",
+        "ola",
+        "oi",
+        "claro",
+        "pronto",
+        "opa",
+        "alô",
+        "alo",
+        "perfeito",
+        "certo",
+        "beleza",
+        "entendi",
+        "sim",
+        "não",
+        "nao",
+        "bom",
+        "olha",
+        "veja",
+        "fala",
+        "ei",
+    }
+)
+
+
+def _is_stage_direction(raw_inner: str) -> bool:
+    clean = raw_inner.strip()
+    if not clean:
+        return True
+    if " " in clean:
+        return True
+    lower = clean.lower()
+    if lower in STAGE_DIRECTION_WORDS:
+        return True
+    if len(lower) >= 5 and lower.endswith(("ando", "endo", "indo", "ondo")):
+        return True
+    return False
 
 
 @dataclass(frozen=True, slots=True)
@@ -482,8 +562,9 @@ class PTBRProsodicChunker:
     GEAR_1_SOFT_MAX_CHARS: int = 48
     GEAR_2_SOFT_MAX_CHARS: int = 95
     GEAR_1_MIN_CHARS: int = 2
-    GEAR_2_COMMA_MIN_CHARS: int = 12
-    GEAR_2_COMMA_MIN_WORDS: int = 3
+    GEAR_1_MIN_WORDS: int = 1
+    GEAR_2_COMMA_MIN_CHARS: int = 36
+    GEAR_2_COMMA_MIN_WORDS: int = 6
     GEAR_2_STRONG_MIN_CHARS: int = 3
 
     def __init__(
@@ -496,6 +577,7 @@ class PTBRProsodicChunker:
         self.block_index = block_index
         self._buffer: str = ""
         self._chunk_index: int = 0
+        self._first_chunk_words: int = 0
         self._pending_markers: list[str] = []
 
     def reset_for_new_block(self, block_index: int | None = None) -> None:
@@ -505,6 +587,7 @@ class PTBRProsodicChunker:
             self.block_index += 1
         self._buffer = ""
         self._chunk_index = 0
+        self._first_chunk_words = 0
         self._pending_markers.clear()
 
     def add_inline_marker(self, marker: str) -> None:
@@ -543,8 +626,8 @@ class PTBRProsodicChunker:
         # Siglas com pontos como E.U.A. ou S.A.
         if re.match(r"^(?:[a-zà-ÿ]\.){2,}$", token):
             return True
-        # Versão como v1.
-        if re.match(r"^v\d+\.$", token):
+        # Versão como v1. ou numeração de lista como 1. / 2.
+        if re.match(r"^v\d+\.$", token) or re.match(r"^\d{1,3}\.$", token):
             return True
         return False
 
@@ -613,6 +696,9 @@ class PTBRProsodicChunker:
 
         markers = tuple(self._pending_markers)
         self._pending_markers.clear()
+
+        if self._chunk_index == 0:
+            self._first_chunk_words = len(self._extract_words(sanitized_clean))
 
         chunk = ProsodicChunk(
             chunk_index=self._chunk_index,
@@ -712,15 +798,23 @@ class PTBRProsodicChunker:
                         if len(candidate_clean) < self.GEAR_1_MIN_CHARS or len(words) < 1:
                             i = p_end
                             continue
+                        if (
+                            boundary_kind == BoundaryKind.COMMA
+                            and len(words) == 1
+                            and words[0].lower() not in STANDALONE_GREETING_OPENERS
+                        ):
+                            i = p_end
+                            continue
                     else:
                         # Marcha 2 (Cruzeiro Prosódico)
                         if boundary_kind == BoundaryKind.COMMA:
-                            if (
-                                len(candidate_clean) < self.GEAR_2_COMMA_MIN_CHARS
-                                and len(words) < self.GEAR_2_COMMA_MIN_WORDS
-                            ):
-                                i = p_end
-                                continue
+                            if not (self._chunk_index == 1 and self._first_chunk_words == 1 and len(words) >= 4):
+                                if (
+                                    len(candidate_clean) < self.GEAR_2_COMMA_MIN_CHARS
+                                    and len(words) < self.GEAR_2_COMMA_MIN_WORDS
+                                ):
+                                    i = p_end
+                                    continue
                         else:
                             if len(candidate_clean) < self.GEAR_2_STRONG_MIN_CHARS:
                                 i = p_end
@@ -831,7 +925,7 @@ class PTBRProsodicChunker:
 
 _OPEN_SPEAK_FULL_RE = re.compile(r"^<\s*speak(?:\s[^>]*)?>$", re.IGNORECASE)
 _CLOSE_SPEAK_FULL_RE = re.compile(r"^<\s*/\s*speak\s*>$", re.IGNORECASE)
-_INLINE_MARKER_FULL_RE = re.compile(r"^\[\s*([a-zA-ZÀ-ÿ_]+)\s*\]$")
+_INLINE_MARKER_FULL_RE = re.compile(r"^\[\s*([a-zA-ZÀ-ÿ0-9_-]+(?:\s+[a-zA-ZÀ-ÿ0-9_-]+)*)\s*\]$")
 
 
 def _is_potential_speak_tag_prefix(buf: str) -> bool:
@@ -869,36 +963,57 @@ def _is_potential_speak_tag_prefix(buf: str) -> bool:
 
 
 def _is_potential_inline_marker_prefix(buf: str) -> bool:
-    """Retorna True enquanto `buf` (iniciando com `[`) puder ser um marcador vocal inline como `[hmm]`."""
+    """Retorna True enquanto `buf` (iniciando com `[`) puder ser um marcador vocal inline,
+    rubrica de direção de cena ou colchete de ênfase dentro de `<speak>`."""
     if not buf.startswith("["):
         return False
-    if len(buf) > 16 or "\n" in buf:
+    if len(buf) > 40 or "\n" in buf:
         return False
     if "]" in buf:
-        m = _INLINE_MARKER_FULL_RE.match(buf)
-        return bool(m and m.group(1).lower() in KNOWN_VOCAL_MARKERS)
+        return bool(_INLINE_MARKER_FULL_RE.match(buf))
 
-    inner = buf[1:].strip().lower()
+    inner = buf[1:]
     if not inner:
         return True
-    return any(marker.startswith(inner) for marker in KNOWN_VOCAL_MARKERS)
+    return bool(re.match(r"^[a-zA-ZÀ-ÿ0-9_\-\s]+$", inner))
+
+
+def _clean_streaming_fallback_text(text: str) -> str:
+    if not text:
+        return ""
+    s = re.sub(r"(?m)^\s*#{1,6}\s+", "", text)
+    s = re.sub(r"(?m)^\s*[-*•]\s+", "", s)
+    s = s.replace("**", "").replace("__", "")
+    s = re.sub(r"(?<!`)`(?!`)", "", s)
+    return s
 
 
 class SpeakStreamParser:
     """FSM Token-a-Token Tolerante a Falhas para extração de `<speak>...</speak>`,
-    marcadores vocais inline (`[hmm]`, `[sigh]`, `[breath]`, `[laugh]`) e
+    marcadores vocais inline (`[hmm]`, `[sigh]`, `[breath]`, `[laugh]`, `[riso leve]`, `[suspiro]`) e
     acionamento incremental do `PTBRProsodicChunker`.
     """
 
-    def __init__(self, normalizer: PTBRTextNormalizer | None = None) -> None:
+    REALTIME_FALLBACK_CHAR_THRESHOLD: int = 60
+
+    def __init__(
+        self,
+        normalizer: PTBRTextNormalizer | None = None,
+        *,
+        live_voice_enabled: bool = False,
+    ) -> None:
         self.normalizer = normalizer or PTBRTextNormalizer()
         self.chunker = PTBRProsodicChunker(normalizer=self.normalizer, block_index=0)
+        self._live_voice_enabled: bool = bool(live_voice_enabled)
         self._in_speak: bool = False
+        self._auto_speak_fallback: bool = False
         self._tag_buffer: str = ""
         self._marker_buffer: str = ""
         self._speak_blocks_count: int = 0
         self._total_chunks_emitted: int = 0
         self._accumulated_visual_text: list[str] = []
+        self._spoken_text_accum: list[str] = []
+        self._after_last_speak_text: list[str] = []
 
     @property
     def in_speak(self) -> bool:
@@ -920,32 +1035,73 @@ class SpeakStreamParser:
             if speak_chars:
                 s_delta = "".join(speak_chars)
                 speak_chars.clear()
-                result.speak_delta += s_delta
-                new_chunks = self.chunker.feed(s_delta)
-                if new_chunks:
-                    result.chunks.extend(new_chunks)
-                    self._total_chunks_emitted += len(new_chunks)
+                if self._auto_speak_fallback:
+                    if "```" in s_delta or "```" in (self.chunker._buffer + s_delta):
+                        combined_buf = self.chunker._buffer + s_delta
+                        before_fence = combined_buf.split("```", 1)[0]
+                        self.chunker._buffer = ""
+                        cleaned_before = _clean_streaming_fallback_text(before_fence).rstrip("`")
+                        if cleaned_before:
+                            self._spoken_text_accum.append(cleaned_before)
+                            result.speak_delta += cleaned_before
+                            new_chunks = self.chunker.feed(cleaned_before)
+                            if new_chunks:
+                                result.chunks.extend(new_chunks)
+                                self._total_chunks_emitted += len(new_chunks)
+                        flushed = self.chunker.flush()
+                        if flushed:
+                            result.chunks.extend(flushed)
+                            self._total_chunks_emitted += len(flushed)
+                        self._in_speak = False
+                        self._auto_speak_fallback = False
+                        result.speak_closed = True
+                        return
+                    s_delta = _clean_streaming_fallback_text(s_delta)
+                if s_delta:
+                    self._spoken_text_accum.append(s_delta)
+                    result.speak_delta += s_delta
+                    new_chunks = self.chunker.feed(s_delta)
+                    if new_chunks:
+                        result.chunks.extend(new_chunks)
+                        self._total_chunks_emitted += len(new_chunks)
 
         for ch in delta:
-            # 1. Se estamos acumulando um possível marcador inline `[hmm]`
+            # 1. Se estamos acumulando um possível marcador inline `[hmm]`, rubrica `[sorrindo]` ou `[E]i`
             if self._marker_buffer:
                 candidate_marker = self._marker_buffer + ch
                 if _is_potential_inline_marker_prefix(candidate_marker):
                     self._marker_buffer = candidate_marker
                     if self._marker_buffer.endswith("]"):
-                        marker_val = VocalMarker(self._marker_buffer.lower())
-                        result.inline_markers.append(marker_val)
-                        self.chunker.add_inline_marker(marker_val)
+                        m = _INLINE_MARKER_FULL_RE.match(self._marker_buffer)
                         self._marker_buffer = ""
+                        if m:
+                            raw_inner = re.sub(r"\s+", " ", m.group(1).strip())
+                            lower_inner = raw_inner.lower()
+                            if lower_inner in KNOWN_VOCAL_MARKERS:
+                                marker_val = VocalMarker(f"[{lower_inner}]")
+                                result.inline_markers.append(marker_val)
+                                self.chunker.add_inline_marker(marker_val)
+                            elif _is_stage_direction(raw_inner):
+                                # Rubrica de direção de cena (ex.: [sorrindo], [em tom amigável]) -> removida da fala e do visual
+                                pass
+                            else:
+                                # Colchete de ênfase em letra/palavra (ex.: [E]i!, [alô]?) -> remove apenas '[' e ']'
+                                visual_chars.append(raw_inner)
+                                if self._in_speak:
+                                    speak_chars.append(raw_inner)
+                                elif self._speak_blocks_count > 0:
+                                    self._after_last_speak_text.append(raw_inner)
                     continue
                 else:
-                    # Não era um marcador vocal conhecido; devolve o prefixo anterior ao fluxo
+                    # Não era um marcador válido; devolve o prefixo anterior ao fluxo
                     # e deixa `ch` ser reavaliado abaixo (ex.: se `ch == '<'` em `[h</speak>`).
                     fallback = self._marker_buffer
                     self._marker_buffer = ""
                     visual_chars.append(fallback)
                     if self._in_speak:
                         speak_chars.append(fallback)
+                    elif self._speak_blocks_count > 0:
+                        self._after_last_speak_text.append(fallback)
 
             # 2. Se estamos acumulando uma possível tag `<speak>` ou `</speak>`
             if self._tag_buffer:
@@ -959,9 +1115,15 @@ class SpeakStreamParser:
                             if not self._in_speak:
                                 _flush_speak_chars()
                                 self._in_speak = True
+                                self._auto_speak_fallback = False
+                                self._after_last_speak_text.clear()
                                 result.speak_opened = True
                                 self.chunker.reset_for_new_block(self._speak_blocks_count)
                                 self._speak_blocks_count += 1
+                            elif self._auto_speak_fallback:
+                                _flush_speak_chars()
+                                self._auto_speak_fallback = False
+                                self._after_last_speak_text.clear()
                             # Tags <speak> aninhadas redundantes são ignoradas silenciosamente
                         elif _CLOSE_SPEAK_FULL_RE.match(tag_str):
                             if self._in_speak:
@@ -971,6 +1133,7 @@ class SpeakStreamParser:
                                     result.chunks.extend(flushed)
                                     self._total_chunks_emitted += len(flushed)
                                 self._in_speak = False
+                                self._auto_speak_fallback = False
                                 result.speak_closed = True
                             # Tags </speak> órfãs/redundantes são ignoradas silenciosamente
                     continue
@@ -981,6 +1144,8 @@ class SpeakStreamParser:
                     visual_chars.append(fallback_tag)
                     if self._in_speak:
                         speak_chars.append(fallback_tag)
+                    elif self._speak_blocks_count > 0:
+                        self._after_last_speak_text.append(fallback_tag)
 
             # 3. Início de possível tag `<`
             if ch == "<":
@@ -996,6 +1161,8 @@ class SpeakStreamParser:
             visual_chars.append(ch)
             if self._in_speak:
                 speak_chars.append(ch)
+            elif self._speak_blocks_count > 0:
+                self._after_last_speak_text.append(ch)
 
         _flush_speak_chars()
 
@@ -1005,6 +1172,32 @@ class SpeakStreamParser:
             v_delta = re.sub(r"  +", " ", v_delta)
             result.visual_delta = v_delta
             self._accumulated_visual_text.append(v_delta)
+
+        if self._auto_speak_fallback:
+            result.used_zero_speak_fallback = True
+
+        if (
+            self._live_voice_enabled
+            and self._speak_blocks_count == 0
+            and not self._in_speak
+            and not self._tag_buffer
+        ):
+            accum_plain = "".join(self._accumulated_visual_text)
+            if "```" not in accum_plain and len(accum_plain.strip()) >= self.REALTIME_FALLBACK_CHAR_THRESHOLD:
+                self._auto_speak_fallback = True
+                self._in_speak = True
+                self.chunker.reset_for_new_block(self._speak_blocks_count)
+                self._speak_blocks_count += 1
+                result.speak_opened = True
+                result.used_zero_speak_fallback = True
+                cleaned_init = _clean_streaming_fallback_text(accum_plain)
+                if cleaned_init:
+                    self._spoken_text_accum.append(cleaned_init)
+                    result.speak_delta = cleaned_init
+                    init_chunks = self.chunker.feed(cleaned_init)
+                    if init_chunks:
+                        result.chunks.extend(init_chunks)
+                        self._total_chunks_emitted += len(init_chunks)
 
         return result
 
@@ -1031,6 +1224,7 @@ class SpeakStreamParser:
                 result.chunks.extend(flushed)
                 self._total_chunks_emitted += len(flushed)
             self._in_speak = False
+            self._auto_speak_fallback = False
             result.speak_closed = True
 
         return result
@@ -1038,12 +1232,18 @@ class SpeakStreamParser:
     def finish(self, live_voice_enabled: bool = False) -> SpeakParseResult:
         """Finaliza o stream do turno. Se `<speak>` ficou aberto, fecha e dá flush.
         Se `live_voice_enabled=True` e o turno teve 0 blocos `<speak>`, aplica o
-        `ZeroSpeakFallback` extraindo o primeiro parágrafo conversacional limpo.
+        `ZeroSpeakFallback`. Se teve `<speak>` parcial (ex.: intro curta terminada em `:`),
+        fala também o corpo conversacional restante.
         """
+        was_auto_fallback = self._auto_speak_fallback
         result = self.on_non_text_boundary(reason="finish")
+        if was_auto_fallback:
+            result.used_zero_speak_fallback = True
+
+        effective_live = bool(live_voice_enabled or self._live_voice_enabled)
 
         if (
-            live_voice_enabled
+            effective_live
             and self._speak_blocks_count == 0
             and self._total_chunks_emitted == 0
         ):
@@ -1060,25 +1260,71 @@ class SpeakStreamParser:
                     result.speak_closed = True
                     result.used_zero_speak_fallback = True
                     result.speak_delta = fallback_text
+        elif effective_live and self._speak_blocks_count > 0 and not was_auto_fallback:
+            spoken_so_far = "".join(self._spoken_text_accum).strip()
+            unspoken_raw = "".join(self._after_last_speak_text).strip()
+            if unspoken_raw:
+                unspoken_clean = self._extract_zero_speak_fallback(unspoken_raw, max_chars=1200)
+                non_code_total = len(spoken_so_far) + len(unspoken_clean)
+                spoken_ends_with_colon = spoken_so_far.rstrip().endswith(":")
+                if unspoken_clean and (
+                    spoken_ends_with_colon
+                    or (
+                        non_code_total > 0
+                        and (len(spoken_so_far) / non_code_total) < 0.35
+                        and len(unspoken_clean) >= 60
+                    )
+                ):
+                    self.chunker.reset_for_new_block(self._speak_blocks_count)
+                    self._speak_blocks_count += 1
+                    extra_chunks = self.chunker.feed(unspoken_clean) + self.chunker.flush()
+                    if extra_chunks:
+                        result.chunks.extend(extra_chunks)
+                        self._total_chunks_emitted += len(extra_chunks)
+                        result.speak_opened = True
+                        result.speak_closed = True
+                        result.used_zero_speak_fallback = True
+                        result.speak_delta = (
+                            f"{result.speak_delta} {unspoken_clean}".strip()
+                            if result.speak_delta
+                            else unspoken_clean
+                        )
 
         return result
 
     @staticmethod
-    def _extract_zero_speak_fallback(full_text: str) -> str:
+    def _extract_zero_speak_fallback(full_text: str, max_chars: int = 1200) -> str:
         if not full_text:
             return ""
-        # Remove blocos de código cercados e JSONs antes de extrair o primeiro parágrafo
-        without_code = _FENCED_CODE_RE.sub("", full_text)
-        without_code = _UNCLOSED_FENCED_CODE_RE.sub("", without_code)
-        without_code = _RAW_JSON_BLOCK_RE.sub("", without_code).strip()
+        # Remove blocos de código cercados e JSONs antes de extrair o texto conversacional
+        without_code = _FENCED_CODE_RE.sub("\n\n", full_text)
+        without_code = _UNCLOSED_FENCED_CODE_RE.sub("\n\n", without_code)
+        without_code = _RAW_JSON_BLOCK_RE.sub(" ", without_code).strip()
 
-        paragraphs = [p.strip() for p in re.split(r"\n\s*\n", without_code) if p.strip()]
-        if not paragraphs:
-            return strip_non_speakable_content(full_text, max_chars=240)
+        cleaned_lines: list[str] = []
+        for raw_line in without_code.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            if line.startswith(("```", "|", "---", "===")):
+                continue
+            line = re.sub(r"^#{1,6}\s+", "", line).strip()
+            line = re.sub(r"^(?:[-*•]|\d+\))\s+", "", line).strip()
+            line = re.sub(r"\*\*([^*]+)\*\*", r"\1", line)
+            line = re.sub(r"__([^_]+)__", r"\1", line)
+            line = re.sub(r"\*([^*]+)\*", r"\1", line)
+            line = re.sub(r"`([^`]+)`", r"\1", line)
+            line = re.sub(r"\s+", " ", line).strip()
+            if not line:
+                continue
+            if line[-1] not in ".!?…:;":
+                line = f"{line}."
+            elif line[-1] == ":":
+                line = f"{line[:-1]}."
+            cleaned_lines.append(line)
 
-        first_para = paragraphs[0]
-        # Remove formatação Markdown pesada (# headers, *, **)
-        first_para = re.sub(r"^#+\s*", "", first_para)
-        first_para = re.sub(r"\*\*([^*]+)\*\*", r"\1", first_para)
-        first_para = re.sub(r"\*([^*]+)\*", r"\1", first_para)
-        return strip_non_speakable_content(first_para, max_chars=240)
+        if not cleaned_lines:
+            return ""
+
+        combined = " ".join(cleaned_lines)
+        return strip_non_speakable_content(combined, max_chars=max_chars)

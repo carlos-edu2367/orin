@@ -10,12 +10,17 @@ import {
   type ActivityPlanApproval,
   type CodeSessionProposalRequest,
   type ContextUsage,
-  type ConversationActivityEvent,
+  type ConversationActivityEvent as BaseConversationActivityEvent,
   type StructuredPatchHunk,
   type TodoItem,
   type ToolPermissionDecision,
   type ToolPermissionRequest,
 } from '../features/conversations/activityTypes'
+
+export type ConversationActivityEvent = BaseConversationActivityEvent & {
+  /** Pre-normalizer clean text on `speak.chunk_ready` events for accurate remainder alignment. */
+  cleanText?: string
+}
 import type { MessageCommand } from '../features/conversations/MessageCommandChip'
 import {
   normalizeCodePermissionMode,
@@ -90,6 +95,7 @@ export type SendMessageInput = {
   code_mode?: CodeModeChoice
   mode?: ConversationMode
   permission_mode?: PermissionMode
+  liveMode?: boolean
 }
 
 function parseModeAndPermission(data: Record<string, unknown>, fallbackMode: ConversationMode = 'chat'): {
@@ -205,6 +211,7 @@ export function sendConversationMessage(
   codeMode: CodeModeChoice = 'auto',
   permissionModeOrIntent?: PermissionMode | MutationIntent,
   intentArg?: MutationIntent,
+  liveMode?: boolean,
 ): Promise<ConversationReceipt> {
   if (typeof messageOrInput === 'object' && messageOrInput !== null) {
     const effectiveMode = messageOrInput.mode ?? (messageOrInput.code_mode && messageOrInput.code_mode !== 'auto' ? messageOrInput.code_mode : undefined)
@@ -220,6 +227,7 @@ export function sendConversationMessage(
         ...(effectiveMode ? { code_mode: effectiveMode } : {}),
         ...(messageOrInput.permission_mode ? { permission_mode: messageOrInput.permission_mode } : {}),
         ...(messageOrInput.selection ? { selection: messageOrInput.selection } : {}),
+        ...(messageOrInput.liveMode === true ? { live_mode: true } : {}),
       },
       parse: parseConversationReceipt,
     })
@@ -234,6 +242,7 @@ export function sendConversationMessage(
       ...(codeMode !== 'auto' ? { code_mode: codeMode } : {}),
       ...(permissionMode ? { permission_mode: permissionMode } : {}),
       ...(selection ? { selection } : {}),
+      ...(liveMode === true ? { live_mode: true } : {}),
     },
     parse: parseConversationReceipt,
   })
@@ -618,8 +627,10 @@ export function parseConversationActivityEvent(value: unknown, cursor: string): 
     }
   }
   if (type === 'speak.chunk_ready') {
-    const spoken = optionalText(payload.tts_text, 2000) ?? optionalText(payload.clean_text, 2000)
+    const clean = optionalText(payload.clean_text, 2000)
+    const spoken = optionalText(payload.tts_text, 2000) ?? clean
     if (spoken) event.speakText = spoken
+    if (clean) event.cleanText = clean
   }
   const planApproval = parsePlanApproval(payload)
   if (planApproval) {
@@ -1579,7 +1590,7 @@ export type LiveVoiceSocketConfig = {
 
 export type LiveVoiceSocketHandle = {
   sendBargeIn: (epoch: number, chunkSeq: number, playedMs: number) => void
-  sendSpeakText: (text: string, instructions?: string) => void
+  sendSpeakText: (text: string, instructions?: string) => boolean | void
   sendPlaybackProgress: (chunkSeq: number, playedMs: number) => void
   sendSpeechEnd: (transcriptHint: string, silenceMs?: number, extra?: Record<string, unknown>) => void
   sendPcmFrame: (pcmBytes: ArrayBuffer) => void
@@ -1636,10 +1647,12 @@ export function connectLiveVoiceSession(
   }
 
   const isOpen = () => Boolean(ws && ws.readyState === window.WebSocket.OPEN)
-  const sendJson = (payload: Record<string, unknown>) => {
+  const sendJson = (payload: Record<string, unknown>): boolean => {
     if (ws && isOpen()) {
       ws.send(JSON.stringify(payload))
+      return true
     }
+    return false
   }
 
   return {

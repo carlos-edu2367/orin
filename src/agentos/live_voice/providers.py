@@ -130,7 +130,7 @@ class VoiceConfig:
     voice_id: str = "orin-default-ptbr"
     reference_audio_path: str | None = None
     speed: float = 1.0
-    language: str = "pt"
+    language: str = "pt-BR"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -159,7 +159,7 @@ class SynthesizedAudioChunk:
 @dataclass(frozen=True, slots=True)
 class STTTranscriptionResult:
     text: str
-    language: str = "pt"
+    language: str = "pt-BR"
     confidence: float = 1.0
     duration_ms: int = 0
     provider: str = "local_sidecar"
@@ -378,7 +378,7 @@ class MultiProviderTTSAdapter:
                 voice_id=str(voice_config.get("voice_id", "orin-default-ptbr")),
                 reference_audio_path=voice_config.get("reference_audio_path"),
                 speed=float(voice_config.get("speed", 1.0)),
-                language=str(voice_config.get("language", "pt")),
+                language=str(voice_config.get("language", "pt-BR")),
             )
         elif isinstance(voice_config, VoiceConfig):
             cfg = voice_config

@@ -553,3 +553,259 @@ def test_turn_session_in_friend_mode_loads_persona_and_dual_layer_memories(tmp_p
     result = session.run()
     assert result.state == "completed"
     assert "".join(store.deltas) == "Vamos caçar esse fantasma!"
+
+
+
+def test_live_mode_propagates_through_chat_store_and_gateway_and_preserves_in_chat_session(tmp_path: Path) -> None:
+    from sqlalchemy import create_engine
+    from agentos.api.gateway import CreateConversationRequest, SendConversationMessageRequest
+    from agentos.conversations.chat import ChatApplication, PostgresChatStore
+    from agentos.persistence.postgres.schema import metadata
+    from agentos.agentic.prompts import LIVE_MODE_SPEAK_GUIDANCE
+
+    create_req = CreateConversationRequest(
+        message="Alô?",
+        selection={"provider": "openai", "model_id": "gpt-5.4"},
+        code_mode="chat",
+        live_mode=True,
+    )
+    send_req = SendConversationMessageRequest(
+        message="Me ouve?",
+        selection={"provider": "openai", "model_id": "gpt-5.4"},
+        live_mode=True,
+    )
+    assert create_req.live_mode is True
+    assert send_req.live_mode is True
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'chat_live.db'}")
+    metadata.create_all(engine)
+    chat_store = PostgresChatStore(engine)
+    app = ChatApplication(chat_store)
+
+    receipt1 = app.create(
+        user_id="user-1",
+        message="Alô?",
+        provider="openai",
+        model_id="gpt-5.4",
+        idempotency_key="idem-live-1",
+        code_mode="chat",
+        live_mode=True,
+    )
+    claimed1 = chat_store.claim(receipt1.turn_id)
+    assert claimed1 is not None
+    assert claimed1.get("live_mode") is True
+
+    chat_store.finish(claimed1)
+    receipt2 = app.send(
+        user_id="user-1",
+        conversation_id=receipt1.conversation_id,
+        message="O que você faz?",
+        provider="openai",
+        model_id="gpt-5.4",
+        idempotency_key="idem-live-2",
+        live_mode=True,
+    )
+    claimed2 = chat_store.claim(receipt2.turn_id)
+    assert claimed2 is not None
+    assert claimed2.get("live_mode") is True
+
+    class DummyAgents:
+        def create(self, name: str, role: str, **kwargs: object) -> dict[str, object]:
+            return {"agent_id": "agent-1", "name": name, "role": role, "created": True}
+
+        def find(self, name: str) -> dict[str, object] | None:
+            return None
+
+        def list(self) -> list[dict[str, object]]:
+            return []
+
+        def set_state(self, agent_id: str, state: str) -> None:
+            pass
+
+        def record_usage(self, *args: object, **kwargs: object) -> None:
+            pass
+
+    class DummyMemory:
+        def recall(self, *args: object, **kwargs: object) -> list[dict[str, object]]:
+            return []
+
+        def prompt_section(self, *args: object, **kwargs: object) -> str:
+            return ""
+
+    store = TimelineStore(
+        turn=_base_turn(conversation_mode="chat", live_mode=True),
+        history=[{"role": "user", "content": "Alô?"}],
+    )
+    session = TurnSession(
+        turn=store.turn,
+        store=store,
+        agents_store=DummyAgents(),
+        memory_store=DummyMemory(),
+        provider_factory=lambda: None,
+        workspace_root=tmp_path,
+        conversation_mode="chat",
+    )
+    assert session.turn["live_mode"] is True
+    assert LIVE_MODE_SPEAK_GUIDANCE in session._system_prompt
+
+
+def test_live_mode_and_friend_mode_fast_path_skips_file_mcp_disables_phase_controller_and_forces_no_effort(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import agentos.mcp.file_servers as file_servers
+
+    assert file_servers.DEFAULT_TIMEOUT_SECONDS == 3.0
+    assert file_servers.FAILURE_TTL_SECONDS == 300.0
+
+    mcp_load_calls: list[bool] = []
+    monkeypatch.setattr(
+        TurnSession,
+        "_load_file_mcp_servers",
+        lambda self, trusted: mcp_load_calls.append(trusted),
+    )
+
+    turn = _base_turn(conversation_mode="friend", live_mode=True)
+    turn["effort"] = "high"
+    store = TimelineStore(turn=turn, history=[{"role": "user", "content": "Alô?"}])
+
+    class DummyAgents:
+        def create(self, name: str, role: str, **kwargs: object) -> dict[str, object]:
+            return {"agent_id": "agent-1", "name": name, "role": role, "created": True}
+
+        def find(self, name: str) -> dict[str, object] | None:
+            return None
+
+        def list(self) -> list[dict[str, object]]:
+            return []
+
+        def set_state(self, agent_id: str, state: str) -> None:
+            pass
+
+        def record_usage(self, *args: object, **kwargs: object) -> None:
+            pass
+
+    class DummyMemory:
+        def recall(self, *args: object, **kwargs: object) -> list[dict[str, object]]:
+            return []
+
+        def prompt_section(self, *args: object, **kwargs: object) -> str:
+            return ""
+
+    class InspectProvider:
+        def __init__(self) -> None:
+            self.requests: list[dict[str, object]] = []
+
+        def stream(self, request: dict[str, object]):
+            self.requests.append(request)
+            return iter(
+                [
+                    NormalizedStreamItem(StreamKind.TEXT, 1, text="<speak>Oi Carlos! Tudo certo por aqui.</speak>"),
+                    NormalizedStreamItem(StreamKind.FINISH, 2, finish_reason="stop"),
+                ]
+            )
+
+    provider = InspectProvider()
+    session = TurnSession(
+        turn=store.turn,
+        store=store,
+        agents_store=DummyAgents(),
+        memory_store=DummyMemory(),
+        provider_factory=lambda: provider,
+        workspace_root=tmp_path,
+        conversation_mode="friend",
+        model_capabilities=("reasoning", "thinking"),
+    )
+    runtime = session.build_runtime()
+    assert mcp_load_calls == []
+    assert runtime.phases is None
+    assert runtime.effort is None
+    assert "write_contract" not in session._system_prompt
+
+    session.run()
+    assert len(provider.requests) == 1
+    req = provider.requests[0]
+    assert "effort" not in req
+    tool_names = [str((t.get("function") or {}).get("name") or "") for t in (req.get("tools") or [])]
+    assert "write_contract" not in tool_names
+
+
+def test_live_mode_speak_guidance_forbids_silent_lists_unnecessary_tools_and_bracket_emphasis() -> None:
+    from agentos.agentic.prompts import LIVE_MODE_SPEAK_GUIDANCE
+
+    assert "1 a 3 frases" in LIVE_MODE_SPEAK_GUIDANCE or "1 a 3" in LIVE_MODE_SPEAK_GUIDANCE
+    assert "[E]i" in LIVE_MODE_SPEAK_GUIDANCE
+    assert "[alô]" in LIVE_MODE_SPEAK_GUIDANCE
+    assert "recall" in LIVE_MODE_SPEAK_GUIDANCE
+    assert "Alô?" in LIVE_MODE_SPEAK_GUIDANCE
+
+
+def test_runtime_rehydrates_multi_paragraph_conversational_reply_and_excludes_fenced_code() -> None:
+    history = [
+        {"role": "user", "content": "Oi Orin!"},
+        {
+            "role": "assistant",
+            "content": "Fala Carlos! Tudo ótimo por aqui.\n\nEstou pronto para te ajudar no projeto.\n\n```python\nprint('oi')\n```",
+        },
+        {"role": "user", "content": "Qual é o próximo passo?"},
+    ]
+    store = TimelineStore(turn=_base_turn(live_mode=True, conversation_mode="friend"), history=history)
+
+    class InspectProvider:
+        def __init__(self) -> None:
+            self.requests: list[dict[str, object]] = []
+
+        def stream(self, request: dict[str, object]):
+            self.requests.append(request)
+            return iter(
+                [
+                    NormalizedStreamItem(StreamKind.TEXT, 1, text="<speak>Vamos revisar o código.</speak>"),
+                    NormalizedStreamItem(StreamKind.FINISH, 2, finish_reason="stop"),
+                ]
+            )
+
+    provider = InspectProvider()
+    runtime = AgenticTurnRuntime(store=store, provider=provider)
+    runtime.run("turn-friend-1")
+
+    sent_messages = provider.requests[0]["messages"]
+    assistant_msgs = [m for m in sent_messages if isinstance(m, dict) and m.get("role") == "assistant"]
+    assert assistant_msgs[0]["content"] == (
+        "<speak>Fala Carlos! Tudo ótimo por aqui.\n\nEstou pronto para te ajudar no projeto.</speak>"
+        "\n\n```python\nprint('oi')\n```"
+    )
+
+
+def test_friend_mode_zero_speak_fallback_works_even_if_turn_live_mode_not_preset() -> None:
+    turn = {
+        "turn_id": "turn-friend-no-flag",
+        "conversation_id": "conv-friend-1",
+        "execution_id": "exec-friend-1",
+        "user_id": "user-1",
+        "assistant_message_id": "msg-asst-1",
+        "provider": "openai",
+        "model_id": "gpt-5.4",
+        "conversation_mode": "friend",
+    }
+    store = TimelineStore(turn=turn)
+
+    class ForgotSpeakProvider:
+        def stream(self, _request: dict[str, object]):
+            return iter(
+                [
+                    NormalizedStreamItem(
+                        StreamKind.TEXT,
+                        1,
+                        text="Oi Carlos! Estou te ouvindo alto e claro por aqui, pode falar comigo.",
+                    ),
+                    NormalizedStreamItem(StreamKind.FINISH, 2, finish_reason="stop"),
+                ]
+            )
+
+    runtime = AgenticTurnRuntime(store=store, provider=ForgotSpeakProvider())
+    result = runtime.run("turn-friend-no-flag")
+    assert result.state == "completed"
+    chunk_events = [
+        payload for evt_type, _summary, payload in store.activity if evt_type is AgentActivityEventType.SPEAK_CHUNK_READY
+    ]
+    assert len(chunk_events) >= 1
+    assert "Oi Carlos" in str(chunk_events[0].get("clean_text") or "")

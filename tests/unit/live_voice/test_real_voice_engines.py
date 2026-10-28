@@ -101,7 +101,8 @@ def test_openai_speech_requests_raw_pcm_and_sanitises_voice() -> None:
     assert seen["response_format"] == "pcm"
     assert seen["voice"] == "coral"
     assert seen["speed"] == 2.0
-    assert seen["instructions"] == "calmo"
+    assert "calmo" in seen["instructions"]
+    assert "português do Brasil (pt-BR)" in seen["instructions"]
 
 
 def _app(principal_for: Any = None, services: Any = None, runtime: Any = None) -> FastAPI:
@@ -184,3 +185,106 @@ def test_websocket_transcribes_real_audio_with_local_engine(monkeypatch: pytest.
         assert transcript["text"] == "Qual é a previsão do tempo hoje?"
     assert captured["bytes"] == len(pcm)
     assert captured["sample_rate"] == 16000
+
+
+def test_voice_config_defaults_to_pt_br_and_normalizes_instructions() -> None:
+    from agentos.live_voice.providers import VoiceConfig
+
+    cfg = VoiceConfig()
+    assert cfg.language == "pt-BR"
+
+    instr = engines.normalize_ptbr_instructions("voz suave", language="pt-BR")
+    assert "português do Brasil (pt-BR)" in instr
+    assert "Nunca use sotaque de Portugal (pt-PT)" in instr
+    assert "voz suave" in instr
+
+    # Idempotent when called twice
+    instr_twice = engines.normalize_ptbr_instructions(instr, language="pt-BR")
+    assert instr_twice.count("Nunca use sotaque de Portugal") == 1
+
+    # Non-Portuguese language is untouched
+    assert engines.normalize_ptbr_instructions("speak warmly", language="en-US") == "speak warmly"
+
+
+def test_openai_speech_upgrades_tts1_to_gpt4o_mini_tts_and_enforces_ptbr() -> None:
+    seen: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(json.loads(request.read()))
+        return httpx.Response(200, content=b"\x00\x01" * 600)
+
+    synthesize_openai_speech(
+        CRED,
+        "Sim!",
+        model_id="tts-1",
+        voice="coral",
+        transport=httpx.MockTransport(handler),
+    )
+    assert seen["model"] == "gpt-4o-mini-tts"
+    assert "português do Brasil (pt-BR)" in seen["instructions"]
+
+
+def test_http_client_connection_pool_reuses_persistent_client() -> None:
+    client_a = engines._get_http_client(60.0)
+    client_b = engines._get_http_client(60.0)
+    assert client_a is client_b
+    assert not client_a.is_closed
+    engines.close_http_clients()
+    assert client_a.is_closed
+    client_c = engines._get_http_client(60.0)
+    assert client_c is not client_a
+    assert not client_c.is_closed
+
+
+def test_credential_cache_avoids_repeated_db_and_cipher_queries(monkeypatch: pytest.MonkeyPatch) -> None:
+    from agentos.live_voice import credentials
+
+    credentials.clear_credential_cache()
+    connect_calls = 0
+
+    class FakeResult:
+        def mappings(self) -> FakeResult:
+            return self
+
+        def first(self) -> dict[str, Any]:
+            return {"base_url": "https://api.openai.test/v1", "enabled": True}
+
+    class FakeConn:
+        def __enter__(self) -> FakeConn:
+            return self
+
+        def __exit__(self, *args: Any) -> None:
+            pass
+
+        def execute(self, *_args: Any, **_kwargs: Any) -> FakeResult:
+            nonlocal connect_calls
+            connect_calls += 1
+            return FakeResult()
+
+    class FakeEngine:
+        def connect(self) -> FakeConn:
+            return FakeConn()
+
+    class FakePool:
+        def __init__(self, _engine: Any, *, cipher: Any) -> None:
+            pass
+
+        def next_available_key(self, _user_id: str, _provider: str) -> Any:
+            return SimpleNamespace(plaintext="sk-cached-key")
+
+    monkeypatch.setattr("agentos.api.friend_routes.engine_from_services", lambda s: getattr(s, "engine", None))
+    monkeypatch.setattr("agentos.persistence.postgres.provider_api_keys.PostgresProviderApiKeyAdapter", FakePool)
+    monkeypatch.setattr("agentos.persistence.provider_secrets.ProviderSecretCipher.from_environment", classmethod(lambda cls, required=True: object()))
+
+    services_1 = SimpleNamespace(engine=FakeEngine())
+    for _ in range(5):
+        cred = credentials.resolve_cloud_credential(services_1, "user-1", "openai")
+        assert cred is not None
+        assert cred.api_key == "sk-cached-key"
+    assert connect_calls == 1
+
+    # Different database/services instance must never collide in cache
+    services_2 = SimpleNamespace(engine=FakeEngine())
+    cred_2 = credentials.resolve_cloud_credential(services_2, "user-1", "openai")
+    assert cred_2 is not None
+    assert connect_calls == 2

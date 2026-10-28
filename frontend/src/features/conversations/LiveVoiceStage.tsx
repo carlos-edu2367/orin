@@ -153,7 +153,7 @@ export function LiveVoiceStage({
     assistantBusy,
     pushToTalk,
     onUtterance: (text) => utteranceRef.current?.(text),
-    voiceInstructions: `Você é ${companionName}. Fale em português do Brasil, de forma natural, calorosa e conversacional.`,
+    voiceInstructions: `Você é ${companionName}. Fale SEMPRE em português do Brasil (pt-BR) nativo, de forma natural, calorosa, concisa e conversacional. Nunca use sotaque de Portugal (pt-PT).`,
   })
   const phase = phaseOverride ?? voice.phase
   const { setMuted, muted, interrupt, setPushToTalkHeld } = voice

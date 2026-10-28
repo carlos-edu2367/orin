@@ -327,3 +327,152 @@ class TestStripNonSpeakableContent:
         assert "print" not in combined
         assert "o link na tela" in combined
         assert "https://" not in combined
+
+
+class TestLiveCallRegressionsAndRealTimeFallback:
+    def test_bracket_emphasis_and_extended_vocal_markers_do_not_leak_brackets(self) -> None:
+        parser = SpeakStreamParser()
+        stream = [
+            "<speak>[E]i! ",
+            "[alô]? ",
+            "[riso leve] Tudo bem por aí? ",
+            "[suspiro] [sorrindo] [em tom amigável] Bora lá!</speak>",
+        ]
+        chunks: list[ProsodicChunk] = []
+        markers = []
+        visual = ""
+        for token in stream:
+            res = parser.feed(token)
+            visual += res.visual_delta
+            chunks.extend(res.chunks)
+        fin = parser.finish()
+        visual += fin.visual_delta
+        chunks.extend(fin.chunks)
+
+        marker_names = [m.marker for c in chunks for m in c.inline_markers]
+        assert "riso leve" in marker_names
+        assert "suspiro" in marker_names
+
+        assert "[" not in visual
+        assert "]" not in visual
+        assert "Ei!" in visual
+        assert "alô?" in visual
+        assert "sorrindo" not in visual
+        assert "em tom amigável" not in visual
+
+        combined_clean = " ".join(c.clean_text for c in chunks)
+        combined_norm = " ".join(c.normalized_text for c in chunks)
+        assert "[" not in combined_clean
+        assert "]" not in combined_clean
+        assert "[" not in combined_norm
+        assert "]" not in combined_norm
+        assert "Ei" in combined_clean
+        assert "alô" in combined_clean
+        assert "sorrindo" not in combined_clean
+        assert "amigável" not in combined_clean
+
+    def test_zero_speak_fallback_joins_multiple_paragraphs_and_cleans_markdown_up_to_1200_chars(self) -> None:
+        parser = SpeakStreamParser()
+        long_markdown = (
+            "Eu trabalho direto com você nos seus projetos locais.\n\n"
+            "### 1. Mão na massa no código\n"
+            "• Eu leio, crio e edito arquivos direto na sua máquina.\n"
+            "• Rodo comandos e testes no **terminal** para validar tudo.\n\n"
+            "### 2. Pesquisa e memória\n"
+            "- Busco referências atualizadas na web quando necessário.\n"
+            "- Guardo o contexto importante entre as nossas conversas.\n\n"
+            "```bash\npytest -q\n```"
+        )
+        parser.feed(long_markdown)
+        fin = parser.finish(live_voice_enabled=True)
+        assert fin.used_zero_speak_fallback is True
+        assert len(fin.chunks) >= 4
+        spoken_all = " ".join(c.clean_text for c in fin.chunks)
+        assert "Mão na massa no código" in spoken_all
+        assert "Eu leio, crio e edito arquivos direto na sua máquina" in spoken_all
+        assert "Rodo comandos e testes no terminal para validar tudo" in spoken_all
+        assert "Pesquisa e memória" in spoken_all
+        assert "Guardo o contexto importante entre as nossas conversas" in spoken_all
+        assert "###" not in spoken_all
+        assert "•" not in spoken_all
+        assert "**" not in spoken_all
+        assert "pytest" not in spoken_all
+
+    def test_partial_speak_fallback_speaks_unspoken_body_after_short_colon_intro(self) -> None:
+        parser = SpeakStreamParser()
+        partial_speak_response = (
+            "<speak>Aqui vai a tradução direta do que faço:</speak>\n\n"
+            "### 1. Mão na massa no seu código\n"
+            "• Eu leio e edito arquivos na sua máquina.\n"
+            "• Rodo testes no terminal para conferir se passou."
+        )
+        r1 = parser.feed(partial_speak_response)
+        fin = parser.finish(live_voice_enabled=True)
+        all_chunks = r1.chunks + fin.chunks
+        spoken_all = " ".join(c.clean_text for c in all_chunks)
+        assert "Aqui vai a tradução direta do que faço" in spoken_all
+        assert "Mão na massa no seu código" in spoken_all
+        assert "Eu leio e edito arquivos na sua máquina" in spoken_all
+        assert "Rodo testes no terminal para conferir se passou" in spoken_all
+        assert "###" not in spoken_all
+        assert "•" not in spoken_all
+
+    def test_realtime_streaming_fallback_activates_during_feed_when_live_voice_enabled(self) -> None:
+        parser = SpeakStreamParser(live_voice_enabled=True)
+        tokens = [
+            "Estou te ouvindo perfeitamente, Carlos! ",
+            "Pode me dizer no que você quer trabalhar agora mesmo, ",
+            "que eu já olho os arquivos do projeto com você.",
+        ]
+        streamed_chunks: list[ProsodicChunk] = []
+        opened_during_feed = False
+        for tok in tokens:
+            res = parser.feed(tok)
+            if res.speak_opened:
+                opened_during_feed = True
+            streamed_chunks.extend(res.chunks)
+
+        assert opened_during_feed is True
+        assert len(streamed_chunks) >= 1
+        fin = parser.finish(live_voice_enabled=True)
+        all_chunks = streamed_chunks + fin.chunks
+        full_spoken = " ".join(c.clean_text for c in all_chunks)
+        assert "Estou te ouvindo perfeitamente" in full_spoken
+        assert "arquivos do projeto com você" in full_spoken
+
+    def test_chunker_gear1_does_not_split_single_non_greeting_word_comma_and_gear2_avoids_micro_comma_fragments(self) -> None:
+        assert PTBRProsodicChunker.GEAR_2_COMMA_MIN_CHARS == 36
+        assert PTBRProsodicChunker.GEAR_2_COMMA_MIN_WORDS == 6
+
+        parser = SpeakStreamParser()
+        res = parser.feed(
+            "<speak>Hoje, vamos analisar o seu código com bastante cuidado, sem pressa, para garantir que tudo funcione bem.</speak>"
+        )
+        fin = parser.finish()
+        chunks = res.chunks + fin.chunks
+        assert len(chunks) >= 1
+        assert chunks[0].clean_text != "Hoje"
+        assert chunks[0].clean_text.startswith("Hoje, vamos analisar")
+        for c in chunks:
+            assert c.clean_text != "sem pressa"
+
+    def test_realtime_fallback_stops_at_fenced_code_and_partial_fallback_ignores_pure_code_blocks(self) -> None:
+        parser = SpeakStreamParser(live_voice_enabled=True)
+        chunks: list[ProsodicChunk] = []
+        for tok in [
+            "Claro, Carlos! Preparei o trecho em Python para você testar agora mesmo.\n\n",
+            "```python\ndef secret_impl():\n    return 42\n```",
+        ]:
+            chunks.extend(parser.feed(tok).chunks)
+        chunks.extend(parser.finish(live_voice_enabled=True).chunks)
+        spoken = " ".join(c.clean_text for c in chunks)
+        assert "Preparei o trecho em Python" in spoken
+        assert "secret_impl" not in spoken
+
+        parser2 = SpeakStreamParser(live_voice_enabled=True)
+        r2 = parser2.feed("<speak>Veja o código abaixo:</speak>\n\n```python\ndef only_code():\n    return 99\n```")
+        f2 = parser2.finish(live_voice_enabled=True)
+        assert f2.chunks == []
+        spoken2 = " ".join(c.clean_text for c in r2.chunks + f2.chunks)
+        assert "only_code" not in spoken2
+

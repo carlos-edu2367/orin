@@ -38,7 +38,7 @@ export const DEFAULT_LIVE_VOICE_PREFS: LiveVoicePrefs = {
   rate: 1.05,
   pitch: 1,
   sensitivity: 0.6,
-  endSilenceMs: 800,
+  endSilenceMs: 600,
   bargeIn: true,
 }
 

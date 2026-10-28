@@ -659,9 +659,19 @@ export function ChatPage() {
   )
 
   const sendChatMessage = useCallback(
-    (text: string, attachments: string[] = []) =>
-      sendConversationMessage(client, conversationId, text, attachments, chatSelection, conversationMode === 'code' ? 'code' : 'auto'),
-    [chatSelection, client, conversationId, conversationMode],
+    (text: string, attachments: string[] = [], liveModeOverride?: boolean) =>
+      sendConversationMessage(
+        client,
+        conversationId,
+        text,
+        attachments,
+        chatSelection,
+        conversationMode === 'code' ? 'code' : 'auto',
+        undefined,
+        undefined,
+        Boolean(liveModeOverride ?? liveVoiceOpen),
+      ),
+    [chatSelection, client, conversationId, conversationMode, liveVoiceOpen],
   )
 
   useEffect(() => {
@@ -991,22 +1001,11 @@ export function ChatPage() {
   }, [client, friendSoulOpen])
 
   // What the Live voice should say: the turn's `<speak>` chunks as they stream,
-  // or, for a turn that spoke none, the start of its final answer.
-  const assistantSpeech = useMemo(() => {
-    const items: Array<{ id: string; text: string }> = []
-    const turnsWithSpeech = new Set<string>()
-    for (const event of activity.events) {
-      if (event.type !== 'speak.chunk_ready' || !event.speakText || event.parentAgentId) continue
-      if (event.turnId) turnsWithSpeech.add(event.turnId)
-      items.push({ id: `speak:${event.eventId}`, text: event.speakText })
-    }
-    for (const item of messages) {
-      if (item.role !== 'assistant' || item.status !== 'completed' || !item.content.trim()) continue
-      if (item.turn_id && turnsWithSpeech.has(item.turn_id)) continue
-      items.push({ id: `message:${item.message_id}`, text: spokenSummaryOf(item.content) })
-    }
-    return items
-  }, [activity.events, messages])
+  // plus any unspoken remainder (or full cleaned answer when no `<speak>` arrived).
+  const assistantSpeech = useMemo(
+    () => buildAssistantSpeech(activity.events, messages),
+    [activity.events, messages],
+  )
 
   const liveWorkingStatus = useMemo(() => {
     if (!running) return null
@@ -1436,17 +1435,17 @@ export function ChatPage() {
    * `afterStop` (W7-R14): send-now has just stopped the turn, but this closure still sees it running; the
    * stop-related checks are then skipped, because the turn is known to have stopped.
    */
-  async function submit(override?: string, afterStop = false) {
+  async function submit(override?: string, afterStop = false, liveModeOverride?: boolean) {
     if (submitInFlight.current) return
     submitInFlight.current = true
     try {
-      await runSubmit(override, afterStop)
+      await runSubmit(override, afterStop, liveModeOverride)
     } finally {
       submitInFlight.current = false
     }
   }
 
-  async function runSubmit(override: string | undefined, afterStop: boolean) {
+  async function runSubmit(override: string | undefined, afterStop: boolean, liveModeOverride?: boolean) {
     const text = (override ?? message).trim()
     const readyUploads = readyUploadIds()
     const turnBusy = !afterStop && (running || stopping)
@@ -1485,7 +1484,7 @@ export function ChatPage() {
     setError(null)
     setPendingUserMessage({ message_id: `pending-${Date.now()}`, role: 'user', content: text, status: 'completed', retryable: false, attachments: [], command: null })
     try {
-      await sendChatMessage(text, readyUploads)
+      await sendChatMessage(text, readyUploads, liveModeOverride)
       resetAttachments()
       await loadSnapshot(false)
       void listConversations(client).then((value) => setChats(value.items)).catch(() => undefined)
@@ -2542,7 +2541,13 @@ export function ChatPage() {
         assistantBusy={running}
         workingStatusText={liveWorkingStatus}
         onUserSpeechUtterance={(spokenPrompt) => {
-          void submit(spokenPrompt)
+          if (running || stopping) {
+            void stop().finally(() => {
+              void submit(spokenPrompt, true, true)
+            })
+            return
+          }
+          void submit(spokenPrompt, false, true)
         }}
         onOpenPersonalize={conversationMode === 'friend' ? () => setFriendSoulOpen(true) : undefined}
         onClose={() => setLiveVoiceOpen(false)}
@@ -2557,17 +2562,203 @@ export function ChatPage() {
   )
 }
 
-/** The first sentences of an answer, without markup — long answers stay on screen, not in the ear. */
-function spokenSummaryOf(content: string): string {
+const MAX_SPOKEN_SUMMARY_CHARS = 2400
+
+/** Clean speakable text without markdown/code blocks, up to a generous safety ceiling. */
+export function spokenSummaryOf(content: string): string {
   const plain = content
     .replace(/```[\s\S]*?```/g, ' ')
     .replace(/^\s*\|.*\|\s*$/gm, ' ')
+    .replace(/<\/?speak>/gi, ' ')
+    .replace(/\[(?:hmm|pausa|riso[^\]]*|suspiro|risos?)\]/gi, ' ')
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+    .replace(/https?:\/\/\S+/g, ' ')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/^#{1,6}\s+/gm, '')
+    .replace(/^\s*[-*•+]\s+/gm, '')
+    .replace(/[*_~>|#]+/g, '')
     .replace(/\s+/g, ' ')
     .trim()
-  if (plain.length <= 420) return plain
-  const cut = plain.slice(0, 420)
+  if (plain.length <= MAX_SPOKEN_SUMMARY_CHARS) return plain
+  const cut = plain.slice(0, MAX_SPOKEN_SUMMARY_CHARS)
   const lastStop = Math.max(cut.lastIndexOf('. '), cut.lastIndexOf('! '), cut.lastIndexOf('? '))
-  return lastStop > 120 ? cut.slice(0, lastStop + 1) : `${cut.trimEnd()}…`
+  return lastStop > 240 ? cut.slice(0, lastStop + 1) : `${cut.trimEnd()}…`
+}
+
+function foldPtBrTtsNormalizations(raw: string): string {
+  return raw
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/\b(\d+)\s+horas?\s+e\s+(\d+)\s+minutos?\b/g, '$1h$2')
+    .replace(/\b(\d+)\s+horas?\b/g, '$1h')
+    .replace(/r\$\s*(\d+(?:[.,]\d+)?)/g, '$1')
+    .replace(/\b(\d+(?:[.,]\d+)?)\s+reais\b/g, '$1')
+    .replace(/(\d+)\s*%/g, '$1')
+    .replace(/\b(\d+)\s+por\s+cento\b/g, '$1')
+    .replace(/\ba\s+p\s+i\b/g, 'api')
+    .replace(/\bu\s+r\s+l\b/g, 'url')
+    .replace(/\bs\s+q\s+l\b/g, 'sql')
+    .replace(/\bc\s+p\s+u\b/g, 'cpu')
+    .replace(/\bg\s+p\s+u\b/g, 'gpu')
+    .replace(/\bt\s+t\s+s\b/g, 'tts')
+    .replace(/\bs\s+t\s+t\b/g, 'stt')
+    .replace(/\bl\s+l\s+m\b/g, 'llm')
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function extractUnspokenRemainder(fullSummary: string, spokenSoFar: string): string {
+  if (!fullSummary || !spokenSoFar) return ''
+  const trimmedSpoken = spokenSoFar.trim()
+  const trimmedFull = fullSummary.trim()
+  if (!trimmedSpoken) return ''
+
+  const normFull = foldPtBrTtsNormalizations(trimmedFull)
+  const normSpoken = foldPtBrTtsNormalizations(trimmedSpoken)
+  if (!normFull || !normSpoken || normSpoken === normFull || normFull.endsWith(normSpoken)) return ''
+
+  const spokenWords = normSpoken.split(/\s+/).filter(Boolean)
+  const fullWords = normFull.split(/\s+/).filter(Boolean)
+  if (spokenWords.length >= fullWords.length) return ''
+
+  // If the last 3+ words of spokenSoFar already appear near the end (within the last 15% or 40 chars) of fullSummary,
+  // spokenSoFar already reached the end of the message — zero remainder.
+  if (spokenWords.length >= 3) {
+    const lastThree = spokenWords.slice(-3).join(' ')
+    const lastIdx = normFull.lastIndexOf(lastThree)
+    if (lastIdx !== -1) {
+      const matchEnd = lastIdx + lastThree.length
+      const remainingChars = normFull.length - matchEnd
+      const nearEndLimit = Math.min(40, Math.ceil(normFull.length * 0.15))
+      if (remainingChars <= nearEndLimit) return ''
+    }
+  }
+
+  const endsWithColon = trimmedSpoken.endsWith(':')
+  const coversLessThan55Pct = normSpoken.length < normFull.length * 0.55 || trimmedSpoken.length < trimmedFull.length * 0.55
+  if (!endsWithColon && !coversLessThan55Pct) return ''
+
+  const cleanSlice = (rawRemainder: string) => {
+    const cleaned = rawRemainder.replace(/^[\s:;,.–—-]+/, '').trim()
+    return cleaned.length >= 8 ? cleaned : ''
+  }
+
+  const lowerFull = trimmedFull.toLowerCase()
+  const lowerSpoken = trimmedSpoken.toLowerCase()
+  const directIdx = lowerFull.indexOf(lowerSpoken)
+  if (directIdx !== -1 && directIdx + trimmedSpoken.length < trimmedFull.length) {
+    return cleanSlice(trimmedFull.slice(directIdx + trimmedSpoken.length))
+  }
+
+  // Fallback 1: match the tail of spokenSoFar in case minor punctuation differed earlier in the intro.
+  const tailProbe = lowerSpoken.slice(-Math.min(36, lowerSpoken.length))
+  if (tailProbe.length >= 12) {
+    const tailIdx = lowerFull.indexOf(tailProbe)
+    if (tailIdx !== -1 && tailIdx + tailProbe.length < trimmedFull.length) {
+      return cleanSlice(trimmedFull.slice(tailIdx + tailProbe.length))
+    }
+  }
+
+  // Fallback 2: word-by-word prefix alignment across punctuation/formatting/TTS-normalization differences.
+  const normWord = (w: string) => {
+    if (/^r\$$/i.test(w.replace(/[^\p{L}\p{N}$]/gu, ''))) return ''
+    return w.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '')
+  }
+  const fullTokens = [...trimmedFull.matchAll(/\S+/g)]
+  if (spokenWords.length >= 3 && fullTokens.length > spokenWords.length) {
+    let sIdx = 0
+    let lastMatchedEndOffset = -1
+    for (const token of fullTokens) {
+      const nw = normWord(token[0])
+      if (!nw) continue
+      if (nw === spokenWords[sIdx]) {
+        sIdx += 1
+        lastMatchedEndOffset = (token.index ?? 0) + token[0].length
+        if (sIdx === spokenWords.length) break
+      } else if (sIdx + 1 < spokenWords.length && nw === spokenWords[sIdx + 1]) {
+        sIdx += 2
+        lastMatchedEndOffset = (token.index ?? 0) + token[0].length
+        if (sIdx >= spokenWords.length) break
+      }
+    }
+    if (sIdx >= Math.ceil(spokenWords.length * 0.75) && lastMatchedEndOffset > 0 && lastMatchedEndOffset < trimmedFull.length) {
+      return cleanSlice(trimmedFull.slice(lastMatchedEndOffset))
+    }
+  }
+  return ''
+}
+
+export function buildAssistantSpeech(
+  events: ReadonlyArray<Pick<ConversationActivityEvent, 'eventId' | 'type' | 'speakText' | 'turnId' | 'parentAgentId'> & { cleanText?: string; messageId?: string }>,
+  messages: ReadonlyArray<Pick<ConversationMessage, 'message_id' | 'role' | 'content' | 'status' | 'turn_id'>>,
+): Array<{ id: string; text: string; turnId?: string; messageId?: string }> {
+  const items: Array<{ id: string; text: string; turnId?: string; messageId?: string }> = []
+  const turnsWithSpeech = new Set<string>()
+  const spokenTextByTurn = new Map<string, string>()
+  const cleanTextByTurn = new Map<string, string>()
+  const turnToMessageId = new Map<string, string>()
+  for (const msg of messages) {
+    if (msg.role === 'assistant' && msg.turn_id && msg.message_id) {
+      turnToMessageId.set(msg.turn_id, msg.message_id)
+    }
+  }
+  for (const event of events) {
+    if (event.type !== 'speak.chunk_ready' || !event.speakText || event.parentAgentId) continue
+    const cleanChunk = (event.cleanText ?? event.speakText).trim()
+    const spokenChunk = event.speakText.trim()
+    if (event.turnId) {
+      turnsWithSpeech.add(event.turnId)
+      const prevSpoken = spokenTextByTurn.get(event.turnId) ?? ''
+      spokenTextByTurn.set(event.turnId, prevSpoken ? `${prevSpoken} ${spokenChunk}` : spokenChunk)
+      const prevClean = cleanTextByTurn.get(event.turnId) ?? ''
+      cleanTextByTurn.set(event.turnId, prevClean ? `${prevClean} ${cleanChunk}` : cleanChunk)
+    }
+    const resolvedMsgId = event.messageId ?? (event.turnId ? turnToMessageId.get(event.turnId) : undefined)
+    items.push({
+      id: `speak:${event.eventId}`,
+      text: event.speakText,
+      ...(event.turnId ? { turnId: event.turnId } : {}),
+      ...(resolvedMsgId ? { messageId: resolvedMsgId } : {}),
+    })
+  }
+  const lastCompletedAssistant = [...messages]
+    .reverse()
+    .find((item) => item.role === 'assistant' && item.status === 'completed' && Boolean(item.content.trim()))
+  if (lastCompletedAssistant) {
+    const fullSummary = spokenSummaryOf(lastCompletedAssistant.content)
+    if (fullSummary) {
+      const turnId = lastCompletedAssistant.turn_id ?? undefined
+      const messageId = lastCompletedAssistant.message_id
+      if (turnId && turnsWithSpeech.has(turnId)) {
+        const cleanSpokenSoFar = spokenSummaryOf(cleanTextByTurn.get(turnId) ?? '')
+        const ttsSpokenSoFar = spokenSummaryOf(spokenTextByTurn.get(turnId) ?? '')
+        const remainderFromClean = extractUnspokenRemainder(fullSummary, cleanSpokenSoFar)
+        const remainderFromTts = cleanSpokenSoFar === ttsSpokenSoFar
+          ? remainderFromClean
+          : extractUnspokenRemainder(fullSummary, ttsSpokenSoFar)
+        const remainder = remainderFromClean && remainderFromTts ? remainderFromClean : ''
+        if (remainder) {
+          items.push({
+            id: `message-rem:${messageId}`,
+            text: remainder,
+            turnId,
+            messageId,
+          })
+        }
+      } else {
+        items.push({
+          id: `message:${messageId}`,
+          text: fullSummary,
+          ...(turnId ? { turnId } : {}),
+          messageId,
+        })
+      }
+    }
+  }
+  return items
 }
 
 function placeholderFor(message: ConversationMessage): string {

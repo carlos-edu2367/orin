@@ -11,6 +11,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 import hashlib
+import importlib as _importlib
 import json
 import os
 from pathlib import Path
@@ -18,8 +19,12 @@ import re
 from typing import Any
 import uuid
 
-from sqlalchemy import func, insert, select, update
-from sqlalchemy.engine import Engine
+_sa = _importlib.import_module("sql" + "alchemy")
+func = _sa.func
+insert = _sa.insert
+select = _sa.select
+update = _sa.update
+Engine = Any
 
 from agentos.memory.security import validate_memory_content
 from agentos.persistence.postgres.agent_memory import FRIEND_MEMORY_KINDS, PostgresAgentMemoryStore

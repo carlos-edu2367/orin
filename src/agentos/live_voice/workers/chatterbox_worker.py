@@ -15,6 +15,24 @@ _model: Any = None
 _device = "cpu"
 _builtin_conds: Any = None
 _voice_conds: dict[tuple[str, float], Any] = {}
+_DEFAULT_SEED = 42
+
+
+def _seed_deterministic(seed: int = _DEFAULT_SEED) -> None:
+    try:
+        import torch
+
+        torch.manual_seed(seed)
+        if hasattr(torch, "cuda") and torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+    except Exception:
+        pass
+    try:
+        import numpy as np
+
+        np.random.seed(seed)
+    except Exception:
+        pass
 
 
 def _chatterbox() -> Any:
@@ -34,6 +52,7 @@ def _chatterbox() -> Any:
 
 def load(_request: dict[str, Any]) -> dict[str, Any]:
     model = _chatterbox()
+    _seed_deterministic(_DEFAULT_SEED)
     # Downloads the weights on first run and proves the whole pipeline speaks.
     model.generate("Olá!", language_id="pt")
     return {"device": _device}
@@ -53,9 +72,12 @@ def synthesize(request: dict[str, Any]) -> dict[str, Any]:
         model.conds = conds
     else:
         model.conds = _builtin_conds
+        _seed_deterministic(int(request.get("seed") or _DEFAULT_SEED))
+    raw_lang = str(request.get("language") or "pt").strip().lower()
+    lang_id = "pt" if raw_lang.startswith("pt") else (raw_lang.split("-")[0] or "pt")
     wav = model.generate(
         str(request.get("text") or ""),
-        language_id=str(request.get("language") or "pt"),
+        language_id=lang_id,
         exaggeration=exaggeration,
         cfg_weight=max(0.0, min(1.0, float(request.get("cfg_weight") if request.get("cfg_weight") is not None else 0.5))),
     )

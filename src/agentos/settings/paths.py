@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -14,12 +15,34 @@ def _env_path(name: str) -> Path | None:
     return Path(value).expanduser() if value else None
 
 
+def _is_running_under_pytest() -> bool:
+    return (
+        "pytest" in sys.modules
+        or "_pytest" in sys.modules
+        or "PYTEST_CURRENT_TEST" in os.environ
+    )
+
+
+def _pytest_fallback_root() -> Path:
+    return Path(tempfile.gettempdir()) / f"orin-pytest-fallback-{os.getpid()}"
+
+
 def orin_user_dir() -> Path:
-    return _env_path("ORIN_USER_DIR") or Path.home() / ".orin"
+    override = _env_path("ORIN_USER_DIR")
+    if override is not None:
+        return override
+    if _is_running_under_pytest():
+        return _pytest_fallback_root() / ".orin"
+    return Path.home() / ".orin"
 
 
 def claude_user_dir() -> Path:
-    return _env_path("ORIN_CLAUDE_HOME") or Path.home() / ".claude"
+    override = _env_path("ORIN_CLAUDE_HOME")
+    if override is not None:
+        return override
+    if _is_running_under_pytest():
+        return _pytest_fallback_root() / ".claude"
+    return Path.home() / ".claude"
 
 
 def claude_user_config_file() -> Path:
@@ -27,10 +50,17 @@ def claude_user_config_file() -> Path:
     return _env_path("ORIN_CLAUDE_CONFIG") or claude_user_dir().parent / ".claude.json"
 
 
+def trust_store_file() -> Path:
+    """User-owned record of trusted workspaces, inside the user's Orin directory."""
+    return orin_user_dir() / "trusted-workspaces.json"
+
+
 def orin_managed_dir() -> Path:
     override = _env_path("ORIN_MANAGED_DIR")
     if override is not None:
         return override
+    if _is_running_under_pytest():
+        return _pytest_fallback_root() / "orin-managed"
     if os.name == "nt":
         return Path(os.environ.get("ProgramData") or r"C:\ProgramData") / "Orin"
     return Path("/etc/orin")
@@ -40,6 +70,8 @@ def claude_managed_dir() -> Path:
     override = _env_path("ORIN_CLAUDE_MANAGED_DIR")
     if override is not None:
         return override
+    if _is_running_under_pytest():
+        return _pytest_fallback_root() / "claude-managed"
     if os.name == "nt":
         return Path(os.environ.get("ProgramFiles") or r"C:\Program Files") / "ClaudeCode"
     if sys.platform == "darwin":
@@ -70,11 +102,14 @@ def _managed_files(directory: Path) -> list[Path]:
 
 @dataclass(frozen=True, slots=True)
 class SettingsPaths:
-    project_root: Path | None
+    project_root: Path | None = None
+    user_files: tuple[Path, ...] | None = None
 
     def files_for(self, layer: str) -> tuple[Path, ...]:
         """Files of one layer, lowest precedence first (Claude before Orin)."""
         if layer == "user":
+            if self.user_files is not None:
+                return tuple(Path(item) for item in self.user_files)
             return (claude_user_dir() / "settings.json", orin_user_dir() / "settings.json")
         if layer == "managed":
             return (*_managed_files(claude_managed_dir()), *_managed_files(orin_managed_dir()))

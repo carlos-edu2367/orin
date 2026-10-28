@@ -56,14 +56,19 @@ def load(_request: dict[str, Any]) -> dict[str, Any]:
 
 def synthesize(request: dict[str, Any]) -> dict[str, Any]:
     engine = _kokoro()
-    voice = str(request.get("voice") or "pf_dora")
-    if voice not in engine.get_voices():
+    raw_lang = str(request.get("language") or "pt-br").strip().lower()
+    lang = "pt-br" if raw_lang.startswith("pt") else raw_lang
+    available_voices = set(engine.get_voices())
+    voice = str(request.get("voice") or "pf_dora").strip()
+    if voice not in available_voices:
+        voice = "pf_dora"
+    elif lang == "pt-br" and voice.startswith(("ef_", "em_", "bf_", "bm_")):
         voice = "pf_dora"
     samples, sample_rate = engine.create(
         str(request.get("text") or ""),
         voice=voice,
         speed=max(0.5, min(2.0, float(request.get("speed") or 1.0))),
-        lang=str(request.get("language") or "pt-br"),
+        lang=lang,
     )
     return {"pcm_base64": pcm16_base64(samples), "sample_rate": int(sample_rate), "voice": voice}
 

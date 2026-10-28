@@ -8,8 +8,8 @@ message instead.
 """
 from __future__ import annotations
 
-import importlib.util
 import base64
+import importlib.util
 import io
 import logging
 import threading
@@ -30,6 +30,11 @@ WHISPER_SAMPLE_RATE = 16000
 OPENAI_TTS_SAMPLE_RATE = 24000
 CLOUD_TIMEOUT_SECONDS = 60.0
 
+PTBR_DEFAULT_TTS_INSTRUCTIONS = (
+    "Fale estritamente em português do Brasil (pt-BR) nativo, natural, fluido e expressivo. "
+    "Nunca use sotaque de Portugal (pt-PT) nem pronúncia lusitana."
+)
+
 LOCAL_WHISPER_MODEL_ALIASES: dict[str, str] = {
     "faster-whisper-large-v3-turbo": "large-v3-turbo",
     "faster-whisper-small-int8": "small",
@@ -38,6 +43,66 @@ LOCAL_WHISPER_MODEL_ALIASES: dict[str, str] = {
 OPENAI_TTS_VOICES: tuple[str, ...] = (
     "alloy", "ash", "ballad", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer",
 )
+
+_HTTP_CLIENTS: dict[float, httpx.Client] = {}
+_HTTP_CLIENTS_LOCK = threading.Lock()
+_REAL_HTTPX_CLIENT = httpx.Client
+
+# Models discovered at runtime to reject MP3 and require raw PCM on OpenRouter.
+_OPENROUTER_PCM_ONLY_MODELS: set[str] = set()
+
+
+def _get_http_client(timeout: float = CLOUD_TIMEOUT_SECONDS) -> httpx.Client:
+    key = float(timeout)
+    if httpx.Client is not _REAL_HTTPX_CLIENT:
+        return httpx.Client(timeout=key)
+    with _HTTP_CLIENTS_LOCK:
+        client = _HTTP_CLIENTS.get(key)
+        if client is None or client.is_closed:
+            client = httpx.Client(
+                timeout=key,
+                limits=httpx.Limits(max_keepalive_connections=10, max_connections=20),
+            )
+            _HTTP_CLIENTS[key] = client
+        return client
+
+
+def close_http_clients() -> None:
+    with _HTTP_CLIENTS_LOCK:
+        clients = list(_HTTP_CLIENTS.values())
+        _HTTP_CLIENTS.clear()
+    for client in clients:
+        try:
+            client.close()
+        except Exception:
+            pass
+
+
+def normalize_ptbr_instructions(
+    instructions: str | None = None,
+    *,
+    language: str = "pt-BR",
+    previous_text: str | None = None,
+) -> str:
+    raw = (instructions or "").strip()
+    lang_norm = (language or "pt-BR").strip().lower()
+    if not lang_norm.startswith("pt"):
+        return raw
+
+    if "Nunca use sotaque de Portugal" in raw:
+        combined = raw
+    elif raw:
+        combined = f"{PTBR_DEFAULT_TTS_INSTRUCTIONS} {raw}"
+    else:
+        combined = PTBR_DEFAULT_TTS_INSTRUCTIONS
+
+    prev = (previous_text or "").strip()
+    if prev and "Contexto imediatamente anterior" not in combined:
+        combined = (
+            f"{combined} Contexto imediatamente anterior já falado "
+            f'(mantenha o mesmo tom e ritmo): "{prev[-160:]}"'
+        )
+    return combined[:500]
 
 
 class VoiceEngineError(RuntimeError):
@@ -152,7 +217,7 @@ class LocalWhisperEngine:
         pcm_bytes: bytes,
         *,
         sample_rate: int,
-        language: str = "pt",
+        language: str = "pt-BR",
         model_id: str = "",
         prompt_hint: str | None = None,
     ) -> str:
@@ -199,16 +264,25 @@ class LocalWhisperEngine:
             ) from exc
 
 
-def synthesize_local(runtime: Any, engine: str, text: str, *, voice: str, speed: float, language: str = "pt") -> tuple[bytes, int]:
+def synthesize_local(
+    runtime: Any,
+    engine: str,
+    text: str,
+    *,
+    voice: str,
+    speed: float,
+    language: str = "pt-BR",
+) -> tuple[bytes, int]:
     """Kokoro or Chatterbox through the isolated runtime: raw PCM16 and its sample rate."""
     from agentos.live_voice.local_runtime import LocalEngineError
 
+    lang_norm = (language or "pt-BR").strip().lower()
     payload: dict[str, Any] = {"op": "synthesize", "text": text, "speed": speed}
     if engine == "kokoro":
-        payload.update({"voice": voice or "pf_dora", "language": "pt-br" if language.startswith("pt") else language})
+        payload.update({"voice": voice or "pf_dora", "language": "pt-br" if lang_norm.startswith("pt") else language})
     else:
         clip = runtime.voice_clip_path(voice) if voice and voice != "default" else None
-        payload.update({"voice_path": str(clip) if clip else "", "language": language.split("-")[0] or "pt"})
+        payload.update({"voice_path": str(clip) if clip else "", "language": lang_norm.split("-")[0] or "pt"})
     try:
         response = runtime.call(engine, payload)
     except LocalEngineError as exc:
@@ -236,7 +310,7 @@ def transcribe_openai_compatible(
     pcm_bytes: bytes,
     *,
     sample_rate: int,
-    language: str = "pt",
+    language: str = "pt-BR",
     model_id: str = "gpt-4o-mini-transcribe",
     prompt_hint: str | None = None,
     transport: httpx.BaseTransport | None = None,
@@ -248,14 +322,16 @@ def transcribe_openai_compatible(
     }
     if prompt_hint:
         data["prompt"] = prompt_hint[:400]
+    url = f"{credential.base_url.rstrip('/')}/audio/transcriptions"
+    headers = {"Authorization": f"Bearer {credential.api_key}"}
+    files = {"file": ("speech.wav", pcm16_to_wav(pcm_bytes, sample_rate), "audio/wav")}
     try:
-        with httpx.Client(timeout=CLOUD_TIMEOUT_SECONDS, transport=transport) as client:
-            response = client.post(
-                f"{credential.base_url.rstrip('/')}/audio/transcriptions",
-                headers={"Authorization": f"Bearer {credential.api_key}"},
-                data=data,
-                files={"file": ("speech.wav", pcm16_to_wav(pcm_bytes, sample_rate), "audio/wav")},
-            )
+        if transport is not None:
+            with httpx.Client(timeout=CLOUD_TIMEOUT_SECONDS, transport=transport) as client:
+                response = client.post(url, headers=headers, data=data, files=files)
+        else:
+            client = _get_http_client(CLOUD_TIMEOUT_SECONDS)
+            response = client.post(url, headers=headers, data=data, files=files)
     except httpx.HTTPError as exc:
         raise VoiceEngineError("cloud_stt_failed", f"Não consegui falar com {credential.provider}: {exc.__class__.__name__}.") from exc
     if response.status_code >= 400:
@@ -274,26 +350,39 @@ def synthesize_openai_speech(
     model_id: str = "gpt-4o-mini-tts",
     voice: str = "coral",
     speed: float = 1.0,
+    language: str = "pt-BR",
     instructions: str | None = None,
+    previous_text: str | None = None,
     transport: httpx.BaseTransport | None = None,
 ) -> bytes:
     """Return raw 24 kHz mono PCM16 for `text`."""
+    effective_model = (model_id or "gpt-4o-mini-tts").strip()
+    if (language or "pt-BR").strip().lower().startswith("pt") and effective_model in {"tts-1", "tts-1-hd"}:
+        effective_model = "gpt-4o-mini-tts"
+
     body: dict[str, Any] = {
-        "model": model_id,
+        "model": effective_model,
         "input": text,
         "voice": voice if voice in OPENAI_TTS_VOICES else "coral",
         "response_format": "pcm",
         "speed": max(0.5, min(2.0, float(speed or 1.0))),
     }
-    if instructions and "gpt-4o" in model_id:
-        body["instructions"] = instructions[:500]
+    norm_instructions = normalize_ptbr_instructions(
+        instructions,
+        language=language,
+        previous_text=previous_text,
+    )
+    if norm_instructions and "gpt-4o" in effective_model:
+        body["instructions"] = norm_instructions[:500]
+    url = f"{credential.base_url.rstrip('/')}/audio/speech"
+    headers = {"Authorization": f"Bearer {credential.api_key}"}
     try:
-        with httpx.Client(timeout=CLOUD_TIMEOUT_SECONDS, transport=transport) as client:
-            response = client.post(
-                f"{credential.base_url.rstrip('/')}/audio/speech",
-                headers={"Authorization": f"Bearer {credential.api_key}"},
-                json=body,
-            )
+        if transport is not None:
+            with httpx.Client(timeout=CLOUD_TIMEOUT_SECONDS, transport=transport) as client:
+                response = client.post(url, headers=headers, json=body)
+        else:
+            client = _get_http_client(CLOUD_TIMEOUT_SECONDS)
+            response = client.post(url, headers=headers, json=body)
     except httpx.HTTPError as exc:
         raise VoiceEngineError("cloud_tts_failed", f"Não consegui falar com {credential.provider}: {exc.__class__.__name__}.") from exc
     if response.status_code >= 400:
@@ -303,10 +392,8 @@ def synthesize_openai_speech(
     return response.content
 
 
-
-
-# Models that read the `instructions` field (tone, pacing); others ignore or reject it.
-_INSTRUCTION_PREFIXES = ("openai/", "google/", "fish-audio/")
+# Models that read the `instructions` field (tone, pacing, Brazilian Portuguese enforcement).
+_INSTRUCTION_PREFIXES = ("openai/", "google/", "fish-audio/", "elevenlabs/", "minimax/", "cartesia/")
 
 
 def _openrouter_headers(credential: CloudCredential) -> dict[str, str]:
@@ -332,7 +419,11 @@ class OpenRouterVoiceCatalog:
             if cached and time.monotonic() - cached[0] < OPENROUTER_CATALOG_TTL_SECONDS:
                 return cached[1]
         try:
-            with httpx.Client(timeout=20.0, transport=self._transport) as client:
+            if self._transport is not None:
+                with httpx.Client(timeout=20.0, transport=self._transport) as client:
+                    response = client.get(f"{self._base_url}/models", params={"output_modalities": modality})
+            else:
+                client = _get_http_client(20.0)
                 response = client.get(f"{self._base_url}/models", params={"output_modalities": modality})
             response.raise_for_status()
             raw = response.json().get("data") or []
@@ -385,27 +476,70 @@ def synthesize_openrouter_speech(
     model_id: str,
     voice: str | None,
     speed: float = 1.0,
+    language: str = "pt-BR",
     instructions: str | None = None,
+    previous_text: str | None = None,
     transport: httpx.BaseTransport | None = None,
 ) -> tuple[bytes, str, int]:
     """Return (audio bytes, encoding, sample rate); encoding is `mp3` or `pcm16`.
 
     MP3 is asked for first because its sample rate travels with it; models that
-    only produce PCM (Gemini, HeyGen) answer 400 and are retried as 16-bit PCM.
+    only produce PCM (Gemini, HeyGen) answer 400 and are retried as 16-bit PCM
+    and remembered in `_OPENROUTER_PCM_ONLY_MODELS`.
     """
-    body: dict[str, Any] = {"model": model_id, "input": text}
+    minimal_body: dict[str, Any] = {"model": model_id, "input": text}
     if voice:
-        body["voice"] = voice
-    if instructions and model_id.startswith(_INSTRUCTION_PREFIXES):
-        body["instructions"] = instructions[:500]
+        minimal_body["voice"] = voice
     if model_id.startswith("openai/") and abs(float(speed or 1.0) - 1.0) > 0.01:
-        body["speed"] = max(0.5, min(2.0, float(speed)))
+        minimal_body["speed"] = max(0.5, min(2.0, float(speed)))
+
+    body: dict[str, Any] = dict(minimal_body)
+    lang_norm = (language or "pt-BR").strip().lower()
+    if lang_norm.startswith("pt"):
+        body["language_code"] = "pt"
+    if previous_text and previous_text.strip():
+        body["previous_text"] = previous_text.strip()[:300]
+    norm_instructions = normalize_ptbr_instructions(
+        instructions,
+        language=language,
+        previous_text=previous_text,
+    )
+    if norm_instructions:
+        body["instructions"] = norm_instructions[:500]
+
+    preferred_fmt = "pcm" if model_id in _OPENROUTER_PCM_ONLY_MODELS else "mp3"
     url = f"{credential.base_url.rstrip('/')}/audio/speech"
+    headers = _openrouter_headers(credential)
+
+    def _run_requests(client: httpx.Client) -> httpx.Response:
+        resp = client.post(url, headers=headers, json={**body, "response_format": preferred_fmt})
+        if resp.status_code in (400, 422):
+            err_lower = _cloud_error_message(resp).lower()
+            is_format_err = any(tok in err_lower for tok in ("pcm", "mp3", "response_format", "format"))
+            if preferred_fmt == "mp3" and is_format_err:
+                resp = client.post(url, headers=headers, json={**body, "response_format": "pcm"})
+                if resp.status_code < 400:
+                    _OPENROUTER_PCM_ONLY_MODELS.add(model_id)
+                elif body != minimal_body:
+                    resp = client.post(url, headers=headers, json={**minimal_body, "response_format": "pcm"})
+                    if resp.status_code < 400:
+                        _OPENROUTER_PCM_ONLY_MODELS.add(model_id)
+            else:
+                if body != minimal_body:
+                    resp = client.post(url, headers=headers, json={**minimal_body, "response_format": preferred_fmt})
+                if resp.status_code in (400, 422) and preferred_fmt == "mp3":
+                    resp = client.post(url, headers=headers, json={**minimal_body, "response_format": "pcm"})
+                    if resp.status_code < 400:
+                        _OPENROUTER_PCM_ONLY_MODELS.add(model_id)
+        return resp
+
     try:
-        with httpx.Client(timeout=CLOUD_TIMEOUT_SECONDS, transport=transport) as client:
-            response = client.post(url, headers=_openrouter_headers(credential), json={**body, "response_format": "mp3"})
-            if response.status_code == 400:
-                response = client.post(url, headers=_openrouter_headers(credential), json={**body, "response_format": "pcm"})
+        if transport is not None:
+            with httpx.Client(timeout=CLOUD_TIMEOUT_SECONDS, transport=transport) as client:
+                response = _run_requests(client)
+        else:
+            client = _get_http_client(CLOUD_TIMEOUT_SECONDS)
+            response = _run_requests(client)
     except httpx.HTTPError as exc:
         raise VoiceEngineError("cloud_tts_failed", f"Não consegui falar com o OpenRouter: {exc.__class__.__name__}.") from exc
     if response.status_code >= 400:
@@ -425,7 +559,7 @@ def transcribe_openrouter(
     pcm_bytes: bytes,
     *,
     sample_rate: int,
-    language: str = "pt",
+    language: str = "pt-BR",
     model_id: str = "openai/whisper-large-v3-turbo",
     transport: httpx.BaseTransport | None = None,
 ) -> str:
@@ -434,13 +568,15 @@ def transcribe_openrouter(
         "input_audio": {"data": base64.b64encode(pcm16_to_wav(pcm_bytes, sample_rate)).decode("ascii"), "format": "wav"},
         "language": (language or "pt").split("-")[0],
     }
+    url = f"{credential.base_url.rstrip('/')}/audio/transcriptions"
+    headers = _openrouter_headers(credential)
     try:
-        with httpx.Client(timeout=CLOUD_TIMEOUT_SECONDS, transport=transport) as client:
-            response = client.post(
-                f"{credential.base_url.rstrip('/')}/audio/transcriptions",
-                headers=_openrouter_headers(credential),
-                json=body,
-            )
+        if transport is not None:
+            with httpx.Client(timeout=CLOUD_TIMEOUT_SECONDS, transport=transport) as client:
+                response = client.post(url, headers=headers, json=body)
+        else:
+            client = _get_http_client(CLOUD_TIMEOUT_SECONDS)
+            response = client.post(url, headers=headers, json=body)
     except httpx.HTTPError as exc:
         raise VoiceEngineError("cloud_stt_failed", f"Não consegui falar com o OpenRouter: {exc.__class__.__name__}.") from exc
     if response.status_code >= 400:
@@ -461,7 +597,12 @@ __all__ = [
     "OpenRouterVoiceCatalog",
     "OPENAI_TTS_SAMPLE_RATE",
     "OPENAI_TTS_VOICES",
+    "PTBR_DEFAULT_TTS_INSTRUCTIONS",
     "VoiceEngineError",
+    "_OPENROUTER_PCM_ONLY_MODELS",
+    "_get_http_client",
+    "close_http_clients",
+    "normalize_ptbr_instructions",
     "pcm16_to_float32",
     "pcm16_to_wav",
     "synthesize_local",

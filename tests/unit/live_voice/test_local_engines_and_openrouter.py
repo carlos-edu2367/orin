@@ -46,7 +46,7 @@ def synthesize(req):
     if req.get("text") == "boom":
         raise RuntimeError("engine exploded")
     if req.get("text") == "die":
-        sys.exit(3)
+        import os; os._exit(3)
     samples = [0.25] * 2400
     return {"pcm_base64": pcm16_base64(samples), "sample_rate": 24000, "echo": req}
 
@@ -199,7 +199,7 @@ def test_openrouter_catalog_keeps_each_models_own_voices_and_caches() -> None:
     assert models["elevenlabs/eleven-v3"]["voices"] == ["adam"]
     assert models["fish-audio/s2-pro"]["voices"] == []
     assert models["google/gemini-3.8-flash-tts"]["supports_instructions"] is True
-    assert models["elevenlabs/eleven-v3"]["supports_instructions"] is False
+    assert models["elevenlabs/eleven-v3"]["supports_instructions"] is True
     catalog.speech_models()
     assert len(hits) == 1
     assert catalog.transcription_models()[0]["id"] == "openai/whisper-large-v3-turbo"
@@ -221,10 +221,10 @@ def test_openrouter_speech_prefers_mp3_and_falls_back_to_pcm() -> None:
     transport = httpx.MockTransport(handler)
     audio, encoding, _ = synthesize_openrouter_speech(OPENROUTER, "Oi", model_id="elevenlabs/eleven-v3", voice="adam", instructions="calmo", speed=1.3, transport=transport)
     assert (audio, encoding) == (b"ID3mp3", "mp3")
-    assert bodies[0] == {"model": "elevenlabs/eleven-v3", "input": "Oi", "voice": "adam", "response_format": "mp3"}
+    assert bodies[0]["model"] == "elevenlabs/eleven-v3" and bodies[0]["language_code"] == "pt" and "português do Brasil (pt-BR)" in bodies[0]["instructions"]
     audio, encoding, rate = synthesize_openrouter_speech(OPENROUTER, "Oi", model_id="google/gemini-3.8-flash-tts", voice="Kore", instructions="calmo", transport=transport)
     assert (encoding, rate, len(audio)) == ("pcm16", 24000, 200)
-    assert bodies[-1]["instructions"] == "calmo"
+    assert "calmo" in bodies[-1]["instructions"] and "português do Brasil (pt-BR)" in bodies[-1]["instructions"]
 
 
 def test_openrouter_transcription_sends_base64_wav() -> None:
@@ -271,3 +271,130 @@ def test_websocket_speaks_with_local_kokoro_and_engine_routes(tmp_path: Path, fa
             assert chunk["duration_ms"] == 100
     finally:
         runtime.stop_all()
+
+
+def test_openrouter_pcm_only_model_is_cached_after_first_400() -> None:
+    from agentos.live_voice import engines
+
+    engines._OPENROUTER_PCM_ONLY_MODELS.discard("google/gemini-2.5-flash-tts-cached")
+    formats_seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.read())
+        formats_seen.append(body["response_format"])
+        if body["response_format"] == "mp3":
+            return httpx.Response(400, json={"error": {"message": "mp3 unsupported"}})
+        return httpx.Response(200, content=b"\x00\x01" * 100, headers={"content-type": "audio/pcm;rate=24000"})
+
+    transport = httpx.MockTransport(handler)
+    # 1st call: tries mp3 (400), retries pcm (200) -> caches model as pcm-only
+    synthesize_openrouter_speech(
+        OPENROUTER,
+        "Primeira frase.",
+        model_id="google/gemini-2.5-flash-tts-cached",
+        voice="Kore",
+        transport=transport,
+    )
+    assert formats_seen == ["mp3", "pcm"]
+
+    # 2nd call: goes straight to pcm in a single POST!
+    formats_seen.clear()
+    synthesize_openrouter_speech(
+        OPENROUTER,
+        "Segunda frase.",
+        model_id="google/gemini-2.5-flash-tts-cached",
+        voice="Kore",
+        transport=transport,
+    )
+    assert formats_seen == ["pcm"]
+
+
+def test_openrouter_speech_passes_previous_text_and_retries_unknown_fields() -> None:
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.read())
+        bodies.append(body)
+        if "instructions" in body and body["model"] == "strict/vendor-tts":
+            return httpx.Response(400, json={"error": {"message": "Unknown field: instructions"}})
+        return httpx.Response(200, content=b"ID3mp3", headers={"content-type": "audio/mpeg"})
+
+    transport = httpx.MockTransport(handler)
+    synthesize_openrouter_speech(
+        OPENROUTER,
+        "Claro!",
+        model_id="elevenlabs/eleven-v3",
+        voice="adam",
+        previous_text="Como posso ajudar você hoje?",
+        transport=transport,
+    )
+    assert bodies[-1]["previous_text"] == "Como posso ajudar você hoje?"
+    assert bodies[-1]["language_code"] == "pt"
+    assert "português do Brasil (pt-BR)" in bodies[-1]["instructions"]
+
+    # Vendor that rejects extra fields with 400 gracefully retries without them
+    audio, enc, _ = synthesize_openrouter_speech(
+        OPENROUTER,
+        "Tudo bem!",
+        model_id="strict/vendor-tts",
+        voice="v1",
+        transport=transport,
+    )
+    assert (audio, enc) == (b"ID3mp3", "mp3")
+    assert "instructions" not in bodies[-1]
+
+
+def test_kokoro_and_chatterbox_workers_enforce_ptbr_and_seed(monkeypatch: pytest.MonkeyPatch) -> None:
+    workers_dir = str(runtime_module.WORKERS_DIR)
+    if workers_dir not in sys.path:
+        sys.path.insert(0, workers_dir)
+    from agentos.live_voice.workers import chatterbox_worker, kokoro_worker
+
+    # 1. Kokoro worker forces lang="pt-br" and defaults to pf_dora for any pt* language
+    seen_kokoro: dict[str, Any] = {}
+
+    class FakeKokoroEngine:
+        def get_voices(self) -> list[str]:
+            return ["pf_dora", "pm_alex"]
+
+        def create(self, text: str, *, voice: str, speed: float, lang: str) -> tuple[np.ndarray, int]:
+            seen_kokoro.update({"text": text, "voice": voice, "speed": speed, "lang": lang})
+            return np.zeros(240, dtype=np.float32), 24000
+
+    monkeypatch.setattr(kokoro_worker, "_kokoro", lambda: FakeKokoroEngine())
+    res_k = kokoro_worker.synthesize({"text": "Oi!", "voice": "invalid_voice", "language": "pt-PT", "speed": 1.0})
+    assert res_k["voice"] == "pf_dora"
+    assert seen_kokoro["lang"] == "pt-br"
+
+    # 2. Chatterbox worker seeds torch and numpy when using built-in conditionals
+    seeded: list[tuple[str, int]] = []
+    fake_torch = type("FakeTorch", (), {
+        "manual_seed": staticmethod(lambda s: seeded.append(("torch", s))),
+        "cuda": type("FakeCuda", (), {
+            "is_available": staticmethod(lambda: True),
+            "manual_seed_all": staticmethod(lambda s: seeded.append(("cuda", s))),
+        })(),
+    })()
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+    class FakeTensor:
+        def squeeze(self, _dim: int) -> FakeTensor:
+            return self
+
+        def numpy(self) -> np.ndarray:
+            return np.zeros(240, dtype=np.float32)
+
+    class FakeChatterbox:
+        sr = 24000
+        conds = "builtin_conds"
+
+        def generate(self, text: str, **kwargs: Any) -> FakeTensor:
+            seeded.append(("lang", kwargs.get("language_id")))
+            return FakeTensor()
+
+    monkeypatch.setattr(chatterbox_worker, "_chatterbox", lambda: FakeChatterbox())
+    monkeypatch.setattr(chatterbox_worker, "_builtin_conds", "builtin_conds")
+    chatterbox_worker.synthesize({"text": "Oi!", "language": "pt-BR"})
+    assert ("torch", 42) in seeded
+    assert ("cuda", 42) in seeded
+    assert ("lang", "pt") in seeded

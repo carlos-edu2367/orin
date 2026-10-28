@@ -219,7 +219,7 @@ class WorkerProcess:
                 while True:
                     line = self._next_line(max(0.1, deadline - time.monotonic()))
                     if line is None:
-                        timed_out = self.alive()
+                        timed_out = (time.monotonic() >= deadline) and self.alive()
                         self.stop()
                         if timed_out:
                             raise LocalEngineError("local_engine_timeout", "O motor de voz local demorou demais para responder.")

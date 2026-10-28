@@ -44,20 +44,20 @@ PTBR_HOLD_MARKERS_SINGLE: frozenset[str] = frozenset(
         "ahn",
         "uhm",
         "eh",
-        "é",
+
         "se",
-        "como",
+
         "quando",
         "enquanto",
-        "onde",
-        "qual",
+
+
         "quais",
         "porém",
         "contudo",
         "entretanto",
         "portanto",
         "aliás",
-        "assim",
+
         "com",
         "sem",
         "por",

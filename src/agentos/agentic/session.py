@@ -509,7 +509,8 @@ def build_system_prompt(
         "- When you create a useful workspace file, link it in your final answer as [filename](workspace://relative/path). Prioritize final deliverables and include generator scripts when useful.",
         "- Use run_command only for commands that finish. To start a local server, call run_command with background=true; on Windows do not use nohup or Unix '&' syntax.",
     ]
-    if not code_mode_context:
+    is_live_or_friend_prompt = bool(live_mode) or str(conversation_mode or "chat").strip().lower() == "friend"
+    if not code_mode_context and not is_live_or_friend_prompt:
         # The reference material below describes every tool the workspace can
         # offer, but a request publishes only the ones the current stage needs.
         # Saying so prevents the model from planning around a tool it cannot
@@ -935,9 +936,9 @@ class TurnSession:
         *,
         turn: dict[str, object],
         store,
-        agents_store,
-        memory_store,
-        provider_factory: Callable[[], object],
+        agents_store=None,
+        memory_store=None,
+        provider_factory: Callable[[], object] = lambda: None,
         workspace_root: Path | str | None = None,
         cancelled: Callable[[Mapping[str, object]], bool] | None = None,
         reconciliation_required: Callable[[Mapping[str, object]], bool] | None = None,
@@ -4174,6 +4175,8 @@ class TurnSession:
 
     def _effort(self) -> str | None:
         """The turn's effort (turn value, else the user's ``effort``/``effortLevel``), if this model can use it."""
+        if bool(self.turn.get("live_mode")):
+            return None
         from .effort import normalize_effort, reasoning_supported
         from .loop_settings import operator_value
 
@@ -4386,7 +4389,12 @@ class TurnSession:
         self._disk_skills = self._load_disk_skills(trusted_workspace)
         self._agent_definitions = self._load_agent_definitions(trusted_workspace)
         self._announce_defined_agents()
-        self._load_file_mcp_servers(trusted_workspace)
+        is_live_or_friend = bool(self.turn.get("live_mode")) or self.conversation_mode == "friend"
+        explicit_file_mcp = bool(self.turn.get("load_file_mcp_servers")) or bool(
+            self.cli_options is not None and (self.cli_options.mcp_servers or self.cli_options.strict_mcp_config)
+        )
+        if not is_live_or_friend or explicit_file_mcp:
+            self._load_file_mcp_servers(trusted_workspace)
         toolset = self._toolset(
             subagents=self.enable_subagents,
             non_interactive_ask=self._non_interactive_ask(),
@@ -4564,11 +4572,11 @@ class TurnSession:
             prompt = self._snapshotted_prompt(prompt)
         if turn_start["prompt_context"]:
             volatile_prompt = (volatile_prompt + "\n\n" + system_reminder("\n".join(turn_start["prompt_context"]))).strip()
-        # In Code Mode, use a single fluid agentic loop without rigid phase boundaries;
+        # In Code Mode and Live/Friend Mode, use a single fluid agentic loop without rigid phase boundaries;
         # standard chat keeps PhaseController.
         phase_controller = (
             None
-            if self.turn.get("code_mode") == "code"
+            if self.turn.get("code_mode") == "code" or is_live_or_friend
             else PhaseController(
                 model_calls_tools=self.model_calls_tools,
                 resumed_contract=resumed is not None,

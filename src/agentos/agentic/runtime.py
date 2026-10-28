@@ -826,7 +826,7 @@ class AgenticTurnRuntime:
                 "messages": window, "tools": tool_schemas,
                 "max_output_tokens": min([value for value in (self._output_cap or self.limits.max_output_tokens, remaining_tokens) if value is not None], default=None),
             }
-            if self.effort:
+            if self.effort and not bool(turn.get("live_mode")):
                 request["effort"] = self.effort
             if final_iteration:
                 request["tool_choice"] = "none"
@@ -878,7 +878,14 @@ class AgenticTurnRuntime:
             rate_limited = False
             context_overflow_error = False
             call_cost_reported = False
-            speak_parser = SpeakStreamParser() if is_live_or_friend else None
+            live_fallback_enabled = bool(turn.get("live_mode")) or (
+                is_live_or_friend and turn.get("live_mode") is not False
+            )
+            speak_parser = (
+                SpeakStreamParser(live_voice_enabled=live_fallback_enabled and not pending_optimistic_lie_retraction)
+                if is_live_or_friend
+                else None
+            )
             iteration_had_speak = False
 
             def emit_speak_parse_result(parse_result: SpeakParseResult) -> str:
@@ -914,6 +921,7 @@ class AgenticTurnRuntime:
                         {
                             "chunk_index": chunk.chunk_index,
                             "block_index": chunk.block_index,
+                            "text": chunk.clean_text,
                             "raw_text": chunk.raw_tts_text,
                             "clean_text": chunk.clean_text,
                             "tts_text": chunk.tts_text,
@@ -1080,7 +1088,7 @@ class AgenticTurnRuntime:
                         retryable_error = event.error.retryability.value == "SAFE"
                 flush_thinking_buffer()
                 if speak_parser is not None:
-                    allow_fallback = bool(turn.get("live_mode")) and not calls and not pending_optimistic_lie_retraction
+                    allow_fallback = live_fallback_enabled and not calls and not pending_optimistic_lie_retraction
                     fin_res = speak_parser.finish(live_voice_enabled=allow_fallback)
                     fin_tail = emit_speak_parse_result(fin_res)
                     if fin_tail:
@@ -1423,7 +1431,13 @@ class AgenticTurnRuntime:
                     return self.toolset.schemas(allowed)
                 except TypeError:
                     return self.toolset.schemas()
-            return self.toolset.schemas()
+            schemas = self.toolset.schemas()
+            if self._is_live_or_friend(turn):
+                schemas = [
+                    s for s in schemas
+                    if str((s.get("function") or {}).get("name") or "") not in {"write_contract", "report_verification"}
+                ]
+            return schemas
         toolkits = self.contract.toolkits if self.contract is not None else None
         allowed = phases.tools_for(self.phases.current, toolkits)
         if not allowed:
@@ -2502,13 +2516,24 @@ class AgenticTurnRuntime:
             return message
         stripped = content.lstrip()
         leading_ws = content[: len(content) - len(stripped)]
-        parts = stripped.split("\n\n", 1)
-        first_para = parts[0].strip()
-        if not first_para or first_para.startswith(("```", "#", "|", "- ", "* ")):
+        paragraphs = stripped.split("\n\n")
+        speakable_paras: list[str] = []
+        remainder_paras: list[str] = []
+        for idx, para in enumerate(paragraphs):
+            p_strip = para.strip()
+            if not p_strip:
+                continue
+            if p_strip.startswith(("```", "#", "|", "- ", "* ", "• ")):
+                remainder_paras = paragraphs[idx:]
+                break
+            speakable_paras.append(p_strip)
+        if not speakable_paras:
             return message
-        rehydrated = f"{leading_ws}<speak>{first_para}</speak>"
-        if len(parts) > 1:
-            rehydrated = f"{rehydrated}\n\n{parts[1]}"
+        spoken_block = "\n\n".join(speakable_paras)
+        rehydrated = f"{leading_ws}<speak>{spoken_block}</speak>"
+        if remainder_paras:
+            tail = "\n\n".join(remainder_paras)
+            rehydrated = f"{rehydrated}\n\n{tail}"
         return {**message, "content": rehydrated}
 
     def _record_speak_event(

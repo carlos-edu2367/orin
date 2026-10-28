@@ -25,7 +25,7 @@ export function listSystemVoices(): SystemVoice[] {
   }))
   const rank = (voice: SystemVoice) => {
     const lang = voice.lang.toLowerCase()
-    if (lang === 'pt-br' || lang === 'pt_br') return 0
+    if (lang.startsWith('pt-br') || lang.startsWith('pt_br')) return 0
     if (lang.startsWith('pt')) return 1
     return 2
   }
@@ -84,6 +84,7 @@ export class SpeechOutput {
   private levelTimer: number | null = null
   private analyserData: Uint8Array<ArrayBuffer> | null = null
   private generation = 0
+  private activeUtterance: SpeechSynthesisUtterance | null = null
 
   constructor(private events: SpeechOutputEvents = {}, private system: SystemVoiceSettings = { voiceUri: null, rate: 1.05, pitch: 1 }) {}
 
@@ -137,7 +138,10 @@ export class SpeechOutput {
     this.queue = []
     const wasSpeaking = this.current !== null
     this.current = null
-    if (speechSynthesisSupported()) window.speechSynthesis.cancel()
+    this.activeUtterance = null
+    if (speechSynthesisSupported() && (window.speechSynthesis.speaking || window.speechSynthesis.pending)) {
+      window.speechSynthesis.cancel()
+    }
     try {
       this.source?.stop()
     } catch {
@@ -181,20 +185,39 @@ export class SpeechOutput {
       done()
       return
     }
+    const synth = window.speechSynthesis
+    if (synth.speaking || synth.pending) {
+      synth.cancel()
+    }
     const utterance = new window.SpeechSynthesisUtterance(text)
-    const voice = window.speechSynthesis.getVoices().find((candidate) => candidate.voiceURI === this.system.voiceUri)
-      ?? window.speechSynthesis.getVoices().find((candidate) => candidate.lang.toLowerCase().startsWith('pt'))
+    const voices = synth.getVoices()
+    const isPtBr = (lang: string) => {
+      const lower = lang.toLowerCase()
+      return lower.startsWith('pt-br') || lower.startsWith('pt_br')
+    }
+    const rankedBestUri = listSystemVoices()[0]?.uri
+    const voice =
+      (this.system.voiceUri ? voices.find((candidate) => candidate.voiceURI === this.system.voiceUri) : undefined)
+      ?? voices.find((candidate) => isPtBr(candidate.lang) && candidate.localService)
+      ?? voices.find((candidate) => isPtBr(candidate.lang))
+      ?? (rankedBestUri ? voices.find((candidate) => candidate.voiceURI === rankedBestUri) : undefined)
+      ?? voices.find((candidate) => candidate.lang.toLowerCase().startsWith('pt'))
     if (voice) utterance.voice = voice
-    utterance.lang = voice?.lang ?? 'pt-BR'
+    utterance.lang = voice && isPtBr(voice.lang) ? voice.lang : 'pt-BR'
     utterance.rate = this.system.rate
     utterance.pitch = this.system.pitch
+    this.activeUtterance = utterance
     utterance.onboundary = (event) => {
       this.boundaryPulse = 1
       this.events.onProgress?.(text, event.charIndex)
     }
-    utterance.onend = done
-    utterance.onerror = done
-    window.speechSynthesis.speak(utterance)
+    const finishUtterance = () => {
+      if (this.activeUtterance === utterance) this.activeUtterance = null
+      done()
+    }
+    utterance.onend = finishUtterance
+    utterance.onerror = finishUtterance
+    synth.speak(utterance)
   }
 
   private ensureContext(): AudioContext | null {

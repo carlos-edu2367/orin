@@ -2,7 +2,7 @@
 
 Listing a server's tools means starting it (or calling it) once; the answer is kept per exact configuration for
 ``DISCOVERY_TTL_SECONDS`` (a failure for ``FAILURE_TTL_SECONDS``), so a turn after the first one starts at once.
-Servers are listed in parallel and the turn waits at most ``MCP_TIMEOUT`` milliseconds (default 30 s) for them; one
+Servers are listed in parallel and the turn waits at most ``MCP_TIMEOUT`` milliseconds (default 3 s) for them; one
 that answers later is ready for the next turn. A failure's text never carries the values of the server's
 environment, headers or URL query (they are often credentials).
 """
@@ -20,8 +20,8 @@ from .models import McpServerConfig, McpServerState, McpToolDescriptor, McpTrans
 from .toolset import ServerBundle, discover
 
 DISCOVERY_TTL_SECONDS = 600.0
-FAILURE_TTL_SECONDS = 60.0
-DEFAULT_TIMEOUT_SECONDS = 30.0
+FAILURE_TTL_SECONDS = 300.0
+DEFAULT_TIMEOUT_SECONDS = 3.0
 MAX_CACHE_ENTRIES = 256
 MAX_PARALLEL_DISCOVERY = 8
 
@@ -138,7 +138,9 @@ def connect_file_servers(servers: Iterable[FileServer], *, user_id: str, connect
             pool.shutdown(wait=False)  # a late server keeps starting in the background and is cached for the next turn
         for future, (server, config, secrets) in futures.items():
             if future not in done:
-                failures.append((server.name, f"did not answer within {limit:g} s; it is tried again next turn"))
+                timeout_msg = f"did not answer within {limit:g} s; it is tried again next turn"
+                _store(server.fingerprint(), (), timeout_msg)
+                failures.append((server.name, timeout_msg))
                 continue
             tools, error = future.result()
             if error:
@@ -149,6 +151,6 @@ def connect_file_servers(servers: Iterable[FileServer], *, user_id: str, connect
 
 
 __all__ = [
-    "DISCOVERY_TTL_SECONDS", "FAILURE_TTL_SECONDS", "clear_discovery_cache", "connect_file_servers", "discovery_timeout",
-    "file_bundle",
+    "DEFAULT_TIMEOUT_SECONDS", "DISCOVERY_TTL_SECONDS", "FAILURE_TTL_SECONDS", "clear_discovery_cache",
+    "connect_file_servers", "discovery_timeout", "file_bundle",
 ]

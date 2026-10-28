@@ -87,8 +87,8 @@ export type VadEvent =
   | { type: 'speech_frame'; frame: Int16Array }
   | { type: 'speech_end'; frames: Int16Array[]; durationMs: number; silenceMs: number }
 
-export const DUCKING_MULTIPLIER = 2.8
-export const DUCKING_MIN_SPEECH_MS = 220
+export const DUCKING_MULTIPLIER = 3.5
+export const DUCKING_MIN_SPEECH_MS = 420
 
 /**
  * Adaptive energy VAD. The noise floor follows the room quickly downwards and
@@ -109,7 +109,7 @@ export class EnergyVad {
   constructor(options: VadOptions = {}) {
     this.opts = {
       sensitivity: options.sensitivity ?? 0.6,
-      endSilenceMs: options.endSilenceMs ?? 750,
+      endSilenceMs: options.endSilenceMs ?? 600,
       startSpeechMs: options.startSpeechMs ?? 96,
       preRollMs: options.preRollMs ?? 320,
       maxUtteranceMs: options.maxUtteranceMs ?? 28000,
@@ -230,6 +230,7 @@ registerProcessor('orin-mic-tap', OrinMicTap)
 
 export type MicCaptureOptions = {
   deviceId?: string
+  headphoneMode?: boolean
   /** 16 kHz PCM16 frames of `LIVE_FRAME_SAMPLES`, with their RMS. */
   onFrame?: (frame: Int16Array, rms: number) => void
 }
@@ -284,7 +285,7 @@ export class MicCapture {
           ...(options.deviceId && options.deviceId !== 'default' ? { deviceId: { exact: options.deviceId } } : {}),
           echoCancellation: true,
           noiseSuppression: true,
-          autoGainControl: true,
+          autoGainControl: Boolean(options.headphoneMode),
           channelCount: 1,
         },
       })

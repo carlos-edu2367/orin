@@ -594,3 +594,165 @@ def test_websocket_red_team_malformed_inputs_echo_guard_and_buffer_cap() -> None
         )
         echo_ev = ws.receive_json()
         assert echo_ev["type"] == "vad.echo_discarded"
+
+
+@pytest.mark.parametrize(
+    "complete_phrase",
+    [
+        "Você sabe qual é",
+        "Me explica como",
+        "Você viu onde",
+        "Me diz qual",
+        "Quero deixar assim",
+    ],
+)
+def test_ptbr_semantic_eou_detector_does_not_hold_on_complete_question_endings(
+    complete_phrase: str,
+) -> None:
+    detector = PTBRSemanticEOUDetector(fast_timeout_ms=380, normal_timeout_ms=520, hold_timeout_ms=1400)
+    decision = detector.evaluate(complete_phrase, silence_ms=520)
+    assert decision.detected_hold_marker is None
+    assert decision.is_end_of_utterance is True
+
+
+def test_websocket_eou_wait_reuses_cached_stt_transcript_without_double_transcription(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agentos.live_voice.engines import LocalWhisperEngine
+
+    transcribe_calls = 0
+
+    def fake_transcribe(self: LocalWhisperEngine, pcm: bytes, **kwargs: Any) -> str:
+        nonlocal transcribe_calls
+        transcribe_calls += 1
+        return "Eu queria saber mas" if transcribe_calls == 1 else "Nova frase completa agora."
+
+    monkeypatch.setattr(LocalWhisperEngine, "transcribe", fake_transcribe)
+    t = np.linspace(0.0, 0.4, int(16000 * 0.4), dtype=np.float32)
+    speech_pcm = (np.sin(2.0 * np.pi * 200.0 * t) * 10000).astype(np.int16).tobytes()
+
+    app = _build_test_app()
+    client = TestClient(app)
+    with client.websocket_connect("/v1/conversations/conv_eou_cache/live") as ws:
+        ws.receive_json()  # session.ready
+        ws.send_bytes(speech_pcm)
+        assert ws.receive_json()["type"] == "vad.frame"
+
+        # 1st audio_speech_end at 500ms -> runs STT once and enters vad.eou_wait
+        ws.send_json({"type": "audio_speech_end", "silence_ms": 500, "sample_rate": 16000})
+        assert ws.receive_json()["type"] == "stt.processing"
+        wait_ev = ws.receive_json()
+        assert wait_ev["type"] == "vad.eou_wait"
+        assert wait_ev["partial_text"] == "Eu queria saber mas"
+        assert transcribe_calls == 1
+
+        # 2nd audio_speech_end at 1500ms without new speech -> MUST reuse cached transcript (0 new STT calls!)
+        ws.send_json({"type": "audio_speech_end", "silence_ms": 1500, "sample_rate": 16000})
+        final_ev = ws.receive_json()
+        assert final_ev["type"] == "stt.transcript"
+        assert final_ev["text"] == "Eu queria saber mas"
+        assert transcribe_calls == 1
+
+        # New speech frame arrives -> invalidates cache and calls STT for new utterance
+        ws.send_bytes(speech_pcm)
+        ws.send_json({"type": "audio_speech_end", "silence_ms": 600, "sample_rate": 16000})
+        first_after = ws.receive_json()
+        if first_after["type"] == "vad.frame":
+            first_after = ws.receive_json()
+        assert first_after["type"] == "stt.processing"
+        second_final = ws.receive_json()
+        assert second_final["type"] == "stt.transcript"
+        assert second_final["text"] == "Nova frase completa agora."
+        assert transcribe_calls == 2
+
+
+def test_websocket_speak_text_splits_long_text_and_pipelines_without_blocking_barge_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import threading
+    import time as _time
+    from agentos.live_voice import session as session_mod
+
+    synth_calls: list[dict[str, Any]] = []
+    in_flight = 0
+    max_concurrent = 0
+    lock = threading.Lock()
+
+    def fake_synthesize_local(
+        runtime: Any,
+        engine: str,
+        text: str,
+        *,
+        voice: str,
+        speed: float,
+        language: str = "pt-BR",
+    ) -> tuple[bytes, int]:
+        nonlocal in_flight, max_concurrent
+        with lock:
+            in_flight += 1
+            if in_flight > max_concurrent:
+                max_concurrent = in_flight
+            synth_calls.append({"text": text, "language": language})
+        _time.sleep(0.06)
+        with lock:
+            in_flight -= 1
+        return (b"\x01\x00" * 1200), 24000
+
+    monkeypatch.setattr(session_mod, "synthesize_local", fake_synthesize_local)
+    app = _build_test_app()
+    client = TestClient(app)
+
+    with client.websocket_connect("/v1/conversations/conv_pipeline/live") as ws:
+        ws.receive_json()  # session.ready
+        ws.send_json({"type": "config", "tts_provider": "kokoro", "tts_model": "kokoro-82m-onnx"})
+        assert ws.receive_json()["type"] == "config.updated"
+
+        # 1. Long multi-sentence text (> 120 chars) is split into sentence clauses and pipelined (up to 2 concurrent)
+        long_text = (
+            "A primeira frase do Orin explica como o motor de voz funciona com baixíssima latência no Brasil. "
+            "A segunda frase demonstra que o sintetizador divide textos longos e pré-carrega duas partes em paralelo."
+        )
+        assert len(long_text) > 120
+        ws.send_json({"type": "speak_text", "text": long_text})
+        c0 = ws.receive_json()
+        assert c0["type"] == "tts.chunk"
+        assert len(c0["clean_text"]) <= 120
+        c1 = ws.receive_json()
+        assert c1["type"] == "tts.chunk"
+        assert len(c1["clean_text"]) <= 120
+        assert c0["chunk_seq"] == 0
+        assert c1["chunk_seq"] == 1
+        assert "primeira frase" in c0["clean_text"]
+        assert "segunda frase" in c1["clean_text"]
+        assert max_concurrent >= 2
+
+        # 2. Barge-in while synthesis is running in background is NOT blocked and suppresses stale epoch chunks
+        ws.send_json(
+            {
+                "type": "speak_text",
+                "text": (
+                    "Esta frase longa está sendo sintetizada em background quando o usuário interrompe. "
+                    "Esta segunda parte jamais deve ser emitida após o corte de barge-in na sessão."
+                ),
+            }
+        )
+        ws.send_json({"type": "barge_in", "epoch": 1, "chunk_seq": 1, "played_ms": 200})
+
+        seen_clear = False
+        for _ in range(4):
+            ev = ws.receive_json()
+            if ev["type"] == "tts.chunk":
+                # Any chunk emitted before barge_in was processed must belong to epoch 1, NEVER after audio.clear
+                assert not seen_clear, "Must never emit stale tts.chunk after audio.clear!"
+            elif ev["type"] == "audio.clear":
+                seen_clear = True
+                assert ev["new_epoch"] == 2
+                break
+        assert seen_clear is True
+
+        # Wait for background threads to finish and ensure no stale tts.chunk is queued after audio.clear
+        _time.sleep(0.15)
+        ws.send_json({"type": "ping"})
+        pong = ws.receive_json()
+        assert pong["type"] == "pong"
+        assert pong["audio_epoch"] == 2

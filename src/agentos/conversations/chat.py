@@ -458,6 +458,7 @@ class PostgresChatStore:
         self._skill_library = skill_library
         self._sequence_lock = threading.Lock()
         self._claim_lock = threading.Lock()
+        self._live_mode_turns: dict[str, bool] = {}
         _ensure_conversation_mode_columns(engine)
 
     def _activity(
@@ -808,7 +809,7 @@ class PostgresChatStore:
         # Stable across turns so the conversation-level graph keeps one root node.
         return f"agent:{turn['conversation_id']}:main"
 
-    def create(self, *, user_id: str, message: str, provider: str, model_id: str, idempotency_key: str, conversation_id: str | None = None, project_id: str | None = None, workspace_id: str | None = None, attachments: Sequence[Mapping[str, object]] = (), new_conversation_id: str | None = None, scheduled_by_schedule_id: str | None = None, code_mode: str = "chat", permission_mode: str | None = None, turn_kind: str | None = None, cli_options: str | None = None) -> ChatReceipt:
+    def create(self, *, user_id: str, message: str, provider: str, model_id: str, idempotency_key: str, conversation_id: str | None = None, project_id: str | None = None, workspace_id: str | None = None, attachments: Sequence[Mapping[str, object]] = (), new_conversation_id: str | None = None, scheduled_by_schedule_id: str | None = None, code_mode: str = "chat", permission_mode: str | None = None, turn_kind: str | None = None, cli_options: str | None = None, live_mode: bool = False) -> ChatReceipt:
         message = message.strip()
         attachments = list(attachments)
         if turn_kind not in (None, "compact", "shell"):
@@ -953,8 +954,18 @@ class PostgresChatStore:
                     plan_path=None, plan_versioned=None, completion_kind=None, caveats=None,
                     created_at=now, updated_at=now,
                 ))
+            effective_live_mode = bool(live_mode) or (conv_mode == "friend")
+            if effective_live_mode:
+                if len(self._live_mode_turns) >= 1024:
+                    oldest_key = next(iter(self._live_mode_turns), None)
+                    if oldest_key is not None:
+                        self._live_mode_turns.pop(oldest_key, None)
+                self._live_mode_turns[turn_id] = True
+            queued_payload: dict[str, object] = {"state": "queued"}
+            if effective_live_mode:
+                queued_payload["live_mode"] = True
             c.execute(insert(conversation_dispatches).values(turn_id=turn_id, state="pending", attempts=0, queued_at=now, updated_at=now))
-            c.execute(insert(conversation_events).values(conversation_id=conversation_id, user_id=user_id, event_type="turn.queued", message_id=assistant_message_id, payload={"state": "queued"}, created_at=now))
+            c.execute(insert(conversation_events).values(conversation_id=conversation_id, user_id=user_id, event_type="turn.queued", message_id=assistant_message_id, payload=queued_payload, created_at=now))
             has_running = c.execute(
                 select(conversation_turns.c.turn_id).where(
                     conversation_turns.c.conversation_id == conversation_id,
@@ -1764,11 +1775,23 @@ class PostgresChatStore:
                     .outerjoin(workspace_roots, workspace_roots.c.workspace_id == effective_workspace_id)
                     .where(conversation_turns.c.turn_id == turn_id)
                 ).mappings().one()
+                queued_evt_payload = c.execute(
+                    select(conversation_events.c.payload).where(
+                        conversation_events.c.conversation_id == turn["conversation_id"],
+                        conversation_events.c.message_id == turn["assistant_message_id"],
+                        conversation_events.c.event_type == "turn.queued",
+                    )
+                ).scalar_one_or_none()
+                is_live_mode = (
+                    bool(self._live_mode_turns.get(turn_id))
+                    or bool(isinstance(queued_evt_payload, Mapping) and queued_evt_payload.get("live_mode"))
+                    or str(turn.get("conversation_mode") or "").strip().lower() == "friend"
+                )
                 c.execute(update(conversation_turns).where(conversation_turns.c.turn_id == turn_id).values(state="running", started_at=now, updated_at=now))
                 c.execute(update(conversation_messages).where(conversation_messages.c.message_id == turn["assistant_message_id"]).values(status="streaming", updated_at=now))
                 c.execute(update(conversations).where(conversations.c.conversation_id == turn["conversation_id"]).values(state="running", updated_at=now))
                 c.execute(insert(conversation_events).values(conversation_id=turn["conversation_id"], user_id=turn["user_id"], event_type="turn.running", message_id=turn["assistant_message_id"], payload={"state": "running"}, created_at=now))
-        claimed = {**dict(turn), "state": "running", "started_at": now}
+        claimed = {**dict(turn), "state": "running", "started_at": now, "live_mode": is_live_mode}
         self._activity(claimed, AgentActivityEventType.TURN_STARTED, "Turn started")
         return claimed
 
@@ -2375,6 +2398,7 @@ class PostgresChatStore:
         self._activity(turn, event_type, summary, payload, agent_id=agent_id, parent_agent_id=parent_agent_id)
 
     def finish(self, turn: dict[str, object], *, failed: bool = False, code: str | None = None) -> None:
+        self._live_mode_turns.pop(str(turn.get("turn_id") or ""), None)
         now = datetime.now(UTC)
         # A cancelled turn is a distinct terminal state, not a failure: the UI
         # must not offer "retry" for something the user chose to stop.
@@ -2687,11 +2711,18 @@ class ChatApplication:
         self.store = store
     def allocate_conversation_id(self) -> str:
         return _id("chat")
-    def create(self, context, *, message: str, provider: str, model_id: str, workspace_id: str | None, idempotency_key: str, project_id: str | None = None, attachments=(), new_conversation_id: str | None = None, code_mode: str = "chat", permission_mode: str | None = None, cli_options: str | None = None):
-        return self.store.create(user_id=context.user_id, message=message, provider=provider, model_id=model_id, idempotency_key=idempotency_key, project_id=project_id, workspace_id=workspace_id, attachments=attachments, new_conversation_id=new_conversation_id, code_mode=code_mode, permission_mode=permission_mode, cli_options=cli_options)
-    def send(self, user_id: str, conversation_id: str, message: str, idempotency_key: str, attachments=(), provider: str = "", model_id: str = "", code_mode: str = "chat", permission_mode: str | None = None, turn_kind: str | None = None, cli_options: str | None = None):
+    def create(self, context=None, *, user_id: str | None = None, message: str, provider: str, model_id: str, workspace_id: str | None = None, idempotency_key: str, project_id: str | None = None, attachments=(), new_conversation_id: str | None = None, code_mode: str = "chat", permission_mode: str | None = None, cli_options: str | None = None, live_mode: bool = False):
+        resolved_user_id = str(user_id or getattr(context, "user_id", "") or "")
+        store_kwargs: dict[str, object] = {}
+        if live_mode:
+            store_kwargs["live_mode"] = True
+        return self.store.create(user_id=resolved_user_id, message=message, provider=provider, model_id=model_id, idempotency_key=idempotency_key, project_id=project_id, workspace_id=workspace_id, attachments=attachments, new_conversation_id=new_conversation_id, code_mode=code_mode, permission_mode=permission_mode, cli_options=cli_options, **store_kwargs)
+    def send(self, user_id: str, conversation_id: str, message: str, idempotency_key: str, attachments=(), provider: str = "", model_id: str = "", code_mode: str = "chat", permission_mode: str | None = None, turn_kind: str | None = None, cli_options: str | None = None, live_mode: bool = False):
         waiting = self.store.waiting_execution_ids(conversation_id, user_id)
-        receipt = self.store.create(user_id=user_id, message=message, provider=provider, model_id=model_id, idempotency_key=idempotency_key, conversation_id=conversation_id, attachments=attachments, code_mode=code_mode, permission_mode=permission_mode, turn_kind=turn_kind, cli_options=cli_options)
+        store_kwargs: dict[str, object] = {}
+        if live_mode:
+            store_kwargs["live_mode"] = True
+        receipt = self.store.create(user_id=user_id, message=message, provider=provider, model_id=model_id, idempotency_key=idempotency_key, conversation_id=conversation_id, attachments=attachments, code_mode=code_mode, permission_mode=permission_mode, turn_kind=turn_kind, cli_options=cli_options, **store_kwargs)
         # A normal follow-up is the durable answer to an ask_user effect. The
         # old execution is resumed through its canonical input command before
         # the new turn is allowed to become the only visible continuation.

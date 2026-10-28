@@ -186,8 +186,9 @@ class CreateConversationRequest(_RequestModel):
     workspace_path: str | None = Field(default=None, max_length=4096)
     workspace_acknowledged_risk: bool = False
     attachments: list[str] = Field(default_factory=list, max_length=MAX_FILES_PER_MESSAGE)
-    code_mode: str = Field(default="chat", pattern="^(auto|code|chat)$")
+    code_mode: str = Field(default="chat", pattern="^(auto|code|chat|friend)$")
     permission_mode: str | None = Field(default=None, pattern="^(accept_edits|plan_mode|ask_permissions|full_autonomy|auto|dont_ask|default|acceptEdits|plan|bypassPermissions|dontAsk|manual)$")
+    live_mode: bool = False
     # W6: what `orin code` attaches to the turn; accepted only with this run's CLI token.
     cli: CliTurnOptions | None = None
 
@@ -285,8 +286,9 @@ class SendConversationMessageRequest(_RequestModel):
     message: str = Field(default="", max_length=16000)
     attachments: list[str] = Field(default_factory=list, max_length=MAX_FILES_PER_MESSAGE)
     selection: ConversationSelectionRequest | None = None
-    code_mode: str = Field(default="chat", pattern="^(auto|code|chat)$")
+    code_mode: str = Field(default="chat", pattern="^(auto|code|chat|friend)$")
     permission_mode: str | None = Field(default=None, pattern="^(accept_edits|plan_mode|ask_permissions|full_autonomy|auto|dont_ask|default|acceptEdits|plan|bypassPermissions|dontAsk|manual)$")
+    live_mode: bool = False
     # W6: what `orin code` attaches to the turn; accepted only with this run's CLI token.
     cli: CliTurnOptions | None = None
 
@@ -790,6 +792,8 @@ def create_app(services: ApiServices) -> FastAPI:
                 create_kwargs["permission_mode"] = normalize_permission_mode(payload.permission_mode).value
             if cli_options is not None:
                 create_kwargs["cli_options"] = cli_options
+            if payload.live_mode:
+                create_kwargs["live_mode"] = True
             result = application.create(  # type: ignore[union-attr]
                 ProviderCatalogContext(principal.user_id, "conversation.create"),
                 **create_kwargs,
@@ -1460,6 +1464,8 @@ def create_app(services: ApiServices) -> FastAPI:
                 send_kwargs["permission_mode"] = normalize_permission_mode(payload.permission_mode).value
             if cli_options is not None:
                 send_kwargs["cli_options"] = cli_options
+            if payload.live_mode:
+                send_kwargs["live_mode"] = True
             result = require_port(services.conversation_application).send(
                 principal.user_id, conversation_id, payload.message, _idempotency(request),
                 attachments=attachments, provider=provider, model_id=model_id, code_mode=payload.code_mode,

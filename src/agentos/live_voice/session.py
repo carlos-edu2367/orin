@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import math
@@ -52,6 +53,60 @@ OPENROUTER_DEFAULT_STT_MODEL = "openai/whisper-large-v3-turbo"
 
 # Limite máximo de 60 segundos de áudio PCM 16kHz mono Int16 (~1.92 MB) para prevenir DoS de memória
 MAX_PCM_INPUT_BUFFER_BYTES = 16000 * 2 * 60
+
+
+def split_realtime_tts_clauses(text: str, *, max_chars: int = 120) -> list[str]:
+    """Split text into sentence/clause chunks (`<= max_chars`) so the first audio chunk
+    can be synthesized and streamed immediately while subsequent clauses pipeline in parallel.
+    """
+    cleaned = re.sub(r"\s+", " ", (text or "").strip())
+    if not cleaned:
+        return []
+    raw_sentences = [s.strip() for s in re.split(r"(?<=[.!?…])\s+", cleaned) if s.strip()]
+    clauses: list[str] = []
+    for sentence in raw_sentences:
+        if len(sentence) <= max_chars:
+            clauses.append(sentence)
+            continue
+        parts = [p.strip() for p in re.split(r"(?<=[,;:—])\s+", sentence) if p.strip()]
+        current = ""
+        for part in parts:
+            if not current:
+                current = part
+            elif len(current) + 1 + len(part) <= max_chars:
+                current = f"{current} {part}"
+            else:
+                clauses.append(current)
+                current = part
+        if current:
+            clauses.append(current)
+
+    final_clauses: list[str] = []
+    for clause in clauses:
+        if len(clause) <= max_chars:
+            final_clauses.append(clause)
+            continue
+        words = clause.split(" ")
+        buf = ""
+        for w in words:
+            while len(w) > max_chars:
+                if buf:
+                    final_clauses.append(buf)
+                    buf = ""
+                final_clauses.append(w[:max_chars])
+                w = w[max_chars:]
+            if not w:
+                continue
+            if not buf:
+                buf = w
+            elif len(buf) + 1 + len(w) <= max_chars:
+                buf = f"{buf} {w}"
+            else:
+                final_clauses.append(buf)
+                buf = w
+        if buf:
+            final_clauses.append(buf)
+    return final_clauses
 
 
 def _safe_int(val: Any, default: int = 0, *, minimum: int | None = None, maximum: int | None = None) -> int:
@@ -283,15 +338,24 @@ class LiveVoiceSession:
     recent_tts_texts: list[str] = field(default_factory=list)
     pcm_input_buffer: bytearray = field(default_factory=bytearray)
     next_chunk_seq: int = 0
+    _cached_stt_pcm_len: int = 0
+    _cached_stt_transcript: str = ""
 
     @property
     def audio_epoch(self) -> int:
         return self.ledger.audio_epoch
 
+    def clear_pcm_input(self) -> None:
+        self.pcm_input_buffer.clear()
+        self._cached_stt_pcm_len = 0
+        self._cached_stt_transcript = ""
+
     def append_pcm_input(self, pcm_frame: bytes) -> None:
         if not pcm_frame:
             return
         self.pcm_input_buffer.extend(pcm_frame)
+        self._cached_stt_pcm_len = 0
+        self._cached_stt_transcript = ""
         if len(self.pcm_input_buffer) > MAX_PCM_INPUT_BUFFER_BYTES:
             overflow = len(self.pcm_input_buffer) - MAX_PCM_INPUT_BUFFER_BYTES
             # Mantém alinhamento par de 2 bytes (Int16)
@@ -320,7 +384,7 @@ class LiveVoiceSession:
                 "reference_audio_path", self.voice_config.reference_audio_path
             ),
             speed=speed,
-            language=str(payload.get("language") or self.voice_config.language).strip(),
+            language=str(payload.get("language") or self.voice_config.language or "pt-BR").strip(),
         )
         return self.voice_config
 
@@ -770,7 +834,13 @@ def register_live_voice_routes(
             return hint
         raise VoiceEngineError("stt_provider_unsupported", f"O provedor de transcrição {provider!r} ainda não é suportado.")
 
-    def _synthesize(session: LiveVoiceSession, user_id: str | None, text: str, instructions: str | None) -> tuple[bytes, int, str]:
+    def _synthesize(
+        session: LiveVoiceSession,
+        user_id: str | None,
+        text: str,
+        instructions: str | None,
+        previous_text: str | None = None,
+    ) -> tuple[bytes, int, str]:
         """Return (audio, sample rate, encoding) from the engine the session chose."""
         provider = session.voice_config.tts_provider
         if provider in LOCAL_TTS_PROVIDERS:
@@ -801,7 +871,9 @@ def register_live_voice_routes(
                 model_id=model_id,
                 voice=voice or None,
                 speed=session.voice_config.speed,
+                language=session.voice_config.language,
                 instructions=instructions,
+                previous_text=previous_text,
             )
             return audio, rate, encoding
         model_id = session.voice_config.tts_model
@@ -813,7 +885,9 @@ def register_live_voice_routes(
             model_id=model_id,
             voice=session.voice_config.voice_id,
             speed=session.voice_config.speed,
+            language=session.voice_config.language,
             instructions=instructions,
+            previous_text=previous_text,
         )
         return pcm, OPENAI_TTS_SAMPLE_RATE, "pcm16"
 
@@ -850,7 +924,76 @@ def register_live_voice_routes(
             stt_model=hw_profile.recommended_stt_model,
         )
 
-        await websocket.send_json(
+        ws_send_lock = asyncio.Lock()
+        pending_tts_tasks: set[asyncio.Task[Any]] = set()
+        tts_pipeline_sem = asyncio.Semaphore(2)
+
+        async def _ws_send(payload: dict[str, Any]) -> None:
+            async with ws_send_lock:
+                await websocket.send_json(payload)
+
+        def _cancel_pending_tts() -> None:
+            for t in list(pending_tts_tasks):
+                if not t.done():
+                    t.cancel()
+            pending_tts_tasks.clear()
+
+        async def _run_speak_pipeline(
+            clauses: list[str],
+            target_epoch: int,
+            provider: str,
+            instructions_arg: str | None,
+        ) -> None:
+            async def _synth_clause(clause_text: str, prev_text: str | None) -> tuple[bytes, int, str]:
+                async with tts_pipeline_sem:
+                    if session.audio_epoch != target_epoch:
+                        raise asyncio.CancelledError()
+                    return await run_in_threadpool(
+                        _synthesize,
+                        session,
+                        user_id,
+                        clause_text,
+                        instructions_arg,
+                        prev_text,
+                    )
+
+            prev_tail = session.recent_tts_texts[-1] if session.recent_tts_texts else None
+            clause_tasks: list[tuple[str, asyncio.Task[tuple[bytes, int, str]]]] = []
+            for idx, clause in enumerate(clauses):
+                prev = clauses[idx - 1] if idx > 0 else prev_tail
+                t = asyncio.create_task(_synth_clause(clause, prev))
+                clause_tasks.append((clause, t))
+
+            try:
+                for clause_text, c_task in clause_tasks:
+                    if session.audio_epoch != target_epoch:
+                        break
+                    try:
+                        audio, rate, encoding = await c_task
+                    except asyncio.CancelledError:
+                        break
+                    except VoiceEngineError as exc:
+                        async with ws_send_lock:
+                            if session.audio_epoch == target_epoch:
+                                await websocket.send_json({**exc.to_event("tts.error"), "text": clause_text})
+                        break
+                    async with ws_send_lock:
+                        if session.audio_epoch != target_epoch:
+                            break
+                        ev = session.register_audio_chunk(
+                            clause_text,
+                            audio,
+                            rate,
+                            provider=provider,
+                            encoding=encoding,
+                        )
+                        await websocket.send_json(ev)
+            finally:
+                for _c, c_task in clause_tasks:
+                    if not c_task.done():
+                        c_task.cancel()
+
+        await _ws_send(
             {
                 "type": "session.ready",
                 "conversation_id": conversation_id,
@@ -875,7 +1018,7 @@ def register_live_voice_routes(
                     # frame doubles the socket traffic for no information.
                     if is_voice != last_vad_state:
                         last_vad_state = is_voice
-                        await websocket.send_json(
+                        await _ws_send(
                             {
                                 "type": "vad.frame",
                                 "is_speech": is_voice,
@@ -891,13 +1034,13 @@ def register_live_voice_routes(
                 try:
                     msg = json.loads(text_data)
                 except ValueError:
-                    await websocket.send_json(
+                    await _ws_send(
                         {"type": "error", "code": "invalid_json", "message": "Invalid JSON frame"}
                     )
                     continue
 
                 if not isinstance(msg, dict):
-                    await websocket.send_json(
+                    await _ws_send(
                         {"type": "error", "code": "invalid_payload", "message": "JSON object expected"}
                     )
                     continue
@@ -905,11 +1048,11 @@ def register_live_voice_routes(
                 msg_type = str(msg.get("type") or "").strip().lower()
 
                 if msg_type == "ping":
-                    await websocket.send_json({"type": "pong", "audio_epoch": session.audio_epoch})
+                    await _ws_send({"type": "pong", "audio_epoch": session.audio_epoch})
 
                 elif msg_type == "config":
                     updated = session.update_config(msg)
-                    await websocket.send_json(
+                    await _ws_send(
                         {
                             "type": "config.updated",
                             "voice_config": updated.to_dict(),
@@ -918,8 +1061,9 @@ def register_live_voice_routes(
                     )
 
                 elif msg_type == "audio_reset":
-                    session.pcm_input_buffer.clear()
-                    await websocket.send_json({"type": "audio.reset", "audio_epoch": session.audio_epoch})
+                    _cancel_pending_tts()
+                    session.clear_pcm_input()
+                    await _ws_send({"type": "audio.reset", "audio_epoch": session.audio_epoch})
 
                 elif msg_type == "speak_text":
                     raw_text = str(msg.get("text") or "")
@@ -927,22 +1071,20 @@ def register_live_voice_routes(
                     # Cloud voices need the person's key, so they run only on an authenticated socket.
                     if provider in LOCAL_TTS_PROVIDERS or (provider in REAL_TTS_PROVIDERS and principal_for is not None):
                         clean = re.sub(r"</?speak>", "", raw_text, flags=re.IGNORECASE).strip()[:2000]
-                        if not clean:
+                        clauses = split_realtime_tts_clauses(clean, max_chars=120)
+                        if not clauses:
                             continue
-                        try:
-                            audio, rate, encoding = await run_in_threadpool(
-                                _synthesize,
-                                session,
-                                user_id,
-                                clean,
-                                str(msg.get("instructions") or "") or None,
+                        instructions_arg = str(msg.get("instructions") or "") or None
+                        pipeline_task = asyncio.create_task(
+                            _run_speak_pipeline(
+                                clauses,
+                                session.audio_epoch,
+                                provider,
+                                instructions_arg,
                             )
-                        except VoiceEngineError as exc:
-                            await websocket.send_json({**exc.to_event("tts.error"), "text": clean})
-                            continue
-                        await websocket.send_json(
-                            session.register_audio_chunk(clean, audio, rate, provider=provider, encoding=encoding)
                         )
+                        pending_tts_tasks.add(pipeline_task)
+                        pipeline_task.add_done_callback(pending_tts_tasks.discard)
                         continue
                     override_raw = msg.get("chunk_duration_override_ms")
                     dur_override = (
@@ -955,7 +1097,7 @@ def register_live_voice_routes(
                         chunk_duration_override_ms=dur_override,
                     )
                     for ev in chunk_events:
-                        await websocket.send_json(ev)
+                        await _ws_send(ev)
 
                 elif msg_type == "playback_progress":
                     c_seq = _safe_int(msg.get("chunk_seq"), 0, minimum=0)
@@ -964,7 +1106,7 @@ def register_live_voice_routes(
                         chunk_seq=c_seq,
                         played_ms=p_ms,
                     )
-                    await websocket.send_json(
+                    await _ws_send(
                         {
                             "type": "playback.ack",
                             "chunk_seq": c_seq,
@@ -973,58 +1115,71 @@ def register_live_voice_routes(
                     )
 
                 elif msg_type == "barge_in":
-                    barge = session.ledger.on_barge_in(
-                        epoch=_safe_int(msg.get("epoch"), session.audio_epoch, minimum=0),
-                        chunk_seq=_safe_int(msg.get("chunk_seq"), 0, minimum=0),
-                        played_ms=_safe_float(msg.get("played_ms"), 0.0, minimum=0.0),
-                    )
-                    session.continuity_engine.reset()
-                    await websocket.send_json(
-                        {
-                            "type": "audio.clear",
-                            "previous_epoch": barge.previous_epoch,
-                            "new_epoch": barge.new_epoch,
-                            "interrupted_chunk_seq": barge.interrupted_chunk_seq,
-                            "played_ms": barge.played_ms,
-                            "truncated_text": barge.truncated_text,
-                            "unspoken_text": barge.unspoken_text,
-                            "system_receipt": barge.system_receipt,
-                            "ignored_stale_epoch": barge.ignored_stale_epoch,
-                        }
-                    )
+                    async with ws_send_lock:
+                        barge = session.ledger.on_barge_in(
+                            epoch=_safe_int(msg.get("epoch"), session.audio_epoch, minimum=0),
+                            chunk_seq=_safe_int(msg.get("chunk_seq"), 0, minimum=0),
+                            played_ms=_safe_float(msg.get("played_ms"), 0.0, minimum=0.0),
+                        )
+                        _cancel_pending_tts()
+                        session.continuity_engine.reset()
+                        await websocket.send_json(
+                            {
+                                "type": "audio.clear",
+                                "previous_epoch": barge.previous_epoch,
+                                "new_epoch": barge.new_epoch,
+                                "interrupted_chunk_seq": barge.interrupted_chunk_seq,
+                                "played_ms": barge.played_ms,
+                                "truncated_text": barge.truncated_text,
+                                "unspoken_text": barge.unspoken_text,
+                                "system_receipt": barge.system_receipt,
+                                "ignored_stale_epoch": barge.ignored_stale_epoch,
+                            }
+                        )
 
                 elif msg_type == "audio_speech_end":
                     hint = str(msg.get("transcript_hint") or "").strip()
                     pcm_payload = bytes(session.pcm_input_buffer)
+                    has_inline_pcm = False
                     if msg.get("pcm_base64"):
                         try:
                             pcm_payload = base64.b64decode(str(msg["pcm_base64"]))
+                            has_inline_pcm = True
                         except Exception:
                             pass
                     sample_rate = _safe_int(msg.get("sample_rate"), 16000, minimum=8000, maximum=48000)
 
                     if pcm_payload and not hint:
-                        await websocket.send_json(
-                            {
-                                "type": "stt.processing",
-                                "provider": session.voice_config.stt_provider,
-                                "audio_ms": int(len(pcm_payload) / 2 / sample_rate * 1000),
-                            }
-                        )
-                        try:
-                            transcript = await run_in_threadpool(
-                                _transcribe, session, user_id, pcm_payload, sample_rate, hint
+                        if (
+                            not has_inline_pcm
+                            and session._cached_stt_transcript
+                            and len(pcm_payload) == session._cached_stt_pcm_len
+                        ):
+                            transcript = session._cached_stt_transcript
+                        else:
+                            await _ws_send(
+                                {
+                                    "type": "stt.processing",
+                                    "provider": session.voice_config.stt_provider,
+                                    "audio_ms": int(len(pcm_payload) / 2 / sample_rate * 1000),
+                                }
                             )
-                        except VoiceEngineError as exc:
-                            session.pcm_input_buffer.clear()
-                            await websocket.send_json(exc.to_event("stt.error"))
-                            continue
+                            try:
+                                transcript = await run_in_threadpool(
+                                    _transcribe, session, user_id, pcm_payload, sample_rate, hint
+                                )
+                            except VoiceEngineError as exc:
+                                session.clear_pcm_input()
+                                await _ws_send(exc.to_event("stt.error"))
+                                continue
+                            session._cached_stt_pcm_len = len(pcm_payload)
+                            session._cached_stt_transcript = transcript
                     else:
                         transcript = hint
 
                     if not transcript.strip():
-                        session.pcm_input_buffer.clear()
-                        await websocket.send_json({"type": "stt.empty", "audio_epoch": session.audio_epoch})
+                        session.clear_pcm_input()
+                        await _ws_send({"type": "stt.empty", "audio_epoch": session.audio_epoch})
                         continue
 
                     # 1. Guarda Anti-Eco Textual
@@ -1034,8 +1189,8 @@ def register_live_voice_routes(
                         threshold=_safe_float(msg.get("echo_threshold"), 0.65, minimum=0.1, maximum=0.99),
                         has_strong_barge_in_energy=bool(msg.get("strong_barge_in_energy", False)),
                     ):
-                        session.pcm_input_buffer.clear()
-                        await websocket.send_json(
+                        session.clear_pcm_input()
+                        await _ws_send(
                             {
                                 "type": "vad.echo_discarded",
                                 "text": transcript,
@@ -1048,7 +1203,7 @@ def register_live_voice_routes(
                     silence_ms = _safe_int(msg.get("silence_ms"), 420, minimum=0, maximum=60_000)
                     eou = session.eou_detector.evaluate(transcript, silence_ms=silence_ms)
                     if not eou.is_end_of_utterance:
-                        await websocket.send_json(
+                        await _ws_send(
                             {
                                 "type": "vad.eou_wait",
                                 "is_end_of_utterance": False,
@@ -1061,8 +1216,8 @@ def register_live_voice_routes(
                         )
                         continue
 
-                    session.pcm_input_buffer.clear()
-                    await websocket.send_json(
+                    session.clear_pcm_input()
+                    await _ws_send(
                         {
                             "type": "stt.transcript",
                             "is_end_of_utterance": True,
@@ -1074,6 +1229,8 @@ def register_live_voice_routes(
                     )
         except WebSocketDisconnect:
             return
+        finally:
+            _cancel_pending_tts()
 
 
 __all__ = [
@@ -1083,4 +1240,5 @@ __all__ = [
     "MAX_PCM_INPUT_BUFFER_BYTES",
     "SpokenTranscriptLedger",
     "register_live_voice_routes",
+    "split_realtime_tts_clauses",
 ]
