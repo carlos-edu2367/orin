@@ -1,16 +1,16 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
 
-export type ThemeMode = 'dark' | 'carbon' | 'light' | 'system'
-export type ResolvedTheme = 'dark' | 'carbon' | 'light'
-export type ThemeAccent = 'violet' | 'sapphire' | 'emerald' | 'amber' | 'mono'
+export type ThemeMode = 'dark' | 'carbon' | 'midnight' | 'forest' | 'light' | 'system'
+export type ResolvedTheme = 'dark' | 'carbon' | 'midnight' | 'forest' | 'light'
+export type ThemeAccent = 'violet' | 'sapphire' | 'emerald' | 'amber' | 'rose' | 'mono'
 export type ThemeAmbient = 'on' | 'off'
 
 const MODE_KEY = 'orin.theme.mode'
 const ACCENT_KEY = 'orin.theme.accent'
 const AMBIENT_KEY = 'orin.theme.ambient'
 
-const VALID_MODES: readonly ThemeMode[] = ['dark', 'carbon', 'light', 'system']
-const VALID_ACCENTS: readonly ThemeAccent[] = ['violet', 'sapphire', 'emerald', 'amber', 'mono']
+const VALID_MODES: readonly ThemeMode[] = ['dark', 'carbon', 'midnight', 'forest', 'light', 'system']
+const VALID_ACCENTS: readonly ThemeAccent[] = ['violet', 'sapphire', 'emerald', 'amber', 'rose', 'mono']
 const VALID_AMBIENTS: readonly ThemeAmbient[] = ['on', 'off']
 
 function readValid<T extends string>(key: string, valid: readonly T[], fallback: T): T {

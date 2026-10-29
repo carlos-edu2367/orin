@@ -56,11 +56,38 @@ describe('WorkspaceShell & Sidebar Hubs', () => {
     expect(container.querySelector('.workspace-shell__canvas')).not.toBeNull()
     expect(container.querySelector('.canvas-stage')).not.toBeNull()
 
-    // Sidebar hubs links exist and redundant "Seu espaço" heading next to logo is removed
+    // Primary CTA "+ Nova conversa" and primary nav items ("Início", "Friend", "Ações agendadas")
+    const newConvBtn = screen.getByTestId('sidebar-new-chat')
+    expect(newConvBtn).toHaveTextContent(/\+\s*Nova conversa/i)
+    expect(screen.getByRole('link', { name: /^Início$/i })).toHaveAttribute('href', '/')
+    expect(screen.getByTestId('sidebar-orin-friend-button')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /Ações agendadas/i })).toHaveAttribute('href', '/schedules')
+
+    // Sidebar footer links ("Habilidades", "Conexões", "Configurações") and local ProfileMenu
     expect(screen.queryByRole('heading', { name: /Seu espaço/i })).not.toBeInTheDocument()
-    expect(screen.getByRole('link', { name: /Biblioteca/i })).toHaveAttribute('href', '/library/skills')
-    expect(screen.getByRole('link', { name: /Integrações/i })).toHaveAttribute('href', '/integrations/providers')
-    expect(screen.getByRole('link', { name: /Automações/i })).toHaveAttribute('href', '/schedules')
+    expect(screen.getByRole('link', { name: /Habilidades/i })).toHaveAttribute('href', '/library/skills')
+    expect(screen.getByRole('link', { name: /Conexões/i })).toHaveAttribute('href', '/integrations/providers')
+    expect(screen.getByRole('link', { name: /Configurações/i })).toHaveAttribute('href', '/settings/general')
+    expect(screen.getByTestId('sidebar-profile-menu')).toBeInTheDocument()
+
+    // Topbar right includes "Conversar por voz" button and OrinMascot (size 30) with online status dot
+    const voiceBtn = screen.getByTestId('topbar-voice-button')
+    expect(voiceBtn).toHaveTextContent(/Conversar por voz/i)
+    expect(header.querySelector('[data-testid="orin-mascot-status-dot"]')).not.toBeNull()
+    expect(header.querySelector('[data-testid="orin-mascot"]')).toHaveStyle({ width: '30px', height: '30px' })
+
+    // Local ProfileMenu defaults to "Você" when orin.user.displayName is unset, and closes on Escape / outside click
+    const profileTrigger = screen.getByTestId('sidebar-profile-trigger')
+    expect(profileTrigger).toHaveTextContent(/Você/i)
+    await user.click(profileTrigger)
+    expect(screen.getByRole('menu', { name: /Conta/i })).toBeInTheDocument()
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(screen.queryByRole('menu', { name: /Conta/i })).not.toBeInTheDocument()
+
+    await user.click(profileTrigger)
+    expect(screen.getByRole('menu', { name: /Conta/i })).toBeInTheDocument()
+    fireEvent.pointerDown(document.body)
+    expect(screen.queryByRole('menu', { name: /Conta/i })).not.toBeInTheDocument()
 
     // Toggle sidebar rail collapse and persist in localStorage
     const shell = container.querySelector('.workspace-shell')
@@ -191,5 +218,76 @@ describe('WorkspaceShell & Sidebar Hubs', () => {
       const cls = typeof el.className === 'string' ? el.className : ''
       expect(cls).not.toMatch(/\b(text-white|bg-black|border-white)\b/)
     }
+  })
+
+  it('renders relative time on conversations, folder icon + conversation count on projects, and closes Criar projeto dialog on Escape', async () => {
+    const user = userEvent.setup()
+    const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString()
+    const client = new ApiClient({
+      fetchImpl: vi.fn<typeof fetch>().mockImplementation(async (input) => {
+        const url = typeof input === 'string' ? input : (input as Request).url ?? String(input)
+        if (url.includes('/v1/conversations')) {
+          return new Response(
+            JSON.stringify({
+              items: [
+                {
+                  conversation_id: 'chat-rel-1',
+                  title: 'Planejamento semanal',
+                  state: 'completed',
+                  updated_at: twoHoursAgo,
+                },
+              ],
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          )
+        }
+        if (url.includes('/v1/projects/sidebar')) {
+          return new Response(
+            JSON.stringify({
+              items: [
+                {
+                  project_id: 'proj-rel-1',
+                  name: 'Auryly',
+                  description: null,
+                  chats: [
+                    { conversation_id: 'c1', title: 'Trilha 1', state: 'completed', updated_at: twoHoursAgo },
+                    { conversation_id: 'c2', title: 'Trilha 2', state: 'completed', updated_at: twoHoursAgo },
+                  ],
+                },
+              ],
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          )
+        }
+        return new Response(JSON.stringify({ items: [] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }),
+      maxAttempts: 1,
+    })
+
+    render(
+      <MemoryRouter>
+        <ThemeProvider>
+          <WorkspaceShell client={client}>
+            <div>Stage</div>
+          </WorkspaceShell>
+        </ThemeProvider>
+      </MemoryRouter>,
+    )
+
+    const chatTime = await screen.findByTestId('conversation-time-chat-rel-1')
+    expect(chatTime).toHaveTextContent(/há 2\s*h/i)
+
+    await user.click(screen.getByRole('tab', { name: 'Projetos' }))
+    const projectCount = await screen.findByTestId('project-count-proj-rel-1')
+    expect(projectCount).toHaveTextContent(/2 conversas/i)
+    expect(screen.getByTestId('project-folder-icon-proj-rel-1')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Novo projeto' }))
+    expect(screen.getByRole('dialog', { name: 'Criar projeto' })).toBeInTheDocument()
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(screen.queryByRole('dialog', { name: 'Criar projeto' })).not.toBeInTheDocument()
   })
 })

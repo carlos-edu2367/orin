@@ -2,6 +2,7 @@ import { act, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ThemeProvider, initThemeDom, useTheme } from '../ThemeContext'
+import themeCss from '../../styles/theme.css?raw'
 
 function ThemeHarness() {
   const { mode, resolvedTheme, accent, ambient, setMode, setAccent, setAmbient, cycleMode } = useTheme()
@@ -13,10 +14,13 @@ function ThemeHarness() {
       <span data-testid="ambient">{ambient}</span>
       <button type="button" onClick={() => setMode('light')}>Light</button>
       <button type="button" onClick={() => setMode('carbon')}>Carbon</button>
+      <button type="button" onClick={() => setMode('midnight')}>Midnight</button>
+      <button type="button" onClick={() => setMode('forest')}>Forest</button>
       <button type="button" onClick={() => setMode('system')}>System</button>
       <button type="button" onClick={() => setAccent('sapphire')}>Sapphire</button>
       <button type="button" onClick={() => setAccent('emerald')}>Emerald</button>
       <button type="button" onClick={() => setAccent('amber')}>Amber</button>
+      <button type="button" onClick={() => setAccent('rose')}>Rose</button>
       <button type="button" onClick={() => setAccent('mono')}>Mono</button>
       <button type="button" onClick={() => setAmbient('off')}>Ambient Off</button>
       <button type="button" onClick={cycleMode}>Cycle</button>
@@ -58,10 +62,19 @@ describe('ThemeContext & initThemeDom', () => {
     expect(document.documentElement.getAttribute('data-theme')).toBe('carbon')
     expect(window.localStorage.getItem('orin.theme.mode')).toBe('carbon')
 
+    await user.click(screen.getByRole('button', { name: 'Midnight' }))
+    expect(document.documentElement.getAttribute('data-theme')).toBe('midnight')
+    expect(window.localStorage.getItem('orin.theme.mode')).toBe('midnight')
+
+    await user.click(screen.getByRole('button', { name: 'Forest' }))
+    expect(document.documentElement.getAttribute('data-theme')).toBe('forest')
+    expect(window.localStorage.getItem('orin.theme.mode')).toBe('forest')
+
     for (const [btnName, accentVal] of [
       ['Sapphire', 'sapphire'],
       ['Emerald', 'emerald'],
       ['Amber', 'amber'],
+      ['Rose', 'rose'],
       ['Mono', 'mono'],
     ] as const) {
       await user.click(screen.getByRole('button', { name: btnName }))
@@ -72,6 +85,18 @@ describe('ThemeContext & initThemeDom', () => {
     await user.click(screen.getByRole('button', { name: 'Ambient Off' }))
     expect(document.documentElement.getAttribute('data-ambient')).toBe('off')
     expect(window.localStorage.getItem('orin.theme.ambient')).toBe('off')
+  })
+
+  it('defines canonical reference tokens (#101014, #141419, #1A1A21, #1E1E26, #B4A4EF, --orin-accent-ink) and custom theme blocks in theme.css', () => {
+    expect(themeCss).toMatch(/--orin-page-bg:\s*#101014/i)
+    expect(themeCss).toMatch(/--orin-surface-1:\s*#141419/i)
+    expect(themeCss).toMatch(/--orin-surface-2:\s*#1A1A21/i)
+    expect(themeCss).toMatch(/--orin-surface-3:\s*#1E1E26/i)
+    expect(themeCss).toMatch(/--orin-accent:\s*#B4A4EF/i)
+    expect(themeCss).toMatch(/--orin-accent-ink:\s*#181523/i)
+    expect(themeCss).toContain('[data-theme="midnight"]')
+    expect(themeCss).toContain('[data-theme="forest"]')
+    expect(themeCss).toContain('[data-accent="rose"]')
   })
 
   it('cycles through dark -> light -> carbon -> dark and falls back safely on invalid storage values', async () => {

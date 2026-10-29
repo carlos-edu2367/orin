@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState, type JSX, type ReactNode } from 'react'
 import { createBrowserApiClient, type ApiClient } from '../api/client'
 import { CommandPalette } from '../components/CommandPalette'
+import { OrinMascot } from '../components/OrinMascot'
 import {
   WorkspaceNavigation,
   type WorkspaceNavigationConversationSummary,
@@ -38,6 +39,7 @@ export type WorkspaceShellProps = {
   onChatsChange?: (chats: WorkspaceNavigationConversationSummary[]) => void
   onNewConversation?: () => void
   onNewCodeConversation?: () => void
+  onStartVoice?: () => void
   initialPreferencesTab?: PreferencesTab
   defaultPreferencesOpen?: boolean
   backdrop?: ReactNode
@@ -54,6 +56,7 @@ export function WorkspaceShell({
   onChatsChange,
   onNewConversation,
   onNewCodeConversation,
+  onStartVoice,
   initialPreferencesTab = 'appearance',
   defaultPreferencesOpen = false,
   backdrop,
@@ -138,7 +141,43 @@ export function WorkspaceShell({
         <header className="canvas-header" data-testid="canvas-header">
           <div className="canvas-header__left">{headerLeft}</div>
           <div className="canvas-header__center">{headerCenter}</div>
-          <div className="canvas-header__right">{headerRight}</div>
+          <div className="canvas-header__right">
+            {headerRight}
+            <button
+              type="button"
+              className="canvas-header__voice-btn"
+              data-testid="topbar-voice-button"
+              onClick={() => {
+                if (onStartVoice) {
+                  onStartVoice()
+                  return
+                }
+                const friendBtn = document.querySelector<HTMLButtonElement>('[data-testid="sidebar-orin-friend-button"]')
+                friendBtn?.click()
+              }}
+              aria-label="Conversar por voz"
+              title="Conversar por voz"
+            >
+              <svg
+                className="canvas-header__voice-icon"
+                viewBox="0 0 16 16"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.6"
+                aria-hidden="true"
+              >
+                <path d="M3 6.5v3M5.5 4.5v7M8 3v10M10.5 5v6M13 6.5v3" strokeLinecap="round" />
+              </svg>
+              <span>Conversar por voz</span>
+            </button>
+            <OrinMascot
+              size={30}
+              variant="flat"
+              statusDot="online"
+              ariaLabel="Orin ativo"
+              className="canvas-header__mascot"
+            />
+          </div>
         </header>
         <div className="canvas-stage">{children}</div>
       </div>

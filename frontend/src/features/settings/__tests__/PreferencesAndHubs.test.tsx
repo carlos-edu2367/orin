@@ -188,6 +188,14 @@ describe('PreferencesModal & Sidebar Hubs', () => {
     await user.click(screen.getByTestId('theme-mode-carbon'))
     expect(document.documentElement.getAttribute('data-theme')).toBe('carbon')
 
+    // Select Midnight Deep theme
+    await user.click(screen.getByTestId('theme-mode-midnight'))
+    expect(document.documentElement.getAttribute('data-theme')).toBe('midnight')
+
+    // Select Forest Night theme
+    await user.click(screen.getByTestId('theme-mode-forest'))
+    expect(document.documentElement.getAttribute('data-theme')).toBe('forest')
+
     // Select Space Dark theme
     await user.click(screen.getByTestId('theme-mode-dark'))
     expect(document.documentElement.getAttribute('data-theme')).toBe('dark')
@@ -196,9 +204,11 @@ describe('PreferencesModal & Sidebar Hubs', () => {
     await user.click(screen.getByTestId('theme-mode-system'))
     expect(document.documentElement.getAttribute('data-theme-preference')).toBe('system')
 
-    // Select Emerald accent
+    // Select Emerald and Rose accents
     await user.click(screen.getByTestId('theme-accent-emerald'))
     expect(document.documentElement.getAttribute('data-accent')).toBe('emerald')
+    await user.click(screen.getByTestId('theme-accent-rose'))
+    expect(document.documentElement.getAttribute('data-accent')).toBe('rose')
 
     // Toggle ambient off
     await user.click(screen.getByTestId('theme-ambient-toggle'))

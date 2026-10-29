@@ -1,79 +1,87 @@
-/* frontend/src/styles/theme.css — Especificação Canônica Orin v3 (3D Theme System: Dark, Carbon, Light + 5 Accents + Ambient) */
+/* frontend/src/styles/theme.css — Especificação Canônica Orin v4 (Tema Padrão das Referências + Temas Personalizados: Dark, Carbon, Midnight, Forest, Light + 6 Accents + Ambient) */
 
 :root,
 [data-theme="dark"] {
   color-scheme: dark;
   --orin-rem-scale: calc(16 / 17);
 
-  /* Tipografia Anti-Slop (taste-skill) */
-  --orin-font-sans: 'Plus Jakarta Sans', 'Geist', -apple-system, BlinkMacSystemFont, sans-serif;
+  /* Tipografia */
+  --orin-font-sans: 'Plus Jakarta Sans', 'Inter', 'Geist', -apple-system, BlinkMacSystemFont, sans-serif;
   --orin-font-mono: 'JetBrains Mono', 'Geist Mono', monospace;
 
-  /* 1. Superfícies (Atmospheric Space Dark) */
-  --orin-bg-primary: #090a0f;
-  --orin-bg-secondary: #10121a;
-  --orin-bg-elevated: #171a24;
-  --orin-page-bg: #07060e;
-  --orin-ink: #07060e;
-  --orin-ink-rgb: 7 6 14;
-  --orin-surface-0: #07060e;
-  --orin-surface-1: #0d0b16;
-  --orin-surface: #0d0b16;
-  --orin-surface-rgb: 13 11 22;
-  --orin-surface-2: #141122;          /* Sidebar, Rail Panel, Cards (OPACO) */
-  --orin-surface-3: #1b172d;          /* Composer, Popovers, Modais, TodoBar (OPACO) */
-  --orin-surface-translucent: rgba(245, 242, 255, 0.045);
-  --orin-surface-translucent-strong: rgba(245, 242, 255, 0.08);
-  --orin-surface-hover: rgba(245, 242, 255, 0.065);
-  --orin-surface-selected: rgba(166, 108, 255, 0.14);
+  /* 1. Superfícies (Orin Warm Charcoal & Plum Dark — Referências ref-01..16) */
+  --orin-bg-primary: #141419;
+  --orin-bg-secondary: #101014;
+  --orin-bg-elevated: #1A1A21;
+  --orin-page-bg: #101014;
+  --orin-ink: #101014;
+  --orin-ink-rgb: 16 16 20;
+  --orin-surface-0: #101014;
+  --orin-surface-1: #141419;
+  --orin-surface: #141419;
+  --orin-surface-rgb: 20 20 25;
+  --orin-surface-2: #1A1A21;          /* Cards, Painéis Laterais (OPACO) */
+  --orin-surface-3: #1E1E26;          /* Composer, Inputs, Popovers, Modais (OPACO) */
+  --orin-surface-translucent: rgba(255, 255, 255, 0.04);
+  --orin-surface-translucent-strong: rgba(255, 255, 255, 0.075);
+  --orin-surface-hover: rgba(255, 255, 255, 0.06);
+  --orin-surface-selected: rgba(180, 164, 239, 0.14);
 
-  /* 2. Escala Alfa e Bordas (Hairline & Inner Ring no Escuro) */
-  --orin-alpha-1: rgba(245, 242, 255, 0.05);
-  --orin-alpha-2: rgba(245, 242, 255, 0.10);
-  --orin-alpha-3: rgba(245, 242, 255, 0.18);
-  --orin-alpha-4: rgba(245, 242, 255, 0.32);
+  /* 2. Escala Alfa e Bordas (Hairline Sutil) */
+  --orin-alpha-1: rgba(255, 255, 255, 0.04);
+  --orin-alpha-2: rgba(255, 255, 255, 0.09);
+  --orin-alpha-3: rgba(255, 255, 255, 0.15);
+  --orin-alpha-4: rgba(255, 255, 255, 0.28);
   --orin-border: var(--orin-alpha-2);
-  --orin-border-subtle: rgba(245, 242, 255, 0.08);
+  --orin-border-subtle: rgba(255, 255, 255, 0.06);
   --orin-border-strong: var(--orin-alpha-3);
   --orin-ring-outer: 0px;
   --orin-ring-inner: 1px;
   --orin-ring-color: var(--orin-alpha-2);
 
   /* 3. Texto (WCAG AA verificado) */
-  --orin-text-primary: #f5f2ff;
-  --orin-text-rgb: 245 242 255;
-  --orin-text-secondary: rgba(245, 242, 255, 0.72);
-  --orin-text-muted: rgba(245, 242, 255, 0.50);
-  --orin-text-disabled: rgba(245, 242, 255, 0.36);
-  --orin-mono-readable: rgba(245, 242, 255, 0.90);
+  --orin-text-primary: #F4F3F8;
+  --orin-text-rgb: 244 243 248;
+  --orin-text-secondary: #9A98A6;
+  --orin-text-muted: #636170;
+  --orin-text-disabled: rgba(244, 243, 248, 0.34);
+  --orin-mono-readable: rgba(244, 243, 248, 0.90);
 
-  /* 4. Acento Padrão (Violet Signal) */
-  --orin-accent: #a66cff;
-  --orin-accent-strong: #8b5cf6;
-  --orin-accent-hover: #b889ff;
-  --orin-accent-soft: #dfd0ff;
-  --orin-accent-rgb: 166 108 255;
-  --orin-accent-dim: rgba(192, 144, 255, 0.88);
-  --orin-accent-bg: rgba(166, 108, 255, 0.14);
-  --orin-accent-border: rgba(166, 108, 255, 0.38);
-  --orin-border-focus: #a66cff;
-  --orin-orb-core: #a66cff;
-  --orin-focus-ring: inset 0 0 0 1px var(--orin-page-bg), 0 0 0 2px var(--orin-accent), 0 0 8px 1px rgb(var(--orin-accent-rgb) / 0.45);
+  /* 4. Acento Padrão (Lavanda Orin #B4A4EF) */
+  --orin-accent: #B4A4EF;
+  --orin-accent-strong: #9F8CE8;
+  --orin-accent-hover: #C4B7F7;
+  --orin-accent-soft: #DDD5FA;
+  --orin-accent-ink: #181523;
+  --orin-accent-rgb: 180 164 239;
+  --orin-accent-dim: rgba(180, 164, 239, 0.86);
+  --orin-accent-bg: rgba(180, 164, 239, 0.12);
+  --orin-accent-border: rgba(180, 164, 239, 0.40);
+  --orin-border-focus: #B4A4EF;
+  --orin-orb-core: #B4A4EF;
+  --orin-focus-ring: inset 0 0 0 1px var(--orin-page-bg), 0 0 0 2px var(--orin-accent), 0 0 8px 1px rgb(var(--orin-accent-rgb) / 0.40);
 
-  /* 5. Semânticos e Diffs (Git) */
-  --orin-success: #7ee2a8;
-  --orin-success-bg: rgba(126, 226, 168, 0.14);
-  --orin-success-border: rgba(126, 226, 168, 0.35);
-  --orin-warn: #f5c97b;
+  /* 5. Semânticos, Pastas de Projetos e Diffs (Git) */
+  --orin-success: #4ADE80;
+  --orin-success-bg: rgba(74, 222, 128, 0.12);
+  --orin-success-border: rgba(74, 222, 128, 0.34);
+  --orin-warn: #F5C97B;
   --orin-warn-rgb: 245 201 123;
   --orin-warn-bg: rgba(245, 201, 123, 0.14);
   --orin-warn-border: rgba(245, 201, 123, 0.35);
-  --orin-danger: #ff9d91;
-  --orin-danger-rgb: 255 157 145;
-  --orin-danger-bg: rgba(255, 157, 145, 0.14);
-  --orin-danger-border: rgba(255, 157, 145, 0.38);
-  --orin-info: #9ac7ff;
-  --orin-info-bg: rgba(154, 199, 255, 0.14);
+  --orin-danger: #F87171;
+  --orin-danger-rgb: 248 113 113;
+  --orin-danger-bg: rgba(248, 113, 113, 0.14);
+  --orin-danger-border: rgba(248, 113, 113, 0.38);
+  --orin-info: #60A5FA;
+  --orin-info-bg: rgba(96, 165, 250, 0.14);
+
+  --orin-project-violet-fg: #B4A4EF;
+  --orin-project-violet-bg: rgba(180, 164, 239, 0.16);
+  --orin-project-blue-fg: #60A5FA;
+  --orin-project-blue-bg: rgba(96, 165, 250, 0.16);
+  --orin-project-green-fg: #4ADE80;
+  --orin-project-green-bg: rgba(74, 222, 128, 0.16);
 
   --orin-diff-add-text: #86efac;
   --orin-diff-add-bg: rgba(34, 197, 94, 0.14);
@@ -83,9 +91,9 @@
   --orin-diff-del-line-bg: rgba(244, 63, 94, 0.22);
 
   /* 6. Compensação Óptica de Peso Tipográfico no Escuro */
-  --orin-font-weight-regular: 370;
-  --orin-font-weight-medium: 470;
-  --orin-font-weight-semibold: 560;
+  --orin-font-weight-regular: 400;
+  --orin-font-weight-medium: 500;
+  --orin-font-weight-semibold: 600;
 }
 
 /* Tema Carbon OLED Minimal — Ativado por data-theme="carbon" */
@@ -126,9 +134,95 @@
   --orin-text-disabled: rgba(244, 244, 246, 0.34);
   --orin-mono-readable: rgba(244, 244, 246, 0.90);
 
-  --orin-font-weight-regular: 370;
-  --orin-font-weight-medium: 470;
-  --orin-font-weight-semibold: 560;
+  --orin-font-weight-regular: 400;
+  --orin-font-weight-medium: 500;
+  --orin-font-weight-semibold: 600;
+}
+
+/* Tema Noite Profunda (Midnight Deep) — Ativado por data-theme="midnight" */
+[data-theme="midnight"] {
+  color-scheme: dark;
+
+  --orin-bg-primary: #0F1521;
+  --orin-bg-secondary: #0B0F17;
+  --orin-bg-elevated: #161E2E;
+  --orin-page-bg: #0B0F17;
+  --orin-ink: #0B0F17;
+  --orin-ink-rgb: 11 15 23;
+  --orin-surface-0: #0B0F17;
+  --orin-surface-1: #0F1521;
+  --orin-surface: #0F1521;
+  --orin-surface-rgb: 15 21 33;
+  --orin-surface-2: #161E2E;
+  --orin-surface-3: #1C263B;
+  --orin-surface-translucent: rgba(236, 242, 255, 0.045);
+  --orin-surface-translucent-strong: rgba(236, 242, 255, 0.08);
+  --orin-surface-hover: rgba(236, 242, 255, 0.065);
+
+  --orin-alpha-1: rgba(236, 242, 255, 0.05);
+  --orin-alpha-2: rgba(236, 242, 255, 0.10);
+  --orin-alpha-3: rgba(236, 242, 255, 0.18);
+  --orin-alpha-4: rgba(236, 242, 255, 0.30);
+  --orin-border: var(--orin-alpha-2);
+  --orin-border-subtle: rgba(236, 242, 255, 0.07);
+  --orin-border-strong: var(--orin-alpha-3);
+  --orin-ring-outer: 0px;
+  --orin-ring-inner: 1px;
+  --orin-ring-color: var(--orin-alpha-2);
+
+  --orin-text-primary: #F0F4FC;
+  --orin-text-rgb: 240 244 252;
+  --orin-text-secondary: #94A3B8;
+  --orin-text-muted: #64748B;
+  --orin-text-disabled: rgba(240, 244, 252, 0.34);
+  --orin-mono-readable: rgba(240, 244, 252, 0.90);
+
+  --orin-font-weight-regular: 400;
+  --orin-font-weight-medium: 500;
+  --orin-font-weight-semibold: 600;
+}
+
+/* Tema Floresta Noturna (Forest Night) — Ativado por data-theme="forest" */
+[data-theme="forest"] {
+  color-scheme: dark;
+
+  --orin-bg-primary: #101815;
+  --orin-bg-secondary: #0C1210;
+  --orin-bg-elevated: #16211D;
+  --orin-page-bg: #0C1210;
+  --orin-ink: #0C1210;
+  --orin-ink-rgb: 12 18 16;
+  --orin-surface-0: #0C1210;
+  --orin-surface-1: #101815;
+  --orin-surface: #101815;
+  --orin-surface-rgb: 16 24 21;
+  --orin-surface-2: #16211D;
+  --orin-surface-3: #1C2B25;
+  --orin-surface-translucent: rgba(236, 253, 245, 0.045);
+  --orin-surface-translucent-strong: rgba(236, 253, 245, 0.08);
+  --orin-surface-hover: rgba(236, 253, 245, 0.065);
+
+  --orin-alpha-1: rgba(236, 253, 245, 0.05);
+  --orin-alpha-2: rgba(236, 253, 245, 0.10);
+  --orin-alpha-3: rgba(236, 253, 245, 0.18);
+  --orin-alpha-4: rgba(236, 253, 245, 0.30);
+  --orin-border: var(--orin-alpha-2);
+  --orin-border-subtle: rgba(236, 253, 245, 0.07);
+  --orin-border-strong: var(--orin-alpha-3);
+  --orin-ring-outer: 0px;
+  --orin-ring-inner: 1px;
+  --orin-ring-color: var(--orin-alpha-2);
+
+  --orin-text-primary: #F1F7F4;
+  --orin-text-rgb: 241 247 244;
+  --orin-text-secondary: #98ADA3;
+  --orin-text-muted: #667A70;
+  --orin-text-disabled: rgba(241, 247, 244, 0.34);
+  --orin-mono-readable: rgba(241, 247, 244, 0.90);
+
+  --orin-font-weight-regular: 400;
+  --orin-font-weight-medium: 500;
+  --orin-font-weight-semibold: 600;
 }
 
 /* Tema Claro (Warm Daylight Paper) — Ativado por data-theme="light" */
@@ -174,6 +268,7 @@
   --orin-accent-strong: #5b21b6;
   --orin-accent-hover: #5b21b6;
   --orin-accent-soft: #4c1d95;
+  --orin-accent-ink: #ffffff;
   --orin-accent-rgb: 109 40 217;
   --orin-accent-dim: rgba(109, 40, 217, 0.78);
   --orin-accent-bg: rgba(109, 40, 217, 0.09);
@@ -252,6 +347,7 @@
     --orin-accent-strong: #5b21b6;
     --orin-accent-hover: #5b21b6;
     --orin-accent-soft: #4c1d95;
+    --orin-accent-ink: #ffffff;
     --orin-accent-rgb: 109 40 217;
     --orin-accent-dim: rgba(109, 40, 217, 0.78);
     --orin-accent-bg: rgba(109, 40, 217, 0.09);
@@ -288,24 +384,27 @@
 }
 
 /* ==========================================================================
-   5 Paletas de Cor de Acento (data-accent: violet | sapphire | emerald | amber | mono)
+   6 Paletas de Cor de Acento (data-accent: violet | sapphire | emerald | amber | rose | mono)
    ========================================================================== */
 
-/* 1. Violet (Padrão) */
+/* 1. Violet / Lavanda Orin (Padrão das Referências) */
 :root[data-accent="violet"],
 [data-theme="dark"][data-accent="violet"],
-[data-theme="carbon"][data-accent="violet"] {
-  --orin-accent: #a66cff;
-  --orin-accent-strong: #8b5cf6;
-  --orin-accent-hover: #b889ff;
-  --orin-accent-soft: #dfd0ff;
-  --orin-accent-rgb: 166 108 255;
-  --orin-accent-dim: rgba(192, 144, 255, 0.88);
-  --orin-accent-bg: rgba(166, 108, 255, 0.14);
-  --orin-accent-border: rgba(166, 108, 255, 0.38);
-  --orin-surface-selected: rgba(166, 108, 255, 0.14);
-  --orin-border-focus: #a66cff;
-  --orin-orb-core: #a66cff;
+[data-theme="carbon"][data-accent="violet"],
+[data-theme="midnight"][data-accent="violet"],
+[data-theme="forest"][data-accent="violet"] {
+  --orin-accent: #B4A4EF;
+  --orin-accent-strong: #9F8CE8;
+  --orin-accent-hover: #C4B7F7;
+  --orin-accent-soft: #DDD5FA;
+  --orin-accent-ink: #181523;
+  --orin-accent-rgb: 180 164 239;
+  --orin-accent-dim: rgba(180, 164, 239, 0.86);
+  --orin-accent-bg: rgba(180, 164, 239, 0.12);
+  --orin-accent-border: rgba(180, 164, 239, 0.40);
+  --orin-surface-selected: rgba(180, 164, 239, 0.14);
+  --orin-border-focus: #B4A4EF;
+  --orin-orb-core: #B4A4EF;
 }
 
 [data-theme="light"][data-accent="violet"] {
@@ -313,6 +412,7 @@
   --orin-accent-strong: #5b21b6;
   --orin-accent-hover: #5b21b6;
   --orin-accent-soft: #4c1d95;
+  --orin-accent-ink: #ffffff;
   --orin-accent-rgb: 109 40 217;
   --orin-accent-dim: rgba(109, 40, 217, 0.78);
   --orin-accent-bg: rgba(109, 40, 217, 0.09);
@@ -325,18 +425,21 @@
 /* 2. Sapphire (Azul/Índigo Técnico) */
 :root[data-accent="sapphire"],
 [data-theme="dark"][data-accent="sapphire"],
-[data-theme="carbon"][data-accent="sapphire"] {
-  --orin-accent: #637dff;
-  --orin-accent-strong: #4f67eb;
-  --orin-accent-hover: #7f95ff;
-  --orin-accent-soft: #cfdaff;
-  --orin-accent-rgb: 99 125 255;
-  --orin-accent-dim: rgba(127, 149, 255, 0.88);
-  --orin-accent-bg: rgba(99, 125, 255, 0.14);
-  --orin-accent-border: rgba(99, 125, 255, 0.38);
-  --orin-surface-selected: rgba(99, 125, 255, 0.14);
-  --orin-border-focus: #637dff;
-  --orin-orb-core: #637dff;
+[data-theme="carbon"][data-accent="sapphire"],
+[data-theme="midnight"][data-accent="sapphire"],
+[data-theme="forest"][data-accent="sapphire"] {
+  --orin-accent: #7AA2F7;
+  --orin-accent-strong: #5E8BF2;
+  --orin-accent-hover: #93B4FA;
+  --orin-accent-soft: #CFDAFF;
+  --orin-accent-ink: #0F172A;
+  --orin-accent-rgb: 122 162 247;
+  --orin-accent-dim: rgba(122, 162, 247, 0.88);
+  --orin-accent-bg: rgba(122, 162, 247, 0.14);
+  --orin-accent-border: rgba(122, 162, 247, 0.38);
+  --orin-surface-selected: rgba(122, 162, 247, 0.14);
+  --orin-border-focus: #7AA2F7;
+  --orin-orb-core: #7AA2F7;
 }
 
 [data-theme="light"][data-accent="sapphire"] {
@@ -344,6 +447,7 @@
   --orin-accent-strong: #2f3ea8;
   --orin-accent-hover: #2f3ea8;
   --orin-accent-soft: #25328a;
+  --orin-accent-ink: #ffffff;
   --orin-accent-rgb: 59 76 202;
   --orin-accent-dim: rgba(59, 76, 202, 0.78);
   --orin-accent-bg: rgba(59, 76, 202, 0.09);
@@ -353,14 +457,17 @@
   --orin-orb-core: #3b4cca;
 }
 
-/* 3. Emerald (Verde Engenharia / Terminal) */
+/* 3. Emerald (Verde Engenharia) */
 :root[data-accent="emerald"],
 [data-theme="dark"][data-accent="emerald"],
-[data-theme="carbon"][data-accent="emerald"] {
+[data-theme="carbon"][data-accent="emerald"],
+[data-theme="midnight"][data-accent="emerald"],
+[data-theme="forest"][data-accent="emerald"] {
   --orin-accent: #34d399;
   --orin-accent-strong: #10b981;
   --orin-accent-hover: #6ee7b7;
   --orin-accent-soft: #d1fae5;
+  --orin-accent-ink: #0D2016;
   --orin-accent-rgb: 52 211 153;
   --orin-accent-dim: rgba(110, 231, 183, 0.88);
   --orin-accent-bg: rgba(52, 211, 153, 0.14);
@@ -375,6 +482,7 @@
   --orin-accent-strong: #065f46;
   --orin-accent-hover: #065f46;
   --orin-accent-soft: #064e3b;
+  --orin-accent-ink: #ffffff;
   --orin-accent-rgb: 4 120 87;
   --orin-accent-dim: rgba(4, 120, 87, 0.78);
   --orin-accent-bg: rgba(4, 120, 87, 0.09);
@@ -384,14 +492,17 @@
   --orin-orb-core: #047857;
 }
 
-/* 4. Amber (Âmbar Quente / Foco Orin Code) */
+/* 4. Amber (Âmbar Solar) */
 :root[data-accent="amber"],
 [data-theme="dark"][data-accent="amber"],
-[data-theme="carbon"][data-accent="amber"] {
+[data-theme="carbon"][data-accent="amber"],
+[data-theme="midnight"][data-accent="amber"],
+[data-theme="forest"][data-accent="amber"] {
   --orin-accent: #fbbf24;
   --orin-accent-strong: #f59e0b;
   --orin-accent-hover: #fcd34d;
   --orin-accent-soft: #fef3c7;
+  --orin-accent-ink: #231805;
   --orin-accent-rgb: 251 191 36;
   --orin-accent-dim: rgba(252, 211, 77, 0.88);
   --orin-accent-bg: rgba(251, 191, 36, 0.14);
@@ -406,6 +517,7 @@
   --orin-accent-strong: #92400e;
   --orin-accent-hover: #92400e;
   --orin-accent-soft: #78350f;
+  --orin-accent-ink: #ffffff;
   --orin-accent-rgb: 180 83 9;
   --orin-accent-dim: rgba(180, 83, 9, 0.78);
   --orin-accent-bg: rgba(180, 83, 9, 0.09);
@@ -415,14 +527,52 @@
   --orin-orb-core: #b45309;
 }
 
-/* 5. Mono (Utilitarismo Monocromático Puro) */
+/* 5. Rose (Quartzo Rosa / Coral) */
+:root[data-accent="rose"],
+[data-theme="dark"][data-accent="rose"],
+[data-theme="carbon"][data-accent="rose"],
+[data-theme="midnight"][data-accent="rose"],
+[data-theme="forest"][data-accent="rose"] {
+  --orin-accent: #F4A2B8;
+  --orin-accent-strong: #EC84A0;
+  --orin-accent-hover: #F8B8C9;
+  --orin-accent-soft: #FCE0E8;
+  --orin-accent-ink: #261118;
+  --orin-accent-rgb: 244 162 184;
+  --orin-accent-dim: rgba(244, 162, 184, 0.86);
+  --orin-accent-bg: rgba(244, 162, 184, 0.14);
+  --orin-accent-border: rgba(244, 162, 184, 0.38);
+  --orin-surface-selected: rgba(244, 162, 184, 0.14);
+  --orin-border-focus: #F4A2B8;
+  --orin-orb-core: #F4A2B8;
+}
+
+[data-theme="light"][data-accent="rose"] {
+  --orin-accent: #be185d;
+  --orin-accent-strong: #9d174d;
+  --orin-accent-hover: #9d174d;
+  --orin-accent-soft: #831843;
+  --orin-accent-ink: #ffffff;
+  --orin-accent-rgb: 190 24 93;
+  --orin-accent-dim: rgba(190, 24, 93, 0.78);
+  --orin-accent-bg: rgba(190, 24, 93, 0.09);
+  --orin-accent-border: rgba(190, 24, 93, 0.30);
+  --orin-surface-selected: rgba(190, 24, 93, 0.10);
+  --orin-border-focus: #be185d;
+  --orin-orb-core: #be185d;
+}
+
+/* 6. Mono (Utilitarismo Monocromático Puro) */
 :root[data-accent="mono"],
 [data-theme="dark"][data-accent="mono"],
-[data-theme="carbon"][data-accent="mono"] {
+[data-theme="carbon"][data-accent="mono"],
+[data-theme="midnight"][data-accent="mono"],
+[data-theme="forest"][data-accent="mono"] {
   --orin-accent: #e4e4e7;
   --orin-accent-strong: #d4d4d8;
   --orin-accent-hover: #fafafa;
   --orin-accent-soft: #f4f4f5;
+  --orin-accent-ink: #141418;
   --orin-accent-rgb: 228 228 231;
   --orin-accent-dim: rgba(228, 228, 231, 0.85);
   --orin-accent-bg: rgba(228, 228, 231, 0.12);
@@ -437,6 +587,7 @@
   --orin-accent-strong: #09090b;
   --orin-accent-hover: #27272a;
   --orin-accent-soft: #3f3f46;
+  --orin-accent-ink: #ffffff;
   --orin-accent-rgb: 24 24 27;
   --orin-accent-dim: rgba(24, 24, 27, 0.78);
   --orin-accent-bg: rgba(24, 24, 27, 0.08);
@@ -444,6 +595,14 @@
   --orin-surface-selected: rgba(24, 24, 27, 0.08);
   --orin-border-focus: #18181b;
   --orin-orb-core: #18181b;
+}
+
+@media (prefers-color-scheme: light) {
+  :root[data-theme="system"][data-accent="sapphire"] { --orin-accent: #2563eb; --orin-accent-rgb: 37 99 235; }
+  :root[data-theme="system"][data-accent="emerald"] { --orin-accent: #059669; --orin-accent-rgb: 5 150 105; }
+  :root[data-theme="system"][data-accent="amber"] { --orin-accent: #d97706; --orin-accent-rgb: 217 119 6; }
+  :root[data-theme="system"][data-accent="rose"] { --orin-accent: #be185d; --orin-accent-rgb: 190 24 93; }
+  :root[data-theme="system"][data-accent="mono"] { --orin-accent: #18181b; --orin-accent-rgb: 24 24 27; }
 }
 
 /* ==========================================================================
@@ -465,6 +624,8 @@
 :root,
 [data-theme="dark"],
 [data-theme="carbon"],
+[data-theme="midnight"],
+[data-theme="forest"],
 [data-theme="light"] {
   --orin-ink: var(--orin-page-bg);
   --orin-surface: var(--orin-surface-1);
@@ -485,7 +646,7 @@
   --text-secondary: var(--orin-text-secondary);
   --text-muted: var(--orin-text-muted);
   --accent-primary: var(--orin-accent);
-  --orin-font-sans: 'Plus Jakarta Sans', 'Geist', -apple-system, BlinkMacSystemFont, sans-serif;
+  --orin-font-sans: 'Plus Jakarta Sans', 'Inter', 'Geist', -apple-system, BlinkMacSystemFont, sans-serif;
   --orin-font-mono: 'JetBrains Mono', 'Geist Mono', monospace;
   --orin-mono: var(--orin-font-mono);
   --card-accent: var(--orin-accent);
@@ -512,9 +673,9 @@
 
   /* Métricas Estruturais do Shell (--of-*) */
   --of-titlebar-h: 36px;
-  --of-header-h: 44px;
-  --of-sidebar-w: 272px;
-  --of-sidebar-inset: 8px;
+  --of-header-h: 56px;
+  --of-sidebar-w: 256px;
+  --of-sidebar-inset: 0px;
   --of-transcript-max-w: 48rem;
   --of-composer-max-w: 46rem;
   --of-chat-gutter: 32px;

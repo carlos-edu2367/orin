@@ -32,17 +32,20 @@ function normalizeTab(tab?: PreferencesTab): PreferencesTab {
 }
 
 const THEME_MODES: ReadonlyArray<{ id: ThemeMode; label: string; hint: string }> = [
-  { id: 'dark', label: 'Space Dark', hint: 'Grafite espacial profundo' },
-  { id: 'carbon', label: 'Carbon OLED', hint: 'Neutro técnico puro' },
-  { id: 'light', label: 'Warm Paper', hint: 'Papel quente editorial' },
+  { id: 'dark', label: 'Orin Escuro (Padrão)', hint: 'Grafite quente e lavanda' },
+  { id: 'carbon', label: 'Carbon OLED', hint: 'Preto puro de alto contraste' },
+  { id: 'midnight', label: 'Noite Profunda', hint: 'Azul-marinho espacial sereno' },
+  { id: 'forest', label: 'Floresta Noturna', hint: 'Grafite esverdeado orgânico' },
+  { id: 'light', label: 'Papel Quente', hint: 'Claro editorial confortável' },
   { id: 'system', label: 'Automático (Sistema)', hint: 'Segue a preferência do SO' },
 ]
 
 const THEME_ACCENTS: ReadonlyArray<{ id: ThemeAccent; label: string }> = [
-  { id: 'violet', label: 'Violeta Orin' },
+  { id: 'violet', label: 'Lavanda Orin' },
   { id: 'sapphire', label: 'Safira' },
   { id: 'emerald', label: 'Esmeralda' },
-  { id: 'amber', label: 'Âmbar' },
+  { id: 'amber', label: 'Âmbar Solar' },
+  { id: 'rose', label: 'Quartzo Rosa' },
   { id: 'mono', label: 'Monocromático' },
 ]
 

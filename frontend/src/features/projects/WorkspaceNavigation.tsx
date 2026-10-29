@@ -7,10 +7,12 @@ import { createProject, listProjectSidebar, type ProjectSidebarItem } from '../.
 import { inspectNewWorkspaceFolder } from '../../api/workspace'
 import { useTheme } from '../../app/ThemeContext'
 import { Brand } from '../../components/Brand'
+import { OrinMascot } from '../../components/OrinMascot'
 import { ProfileMenu } from '../auth/ProfileMenu'
 
 export type WorkspaceNavigationConversationSummary = Pick<Conversation, 'conversation_id' | 'title' | 'state'> & {
   mode?: ConversationMode
+  updated_at?: string | null
 }
 
 export type WorkspaceNavigationProps = {
@@ -74,6 +76,20 @@ function detectApplePlatform(): boolean {
   const nav = navigator as Navigator & { userAgentData?: { platform?: string } }
   const platform = nav.userAgentData?.platform ?? navigator.platform ?? navigator.userAgent ?? ''
   return /mac|iphone|ipad|ipod/i.test(platform)
+}
+
+export function formatRelativeShort(isoDate?: string | null): string {
+  if (!isoDate) return 'agora'
+  const ts = Date.parse(isoDate)
+  if (!Number.isFinite(ts)) return 'agora'
+  const diffMs = Math.max(0, Date.now() - ts)
+  const mins = Math.floor(diffMs / 60000)
+  if (mins < 1) return 'agora'
+  if (mins < 60) return `há ${mins}m`
+  const hours = Math.floor(mins / 60)
+  if (hours < 24) return `há ${hours}h`
+  const days = Math.floor(hours / 24)
+  return `há ${days}d`
 }
 
 function ModeBadge({ mode, conversationId }: { mode?: ConversationMode; conversationId: string }) {
@@ -212,6 +228,7 @@ export function WorkspaceNavigation({
   }
 
   const activeProjectId = location.pathname.match(/^\/projects\/([^/]+)/)?.[1]
+  const isHomeActive = location.pathname === '/'
   const isLibraryActive =
     location.pathname.startsWith('/library') ||
     location.pathname.startsWith('/settings/skills') ||
@@ -223,6 +240,11 @@ export function WorkspaceNavigation({
     location.pathname.startsWith('/settings/mcp') ||
     location.pathname.startsWith('/settings/vision')
   const isSchedulesActive = location.pathname.startsWith('/schedules')
+  const isSettingsActive =
+    location.pathname === '/settings' ||
+    location.pathname.startsWith('/settings/general') ||
+    location.pathname.startsWith('/settings/permissions') ||
+    location.pathname.startsWith('/settings/trusted-folders')
 
   const reload = useCallback(async () => {
     const [conversationList, sidebar] = await Promise.all([listConversations(apiClient), listProjectSidebar(apiClient)])
@@ -277,6 +299,18 @@ export function WorkspaceNavigation({
     }, 3000)
     return () => window.clearInterval(intervalId)
   }, [activeSessionCount, reload])
+
+  useEffect(() => {
+    if (!creatingProject) return
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') {
+        event.stopPropagation()
+        setCreatingProject(false)
+      }
+    }
+    document.addEventListener('keydown', handleKeyDown)
+    return () => document.removeEventListener('keydown', handleKeyDown)
+  }, [creatingProject])
 
   async function handlePickProjectFolder() {
     if (pickingProjectFolder) return
@@ -416,9 +450,29 @@ export function WorkspaceNavigation({
                 </span>
               </span>
             )}
-            <span className="project-navigation__count project-navigation__rail-hide" aria-label={`${chats.length + projects.length} itens`}>
+            <span className="project-navigation__count visually-hidden" aria-label={`${chats.length + projects.length} itens`}>
               {chats.length + projects.length}
             </span>
+            <button
+              type="button"
+              className="project-navigation__rail-toggle"
+              onClick={openCommandPalette}
+              title={`Buscar e comandos (${paletteShortcut})`}
+              aria-label={`Buscar conversas e comandos (${paletteShortcut})`}
+            >
+              <svg
+                className="project-navigation__search-icon h-4 w-4"
+                data-testid="sidebar-search-icon"
+                viewBox="0 0 16 16"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                aria-hidden="true"
+              >
+                <circle cx="7" cy="7" r="4.25" />
+                <path d="M10.25 10.25 13.5 13.5" strokeLinecap="round" />
+              </svg>
+            </button>
             <button
               type="button"
               className="project-navigation__rail-toggle"
@@ -446,119 +500,83 @@ export function WorkspaceNavigation({
           </div>
         </header>
 
-        <div className="mb-2">
-          <button
-            type="button"
-            data-testid="sidebar-orin-friend-button"
-            onClick={() => void handleOpenOrinFriend()}
-            title={`${friendName} — seu companheiro com memória e conversa por voz`}
-            aria-current={isOrinFriendActive ? 'page' : undefined}
-            className="project-navigation__cta-btn flex w-full items-center justify-between gap-2 rounded-lg border border-[var(--orin-border-subtle)] bg-[var(--orin-accent-bg)] px-3 py-2 text-xs font-semibold text-[var(--orin-text-primary)] transition-colors hover:border-[var(--orin-accent)] hover:bg-[var(--orin-surface-selected)]"
-          >
-            <span className="flex items-center gap-2">
-              <span className="font-mono text-sm text-[var(--orin-text-primary)]" aria-hidden="true">◈</span>
-              <span className="project-navigation__rail-hide">{friendName}</span>
-            </span>
-            <span className="project-navigation__rail-hide rounded-full bg-[#4C1D95] px-1.5 py-0.5 font-mono text-[10px] text-[#F4F2FF]">
-              LIVE
-            </span>
-          </button>
-        </div>
-
-        <div className="project-navigation__cta-group mb-2.5 grid grid-cols-2 gap-1.5" role="group" aria-label="Criar nova sessão">
+        <div className="project-navigation__cta-primary mb-2.5" role="group" aria-label="Criar nova sessão">
           <button
             type="button"
             data-testid="sidebar-new-chat"
             onClick={handleNewChat}
-            title="Novo chat"
-            className="project-navigation__cta-btn flex items-center justify-center gap-1.5 rounded-lg border border-[var(--orin-border)] bg-[var(--orin-surface-raised)] px-2.5 py-2 text-xs font-medium text-[var(--orin-text-primary)] transition-colors hover:border-[var(--orin-border-strong)] hover:bg-[var(--orin-surface-hover)]"
+            title="Nova conversa"
+            className="project-navigation__new-conversation-btn"
           >
-            <span aria-hidden="true">+</span>
-            <span className="project-navigation__rail-hide">Novo chat</span>
+            <span className="project-navigation__new-conversation-plus" aria-hidden="true">+</span>
+            <span className="project-navigation__rail-hide">Nova conversa</span>
           </button>
           <button
             type="button"
             data-testid="sidebar-new-code"
             onClick={handleNewCode}
             title="Novo Code"
-            className="project-navigation__cta-btn flex items-center justify-center gap-1.5 rounded-lg border border-[var(--orin-border-subtle)] bg-[var(--orin-accent-bg)] px-2.5 py-2 text-xs font-medium text-[var(--orin-text-primary)] transition-colors hover:border-[var(--orin-accent)] hover:bg-[var(--orin-surface-selected)]"
+            className="visually-hidden"
           >
-            <span className="font-mono text-[10px] font-bold text-[var(--orin-accent-soft)]" aria-hidden="true">&gt;_</span>
-            <span className="project-navigation__rail-hide">Novo Code</span>
+            Novo Code
           </button>
         </div>
 
-        <button
-          type="button"
-          className="project-navigation__search-trigger"
-          onClick={openCommandPalette}
-          title={`Buscar e comandos (${paletteShortcut})`}
-          aria-label={`Buscar conversas e comandos (${paletteShortcut})`}
-        >
-          <span className="project-navigation__search-lead">
-            <svg
-              className="project-navigation__search-icon"
-              data-testid="sidebar-search-icon"
-              viewBox="0 0 16 16"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.5"
-              aria-hidden="true"
-            >
-              <circle cx="7" cy="7" r="4.25" />
-              <path d="M10.25 10.25 13.5 13.5" strokeLinecap="round" />
-            </svg>
-            <span className="project-navigation__rail-hide">Buscar e comandos…</span>
-          </span>
-          <kbd className="project-navigation__rail-hide">{paletteShortcut}</kbd>
-        </button>
-
-        <div className="project-navigation__hubs" role="group" aria-label="Hubs do workspace">
+        <div className="project-navigation__primary-nav" role="group" aria-label="Navegação principal">
           <Link
-            to="/library/skills"
+            to="/"
             onClick={() => setMobileOpen(false)}
-            aria-current={isLibraryActive ? 'page' : undefined}
-            className={`project-navigation__hub-link${isLibraryActive ? ' is-active' : ''}`}
-            title="Biblioteca"
+            aria-current={isHomeActive ? 'page' : undefined}
+            className={`project-navigation__hub-link${isHomeActive ? ' is-active' : ''}`}
+            title="Início"
           >
             <span className="project-navigation__hub-icon" aria-hidden="true">
-              <svg className="h-3.5 w-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
-                <path d="M3 2.5h8.5A1.5 1.5 0 0 1 13 4v9.5a.5.5 0 0 1-.5.5H3.5A1.5 1.5 0 0 1 2 12.5v-8.5A1.5 1.5 0 0 1 3.5 2.5Z" />
-                <path d="M5.5 5.5h4.5M5.5 8h4.5" strokeLinecap="round" />
+              <svg className="h-4 w-4" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+                <path d="M2.5 6.8 8 2.25l5.5 4.55v5.7a1 1 0 0 1-1 1h-3v-4h-3v4h-3a1 1 0 0 1-1-1v-5.7Z" strokeLinecap="round" strokeLinejoin="round" />
               </svg>
             </span>
-            <span className="project-navigation__hub-label">Biblioteca</span>
+            <span className="project-navigation__hub-label">Início</span>
           </Link>
 
-          <Link
-            to="/integrations/providers"
-            onClick={() => setMobileOpen(false)}
-            aria-current={isIntegrationsActive ? 'page' : undefined}
-            className={`project-navigation__hub-link${isIntegrationsActive ? ' is-active' : ''}`}
-            title="Integrações"
+          <button
+            type="button"
+            data-testid="sidebar-orin-friend-button"
+            onClick={() => void handleOpenOrinFriend()}
+            title={`${friendName} — seu companheiro com memória e conversa por voz`}
+            aria-current={isOrinFriendActive ? 'page' : undefined}
+            className={`project-navigation__hub-link project-navigation__hub-link--friend${isOrinFriendActive ? ' is-active' : ''}`}
           >
             <span className="project-navigation__hub-icon" aria-hidden="true">
-              <svg className="h-3.5 w-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
-                <path d="M6 2.5v2.5M10 2.5v2.5M4.5 5h7v2.5a3.5 3.5 0 0 1-7 0V5ZM8 11v2.5" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
+              <OrinMascot size={18} variant="flat" ariaHidden />
             </span>
-            <span className="project-navigation__hub-label">Integrações</span>
-          </Link>
+            <span className="project-navigation__hub-label">
+              {friendName === 'Orin Friend' ? (
+                <>
+                  Friend
+                  <span className="visually-hidden"> (Orin Friend)</span>
+                </>
+              ) : (
+                friendName
+              )}
+            </span>
+            <span className="project-navigation__hub-chevron project-navigation__rail-hide" aria-hidden="true">›</span>
+          </button>
 
           <Link
             to="/schedules"
             onClick={() => setMobileOpen(false)}
             aria-current={isSchedulesActive ? 'page' : undefined}
+            aria-label="Ações agendadas (Automações)"
             className={`project-navigation__hub-link${isSchedulesActive ? ' is-active' : ''}`}
-            title="Automações"
+            title="Ações agendadas"
           >
             <span className="project-navigation__hub-icon" aria-hidden="true">
-              <svg className="h-3.5 w-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
-                <circle cx="8" cy="8" r="5.5" />
-                <path d="M8 5v3.2l2.2 1.3" strokeLinecap="round" strokeLinejoin="round" />
+              <svg className="h-4 w-4" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+                <rect x="2.25" y="3.25" width="11.5" height="10.5" rx="1.75" />
+                <path d="M5.25 2v2.25M10.75 2v2.25M2.25 6.25h11.5M6.25 9.75l1.35 1.35 2.4-2.4" strokeLinecap="round" strokeLinejoin="round" />
               </svg>
             </span>
-            <span className="project-navigation__hub-label">Automações</span>
+            <span className="project-navigation__hub-label">Ações agendadas</span>
           </Link>
         </div>
 
@@ -566,7 +584,7 @@ export function WorkspaceNavigation({
           <button
             type="button"
             role="tab"
-            aria-label="Chats"
+            aria-label="Conversas (Chats)"
             aria-selected={view === 'chats'}
             aria-controls="navigation-chats"
             onClick={() => changeView('chats')}
@@ -586,7 +604,7 @@ export function WorkspaceNavigation({
                 strokeLinejoin="round"
               />
             </svg>
-            <span>Chats</span>
+            <span>Conversas</span>
             <small>{chats.length}</small>
           </button>
           <button
@@ -644,6 +662,14 @@ export function WorkspaceNavigation({
                     >
                       <ModeBadge mode={chat.mode} conversationId={chat.conversation_id} />
                       <span className="project-navigation__chat-title" title={chat.title}>{chat.title}</span>
+                      {chat.state !== 'running' && (
+                        <span
+                          className="project-navigation__chat-time"
+                          data-testid={`conversation-time-${chat.conversation_id}`}
+                        >
+                          {formatRelativeShort(chat.updated_at)}
+                        </span>
+                      )}
                       <span
                         className="project-navigation__chat-state"
                         data-testid={`conversation-state-${chat.conversation_id}`}
@@ -688,7 +714,7 @@ export function WorkspaceNavigation({
                   {projects.length > 0 && <small>{projects.length} {projects.length === 1 ? 'projeto' : 'projetos'}</small>}
                 </div>
                 {projects.length > 0 ? (
-                  projects.map((project) => (
+                  projects.map((project, projectIdx) => (
                     <section key={project.project_id} className="project-navigation__project">
                       <div className={activeProjectId === project.project_id ? 'project-navigation__project-heading is-active' : 'project-navigation__project-heading'}>
                         <button
@@ -706,9 +732,23 @@ export function WorkspaceNavigation({
                           title={project.name}
                           onClick={() => setMobileOpen(false)}
                         >
-                          <span className="project-navigation__project-dot" aria-hidden="true" />
-                          {project.name}
+                          <span
+                            className={`project-navigation__project-folder is-color-${projectIdx % 3}`}
+                            data-testid={`project-folder-icon-${project.project_id}`}
+                            aria-hidden="true"
+                          >
+                            <svg viewBox="0 0 16 16" fill="currentColor" className="h-3.5 w-3.5">
+                              <path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h2.88a1.5 1.5 0 0 1 1.06.44l.87.87a.5.5 0 0 0 .35.15h3.84A1.5 1.5 0 0 1 14 5.96v5.54A1.5 1.5 0 0 1 12.5 13h-9A1.5 1.5 0 0 1 2 11.5v-7Z" />
+                            </svg>
+                          </span>
+                          <span className="project-navigation__project-name-text">{project.name}</span>
                         </Link>
+                        <span
+                          className="project-navigation__project-count"
+                          data-testid={`project-count-${project.project_id}`}
+                        >
+                          {project.chats.length} {project.chats.length === 1 ? 'conversa' : 'conversas'}
+                        </span>
                         <button
                           type="button"
                           className="project-navigation__add-chat"
@@ -788,9 +828,63 @@ export function WorkspaceNavigation({
             </button>
           )}
 
+          <div className="project-navigation__hubs project-navigation__footer-hubs" role="group" aria-label="Links do sistema">
+            <Link
+              to="/library/skills"
+              onClick={() => setMobileOpen(false)}
+              aria-current={isLibraryActive ? 'page' : undefined}
+              aria-label="Habilidades (Biblioteca)"
+              className={`project-navigation__hub-link${isLibraryActive ? ' is-active' : ''}`}
+              title="Habilidades"
+            >
+              <span className="project-navigation__hub-icon" aria-hidden="true">
+                <svg className="h-3.5 w-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+                  <rect x="2.25" y="2.25" width="4.75" height="4.75" rx="1" />
+                  <rect x="9" y="2.25" width="4.75" height="4.75" rx="1" />
+                  <rect x="2.25" y="9" width="4.75" height="4.75" rx="1" />
+                  <rect x="9" y="9" width="4.75" height="4.75" rx="1" />
+                </svg>
+              </span>
+              <span className="project-navigation__hub-label">Habilidades</span>
+            </Link>
+
+            <Link
+              to="/integrations/providers"
+              onClick={() => setMobileOpen(false)}
+              aria-current={isIntegrationsActive ? 'page' : undefined}
+              aria-label="Conexões (Integrações)"
+              className={`project-navigation__hub-link${isIntegrationsActive ? ' is-active' : ''}`}
+              title="Conexões"
+            >
+              <span className="project-navigation__hub-icon" aria-hidden="true">
+                <svg className="h-3.5 w-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+                  <path d="M6.5 9.5 9.5 6.5M5.25 11.25l-1 1a2.12 2.12 0 0 1-3-3l1.5-1.5a2.12 2.12 0 0 1 3 0M10.75 4.75l1-1a2.12 2.12 0 0 1 3 3l-1.5 1.5a2.12 2.12 0 0 1-3 0" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </span>
+              <span className="project-navigation__hub-label">Conexões</span>
+            </Link>
+
+            <Link
+              to="/settings/general"
+              onClick={() => setMobileOpen(false)}
+              aria-current={isSettingsActive ? 'page' : undefined}
+              aria-label="Configurações"
+              className={`project-navigation__hub-link${isSettingsActive ? ' is-active' : ''}`}
+              title="Configurações"
+            >
+              <span className="project-navigation__hub-icon" aria-hidden="true">
+                <svg className="h-3.5 w-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+                  <circle cx="8" cy="8" r="2.25" />
+                  <path d="M8 2.25v1.5M8 12.25v1.5M2.25 8h1.5M12.25 8h1.5M3.93 3.93l1.06 1.06M11.01 11.01l1.06 1.06M12.07 3.93l-1.06 1.06M4.99 11.01l-1.06 1.06" strokeLinecap="round" />
+                </svg>
+              </span>
+              <span className="project-navigation__hub-label">Configurações</span>
+            </Link>
+          </div>
+
           <div className="project-navigation__footer">
             <div className="project-navigation__footer-profile project-navigation__rail-hide">
-              <ProfileMenu />
+              <ProfileMenu showLocalFallback onOpenPreferences={handleOpenPreferences} />
             </div>
             <div className="project-navigation__footer-controls">
               <button
@@ -814,10 +908,11 @@ export function WorkspaceNavigation({
                 onClick={handleOpenPreferences}
               >
                 <span aria-hidden="true">⚙</span>
-                <span className="project-navigation__footer-label project-navigation__rail-hide">Preferências</span>
+                <span className="visually-hidden">Preferências</span>
               </button>
             </div>
           </div>
+          {error && <p className="workspace-navigation__error project-navigation__rail-hide" role="status">{error}</p>}
         </div>
       </nav>
       {creatingProject && (
@@ -877,7 +972,6 @@ export function WorkspaceNavigation({
           </form>
         </div>
       )}
-      {error && <p className="workspace-navigation__error" role="status">{error}</p>}
     </>
   )
 }
