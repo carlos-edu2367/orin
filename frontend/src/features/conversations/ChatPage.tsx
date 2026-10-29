@@ -25,6 +25,7 @@ import {
 import { attachWorkspaceFolder, detachWorkspaceFolder, inspectWorkspaceFolder, type WorkspaceState } from '../../api/workspace'
 import { CommandPalette } from '../../components/CommandPalette'
 import { ModelPicker } from '../../components/ModelPicker'
+import { OrinMascot } from '../../components/OrinMascot'
 import {
   enqueueMessage, forkConversation, getFileHistory, listCommandCatalog, listQueue, removeQueued, renameConversation, rewindCode,
   rewindMessage, runShell, TOO_LARGE_TO_BACK_UP, type CatalogCommand, type FileHistoryItem, type QueuedInput,
@@ -57,6 +58,7 @@ import { MessageAttachments } from './MessageAttachments'
 import { PushNotificationToast, isFreshNotice, type PushNotice } from './PushNotificationToast'
 import { StatusLineBar } from './StatusLineBar'
 import { TasksPanel } from './TasksPanel'
+import { TeamActivityView } from './TeamActivityView'
 import { TranscriptView } from './TranscriptView'
 import { useKeybindingHandlers } from '../keybindings/engine'
 import { useTheme } from '../../app/ThemeContext'
@@ -594,6 +596,8 @@ export function ChatPage() {
   // so they happen during render: an effect would paint one frame of the
   // previous conversation's model before correcting itself, and that flicker
   // sits in the most-used screen in the product.
+  const [teamViewOpen, setTeamViewOpen] = useState(false)
+  const [teamPaused, setTeamPaused] = useState(false)
   const [selectionFor, setSelectionFor] = useState('')
   const [renderedConversationId, setRenderedConversationId] = useState(conversationId)
   if (conversationId !== renderedConversationId) {
@@ -606,6 +610,8 @@ export function ChatPage() {
     setStopping(false)
     setError(null)
     setOversizedInput(null)
+    setTeamViewOpen(false)
+    setTeamPaused(false)
   } else if (conversation && conversation.conversation_id === conversationId && selectionFor !== conversationId) {
     const initialProvider = asProviderName(conversation.provider)
     if (initialProvider) {
@@ -1042,6 +1048,27 @@ export function ChatPage() {
     return latestTool && latestTool.state === 'working' ? latestTool.summary || null : null
   }, [activity.events, running])
 
+  const liveWorkStep = useMemo(() => {
+    if (!running) return null
+    const latestActive = [...activity.events]
+      .reverse()
+      .find((ev) => ev.kind === 'tool' || ev.kind === 'agent' || ev.kind === 'lifecycle')
+    const title = liveWorkingStatus ?? latestActive?.summary ?? 'Comparando referências'
+    const subtitle = latestActive?.detail ?? latestActive?.tool ?? 'Buscando benchmarks e casos de mercado…'
+    return { title, subtitle }
+  }, [activity.events, liveWorkingStatus, running])
+
+  const userInitial = useMemo(() => {
+    try {
+      const stored = localStorage.getItem('orin.user.displayName') ?? localStorage.getItem('agentos.user.name') ?? ''
+      const trimmed = stored.trim()
+      if (trimmed) return trimmed.charAt(0).toUpperCase()
+    } catch {
+      // Ignore storage access issues
+    }
+    return 'C'
+  }, [])
+
   // The queue lives on the server: read it when the chat opens (a reload keeps it visible) and whenever the turn
   // starts or ends (a turn that ends has read what was queued for it).
   useEffect(() => {
@@ -1152,6 +1179,12 @@ export function ChatPage() {
     // explicit "Ir para o fim" action below.
     element.scrollTop = element.scrollHeight
   }, [messages, activity.events, activity.cursor, showAgentPulse])
+
+  useLayoutEffect(() => {
+    document
+      .querySelectorAll('.workspace-navigation .project-navigation__chat-time')
+      .forEach((el) => el.setAttribute('aria-hidden', 'true'))
+  }, [chats])
 
   useEffect(() => {
     if (typeof ResizeObserver === 'undefined') return
@@ -1890,6 +1923,26 @@ export function ChatPage() {
         </div>
 
         <div className="chat__bar-actions canvas-header__right">
+          {conversationMode !== 'code' && (
+            <button
+              type="button"
+              className="chat__open-code-btn"
+              data-testid="chat-open-in-code-button"
+              onClick={() => navigate(activeConvProjectId ? `/projects/${encodeURIComponent(activeConvProjectId)}/new?mode=code` : '/?mode=code')}
+            >
+              <span aria-hidden="true">&lt;&gt;</span>
+              <span>Abrir no Code</span>
+            </button>
+          )}
+          <button
+            type="button"
+            className={teamViewOpen ? 'chat__team-toggle-btn is-active' : 'chat__team-toggle-btn'}
+            data-testid="chat-team-view-toggle"
+            aria-pressed={teamViewOpen}
+            onClick={() => setTeamViewOpen((prev) => !prev)}
+          >
+            <span>Equipe em atividade</span>
+          </button>
           <ContextIndicator usage={contextUsage} />
 
           <div className="chat__project-control" data-testid="conversation-project-control">
@@ -2043,6 +2096,18 @@ export function ChatPage() {
             <span className="chat__action-label">Voz</span>
           </button>
           <CommandPalette conversations={chats} />
+          <button
+            type="button"
+            className="canvas-header__voice-btn"
+            data-testid="chat-voice-button"
+            onClick={() => setLiveVoiceOpen((prev) => !prev)}
+          >
+            <svg className="canvas-header__voice-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" aria-hidden="true">
+              <path d="M3 6.5v3M6.3 4v8M9.7 5.2v5.6M13 6.8v2.4" />
+            </svg>
+            <span>Conversar por voz</span>
+          </button>
+          <OrinMascot size={30} variant="flat" statusDot="online" ariaLabel="Orin ativo" />
         </div>
       </header>
 
@@ -2059,6 +2124,7 @@ export function ChatPage() {
           client={client}
           onChatsChange={setChats}
           onOpenPreferences={() => setPreferencesOpen(true)}
+          initialView={projectId ? 'projects' : undefined}
         />
       </aside>
 
@@ -2073,6 +2139,25 @@ export function ChatPage() {
             void loadOlderActivities()
           }
         }}>
+          {teamViewOpen ? (
+            <TeamActivityView
+              events={activity.events}
+              todos={activity.todos}
+              running={running}
+              paused={teamPaused}
+              onPauseTeam={() => setTeamPaused((prev) => !prev)}
+              onBackToChat={() => setTeamViewOpen(false)}
+              onResolveDecision={(optionValue) => {
+                setTeamViewOpen(false)
+                void submit(optionValue)
+              }}
+              onOpenDeliverable={(deliverable) => {
+                if (deliverable.path) {
+                  setPreviewReference({ conversationId, path: deliverable.path, name: deliverable.fileName })
+                }
+              }}
+            />
+          ) : (
           <div className="chat__thread" ref={threadRef} role="log" aria-live="polite" aria-relevant="additions text">
             {!loading && loadFailure && (
               <section className="chat__load-error" role="alert">
@@ -2150,6 +2235,16 @@ export function ChatPage() {
                   animate={{ opacity: 1, y: 0 }}
                   transition={{ duration: 0.24, ease: [0.22, 0.61, 0.36, 1] }}
                 >
+                  {item.role === 'assistant' && (
+                    <div className="chat__assistant-mascot" data-testid="assistant-turn-mascot">
+                      <OrinMascot size={28} variant="flat" ariaHidden />
+                    </div>
+                  )}
+                  {item.role === 'user' && (
+                    <span className="chat__user-avatar" data-testid="user-message-avatar" aria-hidden="true">
+                      {userInitial}
+                    </span>
+                  )}
                   {isEarliestPartialTurn && (
                     <div className="flex justify-start pb-2">
                       <button
@@ -2332,7 +2427,41 @@ export function ChatPage() {
                 </motion.div>
               )}
             </AnimatePresence>
+            {!loadFailure && running && (
+              <div className="live-work-progress-card" data-testid="live-work-progress-card">
+                <div className="live-work-progress-card__status">
+                  <span className="live-work-progress-card__dot" aria-hidden="true" />
+                  <div className="live-work-progress-card__copy">
+                    <span className="live-work-progress-card__title">
+                      {liveWorkStep?.title ?? 'Comparando referências'}
+                    </span>
+                    <span className="live-work-progress-card__subtitle">
+                      {liveWorkStep?.subtitle ?? 'Buscando benchmarks e casos de mercado…'}
+                    </span>
+                  </div>
+                </div>
+                <div className="live-work-progress-card__actions">
+                  <button
+                    type="button"
+                    className="live-work-progress-card__details-btn"
+                    data-testid="live-work-view-details"
+                    onClick={() => setTeamViewOpen(true)}
+                  >
+                    Ver detalhes ›
+                  </button>
+                  <button
+                    type="button"
+                    className="live-work-progress-card__stop-btn"
+                    data-testid="live-work-stop-button"
+                    onClick={() => { void stop() }}
+                  >
+                    Parar
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
+          )}
         </div>
 
         {newActivityCount > 0 && !atBottom && (
@@ -2474,6 +2603,14 @@ export function ChatPage() {
           busy={queueBusy}
           onRemove={(queueId) => { void removeQueued(client, conversationId, queueId).then(refreshQueue).catch(() => setError('Não foi possível tirar da fila.')) }}
           onSendNow={(item) => { void sendNow(item.content, item.queueId) }}
+          onEdit={(item) => {
+            setQueue((current) => current.filter((q) => q.queueId !== item.queueId))
+            setMessage(item.content)
+            void removeQueued(client, conversationId, item.queueId).then(refreshQueue).catch(() => {
+              void refreshQueue()
+              setError('Não foi possível editar item da fila.')
+            })
+          }}
         />
         <Composer
           value={message}

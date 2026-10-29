@@ -136,7 +136,7 @@ export function WorkspaceFileCard({
   }
 
   return (
-    <span className="workspace-file-card" aria-label={`Arquivo ${name}`}>
+    <article className="workspace-file-card" data-deliverable="true" aria-label={`Arquivo ${name}`}>
       {kind === 'image' && (
         <img
           className="workspace-file-card__media workspace-file-card__image"
@@ -186,11 +186,11 @@ export function WorkspaceFileCard({
         </span>
       </button>
       <span className="workspace-file-card__actions">
-        <button type="button" onClick={() => onPreview?.(reference)} aria-label={`Visualizar ${name}`}>Prévia</button>
+        <button type="button" onClick={() => onPreview?.(reference)} aria-label={`Visualizar ${name}`}>Abrir ↗</button>
         <a href={downloadUrl} aria-label={`Baixar ${name}`}>Baixar</a>
         {capabilities.open_in_desktop_app && <button type="button" onClick={() => void open()} disabled={!client} aria-label={`Abrir ${name} no sistema`}>Abrir</button>}
       </span>
-    </span>
+    </article>
   )
 }
 

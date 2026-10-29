@@ -119,14 +119,35 @@ export function Composer({
   placeholder = 'Descreva o que você precisa…', settings, hint, error, autoFocus, notice, focusSignal = 0, canSend = true,
   attachments = [], onAttach = () => {}, onRemoveAttachment = () => {}, commands = [], skills = [],
   builtinCommands = [], catalogCommands = [], onSendNow, onOpenModelPicker, onRunCommand, onQueue, onOpenRewind, history = [],
+  mode, onModeChange,
   codeMode = 'auto', onCodeModeChange, modeSwitch, sessionContext, hideCodeModeToggle = false, conversationMode,
   codePermissionMode, onCodePermissionModeChange, todos,
   workspaceFiles = [], onSearchWorkspaceFiles,
   worktreeIsolated, onWorktreeIsolatedChange, worktreeBranch = null,
   isLiveVoiceActive = false, onToggleLiveVoice,
 }: ComposerProps) {
-  const effectiveCodeMode: CodeModeChoice = modeSwitch?.mode ?? conversationMode ?? codeMode
+  const externalMode: 'chat' | 'code' =
+    modeSwitch?.mode === 'code' || mode === 'code' || conversationMode === 'code' || codeMode === 'code'
+      ? 'code'
+      : 'chat'
+  const [internalAutoMode, setInternalAutoMode] = useState<'chat' | 'code'>(externalMode)
+  const [prevExternalMode, setPrevExternalMode] = useState<'chat' | 'code'>(externalMode)
+  if (externalMode !== prevExternalMode) {
+    setPrevExternalMode(externalMode)
+    setInternalAutoMode(externalMode)
+  }
+  const effectiveCodeMode: CodeModeChoice =
+    modeSwitch?.mode ?? conversationMode ?? (internalAutoMode === 'code' ? 'code' : codeMode)
   const showCodeModeToggle = Boolean(!modeSwitch && onCodeModeChange && !hideCodeModeToggle && conversationMode === undefined)
+
+  function handleToggleAutoModePill() {
+    if (disabled) return
+    const nextMode: 'chat' | 'code' = internalAutoMode === 'code' ? 'chat' : 'code'
+    setInternalAutoMode(nextMode)
+    modeSwitch?.onModeChange(nextMode)
+    onModeChange?.(nextMode)
+    onCodeModeChange?.(nextMode === 'code' ? 'code' : 'auto')
+  }
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [focused, setFocused] = useState(false)
@@ -521,6 +542,17 @@ export function Composer({
                 <path d="M10.7 4.3 5.4 9.6a2 2 0 1 0 2.8 2.8l5.1-5.1a3.4 3.4 0 1 0-4.8-4.8L3.3 7.7" />
               </svg>
             </button>
+            <button
+              type="button"
+              data-testid="composer-auto-mode-pill"
+              aria-pressed={internalAutoMode === 'code'}
+              disabled={disabled}
+              className={`composer__auto-mode-pill${internalAutoMode === 'code' ? ' is-code' : ''}`}
+              onClick={handleToggleAutoModePill}
+            >
+              <span>{internalAutoMode === 'code' ? 'Orin Code' : 'Automático'}</span>
+              <span aria-hidden="true" className="composer__auto-mode-chevron">⌄</span>
+            </button>
             {modeSwitch ? (
               <div
                 className="composer__mode-switch"
@@ -533,7 +565,10 @@ export function Composer({
                   data-testid="home-mode-chat"
                   aria-pressed={modeSwitch.mode === 'chat'}
                   className={`composer__mode-pill${modeSwitch.mode === 'chat' ? ' is-active' : ''}`}
-                  onClick={() => modeSwitch.onModeChange('chat')}
+                  onClick={() => {
+                    setInternalAutoMode('chat')
+                    modeSwitch.onModeChange('chat')
+                  }}
                 >
                   <span>Chat</span>
                 </button>
@@ -542,7 +577,10 @@ export function Composer({
                   data-testid="home-mode-code"
                   aria-pressed={modeSwitch.mode === 'code'}
                   className={`composer__mode-pill composer__mode-pill--code${modeSwitch.mode === 'code' ? ' is-active' : ''}`}
-                  onClick={() => modeSwitch.onModeChange('code')}
+                  onClick={() => {
+                    setInternalAutoMode('code')
+                    modeSwitch.onModeChange('code')
+                  }}
                 >
                   <span aria-hidden="true">&gt;_</span>
                   <span>Orin Code</span>
@@ -555,7 +593,11 @@ export function Composer({
                 aria-pressed={effectiveCodeMode === 'code'}
                 aria-label={effectiveCodeMode === 'code' ? 'Desativar Modo Code' : 'Ativar Modo Code'}
                 title={effectiveCodeMode === 'code' ? 'Modo Code ativo' : 'Ativar Modo Code'}
-                onClick={() => onCodeModeChange?.(effectiveCodeMode === 'code' ? 'auto' : 'code')}
+                onClick={() => {
+                  const next = effectiveCodeMode === 'code' ? 'auto' : 'code'
+                  setInternalAutoMode(next === 'code' ? 'code' : 'chat')
+                  onCodeModeChange?.(next)
+                }}
               >
                 <span aria-hidden="true">&lt;/&gt;</span>
                 <span>Code</span>
@@ -638,6 +680,38 @@ export function Composer({
                 <span>LIVE</span>
               </button>
             )}
+            <button
+              type="button"
+              data-testid="composer-voice-dictation-button"
+              aria-label="Entrada por voz"
+              title="Entrada por voz"
+              disabled={disabled}
+              onClick={() => {
+                if (onToggleLiveVoice) {
+                  onToggleLiveVoice()
+                } else if (typeof window !== 'undefined') {
+                  window.dispatchEvent(new CustomEvent('orin:open-friend-voice'))
+                }
+              }}
+              className={`composer__voice-button${isLiveVoiceActive ? ' is-active' : ''}`}
+            >
+              <svg
+                aria-hidden="true"
+                viewBox="0 0 16 16"
+                width="15"
+                height="15"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.4"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <rect x="5.5" y="1.8" width="5" height="8.2" rx="2.5" />
+                <path d="M3.2 7.5a4.8 4.8 0 0 0 9.6 0" />
+                <path d="M8 12.3v2.2" />
+                <path d="M5.8 14.5h4.4" />
+              </svg>
+            </button>
             <AnimatePresence mode="wait" initial={false}>
               {running ? (
                 <motion.button
@@ -666,7 +740,21 @@ export function Composer({
                   exit={reduced ? { opacity: 0 } : { scale: 0.7, opacity: 0, rotate: -25 }}
                   transition={{ duration: 0.18, ease: 'easeOut' }}
                 >
-                  <span aria-hidden="true">↑</span>
+                  <svg
+                    data-testid="composer-send-icon"
+                    aria-hidden="true"
+                    viewBox="0 0 16 16"
+                    width="15"
+                    height="15"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.5"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <path d="M14.5 1.5 7.2 8.8" />
+                    <path d="m14.5 1.5-4.6 13-2.7-5.7-5.7-2.7 13-4.6Z" />
+                  </svg>
                 </motion.button>
               )}
             </AnimatePresence>

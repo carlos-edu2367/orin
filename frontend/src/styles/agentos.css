@@ -4674,4 +4674,223 @@ progress.orin-progress::-moz-progress-bar,
   flex-shrink: 0;
 }
 
+/* --- Fase 3: Chat (ref-03.png), Composer (ref-01.png / ref-08.png) & Team Toggle --- */
+
+.composer__auto-mode-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid var(--orin-border-subtle, rgba(255, 255, 255, 0.08));
+  background: var(--orin-surface-2, #1A1A21);
+  color: var(--orin-text-secondary, #9D9BA8);
+  font-size: 12px;
+  font-weight: 500;
+  user-select: none;
+}
+
+.composer__auto-mode-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--orin-accent, #B4A4EF);
+}
+
+.composer__voice-button {
+  display: inline-grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 10px;
+  border: 1px solid var(--orin-border-subtle, rgba(255, 255, 255, 0.08));
+  background: var(--orin-surface-2, #1A1A21);
+  color: var(--orin-text-secondary, #9D9BA8);
+  cursor: pointer;
+  transition: background 0.16s var(--ease), color 0.16s var(--ease), border-color 0.16s var(--ease);
+}
+
+.composer__voice-button:hover,
+.composer__voice-button.is-active {
+  background: var(--orin-accent-soft, rgba(180, 164, 239, 0.14));
+  border-color: var(--orin-accent-border, rgba(180, 164, 239, 0.34));
+  color: var(--orin-accent, #B4A4EF);
+}
+
+.composer__permission-pill--plan {
+  border-color: var(--orin-amber-border, rgba(245, 196, 81, 0.34));
+  background: var(--orin-amber-soft, rgba(245, 196, 81, 0.12));
+  color: var(--orin-amber, #F5C451);
+}
+
+.chat__open-code-btn,
+.chat__team-toggle-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 0 12px;
+  border-radius: 10px;
+  border: 1px solid var(--orin-border, rgba(255, 255, 255, 0.09));
+  background: var(--orin-surface-2, #1A1A21);
+  color: var(--orin-text-primary, #F4F3F8);
+  font-size: 12.5px;
+  font-weight: 550;
+  cursor: pointer;
+  transition: background 0.16s var(--ease), border-color 0.16s var(--ease), color 0.16s var(--ease);
+}
+
+.chat__open-code-btn:hover,
+.chat__team-toggle-btn:hover,
+.chat__team-toggle-btn.is-active {
+  background: var(--orin-accent-soft, rgba(180, 164, 239, 0.14));
+  border-color: var(--orin-accent-border, rgba(180, 164, 239, 0.32));
+  color: var(--orin-accent, #B4A4EF);
+}
+
+.chat__user-avatar {
+  display: inline-grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  margin-left: 8px;
+  border-radius: 999px;
+  background: var(--orin-accent-soft, rgba(180, 164, 239, 0.18));
+  border: 1px solid var(--orin-accent-border, rgba(180, 164, 239, 0.32));
+  color: var(--orin-accent, #B4A4EF);
+  font-size: 11.5px;
+  font-weight: 650;
+  vertical-align: middle;
+  flex-shrink: 0;
+}
+
+.chat__assistant-mascot {
+  display: inline-flex;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.live-work-progress-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 12px 16px;
+  margin-top: 8px;
+  border-radius: 14px;
+  border: 1px solid var(--orin-accent-border, rgba(180, 164, 239, 0.26));
+  background: var(--orin-surface-1, #141419);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.22);
+}
+
+.live-work-progress-card__status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.live-work-progress-card__dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  background: var(--orin-accent, #B4A4EF);
+  box-shadow: 0 0 0 4px var(--orin-accent-soft, rgba(180, 164, 239, 0.18));
+  flex-shrink: 0;
+}
+
+.live-work-progress-card__copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.live-work-progress-card__title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--orin-text-primary, #F4F3F8);
+}
+
+.live-work-progress-card__subtitle {
+  font-size: 12px;
+  color: var(--orin-text-secondary, #9D9BA8);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.live-work-progress-card__actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.live-work-progress-card__details-btn {
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--orin-accent, #B4A4EF);
+  font-size: 12.5px;
+  font-weight: 550;
+  cursor: pointer;
+}
+
+.live-work-progress-card__details-btn:hover {
+  background: var(--orin-accent-soft, rgba(180, 164, 239, 0.12));
+}
+
+.live-work-progress-card__stop-btn {
+  padding: 6px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--orin-border, rgba(255, 255, 255, 0.12));
+  background: var(--orin-surface-2, #1A1A21);
+  color: var(--orin-text-primary, #F4F3F8);
+  font-size: 12.5px;
+  font-weight: 550;
+  cursor: pointer;
+}
+
+.live-work-progress-card__stop-btn:hover {
+  border-color: var(--orin-danger, #F87171);
+  color: var(--orin-danger, #F87171);
+}
+
+.queue-panel__badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--orin-amber-soft, rgba(245, 196, 81, 0.14));
+  border: 1px solid var(--orin-amber-border, rgba(245, 196, 81, 0.28));
+  color: var(--orin-amber, #F5C451);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  flex-shrink: 0;
+}
+
+.memory-learned-card {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  margin-top: 8px;
+  border-radius: 10px;
+  border: 1px solid var(--orin-accent-border, rgba(180, 164, 239, 0.24));
+  background: var(--orin-accent-soft, rgba(180, 164, 239, 0.09));
+  color: var(--orin-text-primary, #F4F3F8);
+  font-size: 12.5px;
+}
+
+.memory-learned-card__icon {
+  display: inline-flex;
+  color: var(--orin-accent, #B4A4EF);
+  flex-shrink: 0;
+}
+
+
 

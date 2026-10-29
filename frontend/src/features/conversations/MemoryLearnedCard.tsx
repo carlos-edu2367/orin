@@ -12,21 +12,38 @@ import type { ConversationActivityEvent } from './activityTypes'
  */
 export function MemoryLearnedCard({ event }: { event: ConversationActivityEvent }) {
   const [undone, setUndone] = useState(false)
+  const [undoing, setUndoing] = useState(false)
   const [failed, setFailed] = useState(false)
 
   const undo = () => {
-    if (!event.memoryId) return
+    if (undoing || undone) return
+    if (!event.memoryId) {
+      setUndone(true)
+      setFailed(false)
+      return
+    }
+    setUndoing(true)
     deleteManagedMemory(createBrowserApiClient(), event.memoryId, event.memoryScope ?? 'user', event.memoryProjectId)
       .then(() => { setUndone(true); setFailed(false) })
       .catch(() => setFailed(true))
+      .finally(() => setUndoing(false))
   }
 
   return (
     <article className="activity-card memory-learned" data-state={undone ? 'cancelled' : 'completed'} data-kind="lifecycle">
       <span className="activity-card__glyph" aria-hidden="true">◈</span>
-      <span className="activity-card__label">{undone ? 'Memória descartada' : event.summary}</span>
-      {!undone && event.memoryId && (
-        <button type="button" className="memory-learned__undo" onClick={undo}>Desfazer</button>
+      <span className="activity-card__label">
+        {undone ? (
+          'Memória descartada'
+        ) : (
+          <>
+            <span className="memory-learned__prefix" data-testid="memory-learned-prefix">Memória atualizada ·</span>{' '}
+            <span className="memory-learned__summary">{event.summary}</span>
+          </>
+        )}
+      </span>
+      {!undone && (
+        <button type="button" className="memory-learned__undo" disabled={undoing} onClick={undo}>Desfazer</button>
       )}
       {failed && <span role="alert" className="memory-learned__error">Não foi possível desfazer.</span>}
     </article>
