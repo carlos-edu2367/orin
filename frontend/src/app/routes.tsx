@@ -37,6 +37,7 @@ import { McpScopesSection } from '../features/codeSettings/McpScopesSection'
 import { OutputStylesSection } from '../features/codeSettings/OutputStylesSection'
 import { PermissionsSection } from '../features/codeSettings/PermissionsSection'
 import { TrustedFoldersSection } from '../features/codeSettings/TrustedFoldersSection'
+import { OnboardingWizard } from '../features/onboarding/OnboardingWizard'
 import { useSession } from './useSession'
 
 export type RouteDefinition = {
@@ -46,6 +47,7 @@ export type RouteDefinition = {
 
 export const routes: RouteDefinition[] = [
   { path: '/', element: <Home /> },
+  { path: '/onboarding', element: <OnboardingWizard /> },
   { path: '/projects/:projectId/new', element: <Home /> },
   { path: '/chats/:conversationId', element: <ConversationRoute /> },
   { path: '/chats/:conversationId/overview', element: <ConversationRoute /> },

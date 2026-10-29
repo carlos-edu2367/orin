@@ -4,7 +4,7 @@ import { createMemoryRouter, MemoryRouter, Route, RouterProvider, Routes } from 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiClient } from '../../api/client';
 import { ChatPage } from '../../features/conversations/ChatPage';
-import { Home } from '../Home';
+import { formatHomeGreeting, Home } from '../Home';
 import { ThemeProvider } from '../ThemeContext';
 import { appRoutes } from '../routes';
 import homeSource from '../Home.tsx?raw';
@@ -59,7 +59,8 @@ describe('Home, ChatPage, and Routes Refactored Shell', () => {
     window.localStorage.clear();
   });
 
-  it('renders Home with top-left ModelPicker in canvas-header, modeSwitch and sessionContext in Composer, contextual quick actions, and no bottom recent cards', async () => {
+  it('renders Home (ref-01) with topbar Início + voice CTA + online mascot, 3D hero mascot, greeting, single h1, lavender quick chips, and Continue de onde parou section', async () => {
+    window.localStorage.setItem('orin.user.displayName', 'Carlos');
     const user = userEvent.setup();
     const client = createHomeClientStub();
 
@@ -75,24 +76,70 @@ describe('Home, ChatPage, and Routes Refactored Shell', () => {
     );
 
     const header = await screen.findByTestId('canvas-header');
+    expect(within(header).getByTestId('home-topbar-title')).toHaveTextContent('Início');
     expect(header.querySelector('.model-picker')).not.toBeNull();
     expect(container.querySelectorAll('.model-picker').length).toBe(1);
 
+    const voiceCta = within(header).getByTestId('home-voice-cta');
+    expect(voiceCta).toHaveTextContent('Conversar por voz');
+
+    const topbarMascot = header.querySelector('[data-testid="orin-mascot"]');
+    expect(topbarMascot).not.toBeNull();
+    expect(topbarMascot).toHaveAttribute('data-variant', 'flat');
+    expect(topbarMascot).toHaveAttribute('data-status-dot', 'online');
+
+    const heroMascotWrap = screen.getByTestId('home-hero-mascot');
+    const heroMascot = within(heroMascotWrap).getByTestId('orin-mascot');
+    expect(heroMascot).toHaveAttribute('data-variant', 'soft3d');
+    expect(heroMascot.querySelector('svg')).toHaveAttribute('width', '88');
+
+    const greeting = screen.getByTestId('home-greeting');
+    expect(greeting.textContent).toMatch(/^Bom dia, Carlos\.|^Boa tarde, Carlos\.|^Boa noite, Carlos\.$/);
+
     expect(
-      await screen.findByRole('heading', { name: 'Por onde começamos?' }),
+      await screen.findByRole('heading', { level: 1, name: 'O que vamos fazer hoje?' }),
     ).toBeInTheDocument();
+    expect(screen.getAllByRole('heading', { level: 1 })).toHaveLength(1);
+
+    const messageInput = screen.getByRole('textbox', { name: 'Mensagem' });
+    expect(messageInput).toHaveAttribute('placeholder', 'Peça algo ou continue uma ideia...');
 
     const quickActions = screen.getByTestId('home-quick-actions');
-    const synthChip = within(quickActions).getByRole('button', { name: /Pesquisar e sintetizar/i });
+    const synthChip = within(quickActions).getByRole('button', {
+      name: 'Pesquisar um assunto (Pesquisar e sintetizar)',
+    });
+    const analyzeChip = within(quickActions).getByRole('button', {
+      name: 'Analisar um arquivo (Analisar arquivos ou imagens)',
+    });
+    const projectChip = within(quickActions).getByRole('button', {
+      name: 'Criar um projeto (Usar uma Skill da Biblioteca)',
+    });
+    expect(synthChip).toHaveTextContent('Pesquisar um assunto');
+    expect(analyzeChip).toHaveTextContent('Analisar um arquivo');
+    expect(projectChip).toHaveTextContent('Criar um projeto');
+    expect(synthChip.querySelector('svg')).not.toBeNull();
+    expect(analyzeChip.querySelector('svg')).not.toBeNull();
+    expect(projectChip.querySelector('svg')).not.toBeNull();
+
     await user.click(synthChip);
-    expect(screen.getByRole('textbox', { name: 'Mensagem' })).toHaveValue('Pesquise e sintetize sobre: ');
+    expect(messageInput).toHaveValue('Pesquise e sintetize sobre: ');
+
+    const continueSection = await screen.findByTestId('home-continue-section');
+    expect(within(continueSection).getByText('Continue de onde parou')).toBeInTheDocument();
+    expect(within(continueSection).getByText(/Ver atividade/i)).toBeInTheDocument();
+    const recentCard = within(continueSection).getByRole('button', { name: /Conversa antiga/i });
+    expect(recentCard).toHaveClass('home__continue-card');
+    expect(recentCard).toHaveTextContent('›');
 
     await user.click(screen.getByTestId('home-mode-code'));
     expect(
       await screen.findByRole('heading', {
+        level: 1,
         name: 'Qual repositório vamos construir ou evoluir?',
       }),
     ).toBeInTheDocument();
+    expect(screen.getAllByRole('heading', { level: 1 })).toHaveLength(1);
+
     const planChip = within(screen.getByTestId('home-quick-actions')).getByRole('button', {
       name: /Planejar arquitetura/i,
     });
@@ -105,6 +152,25 @@ describe('Home, ChatPage, and Routes Refactored Shell', () => {
     expect(container.querySelector('.home__code-workspace-bar')).toBeNull();
     expect(container.querySelector('.home__recent')).toBeNull();
     expect(container.querySelector('.home__foot')).toBeNull();
+  });
+
+  it('formatHomeGreeting handles time ranges and adversarial (Red-Team) inputs safely', () => {
+    expect(formatHomeGreeting(5, 'Carlos')).toBe('Bom dia, Carlos.');
+    expect(formatHomeGreeting(11, 'Carlos')).toBe('Bom dia, Carlos.');
+    expect(formatHomeGreeting(12, 'Carlos')).toBe('Boa tarde, Carlos.');
+    expect(formatHomeGreeting(17, 'Carlos')).toBe('Boa tarde, Carlos.');
+    expect(formatHomeGreeting(18, 'Carlos')).toBe('Boa noite, Carlos.');
+    expect(formatHomeGreeting(0, 'Carlos')).toBe('Boa noite, Carlos.');
+    expect(formatHomeGreeting(4, 'Carlos')).toBe('Boa noite, Carlos.');
+
+    // Red-Team: empty, whitespace, control chars, > 60 chars, invalid hours
+    expect(formatHomeGreeting(14, '')).toBe('Boa tarde, Carlos.');
+    expect(formatHomeGreeting(14, '   \n\t  ')).toBe('Boa tarde, Carlos.');
+    expect(formatHomeGreeting(14, null)).toBe('Boa tarde, Carlos.');
+    expect(formatHomeGreeting(9, 'A'.repeat(100))).toBe(`Bom dia, ${'A'.repeat(60)}.`);
+    expect(formatHomeGreeting(-5, 'Carlos')).toBe('Boa noite, Carlos.');
+    expect(formatHomeGreeting(25, 'Carlos')).toBe('Boa noite, Carlos.');
+    expect(formatHomeGreeting(Number.NaN, 'Carlos')).toBe('Boa noite, Carlos.');
   });
 
   it('respects ambient === "off" in Home by suppressing AmbientField and glow', async () => {
@@ -122,7 +188,7 @@ describe('Home, ChatPage, and Routes Refactored Shell', () => {
       </ThemeProvider>,
     );
 
-    await screen.findByRole('heading', { name: 'Por onde começamos?' });
+    await screen.findByRole('heading', { name: 'O que vamos fazer hoje?' });
     expect(container.querySelector('.home__glow')).toBeNull();
     expect(container.querySelector('.ambient-field')).toBeNull();
   });
