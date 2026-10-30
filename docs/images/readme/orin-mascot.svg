@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="160" height="160" viewBox="0 0 160 160" fill="none" role="img" aria-labelledby="orin-title">
+  <title id="orin-title">Mascote Orin</title>
+
+  <!-- Corpo e topete -->
+  <path d="
+      M 55 46
+      C 48 29, 58 21, 68 35
+      C 74 14, 95 18, 87 37
+      C 115 38, 137 66, 139 96
+      C 142 125, 121 138, 81 139
+      C 42 140, 20 128, 21 102
+      C 22 77, 35 55, 55 46
+      Z
+    " fill="#B4A4EF"></path>
+
+  <!-- Olhos -->
+  <ellipse cx="61" cy="88" rx="5" ry="11" fill="#282333" transform="rotate(-5 61 88)"></ellipse>
+  <ellipse cx="101" cy="86" rx="5" ry="11" fill="#282333" transform="rotate(-5 101 86)"></ellipse>
+
+  <!-- Sorriso -->
+  <path d="M 76 105 Q 81 112 87 104" stroke="#282333" stroke-width="3" stroke-linecap="round"></path>
+</svg>

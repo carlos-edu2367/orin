@@ -1,0 +1,152 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 510" width="100%" height="100%">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#09090d"/>
+      <stop offset="50%" stop-color="#11101a"/>
+      <stop offset="100%" stop-color="#0b0a12"/>
+    </linearGradient>
+    <radialGradient id="glowViolet" cx="28%" cy="42%" r="48%">
+      <stop offset="0%" stop-color="#B4A4EF" stop-opacity="0.22"/>
+      <stop offset="55%" stop-color="#7c66dc" stop-opacity="0.08"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glowWarm" cx="78%" cy="36%" r="45%">
+      <stop offset="0%" stop-color="#B4A4EF" stop-opacity="0.28"/>
+      <stop offset="55%" stop-color="#38bdf8" stop-opacity="0.08"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="mascotHalo" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#B4A4EF" stop-opacity="0.48"/>
+      <stop offset="60%" stop-color="#8b5cf6" stop-opacity="0.16"/>
+      <stop offset="100%" stop-color="#8b5cf6" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="titleGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="55%" stop-color="#f5f3ff"/>
+      <stop offset="100%" stop-color="#B4A4EF"/>
+    </linearGradient>
+    <linearGradient id="cardBorder" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#B4A4EF" stop-opacity="0.32"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0.06"/>
+    </linearGradient>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#ffffff" stroke-width="1" stroke-opacity="0.03"/>
+    </pattern>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1280" height="510" rx="24" fill="url(#bg)"/>
+  <rect width="1280" height="510" rx="24" fill="url(#glowViolet)"/>
+  <rect width="1280" height="510" rx="24" fill="url(#glowWarm)"/>
+  <rect width="1280" height="510" rx="24" fill="url(#grid)"/>
+  <rect x="1" y="1" width="1278" height="508" rx="23" fill="none" stroke="#B4A4EF" stroke-opacity="0.18" stroke-width="1.5"/>
+
+  <!-- Top Version & Local-First Pill -->
+  <g transform="translate(80, 48)">
+    <rect x="0" y="0" width="430" height="32" rx="16" fill="#171522" fill-opacity="0.9" stroke="#B4A4EF" stroke-opacity="0.4" stroke-width="1"/>
+    <circle cx="18" cy="16" r="4.5" fill="#34d399"/>
+    <text x="32" y="20.5" fill="#f1f5f9" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif" font-size="12" font-weight="600" letter-spacing="0.6">ORIN v0.11.0 · LOCAL-FIRST AI WORKSPACE &amp; COMPANION</text>
+  </g>
+
+  <!-- Left Hero Typography -->
+  <g transform="translate(80, 148)">
+    <text x="0" y="0" fill="url(#titleGrad)" font-family="Georgia, 'Times New Roman', -apple-system, BlinkMacSystemFont, 'Segoe UI', serif" font-size="76" font-weight="700" letter-spacing="-1.5">Orin</text>
+    <text x="168" y="-12" fill="#B4A4EF" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="19" font-weight="600">✦ Friend · Chat · Equipes · Code</text>
+
+    <text x="0" y="48" fill="#e2e8f0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif" font-size="21" font-weight="500">
+      Seu companheiro de voz em tempo real, equipe multiagente de pesquisa
+    </text>
+    <text x="0" y="78" fill="#cbd5e1" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif" font-size="21" font-weight="400">
+      e bancada completa de engenharia de software — rodando no seu PC.
+    </text>
+
+    <!-- Feature Pills Row -->
+    <g transform="translate(0, 104)">
+      <rect x="0" y="0" width="166" height="28" rx="14" fill="#1e1b2e" stroke="#B4A4EF" stroke-opacity="0.35"/>
+      <text x="14" y="18.5" fill="#ddd6fe" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11.5" font-weight="600">● Voz Full-Duplex PT-BR</text>
+
+      <rect x="178" y="0" width="184" height="28" rx="14" fill="#1e1b2e" stroke="#B4A4EF" stroke-opacity="0.35"/>
+      <text x="192" y="18.5" fill="#ddd6fe" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11.5" font-weight="600">● Split Workbench &amp; Diff</text>
+
+      <rect x="374" y="0" width="196" height="28" rx="14" fill="#1e1b2e" stroke="#B4A4EF" stroke-opacity="0.35"/>
+      <text x="388" y="18.5" fill="#ddd6fe" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11.5" font-weight="600">● Claude Code CLI Bridge</text>
+
+      <rect x="582" y="0" width="168" height="28" rx="14" fill="#1e1b2e" stroke="#B4A4EF" stroke-opacity="0.35"/>
+      <text x="596" y="18.5" fill="#ddd6fe" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11.5" font-weight="600">● Máquina do Tempo</text>
+    </g>
+  </g>
+
+  <!-- Right Official Orin Mascot & Live Aura -->
+  <g transform="translate(1045, 185)">
+    <circle cx="0" cy="0" r="145" fill="url(#mascotHalo)"/>
+    <circle cx="0" cy="0" r="110" fill="none" stroke="#B4A4EF" stroke-opacity="0.25" stroke-width="1.2" stroke-dasharray="6 8"/>
+    <circle cx="0" cy="0" r="88" fill="none" stroke="#B4A4EF" stroke-opacity="0.38" stroke-width="1.5"/>
+
+    <!-- Celebration Radial Particles -->
+    <circle cx="-78" cy="-58" r="4.5" fill="#B4A4EF" fill-opacity="0.85"/>
+    <circle cx="84" cy="-52" r="3.5" fill="#38bdf8" fill-opacity="0.85"/>
+    <circle cx="-94" cy="18" r="3.5" fill="#f472b6" fill-opacity="0.75"/>
+    <circle cx="92" cy="24" r="4.5" fill="#B4A4EF" fill-opacity="0.85"/>
+    <circle cx="0" cy="-98" r="3.5" fill="#fcd34d" fill-opacity="0.85"/>
+
+    <!-- Official OrinMascot SVG (centered at 0,0) -->
+    <g transform="translate(-84, -88) scale(1.05)">
+      <path d="
+          M 55 46
+          C 48 29, 58 21, 68 35
+          C 74 14, 95 18, 87 37
+          C 115 38, 137 66, 139 96
+          C 142 125, 121 138, 81 139
+          C 42 140, 20 128, 21 102
+          C 22 77, 35 55, 55 46
+          Z
+        " fill="#B4A4EF"/>
+      <ellipse cx="61" cy="88" rx="5" ry="11" fill="#282333" transform="rotate(-5 61 88)"/>
+      <ellipse cx="101" cy="86" rx="5" ry="11" fill="#282333" transform="rotate(-5 101 86)"/>
+      <path d="M 76 105 Q 81 112 87 104" stroke="#282333" stroke-width="3.2" stroke-linecap="round" fill="none"/>
+    </g>
+
+    <!-- Live Voice Waveform Badge -->
+    <g transform="translate(-82, 86)">
+      <rect x="0" y="0" width="164" height="30" rx="15" fill="#13111c" fill-opacity="0.95" stroke="#B4A4EF" stroke-opacity="0.55" stroke-width="1.2"/>
+      <circle cx="18" cy="15" r="4.5" fill="#34d399"/>
+      <text x="30" y="19.5" fill="#f8fafc" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="700">((•)) LIVE FULL-DUPLEX</text>
+    </g>
+  </g>
+
+  <!-- Bottom 3 Pillar Cards -->
+  <g transform="translate(80, 346)">
+    <!-- Card 1: Orin Friend -->
+    <g transform="translate(0, 0)">
+      <rect width="360" height="114" rx="16" fill="#14131f" fill-opacity="0.92" stroke="url(#cardBorder)" stroke-width="1.2"/>
+      <rect x="18" y="18" width="36" height="36" rx="10" fill="#B4A4EF" fill-opacity="0.2" stroke="#B4A4EF" stroke-opacity="0.45"/>
+      <text x="27" y="42" fill="#B4A4EF" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="18" font-weight="700">✦</text>
+      <text x="66" y="34" fill="#f8fafc" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif" font-size="16.5" font-weight="700">Orin Friend &amp; Modo LIVE</text>
+      <text x="66" y="55" fill="#94a3b8" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif" font-size="12.5">Voz full-duplex PT-BR, wake word "Orin",</text>
+      <text x="66" y="73" fill="#94a3b8" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif" font-size="12.5">barge-in &lt;80ms, 7 sliders de alma e supervisão.</text>
+      <text x="66" y="95" fill="#B4A4EF" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600">Chatterbox · Kokoro · Whisper GPU · SOUL.md</text>
+    </g>
+
+    <!-- Card 2: Orin Chat & Equipes -->
+    <g transform="translate(380, 0)">
+      <rect width="360" height="114" rx="16" fill="#14131f" fill-opacity="0.92" stroke="url(#cardBorder)" stroke-width="1.2"/>
+      <rect x="18" y="18" width="36" height="36" rx="10" fill="#06b6d4" fill-opacity="0.18" stroke="#38bdf8" stroke-opacity="0.4"/>
+      <text x="27" y="41" fill="#7dd3fc" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="16" font-weight="700">💬</text>
+      <text x="66" y="34" fill="#f8fafc" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif" font-size="16.5" font-weight="700">Chat, Equipes &amp; Memória</text>
+      <text x="66" y="55" fill="#94a3b8" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif" font-size="12.5">Leitura PDF/Office, visão, equipe multiagente,</text>
+      <text x="66" y="73" fill="#94a3b8" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif" font-size="12.5">ações agendadas, skills e conexões MCP.</text>
+      <text x="66" y="95" fill="#38bdf8" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600">Memória (Trabalho/Friend/Projeto) · Equipes</text>
+    </g>
+
+    <!-- Card 3: Orin Code & Máquina do Tempo -->
+    <g transform="translate(760, 0)">
+      <rect width="360" height="114" rx="16" fill="#14131f" fill-opacity="0.92" stroke="url(#cardBorder)" stroke-width="1.2"/>
+      <rect x="18" y="18" width="36" height="36" rx="10" fill="#f59e0b" fill-opacity="0.16" stroke="#fbbf24" stroke-opacity="0.4"/>
+      <text x="25" y="41" fill="#fcd34d" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15" font-weight="700">&gt;_</text>
+      <text x="66" y="34" fill="#f8fafc" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif" font-size="16.5" font-weight="700">Orin Code &amp; Máquina do Tempo</text>
+      <text x="66" y="55" fill="#94a3b8" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif" font-size="12.5">Split Workbench (Prévia, Arquivos e Terminal),</text>
+      <text x="66" y="73" fill="#94a3b8" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif" font-size="12.5">checkpoints SHA-256, AST Shell e 33 hooks.</text>
+      <text x="66" y="95" fill="#fbbf24" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600">orin code · Claude CLI Bridge · OpenCode</text>
+    </g>
+  </g>
+</svg>

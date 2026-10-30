@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 116" width="100%" height="100%">
+  <defs>
+    <linearGradient id="cliBgL" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="100%" stop-color="#fffbeb"/>
+    </linearGradient>
+  </defs>
+  <rect x="1.5" y="1.5" width="397" height="113" rx="16" fill="url(#cliBgL)" stroke="#fcd34d" stroke-width="1.5"/>
+  <g transform="translate(24, 26)">
+    <rect x="0" y="0" width="64" height="64" rx="14" fill="#fef3c7" stroke="#fcd34d"/>
+    <text x="16" y="40" fill="#b45309" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="22" font-weight="800">&gt;_</text>
+    <text x="82" y="16" fill="#b45309" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="700" letter-spacing="0.8">TERMINAL &amp; HEADLESS SDK</text>
+    <text x="82" y="40" fill="#0f172a" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif" font-size="20" font-weight="800">Orin Code CLI</text>
+    <text x="82" y="60" fill="#475569" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif" font-size="12.5">orin code · Compatível com Claude SDK</text>
+  </g>
+</svg>
