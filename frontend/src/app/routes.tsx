@@ -22,6 +22,7 @@ import { useSettingsBadges } from '../features/settings/useSettingsBadges'
 import { AboutSection } from '../features/settings/AboutSection'
 import { BackgroundSection } from '../features/settings/BackgroundSection'
 import { BrowserSection } from '../features/settings/BrowserSection'
+import { VoiceSettingsSection } from '../features/settings/VoiceSettingsSection'
 import { WorkspaceSection } from '../features/settings/WorkspaceSection'
 import { MemoryPage } from '../features/memory/MemoryPage'
 import { SchedulesPage } from '../features/schedules/SchedulesPage'
@@ -77,6 +78,8 @@ export const routes: RouteDefinition[] = [
   { path: '/settings/media', element: <MediaSettingsRoute /> },
   { path: '/settings/mcp', element: <SettingsRoute><McpSection /></SettingsRoute> },
   { path: '/settings/plugins', element: <SettingsRoute><PluginsSection /></SettingsRoute> },
+  { path: '/settings/voice', element: <SettingsRoute><VoiceSettingsSection /></SettingsRoute> },
+  { path: '/settings/security', element: <SettingsRoute><PermissionsSection /></SettingsRoute> },
   { path: '/settings/permissions', element: <SettingsRoute><PermissionsSection /></SettingsRoute> },
   { path: '/settings/hooks', element: <SettingsRoute><HooksSection /></SettingsRoute> },
   { path: '/settings/mcp-scopes', element: <SettingsRoute><McpScopesSection /></SettingsRoute> },

@@ -8,10 +8,12 @@ export type ThemeAmbient = 'on' | 'off'
 const MODE_KEY = 'orin.theme.mode'
 const ACCENT_KEY = 'orin.theme.accent'
 const AMBIENT_KEY = 'orin.theme.ambient'
+const REDUCE_MOTION_KEY = 'orin.theme.reduceMotion'
 
 const VALID_MODES: readonly ThemeMode[] = ['dark', 'carbon', 'midnight', 'forest', 'light', 'system']
 const VALID_ACCENTS: readonly ThemeAccent[] = ['violet', 'sapphire', 'emerald', 'amber', 'rose', 'mono']
 const VALID_AMBIENTS: readonly ThemeAmbient[] = ['on', 'off']
+const VALID_REDUCE_MOTION = ['true', 'false'] as const
 
 function readValid<T extends string>(key: string, valid: readonly T[], fallback: T): T {
   try {
@@ -46,7 +48,12 @@ export function resolveThemeMode(mode: ThemeMode): ResolvedTheme {
   return mode === 'system' ? resolveSystemTheme() : mode
 }
 
-export function applyThemeAttributes(mode: ThemeMode, accent: ThemeAccent, ambient: ThemeAmbient): ResolvedTheme {
+export function applyThemeAttributes(
+  mode: ThemeMode,
+  accent: ThemeAccent,
+  ambient: ThemeAmbient,
+  reduceMotion: boolean = readValid(REDUCE_MOTION_KEY, VALID_REDUCE_MOTION, 'false') === 'true',
+): ResolvedTheme {
   const resolved = resolveThemeMode(mode)
   if (typeof document !== 'undefined' && document.documentElement) {
     const root = document.documentElement
@@ -54,6 +61,10 @@ export function applyThemeAttributes(mode: ThemeMode, accent: ThemeAccent, ambie
     root.setAttribute('data-theme-preference', mode)
     root.setAttribute('data-accent', accent)
     root.setAttribute('data-ambient', ambient)
+    root.setAttribute('data-reduce-motion', reduceMotion ? 'true' : 'false')
+  }
+  if (typeof document !== 'undefined' && document.body) {
+    document.body.classList.toggle('reduce-motion', Boolean(reduceMotion))
   }
   return resolved
 }
@@ -63,7 +74,8 @@ export function initThemeDom(): void {
   const mode = readValid(MODE_KEY, VALID_MODES, 'dark')
   const accent = readValid(ACCENT_KEY, VALID_ACCENTS, 'violet')
   const ambient = readValid(AMBIENT_KEY, VALID_AMBIENTS, 'on')
-  applyThemeAttributes(mode, accent, ambient)
+  const reduceMotion = readValid(REDUCE_MOTION_KEY, VALID_REDUCE_MOTION, 'false') === 'true'
+  applyThemeAttributes(mode, accent, ambient, reduceMotion)
 }
 
 export type ThemeContextValue = {
@@ -71,9 +83,11 @@ export type ThemeContextValue = {
   resolvedTheme: ResolvedTheme
   accent: ThemeAccent
   ambient: ThemeAmbient
+  reduceMotion: boolean
   setMode: (next: ThemeMode) => void
   setAccent: (next: ThemeAccent) => void
   setAmbient: (next: ThemeAmbient) => void
+  setReduceMotion: (next: boolean) => void
   cycleMode: () => void
 }
 
@@ -83,6 +97,9 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   const [mode, setModeState] = useState<ThemeMode>(() => readValid(MODE_KEY, VALID_MODES, 'dark'))
   const [accent, setAccentState] = useState<ThemeAccent>(() => readValid(ACCENT_KEY, VALID_ACCENTS, 'violet'))
   const [ambient, setAmbientState] = useState<ThemeAmbient>(() => readValid(AMBIENT_KEY, VALID_AMBIENTS, 'on'))
+  const [reduceMotion, setReduceMotionState] = useState<boolean>(
+    () => readValid(REDUCE_MOTION_KEY, VALID_REDUCE_MOTION, 'false') === 'true',
+  )
   const [systemTheme, setSystemTheme] = useState<'dark' | 'light'>(() => resolveSystemTheme())
 
   const resolvedTheme: ResolvedTheme = mode === 'system' ? systemTheme : mode
@@ -94,9 +111,13 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
       root.setAttribute('data-theme-preference', mode)
       root.setAttribute('data-accent', accent)
       root.setAttribute('data-ambient', ambient)
+      root.setAttribute('data-reduce-motion', reduceMotion ? 'true' : 'false')
       root.setAttribute('data-desktop', typeof window !== 'undefined' && Boolean(window.orinDesktop) ? 'true' : 'false')
     }
-  }, [mode, resolvedTheme, accent, ambient])
+    if (typeof document !== 'undefined' && document.body) {
+      document.body.classList.toggle('reduce-motion', reduceMotion)
+    }
+  }, [mode, resolvedTheme, accent, ambient, reduceMotion])
 
   useEffect(() => {
     if (mode !== 'system' || typeof window === 'undefined' || typeof window.matchMedia !== 'function') return
@@ -127,9 +148,9 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
         setSystemTheme(resolveSystemTheme())
       }
       writeStorage(MODE_KEY, validNext)
-      applyThemeAttributes(validNext, accent, ambient)
+      applyThemeAttributes(validNext, accent, ambient, reduceMotion)
     },
-    [accent, ambient],
+    [accent, ambient, reduceMotion],
   )
 
   const setAccent = useCallback(
@@ -137,9 +158,9 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
       const validNext = VALID_ACCENTS.includes(next) ? next : 'violet'
       setAccentState(validNext)
       writeStorage(ACCENT_KEY, validNext)
-      applyThemeAttributes(mode, validNext, ambient)
+      applyThemeAttributes(mode, validNext, ambient, reduceMotion)
     },
-    [mode, ambient],
+    [mode, ambient, reduceMotion],
   )
 
   const setAmbient = useCallback(
@@ -147,9 +168,19 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
       const validNext = VALID_AMBIENTS.includes(next) ? next : 'on'
       setAmbientState(validNext)
       writeStorage(AMBIENT_KEY, validNext)
-      applyThemeAttributes(mode, accent, validNext)
+      applyThemeAttributes(mode, accent, validNext, reduceMotion)
     },
-    [mode, accent],
+    [mode, accent, reduceMotion],
+  )
+
+  const setReduceMotion = useCallback(
+    (next: boolean) => {
+      const validNext = Boolean(next)
+      setReduceMotionState(validNext)
+      writeStorage(REDUCE_MOTION_KEY, validNext ? 'true' : 'false')
+      applyThemeAttributes(mode, accent, ambient, validNext)
+    },
+    [mode, accent, ambient],
   )
 
   const cycleMode = useCallback(() => {
@@ -165,12 +196,14 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
       resolvedTheme,
       accent,
       ambient,
+      reduceMotion,
       setMode,
       setAccent,
       setAmbient,
+      setReduceMotion,
       cycleMode,
     }),
-    [mode, resolvedTheme, accent, ambient, setMode, setAccent, setAmbient, cycleMode],
+    [mode, resolvedTheme, accent, ambient, reduceMotion, setMode, setAccent, setAmbient, setReduceMotion, cycleMode],
   )
 
   return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>
@@ -184,9 +217,11 @@ export function useTheme(): ThemeContextValue {
       resolvedTheme: 'dark',
       accent: 'violet',
       ambient: 'on',
+      reduceMotion: false,
       setMode: () => {},
       setAccent: () => {},
       setAmbient: () => {},
+      setReduceMotion: () => {},
       cycleMode: () => {},
     }
   }

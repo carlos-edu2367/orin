@@ -71,8 +71,9 @@ export function Home({ client, bootstrap }: HomeProps) {
   const { projectId } = useParams()
   const [searchParams, setSearchParams] = useSearchParams()
   const navigate = useNavigate()
-  const reduced = useReducedMotion()
-  const { ambient } = useTheme()
+  const osReduced = useReducedMotion()
+  const { ambient, reduceMotion } = useTheme()
+  const reduced = Boolean(osReduced || reduceMotion)
   const apiClient = useMemo(() => client ?? createBrowserApiClient(), [client])
   const session = bootstrap ?? (typeof document === 'undefined' ? { status: 'missing_csrf' as const } : readBrowserSessionBootstrap(document))
 
@@ -101,12 +102,33 @@ export function Home({ client, bootstrap }: HomeProps) {
   const [pluginCommands, setPluginCommands] = useState<PluginCommand[]>([])
   const [skills, setSkills] = useState<SkillSummary[]>([])
   const [preferencesOpen, setPreferencesOpen] = useState(false)
+  const [celebrating, setCelebrating] = useState(false)
+  const celebrationTimerRef = useRef<number | null>(null)
   const activeProjectName = projectId ? projectName : null
   const greeting = formatHomeGreeting()
   const activeTaskCount = useMemo(
     () => chats.filter((chat) => ACTIVE_CONVERSATION_STATES.has(chat.state)).length,
     [chats],
   )
+
+  const triggerCelebration = useCallback(() => {
+    setCelebrating(true)
+    if (celebrationTimerRef.current !== null) {
+      window.clearTimeout(celebrationTimerRef.current)
+    }
+    celebrationTimerRef.current = window.setTimeout(() => {
+      celebrationTimerRef.current = null
+      setCelebrating(false)
+    }, 950)
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      if (celebrationTimerRef.current !== null) {
+        window.clearTimeout(celebrationTimerRef.current)
+      }
+    }
+  }, [])
 
   const [previousRequestedModeParam, setPreviousRequestedModeParam] = useState(requestedModeParam)
   if (requestedModeParam !== previousRequestedModeParam) {
@@ -208,6 +230,7 @@ export function Home({ client, bootstrap }: HomeProps) {
     const text = message.trim()
     const readyUploads = readyUploadIds()
     if ((!text && readyUploads.length === 0) || !modelId || submitting || !sessionReady) return
+    triggerCelebration()
     setSubmitting(true)
     setError(null)
     const resolvedMode: ConversationMode = codeMode === 'code' ? 'code' : 'chat'
@@ -315,7 +338,13 @@ export function Home({ client, bootstrap }: HomeProps) {
             <span>Conversar por voz</span>
           </button>
           <CommandPalette conversations={chats} />
-          <OrinMascot size={30} variant="flat" statusDot="online" ariaLabel="Orin ativo" />
+          <OrinMascot
+            size={30}
+            variant="flat"
+            statusDot="online"
+            ariaLabel="Orin ativo"
+            celebrating={celebrating}
+          />
         </div>
       </header>
 
@@ -339,11 +368,18 @@ export function Home({ client, bootstrap }: HomeProps) {
 
       <section className="home__stage" data-testid="home-submit-state" data-submitting={submitting}>
         <div className="home__hero">
-          <div className="home__hero-mascot" data-testid="home-hero-mascot">
+          <div
+            className="home__hero-mascot"
+            data-testid="home-hero-mascot"
+            data-celebrating={celebrating ? 'true' : 'false'}
+            onClick={triggerCelebration}
+          >
             <OrinMascot
               size={88}
               variant="soft3d"
               animated={!reduced}
+              celebrating={celebrating}
+              showParticles={true}
               ariaLabel="Mascote Orin 3D"
             />
           </div>
@@ -433,6 +469,7 @@ export function Home({ client, bootstrap }: HomeProps) {
                   type="button"
                   className="home__quick-chip"
                   onClick={() => {
+                    triggerCelebration()
                     const trigger = document.querySelector<HTMLButtonElement>('[data-testid="session-context-trigger"]')
                     trigger?.click()
                   }}
@@ -446,6 +483,7 @@ export function Home({ client, bootstrap }: HomeProps) {
                   type="button"
                   className="home__quick-chip"
                   onClick={() => {
+                    triggerCelebration()
                     changeCodePermissionMode('plan_mode')
                     setFocusSignal((n) => n + 1)
                   }}
@@ -460,6 +498,7 @@ export function Home({ client, bootstrap }: HomeProps) {
                   type="button"
                   className="home__quick-chip"
                   onClick={() => {
+                    triggerCelebration()
                     setMessage('Execute a suíte de testes, identifique falhas e proponha a correção.')
                     setFocusSignal((n) => n + 1)
                   }}
@@ -478,6 +517,7 @@ export function Home({ client, bootstrap }: HomeProps) {
                   className="home__quick-chip"
                   aria-label="Pesquisar um assunto (Pesquisar e sintetizar)"
                   onClick={() => {
+                    triggerCelebration()
                     setMessage('Pesquise e sintetize sobre: ')
                     setFocusSignal((n) => n + 1)
                   }}
@@ -493,6 +533,7 @@ export function Home({ client, bootstrap }: HomeProps) {
                   className="home__quick-chip"
                   aria-label="Analisar um arquivo (Analisar arquivos ou imagens)"
                   onClick={() => {
+                    triggerCelebration()
                     setMessage('Analise os arquivos ou imagens anexados e destaque os pontos principais.')
                     setFocusSignal((n) => n + 1)
                   }}
@@ -507,7 +548,10 @@ export function Home({ client, bootstrap }: HomeProps) {
                   type="button"
                   className="home__quick-chip"
                   aria-label="Criar um projeto (Usar uma Skill da Biblioteca)"
-                  onClick={() => navigate('/library/skills')}
+                  onClick={() => {
+                    triggerCelebration()
+                    navigate('/library/skills')
+                  }}
                 >
                   <svg className="home__quick-chip-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                     <path d="M8 2.2 9.4 6l3.8 1.4-3.8 1.4L8 12.6 6.6 8.8 2.8 7.4 6.6 6 8 2.2Z" />

@@ -3,6 +3,7 @@ import { ApiClient, createBrowserApiClient } from '../../api/client'
 import { getInstallationStatus, removeInstalledVersion, type InstallationStatus } from '../../api/installation'
 import { getAgentRuntimeSettings, setAgentRuntimeSettings } from '../../api/runtime'
 import { getCodeModeSettings, setCodeModeSettings, type CodeAutonomy, type CodeModeSettings } from '../../api/codeMode'
+import { useTheme } from '../../app/ThemeContext'
 import { CustomSelect } from '../../components/CustomSelect'
 import { SettingsPage } from './SettingsPage'
 import { SettingsSection } from './SettingsSection'
@@ -28,6 +29,7 @@ const CODE_AUTONOMY_OPTIONS = [
 
 export function RuntimeSettingsPage({ client, embedded = false }: { client?: ApiClient; embedded?: boolean }) {
   const apiClient = useMemo(() => client ?? createBrowserApiClient(), [client])
+  const { reduceMotion, setReduceMotion } = useTheme()
   const [maxIterations, setMaxIterations] = useState<number | null>(null)
   const [draft, setDraft] = useState('24')
   const [subagentMaxIterations, setSubagentMaxIterations] = useState<number | null>(null)
@@ -177,6 +179,7 @@ export function RuntimeSettingsPage({ client, embedded = false }: { client?: Api
     <h2 className="runtime-settings__title">Interações do agente</h2>
     <p className="settings-content__lede">Defina quantas rodadas de ferramentas e raciocínio o agente principal e os subagentes podem executar por turno. Sem limite remove os tetos de rodadas e ações; a proteção contra processos travados continua ativa.</p>
     <section className="runtime-settings" aria-busy={loading}>
+      <label className="provider-panel__toggle"><input type="checkbox" data-testid="general-reduce-motion-toggle" checked={reduceMotion} onChange={(e) => setReduceMotion(e.target.checked)} />Movimento reduzido (desativar animações contínuas e partículas)</label>
       <label className="provider-panel__toggle"><input type="checkbox" checked={maxIterations === null} disabled={loading || saving} onChange={(event) => setMaxIterations(event.target.checked ? null : Number(draft) || 24)} />Sem limite de interações</label>
       <label className="runtime-settings__field">Máximo de interações por turno<input aria-label="Máximo de interações por turno" type="number" min="1" step="1" value={draft} disabled={loading || saving || maxIterations === null} onChange={(event) => setDraft(event.target.value)} /></label>
       <label className="provider-panel__toggle"><input type="checkbox" data-testid="subagent-unlimited-toggle" checked={subagentMaxIterations === null} disabled={loading || saving} onChange={(event) => { setSubagentConfigured(true); setSubagentMaxIterations(event.target.checked ? null : Number(subagentDraft) || 48) }} />Sem limite de interações em subagentes</label>

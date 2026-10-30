@@ -1,9 +1,21 @@
-import { useId, type JSX } from 'react'
+import { useId, type CSSProperties, type JSX } from 'react'
 
 export type OrinMascotVariant = 'flat' | 'soft3d' | 'waving' | 'mini'
 export type OrinMascotStatusDot = 'online' | 'busy' | 'none'
 
 const DEFAULT_MASCOT_COLOR = 'var(--orin-accent, #B4A4EF)'
+
+const PARTICLE_VECTORS: ReadonlyArray<{ dx: string; dy: string; delay: string }> = [
+  { dx: '-58px', dy: '-38px', delay: '0ms' },
+  { dx: '-70px', dy: '6px', delay: '20ms' },
+  { dx: '-42px', dy: '52px', delay: '40ms' },
+  { dx: '0px', dy: '-68px', delay: '10ms' },
+  { dx: '56px', dy: '-42px', delay: '30ms' },
+  { dx: '72px', dy: '8px', delay: '50ms' },
+  { dx: '46px', dy: '54px', delay: '25ms' },
+  { dx: '-18px', dy: '-60px', delay: '35ms' },
+  { dx: '22px', dy: '62px', delay: '45ms' },
+]
 
 export type OrinMascotProps = {
   size?: number | string
@@ -11,6 +23,8 @@ export type OrinMascotProps = {
   statusDot?: OrinMascotStatusDot
   color?: string
   animated?: boolean
+  celebrating?: boolean
+  showParticles?: boolean
   ariaLabel?: string
   ariaHidden?: boolean
   className?: string
@@ -44,6 +58,8 @@ export function OrinMascot({
   statusDot = 'none',
   color = DEFAULT_MASCOT_COLOR,
   animated = false,
+  celebrating = false,
+  showParticles = false,
   ariaLabel = 'Mascote Orin',
   ariaHidden = false,
   className,
@@ -68,11 +84,12 @@ export function OrinMascot({
 
   return (
     <span
-      className={`orin-mascot orin-mascot--${validVariant}${animated ? ' is-animated' : ''}${className ? ` ${className}` : ''}`}
+      className={`orin-mascot orin-mascot--${validVariant}${animated ? ' is-animated' : ''}${celebrating ? ' is-celebrating' : ''}${className ? ` ${className}` : ''}`}
       style={{ width: `${pxSize}px`, height: `${pxSize}px` }}
       data-testid="orin-mascot"
       data-variant={validVariant}
       data-status-dot={validStatus}
+      data-celebrating={celebrating ? 'true' : 'false'}
     >
       <svg
         xmlns="http://www.w3.org/2000/svg"
@@ -175,6 +192,18 @@ export function OrinMascot({
           data-mascot-part="smile"
         />
       </svg>
+
+      {(showParticles || celebrating) && (
+        <span className="orin-mascot__particles" data-testid="orin-mascot-particles" aria-hidden="true">
+          {PARTICLE_VECTORS.map((vec, idx) => (
+            <span
+              key={idx}
+              className="orin-mascot__particle"
+              style={{ '--dx': vec.dx, '--dy': vec.dy, '--delay': vec.delay } as CSSProperties}
+            />
+          ))}
+        </span>
+      )}
 
       {validStatus !== 'none' && (
         <span

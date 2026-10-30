@@ -52,7 +52,7 @@ const THEME_ACCENTS: ReadonlyArray<{ id: ThemeAccent; label: string }> = [
 export function PreferencesModal({ open, initialTab = 'appearance', onClose, client }: PreferencesModalProps): JSX.Element | null {
   const apiClient = useMemo(() => client ?? createBrowserApiClient(), [client])
   const session = useSession()
-  const { mode, accent, ambient, setMode, setAccent, setAmbient } = useTheme()
+  const { mode, accent, ambient, reduceMotion, setMode, setAccent, setAmbient, setReduceMotion } = useTheme()
   const syncKey = `${String(open)}|${String(initialTab)}`
   const derivedTab = normalizeTab(initialTab)
   const [localTab, setLocalTab] = useState<{ key: string; tab?: PreferencesTab }>({ key: syncKey })
@@ -237,6 +237,22 @@ export function PreferencesModal({ open, initialTab = 'appearance', onClose, cli
                     <div className="preferences-ambient-toggle__copy">
                       <strong>Exibir esfera orbital e brilho atmosférico no palco inicial</strong>
                       <small>Desative para zerar efeitos visuais em segundo plano e deixar o palco 100% sólido.</small>
+                    </div>
+                    <span className="preferences-ambient-toggle__pill" aria-hidden="true">
+                      <span className="preferences-ambient-toggle__thumb" />
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={reduceMotion}
+                    data-testid="theme-reduce-motion-toggle"
+                    className={`preferences-ambient-toggle${reduceMotion ? ' is-active' : ''}`}
+                    onClick={() => setReduceMotion(!reduceMotion)}
+                  >
+                    <div className="preferences-ambient-toggle__copy">
+                      <strong>Movimento reduzido</strong>
+                      <small>Desativa flutuação contínua, partículas e transições elásticas.</small>
                     </div>
                     <span className="preferences-ambient-toggle__pill" aria-hidden="true">
                       <span className="preferences-ambient-toggle__thumb" />

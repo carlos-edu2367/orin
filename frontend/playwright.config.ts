@@ -1,6 +1,9 @@
 import { defineConfig } from '@playwright/test'
 import { env as processEnv } from 'node:process'
 
+const port = processEnv.PLAYWRIGHT_PORT ?? '4173'
+const baseURL = `http://127.0.0.1:${port}`
+
 export default defineConfig({
   testDir: './tests/e2e',
   fullyParallel: false,
@@ -14,13 +17,13 @@ export default defineConfig({
   // retry distinguishes that runner condition from a reproducible product bug.
   retries: processEnv.CI ? 1 : 0,
   use: {
-    baseURL: 'http://127.0.0.1:4173',
+    baseURL,
     trace: 'retain-on-failure',
   },
   webServer: {
-    command: 'npm run dev -- --host 127.0.0.1',
-    url: 'http://127.0.0.1:4173',
-    reuseExistingServer: true,
+    command: `npm run dev -- --host 127.0.0.1 --port ${port} --strictPort`,
+    url: baseURL,
+    reuseExistingServer: !processEnv.PLAYWRIGHT_PORT,
     // Browser specs inject their own CSRF bootstrap. Do not inherit a developer's
     // loopback-mode environment, which would deliberately bypass that token and
     // make the authentication assertions non-deterministic.
