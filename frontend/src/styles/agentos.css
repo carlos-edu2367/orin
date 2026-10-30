@@ -461,7 +461,7 @@
 }
 .home__continue-card-time {
   font-size: 11.5px;
-  color: var(--orin-text-muted, #636170);
+  color: var(--orin-text-muted, #9d9baa);
 }
 .home__continue-card-arrow {
   margin-left: auto;
@@ -4631,7 +4631,7 @@ progress.orin-progress::-moz-progress-bar,
 .project-navigation__chat-time {
   margin-left: auto;
   font-size: 11px;
-  color: var(--orin-text-muted, #636170);
+  color: var(--orin-text-muted, #9d9baa);
   flex-shrink: 0;
 }
 
@@ -4669,7 +4669,7 @@ progress.orin-progress::-moz-progress-bar,
 .project-navigation__project-count {
   margin-left: auto;
   font-size: 11px;
-  color: var(--orin-text-muted, #636170);
+  color: var(--orin-text-muted, #9d9baa);
   white-space: nowrap;
   flex-shrink: 0;
 }

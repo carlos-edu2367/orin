@@ -99,8 +99,8 @@ flowchart TD
 
 2. **Layout de 2 Colunas da Aba `Personalidade` (`ref-06.png`):**
    - **Coluna Esquerda — Card de Identidade & Prévia (`data-testid="friend-preview-card"`):**
-     - Mascote `<OrinMascot size={160} variant="hero" />` (com suporte visual ao `draft.theme` e `<LiveOrb>` preservado para testes).
-     - Nome em destaque: **`{displayName}`** (`24px`, `font-weight: 700`).
+     - Mascote `<OrinMascot size={160} variant="soft3d" />` (com suporte visual ao `draft.theme` e `<LiveOrb>` preservado para testes).
+     - Nome em destaque: **`<h2 data-testid="friend-preview-name">{displayName}</h2>`** (`24px`, `font-weight: 700` — único `<h2>` do componente para preservar `getByRole('heading', { level: 2 })`).
      - Subtítulo de parceria: **`Seu parceiro de trabalho.`** (`bondStageLabel` + afinidade no card de vínculo).
      - Botão **`▷ Ouvir uma prévia`** (`data-testid="friend-listen-preview-button"`): sintetiza/reproduz uma frase de exemplo refletindo os traços atuais (com feedback de estado `"Reproduzindo prévia…"` e proteção contra cliques simultâneos).
    - **Coluna Direita — Identidade, 5 Sliders Bipolares e `"Mais ajustes"`:**

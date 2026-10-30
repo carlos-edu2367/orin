@@ -49,7 +49,7 @@ import type { CodeSessionProposalDecision } from './CodeSessionProposalCard'
 import { Composer } from './Composer'
 import { FriendSoulDrawer } from './FriendSoulDrawer'
 import { LiveVoiceQuickSettings } from './LiveVoiceQuickSettings'
-import { LiveVoiceStage } from './LiveVoiceStage'
+import { LiveVoiceStage, type LiveVoiceTranscriptItem } from './LiveVoiceStage'
 import { CodeSessionLiveCard } from './CodeSessionLiveCard'
 import { ContextIndicator } from './ContextIndicator'
 import { MarkdownMessage } from './MarkdownMessage'
@@ -1020,13 +1020,13 @@ export function ChatPage() {
     return () => window.removeEventListener('orin:open-friend-live', onOpenFriendLive)
   }, [conversationId])
 
-  // The persona is the friend conversation's identity: load it with the conversation.
+  // The persona is the friend conversation's identity: load it with the conversation or when live voice opens.
   useEffect(() => {
-    if (conversationMode !== 'friend') return
+    if (conversationMode !== 'friend' && !liveVoiceOpen) return
     const controller = new AbortController()
     getFriendPersona(client, controller.signal).then(setFriendPersona).catch(() => {})
     return () => controller.abort()
-  }, [client, conversationMode, conversationId])
+  }, [client, conversationMode, conversationId, liveVoiceOpen])
   useEffect(() => {
     if (!friendSoulOpen) return
     const controller = new AbortController()
@@ -1034,6 +1034,31 @@ export function ChatPage() {
     listFriendMemories(client, controller.signal).then(setFriendMemories).catch(() => {})
     return () => controller.abort()
   }, [client, friendSoulOpen])
+
+  const liveVoiceTranscriptItems = useMemo<LiveVoiceTranscriptItem[]>(() => {
+    const turnById = new Map((conversation?.turns ?? []).map((t) => [t.turn_id, t]))
+    return messages
+      .filter((m): m is ConversationMessage & { role: 'user' | 'assistant' } =>
+        (m.role === 'user' || m.role === 'assistant') && m.content.trim().length > 0,
+      )
+      .slice(-6)
+      .map((m) => {
+        const rawCreatedAt =
+          (m as { created_at?: string }).created_at ??
+          (m.turn_id ? turnById.get(m.turn_id)?.created_at : undefined)
+        return {
+          id: m.message_id,
+          role: m.role === 'user' ? 'user' : 'assistant',
+          content: m.content,
+          timestamp: rawCreatedAt,
+        }
+      })
+  }, [conversation?.turns, messages])
+
+  const latestDelegatedCodeSession = useMemo(
+    () => [...activity.events].reverse().find((ev) => Boolean(ev.delegatedCodeSession))?.delegatedCodeSession ?? null,
+    [activity.events],
+  )
 
   // What the Live voice should say: the turn's `<speak>` chunks as they stream,
   // plus any unspoken remainder (or full cleaned answer when no `<speak>` arrived).
@@ -2323,7 +2348,7 @@ export function ChatPage() {
                         aria-label="Copiar resposta"
                         data-testid={`copy-message-${item.message_id}`}
                         onClick={() => { void copyAssistantMessage(item.message_id, item.content) }}
-                        style={{ fontSize: '11px', padding: '2px 8px', opacity: 0.78 }}
+                        style={{ fontSize: '11px', padding: '2px 8px' }}
                       >
                         {copiedMessageId === item.message_id ? 'Copiado' : 'Copiar resposta'}
                       </button>
@@ -2686,6 +2711,10 @@ export function ChatPage() {
         persona={friendPersona}
         memories={friendMemories}
         onClose={() => setFriendSoulOpen(false)}
+        onStartVoice={() => {
+          setFriendSoulOpen(false)
+          setLiveVoiceOpen(true)
+        }}
         onUpdatePersona={async (input) => {
           const updated = await updateFriendPersona(client, input)
           setFriendPersona(updated)
@@ -2709,11 +2738,20 @@ export function ChatPage() {
         conversationId={conversationId}
         client={client}
         companionName={conversationMode === 'friend' ? friendDisplayName : 'Orin'}
-        userNickname={conversationMode === 'friend' ? friendPersona?.user_nickname ?? '' : ''}
+        userNickname={friendPersona?.user_nickname || ''}
         orbThemeId={conversationMode === 'friend' ? friendPersona?.orb_theme ?? 'aurora' : 'aurora'}
         assistantSpeech={assistantSpeech}
         assistantBusy={running}
         workingStatusText={liveWorkingStatus}
+        transcriptItems={liveVoiceTranscriptItems}
+        todos={activity.todos}
+        delegatedCodeSession={latestDelegatedCodeSession}
+        onOpenCodeSession={(codeConvId) => {
+          setLiveVoiceOpen(false)
+          if (codeConvId) navigate(`/chats/${encodeURIComponent(codeConvId)}`)
+          else if (activeConvProjectId) navigate(`/projects/${encodeURIComponent(activeConvProjectId)}/new?mode=code`)
+          else navigate('/?mode=code')
+        }}
         onUserSpeechUtterance={(spokenPrompt) => {
           if (running || stopping) {
             void stop().finally(() => {
