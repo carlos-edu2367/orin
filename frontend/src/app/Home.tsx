@@ -77,7 +77,8 @@ export function Home({ client, bootstrap }: HomeProps) {
   const session = bootstrap ?? (typeof document === 'undefined' ? { status: 'missing_csrf' as const } : readBrowserSessionBootstrap(document))
 
   const requestedModeParam = searchParams.get('mode')
-  const [message, setMessage] = useState('')
+  const requestedPromptParam = searchParams.get('prompt')
+  const [message, setMessage] = useState(() => requestedPromptParam ?? '')
   const [codeMode, setCodeMode] = useState<ConversationMode>(() => (requestedModeParam === 'code' ? 'code' : 'chat'))
   const [serverPermissionMode, setServerPermissionMode] = useState<CodePermissionMode>('ask_permissions')
   const [codePermissionMode, setCodePermissionMode] = useState<CodePermissionMode>('ask_permissions')
@@ -114,6 +115,14 @@ export function Home({ client, bootstrap }: HomeProps) {
       setCodeMode('code')
     } else if (requestedModeParam === 'chat') {
       setCodeMode('chat')
+    }
+  }
+
+  const [previousRequestedPromptParam, setPreviousRequestedPromptParam] = useState(requestedPromptParam)
+  if (requestedPromptParam !== previousRequestedPromptParam) {
+    setPreviousRequestedPromptParam(requestedPromptParam)
+    if (requestedPromptParam !== null) {
+      setMessage(requestedPromptParam)
     }
   }
 

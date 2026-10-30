@@ -27,6 +27,7 @@ export type WorkspaceNavigationProps = {
   onToggleRail?: () => void
   onOpenPreferences?: () => void
   initialView?: 'chats' | 'projects'
+  hideProjectChatSublist?: boolean
 }
 
 const SIDEBAR_COLLAPSED_STORAGE_KEY = 'orin.sidebar.collapsed'
@@ -145,6 +146,7 @@ export function WorkspaceNavigation({
   onToggleRail,
   onOpenPreferences,
   initialView,
+  hideProjectChatSublist = false,
 }: WorkspaceNavigationProps) {
   const apiClient = useMemo(() => client ?? createBrowserApiClient(), [client])
   const navigate = useNavigate()
@@ -636,16 +638,16 @@ export function WorkspaceNavigation({
         </div>
 
         <div className="project-navigation__scroll project-navigation__rail-hide">
-          <AnimatePresence mode="wait">
+          <AnimatePresence mode="wait" initial={false}>
             {view === 'chats' ? (
               <motion.div
                 id="navigation-chats"
                 role="tabpanel"
                 aria-label="Chats independentes"
                 key="chats"
-                initial={reduced ? false : { opacity: 0, y: 4 }}
+                initial={reduced ? false : { y: 4 }}
                 animate={{ opacity: 1, y: 0 }}
-                exit={reduced ? undefined : { opacity: 0, y: -4 }}
+                exit={reduced ? undefined : { y: -4 }}
               >
                 <div className="project-navigation__section-heading">
                   <span>Conversas recentes</span>
@@ -705,27 +707,37 @@ export function WorkspaceNavigation({
                 role="tabpanel"
                 aria-label="Projetos"
                 key="projects"
-                initial={reduced ? false : { opacity: 0, y: 4 }}
+                initial={reduced ? false : { y: 4 }}
                 animate={{ opacity: 1, y: 0 }}
-                exit={reduced ? undefined : { opacity: 0, y: -4 }}
+                exit={reduced ? undefined : { y: -4 }}
               >
                 <div className="project-navigation__section-heading">
                   <span>Seus projetos</span>
                   {projects.length > 0 && <small>{projects.length} {projects.length === 1 ? 'projeto' : 'projetos'}</small>}
+                  <Link
+                    to="/projects"
+                    className="project-navigation__view-all-link"
+                    data-testid="sidebar-view-all-projects"
+                    onClick={() => setMobileOpen(false)}
+                  >
+                    Ver todos os projetos
+                  </Link>
                 </div>
                 {projects.length > 0 ? (
                   projects.map((project, projectIdx) => (
                     <section key={project.project_id} className="project-navigation__project">
                       <div className={activeProjectId === project.project_id ? 'project-navigation__project-heading is-active' : 'project-navigation__project-heading'}>
-                        <button
-                          type="button"
-                          className="project-navigation__chevron"
-                          onClick={() => toggleProject(project.project_id)}
-                          aria-label={`Alternar ${project.name}`}
-                          aria-expanded={!collapsed.has(project.project_id)}
-                        >
-                          {collapsed.has(project.project_id) ? '›' : '⌄'}
-                        </button>
+                        {!hideProjectChatSublist && (
+                          <button
+                            type="button"
+                            className="project-navigation__chevron"
+                            onClick={() => toggleProject(project.project_id)}
+                            aria-label={`Alternar ${project.name}`}
+                            aria-expanded={!collapsed.has(project.project_id)}
+                          >
+                            {collapsed.has(project.project_id) ? '›' : '⌄'}
+                          </button>
+                        )}
                         <Link
                           to={`/projects/${encodeURIComponent(project.project_id)}`}
                           className="project-navigation__project-name"
@@ -761,7 +773,7 @@ export function WorkspaceNavigation({
                           +
                         </button>
                       </div>
-                      {!collapsed.has(project.project_id) &&
+                      {!hideProjectChatSublist && !collapsed.has(project.project_id) &&
                         project.chats.map((chat) => (
                           <NavLink
                             key={chat.conversation_id}
@@ -784,7 +796,7 @@ export function WorkspaceNavigation({
                             />
                           </NavLink>
                         ))}
-                      {!collapsed.has(project.project_id) && project.chats.length === 0 && (
+                      {!hideProjectChatSublist && !collapsed.has(project.project_id) && project.chats.length === 0 && (
                         <p className="project-navigation__empty project-navigation__empty--project">Ainda não há chats neste projeto.</p>
                       )}
                     </section>

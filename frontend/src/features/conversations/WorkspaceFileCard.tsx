@@ -334,7 +334,7 @@ export function StructuredDiffView({
 }) {
   if (mode === 'split') {
     return (
-      <section className="workspace-diff workspace-diff--split" aria-label="Visualização de diff lado a lado">
+      <section className="workspace-diff workspace-diff--split" aria-label="Visualização de diff lado a lado" tabIndex={0}>
         {hunks.map((hunk, hunkIdx) => {
           let oldLine = hunk.oldStart
           let newLine = hunk.newStart
@@ -374,7 +374,7 @@ export function StructuredDiffView({
   }
 
   return (
-    <section className="workspace-diff workspace-diff--unified" aria-label="Visualização de diff unificado">
+    <section className="workspace-diff workspace-diff--unified" aria-label="Visualização de diff unificado" tabIndex={0}>
       {hunks.map((hunk, hunkIdx) => {
         let oldLine = hunk.oldStart
         let newLine = hunk.newStart

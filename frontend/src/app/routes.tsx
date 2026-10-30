@@ -14,6 +14,7 @@ import { Home } from './Home'
 import { ChatPage } from '../features/conversations/ChatPage'
 import { SkillsSection } from '../features/skills/SkillsSection'
 import { ProjectPage } from '../features/projects/ProjectPage'
+import { ProjectsGalleryPage } from '../features/projects/ProjectsGalleryPage'
 import { RuntimeSettingsPage } from '../features/settings/RuntimeSettingsPage'
 import { SettingsShell } from '../features/settings/SettingsShell'
 import { SettingsSection } from '../features/settings/SettingsSection'
@@ -48,6 +49,7 @@ export type RouteDefinition = {
 export const routes: RouteDefinition[] = [
   { path: '/', element: <Home /> },
   { path: '/onboarding', element: <OnboardingWizard /> },
+  { path: '/projects', element: <ProjectsGalleryPage /> },
   { path: '/projects/:projectId/new', element: <Home /> },
   { path: '/chats/:conversationId', element: <ConversationRoute /> },
   { path: '/chats/:conversationId/overview', element: <ConversationRoute /> },

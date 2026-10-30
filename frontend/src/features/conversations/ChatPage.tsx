@@ -32,6 +32,12 @@ import {
 } from '../../api/sessionTools'
 import { QueuePanel } from './QueuePanel'
 import { RewindPicker, type RewindMode } from './RewindPicker'
+import {
+  CodeWorkbenchPanel,
+  type CodeWorkbenchFileItem,
+  type CodeWorkbenchTerminalEntry,
+  type CodeWorkbenchTab,
+} from './CodeWorkbenchPanel'
 import { CommandInfoDialog } from '../commands/CommandInfoDialog'
 import { useChatCommands, type InfoPanel } from '../commands/useChatCommands'
 import { OverviewPanel } from '../overview/OverviewPanel'
@@ -67,7 +73,7 @@ import { TurnTimeline } from './TurnTimeline'
 import { WorkspaceFilePreview, type WorkspaceFileReference } from './WorkspaceFileCard'
 import { activityReducer, createActivityState } from './activityReducer'
 import { formatTurnWorkDuration } from './activitySummary'
-import type { ConversationActivityEvent, ToolPermissionDecision } from './activityTypes'
+import type { ConversationActivityEvent, StructuredPatchHunk, ToolPermissionDecision } from './activityTypes'
 import type { UserQuestionAnswer } from './UserQuestionCard'
 import { buildMessageTimelines, resolveTurnId } from './turnTimelineFold'
 import { useComposerAttachments } from './useComposerAttachments'
@@ -598,6 +604,9 @@ export function ChatPage() {
   // sits in the most-used screen in the product.
   const [teamViewOpen, setTeamViewOpen] = useState(false)
   const [teamPaused, setTeamPaused] = useState(false)
+  const [workbenchTab, setWorkbenchTab] = useState<CodeWorkbenchTab>('preview')
+  const [selectedWorkbenchFile, setSelectedWorkbenchFile] = useState<string | null>(null)
+  const [changedFilesExpanded, setChangedFilesExpanded] = useState(false)
   const [selectionFor, setSelectionFor] = useState('')
   const [renderedConversationId, setRenderedConversationId] = useState(conversationId)
   if (conversationId !== renderedConversationId) {
@@ -612,6 +621,9 @@ export function ChatPage() {
     setOversizedInput(null)
     setTeamViewOpen(false)
     setTeamPaused(false)
+    setWorkbenchTab('preview')
+    setSelectedWorkbenchFile(null)
+    setChangedFilesExpanded(false)
   } else if (conversation && conversation.conversation_id === conversationId && selectionFor !== conversationId) {
     const initialProvider = asProviderName(conversation.provider)
     if (initialProvider) {
@@ -1880,8 +1892,95 @@ export function ChatPage() {
     ?? conversation?.workspace?.projectName
     ?? (activeConvProjectId ? availableProjects.find((p) => p.project_id === activeConvProjectId)?.name ?? null : null)
 
+  const { codeWorkbenchFiles, codeWorkbenchTerminalEntries, detectedPreviewUrl, latestFilePatchesByPath } = useMemo(() => {
+    const fileMap = new Map<string, CodeWorkbenchFileItem>()
+    const terminalList: CodeWorkbenchTerminalEntry[] = []
+    const patchesByPath: Record<string, StructuredPatchHunk[]> = {}
+    let previewUrl: string | undefined
+
+    for (const event of activity.events) {
+      const candidateUrl = event.detectedUrl ?? event.bashOutput?.detected_url
+      if (candidateUrl) {
+        previewUrl = candidateUrl
+      }
+
+      const toolName = (event.toolName ?? '').toLowerCase()
+      const toolKind = (event.toolKind ?? '').toLowerCase()
+      const rawPath =
+        event.path
+        ?? event.filePath
+        ?? event.diff?.path
+        ?? (toolKind === 'filesystem' && event.label && !event.todos ? event.label : undefined)
+
+      const isWriteOrEdit =
+        toolName === 'write_file'
+        || toolName === 'edit_file'
+        || toolName === 'create_file'
+        || event.type === 'code_mode.file_edited'
+        || Boolean(event.structuredPatch?.length)
+        || Boolean(event.diff)
+      const isRead =
+        toolName === 'read_file'
+        || toolName === 'view_file'
+        || (toolKind === 'filesystem' && !isWriteOrEdit && toolName !== 'todo_write')
+
+      if (rawPath && (isWriteOrEdit || isRead)) {
+        const cleanPath = rawPath.trim()
+        if (cleanPath) {
+          const patch = event.structuredPatch ?? event.diff?.structured_patch
+          if (patch && patch.length > 0) {
+            patchesByPath[cleanPath] = patch
+          }
+          const existing = fileMap.get(cleanPath)
+          const nextStatus: 'modified' | 'inspected' =
+            isWriteOrEdit || existing?.status === 'modified' ? 'modified' : 'inspected'
+          fileMap.set(cleanPath, {
+            path: cleanPath,
+            status: nextStatus,
+            addedLines: event.addedLines ?? event.diff?.added_lines ?? existing?.addedLines,
+            removedLines: event.removedLines ?? event.diff?.removed_lines ?? existing?.removedLines,
+            structuredPatch: patch && patch.length > 0 ? patch : existing?.structuredPatch,
+          })
+        }
+      }
+
+      const isTerminal =
+        toolKind === 'terminal'
+        || toolName === 'run_command'
+        || toolName === 'bash'
+        || Boolean(event.command)
+        || Boolean(event.bashOutput?.command)
+
+      if (isTerminal) {
+        const command = event.command ?? event.bashOutput?.command ?? event.label ?? 'command'
+        const stdout = event.bashOutput?.stdout
+        const stderr = event.bashOutput?.stderr
+        const output = [stdout, stderr, event.outputTail].filter(Boolean).join('\n') || undefined
+        const status: CodeWorkbenchTerminalEntry['status'] =
+          event.state === 'failed'
+            ? 'failed'
+            : event.state === 'working' || event.state === 'queued'
+              ? 'running'
+              : 'completed'
+        terminalList.push({
+          id: event.eventId || `term-${terminalList.length}`,
+          command,
+          output,
+          status,
+        })
+      }
+    }
+
+    return {
+      codeWorkbenchFiles: Array.from(fileMap.values()),
+      codeWorkbenchTerminalEntries: terminalList,
+      detectedPreviewUrl: previewUrl,
+      latestFilePatchesByPath: patchesByPath,
+    }
+  }, [activity.events])
+
   return (
-    <main className="chat">
+    <main className={conversationMode === 'code' ? 'chat chat--code-split' : 'chat'}>
       <PushNotificationToast notice={pushNotice} onDismiss={dismissPushNotice} />
       {infoPanel && <CommandInfoDialog panel={infoPanel} commands={chatCommands.offered} onClose={() => setInfoPanel(null)} />}
       {tasksOpen && <TasksPanel client={client} conversationId={conversationId} onClose={() => setTasksOpen(false)} />}
@@ -1895,6 +1994,8 @@ export function ChatPage() {
           initialMessageId={rewindState.initialMessageId ?? null}
           unbackable={rewindState.unbackable ?? []}
           unbackableFor={rewindState.unbackableFor ?? null}
+          projectName={activeConvProjectName}
+          filePatches={latestFilePatchesByPath}
           onRewind={(messageId, mode, force) => { void rewindTo(messageId, mode, force) }}
           onClose={() => setRewindState(null)}
         />
@@ -1948,6 +2049,17 @@ export function ChatPage() {
         </div>
 
         <div className="chat__bar-actions canvas-header__right">
+          {conversationMode === 'code' && (
+            <button
+              type="button"
+              className="chat__history-btn"
+              data-testid="code-open-history-button"
+              onClick={() => { void openRewind() }}
+            >
+              <span aria-hidden="true">🕒</span>
+              <span>Histórico</span>
+            </button>
+          )}
           {conversationMode !== 'code' && (
             <button
               type="button"
@@ -2435,6 +2547,83 @@ export function ChatPage() {
                 />
               )
             })()}
+            {!loadFailure && conversationMode === 'code' && codeWorkbenchFiles.length > 0 && (
+              <div className="code-changed-files-card" data-testid="code-changed-files-card">
+                <div className="code-changed-files-card__header">
+                  <div className="code-changed-files-card__summary">
+                    <span className="code-changed-files-card__icon" aria-hidden="true">📄</span>
+                    <span className="code-changed-files-card__count">
+                      {codeWorkbenchFiles.length} {codeWorkbenchFiles.length === 1 ? 'arquivo alterado' : 'arquivos alterados'}
+                    </span>
+                    <span className="code-changed-files-card__dot" aria-hidden="true">·</span>
+                    <button
+                      type="button"
+                      className="code-changed-files-card__btn"
+                      data-testid="code-view-changes-button"
+                      onClick={() => {
+                        setWorkbenchTab('files')
+                        setChangedFilesExpanded((prev) => !prev)
+                      }}
+                    >
+                      Ver alterações
+                    </button>
+                  </div>
+                  <button
+                    type="button"
+                    className="code-changed-files-card__chevron"
+                    aria-label={changedFilesExpanded ? 'Recolher arquivos alterados' : 'Expandir arquivos alterados'}
+                    onClick={() => setChangedFilesExpanded((prev) => !prev)}
+                  >
+                    {changedFilesExpanded ? '▴' : '▾'}
+                  </button>
+                </div>
+                {changedFilesExpanded && (
+                  <ul className="code-changed-files-card__list">
+                    {codeWorkbenchFiles.map((file) => (
+                      <li key={file.path} className="code-changed-files-card__item">
+                        <button
+                          type="button"
+                          className="code-changed-files-card__file-btn"
+                          onClick={() => {
+                            setSelectedWorkbenchFile(file.path)
+                            setWorkbenchTab('files')
+                          }}
+                        >
+                          <span className="code-changed-files-card__file-path">{file.path}</span>
+                          <span className={`code-changed-files-card__file-badge is-${file.status}`}>
+                            {file.status === 'modified' ? 'Editado' : 'Lido'}
+                          </span>
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
+
+            {!loadFailure && conversationMode === 'code' && activity.todos.length > 0 && (
+              <div className="code-steps-checklist-card" data-testid="code-steps-checklist-card">
+                <ul className="code-steps-checklist-card__list">
+                  {activity.todos.map((todo, idx) => {
+                    const isDone = todo.status === 'completed'
+                    return (
+                      <li
+                        key={`${idx}-${todo.content}`}
+                        className={`code-steps-checklist-card__item${isDone ? ' is-done' : ' is-pending'}`}
+                      >
+                        <span className="code-steps-checklist-card__check" aria-hidden="true">
+                          {isDone ? '✓' : '○'}
+                        </span>
+                        <span className="code-steps-checklist-card__text">{todo.content}</span>
+                        {!isDone && (
+                          <span className="code-steps-checklist-card__status">Em andamento</span>
+                        )}
+                      </li>
+                    )
+                  })}
+                </ul>
+              </div>
+            )}
             <AnimatePresence>
               {!loadFailure && showAgentPulse && (
                 <motion.div
@@ -2646,7 +2835,7 @@ export function ChatPage() {
           disabled={stopping}
           error={error}
           hint={stopping ? 'parando…' : undefined}
-          placeholder="Continue a conversa…"
+          placeholder={conversationMode === 'code' && messages.length > 0 ? 'Peça um ajuste...' : 'Continue a conversa…'}
           attachments={attachments}
           onAttach={onAttach}
           onRemoveAttachment={onRemoveAttachment}
@@ -2693,6 +2882,18 @@ export function ChatPage() {
         />
         <StatusLineBar client={client} conversationId={conversationId} refreshKey={`${running ? 'running' : 'idle'}:${conversation?.turns.length ?? 0}`} />
       </footer>}
+      {!loadFailure && conversationMode === 'code' && (
+        <CodeWorkbenchPanel
+          files={codeWorkbenchFiles}
+          terminalEntries={codeWorkbenchTerminalEntries}
+          activeTab={workbenchTab}
+          onTabChange={setWorkbenchTab}
+          initialPreviewUrl={detectedPreviewUrl}
+          running={running}
+          selectedFilePath={selectedWorkbenchFile}
+          onSelectFile={setSelectedWorkbenchFile}
+        />
+      )}
       {oversizedInput && (
         <div className="input-limit-dialog__backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !sendingOversizedInput) setOversizedInput(null) }}>
           <section className="input-limit-dialog" role="dialog" aria-modal="true" aria-labelledby="input-limit-title">
